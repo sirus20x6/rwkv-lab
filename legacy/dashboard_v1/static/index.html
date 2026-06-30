@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>moe-mla dashboard</title>
+  <link rel="stylesheet" href="/static/dashboard.css" />
+  <script src="/static/chart.umd.min.js"></script>
+</head>
+<body>
+  <header id="sys-header">
+    <div class="brand">moe-mla</div>
+    <div id="sys-gpus" class="sys-block"></div>
+    <div id="sys-host" class="sys-block"></div>
+    <div id="sys-proc" class="sys-block"></div>
+    <div id="sys-ts" class="sys-ts">—</div>
+  </header>
+
+  <main>
+    <aside id="sidebar">
+      <div class="side-section">
+        <div class="section-heading">
+          <h2>runs</h2>
+          <span id="run-count">0</span>
+        </div>
+        <input id="run-search" type="search" placeholder="Filter runs" autocomplete="off" />
+        <div id="run-list"></div>
+      </div>
+      <div class="side-section">
+        <div class="section-heading">
+          <h2>compare</h2>
+          <span id="compare-count">0 selected</span>
+        </div>
+        <div class="compare-controls">
+          <label>metric
+            <select id="compare-metric">
+              <optgroup label="train">
+                <option value="train.loss">train loss</option>
+                <option value="train.lr">lr</option>
+                <option value="train.gnorm">gnorm</option>
+                <option value="train.tok_per_sec">tok/sec</option>
+              </optgroup>
+              <optgroup label="eval">
+                <option value="eval.loss">eval loss</option>
+                <option value="eval.ppl">eval ppl</option>
+                <option value="eval.top1_acc">top-1 acc</option>
+                <option value="eval.top5_acc">top-5 acc</option>
+                <option value="eval.h1_top1">h=1 top-1</option>
+                <option value="eval.h2_top1">h=2 top-1</option>
+                <option value="eval.h3_top1">h=3 top-1</option>
+                <option value="eval.h4_top1">h=4 top-1</option>
+                <option value="eval.h1_top5">h=1 top-5</option>
+                <option value="eval.h2_top5">h=2 top-5</option>
+                <option value="eval.h3_top5">h=3 top-5</option>
+                <option value="eval.h4_top5">h=4 top-5</option>
+                <option value="eval.h2_ppl">h=2 ppl</option>
+                <option value="eval.h3_ppl">h=3 ppl</option>
+                <option value="eval.h4_ppl">h=4 ppl</option>
+              </optgroup>
+            </select>
+          </label>
+          <label class="smooth"><input type="checkbox" id="compare-smooth" checked />smooth</label>
+        </div>
+        <div id="compare-list"></div>
+      </div>
+    </aside>
+
+    <section id="main-panel">
+      <div id="run-header">
+        <h1>select a run</h1>
+        <div class="sub">live system metrics update every 2 s</div>
+      </div>
+
+      <div id="compare-box" class="panel hidden">
+        <div class="panel-title">overlay
+          <span class="sub" id="compare-metric-label"></span>
+        </div>
+        <div class="chart-box"><canvas id="chart-compare"></canvas></div>
+      </div>
+
+      <div id="run-body" class="hidden">
+        <div class="panel" id="arch-panel">
+          <div class="panel-title">model architecture
+            <span class="sub" id="arch-sub"></span>
+            <button id="arch-toggle" class="arch-toggle">show</button>
+          </div>
+          <div id="arch-body" class="hidden">
+            <div id="arch-summary"></div>
+            <div id="arch-layer-list"></div>
+          </div>
+        </div>
+
+        <div class="kpis">
+          <div class="kpi"><div class="kpi-label">step</div><div class="kpi-val" id="kpi-step">—</div><div class="kpi-sub" id="kpi-step-sub">—</div></div>
+          <div class="kpi"><div class="kpi-label">train loss</div><div class="kpi-val" id="kpi-loss">—</div><div class="kpi-sub" id="kpi-loss-sub">—</div></div>
+          <div class="kpi"><div class="kpi-label">eval ppl</div><div class="kpi-val" id="kpi-ppl">—</div><div class="kpi-sub" id="kpi-ppl-sub">—</div></div>
+          <div class="kpi"><div class="kpi-label">best ppl</div><div class="kpi-val" id="kpi-best-ppl">—</div><div class="kpi-sub" id="kpi-best-ppl-sub">—</div></div>
+          <div class="kpi"><div class="kpi-label">top-1</div><div class="kpi-val" id="kpi-top1">—</div><div class="kpi-sub" id="kpi-top1-sub">—</div></div>
+          <div class="kpi"><div class="kpi-label">best top-1</div><div class="kpi-val" id="kpi-best-top1">—</div><div class="kpi-sub" id="kpi-best-top1-sub">—</div></div>
+          <div class="kpi"><div class="kpi-label">tok/s</div><div class="kpi-val" id="kpi-toks">—</div><div class="kpi-sub" id="kpi-toks-sub">—</div></div>
+          <div class="kpi"><div class="kpi-label">events</div><div class="kpi-val" id="kpi-events">—</div><div class="kpi-sub" id="kpi-events-sub">—</div></div>
+        </div>
+
+        <div class="panel" id="loss-panel">
+          <div class="panel-title">loss &amp; perplexity</div>
+          <div class="chart-box"><canvas id="chart-loss"></canvas></div>
+        </div>
+
+        <div class="panel hidden" id="looprw-panel">
+          <div class="panel-title">loop usage — residual_weight per layer <span id="looprw-sub" class="panel-sub"></span></div>
+          <div class="chart-box"><canvas id="chart-looprw"></canvas></div>
+        </div>
+
+        <div class="panel" id="horizons-panel">
+          <div class="panel-title">per-horizon accuracy (h=1…4)</div>
+          <div class="chart-box"><canvas id="chart-horizons"></canvas></div>
+        </div>
+
+        <div class="panel" id="training-panel">
+          <div class="panel-title">training signal</div>
+          <div class="chart-box"><canvas id="chart-training"></canvas></div>
+        </div>
+
+        <div class="panel" id="events-panel">
+          <div class="panel-title">events</div>
+          <div id="event-list"></div>
+        </div>
+
+        <div class="panel" id="ckpt-panel">
+          <div class="panel-title">checkpoints</div>
+          <div id="ckpt-list"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/dashboard.js?v=4"></script>
+</body>
+</html>
