@@ -337,6 +337,9 @@ def build(args):
     ).to(args.device)
     for p in codec.parameters():
         p.requires_grad_(False)
+    if getattr(args, "compile", 0):
+        text_model = torch.compile(text_model)  # graph-breaks expected at fla/hook boundaries
+        print("  torch.compile: text_model wrapped (experimental)", flush=True)
     return dict(model=model, text_model=text_model, student=student,
                 teacher_gdn=teacher_gdn, teacher_cap=teacher_cap, box=box, codec=codec,
                 lm_head=model.lm_head, init_opt_state=init_opt_state, init_opt_type=init_opt_type)
@@ -1172,6 +1175,10 @@ def main():
                     help="LLR active only over the first this-fraction of training (then multipliers freeze).")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--dtype", default="bfloat16")
+    ap.add_argument("--compile", type=int, default=0,
+                    help="EXPERIMENTAL: torch.compile the student backbone forward. fla Triton kernels "
+                         "and the linear_attn activation-capture hooks (box['h']/box['y']) graph-break, so "
+                         "the win is uncertain and must be validated (correct block loss + faster) before use.")
     ap.add_argument("--log-every", type=int, default=10)
     ap.add_argument("--eval-every", type=int, default=100, help="held-out eval cadence (0=off)")
     ap.add_argument("--eval-windows", type=int, default=16,
