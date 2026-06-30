@@ -42,6 +42,9 @@ import time
 from pathlib import Path
 
 import numpy as np
+# perf #1: expandable segments cuts the per-step CE-logit alloc/free fragmentation.
+# Must be set before torch initializes the CUDA caching allocator.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import torch
 import torch.nn.functional as F
 
@@ -53,6 +56,11 @@ import signal
 _SIG = {"ckpt": False, "stop": False}
 def _on_sigusr1(_s, _f): _SIG["ckpt"] = True
 def _on_sigint(_s, _f): _SIG["stop"] = True
+
+
+class _StopForward(Exception):
+    """perf #3: raised in the layer-L forward hook to abort the backbone forward early
+    when the upper stack + lm_head are unused (w_lmce==0). Gated by --truncate-forward."""
 
 from build_memory_targets import _GDNStateCapture, load_token_stream, find_gdn_layer
 from smt_dmt import BilinearStateCodec, MemoryTargetCache, smt_transition_loss, dmt_rollout_loss, fit_codec
@@ -325,8 +333,11 @@ def build(args):
     decoder_layer.linear_attn.register_forward_pre_hook(
         lambda m, a, kw: box.__setitem__("h", (a[0] if a else kw["hidden_states"])),
         with_kwargs=True)
-    decoder_layer.linear_attn.register_forward_hook(
-        lambda m, a, o: box.__setitem__("y", o))
+    def _capture_y(m, a, o):
+        box["y"] = o
+        if box.get("_truncate"):           # perf #3: stop the forward after layer L when w_lmce==0
+            raise _StopForward
+    decoder_layer.linear_attn.register_forward_hook(_capture_y)
 
     # codec is a FIXED GDN->RWKV state-space map (pre-fit-then-frozen via
     # --codec-pretrain, else random-init frozen). SMT/DMT detach its output, so
@@ -789,20 +800,28 @@ def train(args):
 
         start = None
         x = y = None
+        B = args.batch_size
         if train_cache is None:
-            start = (fixed_starts[step % len(fixed_starts)] if fixed_starts is not None
-                     else int(rng.integers(0, max_start + 1)))
-            ids = torch.as_tensor(np.asarray(toks[start:start + T + 1], dtype=np.int64), device=dev)
-            x, y = ids[:-1].unsqueeze(0), ids[1:].unsqueeze(0)
+            if fixed_starts is not None:
+                bstarts = [fixed_starts[(step * B + i) % len(fixed_starts)] for i in range(B)]
+            else:
+                bstarts = [int(rng.integers(0, max_start + 1)) for _ in range(B)]
+            ids = torch.as_tensor(
+                np.stack([np.asarray(toks[s:s + T + 1], dtype=np.int64) for s in bstarts]), device=dev)  # [B,T+1]
+            x, y = ids[:, :-1], ids[:, 1:]   # [B,T]
 
         # student forward through the frozen backbone, or local cached layer-target training.
         hidden = None
         with torch.set_grad_enabled(True):
             if train_cache is None:
-                outputs = text_model(input_ids=x, use_cache=False)
-                hidden = outputs.last_hidden_state if hasattr(outputs, "last_hidden_state") else outputs[0]
-                hL = box["h"]                      # [1,T,C] input to layer L (teacher-faithful)
-                student_out = box["y"]             # [1,T,C] student RWKV block output
+                box["_truncate"] = bool(args.truncate_forward) and w_lmce == 0.0  # perf #3 (EXPERIMENTAL)
+                try:
+                    outputs = text_model(input_ids=x, use_cache=False)
+                    hidden = outputs.last_hidden_state if hasattr(outputs, "last_hidden_state") else outputs[0]
+                except _StopForward:
+                    hidden = None              # truncated after layer L; box['h']/box['y'] already captured
+                hL = box["h"]                      # [B,T,C] input to layer L (teacher-faithful)
+                student_out = box["y"]             # [B,T,C] student RWKV block output
 
                 # teacher GDN block output (+ boundary states only if SMT/DMT are active).
                 # want_states gates _GDNStateCapture's expensive chunk-wise re-run — skip it
@@ -815,14 +834,15 @@ def train(args):
                     # teacher_cap.states: [n_bounds, B, Hv, Dk, Dv] -> [B, n_bounds, Hv, Dk, Dv]
                     S_gdn = teacher_cap.states.transpose(0, 1).contiguous() if need_state else None
             else:
-                ci = int(rng.integers(0, train_cache.n_windows))
-                hL = torch.as_tensor(np.asarray(train_cache.h[ci:ci + 1]), device=dev, dtype=getattr(torch, args.dtype))
-                teacher_out = torch.as_tensor(np.asarray(train_cache.block_out[ci:ci + 1]), device=dev,
-                                              dtype=getattr(torch, args.dtype))
+                cis = [int(rng.integers(0, train_cache.n_windows)) for _ in range(B)]
+                dt = getattr(torch, args.dtype)
+                hL = torch.as_tensor(np.stack([np.asarray(train_cache.h[c]) for c in cis]), device=dev, dtype=dt)
+                teacher_out = torch.as_tensor(np.stack([np.asarray(train_cache.block_out[c]) for c in cis]),
+                                              device=dev, dtype=dt)
                 student_out = student(hL)
                 need_state = w_smt > 0 or w_dmt > 0
-                S_gdn = (torch.as_tensor(np.asarray(train_cache.state[ci:ci + 1]), device=dev,
-                                         dtype=getattr(torch, args.dtype)) if need_state else None)
+                S_gdn = (torch.as_tensor(np.stack([np.asarray(train_cache.state[c]) for c in cis]),
+                                         device=dev, dtype=dt) if need_state else None)
 
             lm_ce = chunked_ce(hidden, lm_head, y) if (w_lmce > 0.0 and hidden is not None) else _zero_like_loss(student_out)
             so, to = student_out.float(), teacher_out.float()
@@ -941,7 +961,7 @@ def train(args):
                    "smt_update_pen": _finite_float(smt["smt_update_pen"]),
                    "dmt_mem": _finite_float(dmt["dmt_memory"]),
                    "dmt_state_rms": _finite_float(dmt.get("dmt_state_rms", 0.0)),
-                   "gnorm": _finite_float(gnorm), "tok_per_sec": round((step + 1) * T / (time.time() - t0))}
+                   "gnorm": _finite_float(gnorm), "tok_per_sec": round((step + 1) * args.batch_size * T / (time.time() - t0))}
             if nuc_w > 0.0:
                 rec["nuc"] = _finite_float(nuc_val)
             if args.distill_fidelity_log and fid_val is not None:
@@ -990,8 +1010,8 @@ def chunked_ce(hidden, lm_head, labels, chunk=2048):
     Nn = flat_h.shape[0]
     for i in range(0, Nn, chunk):
         end = min(i + chunk, Nn)
-        logits = F.linear(flat_h[i:end], Wt, bias).float()
-        total = total + F.cross_entropy(logits, flat_labels[i:end], reduction="sum")
+        logits = F.linear(flat_h[i:end], Wt, bias)   # keep bf16; the fp32 logit copy was redundant memory
+        total = total + F.cross_entropy(logits, flat_labels[i:end], reduction="none").float().sum()
     return total / Nn
 
 
@@ -1030,8 +1050,8 @@ def evaluate(text_model, lm_head, toks, n_windows, T, device, seed=12345, chunk=
         Wt = lm_head.weight; bias = getattr(lm_head, "bias", None)
         for i in range(0, flat_h.shape[0], chunk):
             e = min(i + chunk, flat_h.shape[0])
-            logits = F.linear(flat_h[i:e], Wt, bias).float()
-            tot_ce += F.cross_entropy(logits, flat_y[i:e], reduction="sum").item()
+            logits = F.linear(flat_h[i:e], Wt, bias)   # keep bf16; the fp32 logit copy was redundant memory
+            tot_ce += F.cross_entropy(logits, flat_y[i:e], reduction="none").float().sum().item()
             tot_correct += (logits.argmax(-1) == flat_y[i:e]).sum().item()
             tot_tok += e - i
     loss = tot_ce / max(tot_tok, 1)
@@ -1057,6 +1077,10 @@ def main():
     ap.add_argument("--data", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--seq-len", type=int, default=1024)
+    ap.add_argument("--batch-size", type=int, default=8,
+                    help="train windows per step (mean-reduced loss). Bigger batch = less gradient "
+                         "noise; scale LR up ~2-3x (sqrt(B)) vs the batch=1 recipes or it just trains "
+                         "slower per token. Eval uses --eval-batch-size separately.")
     ap.add_argument("--steps", type=int, default=10000)
     ap.add_argument("--state-stride", type=int, default=64)
     ap.add_argument("--decay-cap-delta", type=float, default=0.005)
@@ -1179,12 +1203,17 @@ def main():
                     help="EXPERIMENTAL: torch.compile the student backbone forward. fla Triton kernels "
                          "and the linear_attn activation-capture hooks (box['h']/box['y']) graph-break, so "
                          "the win is uncertain and must be validated (correct block loss + faster) before use.")
+    ap.add_argument("--truncate-forward", type=int, default=0,
+                    help="EXPERIMENTAL: when --w-lmce 0 (I/O-first, non-cache), abort the backbone forward "
+                         "right after the converted layer via a sentinel exception -> skips layers L+1..N + "
+                         "the lm_head (~85-90%% of fwd FLOPs for an early layer). Needs GPU validation of the "
+                         "autograd unwind before trusting; default off.")
     ap.add_argument("--log-every", type=int, default=10)
     ap.add_argument("--eval-every", type=int, default=100, help="held-out eval cadence (0=off)")
     ap.add_argument("--eval-windows", type=int, default=16,
                     help="held-out eval windows of --seq-len tokens each. Raise for final selection; "
                          "the default favors throughput during conversion.")
-    ap.add_argument("--eval-batch-size", type=int, default=4,
+    ap.add_argument("--eval-batch-size", type=int, default=8,
                     help="number of eval windows per full-model forward. Increase until VRAM is full; "
                          "set 1 for old serial eval behavior.")
     ap.add_argument("--log-grokking-metrics", type=int, default=0,
