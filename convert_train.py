@@ -65,6 +65,14 @@ class _StopForward(Exception):
 from build_memory_targets import _GDNStateCapture, load_token_stream, find_gdn_layer
 from smt_dmt import BilinearStateCodec, MemoryTargetCache, smt_transition_loss, dmt_rollout_loss, fit_codec
 
+# perf #2b: flash_attn's Triton CE — fused logsumexp+gather with in-place backward into the
+# bf16 logit buffer (no fp32 logit copy, no separate grad alloc). Optional (--fused-ce).
+try:
+    from flash_attn.ops.triton.cross_entropy import cross_entropy_loss as _flash_ce
+    _HAS_FLASH_CE = True
+except Exception:
+    _flash_ce, _HAS_FLASH_CE = None, False
+
 # --- performance: TF32 on the Blackwell tensor cores for fp32 matmuls. The bf16
 # forward/backward and the bf16 teacher targets are UNAFFECTED (TF32 only touches fp32
 # matmuls); what speeds up is the fp32 path — the MUON+/Muon^p Newton-Schulz
@@ -844,7 +852,7 @@ def train(args):
                 S_gdn = (torch.as_tensor(np.stack([np.asarray(train_cache.state[c]) for c in cis]),
                                          device=dev, dtype=dt) if need_state else None)
 
-            lm_ce = chunked_ce(hidden, lm_head, y) if (w_lmce > 0.0 and hidden is not None) else _zero_like_loss(student_out)
+            lm_ce = chunked_ce(hidden, lm_head, y, fused=bool(args.fused_ce)) if (w_lmce > 0.0 and hidden is not None) else _zero_like_loss(student_out)
             so, to = student_out.float(), teacher_out.float()
             if agree_gate > 0.0:                                  # trust-region per-token gating
                 aw = do.agreement_weight(so, to)
@@ -998,14 +1006,20 @@ def train(args):
     print(f"saved -> {sd/'ckpt.pt'}", flush=True)
 
 
-def chunked_ce(hidden, lm_head, labels, chunk=2048):
+def chunked_ce(hidden, lm_head, labels, chunk=2048, fused=False):
     """Inlined chunked lm_head+CE (matches train_mla.chunked_lmhead_ce) to avoid
-    importing train_mla's heavy module chain."""
+    importing train_mla's heavy module chain. fused=True uses flash_attn's Triton CE:
+    one-shot logits, in-place backward into the bf16 logit buffer (no fp32 copy, no
+    separate grad alloc). Falls back to the chunked path if flash_attn is unavailable."""
     B, T, H = hidden.shape
     flat_h = hidden.reshape(-1, H)
     flat_labels = labels.reshape(-1)
     Wt = lm_head.weight
     bias = getattr(lm_head, "bias", None)
+    if fused and _HAS_FLASH_CE:
+        logits = F.linear(flat_h, Wt, bias)                              # [N, V] bf16, one shot
+        losses, _ = _flash_ce(logits, flat_labels, inplace_backward=True)  # [N] per-token
+        return losses.float().sum() / flat_h.shape[0]
     total = hidden.new_zeros((), dtype=torch.float32)
     Nn = flat_h.shape[0]
     for i in range(0, Nn, chunk):
@@ -1203,6 +1217,10 @@ def main():
                     help="EXPERIMENTAL: torch.compile the student backbone forward. fla Triton kernels "
                          "and the linear_attn activation-capture hooks (box['h']/box['y']) graph-break, so "
                          "the win is uncertain and must be validated (correct block loss + faster) before use.")
+    ap.add_argument("--fused-ce", type=int, default=0,
+                    help="use flash_attn's fused Triton cross-entropy (in-place backward into the bf16 "
+                         "logit buffer: no fp32 logit copy, no separate grad alloc) for the LM-CE term. "
+                         "flash_attn is present; needs GPU validation that the loss matches the chunked path.")
     ap.add_argument("--truncate-forward", type=int, default=0,
                     help="EXPERIMENTAL: when --w-lmce 0 (I/O-first, non-cache), abort the backbone forward "
                          "right after the converted layer via a sentinel exception -> skips layers L+1..N + "
