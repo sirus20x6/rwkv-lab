@@ -45,9 +45,18 @@ class LoopedRWKV(nn.Module):
         return y[0] if isinstance(y, tuple) else y
 
     def forward(self, hidden_states, *args, **kwargs):
-        out = self._t(self.core(hidden_states))           # pass 1 == single-pass output
+        return_state = bool(kwargs.get("return_state", False))
+        first = self.core(hidden_states, *args, **kwargs)
+        if return_state:
+            out, final_state, new_shift_state = first
+        else:
+            out = self._t(first)                          # pass 1 == single-pass output
         for i in range(1, self.n_loops):
             # refine on a NORMALIZED hidden (input + running output); zero-init weight.
             inc = self._t(self.core(self.iter_norm(hidden_states + out)))
             out = out + self.residual_weight[i] * inc
+        if return_state:
+            # SMT/DMT supervise the underlying RWKV recurrent memory. The refinement
+            # passes are output refinements, not separate target state spaces.
+            return out, final_state, new_shift_state
         return out

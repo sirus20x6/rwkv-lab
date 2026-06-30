@@ -55,7 +55,7 @@ def _on_sigusr1(_s, _f): _SIG["ckpt"] = True
 def _on_sigint(_s, _f): _SIG["stop"] = True
 
 from build_memory_targets import _GDNStateCapture, load_token_stream, find_gdn_layer
-from smt_dmt import BilinearStateCodec, smt_transition_loss, dmt_rollout_loss, fit_codec
+from smt_dmt import BilinearStateCodec, MemoryTargetCache, smt_transition_loss, dmt_rollout_loss, fit_codec
 
 # --- performance: TF32 on the Blackwell tensor cores for fp32 matmuls. The bf16
 # forward/backward and the bf16 teacher targets are UNAFFECTED (TF32 only touches fp32
@@ -92,6 +92,16 @@ def _cur_lr(opt):
             return g["lr"]
     g = opt.param_groups[0]
     return g.get("scheduled_lr", g["lr"])  # schedulefree writes the warmup-adjusted lr here
+
+
+def _zero_like_loss(ref):
+    return ref.new_zeros((), dtype=torch.float32)
+
+
+def _finite_float(x, default=0.0):
+    if x is None:
+        return default
+    return float(x.detach() if torch.is_tensor(x) else x)
 
 
 def _save_ckpt(out, step, student, codec, args):
@@ -545,6 +555,15 @@ def train(args):
     if is_sf:
         opt.train()  # Schedule-Free: params held at y (the gradient-eval point) during training
     toks = load_token_stream(args.data)
+    train_cache = MemoryTargetCache(args.train_cache) if args.train_cache else None
+    if train_cache is not None:
+        if train_cache.T != args.seq_len:
+            raise SystemExit(f"--train-cache seq_len {train_cache.T} != --seq-len {args.seq_len}")
+        if train_cache.stride != args.state_stride:
+            raise SystemExit(f"--train-cache state_stride {train_cache.stride} != --state-stride {args.state_stride}")
+        if args.w_lmce > 0.0:
+            print("  [warn] --train-cache is local layer-target training; disabling LM CE for train steps", flush=True)
+        print(f"[train-cache] local layer targets from {args.train_cache}: {train_cache.n_windows} windows", flush=True)
     N = len(toks); T = args.seq_len; max_start = N - (T + 1)
     rng = np.random.default_rng(args.seed)
     dev = args.device
@@ -688,7 +707,7 @@ def train(args):
             llr.update(step, s_max=ctl.get("llr_smax", args.llr_smax))   # LLR live spread (periodic)
         eval_every = int(ctl.get("eval_every", args.eval_every))
         save_every = int(ctl.get("save_every", args.save_every))
-        log_every = int(ctl.get("log_every", args.log_every))
+        log_every = max(1, int(ctl.get("log_every", args.log_every)))
         # grokking lever 2 — decoupled weight decay = weight_decay (constant) + tail
         # ramp(tail_weight_decay over the last wd_tail_frac of training). 0 in the fit
         # phase unless weight_decay>0 (2605.04396 / 2606.05863). All live-tunable;
@@ -710,7 +729,8 @@ def train(args):
             teacher_cap.want_states = False  # evaluate() only needs the block output, never states
             ev = evaluate(text_model, lm_head, toks, args.eval_windows, args.seq_len, dev,
                           teacher_gdn=teacher_gdn if args.log_grokking_metrics else None,
-                          box=box if args.log_grokking_metrics else None, start_lo=eval_lo)
+                          box=box if args.log_grokking_metrics else None, start_lo=eval_lo,
+                          batch_size=args.eval_batch_size)
             if args.log_grokking_metrics and "block_val" in ev and block_ema is not None:
                 ev["gen_gap"] = ev["block_val"] - block_ema
             emit({"kind": "eval", "step": step, **ev})
@@ -727,7 +747,7 @@ def train(args):
             if args.grok_autopilot:
                 ema_ev, ema_saved = apilot.eval_ema(
                     lambda: evaluate(text_model, lm_head, toks, args.eval_windows, args.seq_len, dev,
-                                     start_lo=eval_lo),
+                                     start_lo=eval_lo, batch_size=args.eval_batch_size),
                     best_ppl, lambda pp: _save_best(out, step, pp, student, codec, args))
                 if ema_saved:
                     best_ppl = ema_ev["ppl"]
@@ -744,31 +764,44 @@ def train(args):
             if is_sf:
                 opt.train()  # back to y for the training step
 
-        start = (fixed_starts[step % len(fixed_starts)] if fixed_starts is not None
-                 else int(rng.integers(0, max_start + 1)))
-        ids = torch.as_tensor(np.asarray(toks[start:start + T + 1], dtype=np.int64), device=dev)
-        x, y = ids[:-1].unsqueeze(0), ids[1:].unsqueeze(0)
+        start = None
+        x = y = None
+        if train_cache is None:
+            start = (fixed_starts[step % len(fixed_starts)] if fixed_starts is not None
+                     else int(rng.integers(0, max_start + 1)))
+            ids = torch.as_tensor(np.asarray(toks[start:start + T + 1], dtype=np.int64), device=dev)
+            x, y = ids[:-1].unsqueeze(0), ids[1:].unsqueeze(0)
 
-        # student forward through the (mostly frozen) backbone -> hidden + captures
-        hidden = h_last = None
+        # student forward through the frozen backbone, or local cached layer-target training.
+        hidden = None
         with torch.set_grad_enabled(True):
-            outputs = text_model(input_ids=x, use_cache=False)
-            hidden = outputs.last_hidden_state if hasattr(outputs, "last_hidden_state") else outputs[0]
-            hL = box["h"]                      # [1,T,C] input to layer L (teacher-faithful)
-            student_out = box["y"]             # [1,T,C] student RWKV block output
+            if train_cache is None:
+                outputs = text_model(input_ids=x, use_cache=False)
+                hidden = outputs.last_hidden_state if hasattr(outputs, "last_hidden_state") else outputs[0]
+                hL = box["h"]                      # [1,T,C] input to layer L (teacher-faithful)
+                student_out = box["y"]             # [1,T,C] student RWKV block output
 
-            # teacher GDN block output (+ boundary states only if SMT/DMT are active).
-            # want_states gates _GDNStateCapture's expensive chunk-wise re-run — skip it
-            # whenever SMT/DMT are off (e.g. an I/O-first phase) instead of paying for
-            # boundary states that get thrown away below.
-            need_state = w_smt > 0 or w_dmt > 0
-            teacher_cap.want_states = need_state
-            with torch.no_grad():
-                teacher_out = teacher_gdn(hL)
-                # teacher_cap.states: [n_bounds, B, Hv, Dk, Dv] -> [B, n_bounds, Hv, Dk, Dv]
-                S_gdn = teacher_cap.states.transpose(0, 1).contiguous() if need_state else None
+                # teacher GDN block output (+ boundary states only if SMT/DMT are active).
+                # want_states gates _GDNStateCapture's expensive chunk-wise re-run — skip it
+                # whenever SMT/DMT are off (e.g. an I/O-first phase) instead of paying for
+                # boundary states that get thrown away below.
+                need_state = w_smt > 0 or w_dmt > 0
+                teacher_cap.want_states = need_state
+                with torch.no_grad():
+                    teacher_out = teacher_gdn(hL)
+                    # teacher_cap.states: [n_bounds, B, Hv, Dk, Dv] -> [B, n_bounds, Hv, Dk, Dv]
+                    S_gdn = teacher_cap.states.transpose(0, 1).contiguous() if need_state else None
+            else:
+                ci = int(rng.integers(0, train_cache.n_windows))
+                hL = torch.as_tensor(np.asarray(train_cache.h[ci:ci + 1]), device=dev, dtype=getattr(torch, args.dtype))
+                teacher_out = torch.as_tensor(np.asarray(train_cache.block_out[ci:ci + 1]), device=dev,
+                                              dtype=getattr(torch, args.dtype))
+                student_out = student(hL)
+                need_state = w_smt > 0 or w_dmt > 0
+                S_gdn = (torch.as_tensor(np.asarray(train_cache.state[ci:ci + 1]), device=dev,
+                                         dtype=getattr(torch, args.dtype)) if need_state else None)
 
-            lm_ce = chunked_ce(hidden, lm_head, y)
+            lm_ce = chunked_ce(hidden, lm_head, y) if (w_lmce > 0.0 and hidden is not None) else _zero_like_loss(student_out)
             so, to = student_out.float(), teacher_out.float()
             if agree_gate > 0.0:                                  # trust-region per-token gating
                 aw = do.agreement_weight(so, to)
@@ -792,9 +825,14 @@ def train(args):
             # them ONLY when weighted, so an I/O-only phase (w_smt=w_dmt=0) doesn't pay.
             smt = {"smt_memory": block.new_zeros(()), "smt_block": block.new_zeros(()), "smt_update_pen": 0.0}
             dmt = {"dmt_memory": block.new_zeros(()), "dmt_block": block.new_zeros(()), "dmt_state_rms": 0.0}
+            target_states = None
+            if need_state:
+                with torch.no_grad():
+                    target_states = codec(S_gdn.reshape(-1, *S_gdn.shape[2:])).reshape(
+                        S_gdn.shape[0], S_gdn.shape[1], *codec.shape).detach()
             if w_smt > 0:
-                smt = smt_transition_loss(student, codec, hL, S_gdn, stride=args.state_stride,
-                                          block_out=teacher_out)
+                smt = smt_transition_loss(student, codec, hL, stride=args.state_stride,
+                                          block_out=teacher_out, target_states=target_states)
                 loss = loss + w_smt * smt["smt_memory"] + args.w_smt_block * smt["smt_block"]
             if w_dmt > 0:
                 # DMT rollout horizon grows over training (curriculum); re-align rl DOWN
@@ -802,9 +840,9 @@ def train(args):
                 rl = rollout_len_for_step(step, args.steps, args.dmt_curriculum, args.state_stride)
                 rl = max(args.state_stride, (min(rl, T) // args.state_stride) * args.state_stride)
                 nb = rl // args.state_stride + 1
-                dmt = dmt_rollout_loss(student, codec, hL[:, :rl], S_gdn[:, :nb],
+                dmt = dmt_rollout_loss(student, codec, hL[:, :rl],
                                        stride=args.state_stride, block_out=teacher_out[:, :rl],
-                                       discount=args.dmt_discount)
+                                       discount=args.dmt_discount, target_states=target_states[:, :nb])
                 # dmt_block keeps I/O fidelity DURING the rollout (Codex): without it DMT
                 # optimizes only latent-state trajectory, which drifts ppl up.
                 loss = loss + w_dmt * dmt["dmt_memory"] + args.w_dmt_block * dmt["dmt_block"]
@@ -816,7 +854,7 @@ def train(args):
             if nuc_w > 0.0 and (step % max(1, nuc_every) == 0) and nuc_mats:
                 nuc = sum(torch.linalg.matrix_norm(W.float(), ord="nuc") for W in nuc_mats)
                 loss = loss + nuc_w * nuc
-                nuc_val = float(nuc.detach())
+                nuc_val = nuc.detach()
 
         if not torch.isfinite(loss):
             print(f"step {step}: NON-FINITE loss -> skip", flush=True)
@@ -870,27 +908,28 @@ def train(args):
         if args.grok_autopilot:
             apilot.update_ema()
 
-        rec = {"kind": "train", "step": step, "loss": float(loss),
-               "lr": _cur_lr(opt), "lm_ce": float(lm_ce),
-               "block": float(block), "smt_mem": float(smt["smt_memory"]),
-               "smt_update_pen": float(smt["smt_update_pen"]),
-               "dmt_mem": float(dmt["dmt_memory"]),
-               "dmt_state_rms": float(dmt.get("dmt_state_rms", 0.0)),
-               "gnorm": float(gnorm), "tok_per_sec": round((step + 1) * T / (time.time() - t0))}
-        if nuc_w > 0.0:
-            rec["nuc"] = nuc_val
-        if args.distill_fidelity_log and fid_val is not None:
-            rec["carry_fidelity"] = fid_val
         if args.log_grokking_metrics:
-            block_ema = float(block) if block_ema is None else 0.98 * block_ema + 0.02 * float(block)
-            if args.grok_spec_every and (step % args.grok_spec_every == 0):
+            block_val_now = _finite_float(block)
+            block_ema = block_val_now if block_ema is None else 0.98 * block_ema + 0.02 * block_val_now
+        if step % log_every == 0 or step == args.steps - 1:
+            rec = {"kind": "train", "step": step, "loss": _finite_float(loss),
+                   "lr": _cur_lr(opt), "lm_ce": _finite_float(lm_ce),
+                   "block": _finite_float(block), "smt_mem": _finite_float(smt["smt_memory"]),
+                   "smt_update_pen": _finite_float(smt["smt_update_pen"]),
+                   "dmt_mem": _finite_float(dmt["dmt_memory"]),
+                   "dmt_state_rms": _finite_float(dmt.get("dmt_state_rms", 0.0)),
+                   "gnorm": _finite_float(gnorm), "tok_per_sec": round((step + 1) * T / (time.time() - t0))}
+            if nuc_w > 0.0:
+                rec["nuc"] = _finite_float(nuc_val)
+            if args.distill_fidelity_log and fid_val is not None:
+                rec["carry_fidelity"] = _finite_float(fid_val)
+            if args.log_grokking_metrics and args.grok_spec_every and (step % args.grok_spec_every == 0):
                 rec["wnorm_rms"] = gm.weight_norm_rms(student.parameters())
                 if grok_mat is not None:
                     rec["stable_rank"] = gm.stable_rank(grok_mat)
-        if codec_rel is not None:
-            rec["codec_rel"] = float(codec_rel)  # trainboard: constant after pre-fit (codec frozen)
-        emit(rec)
-        if step % log_every == 0 or step == args.steps - 1:
+            if codec_rel is not None:
+                rec["codec_rel"] = float(codec_rel)  # trainboard: constant after pre-fit (codec frozen)
+            emit(rec)
             print(f"step {step}: loss={rec['loss']:.4f} lm_ce={rec['lm_ce']:.4f} "
                   f"block={rec['block']:.4f} smt={rec['smt_mem']:.4f} dmt={rec['dmt_mem']:.4f} "
                   f"state_rms={rec['dmt_state_rms']:.3f} gnorm={rec['gnorm']:.2f}", flush=True)
@@ -902,7 +941,8 @@ def train(args):
         teacher_cap.want_states = False  # evaluate() only needs the block output, never states
         ev = evaluate(text_model, lm_head, toks, args.eval_windows, args.seq_len, dev,
                       teacher_gdn=teacher_gdn if args.log_grokking_metrics else None,
-                      box=box if args.log_grokking_metrics else None, start_lo=eval_lo)
+                      box=box if args.log_grokking_metrics else None, start_lo=eval_lo,
+                      batch_size=args.eval_batch_size)
         if args.log_grokking_metrics and "block_val" in ev and block_ema is not None:
             ev["gen_gap"] = ev["block_val"] - block_ema
         emit({"kind": "eval", "step": args.steps - 1, **ev})
@@ -934,7 +974,7 @@ def chunked_ce(hidden, lm_head, labels, chunk=2048):
 
 @torch.no_grad()
 def evaluate(text_model, lm_head, toks, n_windows, T, device, seed=12345, chunk=2048,
-             teacher_gdn=None, box=None, start_lo=0):
+             teacher_gdn=None, box=None, start_lo=0, batch_size=1):
     """Held-out LM eval (fixed windows) -> {loss, ppl, top1_acc}, in the dashboard's
     `kind:"eval"` schema. Uses the student model (text_model holds the RWKV layer).
 
@@ -946,18 +986,21 @@ def evaluate(text_model, lm_head, toks, n_windows, T, device, seed=12345, chunk=
     N = len(toks); max_start = N - (T + 1)
     tot_ce = 0.0; tot_tok = 0; tot_correct = 0
     tot_block = 0.0; nb_block = 0
-    for _ in range(n_windows):
-        start = int(rng.integers(min(start_lo, max_start), max_start + 1))  # start_lo>0 => disjoint eval
-        ids = torch.as_tensor(np.asarray(toks[start:start + T + 1], dtype=np.int64), device=device)
-        x, y = ids[:-1].unsqueeze(0), ids[1:].unsqueeze(0)
+    starts = [int(rng.integers(min(start_lo, max_start), max_start + 1)) for _ in range(n_windows)]
+    batch_size = max(1, int(batch_size))
+    for off in range(0, n_windows, batch_size):
+        ss = starts[off:off + batch_size]
+        ids_np = np.stack([np.asarray(toks[s:s + T + 1], dtype=np.int64) for s in ss], axis=0)
+        ids = torch.as_tensor(ids_np, device=device)
+        x, y = ids[:, :-1], ids[:, 1:]
         out = text_model(input_ids=x, use_cache=False)
         hidden = out.last_hidden_state if hasattr(out, "last_hidden_state") else out[0]
         # held-out block-MSE: box["h"]/box["y"] were just refreshed by this forward
         if teacher_gdn is not None and box is not None:
             try:
                 t_out = teacher_gdn(box["h"])
-                tot_block += F.mse_loss(box["y"].float(), t_out.float()).item()
-                nb_block += 1
+                tot_block += F.mse_loss(box["y"].float(), t_out.float(), reduction="sum").item()
+                nb_block += box["y"].numel()
             except Exception:
                 pass
         flat_h = hidden.reshape(-1, hidden.shape[-1]); flat_y = y.reshape(-1)
@@ -987,7 +1030,7 @@ def main():
     ap.add_argument("--data", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--seq-len", type=int, default=1024)
-    ap.add_argument("--steps", type=int, default=200)
+    ap.add_argument("--steps", type=int, default=10000)
     ap.add_argument("--state-stride", type=int, default=64)
     ap.add_argument("--decay-cap-delta", type=float, default=0.005)
     ap.add_argument("--loop-count", type=int, default=4,
@@ -1031,6 +1074,11 @@ def main():
                     help="codec pre-fit steps (0 = random-init FROZEN map; pre-fit "
                          "strongly recommended so SMT/DMT targets are meaningful)")
     ap.add_argument("--codec-cache", default="", help="extraction cache for codec pre-fit (build_memory_targets.py)")
+    ap.add_argument("--train-cache", default="",
+                    help="optional build_memory_targets.py cache for local layer-target training. "
+                         "Uses cached h/block_out/state instead of rerunning the frozen backbone and teacher "
+                         "on train steps; LM CE is disabled for those train steps, while periodic eval still "
+                         "uses --data and the full model.")
     ap.add_argument("--codec-rel-max", type=float, default=0.5,
                     help="abort if pre-fit codec rel_rmse exceeds this (catches the L0/L1 codec "
                          "collapse; healthy fits ~0.12-0.2). Only applies when --codec-pretrain>0.")
@@ -1101,11 +1149,14 @@ def main():
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--dtype", default="bfloat16")
     ap.add_argument("--log-every", type=int, default=10)
-    ap.add_argument("--eval-every", type=int, default=25, help="held-out eval cadence (0=off)")
-    ap.add_argument("--eval-windows", type=int, default=64,
-                    help="held-out eval windows of --seq-len tokens each (~64K tokens at 64); "
-                         "8 was noisy (+-0.03) and let save-best lock onto phantom dips.")
-    ap.add_argument("--log-grokking-metrics", type=int, default=1,
+    ap.add_argument("--eval-every", type=int, default=100, help="held-out eval cadence (0=off)")
+    ap.add_argument("--eval-windows", type=int, default=16,
+                    help="held-out eval windows of --seq-len tokens each. Raise for final selection; "
+                         "the default favors throughput during conversion.")
+    ap.add_argument("--eval-batch-size", type=int, default=4,
+                    help="number of eval windows per full-model forward. Increase until VRAM is full; "
+                         "set 1 for old serial eval behavior.")
+    ap.add_argument("--log-grokking-metrics", type=int, default=0,
                     help="emit memorization-vs-grokking diagnostics: held-out block_val + "
                          "gen_gap (block_val - train block EMA) at eval cadence. Pure additions "
                          "to train.jsonl; surfaces the post-min held-out creep the weight-decay "
