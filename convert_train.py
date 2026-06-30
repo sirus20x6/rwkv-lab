@@ -104,12 +104,15 @@ def _finite_float(x, default=0.0):
     return float(x.detach() if torch.is_tensor(x) else x)
 
 
-def _save_ckpt(out, step, student, codec, args):
+def _save_ckpt(out, step, student, codec, args, opt=None):
     """Write step_<step>/{config.json, ckpt.pt}. For --optimizer schedulefree the
-    caller must opt.eval() first so `student` holds the averaged x weights."""
+    caller must opt.eval() first so `student` holds the averaged x weights. With
+    --save-optimizer, also persist optimizer state so --init-rwkv-ckpt resumes warm."""
     sd = write_sidecar_config(out, step, args)
-    torch.save({"student": student.state_dict(), "codec": codec.state_dict(),
-                "args": vars(args)}, sd / "ckpt.pt")
+    blob = {"student": student.state_dict(), "codec": codec.state_dict(), "args": vars(args)}
+    if opt is not None and getattr(args, "save_optimizer", True):
+        blob["opt"], blob["opt_type"] = opt.state_dict(), args.optimizer
+    torch.save(blob, sd / "ckpt.pt")
     return sd
 
 
@@ -136,15 +139,19 @@ def write_sidecar_config(out, step, args):
     return sd
 
 
-def _save_best(out, step, ppl, student, codec, args):
+def _save_best(out, step, ppl, student, codec, args, opt=None):
     """ATOMICALLY save the best-eval checkpoint to out/best/. Called on EVERY eval
     improvement, so the minimum can never slip between periodic (--save-every) saves.
-    Writes to a temp file then os.replace -> a crash mid-save can't corrupt best/."""
+    Writes to a temp file then os.replace -> a crash mid-save can't corrupt best/. With
+    --save-optimizer, persists optimizer state so --init-rwkv-ckpt (-> best/) resumes warm."""
     bd = Path(out) / "best"
     bd.mkdir(parents=True, exist_ok=True)
     tmp = bd / "ckpt.pt.tmp"
-    torch.save({"student": student.state_dict(), "codec": codec.state_dict(),
-                "args": vars(args), "step": int(step), "ppl": float(ppl)}, tmp)
+    blob = {"student": student.state_dict(), "codec": codec.state_dict(),
+            "args": vars(args), "step": int(step), "ppl": float(ppl)}
+    if opt is not None and getattr(args, "save_optimizer", True):
+        blob["opt"], blob["opt_type"] = opt.state_dict(), args.optimizer
+    torch.save(blob, tmp)
     os.replace(tmp, bd / "ckpt.pt")
     (bd / "best.json").write_text(json.dumps({"step": int(step), "ppl": float(ppl)}))
 
@@ -261,9 +268,12 @@ def build(args):
         student = core
 
     # optional warm-start from a previously-trained library/convert_train ckpt.
+    init_opt_state = init_opt_type = None  # restored after make_optimizer (warm-resume momentum)
     if getattr(args, "init_rwkv_ckpt", ""):
         src = resolve_best_ckpt(args.init_rwkv_ckpt)  # restarting ALWAYS uses the run's BEST ckpt
         blob = torch.load(src, map_location="cpu", weights_only=False)
+        if isinstance(blob, dict):
+            init_opt_state, init_opt_type = blob.get("opt"), blob.get("opt_type")
         is_convert = isinstance(blob, dict) and "student" in blob
         if is_convert:                                        # a convert_train ckpt (isolation run)
             sd_src = blob["student"]
@@ -329,7 +339,7 @@ def build(args):
         p.requires_grad_(False)
     return dict(model=model, text_model=text_model, student=student,
                 teacher_gdn=teacher_gdn, teacher_cap=teacher_cap, box=box, codec=codec,
-                lm_head=model.lm_head)
+                lm_head=model.lm_head, init_opt_state=init_opt_state, init_opt_type=init_opt_type)
 
 
 def make_optimizer(student, codec, args, text_cfg=None):
@@ -479,6 +489,7 @@ def train(args):
     model, text_model, student, teacher_gdn, teacher_cap, box, codec, lm_head = (
         h["model"], h["text_model"], h["student"], h["teacher_gdn"], h["teacher_cap"],
         h["box"], h["codec"], h["lm_head"])
+    init_opt_state, init_opt_type = h["init_opt_state"], h["init_opt_type"]
 
     # Create the run dir + log + sidecar BEFORE the codec pre-fit so the dashboard
     # lists the run (and renders the architecture panel) during the ~2k-step pre-fit
@@ -539,6 +550,15 @@ def train(args):
         print(f"[pc-layer] level={args.pc_layer} on {n_pc} Linears, strength={args.pc_strength}", flush=True)
 
     opt = make_optimizer(student, codec, args, getattr(model.config, "text_config", model.config))
+    if init_opt_state is not None:  # warm-resume: restore optimizer momentum (Adam/Muon) or
+        if init_opt_type == args.optimizer:  # schedulefree averaging, else a restart cold-starts it
+            try:
+                opt.load_state_dict(init_opt_state)
+                print(f"  resumed optimizer state ({args.optimizer}) from warm-start ckpt", flush=True)
+            except Exception as e:
+                print(f"  [warn] optimizer-state restore failed ({e}); cold-starting momentum", flush=True)
+        else:
+            print(f"  [warn] optimizer changed {init_opt_type}->{args.optimizer}; cold-starting momentum", flush=True)
     is_sf = args.optimizer == "schedulefree"
     # External LR schedule (warmup + optional cosine) for AdamW/MuonClip. Schedule-Free
     # owns its warmup internally and its averaging replaces decay, so it uses NO
@@ -669,7 +689,7 @@ def train(args):
         if _SIG["ckpt"] or _SIG["stop"]:
             stopping = _SIG["stop"]
             if is_sf: opt.eval()
-            _save_ckpt(out, step, student, codec, args)
+            _save_ckpt(out, step, student, codec, args, opt)
             reason = "interrupt" if stopping else "sigusr1"
             emit({"kind": "checkpoint", "step": step, "reason": reason})
             print(f"  [{reason}] checkpoint saved at step {step}", flush=True)
@@ -741,14 +761,14 @@ def train(args):
             # periodic saves (which is how 12.023/12.030 slipped through before).
             if ev.get("ppl") is not None and ev["ppl"] < best_ppl:
                 best_ppl = ev["ppl"]
-                _save_best(out, step, ev["ppl"], student, codec, args)
+                _save_best(out, step, ev["ppl"], student, codec, args, opt)
             # autopilot: also eval the weight-EMA (keep the lower ppl), then check for
             # anti-grokking collapse and escalate (reg up + optional restore-best).
             if args.grok_autopilot:
                 ema_ev, ema_saved = apilot.eval_ema(
                     lambda: evaluate(text_model, lm_head, toks, args.eval_windows, args.seq_len, dev,
                                      start_lo=eval_lo, batch_size=args.eval_batch_size),
-                    best_ppl, lambda pp: _save_best(out, step, pp, student, codec, args))
+                    best_ppl, lambda pp: _save_best(out, step, pp, student, codec, args, opt))
                 if ema_saved:
                     best_ppl = ema_ev["ppl"]
                     emit({"kind": "eval", "step": step, "ema": 1, **ema_ev})
@@ -759,7 +779,7 @@ def train(args):
                     print(f"  [autopilot] {act}", flush=True)
             # periodic ckpt (averaged x for schedulefree, since we're in eval mode here)
             if save_every > 0 and step > 0 and step % save_every == 0:
-                _save_ckpt(out, step, student, codec, args)
+                _save_ckpt(out, step, student, codec, args, opt)
             student.train()
             if is_sf:
                 opt.train()  # back to y for the training step
@@ -949,8 +969,8 @@ def train(args):
         print(f"  [eval-final] loss={ev['loss']:.4f} ppl={ev['ppl']:.3f} top1={ev['top1_acc']:.4f}", flush=True)
         if ev.get("ppl") is not None and ev["ppl"] < best_ppl:  # final eval may be the best
             best_ppl = ev["ppl"]
-            _save_best(out, args.steps - 1, ev["ppl"], student, codec, args)
-    sd = _save_ckpt(out, args.steps - 1, student, codec, args)  # x weights (schedulefree in eval mode)
+            _save_best(out, args.steps - 1, ev["ppl"], student, codec, args, opt)
+    sd = _save_ckpt(out, args.steps - 1, student, codec, args, opt)  # x weights (schedulefree in eval mode)
     emit({"kind": "checkpoint", "step": args.steps - 1})
     print(f"saved -> {sd/'ckpt.pt'}", flush=True)
 
@@ -1026,6 +1046,10 @@ def main():
     ap.add_argument("--init-rwkv-ckpt", default="",
                     help="warm-start the bare RWKV core from a library layer file "
                          "(converted_layers_lib/L##.pt; uses its core.* subset). empty=GDN-init")
+    ap.add_argument("--save-optimizer", action=argparse.BooleanOptionalAction, default=True,
+                    help="persist optimizer state (Adam/Muon momentum, schedulefree averaging) in "
+                         "best/ + step_ ckpts so --init-rwkv-ckpt resumes warm instead of cold-starting "
+                         "momentum. Adds ~1-2x the trainable-param size per ckpt; --no-save-optimizer to skip.")
     ap.add_argument("--layer", type=int, required=True)
     ap.add_argument("--data", required=True)
     ap.add_argument("--out", required=True)
