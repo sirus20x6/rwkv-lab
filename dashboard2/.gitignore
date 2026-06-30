@@ -1,0 +1,7 @@
+/trainboard
+/trainboard.db
+/trainboard.db-wal
+/trainboard.db-shm
+*.db
+*.db-wal
+*.db-shm

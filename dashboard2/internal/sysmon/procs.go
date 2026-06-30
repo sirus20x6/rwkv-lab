@@ -1,0 +1,181 @@
+package sysmon
+
+import (
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/shirou/gopsutil/v4/process"
+)
+
+// Training entrypoints we recognize. Any python process whose cmdline names one
+// of these is treated as a training job (mirrors v1, broadened to the current
+// set of entrypoints).
+var trainingScripts = []string{
+	"convert_train.py", "distill_consolidate.py", "drive_isolation.py",
+	"train_mla.py", "train_mla_engram.py",
+}
+
+// AllowedScript reports whether basename(path) is a recognized training
+// entrypoint (the launch allowlist).
+func AllowedScript(path string) bool {
+	base := filepath.Base(path)
+	for _, s := range trainingScripts {
+		if base == s {
+			return true
+		}
+	}
+	return false
+}
+
+func matchedScript(cmdline []string) string {
+	for _, a := range cmdline {
+		base := filepath.Base(a)
+		for _, s := range trainingScripts {
+			if base == s {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+// argValue returns the value of --flag or --flag=value (first match).
+func argValue(cmdline []string, names ...string) (string, bool) {
+	want := map[string]bool{}
+	for _, n := range names {
+		want[n] = true
+	}
+	for i, a := range cmdline {
+		if want[a] && i+1 < len(cmdline) {
+			return cmdline[i+1], true
+		}
+		for n := range want {
+			if strings.HasPrefix(a, n+"=") {
+				return strings.TrimPrefix(a, n+"="), true
+			}
+		}
+	}
+	return "", false
+}
+
+// readProcs enumerates training processes and annotates them with run name +
+// log-age liveness.
+func readProcs(runsDir string) []Proc {
+	procs, err := process.Processes()
+	if err != nil {
+		return nil
+	}
+	now := float64(time.Now().UnixNano()) / 1e9
+	var out []Proc
+	for _, p := range procs {
+		cmdline, err := p.CmdlineSlice()
+		if err != nil || len(cmdline) == 0 {
+			continue
+		}
+		script := matchedScript(cmdline)
+		if script == "" {
+			continue
+		}
+		// Must actually be a python invocation (avoid matching an editor/grep).
+		if !looksPython(cmdline) {
+			continue
+		}
+
+		pr := Proc{PID: p.Pid, Script: script}
+
+		if v, ok := argValue(cmdline, "--out-dir", "--out"); ok {
+			pr.RunName = filepath.Base(v)
+		}
+		if v, ok := argValue(cmdline, "--max-steps", "--steps"); ok {
+			if n, err := strconv.Atoi(v); err == nil {
+				pr.MaxSteps = &n
+			}
+		}
+		if ct, err := p.CreateTime(); err == nil {
+			pr.RuntimeS = now - float64(ct)/1000.0
+		}
+		if cp, err := p.CPUPercent(); err == nil {
+			pr.CPUPct = cp
+		}
+		if mi, err := p.MemoryInfo(); err == nil && mi != nil {
+			pr.RSSGB = float64(mi.RSS) / gb
+		}
+		if nt, err := p.NumThreads(); err == nil {
+			pr.NumThreads = nt
+		}
+
+		pr.LogAgeS, pr.State = liveness(runsDir, pr.RunName, now)
+		out = append(out, pr)
+	}
+	return out
+}
+
+// VerifyTrainingPID re-reads a live PID and confirms it is still a python
+// training process (guards against PID reuse before we signal it). Returns the
+// matched script and whether the cmdline references an instrumented copy.
+func VerifyTrainingPID(pid int32) (ok bool, script string, instrumented bool) {
+	p, err := process.NewProcess(pid)
+	if err != nil {
+		return false, "", false
+	}
+	cmdline, err := p.CmdlineSlice()
+	if err != nil || len(cmdline) == 0 {
+		return false, "", false
+	}
+	script = matchedScript(cmdline)
+	if script == "" || !looksPython(cmdline) {
+		return false, "", false
+	}
+	// "instrumented" == carries the SIGUSR1/SIGINT handlers (checkpoint-now / stop),
+	// so signaling it won't kill the run. convert_train.py carries them natively now:
+	// the dashboard2/instrumented/ copy was reconciled into the root canonical trainer
+	// (2026-06-30), so it's signal-capable regardless of path. Other trainers are only
+	// signal-capable when run from a dashboard2/instrumented/ copy.
+	if script == "convert_train.py" {
+		instrumented = true
+	}
+	for _, a := range cmdline {
+		if strings.Contains(a, "dashboard2/instrumented/") {
+			instrumented = true
+			break
+		}
+	}
+	return true, script, instrumented
+}
+
+func looksPython(cmdline []string) bool {
+	// Check the first couple of argv entries for a python interpreter.
+	n := len(cmdline)
+	if n > 2 {
+		n = 2
+	}
+	for _, a := range cmdline[:n] {
+		if strings.Contains(strings.ToLower(filepath.Base(a)), "python") {
+			return true
+		}
+	}
+	return false
+}
+
+// liveness returns (log_age_seconds, state) from the run's train.jsonl mtime.
+func liveness(runsDir, runName string, now float64) (*float64, string) {
+	if runName == "" {
+		return nil, "unknown"
+	}
+	st, err := os.Stat(filepath.Join(runsDir, runName, "train.jsonl"))
+	if err != nil {
+		return nil, "unknown"
+	}
+	age := now - float64(st.ModTime().UnixNano())/1e9
+	switch {
+	case age < HealthyWindow:
+		return &age, "healthy"
+	case age < StaleWindow:
+		return &age, "stalling"
+	default:
+		return &age, "dead"
+	}
+}

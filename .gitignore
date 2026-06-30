@@ -1,0 +1,48 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.ipynb_checkpoints/
+
+# --- Caches / local tool metadata ---
+caches/
+.uv_cache/
+.hf_cache/
+.codex
+.codex/
+.claude/
+.triton/
+
+# --- Large/generated model + experiment artifacts (weights, states, checkpoints) ---
+# dir-level so git never recurses into the >1TB of data
+Qwen*/
+converted*/
+engram*/
+mem_targets/
+runs/
+research/
+# weight/state blobs anywhere (lenses, plans, patches, ckpts)
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.gguf
+*.onnx
+
+# --- Dashboards: SQLite DBs + compiled binaries (the Go/JS *source* is tracked) ---
+*.db
+*.db-wal
+*.db-shm
+dashboard2/trainboard
+dashboard2/launches/
+
+# --- Logs and local process metadata ---
+*.log
+.supervisor_child_*
+
+# --- Editor / OS cruft ---
+*.swp
+*.tmp
+.DS_Store

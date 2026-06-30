@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>trainboard · moe-mla</title>
+  <link rel="stylesheet" href="/static/app.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <!-- Per-tab id (sessionStorage: survives reload, unique per tab) so each viewer's
+       run selection is isolated server-side. Runs before Datastar (classic script,
+       executes ahead of the deferred module) so window.__tabId is set for data-signals. -->
+  <script>
+    (function () {
+      try {
+        var k = "tb_tab", id = sessionStorage.getItem(k);
+        if (!id) {
+          id = (window.crypto && crypto.randomUUID) ? crypto.randomUUID()
+               : "tab-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+          sessionStorage.setItem(k, id);
+        }
+        window.__tabId = id;
+      } catch (e) { window.__tabId = "tab-" + Math.random().toString(36).slice(2, 10); }
+    })();
+  </script>
+  <script type="module" src="/static/vendor/datastar.js"></script>
+  <script src="/static/vendor/pixi.min.js"></script>
+</head>
+<body data-signals="{ tabId:(window.__tabId || ''), selectedRun:'', hasSel:false, now:'', runVersions:{}, kpi:{}, runFilter:'',
+                      notes:'', tags:'', launchScript:'convert_train.py', launchArgs:'', toast:'',
+                      ctl:{ w_lmce:'', w_block:'', w_smt:'', w_dmt:'', lr:'', lr_scale:'', eval_every:'', save_every:'', log_every:'', grad_clip:'' },
+                      showLB:false, diffA:'', diffB:'' }">
+  <!-- Open the live SSE stream on load (system header + run list + selected KPIs). -->
+  <div data-effect="@get('/api/stream')" hidden></div>
+
+  <header id="topbar">
+    <div class="brand">trainboard <span class="ver">v2.0</span></div>
+    <button class="btn topbtn" data-on:click="$showLB=!$showLB; @get('/api/leaderboard')">leaderboard</button>
+    <div id="sys-gpus" class="sys-block"><span class="muted">connecting…</span></div>
+    <div id="sys-host" class="sys-block"></div>
+    <div id="sys-proc" class="sys-block"></div>
+    <div class="sys-ts" data-text="$now">—</div>
+  </header>
+
+  <main>
+    <aside id="sidebar">
+      <div class="side-section">
+        <div class="section-heading"><h2>runs</h2></div>
+        <input id="run-search" type="search" placeholder="Filter runs" autocomplete="off"
+               data-bind="runFilter" />
+        <div id="run-list"><div class="empty">connecting…</div></div>
+      </div>
+
+      <div class="side-section">
+        <div class="section-heading"><h2>launch</h2></div>
+        <select class="ctl-input" data-bind="launchScript">
+          <option value="convert_train.py">convert_train.py</option>
+          <option value="train_mla.py">train_mla.py</option>
+          <option value="convert_distill_progressive.py">convert_distill_progressive.py</option>
+          <option value="distill_consolidate.py">distill_consolidate.py</option>
+          <option value="fit_variant.py">fit_variant.py</option>
+          <option value="convert_stack.py">convert_stack.py</option>
+          <option value="train_mla_engram.py">train_mla_engram.py</option>
+        </select>
+        <input class="ctl-input" placeholder="args e.g. --layer 1 --out runs/x" data-bind="launchArgs" />
+        <div class="launch-btns">
+          <button class="btn" data-on:click="confirm('Launch '+$launchScript+' '+$launchArgs+'?\\nThis spawns a training process (competes for GPU).') && @post('/api/launch')"><svg class="bi" viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.5v9l7-4.5z"/></svg><span>launch now</span></button>
+          <button class="btn" data-on:click="@post('/api/queue/enqueue')"><svg class="bi" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" stroke="currentColor" stroke-width="2" fill="none"/></svg><span>queue</span></button>
+        </div>
+      </div>
+
+      <div class="side-section">
+        <div class="section-heading"><h2>queue</h2></div>
+        <div id="queue-list"><div class="empty">queue empty</div></div>
+      </div>
+    </aside>
+
+    <section id="main-panel">
+      <div id="alerts-banner" class="alerts-banner"></div>
+      <div id="conv-board" class="conv-board"></div>
+
+      <div class="panel" data-show="$showLB">
+        <div class="panel-title">run leaderboard <span class="sub">click a column to sort · a row to open</span></div>
+        <div id="leaderboard"><div class="empty">loading…</div></div>
+        <div class="diff-form">
+          <input class="ctl-input" placeholder="run A" data-bind="diffA" />
+          <input class="ctl-input" placeholder="run B" data-bind="diffB" />
+          <button class="btn" data-on:click="@get('/api/diff?a='+encodeURIComponent($diffA)+'&b='+encodeURIComponent($diffB))">config diff</button>
+        </div>
+        <div id="diff-out"></div>
+      </div>
+
+      <div id="run-header">
+        <h1>select a run</h1>
+        <div class="sub">live system + run metrics stream every second</div>
+      </div>
+
+      <div id="run-detail" data-show="$hasSel">
+        <div class="control-bar">
+          <button class="btn danger"
+            data-on:click="confirm('Stop '+$selectedRun+'? It will save a checkpoint and exit gracefully (SIGINT).') && @post('/api/runs/'+$selectedRun+'/stop')"><svg class="bi" viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.2"/></svg><span>stop</span></button>
+          <button class="btn"
+            data-on:click="confirm('Request a checkpoint for '+$selectedRun+'? (instrumented trainer only — refused otherwise.)') && @post('/api/runs/'+$selectedRun+'/checkpoint')"><svg class="bi" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5h8v11l-4-3-4 3z"/></svg><span>checkpoint now</span></button>
+        </div>
+
+        <div class="kpis">
+          <div class="kpi"><div class="kpi-label">step</div>
+            <div class="kpi-val" data-text="typeof $kpi.step==='number' ? $kpi.step.toLocaleString() : '—'">—</div></div>
+          <div class="kpi"><div class="kpi-label">train loss</div>
+            <div class="kpi-val" data-text="typeof $kpi.loss==='number' ? $kpi.loss.toFixed(3) : '—'">—</div>
+            <div class="kpi-sub" data-text="typeof $kpi.best_loss==='number' ? ('best '+$kpi.best_loss.toFixed(3)+(typeof $kpi.best_loss_step==='number'?' @ '+$kpi.best_loss_step.toLocaleString():'')) : ''"></div></div>
+          <div class="kpi"><div class="kpi-label">eval ppl</div>
+            <div class="kpi-val" data-text="typeof $kpi.ppl==='number' ? $kpi.ppl.toFixed(3) : '—'">—</div>
+            <div class="kpi-sub" data-text="(typeof $kpi.ppl==='number' && typeof $kpi.best_ppl==='number') ? (($kpi.ppl-$kpi.best_ppl<=0?'':'+')+($kpi.ppl-$kpi.best_ppl).toFixed(3)+' vs best') : ''"></div></div>
+          <div class="kpi"><div class="kpi-label">best ppl</div>
+            <div class="kpi-val good" data-text="typeof $kpi.best_ppl==='number' ? $kpi.best_ppl.toFixed(3) : '—'">—</div>
+            <div class="kpi-sub good" data-text="typeof $kpi.best_ppl_step==='number' ? '@ step '+$kpi.best_ppl_step.toLocaleString() : ''"></div></div>
+          <div class="kpi"><div class="kpi-label">top-1</div>
+            <div class="kpi-val" data-text="typeof $kpi.top1==='number' ? ($kpi.top1*100).toFixed(1)+'%' : '—'">—</div>
+            <div class="kpi-sub" data-text="(typeof $kpi.top1==='number' && typeof $kpi.best_top1==='number') ? ((($kpi.top1-$kpi.best_top1)*100>=0?'+':'')+(($kpi.top1-$kpi.best_top1)*100).toFixed(2)+' pp vs best') : ''"></div></div>
+          <div class="kpi"><div class="kpi-label">best top-1</div>
+            <div class="kpi-val good" data-text="typeof $kpi.best_top1==='number' ? ($kpi.best_top1*100).toFixed(1)+'%' : '—'">—</div>
+            <div class="kpi-sub good" data-text="typeof $kpi.best_top1_step==='number' ? '@ step '+$kpi.best_top1_step.toLocaleString() : ''"></div></div>
+          <div class="kpi"><div class="kpi-label">tok/s</div>
+            <div class="kpi-val" data-text="typeof $kpi.toks==='number' ? Math.round($kpi.toks).toLocaleString() : '—'">—</div></div>
+          <div class="kpi"><div class="kpi-label">events</div>
+            <div class="kpi-val" data-text="($kpi.n_train ?? 0)+'t/'+($kpi.n_eval ?? 0)+'e'">—</div>
+            <div class="kpi-sub" data-text="($kpi.n_ckpt ?? 0)+' checkpoints'"></div></div>
+        </div>
+
+        <div class="panel"><div class="panel-title">architecture
+            <span class="sub">layer types · params · trainable/frozen</span>
+            <button class="btn arch-btn" data-on:click="@get('/api/runs/'+$selectedRun+'/architecture')">load</button></div>
+          <div id="arch-body" class="arch-body"><div class="empty">click load — reads the model config + safetensors metadata (cached)</div></div>
+        </div>
+
+        <!-- Chart panels (canvases wired by Pixi in phase 4). -->
+        <div class="chart-toolbar">
+          <label class="cb"><input type="checkbox" id="smooth-on" /> EMA smoothing</label>
+          <label class="sl">α <input type="range" id="smooth-alpha" min="0.02" max="0.5" step="0.01" /></label>
+          <label class="cmp">compare vs <select id="compare-run"><option value="">none</option></select></label>
+          <span class="hint">click a legend entry to hide/show a series · scroll = zoom-x · drag = pan · dbl-click = reset</span>
+        </div>
+        <div class="panel"><div class="panel-title">loss &amp; perplexity</div>
+          <div class="chart-box"><canvas id="chart-loss"></canvas></div></div>
+        <div class="panel"><div class="panel-title">training signal <span class="sub">tok/s · gnorm · lr</span></div>
+          <div class="chart-box"><canvas id="chart-training"></canvas></div></div>
+        <div class="panel" id="conv-panel"><div class="panel-title">conversion signal <span class="sub">lm_ce · block · smt · dmt</span></div>
+          <div class="chart-box"><canvas id="chart-conv"></canvas></div></div>
+        <div class="panel" id="horizons-panel"><div class="panel-title">per-horizon accuracy <span class="sub">h=1…4 top-1 solid / top-5 dashed</span></div>
+          <div class="chart-box"><canvas id="chart-horizons"></canvas></div></div>
+        <div class="panel" id="memact-panel"><div class="panel-title">memory activation <span class="sub">ROSA / Engram injection RMS · recall path grokking-on</span></div>
+          <div class="chart-box"><canvas id="chart-memact"></canvas></div></div>
+        <div class="panel" id="memgen-panel"><div class="panel-title">memorization vs generalization <span class="sub">train block · held-out block · gen gap</span></div>
+          <div class="chart-box"><canvas id="chart-memgen"></canvas></div></div>
+
+        <div class="panel" id="events-panel" style="display:none">
+          <div class="panel-title">checkpoints &amp; events <span class="sub">click a row to focus the charts · markers overlaid on every chart · hover a tick</span></div>
+          <div class="ev-legend">
+            <span><i class="evdot" style="background:#999999"></i>checkpoint</span>
+            <span><i class="evdot" style="background:#f0e442"></i>alert (warn)</span>
+            <span><i class="evdot" style="background:#d55e00"></i>alert (critical)</span>
+            <span><i class="evdot" style="background:#0072b2"></i>control applied</span>
+            <span><i class="evdot" style="background:#cc79a7"></i>action</span>
+          </div>
+          <div id="event-list" class="event-list"></div>
+        </div>
+
+        <div class="panel" id="custom-panel">
+          <div class="panel-title">custom metrics <span class="sub">pick any logged metric · each normalized to its own range · hover for raw values</span></div>
+          <div id="metric-catalog" class="metric-catalog"></div>
+          <div class="chart-box" id="custom-chartbox" style="display:none"><canvas id="chart-custom"></canvas></div>
+        </div>
+
+        <div id="looprw-panel" class="panel hidden"></div>
+
+        <div class="panel"><div class="panel-title">live tuning
+            <span class="sub">applies on the trainer's next poll · instrumented runs only</span></div>
+          <div class="tune-grid">
+            <label>w_lmce<input class="ctl-input" type="number" step="any" data-bind="ctl.w_lmce" /></label>
+            <label>w_block<input class="ctl-input" type="number" step="any" data-bind="ctl.w_block" /></label>
+            <label>w_smt<input class="ctl-input" type="number" step="any" data-bind="ctl.w_smt" /></label>
+            <label>w_dmt<input class="ctl-input" type="number" step="any" data-bind="ctl.w_dmt" /></label>
+            <label>lr<input class="ctl-input" type="number" step="any" data-bind="ctl.lr" /></label>
+            <label>lr_scale<input class="ctl-input" type="number" step="any" data-bind="ctl.lr_scale" /></label>
+            <label>eval_every<input class="ctl-input" type="number" step="1" data-bind="ctl.eval_every" /></label>
+            <label>save_every<input class="ctl-input" type="number" step="1" data-bind="ctl.save_every" /></label>
+            <label>log_every<input class="ctl-input" type="number" step="1" data-bind="ctl.log_every" /></label>
+            <label>grad_clip<input class="ctl-input" type="number" step="any" data-bind="ctl.grad_clip" /></label>
+          </div>
+          <button class="btn full" data-on:click="@post('/api/runs/'+$selectedRun+'/control')">apply overrides (only filled fields)</button>
+          <div id="controls-list" class="controls-list"></div>
+        </div>
+
+        <div class="panel"><div class="panel-title">notes &amp; tags</div>
+          <textarea class="ctl-input" rows="2" placeholder="run notes…" data-bind="notes"></textarea>
+          <div class="ctl-row">
+            <input class="ctl-input" placeholder="tags (comma separated)" data-bind="tags" />
+            <button class="btn" data-on:click="@post('/api/runs/'+$selectedRun+'/notes')">save notes</button>
+            <button class="btn" data-on:click="@post('/api/runs/'+$selectedRun+'/tags')">save tags</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Pixi glue observes this hidden node for (run, version) changes. -->
+      <div id="active-run" hidden></div>
+    </section>
+  </main>
+
+  <!-- transient action status; click to dismiss -->
+  <div id="toast" class="toast" data-show="$toast" data-text="$toast" data-on:click="$toast=''"></div>
+
+  <script src="/static/app.js"></script>
+  <script src="/static/pixi-glue.js"></script>
+</body>
+</html>

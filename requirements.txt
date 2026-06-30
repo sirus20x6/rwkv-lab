@@ -1,0 +1,16 @@
+# Core deps for GQA -> MLA conversion + training on Qwen3.6-35B-A3B.
+# torch is inherited from the system site-packages (see .venv creation).
+transformers>=4.57
+safetensors>=0.4
+accelerate>=0.34
+huggingface_hub>=0.25
+einops>=0.8
+numpy>=1.26
+bitsandbytes>=0.43
+fastapi>=0.115
+uvicorn>=0.30
+sse-starlette>=2.1
+psutil>=6.0
+pynvml>=11.5
+datasets>=2.20
+schedulefree>=1.4.1
