@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 """Weight-tied N-loop refinement wrapper around RWKV8TimeMixDeltaNet.
 
-LT2-style (apps/LT2/transformer.py): each looped iteration runs the core on a
-*normalized* hidden and adds it as a residual with a zero-init weight. The
-pre-norm is the key stabilizer — it bounds the core's input no matter how large
-the running output gets, breaking the positive-feedback gain. (An earlier version
-fed the raw, un-normalized output back as input and accumulated it; that has
-unbounded gain and diverged to Inf/NaN within a few layers.)
+LT2-style (research/LT2-RWKV apps/LT2/transformer.py): each looped iteration runs
+the core on a *normalized* hidden and adds it as a residual with a zero-init
+weight. The pre-norm is the key stabilizer — it bounds the core's input no matter
+how large the running output gets, breaking the positive-feedback gain. (An
+earlier version fed the raw, un-normalized output back as input and accumulated
+it; that has unbounded gain and diverged to Inf/NaN within a few layers.)
 
 Init-preserving: residual_weight=0 => loop 1 == single-pass, so a codec-initialized
 core (and the lossless top layers) are untouched; loops 2..N only add once trained.
@@ -22,8 +22,22 @@ Gate granularity (gate_mode): how many independent gates each refinement pass ha
              init (exact no-op preserved), (b) gate_chan's gradient is gated by the
              head factor -> automatic coarse-to-fine curriculum, and (c) weight
              decay pulls the channel factor toward 1, not 0 (the gauge fix).
-All modes are exact no-ops at init. A coarser checkpoint broadcasts losslessly
-into a finer mode (convert_train._expand_loop_gates).
+
+gate_cap (>0): soft-cap the effective gate to (-cap, cap) via cap*tanh(g/cap).
+  residual_weight is otherwise unbounded (iter_norm bounds each pass's INPUT but
+  not the accumulated output), so a hot loop LR could destabilize the block. The
+  cap bounds the loop's contribution BY CONSTRUCTION (OpenMythos's spectral-radius
+  argument, adapted), instead of relying on grad-clip + the dashboard's after-the-
+  fact loop_pinned cool. tanh(0)=0 so the init no-op is preserved; near 0 it is
+  ~identity, so small gates behave exactly as uncapped.
+
+loop_index (bool): add a per-pass, zero-init learned offset to the pass input so
+  the weight-tied core can specialize each refinement pass (OpenMythos loop-index
+  embedding). Zero-init => adds nothing at init, so pass 1 stays the faithful
+  single-pass and the whole loop is still an exact no-op until trained.
+
+All modes/options are exact no-ops at init. A coarser checkpoint broadcasts
+losslessly into a finer mode (convert_train._expand_loop_gates).
 """
 from __future__ import annotations
 
@@ -46,7 +60,8 @@ class _RMSNorm(nn.Module):
 
 class LoopedRWKV(nn.Module):
     def __init__(self, core, n_loops: int = 4, hidden_size: int | None = None,
-                 gate_mode: str = "scalar"):
+                 gate_mode: str = "scalar", gate_cap: float = 0.0,
+                 loop_index: bool = False):
         super().__init__()
         self.core = core
         self.n_loops = int(n_loops)
@@ -54,6 +69,8 @@ class LoopedRWKV(nn.Module):
         G = int(getattr(core, "num_heads", 0)) or 64
         assert H % G == 0, f"hidden {H} not divisible by head-groups {G}"
         self.gate_mode = gate_mode
+        self.gate_cap = float(gate_cap)
+        self.loop_index = bool(loop_index)
         self.ch_per_group = H // G
         self.iter_norm = _RMSNorm(H)                       # pre-norm => bounded iteration input
         if gate_mode == "scalar":
@@ -67,27 +84,44 @@ class LoopedRWKV(nn.Module):
             self.gate_chan = nn.Parameter(torch.zeros(self.n_loops, H))         # channel DELTA (0 -> factor 1)
         else:
             raise ValueError(f"unknown gate_mode {gate_mode!r}")
+        if self.loop_index:                                # per-pass input offset (zero-init no-op)
+            self.loop_index_embed = nn.Parameter(torch.zeros(self.n_loops, H))
         self._save_key = getattr(core, "_save_key", None)
+
+    def loop_param_names(self) -> set[str]:
+        """Names of the loop-GATE params: the zero-init, tiny-gradient tensors that
+        want the dedicated rwkv_loop optimizer group + loop_lr_mult steering.
+        iter_norm/core params are NOT gates and stay in their normal groups."""
+        names = {"residual_weight"}
+        if self.gate_mode == "factored":
+            names.add("gate_chan")
+        if self.loop_index:
+            names.add("loop_index_embed")
+        return names
 
     @staticmethod
     def _t(y):
         return y[0] if isinstance(y, tuple) else y
 
     def _gate(self, i):
-        """Effective gate for pass i: 0-dim (scalar) or [C] (head/channel/factored)."""
+        """Effective gate for pass i: 0-dim (scalar) or [C] (head/channel/factored),
+        soft-capped to (-gate_cap, gate_cap) when gate_cap>0."""
         rw = self.residual_weight[i]
         if self.gate_mode in ("scalar", "channel"):
-            return rw
-        rw = rw.repeat_interleave(self.ch_per_group)       # [G] -> [C]
-        if self.gate_mode == "factored":
-            rw = rw * (1.0 + self.gate_chan[i])
-        return rw
+            g = rw
+        else:
+            g = rw.repeat_interleave(self.ch_per_group)    # [G] -> [C]
+            if self.gate_mode == "factored":
+                g = g * (1.0 + self.gate_chan[i])
+        if self.gate_cap > 0.0:
+            g = self.gate_cap * torch.tanh(g / self.gate_cap)  # tanh(0)=0 keeps the init no-op
+        return g
 
     @torch.no_grad()
     def effective_rw(self):
-        """Per-pass effective gates for telemetry: [n_loops] (scalar) or [n_loops, C]."""
-        if self.gate_mode == "scalar":
-            return self.residual_weight.detach().clone()
+        """Per-pass effective gates for telemetry: [n_loops] (scalar) or [n_loops, C].
+        Reflects gate_cap, so the dashboard/detector see the true bounded gate.
+        _gate(i) is 0-dim for scalar and [C] otherwise, so a single stack covers both."""
         return torch.stack([self._gate(i) for i in range(self.n_loops)])
 
     def forward(self, hidden_states, *args, **kwargs):
@@ -99,7 +133,10 @@ class LoopedRWKV(nn.Module):
             out = self._t(first)                          # pass 1 == single-pass output
         for i in range(1, self.n_loops):
             # refine on a NORMALIZED hidden (input + running output); zero-init gates.
-            inc = self._t(self.core(self.iter_norm(hidden_states + out)))
+            inp = hidden_states + out
+            if self.loop_index:                           # per-pass specialization offset
+                inp = inp + self.loop_index_embed[i]
+            inc = self._t(self.core(self.iter_norm(inp)))
             out = out + self._gate(i) * inc
         if return_state:
             # SMT/DMT supervise the underlying RWKV recurrent memory. The refinement
