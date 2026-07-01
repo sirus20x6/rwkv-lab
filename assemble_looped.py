@@ -2,7 +2,12 @@
 """Assemble independently-converted single layers into one LoopedRWKV artifact.
 
 Input: per-layer files, each one of
-  * a convert_train.py checkpoint  {"student": <bare-core sd>, "codec": ..., "args": {"layer": L, ...}}
+  * a convert_train.py checkpoint  {"student": <sd>, "codec": ..., "args": {"layer": L, ...}}
+    The student sd may be a bare core OR a LoopedRWKV sd (core.* + gates) — convert_train
+    saves the student AS a LoopedRWKV since the loop went native (--loop-count default 4).
+    Looped sds are STRIPPED to the bare core here: the isolation-trained loop is
+    deliberately discarded (see below) and wrapping it directly would double-prefix
+    the keys to core.core.* (a bug that broke every gdn_sweep banked ckpt).
   * a library layer file           {"layer_id": L, "state_dict": <LoopedRWKV sd: core.* + residual_weight + iter_norm.weight>, ...}
 
 Output: the rwkv_layers_looped.pt format consumed by distill_consolidate.py and
@@ -52,13 +57,21 @@ def _looped_layer(blob, loop_count: int):
     """Return (layer_idx, looped_state_dict) from one input file's loaded blob."""
     if isinstance(blob, dict) and "student" in blob:           # convert_train ckpt
         layer = int(blob["args"]["layer"])
-        return layer, _wrap_bare(blob["student"], loop_count)
+        sd = blob["student"]
+        if any(str(k).startswith("core.") for k in sd):
+            # Looped convert_train ckpt: strip to the bare core. The isolation-trained
+            # loop (gates + iter_norm) is discarded on purpose — the loop is re-learned
+            # in joint consolidation, the only place the full-model trajectory exists.
+            sd = {str(k)[len("core."):]: v for k, v in sd.items() if str(k).startswith("core.")}
+        return layer, _wrap_bare(sd, loop_count)
     if isinstance(blob, dict) and "state_dict" in blob:        # library layer file
         layer = int(blob["layer_id"])
         sd = blob["state_dict"]
-        n = int(sd["residual_weight"].numel()) if "residual_weight" in sd else loop_count
+        # n_loops is dim 0 of residual_weight ([N] scalar gates, [N,G]/[N,C] finer modes);
+        # numel() would mis-read a 2D gate (e.g. [4,64] -> 256).
+        n = int(sd["residual_weight"].shape[0]) if "residual_weight" in sd else loop_count
         if n != loop_count:  # fatal: metadata loop_count would disagree with this layer's residual_weight
-            raise SystemExit(f"layer {layer}: source residual_weight len {n} != --loop-count {loop_count}; "
+            raise SystemExit(f"layer {layer}: source residual_weight n_loops {n} != --loop-count {loop_count}; "
                              f"re-run with --loop-count {n} or fix the source")
         return layer, sd
     raise SystemExit(f"unrecognized per-layer file (no 'student' or 'state_dict' key): keys={list(blob)[:8]}")
@@ -68,6 +81,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("inputs", nargs="+", help="per-layer files or globs (convert_train ckpt.pt or library L##.pt)")
     ap.add_argument("--loop-count", type=int, default=4)
+    ap.add_argument("--gate-cap", type=float, default=0.0,
+                    help="loop gate soft-cap (--loop-gate-cap) the LIBRARY layers' gates were "
+                         "trained with; recorded into the artifact so distill_consolidate "
+                         "rebuilds LoopedRWKV with the same effective-gate function. Irrelevant "
+                         "for convert ckpts (stripped to zero-init gates).")
     ap.add_argument("--out", required=True)
     ap.add_argument("--allow-neg-eigval", action=argparse.BooleanOptionalAction, default=True)
     args = ap.parse_args()
@@ -99,6 +117,7 @@ def main():
         "layers": layers,
         "converted": conv,
         "loop_count": args.loop_count,
+        "gate_cap": float(args.gate_cap),
         "allow_neg_eigval": bool(args.allow_neg_eigval),
         "stream_cursor": 0,
         "batch": 1,

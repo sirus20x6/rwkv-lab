@@ -145,13 +145,18 @@ type EvalStats struct {
 	LastBlockVal *float64
 	MinBlockVal  *float64
 	LastMaxRW    *float64 // latest loop_max_rw (LoopedRWKV gate magnitude; nil = no loop)
+	LastLoopMult *float64 // trainer-reported EFFECTIVE loop_lr_mult (folds in the launch arg; nil = old run)
+	LastPinThr   *float64 // trainer-reported pin threshold (scales with --loop-gate-cap; nil = legacy 0.245)
+	LastLoopLive *float64 // 1 = live loop_lr_mult steering applies; 0 = baked in (schedulefree)
 }
 
 // RecentEvalStats aggregates the last n eval rows for a run (ppl + held-out
-// block_val and the loop-gate magnitude from extra_json).
+// block_val and the loop-gate state from extra_json).
 func (d *DB) RecentEvalStats(runID int64, n int) (EvalStats, error) {
 	rows, err := d.Query(
-		`SELECT ppl, json_extract(extra_json,'$.block_val'), json_extract(extra_json,'$.loop_max_rw')
+		`SELECT ppl, json_extract(extra_json,'$.block_val'), json_extract(extra_json,'$.loop_max_rw'),
+		        json_extract(extra_json,'$.loop_lr_mult'), json_extract(extra_json,'$.loop_pin_thr'),
+		        json_extract(extra_json,'$.loop_live')
 		 FROM eval_events WHERE run_id=? ORDER BY step DESC LIMIT ?`, runID, n)
 	if err != nil {
 		return EvalStats{}, err
@@ -160,8 +165,8 @@ func (d *DB) RecentEvalStats(runID int64, n int) (EvalStats, error) {
 	var es EvalStats
 	first := true
 	for rows.Next() {
-		var ppl, block, maxRW sql.NullFloat64
-		if err := rows.Scan(&ppl, &block, &maxRW); err != nil {
+		var ppl, block, maxRW, loopMult, pinThr, loopLive sql.NullFloat64
+		if err := rows.Scan(&ppl, &block, &maxRW, &loopMult, &pinThr, &loopLive); err != nil {
 			return es, err
 		}
 		if first {
@@ -173,6 +178,18 @@ func (d *DB) RecentEvalStats(runID int64, n int) (EvalStats, error) {
 			if maxRW.Valid {
 				v := maxRW.Float64
 				es.LastMaxRW = &v
+			}
+			if loopMult.Valid {
+				v := loopMult.Float64
+				es.LastLoopMult = &v
+			}
+			if pinThr.Valid {
+				v := pinThr.Float64
+				es.LastPinThr = &v
+			}
+			if loopLive.Valid {
+				v := loopLive.Float64
+				es.LastLoopLive = &v
 			}
 			first = false
 		}

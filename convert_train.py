@@ -304,6 +304,10 @@ def _expand_loop_gates(load_sd, student):
           and rw_new.shape[1] % rw_old.shape[1] == 0):
         load_sd["residual_weight"] = rw_old.repeat_interleave(
             rw_new.shape[1] // rw_old.shape[1], dim=1).clone()
+    elif rw_old.shape[0] != N:
+        raise SystemExit(f"ckpt residual_weight has n_loops={rw_old.shape[0]} but this run has "
+                         f"--loop-count {N}: pass counts cannot be adapted; relaunch with "
+                         f"--loop-count {rw_old.shape[0]}.")
     else:
         raise SystemExit(f"cannot adapt ckpt residual_weight {tuple(rw_old.shape)} to the "
                          f"--loop-gate shape {tuple(rw_new.shape)}: finer->coarser is lossy; "
@@ -374,6 +378,7 @@ def build(args):
         student = LoopedRWKV(core, n_loops=args.loop_count, gate_mode=args.loop_gate,
                              gate_cap=args.loop_gate_cap, loop_index=bool(args.loop_index),
                              ).to(device=_p0.device, dtype=_p0.dtype)
+        student.float_gates()  # gates stay fp32: bf16 ulp swallows their tiny growth steps
         decoder_layer.linear_attn = student  # iter_norm + residual_weight onto the same device/dtype
     else:
         student = core
@@ -400,6 +405,16 @@ def build(args):
             # file's loop was trained in the cumulative stack and is WRONG here (it jumped step-0
             # 12.1 -> 15.4), so strip it to the single-pass core and re-learn the loop.
             if src_looped and is_convert:
+                # KEEPING the loop is only loss-free if the gate soft-cap matches: the
+                # effective gate is cap*tanh(rw/cap) (or raw rw uncapped), so a cap change
+                # silently reshapes every trained gate. Refuse, like finer->coarser gates.
+                old_cap = float((blob.get("args") or {}).get("loop_gate_cap") or 0.0)
+                if old_cap != float(args.loop_gate_cap):
+                    raise SystemExit(
+                        f"warm-start gate_cap mismatch: ckpt was trained with loop_gate_cap="
+                        f"{old_cap:g}, this run has --loop-gate-cap {args.loop_gate_cap:g}. "
+                        f"The kept loop would silently change function; relaunch with "
+                        f"--loop-gate-cap {old_cap:g}.")
                 load_sd = dict(sd_src)                        # full: core.* + residual_weight + iter_norm.*
                 strip_loop = False
             elif src_looped:
@@ -609,6 +624,13 @@ def _make_muonclip(student, text_cfg, args):
     receptance/key, which are not GQA-shaped). lr_muon is CALIBRATED: the baked-in
     0.4*sqrt(max_dim) amplifier (~25.6x @4096) makes it ~vanilla-Muon-lr/25 —
     train_mla's validated 1e-4 (5e-4 blew up two runs)."""
+    if _loop_param_names(student):
+        raise SystemExit(
+            "--optimizer muonclip cannot train a LoopedRWKV student: GuardedMuonClip caps the "
+            "step at ratio*RMS(p), so the zero-init loop gates are an absorbing state (RMS(p)=0 "
+            "=> max step ~0 forever), and it has no rwkv_loop group, so --loop-lr-mult and the "
+            "detector's live steering silently never apply. Use --optimizer spectral_muon or "
+            "adamw, or --loop-count 1.")
     from muon_helpers import _make_guarded_muonclip_class, _ParamProxy
     from muon import MuonConfig
     if text_cfg is None:
@@ -720,9 +742,21 @@ def train(args):
     logf = open(out / "train.jsonl", "w")
     def emit(rec):
         logf.write(json.dumps(rec) + "\n"); logf.flush()
-    def write_loop_rw():  # loop-usage card data for the dashboard (no-op for a bare core).
-        # Returns {loop_max_rw, loop_pinned} so eval records carry the gate state into the
-        # DB (extra_json) — that's what the detector's loop_stall/loop_pinned rules read.
+    # pin threshold: 0.245 matches the legacy UNBOUNDED regime (~the old 0.25 clamp).
+    # With --loop-gate-cap the effective gate saturates at cap (cap*tanh), so a fixed
+    # 0.245 either can never fire (cap<=0.245) or fires inside the healthy bounded
+    # range — scale it to the cap instead. The threshold rides eval records
+    # (loop_pin_thr) so the dashboard detector judges by the same number.
+    loop_pin_thr = 0.245 if args.loop_gate_cap <= 0.0 else 0.98 * args.loop_gate_cap
+    # schedulefree bakes loop_lr_mult into the group lr (no live multipliers), so live
+    # steering is a no-op there; loop_live=0 tells the detector not to write controls.
+    loop_live = 0 if args.optimizer == "schedulefree" else 1
+    def write_loop_rw(cur_mult=None):  # loop-usage card data for the dashboard (no-op for a bare core).
+        # Returns {loop_max_rw, loop_pinned, loop_pin_thr, loop_live[, loop_lr_mult]} so
+        # eval records carry the gate state into the DB (extra_json) — that's what the
+        # detector's loop_stall/loop_pinned/loop_release rules read. cur_mult is the
+        # EFFECTIVE multiplier (launch arg or live override): without it the detector
+        # can't see an arg-launched boost and would "boost" a 30x run down to 10x.
         rw = getattr(student, "residual_weight", None)
         if rw is None:
             return None
@@ -733,11 +767,17 @@ def train(args):
         else:              # head/channel/factored: per-pass max|gate| across channels
             rwl = [float(x) for x in eff.abs().amax(dim=1).tolist()]
         mx = max((abs(x) for x in rwl), default=0.0)
+        pinned = int(mx >= loop_pin_thr)
         (out / "loop_rw.json").write_text(json.dumps({
-            "loop_count": int(args.loop_count), "n_layers": 1, "n_pinned": int(mx >= 0.245),
+            "loop_count": int(args.loop_count), "n_layers": 1, "n_pinned": pinned,
             "gate_mode": getattr(student, "gate_mode", "scalar"),
+            "gate_cap": float(args.loop_gate_cap), "pin_thr": loop_pin_thr,
             "mean_max_rw": mx, "layers": [{"layer": int(args.layer), "max_rw": mx, "rw": rwl}]}))
-        return {"loop_max_rw": mx, "loop_pinned": int(mx >= 0.245)}
+        lw = {"loop_max_rw": mx, "loop_pinned": pinned,
+              "loop_pin_thr": loop_pin_thr, "loop_live": loop_live}
+        if cur_mult is not None:
+            lw["loop_lr_mult"] = float(cur_mult)
+        return lw
     write_sidecar_config(out, 0, args)
     write_loop_rw()  # initial (zeros) so the card appears immediately for looped runs
 
@@ -935,9 +975,16 @@ def train(args):
               f"({'adaptive' if args.rosa_soft_scale is None else 'fixed --rosa-soft-scale, log-only'})",
               flush=True)
     # spectral loop levers: Hyperball Frobenius-sphere projection + river-valley switch.
+    # Loop gates are EXCLUDED: they are zero-init 2D tensors whose whole job is to grow
+    # off the zero sphere — projecting back to R=0 would re-zero them every step and
+    # silently kill the loop. Same guard for any other zero-init 2D param (R=0 sphere
+    # projection is degenerate).
+    _hb_skip = {id(p) for n, p in student.named_parameters() if n in _loop_param_names(student)}
     hb_R = ({p: float(p.detach().norm()) for g in opt.param_groups for p in g["params"]
-             if p.ndim == 2} if args.hyperball else {})
+             if p.ndim == 2 and id(p) not in _hb_skip and float(p.detach().norm()) > 0.0}
+            if args.hyperball else {})
     switched = False
+    loop_mult = args.loop_lr_mult  # effective mult; live ctl override re-read each step
     for step in range(args.steps):
         if (not switched and args.muon_to_adamw_frac > 0.0
                 and args.optimizer in ("muonclip", "spectral_muon")
@@ -1033,7 +1080,8 @@ def train(args):
                           batch_size=args.eval_batch_size)
             if args.log_grokking_metrics and "block_val" in ev and block_ema is not None:
                 ev["gen_gap"] = ev["block_val"] - block_ema
-            lw = write_loop_rw()  # loop-usage card; gate state rides the eval record too
+            # loop-usage card; gate state + EFFECTIVE loop_lr_mult ride the eval record too
+            lw = write_loop_rw(args.loop_lr_mult if is_sf else loop_mult)
             if lw:
                 ev.update(lw)
             emit({"kind": "eval", "step": step, **ev})
@@ -1290,7 +1338,7 @@ def train(args):
                       batch_size=args.eval_batch_size)
         if args.log_grokking_metrics and "block_val" in ev and block_ema is not None:
             ev["gen_gap"] = ev["block_val"] - block_ema
-        lw = write_loop_rw()
+        lw = write_loop_rw(args.loop_lr_mult if is_sf else loop_mult)
         if lw:
             ev.update(lw)
         emit({"kind": "eval", "step": args.steps - 1, **ev})

@@ -76,30 +76,51 @@ def load_student(model_dir, rwkv_ckpt, decay_cap_delta, device, dtype):
     # mislabeled checkpoint (e.g. loop_count>1 over bare cores).
     if has_core:
         looped = True
-        rw_len = int(sample["residual_weight"].numel()) if "residual_weight" in sample else meta_lc
+        # n_loops is dim 0 of residual_weight; numel() would mis-read a non-scalar
+        # gate ([4,64] head gates -> 256).
+        rw_len = int(sample["residual_weight"].shape[0]) if "residual_weight" in sample else meta_lc
         if meta_lc > 1 and rw_len and rw_len != meta_lc:
-            raise SystemExit(f"loop_count metadata {meta_lc} != residual_weight len {rw_len}")
+            raise SystemExit(f"loop_count metadata {meta_lc} != residual_weight n_loops {rw_len}")
         loop_count = rw_len or meta_lc
     else:
         if meta_lc > 1:
             raise SystemExit(f"loop_count={meta_lc} but layer state dicts are bare (no core.*)")
         looped, loop_count = False, 0
     aneg = bool(ck.get("allow_neg_eigval", False))     # constructor state (_a_scale), NOT in state_dict
+    gate_cap = float(ck.get("gate_cap", 0.0) or 0.0)   # constructor state too (assemble_looped records it)
+
+    def _gate_mode_of(sd):
+        """Infer the LoopedRWKV gate mode from a layer sd's actual tensors: the mode
+        is constructor state, not state_dict content, so it must be reconstructed."""
+        rw = sd.get("residual_weight")
+        if rw is None or rw.ndim == 1:
+            return "scalar"
+        if "gate_chan" in sd:
+            return "factored"
+        return "channel" if rw.shape[1] == cfg.hidden_size else "head"
+
     for L in conv:
         core = rwkv8_timemix_from_config(m.config, layer_idx=L, depth_n_layer=cfg.num_hidden_layers,
                                          decay_cap_delta=decay_cap_delta, allow_neg_eigval=aneg)
         # LoopedRWKV wraps the core; its parameters() (incl. residual_weight) are the
         # ones we train jointly below — so the loop IS consolidated here.
-        r = LoopedRWKV(core, n_loops=loop_count, hidden_size=cfg.hidden_size) if looped else core
-        miss, unexp = r.load_state_dict(ck["layers"][L], strict=False)
+        lsd = ck["layers"][L]
+        r = (LoopedRWKV(core, n_loops=loop_count, hidden_size=cfg.hidden_size,
+                        gate_mode=_gate_mode_of(lsd), gate_cap=gate_cap,
+                        loop_index="loop_index_embed" in lsd)
+             if looped else core)
+        miss, unexp = r.load_state_dict(lsd, strict=False)
         if miss or unexp:                              # by construction empty; fail loud on any drift
             raise SystemExit(f"layer {L} load mismatch: missing={list(miss)[:6]} unexpected={list(unexp)[:6]}")
-        r = r.to(device=device, dtype=dtype); r._save_key = f"rwkv8_layer_{L}"
+        r = r.to(device=device, dtype=dtype)
+        if looped:
+            r.float_gates()                            # gates fp32: bf16 ulp swallows tiny steps
+        r._save_key = f"rwkv8_layer_{L}"
         setattr(layers[L], "linear_attn", r)
     print(f"loaded {len(conv)} layers "
           f"({'LoopedRWKV n_loops=' + str(loop_count) if looped else 'bare core'}, "
-          f"allow_neg_eigval={aneg})", flush=True)
-    return m, tm, layers, conv, looped, loop_count, aneg
+          f"gate_cap={gate_cap:g}, allow_neg_eigval={aneg})", flush=True)
+    return m, tm, layers, conv, looped, loop_count, aneg, gate_cap
 
 
 def _hook(store, i):
@@ -136,7 +157,7 @@ def main():
         p.requires_grad_(False)
     t_tm = _text(teacher); t_layers = t_tm.layers
     print("loading student (RWKV) ...", flush=True)
-    student, s_tm, s_layers, converted, looped, loop_count, aneg = load_student(
+    student, s_tm, s_layers, converted, looped, loop_count, aneg, gate_cap = load_student(
         args.model_dir, args.rwkv_ckpt, args.decay_cap_delta, dev, dtype)
     for p in student.parameters():
         p.requires_grad_(False)
@@ -195,7 +216,8 @@ def main():
                                    for L in converted}}
                 if looped:  # round-trip as a LoopedRWKV artifact (assemble_looped format)
                     blob.update(converted=list(converted), loop_count=loop_count,
-                                allow_neg_eigval=aneg, stream_cursor=0, batch=1)
+                                gate_cap=gate_cap, allow_neg_eigval=aneg,
+                                stream_cursor=0, batch=1)
                 torch.save(blob, args.out)
     emit({"kind": "checkpoint", "step": args.steps}); sidecar(args.steps)
     print(f"\nDONE: teacher {tp['ppl']:.2f} -> student start {sp['ppl']:.2f} -> best {best:.2f}", flush=True)

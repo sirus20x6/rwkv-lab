@@ -45,7 +45,7 @@ const (
 	loopStallRW      = 1e-3  // max|rw| still below this = the gates never opened
 	loopStallMinStep = 800   // give warmup + momentum rebuild time before judging
 	loopReleaseRW    = 0.01  // 10x stall threshold: gates clearly moving -> relax the boost
-	loopPinRW        = 0.245 // matches the trainer's loop_rw.json pin threshold
+	loopPinRW        = 0.245 // legacy default; trainer now reports loop_pin_thr per run (scales with --loop-gate-cap)
 	loopMultCap      = 30.0  // --loop-lr-mult help's fresh-conversion ceiling
 )
 
@@ -169,8 +169,22 @@ func (d *Detector) scanRun(p sysmon.Proc) {
 	// the boost back toward 1 (it exists for escape velocity, not steady state);
 	// pinned at the cap -> cool it. residual_weight is UNBOUNDED in looped_rwkv, so
 	// the boost must never be left hot longer than the escape window needs.
-	if eerr == nil && es.N >= 1 && es.LastMaxRW != nil {
-		cur := d.currentControl(p.RunName, "loop_lr_mult", 1.0)
+	// loop_live=0 (schedulefree) means the mult is baked into the group lr — live
+	// steering is a no-op there, so write nothing rather than alert forever.
+	if eerr == nil && es.N >= 1 && es.LastMaxRW != nil && (es.LastLoopLive == nil || *es.LastLoopLive != 0) {
+		// Current effective mult: an explicit control row wins (it's what the trainer
+		// polls next); else the trainer-reported value, which folds in the LAUNCH
+		// --loop-lr-mult this side can't otherwise see — a run started at 30x must not
+		// be "boosted" down to 10x, and its release/cool rules must still engage.
+		fallback := 1.0
+		if es.LastLoopMult != nil {
+			fallback = *es.LastLoopMult
+		}
+		cur := d.currentControl(p.RunName, "loop_lr_mult", fallback)
+		pinThr := loopPinRW // legacy default; trainer reports the cap-scaled threshold
+		if es.LastPinThr != nil {
+			pinThr = *es.LastPinThr
+		}
 		if stats.LastStep > loopStallMinStep && *es.LastMaxRW < loopStallRW {
 			next := math.Min(math.Max(cur, 1.0)*10.0, loopMultCap)
 			if next > cur {
@@ -181,11 +195,11 @@ func (d *Detector) scanRun(p sysmon.Proc) {
 					_ = d.db.SetControls(p.RunName, map[string]float64{"loop_lr_mult": next}, now)
 				}
 			}
-		} else if *es.LastMaxRW >= loopPinRW && cur > 1.0 {
+		} else if *es.LastMaxRW >= pinThr && cur > 1.0 {
 			next := math.Max(cur*0.5, 1.0)
 			if d.raise(p, "loop_pinned", "warn", stats.LastStep,
 				fmt.Sprintf("loop gates pinned (max|rw| %.3f ≥ %.3f) — cooling loop_lr_mult %.3g→%.3g",
-					*es.LastMaxRW, loopPinRW, cur, next)) {
+					*es.LastMaxRW, pinThr, cur, next)) {
 				now := float64(time.Now().UnixNano()) / 1e9
 				_ = d.db.SetControls(p.RunName, map[string]float64{"loop_lr_mult": next}, now)
 			}

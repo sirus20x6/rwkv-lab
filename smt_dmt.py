@@ -252,7 +252,13 @@ def smt_transition_loss(layer, codec, h_seq, S_gdn=None, *, stride,
         for _j, lo, _hi in group:
             shifts.append(h_seq[:, lo - 1:lo] if lo > 0 else h_seq[:, :1].new_zeros(B, 1, C))
         shift = torch.cat(shifts, dim=0)
-        y, s1, _sh = layer(x, initial_state=s0, shift_state=shift, return_state=True)
+        # skip_refine: SMT supervises the CORE's state transition + within-chunk readout.
+        # LoopedRWKV refinement passes are stateless re-reads of the window, so on a
+        # 64-token chunk they compute a different function than the full-window block
+        # loss trains — and only pass-1 states are supervised anyway. Pass-1 only:
+        # consistent semantics, no n_loops x chunk cost. Bare cores ignore the kwarg.
+        y, s1, _sh = layer(x, initial_state=s0, shift_state=shift, return_state=True,
+                           skip_refine=True)
         mem_loss = mem_loss + F.mse_loss(s1.float(), s1_tgt) * G
         if block_out is not None:
             y_tgt = torch.cat([block_out[:, lo:hi] for _j, lo, hi in group], dim=0)
@@ -294,7 +300,8 @@ def dmt_rollout_loss(layer, codec, h_seq, S_gdn=None, *, stride, discount=1.0,
     states = [st]
     for j, (lo, hi) in enumerate(chunks):
         y, st, shift = layer(h_seq[:, lo:hi], initial_state=st,
-                             shift_state=shift, return_state=True)
+                             shift_state=shift, return_state=True,
+                             skip_refine=True)  # pass-1 (core) semantics — see smt note
         w = discount ** j
         mem_loss = mem_loss + w * F.mse_loss(st.float(), tgt[:, j + 1].detach())
         if block_out is not None:
