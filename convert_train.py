@@ -39,6 +39,7 @@ import json
 import math
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -120,7 +121,24 @@ def _finite_float(x, default=0.0):
     return float(x.detach() if torch.is_tensor(x) else x)
 
 
-def _save_ckpt(out, step, student, codec, args, opt=None):
+def _optimizer_params(opt):
+    return [p for g in opt.param_groups for p in g["params"]]
+
+
+def _token_windows_tensor(toks, starts, length, device, out=None):
+    starts = np.asarray(starts, dtype=np.int64)
+    shape = (starts.shape[0], length)
+    ids_np = out if out is not None and out.shape == shape else np.empty(shape, dtype=np.int64)
+    for i, s in enumerate(starts):
+        ids_np[i] = toks[int(s):int(s) + length]
+    return torch.as_tensor(ids_np, device=device)
+
+
+def _cache_batch_tensor(mm, indices, device, dtype):
+    return torch.as_tensor(np.asarray(mm[np.asarray(indices, dtype=np.int64)]), device=device, dtype=dtype)
+
+
+def _save_ckpt(out, step, student, codec, args, opt=None, rosa_soft=None):
     """Write step_<step>/{config.json, ckpt.pt}. For --optimizer schedulefree the
     caller must opt.eval() first so `student` holds the averaged x weights. With
     --save-optimizer, also persist optimizer state so --init-rwkv-ckpt resumes warm."""
@@ -128,6 +146,8 @@ def _save_ckpt(out, step, student, codec, args, opt=None):
     blob = {"student": student.state_dict(), "codec": codec.state_dict(), "args": vars(args)}
     if opt is not None and getattr(args, "save_optimizer", True):
         blob["opt"], blob["opt_type"] = opt.state_dict(), args.optimizer
+    if rosa_soft is not None:
+        blob["rosa_soft"] = rosa_soft.state_dict()
     torch.save(blob, sd / "ckpt.pt")
     return sd
 
@@ -155,21 +175,61 @@ def write_sidecar_config(out, step, args):
     return sd
 
 
-def _save_best(out, step, ppl, student, codec, args, opt=None):
+_SAVE_POOL = ThreadPoolExecutor(max_workers=1)  # best-ckpt writer: single worker => writes land in submit order
+_LAST_SAVE = [None]  # most recent queued best-write future
+
+
+def _flush_best_saves():
+    """Block until any queued best-ckpt write has hit disk. Anything that torch.loads
+    out/best/ckpt.pt MID-RUN (autopilot restore-best) must flush first, or it can read
+    the previous minimum while the newest one is still in the write queue."""
+    f = _LAST_SAVE[0]
+    if f is not None:
+        f.result()
+
+
+def _snap_cpu(obj):
+    """Deep-copy a (nested) state blob to CPU. A background torch.save must see an
+    immutable snapshot: the live GPU tensors keep training while the write runs."""
+    if torch.is_tensor(obj):
+        return obj.detach().to("cpu", copy=True)
+    if isinstance(obj, dict):
+        return {k: _snap_cpu(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        vals = [_snap_cpu(v) for v in obj]
+        return vals if isinstance(obj, list) else tuple(vals)
+    return obj
+
+
+def _save_best(out, step, ppl, student, codec, args, opt=None, rosa_soft=None):
     """ATOMICALLY save the best-eval checkpoint to out/best/. Called on EVERY eval
     improvement, so the minimum can never slip between periodic (--save-every) saves.
-    Writes to a temp file then os.replace -> a crash mid-save can't corrupt best/. With
-    --save-optimizer, persists optimizer state so --init-rwkv-ckpt (-> best/) resumes warm."""
+    The CPU snapshot happens synchronously HERE — schedulefree's eval-mode x weights and
+    the autopilot's EMA swap must be captured before the caller swaps them back — then
+    the pickle+disk write runs on _SAVE_POOL so the improvement streaks early in training
+    don't stall train steps. Writes to a temp file then os.replace -> a crash mid-save
+    can't corrupt best/ (an in-flight write is lost, best/ keeps the previous minimum).
+    With --save-optimizer, persists optimizer state so --init-rwkv-ckpt resumes warm."""
     bd = Path(out) / "best"
     bd.mkdir(parents=True, exist_ok=True)
-    tmp = bd / "ckpt.pt.tmp"
     blob = {"student": student.state_dict(), "codec": codec.state_dict(),
             "args": vars(args), "step": int(step), "ppl": float(ppl)}
     if opt is not None and getattr(args, "save_optimizer", True):
         blob["opt"], blob["opt_type"] = opt.state_dict(), args.optimizer
-    torch.save(blob, tmp)
-    os.replace(tmp, bd / "ckpt.pt")
-    (bd / "best.json").write_text(json.dumps({"step": int(step), "ppl": float(ppl)}))
+    if rosa_soft is not None:
+        blob["rosa_soft"] = rosa_soft.state_dict()
+    blob = _snap_cpu(blob)
+
+    def _write():
+        try:
+            tmp = bd / "ckpt.pt.tmp"
+            torch.save(blob, tmp)
+            os.replace(tmp, bd / "ckpt.pt")
+            (bd / "best.json").write_text(json.dumps({"step": int(step), "ppl": float(ppl)}))
+        except Exception as e:
+            print(f"  [warn] background best-ckpt write failed: {e}", flush=True)
+
+    _LAST_SAVE[0] = _SAVE_POOL.submit(_write)
 
 
 def resolve_best_ckpt(path):
@@ -347,6 +407,36 @@ def build(args):
             raise _StopForward
     decoder_layer.linear_attn.register_forward_hook(_capture_y)
 
+    # ROSA-soft: additive retrieval injection on the layer's output. Registered AFTER
+    # _capture_y so box["y"] (read by SMT/DMT) stays pre-injection -- the primary
+    # conversion loss always measures pure RWKV-vs-GDN fidelity, unaffected by
+    # --rosa-soft; only downstream layers + the LM-CE path see the augmented output.
+    rosa_soft = None
+    if getattr(args, "rosa_soft", 0):
+        from rosa_soft_layer import RosaAnchorLayer
+        _p0 = next(student.parameters())
+        rosa_soft = RosaAnchorLayer(
+            hidden_size=text_model.config.hidden_size, M=args.rosa_soft_m,
+            window_size=args.rosa_soft_window, scale=args.rosa_soft_scale,
+            value_heads=args.rosa_soft_value_heads,
+            logit_epsilon=args.rosa_soft_logit_epsilon,
+            qk_damper_strength=args.rosa_soft_qk_damper,
+            route_dim=(args.rosa_soft_dim or None),
+        ).to(device=_p0.device, dtype=_p0.dtype)
+        for p in rosa_soft.parameters():
+            p.requires_grad_(True)
+        def _inject_rosa_soft(m, a, o):
+            if not torch.is_tensor(o):
+                # SMT/DMT call the same module directly with return_state=True to
+                # probe pure RWKV-vs-GDN state/block fidelity -> (y, s1, shift_state)
+                # tuple. Leave that untouched, same reasoning as box["y"] above.
+                return None
+            return o + rosa_soft.injection(box["h"])
+        decoder_layer.linear_attn.register_forward_hook(_inject_rosa_soft)
+        if getattr(args, "init_rwkv_ckpt", "") and isinstance(blob, dict) and "rosa_soft" in blob:
+            rosa_soft.load_state_dict(blob["rosa_soft"])
+            print(f"  warm-start: loaded rosa_soft state from {src}", flush=True)
+
     # codec is a FIXED GDN->RWKV state-space map (pre-fit-then-frozen via
     # --codec-pretrain, else random-init frozen). SMT/DMT detach its output, so
     # it never receives gradient; freeze it explicitly to make that unambiguous.
@@ -361,20 +451,22 @@ def build(args):
         print("  torch.compile: text_model wrapped (experimental)", flush=True)
     return dict(model=model, text_model=text_model, student=student,
                 teacher_gdn=teacher_gdn, teacher_cap=teacher_cap, box=box, codec=codec,
-                lm_head=model.lm_head, init_opt_state=init_opt_state, init_opt_type=init_opt_type)
+                lm_head=model.lm_head, init_opt_state=init_opt_state, init_opt_type=init_opt_type,
+                rosa_soft=rosa_soft)
 
 
-def make_optimizer(student, codec, args, text_cfg=None):
+def make_optimizer(student, codec, args, text_cfg=None, rosa_soft=None):
     """AdamW (default) or DeepSeek-V4-style MuonClip (--optimizer muonclip).
     AdamW path: decay/time params low LR, projections normal. MuonClip path routes
     2D matrices -> Muon and 1D/scalar/norm -> AdamW (see _make_muonclip). The codec
-    is a frozen target map (SMT/DMT detach it) so it is never in the optimizer."""
+    is a frozen target map (SMT/DMT detach it) so it is never in the optimizer.
+    rosa_soft (AdamW path only; enforced at argparse time) gets its own group."""
     if args.optimizer == "muonclip":
         return _make_muonclip(student, text_cfg, args)
     if args.optimizer == "schedulefree":
         return _make_schedulefree(student, codec, args)
     if args.optimizer == "spectral_muon":
-        return _make_spectral_muon(student, codec, args)
+        return _make_spectral_muon(student, codec, args, rosa_soft=rosa_soft)
     decay_names = ("w0", "w1", "w2", "a0", "a1", "a2", "k_k", "k_a")
     decay_p, proj_p, readout_p = [], [], []
     for n, p in student.named_parameters():
@@ -395,14 +487,19 @@ def make_optimizer(student, codec, args, text_cfg=None):
     ]
     if readout_p:
         groups.append({"params": readout_p, "lr": args.lr, "name": "rwkv_readout"})
+    if rosa_soft is not None:
+        groups.append({"params": [p for p in rosa_soft.parameters() if p.requires_grad],
+                       "lr": args.rosa_soft_lr or args.lr, "name": "rosa_soft"})
     return torch.optim.AdamW(groups, betas=(0.9, 0.95), weight_decay=0.0)
 
 
-def _make_spectral_muon(student, codec, args):
+def _make_spectral_muon(student, codec, args, rosa_soft=None):
     """SpectralMuon (spectral_muon.py): 2D matrices -> configurable Muon update,
     everything else -> built-in AdamW. All --sm-* flags default to vanilla Muon, so
     `--optimizer spectral_muon` with no flags == plain Muon. Each lever maps to a
-    2026 paper; stack them freely (e.g. --sm-plus-norm row --sm-second-moment 1)."""
+    2026 paper; stack them freely (e.g. --sm-plus-norm row --sm-second-moment 1).
+    rosa_soft (if attached) rides SpectralMuon's built-in AdamW fallback as its own
+    group (use_muon=False, ddc off) so the core keeps Muon+ while rosa-soft is plain AdamW."""
     from spectral_muon import SpectralMuon
     muon_p, adam_p = [], []
     for n, p in student.named_parameters():
@@ -415,6 +512,10 @@ def _make_spectral_muon(student, codec, args):
         {"params": muon_p, "lr": args.muon_lr, "use_muon": True, "name": "muon"},
         {"params": adam_p, "lr": args.muon_adam_lr, "use_muon": False, "name": "adam"},
     ]
+    if rosa_soft is not None:                          # ROSA-soft -> plain AdamW group, appended
+        rosa_p = [p for p in rosa_soft.parameters() if p.requires_grad]  # LAST so a warm-resume from
+        groups.append({"params": rosa_p, "lr": args.rosa_soft_lr or args.muon_adam_lr,  # a no-rosa ckpt
+                       "use_muon": False, "ddc_strength": 0.0, "name": "rosa_soft"})     # still matches core groups
     opt = SpectralMuon(groups, momentum=0.95, nesterov=bool(args.sm_nesterov),
                        ns_steps=args.sm_ns_steps, cubic=bool(args.sm_cheap_cubic),
                        spectral_power=args.sm_spectral_power, power_method=args.sm_power_method,
@@ -423,6 +524,9 @@ def _make_spectral_muon(student, codec, args):
                        row_uniform=bool(args.sm_row_uniform), mona=bool(args.sm_mona),
                        mona_alpha=args.sm_mona_alpha, scale=args.sm_scale,
                        ddc_strength=args.sm_ddc_strength, ddc_mode=args.sm_ddc_mode)
+    if rosa_soft is not None:
+        print(f"  + rosa_soft: {sum(p.numel() for p in rosa_p)/1e6:.3f}M params on AdamW fallback "
+              f"@ lr={args.rosa_soft_lr or args.muon_adam_lr:.1e} (ddc off)", flush=True)
     print(f"  SpectralMuon: {len(muon_p)} 2D mats @ muon_lr={args.muon_lr:.1e}, "
           f"{len(adam_p)} other @ adam_lr={args.muon_adam_lr:.1e} | levers: plus={args.sm_plus_norm} "
           f"eq={args.sm_equilibrate} 2nd={bool(args.sm_second_moment)} aurora={bool(args.sm_row_uniform)} "
@@ -506,12 +610,40 @@ def _make_schedulefree(student, codec, args):
     return opt
 
 
+def _restore_matching_opt_state(opt, saved):
+    """Partial optimizer-state restore for when the group COUNT changed since the ckpt
+    (torch's load_state_dict is all-or-nothing and rejects that). Copies per-parameter
+    momentum into the leading param groups whose param counts still match, in order, and
+    leaves any group appended since (e.g. a fresh rosa_soft group) in its clean init
+    state. Preserves the core Muon/Adam momentum across an architecture add-on. Returns
+    the number of groups restored."""
+    saved_groups = saved.get("param_groups", [])
+    saved_state = saved.get("state", {})
+    restored = 0
+    for cg, sg in zip(opt.param_groups, saved_groups):
+        if len(cg["params"]) != len(sg["params"]):
+            break  # structure diverged here; this and later groups stay fresh
+        if cg.get("name") and sg.get("name") and cg["name"] != sg["name"]:
+            break  # group identity diverged (reordered) -> refuse to restore wrong state
+        matched = False
+        for cur_p, sidx in zip(cg["params"], sg["params"]):
+            entry = saved_state.get(sidx)
+            if entry is None:
+                continue
+            opt.state[cur_p] = {k: (v.to(device=cur_p.device) if torch.is_tensor(v) else v)
+                                for k, v in entry.items()}
+            matched = True
+        restored += int(matched)
+    return restored
+
+
 def train(args):
     h = build(args)
     model, text_model, student, teacher_gdn, teacher_cap, box, codec, lm_head = (
         h["model"], h["text_model"], h["student"], h["teacher_gdn"], h["teacher_cap"],
         h["box"], h["codec"], h["lm_head"])
     init_opt_state, init_opt_type = h["init_opt_state"], h["init_opt_type"]
+    rosa_soft = h["rosa_soft"]
 
     # Create the run dir + log + sidecar BEFORE the codec pre-fit so the dashboard
     # lists the run (and renders the architecture panel) during the ~2k-step pre-fit
@@ -571,14 +703,18 @@ def train(args):
         pc_strength[0] = args.pc_strength
         print(f"[pc-layer] level={args.pc_layer} on {n_pc} Linears, strength={args.pc_strength}", flush=True)
 
-    opt = make_optimizer(student, codec, args, getattr(model.config, "text_config", model.config))
+    opt = make_optimizer(student, codec, args, getattr(model.config, "text_config", model.config),
+                         rosa_soft=rosa_soft)
+    opt_params = _optimizer_params(opt)
     if init_opt_state is not None:  # warm-resume: restore optimizer momentum (Adam/Muon) or
         if init_opt_type == args.optimizer:  # schedulefree averaging, else a restart cold-starts it
             try:
                 opt.load_state_dict(init_opt_state)
                 print(f"  resumed optimizer state ({args.optimizer}) from warm-start ckpt", flush=True)
             except Exception as e:
-                print(f"  [warn] optimizer-state restore failed ({e}); cold-starting momentum", flush=True)
+                n = _restore_matching_opt_state(opt, init_opt_state)
+                print(f"  [warn] full opt-state restore failed ({e}); partially restored "
+                      f"{n} matching param group(s), any new group starts fresh", flush=True)
         else:
             print(f"  [warn] optimizer changed {init_opt_type}->{args.optimizer}; cold-starting momentum", flush=True)
     is_sf = args.optimizer == "schedulefree"
@@ -609,6 +745,23 @@ def train(args):
     N = len(toks); T = args.seq_len; max_start = N - (T + 1)
     rng = np.random.default_rng(args.seed)
     dev = args.device
+    train_dtype = getattr(torch, args.dtype)
+    batch_offsets = np.arange(args.batch_size, dtype=np.int64)
+    token_batch_buf = None if args.train_cache else np.empty((args.batch_size, T + 1), dtype=np.int64)
+    # --train-cache prefetch: the per-step memmap reads + H2D uploads (h/block_out/state,
+    # ~100-200MB) are synchronous, so a single worker fetches ONE step ahead to hide them
+    # behind the GPU step. The worker owns every train-time rng.integers call (train_cache
+    # mode never touches rng on the main thread) and fetches are submitted in step order,
+    # so the sampled window sequence is identical to drawing in-loop.
+    cache_pool = cache_fut = None
+    if train_cache is not None:
+        cache_pool = ThreadPoolExecutor(max_workers=1)
+        def _fetch_cache_batch(need_state):
+            cis = rng.integers(0, train_cache.n_windows, size=args.batch_size, dtype=np.int64)
+            return (cis,
+                    _cache_batch_tensor(train_cache.h, cis, dev, train_dtype),
+                    _cache_batch_tensor(train_cache.block_out, cis, dev, train_dtype),
+                    _cache_batch_tensor(train_cache.state, cis, dev, train_dtype) if need_state else None)
     # grokking lever 1 — fixed reused trainset: cache N windows once and CYCLE them,
     # creating the small-fixed-set memorize→generalize regime where grokking occurs
     # (the default fresh-window sampling has no set to memorize, so no transition).
@@ -620,13 +773,15 @@ def train(args):
         # production conversion; it is a diagnostic only.
         split = (max_start // 2) if args.disjoint_eval else max_start
         pool_rng = np.random.default_rng(args.seed + 7)
-        fixed_starts = [int(pool_rng.integers(0, max(1, split) + 1)) for _ in range(args.fixed_trainset)]
+        fixed_starts = pool_rng.integers(0, max(1, split) + 1,
+                                         size=args.fixed_trainset, dtype=np.int64)
         if args.disjoint_eval:
             eval_lo = min(max_start, split + T)    # eval windows start past the train pool
         print(f"[grokking] DIAGNOSTIC fixed trainset: cycling {args.fixed_trainset} windows "
               f"(eval {'disjoint' if args.disjoint_eval else 'OVERLAPPING'}) — NOT for production", flush=True)
     best_ppl = float("inf")  # save-on-improve: the eval minimum can never be missed
     t0 = time.time()
+    eval_time = 0.0  # tok_per_sec reports train throughput: eval/save pauses excluded
     # --- grokking diagnostics (memorization vs generalization) ---------------
     # block_ema tracks the *train* block-MSE so gen_gap = held-out block - train
     # block makes the "train fits while held-out regresses" (anti-grokking) creep
@@ -682,6 +837,26 @@ def train(args):
                           active_frac=args.llr_active_frac, total_steps=args.steps)
         print(f"[llr] heavy-tail layerwise LR: s_max={args.llr_smax} every={args.llr_every} "
               f"on {len(opt.param_groups)} groups", flush=True)
+    # ROSA-soft scale calibration (reference recipe: rosa_soft.training). Every
+    # --rosa-soft-scale-every steps one train forward also captures rosa_anchor_ops
+    # telemetry; when --rosa-soft-scale is unset the RosaAnchorScaleController steers the
+    # retrieval softmax scale toward --rosa-soft-target-top-prob. With a fixed scale the
+    # probe still runs so top_prob/null_prob/truncated_fraction land in train.jsonl
+    # (that's the signal --rosa-soft-logit-epsilon tuning needs).
+    rosa_ctl, rosa_stats = None, {}
+    if rosa_soft is not None and args.rosa_soft_scale_every > 0:
+        from rosa_soft import RosaAnchorScaleConfig, RosaAnchorScaleController
+        rosa_ctl = RosaAnchorScaleController(RosaAnchorScaleConfig(
+            seq_len=args.seq_len, qk_bits=args.rosa_soft_m, window_size=args.rosa_soft_window,
+            target_top_prob=args.rosa_soft_target_top_prob,
+            update_interval=args.rosa_soft_scale_every,
+            initial_scale=args.rosa_soft_scale))
+        if args.rosa_soft_scale is None:
+            rosa_soft.scale = rosa_ctl.scale      # controller owns the scale from step 0
+        print(f"[rosa-soft] scale controller: init={rosa_ctl.scale:.4f} "
+              f"target_top_prob={args.rosa_soft_target_top_prob} every={args.rosa_soft_scale_every} "
+              f"({'adaptive' if args.rosa_soft_scale is None else 'fixed --rosa-soft-scale, log-only'})",
+              flush=True)
     # spectral loop levers: Hyperball Frobenius-sphere projection + river-valley switch.
     hb_R = ({p: float(p.detach().norm()) for g in opt.param_groups for p in g["params"]
              if p.ndim == 2} if args.hyperball else {})
@@ -692,7 +867,9 @@ def train(args):
                 and step >= args.muon_to_adamw_frac * args.steps):
             switched = True
             _prev = args.optimizer; args.optimizer = "adamw"   # river-valley: refine tail in AdamW
-            opt = make_optimizer(student, codec, args, getattr(model.config, "text_config", model.config))
+            opt = make_optimizer(student, codec, args, getattr(model.config, "text_config", model.config),
+                                 rosa_soft=rosa_soft)
+            opt_params = _optimizer_params(opt)
             # LambdaLR computes lr from ITS OWN internal counter (last_epoch), not the
             # closure's `step` — without last_epoch=step-1 here it resets to "step 0" on
             # every switch, re-triggering the warmup ramp from near-zero mid-run. Seed
@@ -711,11 +888,13 @@ def train(args):
         if _SIG["ckpt"] or _SIG["stop"]:
             stopping = _SIG["stop"]
             if is_sf: opt.eval()
-            _save_ckpt(out, step, student, codec, args, opt)
+            _save_ckpt(out, step, student, codec, args, opt, rosa_soft=rosa_soft)
             reason = "interrupt" if stopping else "sigusr1"
             emit({"kind": "checkpoint", "step": step, "reason": reason})
             print(f"  [{reason}] checkpoint saved at step {step}", flush=True)
             if stopping:
+                if cache_pool is not None:      # drop the queued prefetch before exit
+                    cache_pool.shutdown(wait=False, cancel_futures=True)
                 logf.close()
                 sys.exit(0)
             _SIG["ckpt"] = False
@@ -765,6 +944,7 @@ def train(args):
                 g["weight_decay"] = decay_now  # schedulefree applies this at step time
         # periodic held-out eval -> dashboard ppl/top1 KPIs
         if eval_every > 0 and step % eval_every == 0:
+            _eval_t0 = time.time()
             if is_sf:
                 opt.eval()   # swap params to the averaged x so the eval reflects the real model
             student.eval()
@@ -783,51 +963,59 @@ def train(args):
             # periodic saves (which is how 12.023/12.030 slipped through before).
             if ev.get("ppl") is not None and ev["ppl"] < best_ppl:
                 best_ppl = ev["ppl"]
-                _save_best(out, step, ev["ppl"], student, codec, args, opt)
+                _save_best(out, step, ev["ppl"], student, codec, args, opt, rosa_soft=rosa_soft)
             # autopilot: also eval the weight-EMA (keep the lower ppl), then check for
             # anti-grokking collapse and escalate (reg up + optional restore-best).
             if args.grok_autopilot:
                 ema_ev, ema_saved = apilot.eval_ema(
                     lambda: evaluate(text_model, lm_head, toks, args.eval_windows, args.seq_len, dev,
                                      start_lo=eval_lo, batch_size=args.eval_batch_size),
-                    best_ppl, lambda pp: _save_best(out, step, pp, student, codec, args, opt))
+                    best_ppl, lambda pp: _save_best(out, step, pp, student, codec, args, opt, rosa_soft=rosa_soft))
                 if ema_saved:
                     best_ppl = ema_ev["ppl"]
                     emit({"kind": "eval", "step": step, "ema": 1, **ema_ev})
                     print(f"  [autopilot] EMA best ppl={ema_ev['ppl']:.3f}", flush=True)
+                if apilot.restore_best:
+                    _flush_best_saves()  # on_eval may torch.load best/ckpt.pt (restore-best)
                 act = apilot.on_eval(step, ev.get("ppl"), best_ppl)
                 if act:
                     emit({"kind": "train", "step": step, **act})
                     print(f"  [autopilot] {act}", flush=True)
             # periodic ckpt (averaged x for schedulefree, since we're in eval mode here)
             if save_every > 0 and step > 0 and step % save_every == 0:
-                _save_ckpt(out, step, student, codec, args, opt)
+                _save_ckpt(out, step, student, codec, args, opt, rosa_soft=rosa_soft)
             student.train()
             if is_sf:
                 opt.train()  # back to y for the training step
+            eval_time += time.time() - _eval_t0
 
-        start = None
         x = y = None
         B = args.batch_size
         if train_cache is None:
             if fixed_starts is not None:
-                bstarts = [fixed_starts[(step * B + i) % len(fixed_starts)] for i in range(B)]
+                bstarts = fixed_starts[(step * B + batch_offsets) % len(fixed_starts)]
             else:
-                bstarts = [int(rng.integers(0, max_start + 1)) for _ in range(B)]
-            ids = torch.as_tensor(
-                np.stack([np.asarray(toks[s:s + T + 1], dtype=np.int64) for s in bstarts]), device=dev)  # [B,T+1]
+                bstarts = rng.integers(0, max_start + 1, size=B, dtype=np.int64)
+            ids = _token_windows_tensor(toks, bstarts, T + 1, dev, out=token_batch_buf)  # [B,T+1]
             x, y = ids[:, :-1], ids[:, 1:]   # [B,T]
 
         # student forward through the frozen backbone, or local cached layer-target training.
         hidden = None
         with torch.set_grad_enabled(True):
             if train_cache is None:
+                if rosa_ctl is not None and step % args.rosa_soft_scale_every == 0:
+                    rosa_soft.want_telemetry = True  # this train forward also captures telemetry
                 box["_truncate"] = bool(args.truncate_forward) and w_lmce == 0.0  # perf #3 (EXPERIMENTAL)
                 try:
                     outputs = text_model(input_ids=x, use_cache=False)
                     hidden = outputs.last_hidden_state if hasattr(outputs, "last_hidden_state") else outputs[0]
                 except _StopForward:
                     hidden = None              # truncated after layer L; box['h']/box['y'] already captured
+                finally:
+                    # the flag must not outlive THIS forward: _capture_y also fires on the
+                    # SMT/DMT direct student calls below and on every evaluate() forward,
+                    # where a stale True raises _StopForward into code that can't catch it.
+                    box["_truncate"] = False
                 hL = box["h"]                      # [B,T,C] input to layer L (teacher-faithful)
                 student_out = box["y"]             # [B,T,C] student RWKV block output
 
@@ -842,15 +1030,14 @@ def train(args):
                     # teacher_cap.states: [n_bounds, B, Hv, Dk, Dv] -> [B, n_bounds, Hv, Dk, Dv]
                     S_gdn = teacher_cap.states.transpose(0, 1).contiguous() if need_state else None
             else:
-                cis = [int(rng.integers(0, train_cache.n_windows)) for _ in range(B)]
-                dt = getattr(torch, args.dtype)
-                hL = torch.as_tensor(np.stack([np.asarray(train_cache.h[c]) for c in cis]), device=dev, dtype=dt)
-                teacher_out = torch.as_tensor(np.stack([np.asarray(train_cache.block_out[c]) for c in cis]),
-                                              device=dev, dtype=dt)
-                student_out = student(hL)
                 need_state = w_smt > 0 or w_dmt > 0
-                S_gdn = (torch.as_tensor(np.stack([np.asarray(train_cache.state[c]) for c in cis]),
-                                         device=dev, dtype=dt) if need_state else None)
+                if cache_fut is None:                        # prime the one-step-ahead pipeline
+                    cache_fut = cache_pool.submit(_fetch_cache_batch, need_state)
+                cis, hL, teacher_out, S_gdn = cache_fut.result()
+                cache_fut = cache_pool.submit(_fetch_cache_batch, need_state)
+                if need_state and S_gdn is None:             # SMT/DMT live-toggled on after prefetch
+                    S_gdn = _cache_batch_tensor(train_cache.state, cis, dev, train_dtype)
+                student_out = student(hL)
 
             lm_ce = chunked_ce(hidden, lm_head, y, fused=bool(args.fused_ce)) if (w_lmce > 0.0 and hidden is not None) else _zero_like_loss(student_out)
             so, to = student_out.float(), teacher_out.float()
@@ -870,7 +1057,9 @@ def train(args):
                 loss = loss + w_flow * do.flow_loss(so, to)
             if w_bridge > 0.0 and bridge is not None:
                 loss = loss + w_bridge * bridge.loss(so, to)
-            fid_val = do.carry_fidelity(so, to) if args.distill_fidelity_log else None
+            fid_val = (do.carry_fidelity(so, to)   # consumed only at log cadence — skip the rest
+                       if args.distill_fidelity_log and (step % log_every == 0 or step == args.steps - 1)
+                       else None)
             # SMT/DMT are the EXPENSIVE objectives (extra student rollouts) and pull
             # toward state fidelity, which can fight I/O fidelity (Codex review). Compute
             # them ONLY when weighted, so an I/O-only phase (w_smt=w_dmt=0) doesn't pay.
@@ -907,26 +1096,43 @@ def train(args):
                 loss = loss + nuc_w * nuc
                 nuc_val = nuc.detach()
 
+        opt.zero_grad(set_to_none=True)
+        loss.backward()
+        # NaN/Inf skip guard: must sit AFTER backward (a pre-backward isfinite() check
+        # syncs and drains the kernel queue between fwd and bwd every step) and BEFORE
+        # GrokFast (a non-finite gradient must never enter the gf_ema slow-grad average).
         if not torch.isfinite(loss):
             print(f"step {step}: NON-FINITE loss -> skip", flush=True)
             opt.zero_grad(set_to_none=True)
             continue
-        opt.zero_grad(set_to_none=True)
-        loss.backward()
+        # ROSA-soft probe -> scale calibration. Processed after backward so the telemetry
+        # .cpu() syncs overlap the queued backward work instead of draining the fwd queue.
+        if rosa_ctl is not None and rosa_soft.last_telemetry is not None:
+            _telem, rosa_soft.last_telemetry = rosa_soft.last_telemetry, None
+            if args.rosa_soft_scale is None:
+                rosa_soft.scale = rosa_ctl.observe(_telem)  # steer toward target top_prob
+            _tf = _telem.as_float_dict()
+            rosa_stats = {"rosa_scale": float(rosa_soft.scale), "rosa_top_prob": _tf["top_prob"],
+                          "rosa_null_prob": _tf["null_prob"], "rosa_entropy": _tf["entropy_norm"]}
+            if "truncated_fraction" in _tf:
+                rosa_stats["rosa_trunc"] = _tf["truncated_fraction"]
         if gf_lamb > 0.0:                          # GrokFast: amplify the slow-varying
-            for g in opt.param_groups:             # gradient component so the model reaches
-                for p in g["params"]:              # the generalizing solution sooner (no delay)
-                    if p.grad is None:
-                        continue
-                    e = gf_ema.get(p)
-                    if e is None:
-                        e = p.grad.detach().clone()
-                    else:
-                        e.mul_(gf_alpha).add_(p.grad.detach(), alpha=1.0 - gf_alpha)
-                    gf_ema[p] = e
-                    p.grad.add_(e, alpha=gf_lamb)
-        gnorm = torch.nn.utils.clip_grad_norm_(
-            [p for g in opt.param_groups for p in g["params"]], grad_clip)
+            gf_ps, gf_old_e, gf_old_g = [], [], [] # gradient component so the model reaches
+            for p in opt_params:                   # the generalizing solution sooner (no delay)
+                if p.grad is None:
+                    continue
+                gf_ps.append(p)
+                e = gf_ema.get(p)
+                if e is None:
+                    gf_ema[p] = p.grad.detach().clone()  # first sight: the EMA starts AT the grad
+                else:
+                    gf_old_e.append(e); gf_old_g.append(p.grad)
+            if gf_old_e:                           # batched EMA update, one launch per op
+                torch._foreach_mul_(gf_old_e, gf_alpha)
+                torch._foreach_add_(gf_old_e, gf_old_g, alpha=1.0 - gf_alpha)
+            if gf_ps:
+                torch._foreach_add_([p.grad for p in gf_ps], [gf_ema[p] for p in gf_ps], alpha=gf_lamb)
+        gnorm = torch.nn.utils.clip_grad_norm_(opt_params, grad_clip)
         opt.step()
         if sched is not None:
             sched.step()
@@ -946,16 +1152,17 @@ def train(args):
                     lr_g = g.get("scheduled_lr", g["lr"])
                     if lr_g <= 0:
                         continue
-                    for p in g["params"]:
-                        if p.requires_grad:
-                            p.data.mul_(1.0 - lr_g * decay_now)
+                    ps = [p for p in g["params"] if p.requires_grad]
+                    if ps:
+                        torch._foreach_mul_(ps, 1.0 - lr_g * decay_now)
         # Hyperball: project each 2D weight back onto its initial Frobenius sphere.
         if hb_R:
             with torch.no_grad():
-                for p, R in hb_R.items():
-                    n = float(p.norm())
-                    if n > 0.0:
-                        p.mul_(R / n)
+                hb_ps = list(hb_R)
+                norms = torch._foreach_norm(hb_ps)  # norms stay on-GPU: no host sync per matrix
+                torch._foreach_mul_(hb_ps, [
+                    torch.where(n > 0, R / n.float(), torch.ones_like(n, dtype=torch.float32))
+                    for n, R in zip(norms, hb_R.values())])
         if args.grok_autopilot:
             apilot.update_ema()
 
@@ -969,7 +1176,8 @@ def train(args):
                    "smt_update_pen": _finite_float(smt["smt_update_pen"]),
                    "dmt_mem": _finite_float(dmt["dmt_memory"]),
                    "dmt_state_rms": _finite_float(dmt.get("dmt_state_rms", 0.0)),
-                   "gnorm": _finite_float(gnorm), "tok_per_sec": round((step + 1) * args.batch_size * T / (time.time() - t0))}
+                   "gnorm": _finite_float(gnorm),
+                   "tok_per_sec": round((step + 1) * args.batch_size * T / max(time.time() - t0 - eval_time, 1e-9))}
             if nuc_w > 0.0:
                 rec["nuc"] = _finite_float(nuc_val)
             if args.distill_fidelity_log and fid_val is not None:
@@ -980,11 +1188,15 @@ def train(args):
                     rec["stable_rank"] = gm.stable_rank(grok_mat)
             if codec_rel is not None:
                 rec["codec_rel"] = float(codec_rel)  # trainboard: constant after pre-fit (codec frozen)
+            if rosa_stats:
+                rec.update(rosa_stats)  # most recent probe (probe cadence may differ from log cadence)
             emit(rec)
             print(f"step {step}: loss={rec['loss']:.4f} lm_ce={rec['lm_ce']:.4f} "
                   f"block={rec['block']:.4f} smt={rec['smt_mem']:.4f} dmt={rec['dmt_mem']:.4f} "
                   f"state_rms={rec['dmt_state_rms']:.3f} gnorm={rec['gnorm']:.2f}", flush=True)
 
+    if cache_pool is not None:
+        cache_pool.shutdown(wait=False, cancel_futures=True)  # drop the dangling prefetch
     if is_sf:
         opt.eval()  # averaged x for the final eval AND the saved checkpoint
     if args.eval_every > 0:
@@ -1000,8 +1212,8 @@ def train(args):
         print(f"  [eval-final] loss={ev['loss']:.4f} ppl={ev['ppl']:.3f} top1={ev['top1_acc']:.4f}", flush=True)
         if ev.get("ppl") is not None and ev["ppl"] < best_ppl:  # final eval may be the best
             best_ppl = ev["ppl"]
-            _save_best(out, args.steps - 1, ev["ppl"], student, codec, args, opt)
-    sd = _save_ckpt(out, args.steps - 1, student, codec, args, opt)  # x weights (schedulefree in eval mode)
+            _save_best(out, args.steps - 1, ev["ppl"], student, codec, args, opt, rosa_soft=rosa_soft)
+    sd = _save_ckpt(out, args.steps - 1, student, codec, args, opt, rosa_soft=rosa_soft)  # x weights (schedulefree in eval mode)
     emit({"kind": "checkpoint", "step": args.steps - 1})
     print(f"saved -> {sd/'ckpt.pt'}", flush=True)
 
@@ -1025,11 +1237,11 @@ def chunked_ce(hidden, lm_head, labels, chunk=2048, fused=False):
     for i in range(0, Nn, chunk):
         end = min(i + chunk, Nn)
         logits = F.linear(flat_h[i:end], Wt, bias)   # keep bf16; the fp32 logit copy was redundant memory
-        total = total + F.cross_entropy(logits, flat_labels[i:end], reduction="none").float().sum()
+        total = total + F.cross_entropy(logits, flat_labels[i:end], reduction="sum").float()
     return total / Nn
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def evaluate(text_model, lm_head, toks, n_windows, T, device, seed=12345, chunk=2048,
              teacher_gdn=None, box=None, start_lo=0, batch_size=1):
     """Held-out LM eval (fixed windows) -> {loss, ppl, top1_acc}, in the dashboard's
@@ -1041,14 +1253,20 @@ def evaluate(text_model, lm_head, toks, n_windows, T, device, seed=12345, chunk=
     extra_json; the LM metrics are unchanged."""
     rng = np.random.default_rng(seed)
     N = len(toks); max_start = N - (T + 1)
-    tot_ce = 0.0; tot_tok = 0; tot_correct = 0
-    tot_block = 0.0; nb_block = 0
-    starts = [int(rng.integers(min(start_lo, max_start), max_start + 1)) for _ in range(n_windows)]
+    # accumulate on-GPU; one host sync at the end instead of several per chunk
+    tot_ce = torch.zeros((), dtype=torch.float64, device=device)
+    tot_correct = torch.zeros((), dtype=torch.int64, device=device)
+    tot_block = torch.zeros((), dtype=torch.float64, device=device)
+    tot_tok = 0; nb_block = 0
+    starts = rng.integers(min(start_lo, max_start), max_start + 1,
+                          size=n_windows, dtype=np.int64)
     batch_size = max(1, int(batch_size))
+    ids_buf = np.empty((batch_size, T + 1), dtype=np.int64)
+    Wt = lm_head.weight
+    bias = getattr(lm_head, "bias", None)
     for off in range(0, n_windows, batch_size):
         ss = starts[off:off + batch_size]
-        ids_np = np.stack([np.asarray(toks[s:s + T + 1], dtype=np.int64) for s in ss], axis=0)
-        ids = torch.as_tensor(ids_np, device=device)
+        ids = _token_windows_tensor(toks, ss, T + 1, device, out=ids_buf)
         x, y = ids[:, :-1], ids[:, 1:]
         out = text_model(input_ids=x, use_cache=False)
         hidden = out.last_hidden_state if hasattr(out, "last_hidden_state") else out[0]
@@ -1056,22 +1274,21 @@ def evaluate(text_model, lm_head, toks, n_windows, T, device, seed=12345, chunk=
         if teacher_gdn is not None and box is not None:
             try:
                 t_out = teacher_gdn(box["h"])
-                tot_block += F.mse_loss(box["y"].float(), t_out.float(), reduction="sum").item()
+                tot_block += F.mse_loss(box["y"].float(), t_out.float(), reduction="sum").double()
                 nb_block += box["y"].numel()
             except Exception:
                 pass
         flat_h = hidden.reshape(-1, hidden.shape[-1]); flat_y = y.reshape(-1)
-        Wt = lm_head.weight; bias = getattr(lm_head, "bias", None)
         for i in range(0, flat_h.shape[0], chunk):
             e = min(i + chunk, flat_h.shape[0])
             logits = F.linear(flat_h[i:e], Wt, bias)   # keep bf16; the fp32 logit copy was redundant memory
-            tot_ce += F.cross_entropy(logits, flat_y[i:e], reduction="none").float().sum().item()
-            tot_correct += (logits.argmax(-1) == flat_y[i:e]).sum().item()
+            tot_ce += F.cross_entropy(logits, flat_y[i:e], reduction="sum").double()
+            tot_correct += (logits.argmax(-1) == flat_y[i:e]).sum()
             tot_tok += e - i
-    loss = tot_ce / max(tot_tok, 1)
-    res = {"loss": loss, "ppl": math.exp(min(loss, 20.0)), "top1_acc": tot_correct / max(tot_tok, 1)}
+    loss = tot_ce.item() / max(tot_tok, 1)
+    res = {"loss": loss, "ppl": math.exp(min(loss, 20.0)), "top1_acc": tot_correct.item() / max(tot_tok, 1)}
     if nb_block > 0:
-        res["block_val"] = tot_block / nb_block
+        res["block_val"] = tot_block.item() / nb_block
     return res
 
 
@@ -1326,8 +1543,63 @@ def main():
                          "down-weighting diverged tokens (stabilizes compounding cross-arch mismatch). Live.")
     ap.add_argument("--distill-fidelity-log", type=int, default=0,
                     help="emit carry_fidelity (2606.26488): label-free cosine drift monitor for the dashboard.")
+    # --- ROSA-soft (rosa_soft_layer.RosaAnchorLayer): additive retrieval injection on
+    # the converted layer's output, via research/rosa_soft's differentiable CUDA
+    # softmax-suffix-match op. Default off; e0=e1=0 init -> exact no-op until trained.
+    ap.add_argument("--rosa-soft", type=int, default=0,
+                    help="attach a RosaAnchorLayer to the converted layer's output "
+                         "(rosa_soft_layer.py). Additive injection, no-op at init. "
+                         "Requires --optimizer adamw or spectral_muon. 0=off.")
+    ap.add_argument("--rosa-soft-m", type=int, default=4,
+                    help="ROSA-soft route bit-width M (hidden_size must be divisible by it).")
+    ap.add_argument("--rosa-soft-window", type=int, default=32,
+                    help="ROSA-soft rosa_anchor_ops window_size (candidate lookback span).")
+    ap.add_argument("--rosa-soft-value-heads", type=int, default=None,
+                    help="ROSA-soft grouped value heads H_v. Default keeps the previous one-value-head-per-route "
+                         "mapping; lower values reduce Wv params/activation while preserving output shape "
+                         "when (hidden_size // M) %% H_v == 0.")
+    ap.add_argument("--rosa-soft-dim", type=int, default=0,
+                    help="ROSA-soft low-rank routing width d: route a d-dim Q/K subspace instead of the full "
+                         "hidden. The CUDA kernel launches B*T*(d/M) blocks, so cost is LINEAR in d -- this is "
+                         "the throughput lever (full 4096-wide routing is ~40x slower than a d=256 bottleneck). "
+                         "Must be divisible by --rosa-soft-m. 0=full hidden width.")
+    ap.add_argument("--rosa-soft-lr", type=float, default=None,
+                    help="LR for the rosa_soft param group; default falls back to --lr (adamw) "
+                         "or --muon-adam-lr (spectral_muon).")
+    ap.add_argument("--rosa-soft-scale", type=float, default=None,
+                    help="FIXED rosa_anchor_ops scale (disables auto-calibration; telemetry probing still "
+                         "logs). Default: the RosaAnchorScaleController owns the scale when "
+                         "--rosa-soft-scale-every>0, else per-call auto-resolve.")
+    ap.add_argument("--rosa-soft-scale-every", type=int, default=100,
+                    help="probe rosa_anchor_ops telemetry every N train steps (top_prob/null_prob/entropy/"
+                         "truncated_fraction -> train.jsonl as rosa_*) and, when --rosa-soft-scale is unset, "
+                         "auto-calibrate the retrieval softmax scale toward --rosa-soft-target-top-prob "
+                         "(reference RosaAnchorScaleController, rosa_soft.training). 0=off (legacy static scale).")
+    ap.add_argument("--rosa-soft-target-top-prob", type=float, default=0.8,
+                    help="scale-controller target for the retrieval softmax top probability (reference "
+                         "training default 0.8; higher = sharper retrieval).")
+    ap.add_argument("--rosa-soft-logit-epsilon", type=float, default=0.0,
+                    help="rosa_anchor_ops early-stop tolerance. 0.0 is exact; values like 1e-3 can speed "
+                         "window>=64 runs after checking metrics/truncated_fraction.")
+    ap.add_argument("--rosa-soft-qk-damper", type=float, default=0.0,
+                    help="rosa_anchor_ops Q/K gradient damper in [0,1]. Default matches source; try 0.1..0.3 "
+                         "only if Q/K saturation collapses route entropy.")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
+    if args.rosa_soft and args.optimizer not in ("adamw", "spectral_muon"):
+        raise SystemExit(f"--rosa-soft requires --optimizer adamw or spectral_muon (got {args.optimizer!r}); "
+                         f"the rosa_soft group is wired into the AdamW and SpectralMuon paths only "
+                         f"(spectral_muon runs rosa-soft on its built-in AdamW fallback).")
+    if args.rosa_soft and args.w_lmce <= 0.0:
+        raise SystemExit(f"--rosa-soft trains ONLY through the LM-CE path — block/SMT/DMT/eval-block all read "
+                         f"the PRE-injection output (box['y']) — so --w-lmce must be > 0 (got {args.w_lmce}). "
+                         f"The reference recipe (research/rosa_soft/rosa_soft/training.py) trains rosa purely "
+                         f"on next-token CE; with w_lmce=0 the module is frozen dead weight.")
+    if args.rosa_soft and args.train_cache:
+        raise SystemExit("--rosa-soft is incompatible with --train-cache: cached local training disables LM CE "
+                         "(rosa's only gradient path), and the cached path takes student(hL)'s return value, "
+                         "which would fold the injection into the block loss (the non-cache path keeps the "
+                         "block loss pure via box['y']).")
     if args.save_every > 0 and args.eval_every > 0 and args.save_every % args.eval_every != 0:
         raise SystemExit(f"--save-every ({args.save_every}) must be a multiple of --eval-every "
                          f"({args.eval_every}): periodic saves only fire on eval steps.")
