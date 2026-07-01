@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,6 +39,13 @@ const (
 	pplCollapseRatio   = 1.15 // held-out ppl risen >15% over its own best = collapse
 	blockCollapseRatio = 1.15 // held-out block-MSE risen >15% over its own best
 	antiGrokLRCool     = 0.5  // lr_scale written on collapse (cool in place, don't kill)
+
+	// LoopedRWKV loop-gate steering (loop_max_rw rides eval records; the trainer
+	// applies loop_lr_mult to the "rwkv_loop" param group per step).
+	loopStallRW      = 1e-3  // max|rw| still below this = the gates never opened
+	loopStallMinStep = 800   // give warmup + momentum rebuild time before judging
+	loopPinRW        = 0.245 // matches the trainer's loop_rw.json pin threshold
+	loopMultCap      = 30.0  // --loop-lr-mult help's fresh-conversion ceiling
 )
 
 type Detector struct {
@@ -152,10 +160,38 @@ func (d *Detector) scanRun(p sysmon.Proc) {
 		}
 	}
 
+	es, eerr := d.db.RecentEvalStats(runID, 30)
+
+	// loop-gate steering (LoopedRWKV residual_weight, surfaced as loop_max_rw on eval
+	// records). Stalled ~0 well past warmup -> boost the live loop_lr_mult so the
+	// zero-init gates get off the floor; pinned at the cap -> cool the boost back.
+	if eerr == nil && es.N >= 1 && es.LastMaxRW != nil {
+		cur := d.currentControl(p.RunName, "loop_lr_mult", 1.0)
+		if stats.LastStep > loopStallMinStep && *es.LastMaxRW < loopStallRW {
+			next := math.Min(math.Max(cur, 1.0)*10.0, loopMultCap)
+			if next > cur {
+				if d.raise(p, "loop_stall", "warn", stats.LastStep,
+					fmt.Sprintf("loop gates still ~0 (max|rw| %.1e) at step %d — boosting loop_lr_mult %.3g→%.3g",
+						*es.LastMaxRW, stats.LastStep, cur, next)) {
+					now := float64(time.Now().UnixNano()) / 1e9
+					_ = d.db.SetControls(p.RunName, map[string]float64{"loop_lr_mult": next}, now)
+				}
+			}
+		} else if *es.LastMaxRW >= loopPinRW && cur > 1.0 {
+			next := math.Max(cur*0.5, 1.0)
+			if d.raise(p, "loop_pinned", "warn", stats.LastStep,
+				fmt.Sprintf("loop gates pinned (max|rw| %.3f ≥ %.3f) — cooling loop_lr_mult %.3g→%.3g",
+					*es.LastMaxRW, loopPinRW, cur, next)) {
+				now := float64(time.Now().UnixNano()) / 1e9
+				_ = d.db.SetControls(p.RunName, map[string]float64{"loop_lr_mult": next}, now)
+			}
+		}
+	}
+
 	// anti_grokking_collapse: a held-out metric regressing from its own best while
 	// training keeps improving — late-stage "un-grokking" (distinct from ppl_regress,
 	// which compares to the original-model baseline, not the run's own minimum).
-	if es, eerr := d.db.RecentEvalStats(runID, 30); eerr == nil && es.N >= 3 {
+	if eerr == nil && es.N >= 3 {
 		trainImproving := stats.OldestLoss > 0 && stats.LastLoss < stats.OldestLoss
 		pplCollapse := es.MinPPL > 0 && es.LastPPL > pplCollapseRatio*es.MinPPL
 		blockCollapse := es.LastBlockVal != nil && es.MinBlockVal != nil &&
@@ -176,6 +212,21 @@ func (d *Detector) scanRun(p sysmon.Proc) {
 			}
 		}
 	}
+}
+
+// currentControl reads the current desired value of a live-tune key for a run
+// (the steering target the detector escalates from), defaulting when unset.
+func (d *Detector) currentControl(run, key string, def float64) float64 {
+	cs, err := d.db.GetControls(run)
+	if err != nil {
+		return def
+	}
+	for _, c := range cs {
+		if c.Key == key {
+			return c.Value
+		}
+	}
+	return def
 }
 
 // raise records an alert (subject to cooldown) and, for criticals with auto-stop
