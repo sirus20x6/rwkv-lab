@@ -468,14 +468,17 @@ def make_optimizer(student, codec, args, text_cfg=None, rosa_soft=None):
     if args.optimizer == "spectral_muon":
         return _make_spectral_muon(student, codec, args, rosa_soft=rosa_soft)
     decay_names = ("w0", "w1", "w2", "a0", "a1", "a2", "k_k", "k_a")
-    decay_p, proj_p, readout_p = [], [], []
+    decay_p, proj_p, readout_p, loop_p = [], [], [], []
     for n, p in student.named_parameters():
         if not p.requires_grad:
             continue
-        tail = n.rsplit(".", 1)[-1]  # match decay params even under LoopedRWKV's "core." prefix
-        if "out_proj" in n:                       # readout: a faster readout closes the
-            readout_p.append(p)                   # representation->behavior lag (2604.13082)
-        elif tail in decay_names:
+        parts = n.split(".")
+        tail = parts[-1]  # match decay params even under LoopedRWKV's "core." prefix
+        if n == "residual_weight":                # loop gates: own group so loop_lr_mult
+            loop_p.append(p)                      # (static + live) can steer them
+        elif "out_proj" in n or "output" in parts[:-1]:  # readout: RWKV8 core names it `output`
+            readout_p.append(p)                   # (converted FROM GDN's out_proj); a faster
+        elif tail in decay_names:                 # readout closes the repr->behavior lag (2604.13082)
             decay_p.append(p)
         else:
             proj_p.append(p)
@@ -487,6 +490,10 @@ def make_optimizer(student, codec, args, text_cfg=None, rosa_soft=None):
     ]
     if readout_p:
         groups.append({"params": readout_p, "lr": args.lr, "name": "rwkv_readout"})
+    if loop_p:  # appended after the core groups: leading-group momentum restore from
+        # pre-loop-group ckpts stays possible. Base lr here; loop_lr_mult applies LIVE
+        # per step (post-sched multiplier block), so it is steerable mid-run.
+        groups.append({"params": loop_p, "lr": args.lr, "name": "rwkv_loop"})
     if rosa_soft is not None:
         groups.append({"params": [p for p in rosa_soft.parameters() if p.requires_grad],
                        "lr": args.rosa_soft_lr or args.lr, "name": "rosa_soft"})
@@ -501,17 +508,25 @@ def _make_spectral_muon(student, codec, args, rosa_soft=None):
     rosa_soft (if attached) rides SpectralMuon's built-in AdamW fallback as its own
     group (use_muon=False, ddc off) so the core keeps Muon+ while rosa-soft is plain AdamW."""
     from spectral_muon import SpectralMuon
-    muon_p, adam_p = [], []
+    muon_p, adam_p, loop_p = [], [], []
     for n, p in student.named_parameters():
         if not p.requires_grad:
             continue
-        (muon_p if (p.ndim == 2 and min(p.shape) > 1) else adam_p).append(p)
+        if n == "residual_weight":                     # loop gates: own AdamW-fallback group
+            loop_p.append(p)                           # so loop_lr_mult can steer them live
+        elif p.ndim == 2 and min(p.shape) > 1:
+            muon_p.append(p)
+        else:
+            adam_p.append(p)
     if codec is not None:                              # codec joins the Adam side until it
         adam_p += [p for _, p in codec.named_parameters() if p.requires_grad]  # unfreezes
     groups = [
         {"params": muon_p, "lr": args.muon_lr, "use_muon": True, "name": "muon"},
         {"params": adam_p, "lr": args.muon_adam_lr, "use_muon": False, "name": "adam"},
     ]
+    if loop_p:  # after muon/adam (leading-group momentum restore), before rosa_soft.
+        groups.append({"params": loop_p, "lr": args.muon_adam_lr, "use_muon": False,
+                       "ddc_strength": 0.0, "name": "rwkv_loop"})
     if rosa_soft is not None:                          # ROSA-soft -> plain AdamW group, appended
         rosa_p = [p for p in rosa_soft.parameters() if p.requires_grad]  # LAST so a warm-resume from
         groups.append({"params": rosa_p, "lr": args.rosa_soft_lr or args.muon_adam_lr,  # a no-rosa ckpt
@@ -524,6 +539,9 @@ def _make_spectral_muon(student, codec, args, rosa_soft=None):
                        row_uniform=bool(args.sm_row_uniform), mona=bool(args.sm_mona),
                        mona_alpha=args.sm_mona_alpha, scale=args.sm_scale,
                        ddc_strength=args.sm_ddc_strength, ddc_mode=args.sm_ddc_mode)
+    if loop_p:
+        print(f"  + rwkv_loop: {sum(p.numel() for p in loop_p)} gate(s) on AdamW fallback "
+              f"@ base lr={args.muon_adam_lr:.1e} x loop_lr_mult={args.loop_lr_mult:g} (live)", flush=True)
     if rosa_soft is not None:
         print(f"  + rosa_soft: {sum(p.numel() for p in rosa_p)/1e6:.3f}M params on AdamW fallback "
               f"@ lr={args.rosa_soft_lr or args.muon_adam_lr:.1e} (ddc off)", flush=True)
@@ -581,10 +599,11 @@ def _make_schedulefree(student, codec, args):
     for n, p in student.named_parameters():
         if not p.requires_grad:
             continue
-        tail = n.rsplit(".", 1)[-1]  # match decay params even under LoopedRWKV's "core." prefix
+        parts = n.split(".")
+        tail = parts[-1]  # match decay params even under LoopedRWKV's "core." prefix
         if n == "residual_weight":
             loop_p.append(p)                       # loop gates: tiny gradient -> own high LR
-        elif "out_proj" in n:
+        elif "out_proj" in n or "output" in parts[:-1]:  # RWKV8 core names its readout `output`
             readout_p.append(p)                    # readout: faster readout closes the lag (2604.13082)
         elif tail in decay_names:
             decay_p.append(p)
@@ -596,8 +615,8 @@ def _make_schedulefree(student, codec, args):
         {"params": proj_p, "lr": args.lr},
         {"params": decay_p, "lr": args.lr * args.decay_lr_mult},
     ]
-    if loop_p:
-        groups.append({"params": loop_p, "lr": args.lr * args.loop_lr_mult})
+    if loop_p:  # schedulefree has no live multipliers (no sched), so the mult is baked in
+        groups.append({"params": loop_p, "lr": args.lr * args.loop_lr_mult, "name": "rwkv_loop"})
     if readout_p:
         groups.append({"params": readout_p, "lr": args.lr, "name": "rwkv_readout"})
     opt = AdamWScheduleFree(groups, lr=args.lr, betas=(0.9, 0.999), eps=1e-8,
@@ -652,15 +671,18 @@ def train(args):
     logf = open(out / "train.jsonl", "w")
     def emit(rec):
         logf.write(json.dumps(rec) + "\n"); logf.flush()
-    def write_loop_rw():  # loop-usage card data for the dashboard (no-op for a bare core)
+    def write_loop_rw():  # loop-usage card data for the dashboard (no-op for a bare core).
+        # Returns {loop_max_rw, loop_pinned} so eval records carry the gate state into the
+        # DB (extra_json) — that's what the detector's loop_stall/loop_pinned rules read.
         rw = getattr(student, "residual_weight", None)
         if rw is None:
-            return
+            return None
         rwl = [float(x) for x in rw.detach().float().cpu().tolist()]
         mx = max((abs(x) for x in rwl), default=0.0)
         (out / "loop_rw.json").write_text(json.dumps({
             "loop_count": int(args.loop_count), "n_layers": 1, "n_pinned": int(mx >= 0.245),
             "mean_max_rw": mx, "layers": [{"layer": int(args.layer), "max_rw": mx, "rw": rwl}]}))
+        return {"loop_max_rw": mx, "loop_pinned": int(mx >= 0.245)}
     write_sidecar_config(out, 0, args)
     write_loop_rw()  # initial (zeros) so the card appears immediately for looped runs
 
@@ -807,7 +829,7 @@ def train(args):
         "w_lmce", "w_block", "w_smt", "w_dmt", "grad_clip", "lr_scale",
         "eval_every", "save_every", "log_every",
         "weight_decay", "tail_weight_decay", "wd_tail_frac", "nuc_weight", "nuc_every",
-        "grokfast_lamb", "grokfast_alpha", "readout_lr_mult",
+        "grokfast_lamb", "grokfast_alpha", "readout_lr_mult", "loop_lr_mult",
         "sm_spectral_power", "sm_scale", "ddc_strength", "pc_strength", "llr_smax",
         "w_cos", "w_cka", "w_flow", "w_bridge", "agreement_gate"})
     if ctl.enabled:
@@ -912,6 +934,7 @@ def train(args):
         nuc_every = int(ctl.get("nuc_every", args.nuc_every))
         lr_scale = ctl.get("lr_scale", 1.0)
         readout_mult = ctl.get("readout_lr_mult", apilot.overrides.get("readout_lr_mult", args.readout_lr_mult))
+        loop_mult = ctl.get("loop_lr_mult", args.loop_lr_mult)
         gf_lamb = ctl.get("grokfast_lamb", apilot.overrides.get("grokfast_lamb",
                           args.grokfast_lamb if args.grokfast else 0.0))
         gf_alpha = ctl.get("grokfast_alpha", args.grokfast_alpha)
@@ -955,10 +978,12 @@ def train(args):
                           batch_size=args.eval_batch_size)
             if args.log_grokking_metrics and "block_val" in ev and block_ema is not None:
                 ev["gen_gap"] = ev["block_val"] - block_ema
+            lw = write_loop_rw()  # loop-usage card; gate state rides the eval record too
+            if lw:
+                ev.update(lw)
             emit({"kind": "eval", "step": step, **ev})
             print(f"  [eval] step {step} loss={ev['loss']:.4f} ppl={ev['ppl']:.3f} "
                   f"top1={ev['top1_acc']:.4f}", flush=True)
-            write_loop_rw()  # refresh loop-usage card (residual_weight as the loop trains)
             # save the BEST eval NO MATTER WHAT -> the minimum is never lost between
             # periodic saves (which is how 12.023/12.030 slipped through before).
             if ev.get("ppl") is not None and ev["ppl"] < best_ppl:
@@ -1140,6 +1165,8 @@ def train(args):
                 m = lr_scale                          # global lr_scale, readout boost, LLR layerwise
                 if readout_mult != 1.0 and g.get("name") == "rwkv_readout":
                     m = m * readout_mult              # boost to close the readout lag
+                if loop_mult != 1.0 and g.get("name") == "rwkv_loop":
+                    m = m * loop_mult                 # loop-gate steer (--loop-lr-mult / live)
                 m = m * g.get("llr_mult", 1.0)        # LLR heavy-tail layerwise multiplier
                 if m != 1.0:
                     g["lr"] = g["lr"] * m
@@ -1208,6 +1235,9 @@ def train(args):
                       batch_size=args.eval_batch_size)
         if args.log_grokking_metrics and "block_val" in ev and block_ema is not None:
             ev["gen_gap"] = ev["block_val"] - block_ema
+        lw = write_loop_rw()
+        if lw:
+            ev.update(lw)
         emit({"kind": "eval", "step": args.steps - 1, **ev})
         print(f"  [eval-final] loss={ev['loss']:.4f} ppl={ev['ppl']:.3f} top1={ev['top1_acc']:.4f}", flush=True)
         if ev.get("ppl") is not None and ev["ppl"] < best_ppl:  # final eval may be the best
@@ -1320,10 +1350,13 @@ def main():
                          "passes (residual_weight zero-init => loop==single-pass at start, so it can "
                          "only match the teacher at least as well as a bare core). 1 = bare core.")
     ap.add_argument("--loop-lr-mult", type=float, default=1.0,
-                    help="LR multiplier for residual_weight (the loop gates). Default 1x: the refine/warm-start "
-                         "case, where the loop is already trained and should move at the base rate. For a FRESH "
-                         "conversion (residual_weight zero-init, tiny gradient) pass a higher mult, e.g. 30, so "
-                         "the loop reaches useful magnitude.")
+                    help="LR multiplier for residual_weight (the loop gates, their own 'rwkv_loop' group). "
+                         "Default 1x: the refine/warm-start case, where the loop is already trained and should "
+                         "move at the base rate. For a FRESH conversion (residual_weight zero-init, tiny "
+                         "gradient) pass a higher mult, e.g. 30, so the loop reaches useful magnitude. Applies "
+                         "to adamw/spectral_muon via the per-step multiplier (LIVE-tunable: loop_lr_mult; the "
+                         "dashboard detector auto-boosts it on loop_stall and cools it on loop_pinned) and is "
+                         "baked into the group lr for schedulefree (no live multipliers there).")
     ap.add_argument("--allow-neg-eigval", action=argparse.BooleanOptionalAction, default=True,
                     help="enable RWKV-7 negative eigenvalues (_a_scale 1->2, in-context gate a in (0,2)) to "
                          "match GDN's gated delta rule (beta in (0,2)). DEFAULT TRUE (the structural lever for "

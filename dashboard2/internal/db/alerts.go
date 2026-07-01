@@ -144,13 +144,14 @@ type EvalStats struct {
 	MinPPL       float64
 	LastBlockVal *float64
 	MinBlockVal  *float64
+	LastMaxRW    *float64 // latest loop_max_rw (LoopedRWKV gate magnitude; nil = no loop)
 }
 
 // RecentEvalStats aggregates the last n eval rows for a run (ppl + held-out
-// block_val from extra_json).
+// block_val and the loop-gate magnitude from extra_json).
 func (d *DB) RecentEvalStats(runID int64, n int) (EvalStats, error) {
 	rows, err := d.Query(
-		`SELECT ppl, json_extract(extra_json,'$.block_val')
+		`SELECT ppl, json_extract(extra_json,'$.block_val'), json_extract(extra_json,'$.loop_max_rw')
 		 FROM eval_events WHERE run_id=? ORDER BY step DESC LIMIT ?`, runID, n)
 	if err != nil {
 		return EvalStats{}, err
@@ -159,8 +160,8 @@ func (d *DB) RecentEvalStats(runID int64, n int) (EvalStats, error) {
 	var es EvalStats
 	first := true
 	for rows.Next() {
-		var ppl, block sql.NullFloat64
-		if err := rows.Scan(&ppl, &block); err != nil {
+		var ppl, block, maxRW sql.NullFloat64
+		if err := rows.Scan(&ppl, &block, &maxRW); err != nil {
 			return es, err
 		}
 		if first {
@@ -168,6 +169,10 @@ func (d *DB) RecentEvalStats(runID int64, n int) (EvalStats, error) {
 			if block.Valid {
 				v := block.Float64
 				es.LastBlockVal = &v
+			}
+			if maxRW.Valid {
+				v := maxRW.Float64
+				es.LastMaxRW = &v
 			}
 			first = false
 		}
