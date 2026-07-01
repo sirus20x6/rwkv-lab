@@ -279,6 +279,14 @@ def resolve_best_ckpt(path):
     return str(p)
 
 
+def _loop_param_names(student):
+    """The student's loop-gate param names (rwkv_loop group + loop_lr_mult), or an
+    empty set for a bare core (loop_count==1). Centralizes what the three optimizer
+    builders used to hardcode as `n in ("residual_weight","gate_chan")`, so adding a
+    gate tensor (e.g. loop_index_embed) updates every path at once."""
+    return student.loop_param_names() if hasattr(student, "loop_param_names") else set()
+
+
 def _expand_loop_gates(load_sd, student):
     """Broadcast a coarser ckpt residual_weight into the student's gate shape:
     scalar [N] -> [N,G]/[N,C] (same value per group/channel) and head [N,G] -> [N,C]
@@ -363,8 +371,9 @@ def build(args):
     if args.loop_count > 1:
         from looped_rwkv import LoopedRWKV
         _p0 = next(core.parameters())  # core is already on-device; move the new
-        student = LoopedRWKV(core, n_loops=args.loop_count,
-                             gate_mode=args.loop_gate).to(device=_p0.device, dtype=_p0.dtype)
+        student = LoopedRWKV(core, n_loops=args.loop_count, gate_mode=args.loop_gate,
+                             gate_cap=args.loop_gate_cap, loop_index=bool(args.loop_index),
+                             ).to(device=_p0.device, dtype=_p0.dtype)
         decoder_layer.linear_attn = student  # iter_norm + residual_weight onto the same device/dtype
     else:
         student = core
@@ -403,11 +412,16 @@ def build(args):
                 _expand_loop_gates(load_sd, student)          # coarser-gate ckpt -> this --loop-gate
             miss, unexp = student.load_state_dict(load_sd, strict=False)
             if strip_loop:                                    # loop params legitimately absent
-                miss = [m for m in miss if not (m in ("residual_weight", "gate_chan")
+                miss = [m for m in miss if not (m in ("residual_weight", "gate_chan", "loop_index_embed")
                                                 or m.startswith("iter_norm."))]
-            elif "gate_chan" in miss:                         # factored student from a pre-factored
-                miss = [m for m in miss if m != "gate_chan"]  # ckpt: fresh delta=0 -> channel factor
-                print("  warm-start: ckpt has no gate_chan; channel factor starts at 1 (exact)", flush=True)
+            else:
+                # gate tensors this student has but the ckpt lacks (e.g. a factored/loop-index
+                # student warm-started from a plainer ckpt) init to their exact no-op:
+                # gate_chan delta=0 -> channel factor 1; loop_index_embed=0 -> no offset.
+                new_gates = {"gate_chan", "loop_index_embed"} & set(miss)
+                if new_gates:
+                    miss = [m for m in miss if m not in new_gates]
+                    print(f"  warm-start: ckpt lacks {sorted(new_gates)}; fresh no-op init", flush=True)
             n_loaded = len(load_sd)
         else:
             load_sd = {k[len("core."):]: v for k, v in sd_src.items() if k.startswith("core.")}
@@ -500,14 +514,15 @@ def make_optimizer(student, codec, args, text_cfg=None, rosa_soft=None):
     if args.optimizer == "spectral_muon":
         return _make_spectral_muon(student, codec, args, rosa_soft=rosa_soft)
     decay_names = ("w0", "w1", "w2", "a0", "a1", "a2", "k_k", "k_a")
+    loop_names = _loop_param_names(student)
     decay_p, proj_p, readout_p, loop_p = [], [], [], []
     for n, p in student.named_parameters():
         if not p.requires_grad:
             continue
         parts = n.split(".")
         tail = parts[-1]  # match decay params even under LoopedRWKV's "core." prefix
-        if n in ("residual_weight", "gate_chan"):  # loop gates (+ factored channel delta):
-            loop_p.append(p)                       # own group so loop_lr_mult can steer them
+        if n in loop_names:                        # loop gates (residual_weight/gate_chan/
+            loop_p.append(p)                       # loop_index_embed): own group -> loop_lr_mult
         elif "out_proj" in n or "output" in parts[:-1]:  # readout: RWKV8 core names it `output`
             readout_p.append(p)                   # (converted FROM GDN's out_proj); a faster
         elif tail in decay_names:                 # readout closes the repr->behavior lag (2604.13082)
@@ -540,11 +555,12 @@ def _make_spectral_muon(student, codec, args, rosa_soft=None):
     rosa_soft (if attached) rides SpectralMuon's built-in AdamW fallback as its own
     group (use_muon=False, ddc off) so the core keeps Muon+ while rosa-soft is plain AdamW."""
     from spectral_muon import SpectralMuon
+    loop_names = _loop_param_names(student)
     muon_p, adam_p, loop_p = [], [], []
     for n, p in student.named_parameters():
         if not p.requires_grad:
             continue
-        if n in ("residual_weight", "gate_chan"):      # loop gates: own AdamW-fallback group
+        if n in loop_names:                            # loop gates: own AdamW-fallback group
             loop_p.append(p)                           # so loop_lr_mult can steer them live
         elif p.ndim == 2 and min(p.shape) > 1:
             muon_p.append(p)
@@ -627,13 +643,14 @@ def _make_schedulefree(student, codec, args):
     training and opt.eval() before every eval/save (handled in train())."""
     from schedulefree import AdamWScheduleFree
     decay_names = ("w0", "w1", "w2", "a0", "a1", "a2", "k_k", "k_a")
+    loop_names = _loop_param_names(student)
     decay_p, proj_p, loop_p, readout_p = [], [], [], []
     for n, p in student.named_parameters():
         if not p.requires_grad:
             continue
         parts = n.split(".")
         tail = parts[-1]  # match decay params even under LoopedRWKV's "core." prefix
-        if n in ("residual_weight", "gate_chan"):
+        if n in loop_names:
             loop_p.append(p)                       # loop gates: tiny gradient -> own high LR
         elif "out_proj" in n or "output" in parts[:-1]:  # RWKV8 core names its readout `output`
             readout_p.append(p)                    # readout: faster readout closes the lag (2604.13082)
@@ -1396,6 +1413,18 @@ def main():
                          "until it opens); weight decay pulls the channel factor toward 1, not 0. All modes "
                          "are exact no-ops at init; --init-rwkv-ckpt from a coarser gate mode broadcasts "
                          "losslessly (finer->coarser is refused).")
+    ap.add_argument("--loop-gate-cap", type=float, default=0.0,
+                    help="soft-cap the effective loop gate to (-cap, cap) via cap*tanh(g/cap). "
+                         "residual_weight is otherwise UNBOUNDED (iter_norm bounds each pass's input, "
+                         "not the accumulated output), so a hot loop LR can destabilize the block. "
+                         "Bounds the loop contribution by construction (vs relying on grad-clip + the "
+                         "dashboard's after-the-fact loop_pinned cool). tanh(0)=0 keeps the init no-op; "
+                         "near 0 it is ~identity. 0=off (unbounded, legacy). Try ~0.5 for stability.")
+    ap.add_argument("--loop-index", type=int, default=0,
+                    help="add a per-pass, zero-init learned offset to each refinement pass's input so the "
+                         "weight-tied core can specialize per pass (OpenMythos loop-index embedding). Zero-init "
+                         "=> exact no-op at init; pass 1 stays the faithful single-pass. 0=off. Rides the "
+                         "rwkv_loop group (loop_lr_mult steers it).")
     ap.add_argument("--loop-lr-mult", type=float, default=1.0,
                     help="LR multiplier for residual_weight (the loop gates, their own 'rwkv_loop' group). "
                          "Default 1x: the refine/warm-start case, where the loop is already trained and should "
@@ -1667,10 +1696,10 @@ def main():
                          "only if Q/K saturation collapses route entropy.")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
-    if args.loop_gate != "scalar" and args.optimizer == "muonclip":
-        raise SystemExit(f"--loop-gate {args.loop_gate} requires adamw/spectral_muon/schedulefree: "
-                         f"muonclip routes params by ndim and would send the 2D gate tensors to Muon "
-                         f"(Newton-Schulz orthogonalization of loop gates is meaningless).")
+    if (args.loop_gate != "scalar" or args.loop_index) and args.optimizer == "muonclip":
+        raise SystemExit(f"--loop-gate {args.loop_gate}/--loop-index requires adamw/spectral_muon/"
+                         f"schedulefree: muonclip routes params by ndim and would send the 2D gate "
+                         f"tensors to Muon (Newton-Schulz orthogonalization of loop gates is meaningless).")
     if args.rosa_soft and args.optimizer not in ("adamw", "spectral_muon"):
         raise SystemExit(f"--rosa-soft requires --optimizer adamw or spectral_muon (got {args.optimizer!r}); "
                          f"the rosa_soft group is wired into the AdamW and SpectralMuon paths only "
