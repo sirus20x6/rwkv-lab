@@ -44,6 +44,7 @@ const (
 	// applies loop_lr_mult to the "rwkv_loop" param group per step).
 	loopStallRW      = 1e-3  // max|rw| still below this = the gates never opened
 	loopStallMinStep = 800   // give warmup + momentum rebuild time before judging
+	loopReleaseRW    = 0.01  // 10x stall threshold: gates clearly moving -> relax the boost
 	loopPinRW        = 0.245 // matches the trainer's loop_rw.json pin threshold
 	loopMultCap      = 30.0  // --loop-lr-mult help's fresh-conversion ceiling
 )
@@ -163,8 +164,11 @@ func (d *Detector) scanRun(p sysmon.Proc) {
 	es, eerr := d.db.RecentEvalStats(runID, 30)
 
 	// loop-gate steering (LoopedRWKV residual_weight, surfaced as loop_max_rw on eval
-	// records). Stalled ~0 well past warmup -> boost the live loop_lr_mult so the
-	// zero-init gates get off the floor; pinned at the cap -> cool the boost back.
+	// records). Full lifecycle: stalled ~0 well past warmup -> boost the live
+	// loop_lr_mult so the zero-init gates get off the floor; clearly moving -> release
+	// the boost back toward 1 (it exists for escape velocity, not steady state);
+	// pinned at the cap -> cool it. residual_weight is UNBOUNDED in looped_rwkv, so
+	// the boost must never be left hot longer than the escape window needs.
 	if eerr == nil && es.N >= 1 && es.LastMaxRW != nil {
 		cur := d.currentControl(p.RunName, "loop_lr_mult", 1.0)
 		if stats.LastStep > loopStallMinStep && *es.LastMaxRW < loopStallRW {
@@ -182,6 +186,14 @@ func (d *Detector) scanRun(p sysmon.Proc) {
 			if d.raise(p, "loop_pinned", "warn", stats.LastStep,
 				fmt.Sprintf("loop gates pinned (max|rw| %.3f ≥ %.3f) — cooling loop_lr_mult %.3g→%.3g",
 					*es.LastMaxRW, loopPinRW, cur, next)) {
+				now := float64(time.Now().UnixNano()) / 1e9
+				_ = d.db.SetControls(p.RunName, map[string]float64{"loop_lr_mult": next}, now)
+			}
+		} else if *es.LastMaxRW >= loopReleaseRW && cur > 1.0 {
+			next := math.Max(cur*0.5, 1.0)
+			if d.raise(p, "loop_release", "info", stats.LastStep,
+				fmt.Sprintf("loop gates moving (max|rw| %.3f ≥ %.2g) — releasing loop_lr_mult %.3g→%.3g",
+					*es.LastMaxRW, loopReleaseRW, cur, next)) {
 				now := float64(time.Now().UnixNano()) / 1e9
 				_ = d.db.SetControls(p.RunName, map[string]float64{"loop_lr_mult": next}, now)
 			}

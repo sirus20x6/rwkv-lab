@@ -1355,8 +1355,9 @@ def main():
                          "move at the base rate. For a FRESH conversion (residual_weight zero-init, tiny "
                          "gradient) pass a higher mult, e.g. 30, so the loop reaches useful magnitude. Applies "
                          "to adamw/spectral_muon via the per-step multiplier (LIVE-tunable: loop_lr_mult; the "
-                         "dashboard detector auto-boosts it on loop_stall and cools it on loop_pinned) and is "
-                         "baked into the group lr for schedulefree (no live multipliers there).")
+                         "dashboard detector auto-boosts it on loop_stall, releases the boost back toward 1 "
+                         "once gates clearly move (loop_release, max|rw|>=0.01), and cools it on loop_pinned) "
+                         "and is baked into the group lr for schedulefree (no live multipliers there).")
     ap.add_argument("--allow-neg-eigval", action=argparse.BooleanOptionalAction, default=True,
                     help="enable RWKV-7 negative eigenvalues (_a_scale 1->2, in-context gate a in (0,2)) to "
                          "match GDN's gated delta rule (beta in (0,2)). DEFAULT TRUE (the structural lever for "
