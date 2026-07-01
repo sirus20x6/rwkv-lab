@@ -36,6 +36,19 @@ loop_index (bool): add a per-pass, zero-init learned offset to the pass input so
   embedding). Zero-init => adds nothing at init, so pass 1 stays the faithful
   single-pass and the whole loop is still an exact no-op until trained.
 
+skip_refine (forward kwarg): return the pass-1 output only. Refinement passes
+  re-run the core WITHOUT initial_state/shift_state (each pass re-reads the given
+  window from a zero state), so in chunked state-supervised calls (SMT/DMT) the
+  refined output is NOT the function the full-window block loss trains. Chunked
+  callers pass skip_refine=True to get pure pass-1 (core) semantics — consistent
+  with the pass-1-only state supervision, and no n_loops x chunk cost. A bare
+  core swallows the kwarg via **kwargs, so call sites need no isinstance checks.
+
+The gate params (residual_weight/gate_chan/loop_index_embed) are kept in fp32 via
+float_gates(): they grow from zero by tiny optimizer steps that bf16's ~3
+significant digits can quantize away. _gate()/loop_index cast back to the stream
+dtype at the use site, so the residual stream never gets promoted.
+
 All modes/options are exact no-ops at init. A coarser checkpoint broadcasts
 losslessly into a finer mode (convert_train._expand_loop_gates).
 """
@@ -88,6 +101,19 @@ class LoopedRWKV(nn.Module):
             self.loop_index_embed = nn.Parameter(torch.zeros(self.n_loops, H))
         self._save_key = getattr(core, "_save_key", None)
 
+    def float_gates(self):
+        """Re-cast the loop-gate params to fp32 (call after a module-wide
+        .to(dtype=bf16)). Zero-init gates grow by tiny optimizer steps; bf16
+        quantizes those away once the gate has magnitude (the repo's
+        fp32-master-weights finding). Tiny tensors, off the matmul hot path —
+        forward casts back to the stream dtype at the use site."""
+        self.residual_weight.data = self.residual_weight.data.float()
+        if self.gate_mode == "factored":
+            self.gate_chan.data = self.gate_chan.data.float()
+        if self.loop_index:
+            self.loop_index_embed.data = self.loop_index_embed.data.float()
+        return self
+
     def loop_param_names(self) -> set[str]:
         """Names of the loop-GATE params: the zero-init, tiny-gradient tensors that
         want the dedicated rwkv_loop optimizer group + loop_lr_mult steering.
@@ -125,6 +151,7 @@ class LoopedRWKV(nn.Module):
         return torch.stack([self._gate(i) for i in range(self.n_loops)])
 
     def forward(self, hidden_states, *args, **kwargs):
+        skip_refine = bool(kwargs.pop("skip_refine", False))
         return_state = bool(kwargs.get("return_state", False))
         first = self.core(hidden_states, *args, **kwargs)
         if return_state:
@@ -132,12 +159,14 @@ class LoopedRWKV(nn.Module):
         else:
             out = self._t(first)                          # pass 1 == single-pass output
         for i in range(1, self.n_loops):
+            if skip_refine:                               # pass-1 (core) semantics only
+                break
             # refine on a NORMALIZED hidden (input + running output); zero-init gates.
             inp = hidden_states + out
             if self.loop_index:                           # per-pass specialization offset
-                inp = inp + self.loop_index_embed[i]
+                inp = inp + self.loop_index_embed[i].to(inp.dtype)
             inc = self._t(self.core(self.iter_norm(inp)))
-            out = out + self._gate(i) * inc
+            out = out + self._gate(i).to(inc.dtype) * inc
         if return_state:
             # SMT/DMT supervise the underlying RWKV recurrent memory. The refinement
             # passes are output refinements, not separate target state spaces.
