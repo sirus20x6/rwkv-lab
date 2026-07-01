@@ -1370,7 +1370,11 @@ def chunked_ce(hidden, lm_head, labels, chunk=2048, fused=False):
     for i in range(0, Nn, chunk):
         end = min(i + chunk, Nn)
         logits = F.linear(flat_h[i:end], Wt, bias)   # keep bf16; the fp32 logit copy was redundant memory
-        total = total + F.cross_entropy(logits, flat_labels[i:end], reduction="sum").float()
+        # reduction="none" -> float -> sum: a bf16 "sum" scalar has ulp 32 at magnitude
+        # ~5e3, quantizing the mean CE to a 2^-10-nat grid (different models collide on
+        # identical loss values). Per-token bf16 rounding (~1e-4 after averaging) stays;
+        # the catastrophic sum-then-round does not. Gradients were never affected.
+        total = total + F.cross_entropy(logits, flat_labels[i:end], reduction="none").float().sum()
     return total / Nn
 
 
@@ -1414,8 +1418,12 @@ def evaluate(text_model, lm_head, toks, n_windows, T, device, seed=12345, chunk=
         flat_h = hidden.reshape(-1, hidden.shape[-1]); flat_y = y.reshape(-1)
         for i in range(0, flat_h.shape[0], chunk):
             e = min(i + chunk, flat_h.shape[0])
-            logits = F.linear(flat_h[i:e], Wt, bias)   # keep bf16; the fp32 logit copy was redundant memory
-            tot_ce += F.cross_entropy(logits, flat_y[i:e], reduction="sum").double()
+            logits = F.linear(flat_h[i:e], Wt, bias)
+            # fp32 log-softmax for EVAL: a bf16 CE "sum" scalar has ulp 32 at ~5e3,
+            # snapping mean CE to a 2^-10-nat grid — different models collided on
+            # bit-identical eval ppl (gate A/B scalar==factored to 15 digits). The
+            # transient fp32 logit chunk is free under inference_mode (no graph).
+            tot_ce += F.cross_entropy(logits.float(), flat_y[i:e], reduction="sum").double()
             tot_correct += (logits.argmax(-1) == flat_y[i:e]).sum()
             tot_tok += e - i
     loss = tot_ce.item() / max(tot_tok, 1)
