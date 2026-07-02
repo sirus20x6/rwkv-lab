@@ -48,6 +48,10 @@ type Server struct {
 	seen     map[string]time.Time
 
 	queueAuto atomic.Bool // opt-in: auto-start next queued run when GPU free (off by default)
+
+	// tick is the shared per-second snapshot every stream connection renders.
+	// Computed once by refreshLoop (tickcache.go) so N tabs cost one query suite.
+	tick atomic.Pointer[tickSnap]
 }
 
 // tabTTL bounds the per-tab selection map: a tab idle (no stream tick, no select)
@@ -173,6 +177,7 @@ func (s *Server) Run(ctx context.Context) error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go s.queueManager(ctx) // reconcile running items + opt-in auto-start
+	go s.refreshLoop(ctx)  // shared once-per-second tick snapshot for all streams
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

@@ -22,8 +22,15 @@ import (
 func nowTs() float64 { return float64(time.Now().UnixNano()) / 1e9 }
 
 // toast pushes a transient status line to the UI via the $toast signal.
-func toast(sse *datastar.ServerSentEventGenerator, msg string) {
-	_ = sse.MarshalAndPatchSignals(map[string]any{"toast": msg})
+// $toastKind colors it: "" neutral info, "ok" green success, "err" red failure.
+func toast(sse *datastar.ServerSentEventGenerator, msg string) { toastKind(sse, "", msg) }
+
+func toastOK(sse *datastar.ServerSentEventGenerator, msg string) { toastKind(sse, "ok", msg) }
+
+func toastErr(sse *datastar.ServerSentEventGenerator, msg string) { toastKind(sse, "err", msg) }
+
+func toastKind(sse *datastar.ServerSentEventGenerator, kind, msg string) {
+	_ = sse.MarshalAndPatchSignals(map[string]any{"toast": msg, "toastKind": kind})
 }
 
 func (s *Server) procFor(name string) (sysmon.Proc, bool) {
@@ -43,22 +50,22 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	proc, ok := s.procFor(name)
 	if !ok {
 		s.db.LogAction(nowTs(), "stop", name, "{}", "no live process", 0)
-		toast(sse, "stop: no live process for "+name)
+		toastErr(sse, "stop: no live process for "+name)
 		return
 	}
 	alive, _, _ := sysmon.VerifyTrainingPID(proc.PID)
 	if !alive {
 		s.db.LogAction(nowTs(), "stop", name, "{}", "pid not a training process", int(proc.PID))
-		toast(sse, "stop: PID no longer a training process")
+		toastErr(sse, "stop: PID no longer a training process")
 		return
 	}
 	if err := syscall.Kill(int(proc.PID), syscall.SIGINT); err != nil {
 		s.db.LogAction(nowTs(), "stop", name, "{}", "kill error: "+err.Error(), int(proc.PID))
-		toast(sse, "stop failed: "+err.Error())
+		toastErr(sse, "stop failed: "+err.Error())
 		return
 	}
 	s.db.LogAction(nowTs(), "stop", name, "{}", "SIGINT sent", int(proc.PID))
-	toast(sse, fmt.Sprintf("SIGINT sent to PID %d (%s) — it will save & exit", proc.PID, name))
+	toastOK(sse, fmt.Sprintf("SIGINT sent to PID %d (%s) — it will save & exit", proc.PID, name))
 }
 
 // handleCheckpoint sends SIGUSR1 (save-without-exit). Gated to instrumented
@@ -70,25 +77,25 @@ func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 	sse := datastar.NewSSE(w, r)
 	proc, ok := s.procFor(name)
 	if !ok {
-		toast(sse, "checkpoint: no live process for "+name)
+		toastErr(sse, "checkpoint: no live process for "+name)
 		return
 	}
 	alive, _, instrumented := sysmon.VerifyTrainingPID(proc.PID)
 	if !alive {
-		toast(sse, "checkpoint: PID no longer a training process")
+		toastErr(sse, "checkpoint: PID no longer a training process")
 		return
 	}
 	if !instrumented {
 		s.db.LogAction(nowTs(), "checkpoint", name, "{}", "refused: not instrumented", int(proc.PID))
-		toast(sse, "checkpoint-now needs the instrumented trainer (Phase 6) — refused to avoid killing the run")
+		toastErr(sse, "checkpoint-now needs the instrumented trainer (Phase 6) — refused to avoid killing the run")
 		return
 	}
 	if err := syscall.Kill(int(proc.PID), syscall.SIGUSR1); err != nil {
-		toast(sse, "checkpoint failed: "+err.Error())
+		toastErr(sse, "checkpoint failed: "+err.Error())
 		return
 	}
 	s.db.LogAction(nowTs(), "checkpoint", name, "{}", "SIGUSR1 sent", int(proc.PID))
-	toast(sse, fmt.Sprintf("SIGUSR1 sent to PID %d — checkpoint requested", proc.PID))
+	toastOK(sse, fmt.Sprintf("SIGUSR1 sent to PID %d — checkpoint requested", proc.PID))
 }
 
 // handleNotes / handleTags persist user annotations on a run.
@@ -100,11 +107,11 @@ func (s *Server) handleNotes(w http.ResponseWriter, r *http.Request) {
 	_ = datastar.ReadSignals(r, &sig)
 	sse := datastar.NewSSE(w, r)
 	if err := s.db.SetNotes(name, sig.Notes); err != nil {
-		toast(sse, "notes save failed: "+err.Error())
+		toastErr(sse, "notes save failed: "+err.Error())
 		return
 	}
 	s.db.LogAction(nowTs(), "notes", name, "{}", "saved", 0)
-	toast(sse, "notes saved for "+name)
+	toastOK(sse, "notes saved for "+name)
 }
 
 func (s *Server) handleTags(w http.ResponseWriter, r *http.Request) {
@@ -118,11 +125,11 @@ func (s *Server) handleTags(w http.ResponseWriter, r *http.Request) {
 	tags := splitTags(sig.Tags)
 	tagsJSON := "[" + strings.Join(quoteAll(tags), ",") + "]"
 	if err := s.db.SetTags(name, tagsJSON); err != nil {
-		toast(sse, "tags save failed: "+err.Error())
+		toastErr(sse, "tags save failed: "+err.Error())
 		return
 	}
 	s.db.LogAction(nowTs(), "tags", name, tagsJSON, "saved", 0)
-	toast(sse, "tags saved for "+name)
+	toastOK(sse, "tags saved for "+name)
 }
 
 // handleLaunch spawns an allowlisted training script (detached). Body signals:
@@ -139,11 +146,11 @@ func (s *Server) handleLaunch(w http.ResponseWriter, r *http.Request) {
 	pid, logPath, err := s.spawnTraining(sig.LaunchScript, sig.LaunchArgs)
 	if err != nil {
 		s.db.LogAction(nowTs(), "launch", "", `{"script":"`+sig.LaunchScript+`"}`, "refused/failed: "+err.Error(), 0)
-		toast(sse, "launch refused: "+err.Error())
+		toastErr(sse, "launch refused: "+err.Error())
 		return
 	}
 	s.db.LogAction(nowTs(), "launch", "", fmt.Sprintf(`{"script":%q,"args":%q,"log":%q}`, sig.LaunchScript, sig.LaunchArgs, logPath), "started", pid)
-	toast(sse, fmt.Sprintf("launched %s (PID %d) → %s", sig.LaunchScript, pid, logPath))
+	toastOK(sse, fmt.Sprintf("launched %s (PID %d) → %s", sig.LaunchScript, pid, logPath))
 }
 
 // spawnTraining validates + launches an allowlisted training script detached,

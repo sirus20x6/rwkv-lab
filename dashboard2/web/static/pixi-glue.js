@@ -25,12 +25,60 @@
     lm_ce: OI.sky, block: OI.orange, smt_mem: OI.green, dmt_mem: OI.purple,
     dmt_state_rms: OI.yellow, top1: OI.sky, top5: OI.green,
   };
-  const AXIS = 0x7a8594, GRID = 0x222a33, TXT = 0xaab1b9, INK = 0x0f1113;
+  // Mirrors the app.css tokens (no build step): AXIS≈--border-hi lifted a step,
+  // GRID=--divider, TXT=--text-dim, INK=--bg-panel.
+  const AXIS = 0x4a5663, GRID = 0x1b2027, TXT = 0xa8b2be, INK = 0x13161b;
   const PAD = { l: 52, r: 52, t: 14, b: 26 };
 
   // user smoothing preference + per-chart hidden-series set, persisted to localStorage
   const SMOOTH = (() => { try { return Object.assign({ on: true, alpha: 0.10 }, JSON.parse(localStorage.getItem("tb_smooth") || "{}")); } catch (e) { return { on: true, alpha: 0.10 }; } })();
   function saveSmooth() { try { localStorage.setItem("tb_smooth", JSON.stringify(SMOOTH)); } catch (e) {} }
+  // log-y (applied per axis when its whole domain is positive) + time-x mode
+  const LOGY = (() => { try { return { on: localStorage.getItem("tb_logy") === "1" }; } catch (e) { return { on: false }; } })();
+  function saveLogy() { try { localStorage.setItem("tb_logy", LOGY.on ? "1" : "0"); } catch (e) {} }
+  const XM = (() => { try { return { time: localStorage.getItem("tb_xmode") === "time" }; } catch (e) { return { time: false }; } })();
+  function saveXmode() { try { localStorage.setItem("tb_xmode", XM.time ? "time" : "step"); } catch (e) {} }
+
+  function fmtElapsed(v) {
+    if (v == null || !isFinite(v)) return "—";
+    if (v < 0) v = 0;
+    if (v < 120) return Math.round(v) + "s";
+    if (v < 7200) return Math.round(v / 60) + "m";
+    return (v / 3600).toFixed(1) + "h";
+  }
+  // earliest positive wall-clock ts across series = the run's t0 for elapsed-x
+  function firstTs(...seriesList) {
+    let t0 = Infinity;
+    for (const s of seriesList) {
+      if (!s || !s.ts) continue;
+      for (const v of s.ts) { if (v > 0) { t0 = Math.min(t0, v); break; } }
+    }
+    return isFinite(t0) ? t0 : 0;
+  }
+  // elapsed-seconds x-array for a series (monotonized via running max so restart
+  // rows can't send the x-axis backwards). Falls back to steps when wall-clock is
+  // absent OR degenerate — rows backfilled in one ingest gulp all share the file
+  // mtime, which would collapse the whole run onto one x position.
+  function xArrOf(s, t0) {
+    if (!s) return null;
+    if (s.__hasTs == null || s.__hasTsN !== s.step.length) {
+      let lo = Infinity, hi = -Infinity;
+      if (s.ts) for (const v of s.ts) { if (v > 0) { if (v < lo) lo = v; if (v > hi) hi = v; } }
+      s.__hasTs = isFinite(lo) && (hi - lo) >= 30;
+      s.__hasTsN = s.step.length;
+    }
+    if (!s.__hasTs) return s.step;
+    if (s.__ela && s.__elaN === s.step.length && s.__elaT0 === t0) return s.__ela;
+    const out = new Array(s.step.length);
+    let prev = 0;
+    for (let i = 0; i < s.step.length; i++) {
+      const t = s.ts ? s.ts[i] : 0;
+      if (t > 0) prev = Math.max(prev, t - t0);
+      out[i] = prev;
+    }
+    s.__ela = out; s.__elaN = s.step.length; s.__elaT0 = t0;
+    return out;
+  }
   function loadHidden(id) { try { return new Set(JSON.parse(localStorage.getItem("tb_hidden_" + id) || "[]")); } catch (e) { return new Set(); } }
   function saveHidden(id, set) { try { localStorage.setItem("tb_hidden_" + id, JSON.stringify([...set])); } catch (e) {} }
   function saveRun(run) {
@@ -58,16 +106,17 @@
     if (!s || !Array.isArray(s.step) || !s.step.length) return null;
     const n = s.step.length;
     const idx = Array.from({ length: n }, (_, i) => i).sort((a, b) => s.step[a] - s.step[b]);
-    const step = [], cols = {};
+    const step = [], ts = [], cols = {};
     for (const k in (s.cols || {})) cols[k] = [];
     let last = -Infinity;
     for (const i of idx) {
       const st = s.step[i];
       if (!(st > last)) continue;            // skip <= previous (dup / non-increasing)
       last = st; step.push(st);
+      ts.push(s.ts ? (s.ts[i] || 0) : 0);
       for (const k in cols) cols[k].push(s.cols[k][i]);
     }
-    return { step, cols };
+    return { step, ts, cols };
   }
 
   // ---- one chart ----
@@ -96,17 +145,87 @@
         resolution: window.devicePixelRatio || 1, autoDensity: true,
         width: this.canvas.clientWidth || 600, height: this.canvas.clientHeight || 280,
         preference: "webgl",
+        // render-on-demand: the scene only changes on data ticks / interaction,
+        // so a free-running 60fps ticker per canvas would just burn GPU cycles
+        // on the box that is training. We call _render() explicitly instead.
+        autoStart: false, sharedTicker: false,
       });
+      if (this.app.ticker) this.app.ticker.stop();
       this.gStatic = new PIXI.Graphics();
       this.labels = new PIXI.Container();
       this.gOverlay = new PIXI.Graphics();
       this.tip = new PIXI.Container();
       this.app.stage.addChild(this.gStatic, this.labels, this.gOverlay, this.tip);
+      this._tpool = new Map();   // pooled label Texts (rasterizing text is the CPU cost)
+      this._ephem = [];          // same-frame duplicates that can't share a pooled Text
+      this._epoch = 0;
+      this._visible = true;      // offscreen charts skip geometry until scrolled to
+      this._dirty = false;
 
       this._wire();
       const ro = new ResizeObserver(() => this._resize());
       ro.observe(this.canvas.parentElement);
+      const io = new IntersectionObserver((entries) => {
+        for (const en of entries) {
+          const was = this._visible;
+          this._visible = en.isIntersecting;
+          if (this._visible && !was && this._dirty) { this._dirty = false; this.drawStatic(); }
+        }
+      }, { rootMargin: "120px" });
+      io.observe(this.canvas.parentElement);
       this.ready = true;
+    }
+
+    _render() { if (this.ready && this.app && this._visible) this.app.render(); }
+
+    // pooled Text: reuse label rasterizations across redraws; a key already used
+    // this draw (duplicate value callout) gets a fresh ephemeral instance
+    _text(text, color, fontSize, fontWeight) {
+      const key = text + "|" + color + "|" + fontSize + "|" + (fontWeight || "");
+      let t = this._tpool.get(key);
+      if (t && t.__epoch === this._epoch) {
+        const e = new PIXI.Text({ text, style: { fill: color, fontSize, fontFamily: "monospace", ...(fontWeight ? { fontWeight } : {}) } });
+        this._ephem.push(e);
+        return e;
+      }
+      if (!t) {
+        t = new PIXI.Text({ text, style: { fill: color, fontSize, fontFamily: "monospace", ...(fontWeight ? { fontWeight } : {}) } });
+        this._tpool.set(key, t);
+      }
+      t.__epoch = this._epoch;
+      return t;
+    }
+
+    // active x-array for a source: steps, or monotonized elapsed seconds in time mode
+    _xa(src) {
+      const s = this.data[src];
+      if (!s) return null;
+      return XM.time ? xArrOf(s, this._t0 || 0) : s.step;
+    }
+    // does any series here have a usable wall-clock axis right now?
+    _timeUsable() {
+      for (const src of ["train", "eval"]) {
+        const s = this.data[src];
+        if (s && s.step.length && this._xa(src) !== s.step) return true;
+      }
+      return false;
+    }
+    // map a step to the active x-unit (and back) via the densest series present
+    _stepToX(step) {
+      if (!XM.time) return step;
+      const src = this.data.train ? "train" : (this.data.eval ? "eval" : null);
+      if (!src) return step;
+      const s = this.data[src], xs = this._xa(src);
+      if (!s.step.length) return step;
+      return xs[nearestIdx(s.step, step)];
+    }
+    _xToStep(xv) {
+      if (!XM.time) return Math.round(xv);
+      const src = this.data.train ? "train" : (this.data.eval ? "eval" : null);
+      if (!src) return Math.round(xv);
+      const s = this.data[src], xs = this._xa(src);
+      if (!s.step.length) return Math.round(xv);
+      return s.step[nearestIdx(xs, xv)];
     }
 
     _resize() {
@@ -119,11 +238,13 @@
     setData(d) {
       this._fullData = d;
       this.data = { train: monotonicSeries(d.train), eval: monotonicSeries(d.eval), baseline: d.baseline || null };
+      this._t0 = firstTs(this.data.train, this.data.eval);
       this.view = null;
       this.drawStatic();
     }
 
-    // setWindow swaps in a full-resolution slice for the current zoom (keeps view).
+    // setWindow swaps in a full-resolution slice for the current zoom (keeps view
+    // AND the run's t0, so elapsed-x coordinates stay in the same frame).
     setWindow(d) {
       const base = this.data ? this.data.baseline : null;
       this.data = { train: monotonicSeries(d.train), eval: monotonicSeries(d.eval), baseline: (d.baseline || base) || null };
@@ -134,6 +255,7 @@
       if (!this._fullData) { this.view = null; this.drawStatic(); return; }
       const d = this._fullData;
       this.data = { train: monotonicSeries(d.train), eval: monotonicSeries(d.eval), baseline: d.baseline || null };
+      this._t0 = firstTs(this.data.train, this.data.eval);
       this.view = null;
       this.drawStatic();
     }
@@ -154,12 +276,15 @@
           if (!(st > maxStep)) continue;
           maxStep = st;
           cur.step.push(st);
+          if (!cur.ts) cur.ts = new Array(cur.step.length - 1).fill(0);
+          cur.ts.push(inc.ts ? (inc.ts[i] || 0) : 0);
           for (const k in inc.cols) {
             if (!cur.cols[k]) cur.cols[k] = [];
             cur.cols[k].push(inc.cols[k][i]);
           }
         }
       }
+      if (!this._t0) this._t0 = firstTs(this.data.train, this.data.eval);
       this.drawStatic();
     }
 
@@ -168,7 +293,8 @@
       let lo = Infinity, hi = -Infinity;
       for (const src of ["train", "eval"]) {
         const s = this.data[src];
-        if (s && s.step.length) { lo = Math.min(lo, s.step[0]); hi = Math.max(hi, s.step[s.step.length - 1]); }
+        const xs = this._xa(src);
+        if (s && xs && s.step.length) { lo = Math.min(lo, xs[0]); hi = Math.max(hi, xs[xs.length - 1]); }
       }
       if (!isFinite(lo)) return [0, 1];
       if (lo === hi) return [lo - 1, hi + 1];
@@ -182,7 +308,7 @@
         if (sp.axis !== axis || sp.horizontal) continue;
         const s = this.data[sp.src];
         if (!s || !s.cols[sp.key]) continue;
-        const col = s.cols[sp.key], steps = s.step;
+        const col = s.cols[sp.key], steps = this._xa(sp.src);
         // collect in-window finite values (no spread: train cols can be 50k+ long)
         const vals = [];
         for (let i = 0; i < col.length; i++) {
@@ -223,8 +349,11 @@
       const dom = this._yDomain(axis);
       if (!dom) return null;
       const W = this.app.screen.width, H = this.app.screen.height;
-      const log = this.spec.series.some(s => s.axis === axis && s.log);
       const [lo, hi] = dom;
+      // per-series log flags always apply; the global log-y toggle applies to any
+      // axis whose whole visible domain is positive (log of accuracies is fine,
+      // log of a signed delta is not)
+      const log = this.spec.series.some(s => s.axis === axis && s.log) || (LOGY.on && lo > 0);
       const y0 = H - PAD.b, y1 = PAD.t;
       if (log) {
         const llo = Math.log10(Math.max(lo, 1e-9)), lhi = Math.log10(Math.max(hi, 1e-8));
@@ -258,12 +387,20 @@
 
     drawStatic() {
       if (!this.ready || !this.app) return;
+      if (!this._visible) { this._dirty = true; return; } // offscreen: skip the work
       const W = this.app.screen.width, H = this.app.screen.height;
-      const g = this.gStatic; g.clear(); clearKids(this.labels);
+      // new label epoch: detach (don't destroy) pooled texts, drop last draw's dupes
+      this._epoch++;
+      for (const t of this._ephem) t.destroy();
+      this._ephem = [];
+      this.labels.removeChildren();
+      const g = this.gStatic; g.clear();
       clearKids(this.tip); this.gOverlay.clear();
 
       const [xmin, xmax] = this._xDomain();
       const xpx = step => PAD.l + (W - PAD.l - PAD.r) * (step - xmin) / (xmax - xmin || 1);
+      // time-x is only "on" for this chart if some series actually has usable ts
+      this._timeLabels = XM.time && this._timeUsable();
       const norm = !!this.spec.normalize;
       this._normScales = {};
       const sy = norm ? this._unitScale() : this._mkScale("y");
@@ -278,21 +415,24 @@
           const val = sy.log ? Math.pow(10, Math.log10(sy.lo) + t * (Math.log10(sy.hi) - Math.log10(sy.lo))) : sy.lo + t * (sy.hi - sy.lo);
           const y = sy.px(val);
           g.moveTo(PAD.l, y).lineTo(W - PAD.r, y).stroke({ width: 1, color: GRID });
-          this._label(fmtNum(val), PAD.l - 6, y, "right", 0x99a3af);
+          this._label(fmtNum(val), PAD.l - 6, y, "right", TXT);
         }
       }
       if (sy1) {
         for (let i = 0; i <= ticks; i++) {
           const t = i / ticks;
           const val = sy1.log ? Math.pow(10, Math.log10(sy1.lo) + t * (Math.log10(sy1.hi) - Math.log10(sy1.lo))) : sy1.lo + t * (sy1.hi - sy1.lo);
-          this._label(fmtNum(val), W - PAD.r + 6, sy1.px(val), "left", 0x99a3af);
+          this._label(fmtNum(val), W - PAD.r + 6, sy1.px(val), "left", TXT);
         }
       }
-      // x ticks
+      // x ticks — clamped inside the plot span so the first/last labels don't
+      // collide with the bottom-most left/right axis labels
       for (let i = 0; i <= 4; i++) {
-        const step = xmin + (i / 4) * (xmax - xmin);
-        const x = xpx(step);
-        this._label(Math.round(step).toLocaleString(), x, H - PAD.b + 4, "center", TXT, true);
+        const xv = xmin + (i / 4) * (xmax - xmin);
+        const x = xpx(xv);
+        const txt = this._timeLabels ? fmtElapsed(xv) : Math.round(xv).toLocaleString();
+        this._label(txt, x, H - PAD.b + 4, "center", TXT, true,
+          [PAD.l - 2, W - PAD.r + 2]);
       }
       // axis frame
       g.moveTo(PAD.l, PAD.t).lineTo(PAD.l, H - PAD.b).lineTo(W - PAD.r, H - PAD.b).stroke({ width: 1, color: AXIS, alpha: 0.6 });
@@ -307,10 +447,11 @@
         if (sp.horizontal) { if (scale) this._drawBaseline(sp, scale, xpx, xmin, xmax); continue; }
         const s = this.data[sp.src];
         if (!s || !s.cols[sp.key]) continue;
-        if (norm) { scale = this._normScale(s.cols[sp.key], xmin, xmax, s.step); this._normScales[sp.key] = scale; }
+        const xs = this._xa(sp.src);
+        if (norm) { scale = this._normScale(s.cols[sp.key], xmin, xmax, xs); this._normScales[sp.key] = scale; }
         if (!scale) continue;
-        if (sp.type === "scatter") this._drawScatter(s, sp, scale, xpx);
-        else this._drawLine(s, sp, scale, xpx);
+        if (sp.type === "scatter") this._drawScatter(s, sp, scale, xpx, xs);
+        else this._drawLine(s, sp, scale, xpx, xs);
       }
       // cross-run compare overlay (run B as a dimmed EMA trend on the same axes)
       if (this.compare && !norm) this._drawCompare(sy, sy1, xpx, xmin, xmax);
@@ -321,14 +462,50 @@
         const s = this.data[sp.src];
         if (scale && s && s.cols[sp.key]) this._drawLabels(s, sp, scale, xpx);
       }
+      // best-point markers (★ + ring at the series' best value, e.g. best eval ppl)
+      if (!norm) this._drawBest(sy, sy1, xpx, xmin, xmax);
       // legend
       this._legend();
+      // evict pooled labels that no draw is using anymore
+      if (this._tpool.size > 600) {
+        for (const [k, t] of this._tpool) {
+          if (t.__epoch !== this._epoch) { t.destroy(); this._tpool.delete(k); }
+        }
+      }
+      this._render();
+    }
+
+    // ★ at the best (min) point of any series flagged best:"min" — ties the
+    // curve to the "best ppl" the KPI strip reports
+    _drawBest(sy, sy1, xpx, xmin, xmax) {
+      for (const sp of this.spec.series) {
+        if (sp.best !== "min" || sp.horizontal || this.hidden.has(sp.label)) continue;
+        const s = this.data[sp.src];
+        if (!s || !s.cols[sp.key]) continue;
+        const scale = sp.axis === "y1" ? sy1 : sy;
+        if (!scale) continue;
+        const col = s.cols[sp.key], xs = this._xa(sp.src);
+        let bi = -1;
+        for (let i = 0; i < col.length; i++) {
+          const v = col[i];
+          if (v == null || !isFinite(v)) continue;
+          if (bi < 0 || v < col[bi]) bi = i;
+        }
+        if (bi < 0 || xs[bi] < xmin || xs[bi] > xmax) continue;
+        const x = xpx(xs[bi]), y = scale.px(col[bi]);
+        this.gStatic.circle(x, y, 7.5).stroke({ width: 2, color: 0x3fd07a, alpha: 0.95 });
+        const star = this._text("★", 0x3fd07a, 16);
+        star.x = x + 9; star.y = y - 20;
+        this.labels.addChild(star);
+      }
     }
 
     setTimeline(evs) { this.timeline = Array.isArray(evs) ? evs : []; this.drawStatic(); }
 
     setCompare(d, label) {
       this.compare = d ? { train: monotonicSeries(d.train), eval: monotonicSeries(d.eval) } : null;
+      // compare run gets its own t0, so in time mode both runs align at their start
+      this._t0c = this.compare ? firstTs(this.compare.train, this.compare.eval) : 0;
       this.compareLabel = d ? (label || "") : "";
       this.drawStatic();
     }
@@ -342,10 +519,11 @@
         const s = this.compare[sp.src];
         const col = s && s.cols[sp.key];
         if (!col || !s.step.length) continue;
+        const xs = XM.time ? xArrOf(s, this._t0c || 0) : s.step;
         const sm = emaCol(col, 0.12);                 // clean trend so B reads as a faint underlay
         let pen = false;
         for (let i = 0; i < s.step.length; i++) {
-          const st = s.step[i];
+          const st = xs[i];
           if (st < xmin || st > xmax) { pen = false; continue; }   // clip to the visible window
           const v = sm[i];
           if (v == null || !isFinite(v) || (sp.log && v <= 0)) { pen = false; continue; }
@@ -356,7 +534,7 @@
       }
       if (this.compareLabel) {
         const W = this.app.screen.width;
-        const t = new PIXI.Text({ text: "dim = " + this.compareLabel, style: { fill: 0x9aa4b0, fontSize: 13.5, fontFamily: "monospace" } });
+        const t = this._text("dim = " + this.compareLabel, TXT, 14.5);
         t.x = Math.max(PAD.l, W - PAD.r - t.width); t.y = 1;
         this.labels.addChild(t);
       }
@@ -368,7 +546,7 @@
       if (!evs || !evs.length) return;
       const g = this.gStatic;
       for (const e of evs) {
-        const st = e.step || 0;
+        const st = this._stepToX(e.step || 0);
         if (st < xmin || st > xmax) continue;
         const x = xpx(st), c = markColor(e);
         for (let yy = PAD.t; yy < H - PAD.b; yy += 9) {
@@ -379,8 +557,8 @@
       }
     }
 
-    _drawLine(s, sp, scale, xpx) {
-      const g = this.gStatic, col = s.cols[sp.key], steps = s.step;
+    _drawLine(s, sp, scale, xpx, xs) {
+      const g = this.gStatic, col = s.cols[sp.key], steps = xs || s.step;
       const trace = (valOf, width, alpha) => {
         let pen = false;
         for (let i = 0; i < col.length; i++) {
@@ -412,8 +590,8 @@
       }
     }
 
-    _drawScatter(s, sp, scale, xpx) {
-      const g = this.gStatic, col = s.cols[sp.key], steps = s.step;
+    _drawScatter(s, sp, scale, xpx, xs) {
+      const g = this.gStatic, col = s.cols[sp.key], steps = xs || s.step;
       for (let i = 0; i < col.length; i++) {
         const v = col[i];
         if (v == null || !isFinite(v)) continue;
@@ -433,7 +611,7 @@
     // Value callouts with leader lines on a sparse series (e.g. eval ppl). Sampled
     // to ~maxLabels, alternating above/below the point, clamped into the plot.
     _drawLabels(s, sp, scale, xpx) {
-      const col = s.cols[sp.key], steps = s.step, g = this.gStatic;
+      const col = s.cols[sp.key], steps = this._xa(sp.src) || s.step, g = this.gStatic;
       const W = this.app.screen.width, H = this.app.screen.height;
       const pts = [];
       for (let i = 0; i < col.length; i++) {
@@ -449,8 +627,8 @@
       const sel = pts.filter((_, i) => i % stride === 0 || i === pts.length - 1);
       sel.forEach((p, k) => {
         const txt = sp.labelFmt ? sp.labelFmt(p.v) : fmtNum(p.v);
-        const t = new PIXI.Text({ text: txt, style: { fill: sp.color, fontSize: 16.2, fontFamily: "monospace", fontWeight: "600" } });
-        const bw = t.width + 14, bh = 22;
+        const t = this._text(txt, sp.color, 17, "600");
+        const bw = t.width + 14, bh = 24;
         // v1 style: offset the box to the side (toward open space) and above the
         // point, stagger by parity, then run a diagonal leader from point to box.
         const rightSide = p.x < W - PAD.r - bw - 34;
@@ -475,7 +653,8 @@
       for (const sp of this.spec.series) {
         const hidden = this.hidden.has(sp.label);
         const item = new PIXI.Container();
-        const t = new PIXI.Text({ text: sp.label, style: { fill: sp.color, fontSize: 15.6, fontFamily: "monospace" } });
+        this._ephem.push(item); // container + its children are rebuilt per draw
+        const t = new PIXI.Text({ text: sp.label, style: { fill: sp.color, fontSize: 15.5, fontFamily: "monospace" } });
         t.x = 14; t.y = 1; t.alpha = hidden ? 0.4 : 1;
         const dot = new PIXI.Graphics();
         if (hidden) dot.rect(0, 5, 10, 10).stroke({ width: 1.5, color: sp.color, alpha: 0.75 });
@@ -489,24 +668,32 @@
       }
     }
 
-    _label(text, x, y, align, color, below) {
-      const t = new PIXI.Text({ text, style: { fill: color, fontSize: 15.0, fontFamily: "monospace" } });
+    _label(text, x, y, align, color, below, clampX) {
+      const t = this._text(text, color, 14.5);
       if (align === "right") t.x = x - t.width;
       else if (align === "center") t.x = x - t.width / 2;
       else t.x = x;
+      if (clampX) t.x = Math.max(clampX[0], Math.min(t.x, clampX[1] - t.width));
       t.y = below ? y : y - 6;
       this.labels.addChild(t);
+    }
+
+    // x-domain value under a canvas-local pixel x
+    _xAt(px) {
+      const [xmin, xmax] = this._xDomain();
+      const W = this.app.screen.width;
+      return xmin + (xmax - xmin) * (px - PAD.l) / (W - PAD.l - PAD.r);
     }
 
     _wire() {
       const cv = this.canvas;
       let dragging = false, dragX = 0, dragDom = null;
+      let boxing = false, boxX0 = 0;
       cv.addEventListener("wheel", (e) => {
         e.preventDefault();
         const [xmin, xmax] = this._xDomain();
         const rect = cv.getBoundingClientRect();
-        const W = this.app.screen.width;
-        const at = xmin + (xmax - xmin) * ((e.clientX - rect.left) - PAD.l) / (W - PAD.l - PAD.r);
+        const at = this._xAt(e.clientX - rect.left);
         if (!isFinite(at)) return;
         const f = e.deltaY < 0 ? 0.82 : 1 / 0.82;
         const nr = (xmax - xmin) * f, frac = (at - xmin) / (xmax - xmin || 1);
@@ -523,31 +710,56 @@
             saveHidden(this.id, this.hidden); this.drawStatic(); return;
           }
         }
+        if (e.shiftKey) { boxing = true; boxX0 = px; return; }   // shift+drag = box zoom (x)
         dragging = true; dragX = e.clientX; dragDom = this._xDomain();
       });
-      window.addEventListener("pointerup", () => { const was = dragging; dragging = false; if (was) this._emitView(); });
+      window.addEventListener("pointerup", (e) => {
+        if (boxing) {
+          boxing = false;
+          const r = cv.getBoundingClientRect();
+          const px = e.clientX - r.left;
+          if (Math.abs(px - boxX0) >= 8) {
+            const a = this._xAt(Math.min(boxX0, px)), b = this._xAt(Math.max(boxX0, px));
+            if (isFinite(a) && isFinite(b) && b > a) {
+              this.view = { min: a, max: b };
+              this.drawStatic();
+              this._emitView();
+            }
+          } else { this.gOverlay.clear(); this._render(); }
+          return;
+        }
+        const was = dragging; dragging = false; if (was) this._emitView();
+      });
       cv.addEventListener("pointermove", (e) => {
-        if (dragging && dragDom) {
-          const W = this.app.screen.width, rect = cv.getBoundingClientRect();
+        const rect = cv.getBoundingClientRect();
+        if (boxing) {
+          const px = e.clientX - rect.left;
+          const H = this.app.screen.height;
+          this.gOverlay.clear(); clearKids(this.tip);
+          this.gOverlay.rect(Math.min(boxX0, px), PAD.t, Math.abs(px - boxX0), H - PAD.t - PAD.b)
+            .fill({ color: 0x6fa8ff, alpha: 0.12 })
+            .stroke({ width: 1, color: 0x6fa8ff, alpha: 0.6 });
+          this._render();
+        } else if (dragging && dragDom) {
+          const W = this.app.screen.width;
           const dpx = (e.clientX - dragX) / (W - PAD.l - PAD.r);
           const span = dragDom[1] - dragDom[0];
           this.view = { min: dragDom[0] - dpx * span, max: dragDom[1] - dpx * span };
           this.drawStatic();
         } else {
-          const rect = cv.getBoundingClientRect();
           this._hover(e.clientX - rect.left, e.clientY - rect.top);
         }
       });
-      cv.addEventListener("pointerleave", () => { this.gOverlay.clear(); clearKids(this.tip); });
+      cv.addEventListener("pointerleave", () => { this.gOverlay.clear(); clearKids(this.tip); this._render(); });
       cv.addEventListener("dblclick", () => { this.view = null; this.drawStatic(); if (this.onReset) this.onReset(); });
-      cv.title = "scroll: zoom-x · drag: pan · dbl-click: reset";
+      cv.title = "scroll: zoom-x · drag: pan · shift+drag: box zoom · dbl-click: reset";
     }
 
     _hover(mouseX, mouseY) {
-      if (!this.scales) return;
+      if (!this.scales || !this._visible) return;
       const { xmin, xmax, xpx } = this.scales;
       const W = this.app.screen.width, H = this.app.screen.height;
-      if (mouseX < PAD.l || mouseX > W - PAD.r) { this.gOverlay.clear(); clearKids(this.tip); return; }
+      if (mouseX < PAD.l || mouseX > W - PAD.r) { this.gOverlay.clear(); clearKids(this.tip); this._render(); return; }
       // marker hover: pointer in the top band -> describe the nearest timeline event
       if (mouseY != null && mouseY <= PAD.t + 9 && this._markHits && this._markHits.length) {
         let best = null, bd = 9;
@@ -558,38 +770,60 @@
           const e = best.e;
           const head = `${e.type}${e.severity ? " \u00b7 " + e.severity : ""} @ ${(e.step || 0).toLocaleString()}`;
           const txt = head + (e.label ? "\n" + e.label : "") + (e.detail ? "\n" + wrap(e.detail, 46) : "");
-          const box = new PIXI.Text({ text: txt, style: { fill: TXT, fontSize: 14, fontFamily: "monospace", lineHeight: 16 } });
+          const box = new PIXI.Text({ text: txt, style: { fill: TXT, fontSize: 15.5, fontFamily: "monospace", lineHeight: 18 } });
           const bx = Math.min(best.x + 10, W - box.width - 8), by = PAD.t + 6;
           const bg = new PIXI.Graphics();
           bg.roundRect(bx - 5, by - 4, box.width + 10, box.height + 8, 4).fill({ color: INK, alpha: 0.96 }).stroke({ width: 1, color: best.color, alpha: 0.7 });
-          box.x = bx; box.y = by; this.tip.addChild(bg, box); return;
+          box.x = bx; box.y = by; this.tip.addChild(bg, box); this._render(); return;
         }
       }
-      let step = xmin + (xmax - xmin) * (mouseX - PAD.l) / (W - PAD.l - PAD.r);
+      let xv = xmin + (xmax - xmin) * (mouseX - PAD.l) / (W - PAD.l - PAD.r);
       // snap to the nearest marked (eval) point so a sparse value is easy to land on
       const _snap = this.spec.series.find(sp => sp.labels || sp.points);
-      if (_snap) { const ss = this.data[_snap.src]; if (ss && ss.step && ss.step.length) step = ss.step[nearestIdx(ss.step, step)]; }
+      if (_snap) { const xs = this._xa(_snap.src); if (xs && xs.length) xv = xs[nearestIdx(xs, xv)]; }
       this.gOverlay.clear(); clearKids(this.tip);
       this.gOverlay.moveTo(mouseX, PAD.t).lineTo(mouseX, H - PAD.b).stroke({ width: 1, color: 0x4a5663, alpha: 0.8 });
 
-      const lines = [`step ${Math.round(step).toLocaleString()}`];
+      // header: step (+ elapsed when wall-clock is usable)
+      const timeAxis = !!this._timeLabels;
+      const psrc = this.data.train ? "train" : (this.data.eval ? "eval" : null);
+      let header = timeAxis ? `t +${fmtElapsed(xv)}` : `step ${Math.round(xv).toLocaleString()}`;
+      if (psrc) {
+        const ps = this.data[psrc], pxs = this._xa(psrc);
+        if (ps.step.length) {
+          const pi = nearestIdx(pxs, xv);
+          if (timeAxis) header = `t +${fmtElapsed(xv)} · step ${ps.step[pi].toLocaleString()}`;
+          else if (ps.__hasTs && ps.ts[pi] > 0 && this._t0) header = `step ${ps.step[pi].toLocaleString()} · t +${fmtElapsed(ps.ts[pi] - this._t0)}`;
+        }
+      }
+      const lines = [header];
       for (const sp of this.spec.series) {
         if (sp.horizontal || this.hidden.has(sp.label)) continue;
         const s = this.data[sp.src];
         if (!s || !s.cols[sp.key] || !s.step.length) continue;
-        const i = nearestIdx(s.step, step);
+        const xs = this._xa(sp.src);
+        const i = nearestIdx(xs, xv);
         const v = s.cols[sp.key][i];
         if (v == null || !isFinite(v)) continue;
         const scale = this.scales.norm ? (this._normScales && this._normScales[sp.key]) : (sp.axis === "y1" ? this.scales.sy1 : this.scales.sy);
-        if (scale) { this.gOverlay.circle(xpx(s.step[i]), scale.px(v), 7).stroke({ width: 2.5, color: sp.color }); }
-        lines.push(`${sp.label}: ${fmtNum(v)}`);
+        if (scale) { this.gOverlay.circle(xpx(xs[i]), scale.px(v), 7).stroke({ width: 2.5, color: sp.color }); }
+        let line = `${sp.label}: ${fmtNum(v)}`;
+        if (sp.best === "min") {
+          // distance from the series' best so a regression is readable in place
+          let bv = Infinity;
+          const col = s.cols[sp.key];
+          for (let j = 0; j < col.length; j++) { const w = col[j]; if (w != null && isFinite(w) && w < bv) bv = w; }
+          if (isFinite(bv)) { const d = v - bv; line += d <= 0 ? "  (= best)" : `  (+${fmtNum(d)} vs best)`; }
+        }
+        lines.push(line);
       }
-      const box = new PIXI.Text({ text: lines.join("\n"), style: { fill: TXT, fontSize: 15.6, fontFamily: "monospace", lineHeight: 17 } });
+      const box = new PIXI.Text({ text: lines.join("\n"), style: { fill: TXT, fontSize: 15.5, fontFamily: "monospace", lineHeight: 18 } });
       const bx = Math.min(mouseX + 10, W - box.width - 8), by = PAD.t + 6;
       const bg = new PIXI.Graphics();
       bg.roundRect(bx - 5, by - 4, box.width + 10, box.height + 8, 4).fill({ color: INK, alpha: 0.9 }).stroke({ width: 1, color: 0x2a323b });
       box.x = bx; box.y = by;
       this.tip.addChild(bg, box);
+      this._render();
     }
   }
 
@@ -622,7 +856,7 @@
       series: [
         { src: "train", key: "loss", label: "train loss (ema)", color: COL.loss, axis: "y", type: "line", smooth: 0.1, robust: true, width: 2 },
         { src: "eval", key: "loss", label: "eval loss", color: COL.evalLoss, axis: "y", type: "scatter", r: 6.5 },
-        { src: "eval", key: "ppl", label: "eval ppl", color: COL.ppl, axis: "y1", type: "line", points: true, r: 6.5, width: 2.6, labels: true, maxLabels: 24, labelFmt: v => v.toFixed(2) },
+        { src: "eval", key: "ppl", label: "eval ppl", color: COL.ppl, axis: "y1", type: "line", points: true, r: 6.5, width: 2.6, labels: true, maxLabels: 24, labelFmt: v => v.toFixed(2), best: "min" },
         { src: "baseline", key: "ppl", label: "orig ppl", color: COL.baseline, axis: "y1", horizontal: true },
       ],
     },
@@ -801,7 +1035,14 @@
   }
   function redrawAll() { for (const id in charts) charts[id].drawStatic(); if (customChart) customChart.drawStatic(); }
   function focusStep(step) {
-    for (const id in charts) { charts[id].view = { min: Math.max(0, step - 400), max: step + 400 }; charts[id].drawStatic(); }
+    if (tailN) { tailN = 0; saveTail(); updateTailChips(); }   // focusing an event unpins the tail
+    for (const id in charts) {
+      const c = charts[id];
+      let lo = c._stepToX(Math.max(0, step - 400)), hi = c._stepToX(step + 400);
+      if (hi <= lo) { lo -= 1; hi = lo + 2; }
+      c.view = { min: lo, max: hi };
+      c.drawStatic();
+    }
   }
   function renderEventList(events) {
     const host = document.getElementById("event-list");
@@ -827,7 +1068,50 @@
     const cb = document.getElementById("smooth-on"), sl = document.getElementById("smooth-alpha");
     if (cb) { cb.checked = SMOOTH.on; cb.addEventListener("change", () => { SMOOTH.on = cb.checked; saveSmooth(); redrawAll(); }); }
     if (sl) { sl.value = String(SMOOTH.alpha); sl.addEventListener("input", () => { SMOOTH.alpha = parseFloat(sl.value); saveSmooth(); redrawAll(); }); }
+    const ly = document.getElementById("log-y");
+    if (ly) { ly.checked = LOGY.on; ly.addEventListener("change", () => { LOGY.on = ly.checked; saveLogy(); redrawAll(); }); }
+    const tx = document.getElementById("time-x");
+    if (tx) {
+      tx.checked = XM.time;
+      tx.addEventListener("change", () => {
+        XM.time = tx.checked; saveXmode();
+        // views are stored in x-units, so a mode flip invalidates them
+        for (const id in charts) charts[id].view = null;
+        if (customChart) customChart.view = null;
+        if (tailN) applyTail(); else redrawAll();
+      });
+    }
   }
+
+  // ---- tail window chips: keep the view glued to the last N steps ----
+  let tailN = (() => { try { return parseInt(localStorage.getItem("tb_tail") || "0", 10) || 0; } catch (e) { return 0; } })();
+  function saveTail() { try { localStorage.setItem("tb_tail", String(tailN)); } catch (e) {} }
+  function updateTailChips() {
+    document.querySelectorAll("[data-tail]").forEach(btn => {
+      const n = parseInt(btn.dataset.tail, 10) || 0;
+      btn.classList.toggle("active", tailN > 0 && n === tailN);
+    });
+  }
+  function applyTail() {
+    if (!tailN || !lastStep) { redrawAll(); return; }
+    const c = charts["chart-loss"];
+    if (!c) return;
+    const lo = c._stepToX(Math.max(0, lastStep - tailN));
+    let hi = c._stepToX(lastStep);
+    if (hi <= lo) hi = lo + 1;
+    onChartZoom({ min: lo, max: hi }, true);
+  }
+  function setTail(n) {
+    tailN = n; saveTail(); updateTailChips();
+    if (!n) { onChartReset(); return; }
+    applyTail();
+  }
+  function wireTailChips() {
+    document.querySelectorAll("[data-tail]").forEach(btn =>
+      btn.addEventListener("click", () => setTail(parseInt(btn.dataset.tail, 10) || 0)));
+    updateTailChips();
+  }
+
   let curRun = null, lastStep = 0, loading = false;
   let zoomTimer = null, zoomGen = 0;
   function syncView(view) {
@@ -837,13 +1121,19 @@
       charts[id].drawStatic();
     }
   }
-  function onChartZoom(view) {
+  function onChartZoom(view, fromTail) {
+    if (!fromTail && tailN) { tailN = 0; saveTail(); updateTailChips(); } // manual zoom unpins the tail
     syncView(view);                                  // instant zoom on the decimated data
     const gen = ++zoomGen;
     clearTimeout(zoomTimer);
     zoomTimer = setTimeout(async () => {
       if (!curRun) return;
-      const from = Math.max(0, Math.floor(view.min)), to = Math.ceil(view.max);
+      // view is in the active x-unit; the API window is steps — map back if needed
+      const primary = charts["chart-loss"];
+      let from, to;
+      if (XM.time && primary) { from = primary._xToStep(view.min); to = primary._xToStep(view.max); }
+      else { from = Math.floor(view.min); to = Math.ceil(view.max); }
+      from = Math.max(0, from);
       if (to - from < 2) return;
       const url = `/api/series/${encodeURIComponent(curRun)}?train=${TRAIN_FIELDS.join(",")}&eval=${EVAL_FIELDS.join(",")}&from=${from}&to=${to}`;
       const data = await fetch(url).then(r => r.json()).catch(() => null);
@@ -851,7 +1141,11 @@
       for (const id in charts) { if (id !== "chart-custom") charts[id].setWindow(data); }
     }, 260);
   }
-  function onChartReset() { zoomGen++; for (const id in charts) { if (id !== "chart-custom") charts[id].restoreFull(); } }
+  function onChartReset() {
+    zoomGen++;
+    if (tailN) { tailN = 0; saveTail(); updateTailChips(); }
+    for (const id in charts) { if (id !== "chart-custom") charts[id].restoreFull(); }
+  }
 
   function distribute(chart, data) {
     // give each chart the full payload; it reads only the cols it needs
@@ -868,6 +1162,8 @@
     loading = false;
     if (!data) return;
     curRun = run; lastStep = data.max_step || 0;
+    const note = document.getElementById("decim-note");
+    if (note) note.style.display = data.decimated ? "" : "none";
     const events = (tl && tl.events) || [];
     for (const spec of CHARTS) {
       const ch = charts[spec.id];
@@ -876,6 +1172,7 @@
       togglePanel(spec, data);
       ch.setData(data);
     }
+    if (tailN) applyTail();                          // sticky tail follows across run switches
     renderEventList(events);
     saveRun(run);
     loadCatalog(run);
@@ -897,6 +1194,14 @@
     for (const spec of CHARTS) {
       const ch = charts[spec.id];
       if (ch) ch.append(data);
+    }
+    // pinned tail slides with the live tip (appended rows are full resolution)
+    if (tailN && charts["chart-loss"]) {
+      const c = charts["chart-loss"];
+      const lo = c._stepToX(Math.max(0, lastStep - tailN));
+      let hi = c._stepToX(lastStep);
+      if (hi <= lo) hi = lo + 1;
+      syncView({ min: lo, max: hi });
     }
     fetch(`/api/timeline/${encodeURIComponent(run)}`).then(r => r.json()).then(tl => {
       const events = (tl && tl.events) || [];
@@ -932,6 +1237,10 @@
   }
 
   async function boot() {
+    // render-on-demand: no chart animates, so the global tickers must not spin
+    // a 60fps rAF loop on the training box (per-app tickers are already off)
+    try { PIXI.Ticker.shared.autoStart = false; PIXI.Ticker.shared.stop(); } catch (e) {}
+    try { PIXI.Ticker.system.autoStart = false; PIXI.Ticker.system.stop(); } catch (e) {}
     for (const spec of CHARTS) {
       const ch = new Chart(spec.id, spec);
       await ch.init();
@@ -942,6 +1251,7 @@
     customChart = new Chart("chart-custom", { id: "chart-custom", normalize: true, series: [] });
     await customChart.init();
     wireSmoothControls();
+    wireTailChips();
     wireCompare();
     restoreRun();
     // React to (run, version) changes published by Datastar via #active-run.

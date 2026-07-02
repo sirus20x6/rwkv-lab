@@ -1,7 +1,7 @@
 package server
 
 import (
-	"log"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"time"
@@ -42,57 +42,50 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// pushTick renders one stream tick for one connection. All shared content
+// (system header, run list, alerts, conv map, queue) comes from the global
+// once-per-second snapshot — the only per-connection DB work is the small
+// selected-run queries, so N open tabs no longer multiply the heavy aggregates.
 func (s *Server) pushTick(sse *datastar.ServerSentEventGenerator, tabID string) {
-	now := float64(time.Now().UnixNano()) / 1e9
-	snap := s.sampler.Latest()
-
-	summaries, err := s.db.RunSummaries(now)
-	if err != nil {
-		log.Printf("[stream] run summaries: %v", err)
-		return
+	snap := s.latestTick()
+	if snap == nil {
+		return // refreshLoop hasn't produced the first snapshot yet
 	}
-	procByRun := procIndex(snap.Procs)
 
 	// System header (morph each element by id).
-	_ = sse.PatchElements(renderSysGPUs(snap.GPUs))
-	_ = sse.PatchElements(renderSysHost(snap.Host))
-	_ = sse.PatchElements(renderSysProc(snap.Procs))
+	_ = sse.PatchElements(snap.sysGPUs)
+	_ = sse.PatchElements(snap.sysHost)
+	_ = sse.PatchElements(snap.sysProc)
 	// Sidebar run list.
-	_ = sse.PatchElements(renderRunList(summaries, procByRun, now))
+	_ = sse.PatchElements(snap.runList)
 	// Global alerts banner (+ auto-stop toggle).
-	if active, err := s.db.ActiveAlerts(20); err == nil {
-		_ = sse.PatchElements(renderAlerts(active, s.autoStopOn()))
+	if snap.alerts != "" {
+		_ = sse.PatchElements(snap.alerts)
 	}
 	// Whole-model conversion map.
-	_ = sse.PatchElements(renderConvBoard(s.scanBoard(summaries, snap.Procs)))
+	_ = sse.PatchElements(snap.conv)
 	// Launch queue.
-	if q, err := s.db.ActiveQueue(); err == nil {
-		_ = sse.PatchElements(renderQueue(q, s.queueAuto.Load(), len(snap.Procs) == 0))
+	if snap.queue != "" {
+		_ = sse.PatchElements(snap.queue)
 	}
-
-	// runVersions: name -> latest step (drives Pixi incremental append).
-	versions := make(map[string]int64, len(summaries))
-	for _, su := range summaries {
-		if su.LatestStep != nil {
-			versions[su.Name] = *su.LatestStep
-		}
-	}
+	// Launch-args history datalist (recent launches/enqueues).
+	_ = sse.PatchElements(snap.launchHist)
 
 	signals := map[string]any{
 		"now":         time.Now().Format("15:04:05"),
-		"runVersions": versions,
+		"runVersions": snap.versions,
 	}
 
 	sel := s.selectedFor(tabID)
 	if sel != "" {
 		// Live header for the selected run (incl. authoritative best/ checkpoint).
 		runDir := filepath.Join(s.cfg.RunsDir, sel)
-		if sum, ok := findSummary(summaries, sel); ok {
+		if sum, ok := findSummary(snap.summaries, sel); ok {
 			var proc *sysmon.Proc
-			if p, has := procByRun[sel]; has {
+			if p, has := snap.procByRun[sel]; has {
 				proc = &p
 			}
-			_ = sse.PatchElements(renderRunHeader(sum, proc, readBest(runDir), now))
+			_ = sse.PatchElements(renderRunHeader(sum, proc, readBest(runDir), snap.ts))
 		}
 		// LoopedRWKV residual-weight panel (live loop_rw.json).
 		if lr, ok := readLoopRW(runDir); ok {
@@ -110,7 +103,7 @@ func (s *Server) pushTick(sse *datastar.ServerSentEventGenerator, tabID string) 
 		}
 		// Hidden element the Pixi glue observes for (run, version) changes.
 		_ = sse.PatchElementf(`<div id="active-run" data-run="%s" data-v="%d" hidden></div>`,
-			esc(sel), versions[sel])
+			esc(sel), snap.versions[sel])
 	}
 
 	_ = sse.MarshalAndPatchSignals(signals)
@@ -127,12 +120,14 @@ func (s *Server) handleRunSelect(w http.ResponseWriter, r *http.Request) {
 	_ = datastar.ReadSignals(r, &sig)
 	now := float64(time.Now().UnixNano()) / 1e9
 
-	summaries, err := s.db.RunSummaries(now)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	// Resolve against the shared snapshot (≤1s stale) — selection happens on
+	// runs the user can already see, and this keeps clicks off the heavy path.
+	snap := s.latestTick()
+	if snap == nil {
+		http.Error(w, "warming up", http.StatusServiceUnavailable)
 		return
 	}
-	sum, ok := findSummary(summaries, name)
+	sum, ok := findSummary(snap.summaries, name)
 	if !ok {
 		http.Error(w, "no such run", http.StatusNotFound)
 		return
@@ -148,9 +143,26 @@ func (s *Server) handleRunSelect(w http.ResponseWriter, r *http.Request) {
 	_ = sse.PatchElementf(`<div id="active-run" data-run="%s" data-v="%d" hidden></div>`,
 		esc(name), latestStep(sum))
 	notes, tagsJSON := s.db.RunMeta(name)
+	// Reset staged live-tune overrides on run switch (values staged for one run
+	// must not silently carry to another) and surface the run's current config
+	// values so the tuning inputs show what an override would replace.
+	ctlReset := map[string]any{}
+	ctlCur := map[string]any{}
+	for k := range controlWhitelist {
+		ctlReset[k] = ""
+		ctlCur[k] = ""
+	}
+	if cfg := s.readSidecarConfig(name); cfg != nil {
+		for k := range controlWhitelist {
+			if v, ok := cfg[k]; ok && v != nil {
+				ctlCur[k] = fmt.Sprint(v)
+			}
+		}
+	}
 	_ = sse.MarshalAndPatchSignals(map[string]any{
 		"selectedRun": name, "hasSel": true,
 		"notes": notes, "tags": tagsCSV(tagsJSON),
+		"ctl": ctlReset, "ctlCur": ctlCur,
 	})
 }
 

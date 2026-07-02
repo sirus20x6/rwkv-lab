@@ -12,7 +12,7 @@ func (s *Server) handleAckAlert(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
 	sse := datastar.NewSSE(w, r)
 	if err := s.db.AckAlert(id); err != nil {
-		toast(sse, "ack failed: "+err.Error())
+		toastErr(sse, "ack failed: "+err.Error())
 		return
 	}
 	// Repaint the banner immediately (don't wait for the next tick).
@@ -33,7 +33,7 @@ func (s *Server) handleAutoStop(w http.ResponseWriter, r *http.Request) {
 		_ = sse.PatchElements(renderAlerts(active, on))
 	}
 	if on {
-		toast(sse, "auto-stop ENABLED — critical alerts will SIGINT the run")
+		toastOK(sse, "auto-stop ENABLED — critical alerts will SIGINT the run")
 	} else {
 		toast(sse, "auto-stop disabled")
 	}

@@ -123,6 +123,13 @@ CREATE TABLE IF NOT EXISTS launch_queue (
   log_path    TEXT
 );
 
+-- Narrow secondary indexes for the per-second summary aggregates. The event
+-- tables are WITHOUT ROWID, so scanning "the table" reads whole rows including
+-- extra_json blobs; these key-only indexes keep count()/max(step)/min(ppl)
+-- GROUP BY scans to a few MB regardless of how big extra_json payloads grow.
+CREATE INDEX IF NOT EXISTS idx_train_run_step ON train_events(run_id, step);
+CREATE INDEX IF NOT EXISTS idx_eval_run_step_ppl ON eval_events(run_id, step, ppl, top1);
+
 -- Layer library provenance: which run/checkpoint produced each accepted L*.pt.
 CREATE TABLE IF NOT EXISTS layer_lib (
   layer       INTEGER PRIMARY KEY,

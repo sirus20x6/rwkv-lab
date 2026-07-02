@@ -70,18 +70,18 @@ func (d *DB) GetTimeline(runName string) (*Timeline, error) {
 		rows.Close()
 	}
 
-	// alerts (step or ts)
+	// alerts (step or ts). NOTE: ts->step mapping happens AFTER rows.Close() —
+	// with a single-connection pool, calling stepAtTs (a nested query) while
+	// these rows are still open self-deadlocks the entire DB.
 	if rows, err := d.Query(
 		`SELECT COALESCE(step,0), COALESCE(ts,0), kind, COALESCE(severity,''), COALESCE(message,'')
 		 FROM alerts WHERE run_name=? ORDER BY ts`, runName); err == nil {
+		start := len(tl.Events)
 		for rows.Next() {
 			var step int64
 			var ts float64
 			var kind, sev, msg string
 			if rows.Scan(&step, &ts, &kind, &sev, &msg) == nil {
-				if step <= 0 && ts > 0 {
-					step = d.stepAtTs(runID, ts)
-				}
 				tl.Events = append(tl.Events, TimelineEvent{
 					Step: step, Ts: ts, Type: "alert", Kind: kind,
 					Severity: sev, Label: kind, Detail: msg,
@@ -89,6 +89,11 @@ func (d *DB) GetTimeline(runName string) (*Timeline, error) {
 			}
 		}
 		rows.Close()
+		for i := start; i < len(tl.Events); i++ {
+			if e := &tl.Events[i]; e.Step <= 0 && e.Ts > 0 {
+				e.Step = d.stepAtTs(runID, e.Ts)
+			}
+		}
 	}
 
 	// applied control overrides (applied_step)
@@ -111,21 +116,25 @@ func (d *DB) GetTimeline(runName string) (*Timeline, error) {
 		rows.Close()
 	}
 
-	// operator actions (ts only -> map to step)
+	// operator actions (ts only -> map to step after the rows are closed; see
+	// the deadlock note on the alerts block above)
 	if rows, err := d.Query(
 		`SELECT COALESCE(ts,0), kind, COALESCE(result,'') FROM actions WHERE run_id=? ORDER BY ts`,
 		runID); err == nil {
+		start := len(tl.Events)
 		for rows.Next() {
 			var ts float64
 			var kind, result string
 			if rows.Scan(&ts, &kind, &result) == nil {
 				tl.Events = append(tl.Events, TimelineEvent{
-					Step: d.stepAtTs(runID, ts), Ts: ts, Type: "action",
-					Kind: kind, Label: kind, Detail: result,
+					Ts: ts, Type: "action", Kind: kind, Label: kind, Detail: result,
 				})
 			}
 		}
 		rows.Close()
+		for i := start; i < len(tl.Events); i++ {
+			tl.Events[i].Step = d.stepAtTs(runID, tl.Events[i].Ts)
+		}
 	}
 
 	sort.SliceStable(tl.Events, func(i, j int) bool {

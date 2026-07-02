@@ -81,26 +81,26 @@ func (s *Server) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 	sse := datastar.NewSSE(w, r)
 	script := strings.TrimSpace(sig.LaunchScript)
 	if !sysmon.AllowedScript(script) {
-		toast(sse, "enqueue refused: "+script+" not allowlisted")
+		toastErr(sse, "enqueue refused: "+script+" not allowlisted")
 		return
 	}
 	id, err := s.db.Enqueue(script, sig.LaunchArgs, 0, nowTs())
 	if err != nil {
-		toast(sse, "enqueue failed: "+err.Error())
+		toastErr(sse, "enqueue failed: "+err.Error())
 		return
 	}
 	s.db.LogAction(nowTs(), "enqueue", "", fmt.Sprintf(`{"id":%d,"script":%q,"args":%q}`, id, script, sig.LaunchArgs), "queued", 0)
-	toast(sse, fmt.Sprintf("queued #%d: %s %s", id, script, sig.LaunchArgs))
+	toastOK(sse, fmt.Sprintf("queued #%d: %s %s", id, script, sig.LaunchArgs))
 }
 
 func (s *Server) handleStartNext(w http.ResponseWriter, r *http.Request) {
 	sse := datastar.NewSSE(w, r)
 	if !s.gpuFree() {
-		toast(sse, "start-next: a training process is already running (GPU busy)")
+		toastErr(sse, "start-next: a training process is already running (GPU busy)")
 		return
 	}
 	if s.startNextInternal() {
-		toast(sse, "started next queued run")
+		toastOK(sse, "started next queued run")
 	} else {
 		toast(sse, "queue empty (nothing to start)")
 	}
@@ -111,14 +111,14 @@ func (s *Server) handleCancelQueue(w http.ResponseWriter, r *http.Request) {
 	sse := datastar.NewSSE(w, r)
 	ok, err := s.db.CancelQueued(id)
 	if err != nil {
-		toast(sse, "cancel failed: "+err.Error())
+		toastErr(sse, "cancel failed: "+err.Error())
 		return
 	}
 	if ok {
 		s.db.LogAction(nowTs(), "queue_cancel", "", fmt.Sprintf(`{"id":%d}`, id), "canceled", 0)
-		toast(sse, fmt.Sprintf("canceled queue #%d", id))
+		toastOK(sse, fmt.Sprintf("canceled queue #%d", id))
 	} else {
-		toast(sse, "cancel: item not queued (already running/done?)")
+		toastErr(sse, "cancel: item not queued (already running/done?)")
 	}
 }
 
@@ -168,6 +168,18 @@ func renderQueue(items []db.QueueItem, auto, gpuFree bool) string {
 			esc(q.Status), esc(q.Status), esc(q.Script), esc(q.Args), pid, x)
 	}
 	b.WriteString(`</div>`)
+	return b.String()
+}
+
+// renderLaunchHistory fills the datalist backing the launch-args input with
+// recently launched/queued arg strings (from the actions audit table).
+func renderLaunchHistory(items []db.LaunchHistoryItem) string {
+	var b strings.Builder
+	b.WriteString(`<datalist id="launch-history">`)
+	for _, it := range items {
+		fmt.Fprintf(&b, `<option value="%s" label="%s"></option>`, esc(it.Args), esc(it.Script))
+	}
+	b.WriteString(`</datalist>`)
 	return b.String()
 }
 

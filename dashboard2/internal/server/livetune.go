@@ -28,6 +28,9 @@ var controlWhitelist = map[string]bool{
 	// LR boost. (--grokfast must be on for grokfast_lamb to apply; the autopilot can
 	// also drive these.)
 	"grokfast_lamb": true, "grokfast_alpha": true, "readout_lr_mult": true,
+	// loop-gate (LoopedRWKV residual_weight) LR steer — the detector's
+	// loop_stall/loop_pinned rules also drive this one.
+	"loop_lr_mult": true,
 	// spectral_muon live knobs (convert_train_spectral.py): Muon^p exponent + amplifier.
 	"sm_spectral_power": true, "sm_scale": true,
 	// DDC strength + PC-Layer blend + LLR spread (convert_train_spectral.py).
@@ -65,11 +68,11 @@ func (s *Server) handleSetControl(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(kv) == 0 {
-		toast(sse, "live-tune: no valid overrides entered")
+		toastErr(sse, "live-tune: no valid overrides entered")
 		return
 	}
 	if err := s.db.SetControls(name, kv, nowTs()); err != nil {
-		toast(sse, "live-tune failed: "+err.Error())
+		toastErr(sse, "live-tune failed: "+err.Error())
 		return
 	}
 	argsJSON, _ := json.Marshal(kv)
@@ -85,5 +88,5 @@ func (s *Server) handleSetControl(w http.ResponseWriter, r *http.Request) {
 	for i, k := range keys {
 		parts[i] = fmt.Sprintf("%s=%g", k, kv[k])
 	}
-	toast(sse, fmt.Sprintf("queued for %s: %s (pending next trainer poll)", name, strings.Join(parts, " ")))
+	toastOK(sse, fmt.Sprintf("queued for %s: %s (pending next trainer poll)", name, strings.Join(parts, " ")))
 }
