@@ -84,11 +84,24 @@ class RosaAnchorLayer(nn.Module):
         # RosaAnchorScaleController (top_prob-targeted scale calibration) + train.jsonl.
         self.want_telemetry = False
         self.last_telemetry = None
+        # NOTE: `scale` above is also a plain attr (not a buffer) for the same reason;
+        # convert_train persists it separately (blob["rosa_soft_scale"]) so a calibrated
+        # retrieval temperature survives warm-restarts.
         if d == C:
             nn.init.eye_(self.Wout.weight)       # W_out = I clean start (square, full-width path)
         # else: keep default (nonzero) init so gradients still reach e0/e1; y==0 at init (e0==e1)
         # already gives an exact no-op regardless of Wout, so zero-init is unnecessary and would
         # starve e0/e1 of gradient.
+
+    def float_growth_params(self):
+        """Keep e0/e1 in fp32 after a module-wide .to(dtype=bf16). They grow from
+        zero by small optimizer steps that bf16's ~3 significant digits quantize
+        away once the params have magnitude (same fix as LoopedRWKV.float_gates).
+        injection() computes the affine in e0's dtype and casts back to the stream
+        dtype before Wout, so the residual stream is unaffected."""
+        self.e0.data = self.e0.data.float()
+        self.e1.data = self.e1.data.float()
+        return self
 
     def injection(self, H: torch.Tensor) -> torch.Tensor:
         """inj = ROSA-soft(H), shape [B,T,C]. Exact no-op while e0==e1 (start of training)."""
@@ -114,8 +127,10 @@ class RosaAnchorLayer(nn.Module):
             s, self.last_telemetry = s
         s = s.reshape(B, T, self.d)
         delta = self.e1 - self.e0
-        y = self.e0 + delta * (s + 1) * 0.5      # bit=0 -> e0, bit=1 -> e1, continuous between; [B,T,d]
-        return self.Wout(y)                       # [B,T,d] -> [B,T,C]
+        # bit=0 -> e0, bit=1 -> e1, continuous between; [B,T,d]. Computed in e0's dtype
+        # (fp32 under float_growth_params) then cast back so Wout sees the stream dtype.
+        y = self.e0 + delta * (s.to(self.e0.dtype) + 1) * 0.5
+        return self.Wout(y.to(s.dtype))           # [B,T,d] -> [B,T,C]
 
 
 def rosa_anchor_parameters(rosa):
@@ -161,3 +176,15 @@ if __name__ == "__main__":
     rosa.injection(H)  # one-shot: next call must NOT probe
     assert rosa.last_telemetry is None, "telemetry probed again without want_telemetry"
     print("OK: telemetry is one-shot (want_telemetry auto-clears)")
+
+    # fp32 growth params under a bf16 stream (the trainer path: .to(bf16) then float)
+    rb = RosaAnchorLayer(C, M=M, window_size=32).to(device, torch.bfloat16).float_growth_params()
+    assert rb.e0.dtype == rb.e1.dtype == torch.float32
+    Hb = H.to(torch.bfloat16)
+    ib = rb.injection(Hb)
+    assert ib.dtype == torch.bfloat16 and ib.abs().max().item() == 0.0, "fp32 e0/e1 broke the init no-op"
+    with torch.no_grad():
+        rb.e1 += 0.5
+    rb.injection(Hb).float().pow(2).sum().backward()
+    assert rb.e0.grad is not None and rb.e0.grad.dtype == torch.float32 and rb.e0.grad.norm() > 0
+    print("OK: float_growth_params keeps e0/e1 fp32, bf16 stream + grads intact")

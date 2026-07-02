@@ -38,9 +38,13 @@ import torch.nn.functional as F
 try:
     from fla.ops.rwkv7 import chunk_rwkv7 as _fla_chunk_rwkv7  # type: ignore
     _HAS_FLA = True
-except Exception:  # pragma: no cover - import-time fallback
+    _FLA_IMPORT_ERROR: Exception | None = None
+except Exception as _e:  # pragma: no cover - import-time fallback
     _fla_chunk_rwkv7 = None
     _HAS_FLA = False
+    _FLA_IMPORT_ERROR = _e
+
+_PYREF_WARNED = False  # warn ONCE at first pyref dispatch, not at import (tools may never forward)
 
 
 class RWKV8ChannelMixDeltaNet(nn.Module):
@@ -425,6 +429,17 @@ class RWKV8TimeMixDeltaNet(nn.Module):
                 output_final_state=output_final_state,
             )
             return out, final
+        global _PYREF_WARNED
+        if not _PYREF_WARNED:
+            _PYREF_WARNED = True
+            if os.environ.get("RWKV8_FORCE_PYREF") == "1":
+                print("[rwkv8] RWKV8_FORCE_PYREF=1: using the slow Python wkv7 reference", flush=True)
+            else:
+                # A broken fla install must not degrade silently: the T-step Python
+                # loop is ~100x slower and the only symptom would be terrible tok/s.
+                print(f"[rwkv8] WARNING: fla unavailable ({_FLA_IMPORT_ERROR!r}) — falling back to the "
+                      f"T-step Python wkv7 reference (~100x slower). Fix the fla install; convert_train "
+                      f"refuses to launch in this state.", flush=True)
         out, final = _rwkv7_python_ref(
             r, gk, k, v, a, b, initial_state=initial_state
         )
