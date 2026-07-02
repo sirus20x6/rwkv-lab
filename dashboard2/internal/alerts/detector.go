@@ -56,7 +56,7 @@ type Detector struct {
 	interval time.Duration
 
 	baselinePPL float64
-	autoStop     atomic.Bool
+	autoStop    atomic.Bool
 
 	mu         sync.Mutex
 	lastRaised map[string]float64
@@ -185,6 +185,13 @@ func (d *Detector) scanRun(p sysmon.Proc) {
 		if es.LastPinThr != nil {
 			pinThr = *es.LastPinThr
 		}
+		// --loop-anneal-rw: the trainer cools the boost itself on a deterministic
+		// schedule. Round-1 gate A/B showed detector-side cooling is ingest/sampler-
+		// laggy (one arm cooled at max|rw| 0.303, the other at 2.1) — so when the
+		// trainer owns cooling, this side never writes loop_lr_mult controls for
+		// pin/release; the stall BOOST still applies (the trainer folds a control
+		// override into its anneal formula), and pin degrades to a watermark alert.
+		annealed := es.LastLoopAnn != nil && *es.LastLoopAnn != 0
 		if stats.LastStep > loopStallMinStep && *es.LastMaxRW < loopStallRW {
 			next := math.Min(math.Max(cur, 1.0)*10.0, loopMultCap)
 			if next > cur {
@@ -195,6 +202,12 @@ func (d *Detector) scanRun(p sysmon.Proc) {
 					_ = d.db.SetControls(p.RunName, map[string]float64{"loop_lr_mult": next}, now)
 				}
 			}
+		} else if *es.LastMaxRW >= pinThr && annealed {
+			// watermark only: gates beyond the healthy regime, but cooling is the
+			// trainer's job. Surfaces on the dashboard without fighting the anneal.
+			d.raise(p, "loop_pinned", "warn", stats.LastStep,
+				fmt.Sprintf("loop gates beyond healthy regime (max|rw| %.3f ≥ %.3f); trainer anneal owns cooling (mult %.3g)",
+					*es.LastMaxRW, pinThr, cur))
 		} else if *es.LastMaxRW >= pinThr && cur > 1.0 {
 			next := math.Max(cur*0.5, 1.0)
 			if d.raise(p, "loop_pinned", "warn", stats.LastStep,
@@ -203,7 +216,7 @@ func (d *Detector) scanRun(p sysmon.Proc) {
 				now := float64(time.Now().UnixNano()) / 1e9
 				_ = d.db.SetControls(p.RunName, map[string]float64{"loop_lr_mult": next}, now)
 			}
-		} else if *es.LastMaxRW >= loopReleaseRW && cur > 1.0 {
+		} else if *es.LastMaxRW >= loopReleaseRW && !annealed && cur > 1.0 {
 			next := math.Max(cur*0.5, 1.0)
 			if d.raise(p, "loop_release", "info", stats.LastStep,
 				fmt.Sprintf("loop gates moving (max|rw| %.3f ≥ %.2g) — releasing loop_lr_mult %.3g→%.3g",

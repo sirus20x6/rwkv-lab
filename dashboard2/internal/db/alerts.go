@@ -62,8 +62,8 @@ type TrainStats struct {
 	LastTokPerSec float64
 	MedTokPerSec  float64
 	LastStep      int64
-	LastLoss      float64  // newest row in the window
-	OldestLoss    float64  // oldest row in the window (coarse train-trend check)
+	LastLoss      float64 // newest row in the window
+	OldestLoss    float64 // oldest row in the window (coarse train-trend check)
 	CodecRel      *float64
 	RosaInjRMS    *float64 // latest ROSA injection RMS (nil if the run has no ROSA)
 	EngramInjRMS  *float64 // latest Engram injection RMS (nil if the run has no Engram)
@@ -148,6 +148,7 @@ type EvalStats struct {
 	LastLoopMult *float64 // trainer-reported EFFECTIVE loop_lr_mult (folds in the launch arg; nil = old run)
 	LastPinThr   *float64 // trainer-reported pin threshold (scales with --loop-gate-cap; nil = legacy 0.245)
 	LastLoopLive *float64 // 1 = live loop_lr_mult steering applies; 0 = baked in (schedulefree)
+	LastLoopAnn  *float64 // 1 = trainer-side anneal owns boost cooling (--loop-anneal-rw); nil/0 = detector-managed
 }
 
 // RecentEvalStats aggregates the last n eval rows for a run (ppl + held-out
@@ -156,7 +157,7 @@ func (d *DB) RecentEvalStats(runID int64, n int) (EvalStats, error) {
 	rows, err := d.Query(
 		`SELECT ppl, json_extract(extra_json,'$.block_val'), json_extract(extra_json,'$.loop_max_rw'),
 		        json_extract(extra_json,'$.loop_lr_mult'), json_extract(extra_json,'$.loop_pin_thr'),
-		        json_extract(extra_json,'$.loop_live')
+		        json_extract(extra_json,'$.loop_live'), json_extract(extra_json,'$.loop_anneal')
 		 FROM eval_events WHERE run_id=? ORDER BY step DESC LIMIT ?`, runID, n)
 	if err != nil {
 		return EvalStats{}, err
@@ -165,8 +166,8 @@ func (d *DB) RecentEvalStats(runID int64, n int) (EvalStats, error) {
 	var es EvalStats
 	first := true
 	for rows.Next() {
-		var ppl, block, maxRW, loopMult, pinThr, loopLive sql.NullFloat64
-		if err := rows.Scan(&ppl, &block, &maxRW, &loopMult, &pinThr, &loopLive); err != nil {
+		var ppl, block, maxRW, loopMult, pinThr, loopLive, loopAnn sql.NullFloat64
+		if err := rows.Scan(&ppl, &block, &maxRW, &loopMult, &pinThr, &loopLive, &loopAnn); err != nil {
 			return es, err
 		}
 		if first {
@@ -190,6 +191,10 @@ func (d *DB) RecentEvalStats(runID int64, n int) (EvalStats, error) {
 			if loopLive.Valid {
 				v := loopLive.Float64
 				es.LastLoopLive = &v
+			}
+			if loopAnn.Valid {
+				v := loopAnn.Float64
+				es.LastLoopAnn = &v
 			}
 			first = false
 		}

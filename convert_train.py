@@ -279,6 +279,22 @@ def resolve_best_ckpt(path):
     return str(p)
 
 
+def loop_anneal_factor(step, trigger_step, anneal_steps):
+    """Boost-decay factor in [0,1] for the loop-LR anneal: 1.0 until the gates escape
+    (trigger_step is None before that), then cosine 1->0 over anneal_steps, then 0.
+    effective mult = 1 + (boost-1)*factor, so factor 0 = boost fully released (1x).
+    Deterministic and lag-free — round-1 gate A/B showed the DB-side reactive cooling
+    fired at max|rw| 0.303 for one arm and 2.1 for the other (ingest/sampler lag),
+    giving the arms materially different LR schedules. Gates only need the boost to
+    ESCAPE zero (0 -> ~0.1); they grew 0.3 -> 3.3 under mult <= 15 regardless."""
+    if trigger_step is None or step <= trigger_step:
+        return 1.0
+    t = step - trigger_step
+    if t >= anneal_steps:
+        return 0.0
+    return 0.5 * (1.0 + math.cos(math.pi * t / anneal_steps))
+
+
 def _loop_param_names(student):
     """The student's loop-gate param names (rwkv_loop group + loop_lr_mult), or an
     empty set for a bare core (loop_count==1). Centralizes what the three optimizer
@@ -747,16 +763,23 @@ def train(args):
     # 0.245 either can never fire (cap<=0.245) or fires inside the healthy bounded
     # range — scale it to the cap instead. The threshold rides eval records
     # (loop_pin_thr) so the dashboard detector judges by the same number.
-    loop_pin_thr = 0.245 if args.loop_gate_cap <= 0.0 else 0.98 * args.loop_gate_cap
+    # uncapped pin = "beyond the observed healthy regime", not the old 0.25 design rail:
+    # round-1 gate A/B ran gates to 1.9-3.3 stably with ppl improving, so 0.245 flagged
+    # every healthy looped run mid-escape. Capped runs keep the exact 0.98*cap rail.
+    loop_pin_thr = 4.0 if args.loop_gate_cap <= 0.0 else 0.98 * args.loop_gate_cap
     # schedulefree bakes loop_lr_mult into the group lr (no live multipliers), so live
     # steering is a no-op there; loop_live=0 tells the detector not to write controls.
     loop_live = 0 if args.optimizer == "schedulefree" else 1
+    # trainer-owned boost cooling (--loop-anneal-rw): anneal_t0 set when gates escape.
+    loop_anneal_on = args.loop_anneal_rw > 0.0 and hasattr(student, "residual_weight")
+    loop_anneal_t0 = None
     def write_loop_rw(cur_mult=None):  # loop-usage card data for the dashboard (no-op for a bare core).
-        # Returns {loop_max_rw, loop_pinned, loop_pin_thr, loop_live[, loop_lr_mult]} so
-        # eval records carry the gate state into the DB (extra_json) — that's what the
-        # detector's loop_stall/loop_pinned/loop_release rules read. cur_mult is the
-        # EFFECTIVE multiplier (launch arg or live override): without it the detector
-        # can't see an arg-launched boost and would "boost" a 30x run down to 10x.
+        # Returns {loop_max_rw, loop_pinned, loop_pin_thr, loop_live, loop_anneal
+        # [, loop_lr_mult]} so eval records carry the gate state into the DB
+        # (extra_json) — that's what the detector's loop rules read. cur_mult is the
+        # EFFECTIVE multiplier (launch arg x anneal factor, or live override): without
+        # it the detector can't see an arg-launched boost and would "boost" a 30x run
+        # down to 10x. loop_anneal=1 tells the detector the trainer owns cooling.
         rw = getattr(student, "residual_weight", None)
         if rw is None:
             return None
@@ -774,7 +797,8 @@ def train(args):
             "gate_cap": float(args.loop_gate_cap), "pin_thr": loop_pin_thr,
             "mean_max_rw": mx, "layers": [{"layer": int(args.layer), "max_rw": mx, "rw": rwl}]}))
         lw = {"loop_max_rw": mx, "loop_pinned": pinned,
-              "loop_pin_thr": loop_pin_thr, "loop_live": loop_live}
+              "loop_pin_thr": loop_pin_thr, "loop_live": loop_live,
+              "loop_anneal": 1 if loop_anneal_on else 0}
         if cur_mult is not None:
             lw["loop_lr_mult"] = float(cur_mult)
         return lw
@@ -984,7 +1008,8 @@ def train(args):
              if p.ndim == 2 and id(p) not in _hb_skip and float(p.detach().norm()) > 0.0}
             if args.hyperball else {})
     switched = False
-    loop_mult = args.loop_lr_mult  # effective mult; live ctl override re-read each step
+    loop_mult = args.loop_lr_mult  # base mult; live ctl override re-read each step
+    loop_mult_eff = loop_mult      # x anneal factor once gates escape (--loop-anneal-rw)
     for step in range(args.steps):
         if (not switched and args.muon_to_adamw_frac > 0.0
                 and args.optimizer in ("muonclip", "spectral_muon")
@@ -1037,6 +1062,18 @@ def train(args):
         lr_scale = ctl.get("lr_scale", 1.0)
         readout_mult = ctl.get("readout_lr_mult", apilot.overrides.get("readout_lr_mult", args.readout_lr_mult))
         loop_mult = ctl.get("loop_lr_mult", args.loop_lr_mult)
+        if loop_anneal_on:
+            # escape check every 10 steps (tiny-tensor sync) until triggered, then fixed
+            if loop_anneal_t0 is None and step % 10 == 0:
+                if float(student.effective_rw().abs().max()) >= args.loop_anneal_rw:
+                    loop_anneal_t0 = step
+                    print(f"[loop-anneal] gates escaped (max|rw| >= {args.loop_anneal_rw:g}) at "
+                          f"step {step}; boost {loop_mult:g}x -> 1x over {args.loop_anneal_steps} steps",
+                          flush=True)
+            loop_mult_eff = 1.0 + (loop_mult - 1.0) * loop_anneal_factor(
+                step, loop_anneal_t0, args.loop_anneal_steps)
+        else:
+            loop_mult_eff = loop_mult
         gf_lamb = ctl.get("grokfast_lamb", apilot.overrides.get("grokfast_lamb",
                           args.grokfast_lamb if args.grokfast else 0.0))
         gf_alpha = ctl.get("grokfast_alpha", args.grokfast_alpha)
@@ -1081,7 +1118,7 @@ def train(args):
             if args.log_grokking_metrics and "block_val" in ev and block_ema is not None:
                 ev["gen_gap"] = ev["block_val"] - block_ema
             # loop-usage card; gate state + EFFECTIVE loop_lr_mult ride the eval record too
-            lw = write_loop_rw(args.loop_lr_mult if is_sf else loop_mult)
+            lw = write_loop_rw(args.loop_lr_mult if is_sf else loop_mult_eff)
             if lw:
                 ev.update(lw)
             emit({"kind": "eval", "step": step, **ev})
@@ -1268,8 +1305,8 @@ def train(args):
                 m = lr_scale                          # global lr_scale, readout boost, LLR layerwise
                 if readout_mult != 1.0 and g.get("name") == "rwkv_readout":
                     m = m * readout_mult              # boost to close the readout lag
-                if loop_mult != 1.0 and g.get("name") == "rwkv_loop":
-                    m = m * loop_mult                 # loop-gate steer (--loop-lr-mult / live)
+                if loop_mult_eff != 1.0 and g.get("name") == "rwkv_loop":
+                    m = m * loop_mult_eff             # loop-gate steer (--loop-lr-mult / live x anneal)
                 m = m * g.get("llr_mult", 1.0)        # LLR heavy-tail layerwise multiplier
                 if m != 1.0:
                     g["lr"] = g["lr"] * m
@@ -1338,7 +1375,7 @@ def train(args):
                       batch_size=args.eval_batch_size)
         if args.log_grokking_metrics and "block_val" in ev and block_ema is not None:
             ev["gen_gap"] = ev["block_val"] - block_ema
-        lw = write_loop_rw(args.loop_lr_mult if is_sf else loop_mult)
+        lw = write_loop_rw(args.loop_lr_mult if is_sf else loop_mult_eff)
         if lw:
             ev.update(lw)
         emit({"kind": "eval", "step": args.steps - 1, **ev})
@@ -1490,6 +1527,18 @@ def main():
                          "dashboard detector auto-boosts it on loop_stall, releases the boost back toward 1 "
                          "once gates clearly move (loop_release, max|rw|>=0.01), and cools it on loop_pinned) "
                          "and is baked into the group lr for schedulefree (no live multipliers there).")
+    ap.add_argument("--loop-anneal-rw", type=float, default=0.0,
+                    help="trainer-side deterministic loop-LR cooling: hold the full --loop-lr-mult boost "
+                         "until max|effective gate| crosses this threshold (escape complete), then cosine-"
+                         "decay the boost to 1x over --loop-anneal-steps. Replaces the dashboard detector's "
+                         "reactive loop_pinned/loop_release cooling, which is ingest/sampler-laggy (round-1 "
+                         "gate A/B: one arm cooled at max|rw| 0.303, the other at 2.1) and unfair across "
+                         "A/B arms. The detector sees loop_anneal=1 on eval records and stops writing "
+                         "loop_lr_mult controls (stall-boost still applies; pin becomes a watermark). "
+                         "0=off (legacy detector-managed). Calibration: gates escape 0->0.1 in ~100-200 "
+                         "steps at 30x; try 0.1.")
+    ap.add_argument("--loop-anneal-steps", type=int, default=400,
+                    help="steps over which the boost cosine-decays to 1x after --loop-anneal-rw triggers")
     ap.add_argument("--allow-neg-eigval", action=argparse.BooleanOptionalAction, default=True,
                     help="enable RWKV-7 negative eigenvalues (_a_scale 1->2, in-context gate a in (0,2)) to "
                          "match GDN's gated delta rule (beta in (0,2)). DEFAULT TRUE (the structural lever for "
@@ -1756,6 +1805,10 @@ def main():
         raise SystemExit(f"--loop-gate {args.loop_gate}/--loop-index requires adamw/spectral_muon/"
                          f"schedulefree: muonclip routes params by ndim and would send the 2D gate "
                          f"tensors to Muon (Newton-Schulz orthogonalization of loop gates is meaningless).")
+    if args.loop_anneal_rw > 0.0 and args.optimizer == "schedulefree":
+        raise SystemExit("--loop-anneal-rw requires a live loop multiplier (adamw/spectral_muon): "
+                         "schedulefree bakes loop_lr_mult into the group lr at build time, so the "
+                         "boost cannot be annealed during the run.")
     if args.rosa_soft and args.optimizer not in ("adamw", "spectral_muon"):
         raise SystemExit(f"--rosa-soft requires --optimizer adamw or spectral_muon (got {args.optimizer!r}); "
                          f"the rosa_soft group is wired into the AdamW and SpectralMuon paths only "
