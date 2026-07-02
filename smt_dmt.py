@@ -284,24 +284,214 @@ def smt_transition_loss(layer, codec, h_seq, S_gdn=None, *, stride,
             "smt_update_pen": upen / max(n_upen, 1)}
 
 
+class DMTGraphedRollout:
+    """CUDA-graph replay for the DMT rollout's launch-bound chunk steps.
+
+    The rollout is inherently sequential (state feedback), so each of the nb chunk
+    steps launches ~dozens of tiny elementwise kernels + the wkv kernel + eager
+    autograd for a 64-token slice — CPU launch overhead dominates GPU work. Each
+    step's forward AND backward are captured once and replayed as single graph
+    launches.
+
+    HAND-ROLLED capture (not torch.cuda.make_graphed_callables). Root cause, torch
+    2.11: each leaf's AccumulateGrad node is created ONCE (weakly cached on the
+    tensor) and bound to the stream current at first use. The trainer's main
+    forward/backward runs on the DEFAULT stream, so the layer's params carry
+    default-bound accumulators; any backward capture that references them makes
+    the engine add a legacy-stream dependency -> cudaErrorStreamCaptureImplicit
+    -> capture invalidated (this is also why stock make_graphed_callables fails
+    here). Fix: the captured graphs NEVER touch the real params. The runner owns
+    STATIC PARAM COPIES, created and first-touched on the capture stream (their
+    accumulators bind there), and the captured forward runs through
+    torch.func.functional_call on those copies. Real param VALUES are synced into
+    the copies once per iteration (chunk 0, one foreach D2D copy); the autograd
+    Function takes the real params as inputs and returns the copies' captured
+    grads for them, so .grad accumulation on the real params stays eager and
+    exact. Warmup + both captures share ONE stream ("global" mode, bit-exact
+    replay validated; "relaxed" fallback kept); replays launch from whatever
+    stream is current at call time.
+
+    One graph pair PER CHUNK INDEX: graphs own static input/output/workspace
+    buffers, so one instance may only replay once per iteration, and the rollout
+    calls the step nb times. Pairs are created lazily as the DMT curriculum grows
+    nb (monotone), never re-captured or freed. Cost: static buffers per index
+    (tens of MB each at B=8/stride=64) + one static copy of the layer params.
+
+    Baked at capture: B, stride, C, dtypes, and shift as a TENSOR (zeros == the
+    shift_state=None zero-pad semantics, so every index shares one signature).
+    j=0 differs only in requires_grad (teacher state/zero shift are leaves; later
+    states are autograd outputs). Param identity must not change after the first
+    capture (lazy first-call capture during training makes construction-after-
+    surgery automatic). Unused params (a LoopedRWKV's gates under skip_refine)
+    get no captured grad path — exactly matching eager DMT, where the gates get
+    no DMT gradient either. The shift OUTPUT is a slice of the (no-grad) chunk
+    input, so — as in eager — no gradient flows through it into the previous
+    chunk; incoming grads for it are dropped.
+    """
+
+    def __init__(self, layer, num_warmup_iters=3):
+        self.layer = layer
+        self.num_warmup_iters = int(num_warmup_iters)
+        self.capture_mode = None  # "global" or "relaxed", set at first capture
+        self._stream = None   # ONE stream shared by every warmup + capture (see docstring)
+        self._pnames = None   # trainable param names (fixed order)
+        self._preal = None    # real params, same order
+        self._pstatic = None  # static copies, first-touched on the capture stream
+        self._steps = []  # graphed step per chunk index (single-use-per-iteration buffers)
+
+    @torch.no_grad()
+    def _sync_params(self):
+        """Copy real param values into the static copies (once per iteration)."""
+        torch._foreach_copy_(self._pstatic, [p.detach() for p in self._preal])
+
+    def _make_step(self, x, s0, shift, first):
+        layer = self.layer
+        assert not x.requires_grad, "DMT chunk inputs come from the frozen backbone (no grad)"
+        if self._stream is None:
+            self._stream = torch.cuda.Stream()
+        S = self._stream
+        if self._pstatic is None:
+            named = [(n, p) for n, p in layer.named_parameters() if p.requires_grad]
+            self._pnames = [n for n, _ in named]
+            self._preal = [p for _, p in named]
+            with torch.cuda.stream(S):  # first touch ON S: accumulators bind to S
+                self._pstatic = [p.detach().clone().requires_grad_(True) for p in self._preal]
+            torch.cuda.current_stream().wait_stream(S)
+        pstatic = self._pstatic
+        pdict = dict(zip(self._pnames, pstatic))
+        static_in = (x.detach().clone(),
+                     s0.detach().clone().requires_grad_(not first),  # j>=1: autograd outputs
+                     shift.detach().clone().requires_grad_(not first))
+        diff_in = tuple(t for t in static_in if t.requires_grad)
+
+        def run():
+            # functional_call: the graph binds to the STATIC param copies, never the
+            # real (default-stream-bound) params — see class docstring.
+            return torch.func.functional_call(
+                layer, pdict, (static_in[0],),
+                dict(initial_state=static_in[1], shift_state=static_in[2],
+                     return_state=True, skip_refine=True))
+
+        # Park .grad across warmup/capture: capture must be grad-neutral no matter
+        # what a hook or warmup pass does.
+        saved = [(p, p.grad) for p in self._preal + pstatic]
+        for p, _ in saved:
+            p.grad = None
+        try:
+            S.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(S):
+                for _ in range(max(1, self.num_warmup_iters)):
+                    outs = run()
+                    douts = [o for o in outs if o.requires_grad]
+                    torch.autograd.grad(douts, diff_in + tuple(pstatic),
+                                        grad_outputs=[torch.ones_like(o) for o in douts],
+                                        allow_unused=True)
+                del outs, douts  # drop the warmup autograd graph before capture
+            torch.cuda.current_stream().wait_stream(S)
+            torch.cuda.synchronize()
+
+            def capture(mode):
+                fwd_graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(fwd_graph, stream=S, capture_error_mode=mode):
+                    static_out = run()
+                douts = tuple(o for o in static_out if o.requires_grad)
+                static_gout = tuple(torch.empty_like(o) for o in douts)
+                bwd_graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(bwd_graph, pool=fwd_graph.pool(), stream=S,
+                                      capture_error_mode=mode):
+                    static_gin = torch.autograd.grad(
+                        douts, diff_in + tuple(pstatic), grad_outputs=static_gout,
+                        allow_unused=True, retain_graph=False)
+                return fwd_graph, bwd_graph, static_out, static_gout, static_gin
+
+            if self.capture_mode is None:
+                try:
+                    cap = capture("global")
+                    self.capture_mode = "global"
+                except Exception:
+                    torch.cuda.synchronize()
+                    cap = capture("relaxed")
+                    self.capture_mode = "relaxed"
+                print(f"  [dmt-cuda-graph] capture_error_mode={self.capture_mode}", flush=True)
+            else:
+                cap = capture(self.capture_mode)
+        finally:
+            for p, g in saved:
+                p.grad = g
+        fwd_graph, bwd_graph, static_out, static_gout, static_gin = cap
+
+        grad_pos = [i for i, o in enumerate(static_out) if o.requires_grad]
+        n_in, n_diff = len(static_in), len(diff_in)
+
+        class _GraphedStep(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, *flat):
+                for dst, src in zip(static_in, flat[:n_in]):
+                    dst.copy_(src)
+                fwd_graph.replay()
+                return tuple(o.detach() for o in static_out)
+
+            @staticmethod
+            def backward(ctx, *gout):
+                for sg, i in zip(static_gout, grad_pos):
+                    if gout[i] is None:
+                        sg.zero_()
+                    else:
+                        sg.copy_(gout[i])
+                bwd_graph.replay()
+                res, k = [], 0
+                for t in static_in:                    # grads for (x, s0, shift)
+                    if t.requires_grad:
+                        g = static_gin[k]; k += 1
+                        res.append(None if g is None else g.detach())
+                    else:
+                        res.append(None)
+                # grads for the REAL params (values identical: pstatic == preal at
+                # replay time); the engine accumulates them into .grad eagerly.
+                for g in static_gin[n_diff:]:
+                    res.append(None if g is None else g.detach())
+                return tuple(res)
+
+        def graphed(x, s0, shift):
+            return _GraphedStep.apply(x, s0, shift, *self._preal)
+
+        return graphed
+
+    def step(self, j, x, s0, shift):
+        if j >= len(self._steps):
+            assert j == len(self._steps), "chunk indices must be visited in order"
+            self._steps.append(self._make_step(x, s0, shift, first=(j == 0)))
+        if j == 0 and self._pstatic is not None:
+            self._sync_params()  # once per iteration: real -> static param values
+        return self._steps[j](x, s0, shift)
+
+
 def dmt_rollout_loss(layer, codec, h_seq, S_gdn=None, *, stride, discount=1.0,
-                     block_out=None, max_update_ratio=0.25, target_states=None):
+                     block_out=None, max_update_ratio=0.25, target_states=None,
+                     graphed=None):
     """Closed-loop rollout: start from teacher state, then consume the student's
     OWN states across chunks; pull the trajectory toward the projected teacher
-    states. Trains against exposure-bias drift (DMT)."""
+    states. Trains against exposure-bias drift (DMT). graphed (DMTGraphedRollout)
+    replays full-stride chunk steps as captured CUDA graphs; ragged tail chunks
+    fall back to the eager call."""
     B, T, C = h_seq.shape
     chunks = _chunks(T, stride)
     tgt = _project_targets(codec, S_gdn, target_states)
     st = tgt[:, 0].detach()
-    shift = None
+    # graphs need one call signature for all chunk indices: a zeros shift tensor
+    # is bit-identical to shift_state=None (the core zero-pads the first token).
+    shift = h_seq.new_zeros(B, 1, C) if graphed is not None else None
     mem_loss = h_seq.new_zeros(())
     blk_loss = h_seq.new_zeros(())
     wsum = 0.0
     states = [st]
     for j, (lo, hi) in enumerate(chunks):
-        y, st, shift = layer(h_seq[:, lo:hi], initial_state=st,
-                             shift_state=shift, return_state=True,
-                             skip_refine=True)  # pass-1 (core) semantics — see smt note
+        if graphed is not None and hi - lo == stride:
+            y, st, shift = graphed.step(j, h_seq[:, lo:hi], st, shift)
+        else:  # no graphs, or the ragged tail chunk (shape differs -> eager)
+            y, st, shift = layer(h_seq[:, lo:hi], initial_state=st,
+                                 shift_state=shift, return_state=True,
+                                 skip_refine=True)  # pass-1 (core) semantics — see smt note
         w = discount ** j
         mem_loss = mem_loss + w * F.mse_loss(st.float(), tgt[:, j + 1].detach())
         if block_out is not None:
