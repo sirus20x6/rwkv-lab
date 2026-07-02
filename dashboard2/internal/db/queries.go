@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 )
 
@@ -206,6 +207,45 @@ func (d *DB) LogAction(ts float64, kind, runName, argsJSON, result string, pid i
 	}
 	_, _ = d.Exec(`INSERT INTO actions(ts,kind,run_id,args_json,result,pid) VALUES(?,?,?,?,?,?)`,
 		ts, kind, rid, argsJSON, result, pid)
+}
+
+// LaunchHistoryItem is one distinct (script, args) pair previously launched or
+// queued via the dashboard, newest first.
+type LaunchHistoryItem struct {
+	Script string `json:"script"`
+	Args   string `json:"args"`
+}
+
+// RecentLaunchArgs returns the most recent distinct launch/enqueue arg strings
+// from the actions audit table, for the launch form's history datalist.
+func (d *DB) RecentLaunchArgs(limit int) []LaunchHistoryItem {
+	rows, err := d.Query(
+		`SELECT args_json FROM actions
+		 WHERE kind IN ('launch','enqueue','queue_start') AND result IN ('started','queued')
+		 ORDER BY ts DESC LIMIT 200`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	seen := map[string]bool{}
+	var out []LaunchHistoryItem
+	for rows.Next() && len(out) < limit {
+		var raw string
+		if rows.Scan(&raw) != nil {
+			continue
+		}
+		var it LaunchHistoryItem
+		if json.Unmarshal([]byte(raw), &it) != nil || it.Args == "" {
+			continue
+		}
+		key := it.Script + "\x00" + it.Args
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, it)
+	}
+	return out
 }
 
 // SetNotes updates a run's free-text notes.

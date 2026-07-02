@@ -102,12 +102,19 @@ func renderSysGPUs(gpus []sysmon.GPU) string {
 		} else if g.TempC >= 75 {
 			tempCls = "warn"
 		}
+		memPct := 0.0
+		if g.MemTotalGB > 0 {
+			memPct = 100 * g.MemUsedGB / g.MemTotalGB
+		}
 		fmt.Fprintf(&b,
-			`<span class="metric"><span class="lbl">GPU%d</span> %d%%`+
+			`<span class="metric"><span class="lbl">GPU%d</span> <b>%d%%</b>`+
 				`<span class="meter"><i class="%s" style="width:%.0f%%"></i></span>`+
-				` · %.1f/%.1fGB · <b class="%s">%d°C</b>%s</span>`,
+				` <span class="lbl">vram</span> <b>%.1f/%.1fGB</b>`+
+				`<span class="meter"><i class="%s" style="width:%.0f%%"></i></span>`+
+				` <b class="%s">%d°C</b>%s</span>`,
 			g.Index, g.UtilPct, meterCls(float64(g.UtilPct)), clampPct(float64(g.UtilPct)),
-			g.MemUsedGB, g.MemTotalGB, tempCls, g.TempC, pwr)
+			g.MemUsedGB, g.MemTotalGB, meterCls(memPct), clampPct(memPct),
+			tempCls, g.TempC, pwr)
 	}
 	b.WriteString(`</div>`)
 	return b.String()
@@ -116,14 +123,14 @@ func renderSysGPUs(gpus []sysmon.GPU) string {
 func renderSysHost(h sysmon.Host) string {
 	meter := func(label, val string, pct float64) string {
 		return fmt.Sprintf(
-			`<span class="metric"><span class="lbl">%s</span> %s`+
+			`<span class="metric"><span class="lbl">%s</span> <b>%s</b>`+
 				`<span class="meter"><i class="%s" style="width:%.0f%%"></i></span></span>`,
 			label, val, meterCls(pct), clampPct(pct))
 	}
 	cpu := meter("CPU", fmt.Sprintf("%.0f%%", h.CPUPct), h.CPUPct)
 	ram := meter("RAM", fmt.Sprintf("%.0f/%.0fGB", h.RAMUsedGB, h.RAMTotalGB), h.RAMPct)
 	disk := meter("disk", fmt.Sprintf("%.0f/%.0fGB", h.DiskUsedGB, h.DiskTotalGB), h.DiskPct)
-	loadS := fmt.Sprintf(`<span class="metric"><span class="lbl">load</span> %.2f</span>`, h.Load1)
+	loadS := fmt.Sprintf(`<span class="metric"><span class="lbl">load</span> <b>%.2f</b></span>`, h.Load1)
 	return `<div id="sys-host" class="sys-block">` + cpu + ram + disk + loadS + `</div>`
 }
 
@@ -134,9 +141,12 @@ func renderSysProc(procs []sysmon.Proc) string {
 	var b strings.Builder
 	b.WriteString(`<div id="sys-proc" class="sys-block">`)
 	for _, p := range procs {
+		// compact chip: liveness + name + runtime + log freshness; PID and RSS
+		// stay one hover away in the tooltip
 		fmt.Fprintf(&b,
-			`<span class="metric"><span class="dot %s"></span> PID <b>%d</b> · %s · %s · %.1fGB · log %s</span>`,
-			p.State, p.PID, esc(p.RunName), fmtDur(p.RuntimeS), p.RSSGB, fmtAge(p.LogAgeS))
+			`<span class="proc-chip" title="PID %d · RSS %.1fGB"><span class="dot %s"></span><b>%s</b>`+
+				`<span class="pc-meta">%s · log %s</span></span>`,
+			p.PID, p.RSSGB, p.State, esc(p.RunName), fmtDur(p.RuntimeS), fmtAge(p.LogAgeS))
 	}
 	b.WriteString(`</div>`)
 	return b.String()
@@ -175,6 +185,11 @@ func renderRunList(summaries []db.RunSummary, procByRun map[string]sysmon.Proc, 
 		if s.HasHorizons {
 			hor = " · h=1…4"
 		}
+		// best eval ppl — the number selection decisions are actually made on
+		best := ""
+		if nz(s.BestPPL) {
+			best = fmt.Sprintf(` · <span class="best">%.2f</span>`, *s.BestPPL)
+		}
 		// data-on:click sets the signal (for highlight) AND fetches the panel.
 		// data-show does client-side filtering against the $runFilter signal.
 		low := strings.ToLower(s.Name)
@@ -184,9 +199,9 @@ func renderRunList(summaries []db.RunSummary, procByRun map[string]sysmon.Proc, 
 				`data-on:click="$selectedRun='%s'; @get('/api/run/%s')">`+
 				`<span class="dot %s"></span>`+
 				`<div class="run-info"><div class="run-name">%s</div>`+
-				`<div class="run-meta">step %s · %s ago%s</div></div></div>`,
+				`<div class="run-meta">step %s%s · %s ago%s</div></div></div>`,
 			esc(s.Name), jsName(s.Name), jsName(low), jsName(s.Name), urlName(s.Name),
-			state, esc(s.Name), step, fmtAge(&age), hor)
+			state, esc(s.Name), step, best, fmtAge(&age), hor)
 	}
 	b.WriteString(`</div>`)
 	return b.String()

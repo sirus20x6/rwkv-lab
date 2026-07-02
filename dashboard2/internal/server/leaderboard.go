@@ -26,26 +26,29 @@ type lbRow struct {
 	NEval    int
 	Status   string
 	AgeS     float64
+	Tags     []string
 }
 
 // handleLeaderboard renders a sortable table of all runs. ?sort= one of
 // ppl|top1|layer|updated|name|events (default best ppl ascending).
 func (s *Server) handleLeaderboard(w http.ResponseWriter, r *http.Request) {
 	now := nowTs()
-	summaries, err := s.db.RunSummaries(now)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	// Serve from the shared per-second snapshot — the summary aggregates are the
+	// expensive part, and the leaderboard doesn't need sub-second freshness.
+	snap := s.latestTick()
+	if snap == nil {
+		http.Error(w, "warming up", http.StatusServiceUnavailable)
 		return
 	}
+	summaries := snap.summaries
 	rows := make([]lbRow, 0, len(summaries))
 	for _, su := range summaries {
 		row := lbRow{Name: su.Name, LastPPL: su.LatestPPL, NTrain: su.NTrain, NEval: su.NEval,
-			Status: su.Status, AgeS: now - su.LastUpdateTs}
+			Status: su.Status, AgeS: now - su.LastUpdateTs,
+			BestPPL: su.BestPPL, BestTop1: su.BestTop1}
+		_ = json.Unmarshal([]byte(su.TagsJSON), &row.Tags)
 		if L, ok := convboard.RunLayer(filepath.Join(s.cfg.RunsDir, su.Name)); ok {
 			row.Layer, row.HasLayer = L, true
-		}
-		if k, ok, _ := s.db.RunKPIsByName(su.Name); ok {
-			row.BestPPL, row.BestTop1 = k.BestPPL, k.BestTop1
 		}
 		rows = append(rows, row)
 	}
@@ -78,19 +81,26 @@ func renderLeaderboard(rows []lbRow) string {
 	b.WriteString(`<div id="leaderboard"><table class="lb"><thead><tr>`)
 	b.WriteString(hdr("name", "run") + hdr("layer", "L") + hdr("ppl", "best ppl") +
 		`<th>last ppl</th>` + hdr("top1", "best top1") + hdr("events", "events") +
-		hdr("updated", "updated") + `<th>status</th></tr></thead><tbody>`)
+		hdr("updated", "updated") + `<th>status</th><th>tags</th></tr></thead><tbody>`)
 	for _, r := range rows {
 		layer := "—"
 		if r.HasLayer {
 			layer = fmt.Sprintf("%d", r.Layer)
 		}
+		var tags strings.Builder
+		for _, t := range r.Tags {
+			fmt.Fprintf(&tags, `<span class="lb-tag">%s</span>`, esc(t))
+		}
+		// rows share the sidebar's $runFilter signal (tags match too)
+		filterKey := strings.ToLower(r.Name + " " + strings.Join(r.Tags, " "))
 		fmt.Fprintf(&b,
-			`<tr data-on:click="$selectedRun='%s'; @get('/api/run/%s')">`+
+			`<tr data-show="$runFilter==='' || '%s'.includes($runFilter.toLowerCase())" `+
+				`data-on:click="$selectedRun='%s'; @get('/api/run/%s')">`+
 				`<td class="lb-name">%s</td><td>%s</td><td class="ok">%s</td><td>%s</td>`+
-				`<td>%s</td><td>%d/%d</td><td>%s ago</td><td><span class="dot %s"></span> %s</td></tr>`,
-			jsName(r.Name), urlName(r.Name), esc(r.Name), layer,
+				`<td>%s</td><td>%d/%d</td><td>%s ago</td><td><span class="dot %s"></span> %s</td><td>%s</td></tr>`,
+			jsName(filterKey), jsName(r.Name), urlName(r.Name), esc(r.Name), layer,
 			fmtPtr(r.BestPPL, 3), fmtPtr(r.LastPPL, 3), fmtPctPtr(r.BestTop1),
-			r.NTrain, r.NEval, fmtAge(&r.AgeS), r.Status, r.Status)
+			r.NTrain, r.NEval, fmtAge(&r.AgeS), r.Status, r.Status, tags.String())
 	}
 	b.WriteString(`</tbody></table></div>`)
 	return b.String()

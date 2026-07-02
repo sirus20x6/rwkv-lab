@@ -15,8 +15,11 @@ import (
 )
 
 // Series is a shared step axis plus one nullable column per requested metric.
+// Ts carries each row's wall-clock timestamp (0 when the row has none) so the
+// client can offer a time-based x-axis.
 type Series struct {
 	Step []int64               `json:"step"`
+	Ts   []float64             `json:"ts"`
 	Cols map[string][]*float64 `json:"cols"`
 }
 
@@ -110,11 +113,11 @@ func tableCatalog(d *db.DB, table string, known map[string]bool, runID int64) []
 }
 
 func fetchTable(d *db.DB, table string, known map[string]bool, runID int64, fields []string, since, to int64, maxPoints int) (Series, bool, error) {
-	s := Series{Step: []int64{}, Cols: map[string][]*float64{}}
+	s := Series{Step: []int64{}, Ts: []float64{}, Cols: map[string][]*float64{}}
 	if len(fields) == 0 {
 		return s, false, nil
 	}
-	exprs := []string{"step"}
+	exprs := []string{"step", "ts"}
 	var valid []string
 	for _, f := range fields {
 		expr, ok := colExpr(f, known)
@@ -139,18 +142,21 @@ func fetchTable(d *db.DB, table string, known map[string]bool, runID int64, fiel
 	for _, f := range valid {
 		s.Cols[f] = []*float64{}
 	}
-	dest := make([]any, len(valid)+1)
+	dest := make([]any, len(valid)+2)
 	var step int64
+	var ts sql.NullFloat64
 	dest[0] = &step
+	dest[1] = &ts
 	vals := make([]sql.NullFloat64, len(valid))
 	for i := range vals {
-		dest[i+1] = &vals[i]
+		dest[i+2] = &vals[i]
 	}
 	for rows.Next() {
 		if err := rows.Scan(dest...); err != nil {
 			return s, false, err
 		}
 		s.Step = append(s.Step, step)
+		s.Ts = append(s.Ts, ts.Float64) // 0 when NULL
 		for i, f := range valid {
 			if vals[i].Valid {
 				v := vals[i].Float64
@@ -170,30 +176,79 @@ func fetchTable(d *db.DB, table string, known map[string]bool, runID int64, fiel
 	return s, false, nil
 }
 
-// decimate stride-samples rows to ~maxPoints, always keeping the last row so the
-// live tip is exact. (Spike-preserving min/max bucketing is a future refinement;
-// zoom/?from-to fetches return full resolution.)
+// decimate reduces rows to roughly maxPoints while PRESERVING SPIKES: within
+// each bucket it keeps, per requested column, the rows holding that column's
+// min and max (plus the first/last rows overall). A one-step loss or gnorm
+// spike therefore survives the overview instead of vanishing between strides —
+// zoom/?from-to fetches still return full resolution.
 func decimate(s Series, maxPoints int) Series {
 	n := len(s.Step)
-	stride := (n + maxPoints - 1) / maxPoints
-	if stride < 2 {
-		return s
-	}
-	out := Series{Cols: map[string][]*float64{}}
-	for k := range s.Cols {
-		out.Cols[k] = []*float64{}
-	}
-	for i := 0; i < n; i += stride {
-		out.Step = append(out.Step, s.Step[i])
-		for k, col := range s.Cols {
-			out.Cols[k] = append(out.Cols[k], col[i])
+	// count columns that actually carry data so bucket sizing matches the ~2
+	// kept rows each contributes per bucket
+	active := 0
+	for _, col := range s.Cols {
+		for _, v := range col {
+			if v != nil {
+				active++
+				break
+			}
 		}
 	}
-	// ensure the final point is present
-	if last := n - 1; (n-1)%stride != 0 {
-		out.Step = append(out.Step, s.Step[last])
+	if active == 0 {
+		active = 1
+	}
+	buckets := maxPoints / (2 * active)
+	if buckets < 64 {
+		buckets = 64
+	}
+	if buckets >= n {
+		return s
+	}
+	size := (n + buckets - 1) / buckets
+	keep := map[int]bool{0: true, n - 1: true}
+	for b0 := 0; b0 < n; b0 += size {
+		b1 := b0 + size
+		if b1 > n {
+			b1 = n
+		}
+		for _, col := range s.Cols {
+			minI, maxI := -1, -1
+			for i := b0; i < b1; i++ {
+				v := col[i]
+				if v == nil {
+					continue
+				}
+				if minI < 0 || *v < *col[minI] {
+					minI = i
+				}
+				if maxI < 0 || *v > *col[maxI] {
+					maxI = i
+				}
+			}
+			if minI >= 0 {
+				keep[minI] = true
+				keep[maxI] = true
+			}
+		}
+	}
+	idx := make([]int, 0, len(keep))
+	for i := range keep {
+		idx = append(idx, i)
+	}
+	sort.Ints(idx)
+	out := Series{Step: make([]int64, 0, len(idx)), Ts: make([]float64, 0, len(idx)), Cols: map[string][]*float64{}}
+	for k := range s.Cols {
+		out.Cols[k] = make([]*float64, 0, len(idx))
+	}
+	for _, i := range idx {
+		out.Step = append(out.Step, s.Step[i])
+		if i < len(s.Ts) {
+			out.Ts = append(out.Ts, s.Ts[i])
+		} else {
+			out.Ts = append(out.Ts, 0)
+		}
 		for k, col := range s.Cols {
-			out.Cols[k] = append(out.Cols[k], col[last])
+			out.Cols[k] = append(out.Cols[k], col[i])
 		}
 	}
 	return out

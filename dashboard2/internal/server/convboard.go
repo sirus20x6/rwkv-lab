@@ -53,12 +53,23 @@ func (s *Server) nLayers() int {
 func renderConvBoard(layers []convboard.LayerStatus) string {
 	var b strings.Builder
 	counts := map[string]int{}
+	var converting []string
 	for _, l := range layers {
 		counts[l.Status]++
+		if l.Status == "converting" {
+			converting = append(converting, fmt.Sprintf("L%d", l.Layer))
+		}
 	}
-	b.WriteString(`<div id="conv-board" class="conv-board"><div class="conv-head">conversion map · ` +
-		fmt.Sprintf(`<span class="ok">%d accepted</span> · <span class="warn">%d converting</span> · %d attempted · %d pending`,
-			counts["accepted"], counts["converting"], counts["attempted"], counts["pending"]) +
+	head := "conversion map"
+	if n := len(layers); n > 0 {
+		head += fmt.Sprintf(` · <span class="ok">%d/%d accepted (%.0f%%)</span>`,
+			counts["accepted"], n, 100*float64(counts["accepted"])/float64(n))
+	}
+	if len(converting) > 0 {
+		head += fmt.Sprintf(` · <span class="warn">converting %s</span>`, strings.Join(converting, " "))
+	}
+	head += fmt.Sprintf(` · %d attempted · %d pending`, counts["attempted"], counts["pending"])
+	b.WriteString(`<div id="conv-board" class="conv-board"><div class="conv-head">` + head +
 		`</div><div class="conv-cells">`)
 	for _, l := range layers {
 		ppl := "—"
@@ -77,7 +88,13 @@ func renderConvBoard(layers []convboard.LayerStatus) string {
 		fmt.Fprintf(&b, `<div class="conv-cell %s" title="%s" %s><span class="cl">L%d</span><span class="cp">%s</span></div>`,
 			esc(l.Status), esc(title), click, l.Layer, ppl)
 	}
-	b.WriteString(`</div></div>`)
+	b.WriteString(`</div>`)
+	if total := len(layers); total > 0 {
+		pct := 100 * float64(counts["accepted"]) / float64(total)
+		fmt.Fprintf(&b, `<div class="conv-progress" title="%d of %d layers accepted"><i style="width:%.1f%%"></i></div>`,
+			counts["accepted"], total, pct)
+	}
+	b.WriteString(`</div>`)
 	return b.String()
 }
 
@@ -95,7 +112,7 @@ func (s *Server) handleAcceptLayer(w http.ResponseWriter, r *http.Request) {
 	run := r.URL.Query().Get("run")
 	sse := datastar.NewSSE(w, r)
 	if run == "" {
-		toast(sse, "accept: no run for this layer")
+		toastErr(sse, "accept: no run for this layer")
 		return
 	}
 	ckpt, step := latestCkpt(filepath.Join(s.cfg.RunsDir, run))
@@ -105,11 +122,11 @@ func (s *Server) handleAcceptLayer(w http.ResponseWriter, r *http.Request) {
 	}
 	libPath := filepath.Join(s.libDir(), fmt.Sprintf("L%02d.pt", layer))
 	if err := s.db.AcceptLayer(layer, run, step, libPath, ppl, nowTs()); err != nil {
-		toast(sse, "accept failed: "+err.Error())
+		toastErr(sse, "accept failed: "+err.Error())
 		return
 	}
 	s.db.LogAction(nowTs(), "accept_layer", run, fmt.Sprintf(`{"layer":%d,"ckpt":%q}`, layer, ckpt), "candidate recorded", 0)
-	toast(sse, fmt.Sprintf("L%d candidate = %s → promote with assemble_looped.py (source: %s)", layer, run, ckpt))
+	toastOK(sse, fmt.Sprintf("L%d candidate = %s → promote with assemble_looped.py (source: %s)", layer, run, ckpt))
 }
 
 // latestCkpt returns the best (preferred) or newest checkpoint path + step.
