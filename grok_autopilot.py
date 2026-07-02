@@ -30,9 +30,10 @@ import torch
 class GrokAutopilot:
     def __init__(self, student, codec, opt, out_dir, is_sf, *, enabled=False,
                  ema_decay=0.999, collapse_thresh=0.02, patience=2, stall_patience=3,
-                 max_restarts=3, reg_mult=2.0, restore_best=True):
+                 max_restarts=3, reg_mult=2.0, restore_best=True, lookahead=None):
         self.enabled = bool(enabled)
         self.student, self.codec, self.opt = student, codec, opt
+        self.lookahead = lookahead       # NextLat/TOP aux heads: rolled back WITH the backbone
         self.out, self.is_sf = Path(out_dir), is_sf
         self.ema_decay = ema_decay
         self.thresh, self.patience = collapse_thresh, max(1, patience)
@@ -136,6 +137,11 @@ class GrokAutopilot:
             self.student.load_state_dict(state["student"])
             if self.codec is not None and "codec" in state:
                 self.codec.load_state_dict(state["codec"])
+            if self.lookahead is not None and "lookahead" in state:
+                # aux heads must roll back with the backbone: their predictions/rankings
+                # are functions of the restored hidden states, and stale heads would
+                # re-shape the backbone toward the collapsed trajectory
+                self.lookahead.load_state_dict(state["lookahead"])
             if self.use_ema:                    # re-seed EMA at the restored weights
                 self.ema = {n: p.detach().float().clone()
                             for n, p in self.student.named_parameters() if p.requires_grad}

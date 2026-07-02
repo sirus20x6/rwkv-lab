@@ -49,7 +49,14 @@ class LayerwiseLR:
         if step > self.active_frac * self.total or (step % self.every) != 0:
             return
         s = self.s_max if s_max is None else s_max
-        alphas = [self._group_alpha(g) for g in self.opt.param_groups]
+        # aux-head groups (lookahead/rosa_soft) are not student layers: heavy-tail
+        # layerwise scaling is meaningless there, and svdvals on the lm_head-sized
+        # TOP matrix would cost minutes per update. rwkv_loop is exempt too: it has
+        # its own live multiplier (loop_lr_mult) and now carries 2D tensors (LoRA
+        # A/B, hyper_alpha) that would otherwise pick up a compounding llr_mult.
+        # NaN -> llr_mult pinned to 1.0.
+        alphas = [float("nan") if g.get("name") in ("lookahead", "rosa_soft", "rwkv_loop")
+                  else self._group_alpha(g) for g in self.opt.param_groups]
         valid = [a for a in alphas if a == a]      # drop NaN
         if not valid:
             return
