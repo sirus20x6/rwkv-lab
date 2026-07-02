@@ -8,7 +8,7 @@ Per 2D matrix each step:
   1. momentum   m = μ·m + g'            (g' = g + α·EMA(Δg) if MONA)        [2605.26842]
   2. Muon²      m ← m / (√v + ε)        Adam-style precond before NS         [2604.09967]
   3. MuonEq     equilibrate rows/cols of m                                   [2603.28254]
-  4. orthog.    p==0 → Newton–Schulz polar (UVᵀ);  p∈(0,1] → U·Σ^p·Vᵀ (SVD)  [2606.13867]
+  4. orthog.    p==0 → Newton–Schulz polar (UVᵀ);  p∈(0,1] → U·Σ^p·Vᵀ (eigh)  [2606.13867]
   5. Aurora     equal-row-norm for tall matrices                            [2606.27715]
   6. MUON+      row/col-normalize the orthogonalized update                 [2602.21545]
   7. scale by `scale·√(max(m,n))` (the repo's MuonClip amplifier) and lr; decoupled WD
@@ -16,6 +16,11 @@ Per 2D matrix each step:
 
 The lever knobs live in each param group, so a trainer may live-tune them by
 setting e.g. opt.param_groups[i]["spectral_power"] = v between steps.
+
+Precision: all optimizer state (momentum, MONA acc, Muon² v, Adam moments) is kept
+in fp32 regardless of param dtype — bf16 moments quantize away small updates (the
+known bf16-AdamW failure). The NS polar iteration runs in bf16 (KJ Muon convention,
+~2x faster than fp32+TF32); the eigh/SVD power paths need fp32 (cuSOLVER).
 """
 from __future__ import annotations
 
@@ -65,19 +70,28 @@ def _power_eigh(G, power, rtol=1e-3):
     return ((U * inner) @ U.mT) @ G
 
 
-def orthogonalize(G, steps=5, cubic=False, power=0.0, power_method="svd"):
-    """(Fractional-power) orthogonalized factor of G. power>0 uses gesvd (power_method
-    'svd', default — exact), OR the math-identical eigh-on-Gram path (power_method
-    'eigh', ~2-3x faster, see _power_eigh)."""
+_power_fallback_warned = [False]
+
+
+def orthogonalize(G, steps=5, cubic=False, power=0.0, power_method="eigh"):
+    """(Fractional-power) orthogonalized factor of G. power>0 uses the math-identical
+    eigh-on-Gram path (power_method 'eigh', default — see _power_eigh; measured ~14x
+    faster than gesvd at 4096², 161ms vs 2.3s on Blackwell) OR exact gesvd ('svd',
+    debug/verification only). The NS polar path runs in bf16 (~2x faster than
+    fp32+TF32); the power paths need fp32 (cuSOLVER)."""
     if power and power > 0.0:
         try:
             if power_method == "eigh":
                 return _power_eigh(G.float(), power)
             U, S, Vh = torch.linalg.svd(G.float(), full_matrices=False)
             return (U * S.clamp_min(0).pow(power)) @ Vh
-        except Exception:
-            pass  # fall back to NS polar factor
-    X = G.float()
+        except Exception as e:  # solver failure -> NS polar (spectral_power OFF for this matrix/step)
+            if not _power_fallback_warned[0]:
+                _power_fallback_warned[0] = True
+                print(f"[spectral_muon] WARNING: power_method={power_method!r} failed ({e!r}); "
+                      "falling back to plain NS polar — spectral_power is silently ignored "
+                      "wherever this recurs (warning printed once).", flush=True)
+    X = G.bfloat16()
     transpose = X.size(-2) > X.size(-1)
     if transpose:
         X = X.mT
@@ -111,7 +125,7 @@ def _ddc_project(U, W, mode, strength):
 
 class SpectralMuon(Optimizer):
     def __init__(self, param_groups, *, momentum=0.95, nesterov=False,
-                 ns_steps=5, cubic=False, spectral_power=0.0, power_method="svd",
+                 ns_steps=5, cubic=False, spectral_power=0.0, power_method="eigh",
                  second_moment=False, sm_beta2=0.99, sm_eps=1e-8,
                  equilibrate="none", plus_norm="none", row_uniform=False,
                  mona=False, mona_beta=0.9, mona_alpha=0.1, scale=0.4,
@@ -126,6 +140,16 @@ class SpectralMuon(Optimizer):
                         weight_decay=weight_decay, adam_betas=adam_betas, adam_eps=adam_eps,
                         use_muon=False, lr=3e-4)
         super().__init__(param_groups, defaults)
+
+    def load_state_dict(self, state_dict):
+        # Optimizer.load_state_dict casts float state to each param's dtype (bf16 for a
+        # bf16 model), silently re-quantizing the fp32 state on every resume; undo it.
+        # Old bf16-state ckpts upcast losslessly through the same path.
+        super().load_state_dict(state_dict)
+        for st in self.state.values():
+            for k, v in st.items():
+                if torch.is_tensor(v) and v.is_floating_point() and v.dtype != torch.float32:
+                    st[k] = v.float()
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -143,19 +167,19 @@ class SpectralMuon(Optimizer):
     def _muon_step(self, p, g, grp, st):
         lr, mu = grp["lr"], grp["momentum"]
         if "mom" not in st:
-            st["mom"] = torch.zeros_like(g)
+            st["mom"] = torch.zeros_like(g, dtype=torch.float32)  # fp32 state: see module docstring
             if grp["mona"]:
-                st["gprev"] = torch.zeros_like(g); st["acc"] = torch.zeros_like(g)
+                st["gprev"] = torch.zeros_like(g, dtype=torch.float32)
+                st["acc"] = torch.zeros_like(g, dtype=torch.float32)
             if grp["second_moment"]:
-                st["v"] = torch.zeros_like(g)
+                st["v"] = torch.zeros_like(g, dtype=torch.float32)
         gg = g
         if grp["mona"]:                                   # MONA curvature/Nesterov term
-            d = g - st["gprev"]; st["gprev"] = g.clone()
+            d = g - st["gprev"]; st["gprev"].copy_(g)
             st["acc"].mul_(grp["mona_beta"]).add_(d, alpha=1 - grp["mona_beta"])
             gg = g + grp["mona_alpha"] * st["acc"]
         m = st["mom"]; m.mul_(mu).add_(gg)
         u = gg.add(m, alpha=mu) if grp["nesterov"] else m
-        u = u.clone()
         if grp["second_moment"]:                          # Muon²
             v = st["v"]; v.mul_(grp["sm_beta2"]).addcmul_(gg, gg, value=1 - grp["sm_beta2"])
             u = u / (v.sqrt() + grp["sm_eps"])
@@ -183,7 +207,9 @@ class SpectralMuon(Optimizer):
     def _adam_step(self, p, g, grp, st):
         b1, b2 = grp["adam_betas"]; eps = grp["adam_eps"]; lr = grp["lr"]
         if "exp_avg" not in st:
-            st["exp_avg"] = torch.zeros_like(g); st["exp_sq"] = torch.zeros_like(g); st["t"] = 0
+            st["exp_avg"] = torch.zeros_like(g, dtype=torch.float32)  # fp32: bf16 moments
+            st["exp_sq"] = torch.zeros_like(g, dtype=torch.float32)   # quantize away fine updates
+            st["t"] = 0
         st["t"] += 1; t = st["t"]
         ea, es = st["exp_avg"], st["exp_sq"]
         ea.mul_(b1).add_(g, alpha=1 - b1)

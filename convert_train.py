@@ -138,7 +138,8 @@ def _cache_batch_tensor(mm, indices, device, dtype):
     return torch.as_tensor(np.asarray(mm[np.asarray(indices, dtype=np.int64)]), device=device, dtype=dtype)
 
 
-def _save_ckpt(out, step, student, codec, args, opt=None, rosa_soft=None):
+def _save_ckpt(out, step, student, codec, args, opt=None, rosa_soft=None, rosa_ctl=None,
+               lookahead=None):
     """Write step_<step>/{config.json, ckpt.pt}. For --optimizer schedulefree the
     caller must opt.eval() first so `student` holds the averaged x weights. With
     --save-optimizer, also persist optimizer state so --init-rwkv-ckpt resumes warm."""
@@ -146,8 +147,16 @@ def _save_ckpt(out, step, student, codec, args, opt=None, rosa_soft=None):
     blob = {"student": student.state_dict(), "codec": codec.state_dict(), "args": vars(args)}
     if opt is not None and getattr(args, "save_optimizer", True):
         blob["opt"], blob["opt_type"] = opt.state_dict(), args.optimizer
+    if lookahead is not None:   # training-only aux heads (config rides in args)
+        blob["lookahead"] = lookahead.state_dict()
     if rosa_soft is not None:
         blob["rosa_soft"] = rosa_soft.state_dict()
+        # calibrated retrieval scale + controller EMA are NOT state_dict content
+        # (plain attrs, kept out to preserve sd shape); persist them beside it so
+        # a warm-restart resumes the calibrated temperature instead of re-estimating.
+        blob["rosa_soft_scale"] = None if rosa_soft.scale is None else float(rosa_soft.scale)
+        if rosa_ctl is not None:
+            blob["rosa_ctl_ema"] = rosa_ctl.top_prob_ema
     torch.save(blob, sd / "ckpt.pt")
     return sd
 
@@ -201,7 +210,8 @@ def _snap_cpu(obj):
     return obj
 
 
-def _save_best(out, step, ppl, student, codec, args, opt=None, rosa_soft=None):
+def _save_best(out, step, ppl, student, codec, args, opt=None, rosa_soft=None, rosa_ctl=None,
+               lookahead=None):
     """ATOMICALLY save the best-eval checkpoint to out/best/. Called on EVERY eval
     improvement, so the minimum can never slip between periodic (--save-every) saves.
     The CPU snapshot happens synchronously HERE — schedulefree's eval-mode x weights and
@@ -216,8 +226,13 @@ def _save_best(out, step, ppl, student, codec, args, opt=None, rosa_soft=None):
             "args": vars(args), "step": int(step), "ppl": float(ppl)}
     if opt is not None and getattr(args, "save_optimizer", True):
         blob["opt"], blob["opt_type"] = opt.state_dict(), args.optimizer
+    if lookahead is not None:   # training-only aux heads (config rides in args)
+        blob["lookahead"] = lookahead.state_dict()
     if rosa_soft is not None:
         blob["rosa_soft"] = rosa_soft.state_dict()
+        blob["rosa_soft_scale"] = None if rosa_soft.scale is None else float(rosa_soft.scale)
+        if rosa_ctl is not None:  # controller EMA rides too (see _save_ckpt)
+            blob["rosa_ctl_ema"] = rosa_ctl.top_prob_ema
     blob = _snap_cpu(blob)
 
     def _write():
@@ -336,7 +351,16 @@ def build(args):
     """Load the model, hold the teacher GDN layer L, swap in the RWKV student,
     freeze everything else. Returns a dict of handles."""
     import layer_swap
+    import rwkv8_deltanet as _r8
     from rwkv8_deltanet import RWKV8TimeMixDeltaNet  # noqa
+    if not _r8._HAS_FLA and os.environ.get("RWKV8_FORCE_PYREF") != "1":
+        # A broken fla install silently routes every forward through the T-step
+        # Python wkv7 reference (~100x slower); the only symptom would be awful
+        # tok/s. Refuse to train in that state instead.
+        raise SystemExit(f"fla (flash-linear-attention) failed to import: {_r8._FLA_IMPORT_ERROR!r}. "
+                         f"Training would silently run the ~100x slower Python wkv7 reference. "
+                         f"Fix the fla install, or set RWKV8_FORCE_PYREF=1 to run the reference "
+                         f"intentionally.")
 
     if args.patch_dir:
         from load_converted import load_converted_model
@@ -393,8 +417,13 @@ def build(args):
         _p0 = next(core.parameters())  # core is already on-device; move the new
         student = LoopedRWKV(core, n_loops=args.loop_count, gate_mode=args.loop_gate,
                              gate_cap=args.loop_gate_cap, loop_index=bool(args.loop_index),
+                             hyper_lanes=int(getattr(args, "loop_hyper", 0)),
+                             lora_rank=int(getattr(args, "loop_lora_rank", 0)),
+                             lora_targets=tuple(t for t in str(getattr(
+                                 args, "loop_lora_targets", "")).split(",") if t.strip()),
                              ).to(device=_p0.device, dtype=_p0.dtype)
         student.float_gates()  # gates stay fp32: bf16 ulp swallows their tiny growth steps
+        student.iter_consist = float(getattr(args, "loop_iter_consist", 0.0)) > 0
         decoder_layer.linear_attn = student  # iter_norm + residual_weight onto the same device/dtype
     else:
         student = core
@@ -443,13 +472,14 @@ def build(args):
                 _expand_loop_gates(load_sd, student)          # coarser-gate ckpt -> this --loop-gate
             miss, unexp = student.load_state_dict(load_sd, strict=False)
             if strip_loop:                                    # loop params legitimately absent
-                miss = [m for m in miss if not (m in ("residual_weight", "gate_chan", "loop_index_embed")
+                miss = [m for m in miss if not (m in _loop_param_names(student)
                                                 or m.startswith("iter_norm."))]
             else:
-                # gate tensors this student has but the ckpt lacks (e.g. a factored/loop-index
-                # student warm-started from a plainer ckpt) init to their exact no-op:
-                # gate_chan delta=0 -> channel factor 1; loop_index_embed=0 -> no offset.
-                new_gates = {"gate_chan", "loop_index_embed"} & set(miss)
+                # gate tensors this student has but the ckpt lacks (e.g. a factored/loop-index/
+                # hyper student warm-started from a plainer ckpt) init to their exact no-op:
+                # gate_chan delta=0 -> channel factor 1; loop_index_embed=0 -> no offset;
+                # hyper_alpha/mix/write/read at one-hot/identity/ones/e0 -> plain-loop function.
+                new_gates = (_loop_param_names(student) - {"residual_weight"}) & set(miss)
                 if new_gates:
                     miss = [m for m in miss if m not in new_gates]
                     print(f"  warm-start: ckpt lacks {sorted(new_gates)}; fresh no-op init", flush=True)
@@ -462,8 +492,17 @@ def build(args):
             miss, unexp = student.load_state_dict(load_sd, strict=False)
             n_loaded = len(load_sd)
         if miss or unexp:  # same classes on both sides -> should be exact; fail loud, don't half-init
+            hint = ""
+            if any(str(u).startswith("loop_lora_") for u in unexp):
+                from looped_rwkv import lora_config_from_sd
+                _r, _t = lora_config_from_sd(sd_src)
+                hint += (f"\n  ckpt carries TRAINED per-pass LoRA adapters; relaunch with "
+                         f"--loop-lora-rank {_r} --loop-lora-targets {','.join(_t)}")
+            if any(str(u).startswith("hyper_") for u in unexp):
+                _k = int(sd_src["hyper_read"].shape[0])
+                hint += f"\n  ckpt carries TRAINED hyper-connection lanes; relaunch with --loop-hyper {_k}"
             raise SystemExit(f"warm-start key mismatch from {src}: "
-                             f"missing={list(miss)[:6]} unexpected={list(unexp)[:6]}")
+                             f"missing={list(miss)[:6]} unexpected={list(unexp)[:6]}{hint}")
         print(f"warm-start from {src}: loaded {n_loaded} tensors "
               f"(loop_count={args.loop_count}) OK", flush=True)
 
@@ -489,6 +528,7 @@ def build(args):
     # conversion loss always measures pure RWKV-vs-GDN fidelity, unaffected by
     # --rosa-soft; only downstream layers + the LM-CE path see the augmented output.
     rosa_soft = None
+    rosa_restore = None  # {"scale":..., "ema":...} from a warm-start ckpt (train() seeds the controller)
     if getattr(args, "rosa_soft", 0):
         from rosa_soft_layer import RosaAnchorLayer
         _p0 = next(student.parameters())
@@ -500,6 +540,7 @@ def build(args):
             qk_damper_strength=args.rosa_soft_qk_damper,
             route_dim=(args.rosa_soft_dim or None),
         ).to(device=_p0.device, dtype=_p0.dtype)
+        rosa_soft.float_growth_params()  # e0/e1 fp32: zero-init growth params, same as loop gates
         for p in rosa_soft.parameters():
             p.requires_grad_(True)
         def _inject_rosa_soft(m, a, o):
@@ -512,7 +553,43 @@ def build(args):
         decoder_layer.linear_attn.register_forward_hook(_inject_rosa_soft)
         if getattr(args, "init_rwkv_ckpt", "") and isinstance(blob, dict) and "rosa_soft" in blob:
             rosa_soft.load_state_dict(blob["rosa_soft"])
-            print(f"  warm-start: loaded rosa_soft state from {src}", flush=True)
+            # the CALIBRATED retrieval scale is constructor/controller state, not
+            # state_dict content: without restoring it, e0/e1/Wq/Wk trained against
+            # one softmax temperature get re-run under the closed-form estimate and
+            # the injection silently changes function at step 0.
+            rosa_restore = {"scale": blob.get("rosa_soft_scale"), "ema": blob.get("rosa_ctl_ema")}
+            if rosa_restore["scale"] is not None and args.rosa_soft_scale is None:
+                rosa_soft.scale = float(rosa_restore["scale"])
+            _sc = "none saved" if rosa_restore["scale"] is None else f"{float(rosa_restore['scale']):.4g}"
+            print(f"  warm-start: loaded rosa_soft state from {src} (calibrated scale: {_sc})", flush=True)
+    elif (getattr(args, "init_rwkv_ckpt", "") and isinstance(blob, dict) and "rosa_soft" in blob):
+        print("  [warn] ckpt carries TRAINED rosa_soft weights (the injection was part of its "
+              "LM function) but this run has --rosa-soft OFF — DISCARDING them changes step-0 "
+              "behavior. Pass --rosa-soft 1 (with the ckpt's rosa dims) to keep them.", flush=True)
+
+    # Lookahead (NextLat + TOP, lookahead_module.py): training-only future-prediction
+    # heads fed by the FULL-forward post-norm hidden (same gradient path as LM-CE).
+    # Both are dropped at inference — unlike rosa_soft they never alter the LM function,
+    # so discarding them on a later run is always safe; ckpts carry them under
+    # "lookahead" for warm restarts.
+    lookahead = None
+    if (getattr(args, "nextlat_weight", 0.0) > 0 or getattr(args, "top_weight", 0.0) > 0
+            or getattr(args, "nextlat_jump_weight", 0.0) > 0
+            or getattr(args, "concept_weight", 0.0) > 0):
+        from lookahead_module import lookahead_from_args
+        _p0 = next(student.parameters())
+        _V, _D = model.lm_head.weight.shape
+        lookahead = lookahead_from_args(args, _D, _V, model.lm_head).to(
+            device=_p0.device, dtype=_p0.dtype)
+        for p in lookahead.parameters():
+            p.requires_grad_(True)
+        print(f"  lookahead: nextlat={'on' if lookahead.nextlat else 'off'} "
+              f"top={'on' if lookahead.top else 'off'} "
+              f"({sum(p.numel() for p in lookahead.parameters())/1e6:.1f}M aux params -> AdamW group)",
+              flush=True)
+        if getattr(args, "init_rwkv_ckpt", "") and isinstance(blob, dict) and "lookahead" in blob:
+            lookahead.load_state_dict(blob["lookahead"])
+            print(f"  warm-start: loaded lookahead state from {src}", flush=True)
 
     # codec is a FIXED GDN->RWKV state-space map (pre-fit-then-frozen via
     # --codec-pretrain, else random-init frozen). SMT/DMT detach its output, so
@@ -523,27 +600,40 @@ def build(args):
     ).to(args.device)
     for p in codec.parameters():
         p.requires_grad_(False)
+    if getattr(args, "compile_core", 0):
+        # IN-PLACE compile of the RWKV core only (nn.Module.compile): param identity,
+        # state_dict keys, and the ckpt format are all unchanged, and the LoopedRWKV
+        # wrapper / box+rosa hooks / losses stay eager. Fuses the eager elementwise
+        # soup around chunk_rwkv7 (measured ~3x the kernel time uncompiled); dynamo
+        # graph-breaks cleanly at the fla op. Expect a few recompiles: train/eval T,
+        # SMT/DMT chunk shapes, state kwargs.
+        _mode = getattr(args, "compile_core_mode", "default")
+        core.compile(mode=(None if _mode == "default" else _mode))
+        print(f"  [compile-core] RWKV core compiled in-place, mode={_mode} "
+              f"(wrapper/hooks/losses stay eager)", flush=True)
     if getattr(args, "compile", 0):
         text_model = torch.compile(text_model)  # graph-breaks expected at fla/hook boundaries
         print("  torch.compile: text_model wrapped (experimental)", flush=True)
     return dict(model=model, text_model=text_model, student=student,
                 teacher_gdn=teacher_gdn, teacher_cap=teacher_cap, box=box, codec=codec,
                 lm_head=model.lm_head, init_opt_state=init_opt_state, init_opt_type=init_opt_type,
-                rosa_soft=rosa_soft)
+                rosa_soft=rosa_soft, rosa_restore=rosa_restore, lookahead=lookahead)
 
 
-def make_optimizer(student, codec, args, text_cfg=None, rosa_soft=None):
+def make_optimizer(student, codec, args, text_cfg=None, rosa_soft=None, lookahead=None):
     """AdamW (default) or DeepSeek-V4-style MuonClip (--optimizer muonclip).
     AdamW path: decay/time params low LR, projections normal. MuonClip path routes
     2D matrices -> Muon and 1D/scalar/norm -> AdamW (see _make_muonclip). The codec
     is a frozen target map (SMT/DMT detach it) so it is never in the optimizer.
-    rosa_soft (AdamW path only; enforced at argparse time) gets its own group."""
+    rosa_soft and lookahead (AdamW/spectral_muon paths only; enforced at argparse
+    time) each get their own group — lookahead MUST stay off Muon (the NextLat
+    authors report Muon instability with the latent-prediction objective)."""
     if args.optimizer == "muonclip":
         return _make_muonclip(student, text_cfg, args)
     if args.optimizer == "schedulefree":
         return _make_schedulefree(student, codec, args)
     if args.optimizer == "spectral_muon":
-        return _make_spectral_muon(student, codec, args, rosa_soft=rosa_soft)
+        return _make_spectral_muon(student, codec, args, rosa_soft=rosa_soft, lookahead=lookahead)
     decay_names = ("w0", "w1", "w2", "a0", "a1", "a2", "k_k", "k_a")
     loop_names = _loop_param_names(student)
     decay_p, proj_p, readout_p, loop_p = [], [], [], []
@@ -575,14 +665,21 @@ def make_optimizer(student, codec, args, text_cfg=None, rosa_soft=None):
     if rosa_soft is not None:
         groups.append({"params": [p for p in rosa_soft.parameters() if p.requires_grad],
                        "lr": args.rosa_soft_lr or args.lr, "name": "rosa_soft"})
+    if lookahead is not None:  # appended LAST (after rosa_soft): leading-group momentum
+        # restore from a no-lookahead ckpt stays possible, same reasoning as rosa_soft
+        groups.append({"params": [p for p in lookahead.parameters() if p.requires_grad],
+                       "lr": args.lookahead_lr or args.lr, "name": "lookahead"})
     return torch.optim.AdamW(groups, betas=(0.9, 0.95), weight_decay=0.0)
 
 
-def _make_spectral_muon(student, codec, args, rosa_soft=None):
+def _make_spectral_muon(student, codec, args, rosa_soft=None, lookahead=None):
     """SpectralMuon (spectral_muon.py): 2D matrices -> configurable Muon update,
-    everything else -> built-in AdamW. All --sm-* flags default to vanilla Muon, so
-    `--optimizer spectral_muon` with no flags == plain Muon. Each lever maps to a
-    2026 paper; stack them freely (e.g. --sm-plus-norm row --sm-second-moment 1).
+    everything else -> built-in AdamW. The --sm-* argparse DEFAULTS are the validated
+    sweep recipe (plus-norm row + eq R + DDC 0.5 both @ muon-lr 4e-6 — banked wins on
+    all 24 GDN layers), so `--optimizer spectral_muon` with no flags == that recipe.
+    Vanilla Muon: --sm-plus-norm none --sm-equilibrate none --sm-ddc-strength 0 (the
+    SpectralMuon CLASS defaults stay vanilla; only the CLI defaults carry the recipe).
+    Each lever maps to a 2026 paper; stack them freely (e.g. --sm-second-moment 1).
     rosa_soft (if attached) rides SpectralMuon's built-in AdamW fallback as its own
     group (use_muon=False, ddc off) so the core keeps Muon+ while rosa-soft is plain AdamW."""
     from spectral_muon import SpectralMuon
@@ -610,6 +707,10 @@ def _make_spectral_muon(student, codec, args, rosa_soft=None):
         rosa_p = [p for p in rosa_soft.parameters() if p.requires_grad]  # LAST so a warm-resume from
         groups.append({"params": rosa_p, "lr": args.rosa_soft_lr or args.muon_adam_lr,  # a no-rosa ckpt
                        "use_muon": False, "ddc_strength": 0.0, "name": "rosa_soft"})     # still matches core groups
+    if lookahead is not None:                          # lookahead heads -> AdamW fallback, NEVER
+        la_p = [p for p in lookahead.parameters() if p.requires_grad]   # Muon (NextLat authors report
+        groups.append({"params": la_p, "lr": args.lookahead_lr or args.muon_adam_lr,    # Muon instability); appended
+                       "use_muon": False, "ddc_strength": 0.0, "name": "lookahead"})     # last, after rosa_soft
     opt = SpectralMuon(groups, momentum=0.95, nesterov=bool(args.sm_nesterov),
                        ns_steps=args.sm_ns_steps, cubic=bool(args.sm_cheap_cubic),
                        spectral_power=args.sm_spectral_power, power_method=args.sm_power_method,
@@ -624,6 +725,10 @@ def _make_spectral_muon(student, codec, args, rosa_soft=None):
     if rosa_soft is not None:
         print(f"  + rosa_soft: {sum(p.numel() for p in rosa_p)/1e6:.3f}M params on AdamW fallback "
               f"@ lr={args.rosa_soft_lr or args.muon_adam_lr:.1e} (ddc off)", flush=True)
+    if lookahead is not None:
+        print(f"  + lookahead: {sum(p.numel() for p in la_p)/1e6:.1f}M params on AdamW fallback "
+              f"@ lr={args.lookahead_lr or args.muon_adam_lr:.1e} (ddc off; Muon unstable for NextLat)",
+              flush=True)
     print(f"  SpectralMuon: {len(muon_p)} 2D mats @ muon_lr={args.muon_lr:.1e}, "
           f"{len(adam_p)} other @ adam_lr={args.muon_adam_lr:.1e} | levers: plus={args.sm_plus_norm} "
           f"eq={args.sm_equilibrate} 2nd={bool(args.sm_second_moment)} aurora={bool(args.sm_row_uniform)} "
@@ -750,6 +855,8 @@ def train(args):
         h["box"], h["codec"], h["lm_head"])
     init_opt_state, init_opt_type = h["init_opt_state"], h["init_opt_type"]
     rosa_soft = h["rosa_soft"]
+    rosa_restore = h.get("rosa_restore") or {}  # warm-start calibrated scale + controller EMA
+    lookahead = h.get("lookahead")               # NextLat/TOP aux heads (None when off)
 
     # Create the run dir + log + sidecar BEFORE the codec pre-fit so the dashboard
     # lists the run (and renders the architecture panel) during the ~2k-step pre-fit
@@ -845,7 +952,7 @@ def train(args):
         print(f"[pc-layer] level={args.pc_layer} on {n_pc} Linears, strength={args.pc_strength}", flush=True)
 
     opt = make_optimizer(student, codec, args, getattr(model.config, "text_config", model.config),
-                         rosa_soft=rosa_soft)
+                         rosa_soft=rosa_soft, lookahead=lookahead)
     opt_params = _optimizer_params(opt)
     if init_opt_state is not None:  # warm-resume: restore optimizer momentum (Adam/Muon) or
         if init_opt_type == args.optimizer:  # schedulefree averaging, else a restart cold-starts it
@@ -960,7 +1067,8 @@ def train(args):
                            ema_decay=args.ap_ema_decay, collapse_thresh=args.ap_collapse_thresh,
                            patience=args.ap_patience, stall_patience=args.ap_stall_patience,
                            max_restarts=args.ap_max_restarts,
-                           reg_mult=args.ap_reg_mult, restore_best=bool(args.ap_restore_best))
+                           reg_mult=args.ap_reg_mult, restore_best=bool(args.ap_restore_best),
+                           lookahead=lookahead)  # restore-best rolls aux heads back too
     if apilot.enabled:
         print(f"[autopilot] on: ema={apilot.use_ema} restore_best={apilot.restore_best} "
               f"max_restarts={apilot.max_restarts}", flush=True)
@@ -991,25 +1099,47 @@ def train(args):
             seq_len=args.seq_len, qk_bits=args.rosa_soft_m, window_size=args.rosa_soft_window,
             target_top_prob=args.rosa_soft_target_top_prob,
             update_interval=args.rosa_soft_scale_every,
-            initial_scale=args.rosa_soft_scale))
+            # explicit --rosa-soft-scale pins the temperature; else resume the warm-start
+            # ckpt's CALIBRATED scale (e0/e1/Wq/Wk were trained against it) rather than
+            # re-deriving the closed-form estimate and silently changing the injection.
+            initial_scale=(args.rosa_soft_scale if args.rosa_soft_scale is not None
+                           else rosa_restore.get("scale"))))
+        if rosa_restore.get("ema") is not None:
+            rosa_ctl.top_prob_ema = float(rosa_restore["ema"])  # resume calibration history too
         if args.rosa_soft_scale is None:
             rosa_soft.scale = rosa_ctl.scale      # controller owns the scale from step 0
+        _src = ("fixed --rosa-soft-scale, log-only" if args.rosa_soft_scale is not None
+                else "resumed from ckpt" if rosa_restore.get("scale") is not None else "adaptive")
         print(f"[rosa-soft] scale controller: init={rosa_ctl.scale:.4f} "
               f"target_top_prob={args.rosa_soft_target_top_prob} every={args.rosa_soft_scale_every} "
-              f"({'adaptive' if args.rosa_soft_scale is None else 'fixed --rosa-soft-scale, log-only'})",
-              flush=True)
+              f"({_src})", flush=True)
     # spectral loop levers: Hyperball Frobenius-sphere projection + river-valley switch.
     # Loop gates are EXCLUDED: they are zero-init 2D tensors whose whole job is to grow
     # off the zero sphere — projecting back to R=0 would re-zero them every step and
     # silently kill the loop. Same guard for any other zero-init 2D param (R=0 sphere
     # projection is degenerate).
     _hb_skip = {id(p) for n, p in student.named_parameters() if n in _loop_param_names(student)}
+    if lookahead is not None:
+        # aux heads are not student mix matrices: norm-pinning the lm_head-clone TOP
+        # head (or the NextLat MLP) to its init sphere is never what --hyperball means
+        _hb_skip |= {id(p) for p in lookahead.parameters()}
     hb_R = ({p: float(p.detach().norm()) for g in opt.param_groups for p in g["params"]
              if p.ndim == 2 and id(p) not in _hb_skip and float(p.detach().norm()) > 0.0}
             if args.hyperball else {})
+    # hyper-connection params: anchored at exact 0/1/identity, exempt from manual decay
+    hyper_skip = {id(p) for n, p in student.named_parameters()
+                  if n.split(".")[-1].startswith("hyper_")}
+    # per-step loop-count sampling (train forwards only; evals/saves see full depth)
+    loop_sampling = args.loop_count > 1 and args.loop_sample != "off"
+    if loop_sampling:
+        from looped_rwkv import sample_loop_count
+        rng_loop = np.random.default_rng(args.seed + 777)
+    loop_k = args.loop_count
     switched = False
     loop_mult = args.loop_lr_mult  # base mult; live ctl override re-read each step
     loop_mult_eff = loop_mult      # x anneal factor once gates escape (--loop-anneal-rw)
+    rosa_lmce_warned = False       # warn-once for the live w_lmce<=0 rosa guard
+    dmt_graph = None               # --dmt-cuda-graph runner, built lazily at first DMT step
     for step in range(args.steps):
         if (not switched and args.muon_to_adamw_frac > 0.0
                 and args.optimizer in ("muonclip", "spectral_muon")
@@ -1017,8 +1147,8 @@ def train(args):
             switched = True
             _prev = args.optimizer; args.optimizer = "adamw"   # river-valley: refine tail in AdamW
             opt = make_optimizer(student, codec, args, getattr(model.config, "text_config", model.config),
-                                 rosa_soft=rosa_soft)
-            opt_params = _optimizer_params(opt)
+                                 rosa_soft=rosa_soft, lookahead=lookahead)  # keep aux heads in the
+            opt_params = _optimizer_params(opt)                             # rebuilt optimizer
             # LambdaLR computes lr from ITS OWN internal counter (last_epoch), not the
             # closure's `step` — without last_epoch=step-1 here it resets to "step 0" on
             # every switch, re-triggering the warmup ramp from near-zero mid-run. Seed
@@ -1037,7 +1167,7 @@ def train(args):
         if _SIG["ckpt"] or _SIG["stop"]:
             stopping = _SIG["stop"]
             if is_sf: opt.eval()
-            _save_ckpt(out, step, student, codec, args, opt, rosa_soft=rosa_soft)
+            _save_ckpt(out, step, student, codec, args, opt, rosa_soft=rosa_soft, rosa_ctl=rosa_ctl, lookahead=lookahead)
             reason = "interrupt" if stopping else "sigusr1"
             emit({"kind": "checkpoint", "step": step, "reason": reason})
             print(f"  [{reason}] checkpoint saved at step {step}", flush=True)
@@ -1052,6 +1182,15 @@ def train(args):
         if step % max(1, args.control_poll_every) == 0:
             ctl.poll(step)
         w_lmce, w_block = ctl.get("w_lmce", args.w_lmce), ctl.get("w_block", args.w_block)
+        if rosa_soft is not None and w_lmce <= 0.0:
+            # LM-CE is rosa's ONLY gradient path (enforced at launch); a live w_lmce=0
+            # override would silently freeze rosa — and with --truncate-forward, stop
+            # computing the injection in train forwards while evals still apply it.
+            if not rosa_lmce_warned:
+                print(f"  [warn] ignoring live w_lmce<=0 override: --rosa-soft trains only "
+                      f"through LM-CE; keeping w_lmce={args.w_lmce:g}", flush=True)
+                rosa_lmce_warned = True
+            w_lmce = args.w_lmce
         w_cos = ctl.get("w_cos", args.w_cos); w_cka = ctl.get("w_cka", args.w_cka)
         w_flow = ctl.get("w_flow", args.w_flow); w_bridge = ctl.get("w_bridge", args.w_bridge)
         agree_gate = ctl.get("agreement_gate", args.agreement_gate)
@@ -1128,14 +1267,16 @@ def train(args):
             # periodic saves (which is how 12.023/12.030 slipped through before).
             if ev.get("ppl") is not None and ev["ppl"] < best_ppl:
                 best_ppl = ev["ppl"]
-                _save_best(out, step, ev["ppl"], student, codec, args, opt, rosa_soft=rosa_soft)
+                _save_best(out, step, ev["ppl"], student, codec, args, opt, rosa_soft=rosa_soft, rosa_ctl=rosa_ctl, lookahead=lookahead)
             # autopilot: also eval the weight-EMA (keep the lower ppl), then check for
             # anti-grokking collapse and escalate (reg up + optional restore-best).
             if args.grok_autopilot:
                 ema_ev, ema_saved = apilot.eval_ema(
                     lambda: evaluate(text_model, lm_head, toks, args.eval_windows, args.seq_len, dev,
                                      start_lo=eval_lo, batch_size=args.eval_batch_size),
-                    best_ppl, lambda pp: _save_best(out, step, pp, student, codec, args, opt, rosa_soft=rosa_soft))
+                    best_ppl, lambda pp: _save_best(out, step, pp, student, codec, args, opt,
+                                                    rosa_soft=rosa_soft, rosa_ctl=rosa_ctl,
+                                                    lookahead=lookahead))
                 if ema_saved:
                     best_ppl = ema_ev["ppl"]
                     emit({"kind": "eval", "step": step, "ema": 1, **ema_ev})
@@ -1148,7 +1289,7 @@ def train(args):
                     print(f"  [autopilot] {act}", flush=True)
             # periodic ckpt (averaged x for schedulefree, since we're in eval mode here)
             if save_every > 0 and step > 0 and step % save_every == 0:
-                _save_ckpt(out, step, student, codec, args, opt, rosa_soft=rosa_soft)
+                _save_ckpt(out, step, student, codec, args, opt, rosa_soft=rosa_soft, rosa_ctl=rosa_ctl, lookahead=lookahead)
             student.train()
             if is_sf:
                 opt.train()  # back to y for the training step
@@ -1164,13 +1305,18 @@ def train(args):
             ids = _token_windows_tensor(toks, bstarts, T + 1, dev, out=token_batch_buf)  # [B,T+1]
             x, y = ids[:, :-1], ids[:, 1:]   # [B,T]
 
+        if loop_sampling:   # applied tightly around the forwards below (exception-safe)
+            loop_k = sample_loop_count(args.loop_sample, args.loop_count, rng_loop)
         # student forward through the frozen backbone, or local cached layer-target training.
         hidden = None
         with torch.set_grad_enabled(True):
             if train_cache is None:
                 if rosa_ctl is not None and step % args.rosa_soft_scale_every == 0:
                     rosa_soft.want_telemetry = True  # this train forward also captures telemetry
-                box["_truncate"] = bool(args.truncate_forward) and w_lmce == 0.0  # perf #3 (EXPERIMENTAL)
+                # lookahead needs the full forward's final hidden, exactly like LM-CE
+                box["_truncate"] = bool(args.truncate_forward) and w_lmce == 0.0 and lookahead is None  # perf #3 (EXPERIMENTAL)
+                if loop_sampling:
+                    student.n_loops = loop_k
                 try:
                     outputs = text_model(input_ids=x, use_cache=False)
                     hidden = outputs.last_hidden_state if hasattr(outputs, "last_hidden_state") else outputs[0]
@@ -1181,6 +1327,8 @@ def train(args):
                     # SMT/DMT direct student calls below and on every evaluate() forward,
                     # where a stale True raises _StopForward into code that can't catch it.
                     box["_truncate"] = False
+                    if loop_sampling:          # same reasoning: evals/saves/SMT-DMT need full depth
+                        student.n_loops = args.loop_count
                 hL = box["h"]                      # [B,T,C] input to layer L (teacher-faithful)
                 student_out = box["y"]             # [B,T,C] student RWKV block output
 
@@ -1202,9 +1350,16 @@ def train(args):
                 cache_fut = cache_pool.submit(_fetch_cache_batch, need_state)
                 if need_state and S_gdn is None:             # SMT/DMT live-toggled on after prefetch
                     S_gdn = _cache_batch_tensor(train_cache.state, cis, dev, train_dtype)
-                student_out = student(hL)
+                if loop_sampling:
+                    student.n_loops = loop_k
+                try:
+                    student_out = student(hL)
+                finally:
+                    if loop_sampling:
+                        student.n_loops = args.loop_count
 
             lm_ce = chunked_ce(hidden, lm_head, y, fused=bool(args.fused_ce)) if (w_lmce > 0.0 and hidden is not None) else _zero_like_loss(student_out)
+            la_parts = None
             so, to = student_out.float(), teacher_out.float()
             if agree_gate > 0.0:                                  # trust-region per-token gating
                 aw = do.agreement_weight(so, to)
@@ -1212,6 +1367,19 @@ def train(args):
             else:
                 block = F.mse_loss(so, to)
             loss = w_lmce * lm_ce + w_block * block
+            if lookahead is not None and hidden is not None:
+                # NextLat + TOP on the post-norm hidden. ids is [B,T+1] (x plus the
+                # last label), so TOP covers the first T+1-W positions (see
+                # LookaheadSystem.compute); NextLat covers all T. Weights are baked
+                # into the system from the --nextlat-*/--top-* flags.
+                la_out = lookahead.compute(hidden, ids, text_model.embed_tokens, lm_head)
+                loss = loss + la_out.pop("aux_total")
+                la_parts = la_out
+            # iterate consistency (equilibrium internalization): captured NOW, before the
+            # SMT/DMT direct calls below overwrite the wrapper's last_iter_consist attr
+            ic_val = getattr(student, "last_iter_consist", None)
+            if args.loop_iter_consist > 0 and ic_val is not None:
+                loss = loss + args.loop_iter_consist * ic_val
             # relational / alignment-invariant distillation terms (cross-arch: match
             # direction / structure / dynamics, not coordinates). Default weights 0 = off.
             if w_cos > 0.0:
@@ -1245,9 +1413,33 @@ def train(args):
                 rl = rollout_len_for_step(step, args.steps, args.dmt_curriculum, args.state_stride)
                 rl = max(args.state_stride, (min(rl, T) // args.state_stride) * args.state_stride)
                 nb = rl // args.state_stride + 1
-                dmt = dmt_rollout_loss(student, codec, hL[:, :rl],
-                                       stride=args.state_stride, block_out=teacher_out[:, :rl],
-                                       discount=args.dmt_discount, target_states=target_states[:, :nb])
+                if dmt_graph is None and getattr(args, "dmt_cuda_graph", 0):
+                    # lazy: capture must postdate ALL model surgery (loop wrap, pc-layer,
+                    # warm-start) — first-use construction here makes that automatic.
+                    from smt_dmt import DMTGraphedRollout
+                    dmt_graph = DMTGraphedRollout(student)
+                    print("  [dmt-cuda-graph] graphed rollout enabled (per-chunk-index CUDA "
+                          "graphs, lazy capture as the curriculum grows)", flush=True)
+                try:
+                    dmt = dmt_rollout_loss(student, codec, hL[:, :rl],
+                                           stride=args.state_stride, block_out=teacher_out[:, :rl],
+                                           discount=args.dmt_discount, target_states=target_states[:, :nb],
+                                           graphed=dmt_graph)
+                except Exception as e:
+                    if dmt_graph is None:
+                        raise  # eager rollout failure is a real bug — fail loud
+                    # FAIL-SOFT: graphs are an optional speedup (default-on); a capture or
+                    # replay failure must never kill a long run. Recompute eager, disable
+                    # graphs for the rest of the run (a genuine loss bug re-raises eagerly).
+                    torch.cuda.synchronize()
+                    print(f"  [warn] dmt-cuda-graph failed ({type(e).__name__}: {e}); falling "
+                          f"back to the eager rollout for the rest of the run", flush=True)
+                    dmt_graph = None
+                    args.dmt_cuda_graph = 0
+                    dmt = dmt_rollout_loss(student, codec, hL[:, :rl],
+                                           stride=args.state_stride, block_out=teacher_out[:, :rl],
+                                           discount=args.dmt_discount, target_states=target_states[:, :nb],
+                                           graphed=None)
                 # dmt_block keeps I/O fidelity DURING the rollout (Codex): without it DMT
                 # optimizes only latent-state trajectory, which drifts ppl up.
                 loss = loss + w_dmt * dmt["dmt_memory"] + args.w_dmt_block * dmt["dmt_block"]
@@ -1319,7 +1511,10 @@ def train(args):
                     lr_g = g.get("scheduled_lr", g["lr"])
                     if lr_g <= 0:
                         continue
-                    ps = [p for p in g["params"] if p.requires_grad]
+                    # hyper-connection params are anchored at exact 0/1/identity values
+                    # (codex: decay would drag them off the loss-free-upgrade identity);
+                    # gate_chan et al. KEEP decay — the factored gauge fix relies on it.
+                    ps = [p for p in g["params"] if p.requires_grad and id(p) not in hyper_skip]
                     if ps:
                         torch._foreach_mul_(ps, 1.0 - lr_g * decay_now)
         # Hyperball: project each 2D weight back onto its initial Frobenius sphere.
@@ -1357,6 +1552,12 @@ def train(args):
                 rec["codec_rel"] = float(codec_rel)  # trainboard: constant after pre-fit (codec frozen)
             if rosa_stats:
                 rec.update(rosa_stats)  # most recent probe (probe cadence may differ from log cadence)
+            if la_parts:
+                rec.update({f"la_{k}": v for k, v in la_parts.items()})
+            if loop_sampling:
+                rec["loop_k"] = int(loop_k)
+            if args.loop_iter_consist > 0 and ic_val is not None:
+                rec["iter_consist"] = _finite_float(ic_val)
             emit(rec)
             print(f"step {step}: loss={rec['loss']:.4f} lm_ce={rec['lm_ce']:.4f} "
                   f"block={rec['block']:.4f} smt={rec['smt_mem']:.4f} dmt={rec['dmt_mem']:.4f} "
@@ -1382,8 +1583,10 @@ def train(args):
         print(f"  [eval-final] loss={ev['loss']:.4f} ppl={ev['ppl']:.3f} top1={ev['top1_acc']:.4f}", flush=True)
         if ev.get("ppl") is not None and ev["ppl"] < best_ppl:  # final eval may be the best
             best_ppl = ev["ppl"]
-            _save_best(out, args.steps - 1, ev["ppl"], student, codec, args, opt, rosa_soft=rosa_soft)
-    sd = _save_ckpt(out, args.steps - 1, student, codec, args, opt, rosa_soft=rosa_soft)  # x weights (schedulefree in eval mode)
+            _save_best(out, args.steps - 1, ev["ppl"], student, codec, args, opt,
+                       rosa_soft=rosa_soft, rosa_ctl=rosa_ctl, lookahead=lookahead)
+    sd = _save_ckpt(out, args.steps - 1, student, codec, args, opt, rosa_soft=rosa_soft,
+                    rosa_ctl=rosa_ctl, lookahead=lookahead)  # x weights (schedulefree in eval mode)
     emit({"kind": "checkpoint", "step": args.steps - 1})
     print(f"saved -> {sd/'ckpt.pt'}", flush=True)
 
@@ -1518,6 +1721,28 @@ def main():
                          "weight-tied core can specialize per pass (OpenMythos loop-index embedding). Zero-init "
                          "=> exact no-op at init; pass 1 stays the faithful single-pass. 0=off. Rides the "
                          "rwkv_loop group (loop_lr_mult steers it).")
+    ap.add_argument("--loop-hyper", type=int, default=0,
+                    help="hyper-connections at the loop boundary (2409.19606): K>=2 parallel residual lanes "
+                         "with learned per-pass pool/mix/write and a learned output read. The iso-depth "
+                         "scaling-law paper (2604.21106) measured this as the largest loop-capacity lever "
+                         "(recurrence exponent 0.45->0.65). Composes with any --loop-gate; exact no-op at "
+                         "init; ~n_loops*(K^2+2K)+K extra scalars riding the rwkv_loop group. 0=off, use 2.")
+    ap.add_argument("--loop-lora-rank", type=int, default=0,
+                    help="per-refinement-pass LoRA on the shared core's linears (unshared loop weights beat "
+                         "weight-tying: CART +5-6%%, Dreamer, MoDr). B zero-init => exact no-op; pass 1 is "
+                         "NEVER adapted (stays the faithful single-pass). Params ride the rwkv_loop group; "
+                         "ckpt keys unchanged (hook-applied). 0=off; 8-16 typical.")
+    ap.add_argument("--loop-lora-targets", default="receptance,key,value,output",
+                    help="comma-separated core nn.Linear attrs the per-pass LoRA adapts.")
+    ap.add_argument("--loop-sample", default="off", choices=["off", "uniform", "poisson"],
+                    help="sample the training loop count per step (dynamic beats fixed n in 4 recurrent-"
+                         "depth papers: depth extrapolation, less overthinking). uniform=U{1..n}; poisson="
+                         "1+Pois(n-1) clamped (mass at full depth). Evals always run at full --loop-count.")
+    ap.add_argument("--loop-iter-consist", type=float, default=0.0,
+                    help="equilibrium-internalization weight (2605.12466): pull each earlier loop "
+                         "iterate toward sg(final iterate) — internalizes refinement into fewer "
+                         "passes and enables early exit. With --loop-sample this reproduces "
+                         "LoopFormer's shortcut-consistency recipe. Paper-analog weight 0.1. 0=off.")
     ap.add_argument("--loop-lr-mult", type=float, default=1.0,
                     help="LR multiplier for residual_weight (the loop gates, their own 'rwkv_loop' group). "
                          "Default 1x: the refine/warm-start case, where the loop is already trained and should "
@@ -1587,31 +1812,38 @@ def main():
     ap.add_argument("--save-every", type=int, default=0,
                     help="also save a ckpt (averaged x, for schedulefree) every N steps (0=only at end); "
                          "should be a multiple of --eval-every")
-    ap.add_argument("--muon-lr", type=float, default=1e-4,
-                    help="Muon lr for 2D matrices (--optimizer muonclip). CALIBRATED: the baked-in "
-                         "0.4*sqrt(max_dim) amplifier (~25.6x @4096) makes this ~vanilla-Muon-lr/25; "
-                         "5e-4 blew up two train_mla runs.")
+    ap.add_argument("--muon-lr", type=float, default=None,
+                    help="Muon lr for 2D matrices. Default is PER-OPTIMIZER (units are NOT shared even though "
+                         "the flag is): 4e-6 for spectral_muon (validated by the 24-layer gdn_sweep with the "
+                         "recipe levers on), 1e-4 for muonclip (train_mla-validated; 5e-4 blew up two runs). "
+                         "Both sit atop the baked-in 0.4*sqrt(max_dim) amplifier (~25.6x @4096, "
+                         "~vanilla-Muon-lr/25).")
     ap.add_argument("--muon-adam-lr", type=float, default=3e-4,
                     help="AdamW lr for the 1D/scalar/norm params under --optimizer muonclip/spectral_muon")
-    # --- spectral_muon levers (--optimizer spectral_muon; all default to vanilla Muon) ---
+    # --- spectral_muon levers (--optimizer spectral_muon). DEFAULTS = the validated sweep
+    # recipe (plus-norm row + eq R + DDC 0.5 both @ muon-lr 4e-6; banked wins on all 24 GDN
+    # layers). Vanilla Muon: --sm-plus-norm none --sm-equilibrate none --sm-ddc-strength 0. ---
     ap.add_argument("--sm-ns-steps", type=int, default=5, help="Newton-Schulz iterations.")
     ap.add_argument("--sm-cheap-cubic", type=int, default=0,
                     help="Tier2: odd-cubic NS schedule, ~1/3 fewer matmuls (2606.00371); weaker orthogonalization.")
-    ap.add_argument("--sm-plus-norm", default="none", choices=["none", "row", "col"],
-                    help="Tier1 MUON+: row/col-normalize the orthogonalized update (2602.21545); up to 37%% faster.")
-    ap.add_argument("--sm-equilibrate", default="none", choices=["none", "R", "C", "RC"],
-                    help="Tier1 MuonEq: row/col equilibration BEFORE NS (2603.28254); R for hidden weights.")
+    ap.add_argument("--sm-plus-norm", default="row", choices=["none", "row", "col"],
+                    help="Tier1 MUON+: row/col-normalize the orthogonalized update (2602.21545); up to 37%% faster. "
+                         "Default 'row' (validated recipe); 'none' for vanilla Muon.")
+    ap.add_argument("--sm-equilibrate", default="R", choices=["none", "R", "C", "RC"],
+                    help="Tier1 MuonEq: row/col equilibration BEFORE NS (2603.28254); R for hidden weights. "
+                         "Default 'R' (validated recipe); 'none' for vanilla Muon.")
     ap.add_argument("--sm-second-moment", type=int, default=0,
                     help="Tier2 Muon2: Adam-style 2nd-moment precondition before NS (2604.09967); ~40%% fewer NS iters.")
     ap.add_argument("--sm-row-uniform", type=int, default=0,
                     help="Tier2 Aurora: equal-row-norm for tall matrices; fixes dead neurons in wide MLPs (2606.27715).")
     ap.add_argument("--sm-spectral-power", type=float, default=0.0,
-                    help="Tier3 Muon^p: U.Sigma^p.Vt (0=Muon UVt; ~1/3 good for FINETUNE, 2606.13867). p>0 uses SVD. Live.")
-    ap.add_argument("--sm-power-method", default="svd", choices=["svd", "eigh"],
-                    help="How Muon^p (p>0) computes U.Sigma^p.Vt: 'svd' (default, exact gesvd) or 'eigh' "
-                         "(math-identical eigh-on-Gram, ~2-3x faster on the 4096^2 mix matrices, near-free on the "
-                         "rank-8 factors). eigh squares the condition number (minor precision loss on the smallest "
-                         "singular directions, clamped) — fine for p~1/3.")
+                    help="Tier3 Muon^p: U.Sigma^p.Vt (0=Muon UVt; ~1/3 good for FINETUNE, 2606.13867). Live.")
+    ap.add_argument("--sm-power-method", default="eigh", choices=["eigh", "svd"],
+                    help="How Muon^p (p>0) computes U.Sigma^p.Vt: 'eigh' (default; math-identical eigh-on-Gram, "
+                         "measured ~14x faster than gesvd on the 4096^2 mix matrices — 161ms vs 2.3s/matrix, the "
+                         "iso_L0_muonp_sp 193-tok/s cliff — and near-free on the rank-8 factors) or 'svd' (exact "
+                         "gesvd, debug/verification only). eigh squares the condition number (minor precision loss "
+                         "on the smallest singular directions, clamped) — fine for p~1/3.")
     ap.add_argument("--sm-mona", type=int, default=0,
                     help="Tier3 MONA: Nesterov/curvature term in the gradient before NS (2605.26842).")
     ap.add_argument("--sm-mona-alpha", type=float, default=0.1, help="MONA curvature weight.")
@@ -1626,9 +1858,10 @@ def main():
                     help="Tier1 river-valley switch: at this fraction of training, switch a muon-family optimizer to "
                          "AdamW for the refinement tail (2606.21514) - fastest early AND lower final loss. 0=off.")
     # --- DDC (Dead-Direction Conditioner), PC-Layer, LLR ---
-    ap.add_argument("--sm-ddc-strength", type=float, default=0.0,
+    ap.add_argument("--sm-ddc-strength", type=float, default=0.5,
                     help="DDC (2606.29176): fraction [0,1] of the per-channel rescale-gauge component removed from the "
-                         "spectral_muon update; resists over-training collapse, gives cleaner minima. Live: ddc_strength.")
+                         "spectral_muon update; resists over-training collapse, gives cleaner minima. Default 0.5 "
+                         "(validated recipe); 0 for vanilla Muon. Live: ddc_strength.")
     ap.add_argument("--sm-ddc-mode", default="both", choices=["row", "col", "both"],
                     help="DDC gauge: row=output-channel scale, col=input-channel scale, both.")
     ap.add_argument("--pc-layer", type=int, default=0,
@@ -1649,6 +1882,34 @@ def main():
                     help="EXPERIMENTAL: torch.compile the student backbone forward. fla Triton kernels "
                          "and the linear_attn activation-capture hooks (box['h']/box['y']) graph-break, so "
                          "the win is uncertain and must be validated (correct block loss + faster) before use.")
+    ap.add_argument("--compile-core", type=int, default=0,
+                    help="torch.compile the RWKV CORE in-place (nn.Module.compile: param identity, "
+                         "state_dict keys, ckpt format unchanged; LoopedRWKV wrapper + hooks + losses "
+                         "stay eager). Fuses the token-shift/LoRA/sigmoid elementwise soup around "
+                         "chunk_rwkv7 — measured ~3x the wkv kernel time uncompiled, and the loop pays "
+                         "it n_loops times. A few recompiles expected (train/eval T, SMT/DMT chunk "
+                         "shapes). Default OFF: fusion changes bf16 rounding, so never flip it mid-A/B; "
+                         "validate with the perf test suite before adopting.")
+    ap.add_argument("--compile-core-mode", default="default",
+                    choices=["default", "reduce-overhead", "max-autotune"],
+                    help="torch.compile mode for --compile-core. reduce-overhead adds inductor "
+                         "CUDA-graph trees on the fused partitions (per-shape graphs, safe across "
+                         "multiple calls per step) — the supported cudagraph path for the general "
+                         "case; --dmt-cuda-graph captures whole DMT chunk steps instead.")
+    ap.add_argument("--dmt-cuda-graph", type=int, default=None,
+                    help="capture each DMT rollout chunk step as a CUDA graph pair (smt_dmt."
+                         "DMTGraphedRollout): the rollout is sequential 64-token calls whose "
+                         "tiny-kernel launch overhead dominates; graph replay collapses each "
+                         "step's fwd+bwd to single graph launches. GPU-validated: losses bit-"
+                         "exact vs eager (fp32 AND bf16), grads exact on all deterministic "
+                         "params, 1.9x on a 16-chunk rollout fwd+bwd. One graph pair per chunk "
+                         "index, captured lazily as the DMT curriculum grows; ragged tail chunks "
+                         "run eager. COST: static buffers, ~3.5GB at B=8/T=1024/16 chunks. "
+                         "Default AUTO: on whenever DMT runs (w_dmt>0) on CUDA, unless "
+                         "--compile-core owns the core (dynamo inside manual capture is "
+                         "unsupported). 1=force (refuses --compile-core/CPU), 0=off. FAIL-SOFT: "
+                         "a capture/replay failure warns and falls back to the eager rollout — "
+                         "it never kills a run.")
     ap.add_argument("--fused-ce", type=int, default=1,
                     help="use flash_attn's fused Triton cross-entropy (in-place backward into the bf16 "
                          "logit buffer: no fp32 logit copy, no separate grad alloc) for the LM-CE term. "
@@ -1799,9 +2060,37 @@ def main():
     ap.add_argument("--rosa-soft-qk-damper", type=float, default=0.0,
                     help="rosa_anchor_ops Q/K gradient damper in [0,1]. Default matches source; try 0.1..0.3 "
                          "only if Q/K saturation collapses route entropy.")
+    # --- Lookahead (lookahead_module.py): NextLat + TOP future-prediction aux
+    # objectives on the full-forward final hidden. Training-only, dropped at
+    # inference; all default OFF. Requires --optimizer adamw or spectral_muon
+    # (aux heads ride the AdamW fallback — NextLat is Muon-unstable per its authors).
+    from lookahead_module import add_lookahead_cli
+    add_lookahead_cli(ap)
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
-    if (args.loop_gate != "scalar" or args.loop_index) and args.optimizer == "muonclip":
+    if args.muon_lr is None:  # per-optimizer default: the two muon paths have different validated units
+        args.muon_lr = 4e-6 if args.optimizer == "spectral_muon" else 1e-4
+    if args.loop_hyper and args.loop_hyper < 2:
+        raise SystemExit(f"--loop-hyper {args.loop_hyper}: K=1 hyper-connections are provably no better "
+                         f"than a plain residual (HC paper Lambda-pattern needs n>1); use 2, or 0 to disable.")
+    if args.loop_hyper and args.loop_count <= 1:
+        raise SystemExit("--loop-hyper requires --loop-count > 1: the lanes live at the loop boundary.")
+    if args.loop_hyper and args.optimizer == "schedulefree":
+        raise SystemExit("--loop-hyper is incompatible with --optimizer schedulefree: it applies "
+                         "weight decay via group['weight_decay'] to the whole rwkv_loop group, "
+                         "which would drag the hyper 0/1/identity anchors off the loss-free upgrade.")
+    if args.loop_lora_rank and args.loop_count <= 1:
+        raise SystemExit("--loop-lora-rank requires --loop-count > 1: the adapters live on refinement passes.")
+    if args.loop_lora_rank and args.compile_core:
+        print("  [warn] --loop-lora-rank + --compile-core: the per-pass LoRA hooks on the core's "
+              "linears will graph-break/recompile inside the compiled core — expect reduced speedup.",
+              flush=True)
+    if args.loop_sample != "off" and args.loop_count <= 1:
+        raise SystemExit("--loop-sample needs --loop-count > 1: there is no loop to sample.")
+    if args.loop_iter_consist > 0 and args.loop_count <= 1:
+        raise SystemExit("--loop-iter-consist needs --loop-count > 1: there are no iterates to align.")
+    if (args.loop_gate != "scalar" or args.loop_index or args.loop_hyper
+            or args.loop_lora_rank) and args.optimizer == "muonclip":
         raise SystemExit(f"--loop-gate {args.loop_gate}/--loop-index requires adamw/spectral_muon/"
                          f"schedulefree: muonclip routes params by ndim and would send the 2D gate "
                          f"tensors to Muon (Newton-Schulz orthogonalization of loop gates is meaningless).")
@@ -1809,6 +2098,27 @@ def main():
         raise SystemExit("--loop-anneal-rw requires a live loop multiplier (adamw/spectral_muon): "
                          "schedulefree bakes loop_lr_mult into the group lr at build time, so the "
                          "boost cannot be annealed during the run.")
+    la_on = (args.nextlat_weight > 0 or args.top_weight > 0
+             or args.nextlat_jump_weight > 0 or args.concept_weight > 0)
+    if la_on and args.optimizer not in ("adamw", "spectral_muon"):
+        raise SystemExit(f"--nextlat-weight/--top-weight require --optimizer adamw or spectral_muon "
+                         f"(got {args.optimizer!r}): the lookahead group is wired into the AdamW and "
+                         f"SpectralMuon(AdamW-fallback) paths only — NextLat is Muon-unstable per its authors.")
+    if la_on and args.train_cache:
+        raise SystemExit("--nextlat-weight/--top-weight are incompatible with --train-cache: cached "
+                         "local training never runs the full forward, so there is no final hidden "
+                         "for the lookahead objectives to supervise.")
+    if la_on and args.truncate_forward and args.w_lmce <= 0.0:
+        print("  [warn] --truncate-forward is ignored while lookahead objectives are on: "
+              "NextLat/TOP need the full forward's final hidden every step.", flush=True)
+    if args.top_weight > 0 and args.top_window >= args.seq_len:
+        raise SystemExit(f"--top-window {args.top_window} must be < --seq-len {args.seq_len}: "
+                         f"TOP covers the first seq_len+1-window positions of each window.")
+    for _fl, _hz, _w in (("--nextlat-d", args.nextlat_d, args.nextlat_weight),
+                         ("--nextlat-jump-k", args.nextlat_jump_k, args.nextlat_jump_weight),
+                         ("--concept-chunk", args.concept_chunk, args.concept_weight)):
+        if _w > 0 and _hz >= args.seq_len:   # parse-time, not step-1-after-model-load
+            raise SystemExit(f"{_fl} {_hz} must be < --seq-len {args.seq_len}.")
     if args.rosa_soft and args.optimizer not in ("adamw", "spectral_muon"):
         raise SystemExit(f"--rosa-soft requires --optimizer adamw or spectral_muon (got {args.optimizer!r}); "
                          f"the rosa_soft group is wired into the AdamW and SpectralMuon paths only "
@@ -1823,6 +2133,48 @@ def main():
                          "(rosa's only gradient path), and the cached path takes student(hL)'s return value, "
                          "which would fold the injection into the block loss (the non-cache path keeps the "
                          "block loss pure via box['y']).")
+    if args.dmt_cuda_graph is None:
+        # AUTO (default): graphed DMT whenever it is legal — the runner only constructs
+        # when DMT is actually active (w_dmt>0), so this costs nothing otherwise.
+        # compile-core owns the core (dynamo inside manual capture is unsupported) and
+        # capture needs CUDA; both silently resolve auto to off rather than erroring.
+        args.dmt_cuda_graph = int(not args.compile_core and str(args.device).startswith("cuda"))
+    elif args.dmt_cuda_graph:  # EXPLICIT 1: fail loud on illegal combinations
+        if args.compile_core:
+            raise SystemExit("--dmt-cuda-graph is incompatible with --compile-core: a dynamo-compiled "
+                             "forward inside torch.cuda.make_graphed_callables capture is unsupported "
+                             "(inductor may allocate/recompile at replay time). Pick one; "
+                             "--compile-core-mode reduce-overhead is the supported cudagraph path "
+                             "for the compiled core.")
+        if not str(args.device).startswith("cuda"):
+            raise SystemExit(f"--dmt-cuda-graph requires --device cuda (CUDA graph capture), got {args.device!r}.")
+        if args.w_dmt <= 0.0:
+            print("  [warn] --dmt-cuda-graph set but --w-dmt is 0: the graphed rollout only "
+                  "constructs when DMT is active (live w_dmt can still enable it).", flush=True)
+    if args.rosa_soft:
+        # pre-validate what rosa_anchor_ops would otherwise only reject at the FIRST
+        # FORWARD — i.e. minutes later, after the model load.
+        if not (1 <= args.rosa_soft_window <= 512):
+            raise SystemExit(f"--rosa-soft-window {args.rosa_soft_window} out of range: rosa_anchor_ops "
+                             f"CUDA backward supports window_size in [1, 512].")
+        if not (1 <= args.rosa_soft_m <= 32):
+            raise SystemExit(f"--rosa-soft-m {args.rosa_soft_m} out of range: per-route bit dim must be in [1, 32].")
+        if args.rosa_soft_dim and args.rosa_soft_dim % args.rosa_soft_m != 0:
+            raise SystemExit(f"--rosa-soft-dim {args.rosa_soft_dim} must be divisible by "
+                             f"--rosa-soft-m {args.rosa_soft_m}.")
+        if not str(args.device).startswith("cuda"):
+            raise SystemExit(f"--rosa-soft requires --device cuda (rosa_anchor_ops is CUDA-only), got {args.device!r}.")
+        # rosa_anchor_ops launches B*T*R CUDA blocks (R = route_dim/M query routes) — cost is
+        # LINEAR in routes. Full width at C=4096 is R=1024 (~34.5s/step measured); the
+        # bottleneck --rosa-soft-dim is the throughput lever, orthogonal to window/value-heads.
+        if not args.rosa_soft_dim:
+            print("  [warn] --rosa-soft-dim 0 routes the FULL hidden width (R=C/M query routes; "
+                  "R=1024 at C=4096 measured ~34.5s/step). Strongly consider --rosa-soft-dim 128..512.",
+                  flush=True)
+        elif args.rosa_soft_dim // args.rosa_soft_m > 256:
+            print(f"  [warn] --rosa-soft-dim {args.rosa_soft_dim} -> "
+                  f"{args.rosa_soft_dim // args.rosa_soft_m} query routes; rosa_anchor_ops cost is "
+                  f"linear in routes — expect slow steps.", flush=True)
     if args.save_every > 0 and args.eval_every > 0 and args.save_every % args.eval_every != 0:
         raise SystemExit(f"--save-every ({args.save_every}) must be a multiple of --eval-every "
                          f"({args.eval_every}): periodic saves only fire on eval steps.")
