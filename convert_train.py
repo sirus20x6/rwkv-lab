@@ -531,6 +531,9 @@ def build(args):
     rosa_restore = None  # {"scale":..., "ema":...} from a warm-start ckpt (train() seeds the controller)
     if getattr(args, "rosa_soft", 0):
         from rosa_soft_layer import RosaAnchorLayer
+        # dtype from args, NOT from next(student.parameters()): a LoopedRWKV student's
+        # first param is the fp32-kept loop gate (float_gates), which would cast the
+        # whole rosa layer to fp32 and dtype-crash against the bf16 stream at first eval.
         _p0 = next(student.parameters())
         rosa_soft = RosaAnchorLayer(
             hidden_size=text_model.config.hidden_size, M=args.rosa_soft_m,
@@ -539,7 +542,7 @@ def build(args):
             logit_epsilon=args.rosa_soft_logit_epsilon,
             qk_damper_strength=args.rosa_soft_qk_damper,
             route_dim=(args.rosa_soft_dim or None),
-        ).to(device=_p0.device, dtype=_p0.dtype)
+        ).to(device=_p0.device, dtype=getattr(torch, args.dtype))
         rosa_soft.float_growth_params()  # e0/e1 fp32: zero-init growth params, same as loop gates
         for p in rosa_soft.parameters():
             p.requires_grad_(True)
@@ -894,15 +897,41 @@ def train(args):
                else rw.detach()).float().cpu()
         if eff.ndim == 1:  # scalar gates: signed per-pass values (legacy card format)
             rwl = [float(x) for x in eff.tolist()]
+            split = None
         else:              # head/channel/factored: per-pass max|gate| across channels
             rwl = [float(x) for x in eff.abs().amax(dim=1).tolist()]
+            C = int(eff.shape[1])
+            G = int(getattr(student, "num_heads", 0) or 0)
+            ch_per_group = int(getattr(student, "ch_per_group", 0) or 0)
+            if G <= 0 and ch_per_group > 0 and C % ch_per_group == 0:
+                G = C // ch_per_group
+            if G <= 0:
+                G = int(getattr(getattr(student, "core", None), "num_heads", 0) or 0)
+            if G <= 0 or C % G:
+                G = 1
+            per_head = eff.reshape(eff.shape[0], G, C // G).abs().amax(dim=2)
+            # Keep the live artifact compact: channel detail is max-pooled into at
+            # most 64 contiguous channel buckets, enough to spot hot channel bands.
+            bucket_n = min(64, C)
+            per_chan = F.adaptive_max_pool1d(eff.abs().unsqueeze(1), bucket_n).squeeze(1)
+            split = {
+                "heads": G,
+                "channels": C,
+                "ch_per_head": C // G,
+                "channel_buckets": bucket_n,
+                "head_abs": [[float(v) for v in row] for row in per_head.tolist()],
+                "channel_abs": [[float(v) for v in row] for row in per_chan.tolist()],
+            }
         mx = max((abs(x) for x in rwl), default=0.0)
         pinned = int(mx >= loop_pin_thr)
+        layer = {"layer": int(args.layer), "max_rw": mx, "rw": rwl}
+        if split is not None:
+            layer["split"] = split
         (out / "loop_rw.json").write_text(json.dumps({
             "loop_count": int(args.loop_count), "n_layers": 1, "n_pinned": pinned,
             "gate_mode": getattr(student, "gate_mode", "scalar"),
             "gate_cap": float(args.loop_gate_cap), "pin_thr": loop_pin_thr,
-            "mean_max_rw": mx, "layers": [{"layer": int(args.layer), "max_rw": mx, "rw": rwl}]}))
+            "mean_max_rw": mx, "layers": [layer]}))
         lw = {"loop_max_rw": mx, "loop_pinned": pinned,
               "loop_pin_thr": loop_pin_thr, "loop_live": loop_live,
               "loop_anneal": 1 if loop_anneal_on else 0}
@@ -954,7 +983,7 @@ def train(args):
     opt = make_optimizer(student, codec, args, getattr(model.config, "text_config", model.config),
                          rosa_soft=rosa_soft, lookahead=lookahead)
     opt_params = _optimizer_params(opt)
-    if init_opt_state is not None:  # warm-resume: restore optimizer momentum (Adam/Muon) or
+    if init_opt_state is not None and args.warm_optimizer:  # warm-resume: restore optimizer momentum (Adam/Muon) or
         if init_opt_type == args.optimizer:  # schedulefree averaging, else a restart cold-starts it
             try:
                 opt.load_state_dict(init_opt_state)
@@ -965,6 +994,9 @@ def train(args):
                       f"{n} matching param group(s), any new group starts fresh", flush=True)
         else:
             print(f"  [warn] optimizer changed {init_opt_type}->{args.optimizer}; cold-starting momentum", flush=True)
+    elif init_opt_state is not None:  # --no-warm-optimizer: warm WEIGHTS but FRESH (cold) momentum, deliberate
+        print("  [warm-optimizer OFF] warm-start weights loaded; optimizer momentum starts FRESH (cold) "
+              "-- deliberate (e.g. loss objective changed, so stale momentum won't fight the new gradient)", flush=True)
     is_sf = args.optimizer == "schedulefree"
     # External LR schedule (warmup + optional cosine) for AdamW/MuonClip. Schedule-Free
     # owns its warmup internally and its averaging replaces decay, so it uses NO
@@ -1361,7 +1393,18 @@ def train(args):
             lm_ce = chunked_ce(hidden, lm_head, y, fused=bool(args.fused_ce)) if (w_lmce > 0.0 and hidden is not None) else _zero_like_loss(student_out)
             la_parts = None
             so, to = student_out.float(), teacher_out.float()
-            if agree_gate > 0.0:                                  # trust-region per-token gating
+            if args.block_loss == "rel":              # OpenMOSE per-token relative L2 norm (validated):
+                # mean_tok ||teacher-student|| / (||teacher||+eps) over the channel dim. Scale-invariant
+                # PER TOKEN (each token normalized by its OWN teacher magnitude, not a global scale), and
+                # uses the L2 norm (not squared) so large per-token errors stay ~linear, not quadratic.
+                per_tok = (torch.linalg.vector_norm(to - so, dim=-1)
+                           / (torch.linalg.vector_norm(to, dim=-1) + 1e-8))       # [B,T]
+                if agree_gate > 0.0:                              # trust-region per-token gating
+                    aw = do.agreement_weight(so, to).squeeze(-1)  # [B,T]
+                    block = (aw * per_tok).sum() / (aw.sum() + 1e-8)
+                else:
+                    block = per_tok.mean()
+            elif agree_gate > 0.0:                                # raw MSE, trust-region per-token gating
                 aw = do.agreement_weight(so, to)
                 block = (aw * (so - to).pow(2)).sum() / (aw.sum() * so.shape[-1] + 1e-8)
             else:
@@ -1685,6 +1728,11 @@ def main():
                     help="persist optimizer state (Adam/Muon momentum, schedulefree averaging) in "
                          "best/ + step_ ckpts so --init-rwkv-ckpt resumes warm instead of cold-starting "
                          "momentum. Adds ~1-2x the trainable-param size per ckpt; --no-save-optimizer to skip.")
+    ap.add_argument("--warm-optimizer", action=argparse.BooleanOptionalAction, default=True,
+                    help="on warm-start (--init-rwkv-ckpt), also restore the saved optimizer momentum "
+                         "(default). --no-warm-optimizer keeps the warm WEIGHTS but starts momentum FRESH "
+                         "(cold) -- use when the loss objective changed since the ckpt (e.g. raw-MSE -> "
+                         "normalized-MSE), so stale ppl-driven momentum doesn't fight the new gradient.")
     ap.add_argument("--layer", type=int, required=True)
     ap.add_argument("--data", required=True)
     ap.add_argument("--out", required=True)
@@ -1771,6 +1819,13 @@ def main():
                          "range, so warm-starting a False-trained core perturbs it (best tested fresh / re-adapted).")
     ap.add_argument("--w-lmce", type=float, default=0.1)
     ap.add_argument("--w-block", type=float, default=1.0)
+    ap.add_argument("--block-loss", default="mse", choices=["mse", "rel"],
+                    help="block-output distillation loss form. 'mse'=raw F.mse_loss (magnitude-weighted; "
+                         "legacy default). 'rel'=OpenMOSE per-token relative L2 norm: mean over tokens of "
+                         "||teacher-student|| / (||teacher||+1e-8) along the channel dim -- scale-invariant "
+                         "per token (each token normalized by its own teacher magnitude), L2 norm NOT squared "
+                         "so large per-token errors stay ~linear. rel is O(0.1-1) vs raw MSE's activation-scale "
+                         "magnitude, so re-tune --w-block. Composes with --agreement-gate (per-token weighted).")
     ap.add_argument("--w-smt", type=float, default=1.0)
     ap.add_argument("--w-dmt", type=float, default=1.0)
     ap.add_argument("--w-smt-block", type=float, default=0.0,
@@ -2034,11 +2089,12 @@ def main():
                     help="ROSA-soft grouped value heads H_v. Default keeps the previous one-value-head-per-route "
                          "mapping; lower values reduce Wv params/activation while preserving output shape "
                          "when (hidden_size // M) %% H_v == 0.")
-    ap.add_argument("--rosa-soft-dim", type=int, default=0,
+    ap.add_argument("--rosa-soft-dim", type=int, default=128,
                     help="ROSA-soft low-rank routing width d: route a d-dim Q/K subspace instead of the full "
                          "hidden. The CUDA kernel launches B*T*(d/M) blocks, so cost is LINEAR in d -- this is "
-                         "the throughput lever (full 4096-wide routing is ~40x slower than a d=256 bottleneck). "
-                         "Must be divisible by --rosa-soft-m. 0=full hidden width.")
+                         "the throughput lever. Default 128 (=32 routes at M=4, ~0.66 s/step/site post-2026-07-02 "
+                         "perf-opts); full 4096-wide routing is ~30x slower (~21 s/step). Must be divisible by "
+                         "--rosa-soft-m. 0=full hidden width (pass explicitly to opt into the slow path).")
     ap.add_argument("--rosa-soft-lr", type=float, default=None,
                     help="LR for the rosa_soft param group; default falls back to --lr (adamw) "
                          "or --muon-adam-lr (spectral_muon).")
@@ -2165,11 +2221,12 @@ def main():
         if not str(args.device).startswith("cuda"):
             raise SystemExit(f"--rosa-soft requires --device cuda (rosa_anchor_ops is CUDA-only), got {args.device!r}.")
         # rosa_anchor_ops launches B*T*R CUDA blocks (R = route_dim/M query routes) — cost is
-        # LINEAR in routes. Full width at C=4096 is R=1024 (~34.5s/step measured); the
-        # bottleneck --rosa-soft-dim is the throughput lever, orthogonal to window/value-heads.
+        # LINEAR in routes. Full width at C=4096 is R=1024 (~21.2s/step measured 2026-07-02);
+        # default d=128 (R=32) is the throughput lever, orthogonal to window/value-heads.
         if not args.rosa_soft_dim:
             print("  [warn] --rosa-soft-dim 0 routes the FULL hidden width (R=C/M query routes; "
-                  "R=1024 at C=4096 measured ~34.5s/step). Strongly consider --rosa-soft-dim 128..512.",
+                  "R=1024 at C=4096 measured ~21.2s/step, 2026-07-02 post-perf-opts). "
+                  "Strongly consider --rosa-soft-dim 128..512.",
                   flush=True)
         elif args.rosa_soft_dim // args.rosa_soft_m > 256:
             print(f"  [warn] --rosa-soft-dim {args.rosa_soft_dim} -> "

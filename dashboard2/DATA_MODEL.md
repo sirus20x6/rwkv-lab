@@ -6,7 +6,8 @@ Each run is a directory `/thearray/git/moe-mla/runs/<name>/` containing:
 - `train.jsonl` — newline-delimited events, one per line, field `kind ∈ {train, eval, checkpoint}`.
 - `step_NNNNNN/config.json` — sidecar TrainConfig dump (architecture panel reads this).
 - `step_NNNNNN/ckpt.pt` — weights (we only stat its size/mtime).
-- `loop_rw.json` — (optional) LoopedRWKV residual-weight stats.
+- `loop_rw.json` — (optional) LoopedRWKV residual-weight stats. Split gate modes add
+  per-layer `split.head_abs` and bucketed `split.channel_abs` arrays for the dashboard heat strips.
 Global: `runs/_baseline.json` — original-model eval reference (ppl/loss/top1) drawn as a fixed line.
 
 Current corpus (2026-06-30): ~105 run dirs, 175 K train / 1.6 K eval / 219 checkpoint events.

@@ -1186,28 +1186,43 @@
   async function appendRun(run, version) {
     if (version <= lastStep || loading) return;
     loading = true;
-    const url = `/api/series/${encodeURIComponent(run)}?train=${TRAIN_FIELDS.join(",")}&eval=${EVAL_FIELDS.join(",")}&since=${lastStep}`;
-    const data = await fetch(url).then(r => r.json()).catch(() => null);
-    loading = false;
-    if (!data) return;
-    lastStep = Math.max(lastStep, data.max_step || 0);
-    for (const spec of CHARTS) {
-      const ch = charts[spec.id];
-      if (ch) ch.append(data);
+    // Crash-isolate the whole live-append tick: a throw here (or a hung fetch)
+    // must never leave `loading` stuck true, or EVERY later tick returns early
+    // and the chart freezes until a manual reload (observed on a NaN/diverged
+    // run). finally always clears the flag; catch keeps one bad point from
+    // killing the live loop and logs it so the real trigger is visible.
+    try {
+      const url = `/api/series/${encodeURIComponent(run)}?train=${TRAIN_FIELDS.join(",")}&eval=${EVAL_FIELDS.join(",")}&since=${lastStep}`;
+      // Bound the request: a wedged/deadlocked query must not hang the await
+      // forever (which would strand `loading` true and freeze all live ticks).
+      const ac = new AbortController();
+      const to = setTimeout(() => ac.abort(), 8000);
+      const data = await fetch(url, { signal: ac.signal }).then(r => r.json()).catch(() => null);
+      clearTimeout(to);
+      if (!data) return;
+      lastStep = Math.max(lastStep, data.max_step || 0);
+      for (const spec of CHARTS) {
+        const ch = charts[spec.id];
+        if (ch) ch.append(data);
+      }
+      // pinned tail slides with the live tip (appended rows are full resolution)
+      if (tailN && charts["chart-loss"]) {
+        const c = charts["chart-loss"];
+        const lo = c._stepToX(Math.max(0, lastStep - tailN));
+        let hi = c._stepToX(lastStep);
+        if (hi <= lo) hi = lo + 1;
+        syncView({ min: lo, max: hi });
+      }
+      fetch(`/api/timeline/${encodeURIComponent(run)}`).then(r => r.json()).then(tl => {
+        const events = (tl && tl.events) || [];
+        for (const id in charts) charts[id].setTimeline(events);
+        renderEventList(events);
+      }).catch(() => {});
+    } catch (e) {
+      console.warn("[trainboard] appendRun failed (live tick skipped):", e);
+    } finally {
+      loading = false;
     }
-    // pinned tail slides with the live tip (appended rows are full resolution)
-    if (tailN && charts["chart-loss"]) {
-      const c = charts["chart-loss"];
-      const lo = c._stepToX(Math.max(0, lastStep - tailN));
-      let hi = c._stepToX(lastStep);
-      if (hi <= lo) hi = lo + 1;
-      syncView({ min: lo, max: hi });
-    }
-    fetch(`/api/timeline/${encodeURIComponent(run)}`).then(r => r.json()).then(tl => {
-      const events = (tl && tl.events) || [];
-      for (const id in charts) charts[id].setTimeline(events);
-      renderEventList(events);
-    }).catch(() => {});
   }
 
   function togglePanel(spec, data) {

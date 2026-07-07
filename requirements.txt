@@ -1,5 +1,6 @@
-# Core deps for GQA -> MLA conversion + training on Qwen3.6-35B-A3B.
+# Core deps for RWKV-Lab: GDN/attention -> RWKV conversion + training on Qwen3.5-9B / Qwen3.6-35B-A3B.
 # torch is inherited from the system site-packages (see .venv creation).
+# fla (flash-linear-attention) provides the Triton wkv7 kernel and is required for conversion.
 transformers>=4.57
 safetensors>=0.4
 accelerate>=0.34

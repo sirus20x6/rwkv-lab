@@ -1,6 +1,6 @@
-# trainboard — moe-mla training dashboard v2.0
+# trainboard — RWKV-Lab training dashboard v2.0
 
-GPU-accelerated, real-time training dashboard for the moe-mla project.
+GPU-accelerated, real-time training dashboard for the RWKV-Lab conversion project.
 **Stack:** Go + SQLite + Datastar + Pixi.js. Successor to `../dashboard/` (FastAPI + Chart.js).
 
 ## Run
