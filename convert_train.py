@@ -721,7 +721,9 @@ def _make_spectral_muon(student, codec, args, rosa_soft=None, lookahead=None):
                        equilibrate=args.sm_equilibrate, plus_norm=args.sm_plus_norm,
                        row_uniform=bool(args.sm_row_uniform), mona=bool(args.sm_mona),
                        mona_alpha=args.sm_mona_alpha, scale=args.sm_scale,
-                       ddc_strength=args.sm_ddc_strength, ddc_mode=args.sm_ddc_mode)
+                       ddc_strength=args.sm_ddc_strength, ddc_mode=args.sm_ddc_mode,
+                       rsav=bool(args.sm_rsav), rsav_c=args.sm_rsav_c,
+                       rsav_cap=args.sm_rsav_cap, rsav_relax=args.sm_rsav_relax)
     if loop_p:
         print(f"  + rwkv_loop: {sum(p.numel() for p in loop_p)} gate(s) on AdamW fallback "
               f"@ base lr={args.muon_adam_lr:.1e} x loop_lr_mult={args.loop_lr_mult:g} (live)", flush=True)
@@ -736,7 +738,8 @@ def _make_spectral_muon(student, codec, args, rosa_soft=None, lookahead=None):
           f"{len(adam_p)} other @ adam_lr={args.muon_adam_lr:.1e} | levers: plus={args.sm_plus_norm} "
           f"eq={args.sm_equilibrate} 2nd={bool(args.sm_second_moment)} aurora={bool(args.sm_row_uniform)} "
           f"power={args.sm_spectral_power}({args.sm_power_method}) mona={bool(args.sm_mona)} cubic={bool(args.sm_cheap_cubic)} "
-          f"ns={args.sm_ns_steps}", flush=True)
+          f"ns={args.sm_ns_steps} rsav={bool(args.sm_rsav)}"
+          f"{f'(c={args.sm_rsav_c:g},cap={args.sm_rsav_cap:g})' if args.sm_rsav else ''}", flush=True)
     return opt
 
 
@@ -1919,6 +1922,15 @@ def main():
                          "(validated recipe); 0 for vanilla Muon. Live: ddc_strength.")
     ap.add_argument("--sm-ddc-mode", default="both", choices=["row", "col", "both"],
                     help="DDC gauge: row=output-channel scale, col=input-channel scale, both.")
+    ap.add_argument("--sm-rsav", type=int, default=0,
+                    help="RSAV (SpecMuon-inspired, 2602.16167 adapted): relaxed scalar-auxiliary-variable step gate on "
+                         "gradient energy Σ||g||²; damps Muon steps when energy spikes. 0=off (vanilla). Unvalidated on LLMs.")
+    ap.add_argument("--sm-rsav-c", type=float, default=1.0,
+                    help="RSAV energy offset C (ξ=r/√(Σ||g||²+C)). Set ~ the run's typical Σ||g||² so C bites; sweep per model.")
+    ap.add_argument("--sm-rsav-cap", type=float, default=0.2,
+                    help="RSAV step-gate clamp: ξ ∈ [1-cap, 1+cap]. 0 forces ξ≡1 (inert = vanilla).")
+    ap.add_argument("--sm-rsav-relax", type=float, default=0.0,
+                    help="RSAV relaxation η∈[0,1] pulling r toward √(E+C) each step; 0=pure SAV lag, 1=strongest reset.")
     ap.add_argument("--pc-layer", type=int, default=0,
                     help="PC-Layer (2606.06470): polynomial spectral weight-preconditioning level (degree grows with it; "
                          "0=off, 2-4 typical). Reparam on student Linears, mergeable at inference. Costs extra forward VRAM.")
