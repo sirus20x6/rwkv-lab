@@ -182,33 +182,34 @@ This is an active research codebase, not a released library. Results are reprodu
 
 ### Papers we build on
 
-Only papers with a concrete implementation or adopted design decision in this repo are listed (each maps to the module named). The wider reading pile is intentionally not committed.
+Only papers with a concrete implementation or adopted design decision in this repo are listed (each maps to the module named, arXiv id linked). The wider reading pile is intentionally not committed.
 
 **Architecture conversion**
-- **Gated Delta Networks: Improving Mamba2 with Delta Rule** — the source linear-attention mechanism → [`convert_gdn_lossless.py`](convert_gdn_lossless.py)
-- **Parallelizing Linear Transformers with the Delta Rule over Sequence Length** — the chunked delta-rule recurrence behind the `wkv7` kernel → [`rwkv8_deltanet.py`](rwkv8_deltanet.py)
-- **RADLADS: Rapid Attention Distillation to Linear Attention Decoders at Scale** ([2505.03005](https://arxiv.org/abs/2505.03005)) — the attention→RWKV protocol (block-align → logit-KL → CE), RAD-RWKV7 init → [`attn_L3_poc.py`](attn_L3_poc.py), [`convert_train.py`](convert_train.py)
+- [Gated Delta Networks: Improving Mamba2 with Delta Rule](https://arxiv.org/abs/2412.06464) — the source linear-attention mechanism → [`convert_gdn_lossless.py`](convert_gdn_lossless.py)
+- [Parallelizing Linear Transformers with the Delta Rule over Sequence Length](https://arxiv.org/abs/2406.06484) — the chunked delta-rule recurrence behind the `wkv7` kernel → [`rwkv8_deltanet.py`](rwkv8_deltanet.py)
+- [Comba: Improving Bilinear RNNs with Closed-loop Control](https://arxiv.org/abs/2506.02475) — the state-query readout-correction scalar → [`rwkv8_deltanet.py`](rwkv8_deltanet.py)
+- [RADLADS: Rapid Attention Distillation to Linear Attention Decoders at Scale](https://arxiv.org/abs/2505.03005) — the attention→RWKV protocol (block-align → logit-KL → CE), RAD-RWKV7 init → [`attn_L3_poc.py`](attn_L3_poc.py), [`convert_train.py`](convert_train.py)
 
 **Looped / recurrent depth**
-- **Hyper-Connections** — per-pass hyper-connection lanes → [`looped_rwkv.py`](looped_rwkv.py)
-- **How Much Is One Recurrence Worth: Iso-Depth Scaling Laws for Looped LMs** — full-BPTT loop-training decision → [`looped_rwkv.py`](looped_rwkv.py), [`loop_probe.py`](loop_probe.py)
-- **Dense Supervision Is Not Enough: The Readout Blind Spot in Looped LMs** — readout-correction scalar in the RWKV readout → [`rwkv8_deltanet.py`](rwkv8_deltanet.py)
+- [Hyper-Connections](https://arxiv.org/abs/2409.19606) — per-pass hyper-connection lanes at the loop boundary → [`looped_rwkv.py`](looped_rwkv.py)
+- [How Much Is One Recurrence Worth: Iso-Depth Scaling Laws for Looped LMs](https://arxiv.org/abs/2604.21106) — full-BPTT loop-training decision → [`looped_rwkv.py`](looped_rwkv.py), [`loop_probe.py`](loop_probe.py)
+- [Dense Supervision Is Not Enough: The Readout Blind Spot in Looped LMs](https://arxiv.org/abs/2606.24898) — loop supervision / readout pinning → [`looped_rwkv.py`](looped_rwkv.py)
 
 **Memory (Engram / ROSA)**
-- **Engram** (offline conditional memory) → [`engram_lmb.py`](engram_lmb.py)
-- **Memory Grafting**, **STEM**, **X-GRAM**, **Scaling Embeddings Outperforms Scaling Experts** — the embedding-memory design rules (param cap, amplification, freq-aware n-grams) → [`engram_lmb_build.py`](engram_lmb_build.py)
-- **ROSA-Tuning: Enhancing Long-Context Modeling via Suffix Matching** → [`rosa.py`](rosa.py), [`rosa_sam.py`](rosa_sam.py)
+- [Engram](https://github.com/deepseek-ai/Engram) (DeepSeek; offline conditional memory) → [`engram_lmb.py`](engram_lmb.py)
+- Embedding-memory design rules (param cap, amplification, freq-aware n-grams) → [`engram_lmb_build.py`](engram_lmb_build.py): [Memory Grafting](https://arxiv.org/abs/2605.20948) · [STEM](https://arxiv.org/abs/2601.10639) · [X-GRAM](https://arxiv.org/abs/2604.21724) · [Scaling Embeddings Outperforms Scaling Experts](https://arxiv.org/abs/2601.21204)
+- [ROSA-Tuning: Enhancing Long-Context Modeling via Suffix Matching](https://arxiv.org/abs/2602.02499) → [`rosa.py`](rosa.py), [`rosa_sam.py`](rosa_sam.py)
 
 **Latent attention & prediction objectives**
-- **DeepSeek-V2 / V3** — Multi-head Latent Attention + MTP → [`mla_module.py`](mla_module.py), [`mtp_module.py`](mtp_module.py)
-- **Better and Faster LLMs via Multi-token Prediction** (Gloeckle et al.) → [`parallel_heads_module.py`](parallel_heads_module.py)
-- **MuToR** (register-token MTP) → [`mutor_module.py`](mutor_module.py)
-- **TOP: Predicting the Order of Upcoming Tokens** + **Next-Latent Prediction** + **Latent Lookahead Training** → [`lookahead_module.py`](lookahead_module.py)
-- **Beyond Multi-Token Prediction: Pretraining LLMs with Future Summaries** → [`fsp_module.py`](fsp_module.py)
+- [DeepSeek-V2](https://arxiv.org/abs/2405.04434) (Multi-head Latent Attention) + [DeepSeek-V3](https://arxiv.org/abs/2412.19437) (MTP) → [`mla_module.py`](mla_module.py), [`mtp_module.py`](mtp_module.py)
+- [Better and Faster LLMs via Multi-token Prediction](https://arxiv.org/abs/2404.19737) (Gloeckle et al.) → [`parallel_heads_module.py`](parallel_heads_module.py)
+- [MuToR: register-token multi-token prediction](https://arxiv.org/abs/2505.10518) → [`mutor_module.py`](mutor_module.py)
+- [TOP: Predicting the Order of Upcoming Tokens](https://arxiv.org/abs/2508.19228) · [NextLat: next-latent prediction](https://arxiv.org/abs/2511.05963) · [ConceptLM: next-concept prediction](https://arxiv.org/abs/2602.08984) → [`lookahead_module.py`](lookahead_module.py)
+- [Beyond Multi-Token Prediction: Pretraining LLMs with Future Summaries](https://arxiv.org/abs/2510.14751) → [`fsp_module.py`](fsp_module.py)
 
 **Optimizers & training dynamics**
-- **Muon** + **MuonClip**, plus spectral-optimizer levers — **PC-Layer** ([2606.06470](https://arxiv.org/abs/2606.06470)), **Heavy-Tail Layerwise LR** ([2605.22297](https://arxiv.org/abs/2605.22297)), distance-aware/**DDC** Muon → [`spectral_muon.py`](spectral_muon.py), [`muon_helpers.py`](muon_helpers.py), [`pc_layer.py`](pc_layer.py), [`llr.py`](llr.py)
-- **GrokFast** + **Unifying Grokking and Double Descent** — memorization-vs-grokking diagnostics → [`grokking_metrics.py`](grokking_metrics.py), [`grok_autopilot.py`](grok_autopilot.py)
+- [Muon](https://kellerjordan.github.io/posts/muon/) + MuonClip, plus spectral-optimizer levers → [`spectral_muon.py`](spectral_muon.py), [`muon_helpers.py`](muon_helpers.py), [`pc_layer.py`](pc_layer.py), [`llr.py`](llr.py): [PC-Layer](https://arxiv.org/abs/2606.06470) · [Heavy-Tail Layerwise LR](https://arxiv.org/abs/2605.22297) · [distance-aware / DDC](https://arxiv.org/abs/2606.29176)
+- [Grokfast: Accelerated Grokking by Amplifying Slow Gradients](https://arxiv.org/abs/2405.20233) + [late-stage un-grokking recovery](https://arxiv.org/abs/2602.02859) — memorization-vs-grokking diagnostics → [`grokking_metrics.py`](grokking_metrics.py), [`grok_autopilot.py`](grok_autopilot.py)
 
 ### Code & upstream references
 
