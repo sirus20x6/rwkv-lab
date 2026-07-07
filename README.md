@@ -208,7 +208,9 @@ Only papers with a concrete implementation or adopted design decision in this re
 - [Beyond Multi-Token Prediction: Pretraining LLMs with Future Summaries](https://arxiv.org/abs/2510.14751) → [`fsp_module.py`](fsp_module.py)
 
 **Optimizers & training dynamics**
-- [Muon](https://kellerjordan.github.io/posts/muon/) + MuonClip, plus spectral-optimizer levers → [`spectral_muon.py`](spectral_muon.py), [`muon_helpers.py`](muon_helpers.py), [`pc_layer.py`](pc_layer.py), [`llr.py`](llr.py): [PC-Layer](https://arxiv.org/abs/2606.06470) · [Heavy-Tail Layerwise LR](https://arxiv.org/abs/2605.22297) · [distance-aware / DDC](https://arxiv.org/abs/2606.29176)
+- [Muon](https://kellerjordan.github.io/posts/muon/) + [MuonClip / QK-Clip](https://arxiv.org/abs/2507.20534) (Kimi K2) — the base orthogonalized-momentum optimizer + attention-logit-stabilizing clip → [`muon_helpers.py`](muon_helpers.py)
+- Configurable spectral-Muon levers in [`spectral_muon.py`](spectral_muon.py): [Muonᵖ spectral-power orthogonalization](https://arxiv.org/abs/2606.13867) · [Muon²](https://arxiv.org/abs/2604.09967) · [MuonEq](https://arxiv.org/abs/2603.28254) · [Aurora](https://arxiv.org/abs/2606.27715) · [Muon⁺](https://arxiv.org/abs/2602.21545) · [MONA](https://arxiv.org/abs/2605.26842) · [DDC (Dead-Direction Conditioner)](https://arxiv.org/abs/2606.29176) · [odd-cubic Newton–Schulz](https://arxiv.org/abs/2606.00371)
+- [PC-Layer polynomial preconditioning](https://arxiv.org/abs/2606.06470) + [Heavy-Tail Layerwise LR](https://arxiv.org/abs/2605.22297) → [`pc_layer.py`](pc_layer.py), [`llr.py`](llr.py)
 - [Grokfast: Accelerated Grokking by Amplifying Slow Gradients](https://arxiv.org/abs/2405.20233) + [late-stage un-grokking recovery](https://arxiv.org/abs/2602.02859) — memorization-vs-grokking diagnostics → [`grokking_metrics.py`](grokking_metrics.py), [`grok_autopilot.py`](grok_autopilot.py)
 
 ### Code & upstream references
