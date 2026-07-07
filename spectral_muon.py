@@ -14,8 +14,22 @@ Per 2D matrix each step:
   7. scale by `scale·√(max(m,n))` (the repo's MuonClip amplifier) and lr; decoupled WD
 `cubic=True` uses the odd-cubic NS schedule (~1/3 fewer matmuls).            [2606.00371]
 
-The lever knobs live in each param group, so a trainer may live-tune them by
-setting e.g. opt.param_groups[i]["spectral_power"] = v between steps.
+RSAV (`rsav=True`) — SpecMuon-inspired relaxed scalar-auxiliary-variable step gate
+[2602.16167, adapted]. A single GLOBAL scalar `r` tracks the gradient "energy"
+E = Σ‖g‖² (over the Muon-routed 2D matrices) via the SAV chain rule, and every
+Muon update this step is scaled by ξ = clamp(r/√(E+C), 1±cap). ξ≈1 at equilibrium
+and dips below 1 when the energy spikes faster than `r` has tracked it — a
+stability damper that costs one extra reduction over the grads per step. NOTE:
+this is the gradient-energy variant (self-contained — the optimizer already sees
+every grad), NOT the paper's faithful loss-energy SAV; the r-update chain rule is
+therefore heuristic (exact only when E is the loss). `rsav_cap=0` forces ξ≡1
+(inert = vanilla). `r` is a global scalar kept on `self` (not per-param state), so
+it re-initialises from the first post-resume step rather than persisting across
+checkpoints — fine for a scalar that re-equilibrates in one step.
+
+The per-matrix lever knobs live in each param group, so a trainer may live-tune
+them by setting e.g. opt.param_groups[i]["spectral_power"] = v between steps; the
+GLOBAL RSAV knobs live on the optimizer (opt.rsav_c, opt.rsav_cap, opt.rsav_relax).
 
 Precision: all optimizer state (momentum, MONA acc, Muon² v, Adam moments) is kept
 in fp32 regardless of param dtype — bf16 moments quantize away small updates (the
@@ -130,6 +144,7 @@ class SpectralMuon(Optimizer):
                  equilibrate="none", plus_norm="none", row_uniform=False,
                  mona=False, mona_beta=0.9, mona_alpha=0.1, scale=0.4,
                  ddc_strength=0.0, ddc_mode="both",
+                 rsav=False, rsav_c=1.0, rsav_cap=0.2, rsav_relax=0.0,
                  weight_decay=0.0, adam_betas=(0.9, 0.95), adam_eps=1e-8):
         defaults = dict(momentum=momentum, nesterov=nesterov, ns_steps=ns_steps, cubic=cubic,
                         spectral_power=spectral_power, power_method=power_method, second_moment=second_moment,
@@ -140,6 +155,15 @@ class SpectralMuon(Optimizer):
                         weight_decay=weight_decay, adam_betas=adam_betas, adam_eps=adam_eps,
                         use_muon=False, lr=3e-4)
         super().__init__(param_groups, defaults)
+        # RSAV is a GLOBAL scalar coupling (not per-param), so its knobs + state live
+        # on the optimizer, not in param groups. r re-inits on resume (see docstring).
+        self.rsav = bool(rsav)
+        self.rsav_c = float(rsav_c)
+        self.rsav_cap = float(rsav_cap)
+        self.rsav_relax = float(rsav_relax)
+        self._rsav_r = None          # fp32 scalar tensor once seen
+        self._rsav_dE = None         # per-step energy-change accumulator (fp32 scalar)
+        self._rsav_last_xi = 1.0     # diagnostics / tests
 
     def load_state_dict(self, state_dict):
         # Optimizer.load_state_dict casts float state to each param's dtype (bf16 for a
@@ -151,20 +175,48 @@ class SpectralMuon(Optimizer):
                 if torch.is_tensor(v) and v.is_floating_point() and v.dtype != torch.float32:
                     st[k] = v.float()
 
+    @staticmethod
+    def _is_muon(grp, p):
+        return bool(grp.get("use_muon")) and p.ndim == 2 and min(p.shape) > 1
+
     @torch.no_grad()
     def step(self, closure=None):
         loss = closure() if closure is not None else None
+        # --- RSAV pre-pass: global gradient energy E = Σ‖g‖² over Muon matrices ---
+        xi, sqrt_Et = 1.0, None
+        if self.rsav:
+            E = None
+            for grp in self.param_groups:
+                for p in grp["params"]:
+                    if p.grad is not None and self._is_muon(grp, p):
+                        s = (p.grad.float() ** 2).sum()
+                        E = s if E is None else E + s.to(E.device)  # colocate (multi-device safe; no-op single-device)
+            if E is not None:
+                sqrt_Et = (E + self.rsav_c).sqrt()
+                if self._rsav_r is None:
+                    self._rsav_r = sqrt_Et.detach().clone()   # first sighting: r = √(E+C), ξ=1
+                else:
+                    cap = self.rsav_cap
+                    xi = float((self._rsav_r / sqrt_Et).clamp(1.0 - cap, 1.0 + cap))
+                self._rsav_dE = torch.zeros((), dtype=torch.float32, device=sqrt_Et.device)
+            self._rsav_last_xi = xi
         for grp in self.param_groups:
             for p in grp["params"]:
                 if p.grad is None:
                     continue
-                if grp.get("use_muon") and p.ndim == 2 and min(p.shape) > 1:
-                    self._muon_step(p, p.grad, grp, self.state[p])
+                if self._is_muon(grp, p):
+                    self._muon_step(p, p.grad, grp, self.state[p], xi)
                 else:
                     self._adam_step(p, p.grad, grp, self.state[p])
+        # --- RSAV post-step: evolve r by the SAV chain rule, then relax toward √(E+C) ---
+        if self.rsav and sqrt_Et is not None:
+            r = self._rsav_r + self._rsav_dE / (2.0 * sqrt_Et)
+            if self.rsav_relax > 0.0:
+                r = (1.0 - self.rsav_relax) * r + self.rsav_relax * sqrt_Et
+            self._rsav_r = r.clamp_min(1e-8)
         return loss
 
-    def _muon_step(self, p, g, grp, st):
+    def _muon_step(self, p, g, grp, st, xi=1.0):
         lr, mu = grp["lr"], grp["momentum"]
         if "mom" not in st:
             st["mom"] = torch.zeros_like(g, dtype=torch.float32)  # fp32 state: see module docstring
@@ -202,7 +254,11 @@ class SpectralMuon(Optimizer):
         scale = grp["scale"] * (max(p.shape) ** 0.5)
         if grp["weight_decay"]:
             p.mul_(1.0 - lr * grp["weight_decay"])
-        p.add_(o, alpha=-lr * scale)
+        alpha = -lr * scale * xi                            # xi==1.0 (default) ⇒ exactly vanilla
+        p.add_(o, alpha=alpha)
+        if self.rsav and self._rsav_dE is not None:         # SAV chain rule: dE ≈ Σ ⟨g, Δx⟩
+            d = (g.float() * o.float()).sum().to(self._rsav_dE.device)  # multi-device safe; no-op single-device
+            self._rsav_dE.add_(d, alpha=alpha)
 
     def _adam_step(self, p, g, grp, st):
         b1, b2 = grp["adam_betas"]; eps = grp["adam_eps"]; lr = grp["lr"]
