@@ -148,6 +148,25 @@ def _hook(store, i):
     return h
 
 
+def logit_kl(s_hpost, t_hpost, s_head, t_head, temp, chunk=256):
+    """T^2 * KL(softmax(teacher/T) || softmax(student/T)) over the lm_head logits, meaned over
+    tokens (OpenMOSE's consolidation adjustment: match the teacher OUTPUT distribution, not the
+    internal hidden states). Chunked over the flattened token dim so the [tokens, vocab] logits
+    never fully materialize (mirrors chunked_ce). Teacher side is no-grad; grad flows via student.
+    F.kl_div(input=log q, target=p) computes sum p*(log p - log q) = KL(p||q), p=teacher here."""
+    H = s_hpost.shape[-1]
+    s_flat = s_hpost.reshape(-1, H)
+    t_flat = t_hpost.reshape(-1, H)
+    n = s_flat.shape[0]
+    total = s_flat.new_zeros((), dtype=torch.float32)
+    for i in range(0, n, chunk):
+        s_lp = F.log_softmax(s_head(s_flat[i:i + chunk]).float() / temp, dim=-1)
+        with torch.no_grad():
+            t_p = F.softmax(t_head(t_flat[i:i + chunk]).float() / temp, dim=-1)
+        total = total + F.kl_div(s_lp, t_p, reduction="sum")
+    return (total / n) * (temp * temp)
+
+
 # --consolidation preset: the recommended enhancement bundle for the consolidate
 # stage, per the 2026-07 research review (loop levers are re-learned HERE — assembly
 # strips isolation-trained loops — and the lookahead objectives have their gradient
@@ -164,6 +183,7 @@ CONSOLIDATION_PRESET = {
     "top_weight": 0.5,         # token-order ranking aux
     "top_rank": 256,           # factored head: avoids the 620M full-vocab matrix
     "ce_weight": 0.1,          # papers pair aux objectives with an NTP-style loss
+    "kl_weight": 1.0,          # OpenMOSE: adjust accumulated per-layer residuals with logit-KL
 }
 
 
@@ -202,6 +222,17 @@ def build_parser():
     ap.add_argument("--ce-weight", type=float, default=0.0,
                     help="optional student LM CE loss weight (the lookahead papers pair "
                          "their aux objectives with an NTP-style loss; default off)")
+    ap.add_argument("--kl-weight", type=float, default=0.0,
+                    help="logit-KL consolidation weight (OpenMOSE): T^2 * KL(softmax(teacher/T) || "
+                         "softmax(student/T)) on the final lm_head logits. Matches the teacher OUTPUT "
+                         "distribution rather than internal hidden states, letting converted layers absorb "
+                         "each other's residual error. 0=off; try 1.0. Pair with --w-resid 0 for pure-KL.")
+    ap.add_argument("--kl-temp", type=float, default=1.0,
+                    help="softmax temperature T for --kl-weight. 1.0=exact match; >1 softens (more "
+                         "dark-knowledge). Loss is scaled by T^2 so its magnitude is ~T-independent.")
+    ap.add_argument("--w-resid", type=float, default=1.0,
+                    help="weight on the residual-stream relative-MSE (hidden-state matching, the legacy "
+                         "consolidation loss). 1.0=unchanged; 0 = OpenMOSE pure-logit-KL (needs --kl-weight>0).")
     ap.add_argument("--loop-hyper", type=int, default=0,
                     help="force-enable K>=2 hyper-connection lanes at the loop boundary on a plain "
                          "LoopedRWKV artifact (fresh identity-init = loss-free upgrade); 0 = keep "
@@ -240,6 +271,10 @@ def main():
     if args.loop_hyper == 1:
         raise SystemExit("--loop-hyper 1: K=1 hyper-connections are provably no better than a "
                          "plain residual (HC paper); use 2, or 0 to keep the checkpoint's lanes.")
+    if args.kl_temp <= 0:
+        raise SystemExit(f"--kl-temp must be > 0 (it divides the logits), got {args.kl_temp}")
+    if args.kl_weight < 0 or args.w_resid < 0:
+        raise SystemExit(f"--kl-weight/--w-resid must be >= 0, got {args.kl_weight}/{args.w_resid}")
     for _fl, _hz, _w in (("--nextlat-d", args.nextlat_d, args.nextlat_weight),
                          ("--nextlat-jump-k", args.nextlat_jump_k, args.nextlat_jump_weight),
                          ("--concept-chunk", args.concept_chunk, args.concept_weight)):
@@ -291,12 +326,18 @@ def main():
               f"top={'on' if la.top else 'off'} "
               f"({sum(p.numel() for p in la_params)/1e6:.1f}M aux params, AdamW)", flush=True)
     aux_on = la is not None or args.ce_weight > 0
-    norm_box = {}
-    if aux_on:  # both objectives consume the POST-final-norm hidden (what lm_head sees)
+    kl_on = args.kl_weight > 0
+    norm_box, t_norm_box = {}, {}
+    if aux_on or kl_on:  # objectives consume the POST-final-norm hidden (what lm_head sees)
         norm = getattr(s_tm, "norm", None)
         if norm is None:
-            raise RuntimeError("student text model has no .norm; --nextlat/--top/--ce need it")
+            raise RuntimeError("student text model has no .norm; --nextlat/--top/--ce/--kl-weight need it")
         norm.register_forward_hook(_hook(norm_box, "h"))
+    if kl_on:            # teacher's post-final-norm hidden -> teacher logits (the KL target)
+        t_norm = getattr(t_tm, "norm", None)
+        if t_norm is None:
+            raise RuntimeError("teacher text model has no .norm; --kl-weight needs it")
+        t_norm.register_forward_hook(_hook(t_norm_box, "h"))
     groups = [{"params": params}]
     if la_params:
         groups.append({"params": la_params, "lr": args.lookahead_lr or args.lr})
@@ -344,13 +385,19 @@ def main():
             if loop_sampling:              # exception-safe: evals/saves must see full depth
                 for r in wrappers:
                     r.n_loops = loop_count
-        loss = x.new_zeros((), dtype=torch.float32)
-        for i in range(nL):
-            t = t_h[i].detach().float()
-            loss = loss + F.mse_loss(s_h[i].float(), t) / (t.pow(2).mean() + 1e-6)
-        distill = loss / nL
-        loss = distill
+        rmse = x.new_zeros((), dtype=torch.float32)
+        if args.w_resid > 0:               # residual-stream relative-MSE (hidden-state match)
+            for i in range(nL):
+                t = t_h[i].detach().float()
+                rmse = rmse + F.mse_loss(s_h[i].float(), t) / (t.pow(2).mean() + 1e-6)
+            rmse = rmse / nL
+        distill = rmse
+        loss = args.w_resid * distill
         parts = {}
+        if kl_on:                          # OpenMOSE logit-KL: match teacher OUTPUT distribution
+            kl = logit_kl(norm_box["h"], t_norm_box["h"], student.lm_head, teacher.lm_head, args.kl_temp)
+            loss = loss + args.kl_weight * kl
+            parts["kl"] = float(kl.detach())
         if ic_on:
             ics = [r.last_iter_consist for r in all_wrappers if r.last_iter_consist is not None]
             if ics:

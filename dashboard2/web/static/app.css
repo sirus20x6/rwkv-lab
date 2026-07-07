@@ -219,6 +219,12 @@ details.panel[open] .d-caret { transform: rotate(90deg); color: var(--accent); }
 .lrw-track i.pinned { background: var(--warn); }
 .lrw-track i.lo { background: var(--accent); }
 .lrw-v { width: 56px; text-align: right; color: var(--text); }
+.looprw-split { margin: -1px 0 7px 42px; display: flex; flex-direction: column; gap: 3px; }
+.lrw-split-meta { color: var(--muted); font-size: var(--fs-xs); font-family: var(--mono); }
+.lrw-heat-row { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.lrw-heat-label { width: 32px; color: var(--text-dim); font-family: var(--mono); font-size: var(--fs-xs); }
+.lrw-heat { flex: 1; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(2px, 1fr); gap: 1px; min-width: 0; }
+.lrw-heat i { display: block; height: 7px; border-radius: 1px; background: var(--accent); }
 
 /* ---- controls ---- */
 .control-bar { display: flex; gap: 8px; margin-top: 14px; }
