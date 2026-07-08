@@ -30,7 +30,7 @@ def _unwrap(o):
 
 
 class Block(nn.Module):
-    def __init__(self, d, n_heads, head_size, i, n_layers, loop_kw):
+    def __init__(self, d, n_heads, head_size, i, n_layers, loop_kw, att_kw=None, ffn_hidden=None):
         super().__init__()
         self.i = i
         if i == 0:
@@ -40,9 +40,10 @@ class Block(nn.Module):
         core = RWKV8TimeMixDeltaNet(d, num_heads=n_heads, head_size=head_size, layer_idx=i,
                                     depth_layer_id=i, depth_n_layer=max(n_layers, 2),
                                     is_first_rwkv_layer=(i == 0),   # native cross-layer v-residual
-                                    out_correct=False)              # clean native g070
+                                    out_correct=False,              # clean native g070
+                                    **(att_kw or {}))               # e.g. g1g LoRA dims
         self.att = LoopedRWKV(core, hidden_size=d, **loop_kw) if loop_kw else core
-        self.ffn = RWKV8ChannelMixDeltaNet(d, layer_idx=i)
+        self.ffn = RWKV8ChannelMixDeltaNet(d, ffn_hidden, layer_idx=i)
 
     def forward(self, x, v_first):
         if self.i == 0:
@@ -54,11 +55,12 @@ class Block(nn.Module):
 
 
 class RWKV7Small(nn.Module):
-    def __init__(self, vocab, d, n_layers, head_size, loop_kw):
+    def __init__(self, vocab, d, n_layers, head_size, loop_kw, att_kw=None, ffn_hidden=None):
         super().__init__()
         assert d % head_size == 0
         self.emb = nn.Embedding(vocab, d)
-        self.blocks = nn.ModuleList([Block(d, d // head_size, head_size, i, n_layers, loop_kw)
+        self.blocks = nn.ModuleList([Block(d, d // head_size, head_size, i, n_layers, loop_kw,
+                                           att_kw, ffn_hidden)
                                      for i in range(n_layers)])
         self.ln_out = nn.LayerNorm(d)
         self.head = nn.Linear(d, vocab, bias=False)
