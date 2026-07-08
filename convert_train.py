@@ -737,7 +737,10 @@ def _make_spectral_muon(student, codec, args, rosa_soft=None, lookahead=None):
                        mona_alpha=args.sm_mona_alpha, scale=args.sm_scale,
                        ddc_strength=args.sm_ddc_strength, ddc_mode=args.sm_ddc_mode,
                        rsav=bool(args.sm_rsav), rsav_c=args.sm_rsav_c,
-                       rsav_cap=args.sm_rsav_cap, rsav_relax=args.sm_rsav_relax)
+                       rsav_cap=args.sm_rsav_cap, rsav_relax=args.sm_rsav_relax,
+                       tile_size=args.sm_tile_size, da_muon=bool(args.sm_da_muon),
+                       da_eta_max=args.sm_da_eta_max, da_r0=args.sm_da_r0,
+                       aro=bool(args.sm_aro), aro_sink_iters=args.sm_aro_iters)
     if loop_p:
         print(f"  + rwkv_loop: {sum(p.numel() for p in loop_p)} gate(s) on AdamW fallback "
               f"@ base lr={args.muon_adam_lr:.1e} x loop_lr_mult={args.loop_lr_mult:g} (live)", flush=True)
@@ -1975,6 +1978,18 @@ def main():
                     help="Spectral Scaling Laws (2606.04058): route the readout/output projection to a "
                          "separate Muon group with THIS many Newton-Schulz steps (e.g. 10) so its "
                          "fast-shrinking momentum stays orthonormalizable. 0=off. Frontier-scale concern.")
+    ap.add_argument("--sm-tile-size", type=int, default=0,
+                    help="Hierarchical Muon (2606.27216): tiled block-diagonal Newton-Schulz with this "
+                         "tile size (e.g. 128/512); scale becomes c·√tile. 0=off (full-matrix NS). Cheaper NS.")
+    ap.add_argument("--sm-da-muon", type=int, default=0,
+                    help="Distance-Aware Muon (2605.18999): per-matrix adaptive radius η=clamp(r̄/√k, η_max), "
+                         "r̄=running-max ‖W−W0‖. 0=off. Adds a W0 snapshot per matrix.")
+    ap.add_argument("--sm-da-eta-max", type=float, default=0.01, help="Distance-Aware Muon radius cap (paper: 0.01).")
+    ap.add_argument("--sm-da-r0", type=float, default=1e-3, help="Distance-Aware Muon initial radius floor.")
+    ap.add_argument("--sm-aro", type=int, default=0,
+                    help="ARO-Sinkhorn (2602.09006): replace NS orthogonalization with a learned rotation + "
+                         "Sinkhorn base optimizer (non-orthonormal update). 0=off. Adds an m×m rotation state.")
+    ap.add_argument("--sm-aro-iters", type=int, default=5, help="ARO Sinkhorn row/col-normalization rounds (paper: 5).")
     ap.add_argument("--pc-layer", type=int, default=0,
                     help="PC-Layer (2606.06470): polynomial spectral weight-preconditioning level (degree grows with it; "
                          "0=off, 2-4 typical). Reparam on student Linears, mergeable at inference. Costs extra forward VRAM.")
