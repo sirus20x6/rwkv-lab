@@ -153,7 +153,8 @@ class LoopedRWKV(nn.Module):
                  loop_index: bool = False, hyper_lanes: int = 0,
                  lora_rank: int = 0, lora_targets=("receptance", "key", "value", "output"),
                  adaptive_halt: bool = False, ponder_prior: float = 0.1,
-                 cart_anchor: bool = False, cart_gate_init: float = 4.0):
+                 cart_anchor: bool = False, cart_gate_init: float = 4.0,
+                 loop_deq: bool = False):
         super().__init__()
         self.core = core
         self.n_loops = int(n_loops)
@@ -227,6 +228,20 @@ class LoopedRWKV(nn.Module):
                 raise ValueError("cart_anchor and hyper_lanes are alternative loop-dynamics "
                                  "mechanisms (each governs how the carried state evolves); enable one")
             self.cart_gate = nn.Parameter(torch.full((H,), float(cart_gate_init)))
+        # DEQ / 1-step gradient (HRM 2506.21734): train the refinement loop with an O(1)-memory
+        # gradient. The forward runs the loop to its fixed point DETACHED (no BPTT), then one graded
+        # refinement step (Neumann approx (I-J)^-1 ≈ I). The forward VALUE is unchanged (no_grad and
+        # detach don't alter values) — only the gradient graph is cheaper, unlocking many more loop
+        # passes without the BPTT memory wall. Precondition: a contractive loop (pair with cart_anchor).
+        # NB our own iso-depth finding says truncated-BPTT hurts loops UNLESS trained as a fixed point,
+        # so this ships OFF as an A/B against full-BPTT. Incompatible with per-pass-grad machinery.
+        self.loop_deq = bool(loop_deq)
+        if self.loop_deq:
+            if self.n_loops < 2:
+                raise ValueError("loop_deq needs n_loops > 1 (the 1-step gradient is over the refine loop)")
+            if self.adaptive_halt or self.hyper_lanes:
+                raise ValueError("loop_deq is incompatible with adaptive_halt / hyper_lanes "
+                                 "(both need per-pass gradients / their own carried-state dynamics)")
         if self.lora_rank > 0:
             if self.n_loops < 2:
                 raise ValueError("lora_rank needs n_loops > 1: the adapters live on refinement passes")
@@ -375,8 +390,34 @@ class LoopedRWKV(nn.Module):
                    and not skip_refine and self.n_loops > 1)
         consist = collect and self.iter_consist       # consistency loss only when requested
         iters = [out] if collect else None            # NON-detached (unlike loop_trace)
+        deq = (self.loop_deq and torch.is_grad_enabled() and not skip_refine and self.n_loops > 1)
+        if deq and (self.iter_consist or keep_iters):
+            raise ValueError("loop_deq is incompatible with iter_consist / keep_iterates: the 1-step "
+                             "gradient detaches the loop, so per-iterate gradients don't exist")
         try:
-            if self.hyper_lanes and not skip_refine and self.n_loops > 1:
+            if deq:
+                # HRM/DEQ 1-step gradient: approach the fixed point DETACHED (no BPTT, O(1) memory),
+                # then take ONE graded refinement step from it (Neumann-1). The forward value equals
+                # the full-BPTT loop; only the gradient graph is cheaper. Pass 1 (and the recurrent
+                # state for SMT/DMT) keep their normal gradient — the REFINEMENT loop is 1-stepped.
+                def _deq_step(o, i):                   # MUST mirror the plain-loop body below
+                    inp = hidden_states + o
+                    if self.loop_index:
+                        inp = inp + self.loop_index_embed[i].to(inp.dtype)
+                    if self.lora_rank:
+                        self._lora_pass = i
+                    inc = self._t(self.core(self.iter_norm(inp)))
+                    if self.cart_anchor:
+                        return torch.sigmoid(self.cart_gate).to(inc.dtype) * o \
+                            + self._gate(i).to(inc.dtype) * inc
+                    return o + self._gate(i).to(inc.dtype) * inc
+                with torch.no_grad():                  # detached approach to equilibrium
+                    for i in range(1, self.n_loops - 1):
+                        out = _deq_step(out, i)
+                if loop_trace is not None:
+                    loop_trace.append(out.detach())
+                out = _deq_step(out.detach(), self.n_loops - 1)   # one graded step (IFT approx)
+            elif self.hyper_lanes and not skip_refine and self.n_loops > 1:
                 # Hyper-connection lanes: K copies of the running output, mixed per pass.
                 # At init (one-hot alpha, identity mix, zero gates, uniform read) this is
                 # numerically identical to the plain loop below — see module docstring.
