@@ -84,15 +84,22 @@ def rwkv_readout(layer, S: torch.Tensor, h: torch.Tensor,
         xg = h + xx * layer.x_g.view(1, C)
     else:
         xr = xk = xv = xg = h
+    xa = h + xx * layer.x_a.view(1, C) if h_prev is not None else h
     r = layer.receptance(xr).view(B, H, N)
-    k = layer.key(xk).view(B, H, N)
+    k = layer.key(xk)                                              # (B, C) raw key
     v = layer.value(xv).view(B, H, N)
     g = torch.sigmoid(xg @ layer.g1) @ layer.g2
-    # Comba output-correction (out_correct_d init 0 => no-op), matches forward.
-    r = r - layer.out_correct_d.repeat_interleave(N).view(1, H, N) * k
+    # a-gate -> k_eff (the k_a-updated key), mirroring the forward's k = k*(1+(a-1)*k_a).
+    a = layer._a_scale * torch.sigmoid(layer.a0.view(1, C) + (xa @ layer.a1) @ layer.a2)
+    k_eff = (k * (1 + (a - 1) * layer.k_a.view(1, C))).view(B, H, N)
+    k = k.view(B, H, N)
+    # Comba output-correction (r -= d*k, raw k), conversion-only: absent on clean-native
+    # (out_correct=False) layers, so guard the read.
+    if getattr(layer, "out_correct", True):
+        r = r - layer.out_correct_d.repeat_interleave(N).view(1, H, N) * k
     out = torch.einsum("bhk,bhkv->bhv", r, S.to(r.dtype))           # read: sum_k S[k,v] r[k]
     out = layer.ln_x(out.reshape(B, C)).view(B, C)
-    bonus = (r * k * layer.r_k.view(1, H, N)).sum(-1, keepdim=True) * v
+    bonus = (r * k_eff * layer.r_k.view(1, H, N)).sum(-1, keepdim=True) * v   # k_eff, matches forward
     return layer.output((out + bonus.reshape(B, C)) * g)
 
 
