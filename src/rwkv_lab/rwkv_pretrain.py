@@ -106,6 +106,9 @@ def main():
     ap.add_argument("--val-windows", type=int, default=40); ap.add_argument("--eval-every", type=int, default=50)
     ap.add_argument("--log-every", type=int, default=10); ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--warmup", type=int, default=100)
+    ap.add_argument("--lr-schedule", default="cosine", choices=["constant", "cosine"])
+    ap.add_argument("--decay-steps", type=int, default=0)   # cosine horizon; 0 => use --steps
+    ap.add_argument("--save", default=""); ap.add_argument("--resume", default="")
     # loop levers
     ap.add_argument("--loop-count", type=int, default=1)
     ap.add_argument("--loop-hyper", type=int, default=0)
@@ -168,7 +171,12 @@ def main():
         print(f"aux heads enabled={heads.enabled} extra_tokens={heads.extra_tokens}", flush=True)
     params = list(model.parameters()) + (list(heads.parameters()) if heads else [])
     opt = torch.optim.AdamW(params, lr=args.lr, betas=(0.9, 0.95), weight_decay=0.1)
-    model.train(); t0 = time.time(); seen = 0; step = 0
+    step = 0
+    if args.resume and os.path.exists(args.resume):
+        ck = torch.load(args.resume, map_location=dev)
+        model.load_state_dict(ck["model"]); opt.load_state_dict(ck["opt"]); step = ck.get("step", 0)
+        print(f"resumed from {args.resume} @ step {step}", flush=True)
+    model.train(); t0 = time.time(); seen = 0
     print(f"budget={'%.1f min' % args.minutes if not args.steps else str(args.steps)+' steps'}", flush=True)
     while True:
         if args.steps and step >= args.steps: break
@@ -177,6 +185,9 @@ def main():
             vl = val_loss(); emit({"kind": "eval", "step": step, "loss": vl, "val_loss": vl, "ppl": math.exp(vl)})
             print(f"[{step}] val {vl:.4f} (ppl {math.exp(vl):.2f})  {(time.time()-t0)/60:.1f}min", flush=True)
         lr = args.lr * min(1.0, (step + 1) / max(args.warmup, 1))       # linear warmup
+        horizon = args.decay_steps or args.steps
+        if args.lr_schedule == "cosine" and horizon:                    # then cosine decay to 0.1x
+            lr *= 0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * min(step, horizon) / horizon))
         for g in opt.param_groups:
             g["lr"] = lr
         ex = heads.extra_tokens if heads else 0
@@ -194,6 +205,10 @@ def main():
                   "lr": lr, "tok_per_sec": int(seen / max(time.time() - t0, 1e-6))})
     vl = val_loss(); emit({"kind": "eval", "step": step, "loss": vl, "val_loss": vl, "ppl": math.exp(vl)})
     emit({"kind": "checkpoint", "step": step})
+    if args.save:
+        torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "step": step, "config": tag},
+                   args.save)
+        print(f"saved -> {args.save}", flush=True)
     print(f"DONE {tag}: {step} steps, final val {vl:.4f} (ppl {math.exp(vl):.2f})", flush=True)
 
 

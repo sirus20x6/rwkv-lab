@@ -51,3 +51,4 @@ legacy/
 *.swp
 *.tmp
 .DS_Store
+experiments.db

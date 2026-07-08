@@ -73,3 +73,14 @@ def test_experiment_significance_logic():
     assert abs(hi_m - base_m) > (hi_s + base_s)          # SIGNIFICANT
     near_m, near_s = _agg([0.89, 0.92])
     assert abs(near_m - base_m) <= (near_s + base_s)     # within noise
+
+
+def test_registry_roundtrip(tmp_path):
+    from rwkv_lab import registry
+    db = str(tmp_path / "t.db")
+    registry.record("copy:8", "baseline", 3, 500, {"acc": [0.90, 0.02]}, db=db)
+    registry.record("copy:8", "loop3", 3, 500, {"acc": [0.50, 0.10]}, db=db)
+    d = registry.latest_by_config("copy:8", "acc", db=db)
+    assert d["baseline"][0] == 0.90 and d["loop3"][0] == 0.50
+    registry.record("copy:8", "baseline", 3, 500, {"acc": [0.95, 0.01]}, db=db)   # latest wins
+    assert registry.latest_by_config("copy:8", "acc", db=db)["baseline"][0] == 0.95
