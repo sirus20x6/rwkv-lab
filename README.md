@@ -145,7 +145,8 @@ Everything is a **drop-in `linear_attn` / attention module swap** on a HuggingFa
 | [`live_controls.py`](live_controls.py) | Trainer-side consumer of the dashboard's live-tuning panel. |
 | [`safe_torch.py`](safe_torch.py) | Safer torch-serialization load wrappers. |
 | [`build_qwen35_data.py`](build_qwen35_data.py) | Build Qwen3.5-tokenized DCLM + FineWeb-Edu caches. |
-| `test_*.py` | CPU/GPU invariant + feature tests (loops, lookahead, Engram, ROSA persistence, CUDA-graph rollout, compile). |
+| [`tests/`](tests/) | CPU/GPU invariant + feature tests (loops, lookahead, Engram, ROSA, the SOTA levers). Run `pytest tests/`. |
+| [`scripts/`](scripts/) | Overnight sweep / A-B drivers (`gate_ab.sh`, `gdn_sweep.sh`, `rel_sweep.sh`, `supervisor_night.sh`). |
 | [`legacy/`](legacy/) | Retired v1 dashboard + earlier trainer snapshots, kept for provenance. |
 
 ---
