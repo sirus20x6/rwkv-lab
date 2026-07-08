@@ -100,6 +100,7 @@ def loop_kwargs(a):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True); ap.add_argument("--out", default="runs/rwkv_scratch")
+    ap.add_argument("--doc-offsets", default="", help="build_corpus .off.npy => within-doc windows")
     ap.add_argument("--d-model", type=int, default=512); ap.add_argument("--n-layers", type=int, default=6)
     ap.add_argument("--head-size", type=int, default=64)
     ap.add_argument("--lr", type=float, default=6e-4); ap.add_argument("--seq-len", type=int, default=512)
@@ -147,10 +148,27 @@ def main():
     val_toks, train_toks = toks[:n_val], toks[n_val:]
     print(f"tokens: {len(toks)/1e6:.1f}M (val {len(val_toks)}, train {len(train_toks)/1e6:.1f}M)", flush=True)
 
+    train_docs = None
+    if args.doc_offsets:                                       # within-doc windows (no mid-doc cuts)
+        allo = np.load(args.doc_offsets).astype(np.int64)
+        ends = np.append(allo[1:], len(toks))
+        train_docs = [(int(s), int(e)) for s, e in zip(allo, ends) if s >= n_val and e - s >= T + 1]
+        print(f"doc-boundary batching: {len(train_docs)} train docs >= {T+1} tok", flush=True)
+
     def batch(src, n, width=T + 1):
         s = rng.integers(0, len(src) - width, size=n)
         x = np.stack([np.asarray(src[i:i + width], dtype=np.int64) for i in s])
         return torch.from_numpy(x).to(dev)
+
+    def train_batch(n, width=T + 1):
+        if not train_docs:                                    # flat fallback
+            return batch(train_toks, n, width)
+        rows = []
+        for _ in range(n):
+            s, e = train_docs[int(rng.integers(0, len(train_docs)))]
+            i = int(rng.integers(s, e - width + 1))
+            rows.append(np.asarray(toks[i:i + width], dtype=np.int64))
+        return torch.from_numpy(np.stack(rows)).to(dev)
 
     def val_loss():
         model.eval()
@@ -193,7 +211,7 @@ def main():
         for g in opt.param_groups:
             g["lr"] = lr
         ex = heads.extra_tokens if heads else 0
-        x = batch(train_toks, args.batch, width=T + 1 + ex)
+        x = train_batch(args.batch, width=T + 1 + ex)
         out = model(x[:, :T], return_hidden=bool(heads))
         lg = (out[0] if heads else out).float()
         loss = F.cross_entropy(lg.reshape(-1, lg.size(-1)), x[:, 1:T + 1].reshape(-1))
