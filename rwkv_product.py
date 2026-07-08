@@ -96,17 +96,16 @@ class RWKVProduct(nn.Module):
 
     def forward(self, hidden_states, *args, return_state: bool = False,
                 shift_state=None, initial_state=None, **kwargs):
-        if return_state or initial_state is not None:
+        if return_state or initial_state is not None or shift_state is not None:
+            # Chunked use would need BOTH the token-shift carry AND the interleaved WKV matrix
+            # state threaded across the boundary; only full-sequence training is supported, so
+            # reject all three rather than silently drop the recurrent state (audit finding).
             raise NotImplementedError("RWKVProduct supports full-sequence training only "
-                                      "(no return_state / SMT-DMT rollout yet)")
+                                      "(no return_state / initial_state / shift_state / SMT-DMT yet)")
         x = hidden_states
         B, T, C = x.shape
         H, N, M = self.num_heads, self.head_size, self.M
-        if shift_state is None:
-            xx = self.time_shift(x) - x
-        else:
-            prev = shift_state.to(dtype=x.dtype).reshape(B, 1, C)
-            xx = torch.cat([prev, x[:, :-1]], dim=1) - x
+        xx = self.time_shift(x) - x
 
         def mix(p):
             return x + xx * p
@@ -126,7 +125,9 @@ class RWKVProduct(nn.Module):
             vj = V0 + (xv @ self.A_v[j]) @ self.B_v[j]
             beta_b = torch.sigmoid(self.beta0_b[j] + (xa @ self.beta1_b[j]) @ self.beta2_b[j])
             beta_c = torch.sigmoid(self.beta0_c[j] + (xa @ self.beta1_c[j]) @ self.beta2_c[j])
-            kb_n = F.normalize((kb * self.k_k).view(B, T, H, N), dim=-1, p=2.0).view(B, T, C)
+            # normalize in fp32: default eps underflows in fp16 and an all-zero head key -> NaN
+            kb_n = F.normalize((kb * self.k_k).float().view(B, T, H, N), dim=-1, p=2.0,
+                               eps=1e-6).to(kb.dtype).view(B, T, C)
             kc_hat = kc * (1 + (beta_c - 1) * self.k_a)          # gated c-key (k_a analog)
             r_j = R if j == M - 1 else torch.zeros_like(R)       # read only last sub-step
             gk_j = gk_tok if j == 0 else zero_gk                 # decay only first sub-step (amb. a)
