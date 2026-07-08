@@ -144,6 +144,8 @@ def himuon_orthogonalize(G, steps=5, tile=512, cubic=False):
     uses scale c·√tile, NOT c·√max(H,W). Cheaper: replaces the min(H,W) NS factor with `tile`."""
     H, W = G.shape[-2], G.shape[-1]
     T = int(tile)
+    if T >= max(H, W):                             # single tile == whole matrix -> exact full NS
+        return orthogonalize(G, steps=steps, cubic=cubic)   # (handles the tall-matrix transpose)
     R, C = (H + T - 1) // T, (W + T - 1) // T
     Gp = G.new_zeros(R * T, C * T)
     Gp[:H, :W] = G
@@ -165,18 +167,29 @@ def _sinkhorn_normalize(X, iters=5):
 
 
 def _cholesky_qr(A, eps=1e-6):
-    """Shifted Cholesky-QR: Q-factor of A [m,m] via P=AᵀA+εI=LLᵀ, Q=A·L⁻ᵀ. Falls back to dense QR
-    on a non-finite result (near-singular A)."""
+    """Shifted Cholesky-QR: Q-factor of A [m,m] via P=AᵀA+εI=LLᵀ, Q=A·L⁻ᵀ. Returns an ORTHONORMAL
+    Q; falls back to dense QR, and to identity if A is degenerate (e.g. a zero-gradient step, where
+    a naive Cholesky-QR returns an all-zero — finite but NOT orthonormal — Q that would poison the
+    persistent rotation)."""
     m = A.shape[-1]
-    P = A.transpose(-1, -2) @ A + eps * torch.eye(m, device=A.device, dtype=A.dtype)
+    Im = torch.eye(m, device=A.device, dtype=A.dtype)
+    def _ortho(Q):
+        return Q is not None and torch.isfinite(Q).all() and \
+            (Q.transpose(-1, -2) @ Q - Im).abs().amax() < 1e-2
     try:
-        L = torch.linalg.cholesky(P)
+        L = torch.linalg.cholesky(A.transpose(-1, -2) @ A + eps * Im)
         Q = torch.linalg.solve_triangular(L, A.transpose(-1, -2), upper=False).transpose(-1, -2)
-        if torch.isfinite(Q).all():
+        if _ortho(Q):
             return Q
     except Exception:
         pass
-    return torch.linalg.qr(A).Q
+    try:
+        Q = torch.linalg.qr(A).Q
+        if _ortho(Q):
+            return Q
+    except Exception:
+        pass
+    return Im                                       # degenerate (e.g. zero A): keep a valid rotation
 
 
 class SpectralMuon(Optimizer):

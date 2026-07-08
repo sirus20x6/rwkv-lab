@@ -5,7 +5,7 @@ Run: python test_muon_levers.py
 """
 import copy
 import torch
-from spectral_muon import SpectralMuon, himuon_orthogonalize, _sinkhorn_normalize, _cholesky_qr
+from spectral_muon import SpectralMuon, himuon_orthogonalize, orthogonalize, _sinkhorn_normalize, _cholesky_qr
 
 
 def _opt(p, **kw):
@@ -39,6 +39,11 @@ def test_himuon_tiling():
     tiled = himuon_orthogonalize(G.clone(), steps=5, tile=8)     # 2x2 grid of 8x8 tiles
     assert torch.isfinite(full).all() and torch.isfinite(tiled).all()
     assert not torch.allclose(full.float(), tiled.float()), "tiling had no effect"
+    # full-tile == full NS, INCLUDING tall matrices (regression: tall transpose handling)
+    for shape in [(16, 16), (5, 3), (3, 8)]:
+        Gr = torch.randn(*shape)
+        assert torch.allclose(himuon_orthogonalize(Gr, 5, max(shape)).float(),
+                              orthogonalize(Gr, 5).float(), atol=1e-5), f"full-tile != full NS for {shape}"
     # a converging run with tiling stays finite and reduces the objective
     p = torch.nn.Parameter(torch.randn(32, 32)); opt = _opt(p, tile_size=16)
     torch.manual_seed(1); Tt = torch.randn(32, 32)
@@ -79,7 +84,20 @@ def test_aro_sinkhorn():
         p.grad = (p.detach() - T).clone(); opt.step(); p.grad = None
     assert "aro_R" in opt.state[p] and torch.isfinite(p).all()
     assert (p.detach() - T).pow(2).sum().item() < l0, "ARO did not reduce the objective"
-    print("[aro] Sinkhorn + Cholesky-QR rotation; ARO mode converges, finite — OK")
+    # zero-gradient step must NOT poison the rotation (regression: cholesky-qr zero-Q)
+    p2 = torch.nn.Parameter(torch.randn(12, 12)); o2 = _opt(p2, aro=True)
+    p2.grad = (p2.detach() - torch.randn(12, 12)); o2.step(); p2.grad = None      # warm up R
+    R_before = o2.state[p2]["aro_R"].clone()
+    p2.grad = torch.zeros_like(p2); o2.step(); p2.grad = None                       # zero-grad step
+    R_after = o2.state[p2]["aro_R"]
+    assert torch.allclose(R_after.t() @ R_after, torch.eye(12), atol=1e-2), "zero-grad poisoned aro_R"
+    p2.grad = (p2.detach() - torch.randn(12, 12)); before = p2.detach().clone()
+    o2.step(); p2.grad = None
+    assert not torch.equal(p2.detach(), before), "ARO stuck after a zero-grad step"
+    # _cholesky_qr on a zero matrix returns a valid (orthonormal) rotation, not zeros
+    Qz = _cholesky_qr(torch.zeros(8, 8))
+    assert torch.allclose(Qz.t() @ Qz, torch.eye(8), atol=1e-3), "cholesky-qr(0) not orthonormal"
+    print("[aro] Sinkhorn + Cholesky-QR rotation; converges, zero-grad-safe — OK")
 
 
 if __name__ == "__main__":
