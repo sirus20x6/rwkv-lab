@@ -221,6 +221,7 @@ class RWKV8TimeMixDeltaNet(nn.Module):
         use_rope: bool = False,
         rope_theta: float = 1e7,
         rope_frac: float = 0.25,
+        comba_decouple: bool = False,
     ) -> None:
         super().__init__()
         if num_heads * head_size != hidden_size:
@@ -252,6 +253,14 @@ class RWKV8TimeMixDeltaNet(nn.Module):
             self.register_buffer("rope_inv_freq", inv_freq, persistent=False)
         else:
             self.rope_dim = 0
+        # Comba (2506.02475) decoupled removal: scale the delta-rule REMOVAL term by a learned
+        # per-head factor b_fb in (0,1) so removal can be WEAKER than the write (Comba's SPLR
+        # β̃ = b·β decoupling; our out_correct_d already provides Comba's output feedback r-d·k).
+        # When off, the removal term is unchanged => bit-identical. On => b_fb init 0.5 (Comba's
+        # "weaker than write" setting).
+        self.comba_decouple = bool(comba_decouple)
+        if self.comba_decouple:
+            self.comba_b = nn.Parameter(torch.zeros(num_heads))    # sigmoid(0)=0.5
         # Structural stability cap: floor w so the effective per-step decay
         # exp(gk) = exp(-exp(w)) stays <= 1 - decay_cap_delta. 0.0 disables it
         # (bit-identical to prior behavior). Prevents the decay->integrator
@@ -577,6 +586,8 @@ class RWKV8TimeMixDeltaNet(nn.Module):
         v_h = v.view(B, T, H, N)
         a_h = (-kk).view(B, T, H, N)
         b_h = (kk * a).view(B, T, H, N)
+        if self.comba_decouple:                                # Comba: decouple removal strength
+            b_h = b_h * torch.sigmoid(self.comba_b).view(1, 1, H, 1)
 
         out, final_state = self._wkv7(
             r_h, gk_h, k_h, v_h, a_h, b_h,

@@ -98,6 +98,9 @@ def main():
     ap.add_argument("--taylor", type=int, default=0,
                     help="Taylor-Calibrate (2606.16429, adapted): init per-head decay half-life from the "
                          "teacher's attention look-back distance. Needs eager attention. 0=off.")
+    ap.add_argument("--comba", type=int, default=0,
+                    help="Comba (2506.02475): decouple the delta-rule removal strength from the write "
+                         "(removal weaker than write). Output-correction is already on via out_correct_d. 0=off.")
     ap.add_argument("--eval-every", type=int, default=100)
     ap.add_argument("--ppl-every", type=int, default=500)
     ap.add_argument("--log-every", type=int, default=10)
@@ -159,7 +162,8 @@ def main():
     core = RWKV8TimeMixDeltaNet(C, num_heads=n_q, head_size=hd, layer_idx=L,
                                 depth_layer_id=L, depth_n_layer=model.config.num_hidden_layers,
                                 use_rope=bool(args.rope), rope_theta=rope_theta,
-                                rope_frac=rope_frac).to(dev, dtype)
+                                rope_frac=rope_frac,
+                                comba_decouple=bool(args.comba)).to(dev, dtype)
     if args.rope:
         print(f"RAD-RWKV7 RoPE: on (theta={rope_theta:g}, frac={rope_frac:g}, rope_dim={core.rope_dim})", flush=True)
     filled = radlads_init(core, attn, n_q, n_kv, hd)
