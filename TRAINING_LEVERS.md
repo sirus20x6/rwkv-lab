@@ -1,9 +1,8 @@
 # `convert_train.py` — Training Levers Manual
 
 Reference for the grokking, spectral-optimizer, and distillation-objective levers added
-to the GDN→RWKV conversion trainer. Two copies are kept byte-identical except for a
-`sys.path` shim: **`convert_train.py`** (canonical, run from repo root) and
-**`dashboard2/instrumented/convert_train.py`** (what the trainboard launcher runs).
+to the GDN→RWKV conversion trainer. The canonical entrypoint is
+`python -m rwkv_lab.convert_train`; trainboard launches the same package module.
 
 ## Read this first
 - **Everything defaults OFF / weight 0.** At default flags the trainer behaves exactly
@@ -15,7 +14,7 @@ to the GDN→RWKV conversion trainer. Two copies are kept byte-identical except 
   "sensible default" column as a *starting point to sweep*, not a known optimum.
 - **Live-tuning:** knobs marked **Live** can be changed mid-run from the trainboard
   live-tuning panel. The dashboard writes the value to `run_controls` in
-  `dashboard2/trainboard.db`; the trainer polls it every `--control-poll-every` steps
+  `dashboard/trainboard.db`; the trainer polls it every `--control-poll-every` steps
   (default 10) via `live_controls.py`. No restart needed.
 
 ---
@@ -122,7 +121,7 @@ block-output pair you already compute (no new forward passes). Module: `distill_
 
 ## 6. Live-tunable keys
 Settable mid-run from the trainboard panel (whitelisted in both the trainer and
-`dashboard2/internal/server/livetune.go`):
+`dashboard/internal/server/livetune.go`):
 
 ```
 w_lmce w_block w_smt w_dmt grad_clip lr_scale eval_every save_every log_every
@@ -134,14 +133,14 @@ w_cos w_cka w_flow w_bridge agreement_gate
 
 ---
 
-## 7. Dashboard additions (`dashboard2`)
+## 7. Dashboard additions (`dashboard`)
 - **Panels:** memory-activation (ROSA/Engram injection RMS), memorization-vs-generalization
   (`gen_gap`), plus `carry_fidelity` from the distill monitor.
 - **Alerts:** `anti_grokking_collapse` (warn + auto-cool `lr_scale`, *not* SIGINT),
   `memory_path_dead` (recall path never activated), extending the existing
   `gnorm_spike`/`codec_collapse`/`ppl_regress`/`stall` set.
 - Metrics ride in `train.jsonl` `extra_json` → no schema change. Rebuild the Go binary
-  after pulling new whitelist keys: `cd dashboard2 && go build ./cmd/trainboard`.
+  after pulling new whitelist keys: `cd dashboard && go build ./cmd/trainboard`.
 
 ---
 

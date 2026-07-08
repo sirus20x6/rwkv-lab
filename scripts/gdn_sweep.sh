@@ -9,6 +9,7 @@
 set -u
 cd /thearray/git/moe-mla || exit 1
 PY=.venv/bin/python
+export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}src"
 DATA=/thearray/git/babyllm/data/cache/qwen3.6_fwedu_train
 MODEL=Qwen3.5-9B-Base
 LOG=runs/gdn_sweep.log
@@ -29,7 +30,7 @@ for L in $LAYERS; do
   mkdir -p "$OUT"
   printf '# L%s GDN-init isolation convert, gdn_sweep driver. eval 120.\n' "$L" > "$OUT/cmd.txt"
   log "L${L}: launching"
-  nohup $PY convert_train.py \
+  nohup $PY -m rwkv_lab.convert_train \
     --layer "${L}" --model-dir "$MODEL" --data "$DATA" --out "$OUT" \
     --optimizer spectral_muon --lr 1e-3 --muon-lr 4e-6 \
     --sm-plus-norm row --sm-ddc-strength 0.5 --sm-ddc-mode both --sm-equilibrate R \

@@ -63,6 +63,7 @@ launch_training() {
     cd /thearray/git/moe-mla
     log "launching $label: resume=$resume_ckpt max_steps=$max_steps"
     source "$VENV/bin/activate"
+    export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}src"
     # MOE_MLA_ENGRAM_COMPILE=0: torch.compile on Engram's post-embedding path
     # produced ~1% bf16 numerical drift vs eager (verified by direct comparison),
     # and over 14 training steps we saw h1_ppl jump 3.27→3.40 (vs ~0.04 normal
@@ -70,7 +71,7 @@ launch_training() {
     # if the training-gradient drift turns out to be unrelated.
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     MOE_MLA_ENGRAM_COMPILE=0 \
-    nohup python train_mla.py \
+    nohup python -m rwkv_lab.train_mla \
         --resume "$resume_ckpt" \
         --patch-dir "$CONFIG_PATCH" \
         --xsa-enabled 1 \

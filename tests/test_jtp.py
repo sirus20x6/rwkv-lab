@@ -5,7 +5,7 @@ Run: python test_jtp.py
 """
 import torch
 import torch.nn as nn
-from lookahead_module import JTPHead, jtp_loss, LookaheadSystem
+from rwkv_lab.lookahead_module import JTPHead, jtp_loss, LookaheadSystem
 
 C, V, B, T = 64, 500, 2, 24
 

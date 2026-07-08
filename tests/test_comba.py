@@ -5,7 +5,7 @@ Run: RWKV8_FORCE_PYREF=1 python test_comba.py
 import os
 os.environ.setdefault("RWKV8_FORCE_PYREF", "1")
 import torch
-from rwkv8_deltanet import RWKV8TimeMixDeltaNet
+from rwkv_lab.rwkv8_deltanet import RWKV8TimeMixDeltaNet
 
 C, H, N = 64, 4, 16
 

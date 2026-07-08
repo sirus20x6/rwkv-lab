@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from lookahead_module import (
+from rwkv_lab.lookahead_module import (
     LookaheadSystem,
     NextLatPredictor,
     TOPHead,
@@ -207,7 +207,7 @@ def test_nextlat_jump_alignment_exact():
     """Echo predictor returns the pooled action; craft emb so the window mean equals
     the target exactly: emb[j] = j + (k-1)/2 makes mean(emb[t+1..t+k]) = t+k = h[t+k].
     Loss is 0 iff every index in the jump path lines up."""
-    from lookahead_module import nextlat_jump_loss
+    from rwkv_lab.lookahead_module import nextlat_jump_loss
 
     class Echo(nn.Module):
         def forward(self, h, act):
@@ -223,7 +223,7 @@ def test_nextlat_jump_alignment_exact():
 
 
 def test_nextlat_jump_guards_and_system():
-    from lookahead_module import nextlat_jump_loss
+    from rwkv_lab.lookahead_module import nextlat_jump_loss
     pred = NextLatPredictor(D)
     h = torch.randn(B, T, D)
     for bad_k in (0, 1, T):
@@ -300,7 +300,7 @@ def test_system_compute_and_weighting():
 
 
 def test_concept_head_targets_and_stopgrad():
-    from lookahead_module import ConceptHead
+    from rwkv_lab.lookahead_module import ConceptHead
     torch.manual_seed(6)
     head = ConceptHead(D, chunk=4, segments=4, codes=8)
     h = torch.randn(B, T, D, requires_grad=True)
@@ -319,7 +319,7 @@ def test_concept_head_targets_and_stopgrad():
 def test_concept_pooled_target_alignment():
     """With h[t] = t, the pooled concept target at t is mean(t+1..t+k) = t+(k+1)/2.
     Craft a codebook-free check by comparing against the cumsum formula directly."""
-    from lookahead_module import ConceptHead
+    from rwkv_lab.lookahead_module import ConceptHead
     k = 4
     head = ConceptHead(D, chunk=k, segments=4, codes=8)
     ramp = torch.arange(T, dtype=torch.float32).view(1, T, 1).expand(1, T, D)
@@ -334,7 +334,7 @@ def test_concept_pooled_target_alignment():
 def test_concept_head_bf16():
     """Trainers cast the lookahead system to model dtype (bf16); the concept head
     must survive that (codex tier-3 #1: fp32 codebook into bf16 cb_mlp crashed)."""
-    from lookahead_module import ConceptHead
+    from rwkv_lab.lookahead_module import ConceptHead
     head = ConceptHead(D, chunk=4, segments=4, codes=8).to(dtype=torch.bfloat16)
     h = torch.randn(B, T, D, dtype=torch.bfloat16)
     l_ncp, l_vq, frac = head.loss(h)
@@ -343,7 +343,7 @@ def test_concept_head_bf16():
 
 
 def test_concept_guards_and_system_integration():
-    from lookahead_module import ConceptHead
+    from rwkv_lab.lookahead_module import ConceptHead
     for bad in (dict(segments=5), dict(chunk=1)):
         try:
             ConceptHead(D, **bad)

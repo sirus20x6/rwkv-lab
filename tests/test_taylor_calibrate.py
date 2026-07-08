@@ -6,8 +6,8 @@ import os, math
 os.environ.setdefault("RWKV8_FORCE_PYREF", "1")
 import torch
 import torch.nn.functional as F
-from rwkv8_deltanet import RWKV8TimeMixDeltaNet
-from taylor_calibrate import teacher_lookback_distance, set_halflife_decay, value_rms_match
+from rwkv_lab.rwkv8_deltanet import RWKV8TimeMixDeltaNet
+from rwkv_lab.taylor_calibrate import teacher_lookback_distance, set_halflife_decay, value_rms_match
 
 C, H, N = 64, 4, 16
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from engram_lmb import (
+from rwkv_lab.engram_lmb import (
     LearnedTable,
     LexicalMemoryBank,
     StreamingRecall,
@@ -141,7 +141,7 @@ def test_token_recall_matches_are_real_and_causal():
 
 def test_token_recall_agrees_with_rosa_sam_kernel():
     try:
-        from rosa_sam import sam_retrieve, HAVE_NUMBA
+        from rwkv_lab.rosa_sam import sam_retrieve, HAVE_NUMBA
     except Exception:
         return  # rosa_sam not importable; skip
     if not HAVE_NUMBA:
@@ -246,7 +246,7 @@ def test_read_recalled_invalid_neighbor_cannot_leak():
 
 def test_freq_allocation():
     import numpy as np
-    from engram_lmb_build import build_freq_allocation
+    from rwkv_lab.engram_lmb_build import build_freq_allocation
     rng = np.random.RandomState(0)
     counts = rng.zipf(1.3, size=V).astype(np.int64)
     idx, w = build_freq_allocation(counts, rho=0.5, k_vip=10, n_buckets=8)

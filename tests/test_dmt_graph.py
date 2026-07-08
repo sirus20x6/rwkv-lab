@@ -10,9 +10,9 @@ Run ONLY on an idle GPU.
 import copy, sys, time, torch
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
 torch.manual_seed(0)
-from rwkv8_deltanet import RWKV8TimeMixDeltaNet
-from looped_rwkv import LoopedRWKV
-from smt_dmt import dmt_rollout_loss, DMTGraphedRollout
+from rwkv_lab.rwkv8_deltanet import RWKV8TimeMixDeltaNet
+from rwkv_lab.looped_rwkv import LoopedRWKV
+from rwkv_lab.smt_dmt import dmt_rollout_loss, DMTGraphedRollout
 
 dev = "cuda"
 B, T, C, H, N = 8, 1024, 4096, 64, 64

@@ -26,6 +26,9 @@ full = [
     "huggingface_hub>=0.25",
     "bitsandbytes>=0.43",
     "datasets>=2.20",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "sse-starlette>=2.1",
     "schedulefree>=1.4.1",
     "pynvml>=11.5",
     "psutil>=6.0",
@@ -34,67 +37,11 @@ full = [
 [project.urls]
 Repository = "https://github.com/sirus20x6/rwkv-lab"
 
-# The research modules live FLAT at the repo root (they import each other by bare name, and the
-# careful-zone trainers assume that), so they are exposed as top-level py-modules rather than a
-# package. `pip install -e .` then makes `import spectral_muon`, `from looped_rwkv import ...`,
-# etc. resolve from anywhere — no sys.path shim needed. New root modules must be added here.
 [tool.setuptools]
-py-modules = [
-    "assemble_looped",
-    "attn_L3_poc",
-    "build_engram_patch",
-    "build_memory_targets",
-    "build_qwen35_data",
-    "coconut",
-    "coda",
-    "convert_gdn_lossless",
-    "convert_train",
-    "distill_consolidate",
-    "distill_objectives",
-    "drive_isolation",
-    "engram_integration",
-    "engram_lmb",
-    "engram_lmb_build",
-    "eval_baseline",
-    "fsp_module",
-    "fwpkm",
-    "gpu_engram_prefill",
-    "grok_autopilot",
-    "grokking_metrics",
-    "hedgehog",
-    "l3_lookup",
-    "layer_swap",
-    "live_controls",
-    "llm_jepa",
-    "llr",
-    "load_converted",
-    "load_mla_engram",
-    "lookahead_module",
-    "loop_probe",
-    "looped_rwkv",
-    "looped_rwkv_rosa_engram_v3",
-    "mla_module",
-    "mtp_module",
-    "muon_helpers",
-    "mutor_module",
-    "parallel_heads_module",
-    "pc_layer",
-    "rosa",
-    "rosa_reference",
-    "rosa_sam",
-    "rosa_soft_layer",
-    "rwkv8_deltanet",
-    "rwkv_product",
-    "safe_torch",
-    "smt_dmt",
-    "spectral_muon",
-    "svd_init",
-    "taylor_calibrate",
-    "train_mla",
-    "train_mla_engram",
-    "verify_engram",
-    "write_sae",
-]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

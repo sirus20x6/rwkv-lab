@@ -36,9 +36,9 @@ research/
 *.db-wal
 *.db-shm
 # compiled Go binaries (built from ./cmd/trainboard); source stays tracked
-dashboard2/trainboard
-dashboard2/trainboard-candidate*
-dashboard2/launches/
+dashboard/trainboard
+dashboard/trainboard-candidate*
+dashboard/launches/
 
 # --- Logs and local process metadata ---
 *.log

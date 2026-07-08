@@ -15,6 +15,7 @@
 set -u
 cd /thearray/git/moe-mla || exit 1
 PY=.venv/bin/python
+export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}src"
 DATA=/thearray/git/babyllm/data/cache/qwen3.6_fwedu_train
 MODEL=Qwen3.5-9B-Base
 LAYER=16
@@ -29,7 +30,7 @@ run_arm(){  # $1 = gate mode; runs in the FOREGROUND (blocks until done)
   printf '# gate A/B: L%s fresh GDN-init, loop-count 4, --loop-gate %s, loop-lr-mult 30, seed 0\n' \
     "$LAYER" "$mode" > "$out/cmd.txt"
   log "START $mode -> $out"
-  $PY convert_train.py \
+  $PY -m rwkv_lab.convert_train \
     --layer "$LAYER" --model-dir "$MODEL" --data "$DATA" --out "$out" \
     --optimizer spectral_muon --lr 1e-3 --muon-lr 4e-6 \
     --sm-plus-norm row --sm-ddc-strength 0.5 --sm-ddc-mode both --sm-equilibrate R \

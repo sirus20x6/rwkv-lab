@@ -3,8 +3,8 @@
 Run: pytest tests/test_rosa_reference.py
 """
 import numpy as np
-from rosa_reference import rosa_reference
-from rosa_sam import sam_retrieve
+from rwkv_lab.rosa_reference import rosa_reference
+from rwkv_lab.rosa_sam import sam_retrieve
 
 
 def _agree(B, T, R, K, seed):

@@ -3,7 +3,7 @@
 Run: pytest tests/test_l3_lookup.py
 """
 import torch
-from l3_lookup import LargeLookupLayer, allocate_slots_by_frequency
+from rwkv_lab.l3_lookup import LargeLookupLayer, allocate_slots_by_frequency
 
 V, D, E, B, T = 50, 32, 24, 3, 7
 

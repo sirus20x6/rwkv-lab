@@ -10,7 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from looped_rwkv import LoopedRWKV, lora_config_from_sd, sample_loop_count
+from rwkv_lab.looped_rwkv import LoopedRWKV, lora_config_from_sd, sample_loop_count
 
 torch.manual_seed(0)
 

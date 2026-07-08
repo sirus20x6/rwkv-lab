@@ -3,7 +3,7 @@
 Run: python test_fwpkm.py
 """
 import torch
-from fwpkm import FwPKM
+from rwkv_lab.fwpkm import FwPKM
 
 C, B, T = 64, 2, 16
 

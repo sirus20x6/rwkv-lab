@@ -5,7 +5,7 @@ Run: pytest tests/test_loop_cart.py
 import copy
 import torch
 import torch.nn as nn
-from looped_rwkv import LoopedRWKV
+from rwkv_lab.looped_rwkv import LoopedRWKV
 
 
 class TinyCore(nn.Module):

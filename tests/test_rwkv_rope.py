@@ -14,7 +14,7 @@ Run: RWKV8_FORCE_PYREF=1 python test_rwkv_rope.py   (CPU, no fla/GPU needed)
 import os
 os.environ.setdefault("RWKV8_FORCE_PYREF", "1")
 import torch
-from rwkv8_deltanet import RWKV8TimeMixDeltaNet
+from rwkv_lab.rwkv8_deltanet import RWKV8TimeMixDeltaNet
 
 C, H, N, T, B = 64, 4, 16, 12, 2
 
