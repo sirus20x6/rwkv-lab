@@ -512,6 +512,8 @@ class RWKV8TimeMixDeltaNet(nn.Module):
         initial_state: Optional[torch.Tensor] = None,
         shift_state: Optional[torch.Tensor] = None,
         return_state: bool = False,
+        v_first: Optional[torch.Tensor] = None,
+        return_v_first: bool = False,
         **kwargs,
     ):
         if cache_params is not None:
@@ -554,6 +556,20 @@ class RWKV8TimeMixDeltaNet(nn.Module):
             w = w.clamp_min(self._w_floor)
         k = self.key(xk)
         v = self.value(xv)
+        # RWKV-7 cross-layer value residual: layer 0 defines the shared v_first; every later
+        # layer lerps its own v toward that layer-0 value, gated by the v-LoRA. This is the
+        # native g070 mechanism; v0/v1/v2 are the residual gate's params.
+        if self.is_first_rwkv_layer:
+            v_first_out = v
+        else:
+            if v_first is None:
+                raise ValueError(
+                    "is_first_rwkv_layer=False requires v_first from layer 0 — thread the "
+                    "layer-0 value through the stack (see RWKV7Small.forward / LoopedRWKV)."
+                )
+            a_v = torch.sigmoid(self.v0 + (xv @ self.v1) @ self.v2)
+            v = torch.lerp(v, v_first.to(v.dtype), a_v.to(v.dtype))
+            v_first_out = v_first
         # Comba output-correction (d init 0 => no-op): r_eff = r - d*k, per head.
         if self.out_correct:
             r = r - self.out_correct_d.repeat_interleave(N).view(1, 1, C) * k
@@ -565,14 +581,6 @@ class RWKV8TimeMixDeltaNet(nn.Module):
             cos, sin = self._rope_cos_sin(B, T, x.device, x.dtype, position_ids)
             r = self._apply_partial_rope(r.view(B, T, H, N), cos, sin, self.rope_dim).reshape(B, T, C)
             k = self._apply_partial_rope(k.view(B, T, H, N), cos, sin, self.rope_dim).reshape(B, T, C)
-        if not self.is_first_rwkv_layer:
-            # Future-stage hook: when more than one RWKV layer exists this
-            # branch must receive ``v_first`` from layer 0. For Stage 1 we
-            # always take the layer-0 path.
-            raise NotImplementedError(
-                "is_first_rwkv_layer=False requires v_first plumbing not yet wired"
-            )
-
         a = self._a_scale * torch.sigmoid(self.a0 + (xa @ self.a1) @ self.a2)
         g = torch.sigmoid(xg @ self.g1) @ self.g2
 
@@ -614,6 +622,10 @@ class RWKV8TimeMixDeltaNet(nn.Module):
         ).view(B, T, C)
 
         y = self.output((out + bonus) * g)
+        if return_v_first:                                     # native-stack threading (opt-in)
+            if return_state:
+                return y, final_state, new_shift_state, v_first_out
+            return y, v_first_out
         if return_state:
             # Recurrent state for rollout/SMT/DMT is the pair
             # (wkv matrix state [B,H,K,V], last-token shift carry [B,1,C]).
