@@ -54,4 +54,5 @@ jobs:
             tests/test_hedgehog_coda.py \
             tests/test_loop_invariants.py \
             tests/test_looped_hyper.py \
+            tests/test_loop_cart.py \
             tests/test_loop_new_features.py

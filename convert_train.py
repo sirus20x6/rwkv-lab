@@ -423,6 +423,8 @@ def build(args):
                                  args, "loop_lora_targets", "")).split(",") if t.strip()),
                              adaptive_halt=bool(getattr(args, "loop_adaptive_halt", 0)),
                              ponder_prior=float(getattr(args, "loop_ponder_prior", 0.1)),
+                             cart_anchor=bool(getattr(args, "loop_cart_anchor", 0)),
+                             cart_gate_init=float(getattr(args, "loop_cart_gate_init", 4.0)),
                              ).to(device=_p0.device, dtype=_p0.dtype)
         student.float_gates()  # gates stay fp32: bf16 ulp swallows their tiny growth steps
         student.iter_consist = float(getattr(args, "loop_iter_consist", 0.0)) > 0
@@ -1837,6 +1839,13 @@ def main():
                     help="weight for the PonderNet KL-to-geometric ponder regularizer (with --loop-adaptive-halt).")
     ap.add_argument("--loop-ponder-prior", type=float, default=0.1,
                     help="geometric prior halt rate for the ponder loss (higher = prefer fewer passes).")
+    ap.add_argument("--loop-cart-anchor", type=int, default=0,
+                    help="CART (2606.01495) contractive LTI gate: each pass multiplies the carried loop "
+                         "state by a learned sigmoid gate (out = σ(g)⊙out + inc), forcing spectral radius "
+                         "<1 so the loop provably converges to a fixed point (damps deep-loop drift). 0=off "
+                         "(bit-identical). Mutually exclusive with --loop-hyper.")
+    ap.add_argument("--loop-cart-gate-init", type=float, default=4.0,
+                    help="CART gate init (pre-sigmoid): 4.0 -> σ≈0.98, so the loop starts near-identity.")
     ap.add_argument("--loop-lr-mult", type=float, default=1.0,
                     help="LR multiplier for residual_weight (the loop gates, their own 'rwkv_loop' group). "
                          "Default 1x: the refine/warm-start case, where the loop is already trained and should "
