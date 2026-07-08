@@ -1,5 +1,7 @@
 # RWKV-Lab
 
+[![tests](https://github.com/sirus20x6/rwkv-lab/actions/workflows/tests.yml/badge.svg)](https://github.com/sirus20x6/rwkv-lab/actions/workflows/tests.yml)
+
 **Cross-architecture LLM conversion, looped recurrence, and memory research — on RWKV linear-attention cores.**
 
 RWKV-Lab is a research codebase for taking a *pretrained* Transformer / gated-linear-attention model and turning it into an efficient **RWKV-style linear-attention** model — without pretraining from scratch. The headline target is [Qwen3.5-9B-Base](#target-model), a 32-layer hybrid (24 gated-delta-net layers + 8 full-attention layers), which we convert layer-by-layer to RWKV-7/8 kernels and then extend with weight-tied **loops** (recurrent depth), an **Engram** lexical memory bank, and **ROSA** suffix-matching retrieval.

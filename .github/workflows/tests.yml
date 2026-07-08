@@ -1,0 +1,56 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cpu-tests:
+    name: CPU tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install (CPU torch + package)
+        run: |
+          python -m pip install --upgrade pip
+          # CPU-only torch (no CUDA on the runner); the RWKV-7 kernel falls back to the
+          # pure-Python reference (RWKV8_FORCE_PYREF, set by tests/conftest.py), so `fla`
+          # is not required.
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e .        # pulls transformers/safetensors/einops/numpy from pyproject
+          pip install pytest
+
+      - name: Run CPU test suite
+        run: |
+          pytest -q \
+            tests/test_muon_levers.py \
+            tests/test_spectral_muon_rsav.py \
+            tests/test_llm_jepa.py \
+            tests/test_jtp.py \
+            tests/test_bst.py \
+            tests/test_lmtp.py \
+            tests/test_comba.py \
+            tests/test_rwkv_rope.py \
+            tests/test_adaptive_halt.py \
+            tests/test_rwkv_product.py \
+            tests/test_taylor_calibrate.py \
+            tests/test_fwpkm.py \
+            tests/test_hedgehog_coda.py \
+            tests/test_loop_invariants.py \
+            tests/test_looped_hyper.py \
+            tests/test_loop_new_features.py
