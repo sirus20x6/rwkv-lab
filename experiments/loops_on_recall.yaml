@@ -1,0 +1,10 @@
+# One file = the whole experiment. `python -m rwkv_lab.config run experiments/loops_on_recall.yaml`
+data:
+  task: recall:12
+seeds: 3
+model: {d_model: 192, n_layers: 3, head_size: 64}
+train: {steps: 500, lr: 3e-3, batch: 64}
+configs:
+  baseline:    {}
+  loop3:       {n_loops: 3}
+  loop3_hyper: {n_loops: 3, hyper_lanes: 2}
