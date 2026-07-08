@@ -41,6 +41,7 @@ jobs:
             tests/test_muon_levers.py \
             tests/test_spectral_muon_rsav.py \
             tests/test_llm_jepa.py \
+            tests/test_coconut.py \
             tests/test_jtp.py \
             tests/test_bst.py \
             tests/test_lmtp.py \
