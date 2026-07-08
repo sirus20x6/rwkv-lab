@@ -44,6 +44,9 @@ dashboard2/launches/
 *.log
 .supervisor_child_*
 
+# --- Retired v1 code (kept locally, not part of the public repo) ---
+legacy/
+
 # --- Editor / OS cruft ---
 *.swp
 *.tmp
