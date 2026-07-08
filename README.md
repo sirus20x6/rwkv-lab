@@ -69,6 +69,21 @@ A second track targets **Qwen3.6-35B-A3B** (a Mixture-of-Experts model) for the 
 
 ---
 
+## What you need locally
+
+This repo does not contain model weights, token caches, run logs, or checkpoints. The scripts assume those exist on disk and expose flags for the paths:
+
+| Input | Used by | Notes |
+|---|---|---|
+| Qwen3.5-9B-Base weights | conversion, baseline eval, target extraction | Pass with `--model-dir`, or put the HF snapshot at `Qwen3.5-9B-Base`. |
+| Tokenized eval/train stream | `eval_baseline.py`, `build_memory_targets.py`, `convert_train.py` | `--data` may be a cache directory or a flat `tokens.bin` accepted by `build_memory_targets.load_token_stream`. |
+| CUDA Torch + `fla` | RWKV-7 kernel path | Install these for your CUDA stack; `requirements.txt` only covers the regular Python deps. |
+| Go toolchain | `dashboard2/` | Needed only for trainboard. |
+
+For a small data-format smoke test, `build_qwen35_data.py --max-docs 1000 --out_root /tmp/qwen35-cache` writes the same flat-cache format without pulling the full corpus.
+
+---
+
 ## Repository layout
 
 Everything is a **drop-in `linear_attn` / attention module swap** on a HuggingFace decoder layer, plus trainers and offline builders around them. Model weights, datasets, checkpoints, and the paper PDFs are **git-ignored** (>1.5 TB locally) — this repo is the *code*.
@@ -138,28 +153,37 @@ Everything is a **drop-in `linear_attn` / attention module swap** on a HuggingFa
 ## Pipeline
 
 ```bash
-# 0. install (torch comes from system/site-packages; see requirements.txt)
-pip install -r requirements.txt         # transformers, fla, safetensors, einops, ...
+# 0. install Python deps, then install CUDA-specific torch + fla separately
+pip install -r requirements.txt
 
-# 1. GDN layers — lossless, no training
+MODEL_DIR=/path/to/Qwen3.5-9B-Base
+DATA=/path/to/qwen3.5-token-cache-or-tokens.bin
+
+# 1. baseline eval on the same windows used by conversion runs
+python eval_baseline.py --model-dir "$MODEL_DIR" --data "$DATA" --out runs/_baseline.json
+
+# 2. GDN layers — lossless, no training
 python -c "from transformers import AutoModelForCausalLM; \
            from convert_gdn_lossless import install_lossless_wkv7; \
-           m = AutoModelForCausalLM.from_pretrained('Qwen3.5-9B-Base'); \
+           m = AutoModelForCausalLM.from_pretrained('$MODEL_DIR'); \
            print(install_lossless_wkv7(m), 'GDN layers converted')"
 
-# 2. attention layers — per-layer distillation against the frozen original
-python build_memory_targets.py --layer 3 --out mem_targets/L3
-python convert_train.py --layer 3 --codec-cache mem_targets/L3 --out runs/iso_L3 --steps 10000
+# 3. attention layers — per-layer distillation against the frozen original
+python build_memory_targets.py --model-dir "$MODEL_DIR" --data "$DATA" --layer 3 --out mem_targets/L3
+python convert_train.py --model-dir "$MODEL_DIR" --data "$DATA" \
+  --layer 3 --codec-cache mem_targets/L3 --out runs/iso_L3 --steps 10000
 
-# 3. assemble the isolated layers into one LoopedRWKV model, then consolidate
-python assemble_looped.py  --out Qwen3.5-9B-RWKV/rwkv_layers_looped.pt
-python distill_consolidate.py --kl-weight 1.0 --out runs/consolidate
+# 4. assemble accepted isolated layers, then consolidate
+python assemble_looped.py runs/iso_L*/best/ckpt.pt --out Qwen3.5-9B-RWKV/rwkv_layers_looped.pt
+python distill_consolidate.py --model-dir "$MODEL_DIR" --data "$DATA" \
+  --rwkv-ckpt Qwen3.5-9B-RWKV/rwkv_layers_looped.pt \
+  --kl-weight 1.0 --out Qwen3.5-9B-RWKV/rwkv_layers_distilled.pt
 
-# 4. watch it (separate terminal)
+# 5. watch it (separate terminal)
 go -C dashboard2 run ./cmd/trainboard   # http://127.0.0.1:9124
 ```
 
-> Paths default to the author's local layout (`/thearray/git/moe-mla/...`); override via the flags each script exposes (`--help`). Every training lever defaults **off** — at default flags the trainers reproduce the plain baseline. See [`TRAINING_LEVERS.md`](TRAINING_LEVERS.md).
+> Many script defaults point at the author's local layout (`/thearray/git/moe-mla/...`). Treat those as examples and pass explicit paths. Every training lever defaults **off** — at default flags the trainers reproduce the plain baseline. See [`TRAINING_LEVERS.md`](TRAINING_LEVERS.md).
 
 ---
 
@@ -215,6 +239,7 @@ Only papers with a concrete implementation or adopted design decision in this re
 - [L-MTP: Leap Multi-Token Prediction](https://arxiv.org/abs/2505.17505) — leap heads predicting non-adjacent offsets {k+1, 2k+1, …} → [`lookahead_module.py`](lookahead_module.py) (`--lmtp-weight`)
 - [The Belief State Transformer](https://arxiv.org/abs/2410.23506) — forward+backward next/prev objective (cheap adapter: reuse decoder hidden + shallow backward GRU) → [`lookahead_module.py`](lookahead_module.py) (`--bst-weight`)
 - [JTP: Efficient Joint Prediction of Multiple Future Tokens](https://arxiv.org/abs/2503.21801) — joint MTP via a Fetch self-attention bottleneck; composes with the Belief State head (forward-joint + backward-prev on one hidden) → [`lookahead_module.py`](lookahead_module.py) (`--jtp-weight`)
+- [LLM-JEPA: LLMs Meet Joint Embedding Predictive Architectures](https://arxiv.org/abs/2509.14252) (LeCun et al.) — paired-view (Text↔Code) latent objective: predict one view's embedding from the other via `[PRED]` tokens, cosine loss, no stop-grad (an SFT-phase objective for a coding model's NL/code pairs) → [`llm_jepa.py`](llm_jepa.py)
 
 **Optimizers & training dynamics**
 - [Muon](https://kellerjordan.github.io/posts/muon/) + [MuonClip / QK-Clip](https://arxiv.org/abs/2507.20534) (Kimi K2) — the base orthogonalized-momentum optimizer + attention-logit-stabilizing clip → [`muon_helpers.py`](muon_helpers.py)
