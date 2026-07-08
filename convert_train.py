@@ -1287,7 +1287,7 @@ def train(args):
         log_every = max(1, int(ctl.get("log_every", args.log_every)))
         # grokking lever 2 — decoupled weight decay = weight_decay (constant) + tail
         # ramp(tail_weight_decay over the last wd_tail_frac of training). 0 in the fit
-        # phase unless weight_decay>0 (2605.04396 / 2606.05863). All live-tunable;
+        # phase unless weight_decay>0 (2605.04396 — Critical Windows of Complexity Control / 2606.05863 — Deciphering Two Training Clocks in Grokking). All live-tunable;
         # applied manually below so it works for adamw/muonclip (internal WD is 0).
         wd_const = ctl.get("weight_decay", apilot.overrides.get("weight_decay", args.weight_decay))
         tail_wd = ctl.get("tail_weight_decay", args.tail_weight_decay)
@@ -1446,7 +1446,7 @@ def train(args):
             ic_val = getattr(student, "last_iter_consist", None)
             if args.loop_iter_consist > 0 and ic_val is not None:
                 loss = loss + args.loop_iter_consist * ic_val
-            # Readout Blind Spot (2606.24898): supervise EVERY loop iterate toward the teacher
+            # Readout Blind Spot (2606.24898 — Dense Supervision Is Not Enough: The Readout Blind Spot…): supervise EVERY loop iterate toward the teacher
             # block target (not just the final), so each refinement pass stays decodable. Uses
             # the same per-token relative-L2 as the block loss.
             ir_val = None
@@ -1526,7 +1526,7 @@ def train(args):
 
             # grokking lever 3 — spectral (nuclear-norm) penalty on the student's 2D
             # mix matrices: the tangential low-rank pressure L2 can't provide under
-            # RMSNorm (2606.04405). SVD per matrix, so amortize with --nuc-every.
+            # RMSNorm (2606.04405 — Low-Rank Decay for Grokking in Scale-Invariant…). SVD per matrix, so amortize with --nuc-every.
             nuc_val = 0.0
             if nuc_w > 0.0 and (step % max(1, nuc_every) == 0) and nuc_mats:
                 nuc = sum(torch.linalg.matrix_norm(W.float(), ord="nuc") for W in nuc_mats)
@@ -1809,7 +1809,7 @@ def main():
     ap.add_argument("--loop-hyper", type=int, default=0,
                     help="hyper-connections at the loop boundary (2409.19606): K>=2 parallel residual lanes "
                          "with learned per-pass pool/mix/write and a learned output read. The iso-depth "
-                         "scaling-law paper (2604.21106) measured this as the largest loop-capacity lever "
+                         "scaling-law paper (2604.21106 — How Much Is One Recurrence Worth: Iso-Depth Scaling Laws…) measured this as the largest loop-capacity lever "
                          "(recurrence exponent 0.45->0.65). Composes with any --loop-gate; exact no-op at "
                          "init; ~n_loops*(K^2+2K)+K extra scalars riding the rwkv_loop group. 0=off, use 2.")
     ap.add_argument("--loop-lora-rank", type=int, default=0,
@@ -1824,12 +1824,12 @@ def main():
                          "depth papers: depth extrapolation, less overthinking). uniform=U{1..n}; poisson="
                          "1+Pois(n-1) clamped (mass at full depth). Evals always run at full --loop-count.")
     ap.add_argument("--loop-iter-consist", type=float, default=0.0,
-                    help="equilibrium-internalization weight (2605.12466): pull each earlier loop "
+                    help="equilibrium-internalization weight (2605.12466 — Solve the Loop: Attractor Models for Language and…): pull each earlier loop "
                          "iterate toward sg(final iterate) — internalizes refinement into fewer "
                          "passes and enables early exit. With --loop-sample this reproduces "
                          "LoopFormer's shortcut-consistency recipe. Paper-analog weight 0.1. 0=off.")
     ap.add_argument("--loop-iter-readout", type=float, default=0.0,
-                    help="Readout Blind Spot (2606.24898): supervise EVERY loop iterate toward the "
+                    help="Readout Blind Spot (2606.24898 — Dense Supervision Is Not Enough: The Readout Blind Spot…): supervise EVERY loop iterate toward the "
                          "teacher block target (per-token rel-L2), not just the final pass, so each "
                          "refinement stays decodable. Distinct from --loop-iter-consist (self-supervised). "
                          "0=off. Needs --loop-count>1.")
@@ -1848,7 +1848,7 @@ def main():
     ap.add_argument("--loop-cart-gate-init", type=float, default=4.0,
                     help="CART gate init (pre-sigmoid): 4.0 -> σ≈0.98, so the loop starts near-identity.")
     ap.add_argument("--loop-deq", type=int, default=0,
-                    help="HRM/DEQ 1-step gradient (2506.21734): run the refinement loop to its fixed "
+                    help="HRM/DEQ 1-step gradient (2506.21734 — Hierarchical Reasoning Model (HRM)): run the refinement loop to its fixed "
                          "point DETACHED (no BPTT, O(1) memory) then take one graded step. Same forward "
                          "value as full-BPTT, cheaper gradient -> many more loop passes. 0=off. Pair with "
                          "--loop-cart-anchor (contractive loop). Incompatible with halt/hyper/iter-consist.")
@@ -1969,10 +1969,10 @@ def main():
     # --- loop-level spectral levers ---
     ap.add_argument("--hyperball", type=int, default=0,
                     help="Tier2 Hyperball: project each 2D weight back to its initial Frobenius sphere each step "
-                         "(2606.16899); removes WD tuning, ~20-30%% token speedup on normalized transformers.")
+                         "(2606.16899 — Fantastic Pretraining Optimizers II: Hyperball…); removes WD tuning, ~20-30%% token speedup on normalized transformers.")
     ap.add_argument("--muon-to-adamw-frac", type=float, default=0.0,
                     help="Tier1 river-valley switch: at this fraction of training, switch a muon-family optimizer to "
-                         "AdamW for the refinement tail (2606.21514) - fastest early AND lower final loss. 0=off.")
+                         "AdamW for the refinement tail (2606.21514 — Power and Limits of the Muon Optimizer: A River-Valley…) - fastest early AND lower final loss. 0=off.")
     # --- DDC (Dead-Direction Conditioner), PC-Layer, LLR ---
     ap.add_argument("--sm-ddc-strength", type=float, default=0.5,
                     help="DDC (2606.29176): fraction [0,1] of the per-channel rescale-gauge component removed from the "
@@ -2137,7 +2137,7 @@ def main():
     ap.add_argument("--readout-lr-mult", type=float, default=1.0,
                     help="LR multiplier on the readout group (student out_proj now; the codec too "
                          "once it unfreezes at consolidation) — a faster readout closes the "
-                         "representation->behavior lag (2604.13082). Scheduled opts (adamw). Live-tunable.")
+                         "representation->behavior lag (2604.13082 — The Long Delay to Arithmetic Generalization). Scheduled opts (adamw). Live-tunable.")
     ap.add_argument("--disjoint-eval", type=int, default=1,
                     help="when --fixed-trainset>0, draw eval windows from a region disjoint from the "
                          "cached train pool so the generalization gap is clean. 1=on.")
@@ -2147,9 +2147,9 @@ def main():
                          "post-grok collapse recovery).")
     # --- relational / cross-arch distillation objectives (distill_objectives.py) ---
     ap.add_argument("--w-cos", type=float, default=0.0,
-                    help="cosine block/state match (2602.05262/2606.26488): direction-invariant, scale-robust. Live.")
+                    help="cosine block/state match (2602.05262 — ReGLA: Efficient Receptive-Field Modeling with Gated…/2606.26488): direction-invariant, scale-robust. Live.")
     ap.add_argument("--w-cka", type=float, default=0.0,
-                    help="CKA/Gram block match (2606.05682): orthogonal+scale invariant, dim-agnostic cross-arch. Live.")
+                    help="CKA/Gram block match (2606.05682 — Beyond Output Matching: Preserving Internal Geometry in…): orthogonal+scale invariant, dim-agnostic cross-arch. Live.")
     ap.add_argument("--w-flow", type=float, default=0.0,
                     help="PHF transition-flow match (2606.29340): match how features MOVE (direction+Gram), not where. Live.")
     ap.add_argument("--w-bridge", type=float, default=0.0,
@@ -2159,7 +2159,7 @@ def main():
                     help="trust-region gating (2606.01249): >0 reweights block MSE by teacher-student cosine agreement, "
                          "down-weighting diverged tokens (stabilizes compounding cross-arch mismatch). Live.")
     ap.add_argument("--distill-fidelity-log", type=int, default=0,
-                    help="emit carry_fidelity (2606.26488): label-free cosine drift monitor for the dashboard.")
+                    help="emit carry_fidelity (2606.26488 — What Survives When You Compress a Recursive Reasoner for…): label-free cosine drift monitor for the dashboard.")
     # --- ROSA-soft (rosa_soft_layer.RosaAnchorLayer): additive retrieval injection on
     # the converted layer's output, via research/rosa_soft's differentiable CUDA
     # softmax-suffix-match op. Default off; e0=e1=0 init -> exact no-op until trained.

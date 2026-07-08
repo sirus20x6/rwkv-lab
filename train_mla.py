@@ -228,7 +228,7 @@ class TrainConfig:
     parallel_head_expansion: int = 4            # MLP expansion factor per head
 
     # Engram — DeepSeek's conditional-memory module (Cheng et al. 2026,
-    # arXiv:2601.07372). Installs at decoder-layer indices specified in the
+    # arXiv:2601.07372 — Conditional Memory via Scalable Lookup). Installs at decoder-layer indices specified in the
     # patch manifest. Uses hashed N-gram embeddings as a static O(1) memory
     # lookup fused via context-aware gating. Applies to the already-loaded
     # MLA/MTP/aux model as an additive residual at select layers — nothing

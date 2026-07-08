@@ -1,7 +1,7 @@
 """Parallel-heads MTP auxiliary loss (Gloeckle et al. 2024 style).
 
 Reference: "Better & Faster Large Language Models via Multi-token Prediction"
-(arXiv:2404.19737). The paper adds K independent transformer heads that each
+(arXiv:2404.19737 — Better and Faster LLMs via Multi-token Prediction). The paper adds K independent transformer heads that each
 read the backbone's final hidden state h_t and predict token x_{t+k} through
 a shared unembedding matrix; all losses are summed.
 

@@ -37,7 +37,7 @@ loop_index (bool): add a per-pass, zero-init learned offset to the pass input so
   single-pass and the whole loop is still an exact no-op until trained.
 
 hyper_lanes (K>=2): hyper-connections at the loop boundary (arXiv 2409.19606; the
-  iso-depth scaling-law paper 2604.21106 measured this as the largest loop-capacity
+  iso-depth scaling-law paper 2604.21106 — How Much Is One Recurrence Worth: Iso-Depth Scaling Laws… measured this as the largest loop-capacity
   lever, recurrence-equivalence exponent 0.45 -> 0.65). The single running output
   is replaced by K parallel residual lanes; each refinement pass reads a learned
   lane pool as its input (hyper_alpha, one-hot init rotating by pass), writes its
@@ -71,7 +71,7 @@ sample_loop_count(): per-step training loop-count sampling (module-level helper 
   clamped to [1,n] (mass at full depth, occasional shallow pass).
 
 iter_consist (attr, default False): equilibrium internalization (Solve-the-Loop
-  2605.12466: the backbone proposal drifts toward the loop's own fixed point, so
+  2605.12466 — Solve the Loop: Attractor Models for Language and…: the backbone proposal drifts toward the loop's own fixed point, so
   fewer iterations are needed over training; a finite-horizon cousin of NextLat on
   loop iterates). When True and grads are enabled, the forward also computes
   self.last_iter_consist = mean_i MSE(out_i, sg(out_final)) over passes i<n —
@@ -83,7 +83,7 @@ iter_consist (attr, default False): equilibrium internalization (Solve-the-Loop
   supervision harmful for OOD compositional generalization; this is output-space
   self-consistency, not answer supervision, but default it off and A/B it.
 
-Scale note (readout blind-spot, arXiv 2606.24898): conversion training pins the
+Scale note (readout blind-spot, arXiv 2606.24898 — Dense Supervision Is Not Enough: The Readout Blind Spot…): conversion training pins the
   block output's scale to the GDN teacher via block/consolidate MSE, so the
   CE-invisible hidden-norm drift that pure-CE looped LMs suffer is anchored here;
   iter_norm bounds each pass's input and gate_cap bounds each pass's contribution.
@@ -228,7 +228,7 @@ class LoopedRWKV(nn.Module):
                 raise ValueError("cart_anchor and hyper_lanes are alternative loop-dynamics "
                                  "mechanisms (each governs how the carried state evolves); enable one")
             self.cart_gate = nn.Parameter(torch.full((H,), float(cart_gate_init)))
-        # DEQ / 1-step gradient (HRM 2506.21734): train the refinement loop with an O(1)-memory
+        # DEQ / 1-step gradient (HRM 2506.21734 — Hierarchical Reasoning Model (HRM)): train the refinement loop with an O(1)-memory
         # gradient. The forward runs the loop to its fixed point DETACHED (no BPTT), then one graded
         # refinement step (Neumann approx (I-J)^-1 ≈ I). The forward VALUE is unchanged (no_grad and
         # detach don't alter values) — only the gradient graph is cheaper, unlocking many more loop

@@ -1,7 +1,7 @@
 """FSP-BCE: handcrafted future-summary auxiliary loss.
 
 Reference: "Beyond Multi-Token Prediction: Pretraining LLMs with Future
-Summaries" (Mahajan et al. 2025, arXiv:2510.14751). The handcrafted variant
+Summaries" (Mahajan et al. 2025, arXiv:2510.14751 — Beyond Multi-Token Prediction: Pretraining LLMs with…). The handcrafted variant
 (FSP-BCE) predicts, at each position t, a multi-hot "bag of tokens appearing
 in the next tau positions" as a distributional future summary, via weighted
 binary cross-entropy.

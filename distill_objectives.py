@@ -2,19 +2,19 @@
 CROSS-ARCHITECTURE feature & state matching (transformer/GDN teacher -> RWKV student).
 
 Pointwise MSE ‖h_S - h_T‖² assumes the student and teacher share a coordinate basis,
-which different architectures do NOT (cross-arch hidden cosine ~0, 2606.06021). These
+which different architectures do NOT (cross-arch hidden cosine ~0, 2606.06021 — OPRD: On-Policy Representation Distillation). These
 terms instead match DIRECTION / STRUCTURE / DYNAMICS, so the basis/dim mismatch is
 tolerated without a learned projector. All operate on [B,T,C] feature sequences (e.g.
 the block outputs you already compute); add them as extra weighted terms beside your
 block/SMT/DMT MSE (default weights 0 -> opt-in).
 
-  cosine_match   1 - mean per-token cosine            (2602.05262 / 2606.26488)
-  cka_loss       1 - linear CKA of feature Grams       (2606.05682; dim-agnostic)
+  cosine_match   1 - mean per-token cosine            (2602.05262 — ReGLA: Efficient Receptive-Field Modeling with Gated… / 2606.26488 — What Survives When You Compress a Recursive Reasoner for…)
+  cka_loss       1 - linear CKA of feature Grams       (2606.05682 — Beyond Output Matching: Preserving Internal Geometry in…; dim-agnostic)
   flow_loss      PHF transition direction + Gram       (2606.29340; offset/scale/rot-inv)
   OPRDBridge     frozen low-rank PCA subspace match    (2606.06021)
   agreement_weight  trust-region per-token gating       (2606.01249)
   entropy_gated_kl  FKL where teacher uncertain, RKL else (2603.07079; needs teacher logits)
-  carry_fidelity    label-free cosine drift monitor     (2606.26488)
+  carry_fidelity    label-free cosine drift monitor     (2606.26488 — What Survives When You Compress a Recursive Reasoner for…)
   taylor_calibrate_*  closed-form gate-init helpers      (2606.16429; arch-specific wiring)
 """
 from __future__ import annotations
@@ -75,7 +75,7 @@ def agreement_weight(s, t, eps=1e-6):
 
 @torch.no_grad()
 def carry_fidelity(s, t, eps=1e-6):
-    """Label-free drift monitor (2606.26488): cosine fidelity of the pooled feature
+    """Label-free drift monitor (2606.26488 — What Survives When You Compress a Recursive Reasoner for…): cosine fidelity of the pooled feature
     trajectory. Monotonic with accuracy loss; ~<0.8 flags global-dynamics collapse even
     while pointwise block-MSE looks fine. Return a float for the dashboard."""
     s = _flat(s.float().mean(dim=1).unsqueeze(1))

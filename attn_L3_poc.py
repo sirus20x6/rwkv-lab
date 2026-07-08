@@ -115,7 +115,7 @@ def main():
     # --- Two-stage self-distillation (the RADLADS Step-2 this PoC used to defer). Stage 1 = block-align
     #     (block-rel MSE, freeze-most); Stage 2 adds top-k logit-KL against the base model with the core
     #     swapped into the full stack. The freeze-then-self-distill schedule + top-k-logit self-distill
-    #     are the portable pieces of 2605.16928 (a sparse-softmax paper, NOT a linearization recipe). ---
+    #     are the portable pieces of 2605.16928 — Full Attention Strikes Back: Transferring Full Attention… (a sparse-softmax paper, NOT a linearization recipe). ---
     ap.add_argument("--logit-kl", type=float, default=0.0,
                     help="weight for top-k logit-KL self-distillation vs the base model (0=off, block-MSE only).")
     ap.add_argument("--logit-topk", type=int, default=16,
