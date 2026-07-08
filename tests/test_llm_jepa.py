@@ -4,7 +4,7 @@ Run: python test_llm_jepa.py
 """
 import torch
 import torch.nn as nn
-from llm_jepa import LLMJEPA, cosine_jepa_loss, last_token_embedding
+from rwkv_lab.llm_jepa import LLMJEPA, cosine_jepa_loss, last_token_embedding
 
 C, B, T = 32, 4, 10
 

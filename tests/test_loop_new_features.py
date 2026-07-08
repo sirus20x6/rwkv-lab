@@ -5,7 +5,7 @@ routing names, bare-core direct-call safety."""
 import sys, torch, torch.nn as nn
 import numpy as np
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
-from looped_rwkv import LoopedRWKV, sample_loop_count, lora_config_from_sd
+from rwkv_lab.looped_rwkv import LoopedRWKV, sample_loop_count, lora_config_from_sd
 
 torch.manual_seed(0)
 H, G = 128, 8

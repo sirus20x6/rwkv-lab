@@ -4,7 +4,7 @@ Run: pytest tests/test_coconut.py   (or python tests/test_coconut.py)
 """
 import torch
 import torch.nn as nn
-from coconut import coconut_forward, coconut_loss, build_coconut_example, coconut_generate
+from rwkv_lab.coconut import coconut_forward, coconut_loss, build_coconut_example, coconut_generate
 
 C, V, B = 24, 40, 2
 

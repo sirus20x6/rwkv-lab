@@ -13,7 +13,7 @@ Run: python test_spectral_muon_rsav.py   (CPU-only, no GPU/fla needed)
 import copy
 import torch
 
-from spectral_muon import SpectralMuon
+from rwkv_lab.spectral_muon import SpectralMuon
 
 torch.manual_seed(0)
 

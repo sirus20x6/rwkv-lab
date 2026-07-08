@@ -5,7 +5,7 @@ Run: python test_muon_levers.py
 """
 import copy
 import torch
-from spectral_muon import SpectralMuon, himuon_orthogonalize, orthogonalize, _sinkhorn_normalize, _cholesky_qr
+from rwkv_lab.spectral_muon import SpectralMuon, himuon_orthogonalize, orthogonalize, _sinkhorn_normalize, _cholesky_qr
 
 
 def _opt(p, **kw):

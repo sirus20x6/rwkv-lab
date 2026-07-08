@@ -3,7 +3,7 @@
 Run: pytest tests/test_write_sae.py
 """
 import torch
-from write_sae import WriteSAE
+from rwkv_lab.write_sae import WriteSAE
 
 DV, DK, B = 16, 16, 8
 

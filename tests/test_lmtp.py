@@ -4,7 +4,7 @@ Run: python test_lmtp.py
 """
 import torch
 import torch.nn as nn
-from lookahead_module import LeapMTPHead, lmtp_loss, LookaheadSystem
+from rwkv_lab.lookahead_module import LeapMTPHead, lmtp_loss, LookaheadSystem
 
 D, V, B, T = 64, 500, 2, 24
 

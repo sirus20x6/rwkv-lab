@@ -1,6 +1,6 @@
 import sys, torch, torch.nn as nn
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
-from looped_rwkv import LoopedRWKV
+from rwkv_lab.looped_rwkv import LoopedRWKV
 
 torch.manual_seed(0)
 H, G = 128, 8
@@ -35,7 +35,7 @@ with torch.no_grad():
     sc.residual_weight.copy_(torch.tensor([0.0, 0.1, -0.2, 0.3]))
     sc.iter_norm.weight.mul_(1.3)
 y_sc = sc(x)
-import convert_train
+from rwkv_lab import convert_train
 for mode in ("head", "channel", "factored"):
     tgt = LoopedRWKV(core, n_loops=4, gate_mode=mode)
     sd = {k: v.clone() for k, v in sc.state_dict().items() if not k.startswith("core.")}
@@ -75,7 +75,7 @@ for mode in ("scalar", "head", "channel", "factored"):
 print("4) float_gates: fp32 params, bf16 stream, no-op + grads OK")
 
 # 5) assemble_looped: looped convert ckpt is stripped, not double-wrapped
-import assemble_looped
+from rwkv_lab import assemble_looped
 looped_sd = sc.state_dict()  # core.* + residual_weight + iter_norm.weight (trained gates)
 blob = {"student": looped_sd, "codec": {}, "args": {"layer": 7}}
 L, out_sd = assemble_looped._looped_layer(blob, 4)

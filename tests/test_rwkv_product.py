@@ -5,7 +5,7 @@ Run: RWKV8_FORCE_PYREF=1 python test_rwkv_product.py
 import os
 os.environ.setdefault("RWKV8_FORCE_PYREF", "1")
 import torch
-from rwkv_product import RWKVProduct
+from rwkv_lab.rwkv_product import RWKVProduct
 
 C, H, N, T, B = 64, 4, 16, 10, 2
 

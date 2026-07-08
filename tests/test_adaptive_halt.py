@@ -5,8 +5,8 @@ Run: RWKV8_FORCE_PYREF=1 python test_adaptive_halt.py
 import os
 os.environ.setdefault("RWKV8_FORCE_PYREF", "1")
 import torch
-from rwkv8_deltanet import RWKV8TimeMixDeltaNet
-from looped_rwkv import LoopedRWKV
+from rwkv_lab.rwkv8_deltanet import RWKV8TimeMixDeltaNet
+from rwkv_lab.looped_rwkv import LoopedRWKV
 
 C, H, N = 64, 4, 16
 

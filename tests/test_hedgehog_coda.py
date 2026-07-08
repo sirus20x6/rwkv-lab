@@ -6,8 +6,8 @@ import os
 os.environ.setdefault("CODA_NO_COMPILE", "1")   # keep the test CPU/eager and deterministic
 import torch
 import torch.nn.functional as F
-from hedgehog import HedgehogFeatureMap, linear_attn_map, attn_map_ce_loss
-from coda import compile_module, SwiGLU
+from rwkv_lab.hedgehog import HedgehogFeatureMap, linear_attn_map, attn_map_ce_loss
+from rwkv_lab.coda import compile_module, SwiGLU
 
 B, H, T, d = 2, 4, 10, 16
 
