@@ -213,6 +213,54 @@ def top_loss(head: TOPHead, h: torch.Tensor, ids_full: torch.Tensor, window: int
 
 
 # ---------------------------------------------------------------------------
+# L-MTP: leap multi-token prediction (arXiv:2505.17505)
+# ---------------------------------------------------------------------------
+
+class LeapMTPHead(nn.Module):
+    """Medusa-style leap heads: head j predicts the token at offset (j+1)*k + 1, i.e.
+    {k+1, 2k+1, ...} — non-adjacent future positions. Each head is a zero-init residual
+    adapter (z' = z + SiLU(W z + b)) reusing the backbone unembedding, so at init every
+    head == the backbone's next-token predictor evaluated at that leap. The next-token
+    (offset 1) term is the base CE, so these are the n leap heads BEYOND it."""
+
+    def __init__(self, d_model: int, n_heads: int, k: int) -> None:
+        super().__init__()
+        self.k = int(k)
+        self.adapters = nn.ModuleList([nn.Linear(d_model, d_model) for _ in range(n_heads)])
+        for a in self.adapters:
+            nn.init.zeros_(a.weight); nn.init.zeros_(a.bias)
+
+    def offset(self, j: int) -> int:
+        return (j + 1) * self.k + 1                     # j=0 -> k+1, j=1 -> 2k+1, ...
+
+
+def lmtp_loss(head: LeapMTPHead, h: torch.Tensor, ids_full: torch.Tensor,
+              lm_head: nn.Linear, chunk: int = 256) -> torch.Tensor:
+    """Mean CE of the leap heads. h [B,T,D] post-norm; ids_full [B, >=T] token ids.
+    Positions without a valid target at a head's offset are simply dropped (like TOP)."""
+    B, T, D = h.shape
+    hw = lm_head.weight
+    hb = getattr(lm_head, "bias", None)
+    tot = h.new_zeros((), dtype=torch.float32)
+    ntok = 0
+    for j, ad in enumerate(head.adapters):
+        off = head.offset(j)
+        tcov = min(T, ids_full.shape[1] - off)         # positions with a target at this leap
+        if tcov < 1:
+            continue
+        zp = h[:, :tcov] + F.silu(ad(h[:, :tcov]))      # [B,tcov,D]
+        tgt = ids_full[:, off:off + tcov]               # [B,tcov]
+        for s in range(0, tcov, chunk):
+            e = min(s + chunk, tcov)
+            lg = F.linear(zp[:, s:e].reshape(-1, D).float(), hw.float(),
+                          hb.float() if hb is not None else None)
+            tt = tgt[:, s:e].reshape(-1)
+            tot = tot + F.cross_entropy(lg, tt, reduction="sum")
+            ntok += tt.numel()
+    return tot / max(ntok, 1)
+
+
+# ---------------------------------------------------------------------------
 # ConceptLM-style next-concept prediction (adapted as a pure aux)
 # ---------------------------------------------------------------------------
 
@@ -304,6 +352,7 @@ class LookaheadSystem(nn.Module):
                  concept_weight: float = 0.0, concept_chunk: int = 4,
                  concept_segments: int = 8, concept_codes: int = 64,
                  concept_vq_weight: float = 1.0,
+                 lmtp_weight: float = 0.0, lmtp_k: int = 2, lmtp_heads: int = 3,
                  lm_head: Optional[nn.Linear] = None, top_init: str = "lmhead") -> None:
         super().__init__()
         self.nextlat_weight = float(nextlat_weight)
@@ -315,6 +364,9 @@ class LookaheadSystem(nn.Module):
         self.top_window = int(top_window)
         self.top_chunk = int(top_chunk)
         self.kl_chunk = int(kl_chunk)
+        self.lmtp_weight = float(lmtp_weight)
+        self.lmtp = (LeapMTPHead(d_model, int(lmtp_heads), int(lmtp_k))
+                     if self.lmtp_weight > 0 else None)
         if self.nextlat_weight > 0 and self.nextlat_d < 1:
             raise ValueError(f"--nextlat-d must be >= 1, got {self.nextlat_d}")
         if self.nextlat_jump_weight > 0 and self.nextlat_jump_k < 2:
@@ -346,7 +398,8 @@ class LookaheadSystem(nn.Module):
     @property
     def enabled(self) -> bool:
         return (self.nextlat is not None or self.nextlat_jump is not None
-                or self.top is not None or self.concept is not None)
+                or self.top is not None or self.concept is not None
+                or self.lmtp is not None)
 
     @property
     def extra_tokens(self) -> int:
@@ -404,6 +457,10 @@ class LookaheadSystem(nn.Module):
                              chunk=self.top_chunk)
             total = total + self.top_weight * l_top
             out["top"] = float(l_top)
+        if self.lmtp is not None and lm_head is not None:
+            l_lmtp = lmtp_loss(self.lmtp, h_final, ids_full, lm_head, chunk=self.top_chunk)
+            total = total + self.lmtp_weight * l_lmtp
+            out["lmtp"] = float(l_lmtp)
         out["aux_total"] = total
         return out
 
@@ -445,6 +502,12 @@ def add_lookahead_cli(ap) -> None:
                    help="codes per segment N (paper 64; discrete space = N^S)")
     g.add_argument("--concept-vq-weight", type=float, default=1.0,
                    help="VQ codebook-fit loss weight, relative to --concept-weight (paper: equal)")
+    g.add_argument("--lmtp-weight", type=float, default=0.0,
+                   help="L-MTP (2505.17505): weight for the leap multi-token-prediction heads; >0 enables it")
+    g.add_argument("--lmtp-k", type=int, default=2,
+                   help="L-MTP leap stride: head j predicts offset (j+1)*k+1, i.e. {k+1,2k+1,...} (k=1 = dense MTP)")
+    g.add_argument("--lmtp-heads", type=int, default=3,
+                   help="number of L-MTP leap heads beyond next-token")
     g.add_argument("--lookahead-lr", type=float, default=0.0,
                    help="LR for the aux heads' AdamW param group; 0 = same as --lr")
 
@@ -453,7 +516,8 @@ def lookahead_from_args(args, d_model: int, vocab: int,
                         lm_head: Optional[nn.Linear]) -> Optional[LookaheadSystem]:
     if (getattr(args, "nextlat_weight", 0.0) <= 0 and getattr(args, "top_weight", 0.0) <= 0
             and getattr(args, "nextlat_jump_weight", 0.0) <= 0
-            and getattr(args, "concept_weight", 0.0) <= 0):
+            and getattr(args, "concept_weight", 0.0) <= 0
+            and getattr(args, "lmtp_weight", 0.0) <= 0):
         return None
     return LookaheadSystem(
         d_model, vocab,
@@ -468,4 +532,6 @@ def lookahead_from_args(args, d_model: int, vocab: int,
         concept_segments=getattr(args, "concept_segments", 8),
         concept_codes=getattr(args, "concept_codes", 64),
         concept_vq_weight=getattr(args, "concept_vq_weight", 1.0),
+        lmtp_weight=getattr(args, "lmtp_weight", 0.0),
+        lmtp_k=getattr(args, "lmtp_k", 2), lmtp_heads=getattr(args, "lmtp_heads", 3),
         lm_head=lm_head, top_init=args.top_init)
