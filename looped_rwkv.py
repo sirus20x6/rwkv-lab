@@ -213,9 +213,11 @@ class LoopedRWKV(nn.Module):
             nn.init.constant_(self.halt_head.bias, -2.0)   # sigmoid(-2)~0.12: conservative, halt late
         # CART (2606.01495) contractive LTI gate. Each refinement pass multiplies the carried loop
         # state by a learned per-channel sigmoid gate: out = sigmoid(g) ⊙ out + increment. Because
-        # sigmoid(g) ∈ (0,1), the loop map is a contraction (spectral radius < 1) ⇒ it PROVABLY
-        # converges to a fixed point instead of drifting/blowing up as depth grows — CART's measured
-        # early-loop-drift damping, and the precondition for a DEQ/1-step-gradient loop. We adopt only
+        # sigmoid(g) ∈ (0,1), the CARRY term is contractive — it damps the loop's drift/blow-up as
+        # depth grows and biases it toward a fixed point (CART's measured early-loop-drift damping,
+        # and a good precondition for a DEQ/1-step-gradient loop). NB this is a strong prior, not an
+        # unconditional guarantee: the increment depends on `out` too, so a pathological gate could
+        # still cycle; the carry gate makes the linear self-term ϱ<1, not the whole map. We adopt only
         # this gate; CART's frozen-KV cross-attention "anchor" doesn't map to an RWKV recurrent block
         # (no attn KV in the loop body) and the paper's own ablations show it near-vestigial. OFF ⇒
         # bit-identical to the plain loop; ON ⇒ starts near-identity (sigmoid(cart_gate_init)≈0.98).
@@ -295,6 +297,8 @@ class LoopedRWKV(nn.Module):
             names.add("gate_chan")
         if self.loop_index:
             names.add("loop_index_embed")
+        if self.cart_anchor:
+            names.add("cart_gate")
         if self.hyper_lanes:
             names |= {"hyper_alpha", "hyper_mix", "hyper_write", "hyper_read"}
         if self.lora_rank > 0:   # full dotted names: optimizer routing matches named_parameters()
