@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "rwkv-lab"
 version = "0.1.0"
-description = "Cross-architecture LLM conversion, looped recurrence, and memory research on RWKV linear-attention cores."
+description = "An experimental toolbox for SOTA LLM techniques — recurrent-depth loops, latent-prediction objectives, memory/retrieval, Muon-family optimizers, and cross-architecture conversion — on RWKV linear-attention cores."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
