@@ -2,22 +2,31 @@
 
 [![tests](https://github.com/sirus20x6/rwkv-lab/actions/workflows/tests.yml/badge.svg)](https://github.com/sirus20x6/rwkv-lab/actions/workflows/tests.yml)
 
-**Cross-architecture LLM conversion, looped recurrence, and memory research — on RWKV linear-attention cores.**
+**An experimental toolbox for state-of-the-art LLM techniques on RWKV linear-attention cores.**
 
-RWKV-Lab is a research codebase for taking a *pretrained* Transformer / gated-linear-attention model and turning it into an efficient **RWKV-style linear-attention** model — without pretraining from scratch. The headline target is [Qwen3.5-9B-Base](#target-model), a 32-layer hybrid (24 gated-delta-net layers + 8 full-attention layers), which we convert layer-by-layer to RWKV-7/8 kernels and then extend with weight-tied **loops** (recurrent depth), an **Engram** lexical memory bank, and **ROSA** suffix-matching retrieval.
+RWKV-Lab implements a broad, growing set of recent research techniques — recurrent-depth **loops**, **latent-prediction** objectives, **memory / retrieval** modules, **Muon-family optimizers**, and cross-architecture **conversion** — as composable, unit-tested, **off-by-default** levers on RWKV-7/8 cores. Every technique maps to a paper (linked in [References](#references)) and a test; at default flags the code reproduces the plain baseline, so each lever can be A/B'd in isolation.
 
-The through-line: *the RWKV-7 recurrence is expressive enough to absorb a gated-delta-net exactly, and expressive enough to absorb softmax attention with a short distillation.* Everything here is built around exploiting that.
+The lab grew out of one concrete goal — losslessly turning a pretrained Transformer / gated-linear-attention model into RWKV *without* pretraining from scratch — and kept absorbing SOTA ideas from the RWKV research community and the literature. That conversion track is still here (and produced a clean lossless result, below); it's now one capability among several.
 
-<p align="center">
-  <img src="docs/images/conversion_map.png" width="100%" alt="Per-layer conversion map: 22 of 32 layers accepted"><br>
-  <em>Live conversion map — 22/32 layers converted to RWKV and accepted. The 8 dashed cells (L3, L7, … L31) are the full-attention layers still being distilled; the green cells are the gated-delta-net layers, which convert <strong>losslessly</strong>.</em>
-</p>
+## What's in the box
+
+Every entry is an off-by-default lever with a paper and a CPU test. Full index in [References](#references).
+
+| Area | Techniques | Modules |
+|---|---|---|
+| **Recurrent-depth loops** | weight-tied loops · hyper-connections · per-iterate readout · PonderNet halt · CART contractive gate · HRM DEQ / Neumann-k gradient · FPRM fixed-point halt · RWKV-Product multi-substep | [`looped_rwkv`](src/rwkv_lab/looped_rwkv.py) · [`rwkv_product`](src/rwkv_lab/rwkv_product.py) |
+| **Latent prediction** | MTP · MuToR · TOP · NextLat · ConceptLM · FSP · L-MTP · Belief-State · JTP · LLM-JEPA · Coconut continuous-thought | [`lookahead_module`](src/rwkv_lab/lookahead_module.py) · [`llm_jepa`](src/rwkv_lab/llm_jepa.py) · [`coconut`](src/rwkv_lab/coconut.py) |
+| **Memory / retrieval** | Engram lexical bank · ROSA suffix-automaton (+ golden reference) · Fast-weight Product-Key Memory · L³ large-lookup · WriteSAE state autoencoder | [`engram_lmb`](src/rwkv_lab/engram_lmb.py) · [`rosa_sam`](src/rwkv_lab/rosa_sam.py) · [`fwpkm`](src/rwkv_lab/fwpkm.py) · [`l3_lookup`](src/rwkv_lab/l3_lookup.py) · [`write_sae`](src/rwkv_lab/write_sae.py) |
+| **Optimizers & dynamics** | Muon (+ MuonClip) · 12 spectral-Muon levers (Muonᵖ, Aurora, MONA, DDC, RSAV, Hierarchical, Distance-Aware, ARO…) · PC-Layer preconditioning · layerwise-LR · grokking probes | [`spectral_muon`](src/rwkv_lab/spectral_muon.py) · [`muon_helpers`](src/rwkv_lab/muon_helpers.py) · [`pc_layer`](src/rwkv_lab/pc_layer.py) |
+| **Cross-arch conversion** | GDN ⊂ RWKV-7 **lossless** remap · RADLADS distillation (+ logit-KL) · Taylor-Calibrate init · Comba readout · Attention-to-Mamba | [`convert_gdn_lossless`](src/rwkv_lab/convert_gdn_lossless.py) · [`convert_train`](src/rwkv_lab/convert_train.py) · [`attn_L3_poc`](src/rwkv_lab/attn_L3_poc.py) |
+
+All Python lives under `src/rwkv_lab/` (`python -m rwkv_lab.<module>`); a from-scratch Go + SQLite + [Pixi.js](https://pixijs.com/) dashboard ([`dashboard/`](dashboard/)) drives and monitors runs.
 
 ---
 
-## The core result
+## Highlight result — GDN ⊂ RWKV-7 (lossless conversion)
 
-Qwen3.5's linear-attention layers are **gated DeltaNet (GDN)**. We proved — algebraically and end-to-end — that **GDN's gated-delta recurrence is an exact special case of the RWKV-7 `wkv7` kernel** at matched head dimensions:
+The conversion track's anchor result. Qwen3.5's linear-attention layers are **gated DeltaNet (GDN)**. We proved — algebraically and end-to-end — that **GDN's gated-delta recurrence is an exact special case of the RWKV-7 `wkv7` kernel** at matched head dimensions:
 
 ```
 Given GDN kernel inputs (q, k, v, g, β), with q/k L2-normalized:
@@ -35,11 +44,16 @@ That collapses the conversion problem to just the **8 full-attention layers**, w
 
 > **Why this matters:** an earlier version of this project built the RWKV core at head-size 64 against GDN's 32×128, a self-imposed 2:1 state compression that *forced* a whole distillation-and-codec pipeline. The matched-dimension remap makes 24 of 32 layers free. The "RWKV-7 decay floor" that dogged early runs turned out to be a parametrization artifact, not a kernel limit.
 
+<p align="center">
+  <img src="docs/images/conversion_map.png" width="100%" alt="Per-layer conversion map: 22 of 32 layers accepted"><br>
+  <em>Live conversion map — 22/32 layers converted to RWKV and accepted. The 8 dashed cells are the full-attention layers still being distilled; the green cells are the gated-delta-net layers, which convert <strong>losslessly</strong>.</em>
+</p>
+
 ---
 
 ## Screenshots
 
-Training is driven and monitored through **trainboard**, a from-scratch Go + SQLite + [Datastar](https://data-star.dev/) + [Pixi.js](https://pixijs.com/) dashboard ([`dashboard/`](dashboard/)) that ingests every run's `train.jsonl` and paints the whole-model conversion state live.
+Experiments are driven and monitored through **trainboard**, a from-scratch Go + SQLite + [Datastar](https://data-star.dev/) + [Pixi.js](https://pixijs.com/) dashboard ([`dashboard/`](dashboard/)) that ingests every run's `train.jsonl` and paints run state live — loss/PPL curves, per-layer conversion maps, and ablation sweeps across the levers above.
 
 <p align="center">
   <img src="docs/images/loss_curve.png" width="90%" alt="Single-layer conversion loss curve"><br>
@@ -58,9 +72,9 @@ Training is driven and monitored through **trainboard**, a from-scratch Go + SQL
 
 ---
 
-## Target model
+## Conversion track — target model
 
-**Qwen3.5-9B-Base** — a 32-layer, hidden-size-4096 hybrid:
+The conversion levers are developed against **Qwen3.5-9B-Base** — a 32-layer, hidden-size-4096 hybrid (the loop / latent-prediction / memory / optimizer levers are model-agnostic and drop onto any RWKV-7/8 core):
 
 | | Layers | Mechanism | Geometry |
 |---|---|---|---|
@@ -195,16 +209,15 @@ go -C dashboard run ./cmd/trainboard   # http://127.0.0.1:9124
 
 ## Status
 
-| Component | State |
+| Area | State |
 |---|---|
-| GDN → RWKV-7 lossless kernel (24 layers) | ✅ Proven (cosine 0.999995; +0.013% full-model PPL) |
-| Per-layer isolation conversion + sweep | ✅ 22/32 layers converted & accepted |
-| Full-attention → RWKV distillation (8 layers) | 🚧 In progress (RADLADS PoC floors at block-rel 0.234; RoPE/q-norm are the gap) |
-| Assemble + joint consolidation | ✅ Tooling complete |
-| LoopedRWKV, Engram LMB, ROSA | ✅ Modules + tests green; integration ongoing |
-| Next-latent prediction | 🔭 Planned |
+| **Technique levers** (loops, latent prediction, memory, optimizers) | ✅ ~25 implemented as off-by-default levers; **CPU unit tests green in CI** |
+| Conversion: GDN → RWKV-7 lossless kernel (24 layers) | ✅ Proven (cosine 0.999995; +0.013% full-model PPL) |
+| Conversion: per-layer isolation sweep | ✅ 22/32 layers converted & accepted |
+| Conversion: full-attention → RWKV distillation (8 layers) | 🚧 In progress (RADLADS PoC floors at block-rel 0.234; RoPE/q-norm are the gap; two-stage logit-KL added) |
+| End-to-end integration + large-scale validation | 🔭 The honest gap — the levers are built and unit-tested, but **not yet A/B-validated at scale** |
 
-This is an active research codebase, not a released library. Results are reproducible from the scripts here given the base weights; the end-to-end converted 9B model is still being assembled.
+This is an active research codebase, not a released library — a **breadth-first toolbox**: each technique is implemented, cited, and unit-tested in isolation, with default flags reproducing the plain baseline so levers can be A/B'd. The next frontier is validation (running the sweeps), not more levers.
 
 ---
 
