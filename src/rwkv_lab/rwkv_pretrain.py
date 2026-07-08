@@ -39,16 +39,18 @@ class Block(nn.Module):
         self.ln2 = nn.LayerNorm(d)
         core = RWKV8TimeMixDeltaNet(d, num_heads=n_heads, head_size=head_size, layer_idx=i,
                                     depth_layer_id=i, depth_n_layer=max(n_layers, 2),
-                                    is_first_rwkv_layer=True, out_correct=False)  # clean native g070
+                                    is_first_rwkv_layer=(i == 0),   # native cross-layer v-residual
+                                    out_correct=False)              # clean native g070
         self.att = LoopedRWKV(core, hidden_size=d, **loop_kw) if loop_kw else core
         self.ffn = RWKV8ChannelMixDeltaNet(d, layer_idx=i)
 
-    def forward(self, x):
+    def forward(self, x, v_first):
         if self.i == 0:
             x = self.ln0(x)
-        x = x + _unwrap(self.att(self.ln1(x)))
+        a, v_first = self.att(self.ln1(x), v_first=v_first, return_v_first=True)
+        x = x + a
         x = x + _unwrap(self.ffn(self.ln2(x)))
-        return x
+        return x, v_first
 
 
 class RWKV7Small(nn.Module):
@@ -72,8 +74,9 @@ class RWKV7Small(nn.Module):
 
     def forward(self, ids, return_hidden=False):
         x = self.emb(ids)
+        v_first = None                           # layer 0 sets it; later layers lerp toward it
         for b in self.blocks:
-            x = b(x)
+            x, v_first = b(x, v_first)
         h = self.ln_out(x)                       # post-norm final hidden (what aux heads read)
         logits = self.head(h)
         return (logits, h) if return_hidden else logits

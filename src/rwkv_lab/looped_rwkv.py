@@ -399,8 +399,18 @@ class LoopedRWKV(nn.Module):
         loop_trace = kwargs.pop("loop_trace", None)   # list -> append each pass's out (loop_probe.py)
         if loop_trace is None:                        # HF layer call sites can't thread kwargs;
             loop_trace = getattr(self, "_probe_trace", None)  # the probe sets this attr instead
+        # v_first (native cross-layer value residual) is a layer-boundary quantity, constant across
+        # refinement passes: inject it into every core call, capture the block's v_first from pass 1.
+        self._loop_v_first = kwargs.pop("v_first", None)
+        want_vf = bool(kwargs.pop("return_v_first", False))
         return_state = bool(kwargs.get("return_state", False))
-        first = self.core(hidden_states, *args, **kwargs)
+        first = self.core(hidden_states, *args, v_first=self._loop_v_first,
+                          return_v_first=want_vf, **kwargs)
+        if want_vf:
+            vf_out = first[-1]
+            first = first[0] if len(first) == 2 else first[:-1]   # strip v_first for the loop logic
+        else:
+            vf_out = self._loop_v_first
         if return_state:
             out, final_state, new_shift_state = first
         else:
@@ -431,7 +441,7 @@ class LoopedRWKV(nn.Module):
                         inp = inp + self.loop_index_embed[i].to(inp.dtype)
                     if self.lora_rank:
                         self._lora_pass = i
-                    inc = self._t(self.core(self.iter_norm(inp)))
+                    inc = self._t(self.core(self.iter_norm(inp), v_first=self._loop_v_first))
                     if self.cart_anchor:
                         return torch.sigmoid(self.cart_gate).to(inc.dtype) * o \
                             + self._gate(i).to(inc.dtype) * inc
@@ -462,7 +472,7 @@ class LoopedRWKV(nn.Module):
                         inp = inp + self.loop_index_embed[i].to(inp.dtype)
                     if self.lora_rank:
                         self._lora_pass = i               # per-pass adapters on the shared core
-                    inc = self._t(self.core(self.iter_norm(inp)))
+                    inc = self._t(self.core(self.iter_norm(inp), v_first=self._loop_v_first))
                     ginc = self._gate(i).to(inc.dtype) * inc
                     M = self.hyper_mix[i].to(out.dtype)
                     w = self.hyper_write[i].to(out.dtype)
@@ -488,7 +498,7 @@ class LoopedRWKV(nn.Module):
                         inp = inp + self.loop_index_embed[i].to(inp.dtype)
                     if self.lora_rank:
                         self._lora_pass = i
-                    inc = self._t(self.core(self.iter_norm(inp)))
+                    inc = self._t(self.core(self.iter_norm(inp), v_first=self._loop_v_first))
                     if self.cart_anchor:                      # CART contractive LTI gate (ϱ<1)
                         out = torch.sigmoid(self.cart_gate).to(inc.dtype) * out \
                             + self._gate(i).to(inc.dtype) * inc
@@ -534,5 +544,9 @@ class LoopedRWKV(nn.Module):
         if return_state:
             # SMT/DMT supervise the underlying RWKV recurrent memory. The refinement
             # passes are output refinements, not separate target state spaces.
+            if want_vf:
+                return out, final_state, new_shift_state, vf_out
             return out, final_state, new_shift_state
+        if want_vf:
+            return out, vf_out
         return out
