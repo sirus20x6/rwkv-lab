@@ -45,6 +45,7 @@ py-modules = [
     "build_engram_patch",
     "build_memory_targets",
     "build_qwen35_data",
+    "coconut",
     "coda",
     "convert_gdn_lossless",
     "convert_train",
