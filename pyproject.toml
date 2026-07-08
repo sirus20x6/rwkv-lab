@@ -80,6 +80,7 @@ py-modules = [
     "parallel_heads_module",
     "pc_layer",
     "rosa",
+    "rosa_reference",
     "rosa_sam",
     "rosa_soft_layer",
     "rwkv8_deltanet",
@@ -92,6 +93,7 @@ py-modules = [
     "train_mla",
     "train_mla_engram",
     "verify_engram",
+    "write_sae",
 ]
 
 [tool.pytest.ini_options]

@@ -52,6 +52,8 @@ jobs:
             tests/test_taylor_calibrate.py \
             tests/test_fwpkm.py \
             tests/test_l3_lookup.py \
+            tests/test_rosa_reference.py \
+            tests/test_write_sae.py \
             tests/test_hedgehog_coda.py \
             tests/test_loop_invariants.py \
             tests/test_looped_hyper.py \

@@ -235,7 +235,8 @@ Only papers with a concrete implementation or adopted design decision in this re
 **Memory (Engram / ROSA)**
 - [Engram](https://github.com/deepseek-ai/Engram) (DeepSeek; offline conditional memory) → [`engram_lmb.py`](engram_lmb.py)
 - Embedding-memory design rules (param cap, amplification, freq-aware n-grams) → [`engram_lmb_build.py`](engram_lmb_build.py): [Memory Grafting](https://arxiv.org/abs/2605.20948) · [STEM](https://arxiv.org/abs/2601.10639) · [X-GRAM](https://arxiv.org/abs/2604.21724) · [Scaling Embeddings Outperforms Scaling Experts](https://arxiv.org/abs/2601.21204)
-- [ROSA-Tuning: Enhancing Long-Context Modeling via Suffix Matching](https://arxiv.org/abs/2602.02499) → [`rosa.py`](rosa.py), [`rosa_sam.py`](rosa_sam.py)
+- [ROSA-Tuning: Enhancing Long-Context Modeling via Suffix Matching](https://arxiv.org/abs/2602.02499) → [`rosa.py`](rosa.py), [`rosa_sam.py`](rosa_sam.py); [`rosa_reference.py`](rosa_reference.py) is a brute-force golden reference (validated against the canonical 1-bit suffix-automaton per [ROSA-FPGA](https://github.com/KakaruHayate/ROSA-FPGA))
+- [WriteSAE: Sparse Autoencoders for Recurrent State](https://arxiv.org/abs/2605.12770) — a state-interpretability diagnostic: write-shaped rank-1 atoms + a bilinear matched-filter encoder decompose the RWKV recurrent state; matched-norm cache substitution for causal analysis → [`write_sae.py`](write_sae.py)
 - [Fast-weight Product Key Memory](https://arxiv.org/abs/2601.00671) — product-key episodic memory (√N sub-keys, IDW scoring, gated residual) + memorization/addressing objectives → [`fwpkm.py`](fwpkm.py)
 - [L³: Large Lookup Layers](https://arxiv.org/abs/2601.21461) — per-token bank of multiple learned K/V embeddings read by a context-dependent softmax (the hidden state queries the token's own slots), with variable per-token allocation → [`l3_lookup.py`](l3_lookup.py)
 
