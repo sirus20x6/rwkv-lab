@@ -222,6 +222,7 @@ class RWKV8TimeMixDeltaNet(nn.Module):
         rope_theta: float = 1e7,
         rope_frac: float = 0.25,
         comba_decouple: bool = False,
+        out_correct: bool = True,
     ) -> None:
         super().__init__()
         if num_heads * head_size != hidden_size:
@@ -259,6 +260,9 @@ class RWKV8TimeMixDeltaNet(nn.Module):
         # When off, the removal term is unchanged => bit-identical. On => b_fb init 0.5 (Comba's
         # "weaker than write" setting).
         self.comba_decouple = bool(comba_decouple)
+        # Comba r-d*k output-correction is a conversion lever, NOT part of native g070.
+        # out_correct=False omits it entirely => clean native RWKV-7 forward.
+        self.out_correct = bool(out_correct)
         if self.comba_decouple:
             self.comba_b = nn.Parameter(torch.zeros(num_heads))    # sigmoid(0)=0.5
         # Structural stability cap: floor w so the effective per-step decay
@@ -328,7 +332,9 @@ class RWKV8TimeMixDeltaNet(nn.Module):
             # Comba (arXiv:2506.02475) output-correction: query the state with
             # (r - d*k) instead of r. Per-head scalar d, init 0 => exact no-op so
             # existing checkpoints/inits are unchanged until distillation trains it.
-            self.out_correct_d = nn.Parameter(torch.zeros(H))
+            # Omitted entirely for the clean-native g070 forward (out_correct=False).
+            if self.out_correct:
+                self.out_correct_d = nn.Parameter(torch.zeros(H))
 
             # Token-shift: pads ZERO at position 0 along the time dim, drops the
             # last position. With 3D input (B,T,C) ``ZeroPad2d`` pads/crops the
@@ -549,7 +555,8 @@ class RWKV8TimeMixDeltaNet(nn.Module):
         k = self.key(xk)
         v = self.value(xv)
         # Comba output-correction (d init 0 => no-op): r_eff = r - d*k, per head.
-        r = r - self.out_correct_d.repeat_interleave(N).view(1, 1, C) * k
+        if self.out_correct:
+            r = r - self.out_correct_d.repeat_interleave(N).view(1, 1, C) * k
         # RAD-RWKV7 RoPE: rotate r and the write-key k (same cos/sin). kk / k_eff / a / b
         # are computed from k below, so they inherit the rotation (QRWKV7 semantics). The
         # Comba mix above is rotation-equivariant (rotate(r - d*k) == rotate(r) - d*rotate(k)),
@@ -599,9 +606,10 @@ class RWKV8TimeMixDeltaNet(nn.Module):
         out = out.reshape(B * T, C)
         out = self.ln_x(out).view(B, T, C)
 
-        # r_k bonus residual.
+        # r_k bonus residual. Uses k_eff (the k_a-updated key), matching BlinkDL x070 which
+        # reassigns k = k*(1+(a-1)*k_a) before the bonus — NOT the raw key (was a port bug).
         bonus = (
-            (r.view(B, T, H, N) * k.view(B, T, H, N) * self.r_k.view(1, 1, H, N))
+            (r.view(B, T, H, N) * k_eff.view(B, T, H, N) * self.r_k.view(1, 1, H, N))
             .sum(dim=-1, keepdim=True) * v.view(B, T, H, N)
         ).view(B, T, C)
 
