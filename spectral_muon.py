@@ -8,14 +8,14 @@ Per 2D matrix each step:
   1. momentum   m = μ·m + g'            (g' = g + α·EMA(Δg) if MONA)        [2605.26842]
   2. Muon²      m ← m / (√v + ε)        Adam-style precond before NS         [2604.09967]
   3. MuonEq     equilibrate rows/cols of m                                   [2603.28254]
-  4. orthog.    p==0 → Newton–Schulz polar (UVᵀ);  p∈(0,1] → U·Σ^p·Vᵀ (eigh)  [2606.13867]
+  4. orthog.    p==0 → Newton–Schulz polar (UVᵀ);  p∈(0,1] → U·Σ^p·Vᵀ (eigh)  [2606.13867 — Muonᵖ spectral-power orthogonalization]
   5. Aurora     equal-row-norm for tall matrices                            [2606.27715]
   6. MUON+      row/col-normalize the orthogonalized update                 [2602.21545]
   7. scale by `scale·√(max(m,n))` (the repo's MuonClip amplifier) and lr; decoupled WD
 `cubic=True` uses the odd-cubic NS schedule (~1/3 fewer matmuls).            [2606.00371]
 
 RSAV (`rsav=True`) — SpecMuon-inspired relaxed scalar-auxiliary-variable step gate
-[2602.16167, adapted]. A single GLOBAL scalar `r` tracks the gradient "energy"
+[2602.16167 — SpecMuon RSAV, adapted]. A single GLOBAL scalar `r` tracks the gradient "energy"
 E = Σ‖g‖² (over the Muon-routed 2D matrices) via the SAV chain rule, and every
 Muon update this step is scaled by ξ = clamp(r/√(E+C), 1±cap). ξ≈1 at equilibrium
 and dips below 1 when the energy spikes faster than `r` has tracked it — a
@@ -121,7 +121,7 @@ def _rms(x, dim):
 
 
 def _ddc_project(U, W, mode, strength):
-    """Dead-Direction Conditioner (abelian subset, 2606.29176): remove the part of the
+    """Dead-Direction Conditioner (abelian subset, 2606.29176 — DDC (Dead-Direction Conditioner)): remove the part of the
     update U that merely RESCALES channels of W — the per-channel gauge / "dead"
     directions where the loss is flat. 'row' = output-channel scale (RMSNorm-after /
     next-layer rescale gauge), 'col' = input-channel scale (RMSNorm-before), 'both' =

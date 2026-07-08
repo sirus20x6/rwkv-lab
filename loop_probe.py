@@ -3,18 +3,18 @@
 
 Implements the diagnostics the recurrent-depth literature converged on:
 
-  Trajectory (Pappone 2509.23314, per looped layer, per pass k over out^(k)):
+  Trajectory (Pappone 2509.23314 — Two-Scale Latent Dynamics for Recurrent-Depth Transformers, per looped layer, per pass k over out^(k)):
     step_norm[k]   ‖Δ^(k)‖₂, Δ^(k)=out^(k+1)−out^(k)   — expect fast decay if loops refine
     step_cos[k]    cos(Δ^(k), Δ^(k−1))                  — plateau ~0.5-0.65 = complementary updates
     accel[k]       ‖out^(k+1)−2out^(k)+out^(k−1)‖₂      — THE halting signal (two-hit rule)
     accel_rel[k]   ‖Δ^(k)−Δ^(k−1)‖/(‖Δ^(k)‖+‖Δ^(k−1)‖)  — bounded [0,2] scale-free variant
     out_rms[k]     RMS of out^(k)                        — scale drift watch (readout blind spot,
-                                                          2606.24898; block-MSE anchors it in
+                                                          2606.24898 — Dense Supervision Is Not Enough: The Readout Blind Spot…; block-MSE anchors it in
                                                           conversion training, CE-only phases don't)
     cka[k]         linear CKA(out^(k), out^(k+1))        — ~1.0 everywhere = stagnant loops (MeSH)
     dlr            mean cross-layer residual jump ÷ mean in-loop step (two-scale separation, ≫1)
 
-  Depth usefulness (2606.24898): CE / ppl / top1 / mean logit margin with every looped
+  Depth usefulness (2606.24898 — Dense Supervision Is Not Enough: The Readout Blind Spot…): CE / ppl / top1 / mean logit margin with every looped
   layer clamped to K passes, K=1..n_loops. A flat curve = loops do nothing measurable —
   the honest metric (halting "speedup" on a flat curve is vanity).
 

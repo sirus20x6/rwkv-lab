@@ -1,7 +1,7 @@
 """MuToR-inspired register-token auxiliary MTP loss.
 
 Reference: "Multi-Token Prediction Needs Registers" (Gerontopoulos et al. 2025,
-arXiv:2505.10518). The paper interleaves learnable register tokens into the
+arXiv:2505.10518 — MuToR: register-token multi-token prediction). The paper interleaves learnable register tokens into the
 training sequence with custom attention masking so registers see only prior
 real tokens, and real tokens ignore registers; each register at offset d is
 tasked with predicting the token d steps ahead.
