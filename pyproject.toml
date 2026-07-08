@@ -62,6 +62,7 @@ py-modules = [
     "grok_autopilot",
     "grokking_metrics",
     "hedgehog",
+    "l3_lookup",
     "layer_swap",
     "live_controls",
     "llm_jepa",
