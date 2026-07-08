@@ -261,6 +261,55 @@ def lmtp_loss(head: LeapMTPHead, h: torch.Tensor, ids_full: torch.Tensor,
 
 
 # ---------------------------------------------------------------------------
+# Belief State Transformer (ICLR 2025) — cheap forward-only-decoder adapter
+# ---------------------------------------------------------------------------
+
+class BeliefStateHead(nn.Module):
+    """BST aux objective. The decoder's own per-position hidden H[:,i] IS the forward belief
+    state f_i (zero extra params). A SHALLOW backward GRU over reversed token embeddings gives
+    the suffix state b_j = summary of x_{j:T}. A fused head over concat[f_i, b_j] predicts the
+    token AFTER the prefix (x_{i+1}) and the token BEFORE the suffix (x_{j-1}) — the backward
+    'prev' signal is the load-bearing part (its ablation collapses to forward-only). The base
+    unembedding is reused/tied for both logits. Off by default; inference is unchanged."""
+
+    def __init__(self, d_model: int, backward_layers: int = 1) -> None:
+        super().__init__()
+        self.benc = nn.GRU(d_model, d_model, num_layers=int(backward_layers), batch_first=True)
+        self.wn = nn.Linear(2 * d_model, d_model)
+        self.wp = nn.Linear(2 * d_model, d_model)
+
+
+def bst_loss(head: BeliefStateHead, H: torch.Tensor, ids_full: torch.Tensor,
+             embed_tokens: nn.Module, lm_head: nn.Linear, lam: float = 0.25,
+             n_pairs: int = 16) -> torch.Tensor:
+    """H [B,T,C] forward states (reused as f). ids_full [B,>=T]. Samples n_pairs valid (i,j),
+    j>=i+2, and returns lam*CE_next + (1-lam)*CE_prev over them. Backward GRU is the only
+    extra compute; the forward path is untouched."""
+    B, T, C = H.shape
+    if T < 3:
+        return H.new_zeros((), dtype=torch.float32)
+    with torch.no_grad():
+        e = embed_tokens(ids_full[:, :T]).to(H.dtype)     # frozen token features
+    b, _ = head.benc(e.flip(1))
+    b = b.flip(1)                                          # b[:,j] summarizes x_j..x_T
+    i = torch.randint(0, T - 2, (n_pairs,), device=H.device)          # 0..T-3
+    span = (T - 1) - (i + 2)                                          # >= 0
+    j = (i + 2 + (torch.rand(n_pairs, device=H.device) * (span + 1)).long()).clamp(max=T - 1)
+    f_i = H[:, i]                                          # [B,P,C]
+    b_j = b[:, j]                                          # [B,P,C]
+    pair = torch.cat([f_i, b_j], dim=-1)                   # [B,P,2C]
+    hw = lm_head.weight
+    hb = getattr(lm_head, "bias", None)
+    nx = F.linear(F.silu(head.wn(pair)).reshape(-1, C).float(), hw.float(),
+                  hb.float() if hb is not None else None)
+    pv = F.linear(F.silu(head.wp(pair)).reshape(-1, C).float(), hw.float(),
+                  hb.float() if hb is not None else None)
+    tgt_n = ids_full[:, i + 1].reshape(-1)                 # token after prefix
+    tgt_p = ids_full[:, j - 1].reshape(-1)                 # token before suffix (unseen by b_j)
+    return lam * F.cross_entropy(nx, tgt_n) + (1.0 - lam) * F.cross_entropy(pv, tgt_p)
+
+
+# ---------------------------------------------------------------------------
 # ConceptLM-style next-concept prediction (adapted as a pure aux)
 # ---------------------------------------------------------------------------
 
@@ -353,6 +402,8 @@ class LookaheadSystem(nn.Module):
                  concept_segments: int = 8, concept_codes: int = 64,
                  concept_vq_weight: float = 1.0,
                  lmtp_weight: float = 0.0, lmtp_k: int = 2, lmtp_heads: int = 3,
+                 bst_weight: float = 0.0, bst_lambda: float = 0.25, bst_pairs: int = 16,
+                 bst_layers: int = 1,
                  lm_head: Optional[nn.Linear] = None, top_init: str = "lmhead") -> None:
         super().__init__()
         self.nextlat_weight = float(nextlat_weight)
@@ -367,6 +418,10 @@ class LookaheadSystem(nn.Module):
         self.lmtp_weight = float(lmtp_weight)
         self.lmtp = (LeapMTPHead(d_model, int(lmtp_heads), int(lmtp_k))
                      if self.lmtp_weight > 0 else None)
+        self.bst_weight = float(bst_weight)
+        self.bst_lambda = float(bst_lambda)
+        self.bst_pairs = int(bst_pairs)
+        self.bst = (BeliefStateHead(d_model, int(bst_layers)) if self.bst_weight > 0 else None)
         if self.nextlat_weight > 0 and self.nextlat_d < 1:
             raise ValueError(f"--nextlat-d must be >= 1, got {self.nextlat_d}")
         if self.nextlat_jump_weight > 0 and self.nextlat_jump_k < 2:
@@ -399,7 +454,7 @@ class LookaheadSystem(nn.Module):
     def enabled(self) -> bool:
         return (self.nextlat is not None or self.nextlat_jump is not None
                 or self.top is not None or self.concept is not None
-                or self.lmtp is not None)
+                or self.lmtp is not None or self.bst is not None)
 
     @property
     def extra_tokens(self) -> int:
@@ -461,6 +516,11 @@ class LookaheadSystem(nn.Module):
             l_lmtp = lmtp_loss(self.lmtp, h_final, ids_full, lm_head, chunk=self.top_chunk)
             total = total + self.lmtp_weight * l_lmtp
             out["lmtp"] = float(l_lmtp)
+        if self.bst is not None and lm_head is not None:
+            l_bst = bst_loss(self.bst, h_final, ids_full, embed_tokens, lm_head,
+                             lam=self.bst_lambda, n_pairs=self.bst_pairs)
+            total = total + self.bst_weight * l_bst
+            out["bst"] = float(l_bst)
         out["aux_total"] = total
         return out
 
@@ -508,6 +568,12 @@ def add_lookahead_cli(ap) -> None:
                    help="L-MTP leap stride: head j predicts offset (j+1)*k+1, i.e. {k+1,2k+1,...} (k=1 = dense MTP)")
     g.add_argument("--lmtp-heads", type=int, default=3,
                    help="number of L-MTP leap heads beyond next-token")
+    g.add_argument("--bst-weight", type=float, default=0.0,
+                   help="Belief State Transformer (ICLR25): weight for the fwd+bwd next/prev aux; >0 enables it")
+    g.add_argument("--bst-lambda", type=float, default=0.25,
+                   help="BST next-vs-prev mix (lower = more of the load-bearing backward 'prev' signal)")
+    g.add_argument("--bst-pairs", type=int, default=16,
+                   help="BST sampled (prefix,suffix) pairs per step")
     g.add_argument("--lookahead-lr", type=float, default=0.0,
                    help="LR for the aux heads' AdamW param group; 0 = same as --lr")
 
@@ -517,7 +583,8 @@ def lookahead_from_args(args, d_model: int, vocab: int,
     if (getattr(args, "nextlat_weight", 0.0) <= 0 and getattr(args, "top_weight", 0.0) <= 0
             and getattr(args, "nextlat_jump_weight", 0.0) <= 0
             and getattr(args, "concept_weight", 0.0) <= 0
-            and getattr(args, "lmtp_weight", 0.0) <= 0):
+            and getattr(args, "lmtp_weight", 0.0) <= 0
+            and getattr(args, "bst_weight", 0.0) <= 0):
         return None
     return LookaheadSystem(
         d_model, vocab,
@@ -534,4 +601,6 @@ def lookahead_from_args(args, d_model: int, vocab: int,
         concept_vq_weight=getattr(args, "concept_vq_weight", 1.0),
         lmtp_weight=getattr(args, "lmtp_weight", 0.0),
         lmtp_k=getattr(args, "lmtp_k", 2), lmtp_heads=getattr(args, "lmtp_heads", 3),
+        bst_weight=getattr(args, "bst_weight", 0.0),
+        bst_lambda=getattr(args, "bst_lambda", 0.25), bst_pairs=getattr(args, "bst_pairs", 16),
         lm_head=lm_head, top_init=args.top_init)
