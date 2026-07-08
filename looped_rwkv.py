@@ -152,7 +152,8 @@ class LoopedRWKV(nn.Module):
                  gate_mode: str = "scalar", gate_cap: float = 0.0,
                  loop_index: bool = False, hyper_lanes: int = 0,
                  lora_rank: int = 0, lora_targets=("receptance", "key", "value", "output"),
-                 adaptive_halt: bool = False, ponder_prior: float = 0.1):
+                 adaptive_halt: bool = False, ponder_prior: float = 0.1,
+                 cart_anchor: bool = False, cart_gate_init: float = 4.0):
         super().__init__()
         self.core = core
         self.n_loops = int(n_loops)
@@ -210,6 +211,20 @@ class LoopedRWKV(nn.Module):
             self.halt_head = nn.Linear(H, 1)
             nn.init.zeros_(self.halt_head.weight)
             nn.init.constant_(self.halt_head.bias, -2.0)   # sigmoid(-2)~0.12: conservative, halt late
+        # CART (2606.01495) contractive LTI gate. Each refinement pass multiplies the carried loop
+        # state by a learned per-channel sigmoid gate: out = sigmoid(g) ⊙ out + increment. Because
+        # sigmoid(g) ∈ (0,1), the loop map is a contraction (spectral radius < 1) ⇒ it PROVABLY
+        # converges to a fixed point instead of drifting/blowing up as depth grows — CART's measured
+        # early-loop-drift damping, and the precondition for a DEQ/1-step-gradient loop. We adopt only
+        # this gate; CART's frozen-KV cross-attention "anchor" doesn't map to an RWKV recurrent block
+        # (no attn KV in the loop body) and the paper's own ablations show it near-vestigial. OFF ⇒
+        # bit-identical to the plain loop; ON ⇒ starts near-identity (sigmoid(cart_gate_init)≈0.98).
+        self.cart_anchor = bool(cart_anchor)
+        if self.cart_anchor:
+            if self.hyper_lanes:
+                raise ValueError("cart_anchor and hyper_lanes are alternative loop-dynamics "
+                                 "mechanisms (each governs how the carried state evolves); enable one")
+            self.cart_gate = nn.Parameter(torch.full((H,), float(cart_gate_init)))
         if self.lora_rank > 0:
             if self.n_loops < 2:
                 raise ValueError("lora_rank needs n_loops > 1: the adapters live on refinement passes")
@@ -256,6 +271,8 @@ class LoopedRWKV(nn.Module):
             self.gate_chan.data = self.gate_chan.data.float()
         if self.loop_index:
             self.loop_index_embed.data = self.loop_index_embed.data.float()
+        if self.cart_anchor:                       # CART LTI gate: tiny steps, bf16 would swallow them
+            self.cart_gate.data = self.cart_gate.data.float()
         if self.hyper_lanes:
             # anchored at exact 0/1 values; bf16 ulp at 1.0 is ~0.004 — far coarser
             # than the optimizer steps that move these
@@ -395,7 +412,11 @@ class LoopedRWKV(nn.Module):
                     if self.lora_rank:
                         self._lora_pass = i
                     inc = self._t(self.core(self.iter_norm(inp)))
-                    out = out + self._gate(i).to(inc.dtype) * inc
+                    if self.cart_anchor:                      # CART contractive LTI gate (ϱ<1)
+                        out = torch.sigmoid(self.cart_gate).to(inc.dtype) * out \
+                            + self._gate(i).to(inc.dtype) * inc
+                    else:
+                        out = out + self._gate(i).to(inc.dtype) * inc
                     if loop_trace is not None:
                         loop_trace.append(out.detach())
                     if collect:
