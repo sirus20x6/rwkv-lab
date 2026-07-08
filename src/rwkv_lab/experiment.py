@@ -23,6 +23,8 @@ import torch.nn.functional as F
 
 from rwkv_lab.rwkv_pretrain import RWKV7Small
 from rwkv_lab.synthetic_tasks import make_task, Task
+from rwkv_lab.looped_rwkv import LoopedRWKV
+from rwkv_lab import registry
 
 # Lever configs -> LoopedRWKV kwargs ({} = bare core baseline). Add rows to grow the lever set.
 LEVERS = {
@@ -54,6 +56,14 @@ def build(task: Task, d_model, n_layers, head_size, lever) -> RWKV7Small:
 def _masked_ce(logits, y, m):
     ce = F.cross_entropy(logits.reshape(-1, logits.size(-1)), y.reshape(-1), reduction="none")
     return (ce * m.reshape(-1)).sum() / m.sum().clamp_min(1)
+
+
+def loop_gate_stats(model) -> float:
+    """Mean |loop gate| (residual_weight) across LoopedRWKV blocks. ~0 => the loops never engaged
+    (stayed at zero-init identity) — the direct test of whether recurrent depth did anything."""
+    gs = [m.residual_weight.detach().float().abs().mean().item()
+          for m in model.modules() if isinstance(m, LoopedRWKV) and hasattr(m, "residual_weight")]
+    return sum(gs) / len(gs) if gs else 0.0
 
 
 @torch.no_grad()
@@ -95,17 +105,19 @@ def train_eval(task, d_model, n_layers, head_size, lever, seed, device, steps, b
     torch.manual_seed(seed); rng = np.random.default_rng(seed)
     model = build(task, d_model, n_layers, head_size, lever).to(device, torch.bfloat16)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.01)
+    warm = max(1, steps // 20)
     for step in range(steps):
-        w = min(1.0, (step + 1) / 100)                       # warmup
+        w = min(1.0, (step + 1) / warm)                      # warmup
+        cos = 0.5 * (1 + math.cos(math.pi * min(step, steps) / steps))   # 1 -> 0
         for g in opt.param_groups:
-            g["lr"] = lr * w
+            g["lr"] = lr * w * (0.1 + 0.9 * cos)             # warmup then cosine decay to 0.1x
         x, y, m = task.batch(batch, device, rng)
         loss = _masked_ce(model(x).float(), y, m)
         opt.zero_grad(set_to_none=True); loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
     acc = _eval_acc(model, task, batch, device, rng)
-    out = {"loss": float(loss), "acc": acc}
+    out = {"loss": float(loss), "acc": acc, "gate": loop_gate_stats(model)}
     # length-generalization: eval on a 2x-longer task of the same family (train short, test long)
     arg = getattr(task, "L", None) or getattr(task, "n", None)
     if arg:
@@ -153,9 +165,13 @@ def main():
         results[cfg] = {k: _agg([r[k] for r in runs if k in r]) for k in keys}
         results[cfg]["_n"] = len(runs)
         acc_m, acc_s = results[cfg]["acc"]
+        gate = results[cfg].get("gate", (0.0, 0.0))[0]
         print(f"  [{cfg}] preflight {why} | acc {acc_m:.3f}±{acc_s:.3f}"
               + (f" | acc_2x {results[cfg]['acc_2x'][0]:.3f}" if "acc_2x" in results[cfg] else "")
+              + (f" | loop_gate {gate:.3f}{' (INERT)' if gate < 0.02 else ''}" if cfg != "baseline" else "")
               + f"  ({(time.time()-t0):.0f}s)", flush=True)
+        registry.record(args.task, cfg, args.seeds, args.steps,
+                        {k: list(v) for k, v in results[cfg].items() if isinstance(v, tuple)})
 
     # significance vs baseline: |Δmean| > (s_a + s_b) is a real effect above the noise
     if "baseline" in results:
