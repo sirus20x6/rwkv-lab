@@ -1,7 +1,7 @@
 # `convert_train.py` — Training Levers Manual
 
-Reference for the grokking, spectral-optimizer, and distillation-objective levers added
-to the GDN→RWKV conversion trainer. The canonical entrypoint is
+Reference for the loop / recurrent-depth, grokking, spectral-optimizer, and distillation-
+objective levers on the conversion trainer. The canonical entrypoint is
 `python -m rwkv_lab.convert_train`; trainboard launches the same package module.
 
 ## Read this first
@@ -76,6 +76,11 @@ runs the Muon update on 2D matrices and a built-in AdamW on everything else. **W
 | `--sm-nesterov` | `0` | Nesterov momentum on the Muon update. | — | Optional. |
 | `--sm-ns-steps` / `--sm-scale` | `5` / `0.4` | NS iterations / update amplifier `scale·√(max_dim)`. **Live** (`sm_scale`). | — | Leave unless re-calibrating LR. |
 | `--sm-ddc-strength` / `--sm-ddc-mode` | `0.0` / `both` | **DDC** (abelian subset): remove the fraction [0,1] of the update along the **per-channel rescale gauge** (dead directions). Resists over-training collapse, cleaner minima. **Live** (`ddc_strength`). | 2606.29176 | When you see over-training/anti-grokking collapse; the optimizer-level analog of the autopilot. |
+| `--sm-rsav` / `--sm-rsav-c` / `--sm-rsav-cap` / `--sm-rsav-relax` | `0` / `1.0` / `0.2` / `0.0` | **SpecMuon RSAV**: a global scalar-auxiliary-variable `r` tracks gradient energy and gates the step size (ξ, capped) — energy-adaptive without per-param state. | 2602.16167 | Stability under noisy/nonstationary gradients; cheap. |
+| `--sm-tile-size T` | `0` | **Hierarchical/tiled Muon**: block-diagonal Newton–Schulz over T×T tiles (scale → c·√T); replaces the min(m,n) NS cost with `T`. 0 = full-matrix. | 2606.27216 | Very wide matrices where NS is the bottleneck. |
+| `--sm-da-muon` / `--sm-da-eta-max` / `--sm-da-r0` | `0` / `0.01` / `1e-3` | **Distance-Aware Muon**: per-matrix adaptive radius `η = clamp(r̄/√k, η_max)`, `r̄` = running-max ‖W−W₀‖. Adds a W₀ snapshot per matrix. | 2605.18999 | When a fixed LR under-/over-shoots across layers. |
+| `--sm-aro` / `--sm-aro-iters` | `0` / `5` | **ARO-Sinkhorn**: replace NS orthogonalization with a learned rotation (orthogonal-Procrustes) + Sinkhorn base optimizer — a non-orthonormal update (a *mode*, not a knob; NS-on-NS is a no-op). Adds an m×m rotation state. | 2602.09006 | Experimental alternative to orthogonalization. |
+| `--sm-ns-steps-final` | `0` | **Spectral-Scaling** guard: route the readout/output projection to a separate Muon group with THIS many NS steps (e.g. 10) so its fast-shrinking momentum stays orthonormalizable. Frontier-scale concern. | 2606.04058 | Large-scale runs where the final layer's spectrum collapses. |
 
 > The full cross-matrix DDC and the rotation gauge need the model graph; the rotation
 > gauge is ~N/A for RWKV (no softmax attention). What's implemented is the single-matrix
@@ -91,6 +96,30 @@ runs the Muon update on 2D matrices and a built-in AdamW on everything else. **W
 | `--llr` / `--llr-smax` / `--llr-every` / `--llr-active-frac` | `0` / `5.0` / `200` / `0.2` | **LLR**: per-param-group LR multiplier from each group's spectral heavy-tail (Hill-α). **Live** (`llr_smax`). | 2605.22297 | **Consolidation stage** (many layer-groups) — ~N/A on a single layer. Up to 1.5×. |
 | `--hyperball` | `0` | Project each 2D weight back to its initial Frobenius sphere each step — removes WD tuning. | 2606.16899 | Normalized transformers, long/over-trained runs. |
 | `--muon-to-adamw-frac` | `0.0` | River-valley switch: at this fraction of training, switch a muon-family optimizer → AdamW for the refinement tail (Muon is a poor late refiner). | 2606.21514 | The last ~10–20% of a Muon run. |
+
+---
+
+## 4b. Loop / recurrent-depth levers (`LoopedRWKV`)
+
+Weight-tied N-pass refinement wrapped around the RWKV layer. **All exact no-ops at init**
+(zero-init gates ⇒ `--loop-count N` with everything else off is bit-identical to a single pass),
+so any subset can be A/B'd. See [`looped_rwkv.py`](src/rwkv_lab/looped_rwkv.py).
+
+| Flag | Default | What it does | Source |
+|---|---|---|---|
+| `--loop-count N` | `1` | N weight-tied refinement passes (recurrent depth). Refine on a pre-normed `input + running output`. | 2604.21106 |
+| `--loop-gate` / `--loop-gate-cap` | `scalar` / `0` | Gate granularity (scalar/head/channel/factored) + soft spectral-radius cap on the loop's contribution. | OpenMythos |
+| `--loop-index` | off | Per-pass zero-init learned input offset so the tied core can specialize each pass. | OpenMythos |
+| `--loop-hyper K` | `0` | K≥2 hyper-connection lanes at the loop boundary (largest loop-capacity lever; φ 0.45→0.65). | 2409.19606 |
+| `--loop-lora-rank R` | `0` | Per-pass LoRA on the shared core's linears (unshare loop weights), zero-init ⇒ no-op until trained. | (CART/MoDr) |
+| `--loop-sample` | off | Per-step loop-count sampling (uniform / poisson) — dynamic beats fixed depth. | (4 recurrent-depth papers) |
+| `--loop-iter-consist` | off | Equilibrium-internalization: pull each earlier iterate toward the (stop-grad) final one. | 2605.12466 |
+| `--loop-iter-readout` | off | Supervise **every** loop iterate against the teacher target (not just the final). | 2606.24898 |
+| `--loop-adaptive-halt` / `--loop-ponder-weight` / `--loop-ponder-prior` | off | PonderNet per-token adaptive depth: halt head → halt-weighted output + KL-to-geometric ponder loss. | 2107.05407 |
+| `--loop-cart-anchor` / `--loop-cart-gate-init` | off / `4.0` | CART contractive LTI gate `out = σ(g)⊙out + inc` — carry term is a contraction, damping deep-loop drift. Mutually exclusive with `--loop-hyper`. | 2606.01495 |
+| `--loop-deq` / `--loop-deq-window k` | off / `1` | DEQ / 1-step gradient: approach the fixed point detached (no BPTT, O(1) memory) then take k graded steps (Neumann-k). Same forward value; cheaper gradient. Pair with `--loop-cart-anchor`. Incompatible with halt/hyper/iter-consist. | 2506.21734, 2606.18206 |
+| `--loop-fp-halt` / `--loop-fp-tol` / `--loop-fp-min-iters` / `--loop-fp-patience` / `--loop-fp-damp` | off / `1e-3` / `1` / `2` / `0.5` | FPRM fixed-point-residual halting: stop when `‖out−prev‖/‖out‖ < tol` (convergence-based, no learned head), with damped-patience for oscillation. Incompatible with adaptive-halt/hyper/deq. | 2606.18206 |
+| `--loop-lr-mult` / `--loop-anneal-rw` / `--loop-anneal-steps` | `1.0` / off / — | LR multiplier for the loop gates (their own `rwkv_loop` group); optional residual-weight anneal-in schedule. | — |
 
 ---
 

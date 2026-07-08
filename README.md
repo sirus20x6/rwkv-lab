@@ -207,6 +207,44 @@ go -C dashboard run ./cmd/trainboard   # http://127.0.0.1:9124
 
 ---
 
+## Levers & flags
+
+Every technique is an **off-by-default flag** on `python -m rwkv_lab.convert_train` — 150 in all; at default flags the trainer *is* the plain baseline, so turning one on gives a clean A/B. Many are **live-tunable** mid-run from the trainboard panel (no restart). The complete manual — defaults, sources, and "when to use" for each — is [`TRAINING_LEVERS.md`](TRAINING_LEVERS.md); the headline levers:
+
+**Recurrent-depth loops** — wrap the RWKV layer in `LoopedRWKV`
+| Flag | Turns on | Paper |
+|---|---|---|
+| `--loop-count N` | N weight-tied refinement passes | [Iso-Depth Scaling Laws](https://arxiv.org/abs/2604.21106) |
+| `--loop-hyper K` | K hyper-connection lanes at the loop boundary | [Hyper-Connections](https://arxiv.org/abs/2409.19606) |
+| `--loop-iter-readout` | supervise every loop iterate toward the teacher | [Readout Blind Spot](https://arxiv.org/abs/2606.24898) |
+| `--loop-adaptive-halt` | PonderNet per-token adaptive depth | [PonderNet](https://arxiv.org/abs/2107.05407) |
+| `--loop-cart-anchor` | contractive LTI gate (bounds the deep loop) | [CART](https://arxiv.org/abs/2606.01495) |
+| `--loop-deq` (`--loop-deq-window k`) | DEQ 1-step / Neumann-k gradient (O(1) memory) | [HRM](https://arxiv.org/abs/2506.21734) · [FPRM](https://arxiv.org/abs/2606.18206) |
+| `--loop-fp-halt` | fixed-point-residual halting | [FPRM](https://arxiv.org/abs/2606.18206) |
+
+**Optimizer** — `--optimizer spectral_muon` (12 levers, all off; the flagships)
+| Flag | Turns on | Paper |
+|---|---|---|
+| `--sm-spectral-power p` | Muonᵖ fractional-power orthogonalization | [2606.13867](https://arxiv.org/abs/2606.13867) |
+| `--sm-mona` | MONA momentum-Nesterov | [2605.26842](https://arxiv.org/abs/2605.26842) |
+| `--sm-rsav` | SpecMuon gradient-energy adaptation | [2602.16167](https://arxiv.org/abs/2602.16167) |
+| `--sm-tile-size T` | Hierarchical / tiled Newton–Schulz | [2606.27216](https://arxiv.org/abs/2606.27216) |
+| `--sm-da-muon` | Distance-Aware adaptive radius | [2605.18999](https://arxiv.org/abs/2605.18999) |
+| `--sm-aro` | ARO-Sinkhorn (replaces orthogonalization) | [2602.09006](https://arxiv.org/abs/2602.09006) |
+| `--sm-ddc-strength` | Dead-Direction Conditioner | [2606.29176](https://arxiv.org/abs/2606.29176) |
+
+**Distillation & grokking**
+| Flag | Turns on | Paper |
+|---|---|---|
+| `--block-loss rel` | per-token relative-L2 block match (OpenMOSE) | — |
+| `--nuc-weight` | nuclear-norm generalization penalty | [2606.04405](https://arxiv.org/abs/2606.04405) |
+| `--grokfast` | Grokfast slow-gradient amplification | [2405.20233](https://arxiv.org/abs/2405.20233) |
+| `--logit-kl` (attn PoC) | top-k logit self-distillation | [RADLADS](https://arxiv.org/abs/2505.03005) |
+
+**Prediction & memory objectives** are aux heads / standalone modules, not `convert_train` flags: the lookahead heads (L-MTP, Belief-State, JTP, TOP, NextLat, …) are wired via `lookahead_module.lookahead_from_args`; LLM-JEPA, Coconut, L³, FwPKM, and WriteSAE are standalone modules for a paired-data / SFT stage — see [References](#references).
+
+---
+
 ## Status
 
 | Area | State |
