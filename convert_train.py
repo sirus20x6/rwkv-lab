@@ -421,6 +421,8 @@ def build(args):
                              lora_rank=int(getattr(args, "loop_lora_rank", 0)),
                              lora_targets=tuple(t for t in str(getattr(
                                  args, "loop_lora_targets", "")).split(",") if t.strip()),
+                             adaptive_halt=bool(getattr(args, "loop_adaptive_halt", 0)),
+                             ponder_prior=float(getattr(args, "loop_ponder_prior", 0.1)),
                              ).to(device=_p0.device, dtype=_p0.dtype)
         student.float_gates()  # gates stay fp32: bf16 ulp swallows their tiny growth steps
         student.iter_consist = float(getattr(args, "loop_iter_consist", 0.0)) > 0
@@ -1448,6 +1450,10 @@ def train(args):
                     (torch.linalg.vector_norm(to - it.float(), dim=-1)
                      / (torch.linalg.vector_norm(to, dim=-1) + 1e-8)).mean() for it in its]).mean()
                 loss = loss + args.loop_iter_readout * ir_val
+            # PonderNet adaptive-halt regularizer (encourages a sensible halt distribution)
+            pond = getattr(student, "last_ponder", None)
+            if getattr(args, "loop_ponder_weight", 0.0) > 0 and pond is not None:
+                loss = loss + args.loop_ponder_weight * pond
             # relational / alignment-invariant distillation terms (cross-arch: match
             # direction / structure / dynamics, not coordinates). Default weights 0 = off.
             if w_cos > 0.0:
@@ -1821,6 +1827,13 @@ def main():
                          "teacher block target (per-token rel-L2), not just the final pass, so each "
                          "refinement stays decodable. Distinct from --loop-iter-consist (self-supervised). "
                          "0=off. Needs --loop-count>1.")
+    ap.add_argument("--loop-adaptive-halt", type=int, default=0,
+                    help="PonderNet/ACT adaptive per-token loop depth: a halt head weights the passes "
+                         "and the block output becomes the halt-weighted expectation. 0=off. Needs loop-count>1.")
+    ap.add_argument("--loop-ponder-weight", type=float, default=0.0,
+                    help="weight for the PonderNet KL-to-geometric ponder regularizer (with --loop-adaptive-halt).")
+    ap.add_argument("--loop-ponder-prior", type=float, default=0.1,
+                    help="geometric prior halt rate for the ponder loss (higher = prefer fewer passes).")
     ap.add_argument("--loop-lr-mult", type=float, default=1.0,
                     help="LR multiplier for residual_weight (the loop gates, their own 'rwkv_loop' group). "
                          "Default 1x: the refine/warm-start case, where the loop is already trained and should "
