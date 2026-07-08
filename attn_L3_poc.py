@@ -1,4 +1,15 @@
-"""L3 attention -> RWKV-7 conversion proof-of-concept (RADLADS Step-1, freeze-most).
+"""L3 attention -> RWKV-7 conversion proof-of-concept (RADLADS, freeze-most).
+
+Two-stage recipe: Stage 1 = block-align (block-relative MSE, freeze-most) — how far the linear kernel
+gets by matching the attention block's *output*. Stage 2 (--logit-kl) adds the RADLADS Step-2 this PoC
+used to defer: top-k logit self-distillation with the converted core swapped into the full model, KL'd
+against the base model's own top-k logits. The freeze-then-self-distill schedule and the top-k-logit
+self-distillation are the portable ideas from arXiv:2605.16928 ("Full Attention Strikes Back") — note
+that paper is about SPARSE-SOFTMAX attention, NOT linear/RWKV, so it offers no linearization recipe;
+these two training-schedule pieces are the only transferable parts. Block-MSE alone floors ~0.234 (the
+RoPE + per-head q/k-norm the linear kernel can't reproduce); the logit-KL stage is the lever to test
+whether self-distillation on the model's own outputs recovers what block-averaged MSE leaves on the table.
+
 
 Converts ONE full-attention layer (default index 3) of Qwen3.5-9B into an RWKV-7
 core, RADLADS-style:
@@ -101,6 +112,18 @@ def main():
     ap.add_argument("--comba", type=int, default=0,
                     help="Comba (2506.02475): decouple the delta-rule removal strength from the write "
                          "(removal weaker than write). Output-correction is already on via out_correct_d. 0=off.")
+    # --- Two-stage self-distillation (the RADLADS Step-2 this PoC used to defer). Stage 1 = block-align
+    #     (block-rel MSE, freeze-most); Stage 2 adds top-k logit-KL against the base model with the core
+    #     swapped into the full stack. The freeze-then-self-distill schedule + top-k-logit self-distill
+    #     are the portable pieces of 2605.16928 (a sparse-softmax paper, NOT a linearization recipe). ---
+    ap.add_argument("--logit-kl", type=float, default=0.0,
+                    help="weight for top-k logit-KL self-distillation vs the base model (0=off, block-MSE only).")
+    ap.add_argument("--logit-topk", type=int, default=16,
+                    help="top-k for the logit-KL (paper uses top-10 self-distill). Must be >0 when --logit-kl>0.")
+    ap.add_argument("--stage1-frac", type=float, default=0.5,
+                    help="fraction of steps as pure block-align warmup before logit-KL turns on (two-stage).")
+    ap.add_argument("--logit-lr", type=float, default=3e-6,
+                    help="LR during the logit-KL self-distill stage (paper Stage-2: 3e-6).")
     ap.add_argument("--eval-every", type=int, default=100)
     ap.add_argument("--ppl-every", type=int, default=500)
     ap.add_argument("--log-every", type=int, default=10)
@@ -141,15 +164,27 @@ def main():
         cap["y"] = (out[0] if isinstance(out, tuple) else out).detach()
     h1 = attn.register_forward_pre_hook(pre_hook, with_kwargs=True)
     h2 = attn.register_forward_hook(post_hook, with_kwargs=True)
+    ntr = args.train_windows
+    kl_on = args.logit_kl > 0.0
+    if kl_on:
+        assert args.logit_topk > 0, "--logit-topk must be >0 when --logit-kl>0 (full-vocab KL isn't cached)"
     xs, ys = [], []
+    win_ids, tk_v, tk_i = [], [], []                            # for logit-KL: window token ids + teacher top-k
     for i, s in enumerate(starts):
-        ids = torch.as_tensor(np.asarray(toks[s:s + T], dtype=np.int64), device=dev).unsqueeze(0)
+        w = np.asarray(toks[s:s + T], dtype=np.int64)
+        ids = torch.as_tensor(w, device=dev).unsqueeze(0)
         with torch.no_grad():
-            model(input_ids=ids, use_cache=False)
+            out = model(input_ids=ids, use_cache=False)
+            if kl_on and i < ntr:                              # cache teacher top-k logits over train windows
+                v, idx = out.logits[0].float().topk(args.logit_topk, dim=-1)   # [T, k]
+                win_ids.append(torch.as_tensor(w)); tk_v.append(v.cpu()); tk_i.append(idx.cpu())
+            del out                                            # free the ~0.5GiB logits ModelOutput each window
         xs.append(cap["x"][0].to("cpu")); ys.append(cap["y"][0].to("cpu"))
     h1.remove(); h2.remove()
     X = torch.stack(xs); Y = torch.stack(ys)                    # [n_all, T, C] cpu bf16
-    ntr = args.train_windows
+    if kl_on:
+        WIN = torch.stack(win_ids); TKv = torch.stack(tk_v); TKi = torch.stack(tk_i)   # [ntr,T] / [ntr,T,k]
+        print(f"logit-KL: cached teacher top-{args.logit_topk} over {ntr} windows", flush=True)
     Xtr, Ytr, Xva, Yva = X[:ntr], Y[:ntr], X[ntr:], Y[ntr:]
     base_block = rel_loss(Xva.to(dev), Yva.to(dev)).item()      # identity baseline (how big is the attn residual)
     print(f"cached: train {tuple(Xtr.shape)} val {tuple(Xva.shape)}  (identity rel {base_block:.4f})", flush=True)
@@ -235,23 +270,48 @@ def main():
             core.train()
         return math.exp(tot_loss / tot_tok)
 
-    # ---- Phase 3: train (block-align), log to dashboard ----
+    # ---- Phase 3: two-stage train. Stage 1 = block-align (freeze-most block-rel MSE); Stage 2 adds
+    #      top-k logit-KL self-distillation with the core swapped into the full stack. ----
+    stage1_steps = int(args.steps * args.stage1_frac) if kl_on else args.steps
+
+    def logit_kl_step():
+        """Top-k logit-KL: swap the core into L{L}, forward cached windows, KL vs the base model's
+        cached top-k teacher logits. Grad flows only to the trainable (unfrozen) core params."""
+        bi = rng.choice(ntr, size=args.batch, replace=False)
+        ids = WIN[bi].to(dev)                                    # [b, T]
+        ti = TKi[bi].to(dev); tv = TKv[bi].to(dev)              # [b, T, k] teacher top-k idx / logits
+        orig = layers[L].self_attn
+        layers[L].self_attn = _RWKVAttnAdapter(core)             # grad-enabled: core is trainable
+        try:
+            slog = model(input_ids=ids, use_cache=False).logits.float()   # [b, T, V]
+        finally:
+            layers[L].self_attn = orig
+        s_at = slog.gather(-1, ti)                               # student logits at teacher's top-k tokens
+        tp = tv.softmax(-1)                                      # KL( teacher_topk || student_topk )
+        return (tp * (tp.clamp_min(1e-9).log() - s_at.log_softmax(-1))).sum(-1).mean()
+
     core.train()
     t0 = time.time(); seen = 0
     idx = np.arange(ntr)
-    print("start training (block-align, freeze-most) ...", flush=True)
+    print(f"start training: stage1(block-align)={stage1_steps} steps"
+          + (f", stage2(logit-KL top-{args.logit_topk}, w={args.logit_kl})={args.steps - stage1_steps}"
+             if kl_on else "") + " ...", flush=True)
     for step in range(args.steps + 1):
         frac = step / max(args.steps, 1)
-        lr = args.lr_final + 0.5 * (args.lr - args.lr_final) * (1 + math.cos(math.pi * frac))
+        in_stage2 = kl_on and step >= stage1_steps
+        lr = args.logit_lr if in_stage2 else \
+            args.lr_final + 0.5 * (args.lr - args.lr_final) * (1 + math.cos(math.pi * frac))
         for g in opt.param_groups: g["lr"] = lr
 
         if step % args.eval_every == 0:
             vb = val_block()
             rec = {"kind": "eval", "step": step, "block_val": vb, "loss": vb}
+            if kl_on: rec["stage"] = 2 if in_stage2 else 1    # extra key only when the two-stage path is active
             if step % args.ppl_every == 0:
                 rec["ppl"] = full_ppl()
             emit(rec)
-            msg = f"[{step}] val_block={vb:.4f}" + (f" ppl={rec['ppl']:.4f}" if "ppl" in rec else "")
+            msg = f"[{step}]" + (f" s{rec['stage']}" if kl_on else "") + f" val_block={vb:.4f}" \
+                + (f" ppl={rec['ppl']:.4f}" if "ppl" in rec else "")
             print(msg, flush=True)
 
         if step == args.steps:
@@ -259,16 +319,19 @@ def main():
         bi = rng.choice(idx, size=args.batch, replace=False)
         xb = Xtr[bi].to(dev); yb = Ytr[bi].to(dev)
         o = core(xb); o = o[0] if isinstance(o, tuple) else o
-        block = rel_loss(o, yb)
-        blk = float(block.detach())
+        block = rel_loss(o, yb)                                  # block-rel MSE anchors both stages
+        kl = logit_kl_step() if in_stage2 else None
+        loss = block + (args.logit_kl * kl if kl is not None else 0.0)
         opt.zero_grad(set_to_none=True)
-        block.backward()
+        loss.backward()
         gn = torch.nn.utils.clip_grad_norm_([p for p in core.parameters() if p.requires_grad], 1.0)
         opt.step()
         seen += xb.shape[0] * T
         if step % args.log_every == 0:
-            emit({"kind": "train", "step": step, "loss": blk, "block": blk,
-                  "lr": lr, "gnorm": float(gn), "tok_per_sec": int(seen / max(time.time() - t0, 1e-6))})
+            rec = {"kind": "train", "step": step, "loss": float(loss.detach()), "block": float(block.detach()),
+                   "lr": lr, "gnorm": float(gn), "tok_per_sec": int(seen / max(time.time() - t0, 1e-6))}
+            if kl is not None: rec["logit_kl"] = float(kl.detach())
+            emit(rec)
 
     torch.save({"core": core.state_dict(), "layer": L, "freeze": args.freeze,
                 "num_heads": n_q, "head_size": hd}, os.path.join(args.out, "core_final.pt"))
