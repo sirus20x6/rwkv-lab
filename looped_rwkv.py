@@ -151,7 +151,8 @@ class LoopedRWKV(nn.Module):
     def __init__(self, core, n_loops: int = 4, hidden_size: int | None = None,
                  gate_mode: str = "scalar", gate_cap: float = 0.0,
                  loop_index: bool = False, hyper_lanes: int = 0,
-                 lora_rank: int = 0, lora_targets=("receptance", "key", "value", "output")):
+                 lora_rank: int = 0, lora_targets=("receptance", "key", "value", "output"),
+                 adaptive_halt: bool = False, ponder_prior: float = 0.1):
         super().__init__()
         self.core = core
         self.n_loops = int(n_loops)
@@ -196,6 +197,19 @@ class LoopedRWKV(nn.Module):
         self._lora_pass = 0                                # 0 = bare shared core (pass 1 / direct calls)
         self.iter_consist = False                          # trainer-set; see module docstring
         self.last_iter_consist = None                      # fp32 scalar after a consist forward
+        # PonderNet/ACT-style adaptive per-token loop depth (MoDr's title notwithstanding, MoDr is
+        # a branch-router; the halt mechanism is PonderNet/ACT). A halt head emits a per-token halt
+        # prob at each pass; the output is the halt-weighted expectation over passes and a KL-to-
+        # geometric ponder loss (self.last_ponder) is exposed to the trainer. Off => bit-identical.
+        self.adaptive_halt = bool(adaptive_halt)
+        self.ponder_prior = float(ponder_prior)
+        self.last_ponder = None
+        if self.adaptive_halt:
+            if self.n_loops < 2:
+                raise ValueError("adaptive_halt needs n_loops > 1 (nothing to halt over)")
+            self.halt_head = nn.Linear(H, 1)
+            nn.init.zeros_(self.halt_head.weight)
+            nn.init.constant_(self.halt_head.bias, -2.0)   # sigmoid(-2)~0.12: conservative, halt late
         if self.lora_rank > 0:
             if self.n_loops < 2:
                 raise ValueError("lora_rank needs n_loops > 1: the adapters live on refinement passes")
@@ -296,6 +310,29 @@ class LoopedRWKV(nn.Module):
         _gate(i) is 0-dim for scalar and [C] otherwise, so a single stack covers both."""
         return torch.stack([self._gate(i) for i in range(self.n_loops)])
 
+    def _ponder_combine(self, iters):
+        """PonderNet halt-weighted combination of the per-pass outputs iters (pass 1..N).
+        Returns the expected output y = sum_n p_n * out_n and sets self.last_ponder to the
+        KL of the halt distribution to a geometric(ponder_prior) prior (under grad only)."""
+        N = len(iters)
+        lam = [torch.sigmoid(self.halt_head(o.float())) for o in iters]   # [B,T,1] halt prob/pass
+        c = torch.ones_like(lam[0])
+        ps, y = [], torch.zeros_like(iters[0], dtype=torch.float32)
+        for n in range(N):
+            p = c if n == N - 1 else c * lam[n]        # last pass absorbs the remaining mass
+            ps.append(p)
+            y = y + p * iters[n].float()
+            c = c * (1.0 - lam[n])
+        if torch.is_grad_enabled():
+            P = torch.stack([p.squeeze(-1) for p in ps], 0)              # [N,B,T]
+            pr = self.ponder_prior
+            g = torch.tensor([pr * (1 - pr) ** n for n in range(N)], device=P.device, dtype=P.dtype)
+            g = (g / g.sum()).clamp_min(1e-8)
+            self.last_ponder = (P * ((P + 1e-8).log() - g.log().view(N, 1, 1))).sum(0).mean()
+        else:
+            self.last_ponder = None
+        return y
+
     def forward(self, hidden_states, *args, **kwargs):
         skip_refine = bool(kwargs.pop("skip_refine", False))
         loop_trace = kwargs.pop("loop_trace", None)   # list -> append each pass's out (loop_probe.py)
@@ -312,7 +349,8 @@ class LoopedRWKV(nn.Module):
         # Readout-Blind-Spot fix 2606.24898 — the trainer supervises each iterate vs the
         # teacher target) is active.
         keep_iters = getattr(self, "keep_iterates", False)
-        collect = ((self.iter_consist or keep_iters) and torch.is_grad_enabled()
+        want_collect = self.iter_consist or keep_iters or self.adaptive_halt
+        collect = (want_collect and (torch.is_grad_enabled() or self.adaptive_halt)
                    and not skip_refine and self.n_loops > 1)
         consist = collect and self.iter_consist       # consistency loss only when requested
         iters = [out] if collect else None            # NON-detached (unlike loop_trace)
@@ -376,6 +414,10 @@ class LoopedRWKV(nn.Module):
         # each iterate against the EXTERNAL teacher target (distinct from iter_consist, which
         # is self-supervised toward the student's own final). None unless keep_iterates is set.
         self.last_iterates = iters if collect else None
+        # PonderNet adaptive halting: replace the output with the halt-weighted expectation over
+        # passes (uses the same non-detached per-pass outputs) and expose the ponder loss.
+        if self.adaptive_halt and iters is not None and len(iters) > 1 and not skip_refine:
+            out = self._ponder_combine(iters).to(out.dtype)
         if return_state:
             # SMT/DMT supervise the underlying RWKV recurrent memory. The refinement
             # passes are output refinements, not separate target state spaces.
