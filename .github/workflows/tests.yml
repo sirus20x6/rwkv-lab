@@ -60,4 +60,5 @@ jobs:
             tests/test_loop_cart.py \
             tests/test_loop_deq.py \
             tests/test_loop_fprm.py \
-            tests/test_loop_new_features.py
+            tests/test_loop_new_features.py \
+            tests/test_synthetic_tasks.py
