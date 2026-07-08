@@ -39,7 +39,7 @@ class Block(nn.Module):
         self.ln2 = nn.LayerNorm(d)
         core = RWKV8TimeMixDeltaNet(d, num_heads=n_heads, head_size=head_size, layer_idx=i,
                                     depth_layer_id=i, depth_n_layer=max(n_layers, 2),
-                                    is_first_rwkv_layer=True)
+                                    is_first_rwkv_layer=True, out_correct=False)  # clean native g070
         self.att = LoopedRWKV(core, hidden_size=d, **loop_kw) if loop_kw else core
         self.ffn = RWKV8ChannelMixDeltaNet(d, layer_idx=i)
 
