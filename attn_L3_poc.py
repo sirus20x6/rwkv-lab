@@ -93,6 +93,8 @@ def main():
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--lr-final", type=float, default=1e-5)     # RADLADS cosine 1e-3 -> 1e-5
     ap.add_argument("--freeze", choices=["most", "all"], default="most")
+    ap.add_argument("--rope", type=int, default=0,
+                    help="RAD-RWKV7: graft the teacher's RoPE onto r/k (the untransferred gap). 0=off.")
     ap.add_argument("--eval-every", type=int, default=100)
     ap.add_argument("--ppl-every", type=int, default=500)
     ap.add_argument("--log-every", type=int, default=10)
@@ -147,8 +149,16 @@ def main():
     print(f"cached: train {tuple(Xtr.shape)} val {tuple(Xva.shape)}  (identity rel {base_block:.4f})", flush=True)
 
     # ---- Phase 2: build RWKV core, RADLADS init, freeze-most ----
+    # RAD-RWKV7: mirror the teacher's RoPE (Qwen3.5 attention uses partial rotary + theta).
+    tcfg = getattr(model.config, "text_config", model.config)
+    rope_theta = float(getattr(tcfg, "rope_theta", 1e7))
+    rope_frac = float(getattr(tcfg, "partial_rotary_factor", 0.25))
     core = RWKV8TimeMixDeltaNet(C, num_heads=n_q, head_size=hd, layer_idx=L,
-                                depth_layer_id=L, depth_n_layer=model.config.num_hidden_layers).to(dev, dtype)
+                                depth_layer_id=L, depth_n_layer=model.config.num_hidden_layers,
+                                use_rope=bool(args.rope), rope_theta=rope_theta,
+                                rope_frac=rope_frac).to(dev, dtype)
+    if args.rope:
+        print(f"RAD-RWKV7 RoPE: on (theta={rope_theta:g}, frac={rope_frac:g}, rope_dim={core.rope_dim})", flush=True)
     filled = radlads_init(core, attn, n_q, n_kv, hd)
     print("RADLADS init:", filled, flush=True)
     if args.freeze == "most":
