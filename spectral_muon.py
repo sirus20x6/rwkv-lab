@@ -137,6 +137,48 @@ def _ddc_project(U, W, mode, strength):
     return out
 
 
+def himuon_orthogonalize(G, steps=5, tile=512, cubic=False):
+    """Hierarchical/Tiled Muon (2606.27216): block-diagonal Newton-Schulz. Pad G [H,W] to a grid
+    of tile×tile blocks, run the SAME quintic NS INDEPENDENTLY on each block (each Frobenius-
+    normalized on its own), reassemble, strip padding. Returns the (unscaled) update — the caller
+    uses scale c·√tile, NOT c·√max(H,W). Cheaper: replaces the min(H,W) NS factor with `tile`."""
+    H, W = G.shape[-2], G.shape[-1]
+    T = int(tile)
+    R, C = (H + T - 1) // T, (W + T - 1) // T
+    Gp = G.new_zeros(R * T, C * T)
+    Gp[:H, :W] = G
+    tiles = Gp.reshape(R, T, C, T).permute(0, 2, 1, 3).reshape(R * C, T, T).bfloat16()
+    n = tiles.flatten(1).norm(dim=1).clamp_min(1e-7).view(-1, 1, 1)
+    X = tiles / n
+    X = _ns_cubic(X, steps) if cubic else _ns_quintic(X, steps)   # batched over the tile axis
+    Up = X.reshape(R, C, T, T).permute(0, 2, 1, 3).reshape(R * T, C * T)
+    return Up[:H, :W]
+
+
+def _sinkhorn_normalize(X, iters=5):
+    """f_Sink (ARO): `iters` rounds of row-then-col L2 normalization. Rotation-NON-equivariant,
+    so ARO's rotate→f→rotate-back actually does something (unlike orthogonalization)."""
+    for _ in range(iters):
+        X = X / (X.norm(dim=1, keepdim=True) + 1e-8)
+        X = X / (X.norm(dim=0, keepdim=True) + 1e-8)
+    return X
+
+
+def _cholesky_qr(A, eps=1e-6):
+    """Shifted Cholesky-QR: Q-factor of A [m,m] via P=AᵀA+εI=LLᵀ, Q=A·L⁻ᵀ. Falls back to dense QR
+    on a non-finite result (near-singular A)."""
+    m = A.shape[-1]
+    P = A.transpose(-1, -2) @ A + eps * torch.eye(m, device=A.device, dtype=A.dtype)
+    try:
+        L = torch.linalg.cholesky(P)
+        Q = torch.linalg.solve_triangular(L, A.transpose(-1, -2), upper=False).transpose(-1, -2)
+        if torch.isfinite(Q).all():
+            return Q
+    except Exception:
+        pass
+    return torch.linalg.qr(A).Q
+
+
 class SpectralMuon(Optimizer):
     def __init__(self, param_groups, *, momentum=0.95, nesterov=False,
                  ns_steps=5, cubic=False, spectral_power=0.0, power_method="eigh",
@@ -145,6 +187,8 @@ class SpectralMuon(Optimizer):
                  mona=False, mona_beta=0.9, mona_alpha=0.1, scale=0.4,
                  ddc_strength=0.0, ddc_mode="both",
                  rsav=False, rsav_c=1.0, rsav_cap=0.2, rsav_relax=0.0,
+                 tile_size=0, da_muon=False, da_eta_max=0.01, da_r0=1e-3,
+                 aro=False, aro_sink_iters=5,
                  weight_decay=0.0, adam_betas=(0.9, 0.95), adam_eps=1e-8):
         defaults = dict(momentum=momentum, nesterov=nesterov, ns_steps=ns_steps, cubic=cubic,
                         spectral_power=spectral_power, power_method=power_method, second_moment=second_moment,
@@ -152,6 +196,8 @@ class SpectralMuon(Optimizer):
                         plus_norm=plus_norm, row_uniform=row_uniform, mona=mona,
                         mona_beta=mona_beta, mona_alpha=mona_alpha, scale=scale,
                         ddc_strength=ddc_strength, ddc_mode=ddc_mode,
+                        tile_size=tile_size, da_muon=da_muon, da_eta_max=da_eta_max, da_r0=da_r0,
+                        aro=aro, aro_sink_iters=aro_sink_iters,
                         weight_decay=weight_decay, adam_betas=adam_betas, adam_eps=adam_eps,
                         use_muon=False, lr=3e-4)
         super().__init__(param_groups, defaults)
@@ -240,25 +286,68 @@ class SpectralMuon(Optimizer):
             u = u / _rms(u, 1)
         if "C" in eq:
             u = u / _rms(u, 0)
-        o = orthogonalize(u, steps=grp["ns_steps"], cubic=grp["cubic"],
-                          power=grp["spectral_power"], power_method=grp["power_method"]).to(p.dtype)
-        if grp["row_uniform"] and o.size(0) >= o.size(1):  # Aurora (tall matrices)
-            o = o / _rms(o, 1)
-        pn = grp["plus_norm"]                              # MUON+ (post-orthogonalization)
-        if pn == "row":
-            o = o / _rms(o, 1)
-        elif pn == "col":
-            o = o / _rms(o, 0)
-        if grp["ddc_strength"] > 0.0:                      # DDC: project out the rescale gauge
-            o = _ddc_project(o, p, grp["ddc_mode"], grp["ddc_strength"])
-        scale = grp["scale"] * (max(p.shape) ** 0.5)
+        # --- transform stage: ARO (replaces NS) | Hierarchical tiled NS | standard NS/power ---
+        if grp["aro"]:                                     # ARO-Sinkhorn: non-orthonormal update
+            o, base_scale = self._aro_update(u, p, st, grp)   # (Aurora/MUON+/DDC don't apply)
+        else:
+            tile = int(grp["tile_size"])
+            tiling = 0 < tile < max(p.shape)               # Hierarchical Muon (tiled NS)
+            if tiling:
+                o = himuon_orthogonalize(u, grp["ns_steps"], tile, grp["cubic"]).to(p.dtype)
+            else:
+                o = orthogonalize(u, steps=grp["ns_steps"], cubic=grp["cubic"],
+                                  power=grp["spectral_power"], power_method=grp["power_method"]).to(p.dtype)
+            if grp["row_uniform"] and o.size(0) >= o.size(1):  # Aurora (tall matrices)
+                o = o / _rms(o, 1)
+            pn = grp["plus_norm"]                          # MUON+ (post-orthogonalization)
+            if pn == "row":
+                o = o / _rms(o, 1)
+            elif pn == "col":
+                o = o / _rms(o, 0)
+            if grp["ddc_strength"] > 0.0:                  # DDC: project out the rescale gauge
+                o = _ddc_project(o, p, grp["ddc_mode"], grp["ddc_strength"])
+            base_scale = grp["scale"] * ((tile if tiling else max(p.shape)) ** 0.5)  # HiMuon: √tile
+        eta = self._da_eta(p, st, grp) if grp["da_muon"] else 1.0   # Distance-Aware radius
         if grp["weight_decay"]:
             p.mul_(1.0 - lr * grp["weight_decay"])
-        alpha = -lr * scale * xi                            # xi==1.0 (default) ⇒ exactly vanilla
+        alpha = -lr * base_scale * xi * eta                # all defaults (1.0) ⇒ exactly vanilla
         p.add_(o, alpha=alpha)
         if self.rsav and self._rsav_dE is not None:         # SAV chain rule: dE ≈ Σ ⟨g, Δx⟩
             d = (g.float() * o.float()).sum().to(self._rsav_dE.device)  # multi-device safe; no-op single-device
             self._rsav_dE.add_(d, alpha=alpha)
+
+    def _da_eta(self, p, st, grp):
+        """Distance-Aware Muon (2605.18999) adaptive radius: η = clamp(r̄/√(k+1), 0, η_max), with
+        r̄ the running-MAX Frobenius distance ‖W − W0‖ from the optimizer's starting weight. Adds
+        one W0 snapshot per matrix. (W0 = weight at first step; = init for a fresh run.)"""
+        if "da_W0" not in st:
+            st["da_W0"] = p.detach().float().clone()
+            st["da_rbar"] = float(grp["da_r0"])
+            st["da_k"] = 0
+        st["da_k"] += 1
+        d = (p.detach().float() - st["da_W0"]).norm().item()
+        st["da_rbar"] = max(st["da_rbar"], d)
+        return min(st["da_rbar"] / (st["da_k"] ** 0.5), float(grp["da_eta_max"]))
+
+    def _aro_update(self, u, p, st, grp):
+        """ARO-Sinkhorn (2602.09006): rotate momentum into a learned frame R, apply Sinkhorn
+        row/col normalization there (rotation-NON-equivariant, so — unlike on NS orthogonalization,
+        where ARO is a no-op — this actually reshapes the update), rotate back. Persistent R (m×m)
+        is re-estimated each step by orthogonal Procrustes (shifted Cholesky-QR). Returns the
+        unit-Frobenius update and ARO's own RMS budget scale 0.2·√(mn)."""
+        M = u.float()
+        m_dim = M.shape[0]
+        if "aro_R" not in st:
+            st["aro_R"] = torch.eye(m_dim, device=M.device, dtype=torch.float32)
+        R = st["aro_R"]
+        it = int(grp["aro_sink_iters"])
+        z_prev = _sinkhorn_normalize(R.t() @ M, it)          # base-opt output in the OLD frame
+        R = _cholesky_qr(M @ z_prev.t())                     # new rotation (SO(m))
+        st["aro_R"].copy_(R)
+        dW = R @ _sinkhorn_normalize(R.t() @ M, it)          # rotate → f_Sink → rotate back
+        dW = dW / (dW.norm() + 1e-12)                        # unit Frobenius
+        base_scale = 0.2 * float(M.shape[0] * M.shape[1]) ** 0.5   # ARO's AdamW-budget RMS match
+        return dW.to(p.dtype), base_scale
 
     def _adam_step(self, p, g, grp, st):
         b1, b2 = grp["adam_betas"]; eps = grp["adam_eps"]; lr = grp["lr"]
