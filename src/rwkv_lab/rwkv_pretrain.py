@@ -83,6 +83,7 @@ def loop_kwargs(a):
     if not any_on:
         return {}
     return dict(n_loops=max(a.loop_count, 2), hyper_lanes=a.loop_hyper,
+                gate_mode=a.loop_gate, gate_cap=a.loop_gate_cap,
                 cart_anchor=bool(a.loop_cart_anchor), loop_deq=bool(a.loop_deq),
                 deq_window=a.loop_deq_window, fixed_point_halt=bool(a.loop_fp_halt),
                 adaptive_halt=bool(a.loop_adaptive_halt))
@@ -102,6 +103,8 @@ def main():
     # loop levers
     ap.add_argument("--loop-count", type=int, default=1)
     ap.add_argument("--loop-hyper", type=int, default=0)
+    ap.add_argument("--loop-gate", default="scalar", choices=["scalar", "head", "channel", "factored"])
+    ap.add_argument("--loop-gate-cap", type=float, default=0.0)
     ap.add_argument("--loop-deq-window", type=int, default=1)
     for f in ["loop-cart-anchor", "loop-deq", "loop-fp-halt", "loop-adaptive-halt", "loop-iter-readout"]:
         ap.add_argument(f"--{f}", type=int, default=0)
@@ -119,7 +122,8 @@ def main():
     tag = f"scratch-L{args.n_layers}d{args.d_model}-loop{args.loop_count}" + \
           ("".join(k for k, v in [("H", args.loop_hyper), ("C", args.loop_cart_anchor),
            ("Q", args.loop_deq), ("F", args.loop_fp_halt), ("A", args.loop_adaptive_halt),
-           ("R", args.loop_iter_readout)] if v) or "")
+           ("R", args.loop_iter_readout)] if v) or "") + \
+          (f"-{args.loop_gate}" if lk and args.loop_gate != "scalar" else "")
     print(f"model {tag}: {nparam/1e6:.1f}M params  loop_kw={lk}", flush=True)
     json.dump({"loop_count": args.loop_count, "n_layers": args.n_layers, "mode": tag,
                "params_m": round(nparam / 1e6, 2)}, open(os.path.join(args.out, "loop_rw.json"), "w"))
