@@ -23,7 +23,7 @@ def test_offsets_and_loss():
     with torch.no_grad():
         ref = 0.0; nt = 0
         for j in range(3):
-            off = head.offset(j); tc = T - off
+            off = head.offset(j); tc = min(T, ids.shape[1] - off)   # same coverage as lmtp_loss
             lg = lm(h[:, :tc]).reshape(-1, V)
             tg = ids[:, off:off + tc].reshape(-1)
             ref += torch.nn.functional.cross_entropy(lg, tg, reduction="sum"); nt += tg.numel()
