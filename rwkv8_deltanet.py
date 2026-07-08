@@ -218,6 +218,9 @@ class RWKV8TimeMixDeltaNet(nn.Module):
         decay_cap_delta: float = 0.0,
         allow_neg_eigval: bool = False,
         is_first_rwkv_layer: bool = True,
+        use_rope: bool = False,
+        rope_theta: float = 1e7,
+        rope_frac: float = 0.25,
     ) -> None:
         super().__init__()
         if num_heads * head_size != hidden_size:
@@ -233,6 +236,22 @@ class RWKV8TimeMixDeltaNet(nn.Module):
         self.head_size = head_size
         self.layer_idx = layer_idx
         self.is_first_rwkv_layer = bool(is_first_rwkv_layer)
+        # RAD-RWKV7 (RADLADS 2505.03005): for converting FULL-ATTENTION layers, graft the
+        # teacher's RoPE onto the receptance r and write-key k. The delta-rule removal keys
+        # kk / a / b are derived from k *after* rotation, so they inherit it automatically
+        # (matches recursal/QRWKV7's forward). v, decay gk, and the iclr gate a are NOT
+        # rotated. Off by default => bit-identical to the GDN-subset path. Partial rotary +
+        # theta are inherited from the teacher (Qwen3.5: frac 1/4, theta 1e7).
+        self.use_rope = bool(use_rope)
+        if self.use_rope:
+            rd = int(head_size * rope_frac)
+            rd = max(2, (rd // 2) * 2)                 # even, <= head_size
+            rd = min(rd, head_size - (head_size % 2))
+            self.rope_dim = rd
+            inv_freq = 1.0 / (rope_theta ** (torch.arange(0, rd, 2, dtype=torch.float32) / rd))
+            self.register_buffer("rope_inv_freq", inv_freq, persistent=False)
+        else:
+            self.rope_dim = 0
         # Structural stability cap: floor w so the effective per-step decay
         # exp(gk) = exp(-exp(w)) stays <= 1 - decay_cap_delta. 0.0 disables it
         # (bit-identical to prior behavior). Prevents the decay->integrator
@@ -445,6 +464,28 @@ class RWKV8TimeMixDeltaNet(nn.Module):
         )
         return out, (final if output_final_state else None)
 
+    def _rope_cos_sin(self, B, T, device, dtype, position_ids):
+        """Build (cos, sin) of shape [B, T, rope_dim] for partial rotary."""
+        if position_ids is None:
+            pos = torch.arange(T, device=device, dtype=torch.float32).unsqueeze(0).expand(B, T)
+        else:
+            pos = position_ids.to(device=device, dtype=torch.float32)
+            if pos.dim() == 1:
+                pos = pos.unsqueeze(0).expand(B, T)
+        freqs = pos[..., None] * self.rope_inv_freq.to(device)   # [B, T, rope_dim/2]
+        emb = torch.cat((freqs, freqs), dim=-1)                  # [B, T, rope_dim]
+        return emb.cos().to(dtype), emb.sin().to(dtype)
+
+    @staticmethod
+    def _apply_partial_rope(x, cos, sin, rd):
+        """Rotate the first ``rd`` channels of each head. x: [B,T,H,N]; cos/sin: [B,T,rd]."""
+        xr, xp = x[..., :rd], x[..., rd:]
+        half = rd // 2
+        rot = torch.cat((-xr[..., half:], xr[..., :half]), dim=-1)
+        c, s = cos.unsqueeze(2), sin.unsqueeze(2)                # [B,T,1,rd]
+        xr = xr * c + rot * s
+        return torch.cat((xr, xp), dim=-1)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -500,6 +541,14 @@ class RWKV8TimeMixDeltaNet(nn.Module):
         v = self.value(xv)
         # Comba output-correction (d init 0 => no-op): r_eff = r - d*k, per head.
         r = r - self.out_correct_d.repeat_interleave(N).view(1, 1, C) * k
+        # RAD-RWKV7 RoPE: rotate r and the write-key k (same cos/sin). kk / k_eff / a / b
+        # are computed from k below, so they inherit the rotation (QRWKV7 semantics). The
+        # Comba mix above is rotation-equivariant (rotate(r - d*k) == rotate(r) - d*rotate(k)),
+        # so applying rotary here is equivalent to rotating before the correction.
+        if self.use_rope:
+            cos, sin = self._rope_cos_sin(B, T, x.device, x.dtype, position_ids)
+            r = self._apply_partial_rope(r.view(B, T, H, N), cos, sin, self.rope_dim).reshape(B, T, C)
+            k = self._apply_partial_rope(k.view(B, T, H, N), cos, sin, self.rope_dim).reshape(B, T, C)
         if not self.is_first_rwkv_layer:
             # Future-stage hook: when more than one RWKV layer exists this
             # branch must receive ``v_first`` from layer 0. For Stage 1 we

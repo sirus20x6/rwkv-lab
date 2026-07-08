@@ -687,14 +687,22 @@ def _make_spectral_muon(student, codec, args, rosa_soft=None, lookahead=None):
     group (use_muon=False, ddc off) so the core keeps Muon+ while rosa-soft is plain AdamW."""
     from spectral_muon import SpectralMuon
     loop_names = _loop_param_names(student)
-    muon_p, adam_p, loop_p = [], [], []
+    muon_p, adam_p, loop_p, muon_final_p = [], [], [], []
+    final_ns = int(getattr(args, "sm_ns_steps_final", 0) or 0)
     for n, p in student.named_parameters():
         if not p.requires_grad:
             continue
         if n in loop_names:                            # loop gates: own AdamW-fallback group
             loop_p.append(p)                           # so loop_lr_mult can steer them live
         elif p.ndim == 2 and min(p.shape) > 1:
-            muon_p.append(p)
+            # Spectral Scaling Laws of Muon (2606.04058): the final/output projection's
+            # momentum singular values shrink fastest with scale and can fall below the
+            # Newton-Schulz 5-step orthonormalization floor (~0.003) at frontier size, so
+            # give it more NS iterations. Only bites at very large scale; no-op by default.
+            if final_ns > 0 and (n.endswith("output.weight") or n.endswith("o_proj.weight")):
+                muon_final_p.append(p)
+            else:
+                muon_p.append(p)
         else:
             adam_p.append(p)
     if codec is not None:                              # codec joins the Adam side until it
@@ -703,6 +711,9 @@ def _make_spectral_muon(student, codec, args, rosa_soft=None, lookahead=None):
         {"params": muon_p, "lr": args.muon_lr, "use_muon": True, "name": "muon"},
         {"params": adam_p, "lr": args.muon_adam_lr, "use_muon": False, "name": "adam"},
     ]
+    if muon_final_p:                                   # final-layer matrices: extra NS steps
+        groups.append({"params": muon_final_p, "lr": args.muon_lr, "use_muon": True,
+                       "ns_steps": final_ns, "name": "muon_final"})
     if loop_p:  # after muon/adam (leading-group momentum restore), before rosa_soft.
         groups.append({"params": loop_p, "lr": args.muon_adam_lr, "use_muon": False,
                        "ddc_strength": 0.0, "name": "rwkv_loop"})
@@ -1931,6 +1942,10 @@ def main():
                     help="RSAV step-gate clamp: ξ ∈ [1-cap, 1+cap]. 0 forces ξ≡1 (inert = vanilla).")
     ap.add_argument("--sm-rsav-relax", type=float, default=0.0,
                     help="RSAV relaxation η∈[0,1] pulling r toward √(E+C) each step; 0=pure SAV lag, 1=strongest reset.")
+    ap.add_argument("--sm-ns-steps-final", type=int, default=0,
+                    help="Spectral Scaling Laws (2606.04058): route the readout/output projection to a "
+                         "separate Muon group with THIS many Newton-Schulz steps (e.g. 10) so its "
+                         "fast-shrinking momentum stays orthonormalizable. 0=off. Frontier-scale concern.")
     ap.add_argument("--pc-layer", type=int, default=0,
                     help="PC-Layer (2606.06470): polynomial spectral weight-preconditioning level (degree grows with it; "
                          "0=off, 2-4 typical). Reparam on student Linears, mergeable at inference. Costs extra forward VRAM.")
