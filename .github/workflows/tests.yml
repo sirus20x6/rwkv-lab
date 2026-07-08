@@ -55,4 +55,5 @@ jobs:
             tests/test_loop_invariants.py \
             tests/test_looped_hyper.py \
             tests/test_loop_cart.py \
+            tests/test_loop_deq.py \
             tests/test_loop_new_features.py

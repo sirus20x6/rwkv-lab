@@ -425,6 +425,7 @@ def build(args):
                              ponder_prior=float(getattr(args, "loop_ponder_prior", 0.1)),
                              cart_anchor=bool(getattr(args, "loop_cart_anchor", 0)),
                              cart_gate_init=float(getattr(args, "loop_cart_gate_init", 4.0)),
+                             loop_deq=bool(getattr(args, "loop_deq", 0)),
                              ).to(device=_p0.device, dtype=_p0.dtype)
         student.float_gates()  # gates stay fp32: bf16 ulp swallows their tiny growth steps
         student.iter_consist = float(getattr(args, "loop_iter_consist", 0.0)) > 0
@@ -1846,6 +1847,11 @@ def main():
                          "(bit-identical). Mutually exclusive with --loop-hyper.")
     ap.add_argument("--loop-cart-gate-init", type=float, default=4.0,
                     help="CART gate init (pre-sigmoid): 4.0 -> σ≈0.98, so the loop starts near-identity.")
+    ap.add_argument("--loop-deq", type=int, default=0,
+                    help="HRM/DEQ 1-step gradient (2506.21734): run the refinement loop to its fixed "
+                         "point DETACHED (no BPTT, O(1) memory) then take one graded step. Same forward "
+                         "value as full-BPTT, cheaper gradient -> many more loop passes. 0=off. Pair with "
+                         "--loop-cart-anchor (contractive loop). Incompatible with halt/hyper/iter-consist.")
     ap.add_argument("--loop-lr-mult", type=float, default=1.0,
                     help="LR multiplier for residual_weight (the loop gates, their own 'rwkv_loop' group). "
                          "Default 1x: the refine/warm-start case, where the loop is already trained and should "
