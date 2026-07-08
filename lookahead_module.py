@@ -310,6 +310,70 @@ def bst_loss(head: BeliefStateHead, H: torch.Tensor, ids_full: torch.Tensor,
 
 
 # ---------------------------------------------------------------------------
+# JTP: joint multi-token prediction (arXiv:2503.21801) — complements Belief State
+# ---------------------------------------------------------------------------
+
+class JTPHead(nn.Module):
+    """Joint multi-token prediction (Ahn/Lamb/Langford — the same group as the Belief State
+    Transformer). Predicts the JOINT distribution of D future tokens via chain-rule factoring
+    with teacher-forcing routed through a lightweight "Fetch" bottleneck, so the FORWARD hidden
+    h_{t-1} is forced to encode multi-step planning info (unlike Gloeckle-MTP's independent
+    marginals). Fetch is a single-layer causal self-attention over the window vectors
+        h^(j) = gamma*h_{t-1} + Emb(x_{t+j-1}),  j=0..D
+    with a skip connection: o_i = h_{t-1} + SelfAttn(h^(0..i)); head(o_i) predicts x_{t+i}.
+    Composes with BeliefStateHead: JTP enriches the forward state, BST adds the backward/prev
+    signal, both sharing the same decoder hidden and unembedding (forward-only at inference)."""
+
+    def __init__(self, d_model: int, D: int = 4, gamma: float = 0.5):
+        super().__init__()
+        self.D = int(D)
+        self.gamma = float(gamma)
+        self.q = nn.Linear(d_model, d_model, bias=False)
+        self.k = nn.Linear(d_model, d_model, bias=False)
+        self.v = nn.Linear(d_model, d_model, bias=False)
+        self.o = nn.Linear(d_model, d_model, bias=False)
+        nn.init.zeros_(self.o.weight)                      # skip-dominant at init: Fetch ~ 0
+        self.scale = d_model ** -0.5
+
+    def fetch(self, hwin):
+        """Causal single-layer self-attention over the window dim of hwin [.., L, C]."""
+        L = hwin.shape[-2]
+        s = (self.q(hwin) @ self.k(hwin).transpose(-1, -2)) * self.scale     # [..,L,L]
+        mask = torch.triu(torch.ones(L, L, device=hwin.device, dtype=torch.bool), 1)
+        a = torch.softmax(s.masked_fill(mask, float("-inf")), dim=-1)
+        return self.o(a @ self.v(hwin))                    # [..,L,C]
+
+
+def jtp_loss(head: JTPHead, h: torch.Tensor, ids_full: torch.Tensor,
+             embed_tokens: nn.Module, lm_head: nn.Linear, chunk: int = 256) -> torch.Tensor:
+    """Mean CE of the JTP joint future heads (offsets 1..D). h [B,T,C]; ids_full [B,>=T+D]."""
+    B, T, C = h.shape
+    D = head.D
+    S = min(T, ids_full.shape[1] - 1 - D)                  # sources s with target x[s+1+D] valid
+    if S < 1:
+        return h.new_zeros((), dtype=torch.float32)
+    hs = h[:, :S]                                          # [B,S,C] forward states
+    with torch.no_grad():                                  # teacher-forced token features (frozen)
+        e = torch.stack([embed_tokens(ids_full[:, kk:kk + S]) for kk in range(D + 1)], dim=2)
+    hwin = head.gamma * hs.unsqueeze(2) + e.to(hs.dtype)   # [B,S,D+1,C]
+    o = hs.unsqueeze(2) + head.fetch(hwin.reshape(B * S, D + 1, C)).reshape(B, S, D + 1, C)  # skip
+    hw = lm_head.weight
+    hb = getattr(lm_head, "bias", None)
+    tot = h.new_zeros((), dtype=torch.float32)
+    ntok = 0
+    for i in range(1, D + 1):                              # joint future tokens (i=0 is base NTP)
+        tgt = ids_full[:, i + 1:i + 1 + S]                 # predict x[s+1+i]
+        for st in range(0, S, chunk):
+            en = min(st + chunk, S)
+            lg = F.linear(o[:, st:en, i].reshape(-1, C).float(), hw.float(),
+                          hb.float() if hb is not None else None)
+            tt = tgt[:, st:en].reshape(-1)
+            tot = tot + F.cross_entropy(lg, tt, reduction="sum")
+            ntok += tt.numel()
+    return tot / max(ntok, 1)
+
+
+# ---------------------------------------------------------------------------
 # ConceptLM-style next-concept prediction (adapted as a pure aux)
 # ---------------------------------------------------------------------------
 
@@ -404,6 +468,7 @@ class LookaheadSystem(nn.Module):
                  lmtp_weight: float = 0.0, lmtp_k: int = 2, lmtp_heads: int = 3,
                  bst_weight: float = 0.0, bst_lambda: float = 0.25, bst_pairs: int = 16,
                  bst_layers: int = 1,
+                 jtp_weight: float = 0.0, jtp_d: int = 4, jtp_gamma: float = 0.5,
                  lm_head: Optional[nn.Linear] = None, top_init: str = "lmhead") -> None:
         super().__init__()
         self.nextlat_weight = float(nextlat_weight)
@@ -422,6 +487,8 @@ class LookaheadSystem(nn.Module):
         self.bst_lambda = float(bst_lambda)
         self.bst_pairs = int(bst_pairs)
         self.bst = (BeliefStateHead(d_model, int(bst_layers)) if self.bst_weight > 0 else None)
+        self.jtp_weight = float(jtp_weight)
+        self.jtp = (JTPHead(d_model, int(jtp_d), float(jtp_gamma)) if self.jtp_weight > 0 else None)
         if self.nextlat_weight > 0 and self.nextlat_d < 1:
             raise ValueError(f"--nextlat-d must be >= 1, got {self.nextlat_d}")
         if self.nextlat_jump_weight > 0 and self.nextlat_jump_k < 2:
@@ -454,7 +521,7 @@ class LookaheadSystem(nn.Module):
     def enabled(self) -> bool:
         return (self.nextlat is not None or self.nextlat_jump is not None
                 or self.top is not None or self.concept is not None
-                or self.lmtp is not None or self.bst is not None)
+                or self.lmtp is not None or self.bst is not None or self.jtp is not None)
 
     @property
     def extra_tokens(self) -> int:
@@ -521,6 +588,10 @@ class LookaheadSystem(nn.Module):
                              lam=self.bst_lambda, n_pairs=self.bst_pairs)
             total = total + self.bst_weight * l_bst
             out["bst"] = float(l_bst)
+        if self.jtp is not None and lm_head is not None:
+            l_jtp = jtp_loss(self.jtp, h_final, ids_full, embed_tokens, lm_head, chunk=self.top_chunk)
+            total = total + self.jtp_weight * l_jtp
+            out["jtp"] = float(l_jtp)
         out["aux_total"] = total
         return out
 
@@ -574,6 +645,11 @@ def add_lookahead_cli(ap) -> None:
                    help="BST next-vs-prev mix (lower = more of the load-bearing backward 'prev' signal)")
     g.add_argument("--bst-pairs", type=int, default=16,
                    help="BST sampled (prefix,suffix) pairs per step")
+    g.add_argument("--jtp-weight", type=float, default=0.0,
+                   help="JTP (2503.21801): joint multi-token prediction via a Fetch bottleneck; >0 enables it. "
+                        "Complements --bst-weight (JTP enriches the forward state, BST adds the backward signal)")
+    g.add_argument("--jtp-d", type=int, default=4, help="JTP future window D")
+    g.add_argument("--jtp-gamma", type=float, default=0.5, help="JTP scale on h in h^(j)=gamma*h+Emb(x)")
     g.add_argument("--lookahead-lr", type=float, default=0.0,
                    help="LR for the aux heads' AdamW param group; 0 = same as --lr")
 
@@ -584,7 +660,8 @@ def lookahead_from_args(args, d_model: int, vocab: int,
             and getattr(args, "nextlat_jump_weight", 0.0) <= 0
             and getattr(args, "concept_weight", 0.0) <= 0
             and getattr(args, "lmtp_weight", 0.0) <= 0
-            and getattr(args, "bst_weight", 0.0) <= 0):
+            and getattr(args, "bst_weight", 0.0) <= 0
+            and getattr(args, "jtp_weight", 0.0) <= 0):
         return None
     return LookaheadSystem(
         d_model, vocab,
@@ -603,4 +680,6 @@ def lookahead_from_args(args, d_model: int, vocab: int,
         lmtp_k=getattr(args, "lmtp_k", 2), lmtp_heads=getattr(args, "lmtp_heads", 3),
         bst_weight=getattr(args, "bst_weight", 0.0),
         bst_lambda=getattr(args, "bst_lambda", 0.25), bst_pairs=getattr(args, "bst_pairs", 16),
+        jtp_weight=getattr(args, "jtp_weight", 0.0),
+        jtp_d=getattr(args, "jtp_d", 4), jtp_gamma=getattr(args, "jtp_gamma", 0.5),
         lm_head=lm_head, top_init=args.top_init)
