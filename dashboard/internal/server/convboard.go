@@ -60,6 +60,13 @@ func renderConvBoard(layers []convboard.LayerStatus) string {
 			converting = append(converting, fmt.Sprintf("L%d", l.Layer))
 		}
 	}
+	// The conversion map is the GDN->RWKV 24-layer *conversion project* view. It's noise during
+	// from-scratch pretraining / lever experiments (those runs never map to a conversion layer, so
+	// nothing is "converting"). Hide it unless a conversion is actively running — but keep the
+	// #conv-board id so the per-tick patch collapses the strip instead of leaving a stale one.
+	if len(converting) == 0 {
+		return `<div id="conv-board" class="conv-board" hidden></div>`
+	}
 	head := "conversion map"
 	if n := len(layers); n > 0 {
 		head += fmt.Sprintf(` · <span class="ok">%d/%d accepted (%.0f%%)</span>`,
