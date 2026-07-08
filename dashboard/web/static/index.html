@@ -150,6 +150,7 @@
             <button class="jump" data-jump="#arch-panel">arch</button>
             <button class="jump" data-jump="#loss-panel">charts</button>
             <button class="jump" data-jump="#conv-panel">conversion</button>
+            <button class="jump" data-jump="#experiments-panel">experiments</button>
             <button class="jump" data-jump="#custom-panel">custom</button>
             <button class="jump" data-jump="#tune-panel">tuning</button>
             <button class="jump" data-jump="#notes-panel">notes</button>
@@ -175,6 +176,14 @@
             <span class="d-caret">▸</span>
           </summary>
           <div id="arch-body" class="arch-body"><div class="empty">expand to load — reads the model config + safetensors metadata (cached)</div></div>
+        </details>
+
+        <details class="panel" id="experiments-panel" data-on:toggle="evt.target.open && @get('/api/experiments')">
+          <summary class="panel-title">experiments
+            <span class="sub">rwkv-lab registry · mean±std + significance · launch a config</span>
+            <span class="d-caret">▸</span>
+          </summary>
+          <div id="experiments-body" class="exp-body"><div class="empty">expand to load — reads experiments.db + experiments/*.yaml</div></div>
         </details>
 
         <div class="panel" id="loss-panel"><div class="panel-title">loss &amp; perplexity</div>
