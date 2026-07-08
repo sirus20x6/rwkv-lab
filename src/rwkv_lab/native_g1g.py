@@ -39,10 +39,22 @@ def load_g1g_native(path, n_layers=24, d=2048, head_size=64, vocab=65536,
                                                 missing=list(info.missing_keys))
 
 
+def add_loops(model, loop_kw: dict):
+    """Wrap every block's time-mix in LoopedRWKV, IN PLACE — attaches recurrent-depth loops to the
+    pretrained g1g. Zero-init gates => identity at start, so the loaded model is unchanged (same ppl)
+    until the loop gates are trained. This is what lets loop/latent levers run on the REAL model."""
+    from rwkv_lab.looped_rwkv import LoopedRWKV
+    d = model.emb.weight.shape[1]
+    for blk in model.blocks:
+        blk.att = LoopedRWKV(blk.att, hidden_size=d, **loop_kw)
+    return model
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="models/rwkv7-g1g-1.5b.pth")
     ap.add_argument("--vocab-file", default="research/RWKV-LM/RWKV-v5/tokenizer/rwkv_vocab_v20230424.txt")
+    ap.add_argument("--wrap-loops", type=int, default=0, help="wrap att in LoopedRWKV with this loop count")
     args = ap.parse_args()
     dev = "cuda"
     model, info = load_g1g_native(args.model, device=dev)
@@ -52,6 +64,10 @@ def main():
         print("  UNFILLED (our params with no g1g source):", info["unfilled"][:8])
     if info["extra"]:
         print("  EXTRA (g1g keys with no home):", info["extra"][:8])
+    if args.wrap_loops:                                        # attach recurrent-depth loops to g1g
+        add_loops(model, dict(n_loops=args.wrap_loops))
+        model = model.to(dev, torch.bfloat16).eval()
+        print(f"wrapped att in LoopedRWKV(n_loops={args.wrap_loops}) — identity at init, ppl should be unchanged")
 
     # baseline ppl on World-tokenized text — should match fla's 2.457 if the forward is faithful
     import sys, glob, torch.nn.functional as F
