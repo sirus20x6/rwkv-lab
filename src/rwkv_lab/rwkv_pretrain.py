@@ -22,6 +22,7 @@ import torch.nn.functional as F
 
 from rwkv_lab.rwkv8_deltanet import RWKV8TimeMixDeltaNet, RWKV8ChannelMixDeltaNet
 from rwkv_lab.looped_rwkv import LoopedRWKV
+from rwkv_lab.lookahead_module import LookaheadSystem
 
 
 def _unwrap(o):
@@ -69,11 +70,13 @@ class RWKV7Small(nn.Module):
         elif isinstance(m, nn.Embedding):
             nn.init.normal_(m.weight, std=0.02)
 
-    def forward(self, ids):
+    def forward(self, ids, return_hidden=False):
         x = self.emb(ids)
         for b in self.blocks:
             x = b(x)
-        return self.head(self.ln_out(x))
+        h = self.ln_out(x)                       # post-norm final hidden (what aux heads read)
+        logits = self.head(h)
+        return (logits, h) if return_hidden else logits
 
 
 def loop_kwargs(a):
@@ -108,6 +111,9 @@ def main():
     ap.add_argument("--loop-deq-window", type=int, default=1)
     for f in ["loop-cart-anchor", "loop-deq", "loop-fp-halt", "loop-adaptive-halt", "loop-iter-readout"]:
         ap.add_argument(f"--{f}", type=int, default=0)
+    # latent-prediction / lookahead aux objectives (aux head on the final hidden; LM head unchanged)
+    for f in ["nextlat-weight", "top-weight", "lmtp-weight", "bst-weight", "jtp-weight"]:
+        ap.add_argument(f"--{f}", type=float, default=0.0)
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -133,9 +139,9 @@ def main():
     val_toks, train_toks = toks[:n_val], toks[n_val:]
     print(f"tokens: {len(toks)/1e6:.1f}M (val {len(val_toks)}, train {len(train_toks)/1e6:.1f}M)", flush=True)
 
-    def batch(src, n):
-        s = rng.integers(0, len(src) - (T + 1), size=n)
-        x = np.stack([np.asarray(src[i:i + T + 1], dtype=np.int64) for i in s])
+    def batch(src, n, width=T + 1):
+        s = rng.integers(0, len(src) - width, size=n)
+        x = np.stack([np.asarray(src[i:i + width], dtype=np.int64) for i in s])
         return torch.from_numpy(x).to(dev)
 
     def val_loss():
@@ -149,7 +155,16 @@ def main():
         model.train()
         return tot / math.ceil(args.val_windows / args.batch)
 
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.95), weight_decay=0.1)
+    heads = None
+    if any(w > 0 for w in [args.nextlat_weight, args.top_weight, args.lmtp_weight,
+                           args.bst_weight, args.jtp_weight]):
+        heads = LookaheadSystem(args.d_model, 65536, nextlat_weight=args.nextlat_weight,
+                                top_weight=args.top_weight, lmtp_weight=args.lmtp_weight,
+                                bst_weight=args.bst_weight, jtp_weight=args.jtp_weight,
+                                lm_head=model.head).to(dev, torch.bfloat16)
+        print(f"aux heads enabled={heads.enabled} extra_tokens={heads.extra_tokens}", flush=True)
+    params = list(model.parameters()) + (list(heads.parameters()) if heads else [])
+    opt = torch.optim.AdamW(params, lr=args.lr, betas=(0.9, 0.95), weight_decay=0.1)
     model.train(); t0 = time.time(); seen = 0; step = 0
     print(f"budget={'%.1f min' % args.minutes if not args.steps else str(args.steps)+' steps'}", flush=True)
     while True:
@@ -161,9 +176,13 @@ def main():
         lr = args.lr * min(1.0, (step + 1) / max(args.warmup, 1))       # linear warmup
         for g in opt.param_groups:
             g["lr"] = lr
-        x = batch(train_toks, args.batch)
-        lg = model(x[:, :T]).float()
+        ex = heads.extra_tokens if heads else 0
+        x = batch(train_toks, args.batch, width=T + 1 + ex)
+        out = model(x[:, :T], return_hidden=bool(heads))
+        lg = (out[0] if heads else out).float()
         loss = F.cross_entropy(lg.reshape(-1, lg.size(-1)), x[:, 1:T + 1].reshape(-1))
+        if heads:                                            # + weighted aux (latent-prediction) loss
+            loss = loss + heads.compute(out[1], x, model.emb, model.head)["aux_total"]
         opt.zero_grad(set_to_none=True); loss.backward()
         gn = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
         opt.step(); seen += args.batch * T; step += 1
