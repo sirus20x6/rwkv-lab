@@ -156,6 +156,9 @@ Everything is a **drop-in `linear_attn` / attention module swap** on a HuggingFa
 ```bash
 # 0. install Python deps, then install CUDA-specific torch + fla separately
 pip install -r requirements.txt
+pip install -e .          # makes the flat modules importable anywhere (import spectral_muon, ...)
+#                          use a venv (e.g. python -m venv --system-site-packages .venv) for the
+#                          CUDA torch/fla stack; tests also run without this via tests/conftest.py
 
 MODEL_DIR=/path/to/Qwen3.5-9B-Base
 DATA=/path/to/qwen3.5-token-cache-or-tokens.bin

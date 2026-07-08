@@ -1,0 +1,96 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rwkv-lab"
+version = "0.1.0"
+description = "Cross-architecture LLM conversion, looped recurrence, and memory research on RWKV linear-attention cores."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "sirus20x6" }]
+# torch and fla (flash-linear-attention) are intentionally NOT listed: they are CUDA-stack
+# specific and provided by the environment (see requirements.txt / the RWKV-7 kernel path).
+dependencies = [
+    "transformers>=4.57",
+    "safetensors>=0.4",
+    "einops>=0.8",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+# Everything the trainers/dashboard-adjacent scripts touch, mirroring requirements.txt.
+full = [
+    "accelerate>=0.34",
+    "huggingface_hub>=0.25",
+    "bitsandbytes>=0.43",
+    "datasets>=2.20",
+    "schedulefree>=1.4.1",
+    "pynvml>=11.5",
+    "psutil>=6.0",
+]
+
+[project.urls]
+Repository = "https://github.com/sirus20x6/rwkv-lab"
+
+# The research modules live FLAT at the repo root (they import each other by bare name, and the
+# careful-zone trainers assume that), so they are exposed as top-level py-modules rather than a
+# package. `pip install -e .` then makes `import spectral_muon`, `from looped_rwkv import ...`,
+# etc. resolve from anywhere — no sys.path shim needed. New root modules must be added here.
+[tool.setuptools]
+py-modules = [
+    "assemble_looped",
+    "attn_L3_poc",
+    "build_engram_patch",
+    "build_memory_targets",
+    "build_qwen35_data",
+    "coda",
+    "convert_gdn_lossless",
+    "convert_train",
+    "distill_consolidate",
+    "distill_objectives",
+    "drive_isolation",
+    "engram_integration",
+    "engram_lmb",
+    "engram_lmb_build",
+    "eval_baseline",
+    "fsp_module",
+    "fwpkm",
+    "gpu_engram_prefill",
+    "grok_autopilot",
+    "grokking_metrics",
+    "hedgehog",
+    "layer_swap",
+    "live_controls",
+    "llm_jepa",
+    "llr",
+    "load_converted",
+    "load_mla_engram",
+    "lookahead_module",
+    "loop_probe",
+    "looped_rwkv",
+    "looped_rwkv_rosa_engram_v3",
+    "mla_module",
+    "mtp_module",
+    "muon_helpers",
+    "mutor_module",
+    "parallel_heads_module",
+    "pc_layer",
+    "rosa",
+    "rosa_sam",
+    "rosa_soft_layer",
+    "rwkv8_deltanet",
+    "rwkv_product",
+    "safe_torch",
+    "smt_dmt",
+    "spectral_muon",
+    "svd_init",
+    "taylor_calibrate",
+    "train_mla",
+    "train_mla_engram",
+    "verify_engram",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
