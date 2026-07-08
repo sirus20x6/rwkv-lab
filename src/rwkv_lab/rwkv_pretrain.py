@@ -6,9 +6,9 @@ forward-reconciliation. Trains from random init on a World-tokenized stream (zto
 is real loss headroom: recurrent depth / hyper-connections / CART / DEQ can actually help,
 and a fixed-wall-clock A/B (~10 min) measures whether the extra compute-per-token pays off.
 
-Each block's time-mix is optionally wrapped in LoopedRWKV(core, ...). is_first_rwkv_layer=True
-on every layer (self-consistent from-scratch architecture; the cross-layer v_first residual is
-a separate EXP-C concern and off here). Logs to a trainboard train.jsonl.
+Each block's time-mix is optionally wrapped in LoopedRWKV(core, ...). is_first_rwkv_layer=(i==0),
+so the native RWKV-7 cross-layer value residual (v_first) is active — layer 0 defines the shared
+value and later layers lerp toward it, threaded through the stack. Logs to a trainboard train.jsonl.
 
     python -m rwkv_lab.rwkv_pretrain --data models/g1g_tokens_big.bin --minutes 10 \
         --d-model 512 --n-layers 6 --loop-count 3 --loop-hyper 2 --out runs/loop_c3h2
