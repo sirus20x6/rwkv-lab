@@ -307,9 +307,15 @@ class LoopedRWKV(nn.Module):
             out, final_state, new_shift_state = first
         else:
             out = self._t(first)                          # pass 1 == single-pass output
-        consist = (self.iter_consist and torch.is_grad_enabled()
+        # collect NON-detached per-pass outputs when either the equilibrium-consistency loss
+        # (iter_consist) OR external per-iterate readout supervision (keep_iterates, the
+        # Readout-Blind-Spot fix 2606.24898 — the trainer supervises each iterate vs the
+        # teacher target) is active.
+        keep_iters = getattr(self, "keep_iterates", False)
+        collect = ((self.iter_consist or keep_iters) and torch.is_grad_enabled()
                    and not skip_refine and self.n_loops > 1)
-        iters = [out] if consist else None            # NON-detached (unlike loop_trace)
+        consist = collect and self.iter_consist       # consistency loss only when requested
+        iters = [out] if collect else None            # NON-detached (unlike loop_trace)
         try:
             if self.hyper_lanes and not skip_refine and self.n_loops > 1:
                 # Hyper-connection lanes: K copies of the running output, mixed per pass.
@@ -335,7 +341,7 @@ class LoopedRWKV(nn.Module):
                     lanes = torch.einsum("kj,j...->k...", M, lanes) + w.view(bshape) * ginc
                     if loop_trace is not None:                         # per-pass lane read
                         loop_trace.append((r.view(bshape) * lanes).sum(0).detach())
-                    if consist:
+                    if collect:
                         iters.append((r.view(bshape) * lanes).sum(0))
                 out = (r.view(bshape) * lanes).sum(0)                  # output lane read
             else:
@@ -354,7 +360,7 @@ class LoopedRWKV(nn.Module):
                     out = out + self._gate(i).to(inc.dtype) * inc
                     if loop_trace is not None:
                         loop_trace.append(out.detach())
-                    if consist:
+                    if collect:
                         iters.append(out)
         finally:
             # a mid-refinement exception must never leave adapters armed: direct core
@@ -366,6 +372,10 @@ class LoopedRWKV(nn.Module):
                 [F.mse_loss(o.float(), fin) for o in iters[:-1]]).mean()
         else:
             self.last_iter_consist = None
+        # Readout-Blind-Spot hook: non-detached per-pass outputs for the trainer to supervise
+        # each iterate against the EXTERNAL teacher target (distinct from iter_consist, which
+        # is self-supervised toward the student's own final). None unless keep_iterates is set.
+        self.last_iterates = iters if collect else None
         if return_state:
             # SMT/DMT supervise the underlying RWKV recurrent memory. The refinement
             # passes are output refinements, not separate target state spaces.

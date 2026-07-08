@@ -424,6 +424,7 @@ def build(args):
                              ).to(device=_p0.device, dtype=_p0.dtype)
         student.float_gates()  # gates stay fp32: bf16 ulp swallows their tiny growth steps
         student.iter_consist = float(getattr(args, "loop_iter_consist", 0.0)) > 0
+        student.keep_iterates = float(getattr(args, "loop_iter_readout", 0.0)) > 0  # per-iterate readout sup.
         decoder_layer.linear_attn = student  # iter_norm + residual_weight onto the same device/dtype
     else:
         student = core
@@ -1437,6 +1438,16 @@ def train(args):
             ic_val = getattr(student, "last_iter_consist", None)
             if args.loop_iter_consist > 0 and ic_val is not None:
                 loss = loss + args.loop_iter_consist * ic_val
+            # Readout Blind Spot (2606.24898): supervise EVERY loop iterate toward the teacher
+            # block target (not just the final), so each refinement pass stays decodable. Uses
+            # the same per-token relative-L2 as the block loss.
+            ir_val = None
+            its = getattr(student, "last_iterates", None)
+            if args.loop_iter_readout > 0 and its:
+                ir_val = torch.stack([
+                    (torch.linalg.vector_norm(to - it.float(), dim=-1)
+                     / (torch.linalg.vector_norm(to, dim=-1) + 1e-8)).mean() for it in its]).mean()
+                loss = loss + args.loop_iter_readout * ir_val
             # relational / alignment-invariant distillation terms (cross-arch: match
             # direction / structure / dynamics, not coordinates). Default weights 0 = off.
             if w_cos > 0.0:
@@ -1805,6 +1816,11 @@ def main():
                          "iterate toward sg(final iterate) — internalizes refinement into fewer "
                          "passes and enables early exit. With --loop-sample this reproduces "
                          "LoopFormer's shortcut-consistency recipe. Paper-analog weight 0.1. 0=off.")
+    ap.add_argument("--loop-iter-readout", type=float, default=0.0,
+                    help="Readout Blind Spot (2606.24898): supervise EVERY loop iterate toward the "
+                         "teacher block target (per-token rel-L2), not just the final pass, so each "
+                         "refinement stays decodable. Distinct from --loop-iter-consist (self-supervised). "
+                         "0=off. Needs --loop-count>1.")
     ap.add_argument("--loop-lr-mult", type=float, default=1.0,
                     help="LR multiplier for residual_weight (the loop gates, their own 'rwkv_loop' group). "
                          "Default 1x: the refine/warm-start case, where the loop is already trained and should "
