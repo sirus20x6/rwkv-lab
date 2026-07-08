@@ -128,7 +128,7 @@ func (s *Server) handleQueueAuto(w http.ResponseWriter, r *http.Request) {
 	s.queueAuto.Store(on)
 	s.db.LogAction(nowTs(), "queue_auto", "", "", boolStr(on), 0)
 	if on {
-		toast(sse, "queue auto-start ON — do NOT also run supervisor_night.sh (they'd double-spawn)")
+		toast(sse, "queue auto-start ON — do NOT also run scripts/supervisor_night.sh (they'd double-spawn)")
 	} else {
 		toast(sse, "queue auto-start off (manual-advance)")
 	}
