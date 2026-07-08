@@ -58,6 +58,18 @@ def _masked_ce(logits, y, m):
     return (ce * m.reshape(-1)).sum() / m.sum().clamp_min(1)
 
 
+def model_stats(model, loop_count: int = 1) -> dict:
+    """Params + a rough forward-FLOP/token estimate, so A/Bs can be compute-normalised (a lever
+    that helps but costs 2x FLOPs isn't free). FLOP/token ~ 2 * non-embedding params (matmul MACs);
+    looped time-mix re-runs, so its share is multiplied by loop_count."""
+    tot = sum(p.numel() for p in model.parameters())
+    emb = sum(p.numel() for n, p in model.named_parameters() if "emb." in n or "head." in n)
+    att = sum(p.numel() for n, p in model.named_parameters() if ".att." in n)
+    non_emb = tot - emb
+    flop_per_tok = 2 * (non_emb + att * (max(loop_count, 1) - 1))   # loops re-run the time-mix
+    return {"params_m": tot / 1e6, "flop_per_tok": flop_per_tok}
+
+
 def loop_gate_stats(model) -> float:
     """Mean |loop gate| (residual_weight) across LoopedRWKV blocks. ~0 => the loops never engaged
     (stayed at zero-init identity) — the direct test of whether recurrent depth did anything."""
@@ -118,6 +130,7 @@ def train_eval(task, d_model, n_layers, head_size, lever, seed, device, steps, b
         opt.step()
     acc = _eval_acc(model, task, batch, device, rng)
     out = {"loss": float(loss), "acc": acc, "gate": loop_gate_stats(model)}
+    out.update(model_stats(model, LEVERS.get(lever, {}).get("n_loops", 1)))
     # length-generalization: eval on a 2x-longer task of the same family (train short, test long)
     arg = getattr(task, "L", None) or getattr(task, "n", None)
     if arg:
@@ -169,6 +182,7 @@ def main():
         print(f"  [{cfg}] preflight {why} | acc {acc_m:.3f}±{acc_s:.3f}"
               + (f" | acc_2x {results[cfg]['acc_2x'][0]:.3f}" if "acc_2x" in results[cfg] else "")
               + (f" | loop_gate {gate:.3f}{' (INERT)' if gate < 0.02 else ''}" if cfg != "baseline" else "")
+              + f" | {results[cfg].get('params_m', (0,))[0]:.2f}M {results[cfg].get('flop_per_tok', (0,))[0]/1e6:.1f}MF/tok"
               + f"  ({(time.time()-t0):.0f}s)", flush=True)
         registry.record(args.task, cfg, args.seeds, args.steps,
                         {k: list(v) for k, v in results[cfg].items() if isinstance(v, tuple)})
