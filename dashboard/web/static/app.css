@@ -548,3 +548,19 @@ details.arch-item[open] .lr-caret { transform: rotate(90deg); color: var(--accen
 .mc-chip { font-family: var(--mono); font-size: var(--fs-xs); padding: 3px 10px; border-radius: var(--r-full); border: 1px solid var(--border); background: var(--bg-elev); color: var(--text-dim); cursor: pointer; transition: border-color .12s, color .12s, background .12s; }
 .mc-chip:hover { border-color: var(--accent); color: var(--text); }
 .mc-chip.active { background: var(--accent); border-color: var(--accent); color: #08121e; font-weight: 600; }
+
+/* experiments panel — rwkv-lab registry + config launcher */
+.exp-body { display: flex; gap: 1.5rem; flex-wrap: wrap; padding: .5rem; }
+.exp-h { font-weight: 600; opacity: .65; margin-bottom: .4rem; font-size: .85em; text-transform: uppercase; letter-spacing: .04em; }
+.exp-configs, .exp-results { min-width: 320px; flex: 1; }
+.exp-cfg { display: flex; align-items: center; gap: .5rem; margin: .25rem 0; }
+.exp-cfg code { font-size: .85em; }
+.exp-task { margin-bottom: .9rem; }
+.exp-tname { font-weight: 600; margin-bottom: .2rem; opacity: .85; }
+.exp-tbl { border-collapse: collapse; width: 100%; font-size: .85em; }
+.exp-tbl td { padding: .15rem .55rem; white-space: nowrap; }
+.exp-cfgn { font-family: ui-monospace, monospace; }
+.exp-tbl .sig { color: #3ecf6b; font-weight: 600; }
+.exp-tbl .ns { opacity: .5; }
+.exp-tbl .dim, .exp-body .dim { opacity: .5; font-size: .9em; }
+.btn.sm { padding: .1rem .5rem; font-size: .8em; }

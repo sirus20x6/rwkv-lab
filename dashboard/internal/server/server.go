@@ -144,6 +144,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/autostop", s.handleAutoStop)
 	s.mux.HandleFunc("POST /api/convboard/accept", s.handleAcceptLayer)
 	s.mux.HandleFunc("GET /api/leaderboard", s.handleLeaderboard)
+	s.mux.HandleFunc("GET /api/experiments", s.handleExperiments)
+	s.mux.HandleFunc("POST /api/experiments/run", s.handleRunConfig)
 	s.mux.HandleFunc("GET /api/diff", s.handleDiff)
 	s.mux.HandleFunc("POST /api/queue/enqueue", s.handleEnqueue)
 	s.mux.HandleFunc("POST /api/queue/start-next", s.handleStartNext)
