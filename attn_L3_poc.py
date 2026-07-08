@@ -95,6 +95,9 @@ def main():
     ap.add_argument("--freeze", choices=["most", "all"], default="most")
     ap.add_argument("--rope", type=int, default=0,
                     help="RAD-RWKV7: graft the teacher's RoPE onto r/k (the untransferred gap). 0=off.")
+    ap.add_argument("--taylor", type=int, default=0,
+                    help="Taylor-Calibrate (2606.16429, adapted): init per-head decay half-life from the "
+                         "teacher's attention look-back distance. Needs eager attention. 0=off.")
     ap.add_argument("--eval-every", type=int, default=100)
     ap.add_argument("--ppl-every", type=int, default=500)
     ap.add_argument("--log-every", type=int, default=10)
@@ -161,6 +164,28 @@ def main():
         print(f"RAD-RWKV7 RoPE: on (theta={rope_theta:g}, frac={rope_frac:g}, rope_dim={core.rope_dim})", flush=True)
     filled = radlads_init(core, attn, n_q, n_kv, hd)
     print("RADLADS init:", filled, flush=True)
+    if args.taylor:
+        # Taylor-Calibrate (2606.16429, adapted): set the per-head decay half-life from the
+        # teacher head's average attention look-back distance. Needs teacher attention probs,
+        # so require eager attention; graceful fallback if the impl doesn't expose them.
+        import taylor_calibrate as tc
+        nb = min(8, len(starts)); aps = []
+        for s in starts[:nb]:
+            ids = torch.as_tensor(np.asarray(toks[s:s + T], dtype=np.int64), device=dev).unsqueeze(0)
+            with torch.no_grad():
+                o = model(input_ids=ids, use_cache=False, output_attentions=True)
+            at = getattr(o, "attentions", None)
+            if at is not None and at[L] is not None:
+                aps.append(at[L].detach().float().cpu())
+        if aps:
+            d_h = tc.teacher_lookback_distance(torch.cat(aps, dim=0))
+            tc.set_halflife_decay(core, d_h)
+            print(f"Taylor-Calibrate: half-life decay set from teacher look-back "
+                  f"(d_h mean {float(d_h.mean()):.1f} / min {float(d_h.min()):.1f} / max {float(d_h.max()):.1f})",
+                  flush=True)
+        else:
+            print("Taylor-Calibrate: teacher attn probs unavailable (SDPA/flash) — load the model with "
+                  "attn_implementation='eager' to enable half-life init; skipping", flush=True)
     if args.freeze == "most":
         n_train, n_froze = set_freeze_most(core)
     else:
