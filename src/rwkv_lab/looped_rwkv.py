@@ -154,7 +154,9 @@ class LoopedRWKV(nn.Module):
                  lora_rank: int = 0, lora_targets=("receptance", "key", "value", "output"),
                  adaptive_halt: bool = False, ponder_prior: float = 0.1,
                  cart_anchor: bool = False, cart_gate_init: float = 4.0,
-                 loop_deq: bool = False):
+                 loop_deq: bool = False, deq_window: int = 1,
+                 fixed_point_halt: bool = False, fp_tol: float = 1e-3,
+                 fp_min_iters: int = 1, fp_patience: int = 2, fp_damp: float = 0.5):
         super().__init__()
         self.core = core
         self.n_loops = int(n_loops)
@@ -236,12 +238,35 @@ class LoopedRWKV(nn.Module):
         # NB our own iso-depth finding says truncated-BPTT hurts loops UNLESS trained as a fixed point,
         # so this ships OFF as an A/B against full-BPTT. Incompatible with per-pass-grad machinery.
         self.loop_deq = bool(loop_deq)
+        # FPRM (2606.18206): k-window truncated BPTT. loop_deq is the Neumann-1 case (grad through the
+        # last 1 refinement step); deq_window=k lets the gradient flow through the LAST k steps (Neumann-k,
+        # truncated BPTT over a k-iteration window). Forward VALUE is unchanged for any k (still n_loops-1
+        # refinement passes; detach only cuts the graph earlier/later). k=1 = the original DEQ behavior.
+        self.deq_window = max(1, int(deq_window))
         if self.loop_deq:
             if self.n_loops < 2:
                 raise ValueError("loop_deq needs n_loops > 1 (the 1-step gradient is over the refine loop)")
             if self.adaptive_halt or self.hyper_lanes:
                 raise ValueError("loop_deq is incompatible with adaptive_halt / hyper_lanes "
                                  "(both need per-pass gradients / their own carried-state dynamics)")
+        # FPRM (2606.18206): fixed-point-residual halting. Stop the loop when the relative residual
+        # ‖out−prev‖/‖out‖ < fp_tol (past fp_min_iters) — i.e. the iterate has reached a fixed point —
+        # instead of PonderNet's learned halt head. Damped-patience: if the residual stops improving for
+        # fp_patience passes, damp the step (out ← prev + fp_damp·(out−prev)) to quell oscillation. Off =>
+        # runs all n_loops unchanged. Exposes self.last_halt_iters. A convergence-based adaptive-compute
+        # signal that composes with cart_anchor (a contractive gate makes the fixed point well-posed).
+        self.fixed_point_halt = bool(fixed_point_halt)
+        self.fp_tol = float(fp_tol)
+        self.fp_min_iters = int(fp_min_iters)
+        self.fp_patience = int(fp_patience)
+        self.fp_damp = float(fp_damp)
+        self.last_halt_iters = None
+        if self.fixed_point_halt:
+            if self.n_loops < 2:
+                raise ValueError("fixed_point_halt needs n_loops > 1 (nothing to converge over)")
+            if self.adaptive_halt or self.hyper_lanes or self.loop_deq:
+                raise ValueError("fixed_point_halt is incompatible with adaptive_halt / hyper_lanes / "
+                                 "loop_deq (they define their own halting / gradient scheme)")
         if self.lora_rank > 0:
             if self.n_loops < 2:
                 raise ValueError("lora_rank needs n_loops > 1: the adapters live on refinement passes")
@@ -411,12 +436,15 @@ class LoopedRWKV(nn.Module):
                         return torch.sigmoid(self.cart_gate).to(inc.dtype) * o \
                             + self._gate(i).to(inc.dtype) * inc
                     return o + self._gate(i).to(inc.dtype) * inc
+                w = min(self.deq_window, self.n_loops - 1)   # graded window ≤ #refinement passes
                 with torch.no_grad():                  # detached approach to equilibrium
-                    for i in range(1, self.n_loops - 1):
+                    for i in range(1, self.n_loops - w):
                         out = _deq_step(out, i)
-                if loop_trace is not None:
-                    loop_trace.append(out.detach())
-                out = _deq_step(out.detach(), self.n_loops - 1)   # one graded step (IFT approx)
+                out = out.detach()                     # cut history: grad only through the last w steps
+                for i in range(self.n_loops - w, self.n_loops):   # graded k-window (Neumann-k, FPRM)
+                    if loop_trace is not None:
+                        loop_trace.append(out.detach())
+                    out = _deq_step(out, i)
             elif self.hyper_lanes and not skip_refine and self.n_loops > 1:
                 # Hyper-connection lanes: K copies of the running output, mixed per pass.
                 # At init (one-hot alpha, identity mix, zero gates, uniform read) this is
@@ -447,9 +475,13 @@ class LoopedRWKV(nn.Module):
             else:
                 if loop_trace is not None:
                     loop_trace.append(out.detach())
+                fp_best, fp_bad = float("inf"), 0          # FPRM damped-patience state
+                if self.fixed_point_halt:
+                    self.last_halt_iters = self.n_loops
                 for i in range(1, self.n_loops):
                     if skip_refine:                           # pass-1 (core) semantics only
                         break
+                    prev = out                                # FPRM: state before this pass
                     # refine on a NORMALIZED hidden (input + running output); zero-init gates.
                     inp = hidden_states + out
                     if self.loop_index:                       # per-pass specialization offset
@@ -462,6 +494,21 @@ class LoopedRWKV(nn.Module):
                             + self._gate(i).to(inc.dtype) * inc
                     else:
                         out = out + self._gate(i).to(inc.dtype) * inc
+                    if self.fixed_point_halt:                 # FPRM: fixed-point-residual halting
+                        res = float((out - prev).norm() / (out.norm() + 1e-6))
+                        if res < fp_best - 1e-6:
+                            fp_best, fp_bad = res, 0
+                        else:                                 # plateau/oscillation -> damp the step
+                            fp_bad += 1
+                            if fp_bad >= self.fp_patience:
+                                out = prev + self.fp_damp * (out - prev)
+                        if i >= self.fp_min_iters and res < self.fp_tol:   # converged -> stop early
+                            self.last_halt_iters = i + 1
+                            if loop_trace is not None:
+                                loop_trace.append(out.detach())
+                            if collect:
+                                iters.append(out)
+                            break
                     if loop_trace is not None:
                         loop_trace.append(out.detach())
                     if collect:

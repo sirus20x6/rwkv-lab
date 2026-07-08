@@ -426,6 +426,12 @@ def build(args):
                              cart_anchor=bool(getattr(args, "loop_cart_anchor", 0)),
                              cart_gate_init=float(getattr(args, "loop_cart_gate_init", 4.0)),
                              loop_deq=bool(getattr(args, "loop_deq", 0)),
+                             deq_window=int(getattr(args, "loop_deq_window", 1)),
+                             fixed_point_halt=bool(getattr(args, "loop_fp_halt", 0)),
+                             fp_tol=float(getattr(args, "loop_fp_tol", 1e-3)),
+                             fp_min_iters=int(getattr(args, "loop_fp_min_iters", 1)),
+                             fp_patience=int(getattr(args, "loop_fp_patience", 2)),
+                             fp_damp=float(getattr(args, "loop_fp_damp", 0.5)),
                              ).to(device=_p0.device, dtype=_p0.dtype)
         student.float_gates()  # gates stay fp32: bf16 ulp swallows their tiny growth steps
         student.iter_consist = float(getattr(args, "loop_iter_consist", 0.0)) > 0
@@ -1852,6 +1858,18 @@ def main():
                          "point DETACHED (no BPTT, O(1) memory) then take one graded step. Same forward "
                          "value as full-BPTT, cheaper gradient -> many more loop passes. 0=off. Pair with "
                          "--loop-cart-anchor (contractive loop). Incompatible with halt/hyper/iter-consist.")
+    ap.add_argument("--loop-deq-window", type=int, default=1,
+                    help="FPRM (2606.18206 — Fixed-Point Reasoners): k-window truncated BPTT for --loop-deq. "
+                         "1=Neumann-1 (original DEQ, grad through last step); k=grad through the last k refine "
+                         "steps. Same forward value; trades memory for a longer gradient window.")
+    ap.add_argument("--loop-fp-halt", type=int, default=0,
+                    help="FPRM (2606.18206) fixed-point-residual halting: stop the loop when the relative "
+                         "residual ‖out−prev‖/‖out‖ < --loop-fp-tol (a convergence-based alternative to "
+                         "PonderNet's learned halt). 0=off. Incompatible with adaptive-halt/hyper/deq.")
+    ap.add_argument("--loop-fp-tol", type=float, default=1e-3, help="fixed-point halt relative-residual tolerance.")
+    ap.add_argument("--loop-fp-min-iters", type=int, default=1, help="min refinement passes before fp-halt can fire.")
+    ap.add_argument("--loop-fp-patience", type=int, default=2, help="passes without residual improvement before damping.")
+    ap.add_argument("--loop-fp-damp", type=float, default=0.5, help="damping factor applied to the step on plateau/oscillation.")
     ap.add_argument("--loop-lr-mult", type=float, default=1.0,
                     help="LR multiplier for residual_weight (the loop gates, their own 'rwkv_loop' group). "
                          "Default 1x: the refine/warm-start case, where the loop is already trained and should "
