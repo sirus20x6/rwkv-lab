@@ -195,6 +195,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True); ap.add_argument("--out", default="runs/rwkv_scratch")
     ap.add_argument("--doc-offsets", default="", help="build_corpus .off.npy => within-doc windows")
+    ap.add_argument("--gpu-data", default="auto", choices=["auto", "on", "off"],
+                    help="hold the token corpus on GPU for CPU-free window sampling (auto = if it fits the cap)")
+    ap.add_argument("--gpu-data-cap-gb", type=float, default=24.0,
+                    help="max int32 corpus size to place on GPU under --gpu-data auto")
     ap.add_argument("--d-model", type=int, default=512); ap.add_argument("--n-layers", type=int, default=6)
     ap.add_argument("--head-size", type=int, default=64)
     ap.add_argument("--lr", type=float, default=6e-4); ap.add_argument("--seq-len", type=int, default=512)
@@ -318,6 +322,35 @@ def main():
     fwd = torch.compile(model) if args.compile else model
     if args.compile:
         print("torch.compile: enabled (step 0 compiles; forward only, checkpoints uncompiled)", flush=True)
+    # Training-batch sampler. Hold the corpus on GPU (int32) when it fits, so each step's window
+    # sampling is a pure GPU gather — no per-step CPU gather, no H2D. This lets tiny models run
+    # data-unbound at very high step rates (the memmap CPU path serializes the GPU behind Python).
+    # Falls back to the CPU memmap sampler for corpora too large for VRAM.
+    width = T + 1 + (heads.extra_tokens if heads else 0)
+    gpu_gb = len(train_toks) * 4 / 1e9
+    use_gpu_data = args.gpu_data == "on" or (args.gpu_data == "auto" and gpu_gb <= args.gpu_data_cap_gb
+                                             and len(train_toks) > width)
+    if use_gpu_data:
+        tg = torch.from_numpy(np.ascontiguousarray(train_toks, dtype=np.int32)).to(dev)
+        ar = torch.arange(width, device=dev)
+        if train_docs:                                          # doc-boundary: sample doc, then offset
+            ds = torch.tensor([s - n_val for s, e in train_docs], device=dev)
+            dl = torch.tensor([e - s for s, e in train_docs], device=dev)
+            def sample_train():
+                di = torch.randint(0, ds.numel(), (args.batch,), device=dev)
+                maxoff = (dl[di] - width).clamp(min=0)
+                off = (torch.rand(args.batch, device=dev) * (maxoff + 1).float()).long().minimum(maxoff)
+                return tg[(ds[di] + off)[:, None] + ar[None, :]].long()
+        else:                                                  # flat: uniform window over the corpus
+            hi = tg.numel() - width
+            def sample_train():
+                idx = torch.randint(0, hi, (args.batch,), device=dev)
+                return tg[idx[:, None] + ar[None, :]].long()
+        print(f"gpu-data: corpus on GPU ({gpu_gb:.2f} GB int32) — window sampling is GPU-side", flush=True)
+    else:
+        def sample_train():
+            return train_batch(args.batch, width=width)
+        print(f"gpu-data: OFF ({gpu_gb:.2f} GB corpus) — CPU memmap sampler", flush=True)
     model.train(); t0 = time.time(); seen = 0
     print(f"budget={'%.1f min' % args.minutes if not args.steps else str(args.steps)+' steps'}", flush=True)
     while True:
@@ -332,8 +365,7 @@ def main():
             lr *= 0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * min(step, horizon) / horizon))
         for g in opt.param_groups:
             g["lr"] = lr
-        ex = heads.extra_tokens if heads else 0
-        x = train_batch(args.batch, width=T + 1 + ex)
+        x = sample_train()
         out = fwd(x[:, :T], return_hidden=bool(heads))
         lg = (out[0] if heads else out).float()
         loss = F.cross_entropy(lg.reshape(-1, lg.size(-1)), x[:, 1:T + 1].reshape(-1))
