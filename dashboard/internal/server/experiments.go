@@ -151,8 +151,15 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 	b.WriteString(`</table>`)
 	b.WriteString(`<div class="exp-levs"><div class="lev-h">configs to compare</div><table class="lev-tbl">`)
 	for _, lv := range knownLevers {
+		if lv.Name == "baseline" {
+			// baseline is the significance reference — locked on, not an optional arm.
+			fmt.Fprintf(&b, `<tr><td class="lev-c"><input type="checkbox" checked disabled></td>`+
+				`<td class="lev-n"><code>%s</code></td>`+
+				`<td class="lev-d">%s <span class="lev-ref">reference — always run</span></td></tr>`, lv.Name, esc(lv.Desc))
+			continue
+		}
 		chk := ""
-		if lv.Name == "baseline" || lv.Name == "loop3" {
+		if lv.Name == "loop3" {
 			chk = " checked"
 		}
 		fmt.Fprintf(&b, `<tr><td class="lev-c"><input type="checkbox" id="lev_%s" data-bind-lev_%s%s></td>`+
@@ -237,14 +244,17 @@ func (s *Server) handleLaunchExperiment(w http.ResponseWriter, r *http.Request) 
 		toastErr(sse, "launch: unknown task")
 		return
 	}
-	var configs []string
+	configs := []string{"baseline"} // significance reference — always run
 	for _, lv := range knownLevers {
+		if lv.Name == "baseline" {
+			continue
+		}
 		if b, _ := sig["lev_"+lv.Name].(bool); b {
 			configs = append(configs, lv.Name)
 		}
 	}
 	if len(configs) < 2 {
-		toastErr(sse, "launch: pick at least 2 configs to compare")
+		toastErr(sse, "launch: check at least one lever to compare against baseline")
 		return
 	}
 	args := []string{"-m", "rwkv_lab.experiment",
