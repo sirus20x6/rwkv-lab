@@ -152,6 +152,17 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(&b, `<option value="%s">%s — %s</option>`, t.Name, t.Name, esc(t.Desc))
 	}
 	b.WriteString(`</select></td><td class="f-d">the capability to probe</td></tr>`)
+	// init / start-from: scratch, continue a pretrained model, or hand off to conversion
+	b.WriteString(`<tr><td class="f-l">init</td><td><select data-bind-init>` +
+		`<option value="scratch">from scratch</option>` +
+		`<option value="g1g">continue · pretrained g1g</option>` +
+		`<option value="resume">resume · saved run</option>` +
+		`<option value="convert">convert · GDN→RWKV</option>` +
+		`</select></td><td class="f-d">random init · continue a pretrained model · convert (opens in the conversion board)</td></tr>`)
+	// resume checkpoint path — relevant only when init = resume (dimmed otherwise)
+	b.WriteString(`<tr data-class-lm-off="$init !== 'resume'"><td class="f-l">resume from</td>` +
+		`<td><input type="text" data-bind-resume placeholder="runs/&lt;name&gt;/ckpt.pt"></td>` +
+		`<td class="f-d">checkpoint to continue [resume only]</td></tr>`)
 	// budget: fixed step count or fixed wall-clock time (Karpathy-style rounds)
 	b.WriteString(`<tr><td class="f-l">budget</td><td><select data-bind-budget>` +
 		`<option value="steps">steps</option><option value="minutes">wall-clock (min)</option>` +
@@ -288,16 +299,35 @@ func (s *Server) handleLaunchExperiment(w http.ResponseWriter, r *http.Request) 
 	if str("budget", "steps") == "minutes" {
 		budget = []string{"--minutes", str("amount", "10")}
 	}
-	if task == lmTask { // LM mode -> rwkv_pretrain per lever (appears in the main leaderboard)
+	init := str("init", "scratch")
+	if init == "convert" { // per-layer GDN→RWKV distillation — not a config sweep
+		toast(sse, "conversion (GDN→RWKV) runs in the conversion board / queue — it's per-layer teacher distillation, not a compare-configs sweep")
+		return
+	}
+	// LM path: an LM corpus task, OR a continuation (g1g / resume) which is inherently an LM.
+	if task == lmTask || init == "g1g" || init == "resume" {
 		args := append([]string{"-m", "rwkv_lab.config", "run-lm", "--levers", strings.Join(configs, ","),
 			"--d-model", str("dmodel", "256"), "--n-layers", str("nlayers", "4"), "--head-size", str("headsize", "64"),
 			"--batch", str("batch", "32"), "--seq-len", str("ctxlen", "512")}, budget...)
+		note := "from scratch"
+		if init == "g1g" {
+			args = append(args, "--init-g1g", "models/rwkv7-g1g-1.5b.pth")
+			note = "continued from g1g"
+		} else if init == "resume" {
+			rp := str("resume", "")
+			if rp == "" {
+				toastErr(sse, "resume: enter a checkpoint path (runs/<name>/ckpt.pt)")
+				return
+			}
+			args = append(args, "--resume", rp)
+			note = "resumed from " + rp
+		}
 		pid, err := s.spawnPy(args, "lm_experiment.log")
 		if err != nil {
 			toastErr(sse, "launch failed: "+err.Error())
 			return
 		}
-		toast(sse, fmt.Sprintf("launched LM sweep [%s] (pid %d) — runs appear in the leaderboard", strings.Join(configs, ","), pid))
+		toast(sse, fmt.Sprintf("launched LM sweep [%s] · %s (pid %d) — runs appear in the leaderboard", strings.Join(configs, ","), note, pid))
 		return
 	}
 	if lmOnlyPicked { // synthetic task can't supply the token future these objectives need

@@ -614,10 +614,12 @@ details.arch-item[open] .lr-caret { transform: rotate(90deg); color: var(--accen
 .field-tbl .f-d { color: var(--text-dim); max-width: 22rem; }   /* wrap hints, don't push off-screen */
 .field-tbl tr:hover .f-d { color: var(--text); }
 .field-tbl input[type=number] { width: 5rem; }
+.field-tbl input[type=text] { width: 15rem; }
 .field-tbl select { width: 17rem; }                             /* fixed, not min-width (would stretch) */
 
 /* theme the field-table controls (they moved out of .exp-form into .field-tbl) */
 .field-tbl select,
+.field-tbl input[type=text],
 .field-tbl input[type=number] {
   font-family: var(--mono); font-size: var(--fs-sm); padding: 3px 8px;
   border-radius: var(--r-sm); border: 1px solid var(--border);

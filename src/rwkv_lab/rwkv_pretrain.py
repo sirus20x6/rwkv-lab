@@ -112,6 +112,7 @@ def main():
     ap.add_argument("--lr-schedule", default="cosine", choices=["constant", "cosine"])
     ap.add_argument("--decay-steps", type=int, default=0)   # cosine horizon; 0 => use --steps
     ap.add_argument("--save", default=""); ap.add_argument("--resume", default="")
+    ap.add_argument("--init-g1g", default="", help="continue-train from a pretrained g1g .pth (dims forced to g1g)")
     # loop levers
     ap.add_argument("--loop-count", type=int, default=1)
     ap.add_argument("--loop-hyper", type=int, default=0)
@@ -132,7 +133,16 @@ def main():
     torch.manual_seed(args.seed); rng = np.random.default_rng(args.seed)
 
     lk = loop_kwargs(args)
-    model = RWKV7Small(65536, args.d_model, args.n_layers, args.head_size, lk).to(dev, torch.bfloat16)
+    if args.init_g1g:                                        # continued pretraining from pretrained g1g
+        from rwkv_lab.native_g1g import load_g1g_native, add_loops
+        model, ginfo = load_g1g_native(args.init_g1g, device=dev)
+        if lk:
+            add_loops(model, lk)                             # levers attach identity-at-init
+        model = model.to(dev, torch.bfloat16)
+        print(f"init from g1g {args.init_g1g}: loaded {ginfo['loaded']}/{ginfo['n_ckpt']} tensors "
+              f"(dims forced to g1g 24L/d2048/h64)", flush=True)
+    else:
+        model = RWKV7Small(65536, args.d_model, args.n_layers, args.head_size, lk).to(dev, torch.bfloat16)
     nparam = sum(p.numel() for p in model.parameters())
     tag = f"scratch-L{args.n_layers}d{args.d_model}-loop{args.loop_count}" + \
           ("".join(k for k, v in [("H", args.loop_hyper), ("C", args.loop_cart_anchor),
