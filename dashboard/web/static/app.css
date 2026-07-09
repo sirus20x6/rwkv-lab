@@ -628,3 +628,7 @@ details.arch-item[open] .lr-caret { transform: rotate(90deg); color: var(--accen
 .field-tbl select:focus,
 .field-tbl input[type=number]:focus { border-color: var(--accent); outline: none; }
 .field-tbl select option { background: var(--bg-elev); color: var(--text); }
+
+/* dark color-scheme for ALL native controls in the experiments panel (checkboxes/selects/inputs) */
+.exp-body { color-scheme: dark; }
+.lev-tbl input[type=checkbox] { accent-color: var(--accent); color-scheme: dark; width: 15px; height: 15px; }
