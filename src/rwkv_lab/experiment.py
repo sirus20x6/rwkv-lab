@@ -41,7 +41,16 @@ LEVERS = {
     "loop3_factor": dict(n_loops=3, gate_mode="factored"),
     "nextlat":       dict(nextlat_weight=0.1),               # next-latent prediction aux (light)
     "loop3_nextlat": dict(n_loops=3, nextlat_weight=0.1),    # recurrent depth + next-latent
+    # LM-only latent objectives (need a real token future -> run via the LM path, not synthetic tasks)
+    "top":           dict(top_weight=0.1),                   # token-order prediction (lookahead window)
+    "lmtp":          dict(lmtp_weight=0.1),                  # leap multi-token prediction
+    "bst":           dict(bst_weight=0.1),                   # belief-state (fwd+bwd) objective
+    "jtp":           dict(jtp_weight=0.1),                   # joint multi-token prediction
 }
+
+# Levers whose objective needs a real token FUTURE — only valid on the LM path (rwkv_pretrain),
+# not the synthetic diagnostic tasks. The board disables these unless an LM corpus is selected.
+LM_ONLY = ("top", "lmtp", "bst", "jtp")
 
 _AUX_KEYS = ("nextlat_weight", "top_weight", "lmtp_weight", "bst_weight", "jtp_weight")
 

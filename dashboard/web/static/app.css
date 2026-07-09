@@ -636,3 +636,7 @@ details.arch-item[open] .lr-caret { transform: rotate(90deg); color: var(--accen
 /* baseline = locked significance reference */
 .lev-ref { font-size: .8em; color: var(--accent); opacity: .8; margin-left: .3rem; }
 .lev-tbl input[type=checkbox]:disabled { opacity: .55; cursor: default; }
+
+/* LM-only levers: dimmed when a synthetic task is selected (enabled only for the LM corpus) */
+.lev-tbl tr.lm-off { opacity: .4; }
+.lev-tbl tr.lm-off .lev-d { color: var(--text-dim); }
