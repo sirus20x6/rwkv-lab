@@ -137,7 +137,7 @@ def preflight(task, d_model, n_layers, head_size, lever, device, batch, steps=20
 
 
 def train_eval(task, d_model, n_layers, head_size, lever, seed, device, steps, batch, lr, minutes=0.0,
-               optimizer="adamw", weight_decay=0.01, warmup=0, muon_opts=None, fp8=False):
+               optimizer="adamw", weight_decay=0.01, warmup=0, muon_opts=None, fp8=False, do_compile=False):
     """Train one model on the task; return metrics incl. length-generalization accuracy. Budget is
     either a fixed step count (minutes=0) or wall-clock minutes (Karpathy-style fixed-time rounds)."""
     torch.manual_seed(seed); rng = np.random.default_rng(seed)
@@ -155,6 +155,7 @@ def train_eval(task, d_model, n_layers, head_size, lever, seed, device, steps, b
     warm = warmup if warmup > 0 else max(1, (steps or 2000) // 20)
     t0 = time.time()
     step = 0
+    fwd = torch.compile(model) if do_compile else model   # compile the train forward; eval stays eager
     while (time.time() - t0 < minutes * 60) if minutes > 0 else (step < steps):
         frac = min(1.0, (time.time() - t0) / (minutes * 60)) if minutes > 0 else step / max(steps, 1)
         w = min(1.0, (step + 1) / warm)                      # warmup
@@ -163,7 +164,7 @@ def train_eval(task, d_model, n_layers, head_size, lever, seed, device, steps, b
             g["lr"] = lr * w * (0.1 + 0.9 * cos)             # warmup then cosine decay to 0.1x
         step += 1
         x, y, m = task.batch(batch, device, rng)
-        out = model(x, return_hidden=bool(heads))
+        out = fwd(x, return_hidden=bool(heads))
         loss = _masked_ce((out[0] if heads else out).float(), y, m)
         if heads:                                            # within-sequence next-latent aux loss
             loss = loss + heads.compute(out[1], x, model.emb, model.head)["aux_total"]
@@ -203,6 +204,8 @@ def main():
     ap.add_argument("--warmup", type=int, default=0, help="warmup steps (0 = auto, about 5 percent)")
     ap.add_argument("--fp8", action="store_true",
                     help="run eligible Linear GEMMs in fp8 (torchao Float8Linear; Blackwell/Hopper)")
+    ap.add_argument("--compile", action="store_true",
+                    help="torch.compile the training forward (fuses fp8 cast+GEMM; ~2x on Blackwell)")
     add_muon_args(ap)
     ap.add_argument("--d-model", type=int, default=256); ap.add_argument("--n-layers", type=int, default=4)
     ap.add_argument("--head-size", type=int, default=64); ap.add_argument("--batch", type=int, default=64)
@@ -225,7 +228,7 @@ def main():
             runs.append(train_eval(task, args.d_model, args.n_layers, args.head_size, cfg, s,
                                    dev, args.steps, args.batch, args.lr, args.minutes,
                                    args.optimizer, args.weight_decay, args.warmup, muon_opts_from(args),
-                                   fp8=args.fp8))
+                                   fp8=args.fp8, do_compile=args.compile))
         keys = runs[0].keys()
         results[cfg] = {k: _agg([r[k] for r in runs if k in r]) for k in keys}
         results[cfg]["_n"] = len(runs)

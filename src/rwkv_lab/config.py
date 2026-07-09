@@ -66,8 +66,8 @@ def _run_synthetic(task_spec, cfg):
             print(f"  [{name}] PREFLIGHT REJECTED: {why}", flush=True); continue
         runs = [E.train_eval(task, dm, nl, hs, name, s, dev, steps, batch, lr, minutes,
                              tr.get("optimizer", "adamw"), float(tr.get("weight_decay", 0.01)),
-                             int(tr.get("warmup", 0)), tr.get("muon"), fp8=bool(tr.get("fp8", False)))
-                for s in range(seeds)]
+                             int(tr.get("warmup", 0)), tr.get("muon"), fp8=bool(tr.get("fp8", False)),
+                             do_compile=bool(tr.get("compile", False))) for s in range(seeds)]
         agg = {k: E._agg([r[k] for r in runs if k in r]) for k in runs[0]}
         registry.record(task_spec, name, seeds, steps, {k: list(v) for k, v in agg.items()})
         results[name] = agg
@@ -136,6 +136,8 @@ def run_lm(levers, model, train):
             cmd += ["--warmup", str(train["warmup"])]
         if train.get("fp8"):                               # fp8 compute (torchao Float8Linear)
             cmd += ["--fp8"]
+        if train.get("compile"):                           # torch.compile the train forward
+            cmd += ["--compile"]
         m = train.get("muon")                              # Muon-variant flags -> rwkv_pretrain
         if m and train.get("optimizer") == "muon":
             cmd += ["--sm-scale", str(m["scale"]), "--sm-spectral-power", str(m["spectral_power"]),
@@ -174,6 +176,7 @@ def main():
     rl.add_argument("--weight-decay", type=float, default=0.1)
     rl.add_argument("--warmup", type=int, default=0)
     rl.add_argument("--fp8", action="store_true")
+    rl.add_argument("--compile", action="store_true")
     from rwkv_lab.rwkv_pretrain import add_muon_args, muon_opts_from
     add_muon_args(rl)                                        # --sm-* Muon variants
     args = ap.parse_args()
@@ -183,7 +186,7 @@ def main():
                {"steps": args.steps, "minutes": args.minutes, "seq_len": args.seq_len,
                 "batch": args.batch, "lr": args.lr, "init_g1g": args.init_g1g, "resume": args.resume,
                 "optimizer": args.optimizer, "weight_decay": args.weight_decay, "warmup": args.warmup,
-                "fp8": args.fp8, "muon": muon_opts_from(args)})
+                "fp8": args.fp8, "compile": args.compile, "muon": muon_opts_from(args)})
     else:
         run(args.config)
 

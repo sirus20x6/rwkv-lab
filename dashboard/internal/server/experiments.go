@@ -206,6 +206,10 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 		`<td class="f-d">run eligible Linear GEMMs in fp8 on the Blackwell/Hopper tensor cores ` +
 		`(torchao Float8Linear; bf16 master weights kept, so the optimizer is unchanged). Throughput ` +
 		`gain needs torch.compile; eager fp8 still trains correctly.</td></tr>`)
+	b.WriteString(`<tr><td class="f-l"><label for="docompile"><code>compile</code></label></td>` +
+		`<td><input type="checkbox" id="docompile" data-bind-docompile></td>` +
+		`<td class="f-d">torch.compile the training forward — fuses the fp8 cast+GEMM for the real ` +
+		`~2× speedup on Blackwell (one-time ~40s compile at step 0). Best paired with fp8.</td></tr>`)
 	// Muon variants — rows shown only when optimizer = muon; each variant is its own checkbox row
 	moff := ` data-class-muon-off="$optimizer !== 'muon'"`
 	mvRow := func(sig, name, desc string) {
@@ -365,6 +369,9 @@ func (s *Server) handleLaunchExperiment(w http.ResponseWriter, r *http.Request) 
 	}
 	if on, _ := sig["fp8"].(bool); on { // fp8 compute — orthogonal to the optimizer
 		optArgs = append(optArgs, "--fp8")
+	}
+	if on, _ := sig["docompile"].(bool); on { // torch.compile the train forward
+		optArgs = append(optArgs, "--compile")
 	}
 	init := str("init", "scratch")
 	if init == "convert" { // per-layer GDN→RWKV distillation — not a config sweep
