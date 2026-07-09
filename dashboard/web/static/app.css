@@ -606,3 +606,12 @@ details.arch-item[open] .lr-caret { transform: rotate(90deg); color: var(--accen
 .ef-l { font-size: .72em; text-transform: uppercase; letter-spacing: .04em; color: var(--text-dim); }
 .exp-form select { min-width: 15rem; }
 .exp-form select option { background: var(--bg-elev); color: var(--text); }
+
+/* builder field table (task + numbers), matching the lever table */
+.field-tbl { border-collapse: collapse; font-size: .85em; margin-bottom: .4rem; }
+.field-tbl td { padding: .22rem .7rem .22rem 0; vertical-align: middle; }
+.field-tbl .f-l { color: var(--text-dim); text-align: right; white-space: nowrap; font-variant: small-caps; }
+.field-tbl .f-d { color: var(--text-dim); }
+.field-tbl tr:hover .f-d { color: var(--text); }
+.field-tbl input[type=number] { width: 5rem; }
+.field-tbl select { min-width: 15rem; }

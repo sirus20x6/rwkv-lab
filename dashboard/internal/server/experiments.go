@@ -133,21 +133,22 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 	b.WriteString(`<div id="experiments-body" class="exp-body">`)
 
 	// --- interactive builder: task dropdown, model pickers, seeds/steps, lever checkboxes ---
-	b.WriteString(`<div class="exp-build"><div class="exp-h">new experiment</div><div class="exp-form">`)
-	b.WriteString(`<div class="exp-field"><span class="ef-l">task</span><select data-bind-task>`)
+	b.WriteString(`<div class="exp-build"><div class="exp-h">new experiment</div>`)
+	b.WriteString(`<table class="field-tbl"><tr><td class="f-l">task</td><td><select data-bind-task>`)
 	for _, t := range knownTasks {
 		fmt.Fprintf(&b, `<option value="%s">%s — %s</option>`, t.Name, t.Name, esc(t.Desc))
 	}
-	b.WriteString(`</select></div>`)
-	numField := func(label, sig string, def int) {
-		fmt.Fprintf(&b, `<div class="exp-field"><span class="ef-l">%s</span>`+
-			`<input type="number" data-bind-%s value="%d" min="1"></div>`, label, sig, def)
+	b.WriteString(`</select></td><td class="f-d">the capability to probe</td></tr>`)
+	numField := func(label, sig, hint string, def int) {
+		fmt.Fprintf(&b, `<tr><td class="f-l">%s</td><td><input type="number" data-bind-%s value="%d" min="1"></td>`+
+			`<td class="f-d">%s</td></tr>`, label, sig, def, esc(hint))
 	}
-	numField("len/pairs", "tasklen", 16)
-	numField("d_model", "dmodel", 256)
-	numField("layers", "nlayers", 4)
-	numField("seeds", "seeds", 3)
-	numField("steps", "steps", 3000)
+	numField("len / pairs", "tasklen", "task difficulty — pairs (recall) / sequence length (copy·induction)", 16)
+	numField("d_model", "dmodel", "model width", 256)
+	numField("layers", "nlayers", "model depth", 4)
+	numField("seeds", "seeds", "runs averaged → error bars + significance", 3)
+	numField("steps", "steps", "training steps per run", 3000)
+	b.WriteString(`</table>`)
 	b.WriteString(`<div class="exp-levs"><div class="lev-h">configs to compare</div><table class="lev-tbl">`)
 	for _, lv := range knownLevers {
 		chk := ""
