@@ -1,9 +1,10 @@
 package server
 
 // Experiments panel: reads the rwkv-lab results registry (experiments.db, written by
-// experiment.py / config.py) and the experiments/*.yaml config files, renders a ranked
-// mean±std table with significance vs baseline, and offers a one-click launch of a config
-// run (python -m rwkv_lab.config run <file>). Turns the CLI-first lab into a managed one.
+// experiment.py / config.py) and renders a per-task ranked table (acc mean±std + significance,
+// loop-gate engagement, params, FLOP/token, length-gen) plus an interactive builder — task
+// dropdown, model number-pickers, seeds/steps, and lever checkboxes — that launches
+// experiment.py with those parameters. Also lists experiments/*.yaml with one-click run.
 
 import (
 	"database/sql"
@@ -15,30 +16,41 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/starfederation/datastar-go/datastar"
 )
 
+// known lever combos (mirrors experiment.LEVERS) — the builder's checkboxes.
+var knownLevers = []string{"baseline", "loop2", "loop3", "loop4", "loop3_hyper", "loop3_cart", "loop3_deq", "loop3_factor"}
+var knownTasks = []string{"recall", "copy", "induction"}
+
 type expRow struct {
-	Config    string
-	Mean, Std float64
-	Seeds     int
-	Sha       string
+	Config                        string
+	Mean, Std                     float64 // acc
+	Gate, ParamsM, FlopTok, Acc2x float64
+	Seeds                         int
+	Sha                           string
 }
 
-// readRegistry returns task -> its config rows (latest per config), acc metric.
+func m0(m map[string][]float64, k string) float64 {
+	if v, ok := m[k]; ok && len(v) > 0 {
+		return v[0]
+	}
+	return math.NaN()
+}
+
 func (s *Server) readRegistry() (map[string][]expRow, error) {
 	path := filepath.Join(s.cfg.RepoRoot, "experiments.db")
 	if _, err := os.Stat(path); err != nil {
-		return nil, nil // no registry yet
+		return nil, nil
 	}
 	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(2000)")
 	if err != nil {
 		return nil, err
 	}
 	defer db.Close()
-	// latest row per (task, config)
 	rows, err := db.Query(`SELECT task, config, seeds, git_sha, metrics_json, MAX(ts)
 		FROM results GROUP BY task, config ORDER BY task`)
 	if err != nil {
@@ -54,22 +66,19 @@ func (s *Server) readRegistry() (map[string][]expRow, error) {
 			continue
 		}
 		var m map[string][]float64
-		if json.Unmarshal([]byte(mj), &m) != nil {
+		if json.Unmarshal([]byte(mj), &m) != nil || len(m["acc"]) < 2 {
 			continue
 		}
-		acc, ok := m["acc"]
-		if !ok || len(acc) < 2 {
-			continue
-		}
-		out[task] = append(out[task], expRow{Config: config, Mean: acc[0], Std: acc[1], Seeds: seeds, Sha: sha})
+		out[task] = append(out[task], expRow{Config: config, Mean: m["acc"][0], Std: m["acc"][1],
+			Gate: m0(m, "gate"), ParamsM: m0(m, "params_m"), FlopTok: m0(m, "flop_per_tok"),
+			Acc2x: m0(m, "acc_2x"), Seeds: seeds, Sha: sha})
 	}
 	return out, nil
 }
 
 func (s *Server) listConfigs() []string {
-	dir := filepath.Join(s.cfg.RepoRoot, "experiments")
 	var files []string
-	entries, _ := os.ReadDir(dir)
+	entries, _ := os.ReadDir(filepath.Join(s.cfg.RepoRoot, "experiments"))
 	for _, e := range entries {
 		if n := e.Name(); strings.HasSuffix(n, ".yaml") || strings.HasSuffix(n, ".yml") || strings.HasSuffix(n, ".json") {
 			files = append(files, "experiments/"+n)
@@ -77,6 +86,13 @@ func (s *Server) listConfigs() []string {
 	}
 	sort.Strings(files)
 	return files
+}
+
+func fnum(v float64, dec int) string {
+	if math.IsNaN(v) {
+		return "—"
+	}
+	return strconv.FormatFloat(v, 'f', dec, 64)
 }
 
 func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
@@ -89,20 +105,42 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 	var b strings.Builder
 	b.WriteString(`<div id="experiments-body" class="exp-body">`)
 
-	// launchable configs
-	b.WriteString(`<div class="exp-configs"><div class="exp-h">config files</div>`)
-	cfgs := s.listConfigs()
-	if len(cfgs) == 0 {
-		b.WriteString(`<div class="empty">no experiments/*.yaml</div>`)
+	// --- interactive builder: task dropdown, model pickers, seeds/steps, lever checkboxes ---
+	b.WriteString(`<div class="exp-build"><div class="exp-h">new experiment</div><div class="exp-form">`)
+	b.WriteString(`<label>task <select data-bind-task>`)
+	for _, t := range knownTasks {
+		fmt.Fprintf(&b, `<option value="%s">%s</option>`, t, t)
 	}
-	for _, c := range cfgs {
+	b.WriteString(`</select></label>`)
+	numField := func(label, sig string, def int) {
+		fmt.Fprintf(&b, `<label>%s <input type="number" data-bind-%s value="%d" min="1"></label>`, label, sig, def)
+	}
+	numField("len/pairs", "tasklen", 16)
+	numField("d_model", "dmodel", 256)
+	numField("layers", "nlayers", 4)
+	numField("seeds", "seeds", 3)
+	numField("steps", "steps", 3000)
+	b.WriteString(`<div class="exp-levs">compare:`)
+	for _, lv := range knownLevers {
+		chk := ""
+		if lv == "baseline" || lv == "loop3" {
+			chk = " checked"
+		}
+		fmt.Fprintf(&b, `<label class="lev"><input type="checkbox" data-bind-lev_%s%s> %s</label>`, lv, chk, lv)
+	}
+	b.WriteString(`</div>`)
+	b.WriteString(`<button class="btn" data-on:click="@post('/api/experiments/launch')">▶ run experiment</button>`)
+	b.WriteString(`</div></div>`)
+
+	// --- launchable config files ---
+	b.WriteString(`<div class="exp-configs"><div class="exp-h">config files</div>`)
+	for _, c := range s.listConfigs() {
 		fmt.Fprintf(&b, `<div class="exp-cfg"><code>%s</code>`+
-			`<button class="btn sm" data-on:click="@post('/api/experiments/run?cfg=%s')">run</button></div>`,
-			esc(c), esc(c))
+			`<button class="btn sm" data-on:click="@post('/api/experiments/run?cfg=%s')">run</button></div>`, esc(c), esc(c))
 	}
 	b.WriteString(`</div>`)
 
-	// results by task, ranked, with significance vs baseline
+	// --- results by task: acc + gate + params + FLOP + length-gen + significance ---
 	b.WriteString(`<div class="exp-results"><div class="exp-h">results (latest per config)</div>`)
 	tasks := make([]string, 0, len(reg))
 	for t := range reg {
@@ -110,7 +148,7 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Strings(tasks)
 	if len(tasks) == 0 {
-		b.WriteString(`<div class="empty">no results yet — run a config</div>`)
+		b.WriteString(`<div class="empty">no results yet — build one above or run a config</div>`)
 	}
 	for _, task := range tasks {
 		rowsT := reg[task]
@@ -122,21 +160,26 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		fmt.Fprintf(&b, `<div class="exp-task"><div class="exp-tname">%s</div><table class="exp-tbl">`, esc(task))
+		b.WriteString(`<tr class="exp-hd"><td>config</td><td>acc</td><td>len-gen</td><td>gate</td><td>params</td><td>MF/tok</td><td>vs base</td></tr>`)
 		for _, rw := range rowsT {
-			delta := ""
+			delta := `<td></td>`
 			if base != nil && rw.Config != "baseline" {
 				d := rw.Mean - base.Mean
 				sig := math.Abs(d) > (rw.Std + base.Std)
-				cls := "ns"
-				if sig {
-					cls = "sig"
-				}
+				cls := map[bool]string{true: "sig", false: "ns"}[sig]
 				delta = fmt.Sprintf(`<td class="%s">Δ%+.3f %s</td>`, cls, d, map[bool]string{true: "✓", false: "·"}[sig])
-			} else {
-				delta = `<td></td>`
 			}
-			fmt.Fprintf(&b, `<tr><td class="exp-cfgn">%s</td><td>%.3f±%.3f</td><td class="dim">n=%d @%s</td>%s</tr>`,
-				esc(rw.Config), rw.Mean, rw.Std, rw.Seeds, esc(rw.Sha), delta)
+			gate := fnum(rw.Gate, 3)
+			if !math.IsNaN(rw.Gate) && rw.Gate < 0.02 && rw.Config != "baseline" {
+				gate += " ⚠"
+			}
+			mf := "—"
+			if !math.IsNaN(rw.FlopTok) {
+				mf = fnum(rw.FlopTok/1e6, 1)
+			}
+			fmt.Fprintf(&b, `<tr><td class="exp-cfgn">%s</td><td>%.3f±%.3f</td><td class="dim">%s</td>`+
+				`<td class="dim">%s</td><td class="dim">%sM</td><td class="dim">%s</td>%s</tr>`,
+				esc(rw.Config), rw.Mean, rw.Std, fnum(rw.Acc2x, 3), gate, fnum(rw.ParamsM, 2), mf, delta)
 		}
 		b.WriteString(`</table></div>`)
 	}
@@ -144,8 +187,69 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 	_ = sse.PatchElements(b.String())
 }
 
-// handleRunConfig launches `python -m rwkv_lab.config run <cfg>` detached. The cfg must be a
-// file under experiments/ (no traversal) — same safety posture as the training-script allowlist.
+// handleLaunchExperiment reads the builder's Datastar signals and spawns experiment.py with them.
+func (s *Server) handleLaunchExperiment(w http.ResponseWriter, r *http.Request) {
+	sse := datastar.NewSSE(w, r)
+	var sig map[string]any
+	if json.NewDecoder(r.Body).Decode(&sig) != nil {
+		toastErr(sse, "launch: bad request")
+		return
+	}
+	str := func(k, def string) string {
+		if v, ok := sig[k]; ok {
+			return fmt.Sprintf("%v", v)
+		}
+		return def
+	}
+	task := str("task", "recall")
+	if !contains(knownTasks, task) {
+		toastErr(sse, "launch: unknown task")
+		return
+	}
+	var configs []string
+	for _, lv := range knownLevers {
+		if b, _ := sig["lev_"+lv].(bool); b {
+			configs = append(configs, lv)
+		}
+	}
+	if len(configs) < 2 {
+		toastErr(sse, "launch: pick at least 2 configs to compare")
+		return
+	}
+	args := []string{"-m", "rwkv_lab.experiment",
+		"--task", task + ":" + str("tasklen", "16"),
+		"--configs", strings.Join(configs, ","),
+		"--seeds", str("seeds", "3"), "--steps", str("steps", "3000"),
+		"--d-model", str("dmodel", "256"), "--n-layers", str("nlayers", "4")}
+	logPath := filepath.Join(s.cfg.RunsDir, "exp_"+task+".log")
+	lf, err := os.Create(logPath)
+	if err != nil {
+		toastErr(sse, "launch: "+err.Error())
+		return
+	}
+	cmd := exec.Command(filepath.Join(s.cfg.RepoRoot, ".venv", "bin", "python"), args...)
+	cmd.Dir = s.cfg.RepoRoot
+	cmd.Env = append(os.Environ(), "PYTHONPATH=src", "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True")
+	cmd.Stdout, cmd.Stderr = lf, lf
+	if err := cmd.Start(); err != nil {
+		lf.Close()
+		toastErr(sse, "launch failed: "+err.Error())
+		return
+	}
+	go func() { _ = cmd.Wait(); lf.Close() }()
+	toast(sse, fmt.Sprintf("launched %s [%s] (pid %d) — expand again to see results", task, strings.Join(configs, ","), cmd.Process.Pid))
+}
+
+func contains(xs []string, v string) bool {
+	for _, x := range xs {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
+// handleRunConfig launches `python -m rwkv_lab.config run <cfg>` (a config file under experiments/).
 func (s *Server) handleRunConfig(w http.ResponseWriter, r *http.Request) {
 	sse := datastar.NewSSE(w, r)
 	cfg := r.URL.Query().Get("cfg")
@@ -154,8 +258,7 @@ func (s *Server) handleRunConfig(w http.ResponseWriter, r *http.Request) {
 		toastErr(sse, "run refused: cfg must be experiments/*.yaml")
 		return
 	}
-	full := filepath.Join(s.cfg.RepoRoot, cfg)
-	if _, err := os.Stat(full); err != nil {
+	if _, err := os.Stat(filepath.Join(s.cfg.RepoRoot, cfg)); err != nil {
 		toastErr(sse, "run refused: "+cfg+" not found")
 		return
 	}
@@ -166,8 +269,7 @@ func (s *Server) handleRunConfig(w http.ResponseWriter, r *http.Request) {
 		toastErr(sse, "run refused: "+err.Error())
 		return
 	}
-	cmd := exec.Command(filepath.Join(s.cfg.RepoRoot, ".venv", "bin", "python"),
-		"-m", "rwkv_lab.config", "run", cfg)
+	cmd := exec.Command(filepath.Join(s.cfg.RepoRoot, ".venv", "bin", "python"), "-m", "rwkv_lab.config", "run", cfg)
 	cmd.Dir = s.cfg.RepoRoot
 	cmd.Env = append(os.Environ(), "PYTHONPATH=src", "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True")
 	cmd.Stdout, cmd.Stderr = lf, lf
