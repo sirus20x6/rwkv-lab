@@ -91,6 +91,10 @@ def _run_lm(data, cfg):
         cmd += (["--steps", str(tr["steps"])] if "steps" in tr else ["--minutes", str(tr.get("minutes", 10))])
         if off_path:
             cmd += ["--doc-offsets", off_path]
+        if train.get("init_g1g"):                      # continued pretraining from pretrained g1g
+            cmd += ["--init-g1g", train["init_g1g"]]
+        elif train.get("resume"):                      # continue from a saved run checkpoint
+            cmd += ["--resume", train["resume"]]
         for k, v in lever.items():                     # translate lever kwargs -> CLI flags
             if k in _LM_FLAG:
                 cmd += [_LM_FLAG[k], str(int(v) if isinstance(v, bool) else v)]
@@ -148,12 +152,14 @@ def main():
     rl.add_argument("--seq-len", type=int, default=512)
     rl.add_argument("--batch", type=int, default=16)
     rl.add_argument("--lr", type=float, default=6e-4)
+    rl.add_argument("--init-g1g", default="")               # continued pretraining from g1g
+    rl.add_argument("--resume", default="")                 # continue from a saved run checkpoint
     args = ap.parse_args()
     if args.cmd == "run-lm":
         run_lm(args.levers.split(","),
                {"d_model": args.d_model, "n_layers": args.n_layers, "head_size": args.head_size},
                {"steps": args.steps, "minutes": args.minutes, "seq_len": args.seq_len,
-                "batch": args.batch, "lr": args.lr})
+                "batch": args.batch, "lr": args.lr, "init_g1g": args.init_g1g, "resume": args.resume})
     else:
         run(args.config)
 
