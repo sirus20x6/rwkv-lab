@@ -187,8 +187,12 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 	numField("batch", "batch", "sequences per step", 16)
 	// optimizer settings
 	b.WriteString(`<tr><td class="f-l">optimizer</td><td><select data-bind-optimizer>` +
-		`<option value="adamw">AdamW</option><option value="muon">Muon (spectral)</option>` +
-		`</select></td><td class="f-d">AdamW, or Muon — Newton–Schulz on 2D weights, AdamW on embeds/norms</td></tr>`)
+		`<option value="adamw">AdamW</option>` +
+		`<option value="adamw8bit">AdamW 8-bit</option>` +
+		`<option value="paged-adamw8bit">AdamW 8-bit (paged)</option>` +
+		`<option value="muon">Muon (spectral)</option>` +
+		`</select></td><td class="f-d">AdamW · 8-bit variants quantize the Adam moment states (bitsandbytes, ~75% ` +
+		`less optimizer memory, ~fp32 quality; paged rides out OOM spikes) · Muon = Newton–Schulz on 2D weights, AdamW on embeds/norms</td></tr>`)
 	strField := func(label, sig, hint, def string) {
 		fmt.Fprintf(&b, `<tr><td class="f-l">%s</td><td><input type="text" data-bind-%s value="%s"></td>`+
 			`<td class="f-d">%s</td></tr>`, label, sig, def, esc(hint))

@@ -84,12 +84,26 @@ class RWKV7Small(nn.Module):
         return (logits, h) if return_hidden else logits
 
 
+def _adamw8bit(params, lr, wd, paged):
+    """bitsandbytes 8-bit AdamW (blockwise-quantized moment states, ~75% optimizer-memory cut at
+    ~fp32 quality). paged=True routes state through CUDA unified memory to ride out OOM spikes on
+    big models. CUDA-only in bnb; a missing/unusable bnb raises a clear error at construction."""
+    try:
+        import bitsandbytes as bnb
+    except Exception as e:  # noqa: BLE001 — surface the real cause (no wheel, bad CUDA, etc.)
+        raise RuntimeError("8-bit optimizer needs bitsandbytes: `uv pip install bitsandbytes`") from e
+    Opt = bnb.optim.PagedAdamW8bit if paged else bnb.optim.AdamW8bit
+    return Opt(params, lr=lr, betas=(0.9, 0.95), weight_decay=wd)
+
+
 def build_optimizer(named_params, name, lr, wd, adam_lr=0.0, muon_opts=None):
-    """AdamW, or spectral_muon (Muon on 2D weight matrices, AdamW on embeds/norms/1D). Shared by the
-    LM and synthetic harnesses so the card's optimizer dropdown drives both. adam_lr (0 = use lr) is
-    the fallback LR for non-matrix params under Muon — Muon matrix LRs run larger than AdamW's.
-    muon_opts selects the Muon variant (spectral_power=Muon^p, ddc_strength=DDC, mona=Muon²/MONA,
-    second_moment=Aurora, rsav, da_muon, aro, + scale/ns_steps) — passed straight to SpectralMuon."""
+    """AdamW, 8-bit AdamW (bitsandbytes), or spectral_muon (Muon on 2D weight matrices, AdamW on
+    embeds/norms/1D). Shared by the LM and synthetic harnesses so the card's optimizer dropdown
+    drives both. adam_lr (0 = use lr) is the fallback LR for non-matrix params under Muon — Muon
+    matrix LRs run larger than AdamW's. muon_opts selects the Muon variant (spectral_power=Muon^p,
+    ddc_strength=DDC, mona=Muon²/MONA, second_moment=Aurora, rsav, da_muon, aro, + scale/ns_steps)
+    — passed straight to SpectralMuon. The 8-bit variants apply only to the AdamW path (the Muon
+    fallback group is embeds/norms/1D — negligible state — so it stays fp32)."""
     named = [(n, p) for n, p in named_params if p.requires_grad]
     if name == "muon":
         from rwkv_lab.spectral_muon import SpectralMuon
@@ -100,8 +114,11 @@ def build_optimizer(named_params, name, lr, wd, adam_lr=0.0, muon_opts=None):
         groups = [{"params": muon, "use_muon": True, "lr": lr},
                   {"params": adam, "use_muon": False, "lr": adam_lr or lr}]
         return SpectralMuon(groups, weight_decay=wd, **(muon_opts or {}))
+    params = [p for _, p in named]
+    if name in ("adamw8bit", "paged-adamw8bit"):
+        return _adamw8bit(params, lr, wd, paged=(name == "paged-adamw8bit"))
     import torch as _t
-    return _t.optim.AdamW([p for _, p in named], lr=lr, betas=(0.9, 0.95), weight_decay=wd)
+    return _t.optim.AdamW(params, lr=lr, betas=(0.9, 0.95), weight_decay=wd)
 
 
 # --sm-* CLI flags -> SpectralMuon kwargs (the Muon variants exposed by the card).
@@ -148,7 +165,8 @@ def main():
     ap.add_argument("--val-windows", type=int, default=40); ap.add_argument("--eval-every", type=int, default=50)
     ap.add_argument("--log-every", type=int, default=10); ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--warmup", type=int, default=100)
-    ap.add_argument("--optimizer", default="adamw", choices=["adamw", "muon"])
+    ap.add_argument("--optimizer", default="adamw",
+                    choices=["adamw", "adamw8bit", "paged-adamw8bit", "muon"])
     ap.add_argument("--weight-decay", type=float, default=0.1)
     add_muon_args(ap)
     ap.add_argument("--lr-schedule", default="cosine", choices=["constant", "cosine"])

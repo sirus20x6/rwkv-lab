@@ -195,7 +195,8 @@ def main():
     ap.add_argument("--seeds", type=int, default=3)
     ap.add_argument("--steps", type=int, default=3000)
     ap.add_argument("--minutes", type=float, default=0.0, help="wall-clock budget per run (0 = use --steps)")
-    ap.add_argument("--optimizer", default="adamw", choices=["adamw", "muon"])
+    ap.add_argument("--optimizer", default="adamw",
+                    choices=["adamw", "adamw8bit", "paged-adamw8bit", "muon"])
     ap.add_argument("--weight-decay", type=float, default=0.01)
     ap.add_argument("--warmup", type=int, default=0, help="warmup steps (0 = auto, about 5 percent)")
     add_muon_args(ap)
