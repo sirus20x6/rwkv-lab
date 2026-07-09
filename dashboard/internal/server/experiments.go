@@ -34,6 +34,8 @@ var knownLevers = []leverDef{
 	{"loop3_cart", "loop ×3 + CART contractive LTI anchor (bounds the deep loop)"},
 	{"loop3_deq", "loop ×3 + DEQ 1-step gradient (O(1) memory)"},
 	{"loop3_factor", "loop ×3 + factored head×channel gate"},
+	{"nextlat", "next-latent prediction aux — predicts h[t+d] in-sequence (training-only, no inference cost)"},
+	{"loop3_nextlat", "loop ×3 + next-latent prediction"},
 }
 
 type taskDef struct{ Name, Desc string }

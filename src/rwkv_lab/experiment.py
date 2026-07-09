@@ -26,17 +26,31 @@ from rwkv_lab.synthetic_tasks import make_task, Task
 from rwkv_lab.looped_rwkv import LoopedRWKV
 from rwkv_lab import registry
 
-# Lever configs -> LoopedRWKV kwargs ({} = bare core baseline). Add rows to grow the lever set.
+# Lever configs. A lever mixes LoopedRWKV kwargs (recurrent depth) with LookaheadSystem aux weights
+# (latent-prediction training objectives, keys ending in _weight). {} = bare core baseline.
+# NOTE: only nextlat is valid on the synthetic tasks — it predicts h[t+d] from within the sequence
+# (no future tokens). top/lmtp/bst/jtp need a real token FUTURE, so they live in the LM path only.
 LEVERS = {
-    "baseline":    {},
-    "loop2":       dict(n_loops=2),
-    "loop3":       dict(n_loops=3),
-    "loop4":       dict(n_loops=4),
-    "loop3_hyper": dict(n_loops=3, hyper_lanes=2),
-    "loop3_cart":  dict(n_loops=3, cart_anchor=True),
-    "loop3_deq":   dict(n_loops=3, loop_deq=True),
+    "baseline":     {},
+    "loop2":        dict(n_loops=2),
+    "loop3":        dict(n_loops=3),
+    "loop4":        dict(n_loops=4),
+    "loop3_hyper":  dict(n_loops=3, hyper_lanes=2),
+    "loop3_cart":   dict(n_loops=3, cart_anchor=True),
+    "loop3_deq":    dict(n_loops=3, loop_deq=True),
     "loop3_factor": dict(n_loops=3, gate_mode="factored"),
+    "nextlat":       dict(nextlat_weight=0.1),               # next-latent prediction aux (light)
+    "loop3_nextlat": dict(n_loops=3, nextlat_weight=0.1),    # recurrent depth + next-latent
 }
+
+_AUX_KEYS = ("nextlat_weight", "top_weight", "lmtp_weight", "bst_weight", "jtp_weight")
+
+
+def _split_lever(kw: dict):
+    """Partition a lever into (loop kwargs, aux latent-prediction weights)."""
+    aux = {k: v for k, v in kw.items() if k in _AUX_KEYS}
+    loop = {k: v for k, v in kw.items() if k not in _AUX_KEYS}
+    return loop, aux
 
 
 def _norm_loopkw(kw: dict) -> dict:
@@ -50,7 +64,8 @@ def _norm_loopkw(kw: dict) -> dict:
 
 
 def build(task: Task, d_model, n_layers, head_size, lever) -> RWKV7Small:
-    return RWKV7Small(task.vocab, d_model, n_layers, head_size, _norm_loopkw(LEVERS[lever]))
+    loop, _ = _split_lever(LEVERS[lever])
+    return RWKV7Small(task.vocab, d_model, n_layers, head_size, _norm_loopkw(loop))
 
 
 def _masked_ce(logits, y, m):
@@ -116,7 +131,13 @@ def train_eval(task, d_model, n_layers, head_size, lever, seed, device, steps, b
     """Train one model on the task; return metrics incl. length-generalization accuracy."""
     torch.manual_seed(seed); rng = np.random.default_rng(seed)
     model = build(task, d_model, n_layers, head_size, lever).to(device, torch.bfloat16)
-    opt = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.01)
+    _, aux = _split_lever(LEVERS[lever])
+    heads = None
+    if aux:                                                  # latent-prediction aux (e.g. nextlat)
+        from rwkv_lab.lookahead_module import LookaheadSystem
+        heads = LookaheadSystem(d_model, task.vocab, **aux).to(device, torch.bfloat16)
+    params = list(model.parameters()) + (list(heads.parameters()) if heads else [])
+    opt = torch.optim.AdamW(params, lr=lr, betas=(0.9, 0.95), weight_decay=0.01)
     warm = max(1, steps // 20)
     for step in range(steps):
         w = min(1.0, (step + 1) / warm)                      # warmup
@@ -124,9 +145,12 @@ def train_eval(task, d_model, n_layers, head_size, lever, seed, device, steps, b
         for g in opt.param_groups:
             g["lr"] = lr * w * (0.1 + 0.9 * cos)             # warmup then cosine decay to 0.1x
         x, y, m = task.batch(batch, device, rng)
-        loss = _masked_ce(model(x).float(), y, m)
+        out = model(x, return_hidden=bool(heads))
+        loss = _masked_ce((out[0] if heads else out).float(), y, m)
+        if heads:                                            # within-sequence next-latent aux loss
+            loss = loss + heads.compute(out[1], x, model.emb, model.head)["aux_total"]
         opt.zero_grad(set_to_none=True); loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(params, 1.0)
         opt.step()
     acc = _eval_acc(model, task, batch, device, rng)
     out = {"loss": float(loss), "acc": acc, "gate": loop_gate_stats(model)}
