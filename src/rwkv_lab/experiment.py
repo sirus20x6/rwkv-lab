@@ -136,8 +136,9 @@ def preflight(task, d_model, n_layers, head_size, lever, device, batch, steps=20
     return True, f"ok (loss {losses[0]:.2f} -> {losses[-1]:.2f})"
 
 
-def train_eval(task, d_model, n_layers, head_size, lever, seed, device, steps, batch, lr):
-    """Train one model on the task; return metrics incl. length-generalization accuracy."""
+def train_eval(task, d_model, n_layers, head_size, lever, seed, device, steps, batch, lr, minutes=0.0):
+    """Train one model on the task; return metrics incl. length-generalization accuracy. Budget is
+    either a fixed step count (minutes=0) or wall-clock minutes (Karpathy-style fixed-time rounds)."""
     torch.manual_seed(seed); rng = np.random.default_rng(seed)
     model = build(task, d_model, n_layers, head_size, lever).to(device, torch.bfloat16)
     _, aux = _split_lever(LEVERS[lever])
@@ -147,12 +148,16 @@ def train_eval(task, d_model, n_layers, head_size, lever, seed, device, steps, b
         heads = LookaheadSystem(d_model, task.vocab, **aux).to(device, torch.bfloat16)
     params = list(model.parameters()) + (list(heads.parameters()) if heads else [])
     opt = torch.optim.AdamW(params, lr=lr, betas=(0.9, 0.95), weight_decay=0.01)
-    warm = max(1, steps // 20)
-    for step in range(steps):
+    warm = max(1, (steps or 2000) // 20)
+    t0 = time.time()
+    step = 0
+    while (time.time() - t0 < minutes * 60) if minutes > 0 else (step < steps):
+        frac = min(1.0, (time.time() - t0) / (minutes * 60)) if minutes > 0 else step / max(steps, 1)
         w = min(1.0, (step + 1) / warm)                      # warmup
-        cos = 0.5 * (1 + math.cos(math.pi * min(step, steps) / steps))   # 1 -> 0
+        cos = 0.5 * (1 + math.cos(math.pi * frac))           # 1 -> 0 over the budget
         for g in opt.param_groups:
             g["lr"] = lr * w * (0.1 + 0.9 * cos)             # warmup then cosine decay to 0.1x
+        step += 1
         x, y, m = task.batch(batch, device, rng)
         out = model(x, return_hidden=bool(heads))
         loss = _masked_ce((out[0] if heads else out).float(), y, m)
@@ -187,6 +192,7 @@ def main():
     ap.add_argument("--configs", default="baseline,loop3")
     ap.add_argument("--seeds", type=int, default=3)
     ap.add_argument("--steps", type=int, default=3000)
+    ap.add_argument("--minutes", type=float, default=0.0, help="wall-clock budget per run (0 = use --steps)")
     ap.add_argument("--d-model", type=int, default=256); ap.add_argument("--n-layers", type=int, default=4)
     ap.add_argument("--head-size", type=int, default=64); ap.add_argument("--batch", type=int, default=64)
     ap.add_argument("--lr", type=float, default=3e-3)
@@ -206,7 +212,7 @@ def main():
         t0 = time.time()
         for s in range(args.seeds):
             runs.append(train_eval(task, args.d_model, args.n_layers, args.head_size, cfg, s,
-                                   dev, args.steps, args.batch, args.lr))
+                                   dev, args.steps, args.batch, args.lr, args.minutes))
         keys = runs[0].keys()
         results[cfg] = {k: _agg([r[k] for r in runs if k in r]) for k in keys}
         results[cfg]["_n"] = len(runs)

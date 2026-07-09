@@ -56,6 +56,7 @@ def _run_synthetic(task_spec, cfg):
     dm, nl, hs = int(m.get("d_model", 256)), int(m.get("n_layers", 4)), int(m.get("head_size", 64))
     steps, batch = int(tr.get("steps", 3000)), int(tr.get("batch", 64))
     lr = float(tr.get("lr", 3e-3))                      # YAML 1.1 parses '3e-3' as str -> coerce
+    minutes = float(tr.get("minutes", 0.0))             # wall-clock budget (0 = use steps)
     seeds = int(cfg.get("seeds", 3))
     print(f"[config] synthetic task={task.name} configs={list(cfg['configs'])} seeds={seeds} dev={dev}", flush=True)
     results = {}
@@ -63,7 +64,7 @@ def _run_synthetic(task_spec, cfg):
         ok, why = E.preflight(task, dm, nl, hs, name, dev, batch)
         if not ok:
             print(f"  [{name}] PREFLIGHT REJECTED: {why}", flush=True); continue
-        runs = [E.train_eval(task, dm, nl, hs, name, s, dev, steps, batch, lr) for s in range(seeds)]
+        runs = [E.train_eval(task, dm, nl, hs, name, s, dev, steps, batch, lr, minutes) for s in range(seeds)]
         agg = {k: E._agg([r[k] for r in runs if k in r]) for k in runs[0]}
         registry.record(task_spec, name, seeds, steps, {k: list(v) for k, v in agg.items()})
         results[name] = agg
@@ -121,8 +122,9 @@ def run_lm(levers, model, train):
         cmd = [sys.executable, "-m", "rwkv_lab.rwkv_pretrain", "--data", bin_path, "--out", f"runs/lm_{name}",
                "--d-model", str(model.get("d_model", 256)), "--n-layers", str(model.get("n_layers", 4)),
                "--head-size", str(model.get("head_size", 64)), "--batch", str(train.get("batch", 16)),
-               "--seq-len", str(train.get("seq_len", 512)), "--lr", str(train.get("lr", 6e-4)),
-               "--steps", str(train.get("steps", 2000))]
+               "--seq-len", str(train.get("seq_len", 512)), "--lr", str(train.get("lr", 6e-4))]
+        cmd += (["--minutes", str(train["minutes"])] if train.get("minutes")     # wall-clock budget
+                else ["--steps", str(train.get("steps", 2000))])
         if off_path:
             cmd += ["--doc-offsets", off_path]
         for k, v in lever.items():
@@ -140,13 +142,18 @@ def main():
     rl.add_argument("--levers", required=True)
     rl.add_argument("--d-model", type=int, default=256)
     rl.add_argument("--n-layers", type=int, default=4)
+    rl.add_argument("--head-size", type=int, default=64)
     rl.add_argument("--steps", type=int, default=2000)
+    rl.add_argument("--minutes", type=float, default=0.0)
     rl.add_argument("--seq-len", type=int, default=512)
+    rl.add_argument("--batch", type=int, default=16)
+    rl.add_argument("--lr", type=float, default=6e-4)
     args = ap.parse_args()
     if args.cmd == "run-lm":
         run_lm(args.levers.split(","),
-               {"d_model": args.d_model, "n_layers": args.n_layers},
-               {"steps": args.steps, "seq_len": args.seq_len})
+               {"d_model": args.d_model, "n_layers": args.n_layers, "head_size": args.head_size},
+               {"steps": args.steps, "minutes": args.minutes, "seq_len": args.seq_len,
+                "batch": args.batch, "lr": args.lr})
     else:
         run(args.config)
 
