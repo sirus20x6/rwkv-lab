@@ -49,6 +49,7 @@ _LM_FLAG = {"n_loops": "--loop-count", "hyper_lanes": "--loop-hyper", "gate_mode
 def _run_synthetic(task_spec, cfg):
     import torch
     from rwkv_lab import experiment as E, registry
+    E.enable_fast_matmul()                              # TF32 tensor cores (free ~1.1-1.3x on fp32)
     E.LEVERS.update(cfg["configs"])                     # register the file's lever combos by name
     task = E.make_task(task_spec)
     dev = "cuda" if torch.cuda.is_available() else "cpu"

@@ -21,7 +21,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from rwkv_lab.rwkv_pretrain import RWKV7Small, build_optimizer, add_muon_args, muon_opts_from, apply_fp8
+from rwkv_lab.rwkv_pretrain import (RWKV7Small, build_optimizer, add_muon_args, muon_opts_from,
+                                    apply_fp8, enable_fast_matmul)
 from rwkv_lab.synthetic_tasks import make_task, Task
 from rwkv_lab.looped_rwkv import LoopedRWKV
 from rwkv_lab import registry
@@ -119,7 +120,7 @@ def preflight(task, d_model, n_layers, head_size, lever, device, batch, steps=20
         model = build(task, d_model, n_layers, head_size, lever).to(device, torch.bfloat16)
     except Exception as e:
         return False, f"build failed: {type(e).__name__}: {e}"
-    opt = torch.optim.AdamW(model.parameters(), lr=3e-3)
+    opt = torch.optim.AdamW(model.parameters(), lr=3e-3, fused=("cuda" in str(device)))
     losses = []
     for i in range(steps):
         x, y, m = task.batch(batch, device, rng)
@@ -192,6 +193,7 @@ def _agg(vals):
 
 
 def main():
+    enable_fast_matmul()
     ap = argparse.ArgumentParser()
     ap.add_argument("--task", default="recall:16")
     ap.add_argument("--configs", default="baseline,loop3")
