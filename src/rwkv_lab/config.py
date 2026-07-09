@@ -64,7 +64,9 @@ def _run_synthetic(task_spec, cfg):
         ok, why = E.preflight(task, dm, nl, hs, name, dev, batch)
         if not ok:
             print(f"  [{name}] PREFLIGHT REJECTED: {why}", flush=True); continue
-        runs = [E.train_eval(task, dm, nl, hs, name, s, dev, steps, batch, lr, minutes) for s in range(seeds)]
+        runs = [E.train_eval(task, dm, nl, hs, name, s, dev, steps, batch, lr, minutes,
+                             tr.get("optimizer", "adamw"), float(tr.get("weight_decay", 0.01)),
+                             int(tr.get("warmup", 0))) for s in range(seeds)]
         agg = {k: E._agg([r[k] for r in runs if k in r]) for k in runs[0]}
         registry.record(task_spec, name, seeds, steps, {k: list(v) for k, v in agg.items()})
         results[name] = agg
@@ -126,7 +128,11 @@ def run_lm(levers, model, train):
         cmd = [sys.executable, "-m", "rwkv_lab.rwkv_pretrain", "--data", bin_path, "--out", f"runs/lm_{name}",
                "--d-model", str(model.get("d_model", 256)), "--n-layers", str(model.get("n_layers", 4)),
                "--head-size", str(model.get("head_size", 64)), "--batch", str(train.get("batch", 16)),
-               "--seq-len", str(train.get("seq_len", 512)), "--lr", str(train.get("lr", 6e-4))]
+               "--seq-len", str(train.get("seq_len", 512)), "--lr", str(train.get("lr", 6e-4)),
+               "--optimizer", str(train.get("optimizer", "adamw")),
+               "--weight-decay", str(train.get("weight_decay", 0.1))]
+        if train.get("warmup"):
+            cmd += ["--warmup", str(train["warmup"])]
         cmd += (["--minutes", str(train["minutes"])] if train.get("minutes")     # wall-clock budget
                 else ["--steps", str(train.get("steps", 2000))])
         if off_path:
@@ -154,12 +160,16 @@ def main():
     rl.add_argument("--lr", type=float, default=6e-4)
     rl.add_argument("--init-g1g", default="")               # continued pretraining from g1g
     rl.add_argument("--resume", default="")                 # continue from a saved run checkpoint
+    rl.add_argument("--optimizer", default="adamw")
+    rl.add_argument("--weight-decay", type=float, default=0.1)
+    rl.add_argument("--warmup", type=int, default=0)
     args = ap.parse_args()
     if args.cmd == "run-lm":
         run_lm(args.levers.split(","),
                {"d_model": args.d_model, "n_layers": args.n_layers, "head_size": args.head_size},
                {"steps": args.steps, "minutes": args.minutes, "seq_len": args.seq_len,
-                "batch": args.batch, "lr": args.lr, "init_g1g": args.init_g1g, "resume": args.resume})
+                "batch": args.batch, "lr": args.lr, "init_g1g": args.init_g1g, "resume": args.resume,
+                "optimizer": args.optimizer, "weight_decay": args.weight_decay, "warmup": args.warmup})
     else:
         run(args.config)
 

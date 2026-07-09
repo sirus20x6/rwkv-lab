@@ -180,6 +180,17 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 	numField("layers", "nlayers", "model depth", 18)
 	numField("head size", "headsize", "attention head width (1024/64 = 16 heads)", 64)
 	numField("batch", "batch", "sequences per step", 16)
+	// optimizer settings
+	b.WriteString(`<tr><td class="f-l">optimizer</td><td><select data-bind-optimizer>` +
+		`<option value="adamw">AdamW</option><option value="muon">Muon (spectral)</option>` +
+		`</select></td><td class="f-d">AdamW, or Muon — Newton–Schulz on 2D weights, AdamW on embeds/norms</td></tr>`)
+	strField := func(label, sig, hint, def string) {
+		fmt.Fprintf(&b, `<tr><td class="f-l">%s</td><td><input type="text" data-bind-%s value="%s"></td>`+
+			`<td class="f-d">%s</td></tr>`, label, sig, def, esc(hint))
+	}
+	strField("lr", "lr", "learning rate — AdamW ~6e-4 · Muon matrix ~0.02 (units differ)", "6e-4")
+	strField("weight decay", "wd", "decoupled weight decay", "0.1")
+	strField("warmup", "warmup", "warmup steps (0 = auto ≈5%)", "0")
 	numField("seeds", "seeds", "runs averaged → error bars (1 for big-model research; ↑ for cheap synthetic A/Bs)", 1)
 	b.WriteString(`</table>`)
 	b.WriteString(`<div class="exp-levs"><div class="lev-h">configs to compare</div><table class="lev-tbl">`)
@@ -301,6 +312,11 @@ func (s *Server) handleLaunchExperiment(w http.ResponseWriter, r *http.Request) 
 	if str("budget", "steps") == "minutes" {
 		budget = []string{"--minutes", str("amount", "10")}
 	}
+	optArgs := []string{"--optimizer", str("optimizer", "adamw"), "--lr", str("lr", "6e-4"),
+		"--weight-decay", str("wd", "0.1")}
+	if wu := str("warmup", "0"); wu != "" && wu != "0" {
+		optArgs = append(optArgs, "--warmup", wu)
+	}
 	init := str("init", "scratch")
 	if init == "convert" { // per-layer GDN→RWKV distillation — not a config sweep
 		toast(sse, "conversion (GDN→RWKV) runs in the conversion board / queue — it's per-layer teacher distillation, not a compare-configs sweep")
@@ -311,6 +327,7 @@ func (s *Server) handleLaunchExperiment(w http.ResponseWriter, r *http.Request) 
 		args := append([]string{"-m", "rwkv_lab.config", "run-lm", "--levers", strings.Join(configs, ","),
 			"--d-model", str("dmodel", "1024"), "--n-layers", str("nlayers", "18"), "--head-size", str("headsize", "64"),
 			"--batch", str("batch", "16"), "--seq-len", str("ctxlen", "1024")}, budget...)
+		args = append(args, optArgs...)
 		note := "from scratch"
 		if init == "g1g" {
 			args = append(args, "--init-g1g", "models/rwkv7-g1g-1.5b.pth")
@@ -340,6 +357,7 @@ func (s *Server) handleLaunchExperiment(w http.ResponseWriter, r *http.Request) 
 		"--task", task + ":" + str("tasklen", "16"), "--configs", strings.Join(configs, ","),
 		"--seeds", str("seeds", "1"), "--d-model", str("dmodel", "1024"), "--n-layers", str("nlayers", "18"),
 		"--head-size", str("headsize", "64"), "--batch", str("batch", "16")}, budget...)
+	args = append(args, optArgs...)
 	pid, err := s.spawnPy(args, "exp_"+task+".log")
 	if err != nil {
 		toastErr(sse, "launch: "+err.Error())
