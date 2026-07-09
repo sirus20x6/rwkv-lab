@@ -573,3 +573,17 @@ details.arch-item[open] .lr-caret { transform: rotate(90deg); color: var(--accen
 .exp-levs { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: center; font-size: .85em; margin: .3rem 0; }
 .exp-levs .lev { display: inline-flex; gap: .25rem; align-items: center; }
 .exp-tbl .exp-hd td { opacity: .55; font-weight: 600; border-bottom: 1px solid rgba(128,128,128,.3); text-transform: uppercase; font-size: .78em; letter-spacing: .03em; }
+
+/* theme the experiments-builder form controls (native select/input default to browser chrome) */
+.exp-form select,
+.exp-form input[type=number] {
+  font-family: var(--mono); font-size: var(--fs-sm); padding: 3px 8px;
+  border-radius: var(--r-sm); border: 1px solid var(--border);
+  background: var(--bg-elev); color: var(--text); color-scheme: dark;
+}
+.exp-form select:hover,
+.exp-form input[type=number]:hover { border-color: var(--border-hi); }
+.exp-form select:focus,
+.exp-form input[type=number]:focus { border-color: var(--accent); outline: none; }
+.exp-levs input[type=checkbox] { accent-color: var(--accent); }
+.exp-build .btn { color-scheme: dark; }
