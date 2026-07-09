@@ -118,7 +118,8 @@ def build_optimizer(named_params, name, lr, wd, adam_lr=0.0, muon_opts=None):
     if name in ("adamw8bit", "paged-adamw8bit"):
         return _adamw8bit(params, lr, wd, paged=(name == "paged-adamw8bit"))
     import torch as _t
-    return _t.optim.AdamW(params, lr=lr, betas=(0.9, 0.95), weight_decay=wd)
+    fused = bool(params) and params[0].is_cuda      # fused AdamW = one fused CUDA kernel (CUDA-only)
+    return _t.optim.AdamW(params, lr=lr, betas=(0.9, 0.95), weight_decay=wd, fused=fused)
 
 
 def apply_fp8(module):
@@ -144,6 +145,17 @@ def apply_fp8(module):
 
     convert_to_float8_training(module, module_filter_fn=keep)
     return sum(isinstance(x, Float8Linear) for x in module.modules())
+
+
+def enable_fast_matmul():
+    """Turn on TF32 tensor cores for fp32 matmuls (the full-vocab CE, Newton-Schulz, any fp32 op)
+    + cuDNN TF32. Free ~1.1-1.3x on Ampere+; no effect on the bf16/fp8 paths. Idempotent — the
+    careful-zone trainers already set this; the research harnesses (this file, experiment.py) did
+    not. Call once at entrypoint startup."""
+    import torch as _t
+    _t.set_float32_matmul_precision("high")
+    _t.backends.cuda.matmul.allow_tf32 = True
+    _t.backends.cudnn.allow_tf32 = True
 
 
 # --sm-* CLI flags -> SpectralMuon kwargs (the Muon variants exposed by the card).
@@ -179,6 +191,7 @@ def loop_kwargs(a):
 
 
 def main():
+    enable_fast_matmul()
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True); ap.add_argument("--out", default="runs/rwkv_scratch")
     ap.add_argument("--doc-offsets", default="", help="build_corpus .off.npy => within-doc windows")
