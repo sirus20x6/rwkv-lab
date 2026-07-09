@@ -84,6 +84,24 @@ class RWKV7Small(nn.Module):
         return (logits, h) if return_hidden else logits
 
 
+def build_optimizer(named_params, name, lr, wd, adam_lr=0.0):
+    """AdamW, or spectral_muon (Muon on 2D weight matrices, AdamW on embeds/norms/1D). Shared by the
+    LM and synthetic harnesses so the card's optimizer dropdown drives both. adam_lr (0 = use lr) is
+    the fallback LR for non-matrix params under Muon — Muon matrix LRs run larger than AdamW's."""
+    named = [(n, p) for n, p in named_params if p.requires_grad]
+    if name == "muon":
+        from rwkv_lab.spectral_muon import SpectralMuon
+        muon, adam = [], []
+        for n, p in named:
+            is_mat = p.ndim == 2 and not any(k in n for k in ("emb", "head", "norm"))
+            (muon if is_mat else adam).append(p)
+        groups = [{"params": muon, "use_muon": True, "lr": lr},
+                  {"params": adam, "use_muon": False, "lr": adam_lr or lr}]
+        return SpectralMuon(groups, weight_decay=wd)
+    import torch as _t
+    return _t.optim.AdamW([p for _, p in named], lr=lr, betas=(0.9, 0.95), weight_decay=wd)
+
+
 def loop_kwargs(a):
     """Map --loop-* flags to LoopedRWKV kwargs. Empty dict => bare core (no loop wrapper)."""
     any_on = a.loop_count > 1 or a.loop_hyper or a.loop_cart_anchor or a.loop_deq \
@@ -109,6 +127,8 @@ def main():
     ap.add_argument("--val-windows", type=int, default=40); ap.add_argument("--eval-every", type=int, default=50)
     ap.add_argument("--log-every", type=int, default=10); ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--warmup", type=int, default=100)
+    ap.add_argument("--optimizer", default="adamw", choices=["adamw", "muon"])
+    ap.add_argument("--weight-decay", type=float, default=0.1)
     ap.add_argument("--lr-schedule", default="cosine", choices=["constant", "cosine"])
     ap.add_argument("--decay-steps", type=int, default=0)   # cosine horizon; 0 => use --steps
     ap.add_argument("--save", default=""); ap.add_argument("--resume", default="")
@@ -199,8 +219,9 @@ def main():
                                 bst_weight=args.bst_weight, jtp_weight=args.jtp_weight,
                                 lm_head=model.head).to(dev, torch.bfloat16)
         print(f"aux heads enabled={heads.enabled} extra_tokens={heads.extra_tokens}", flush=True)
-    params = list(model.parameters()) + (list(heads.parameters()) if heads else [])
-    opt = torch.optim.AdamW(params, lr=args.lr, betas=(0.9, 0.95), weight_decay=0.1)
+    named = list(model.named_parameters()) + (list(heads.named_parameters()) if heads else [])
+    opt = build_optimizer(named, args.optimizer, args.lr, args.weight_decay)
+    print(f"optimizer={args.optimizer} lr={args.lr} wd={args.weight_decay}", flush=True)
     step = 0
     if args.resume and os.path.exists(args.resume):
         ck = torch.load(args.resume, map_location=dev)
