@@ -103,12 +103,52 @@ def run(cfg_path: str):
     (_run_synthetic if kind == "synthetic" else _run_lm)(data, cfg)
 
 
+# Default local corpus for the board's LM-mode launches (code + docs, doc-boundary, cached).
+_LOCAL_LM_SPEC = {"sources": [{"kind": "local",
+                               "patterns": ["/thearray/git/moe-mla/**/*.py", "/thearray/git/moe-mla/**/*.md"],
+                               "weight": 1.0}], "cap_mb": 8.0, "doc_boundary": True}
+
+
+def run_lm(levers, model, train):
+    """Run a set of named levers on the local LM corpus via rwkv_pretrain — used by the board's LM
+    mode so top/lmtp/bst/jtp (which need a token future) are launchable. Lever kwargs come from
+    experiment.LEVERS (single source of truth); each run appears in the main trainboard leaderboard."""
+    from rwkv_lab.experiment import LEVERS
+    from rwkv_lab.build_corpus import resolve_corpus
+    bin_path, off_path = resolve_corpus(_LOCAL_LM_SPEC)
+    for name in levers:
+        lever = LEVERS.get(name, {})
+        cmd = [sys.executable, "-m", "rwkv_lab.rwkv_pretrain", "--data", bin_path, "--out", f"runs/lm_{name}",
+               "--d-model", str(model.get("d_model", 256)), "--n-layers", str(model.get("n_layers", 4)),
+               "--head-size", str(model.get("head_size", 64)), "--batch", str(train.get("batch", 16)),
+               "--seq-len", str(train.get("seq_len", 512)), "--lr", str(train.get("lr", 6e-4)),
+               "--steps", str(train.get("steps", 2000))]
+        if off_path:
+            cmd += ["--doc-offsets", off_path]
+        for k, v in lever.items():
+            if k in _LM_FLAG:
+                cmd += [_LM_FLAG[k], str(int(v) if isinstance(v, bool) else v)]
+        print(f"[config] LM lever '{name}': {' '.join(cmd[2:])}", flush=True)
+        subprocess.run(cmd, env={**os.environ, "PYTHONPATH": "src"})
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run"); r.add_argument("config")
+    rl = sub.add_parser("run-lm")                            # board LM mode: named levers on local corpus
+    rl.add_argument("--levers", required=True)
+    rl.add_argument("--d-model", type=int, default=256)
+    rl.add_argument("--n-layers", type=int, default=4)
+    rl.add_argument("--steps", type=int, default=2000)
+    rl.add_argument("--seq-len", type=int, default=512)
     args = ap.parse_args()
-    run(args.config)
+    if args.cmd == "run-lm":
+        run_lm(args.levers.split(","),
+               {"d_model": args.d_model, "n_layers": args.n_layers},
+               {"steps": args.steps, "seq_len": args.seq_len})
+    else:
+        run(args.config)
 
 
 if __name__ == "__main__":

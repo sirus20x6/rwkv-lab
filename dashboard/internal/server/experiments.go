@@ -22,21 +22,31 @@ import (
 	"github.com/starfederation/datastar-go/datastar"
 )
 
-// known lever combos (mirrors experiment.LEVERS) — the builder's checkbox table.
-type leverDef struct{ Name, Desc string }
+// known lever combos (mirrors experiment.LEVERS) — the builder's checkbox table. LMOnly levers need a
+// real token future, so they're only selectable when an LM corpus (not a synthetic task) is chosen.
+type leverDef struct {
+	Name, Desc string
+	LMOnly     bool
+}
 
 var knownLevers = []leverDef{
-	{"baseline", "single pass — no recurrent depth (the control)"},
-	{"loop2", "recurrent depth ×2 — 2 weight-tied refinement passes"},
-	{"loop3", "recurrent depth ×3 — 3 weight-tied refinement passes"},
-	{"loop4", "recurrent depth ×4 — 4 weight-tied refinement passes"},
-	{"loop3_hyper", "loop ×3 + hyper-connection lanes (extra loop capacity)"},
-	{"loop3_cart", "loop ×3 + CART contractive LTI anchor (bounds the deep loop)"},
-	{"loop3_deq", "loop ×3 + DEQ 1-step gradient (O(1) memory)"},
-	{"loop3_factor", "loop ×3 + factored head×channel gate"},
-	{"nextlat", "next-latent prediction aux — predicts h[t+d] in-sequence (training-only, no inference cost)"},
-	{"loop3_nextlat", "loop ×3 + next-latent prediction"},
+	{"baseline", "single pass — no recurrent depth (the control)", false},
+	{"loop2", "recurrent depth ×2 — 2 weight-tied refinement passes", false},
+	{"loop3", "recurrent depth ×3 — 3 weight-tied refinement passes", false},
+	{"loop4", "recurrent depth ×4 — 4 weight-tied refinement passes", false},
+	{"loop3_hyper", "loop ×3 + hyper-connection lanes (extra loop capacity)", false},
+	{"loop3_cart", "loop ×3 + CART contractive LTI anchor (bounds the deep loop)", false},
+	{"loop3_deq", "loop ×3 + DEQ 1-step gradient (O(1) memory)", false},
+	{"loop3_factor", "loop ×3 + factored head×channel gate", false},
+	{"nextlat", "next-latent prediction aux — predicts h[t+d] in-sequence (training-only, no inference cost)", false},
+	{"loop3_nextlat", "loop ×3 + next-latent prediction", false},
+	{"top", "token-order prediction — lookahead window (LM only)", true},
+	{"lmtp", "leap multi-token prediction (LM only)", true},
+	{"bst", "belief-state forward+backward objective (LM only)", true},
+	{"jtp", "joint multi-token prediction (LM only)", true},
 }
+
+const lmTask = "local-lm"
 
 type taskDef struct{ Name, Desc string }
 
@@ -44,6 +54,7 @@ var knownTasks = []taskDef{
 	{"recall", "associative retrieval (k→v)"},
 	{"copy", "state capacity (reproduce a sequence)"},
 	{"induction", "in-context pattern (A B … A → B)"},
+	{lmTask, "LM: local code+docs corpus (enables top/lmtp/bst/jtp → leaderboard)"},
 }
 
 func validTask(name string) bool {
@@ -164,9 +175,14 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 		if lv.Name == "loop3" {
 			chk = " checked"
 		}
-		fmt.Fprintf(&b, `<tr><td class="lev-c"><input type="checkbox" id="lev_%s" data-bind-lev_%s%s></td>`+
+		gate, rowcls := "", "" // LM-only levers disabled + dimmed unless the LM corpus is selected
+		if lv.LMOnly {
+			gate = ` data-attr-disabled="$task !== '` + lmTask + `'"`
+			rowcls = ` data-class-lm-off="$task !== '` + lmTask + `'"`
+		}
+		fmt.Fprintf(&b, `<tr%s><td class="lev-c"><input type="checkbox" id="lev_%s" data-bind-lev_%s%s%s></td>`+
 			`<td class="lev-n"><label for="lev_%s"><code>%s</code></label></td>`+
-			`<td class="lev-d">%s</td></tr>`, lv.Name, lv.Name, chk, lv.Name, lv.Name, esc(lv.Desc))
+			`<td class="lev-d">%s</td></tr>`, rowcls, lv.Name, lv.Name, chk, gate, lv.Name, lv.Name, esc(lv.Desc))
 	}
 	b.WriteString(`</table></div>`)
 	b.WriteString(`<button class="btn" data-on:click="@post('/api/experiments/launch')">▶ run experiment</button>`)
@@ -229,12 +245,12 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 
 // handleLaunchExperiment reads the builder's Datastar signals and spawns experiment.py with them.
 func (s *Server) handleLaunchExperiment(w http.ResponseWriter, r *http.Request) {
-	sse := datastar.NewSSE(w, r)
 	var sig map[string]any
-	if json.NewDecoder(r.Body).Decode(&sig) != nil {
-		toastErr(sse, "launch: bad request")
-		return
+	_ = datastar.ReadSignals(r, &sig) // MUST read the body before creating the SSE (it closes r.Body)
+	if sig == nil {
+		sig = map[string]any{}
 	}
+	sse := datastar.NewSSE(w, r)
 	str := func(k, def string) string {
 		if v, ok := sig[k]; ok {
 			return fmt.Sprintf("%v", v)
@@ -247,28 +263,52 @@ func (s *Server) handleLaunchExperiment(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	configs := []string{"baseline"} // significance reference — always run
+	lmOnlyPicked := false
 	for _, lv := range knownLevers {
 		if lv.Name == "baseline" {
 			continue
 		}
 		if b, _ := sig["lev_"+lv.Name].(bool); b {
 			configs = append(configs, lv.Name)
+			lmOnlyPicked = lmOnlyPicked || lv.LMOnly
 		}
 	}
 	if len(configs) < 2 {
 		toastErr(sse, "launch: check at least one lever to compare against baseline")
 		return
 	}
+	if task == lmTask { // LM mode -> rwkv_pretrain per lever (appears in the main leaderboard)
+		args := []string{"-m", "rwkv_lab.config", "run-lm", "--levers", strings.Join(configs, ","),
+			"--d-model", str("dmodel", "256"), "--n-layers", str("nlayers", "4"), "--steps", str("steps", "2000")}
+		pid, err := s.spawnPy(args, "lm_experiment.log")
+		if err != nil {
+			toastErr(sse, "launch failed: "+err.Error())
+			return
+		}
+		toast(sse, fmt.Sprintf("launched LM sweep [%s] (pid %d) — runs appear in the leaderboard", strings.Join(configs, ","), pid))
+		return
+	}
+	if lmOnlyPicked { // synthetic task can't supply the token future these objectives need
+		toastErr(sse, "launch: top/lmtp/bst/jtp need the LM corpus — pick 'local-lm' as the task")
+		return
+	}
 	args := []string{"-m", "rwkv_lab.experiment",
-		"--task", task + ":" + str("tasklen", "16"),
-		"--configs", strings.Join(configs, ","),
+		"--task", task + ":" + str("tasklen", "16"), "--configs", strings.Join(configs, ","),
 		"--seeds", str("seeds", "3"), "--steps", str("steps", "3000"),
 		"--d-model", str("dmodel", "256"), "--n-layers", str("nlayers", "4")}
-	logPath := filepath.Join(s.cfg.RunsDir, "exp_"+task+".log")
-	lf, err := os.Create(logPath)
+	pid, err := s.spawnPy(args, "exp_"+task+".log")
 	if err != nil {
 		toastErr(sse, "launch: "+err.Error())
 		return
+	}
+	toast(sse, fmt.Sprintf("launched %s [%s] (pid %d) — expand again to see results", task, strings.Join(configs, ","), pid))
+}
+
+// spawnPy launches `python -m <module> …` detached, logging to runs/<logName>, and returns the pid.
+func (s *Server) spawnPy(args []string, logName string) (int, error) {
+	lf, err := os.Create(filepath.Join(s.cfg.RunsDir, logName))
+	if err != nil {
+		return 0, err
 	}
 	cmd := exec.Command(filepath.Join(s.cfg.RepoRoot, ".venv", "bin", "python"), args...)
 	cmd.Dir = s.cfg.RepoRoot
@@ -276,11 +316,10 @@ func (s *Server) handleLaunchExperiment(w http.ResponseWriter, r *http.Request) 
 	cmd.Stdout, cmd.Stderr = lf, lf
 	if err := cmd.Start(); err != nil {
 		lf.Close()
-		toastErr(sse, "launch failed: "+err.Error())
-		return
+		return 0, err
 	}
 	go func() { _ = cmd.Wait(); lf.Close() }()
-	toast(sse, fmt.Sprintf("launched %s [%s] (pid %d) — expand again to see results", task, strings.Join(configs, ","), cmd.Process.Pid))
+	return cmd.Process.Pid, nil
 }
 
 func contains(xs []string, v string) bool {
