@@ -564,3 +564,12 @@ details.arch-item[open] .lr-caret { transform: rotate(90deg); color: var(--accen
 .exp-tbl .ns { opacity: .5; }
 .exp-tbl .dim, .exp-body .dim { opacity: .5; font-size: .9em; }
 .btn.sm { padding: .1rem .5rem; font-size: .8em; }
+
+/* experiments builder form */
+.exp-build { flex-basis: 100%; }
+.exp-form { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; margin-bottom: .3rem; }
+.exp-form label { display: inline-flex; align-items: center; gap: .3rem; font-size: .85em; }
+.exp-form input[type=number] { width: 4.5rem; }
+.exp-levs { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: center; font-size: .85em; margin: .3rem 0; }
+.exp-levs .lev { display: inline-flex; gap: .25rem; align-items: center; }
+.exp-tbl .exp-hd td { opacity: .55; font-weight: 600; border-bottom: 1px solid rgba(128,128,128,.3); text-transform: uppercase; font-size: .78em; letter-spacing: .03em; }
