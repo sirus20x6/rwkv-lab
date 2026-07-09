@@ -615,3 +615,16 @@ details.arch-item[open] .lr-caret { transform: rotate(90deg); color: var(--accen
 .field-tbl tr:hover .f-d { color: var(--text); }
 .field-tbl input[type=number] { width: 5rem; }
 .field-tbl select { min-width: 15rem; }
+
+/* theme the field-table controls (they moved out of .exp-form into .field-tbl) */
+.field-tbl select,
+.field-tbl input[type=number] {
+  font-family: var(--mono); font-size: var(--fs-sm); padding: 3px 8px;
+  border-radius: var(--r-sm); border: 1px solid var(--border);
+  background: var(--bg-elev); color: var(--text); color-scheme: dark;
+}
+.field-tbl select:hover,
+.field-tbl input[type=number]:hover { border-color: var(--border-hi); }
+.field-tbl select:focus,
+.field-tbl input[type=number]:focus { border-color: var(--accent); outline: none; }
+.field-tbl select option { background: var(--bg-elev); color: var(--text); }
