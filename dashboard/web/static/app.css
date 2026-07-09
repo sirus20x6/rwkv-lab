@@ -655,3 +655,6 @@ details.arch-item[open] .lr-caret { transform: rotate(90deg); color: var(--accen
 /* Muon-variant checkboxes live in the field table now */
 .field-tbl input[type=checkbox] { accent-color: var(--accent); color-scheme: dark; width: 15px; height: 15px; cursor: pointer; }
 .field-tbl tr.muon-off ~ tr .lev-c { }  /* no-op guard */
+
+/* disabled field inputs (LM levers / resume when not applicable) read as inactive, not "broken" */
+.field-tbl input:disabled, .lev-tbl input:disabled { opacity: .45; cursor: default; }

@@ -160,8 +160,8 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 		`<option value="convert">convert · GDN→RWKV</option>` +
 		`</select></td><td class="f-d">random init · continue a pretrained model · convert (opens in the conversion board)</td></tr>`)
 	// resume checkpoint path — relevant only when init = resume (dimmed otherwise)
-	b.WriteString(`<tr data-class-lm-off="$init !== 'resume'"><td class="f-l">resume from</td>` +
-		`<td><input type="text" data-bind-resume placeholder="runs/&lt;name&gt;/ckpt.pt"></td>` +
+	b.WriteString(`<tr><td class="f-l">resume from</td>` +
+		`<td><input type="text" data-bind-resume data-attr-disabled="$init !== 'resume'" placeholder="runs/&lt;name&gt;/ckpt.pt"></td>` +
 		`<td class="f-d">checkpoint to continue [resume only]</td></tr>`)
 	// budget: fixed step count or fixed wall-clock time (Karpathy-style rounds)
 	b.WriteString(`<tr><td class="f-l">budget</td><td><select data-bind-budget>` +
@@ -231,14 +231,13 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 		if lv.Name == "loop3" {
 			chk = " checked"
 		}
-		gate, rowcls := "", "" // LM-only levers disabled + dimmed unless the LM corpus is selected
+		gate := "" // LM-only levers: checkbox disabled (not selectable) unless the LM corpus is chosen
 		if lv.LMOnly {
 			gate = ` data-attr-disabled="$task !== '` + lmTask + `'"`
-			rowcls = ` data-class-lm-off="$task !== '` + lmTask + `'"`
 		}
-		fmt.Fprintf(&b, `<tr%s><td class="lev-c"><input type="checkbox" id="lev_%s" data-bind-lev_%s%s%s></td>`+
+		fmt.Fprintf(&b, `<tr><td class="lev-c"><input type="checkbox" id="lev_%s" data-bind-lev_%s%s%s></td>`+
 			`<td class="lev-n"><label for="lev_%s"><code>%s</code></label></td>`+
-			`<td class="lev-d">%s</td></tr>`, rowcls, lv.Name, lv.Name, chk, gate, lv.Name, lv.Name, esc(lv.Desc))
+			`<td class="lev-d">%s</td></tr>`, lv.Name, lv.Name, chk, gate, lv.Name, lv.Name, esc(lv.Desc))
 	}
 	b.WriteString(`</table></div>`)
 	b.WriteString(`<button class="btn" data-on:click="@post('/api/experiments/launch')">▶ run experiment</button>`)
