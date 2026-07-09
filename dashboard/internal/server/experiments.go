@@ -22,8 +22,20 @@ import (
 	"github.com/starfederation/datastar-go/datastar"
 )
 
-// known lever combos (mirrors experiment.LEVERS) — the builder's checkboxes.
-var knownLevers = []string{"baseline", "loop2", "loop3", "loop4", "loop3_hyper", "loop3_cart", "loop3_deq", "loop3_factor"}
+// known lever combos (mirrors experiment.LEVERS) — the builder's checkbox table.
+type leverDef struct{ Name, Desc string }
+
+var knownLevers = []leverDef{
+	{"baseline", "single pass — no recurrent depth (the control)"},
+	{"loop2", "recurrent depth ×2 — 2 weight-tied refinement passes"},
+	{"loop3", "recurrent depth ×3 — 3 weight-tied refinement passes"},
+	{"loop4", "recurrent depth ×4 — 4 weight-tied refinement passes"},
+	{"loop3_hyper", "loop ×3 + hyper-connection lanes (extra loop capacity)"},
+	{"loop3_cart", "loop ×3 + CART contractive LTI anchor (bounds the deep loop)"},
+	{"loop3_deq", "loop ×3 + DEQ 1-step gradient (O(1) memory)"},
+	{"loop3_factor", "loop ×3 + factored head×channel gate"},
+}
+
 var knownTasks = []string{"recall", "copy", "induction"}
 
 type expRow struct {
@@ -120,15 +132,17 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 	numField("layers", "nlayers", 4)
 	numField("seeds", "seeds", 3)
 	numField("steps", "steps", 3000)
-	b.WriteString(`<div class="exp-levs">compare:`)
+	b.WriteString(`<div class="exp-levs"><div class="lev-h">configs to compare</div><table class="lev-tbl">`)
 	for _, lv := range knownLevers {
 		chk := ""
-		if lv == "baseline" || lv == "loop3" {
+		if lv.Name == "baseline" || lv.Name == "loop3" {
 			chk = " checked"
 		}
-		fmt.Fprintf(&b, `<label class="lev"><input type="checkbox" data-bind-lev_%s%s> %s</label>`, lv, chk, lv)
+		fmt.Fprintf(&b, `<tr><td class="lev-c"><input type="checkbox" id="lev_%s" data-bind-lev_%s%s></td>`+
+			`<td class="lev-n"><label for="lev_%s"><code>%s</code></label></td>`+
+			`<td class="lev-d">%s</td></tr>`, lv.Name, lv.Name, chk, lv.Name, lv.Name, esc(lv.Desc))
 	}
-	b.WriteString(`</div>`)
+	b.WriteString(`</table></div>`)
 	b.WriteString(`<button class="btn" data-on:click="@post('/api/experiments/launch')">▶ run experiment</button>`)
 	b.WriteString(`</div></div>`)
 
@@ -208,8 +222,8 @@ func (s *Server) handleLaunchExperiment(w http.ResponseWriter, r *http.Request) 
 	}
 	var configs []string
 	for _, lv := range knownLevers {
-		if b, _ := sig["lev_"+lv].(bool); b {
-			configs = append(configs, lv)
+		if b, _ := sig["lev_"+lv.Name].(bool); b {
+			configs = append(configs, lv.Name)
 		}
 	}
 	if len(configs) < 2 {

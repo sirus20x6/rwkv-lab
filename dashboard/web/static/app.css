@@ -587,3 +587,15 @@ details.arch-item[open] .lr-caret { transform: rotate(90deg); color: var(--accen
 .exp-form input[type=number]:focus { border-color: var(--accent); outline: none; }
 .exp-levs input[type=checkbox] { accent-color: var(--accent); }
 .exp-build .btn { color-scheme: dark; }
+
+/* lever checkbox table (builder) */
+.exp-levs { display: block; margin: .5rem 0; }
+.lev-h { font-weight: 600; opacity: .6; font-size: .8em; text-transform: uppercase; letter-spacing: .03em; margin-bottom: .25rem; }
+.lev-tbl { border-collapse: collapse; font-size: .85em; }
+.lev-tbl td { padding: .2rem .7rem .2rem 0; vertical-align: middle; }
+.lev-tbl .lev-c { padding-right: .4rem; width: 1.4rem; }
+.lev-tbl .lev-n code { color: var(--text); }
+.lev-tbl .lev-d { color: var(--text-dim); }
+.lev-tbl tr:hover .lev-d { color: var(--text); }
+.lev-tbl input[type=checkbox] { accent-color: var(--accent); cursor: pointer; }
+.lev-tbl label { cursor: pointer; }
