@@ -152,15 +152,22 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(&b, `<option value="%s">%s — %s</option>`, t.Name, t.Name, esc(t.Desc))
 	}
 	b.WriteString(`</select></td><td class="f-d">the capability to probe</td></tr>`)
+	// budget: fixed step count or fixed wall-clock time (Karpathy-style rounds)
+	b.WriteString(`<tr><td class="f-l">budget</td><td><select data-bind-budget>` +
+		`<option value="steps">steps</option><option value="minutes">wall-clock (min)</option>` +
+		`</select></td><td class="f-d">fixed step count, or fixed wall-clock time per run</td></tr>`)
 	numField := func(label, sig, hint string, def int) {
 		fmt.Fprintf(&b, `<tr><td class="f-l">%s</td><td><input type="number" data-bind-%s value="%d" min="1"></td>`+
 			`<td class="f-d">%s</td></tr>`, label, sig, def, esc(hint))
 	}
-	numField("len / pairs", "tasklen", "task difficulty — pairs (recall) / sequence length (copy·induction)", 16)
+	numField("amount", "amount", "step count — or minutes when budget = wall-clock", 3000)
+	numField("len / pairs", "tasklen", "task difficulty — pairs (recall) / length (copy·induction) [synthetic]", 16)
+	numField("context len", "ctxlen", "sequence length [LM mode]", 512)
 	numField("d_model", "dmodel", "model width", 256)
 	numField("layers", "nlayers", "model depth", 4)
+	numField("head size", "headsize", "attention head width", 64)
+	numField("batch", "batch", "sequences per step", 32)
 	numField("seeds", "seeds", "runs averaged → error bars + significance", 3)
-	numField("steps", "steps", "training steps per run", 3000)
 	b.WriteString(`</table>`)
 	b.WriteString(`<div class="exp-levs"><div class="lev-h">configs to compare</div><table class="lev-tbl">`)
 	for _, lv := range knownLevers {
@@ -277,9 +284,14 @@ func (s *Server) handleLaunchExperiment(w http.ResponseWriter, r *http.Request) 
 		toastErr(sse, "launch: check at least one lever to compare against baseline")
 		return
 	}
+	budget := []string{"--steps", str("amount", "3000")} // fixed steps, or wall-clock minutes
+	if str("budget", "steps") == "minutes" {
+		budget = []string{"--minutes", str("amount", "10")}
+	}
 	if task == lmTask { // LM mode -> rwkv_pretrain per lever (appears in the main leaderboard)
-		args := []string{"-m", "rwkv_lab.config", "run-lm", "--levers", strings.Join(configs, ","),
-			"--d-model", str("dmodel", "256"), "--n-layers", str("nlayers", "4"), "--steps", str("steps", "2000")}
+		args := append([]string{"-m", "rwkv_lab.config", "run-lm", "--levers", strings.Join(configs, ","),
+			"--d-model", str("dmodel", "256"), "--n-layers", str("nlayers", "4"), "--head-size", str("headsize", "64"),
+			"--batch", str("batch", "32"), "--seq-len", str("ctxlen", "512")}, budget...)
 		pid, err := s.spawnPy(args, "lm_experiment.log")
 		if err != nil {
 			toastErr(sse, "launch failed: "+err.Error())
@@ -292,10 +304,10 @@ func (s *Server) handleLaunchExperiment(w http.ResponseWriter, r *http.Request) 
 		toastErr(sse, "launch: top/lmtp/bst/jtp need the LM corpus — pick 'local-lm' as the task")
 		return
 	}
-	args := []string{"-m", "rwkv_lab.experiment",
+	args := append([]string{"-m", "rwkv_lab.experiment",
 		"--task", task + ":" + str("tasklen", "16"), "--configs", strings.Join(configs, ","),
-		"--seeds", str("seeds", "3"), "--steps", str("steps", "3000"),
-		"--d-model", str("dmodel", "256"), "--n-layers", str("nlayers", "4")}
+		"--seeds", str("seeds", "3"), "--d-model", str("dmodel", "256"), "--n-layers", str("nlayers", "4"),
+		"--head-size", str("headsize", "64"), "--batch", str("batch", "32")}, budget...)
 	pid, err := s.spawnPy(args, "exp_"+task+".log")
 	if err != nil {
 		toastErr(sse, "launch: "+err.Error())
