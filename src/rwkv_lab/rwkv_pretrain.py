@@ -195,6 +195,8 @@ def main():
     ap.add_argument("--weight-decay", type=float, default=0.1)
     ap.add_argument("--fp8", action="store_true",
                     help="run eligible Linear GEMMs in fp8 (torchao Float8Linear; Blackwell/Hopper)")
+    ap.add_argument("--compile", action="store_true",
+                    help="torch.compile the training forward (fuses fp8 cast+GEMM; ~2x on Blackwell)")
     add_muon_args(ap)
     ap.add_argument("--lr-schedule", default="cosine", choices=["constant", "cosine"])
     ap.add_argument("--decay-steps", type=int, default=0)   # cosine horizon; 0 => use --steps
@@ -297,6 +299,12 @@ def main():
         ck = torch.load(args.resume, map_location=dev)
         model.load_state_dict(ck["model"]); opt.load_state_dict(ck["opt"]); step = ck.get("step", 0)
         print(f"resumed from {args.resume} @ step {step}", flush=True)
+    # Compiled handle for the TRAIN forward only: eager `model` still owns state_dict/params, so
+    # checkpoints stay uncompiled (no `_orig_mod.` prefix) and the eval path (below) never toggles
+    # the compiled graph's train/eval mode (which would force costly recompiles).
+    fwd = torch.compile(model) if args.compile else model
+    if args.compile:
+        print("torch.compile: enabled (step 0 compiles; forward only, checkpoints uncompiled)", flush=True)
     model.train(); t0 = time.time(); seen = 0
     print(f"budget={'%.1f min' % args.minutes if not args.steps else str(args.steps)+' steps'}", flush=True)
     while True:
@@ -313,7 +321,7 @@ def main():
             g["lr"] = lr
         ex = heads.extra_tokens if heads else 0
         x = train_batch(args.batch, width=T + 1 + ex)
-        out = model(x[:, :T], return_hidden=bool(heads))
+        out = fwd(x[:, :T], return_hidden=bool(heads))
         lg = (out[0] if heads else out).float()
         loss = F.cross_entropy(lg.reshape(-1, lg.size(-1)), x[:, 1:T + 1].reshape(-1))
         if heads:                                            # + weighted aux (latent-prediction) loss
