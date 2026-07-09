@@ -200,6 +200,12 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 	strField("lr", "lr", "learning rate — AdamW ~6e-4 · Muon matrix ~0.02 (units differ)", "6e-4")
 	strField("weight decay", "wd", "decoupled weight decay", "0.1")
 	strField("warmup", "warmup", "warmup steps (0 = auto ≈5%)", "0")
+	// fp8 compute — orthogonal to the optimizer choice, so always shown (not gated on Muon)
+	b.WriteString(`<tr><td class="f-l"><label for="fp8"><code>fp8</code></label></td>` +
+		`<td><input type="checkbox" id="fp8" data-bind-fp8></td>` +
+		`<td class="f-d">run eligible Linear GEMMs in fp8 on the Blackwell/Hopper tensor cores ` +
+		`(torchao Float8Linear; bf16 master weights kept, so the optimizer is unchanged). Throughput ` +
+		`gain needs torch.compile; eager fp8 still trains correctly.</td></tr>`)
 	// Muon variants — rows shown only when optimizer = muon; each variant is its own checkbox row
 	moff := ` data-class-muon-off="$optimizer !== 'muon'"`
 	mvRow := func(sig, name, desc string) {
@@ -356,6 +362,9 @@ func (s *Server) handleLaunchExperiment(w http.ResponseWriter, r *http.Request) 
 				optArgs = append(optArgs, t.Flag, "1")
 			}
 		}
+	}
+	if on, _ := sig["fp8"].(bool); on { // fp8 compute — orthogonal to the optimizer
+		optArgs = append(optArgs, "--fp8")
 	}
 	init := str("init", "scratch")
 	if init == "convert" { // per-layer GDN→RWKV distillation — not a config sweep

@@ -21,7 +21,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from rwkv_lab.rwkv_pretrain import RWKV7Small, build_optimizer, add_muon_args, muon_opts_from
+from rwkv_lab.rwkv_pretrain import RWKV7Small, build_optimizer, add_muon_args, muon_opts_from, apply_fp8
 from rwkv_lab.synthetic_tasks import make_task, Task
 from rwkv_lab.looped_rwkv import LoopedRWKV
 from rwkv_lab import registry
@@ -137,11 +137,13 @@ def preflight(task, d_model, n_layers, head_size, lever, device, batch, steps=20
 
 
 def train_eval(task, d_model, n_layers, head_size, lever, seed, device, steps, batch, lr, minutes=0.0,
-               optimizer="adamw", weight_decay=0.01, warmup=0, muon_opts=None):
+               optimizer="adamw", weight_decay=0.01, warmup=0, muon_opts=None, fp8=False):
     """Train one model on the task; return metrics incl. length-generalization accuracy. Budget is
     either a fixed step count (minutes=0) or wall-clock minutes (Karpathy-style fixed-time rounds)."""
     torch.manual_seed(seed); rng = np.random.default_rng(seed)
     model = build(task, d_model, n_layers, head_size, lever).to(device, torch.bfloat16)
+    if fp8:
+        apply_fp8(model)
     _, aux = _split_lever(LEVERS[lever])
     heads = None
     if aux:                                                  # latent-prediction aux (e.g. nextlat)
@@ -199,6 +201,8 @@ def main():
                     choices=["adamw", "adamw8bit", "paged-adamw8bit", "muon"])
     ap.add_argument("--weight-decay", type=float, default=0.01)
     ap.add_argument("--warmup", type=int, default=0, help="warmup steps (0 = auto, about 5 percent)")
+    ap.add_argument("--fp8", action="store_true",
+                    help="run eligible Linear GEMMs in fp8 (torchao Float8Linear; Blackwell/Hopper)")
     add_muon_args(ap)
     ap.add_argument("--d-model", type=int, default=256); ap.add_argument("--n-layers", type=int, default=4)
     ap.add_argument("--head-size", type=int, default=64); ap.add_argument("--batch", type=int, default=64)
@@ -220,7 +224,8 @@ def main():
         for s in range(args.seeds):
             runs.append(train_eval(task, args.d_model, args.n_layers, args.head_size, cfg, s,
                                    dev, args.steps, args.batch, args.lr, args.minutes,
-                                   args.optimizer, args.weight_decay, args.warmup, muon_opts_from(args)))
+                                   args.optimizer, args.weight_decay, args.warmup, muon_opts_from(args),
+                                   fp8=args.fp8))
         keys = runs[0].keys()
         results[cfg] = {k: _agg([r[k] for r in runs if k in r]) for k in keys}
         results[cfg]["_n"] = len(runs)
