@@ -5,6 +5,7 @@
 set -u
 cd /thearray/git/moe-mla
 export PYTHONPATH=src
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 M=models/rwkv7-g1g-1.5b.pth; D=${DATA:-models/g1g_tokens_big.bin}
 MIN=${MIN:-10}; COMMON="--model $M --data $D --minutes $MIN --batch 8 --seq-len 1024 --eval-every 25 --seed 0"
 run(){ name=$1; shift; echo "=== $(date +%H:%M) g1g_$name ==="; python -m rwkv_lab.rwkv_finetune $COMMON --out runs/g1g_$name "$@"; }
