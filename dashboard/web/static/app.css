@@ -632,3 +632,7 @@ details.arch-item[open] .lr-caret { transform: rotate(90deg); color: var(--accen
 /* dark color-scheme for ALL native controls in the experiments panel (checkboxes/selects/inputs) */
 .exp-body { color-scheme: dark; }
 .lev-tbl input[type=checkbox] { accent-color: var(--accent); color-scheme: dark; width: 15px; height: 15px; }
+
+/* baseline = locked significance reference */
+.lev-ref { font-size: .8em; color: var(--accent); opacity: .8; margin-left: .3rem; }
+.lev-tbl input[type=checkbox]:disabled { opacity: .55; cursor: default; }
