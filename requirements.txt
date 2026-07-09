@@ -7,7 +7,7 @@ accelerate>=0.34
 huggingface_hub>=0.25
 einops>=0.8
 numpy>=1.26
-bitsandbytes>=0.43
+bitsandbytes>=0.45  # >=0.45 for Blackwell sm_120 8-bit optimizer kernels
 fastapi>=0.115
 uvicorn>=0.30
 sse-starlette>=2.1
