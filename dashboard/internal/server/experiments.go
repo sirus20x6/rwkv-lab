@@ -36,7 +36,22 @@ var knownLevers = []leverDef{
 	{"loop3_factor", "loop ×3 + factored head×channel gate"},
 }
 
-var knownTasks = []string{"recall", "copy", "induction"}
+type taskDef struct{ Name, Desc string }
+
+var knownTasks = []taskDef{
+	{"recall", "associative retrieval (k→v)"},
+	{"copy", "state capacity (reproduce a sequence)"},
+	{"induction", "in-context pattern (A B … A → B)"},
+}
+
+func validTask(name string) bool {
+	for _, t := range knownTasks {
+		if t.Name == name {
+			return true
+		}
+	}
+	return false
+}
 
 type expRow struct {
 	Config                        string
@@ -119,13 +134,14 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 
 	// --- interactive builder: task dropdown, model pickers, seeds/steps, lever checkboxes ---
 	b.WriteString(`<div class="exp-build"><div class="exp-h">new experiment</div><div class="exp-form">`)
-	b.WriteString(`<label>task <select data-bind-task>`)
+	b.WriteString(`<div class="exp-field"><span class="ef-l">task</span><select data-bind-task>`)
 	for _, t := range knownTasks {
-		fmt.Fprintf(&b, `<option value="%s">%s</option>`, t, t)
+		fmt.Fprintf(&b, `<option value="%s">%s — %s</option>`, t.Name, t.Name, esc(t.Desc))
 	}
-	b.WriteString(`</select></label>`)
+	b.WriteString(`</select></div>`)
 	numField := func(label, sig string, def int) {
-		fmt.Fprintf(&b, `<label>%s <input type="number" data-bind-%s value="%d" min="1"></label>`, label, sig, def)
+		fmt.Fprintf(&b, `<div class="exp-field"><span class="ef-l">%s</span>`+
+			`<input type="number" data-bind-%s value="%d" min="1"></div>`, label, sig, def)
 	}
 	numField("len/pairs", "tasklen", 16)
 	numField("d_model", "dmodel", 256)
@@ -216,7 +232,7 @@ func (s *Server) handleLaunchExperiment(w http.ResponseWriter, r *http.Request) 
 		return def
 	}
 	task := str("task", "recall")
-	if !contains(knownTasks, task) {
+	if !validTask(task) {
 		toastErr(sse, "launch: unknown task")
 		return
 	}
