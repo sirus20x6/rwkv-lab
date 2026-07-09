@@ -642,3 +642,12 @@ details.arch-item[open] .lr-caret { transform: rotate(90deg); color: var(--accen
 /* LM-only levers: dimmed when a synthetic task is selected (enabled only for the LM corpus) */
 .lev-tbl tr.lm-off { opacity: .4; }
 .lev-tbl tr.lm-off .lev-d { color: var(--text-dim); }
+
+/* Muon variant options — shown only when optimizer = muon */
+.field-tbl tr.muon-off { display: none; }
+.muon-toggles { display: flex; flex-wrap: wrap; gap: .5rem .9rem; }
+.muon-toggles .mv { display: inline-flex; gap: .25rem; align-items: center; font-size: .92em; white-space: nowrap; }
+.muon-toggles input[type=checkbox] { accent-color: var(--accent); }
+
+/* live model-size estimate */
+.field-tbl .model-size { color: var(--accent); font-family: var(--mono); font-weight: 600; font-size: .9em; }
