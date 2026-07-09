@@ -11,10 +11,14 @@ and support length-generalization (train at length L, eval at 2L/4L) since each 
 parameterised by length. Accuracy on these is a clean, high-signal metric: a lever either
 extends the capability or it doesn't, no ±0.1-nat noise floor.
 
+Batches are generated DIRECTLY ON `device` with tensor ops (no numpy / no host->device copy) so
+tiny models stay GPU-bound instead of stalling on Python batch construction — the small-vocab
+tasks run at very high step rates where a per-row numpy loop was the bottleneck. Determinism comes
+from the caller's torch.manual_seed(); the legacy `rng` arg is accepted but unused.
+
 Vocab layout: 0=PAD, 1=SEP (delimiter / query marker), 2.. = content symbols.
 """
 from __future__ import annotations
-import numpy as np
 import torch
 
 PAD, SEP = 0, 1
@@ -30,11 +34,21 @@ class Task:
         raise NotImplementedError
 
     @staticmethod
-    def _pack(ids: np.ndarray, mask_from: int, device):
-        x = torch.from_numpy(ids[:, :-1]).long().to(device)
-        y = torch.from_numpy(ids[:, 1:]).long().to(device)
+    def _pack(ids, mask_from: int):
+        """ids: [B,W] long on device -> (x, y, mask) with y (next-token) scored from mask_from on."""
+        x = ids[:, :-1].contiguous()
+        y = ids[:, 1:].contiguous()
         m = torch.zeros_like(y, dtype=torch.float32)
         m[:, mask_from:] = 1.0                      # score the region after the delimiter
+        return x, y, m
+
+    @staticmethod
+    def _pack_last(ids):
+        """ids: [B,W] long -> (x, y, mask) scoring ONLY the final target token."""
+        x = ids[:, :-1].contiguous()
+        y = ids[:, 1:].contiguous()
+        m = torch.zeros_like(y, dtype=torch.float32)
+        m[:, -1] = 1.0
         return x, y, m
 
     @staticmethod
@@ -51,10 +65,11 @@ class CopyTask(Task):
         self.vocab = 2 + n_symbols
         self.name = f"copy{length}"
 
-    def batch(self, B, device, rng):
-        S = rng.integers(2, 2 + self.ns, size=(B, self.L))
-        ids = np.concatenate([S, np.full((B, 1), SEP), S], axis=1)   # [B, 2L+1]
-        return self._pack(ids, mask_from=self.L, device=device)      # score the second S
+    def batch(self, B, device, rng=None):
+        S = torch.randint(2, 2 + self.ns, (B, self.L), device=device)
+        sep = torch.full((B, 1), SEP, dtype=torch.long, device=device)
+        ids = torch.cat([S, sep, S], dim=1)                          # [B, 2L+1]
+        return self._pack(ids, mask_from=self.L)                     # score the second S
 
 
 class AssocRecallTask(Task):
@@ -67,23 +82,19 @@ class AssocRecallTask(Task):
         self.vocab = 2 + n_keys + n_vals
         self.name = f"recall{n_pairs}"
 
-    def batch(self, B, device, rng):
-        rows = []
-        ans_pos = []
-        for _ in range(B):
-            keys = rng.choice(self.nk, size=self.n, replace=False) + self.k0
-            vals = rng.integers(0, self.nv, size=self.n) + self.v0
-            seq = np.empty(2 * self.n, dtype=np.int64)
-            seq[0::2] = keys; seq[1::2] = vals
-            qi = rng.integers(0, self.n)
-            row = np.concatenate([seq, [SEP], [keys[qi]], [vals[qi]]])  # … SEP kq vq
-            rows.append(row); ans_pos.append(len(row) - 1)             # vq is the last token
-        ids = np.stack(rows)
-        x = torch.from_numpy(ids[:, :-1]).long().to(device)
-        y = torch.from_numpy(ids[:, 1:]).long().to(device)
-        m = torch.zeros_like(y, dtype=torch.float32)
-        m[:, -1] = 1.0                                                 # score only vq
-        return x, y, m
+    def batch(self, B, device, rng=None):
+        n = self.n
+        # distinct keys per row: argsort of iid uniforms = uniform random permutation (Fisher-Yates)
+        keys = torch.rand(B, self.nk, device=device).argsort(dim=1)[:, :n] + self.k0   # [B,n]
+        vals = torch.randint(0, self.nv, (B, n), device=device) + self.v0
+        seq = torch.empty(B, 2 * n, dtype=torch.long, device=device)
+        seq[:, 0::2] = keys; seq[:, 1::2] = vals                     # k1 v1 … kn vn
+        qi = torch.randint(0, n, (B,), device=device)               # which pair is queried
+        br = torch.arange(B, device=device)
+        kq, vq = keys[br, qi][:, None], vals[br, qi][:, None]
+        sep = torch.full((B, 1), SEP, dtype=torch.long, device=device)
+        ids = torch.cat([seq, sep, kq, vq], dim=1)                   # … SEP kq vq  [B, 2n+3]
+        return self._pack_last(ids)                                  # score only vq
 
 
 class InductionTask(Task):
@@ -94,21 +105,17 @@ class InductionTask(Task):
         self.vocab = 2 + n_symbols
         self.name = f"induction{length}"
 
-    def batch(self, B, device, rng):
-        rows = []
-        for _ in range(B):
-            s = rng.integers(2, 2 + self.ns, size=self.L)
-            t, c = rng.integers(2, 2 + self.ns, size=2)
-            j = rng.integers(1, self.L - 2)
-            s[j] = t; s[j + 1] = c                                     # plant trigger->continuation
-            s[-1] = t                                                  # repeat trigger at the end
-            rows.append(np.concatenate([s, [c]]))                      # target continuation
-        ids = np.stack(rows)
-        x = torch.from_numpy(ids[:, :-1]).long().to(device)
-        y = torch.from_numpy(ids[:, 1:]).long().to(device)
-        m = torch.zeros_like(y, dtype=torch.float32)
-        m[:, -1] = 1.0                                                 # score the final continuation
-        return x, y, m
+    def batch(self, B, device, rng=None):
+        L = self.L
+        s = torch.randint(2, 2 + self.ns, (B, L), device=device)
+        t = torch.randint(2, 2 + self.ns, (B,), device=device)
+        c = torch.randint(2, 2 + self.ns, (B,), device=device)
+        j = torch.randint(1, L - 2, (B,), device=device)            # trigger position (early)
+        br = torch.arange(B, device=device)
+        s[br, j] = t; s[br, j + 1] = c                              # plant trigger -> continuation
+        s[:, -1] = t                                                # repeat trigger at the end
+        ids = torch.cat([s, c[:, None]], dim=1)                     # [B, L+1], target continuation = c
+        return self._pack_last(ids)                                 # score the final continuation
 
 
 REGISTRY = {"copy": CopyTask, "recall": AssocRecallTask, "induction": InductionTask}
