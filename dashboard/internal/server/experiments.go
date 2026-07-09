@@ -171,14 +171,16 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(&b, `<tr><td class="f-l">%s</td><td><input type="number" data-bind-%s value="%d" min="1"></td>`+
 			`<td class="f-d">%s</td></tr>`, label, sig, def, esc(hint))
 	}
-	numField("amount", "amount", "step count — or minutes when budget = wall-clock", 3000)
+	// defaults target a ~350M from-scratch LM research run (d1024 · L18 · h64 ≈ 362M @ vocab 65536);
+	// dial d_model/layers down for quick synthetic diagnostics.
+	numField("amount", "amount", "step count — or minutes when budget = wall-clock", 20000)
 	numField("len / pairs", "tasklen", "task difficulty — pairs (recall) / length (copy·induction) [synthetic]", 16)
-	numField("context len", "ctxlen", "sequence length [LM mode]", 512)
-	numField("d_model", "dmodel", "model width", 256)
-	numField("layers", "nlayers", "model depth", 4)
-	numField("head size", "headsize", "attention head width", 64)
-	numField("batch", "batch", "sequences per step", 32)
-	numField("seeds", "seeds", "runs averaged → error bars + significance", 3)
+	numField("context len", "ctxlen", "sequence length [LM mode]", 1024)
+	numField("d_model", "dmodel", "model width (1024 ≈ 350M-class)", 1024)
+	numField("layers", "nlayers", "model depth", 18)
+	numField("head size", "headsize", "attention head width (1024/64 = 16 heads)", 64)
+	numField("batch", "batch", "sequences per step", 16)
+	numField("seeds", "seeds", "runs averaged → error bars (1 for big-model research; ↑ for cheap synthetic A/Bs)", 1)
 	b.WriteString(`</table>`)
 	b.WriteString(`<div class="exp-levs"><div class="lev-h">configs to compare</div><table class="lev-tbl">`)
 	for _, lv := range knownLevers {
@@ -295,7 +297,7 @@ func (s *Server) handleLaunchExperiment(w http.ResponseWriter, r *http.Request) 
 		toastErr(sse, "launch: check at least one lever to compare against baseline")
 		return
 	}
-	budget := []string{"--steps", str("amount", "3000")} // fixed steps, or wall-clock minutes
+	budget := []string{"--steps", str("amount", "20000")} // fixed steps, or wall-clock minutes
 	if str("budget", "steps") == "minutes" {
 		budget = []string{"--minutes", str("amount", "10")}
 	}
@@ -307,8 +309,8 @@ func (s *Server) handleLaunchExperiment(w http.ResponseWriter, r *http.Request) 
 	// LM path: an LM corpus task, OR a continuation (g1g / resume) which is inherently an LM.
 	if task == lmTask || init == "g1g" || init == "resume" {
 		args := append([]string{"-m", "rwkv_lab.config", "run-lm", "--levers", strings.Join(configs, ","),
-			"--d-model", str("dmodel", "256"), "--n-layers", str("nlayers", "4"), "--head-size", str("headsize", "64"),
-			"--batch", str("batch", "32"), "--seq-len", str("ctxlen", "512")}, budget...)
+			"--d-model", str("dmodel", "1024"), "--n-layers", str("nlayers", "18"), "--head-size", str("headsize", "64"),
+			"--batch", str("batch", "16"), "--seq-len", str("ctxlen", "1024")}, budget...)
 		note := "from scratch"
 		if init == "g1g" {
 			args = append(args, "--init-g1g", "models/rwkv7-g1g-1.5b.pth")
@@ -336,8 +338,8 @@ func (s *Server) handleLaunchExperiment(w http.ResponseWriter, r *http.Request) 
 	}
 	args := append([]string{"-m", "rwkv_lab.experiment",
 		"--task", task + ":" + str("tasklen", "16"), "--configs", strings.Join(configs, ","),
-		"--seeds", str("seeds", "3"), "--d-model", str("dmodel", "256"), "--n-layers", str("nlayers", "4"),
-		"--head-size", str("headsize", "64"), "--batch", str("batch", "32")}, budget...)
+		"--seeds", str("seeds", "1"), "--d-model", str("dmodel", "1024"), "--n-layers", str("nlayers", "18"),
+		"--head-size", str("headsize", "64"), "--batch", str("batch", "16")}, budget...)
 	pid, err := s.spawnPy(args, "exp_"+task+".log")
 	if err != nil {
 		toastErr(sse, "launch: "+err.Error())
