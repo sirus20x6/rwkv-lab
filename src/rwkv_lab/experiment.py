@@ -137,8 +137,23 @@ def preflight(task, d_model, n_layers, head_size, lever, device, batch, steps=20
     return True, f"ok (loss {losses[0]:.2f} -> {losses[-1]:.2f})"
 
 
+def _block_source(task, B, device, block):
+    """Amortize per-batch kernel launches for synthetic tasks: generate `block` batches' worth of
+    examples in ONE task.batch() call, then serve them B at a time. All rows are iid, so this is
+    distributionally identical to `block` separate calls but pays ~1/block the launch overhead.
+    block<=1 disables (one generation per step)."""
+    while True:
+        if block <= 1:
+            yield task.batch(B, device, None); continue
+        X, Y, M = task.batch(block * B, device, None)
+        for k in range(block):
+            sl = slice(k * B, (k + 1) * B)
+            yield X[sl], Y[sl], M[sl]
+
+
 def train_eval(task, d_model, n_layers, head_size, lever, seed, device, steps, batch, lr, minutes=0.0,
-               optimizer="adamw", weight_decay=0.01, warmup=0, muon_opts=None, fp8=False, do_compile=False):
+               optimizer="adamw", weight_decay=0.01, warmup=0, muon_opts=None, fp8=False, do_compile=False,
+               gen_block=1):
     """Train one model on the task; return metrics incl. length-generalization accuracy. Budget is
     either a fixed step count (minutes=0) or wall-clock minutes (Karpathy-style fixed-time rounds)."""
     torch.manual_seed(seed); rng = np.random.default_rng(seed)
@@ -157,6 +172,7 @@ def train_eval(task, d_model, n_layers, head_size, lever, seed, device, steps, b
     t0 = time.time()
     step = 0
     fwd = torch.compile(model) if do_compile else model   # compile the train forward; eval stays eager
+    src = _block_source(task, batch, device, gen_block)   # amortized synthetic batch generation
     while (time.time() - t0 < minutes * 60) if minutes > 0 else (step < steps):
         frac = min(1.0, (time.time() - t0) / (minutes * 60)) if minutes > 0 else step / max(steps, 1)
         w = min(1.0, (step + 1) / warm)                      # warmup
@@ -164,7 +180,7 @@ def train_eval(task, d_model, n_layers, head_size, lever, seed, device, steps, b
         for g in opt.param_groups:
             g["lr"] = lr * w * (0.1 + 0.9 * cos)             # warmup then cosine decay to 0.1x
         step += 1
-        x, y, m = task.batch(batch, device, rng)
+        x, y, m = next(src)
         out = fwd(x, return_hidden=bool(heads))
         loss = _masked_ce((out[0] if heads else out).float(), y, m)
         if heads:                                            # within-sequence next-latent aux loss
@@ -208,6 +224,8 @@ def main():
                     help="run eligible Linear GEMMs in fp8 (torchao Float8Linear; Blackwell/Hopper)")
     ap.add_argument("--compile", action="store_true",
                     help="torch.compile the training forward (fuses fp8 cast+GEMM; ~2x on Blackwell)")
+    ap.add_argument("--gen-block", type=int, default=1,
+                    help="generate N batches of synthetic data per launch (amortizes gen kernel launches)")
     add_muon_args(ap)
     ap.add_argument("--d-model", type=int, default=256); ap.add_argument("--n-layers", type=int, default=4)
     ap.add_argument("--head-size", type=int, default=64); ap.add_argument("--batch", type=int, default=64)
@@ -230,7 +248,7 @@ def main():
             runs.append(train_eval(task, args.d_model, args.n_layers, args.head_size, cfg, s,
                                    dev, args.steps, args.batch, args.lr, args.minutes,
                                    args.optimizer, args.weight_decay, args.warmup, muon_opts_from(args),
-                                   fp8=args.fp8, do_compile=args.compile))
+                                   fp8=args.fp8, do_compile=args.compile, gen_block=args.gen_block))
         keys = runs[0].keys()
         results[cfg] = {k: _agg([r[k] for r in runs if k in r]) for k in keys}
         results[cfg]["_n"] = len(runs)

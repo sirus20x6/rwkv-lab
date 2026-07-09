@@ -68,7 +68,8 @@ def _run_synthetic(task_spec, cfg):
         runs = [E.train_eval(task, dm, nl, hs, name, s, dev, steps, batch, lr, minutes,
                              tr.get("optimizer", "adamw"), float(tr.get("weight_decay", 0.01)),
                              int(tr.get("warmup", 0)), tr.get("muon"), fp8=bool(tr.get("fp8", False)),
-                             do_compile=bool(tr.get("compile", False))) for s in range(seeds)]
+                             do_compile=bool(tr.get("compile", False)),
+                             gen_block=int(tr.get("gen_block", 1))) for s in range(seeds)]
         agg = {k: E._agg([r[k] for r in runs if k in r]) for k in runs[0]}
         registry.record(task_spec, name, seeds, steps, {k: list(v) for k, v in agg.items()})
         results[name] = agg
