@@ -196,15 +196,18 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 	strField("lr", "lr", "learning rate — AdamW ~6e-4 · Muon matrix ~0.02 (units differ)", "6e-4")
 	strField("weight decay", "wd", "decoupled weight decay", "0.1")
 	strField("warmup", "warmup", "warmup steps (0 = auto ≈5%)", "0")
-	// Muon variants — rows shown only when optimizer = muon
+	// Muon variants — rows shown only when optimizer = muon; each variant is its own checkbox row
 	moff := ` data-class-muon-off="$optimizer !== 'muon'"`
-	b.WriteString(`<tr` + moff + `><td class="f-l">muon variants</td><td class="muon-toggles">`)
-	for _, v := range []struct{ Sig, Label string }{
-		{"sm_mona", "Muon²"}, {"sm_second_moment", "Aurora"}, {"sm_rsav", "RSAV"},
-		{"sm_da_muon", "DA-Muon"}, {"sm_aro", "ARO"}} {
-		fmt.Fprintf(&b, `<label class="mv"><input type="checkbox" data-bind-%s> %s</label>`, v.Sig, v.Label)
+	mvRow := func(sig, name, desc string) {
+		fmt.Fprintf(&b, `<tr%s><td class="f-l"><label for="%s"><code>%s</code></label></td>`+
+			`<td><input type="checkbox" id="%s" data-bind-%s></td><td class="f-d">%s</td></tr>`,
+			moff, sig, name, sig, sig, esc(desc))
 	}
-	b.WriteString(`</td><td class="f-d">named Muon variants (compose freely)</td></tr>`)
+	mvRow("sm_mona", "Muon²", "MONA — momentum-orthogonalized adaptive update")
+	mvRow("sm_second_moment", "Aurora", "Adam-style second moment on the orthogonalized update")
+	mvRow("sm_rsav", "RSAV", "gradient-energy variance gate (two-pass, ξ-clamped scalar)")
+	mvRow("sm_da_muon", "DA-Muon", "distance-aware adaptive step from the update radius")
+	mvRow("sm_aro", "ARO", "approximate row orthogonalization (Sinkhorn iterations)")
 	msf := func(label, sig, hint, def string) {
 		fmt.Fprintf(&b, `<tr%s><td class="f-l">%s</td><td><input type="text" data-bind-%s value="%s"></td>`+
 			`<td class="f-d">%s</td></tr>`, moff, label, sig, def, esc(hint))

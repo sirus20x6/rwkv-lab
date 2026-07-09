@@ -651,3 +651,7 @@ details.arch-item[open] .lr-caret { transform: rotate(90deg); color: var(--accen
 
 /* live model-size estimate */
 .field-tbl .model-size { color: var(--accent); font-family: var(--mono); font-weight: 600; font-size: .9em; }
+
+/* Muon-variant checkboxes live in the field table now */
+.field-tbl input[type=checkbox] { accent-color: var(--accent); color-scheme: dark; width: 15px; height: 15px; cursor: pointer; }
+.field-tbl tr.muon-off ~ tr .lev-c { }  /* no-op guard */
