@@ -70,6 +70,11 @@ Experiments are driven and monitored through **trainboard**, a from-scratch Go +
   <em>Run leaderboard — the conversion is an experiment sweep: hundreds of isolated per-layer runs, ablations (looped vs. control, neg-eigval, schedule-free), and optimizer studies, all sortable by best PPL / top-1 / recency.</em>
 </p>
 
+<p align="center">
+  <img src="docs/images/experiments_card.png" width="100%" alt="Experiments card: config-driven A/B builder + registry results"><br>
+  <em>Experiments card — a config-driven lever lab. Pick a task (or an LM corpus), a step- or wall-clock budget, the model size, and the configs to compare; launch straight from the browser. Results land in a registry with multi-seed mean±std, significance vs. a locked <code>baseline</code>, length-generalization, loop-gate engagement, and compute cost (params · FLOP/token). LM-only objectives (top/lmtp/bst/jtp) enable when an LM corpus is selected.</em>
+</p>
+
 ---
 
 ## Conversion track — target model

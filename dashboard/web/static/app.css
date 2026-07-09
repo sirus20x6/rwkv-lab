@@ -608,13 +608,13 @@ details.arch-item[open] .lr-caret { transform: rotate(90deg); color: var(--accen
 .exp-form select option { background: var(--bg-elev); color: var(--text); }
 
 /* builder field table (task + numbers), matching the lever table */
-.field-tbl { border-collapse: collapse; font-size: .85em; margin-bottom: .4rem; }
+.field-tbl { border-collapse: collapse; font-size: .85em; margin-bottom: .4rem; width: auto; }
 .field-tbl td { padding: .22rem .7rem .22rem 0; vertical-align: middle; }
-.field-tbl .f-l { color: var(--text-dim); text-align: right; white-space: nowrap; font-variant: small-caps; }
-.field-tbl .f-d { color: var(--text-dim); }
+.field-tbl .f-l { color: var(--text-dim); text-align: right; white-space: nowrap; font-variant: small-caps; width: 7rem; }
+.field-tbl .f-d { color: var(--text-dim); max-width: 22rem; }   /* wrap hints, don't push off-screen */
 .field-tbl tr:hover .f-d { color: var(--text); }
 .field-tbl input[type=number] { width: 5rem; }
-.field-tbl select { min-width: 15rem; }
+.field-tbl select { width: 17rem; }                             /* fixed, not min-width (would stretch) */
 
 /* theme the field-table controls (they moved out of .exp-form into .field-tbl) */
 .field-tbl select,
