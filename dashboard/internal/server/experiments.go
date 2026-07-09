@@ -179,6 +179,11 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 	numField("d_model", "dmodel", "model width (1024 ≈ 350M-class)", 1024)
 	numField("layers", "nlayers", "model depth", 18)
 	numField("head size", "headsize", "attention head width (1024/64 = 16 heads)", 64)
+	// live model-size estimate: params ≈ 2·V·d + L·12.1·d² (V=65536), matched to our arch within ~0.5%
+	b.WriteString(`<tr><td class="f-l">model size</td><td colspan="2" class="model-size" ` +
+		`data-text="$init==='g1g' ? 'g1g ≈ 1.5B (dims fixed)' : ($task==='` + lmTask + `' ` +
+		`? ((2*65536*(+$dmodel)+(+$nlayers)*12.1*(+$dmodel)**2)/1e6).toFixed(0)+'M params  (' + ((+$nlayers)*12.1*(+$dmodel)**2/1e6).toFixed(0)+'M non-embed · vocab 65536)' ` +
+		`: ((+$nlayers)*12.1*(+$dmodel)**2/1e6).toFixed(0)+'M params  (synthetic · tiny vocab)')"></td></tr>`)
 	numField("batch", "batch", "sequences per step", 16)
 	// optimizer settings
 	b.WriteString(`<tr><td class="f-l">optimizer</td><td><select data-bind-optimizer>` +
@@ -191,6 +196,23 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 	strField("lr", "lr", "learning rate — AdamW ~6e-4 · Muon matrix ~0.02 (units differ)", "6e-4")
 	strField("weight decay", "wd", "decoupled weight decay", "0.1")
 	strField("warmup", "warmup", "warmup steps (0 = auto ≈5%)", "0")
+	// Muon variants — rows shown only when optimizer = muon
+	moff := ` data-class-muon-off="$optimizer !== 'muon'"`
+	b.WriteString(`<tr` + moff + `><td class="f-l">muon variants</td><td class="muon-toggles">`)
+	for _, v := range []struct{ Sig, Label string }{
+		{"sm_mona", "Muon²"}, {"sm_second_moment", "Aurora"}, {"sm_rsav", "RSAV"},
+		{"sm_da_muon", "DA-Muon"}, {"sm_aro", "ARO"}} {
+		fmt.Fprintf(&b, `<label class="mv"><input type="checkbox" data-bind-%s> %s</label>`, v.Sig, v.Label)
+	}
+	b.WriteString(`</td><td class="f-d">named Muon variants (compose freely)</td></tr>`)
+	msf := func(label, sig, hint, def string) {
+		fmt.Fprintf(&b, `<tr%s><td class="f-l">%s</td><td><input type="text" data-bind-%s value="%s"></td>`+
+			`<td class="f-d">%s</td></tr>`, moff, label, sig, def, esc(hint))
+	}
+	msf("scale", "sm_scale", "Newton–Schulz update scale (0.4·√d amplifier — see LR units)", "0.4")
+	msf("Muon^p", "sm_spectral_power", "spectral power p (0 = plain Muon)", "0.0")
+	msf("DDC", "sm_ddc_strength", "dual-descent correction strength (0 = off)", "0.0")
+	msf("NS steps", "sm_ns_steps", "Newton–Schulz iterations", "5")
 	numField("seeds", "seeds", "runs averaged → error bars (1 for big-model research; ↑ for cheap synthetic A/Bs)", 1)
 	b.WriteString(`</table>`)
 	b.WriteString(`<div class="exp-levs"><div class="lev-h">configs to compare</div><table class="lev-tbl">`)
@@ -316,6 +338,18 @@ func (s *Server) handleLaunchExperiment(w http.ResponseWriter, r *http.Request) 
 		"--weight-decay", str("wd", "0.1")}
 	if wu := str("warmup", "0"); wu != "" && wu != "0" {
 		optArgs = append(optArgs, "--warmup", wu)
+	}
+	if str("optimizer", "adamw") == "muon" { // Muon-variant flags
+		optArgs = append(optArgs, "--sm-scale", str("sm_scale", "0.4"),
+			"--sm-spectral-power", str("sm_spectral_power", "0.0"),
+			"--sm-ddc-strength", str("sm_ddc_strength", "0.0"), "--sm-ns-steps", str("sm_ns_steps", "5"))
+		for _, t := range []struct{ Sig, Flag string }{
+			{"sm_mona", "--sm-mona"}, {"sm_second_moment", "--sm-second-moment"},
+			{"sm_rsav", "--sm-rsav"}, {"sm_da_muon", "--sm-da-muon"}, {"sm_aro", "--sm-aro"}} {
+			if on, _ := sig[t.Sig].(bool); on {
+				optArgs = append(optArgs, t.Flag, "1")
+			}
+		}
 	}
 	init := str("init", "scratch")
 	if init == "convert" { // per-layer GDN→RWKV distillation — not a config sweep
