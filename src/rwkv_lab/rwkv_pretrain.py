@@ -121,6 +121,31 @@ def build_optimizer(named_params, name, lr, wd, adam_lr=0.0, muon_opts=None):
     return _t.optim.AdamW(params, lr=lr, betas=(0.9, 0.95), weight_decay=wd)
 
 
+def apply_fp8(module):
+    """Swap eligible nn.Linear layers to torchao Float8Linear so their GEMMs run on the fp8
+    tensor cores (Blackwell sm_120 / Hopper). This is orthogonal to the optimizer: bf16/fp32
+    MASTER weights are kept and dynamically cast to fp8 per forward, so build_optimizer, the
+    training loop, and checkpointing are all unchanged. Only converts linears whose in/out
+    features are both multiples of 16 (the fp8 GEMM constraint) and skips the vocab head +
+    embeddings (fp8 there costs quality for little FLOP). Returns #layers converted.
+
+    Note: eager fp8 trains correctly but the throughput win needs torch.compile to fuse the
+    cast+GEMM; without it fp8 can be net-neutral on small models. Clear error if torchao missing."""
+    try:
+        from torchao.float8 import convert_to_float8_training
+        from torchao.float8.float8_linear import Float8Linear
+    except Exception as e:  # noqa: BLE001 — surface the real cause (no wheel, bad CUDA, etc.)
+        raise RuntimeError("fp8 training needs torchao: `uv pip install torchao`") from e
+    import torch.nn as _nn
+
+    def keep(m, fqn):
+        return (isinstance(m, _nn.Linear) and "head" not in fqn.lower()
+                and m.in_features % 16 == 0 and m.out_features % 16 == 0)
+
+    convert_to_float8_training(module, module_filter_fn=keep)
+    return sum(isinstance(x, Float8Linear) for x in module.modules())
+
+
 # --sm-* CLI flags -> SpectralMuon kwargs (the Muon variants exposed by the card).
 def add_muon_args(ap):
     ap.add_argument("--sm-scale", type=float, default=0.4)
@@ -168,6 +193,8 @@ def main():
     ap.add_argument("--optimizer", default="adamw",
                     choices=["adamw", "adamw8bit", "paged-adamw8bit", "muon"])
     ap.add_argument("--weight-decay", type=float, default=0.1)
+    ap.add_argument("--fp8", action="store_true",
+                    help="run eligible Linear GEMMs in fp8 (torchao Float8Linear; Blackwell/Hopper)")
     add_muon_args(ap)
     ap.add_argument("--lr-schedule", default="cosine", choices=["constant", "cosine"])
     ap.add_argument("--decay-steps", type=int, default=0)   # cosine horizon; 0 => use --steps
@@ -203,6 +230,9 @@ def main():
               f"(dims forced to g1g 24L/d2048/h64)", flush=True)
     else:
         model = RWKV7Small(65536, args.d_model, args.n_layers, args.head_size, lk).to(dev, torch.bfloat16)
+    if args.fp8:
+        n8 = apply_fp8(model)
+        print(f"fp8: {n8} Linear layers -> Float8Linear (torchao)", flush=True)
     nparam = sum(p.numel() for p in model.parameters())
     tag = f"scratch-L{args.n_layers}d{args.d_model}-loop{args.loop_count}" + \
           ("".join(k for k, v in [("H", args.loop_hyper), ("C", args.loop_cart_anchor),
