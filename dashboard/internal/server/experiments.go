@@ -210,6 +210,7 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 		`<td><input type="checkbox" id="docompile" data-bind-docompile></td>` +
 		`<td class="f-d">torch.compile the training forward — fuses the fp8 cast+GEMM for the real ` +
 		`~2× speedup on Blackwell (one-time ~40s compile at step 0). Best paired with fp8.</td></tr>`)
+	numField("gen block", "genblock", "synthetic: batches generated per launch — amortizes gen kernel launches (1 = off)", 1)
 	// Muon variants — rows shown only when optimizer = muon; each variant is its own checkbox row
 	moff := ` data-class-muon-off="$optimizer !== 'muon'"`
 	mvRow := func(sig, name, desc string) {
@@ -413,6 +414,9 @@ func (s *Server) handleLaunchExperiment(w http.ResponseWriter, r *http.Request) 
 		"--task", task + ":" + str("tasklen", "16"), "--configs", strings.Join(configs, ","),
 		"--seeds", str("seeds", "1"), "--d-model", str("dmodel", "1024"), "--n-layers", str("nlayers", "18"),
 		"--head-size", str("headsize", "64"), "--batch", str("batch", "16")}, budget...)
+	if gb := str("genblock", "1"); gb != "" && gb != "1" { // synthetic-only: amortize gen launches
+		args = append(args, "--gen-block", gb)
+	}
 	args = append(args, optArgs...)
 	pid, err := s.spawnPy(args, "exp_"+task+".log")
 	if err != nil {
