@@ -66,13 +66,7 @@ class _StopForward(Exception):
 from .build_memory_targets import _GDNStateCapture, load_token_stream, find_gdn_layer
 from .smt_dmt import BilinearStateCodec, MemoryTargetCache, smt_transition_loss, dmt_rollout_loss, fit_codec
 
-# perf #2b: flash_attn's Triton CE — fused logsumexp+gather with in-place backward into the
-# bf16 logit buffer (no fp32 logit copy, no separate grad alloc). Optional (--fused-ce).
-try:
-    from flash_attn.ops.triton.cross_entropy import cross_entropy_loss as _flash_ce
-    _HAS_FLASH_CE = True
-except Exception:
-    _flash_ce, _HAS_FLASH_CE = None, False
+from .fused_ce import HAS_FUSED_CE as _HAS_FLASH_CE, lmhead_cross_entropy
 
 # --- performance: TF32 on the Blackwell tensor cores for fp32 matmuls. The bf16
 # forward/backward and the bf16 teacher targets are UNAFFECTED (TF32 only touches fp32
@@ -684,7 +678,8 @@ def make_optimizer(student, codec, args, text_cfg=None, rosa_soft=None, lookahea
         # restore from a no-lookahead ckpt stays possible, same reasoning as rosa_soft
         groups.append({"params": [p for p in lookahead.parameters() if p.requires_grad],
                        "lr": args.lookahead_lr or args.lr, "name": "lookahead"})
-    return torch.optim.AdamW(groups, betas=(0.9, 0.95), weight_decay=0.0)
+    fused = all(p.is_cuda for g in groups for p in g["params"])
+    return torch.optim.AdamW(groups, betas=(0.9, 0.95), weight_decay=0.0, fused=fused)
 
 
 def _make_spectral_muon(student, codec, args, rosa_soft=None, lookahead=None):
@@ -1682,26 +1677,7 @@ def chunked_ce(hidden, lm_head, labels, chunk=2048, fused=False):
     importing train_mla's heavy module chain. fused=True uses flash_attn's Triton CE:
     one-shot logits, in-place backward into the bf16 logit buffer (no fp32 copy, no
     separate grad alloc). Falls back to the chunked path if flash_attn is unavailable."""
-    B, T, H = hidden.shape
-    flat_h = hidden.reshape(-1, H)
-    flat_labels = labels.reshape(-1)
-    Wt = lm_head.weight
-    bias = getattr(lm_head, "bias", None)
-    if fused and _HAS_FLASH_CE:
-        logits = F.linear(flat_h, Wt, bias)                              # [N, V] bf16, one shot
-        losses, _ = _flash_ce(logits, flat_labels, inplace_backward=True)  # [N] per-token
-        return losses.float().sum() / flat_h.shape[0]
-    total = hidden.new_zeros((), dtype=torch.float32)
-    Nn = flat_h.shape[0]
-    for i in range(0, Nn, chunk):
-        end = min(i + chunk, Nn)
-        logits = F.linear(flat_h[i:end], Wt, bias)   # keep bf16; the fp32 logit copy was redundant memory
-        # reduction="none" -> float -> sum: a bf16 "sum" scalar has ulp 32 at magnitude
-        # ~5e3, quantizing the mean CE to a 2^-10-nat grid (different models collide on
-        # identical loss values). Per-token bf16 rounding (~1e-4 after averaging) stays;
-        # the catastrophic sum-then-round does not. Gradients were never affected.
-        total = total + F.cross_entropy(logits, flat_labels[i:end], reduction="none").float().sum()
-    return total / Nn
+    return lmhead_cross_entropy(hidden, lm_head, labels, chunk=chunk, fused=fused)
 
 
 @torch.inference_mode()

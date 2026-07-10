@@ -40,7 +40,7 @@ def _load_patch(patch_path: Path) -> dict[str, torch.Tensor]:
 
 
 def _build_mla(mla_cfg: MLAConfig, gqa_cfg: GQAConfig, dtype: torch.dtype,
-               device: torch.device) -> MLAAttention:
+               device: torch.device, layer_idx: int | None = None) -> MLAAttention:
     m = MLAAttention(
         hidden_size=mla_cfg.hidden_size,
         num_heads=mla_cfg.num_heads,
@@ -54,6 +54,7 @@ def _build_mla(mla_cfg: MLAConfig, gqa_cfg: GQAConfig, dtype: torch.dtype,
         num_kv_rope_heads=mla_cfg.num_kv_rope_heads,
         rope_position=gqa_cfg.rope_position,
         use_latent_norm=False,
+        layer_idx=layer_idx,
     )
     return m.to(device=device, dtype=dtype)
 
@@ -163,7 +164,8 @@ def load_converted_model(
         layer = layers[li]
         old = layer.self_attn
         example_param = next(old.parameters())
-        mla = _build_mla(mla_cfg, gqa_cfg, dtype=dtype, device=example_param.device)
+        mla = _build_mla(mla_cfg, gqa_cfg, dtype=dtype, device=example_param.device,
+                         layer_idx=li)
         prefix = f"model.language_model.layers.{li}.self_attn."
         _load_attn_from_patch(patch, mla, prefix, dtype, example_param.device,
                               label=f"layer {li}")

@@ -293,6 +293,22 @@ def test_attach_noop_byte_exact():
     assert torch.equal(ref, out2)
 
 
+def test_prefetched_recall_matches_inline_path():
+    model = MiniModel(C)
+    ids = _repeat_ids()
+    lmb = _make_lmb()
+    attach_engram(model, lmb)
+    install_input_ids_hook(model, lmb)
+    for site in lmb.sites.values():
+        nn.init.normal_(site.v_c.weight, std=0.05)
+        nn.init.normal_(site.h_c.weight, std=0.05)
+    with torch.no_grad():
+        inline = model(ids)
+        rr = token_rosa_recall(ids.cpu(), V)
+        prefetched = model(ids, precomputed_recall=rr)
+    torch.testing.assert_close(prefetched, inline, rtol=0, atol=0)
+
+
 def test_noop_without_ids():
     model = MiniModel(C)
     ids = _repeat_ids()

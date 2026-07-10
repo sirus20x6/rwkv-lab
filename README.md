@@ -72,8 +72,25 @@ Experiments are driven and monitored through **trainboard**, a from-scratch Go +
 
 <p align="center">
   <img src="docs/images/experiments_card.png" width="100%" alt="Experiments card: config-driven A/B builder + registry results"><br>
-  <em>Experiments card — a config-driven lever lab. Pick a task (or an LM corpus), a step- or wall-clock budget, the model size, and the configs to compare; launch straight from the browser. Results land in a registry with multi-seed mean±std, significance vs. a locked <code>baseline</code>, length-generalization, loop-gate engagement, and compute cost (params · FLOP/token). LM-only objectives (top/lmtp/bst/jtp) enable when an LM corpus is selected.</em>
+  <em>Experiments card — a config-driven lever lab. Campaigns retain every seed and rung, paired confidence intervals, learning curves, measured throughput/memory/energy, Pareto status, lineage, and fresh-seed confirmation. Successive halving and factorial interactions can be launched from the browser.</em>
 </p>
+
+### Conclusive experiment campaigns
+
+`python -m rwkv_lab.experiment` now treats a sweep as a reproducible campaign rather than a table of final averages:
+
+```bash
+python -m rwkv_lab.experiment --task recall:16 \
+  --configs baseline,loop3,engram --factorial \
+  --seeds 4 --steps 3000 --confirm-seeds 8
+```
+
+- Baseline and candidate seeds consume identical deterministic batch/evaluation tapes.
+- Arms pass through configurable successive-halving rungs before full budget.
+- The registry stores every trial, curve, profile, RNG hash, resolved config, environment, package set, dataset identity, and compressed dirty Git patch.
+- Comparisons use paired bootstrap intervals, sign-flip permutation tests, effect sizes, Holm correction, and next-seed power guidance.
+- Evaluation covers a length grid, corruption stress, NLL, calibration, loop engagement, and actual time/memory/energy—not only approximate FLOPs.
+- Exploratory winners are rerun on unused seeds in a child confirmation campaign; only those results can receive the dashboard's **CONFIRMED** badge.
 
 ---
 

@@ -256,7 +256,9 @@ class SpectralMuon(Optimizer):
                     self._rsav_r = sqrt_Et.detach().clone()   # first sighting: r = √(E+C), ξ=1
                 else:
                     cap = self.rsav_cap
-                    xi = float((self._rsav_r / sqrt_Et).clamp(1.0 - cap, 1.0 + cap))
+                    # Keep the gate on-device. Converting it to float here forced
+                    # one full CUDA-stream synchronization per optimizer step.
+                    xi = (self._rsav_r / sqrt_Et).clamp(1.0 - cap, 1.0 + cap)
                 self._rsav_dE = torch.zeros((), dtype=torch.float32, device=sqrt_Et.device)
             self._rsav_last_xi = xi
         for grp in self.param_groups:
@@ -323,7 +325,12 @@ class SpectralMuon(Optimizer):
         eta = self._da_eta(p, st, grp) if grp["da_muon"] else 1.0   # Distance-Aware radius
         if grp["weight_decay"]:
             p.mul_(1.0 - lr * grp["weight_decay"])
-        alpha = -lr * base_scale * xi * eta                # all defaults (1.0) ⇒ exactly vanilla
+        step_scale = xi * eta
+        if torch.is_tensor(step_scale):
+            o.mul_(step_scale.to(device=o.device, dtype=o.dtype))
+        elif step_scale != 1.0:
+            o.mul_(step_scale)
+        alpha = -lr * base_scale                           # all defaults (1.0) ⇒ exactly vanilla
         p.add_(o, alpha=alpha)
         if self.rsav and self._rsav_dE is not None:         # SAV chain rule: dE ≈ Σ ⟨g, Δx⟩
             d = (g.float() * o.float()).sum().to(self._rsav_dE.device)  # multi-device safe; no-op single-device
@@ -335,12 +342,12 @@ class SpectralMuon(Optimizer):
         one W0 snapshot per matrix. (W0 = weight at first step; = init for a fresh run.)"""
         if "da_W0" not in st:
             st["da_W0"] = p.detach().float().clone()
-            st["da_rbar"] = float(grp["da_r0"])
+            st["da_rbar"] = torch.tensor(float(grp["da_r0"]), device=p.device)
             st["da_k"] = 0
         st["da_k"] += 1
-        d = (p.detach().float() - st["da_W0"]).norm().item()
-        st["da_rbar"] = max(st["da_rbar"], d)
-        return min(st["da_rbar"] / (st["da_k"] ** 0.5), float(grp["da_eta_max"]))
+        d = (p.detach().float() - st["da_W0"]).norm()
+        st["da_rbar"] = torch.maximum(st["da_rbar"], d)
+        return (st["da_rbar"] / (st["da_k"] ** 0.5)).clamp_max(float(grp["da_eta_max"]))
 
     def _aro_update(self, u, p, st, grp):
         """ARO-Sinkhorn (2602.09006): rotate momentum into a learned frame R, apply Sinkhorn

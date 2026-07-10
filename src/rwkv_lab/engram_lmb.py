@@ -400,16 +400,20 @@ class EngramContext:
 
     def __init__(self) -> None:
         self.ids: Optional[torch.Tensor] = None  # [B, T] long
+        self.recall: Optional[RecallResult] = None
         self.version: int = 0
         self.enabled: bool = True
         self._warned: bool = False
 
-    def set_input_ids(self, ids: torch.Tensor) -> None:
+    def set_input_ids(self, ids: torch.Tensor,
+                      recall: Optional[RecallResult] = None) -> None:
         self.ids = ids
+        self.recall = recall
         self.version += 1
 
     def clear(self) -> None:
         self.ids = None
+        self.recall = None
         self.version += 1
 
 
@@ -673,8 +677,10 @@ class LexicalMemoryBank(nn.Module):
 
     # -- trainer API ----------------------------------------------------------
 
-    def set_input_ids(self, ids: torch.Tensor) -> None:
-        self.ctx.set_input_ids(ids)
+    def set_input_ids(self, ids: torch.Tensor,
+                      recall: Optional[RecallResult] = None) -> None:
+        """Stash ids and an optional CPU-prefetched recall result for this forward."""
+        self.ctx.set_input_ids(ids, recall)
 
     def set_warmup(self, w: float) -> None:
         self._warmup = float(min(max(w, 0.0), 1.0))
@@ -707,7 +713,11 @@ class LexicalMemoryBank(nn.Module):
         if self.ctx.version == self._feat_version:
             return True
         ids = self.ctx.ids
-        rr = token_rosa_recall(ids, self.table.vocab_size, self.boundary_id)
+        rr = self.ctx.recall
+        if rr is None:
+            rr = token_rosa_recall(ids, self.table.vocab_size, self.boundary_id)
+        elif rr.recalled.device != ids.device:
+            rr = RecallResult(*(x.to(ids.device, non_blocking=True) for x in rr))
         self.last_recall = rr
         self._update_recall_stats(rr)
         m_c = self.read_recalled(rr.recalled, rr.valid)
@@ -836,13 +846,14 @@ def install_input_ids_hook(model: nn.Module, lmb: LexicalMemoryBank
                            ) -> torch.utils.hooks.RemovableHandle:
     """Model-level pre-hook that stashes input_ids into the context each forward."""
     def pre(module, args, kwargs):
+        recall = kwargs.pop("precomputed_recall", None)
         ids = kwargs.get("input_ids")
         if ids is None and args and torch.is_tensor(args[0]) \
                 and args[0].dtype in (torch.int64, torch.int32):
             ids = args[0]
         if ids is not None:
-            lmb.set_input_ids(ids.long())
-        return None
+            lmb.set_input_ids(ids.long(), recall=recall)
+        return args, kwargs
     return model.register_forward_pre_hook(pre, with_kwargs=True)
 
 

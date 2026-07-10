@@ -74,13 +74,14 @@ class CopyTask(Task):
 
 class AssocRecallTask(Task):
     """k1 v1 k2 v2 … kn vn SEP kq -> vq. Keys distinct within an example; retrieve the queried value."""
-    def __init__(self, n_pairs: int = 16, n_keys: int = 64, n_vals: int = 64):
+    def __init__(self, n_pairs: int = 16, n_keys: int = 64, n_vals: int = 64,
+                 distractors: int = 0):
         assert n_keys >= n_pairs
-        self.n, self.nk, self.nv = n_pairs, n_keys, n_vals
+        self.n, self.nk, self.nv, self.distractors = n_pairs, n_keys, n_vals, int(distractors)
         self.k0 = 2
         self.v0 = 2 + n_keys
         self.vocab = 2 + n_keys + n_vals
-        self.name = f"recall{n_pairs}"
+        self.name = f"recall{n_pairs}" + (f"d{self.distractors}" if self.distractors else "")
 
     def batch(self, B, device, rng=None):
         n = self.n
@@ -93,7 +94,8 @@ class AssocRecallTask(Task):
         br = torch.arange(B, device=device)
         kq, vq = keys[br, qi][:, None], vals[br, qi][:, None]
         sep = torch.full((B, 1), SEP, dtype=torch.long, device=device)
-        ids = torch.cat([seq, sep, kq, vq], dim=1)                   # … SEP kq vq  [B, 2n+3]
+        junk = torch.randint(2, self.vocab, (B, self.distractors), device=device)
+        ids = torch.cat([seq, junk, sep, kq, vq], dim=1)             # pairs … distractors SEP kq vq
         return self._pack_last(ids)                                  # score only vq
 
 

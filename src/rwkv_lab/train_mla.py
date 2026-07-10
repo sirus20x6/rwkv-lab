@@ -64,24 +64,14 @@ def chunked_ce(logits: torch.Tensor, labels: torch.Tensor, chunk: int = 2048) ->
 
 
 def chunked_lmhead_ce(hidden: torch.Tensor, lm_head: torch.nn.Linear,
-                      labels: torch.Tensor, chunk: int = 2048) -> torch.Tensor:
+                      labels: torch.Tensor, chunk: int = 2048,
+                      fused: bool = True) -> torch.Tensor:
     """Combined lm_head + cross-entropy without materializing the full
     [B, T, V] logits tensor. Caps peak bf16 tensor to chunk*V bytes instead
     of B*T*V bytes (the full logits), saving ~4 GB per MTP forward at
     batch=4, seq=2048, vocab=248K."""
-    B, T, H = hidden.shape
-    flat_h = hidden.reshape(-1, H)
-    flat_labels = labels.reshape(-1)
-    N = flat_h.shape[0]
-    total = hidden.new_zeros((), dtype=torch.float32)
-    W = lm_head.weight
-    bias = getattr(lm_head, "bias", None)
-    for i in range(0, N, chunk):
-        end = min(i + chunk, N)
-        # Materialize chunk logits only
-        chunk_logits = F.linear(flat_h[i:end], W, bias).float()  # [chunk, V]
-        total = total + F.cross_entropy(chunk_logits, flat_labels[i:end], reduction="sum")
-    return total / N
+    from .fused_ce import lmhead_cross_entropy
+    return lmhead_cross_entropy(hidden, lm_head, labels, chunk=chunk, fused=fused)
 
 
 @torch.no_grad()
@@ -296,6 +286,7 @@ class TrainConfig:
     weight_decay: float = 0.0                   # MLA inits are already near the optimum; WD=0 avoids pulling away
     grad_clip: float = 1.0                      # <= 0 disables grad clipping / norm reduction
     grad_clip_every: int = 1                    # clip every N optimizer steps; 1 = every step, 0 = disabled
+    fused_ce: int = 1                           # flash-attn Triton CE; portable chunked fallback
 
     # Optimizer choice.
     # "adamw8bit" : bitsandbytes' 8-bit AdamW (default; works with Engram SparseAdam).
@@ -641,7 +632,7 @@ def eval_loss(model, arr: np.memmap, eval_start: int, eval_end: int,
         x, y = ids[:, :-1], ids[:, 1:]
         outputs = text_model(input_ids=x, use_cache=False)
         hidden = _last_hidden(outputs)
-        loss = chunked_lmhead_ce(hidden, model.lm_head, y) * y.numel()
+        loss = chunked_lmhead_ce(hidden, model.lm_head, y, fused=bool(cfg.fused_ce)) * y.numel()
         total_loss += loss.item()
         total_tokens += y.numel()
         del ids, x, y, outputs, hidden, loss
@@ -1800,7 +1791,8 @@ def main() -> None:
                     # beyond label range). Labels for this horizon: y[k+1 : T].
                     valid_logits_hidden = mtp_out_k[:, :L_k - 1]
                     valid_labels = y[:, k + 1:]  # length T - k - 1 = L_k - 1
-                    loss_h = chunked_lmhead_ce(valid_logits_hidden, model.lm_head, valid_labels)
+                    loss_h = chunked_lmhead_ce(valid_logits_hidden, model.lm_head, valid_labels,
+                                               fused=bool(cfg.fused_ce))
                     losses_by_horizon.append(weight * loss_h)
 
                     prev_out = mtp_out_k
@@ -1842,7 +1834,8 @@ def main() -> None:
                 text_model = _text_model(model)
                 outputs = text_model(input_ids=x, use_cache=False)
                 backbone_hidden = _last_hidden(outputs)
-                lm_loss = chunked_lmhead_ce(backbone_hidden, model.lm_head, y)
+                lm_loss = chunked_lmhead_ce(backbone_hidden, model.lm_head, y,
+                                            fused=bool(cfg.fused_ce))
 
                 T = x.shape[1]
                 # Precompute full-range RoPE once; each horizon slices.
@@ -1869,7 +1862,8 @@ def main() -> None:
                     )
                     valid_logits_hidden = mtp_out_k[:, :L_k - 1]
                     valid_labels = y[:, k + 1:]
-                    loss_h = chunked_lmhead_ce(valid_logits_hidden, model.lm_head, valid_labels)
+                    loss_h = chunked_lmhead_ce(valid_logits_hidden, model.lm_head, valid_labels,
+                                               fused=bool(cfg.fused_ce))
                     chain_losses.append(weight * loss_h)
                     prev_out = mtp_out_k
                     del hidden_k, ids_k, pos_k, cos_k, sin_k
@@ -1913,7 +1907,8 @@ def main() -> None:
                     text_model = _text_model(model)
                     outputs = text_model(input_ids=x, use_cache=False)
                     backbone_hidden = _last_hidden(outputs)
-                    loss = chunked_lmhead_ce(backbone_hidden, model.lm_head, y)
+                    loss = chunked_lmhead_ce(backbone_hidden, model.lm_head, y,
+                                             fused=bool(cfg.fused_ce))
                     if cfg.mutor_enabled:
                         mut_l, n_mut = mutor_loss(
                             backbone_hidden, y, model.lm_head, model.mutor_head,
@@ -1942,7 +1937,8 @@ def main() -> None:
                     text_model = _text_model(model)
                     outputs = text_model(input_ids=x, use_cache=False)
                     hidden = _last_hidden(outputs)
-                    loss = chunked_lmhead_ce(hidden, model.lm_head, y)
+                    loss = chunked_lmhead_ce(hidden, model.lm_head, y,
+                                             fused=bool(cfg.fused_ce))
                     logits = loss  # placeholder for downstream del
                     del outputs, hidden
 
