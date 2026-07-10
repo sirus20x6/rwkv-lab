@@ -17,7 +17,7 @@ Every entry is an off-by-default lever with a paper and a CPU test. Full index i
 | **Recurrent-depth loops** | weight-tied loops · hyper-connections · per-iterate readout · PonderNet halt · CART contractive gate · HRM DEQ / Neumann-k gradient · FPRM fixed-point halt · RWKV-Product multi-substep | [`looped_rwkv`](src/rwkv_lab/looped_rwkv.py) · [`rwkv_product`](src/rwkv_lab/rwkv_product.py) |
 | **Latent prediction** | MTP · MuToR · TOP · NextLat · ConceptLM · FSP · L-MTP · Belief-State · JTP · LLM-JEPA · Coconut continuous-thought | [`lookahead_module`](src/rwkv_lab/lookahead_module.py) · [`llm_jepa`](src/rwkv_lab/llm_jepa.py) · [`coconut`](src/rwkv_lab/coconut.py) |
 | **Memory / retrieval** | Engram lexical bank · ROSA suffix-automaton (+ golden reference) · Fast-weight Product-Key Memory · L³ large-lookup · WriteSAE state autoencoder | [`engram_lmb`](src/rwkv_lab/engram_lmb.py) · [`rosa_sam`](src/rwkv_lab/rosa_sam.py) · [`fwpkm`](src/rwkv_lab/fwpkm.py) · [`l3_lookup`](src/rwkv_lab/l3_lookup.py) · [`write_sae`](src/rwkv_lab/write_sae.py) |
-| **Scale & online adaptation (P0)** | u-μP scale transfer · Titans/MIRAS/ATLAS/Nested Learning memory · GSPO/Dr.GRPO/DAPO RLVR + deterministic verifiers | [`u_mup`](src/rwkv_lab/u_mup.py) · [`online_memory`](src/rwkv_lab/online_memory.py) · [`rlvr`](src/rwkv_lab/rlvr.py) |
+| **Scale & online adaptation (P0)** | u-μP scale transfer · Titans/MIRAS/ATLAS/Nested Learning memory · GSPO/Dr.GRPO/DAPO RLVR + deterministic verifiers | [`u_mup`](src/rwkv_lab/u_mup.py) · [`online_memory`](src/rwkv_lab/online_memory.py) · [`rlvr`](src/rwkv_lab/rlvr.py) · [`rlvr_train`](src/rwkv_lab/rlvr_train.py) |
 | **Training systems (P1)** | RegMix/MDE mixture surrogate · simulated NVFP4 QAT · Decoupled DiLoCo outer updates | [`data_mixture`](src/rwkv_lab/data_mixture.py) · [`nvfp4`](src/rwkv_lab/nvfp4.py) · [`diloco`](src/rwkv_lab/diloco.py) |
 | **Representation, serving & tracing (P2)** | BLT entropy byte patches · EAGLE-3 feature-fusion drafts and exact verification · recurrent attribution graphs | [`byte_patches`](src/rwkv_lab/byte_patches.py) · [`speculative`](src/rwkv_lab/speculative.py) · [`circuit_trace`](src/rwkv_lab/circuit_trace.py) |
 | **Optimizers & dynamics** | Muon (+ MuonClip) · 12 spectral-Muon levers (Muonᵖ, Aurora, MONA, DDC, RSAV, Hierarchical, Distance-Aware, ARO…) · PC-Layer preconditioning · layerwise-LR · grokking probes | [`spectral_muon`](src/rwkv_lab/spectral_muon.py) · [`muon_helpers`](src/rwkv_lab/muon_helpers.py) · [`pc_layer`](src/rwkv_lab/pc_layer.py) |
@@ -139,6 +139,37 @@ configs:
 Run it with `python -m rwkv_lab.config run experiments/my_conversion.yaml`; it produces the same campaign,
 trial, comparison, artifact, and reproducibility records shown by trainboard.
 
+### Verifiable-reward post-training
+
+[`rlvr_train.py`](src/rwkv_lab/rlvr_train.py) closes the model-side RLVR loop: grouped rollouts,
+deterministic rewards, GSPO/Dr.GRPO/DAPO policy updates, a fixed or rollout reference policy,
+held-out evaluation, resumable optimizer state, and lineage-bearing checkpoints. The objectives follow
+[Dr.GRPO](https://arxiv.org/abs/2503.20783), [DAPO](https://arxiv.org/abs/2503.14476),
+[GSPO](https://arxiv.org/abs/2507.18071), and the programmatic-verifier boundary from
+[Absolute Zero](https://arxiv.org/abs/2505.03335).
+
+```bash
+python -m rwkv_lab.rlvr_train \
+  --ckpt runs/lm/ckpt.pt --out runs/rlvr-gspo \
+  --algorithm gspo --steps 100 --prompts-per-step 2 --group-size 8
+```
+
+Without `--tasks`, the trainer creates disjoint deterministic arithmetic train/eval curricula. An
+Adamaton task producer can instead write [`rlvr_arithmetic.example.jsonl`](experiments/rlvr_arithmetic.example.jsonl):
+
+```json
+{"id":"t1","split":"train","prompt":"Compute 17 * 9.","verifier":{"kind":"numeric","expected":153},"metadata":{}}
+```
+
+Local verifiers support normalized exact answers, bounded arithmetic expressions, and final numeric
+answers. Generated code is never executed by RWKV-Lab. A task with `verifier.kind="external"` is sent
+to `--verifier-command` in a versioned batch JSON request; Adamaton owns that command's sandbox,
+private tests, timeout policy, and verifier independence. The final `result.json`, `manifest.json`,
+`train.jsonl`, and `rlvr.pt` form the machine-readable return contract. The parent checkpoint is never
+overwritten: the trainer evaluates a fixed hidden set before and after RL, and `result.json` marks the
+candidate promotion-eligible only when an informative update occurred and held-out reward clears
+`--min-heldout-delta`; otherwise it names the untouched parent as the rollback target.
+
 ---
 
 ## Conversion track — target model
@@ -196,6 +227,7 @@ Everything is a **drop-in `linear_attn` / attention module swap** on a HuggingFa
 | [`build_corpus.py`](src/rwkv_lab/build_corpus.py) | ztok corpora from local files or streamed HF datasets (chat records flattened to role-tagged text); doc offsets; semantic context-bucket packing (whole docs, best-fit-decreasing, ~0% padding). |
 | [`config.py`](src/rwkv_lab/config.py) | Declarative YAML campaigns; the corpora registry (`local` / `blend` / `blend-mix`) behind the dashboard's LM tasks. |
 | [`registry.py`](src/rwkv_lab/registry.py) / [`fused_ce.py`](src/rwkv_lab/fused_ce.py) | Campaign/trial SQLite registry; fused LM-head cross-entropy (flash CE, pad-masking). |
+| [`rlvr.py`](src/rwkv_lab/rlvr.py) / [`rlvr_train.py`](src/rwkv_lab/rlvr_train.py) | GSPO/Dr.GRPO/DAPO objectives and the end-to-end grouped-rollout trainer; local arithmetic verifiers plus an external Adamaton sandbox contract. |
 
 ### Looped recurrence (recurrent depth)
 | File | Role |
@@ -385,7 +417,7 @@ Only papers with a concrete implementation or adopted design decision in this re
 
 - [u-μP: The Unit-Scaled Maximal Update Parametrization](https://arxiv.org/abs/2407.17465) — unit-scaled initialization plus width-correct Adam learning-rate groups; recurrent CUDA operators retain their native parametrization → [`u_mup.py`](src/rwkv_lab/u_mup.py), [`rwkv_pretrain.py`](src/rwkv_lab/rwkv_pretrain.py) (`--u-mup-base-width`)
 - [Titans: Learning to Memorize at Test Time](https://arxiv.org/abs/2501.00663) · [It's All Connected / MIRAS](https://arxiv.org/abs/2504.13173) · [ATLAS](https://arxiv.org/abs/2505.23735) · [Nested Learning](https://arxiv.org/abs/2512.24695) — differentiable in-forward associative updates, configurable internal objective/retention, windowed updates, and a learned nested update controller → [`online_memory.py`](src/rwkv_lab/online_memory.py), [`rwkv_pretrain.py`](src/rwkv_lab/rwkv_pretrain.py) (`--online-memory`)
-- [Understanding R1-Zero-Like Training / Dr.GRPO](https://arxiv.org/abs/2503.20783) · [DAPO](https://arxiv.org/abs/2503.14476) · [GSPO](https://arxiv.org/abs/2507.18071) · [Absolute Zero](https://arxiv.org/abs/2505.03335) — group-relative policy objectives, asymmetric clipping/dynamic sampling, sequence-level importance ratios, and programmatic verifier interfaces → [`rlvr.py`](src/rwkv_lab/rlvr.py). Adamaton owns proposal curricula and rollout orchestration.
+- [Understanding R1-Zero-Like Training / Dr.GRPO](https://arxiv.org/abs/2503.20783) · [DAPO](https://arxiv.org/abs/2503.14476) · [GSPO](https://arxiv.org/abs/2507.18071) · [Absolute Zero](https://arxiv.org/abs/2505.03335) — group-relative policy objectives, asymmetric clipping/dynamic sampling, sequence-level importance ratios, and programmatic verifier interfaces → [`rlvr.py`](src/rwkv_lab/rlvr.py), [`rlvr_train.py`](src/rwkv_lab/rlvr_train.py). Adamaton owns proposal curricula and isolated code verification.
 
 **P1 — data and distributed/numerical training systems**
 
