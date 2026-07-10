@@ -160,7 +160,7 @@ class RWKV7Small(nn.Module):
         elif isinstance(m, nn.Embedding):
             nn.init.normal_(m.weight, std=0.02)
 
-    def forward(self, ids, return_hidden=False):
+    def forward(self, ids, return_hidden=False, hidden_only=False):
         x = self.emb(ids)
         de_ids = ids if self.deepembed else None  # DeepEmbed blocks gate their FFN by token id
         e0 = x if (self.deepembed and self.de_emb_res) else None  # raw emb for the residual fold
@@ -172,6 +172,8 @@ class RWKV7Small(nn.Module):
             else:                                # last layer consumes the seed but skips the unused s_T
                 x, v_first = b(x, v_first, seed=seed, ids=de_ids, e0=e0)
         h = self.ln_out(x)                       # post-norm final hidden (what aux heads read)
+        if hidden_only:
+            return h
         logits = self.head(h)
         eng = getattr(self, "engram", None)      # copy head: gated bonus on the recalled token
         if eng is not None:                      # (exact no-op at init; see enable_engram)
@@ -321,7 +323,10 @@ def loop_kwargs(a):
 def main():
     enable_fast_matmul()
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", required=True); ap.add_argument("--out", default="runs/rwkv_scratch")
+    ap.add_argument("--data", default=""); ap.add_argument("--out", default="runs/rwkv_scratch")
+    ap.add_argument("--ctx-buckets", default="",
+                    help="packed-buckets meta json (build_corpus.pack_context_buckets) — mixed "
+                         "context-length training with reciprocal batch scaling; replaces --data")
     ap.add_argument("--doc-offsets", default="", help="build_corpus .off.npy => within-doc windows")
     ap.add_argument("--gpu-data", default="auto", choices=["auto", "on", "off"],
                     help="hold the token corpus on GPU for CPU-free window sampling (auto = if it fits the cap)")
@@ -384,6 +389,17 @@ def main():
     ap.add_argument("--ema", type=float, default=0.0,
                     help="EMA decay for a shadow weight copy (e.g. 0.999); eval + checkpoint carry it. 0 = off")
     args = ap.parse_args()
+    if not args.data and not args.ctx_buckets:
+        ap.error("one of --data or --ctx-buckets is required")
+    if args.ctx_buckets:                       # mixed-context mode: fixed-width features rejected
+        if args.engram:
+            ap.error("--ctx-buckets + --engram not wired yet (recall prefetch is width-fixed)")
+        if any(w > 0 for w in [args.nextlat_weight, args.top_weight, args.lmtp_weight,
+                               args.bst_weight, args.jtp_weight]):
+            ap.error("--ctx-buckets: aux lookahead heads are fixed-width — unsupported")
+        if args.doc_offsets:
+            print("warn: --doc-offsets ignored with --ctx-buckets (rows are already packed)", flush=True)
+            args.doc_offsets = ""
 
     os.makedirs(args.out, exist_ok=True)
     jl = open(os.path.join(args.out, "train.jsonl"), "w", buffering=1)
@@ -450,17 +466,48 @@ def main():
           ("-de" + ("h" if args.de_mode == "hidden" else "") + (str(args.de_dim) if args.de_dim else "")
            + ("s" if args.de_shift and args.de_mode == "hidden" else "")
            + ("r" if args.de_emb_res and args.de_mode == "hidden" else "")
-           if args.deepembed and not args.init_g1g else "")
+           if args.deepembed and not args.init_g1g else "") + \
+          ("-mixctx" if args.ctx_buckets else "")
     print(f"model {tag}: {nparam/1e6:.1f}M params  loop_kw={lk}", flush=True)
     json.dump({"loop_count": args.loop_count, "n_layers": args.n_layers, "mode": tag,
                "seed_chain": seed_chain, "engram": lmb is not None,
                "deepembed": bool(args.deepembed) and not args.init_g1g,
+               "mixed_ctx": bool(args.ctx_buckets),
                "params_m": round(nparam / 1e6, 2)}, open(os.path.join(args.out, "loop_rw.json"), "w"))
 
-    toks = np.memmap(args.data, dtype=np.uint16, mode="r")
-    n_val = args.val_windows * T
-    val_toks, train_toks = toks[:n_val], toks[n_val:]
-    print(f"tokens: {len(toks)/1e6:.1f}M (val {len(val_toks)}, train {len(train_toks)/1e6:.1f}M)", flush=True)
+    # Mixed context-length training: packed [rows, T] buckets at standard context sizes with
+    # RECIPROCAL batch scaling — B_bucket = (batch * seq_len) / T_bucket — so a short-context step
+    # runs high-batch and a long-context step low-batch, holding tokens/step and activation VRAM
+    # (~B*T) roughly constant. Buckets are sampled ∝ their real (non-pad) train tokens; pad (0)
+    # is masked out of the loss. Per-bucket val loss doubles as a length-generalization readout.
+    buckets = None
+    if args.ctx_buckets:
+        meta = json.load(open(args.ctx_buckets))
+        buckets = []
+        ref_tok = args.batch * args.seq_len              # token budget per micro-step
+        vb = max(1, args.val_windows // max(len(meta["buckets"]), 1))
+        tot_gb = sum(b["rows"] * b["T"] for b in meta["buckets"]) * 4 / 1e9
+        bkt_gpu = args.gpu_data != "off" and tot_gb <= args.gpu_data_cap_gb
+        for b in meta["buckets"]:
+            arr = np.fromfile(b["bin"], dtype=np.uint16).astype(np.int32).reshape(b["rows"], b["T"])
+            t = torch.from_numpy(arr)
+            if bkt_gpu:
+                t = t.to(dev)
+            n_val_rows = min(vb, max(1, b["rows"] // 10))
+            buckets.append({"T": b["T"], "rows": b["rows"], "data": t, "n_val": n_val_rows,
+                            "B": max(1, round(ref_tok / (b["T"] - 1))),
+                            "w": b["real_tokens"] * (b["rows"] - n_val_rows) / b["rows"]})
+        bprobs = np.array([b["w"] for b in buckets]); bprobs = bprobs / bprobs.sum()
+        print("mixed-ctx: " + "  ".join(f"ctx{b['T']}xB{b['B']}({p*100:.0f}%)"
+                                        for b, p in zip(buckets, bprobs))
+              + f"  [{'GPU' if bkt_gpu else 'CPU'} {tot_gb:.2f} GB, budget {ref_tok} tok/step]", flush=True)
+        toks = train_toks = np.zeros(0, dtype=np.uint16)  # flat structures unused in bucket mode
+        val_toks, train_docs = toks, None
+    else:
+        toks = np.memmap(args.data, dtype=np.uint16, mode="r")
+        n_val = args.val_windows * T
+        val_toks, train_toks = toks[:n_val], toks[n_val:]
+        print(f"tokens: {len(toks)/1e6:.1f}M (val {len(val_toks)}, train {len(train_toks)/1e6:.1f}M)", flush=True)
 
     train_docs = None
     if args.doc_offsets:                                       # within-doc windows (no mid-doc cuts)
@@ -469,20 +516,28 @@ def main():
         train_docs = [(int(s), int(e)) for s, e in zip(allo, ends) if s >= n_val and e - s >= T + 1]
         print(f"doc-boundary batching: {len(train_docs)} train docs >= {T+1} tok", flush=True)
 
-    def batch(src, n, width=T + 1):
-        s = rng.integers(0, len(src) - width, size=n)
+    def batch_cpu(src, n, width=T + 1, sampler_rng=None):
+        rgen = rng if sampler_rng is None else sampler_rng
+        s = rgen.integers(0, len(src) - width, size=n)
         x = np.stack([np.asarray(src[i:i + width], dtype=np.int64) for i in s])
-        return torch.from_numpy(x).to(dev)
+        return torch.from_numpy(x)
 
-    def train_batch(n, width=T + 1):
+    def batch(src, n, width=T + 1):
+        return batch_cpu(src, n, width).to(dev)
+
+    def train_batch_cpu(n, width=T + 1, sampler_rng=None):
+        rgen = rng if sampler_rng is None else sampler_rng
         if not train_docs:                                    # flat fallback
-            return batch(train_toks, n, width)
+            return batch_cpu(train_toks, n, width, sampler_rng=rgen)
         rows = []
         for _ in range(n):
-            s, e = train_docs[int(rng.integers(0, len(train_docs)))]
-            i = int(rng.integers(s, e - width + 1))
+            s, e = train_docs[int(rgen.integers(0, len(train_docs)))]
+            i = int(rgen.integers(s, e - width + 1))
             rows.append(np.asarray(toks[i:i + width], dtype=np.int64))
-        return torch.from_numpy(np.stack(rows)).to(dev)
+        return torch.from_numpy(np.stack(rows))
+
+    def train_batch(n, width=T + 1):
+        return train_batch_cpu(n, width).to(dev)
 
     # EMA shadow weights, fp32 (bf16 ULP would swallow (1-decay)-sized updates at high decay).
     # Eval and checkpoints carry the EMA copy; the live weights keep training unperturbed.
@@ -516,13 +571,43 @@ def main():
         with torch.no_grad():
             tot = 0.0
             for i in range(0, args.val_windows, args.batch):
-                x = batch(val_toks, min(args.batch, args.val_windows - i))
-                lg = model(x[:, :T]).float()
+                xc = batch_cpu(val_toks, min(args.batch, args.val_windows - i))
+                recall = None
+                if lmb is not None:
+                    from rwkv_lab.engram_lmb import token_rosa_recall, RecallResult
+                    recall = token_rosa_recall(xc[:, :T], 65536, lmb.boundary_id)
+                    recall = RecallResult(*(v.to(dev) for v in recall))
+                x = xc.to(dev)
+                lg = (model(x[:, :T], precomputed_recall=recall)
+                      if recall is not None else model(x[:, :T])).float()
                 tot += F.cross_entropy(lg.reshape(-1, lg.size(-1)), x[:, 1:T + 1].reshape(-1)).item()
         if bak is not None:
             ema_restore(bak)
         model.train()
         return tot / math.ceil(args.val_windows / args.batch)
+
+    if buckets is not None:
+        def val_loss():  # noqa: F811 — bucket mode: token-weighted CE over each bucket's held-out rows
+            model.eval()
+            bak = ema_swap() if ema is not None else None
+            tot = 0.0; cnt = 0; per = []
+            with torch.no_grad():
+                for b in buckets:
+                    nll = 0.0; n = 0
+                    for i in range(0, b["n_val"], b["B"]):
+                        x = b["data"][i:i + b["B"]]
+                        x = (x if x.is_cuda else x.to(dev)).long()
+                        tgt = x[:, 1:]
+                        lg = model(x[:, :-1]).float()
+                        nll += float(F.cross_entropy(lg.reshape(-1, lg.size(-1)), tgt.reshape(-1),
+                                                     ignore_index=0, reduction="sum"))
+                        n += int((tgt != 0).sum())
+                    per.append((b["T"], nll / max(n, 1))); tot += nll; cnt += n
+            print("  val/ctx  " + "  ".join(f"{T}: {v:.4f}" for T, v in per), flush=True)
+            if bak is not None:
+                ema_restore(bak)
+            model.train()
+            return tot / max(cnt, 1)
 
     heads = None
     if any(w > 0 for w in [args.nextlat_weight, args.top_weight, args.lmtp_weight,
@@ -556,9 +641,22 @@ def main():
     # Falls back to the CPU memmap sampler for corpora too large for VRAM.
     width = T + 1 + (heads.extra_tokens if heads else 0)
     gpu_gb = len(train_toks) * 4 / 1e9
-    use_gpu_data = args.gpu_data == "on" or (args.gpu_data == "auto" and gpu_gb <= args.gpu_data_cap_gb
-                                             and len(train_toks) > width)
-    if use_gpu_data:
+    use_gpu_data = buckets is None and (args.gpu_data == "on"
+                                        or (args.gpu_data == "auto" and gpu_gb <= args.gpu_data_cap_gb
+                                            and len(train_toks) > width))
+    if use_gpu_data and lmb is not None:
+        # Engram's exact suffix automaton is CPU-side. Sampling the ids on GPU
+        # would immediately copy them back and serialize the stream, so let the
+        # recall worker sample both ids and recall together from the memmap.
+        use_gpu_data = False
+        print("gpu-data: disabled for Engram; CPU recall prefetch owns window sampling", flush=True)
+    if buckets is not None:
+        def sample_train():   # pick a bucket ∝ real tokens; reciprocal batch keeps tok/step flat
+            b = buckets[int(rng.choice(len(buckets), p=bprobs))]
+            rows = torch.randint(b["n_val"], b["rows"], (b["B"],), device=b["data"].device)
+            x = b["data"][rows]
+            return (x if x.is_cuda else x.to(dev)).long()
+    elif use_gpu_data:
         tg = torch.from_numpy(np.ascontiguousarray(train_toks, dtype=np.int32)).to(dev)
         ar = torch.arange(width, device=dev)
         if train_docs:                                          # doc-boundary: sample doc, then offset
@@ -579,6 +677,30 @@ def main():
         def sample_train():
             return train_batch(args.batch, width=width)
         print(f"gpu-data: OFF ({gpu_gb:.2f} GB corpus) — CPU memmap sampler", flush=True)
+    recall_pool = None
+    if lmb is not None and not use_gpu_data:
+        # Build token-SAM recall from the original CPU window one step ahead.
+        # This removes the GPU->CPU ids copy and overlaps Numba with the current
+        # GPU step; pinned tensors make both ids and recall uploads asynchronous.
+        from concurrent.futures import ThreadPoolExecutor
+        from rwkv_lab.engram_lmb import token_rosa_recall, RecallResult
+        recall_pool = ThreadPoolExecutor(max_workers=1)
+        recall_rng = np.random.default_rng(args.seed + 1009)
+
+        def _prefetch_engram():
+            ids = train_batch_cpu(args.batch, width=width, sampler_rng=recall_rng)
+            rr = token_rosa_recall(ids[:, :T], 65536, lmb.boundary_id)
+            return ids.pin_memory(), RecallResult(*(v.pin_memory() for v in rr))
+
+        recall_future = recall_pool.submit(_prefetch_engram)
+
+        def sample_train():
+            nonlocal recall_future
+            ids, rr = recall_future.result()
+            recall_future = recall_pool.submit(_prefetch_engram)
+            return (ids.to(dev, non_blocking=True),
+                    RecallResult(*(v.to(dev, non_blocking=True) for v in rr)))
+        print("engram recall: CPU-prefetched one step ahead (pinned async H2D)", flush=True)
     model.train(); t0 = time.time(); seen = 0
     print(f"budget={'%.1f min' % args.minutes if not args.steps else str(args.steps)+' steps'}", flush=True)
     while True:
@@ -598,21 +720,38 @@ def main():
         opt.zero_grad(set_to_none=True)
         ga = max(args.grad_accum, 1)
         for _ in range(ga):                  # grad accumulation: effective batch = batch * ga
-            x = sample_train()
-            out = fwd(x[:, :T], return_hidden=bool(heads))
-            lg = (out[0] if heads else out).float()
-            loss = F.cross_entropy(lg.reshape(-1, lg.size(-1)), x[:, 1:T + 1].reshape(-1))
+            sample = sample_train()
+            x, precomputed_recall = sample if isinstance(sample, tuple) else (sample, None)
+            # Mixed-ctx rows are exactly T_bucket wide (pad-masked); flat windows are T+1(+extra).
+            xin, tgt = (x[:, :-1], x[:, 1:]) if buckets is not None else (x[:, :T], x[:, 1:T + 1])
+            # The ordinary path skips RWKV7Small's full vocabulary output and lets
+            # fused CE reuse its bf16 logit allocation during backward. Engram's
+            # sparse copy-head mutates logits, so it retains the compatible path.
+            if lmb is None:
+                hidden = fwd(xin, hidden_only=True)
+                from rwkv_lab.fused_ce import lmhead_cross_entropy
+                loss = lmhead_cross_entropy(hidden, model.head, tgt, fused=True,
+                                            ignore_index=(0 if buckets is not None else None))
+                out = (None, hidden) if heads else None
+            else:
+                out = fwd(xin, return_hidden=bool(heads),
+                          precomputed_recall=precomputed_recall)
+                lg = (out[0] if heads else out).float()
+                loss = F.cross_entropy(lg.reshape(-1, lg.size(-1)), tgt.reshape(-1))
             if heads:                                        # + weighted aux (latent-prediction) loss
                 loss = loss + heads.compute(out[1], x, model.emb, model.head)["aux_total"]
             (loss / ga if ga > 1 else loss).backward()
+            seen += xin.shape[0] * xin.shape[1]
         gn = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-        opt.step(); seen += args.batch * T * ga; step += 1
+        opt.step(); step += 1
         if ema is not None:
             ema_update()
         if step % args.log_every == 0:
             emit({"kind": "train", "step": step, "loss": float(loss), "gnorm": float(gn),
                   "lr": lr, "tok_per_sec": int(seen / max(time.time() - t0, 1e-6))})
     vl = val_loss(); emit({"kind": "eval", "step": step, "loss": vl, "val_loss": vl, "ppl": math.exp(vl)})
+    if recall_pool is not None:
+        recall_pool.shutdown(wait=False, cancel_futures=True)
     emit({"kind": "checkpoint", "step": step})
     if args.save:
         blob = {"model": model.state_dict(), "opt": opt.state_dict(), "step": step, "config": tag}
