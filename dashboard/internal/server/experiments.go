@@ -45,6 +45,7 @@ var knownLevers = []leverDef{
 	{"deepembed", "DeepEmbed (RWKV-8) — per-layer per-token FFN gate, 1 + emb(ids); big sparse tables, ~free lookup", false},
 	{"de_hidden", "DeepEmbed exact (BlinkDL v7a) — input-dependent bilinear gate on the FFN hidden, per-token r×r matrix", false},
 	{"de_shift", "DeepEmbed exact + separate gate token-shift — the variant BlinkDL reported as 'very large'", false},
+	{"de_full", "DeepEmbed exact + gate token-shift + emb-residual (global token embedding folded into the gate matrix)", false},
 	{"top", "token-order prediction — lookahead window (LM only)", true},
 	{"lmtp", "leap multi-token prediction (LM only)", true},
 	{"bst", "belief-state forward+backward objective (LM only)", true},
