@@ -656,5 +656,16 @@ details.arch-item[open] .lr-caret { transform: rotate(90deg); color: var(--accen
 .field-tbl input[type=checkbox] { accent-color: var(--accent); color-scheme: dark; width: 15px; height: 15px; cursor: pointer; }
 .field-tbl tr.muon-off ~ tr .lev-c { }  /* no-op guard */
 
+/* RLVR campaign builder + held-out promotion evidence */
+.rlvr-body { display: flex; flex-wrap: wrap; gap: 1.5rem; padding: .5rem; color-scheme: dark; }
+.rlvr-build { flex: 0 1 42rem; }
+.rlvr-results { flex: 1 1 36rem; min-width: 320px; }
+.rlvr-campaign { margin-bottom: 1rem; }
+.rlvr-status { font-family: var(--mono); font-size: var(--fs-xs); padding: 2px 7px;
+  border: 1px solid var(--border); border-radius: var(--r-full); color: var(--text-dim); }
+.rlvr-status.complete { color: var(--ok); border-color: var(--ok); }
+.rlvr-status.failed { color: var(--err); border-color: var(--err); }
+.rlvr-status.running { color: var(--accent); border-color: var(--accent); }
+
 /* disabled field inputs (LM levers / resume when not applicable) read as inactive, not "broken" */
 .field-tbl input:disabled, .lev-tbl input:disabled { opacity: .45; cursor: default; }

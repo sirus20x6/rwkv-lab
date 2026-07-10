@@ -154,6 +154,22 @@ python -m rwkv_lab.rlvr_train \
   --algorithm gspo --steps 100 --prompts-per-step 2 --group-size 8
 ```
 
+For an equal-budget comparison, [`rlvr_campaign.py`](src/rwkv_lab/rlvr_campaign.py) runs isolated
+GSPO, Dr.GRPO, and DAPO arms over paired seeds, then atomically aggregates their held-out reward,
+variance, update count, and promotion decisions into `campaign.json`:
+
+```bash
+python -m rwkv_lab.rlvr_campaign \
+  --ckpt runs/lm/ckpt.pt --out runs/rlvr-comparison \
+  --algorithms gspo,dr_grpo,dapo --seeds 0,1,2 \
+  --steps 100 --prompts-per-step 2 --group-size 8
+```
+
+Trainboard's **verifiable-reward training** panel launches the same versioned campaign contract and
+renders the per-algorithm held-out mean/standard deviation, delta from the frozen parent, applied
+updates, and promotion count. It does not execute generated code: external verifier tasks retain the
+Adamaton sandbox boundary described below.
+
 Without `--tasks`, the trainer creates disjoint deterministic arithmetic train/eval curricula. An
 Adamaton task producer can instead write [`rlvr_arithmetic.example.jsonl`](experiments/rlvr_arithmetic.example.jsonl):
 
@@ -227,7 +243,7 @@ Everything is a **drop-in `linear_attn` / attention module swap** on a HuggingFa
 | [`build_corpus.py`](src/rwkv_lab/build_corpus.py) | ztok corpora from local files or streamed HF datasets (chat records flattened to role-tagged text); doc offsets; semantic context-bucket packing (whole docs, best-fit-decreasing, ~0% padding). |
 | [`config.py`](src/rwkv_lab/config.py) | Declarative YAML campaigns; the corpora registry (`local` / `blend` / `blend-mix`) behind the dashboard's LM tasks. |
 | [`registry.py`](src/rwkv_lab/registry.py) / [`fused_ce.py`](src/rwkv_lab/fused_ce.py) | Campaign/trial SQLite registry; fused LM-head cross-entropy (flash CE, pad-masking). |
-| [`rlvr.py`](src/rwkv_lab/rlvr.py) / [`rlvr_train.py`](src/rwkv_lab/rlvr_train.py) | GSPO/Dr.GRPO/DAPO objectives and the end-to-end grouped-rollout trainer; local arithmetic verifiers plus an external Adamaton sandbox contract. |
+| [`rlvr.py`](src/rwkv_lab/rlvr.py) / [`rlvr_train.py`](src/rwkv_lab/rlvr_train.py) / [`rlvr_campaign.py`](src/rwkv_lab/rlvr_campaign.py) | GSPO/Dr.GRPO/DAPO objectives, the grouped-rollout trainer, and equal-budget multi-seed validation campaigns; local arithmetic verifiers plus an external Adamaton sandbox contract. |
 
 ### Looped recurrence (recurrent depth)
 | File | Role |
