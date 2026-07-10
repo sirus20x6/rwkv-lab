@@ -58,15 +58,31 @@ func TestReadRLVRCampaigns(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "campaign.json"), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	loopData, err := json.Marshal(recursiveLoop{
+		Status: "complete", CurrentCheckpoint: filepath.Join(dir, "rlvr.pt"),
+		CompletedRounds: 2, Promotions: 1, TotalRolloutTokens: 128, Created: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "loop.json"), loopData, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	s := &Server{cfg: Config{RepoRoot: root, RunsDir: runs}}
 	rows := s.readRLVRCampaigns()
 	if len(rows) != 1 || rows[0].Path != "comparison" || rows[0].Summary["gspo"].Runs != 3 {
 		t.Fatalf("unexpected campaign rows: %#v", rows)
 	}
+	loops := s.readRecursiveLoops()
+	if len(loops) != 1 || loops[0].Promotions != 1 || loops[0].TotalRolloutTokens != 128 {
+		t.Fatalf("unexpected recursive loop rows: %#v", loops)
+	}
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest("GET", "/api/rlvr", nil)
 	s.handleRLVR(recorder, request)
-	if body := recorder.Body.String(); !strings.Contains(body, "comparison") || !strings.Contains(body, "gspo") {
+	if body := recorder.Body.String(); !strings.Contains(body, "comparison") ||
+		!strings.Contains(body, "gspo") || !strings.Contains(body, "recursive improvement lineage") ||
+		!strings.Contains(body, "data-bind-rlvrsft") {
 		t.Fatalf("campaign missing from rendered panel: %s", body)
 	}
 }

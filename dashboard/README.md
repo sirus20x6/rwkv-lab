@@ -25,10 +25,15 @@ The dedicated **verifiable-reward training** panel launches equal-budget, paired
 reads their versioned `campaign.json` evidence directly from `runs/`. It compares the sequence-level
 importance ratios from [GSPO](https://arxiv.org/abs/2507.18071), the unbiased group-relative objective
 from [Dr.GRPO](https://arxiv.org/abs/2503.20783), and the asymmetric clipping/dynamic sampling ideas
-from [DAPO](https://arxiv.org/abs/2503.14476). Results report frozen-parent and candidate held-out
-reward, across-seed dispersion, updates actually applied, and promotion eligibility. The panel launches
-model-side training only; generated-code verification remains outside this repository in Adamaton's
-sandboxed verifier process.
+from [DAPO](https://arxiv.org/abs/2503.14476). The launcher exposes
+[DeepSeek-R1](https://arxiv.org/abs/2501.12948)-style cold-start SFT and curriculum/preflight controls,
+[RWKV-7](https://arxiv.org/abs/2503.14456) recurrent batching with a semantics-safe fallback, paired
+[bootstrap](https://doi.org/10.1214/aos/1176344552) confidence, task-family regression limits, and hard
+rollout/time budgets. Results report parent and candidate held-out reward, across-seed dispersion,
+RL/SFT updates, preflight passes, budget usage, and promotion eligibility. The same panel discovers
+`loop.json` lineage from [Absolute Zero](https://arxiv.org/abs/2505.03335)-inspired bounded recursive
+iterations. It launches model-side training only; proposal commands remain CLI-only and generated-code
+verification remains outside this repository in Adamaton's sandboxed verifier process.
 
 ## Why v2
 

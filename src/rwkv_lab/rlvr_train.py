@@ -6,6 +6,12 @@ Primary algorithm references:
 * DAPO, arXiv:2503.14476, https://arxiv.org/abs/2503.14476.
 * GSPO, arXiv:2507.18071, https://arxiv.org/abs/2507.18071.
 * Absolute Zero, arXiv:2505.03335, https://arxiv.org/abs/2505.03335.
+* DeepSeek-R1, arXiv:2501.12948, https://arxiv.org/abs/2501.12948 —
+  cold-start supervised data before sparse-reward RL.
+* RWKV-7, arXiv:2503.14456, https://arxiv.org/abs/2503.14456 —
+  constant-size recurrent state used by the native rollout engine.
+* Efron (1979), https://doi.org/10.1214/aos/1176344552 — paired
+  bootstrap confidence intervals used by the independent promotion gate.
 
 The trainer closes the model-side loop: grouped policy rollouts, deterministic
 verification, clipped RLVR updates, held-out evaluation, and lineage-preserving
@@ -26,6 +32,7 @@ Commands are executed directly (never through a shell) with a timeout.
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
 from dataclasses import asdict, dataclass
 import hashlib
 import json
@@ -44,6 +51,9 @@ import torch.nn.functional as F
 from rwkv_lab.rlvr import (ExactAnswerVerifier, NumericAnswerVerifier,
                            PythonExpressionVerifier, group_advantages,
                            policy_loss, token_log_probs)
+from rwkv_lab.rlvr_evaluation import (audit_task_splits, curriculum_pool,
+                                      promotion_gates, reward_diversity,
+                                      stratified_tasks, task_reward_summary)
 
 
 TASK_SCHEMA = "rwkv-lab.rlvr-task.v1"
@@ -129,8 +139,41 @@ def arithmetic_curriculum(count: int, *, seed: int, split: str,
             id=f"arithmetic-{split}-{task_id}", split=split,
             prompt=f"Compute {expression}. Return only the final integer, with no prose.",
             verifier={"kind": "numeric", "expected": value},
-            metadata={"family": "arithmetic", "difficulty": difficulty},
+            metadata={"family": f"arithmetic/{op1}", "difficulty": difficulty},
         ))
+    return tasks
+
+
+def staged_arithmetic_curriculum(count: int, *, seed: int, split: str,
+                                 difficulties: Sequence[int],
+                                 exclude_prompts: Sequence[str] = (),
+                                 unique: bool = False) -> list[RLVRTask]:
+    """Build a balanced deterministic pool across curriculum difficulties."""
+    stages = sorted(set(int(value) for value in difficulties)) or [1]
+    tasks, seen = [], set()
+    blocked = {" ".join(value.split()).casefold() for value in exclude_prompts}
+    for index, difficulty in enumerate(stages):
+        target = count // len(stages) + int(index < count % len(stages))
+        accepted, attempt = 0, 0
+        while accepted < target:
+            needed = target - accepted
+            candidates = arithmetic_curriculum(
+                max(needed * 4, 16),
+                seed=seed + index * 10_000_019 + attempt * 1_000_003,
+                split=split, difficulty=difficulty)
+            for task in candidates:
+                normalized = " ".join(task.prompt.split()).casefold()
+                if normalized in blocked or (unique and normalized in seen):
+                    continue
+                if unique:
+                    seen.add(normalized)
+                tasks.append(task)
+                accepted += 1
+                if accepted == target:
+                    break
+            attempt += 1
+            if attempt > 100:
+                raise ValueError("could not generate a unique arithmetic curriculum")
     return tasks
 
 
@@ -213,6 +256,25 @@ def _logits(output):
     return output[0] if isinstance(output, tuple) else output
 
 
+def _sample_token(logits: torch.Tensor, *, temperature: float, top_p: float,
+                  top_k: int, generator: torch.Generator) -> int:
+    logits = logits.float().clone()
+    logits[0] = -float("inf")
+    if temperature <= 0:
+        return int(logits.argmax())
+    logits = logits / temperature
+    if top_k > 0:
+        kth = logits.topk(min(top_k, logits.numel())).values[-1]
+        logits = logits.masked_fill(logits < kth, -float("inf"))
+    if 0 < top_p < 1:
+        probs, order = logits.softmax(-1).sort(descending=True)
+        keep = int((probs.cumsum(-1) < top_p).sum()) + 1
+        filtered = torch.full_like(logits, -float("inf"))
+        filtered[order[:keep]] = logits[order[:keep]]
+        logits = filtered
+    return int(torch.multinomial(logits.softmax(-1), 1, generator=generator))
+
+
 @torch.no_grad()
 def sample_response(model, prompt_ids: Sequence[int], *, max_new: int, temperature: float,
                     top_p: float, top_k: int, stop_token: int, device: str,
@@ -225,22 +287,9 @@ def sample_response(model, prompt_ids: Sequence[int], *, max_new: int, temperatu
     tokens = torch.tensor([list(prompt_ids)], dtype=torch.long, device=device)
     response = []
     for _ in range(max(1, int(max_new))):
-        logits = _logits(model(tokens))[0, -1].float()
-        logits[0] = -float("inf")
-        if temperature <= 0:
-            nxt = int(logits.argmax())
-        else:
-            logits = logits / temperature
-            if top_k > 0:
-                kth = logits.topk(min(top_k, logits.numel())).values[-1]
-                logits = logits.masked_fill(logits < kth, -float("inf"))
-            if 0 < top_p < 1:
-                probs, order = logits.softmax(-1).sort(descending=True)
-                keep = int((probs.cumsum(-1) < top_p).sum()) + 1
-                filtered = torch.full_like(logits, -float("inf"))
-                filtered[order[:keep]] = logits[order[:keep]]
-                logits = filtered
-            nxt = int(torch.multinomial(logits.softmax(-1), 1, generator=generator))
+        logits = _logits(model(tokens))[0, -1]
+        nxt = _sample_token(logits, temperature=temperature, top_p=top_p,
+                            top_k=top_k, generator=generator)
         response.append(nxt)
         if nxt == stop_token:
             break
@@ -248,23 +297,99 @@ def sample_response(model, prompt_ids: Sequence[int], *, max_new: int, temperatu
     return response
 
 
+def select_rollout_engine(model, requested: str = "auto") -> tuple[str, str]:
+    """Select exact recurrent decoding or the semantics-preserving fallback."""
+    if requested not in ("auto", "recurrent", "batched"):
+        raise ValueError("rollout engine must be auto, recurrent, or batched")
+    reason = "model does not expose a recurrent state API"
+    if hasattr(model, "recurrent_incompatibility"):
+        reason = model.recurrent_incompatibility() or ""
+    recurrent = hasattr(model, "forward_recurrent") and not reason
+    if requested == "recurrent" and not recurrent:
+        raise ValueError(f"recurrent rollout engine unavailable: {reason}")
+    if requested == "auto":
+        return (("recurrent", "native RWKV constant-size state") if recurrent
+                else ("batched", reason))
+    return requested, reason if requested == "batched" else "native RWKV constant-size state"
+
+
+@torch.no_grad()
+def sample_response_group(model, prompt_ids: Sequence[int], *, count: int, max_new: int,
+                          temperature: float, top_p: float, top_k: int,
+                          stop_token: int, device: str, seeds: Sequence[int],
+                          engine: str = "auto") -> tuple[list[list[int]], dict[str, Any]]:
+    """Decode an equal-prefix rollout group in one model batch.
+
+    Native RWKV checkpoints carry constant-size matrix/shift state across token
+    steps (RWKV-7, https://arxiv.org/abs/2503.14456). Non-causal experimental
+    levers use batched full-prefix recomputation to preserve exact semantics.
+    """
+    if not prompt_ids or count < 1 or len(seeds) != count:
+        raise ValueError("group sampling needs a prompt and one seed per response")
+    chosen, reason = select_rollout_engine(model, engine)
+    generators = [torch.Generator(device=device).manual_seed(int(s)) for s in seeds]
+    prompt = torch.tensor([list(prompt_ids)], dtype=torch.long, device=device).expand(count, -1)
+    responses: list[list[int]] = [[] for _ in range(count)]
+    finished = [False] * count
+    tokens, state = prompt, None
+    started = time.perf_counter()
+    if chosen == "recurrent":
+        logits, state = model.forward_recurrent(tokens)
+        next_logits = logits[:, -1]
+    for step in range(max(1, int(max_new))):
+        if chosen == "batched":
+            next_logits = _logits(model(tokens))[:, -1]
+        next_tokens = []
+        for row in range(count):
+            if finished[row]:
+                next_tokens.append(stop_token)
+                continue
+            nxt = _sample_token(next_logits[row], temperature=temperature, top_p=top_p,
+                                top_k=top_k, generator=generators[row])
+            responses[row].append(nxt)
+            next_tokens.append(nxt)
+            if nxt == stop_token:
+                finished[row] = True
+        if all(finished) or step + 1 == max_new:
+            break
+        token_column = tokens.new_tensor(next_tokens).unsqueeze(1)
+        if chosen == "recurrent":
+            logits, state = model.forward_recurrent(token_column, state)
+            next_logits = logits[:, -1]
+        else:
+            tokens = torch.cat((tokens, token_column), dim=1)
+    elapsed = time.perf_counter() - started
+    generated = sum(len(row) for row in responses)
+    return responses, {"engine": chosen, "fallback_reason": reason, "seconds": elapsed,
+                       "tokens": generated,
+                       "tokens_per_second": generated / max(elapsed, 1e-9)}
+
+
 def generate_rollouts(model, tokenizer, tasks: Sequence[RLVRTask], *, group_size: int,
                       max_new: int, temperature: float, top_p: float, top_k: int,
-                      stop_token: int, device: str, seed: int) -> list[Rollout]:
+                      stop_token: int, device: str, seed: int, engine: str = "auto",
+                      return_stats: bool = False):
     model.eval()
     out = []
+    stats = {"seconds": 0.0, "tokens": 0, "engine": "", "fallback_reason": ""}
     for group, task in enumerate(tasks):
         prompt = f"User: {task.prompt}\n\nAssistant:"
         prompt_ids = tokenizer.encode(prompt)
-        for k in range(int(group_size)):
-            response_ids = sample_response(model, prompt_ids, max_new=max_new,
-                                           temperature=temperature, top_p=top_p, top_k=top_k,
-                                           stop_token=stop_token, device=device,
-                                           seed=seed + group * 100_003 + k)
+        seeds = [seed + group * 100_003 + k for k in range(int(group_size))]
+        responses, group_stats = sample_response_group(
+            model, prompt_ids, count=int(group_size), max_new=max_new,
+            temperature=temperature, top_p=top_p, top_k=top_k,
+            stop_token=stop_token, device=device, seeds=seeds, engine=engine)
+        stats["seconds"] += group_stats["seconds"]
+        stats["tokens"] += group_stats["tokens"]
+        stats["engine"] = group_stats["engine"]
+        stats["fallback_reason"] = group_stats["fallback_reason"]
+        for k, response_ids in enumerate(responses):
             visible = response_ids[:-1] if response_ids and response_ids[-1] == stop_token else response_ids
             out.append(Rollout(f"{task.id}:{k}", task, list(prompt_ids), response_ids,
                                tokenizer.decode(visible)))
-    return out
+    stats["tokens_per_second"] = stats["tokens"] / max(stats["seconds"], 1e-9)
+    return (out, stats) if return_stats else out
 
 
 def response_log_probs(model, rollouts: Sequence[Rollout]) -> tuple[torch.Tensor, torch.Tensor]:
@@ -276,18 +401,22 @@ def response_log_probs(model, rollouts: Sequence[Rollout]) -> tuple[torch.Tensor
     max_response = max(len(r.response_ids) for r in rollouts)
     if max_response <= 0:
         raise ValueError("rollouts must contain at least one policy token")
-    rows, masks = [], []
-    for rollout in rollouts:
-        sequence = rollout.prompt_ids + rollout.response_ids
-        ids = torch.tensor(sequence, dtype=torch.long, device=device)
-        logits = _logits(model(ids[:-1].unsqueeze(0)))[0]
-        targets = ids[1:]
-        start = len(rollout.prompt_ids) - 1
-        logp = token_log_probs(logits[start:start + len(rollout.response_ids)],
-                               targets[start:start + len(rollout.response_ids)])
-        pad = max_response - len(rollout.response_ids)
-        rows.append(F.pad(logp, (0, pad)))
-        masks.append(F.pad(torch.ones_like(logp), (0, pad)))
+    rows, masks = [None] * len(rollouts), [None] * len(rollouts)
+    buckets = defaultdict(list)
+    for index, rollout in enumerate(rollouts):
+        buckets[len(rollout.prompt_ids) + len(rollout.response_ids)].append((index, rollout))
+    for bucket in buckets.values():
+        ids = torch.tensor([r.prompt_ids + r.response_ids for _, r in bucket],
+                           dtype=torch.long, device=device)
+        logits, targets = _logits(model(ids[:, :-1])), ids[:, 1:]
+        for row_index, (output_index, rollout) in enumerate(bucket):
+            start, length = len(rollout.prompt_ids) - 1, len(rollout.response_ids)
+            logp = token_log_probs(logits[row_index, start:start + length],
+                                   targets[row_index, start:start + length])
+            pad = max_response - length
+            rows[output_index] = F.pad(logp, (0, pad))
+            masks[output_index] = F.pad(torch.ones_like(logp), (0, pad))
+    assert all(row is not None for row in rows) and all(mask is not None for mask in masks)
     return torch.stack(rows), torch.stack(masks)
 
 
@@ -296,6 +425,70 @@ def grouped_metrics(rewards: torch.Tensor, group_size: int) -> dict[str, float]:
     return {"reward": float(rewards.mean()), "pass_at_1": float(groups[:, 0].mean()),
             "pass_at_k": float((groups.max(-1).values > 0).float().mean()),
             "reward_std": float(rewards.std(unbiased=False))}
+
+
+def supervised_answer(task: RLVRTask) -> str | None:
+    """Return trusted cold-start supervision without executing model output."""
+    metadata = task.metadata or {}
+    if metadata.get("sft_answer") is not None:
+        return str(metadata["sft_answer"])
+    kind, expected = task.verifier.get("kind"), task.verifier.get("expected")
+    if kind in ("numeric", "expression") and expected is not None:
+        value = float(expected)
+        return str(int(value)) if value.is_integer() else str(value)
+    if kind == "exact":
+        return str(expected[0] if isinstance(expected, list) and expected else expected)
+    return None
+
+
+def supervised_warm_start(model, tokenizer, tasks: Sequence[RLVRTask], optimizer, *,
+                          steps: int, batch_size: int, learning_rate: float,
+                          grad_clip: float, stop_token: int, device: str,
+                          seed: int) -> dict[str, float]:
+    """Short answer-only SFT stage before sparse-reward RLVR.
+
+    DeepSeek-R1 uses cold-start supervised data before its main RL stage
+    (https://arxiv.org/abs/2501.12948). Here targets come only from trusted
+    deterministic verifier specs or explicit ``metadata.sft_answer`` fields.
+    """
+    eligible = [(task, supervised_answer(task)) for task in tasks]
+    eligible = [(task, answer) for task, answer in eligible if answer is not None]
+    if steps <= 0 or not eligible:
+        return {"updates": 0, "tokens": 0, "mean_loss": 0.0, "seconds": 0.0}
+    rng, cache = random.Random(seed), {}
+    old_lrs = [group["lr"] for group in optimizer.param_groups]
+    for group in optimizer.param_groups:
+        group["lr"] = learning_rate * group.get("u_mup_lr_mult", 1.0)
+    losses_seen, tokens_seen, started = [], 0, time.perf_counter()
+    model.train()
+    for _ in range(steps):
+        optimizer.zero_grad(set_to_none=True)
+        losses = []
+        for task, answer in rng.choices(eligible, k=max(1, batch_size)):
+            key = (task.id, answer)
+            if key not in cache:
+                prompt = tokenizer.encode(f"User: {task.prompt}\n\nAssistant:")
+                response = tokenizer.encode(" " + answer) + [stop_token]
+                cache[key] = (prompt, response)
+            prompt_ids, response_ids = cache[key]
+            ids = torch.tensor(prompt_ids + response_ids, dtype=torch.long, device=device)
+            logits = _logits(model(ids[:-1].unsqueeze(0)))[0]
+            start = len(prompt_ids) - 1
+            target = ids[1:]
+            losses.append(F.cross_entropy(
+                logits[start:start + len(response_ids)].float(),
+                target[start:start + len(response_ids)]))
+            tokens_seen += len(response_ids)
+        loss = torch.stack(losses).mean()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        optimizer.step()
+        losses_seen.append(float(loss.detach()))
+    for group, old_lr in zip(optimizer.param_groups, old_lrs):
+        group["lr"] = old_lr
+    return {"updates": steps, "tokens": tokens_seen,
+            "mean_loss": sum(losses_seen) / len(losses_seen),
+            "seconds": time.perf_counter() - started}
 
 
 def promotion_decision(baseline: dict[str, float], candidate: dict[str, float], *,
@@ -384,12 +577,17 @@ def save_checkpoint(path: Path, model, optimizer, source_blob: dict[str, Any], *
 def evaluate_policy(model, tokenizer, tasks: Sequence[RLVRTask], *, group_size: int,
                     max_new: int, temperature: float, top_p: float, top_k: int,
                     stop_token: int, device: str, seed: int,
-                    external_command: Sequence[str], verifier_timeout: float) -> tuple[dict[str, float], list[Rollout]]:
-    rollouts = generate_rollouts(model, tokenizer, tasks, group_size=group_size, max_new=max_new,
-                                 temperature=temperature, top_p=top_p, top_k=top_k,
-                                 stop_token=stop_token, device=device, seed=seed)
+                    external_command: Sequence[str], verifier_timeout: float,
+                    engine: str = "auto") -> tuple[dict[str, Any], list[Rollout]]:
+    rollouts, generation = generate_rollouts(
+        model, tokenizer, tasks, group_size=group_size, max_new=max_new,
+        temperature=temperature, top_p=top_p, top_k=top_k,
+        stop_token=stop_token, device=device, seed=seed, engine=engine,
+        return_stats=True)
     rewards, _ = verify_rollouts(rollouts, external_command=external_command, timeout=verifier_timeout)
-    return grouped_metrics(rewards, group_size), rollouts
+    summary = task_reward_summary(tasks, rewards.tolist(), group_size)
+    return {**grouped_metrics(rewards, group_size), **summary,
+            "generation": generation}, rollouts
 
 
 def run(args) -> dict[str, Any]:
@@ -400,6 +598,14 @@ def run(args) -> dict[str, Any]:
         raise ValueError("group-size must be >=2; prompts-per-step and max-new must be positive")
     if args.eval_group_size < 1 or args.eval_prompts < 1:
         raise ValueError("eval-group-size and eval-prompts must be positive")
+    if args.sft_steps < 0 or args.sft_batch_size < 1 or args.preflight_prompts < 0:
+        raise ValueError("SFT/preflight counts must be non-negative and SFT batch size positive")
+    if not 0 < args.confidence < 1 or args.bootstrap_samples < 0:
+        raise ValueError("confidence must be in (0,1) and bootstrap samples non-negative")
+    if not 0 <= args.min_preflight_reward < args.max_preflight_reward <= 1:
+        raise ValueError("preflight reward thresholds must satisfy 0 <= min < max <= 1")
+    if args.max_family_regression < 0:
+        raise ValueError("max-family-regression must be non-negative")
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     source_path = args.resume or args.ckpt
@@ -412,17 +618,43 @@ def run(args) -> dict[str, Any]:
         reference_model.requires_grad_(False).eval()
     vocab = WorldVocab(args.vocab)
 
+    curriculum_stages = [int(value) for value in args.curriculum_stages.split(",") if value.strip()]
     if args.tasks:
-        all_tasks, task_hash = load_task_jsonl(args.tasks)
+        supplied_tasks, task_hash = load_task_jsonl(args.tasks)
+        if args.heldout_tasks:
+            heldout_tasks, heldout_hash = load_task_jsonl(args.heldout_tasks)
+            train_tasks = [task for task in supplied_tasks if task.split == "train"]
+            eval_tasks = [task for task in heldout_tasks if task.split == "eval"]
+            if len(train_tasks) != len(supplied_tasks) or len(eval_tasks) != len(heldout_tasks):
+                raise ValueError("--tasks must be train-only and --heldout-tasks eval-only when separated")
+            task_hash = hashlib.sha256(f"{task_hash}:{heldout_hash}".encode()).hexdigest()
+            all_tasks = train_tasks + eval_tasks
+        else:
+            all_tasks = supplied_tasks
+            train_tasks, eval_tasks = split_task_pool(all_tasks)
     else:
-        train_generated = arithmetic_curriculum(args.train_tasks, seed=args.seed + 101,
-                                                split="train", difficulty=args.difficulty)
-        eval_generated = arithmetic_curriculum(args.eval_tasks, seed=args.seed + 1_000_003,
-                                               split="eval", difficulty=args.difficulty)
-        all_tasks = train_generated + eval_generated
-        task_hash = hashlib.sha256("\n".join(json.dumps(asdict(t), sort_keys=True)
-                                             for t in all_tasks).encode()).hexdigest()
-    train_tasks, eval_tasks = split_task_pool(all_tasks)
+        stages = curriculum_stages or [args.difficulty]
+        heldout_hash = ""
+        if args.heldout_tasks:
+            eval_tasks, heldout_hash = load_task_jsonl(args.heldout_tasks)
+            if any(task.split != "eval" for task in eval_tasks):
+                raise ValueError("--heldout-tasks must contain eval tasks only")
+        else:
+            eval_tasks = staged_arithmetic_curriculum(
+                args.eval_tasks, seed=args.seed + 1_000_003, split="eval",
+                difficulties=stages, unique=True)
+        train_tasks = staged_arithmetic_curriculum(
+            args.train_tasks, seed=args.seed + 101, split="train", difficulties=stages,
+            exclude_prompts=[task.prompt for task in eval_tasks])
+        all_tasks = train_tasks + eval_tasks
+        task_hash = hashlib.sha256(
+            ("\n".join(json.dumps(asdict(t), sort_keys=True) for t in all_tasks) +
+             (":" + heldout_hash if heldout_hash else "")).encode()).hexdigest()
+    if not train_tasks or not eval_tasks:
+        raise ValueError("RLVR requires non-empty train and held-out task pools")
+    split_audit = audit_task_splits(train_tasks, eval_tasks)
+    if not split_audit["passed"]:
+        raise ValueError(f"train/held-out contamination audit failed: {split_audit}")
     external_command = shlex.split(args.verifier_command) if args.verifier_command else []
     if any(t.verifier.get("kind") == "external" for t in all_tasks) and not external_command:
         raise ValueError("external verifier tasks require --verifier-command")
@@ -449,6 +681,8 @@ def run(args) -> dict[str, Any]:
                 "task_sha256": task_hash, "seed": args.seed, "group_size": args.group_size,
                 "prompts_per_step": args.prompts_per_step, "max_new": args.max_new,
                 "temperature": args.temperature, "top_p": args.top_p, "top_k": args.top_k,
+                "rollout_engine": args.rollout_engine, "curriculum_stages": curriculum_stages,
+                "split_audit": split_audit,
                 "created_ts": time.time()}
     rng = random.Random(args.seed)
     if args.resume and source_blob.get("rlvr_python_rng"):
@@ -457,33 +691,110 @@ def run(args) -> dict[str, Any]:
     log = open(out_dir / "train.jsonl", "a" if args.resume else "w", buffering=1)
     def emit(row):
         return log.write(json.dumps(row, sort_keys=True) + "\n")
-    fixed_eval = eval_tasks[:min(args.eval_prompts, len(eval_tasks))]
+    fixed_eval = stratified_tasks(eval_tasks, min(args.eval_prompts, len(eval_tasks)),
+                                  seed=args.seed + 8_000_003)
+    final_eval_reserve = len(fixed_eval) * args.eval_group_size * args.max_new
+    if args.max_rollout_tokens > 0 and final_eval_reserve > args.max_rollout_tokens:
+        raise ValueError("rollout budget is smaller than one fixed held-out evaluation")
     stored_baseline = (source_blob.get("rlvr") or {}).get("baseline_heldout") if args.resume else None
-    if stored_baseline:
-        baseline_eval = {k: float(v) for k, v in stored_baseline.items()}
+    if stored_baseline and stored_baseline.get("task_rewards"):
+        baseline_eval = dict(stored_baseline)
+    elif args.resume:
+        raise ValueError("resumed checkpoint predates paired held-out evidence; start a fresh RLVR run")
     else:
         baseline_eval, _ = evaluate_policy(
             model, vocab, fixed_eval, group_size=args.eval_group_size,
             max_new=args.max_new, temperature=args.eval_temperature, top_p=args.top_p,
             top_k=args.top_k, stop_token=args.stop_token, device=args.device,
             seed=args.seed + 9_000_001, external_command=external_command,
-            verifier_timeout=args.verifier_timeout)
+            verifier_timeout=args.verifier_timeout, engine=args.rollout_engine)
     manifest["baseline_heldout"] = baseline_eval
     _atomic_json(out_dir / "manifest.json", manifest)
     emit({"kind": "eval", "step": start_step, "split": "heldout",
           "phase": "baseline", **baseline_eval})
-    last_eval: dict[str, float] = dict(baseline_eval)
+    prior_manifest = source_blob.get("rlvr") or {}
+    prior_elapsed = float(prior_manifest.get("elapsed_seconds", 0)) if args.resume else 0.0
+    prior_rollout_tokens = int(prior_manifest.get("total_rollout_tokens", 0)) if args.resume else 0
+    if (args.max_rollout_tokens > 0 and
+            prior_rollout_tokens + final_eval_reserve > args.max_rollout_tokens):
+        raise ValueError("remaining rollout budget cannot reserve one held-out evaluation")
+    training_started = time.time()
+    if args.resume:
+        sft = dict(prior_manifest.get("sft") or
+                   {"updates": 0, "tokens": 0, "mean_loss": 0.0, "seconds": 0.0})
+    else:
+        sft = supervised_warm_start(
+            model, vocab, train_tasks, optimizer, steps=args.sft_steps,
+            batch_size=args.sft_batch_size, learning_rate=args.sft_lr,
+            grad_clip=args.grad_clip, stop_token=args.stop_token,
+            device=args.device, seed=args.seed + 7_000_001)
+    sft_ran = not args.resume and int(sft["updates"]) > 0
+    emit({"kind": "sft", "step": start_step, **sft})
+
+    total_rollout_tokens = prior_rollout_tokens
+    preflight = {"passed": True, "disabled": True}
+    preflight_budget_exhausted = False
+    if not args.resume and args.preflight_prompts > 0:
+        pool = curriculum_pool(train_tasks, step=0, total_steps=max(args.steps, 1),
+                               stages=curriculum_stages)
+        preflight_tasks = stratified_tasks(
+            pool, min(args.preflight_prompts, len(pool)), seed=args.seed + 6_000_007)
+        preflight_reserve = len(preflight_tasks) * args.group_size * args.max_new
+        if (args.max_rollout_tokens > 0 and
+                total_rollout_tokens + preflight_reserve + final_eval_reserve >
+                args.max_rollout_tokens):
+            preflight = {"passed": False, "budget_exhausted": True,
+                         "reason": "preflight plus held-out reserve exceeds rollout budget"}
+            preflight_budget_exhausted = True
+        else:
+            preflight_rollouts, preflight_generation = generate_rollouts(
+                model, vocab, preflight_tasks, group_size=args.group_size,
+                max_new=args.max_new, temperature=args.temperature, top_p=args.top_p,
+                top_k=args.top_k, stop_token=args.stop_token, device=args.device,
+                seed=args.seed + 6_000_011, engine=args.rollout_engine, return_stats=True)
+            preflight_rewards, _ = verify_rollouts(
+                preflight_rollouts, external_command=external_command,
+                timeout=args.verifier_timeout)
+            total_rollout_tokens += int(preflight_generation["tokens"])
+            preflight = reward_diversity(
+                preflight_rewards.tolist(), args.group_size,
+                minimum_rate=args.min_preflight_reward,
+                maximum_rate=args.max_preflight_reward,
+                minimum_active_groups=args.min_preflight_active_groups)
+            preflight["generation"] = preflight_generation
+    manifest["sft"] = sft
+    manifest["preflight"] = preflight
+    emit({"kind": "preflight", "step": start_step, **preflight})
+    _atomic_json(out_dir / "manifest.json", manifest)
+
+    last_eval: dict[str, Any] = dict(baseline_eval)
     last_eval_step = start_step
     updates_applied = int((source_blob.get("rlvr") or {}).get("updates_applied", 0)) if args.resume else 0
     checkpoint_path = out_dir / "rlvr.pt"
-    started = time.time()
+    steps_completed = start_step
+    training_status = ("rollout_budget_exhausted" if preflight_budget_exhausted else
+                       "running" if preflight["passed"] else "preflight_rejected")
 
-    for step in range(start_step, args.steps):
-        chosen = rng.sample(train_tasks, min(args.prompts_per_step, len(train_tasks)))
-        rollouts = generate_rollouts(model, vocab, chosen, group_size=args.group_size,
-                                     max_new=args.max_new, temperature=args.temperature,
-                                     top_p=args.top_p, top_k=args.top_k, stop_token=args.stop_token,
-                                     device=args.device, seed=args.seed + step * 1_000_003)
+    for step in range(start_step, args.steps if preflight["passed"] else start_step):
+        elapsed = prior_elapsed + time.time() - training_started
+        estimate = args.prompts_per_step * args.group_size * args.max_new
+        if (args.max_rollout_tokens > 0 and
+                total_rollout_tokens + estimate + final_eval_reserve > args.max_rollout_tokens):
+            training_status = "rollout_budget_exhausted"
+            break
+        if args.max_train_seconds > 0 and elapsed >= args.max_train_seconds:
+            training_status = "time_budget_exhausted"
+            break
+        pool = curriculum_pool(train_tasks, step=step, total_steps=args.steps,
+                               stages=curriculum_stages)
+        chosen = rng.sample(pool, min(args.prompts_per_step, len(pool)))
+        rollouts, generation = generate_rollouts(
+            model, vocab, chosen, group_size=args.group_size,
+            max_new=args.max_new, temperature=args.temperature,
+            top_p=args.top_p, top_k=args.top_k, stop_token=args.stop_token,
+            device=args.device, seed=args.seed + step * 1_000_003,
+            engine=args.rollout_engine, return_stats=True)
+        total_rollout_tokens += int(generation["tokens"])
         rewards, verifier_details = verify_rollouts(rollouts, external_command=external_command,
                                                     timeout=args.verifier_timeout)
         lr = args.lr * min(1.0, (step + 1) / max(args.warmup, 1))
@@ -498,9 +809,13 @@ def run(args) -> dict[str, Any]:
                                         token_normalizer=args.max_new)
         metrics = {**grouped_metrics(rewards, args.group_size), **diagnostics}
         updates_applied += int(diagnostics["update_applied"] > 0)
+        steps_completed = step + 1
         row = {"kind": "train", "step": step + 1, "lr": lr,
                "rollout_tokens": sum(len(r.response_ids) for r in rollouts),
-               "elapsed_seconds": time.time() - started, **metrics}
+               "total_rollout_tokens": total_rollout_tokens,
+               "generation": generation,
+               "curriculum_pool": len(pool),
+               "elapsed_seconds": time.time() - training_started, **metrics}
         if args.log_samples:
             row["samples"] = [{"task_id": r.task.id, "reward": float(rewards[i]),
                                "response": r.response[:500], "verifier": verifier_details[i]}
@@ -515,37 +830,70 @@ def run(args) -> dict[str, Any]:
                                            top_p=args.top_p, top_k=args.top_k, stop_token=args.stop_token,
                                            device=args.device, seed=args.seed + 9_000_001,
                                            external_command=external_command,
-                                           verifier_timeout=args.verifier_timeout)
+                                           verifier_timeout=args.verifier_timeout,
+                                           engine=args.rollout_engine)
+            total_rollout_tokens += int(last_eval["generation"]["tokens"])
             last_eval_step = step + 1
             emit({"kind": "eval", "step": step + 1, "split": "heldout",
                   "phase": "candidate", **last_eval})
             print(f"  heldout reward={last_eval['reward']:.3f} pass@k={last_eval['pass_at_k']:.3f}", flush=True)
         if args.save_every and (step + 1) % args.save_every == 0:
             manifest["updates_applied"] = updates_applied
+            manifest["total_rollout_tokens"] = total_rollout_tokens
+            manifest["elapsed_seconds"] = prior_elapsed + time.time() - training_started
             save_checkpoint(checkpoint_path, model, optimizer, source_blob, step=step + 1,
                             manifest=manifest, rng=rng)
 
-    if last_eval_step != args.steps:
+    if training_status == "running":
+        training_status = "complete"
+    if (last_eval_step != steps_completed or
+            (sft_ran and steps_completed == start_step) or not preflight["passed"]):
         last_eval, _ = evaluate_policy(model, vocab, fixed_eval, group_size=args.eval_group_size,
                                        max_new=args.max_new, temperature=args.eval_temperature,
                                        top_p=args.top_p, top_k=args.top_k, stop_token=args.stop_token,
                                        device=args.device, seed=args.seed + 9_000_001,
                                        external_command=external_command,
-                                       verifier_timeout=args.verifier_timeout)
-        emit({"kind": "eval", "step": args.steps, "split": "heldout",
+                                       verifier_timeout=args.verifier_timeout,
+                                       engine=args.rollout_engine)
+        total_rollout_tokens += int(last_eval["generation"]["tokens"])
+        emit({"kind": "eval", "step": steps_completed, "split": "heldout",
               "phase": "candidate", **last_eval})
     manifest["updates_applied"] = updates_applied
-    save_checkpoint(checkpoint_path, model, optimizer, source_blob, step=args.steps,
+    manifest["sft_updates"] = int(sft["updates"])
+    manifest["training_status"] = training_status
+    manifest["total_rollout_tokens"] = total_rollout_tokens
+    elapsed_seconds = prior_elapsed + time.time() - training_started
+    manifest["elapsed_seconds"] = elapsed_seconds
+    save_checkpoint(checkpoint_path, model, optimizer, source_blob, step=steps_completed,
                     manifest=manifest, rng=rng)
-    promotion = promotion_decision(
+    promotion = promotion_gates(
         baseline_eval, last_eval, minimum_delta=args.min_heldout_delta,
-        updates_applied=updates_applied, candidate_checkpoint=str(checkpoint_path.resolve()),
-        rollback_checkpoint=str(Path(source_path).resolve()))
+        updates_applied=updates_applied + int(sft["updates"]),
+        maximum_family_regression=args.max_family_regression,
+        require_confidence=args.require_confidence,
+        bootstrap_samples=args.bootstrap_samples, confidence=args.confidence,
+        seed=args.seed + 5_000_011, split_audit=split_audit,
+        rollout_tokens=total_rollout_tokens, elapsed_seconds=elapsed_seconds,
+        maximum_rollout_tokens=args.max_rollout_tokens,
+        maximum_train_seconds=args.max_train_seconds)
+    promotion.update({
+        "heldout_delta": float(last_eval["reward"] - baseline_eval["reward"]),
+        "minimum_delta": args.min_heldout_delta,
+        "updates_applied": updates_applied,
+        "sft_updates": int(sft["updates"]),
+        "candidate_checkpoint": str(checkpoint_path.resolve()),
+        "rollback_checkpoint": str(Path(source_path).resolve()),
+    })
+    failed_gates = [name for name, passed in promotion["gates"].items() if not passed]
+    promotion["reason"] = ("all independent promotion gates passed" if promotion["eligible"]
+                           else "failed gates: " + ", ".join(failed_gates))
     result = {"schema": RESULT_SCHEMA, "status": "complete", "steps": args.steps,
+              "steps_completed": steps_completed, "training_status": training_status,
               "checkpoint": str(checkpoint_path.resolve()), "checkpoint_parent_sha256": parent_hash,
               "task_sha256": task_hash, "baseline_heldout": baseline_eval, "heldout": last_eval,
-              "promotion": promotion,
-              "elapsed_seconds": time.time() - started}
+              "split_audit": split_audit, "sft": sft, "preflight": preflight,
+              "total_rollout_tokens": total_rollout_tokens, "promotion": promotion,
+              "elapsed_seconds": elapsed_seconds}
     _atomic_json(out_dir / "result.json", result)
     log.close()
     return result
@@ -557,12 +905,15 @@ def main() -> None:
     ap.add_argument("--resume", default="", help="RLVR checkpoint to resume")
     ap.add_argument("--out", required=True)
     ap.add_argument("--tasks", default="", help="Adamaton-compatible task JSONL; default generates arithmetic")
+    ap.add_argument("--heldout-tasks", default="",
+                    help="optional separate eval-only JSONL hidden from the proposal process")
     ap.add_argument("--algorithm", choices=["gspo", "dr_grpo", "dapo"], default="gspo")
     ap.add_argument("--steps", type=int, default=100)
     ap.add_argument("--prompts-per-step", type=int, default=2)
     ap.add_argument("--group-size", type=int, default=8)
     ap.add_argument("--epochs", type=int, default=1)
     ap.add_argument("--max-new", type=int, default=64)
+    ap.add_argument("--rollout-engine", choices=["auto", "recurrent", "batched"], default="auto")
     ap.add_argument("--temperature", type=float, default=1.0,
                     help="1.0 is strictly on-policy; other values deliberately temper the behavior policy")
     ap.add_argument("--eval-temperature", type=float, default=0.7)
@@ -583,11 +934,30 @@ def main() -> None:
     ap.add_argument("--train-tasks", type=int, default=4096)
     ap.add_argument("--eval-tasks", type=int, default=256)
     ap.add_argument("--difficulty", type=int, default=2)
+    ap.add_argument("--curriculum-stages", default="",
+                    help="comma-separated arithmetic/metadata difficulty stages, e.g. 1,2,3")
+    ap.add_argument("--sft-steps", type=int, default=0,
+                    help="trusted-answer cold-start updates before RL; 0 disables")
+    ap.add_argument("--sft-batch-size", type=int, default=2)
+    ap.add_argument("--sft-lr", type=float, default=2e-5)
+    ap.add_argument("--preflight-prompts", type=int, default=0,
+                    help="sample this many training tasks and require reward diversity before RL")
+    ap.add_argument("--min-preflight-reward", type=float, default=0.01)
+    ap.add_argument("--max-preflight-reward", type=float, default=0.99)
+    ap.add_argument("--min-preflight-active-groups", type=int, default=1)
     ap.add_argument("--eval-every", type=int, default=10)
     ap.add_argument("--eval-prompts", type=int, default=32)
     ap.add_argument("--eval-group-size", type=int, default=4)
     ap.add_argument("--min-heldout-delta", type=float, default=0.01,
                     help="absolute held-out reward gain required for promotion eligibility")
+    ap.add_argument("--confidence", type=float, default=0.95)
+    ap.add_argument("--bootstrap-samples", type=int, default=10_000)
+    ap.add_argument("--require-confidence", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--max-family-regression", type=float, default=0.0)
+    ap.add_argument("--max-rollout-tokens", type=int, default=0,
+                    help="hard candidate rollout budget; 0 is unlimited")
+    ap.add_argument("--max-train-seconds", type=float, default=0.0,
+                    help="candidate wall-clock budget; 0 is unlimited")
     ap.add_argument("--save-every", type=int, default=10)
     ap.add_argument("--verifier-command", default="",
                     help="trusted argv string for external/code verification; never run through a shell")
