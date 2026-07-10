@@ -16,9 +16,12 @@ Checkpoints written since the arch-record change rebuild themselves (blob["arch"
 need the --d-model/--n-layers/... fallback flags.
 """
 from __future__ import annotations
-import argparse, ast, json, os, subprocess
+import argparse
+import ast
+import json
+import os
+import subprocess
 import torch
-import torch.nn.functional as F
 
 ZTOK = os.environ.get("ZTOK", "/thearray/git/ztok/zig-out/bin/ztok")
 VOCAB = os.environ.get("VOCAB", "/thearray/git/ztok/bench/vocabs/rwkv_vocab_v20230424.txt")
@@ -29,6 +32,7 @@ class WorldVocab:
     """RWKV world vocab: local decode table + ztok-backed encode."""
 
     def __init__(self, path: str = VOCAB):
+        self.path = path
         self.tok = {0: b""}
         for line in open(path, encoding="utf-8"):
             sp1, sp2 = line.index(" "), line.rindex(" ")
@@ -39,7 +43,7 @@ class WorldVocab:
         return b"".join(self.tok.get(int(i), b"") for i in ids).decode("utf-8", errors="replace")
 
     def encode(self, text: str) -> list[int]:
-        out = subprocess.run([ZTOK, "encode", "--model", VOCAB, text],
+        out = subprocess.run([ZTOK, "encode", "--model", self.path, text],
                              capture_output=True, text=True, check=True)
         return [int(t) for t in out.stdout.split()]
 
@@ -139,7 +143,8 @@ def main():
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--json", action="store_true", help="machine output (for the trainboard)")
     # fallback arch flags for pre-arch-record checkpoints
-    ap.add_argument("--d-model", type=int, default=0); ap.add_argument("--n-layers", type=int, default=0)
+    ap.add_argument("--d-model", type=int, default=0)
+    ap.add_argument("--n-layers", type=int, default=0)
     ap.add_argument("--head-size", type=int, default=64)
     args = ap.parse_args()
 
