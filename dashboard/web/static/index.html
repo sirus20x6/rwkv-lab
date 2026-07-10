@@ -29,6 +29,7 @@
 </head>
 <body data-signals="{ tabId:(window.__tabId || ''), selectedRun:'', hasSel:false, now:'', runVersions:{}, kpi:{}, runFilter:'',
                       notes:'', tags:'', launchScript:'convert_train.py', launchArgs:'', toast:'', toastKind:'',
+                      samplePrompt:'', sampleMaxNew:'200', sampleTemp:'0.8', sampleBusy:false,
                       ctl:{ w_lmce:'', w_block:'', w_smt:'', w_dmt:'', lr:'', lr_scale:'', eval_every:'', save_every:'', log_every:'', grad_clip:'',
                             weight_decay:'', tail_weight_decay:'', wd_tail_frac:'', nuc_weight:'', nuc_every:'',
                             grokfast_lamb:'', grokfast_alpha:'', readout_lr_mult:'',
@@ -295,6 +296,20 @@
             <button class="btn" data-on:click="@post('/api/runs/'+$selectedRun+'/notes')">save notes</button>
             <button class="btn" data-on:click="@post('/api/runs/'+$selectedRun+'/tags')">save tags</button>
           </div>
+        </div>
+
+        <!-- Sample from the run's saved checkpoint (rwkv_lab.generate; needs runs/<name>/ckpt.pt). -->
+        <div class="panel" id="sample-panel"><div class="panel-title">sample — generate from this run's checkpoint</div>
+          <textarea class="ctl-input" rows="2" data-bind="samplePrompt"
+                    placeholder="prompt — wrapped in the corpus chat format (User: … Assistant:)"></textarea>
+          <div class="ctl-row">
+            <input class="ctl-input" style="max-width:110px" title="max new tokens" data-bind="sampleMaxNew" />
+            <input class="ctl-input" style="max-width:90px" title="temperature (0 = greedy)" data-bind="sampleTemp" />
+            <button class="btn" data-attr-disabled="$sampleBusy"
+                    data-on:click="@post('/api/runs/'+$selectedRun+'/sample')">▶ sample</button>
+            <span data-show="$sampleBusy">sampling…</span>
+          </div>
+          <pre id="sample-out" class="sample-out" style="white-space:pre-wrap;overflow-x:auto"></pre>
         </div>
       </div>
 
