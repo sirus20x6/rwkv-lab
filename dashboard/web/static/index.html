@@ -113,6 +113,14 @@
         <div id="experiments-body" class="exp-body"><div class="empty">expand to load — reads experiments.db + experiments/*.yaml</div></div>
       </details>
 
+      <details class="panel" id="rlvr-panel" data-on:toggle="evt.target.open && @get('/api/rlvr')">
+        <summary class="panel-title">verifiable-reward training
+          <span class="sub">cold-start · recurrent batches · GSPO/Dr.GRPO/DAPO · recursive promotion lineage</span>
+          <span class="d-caret">▸</span>
+        </summary>
+        <div id="rlvr-body" class="rlvr-body"><div class="empty">expand to configure or inspect RLVR campaigns</div></div>
+      </details>
+
       <div id="run-header">
         <h1>select a run</h1>
         <div class="sub">live system + run metrics stream every second</div>

@@ -148,6 +148,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/experiments", s.handleExperiments)
 	s.mux.HandleFunc("POST /api/experiments/run", s.handleRunConfig)
 	s.mux.HandleFunc("POST /api/experiments/launch", s.handleLaunchExperiment)
+	s.mux.HandleFunc("GET /api/rlvr", s.handleRLVR)
+	s.mux.HandleFunc("POST /api/rlvr/launch", s.handleLaunchRLVR)
 	s.mux.HandleFunc("GET /api/diff", s.handleDiff)
 	s.mux.HandleFunc("POST /api/queue/enqueue", s.handleEnqueue)
 	s.mux.HandleFunc("POST /api/queue/start-next", s.handleStartNext)

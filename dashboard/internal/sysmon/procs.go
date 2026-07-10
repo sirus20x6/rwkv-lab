@@ -15,7 +15,8 @@ import (
 // set of entrypoints).
 var trainingScripts = []string{
 	"convert_train.py", "distill_consolidate.py", "drive_isolation.py",
-	"train_mla.py", "train_mla_engram.py",
+	"train_mla.py", "train_mla_engram.py", "rlvr_train.py", "rlvr_campaign.py",
+	"recursive_improve.py",
 }
 
 var trainingModules = map[string]string{
@@ -24,6 +25,9 @@ var trainingModules = map[string]string{
 	"drive_isolation.py":     "rwkv_lab.drive_isolation",
 	"train_mla.py":           "rwkv_lab.train_mla",
 	"train_mla_engram.py":    "rwkv_lab.train_mla_engram",
+	"rlvr_train.py":          "rwkv_lab.rlvr_train",
+	"rlvr_campaign.py":       "rwkv_lab.rlvr_campaign",
+	"recursive_improve.py":   "rwkv_lab.recursive_improve",
 }
 
 // AllowedScript reports whether basename(path) is a recognized training
