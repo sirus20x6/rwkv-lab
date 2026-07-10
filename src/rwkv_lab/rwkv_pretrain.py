@@ -392,8 +392,6 @@ def main():
     if not args.data and not args.ctx_buckets:
         ap.error("one of --data or --ctx-buckets is required")
     if args.ctx_buckets:                       # mixed-context mode: fixed-width features rejected
-        if args.engram:
-            ap.error("--ctx-buckets + --engram not wired yet (recall prefetch is width-fixed)")
         if any(w > 0 for w in [args.nextlat_weight, args.top_weight, args.lmtp_weight,
                                args.bst_weight, args.jtp_weight]):
             ap.error("--ctx-buckets: aux lookahead heads are fixed-width — unsupported")
@@ -447,13 +445,16 @@ def main():
         if args.init_g1g:
             print("warn: --engram ignored for g1g init (from-scratch only; dims come from g1g)", flush=True)
         else:                                 # after fp8 so the engram Linears stay bf16
+            # packed bucket rows join docs with the sep token: default the recall boundary to it
+            # so recall never crosses packed-document boundaries.
+            bid = args.engram_boundary_id if args.engram_boundary_id >= 0 else \
+                (1 if args.ctx_buckets else None)
             lmb, esites = enable_engram(model, 65536, args.d_model, args.head_size, args.n_layers,
                                         loop_count=args.loop_count, d_row=args.engram_drow,
                                         rows=args.engram_rows, sites=args.engram_sites,
-                                        boundary_id=(args.engram_boundary_id
-                                                     if args.engram_boundary_id >= 0 else None))
+                                        boundary_id=bid)
             print(f"engram: LMB sites={esites} d_row={args.engram_drow} "
-                  f"rows={min(args.engram_rows, 65536)} "
+                  f"rows={min(args.engram_rows, 65536)} boundary_id={bid} "
                   f"(+{sum(p.numel() for p in lmb.parameters())/1e6:.2f}M params)", flush=True)
     nparam = sum(p.numel() for p in model.parameters())
     seed_chain = bool(args.seed_chain) and not args.init_g1g  # g1g branch ignores the flag
@@ -487,7 +488,8 @@ def main():
         ref_tok = args.batch * args.seq_len              # token budget per micro-step
         vb = max(1, args.val_windows // max(len(meta["buckets"]), 1))
         tot_gb = sum(b["rows"] * b["T"] for b in meta["buckets"]) * 4 / 1e9
-        bkt_gpu = args.gpu_data != "off" and tot_gb <= args.gpu_data_cap_gb
+        # engram's recall runs on CPU: keep rows CPU-side so the prefetch thread reads them free
+        bkt_gpu = args.gpu_data != "off" and tot_gb <= args.gpu_data_cap_gb and not args.engram
         for b in meta["buckets"]:
             arr = np.fromfile(b["bin"], dtype=np.uint16).astype(np.int32).reshape(b["rows"], b["T"])
             t = torch.from_numpy(arr)
@@ -595,10 +597,18 @@ def main():
                 for b in buckets:
                     nll = 0.0; n = 0
                     for i in range(0, b["n_val"], b["B"]):
-                        x = b["data"][i:i + b["B"]]
-                        x = (x if x.is_cuda else x.to(dev)).long()
+                        xc = b["data"][i:i + b["B"]].long()
+                        recall = None
+                        if lmb is not None:   # rows are CPU-side when engram is on
+                            from rwkv_lab.engram_lmb import token_rosa_recall, RecallResult
+                            xi = xc[:, :-1].cpu()
+                            rr = token_rosa_recall(xi, 65536, lmb.boundary_id)
+                            recall = RecallResult(rr.recalled, rr.valid & (xi != 0), rr.mlen, rr.dist)
+                            recall = RecallResult(*(v.to(dev) for v in recall))
+                        x = xc if xc.is_cuda else xc.to(dev)
                         tgt = x[:, 1:]
-                        lg = model(x[:, :-1]).float()
+                        lg = (model(x[:, :-1], precomputed_recall=recall)
+                              if recall is not None else model(x[:, :-1])).float()
                         nll += float(F.cross_entropy(lg.reshape(-1, lg.size(-1)), tgt.reshape(-1),
                                                      ignore_index=0, reduction="sum"))
                         n += int((tgt != 0).sum())
@@ -620,14 +630,20 @@ def main():
     named = list(model.named_parameters()) + (list(heads.named_parameters()) if heads else [])
     opt = build_optimizer(named, args.optimizer, args.lr, args.weight_decay, muon_opts=muon_opts_from(args))
     print(f"optimizer={args.optimizer} lr={args.lr} wd={args.weight_decay}", flush=True)
-    step = 0
+    step = 0; resume_recall_rng = None
     if args.resume and os.path.exists(args.resume):
-        ck = torch.load(args.resume, map_location=dev)
+        ck = torch.load(args.resume, map_location=dev, weights_only=False)
         model.load_state_dict(ck["model"]); opt.load_state_dict(ck["opt"]); step = ck.get("step", 0)
+        if heads is not None and ck.get("heads") is not None:
+            heads.load_state_dict(ck["heads"])
         if ema is not None:                  # saved EMA if present, else re-seed from loaded weights
             src = ck.get("ema") or {}
             for n, p in model.named_parameters():
                 ema[n] = src[n].float().to(dev) if n in src else p.detach().float().clone()
+        if ck.get("numpy_rng") is not None: rng.bit_generator.state = ck["numpy_rng"]
+        if ck.get("torch_rng") is not None: torch.set_rng_state(ck["torch_rng"].cpu())
+        if ck.get("cuda_rng") is not None: torch.cuda.set_rng_state(ck["cuda_rng"].cpu(), device=dev)
+        resume_recall_rng = ck.get("recall_numpy_rng")
         print(f"resumed from {args.resume} @ step {step}", flush=True)
     # Compiled handle for the TRAIN forward only: eager `model` still owns state_dict/params, so
     # checkpoints stay uncompiled (no `_orig_mod.` prefix) and the eval path (below) never toggles
@@ -686,11 +702,25 @@ def main():
         from rwkv_lab.engram_lmb import token_rosa_recall, RecallResult
         recall_pool = ThreadPoolExecutor(max_workers=1)
         recall_rng = np.random.default_rng(args.seed + 1009)
+        if resume_recall_rng is not None:
+            recall_rng.bit_generator.state = resume_recall_rng
 
-        def _prefetch_engram():
-            ids = train_batch_cpu(args.batch, width=width, sampler_rng=recall_rng)
-            rr = token_rosa_recall(ids[:, :T], 65536, lmb.boundary_id)
-            return ids.pin_memory(), RecallResult(*(v.pin_memory() for v in rr))
+        if buckets is not None:
+            def _prefetch_engram():
+                # bucket-aware: sample a bucket ∝ real tokens, then rows from its CPU tensor.
+                # Recall is width-agnostic; pad tails (0) never recall — mask their validity.
+                b = buckets[int(recall_rng.choice(len(buckets), p=bprobs))]
+                ridx = torch.from_numpy(recall_rng.integers(b["n_val"], b["rows"], size=b["B"]))
+                ids = b["data"][ridx].long()
+                xin = ids[:, :-1]
+                rr = token_rosa_recall(xin, 65536, lmb.boundary_id)
+                rr = RecallResult(rr.recalled, rr.valid & (xin != 0), rr.mlen, rr.dist)
+                return ids.pin_memory(), RecallResult(*(v.pin_memory() for v in rr))
+        else:
+            def _prefetch_engram():
+                ids = train_batch_cpu(args.batch, width=width, sampler_rng=recall_rng)
+                rr = token_rosa_recall(ids[:, :T], 65536, lmb.boundary_id)
+                return ids.pin_memory(), RecallResult(*(v.pin_memory() for v in rr))
 
         recall_future = recall_pool.submit(_prefetch_engram)
 
@@ -737,7 +767,8 @@ def main():
                 out = fwd(xin, return_hidden=bool(heads),
                           precomputed_recall=precomputed_recall)
                 lg = (out[0] if heads else out).float()
-                loss = F.cross_entropy(lg.reshape(-1, lg.size(-1)), tgt.reshape(-1))
+                loss = F.cross_entropy(lg.reshape(-1, lg.size(-1)), tgt.reshape(-1),
+                                       ignore_index=(0 if buckets is not None else -100))
             if heads:                                        # + weighted aux (latent-prediction) loss
                 loss = loss + heads.compute(out[1], x, model.emb, model.head)["aux_total"]
             (loss / ga if ga > 1 else loss).backward()
@@ -754,7 +785,12 @@ def main():
         recall_pool.shutdown(wait=False, cancel_futures=True)
     emit({"kind": "checkpoint", "step": step})
     if args.save:
-        blob = {"model": model.state_dict(), "opt": opt.state_dict(), "step": step, "config": tag}
+        blob = {"model": model.state_dict(), "opt": opt.state_dict(), "step": step, "config": tag,
+                "heads": heads.state_dict() if heads is not None else None,
+                "numpy_rng": rng.bit_generator.state, "torch_rng": torch.get_rng_state(),
+                "cuda_rng": torch.cuda.get_rng_state(dev).cpu(),
+                "recall_numpy_rng": (recall_rng.bit_generator.state if lmb is not None and not use_gpu_data
+                                      else None)}
         if ema is not None:
             blob["ema"] = ema
         torch.save(blob, args.save)
