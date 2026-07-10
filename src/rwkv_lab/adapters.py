@@ -7,10 +7,8 @@ Primary references:
 
 This module implements the LoRA update ``W x + (alpha/r) B A x`` and the full artifact
 lifecycle around it: frozen-base injection, multiple named adapters, activation, exact
-merge/unmerge, safetensors persistence, and base-model fingerprints.  It deliberately does not
-quantize a model itself.  A bitsandbytes/torchao frozen linear can be wrapped as a QLoRA base,
-but that path must be selected by the caller so unsupported RWKV kernels never get silently
-replaced.
+merge/unmerge, safetensors persistence, and base-model fingerprints. Native NF4 quantization is
+opt-in through ``quantization.py`` so unsupported RWKV kernels never get silently replaced.
 """
 from __future__ import annotations
 
@@ -124,6 +122,8 @@ class LoRALinear(nn.Module):
             raise ValueError(f"unknown adapter {name!r}")
         if name in self.merged:
             return
+        if getattr(self.base, "is_quantized_4bit", False):
+            raise ValueError("cannot mutate a packed 4-bit base; materialize a dense merged model")
         if not self.merged:
             self._unmerged_weight = self.base.weight.detach().clone()
         self.merged.add(name)
@@ -280,7 +280,7 @@ def save_adapter(model: nn.Module, directory: str | Path, name: str, *,
         if branch_config is not None and current != branch_config:
             raise ValueError("one adapter name must use a consistent rank/alpha/dropout")
         branch_config = current
-        quantized |= "4bit" in type(module.base).__name__.lower()
+        quantized |= bool(getattr(module.base, "is_quantized_4bit", False))
     if not tensors or branch_config is None:
         raise ValueError(f"model has no adapter named {name!r}")
     weights = root / "adapter.safetensors"
@@ -332,6 +332,34 @@ def load_adapter(model: nn.Module, directory: str | Path, *, name: str | None = 
 def _linear_like(module: nn.Module) -> bool:
     return (hasattr(module, "weight") and hasattr(module, "in_features") and
             hasattr(module, "out_features") and callable(getattr(module, "forward", None)))
+
+
+@torch.no_grad()
+def unload_adapter(model: nn.Module, name: str, *, merge: bool = True) -> list[str]:
+    """Replace LoRA wrappers by dense linears, suitable for immutable parent checkpoints.
+
+    Packed QLoRA bases are dequantized exactly once during materialization; the quantized parent
+    itself remains immutable, matching the frozen-base contract in https://arxiv.org/abs/2305.14314.
+    """
+    replaced = []
+    for path, wrapper in list(iter_lora(model)):
+        if name not in wrapper.adapters:
+            raise ValueError(f"adapter {name!r} is absent from {path}")
+        base_weight = (wrapper.base.dequantized_weight(dtype=torch.float32)
+                       if getattr(wrapper.base, "is_quantized_4bit", False)
+                       else wrapper.base.weight.detach().float().clone())
+        if merge:
+            base_weight.add_(wrapper.adapters[name].delta().detach().float())
+        bias = wrapper.bias
+        dense = nn.Linear(wrapper.in_features, wrapper.out_features, bias=bias is not None,
+                          device=base_weight.device, dtype=base_weight.dtype)
+        dense.weight.copy_(base_weight)
+        if bias is not None:
+            dense.bias.copy_(bias.detach().to(dense.bias))
+        parent, attr = _parent_module(model, path)
+        setattr(parent, attr, dense)
+        replaced.append(path)
+    return replaced
 
 
 def _parent_module(model: nn.Module, path: str) -> tuple[nn.Module, str]:

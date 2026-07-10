@@ -18,7 +18,7 @@ Every entry is an off-by-default lever with a paper and a CPU test. Full index i
 | **Latent prediction** | MTP · MuToR · TOP · NextLat · ConceptLM · FSP · L-MTP · Belief-State · JTP · LLM-JEPA · Coconut continuous-thought | [`lookahead_module`](src/rwkv_lab/lookahead_module.py) · [`llm_jepa`](src/rwkv_lab/llm_jepa.py) · [`coconut`](src/rwkv_lab/coconut.py) |
 | **Memory / retrieval** | Engram lexical bank · ROSA suffix-automaton (+ golden reference) · Fast-weight Product-Key Memory · L³ large-lookup · WriteSAE state autoencoder | [`engram_lmb`](src/rwkv_lab/engram_lmb.py) · [`rosa_sam`](src/rwkv_lab/rosa_sam.py) · [`fwpkm`](src/rwkv_lab/fwpkm.py) · [`l3_lookup`](src/rwkv_lab/l3_lookup.py) · [`write_sae`](src/rwkv_lab/write_sae.py) |
 | **Scale & online adaptation (P0)** | u-μP scale transfer · Titans/MIRAS/ATLAS/Nested Learning memory · GSPO/Dr.GRPO/DAPO RLVR + deterministic verifiers | [`u_mup`](src/rwkv_lab/u_mup.py) · [`online_memory`](src/rwkv_lab/online_memory.py) · [`rlvr`](src/rwkv_lab/rlvr.py) · [`rlvr_train`](src/rwkv_lab/rlvr_train.py) |
-| **Post-training platform** | typed SFT/preference/feedback/RLVR data · assistant-only masks · named RWKV LoRA · DPO/KTO/ORPO/SimPO · RM/PRM losses · FSDP2/DCP · safe exports | [`posttrain_data`](src/rwkv_lab/posttrain_data.py) · [`adapters`](src/rwkv_lab/adapters.py) · [`preference`](src/rwkv_lab/preference.py) · [`posttrain_train`](src/rwkv_lab/posttrain_train.py) · [`distributed`](src/rwkv_lab/distributed.py) · [`export_bundle`](src/rwkv_lab/export_bundle.py) |
+| **Post-training platform** | typed SFT/preference/feedback/PRM/RLVR + tool calls · cached tokenization/packing audits · named LoRA/native NF4 QLoRA · DPO/KTO/ORPO/SimPO · executable ORM/PRM · paired confirmation campaigns · adapter-first recursion · parity-gated kernels · FSDP2/DCP · safe exports | [`posttrain_data`](src/rwkv_lab/posttrain_data.py) · [`quantization`](src/rwkv_lab/quantization.py) · [`posttrain_train`](src/rwkv_lab/posttrain_train.py) · [`posttrain_campaign`](src/rwkv_lab/posttrain_campaign.py) · [`adapter_recursive`](src/rwkv_lab/adapter_recursive.py) · [`posttrain_kernels`](src/rwkv_lab/posttrain_kernels.py) |
 | **Training systems (P1)** | RegMix/MDE mixture surrogate · simulated NVFP4 QAT · Decoupled DiLoCo outer updates | [`data_mixture`](src/rwkv_lab/data_mixture.py) · [`nvfp4`](src/rwkv_lab/nvfp4.py) · [`diloco`](src/rwkv_lab/diloco.py) |
 | **Representation, serving & tracing (P2)** | BLT entropy byte patches · EAGLE-3 feature-fusion drafts and exact verification · recurrent attribution graphs | [`byte_patches`](src/rwkv_lab/byte_patches.py) · [`speculative`](src/rwkv_lab/speculative.py) · [`circuit_trace`](src/rwkv_lab/circuit_trace.py) |
 | **Optimizers & dynamics** | Muon (+ MuonClip) · 12 spectral-Muon levers (Muonᵖ, Aurora, MONA, DDC, RSAV, Hierarchical, Distance-Aware, ARO…) · PC-Layer preconditioning · layerwise-LR · grokking probes | [`spectral_muon`](src/rwkv_lab/spectral_muon.py) · [`muon_helpers`](src/rwkv_lab/muon_helpers.py) · [`pc_layer`](src/rwkv_lab/pc_layer.py) |
@@ -101,8 +101,8 @@ Experiments are driven and monitored through **trainboard**, a from-scratch Go +
 </p>
 
 <p align="center">
-  <img src="docs/images/posttraining_panel.png" width="100%" alt="Post-training data and behavior panel"><br>
-  <em>Post-training data &amp; behavior — validate and version typed JSONL datasets, preview role-aware train masks, compare two checkpoints under identical sampling settings, and explicitly save a training-only preference. Paths stay repository-confined; held-out data and promotion remain outside this UI.</em>
+  <img src="docs/images/posttraining_panel.png" width="100%" alt="Post-training campaigns and data panel"><br>
+  <em>Post-training — validate/version typed JSONL and role-aware masks; launch equal-token paired-seed campaigns with fresh confirmation; inspect confidence intervals, promotion receipts, and adapter-recursive lineage; compare checkpoints and save explicit training-only preferences. Paths stay repository-confined, and Trainboard itself cannot promote a checkpoint.</em>
 </p>
 
 ### Conclusive experiment campaigns
@@ -207,9 +207,9 @@ names the untouched parent as the rollback target.
 ### Structured adapter and preference post-training
 
 [`posttrain_data.py`](src/rwkv_lab/posttrain_data.py) defines one versioned JSONL contract for
-pretraining text, multi-turn SFT, preference pairs, binary feedback, and existing RLVR tasks. Chat
+pretraining text, multi-turn SFT, preference pairs, binary feedback, step-labeled PRM, and existing RLVR tasks. Chat
 rendering retains system/user/assistant/tool roles, emits an explicit token-level loss mask, and
-records both source and template hashes. Unlike the legacy corpus flattener, SFT trains only the
+canonicalizes structured assistant tool calls, and records both source and template hashes. Unlike the legacy corpus flattener, SFT trains only the
 assistant spans. The contract follows the typed data/template direction in
 [LLaMA-Factory](https://arxiv.org/abs/2403.13372), without importing its Transformer model registry.
 
@@ -217,6 +217,7 @@ assistant spans. The contract follows the typed data/template direction in
 {"id":"s1","kind":"sft","split":"train","messages":[{"role":"user","content":"Compute 17*9."},{"role":"assistant","content":"153"}],"metadata":{}}
 {"id":"p1","kind":"preference","split":"train","messages":[{"role":"user","content":"Explain the result."}],"chosen":"17 groups of 9 equals 153.","rejected":"It is 162.","metadata":{}}
 {"id":"k1","kind":"feedback","split":"train","messages":[{"role":"user","content":"Be concise."}],"response":"Okay.","label":true,"metadata":{}}
+{"id":"r1","kind":"prm","split":"eval","messages":[{"role":"user","content":"Show the proof."}],"steps":[{"text":"First valid step.","label":true},{"text":"Unsupported leap.","label":false}],"adversarial_steps":[{"text":"Reordered invalid step.","label":false}],"metadata":{"family":"proof"}}
 ```
 
 Validate and preview the exact rendered variants before using them:
@@ -237,16 +238,27 @@ python -m rwkv_lab.posttrain_data data/sft.jsonl data/preferences.jsonl \
 [`adapters.py`](src/rwkv_lab/adapters.py) implements frozen-base, zero-output-init
 [LoRA](https://arxiv.org/abs/2106.09685) for explicitly selected RWKV time/channel-mix linears. It
 supports multiple named adapters, activation/deactivation, deterministic merge/unmerge, base-model
-fingerprints, and safetensors artifacts. Quantized linear modules can be wrapped for
-[QLoRA](https://arxiv.org/abs/2305.14314), but quantization is deliberately caller-selected: the lab
-never swaps an RWKV kernel to an unsupported 4-bit backend implicitly.
+fingerprints, and safetensors artifacts. [`quantization.py`](src/rwkv_lab/quantization.py) adds an
+opt-in native [QLoRA](https://arxiv.org/abs/2305.14314) correctness backend: packed NF4 weights,
+per-block scales, a frozen recurrent base, adapter-gradient and zero-init checks, dense-merge parity,
+and measured stored bytes. Its NF4 table matches the primary
+[bitsandbytes implementation](https://github.com/bitsandbytes-foundation/bitsandbytes/blob/main/bitsandbytes/functional.py).
+It currently dequantizes for `F.linear`; this is real 4-bit storage and training semantics, not a
+claim of fused 4-bit throughput. Quantization is caller-selected with `--base-quantization nf4`.
 
-The executable trainer supports SFT and four preference paths plus an outcome reward head:
+The executable trainer supports SFT, four preference paths, outcome rewards, and full process-reward
+training. Tokenization may be streamed into a safe content-addressed cache; its receipt reports token
+length percentiles and truncation counts. Best-fit multipacking preserves target masks and records
+every boundary. Because RWKV recurrent state has no block-diagonal attention mask, multi-example EOS
+packing is audit-only until a reset-mask kernel passes a packed-vs-unpacked parity gate; the trainer
+does not silently enable a contaminated speed path.
 
 ```bash
 python -m rwkv_lab.posttrain_train \
   --checkpoint runs/lm/ckpt.pt --data datasets/posttrain.jsonl \
-  --objective dpo --output runs/posttrain-dpo --rank 16 --alpha 32 --steps 500
+  --eval-data datasets/posttrain-heldout.jsonl --objective dpo \
+  --output runs/posttrain-dpo --rank 16 --alpha 32 --steps 500 \
+  --token-cache caches/posttrain --base-quantization nf4
 ```
 
 The loss implementations map directly to [DPO](https://arxiv.org/abs/2305.18290),
@@ -254,14 +266,49 @@ The loss implementations map directly to [DPO](https://arxiv.org/abs/2305.18290)
 [SimPO](https://arxiv.org/abs/2405.14734). [`preference.py`](src/rwkv_lab/preference.py) also contains
 pairwise outcome-reward heads/losses following [InstructGPT](https://arxiv.org/abs/2203.02155) and
 step-position process-reward heads/masked losses following
-[Let's Verify Step by Step](https://arxiv.org/abs/2305.20050). Learned rewards do not bypass the existing
-hidden-split confidence and family-regression promotion gates.
+[Let's Verify Step by Step](https://arxiv.org/abs/2305.20050). The `prm` objective trains the head,
+reports held-out accuracy/Brier/ECE, evaluates explicitly supplied adversarial steps, and versions the
+reward head with base/data/weight hashes. Learned rewards do not bypass hidden-split confidence,
+calibration, adversarial, or family-regression promotion gates.
 
-Trainboard's **post-training data & behavior** panel validates repository-confined JSONL, previews
+Post-training campaigns put SFT/DPO/KTO/ORPO/SimPO/RM/PRM behind the same evidence contract:
+
+```bash
+python -m rwkv_lab.posttrain_campaign \
+  --checkpoint runs/lm/ckpt.pt --data datasets/posttrain-train.jsonl \
+  --eval-data datasets/posttrain-heldout.jsonl --output runs/posttrain-campaign \
+  --objectives sft,dpo,kto,orpo,simpo --seeds 0,1,2 \
+  --confirm-seeds 100,101,102 --token-budget 100000
+```
+
+Every arm receives the same scored-input-token budget and frozen-parent held-out examples. Per-example
+loss deltas are paired, bootstrapped, and checked for minimum gain, confidence lower bound, content/ID
+leakage, and task-family regression. Unused confirmation seeds are a distinct registry phase. Only a
+successful confirmation writes an eligible `rwkv-lab.posttrain-promotion.v1` receipt; each trained
+adapter remains preserved regardless of the decision.
+
+[`adapter_recursive.py`](src/rwkv_lab/adapter_recursive.py) applies that receipt to recursive
+improvement. Following the proposer/solver lineage explored by
+[Absolute Zero](https://arxiv.org/abs/2505.03335) and
+[Self-Rewarding Language Models](https://arxiv.org/abs/2401.10020), Adamaton may propose bounded
+train-only records and a small allowlisted configuration. Each round trains an isolated adapter;
+rejections stay on disk, and only a confirmed adapter is densely materialized into a new immutable
+parent with checkpoint, adapter, parent, and receipt hashes. Held-out data and promotion authority are
+never sent to the proposal command.
+
+[`posttrain_kernels.py`](src/rwkv_lab/posttrain_kernels.py) benchmarks compiled LoRA branches,
+outcome/process reward heads, and batched recurrent preference scoring. A candidate is adopted only
+when output and gradient parity pass and median timing improves; activation offload uses PyTorch's
+[`save_on_cpu`](https://docs.pytorch.org/docs/stable/autograd.html#torch.autograd.graph.save_on_cpu).
+
+Trainboard's **post-training** panel validates repository-confined JSONL, previews
 the rendered text and trainable spans, reports duplicates/split leakage, materializes validated
 content-addressed versions/merges, and performs base-versus-candidate generation with identical
 prompt, seed, temperature, and token budget. An explicit operator choice can append a training-only
 preference to `datasets/trainboard_preferences.jsonl`; it never modifies held-out evaluation data.
+It also launches the allowlisted campaign command and reads campaign phase, paired interval, promotion,
+and adapter-loop lineage receipts from `runs/`. It cannot run an Adamaton proposal command, merge an
+adapter, overwrite a parent, or publish a model.
 
 ### FSDP2 checkpoints and safe exports
 
@@ -373,8 +420,9 @@ Everything is a **drop-in `linear_attn` / attention module swap** on a HuggingFa
 | [`config.py`](src/rwkv_lab/config.py) | Declarative YAML campaigns; the corpora registry (`local` / `blend` / `blend-mix`) behind the dashboard's LM tasks. |
 | [`registry.py`](src/rwkv_lab/registry.py) / [`fused_ce.py`](src/rwkv_lab/fused_ce.py) | Campaign/trial SQLite registry; fused LM-head cross-entropy (flash CE, pad-masking). |
 | [`rlvr.py`](src/rwkv_lab/rlvr.py) / [`rlvr_train.py`](src/rwkv_lab/rlvr_train.py) / [`rlvr_evaluation.py`](src/rwkv_lab/rlvr_evaluation.py) / [`rlvr_campaign.py`](src/rwkv_lab/rlvr_campaign.py) / [`recursive_improve.py`](src/rwkv_lab/recursive_improve.py) | GSPO/Dr.GRPO/DAPO objectives; cold-start/preflight training; recurrent batched rollouts; leakage, confidence, family-regression, and budget gates; equal-budget campaigns; and bounded Adamaton proposal lineage. |
-| [`posttrain_data.py`](src/rwkv_lab/posttrain_data.py) / [`posttrain_train.py`](src/rwkv_lab/posttrain_train.py) | Typed post-training JSONL, role-aware rendering, assistant-only token masks, validation/preview, and executable native-RWKV SFT/DPO/KTO/ORPO/SimPO/reward training. |
-| [`adapters.py`](src/rwkv_lab/adapters.py) / [`preference.py`](src/rwkv_lab/preference.py) | Named RWKV-aware LoRA lifecycle and reference-tested preference/outcome/process-reward losses. |
+| [`posttrain_data.py`](src/rwkv_lab/posttrain_data.py) / [`posttrain_train.py`](src/rwkv_lab/posttrain_train.py) | Typed tool-aware post-training JSONL, streamed content-addressed token caches, loss-mask/packing/truncation audits, and executable native-RWKV SFT/DPO/KTO/ORPO/SimPO/ORM/PRM training. |
+| [`adapters.py`](src/rwkv_lab/adapters.py) / [`quantization.py`](src/rwkv_lab/quantization.py) / [`preference.py`](src/rwkv_lab/preference.py) | Named RWKV-aware LoRA lifecycle, portable packed-NF4 QLoRA qualification, and reference-tested preference/outcome/process-reward losses. |
+| [`posttrain_campaign.py`](src/rwkv_lab/posttrain_campaign.py) / [`adapter_recursive.py`](src/rwkv_lab/adapter_recursive.py) / [`posttrain_kernels.py`](src/rwkv_lab/posttrain_kernels.py) | Equal-token paired/confirmation campaigns and receipts; adapter-first immutable recursive parents; parity-before-speed kernel and compile qualification. |
 | [`distributed.py`](src/rwkv_lab/distributed.py) / [`export_bundle.py`](src/rwkv_lab/export_bundle.py) | FSDP2 + DCP exact-resume state and verified safetensors export packages with lineage/promotion receipts. |
 
 ### Looped recurrence (recurrent depth)
@@ -569,7 +617,7 @@ Only papers with a concrete implementation or adopted design decision in this re
 
 **P1 — data and distributed/numerical training systems**
 
-- [LoRA](https://arxiv.org/abs/2106.09685) · [QLoRA](https://arxiv.org/abs/2305.14314) — frozen-base low-rank adaptation, named adapter artifacts, merge/unmerge, and guarded compatibility with caller-selected quantized linears → [`adapters.py`](src/rwkv_lab/adapters.py)
+- [LoRA](https://arxiv.org/abs/2106.09685) · [QLoRA](https://arxiv.org/abs/2305.14314) — frozen-base low-rank adaptation, named adapter artifacts, packed NF4 storage, qualification, and confirmed dense materialization → [`adapters.py`](src/rwkv_lab/adapters.py), [`quantization.py`](src/rwkv_lab/quantization.py), [`posttrain_kernels.py`](src/rwkv_lab/posttrain_kernels.py)
 - [DPO](https://arxiv.org/abs/2305.18290) · [KTO](https://arxiv.org/abs/2402.01306) · [ORPO](https://arxiv.org/abs/2403.07691) · [SimPO](https://arxiv.org/abs/2405.14734) · [InstructGPT outcome rewards](https://arxiv.org/abs/2203.02155) · [Let's Verify Step by Step process rewards](https://arxiv.org/abs/2305.20050) — paired, binary-feedback, monolithic, reference-free, outcome, and step-level reward training primitives → [`preference.py`](src/rwkv_lab/preference.py), [`posttrain_train.py`](src/rwkv_lab/posttrain_train.py)
 - [LLaMA-Factory](https://arxiv.org/abs/2403.13372) — the adopted design decision is a typed post-training dataset/template layer with explicit target masks; model-family abstraction and Transformer-specific kernels are not copied → [`posttrain_data.py`](src/rwkv_lab/posttrain_data.py)
 - [RegMix](https://arxiv.org/abs/2407.01492) · [Data Mixing Made Efficient](https://arxiv.org/abs/2502.15950) — ridge mixture surrogate, simplex search, and optional per-domain expert-loss interactions → [`data_mixture.py`](src/rwkv_lab/data_mixture.py)

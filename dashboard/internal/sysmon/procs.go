@@ -16,7 +16,7 @@ import (
 var trainingScripts = []string{
 	"convert_train.py", "distill_consolidate.py", "drive_isolation.py",
 	"train_mla.py", "train_mla_engram.py", "rlvr_train.py", "rlvr_campaign.py",
-	"recursive_improve.py", "posttrain_train.py",
+	"recursive_improve.py", "adapter_recursive.py", "posttrain_train.py", "posttrain_campaign.py",
 }
 
 var trainingModules = map[string]string{
@@ -29,6 +29,8 @@ var trainingModules = map[string]string{
 	"rlvr_campaign.py":       "rwkv_lab.rlvr_campaign",
 	"recursive_improve.py":   "rwkv_lab.recursive_improve",
 	"posttrain_train.py":     "rwkv_lab.posttrain_train",
+	"posttrain_campaign.py":  "rwkv_lab.posttrain_campaign",
+	"adapter_recursive.py":   "rwkv_lab.adapter_recursive",
 }
 
 // AllowedScript reports whether basename(path) is a recognized training

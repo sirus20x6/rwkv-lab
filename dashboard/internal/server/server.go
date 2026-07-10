@@ -153,6 +153,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/posttraining", s.handlePosttraining)
 	s.mux.HandleFunc("POST /api/posttraining/inspect", s.handleInspectPosttraining)
 	s.mux.HandleFunc("POST /api/posttraining/version", s.handleVersionPosttraining)
+	s.mux.HandleFunc("POST /api/posttraining/campaign", s.handleLaunchPosttrainingCampaign)
 	s.mux.HandleFunc("POST /api/posttraining/compare", s.handleComparePosttraining)
 	s.mux.HandleFunc("POST /api/posttraining/feedback", s.handlePosttrainingFeedback)
 	s.mux.HandleFunc("GET /api/diff", s.handleDiff)

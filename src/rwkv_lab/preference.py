@@ -173,3 +173,40 @@ def process_reward_loss(step_logits: torch.Tensor, step_labels: torch.Tensor,
         raise ValueError("process-reward mask must select at least one matching step")
     mask = step_mask.to(raw.dtype)
     return (raw * mask).sum() / mask.sum()
+
+
+def binary_calibration(logits: torch.Tensor, labels: torch.Tensor, *, bins: int = 10) -> dict[str, float]:
+    """Accuracy, Brier score, and expected calibration error for reward-model receipts."""
+    if logits.shape != labels.shape or logits.numel() == 0 or bins <= 0:
+        raise ValueError("calibration needs non-empty matching tensors and positive bins")
+    probabilities = logits.detach().float().sigmoid().flatten()
+    truth = labels.detach().float().flatten()
+    accuracy = ((probabilities >= 0.5) == truth.bool()).float().mean()
+    brier = (probabilities - truth).square().mean()
+    ece = torch.zeros((), dtype=torch.float32, device=probabilities.device)
+    edges = torch.linspace(0.0, 1.0, bins + 1, device=probabilities.device)
+    for index in range(bins):
+        selected = ((probabilities >= edges[index]) &
+                    (probabilities <= edges[index + 1] if index == bins - 1
+                     else probabilities < edges[index + 1]))
+        if torch.any(selected):
+            confidence = probabilities[selected].mean()
+            empirical = truth[selected].mean()
+            ece += selected.float().mean() * (confidence - empirical).abs()
+    return {"accuracy": float(accuracy), "brier": float(brier), "ece": float(ece)}
+
+
+def adversarial_reward_audit(clean_logits: torch.Tensor, adversarial_logits: torch.Tensor,
+                             adversarial_labels: torch.Tensor) -> dict[str, float]:
+    """Measure whether explicitly corrupted/reordered steps receive unjustified high reward."""
+    if adversarial_logits.shape != adversarial_labels.shape or adversarial_logits.numel() == 0:
+        raise ValueError("adversarial audit needs matching non-empty logits and labels")
+    clean_mean = clean_logits.detach().float().sigmoid().mean()
+    adversarial = adversarial_logits.detach().float().sigmoid()
+    labels = adversarial_labels.detach().bool()
+    negatives = ~labels
+    false_positive = ((adversarial >= 0.5) & negatives).float().sum() / negatives.sum().clamp_min(1)
+    return {"clean_probability": float(clean_mean),
+            "adversarial_probability": float(adversarial.mean()),
+            "clean_adversarial_margin": float(clean_mean - adversarial.mean()),
+            "adversarial_false_positive_rate": float(false_positive)}

@@ -8,6 +8,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
@@ -44,6 +45,93 @@ type posttrainInspection struct {
 	Previews      []posttrainPreview `json:"previews"`
 }
 
+type posttrainComparison struct {
+	N                    int `json:"n"`
+	Delta, CILow, CIHigh float64
+}
+
+func (p *posttrainComparison) UnmarshalJSON(data []byte) error {
+	type raw struct {
+		N      int     `json:"n"`
+		Delta  float64 `json:"delta"`
+		CILow  float64 `json:"ci_low"`
+		CIHigh float64 `json:"ci_high"`
+	}
+	var value raw
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	p.N, p.Delta, p.CILow, p.CIHigh = value.N, value.Delta, value.CILow, value.CIHigh
+	return nil
+}
+
+type posttrainReceipt struct {
+	Objective       string `json:"objective"`
+	Eligible        bool   `json:"eligible"`
+	Reason          string `json:"reason"`
+	SelectedAdapter string `json:"selected_adapter"`
+}
+
+type posttrainCampaign struct {
+	Path              string                                    `json:"-"`
+	Status            string                                    `json:"status"`
+	Created           float64                                   `json:"created_ts"`
+	Elapsed           float64                                   `json:"elapsed_seconds"`
+	Objectives        []string                                  `json:"objectives"`
+	Seeds             []int                                     `json:"seeds"`
+	ConfirmationSeeds []int                                     `json:"confirmation_seeds"`
+	Comparisons       map[string]map[string]posttrainComparison `json:"comparisons"`
+	Receipts          []posttrainReceipt                        `json:"promotion_receipts"`
+}
+
+type adapterLoopRow struct {
+	Path       string `json:"-"`
+	Status     string `json:"status"`
+	Current    string `json:"current_checkpoint"`
+	Iterations []struct {
+		Accepted  bool   `json:"accepted"`
+		Preserved string `json:"preserved_adapter"`
+	} `json:"iterations"`
+}
+
+func (s *Server) readPosttrainCampaigns() ([]posttrainCampaign, []adapterLoopRow) {
+	campaigns := []posttrainCampaign{}
+	loops := []adapterLoopRow{}
+	_ = filepath.WalkDir(s.cfg.RunsDir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return nil
+		}
+		if entry.Name() != "posttrain-campaign.json" && entry.Name() != "adapter-loop.json" {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return nil
+		}
+		rel, _ := filepath.Rel(s.cfg.RunsDir, filepath.Dir(path))
+		if entry.Name() == "posttrain-campaign.json" {
+			var row posttrainCampaign
+			if json.Unmarshal(data, &row) == nil && row.Status != "" {
+				row.Path = filepath.ToSlash(rel)
+				campaigns = append(campaigns, row)
+			}
+		}
+		if entry.Name() == "adapter-loop.json" {
+			var row adapterLoopRow
+			if json.Unmarshal(data, &row) == nil && row.Status != "" {
+				row.Path = filepath.ToSlash(rel)
+				loops = append(loops, row)
+			}
+		}
+		return nil
+	})
+	sort.Slice(campaigns, func(i, j int) bool { return campaigns[i].Created > campaigns[j].Created })
+	if len(campaigns) > 20 {
+		campaigns = campaigns[:20]
+	}
+	return campaigns, loops
+}
+
 func (s *Server) handlePosttraining(w http.ResponseWriter, r *http.Request) {
 	sse := datastar.NewSSE(w, r)
 	var b strings.Builder
@@ -55,6 +143,54 @@ func (s *Server) handlePosttraining(w http.ResponseWriter, r *http.Request) {
 	b.WriteString(`</datalist><button class="btn" data-on:click="@post('/api/posttraining/inspect')">inspect</button></div>`)
 	b.WriteString(`<div class="ctl-row"><input class="ctl-input" placeholder="optional additional JSONL paths, comma-separated" data-bind="ptMerge"><button class="btn" data-on:click="confirm('Validate and create an immutable merged dataset version?') && @post('/api/posttraining/version')">version / merge</button></div>`)
 	b.WriteString(`<div id="posttraining-inspect"><div class="empty">select a repository JSONL dataset</div></div>`)
+	b.WriteString(`<div class="panel-title">post-training campaigns <span class="sub">equal token budget · paired seeds · fresh confirmation · immutable promotion receipt</span></div>`)
+	b.WriteString(`<div class="pt-campaign-grid"><div><table class="field-tbl">`)
+	b.WriteString(`<tr><td class="f-l">parent</td><td><input data-bind="ptCampaignCkpt" value="runs/gen_smoke/ckpt.pt"></td></tr>`)
+	b.WriteString(`<tr><td class="f-l">train / held-out</td><td><input data-bind="ptCampaignData" placeholder="datasets/train.jsonl"><input data-bind="ptCampaignEval" placeholder="datasets/eval.jsonl"></td></tr>`)
+	b.WriteString(`<tr><td class="f-l">output</td><td><input data-bind="ptCampaignOut" value="runs/posttrain-campaign"></td></tr>`)
+	b.WriteString(`<tr><td class="f-l">objectives</td><td><input data-bind="ptCampaignObjectives" value="sft,dpo,kto,orpo,simpo"></td></tr>`)
+	b.WriteString(`<tr><td class="f-l">explore / confirm</td><td><input data-bind="ptCampaignSeeds" value="0,1,2"><input data-bind="ptCampaignConfirm" value="100,101,102"></td></tr>`)
+	b.WriteString(`<tr><td class="f-l">token budget</td><td><input type="number" data-bind="ptCampaignBudget" value="100000"></td></tr>`)
+	b.WriteString(`<tr><td class="f-l">base</td><td><select data-bind="ptCampaignQuant"><option value="none">dense LoRA</option><option value="nf4">native NF4 QLoRA</option></select></td></tr>`)
+	b.WriteString(`</table><button class="btn" data-on:click="confirm('Launch paired post-training and confirmation campaign?') && @post('/api/posttraining/campaign')">▶ run campaign</button></div><div class="pt-campaign-results">`)
+	campaigns, loops := s.readPosttrainCampaigns()
+	if len(campaigns) == 0 {
+		b.WriteString(`<div class="empty">no post-training campaigns yet</div>`)
+	}
+	for _, campaign := range campaigns {
+		fmt.Fprintf(&b, `<div class="rlvr-campaign"><div class="exp-tname"><code>%s</code> <span class="rlvr-status %s">%s</span> <span class="dim">%d explore · %d confirm · %.1fm</span></div>`, esc(campaign.Path), esc(campaign.Status), esc(campaign.Status), len(campaign.Seeds), len(campaign.ConfirmationSeeds), campaign.Elapsed/60)
+		b.WriteString(`<table class="exp-tbl"><tr class="exp-hd"><td>objective</td><td>explore Δ [CI]</td><td>confirm Δ [CI]</td><td>promotion</td></tr>`)
+		for _, objective := range campaign.Objectives {
+			explore := campaign.Comparisons[objective]["explore"]
+			confirm := campaign.Comparisons[objective]["confirm"]
+			decision := "pending"
+			for _, receipt := range campaign.Receipts {
+				if receipt.Objective == objective {
+					if receipt.Eligible {
+						decision = "eligible"
+					} else {
+						decision = "rejected"
+					}
+				}
+			}
+			fmt.Fprintf(&b, `<tr><td class="exp-cfgn">%s</td><td>%+.4f [%+.4f,%+.4f]</td><td>%+.4f [%+.4f,%+.4f]</td><td class="%s">%s</td></tr>`, esc(objective), explore.Delta, explore.CILow, explore.CIHigh, confirm.Delta, confirm.CILow, confirm.CIHigh, map[bool]string{true: "sig", false: "ns"}[decision == "eligible"], decision)
+		}
+		b.WriteString(`</table></div>`)
+	}
+	if len(loops) > 0 {
+		b.WriteString(`<div class="exp-h">adapter-recursive lineage</div><table class="exp-tbl"><tr class="exp-hd"><td>loop</td><td>status</td><td>rounds</td><td>accepted</td><td>current parent</td></tr>`)
+		for _, loop := range loops {
+			accepted := 0
+			for _, iteration := range loop.Iterations {
+				if iteration.Accepted {
+					accepted++
+				}
+			}
+			fmt.Fprintf(&b, `<tr><td>%s</td><td>%s</td><td>%d</td><td>%d</td><td><code>%s</code></td></tr>`, esc(loop.Path), esc(loop.Status), len(loop.Iterations), accepted, esc(loop.Current))
+		}
+		b.WriteString(`</table>`)
+	}
+	b.WriteString(`</div></div>`)
 	b.WriteString(`<div class="panel-title">paired behavior <span class="sub">same prompt · seed · sampling settings · explicit preference capture</span></div>`)
 	b.WriteString(`<div class="ctl-row"><input class="ctl-input" placeholder="run A" data-bind="ptRunA"><input class="ctl-input" placeholder="run B" data-bind="ptRunB"></div>`)
 	b.WriteString(`<textarea class="ctl-input" rows="2" placeholder="comparison prompt" data-bind="ptPrompt"></textarea>`)
@@ -187,6 +323,93 @@ func (s *Server) handleVersionPosttraining(w http.ResponseWriter, r *http.Reques
 	relative, _ := filepath.Rel(s.cfg.RepoRoot, result.Dataset)
 	_ = sse.MarshalAndPatchSignals(map[string]any{"ptDataset": filepath.ToSlash(relative), "ptMerge": ""})
 	toastOK(sse, "created immutable dataset version "+result.Version+"; inspect to preview it")
+}
+
+func (s *Server) handleLaunchPosttrainingCampaign(w http.ResponseWriter, r *http.Request) {
+	var sig struct {
+		Checkpoint string `json:"ptCampaignCkpt"`
+		Data       string `json:"ptCampaignData"`
+		Eval       string `json:"ptCampaignEval"`
+		Output     string `json:"ptCampaignOut"`
+		Objectives string `json:"ptCampaignObjectives"`
+		Seeds      string `json:"ptCampaignSeeds"`
+		Confirm    string `json:"ptCampaignConfirm"`
+		Budget     string `json:"ptCampaignBudget"`
+		Quant      string `json:"ptCampaignQuant"`
+	}
+	_ = datastar.ReadSignals(r, &sig)
+	sse := datastar.NewSSE(w, r)
+	checkpoint, err := s.pathUnderRepo(sig.Checkpoint, true)
+	if err != nil || checkpoint == "" {
+		toastErr(sse, "campaign parent must be an existing repository checkpoint")
+		return
+	}
+	data, err := s.pathUnderRepo(sig.Data, true)
+	if err != nil || data == "" || !strings.HasSuffix(strings.ToLower(data), ".jsonl") {
+		toastErr(sse, "campaign train data must be an existing JSONL")
+		return
+	}
+	eval, err := s.pathUnderRepo(sig.Eval, true)
+	if err != nil || eval == "" || !strings.HasSuffix(strings.ToLower(eval), ".jsonl") {
+		toastErr(sse, "campaign requires separate held-out JSONL")
+		return
+	}
+	out, err := s.pathUnderRepo(sig.Output, false)
+	if err != nil || out == "" {
+		toastErr(sse, "campaign output is invalid")
+		return
+	}
+	rel, _ := filepath.Rel(s.cfg.RunsDir, out)
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		toastErr(sse, "campaign output must be under runs/")
+		return
+	}
+	allowed := map[string]bool{"sft": true, "dpo": true, "kto": true, "orpo": true, "simpo": true, "reward": true, "prm": true}
+	objectives := strings.Split(sig.Objectives, ",")
+	for _, value := range objectives {
+		if !allowed[strings.TrimSpace(value)] {
+			toastErr(sse, "campaign objective is not allowlisted")
+			return
+		}
+	}
+	validateSeeds := func(raw string) bool {
+		values := strings.Split(raw, ",")
+		if len(values) < 1 || len(values) > 8 {
+			return false
+		}
+		seen := map[int]bool{}
+		for _, item := range values {
+			value, parseErr := strconv.Atoi(strings.TrimSpace(item))
+			if parseErr != nil || seen[value] {
+				return false
+			}
+			seen[value] = true
+		}
+		return true
+	}
+	if !validateSeeds(sig.Seeds) || !validateSeeds(sig.Confirm) {
+		toastErr(sse, "exploration and confirmation each need 1–8 unique integer seeds")
+		return
+	}
+	budget, err := boundedInt(sig.Budget, 100000, 1, 2_000_000_000)
+	if err != nil {
+		toastErr(sse, "campaign token budget is invalid")
+		return
+	}
+	if sig.Quant != "none" && sig.Quant != "nf4" {
+		toastErr(sse, "campaign base must be dense or NF4")
+		return
+	}
+	args := []string{"-m", "rwkv_lab.posttrain_campaign", "--checkpoint", checkpoint,
+		"--data", data, "--eval-data", eval, "--output", out, "--objectives", sig.Objectives,
+		"--seeds", sig.Seeds, "--confirm-seeds", sig.Confirm, "--token-budget", budget,
+		"--base-quantization", sig.Quant}
+	pid, err := s.spawnPy(args, fmt.Sprintf("posttrain_campaign_%d.log", time.Now().Unix()))
+	if err != nil {
+		toastErr(sse, "post-training campaign launch failed: "+err.Error())
+		return
+	}
+	toastOK(sse, fmt.Sprintf("launched %d-objective post-training campaign (pid %d)", len(objectives), pid))
 }
 
 type pairedSignals struct {
