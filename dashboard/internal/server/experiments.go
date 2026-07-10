@@ -213,6 +213,8 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 		`<td class="f-d">torch.compile the training forward — fuses the fp8 cast+GEMM for the real ` +
 		`~2× speedup on Blackwell (one-time ~40s compile at step 0). Best paired with fp8.</td></tr>`)
 	numField("gen block", "genblock", "synthetic: batches generated per launch — amortizes gen kernel launches (1 = off)", 1)
+	numField("grad accum", "gradaccum", "LM: micro-batches per optimizer step — effective batch = batch × N (1 = off)", 1)
+	strField("ema", "ema", "LM: EMA decay for shadow weights — eval + checkpoint carry them (0.999 typical, 0 = off)", "0")
 	// Muon variants — rows shown only when optimizer = muon; each variant is its own checkbox row
 	moff := ` data-class-muon-off="$optimizer !== 'muon'"`
 	mvRow := func(sig, name, desc string) {
@@ -387,6 +389,12 @@ func (s *Server) handleLaunchExperiment(w http.ResponseWriter, r *http.Request) 
 			"--d-model", str("dmodel", "1024"), "--n-layers", str("nlayers", "18"), "--head-size", str("headsize", "64"),
 			"--batch", str("batch", "16"), "--seq-len", str("ctxlen", "1024")}, budget...)
 		args = append(args, optArgs...)
+		if ga := str("gradaccum", "1"); ga != "" && ga != "1" { // effective batch = batch × N
+			args = append(args, "--grad-accum", ga)
+		}
+		if em := str("ema", "0"); em != "" && em != "0" { // EMA shadow weights (eval + ckpt)
+			args = append(args, "--ema", em)
+		}
 		note := "from scratch"
 		if init == "g1g" {
 			args = append(args, "--init-g1g", "models/rwkv7-g1g-1.5b.pth")
