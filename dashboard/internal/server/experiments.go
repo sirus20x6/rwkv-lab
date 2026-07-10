@@ -40,6 +40,7 @@ var knownLevers = []leverDef{
 	{"loop3_factor", "loop ×3 + factored head×channel gate", false},
 	{"nextlat", "next-latent prediction aux — predicts h[t+d] in-sequence (training-only, no inference cost)", false},
 	{"loop3_nextlat", "loop ×3 + next-latent prediction", false},
+	{"seedchain", "Future-Seed — layer L's state scan starts from layer L−1's final state (no loops)", false},
 	{"top", "token-order prediction — lookahead window (LM only)", true},
 	{"lmtp", "leap multi-token prediction (LM only)", true},
 	{"bst", "belief-state forward+backward objective (LM only)", true},

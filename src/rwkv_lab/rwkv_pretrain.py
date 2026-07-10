@@ -45,19 +45,38 @@ class Block(nn.Module):
         self.att = LoopedRWKV(core, hidden_size=d, **loop_kw) if loop_kw else core
         self.ffn = RWKV8ChannelMixDeltaNet(d, ffn_hidden, layer_idx=i)
 
-    def forward(self, x, v_first):
+    def forward(self, x, v_first, seed=None, return_seed=False):
         if self.i == 0:
             x = self.ln0(x)
-        a, v_first = self.att(self.ln1(x), v_first=v_first, return_v_first=True)
+        if seed is not None or return_seed:                  # Future-Seed: seed this layer's wkv scan
+            if isinstance(self.att, LoopedRWKV):
+                # LoopedRWKV forwards state kwargs to pass 1 only; refinement passes would run
+                # stateless — ambiguous semantics, so refuse rather than silently accept.
+                raise ValueError("Future-Seed state on a LoopedRWKV att is unsupported")
+            if return_seed:
+                a, seed_out, _shift, v_first = self.att(self.ln1(x), v_first=v_first, return_v_first=True,
+                                                        initial_state=seed, return_state=True)
+            else:                                            # last chained layer: consume s_0, skip unused s_T
+                a, v_first = self.att(self.ln1(x), v_first=v_first, return_v_first=True,
+                                      initial_state=seed)
+        else:
+            a, v_first = self.att(self.ln1(x), v_first=v_first, return_v_first=True)
         x = x + a
         x = x + _unwrap(self.ffn(self.ln2(x)))
+        if return_seed:
+            return x, v_first, seed_out
         return x, v_first
 
 
 class RWKV7Small(nn.Module):
-    def __init__(self, vocab, d, n_layers, head_size, loop_kw, att_kw=None, ffn_hidden=None):
+    def __init__(self, vocab, d, n_layers, head_size, loop_kw, att_kw=None, ffn_hidden=None,
+                 seed_chain=False):
         super().__init__()
         assert d % head_size == 0
+        if seed_chain and loop_kw:
+            raise ValueError("seed_chain (Future-Seed cross-layer state) is incompatible with loop "
+                             "levers — run it without loops for a clean A/B")
+        self.seed_chain = seed_chain          # Future-Seed: layer L starts from layer L-1's final wkv state
         self.emb = nn.Embedding(vocab, d)
         self.blocks = nn.ModuleList([Block(d, d // head_size, head_size, i, n_layers, loop_kw,
                                            att_kw, ffn_hidden)
@@ -77,8 +96,12 @@ class RWKV7Small(nn.Module):
     def forward(self, ids, return_hidden=False):
         x = self.emb(ids)
         v_first = None                           # layer 0 sets it; later layers lerp toward it
-        for b in self.blocks:
-            x, v_first = b(x, v_first)
+        seed = None                              # Future-Seed: s_T of layer L-1 -> s_0 of layer L (None => 0)
+        for j, b in enumerate(self.blocks):
+            if self.seed_chain and j < len(self.blocks) - 1:
+                x, v_first, seed = b(x, v_first, seed=seed, return_seed=True)
+            else:                                # last layer consumes the seed but skips the unused s_T
+                x, v_first = b(x, v_first, seed=seed)
         h = self.ln_out(x)                       # post-norm final hidden (what aux heads read)
         logits = self.head(h)
         return (logits, h) if return_hidden else logits
@@ -230,6 +253,8 @@ def main():
     # latent-prediction / lookahead aux objectives (aux head on the final hidden; LM head unchanged)
     for f in ["nextlat-weight", "top-weight", "lmtp-weight", "bst-weight", "jtp-weight"]:
         ap.add_argument(f"--{f}", type=float, default=0.0)
+    ap.add_argument("--seed-chain", type=int, default=0,   # int like the loop flags (lever-translatable)
+                    help="Future-Seed: seed layer L's wkv scan with layer L-1's final state (from-scratch, no loops)")
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -247,19 +272,27 @@ def main():
         model = model.to(dev, torch.bfloat16)
         print(f"init from g1g {args.init_g1g}: loaded {ginfo['loaded']}/{ginfo['n_ckpt']} tensors "
               f"(dims forced to g1g 24L/d2048/h64)", flush=True)
+        if args.seed_chain:
+            print("warn: --seed-chain ignored for g1g init (from-scratch only)", flush=True)
     else:
-        model = RWKV7Small(65536, args.d_model, args.n_layers, args.head_size, lk).to(dev, torch.bfloat16)
+        model = RWKV7Small(65536, args.d_model, args.n_layers, args.head_size, lk,
+                           seed_chain=bool(args.seed_chain)).to(dev, torch.bfloat16)
+        if args.seed_chain:
+            print("Future-Seed: cross-layer state chaining ON (s_0^L = s_T^{L-1})", flush=True)
     if args.fp8:
         n8 = apply_fp8(model)
         print(f"fp8: {n8} Linear layers -> Float8Linear (torchao)", flush=True)
     nparam = sum(p.numel() for p in model.parameters())
+    seed_chain = bool(args.seed_chain) and not args.init_g1g  # g1g branch ignores the flag
     tag = f"scratch-L{args.n_layers}d{args.d_model}-loop{args.loop_count}" + \
           ("".join(k for k, v in [("H", args.loop_hyper), ("C", args.loop_cart_anchor),
            ("Q", args.loop_deq), ("F", args.loop_fp_halt), ("A", args.loop_adaptive_halt),
            ("R", args.loop_iter_readout)] if v) or "") + \
-          (f"-{args.loop_gate}" if lk and args.loop_gate != "scalar" else "")
+          (f"-{args.loop_gate}" if lk and args.loop_gate != "scalar" else "") + \
+          ("-seedchain" if seed_chain else "")
     print(f"model {tag}: {nparam/1e6:.1f}M params  loop_kw={lk}", flush=True)
     json.dump({"loop_count": args.loop_count, "n_layers": args.n_layers, "mode": tag,
+               "seed_chain": seed_chain,
                "params_m": round(nparam / 1e6, 2)}, open(os.path.join(args.out, "loop_rw.json"), "w"))
 
     toks = np.memmap(args.data, dtype=np.uint16, mode="r")
