@@ -20,7 +20,8 @@ Schema:
       loop3:    {n_loops: 3}
 """
 from __future__ import annotations
-import argparse, json, os, subprocess, sys
+import argparse, json, os, subprocess, sys, time
+from pathlib import Path
 import yaml
 
 
@@ -45,7 +46,84 @@ _LM_FLAG = {"n_loops": "--loop-count", "hyper_lanes": "--loop-hyper", "gate_mode
             "top_weight": "--top-weight", "lmtp_weight": "--lmtp-weight", "bst_weight": "--bst-weight",
             "jtp_weight": "--jtp-weight", "seed_chain": "--seed-chain", "engram": "--engram",
             "deepembed": "--deepembed", "de_dim": "--de-dim", "de_mode": "--de-mode",
-            "de_shift": "--de-shift", "de_emb_res": "--de-emb-res"}
+            "de_shift": "--de-shift", "de_emb_res": "--de-emb-res",
+            "u_mup_base_width": "--u-mup-base-width", "u_mup_base_depth": "--u-mup-base-depth",
+            "online_memory": "--online-memory", "online_memory_mode": "--online-memory-mode",
+            "online_memory_dim": "--online-memory-dim", "online_memory_lr": "--online-memory-lr",
+            "online_memory_retention": "--online-memory-retention",
+            "online_memory_window": "--online-memory-window", "nvfp4": "--nvfp4",
+            "nvfp4_rht": "--nvfp4-rht"}
+
+
+def _read_train_log(path: str, mode: str) -> tuple[dict, list, dict]:
+    """Normalize either trainer's JSONL into campaign metrics/curve/profile."""
+    rows = []
+    if os.path.exists(path):
+        with open(path) as f:
+            for line in f:
+                try: rows.append(json.loads(line))
+                except (ValueError, TypeError): pass
+    evals = [r for r in rows if r.get("kind") == "eval"]
+    trains = [r for r in rows if r.get("kind") == "train"]
+    if not evals:
+        raise RuntimeError(f"trainer produced no eval record in {path}")
+    final = evals[-1]
+    if mode == "lm":
+        val_loss = float(final.get("val_loss", final["loss"]))
+        metrics = {"acc": -val_loss, "val_loss": val_loss,
+                   "ppl": float(final.get("ppl", 0.0)), "step": float(final.get("step", 0))}
+    else:
+        metrics = {"acc": float(final.get("top1_acc", 0.0)),
+                   "top1_acc": float(final.get("top1_acc", 0.0)),
+                   "loss": float(final["loss"]), "ppl": float(final.get("ppl", 0.0)),
+                   "step": float(final.get("step", 0))}
+        if "block_val" in final: metrics["block_val"] = float(final["block_val"])
+    curve_rows = trains or evals
+    series = [{"step": int(r.get("step", i)), "loss": float(r["loss"])}
+              for i, r in enumerate(curve_rows) if isinstance(r.get("loss"), (int, float))]
+    profile = {}
+    if trains and isinstance(trains[-1].get("tok_per_sec"), (int, float)):
+        profile["tok_per_sec"] = float(trains[-1]["tok_per_sec"])
+        metrics["tok_per_sec"] = profile["tok_per_sec"]
+    return metrics, series, profile
+
+
+def _execute_trial(cmd, out_dir, *, campaign_id, arm_id, seed, budget, mode,
+                   rung=0, phase="explore", db=None, rng=None, artifacts=()):
+    """Execute a trainer and atomically turn its outputs into one normalized trial."""
+    from rwkv_lab import registry
+    started = time.time()
+    try:
+        subprocess.run(cmd, env={**os.environ, "PYTHONPATH": "src"}, check=True)
+        metrics, series, profile = _read_train_log(os.path.join(out_dir, "train.jsonl"), mode)
+        profile["train_seconds"] = time.time() - started
+        metrics["train_seconds"] = profile["train_seconds"]
+        tid = registry.record_trial(campaign_id, arm_id, seed, rung, budget, metrics,
+                                    series=series, profile=profile,
+                                    rng={**(rng or {}), "command": cmd}, phase=phase,
+                                    started_ts=started, db=db)
+        for kind, path in (("train_log", os.path.join(out_dir, "train.jsonl")), *artifacts):
+            if path and os.path.isfile(path):
+                registry.record_artifact(campaign_id, path, kind, trial_id=tid,
+                                         metadata={"seed": seed, "rung": rung}, db=db)
+        return metrics
+    except Exception as e:
+        registry.record_trial(campaign_id, arm_id, seed, rung, budget, None, status="failed",
+                              error=f"{type(e).__name__}: {e}", phase=phase,
+                              rng={**(rng or {}), "command": cmd}, started_ts=started, db=db)
+        print(f"  trial failed: {type(e).__name__}: {e}", flush=True)
+        return None
+
+
+def _record_campaign_comparisons(cid, arm_ids, runs, *, db=None, metric="acc", phase="explore"):
+    from rwkv_lab import experiment as E, registry
+    stats = E._paired_comparisons(runs, metric=metric, seed=cid)
+    if "baseline" in arm_ids:
+        for name, st in stats.items():
+            registry.record_comparison(cid, arm_ids[name], arm_ids["baseline"], metric, phase, st, db=db)
+            print(f"  {name:18} Δ{st['delta']:+.4f} CI[{st['ci_low']:+.4f},{st['ci_high']:+.4f}] "
+                  f"p_holm={st['p_adjusted']:.3g}", flush=True)
+    return stats
 
 
 def _run_synthetic(task_spec, cfg):
@@ -106,32 +184,170 @@ def _run_synthetic(task_spec, cfg):
     registry.finish_campaign(cid, db=cfg.get("registry_db"))
 
 
+def _lm_command(data_args, off_path, out_dir, model, train, lever, seed, save_path):
+    cmd = [sys.executable, "-m", "rwkv_lab.rwkv_pretrain", *data_args, "--out", out_dir,
+           "--d-model", str(model.get("d_model", 512)), "--n-layers", str(model.get("n_layers", 8)),
+           "--head-size", str(model.get("head_size", 64)), "--batch", str(train.get("batch", 16)),
+           "--seq-len", str(train.get("seq_len", 1024)), "--lr", str(train.get("lr", 6e-4)),
+           "--optimizer", str(train.get("optimizer", "adamw")),
+           "--weight-decay", str(train.get("weight_decay", 0.1)), "--seed", str(seed),
+           "--save", save_path]
+    cmd += (["--minutes", str(train["minutes"])] if train.get("minutes")
+            else ["--steps", str(train.get("steps", 2000))])
+    if off_path: cmd += ["--doc-offsets", off_path]
+    if train.get("init_g1g"): cmd += ["--init-g1g", str(train["init_g1g"])]
+    elif train.get("resume"): cmd += ["--resume", str(train["resume"])]
+    if train.get("warmup"): cmd += ["--warmup", str(train["warmup"])]
+    if train.get("fp8"): cmd += ["--fp8"]
+    if train.get("compile"): cmd += ["--compile"]
+    if int(train.get("grad_accum", 1) or 1) > 1: cmd += ["--grad-accum", str(train["grad_accum"])]
+    if float(train.get("ema", 0.0) or 0.0) > 0: cmd += ["--ema", str(train["ema"])]
+    muon = train.get("muon")
+    if muon and train.get("optimizer") == "muon":
+        for key, value in muon.items():
+            cmd += [f"--sm-{key.replace('_', '-')}", str(int(value) if isinstance(value, bool) else value)]
+    for key, value in lever.items():
+        if key in _LM_FLAG:
+            if key in ("nvfp4", "nvfp4_rht"):
+                if value: cmd += [_LM_FLAG[key]]
+            else:
+                cmd += [_LM_FLAG[key], str(int(value) if isinstance(value, bool) else value)]
+    return cmd
+
+
+def _run_lm_campaign(configs, model, train, data_args, off_path, *, task, seeds=1,
+                     db=None, campaign_name=""):
+    from rwkv_lab import experiment as E, registry
+    campaign_cfg = {"mode": "lm", "model": model, "train": train, "configs": configs,
+                    "seeds": seeds, "data_args": data_args, "doc_offsets": off_path,
+                    "decision_policy": {"primary_metric": "acc", "display_metric": "-val_loss",
+                                        "direction": "maximize", "alpha": 0.05,
+                                        "multiple_testing": "holm"}}
+    cid = registry.create_campaign(task, campaign_cfg, name=campaign_name or task,
+                                   capsule=registry.capture_capsule({"data_args": data_args,
+                                                                     "doc_offsets": off_path}), db=db)
+    arm_ids = {n: registry.ensure_arm(cid, n, cfg, db=db) for n, cfg in configs.items()}
+    runs = {n: [] for n in configs}
+    budget = float(train.get("minutes", 0)) * 60 or float(train.get("steps", 2000))
+    try:
+        for name, lever in configs.items():
+            for seed in range(int(seeds)):
+                out_dir = os.path.join("runs", f"campaign_{cid}", name, f"seed_{seed:04d}")
+                save_path = os.path.join(out_dir, "ckpt.pt")
+                cmd = _lm_command(data_args, off_path, out_dir, model, train, lever, seed, save_path)
+                print(f"[config] LM campaign={cid} arm='{name}' seed={seed}: {' '.join(cmd[2:])}", flush=True)
+                metrics = _execute_trial(cmd, out_dir, campaign_id=cid, arm_id=arm_ids[name],
+                                         seed=seed, budget=budget, mode="lm", db=db,
+                                         rng={"model_seed": seed, "data_seed": seed},
+                                         artifacts=(("checkpoint", save_path),))
+                if metrics: runs[name].append(metrics)
+            if not runs[name]: registry.set_arm_status(arm_ids[name], "failed", db=db)
+        _record_campaign_comparisons(cid, arm_ids, runs, db=db)
+        for name, arm_runs in runs.items():
+            if arm_runs:
+                agg = E._aggregate_runs(arm_runs)
+                registry.record(task, name, len(arm_runs), int(train.get("steps", 0)),
+                                {k: list(v) for k, v in agg.items()}, db=db)
+        registry.finish_campaign(cid, db=db)
+    except BaseException:
+        registry.finish_campaign(cid, status="failed", db=db); raise
+    return cid
+
+
 def _run_lm(data, cfg):
     bin_path, off_path = data
-    m, tr = cfg.get("model", {}), cfg.get("train", {})
-    for name, lever in cfg["configs"].items():
-        cmd = [sys.executable, "-m", "rwkv_lab.rwkv_pretrain", "--data", bin_path, "--out", f"runs/cfg_{name}",
-               "--d-model", str(m.get("d_model", 512)), "--n-layers", str(m.get("n_layers", 8)),
-               "--head-size", str(m.get("head_size", 64)), "--batch", str(tr.get("batch", 16)),
-               "--seq-len", str(tr.get("seq_len", 1024)), "--lr", str(tr.get("lr", 6e-4))]
-        cmd += (["--steps", str(tr["steps"])] if "steps" in tr else ["--minutes", str(tr.get("minutes", 10))])
-        if off_path:
-            cmd += ["--doc-offsets", off_path]
-        if tr.get("init_g1g"):                         # continued pretraining from pretrained g1g
-            cmd += ["--init-g1g", tr["init_g1g"]]
-        elif tr.get("resume"):                         # continue from a saved run checkpoint
-            cmd += ["--resume", tr["resume"]]
-        for k, v in lever.items():                     # translate lever kwargs -> CLI flags
-            if k in _LM_FLAG:
-                cmd += [_LM_FLAG[k], str(int(v) if isinstance(v, bool) else v)]
-        print(f"[config] LM run '{name}': {' '.join(cmd[2:])}", flush=True)
-        subprocess.run(cmd, env={**os.environ, "PYTHONPATH": "src"})
+    return _run_lm_campaign(cfg["configs"], cfg.get("model", {}), cfg.get("train", {}),
+                            ["--data", bin_path], off_path, task=f"lm:{Path(bin_path).name}",
+                            seeds=int(cfg.get("seeds", 1)), db=cfg.get("registry_db"),
+                            campaign_name=str(cfg.get("name", "LM campaign")))
+
+
+def _dict_cli_args(values: dict) -> list[str]:
+    out = []
+    for key, value in values.items():
+        flag = "--" + str(key).replace("_", "-")
+        if value is None: continue
+        if isinstance(value, bool):
+            out.append(flag if value else "--no-" + flag[2:])
+        else:
+            if isinstance(value, (list, tuple)): value = ",".join(str(x) for x in value)
+            out += [flag, str(value)]
+    return out
+
+
+def _run_conversion(cfg):
+    """Run paired per-layer conversion variants as one normalized campaign.
+
+    Config shape: ``conversion: {model_dir, data, layers, args: {...}}``; common
+    trainer options live in ``train`` and arm-specific CLI overrides in ``configs``.
+    Layer/seed pairs are the paired experimental units.
+    """
+    from rwkv_lab import experiment as E, registry
+    conv, train = cfg["conversion"], cfg.get("train", {})
+    layers = conv.get("layers", [conv.get("layer", 0)])
+    if isinstance(layers, str): layers = [int(x) for x in layers.split(",") if x.strip()]
+    layers = [int(x) for x in layers]
+    seeds, db = int(cfg.get("seeds", 1)), cfg.get("registry_db")
+    configs = cfg.get("configs", {"baseline": {}})
+    task = "conversion:" + ",".join(str(x) for x in layers)
+    decision = {"primary_metric": "acc", "display_metric": "top1_acc", "direction": "maximize",
+                "paired_unit": "layer_x_seed", "alpha": 0.05, "multiple_testing": "holm"}
+    campaign_cfg = {**cfg, "mode": "conversion", "decision_policy": decision}
+    cid = registry.create_campaign(task, campaign_cfg, name=str(cfg.get("name", "conversion campaign")),
+                                   capsule=registry.capture_capsule({"model_dir": conv["model_dir"],
+                                                                     "data": conv["data"]}), db=db)
+    arm_ids = {n: registry.ensure_arm(cid, n, lever, db=db) for n, lever in configs.items()}
+    runs = {n: [] for n in configs}
+    common_keys = {"steps", "seq_len", "batch_size", "state_stride", "lr", "optimizer",
+                   "weight_decay", "warmup_steps", "eval_every", "eval_windows",
+                   "eval_batch_size", "save_every", "device", "dtype"}
+    common = {k: v for k, v in train.items() if k in common_keys}
+    common.update(conv.get("args", {}))
+    steps = int(common.get("steps", 10_000))
+    try:
+        for name, lever in configs.items():
+            for layer in layers:
+                for seed in range(seeds):
+                    pair_seed = layer * 1_000_000 + seed
+                    out_dir = os.path.join("runs", f"campaign_{cid}", name,
+                                           f"layer_{layer:02d}_seed_{seed:04d}")
+                    values = {**common, **lever}
+                    init = values.pop("init_rwkv_ckpt", conv.get("init_rwkv_ckpt", ""))
+                    if init: values["init_rwkv_ckpt"] = str(init).format(layer=layer, layer02=f"{layer:02d}")
+                    cmd = [sys.executable, "-m", "rwkv_lab.convert_train", "--model-dir", conv["model_dir"],
+                           "--data", conv["data"], "--layer", str(layer), "--out", out_dir,
+                           "--seed", str(seed), *_dict_cli_args(values)]
+                    print(f"[config] conversion campaign={cid} arm='{name}' layer={layer} seed={seed}", flush=True)
+                    final_ckpt = os.path.join(out_dir, f"step_{steps - 1:06d}", "ckpt.pt")
+                    best_ckpt = os.path.join(out_dir, "best", "ckpt.pt")
+                    metrics = _execute_trial(cmd, out_dir, campaign_id=cid, arm_id=arm_ids[name],
+                                             seed=pair_seed, budget=steps, mode="conversion", db=db,
+                                             rng={"model_seed": seed, "layer": layer,
+                                                  "paired_unit": pair_seed},
+                                             artifacts=(("checkpoint", final_ckpt),
+                                                        ("best_checkpoint", best_ckpt)))
+                    if metrics:
+                        metrics["layer"] = float(layer); metrics["model_seed"] = float(seed)
+                        runs[name].append(metrics)
+            if not runs[name]: registry.set_arm_status(arm_ids[name], "failed", db=db)
+        _record_campaign_comparisons(cid, arm_ids, runs, db=db)
+        for name, arm_runs in runs.items():
+            if arm_runs:
+                agg = E._aggregate_runs(arm_runs)
+                registry.record(task, name, len(arm_runs), steps,
+                                {k: list(v) for k, v in agg.items()}, db=db)
+        registry.finish_campaign(cid, db=db)
+    except BaseException:
+        registry.finish_campaign(cid, status="failed", db=db); raise
+    return cid
 
 
 def run(cfg_path: str):
     cfg = load(cfg_path)
+    if "conversion" in cfg:
+        return _run_conversion(cfg)
     kind, data = resolve_data(cfg)
-    (_run_synthetic if kind == "synthetic" else _run_lm)(data, cfg)
+    return (_run_synthetic if kind == "synthetic" else _run_lm)(data, cfg)
 
 
 # Corpora for the board's LM-mode launches (doc-boundary, cached by spec hash).
@@ -151,7 +367,7 @@ _BLEND_MIX_SPEC = {**_BLEND_LM_SPEC, "ctx_buckets": [512, 1024, 2048, 4096, 8192
 CORPORA = {"local": _LOCAL_LM_SPEC, "blend": _BLEND_LM_SPEC, "blend-mix": _BLEND_MIX_SPEC}
 
 
-def run_lm(levers, model, train, corpus="local"):
+def run_lm(levers, model, train, corpus="local", *, seeds=1, db=None, campaign_name=""):
     """Run a set of named levers on an LM corpus via rwkv_pretrain — used by the board's LM
     mode so top/lmtp/bst/jtp (which need a token future) are launchable. Lever kwargs come from
     experiment.LEVERS (single source of truth); each run appears in the main trainboard leaderboard.
@@ -164,41 +380,10 @@ def run_lm(levers, model, train, corpus="local"):
     else:
         bin_path, off_path = resolve_corpus(spec)
         data_args = ["--data", bin_path]
-    for name in levers:
-        lever = LEVERS.get(name, {})
-        run_dir = f"runs/lm_{name}" if corpus == "local" else f"runs/lm_{corpus}_{name}"
-        cmd = [sys.executable, "-m", "rwkv_lab.rwkv_pretrain", *data_args, "--out", run_dir,
-               "--d-model", str(model.get("d_model", 256)), "--n-layers", str(model.get("n_layers", 4)),
-               "--head-size", str(model.get("head_size", 64)), "--batch", str(train.get("batch", 16)),
-               "--seq-len", str(train.get("seq_len", 512)), "--lr", str(train.get("lr", 6e-4)),
-               "--optimizer", str(train.get("optimizer", "adamw")),
-               "--weight-decay", str(train.get("weight_decay", 0.1))]
-        if train.get("warmup"):
-            cmd += ["--warmup", str(train["warmup"])]
-        if train.get("fp8"):                               # fp8 compute (torchao Float8Linear)
-            cmd += ["--fp8"]
-        if train.get("compile"):                           # torch.compile the train forward
-            cmd += ["--compile"]
-        if int(train.get("grad_accum", 1) or 1) > 1:       # effective batch = batch * grad_accum
-            cmd += ["--grad-accum", str(int(train["grad_accum"]))]
-        if float(train.get("ema", 0.0) or 0.0) > 0:        # EMA shadow weights (eval + ckpt)
-            cmd += ["--ema", str(train["ema"])]
-        m = train.get("muon")                              # Muon-variant flags -> rwkv_pretrain
-        if m and train.get("optimizer") == "muon":
-            cmd += ["--sm-scale", str(m["scale"]), "--sm-spectral-power", str(m["spectral_power"]),
-                    "--sm-ddc-strength", str(m["ddc_strength"]), "--sm-ns-steps", str(m["ns_steps"]),
-                    "--sm-tile-size", str(m["tile_size"]), "--sm-plus-norm", str(m["plus_norm"])]
-            for k in ["mona", "second_moment", "rsav", "da_muon", "aro"]:
-                cmd += [f"--sm-{k.replace('_', '-')}", str(int(m[k]))]
-        cmd += (["--minutes", str(train["minutes"])] if train.get("minutes")     # wall-clock budget
-                else ["--steps", str(train.get("steps", 2000))])
-        if off_path:
-            cmd += ["--doc-offsets", off_path]
-        for k, v in lever.items():
-            if k in _LM_FLAG:
-                cmd += [_LM_FLAG[k], str(int(v) if isinstance(v, bool) else v)]
-        print(f"[config] LM lever '{name}': {' '.join(cmd[2:])}", flush=True)
-        subprocess.run(cmd, env={**os.environ, "PYTHONPATH": "src"})
+    configs = {name: LEVERS.get(name, {}) for name in levers}
+    return _run_lm_campaign(configs, model, train, data_args, off_path,
+                            task=f"lm:{corpus}", seeds=seeds, db=db,
+                            campaign_name=campaign_name or f"{corpus} LM campaign")
 
 
 def main():
@@ -207,6 +392,9 @@ def main():
     r = sub.add_parser("run"); r.add_argument("config")
     rl = sub.add_parser("run-lm")                            # board LM mode: named levers on local corpus
     rl.add_argument("--levers", required=True)
+    rl.add_argument("--seeds", type=int, default=1)
+    rl.add_argument("--db", default=None)
+    rl.add_argument("--campaign-name", default="")
     rl.add_argument("--d-model", type=int, default=256)
     rl.add_argument("--n-layers", type=int, default=4)
     rl.add_argument("--head-size", type=int, default=64)
@@ -235,7 +423,8 @@ def main():
                 "batch": args.batch, "lr": args.lr, "init_g1g": args.init_g1g, "resume": args.resume,
                 "optimizer": args.optimizer, "weight_decay": args.weight_decay, "warmup": args.warmup,
                 "fp8": args.fp8, "compile": args.compile, "grad_accum": args.grad_accum,
-                "ema": args.ema, "muon": muon_opts_from(args)}, corpus=args.corpus)
+                "ema": args.ema, "muon": muon_opts_from(args)}, corpus=args.corpus,
+               seeds=args.seeds, db=args.db, campaign_name=args.campaign_name)
     else:
         run(args.config)
 

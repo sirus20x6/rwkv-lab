@@ -17,6 +17,9 @@ Every entry is an off-by-default lever with a paper and a CPU test. Full index i
 | **Recurrent-depth loops** | weight-tied loops · hyper-connections · per-iterate readout · PonderNet halt · CART contractive gate · HRM DEQ / Neumann-k gradient · FPRM fixed-point halt · RWKV-Product multi-substep | [`looped_rwkv`](src/rwkv_lab/looped_rwkv.py) · [`rwkv_product`](src/rwkv_lab/rwkv_product.py) |
 | **Latent prediction** | MTP · MuToR · TOP · NextLat · ConceptLM · FSP · L-MTP · Belief-State · JTP · LLM-JEPA · Coconut continuous-thought | [`lookahead_module`](src/rwkv_lab/lookahead_module.py) · [`llm_jepa`](src/rwkv_lab/llm_jepa.py) · [`coconut`](src/rwkv_lab/coconut.py) |
 | **Memory / retrieval** | Engram lexical bank · ROSA suffix-automaton (+ golden reference) · Fast-weight Product-Key Memory · L³ large-lookup · WriteSAE state autoencoder | [`engram_lmb`](src/rwkv_lab/engram_lmb.py) · [`rosa_sam`](src/rwkv_lab/rosa_sam.py) · [`fwpkm`](src/rwkv_lab/fwpkm.py) · [`l3_lookup`](src/rwkv_lab/l3_lookup.py) · [`write_sae`](src/rwkv_lab/write_sae.py) |
+| **Scale & online adaptation (P0)** | u-μP scale transfer · Titans/MIRAS/ATLAS/Nested Learning memory · GSPO/Dr.GRPO/DAPO RLVR + deterministic verifiers | [`u_mup`](src/rwkv_lab/u_mup.py) · [`online_memory`](src/rwkv_lab/online_memory.py) · [`rlvr`](src/rwkv_lab/rlvr.py) |
+| **Training systems (P1)** | RegMix/MDE mixture surrogate · simulated NVFP4 QAT · Decoupled DiLoCo outer updates | [`data_mixture`](src/rwkv_lab/data_mixture.py) · [`nvfp4`](src/rwkv_lab/nvfp4.py) · [`diloco`](src/rwkv_lab/diloco.py) |
+| **Representation, serving & tracing (P2)** | BLT entropy byte patches · EAGLE-3 feature-fusion drafts and exact verification · recurrent attribution graphs | [`byte_patches`](src/rwkv_lab/byte_patches.py) · [`speculative`](src/rwkv_lab/speculative.py) · [`circuit_trace`](src/rwkv_lab/circuit_trace.py) |
 | **Optimizers & dynamics** | Muon (+ MuonClip) · 12 spectral-Muon levers (Muonᵖ, Aurora, MONA, DDC, RSAV, Hierarchical, Distance-Aware, ARO…) · PC-Layer preconditioning · layerwise-LR · grokking probes | [`spectral_muon`](src/rwkv_lab/spectral_muon.py) · [`muon_helpers`](src/rwkv_lab/muon_helpers.py) · [`pc_layer`](src/rwkv_lab/pc_layer.py) |
 | **Cross-arch conversion** | GDN ⊂ RWKV-7 **lossless** remap · RADLADS distillation (+ logit-KL) · Taylor-Calibrate init · Comba readout · Attention-to-Mamba | [`convert_gdn_lossless`](src/rwkv_lab/convert_gdn_lossless.py) · [`convert_train`](src/rwkv_lab/convert_train.py) · [`attn_L3_poc`](src/rwkv_lab/attn_L3_poc.py) |
 | **From-scratch lab** | Future-Seed cross-layer state chaining · DeepEmbed per-token FFN gates (output / BlinkDL-exact hidden / +shift / +emb-residual) · Engram-as-lever · semantic context-bucket packing + mixed-context training (reciprocal batch) · grad-accum / EMA / fp8 / 8-bit optimizers | [`rwkv_pretrain`](src/rwkv_lab/rwkv_pretrain.py) · [`experiment`](src/rwkv_lab/experiment.py) · [`build_corpus`](src/rwkv_lab/build_corpus.py) |
@@ -93,7 +96,7 @@ Experiments are driven and monitored through **trainboard**, a from-scratch Go +
 
 <p align="center">
   <img src="docs/images/experiments_card.png" width="100%" alt="Experiments card: config-driven A/B builder + registry results"><br>
-  <em>Experiments card — a config-driven lever lab: 20 lever checkboxes (loops, Future-Seed, Engram, the DeepEmbed variants, MTP heads), synthetic tasks + three LM corpora (incl. mixed-context buckets), and optimizer / fp8 / EMA / grad-accum controls. Campaigns retain every seed and rung, paired confidence intervals, learning curves, measured throughput/memory/energy, Pareto status, lineage, and fresh-seed confirmation. Successive halving and factorial interactions can be launched from the browser.</em>
+  <em>Experiments card — a config-driven lever lab. The current builder supports 27 comparison checkboxes (loops, Future-Seed, Engram, DeepEmbed, MTP, u-μP, four online-memory modes, and NVFP4), synthetic tasks + three LM corpora (incl. mixed-context buckets), and optimizer / fp8 / EMA / grad-accum controls; this screenshot predates the seven P0/P1 rows. Campaigns retain every seed and rung, paired confidence intervals, learning curves, measured throughput/memory/energy, Pareto status, lineage, and fresh-seed confirmation. Successive halving and factorial interactions can be launched from the browser.</em>
 </p>
 
 ### Conclusive experiment campaigns
@@ -325,6 +328,9 @@ Every technique is an **off-by-default flag** on `python -m rwkv_lab.convert_tra
 | `--deepembed` · `--de-mode hidden` · `--de-shift` · `--de-emb-res` | DeepEmbed per-token FFN gates — v1 output gate, BlinkDL-exact bilinear hidden gate, separate gate token-shift, emb-residual fold | [BlinkDL RWKV-LM](https://github.com/BlinkDL/RWKV-LM) (rwkv_v7a) |
 | `--ctx-buckets meta.json` | mixed context-length training over packed 512…32k buckets, reciprocal batch (B = budget/T), pad-masked loss, per-bucket val | — |
 | `--grad-accum N` / `--ema d` / `--fp8` / `--optimizer adamw8bit` | large-batch simulation · fp32 EMA shadow weights · torchao fp8 GEMMs · bitsandbytes 8-bit moments | — |
+| `--u-mup-base-width W` (+ `--u-mup-base-depth L`) | u-μP initialization and AdamW LR groups for width/depth scale transfer | [u-μP](https://arxiv.org/abs/2407.17465) |
+| `--online-memory 1` (+ `--online-memory-mode`) | in-forward associative memory; Titans, MIRAS, ATLAS, and learned nested-controller modes | [Titans](https://arxiv.org/abs/2501.00663) · [MIRAS](https://arxiv.org/abs/2504.13173) · [ATLAS](https://arxiv.org/abs/2505.23735) · [Nested Learning](https://arxiv.org/abs/2512.24695) |
+| `--nvfp4` (+ `--nvfp4-rht`) | E2M1 block fake-quant over master weights; reference QAT path, not native NVFP4 throughput | [NVFP4 pretraining](https://arxiv.org/abs/2509.25149) · [TetraJet-v2](https://arxiv.org/abs/2510.27527) |
 
 **Prediction & memory objectives** are aux heads / standalone modules, not `convert_train` flags: the lookahead heads (L-MTP, Belief-State, JTP, TOP, NextLat, …) are wired via `lookahead_module.lookahead_from_args`; LLM-JEPA, Coconut, L³, FwPKM, and WriteSAE are standalone modules for a paired-data / SFT stage — see [References](#references).
 
@@ -334,7 +340,7 @@ Every technique is an **off-by-default flag** on `python -m rwkv_lab.convert_tra
 
 | Area | State |
 |---|---|
-| **Technique levers** (loops, latent prediction, memory, optimizers) | ✅ ~25 implemented as off-by-default levers; **CPU unit tests green in CI** |
+| **Technique levers** (loops, latent prediction, memory, optimizers) | ✅ 35+ implemented as off-by-default levers; **CPU unit tests green in CI** |
 | Conversion: GDN → RWKV-7 lossless kernel (24 layers) | ✅ Proven (cosine 0.999995; +0.013% full-model PPL) |
 | Conversion: per-layer isolation sweep | ✅ 22/32 layers converted & accepted |
 | Conversion: full-attention → RWKV distillation (8 layers) | 🚧 In progress (RADLADS PoC floors at block-rel 0.234; RoPE/q-norm are the gap; two-stage logit-KL added) |
@@ -374,6 +380,24 @@ Only papers with a concrete implementation or adopted design decision in this re
 - [Future-Seed](https://github.com/yanghu819/future-seed) — cross-layer recurrent-state chaining (s₀ of layer L = s_T of layer L−1); validated here for length generalization and −9.2% LM ppl → [`rwkv_pretrain.py`](src/rwkv_lab/rwkv_pretrain.py) (`--seed-chain`)
 - DeepEmbed ([BlinkDL RWKV-LM](https://github.com/BlinkDL/RWKV-LM), rwkv_v7a) — per-layer per-token FFN gates; our A/B independently reproduces BlinkDL's variant ordering (separate gate token-shift is the win) → [`rwkv_pretrain.py`](src/rwkv_lab/rwkv_pretrain.py) (`--deepembed`, `--de-mode hidden`, `--de-shift`, `--de-emb-res`)
 - [Fewer Truncations Improve Language Modeling](https://arxiv.org/abs/2404.10830) — the best-fit packing idea behind our semantic context-bucket packer (whole docs, standard context sizes, ~0% padding) → [`build_corpus.py`](src/rwkv_lab/build_corpus.py) (`pack_context_buckets`)
+
+**P0 — scale transfer, online learning, and verifiable rewards**
+
+- [u-μP: The Unit-Scaled Maximal Update Parametrization](https://arxiv.org/abs/2407.17465) — unit-scaled initialization plus width-correct Adam learning-rate groups; recurrent CUDA operators retain their native parametrization → [`u_mup.py`](src/rwkv_lab/u_mup.py), [`rwkv_pretrain.py`](src/rwkv_lab/rwkv_pretrain.py) (`--u-mup-base-width`)
+- [Titans: Learning to Memorize at Test Time](https://arxiv.org/abs/2501.00663) · [It's All Connected / MIRAS](https://arxiv.org/abs/2504.13173) · [ATLAS](https://arxiv.org/abs/2505.23735) · [Nested Learning](https://arxiv.org/abs/2512.24695) — differentiable in-forward associative updates, configurable internal objective/retention, windowed updates, and a learned nested update controller → [`online_memory.py`](src/rwkv_lab/online_memory.py), [`rwkv_pretrain.py`](src/rwkv_lab/rwkv_pretrain.py) (`--online-memory`)
+- [Understanding R1-Zero-Like Training / Dr.GRPO](https://arxiv.org/abs/2503.20783) · [DAPO](https://arxiv.org/abs/2503.14476) · [GSPO](https://arxiv.org/abs/2507.18071) · [Absolute Zero](https://arxiv.org/abs/2505.03335) — group-relative policy objectives, asymmetric clipping/dynamic sampling, sequence-level importance ratios, and programmatic verifier interfaces → [`rlvr.py`](src/rwkv_lab/rlvr.py). Adamaton owns proposal curricula and rollout orchestration.
+
+**P1 — data and distributed/numerical training systems**
+
+- [RegMix](https://arxiv.org/abs/2407.01492) · [Data Mixing Made Efficient](https://arxiv.org/abs/2502.15950) — ridge mixture surrogate, simplex search, and optional per-domain expert-loss interactions → [`data_mixture.py`](src/rwkv_lab/data_mixture.py)
+- [Pretraining Large Language Models with NVFP4](https://arxiv.org/abs/2509.25149) · [TetraJet-v2](https://arxiv.org/abs/2510.27527) — E2M1 block quantization, optional randomized Hadamard transform, and straight-through gradients over master weights → [`nvfp4.py`](src/rwkv_lab/nvfp4.py). This is a fake-quant correctness path; native Blackwell throughput still requires a fused backend.
+- [DiLoCo](https://arxiv.org/abs/2311.08105) · [Decoupled DiLoCo](https://arxiv.org/abs/2604.21428) — local displacement pseudo-gradients, token-weighted asynchronous merging, outer momentum, and staleness rejection → [`diloco.py`](src/rwkv_lab/diloco.py). Adamaton owns learner processes, leases, and recovery.
+
+**P2 — bytes, speculative serving, and interpretability**
+
+- [Byte Latent Transformer](https://arxiv.org/abs/2412.09871) — next-byte-entropy patch boundaries plus exact patch pool/unpool mapping around a replaceable local byte encoder → [`byte_patches.py`](src/rwkv_lab/byte_patches.py)
+- [EAGLE-3](https://arxiv.org/abs/2503.01840) — low/middle/high feature-fusion draft heads, top-k tree candidates, and conservative target-greedy verification → [`speculative.py`](src/rwkv_lab/speculative.py)
+- [Circuit Tracing: Revealing Computational Graphs in Language Models](https://transformer-circuits.pub/2025/attribution-graphs/methods.html) — attribution-graph framing adapted to exact per-write contribution propagation through a linear recurrent state → [`circuit_trace.py`](src/rwkv_lab/circuit_trace.py). The exact recurrence decomposition is an algebraic trace, not by itself a causal feature interpretation.
 
 **Memory (Engram / ROSA)**
 - [Engram](https://github.com/deepseek-ai/Engram) (DeepSeek; offline conditional memory) → [`engram_lmb.py`](src/rwkv_lab/engram_lmb.py)

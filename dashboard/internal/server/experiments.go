@@ -50,6 +50,17 @@ var knownLevers = []leverDef{
 	{"lmtp", "leap multi-token prediction (LM only)", true},
 	{"bst", "belief-state forward+backward objective (LM only)", true},
 	{"jtp", "joint multi-token prediction (LM only)", true},
+	{"umup_256", "u-μP scale-transfer profile from d256/L4 (arXiv:2407.17465; AdamW family, scratch LM)", true},
+	{"mem_titans", "Titans in-forward associative memory (arXiv:2501.00663; scratch LM)", true},
+	{"mem_miras", "MIRAS cosine-bias online memory (arXiv:2504.13173; scratch LM)", true},
+	{"mem_atlas", "ATLAS windowed online-memory updates (arXiv:2505.23735; scratch LM)", true},
+	{"mem_nested", "Nested Learning controller for update rate + retention (arXiv:2512.24695; scratch LM)", true},
+	{"nvfp4", "simulated NVFP4 E2M1 block QAT (arXiv:2509.25149; correctness path, not native throughput)", true},
+	{"nvfp4_rht", "simulated NVFP4 + randomized Hadamard transform (TetraJet-v2, arXiv:2510.27527)", true},
+}
+
+func isNewModelLever(name string) bool {
+	return name == "umup_256" || strings.HasPrefix(name, "mem_") || strings.HasPrefix(name, "nvfp4")
 }
 
 const lmTask = "local-lm"
@@ -101,6 +112,7 @@ type campaignRow struct {
 	ID, ParentID      int64
 	Name, Task, Phase string
 	Status, Sha       string
+	MetricLabel       string
 	Created           float64
 	Arms              []*campaignArm
 }
@@ -177,7 +189,7 @@ func (s *Server) readCampaigns() ([]*campaignRow, error) {
 	}
 	defer db.Close()
 	rows, err := db.Query(`SELECT id,COALESCE(parent_id,0),COALESCE(name,''),task,phase,status,
-		COALESCE(git_sha,''),created_ts FROM campaigns ORDER BY created_ts DESC LIMIT 20`)
+		COALESCE(git_sha,''),created_ts,config_json FROM campaigns ORDER BY created_ts DESC LIMIT 20`)
 	if err != nil {
 		if strings.Contains(err.Error(), "no such table") {
 			return nil, nil
@@ -187,7 +199,17 @@ func (s *Server) readCampaigns() ([]*campaignRow, error) {
 	byID, order := map[int64]*campaignRow{}, []*campaignRow{}
 	for rows.Next() {
 		c := &campaignRow{}
-		if rows.Scan(&c.ID, &c.ParentID, &c.Name, &c.Task, &c.Phase, &c.Status, &c.Sha, &c.Created) == nil {
+		var cfgJSON string
+		if rows.Scan(&c.ID, &c.ParentID, &c.Name, &c.Task, &c.Phase, &c.Status, &c.Sha, &c.Created, &cfgJSON) == nil {
+			c.MetricLabel = "acc"
+			var cfg struct {
+				DecisionPolicy struct {
+					DisplayMetric string `json:"display_metric"`
+				} `json:"decision_policy"`
+			}
+			if json.Unmarshal([]byte(cfgJSON), &cfg) == nil && cfg.DecisionPolicy.DisplayMetric != "" {
+				c.MetricLabel = cfg.DecisionPolicy.DisplayMetric
+			}
 			byID[c.ID] = c
 			order = append(order, c)
 		}
@@ -486,8 +508,10 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 		if lv.Name == "loop3" {
 			chk = " checked"
 		}
-		gate := "" // LM-only levers: checkbox disabled (not selectable) unless the LM corpus is chosen
-		if lv.LMOnly {
+		gate := "" // LM-only levers need a corpus; new model levers also need scratch construction.
+		if isNewModelLever(lv.Name) {
+			gate = ` data-attr-disabled="!$task.endsWith('-lm') || $init !== 'scratch'"`
+		} else if lv.LMOnly {
 			gate = ` data-attr-disabled="!$task.endsWith('-lm')"`
 		}
 		fmt.Fprintf(&b, `<tr><td class="lev-c"><input type="checkbox" id="lev_%s" data-bind-lev_%s%s%s></td>`+
@@ -521,7 +545,7 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 			name = c.Task
 		}
 		fmt.Fprintf(&b, `<div class="exp-task"><div class="exp-tname">#%d %s <span class="dim">%s · %s · @%s%s</span></div>`, c.ID, esc(name), esc(c.Phase), esc(c.Status), esc(c.Sha), lineage)
-		b.WriteString(`<table class="exp-tbl"><tr class="exp-hd"><td>arm</td><td>seed acc</td><td>paired evidence</td><td>loss</td><td>tok/s</td><td>step p50</td><td>peak</td><td>energy</td><td>decision</td></tr>`)
+		fmt.Fprintf(&b, `<table class="exp-tbl"><tr class="exp-hd"><td>arm</td><td>seed %s</td><td>paired evidence</td><td>loss</td><td>tok/s</td><td>step p50</td><td>peak</td><td>energy</td><td>decision</td></tr>`, esc(c.MetricLabel))
 		for _, a := range c.Arms {
 			evidence := "—"
 			if !math.IsNaN(a.Delta) {
@@ -610,6 +634,7 @@ func (s *Server) handleLaunchExperiment(w http.ResponseWriter, r *http.Request) 
 	}
 	configs := []string{"baseline"} // significance reference — always run
 	lmOnlyPicked := false
+	newModelPicked, umupPicked, nvfp4Picked := false, false, false
 	for _, lv := range knownLevers {
 		if lv.Name == "baseline" {
 			continue
@@ -617,10 +642,27 @@ func (s *Server) handleLaunchExperiment(w http.ResponseWriter, r *http.Request) 
 		if b, _ := sig["lev_"+lv.Name].(bool); b {
 			configs = append(configs, lv.Name)
 			lmOnlyPicked = lmOnlyPicked || lv.LMOnly
+			newModelPicked = newModelPicked || isNewModelLever(lv.Name)
+			umupPicked = umupPicked || lv.Name == "umup_256"
+			nvfp4Picked = nvfp4Picked || strings.HasPrefix(lv.Name, "nvfp4")
 		}
 	}
 	if len(configs) < 2 {
 		toastErr(sse, "launch: check at least one lever to compare against baseline")
+		return
+	}
+	init := str("init", "scratch")
+	if newModelPicked && init != "scratch" {
+		toastErr(sse, "launch: u-muP, online memory, and NVFP4 comparison arms require from-scratch initialization")
+		return
+	}
+	if umupPicked && str("optimizer", "adamw") == "muon" {
+		toastErr(sse, "launch: the u-muP arm currently supports AdamW-family optimizers, not Muon")
+		return
+	}
+	fp8On, _ := sig["fp8"].(bool)
+	if nvfp4Picked && fp8On {
+		toastErr(sse, "launch: NVFP4 and FP8 are mutually exclusive operand formats")
 		return
 	}
 	budget := []string{"--steps", str("amount", "20000")} // fixed steps, or wall-clock minutes
@@ -644,13 +686,12 @@ func (s *Server) handleLaunchExperiment(w http.ResponseWriter, r *http.Request) 
 			}
 		}
 	}
-	if on, _ := sig["fp8"].(bool); on { // fp8 compute — orthogonal to the optimizer
+	if fp8On { // fp8 compute — orthogonal to the optimizer
 		optArgs = append(optArgs, "--fp8")
 	}
 	if on, _ := sig["docompile"].(bool); on { // torch.compile the train forward
 		optArgs = append(optArgs, "--compile")
 	}
-	init := str("init", "scratch")
 	if init == "convert" { // per-layer GDN→RWKV distillation — not a config sweep
 		toast(sse, "conversion (GDN→RWKV) runs in the conversion board / queue — it's per-layer teacher distillation, not a compare-configs sweep")
 		return
@@ -659,7 +700,8 @@ func (s *Server) handleLaunchExperiment(w http.ResponseWriter, r *http.Request) 
 	if isLMTask(task) || init == "g1g" || init == "resume" {
 		args := append([]string{"-m", "rwkv_lab.config", "run-lm", "--levers", strings.Join(configs, ","),
 			"--d-model", str("dmodel", "1024"), "--n-layers", str("nlayers", "18"), "--head-size", str("headsize", "64"),
-			"--batch", str("batch", "16"), "--seq-len", str("ctxlen", "1024")}, budget...)
+			"--batch", str("batch", "16"), "--seq-len", str("ctxlen", "1024"),
+			"--seeds", str("seeds", "1")}, budget...)
 		if task == blendTask {
 			args = append(args, "--corpus", "blend")
 		} else if task == blendMixTask {

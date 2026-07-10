@@ -58,7 +58,18 @@ def build_from_ckpt(ckpt_path: str, device: str = "cuda", use_ema: bool = False,
                    seed_chain=bool(arch.get("seed_chain")),
                    deepembed=bool(arch.get("deepembed")), de_dim=int(arch.get("de_dim") or 0),
                    de_mode=arch.get("de_mode") or "out", de_shift=bool(arch.get("de_shift")),
-                   de_emb_res=bool(arch.get("de_emb_res"))).to(device, torch.bfloat16)
+                   de_emb_res=bool(arch.get("de_emb_res")))
+    if arch.get("online_memory"):
+        from rwkv_lab.online_memory import install_online_memory
+        install_online_memory(m, d_memory=(int(arch.get("online_memory_dim") or 0) or None),
+                              mode=arch.get("online_memory_mode") or "titans",
+                              learning_rate=float(arch.get("online_memory_lr") or 0.05),
+                              retention=float(arch.get("online_memory_retention") or 0.99),
+                              atlas_window=int(arch.get("online_memory_window") or 4))
+    m = m.to(device, torch.bfloat16)
+    if arch.get("nvfp4"):
+        from rwkv_lab.nvfp4 import convert_to_nvfp4_training
+        convert_to_nvfp4_training(m, rht=bool(arch.get("nvfp4_rht")))
     if arch.get("engram"):
         enable_engram(m, 65536, arch["d_model"], arch["head_size"], arch["n_layers"],
                       loop_count=(arch.get("loop_kw") or {}).get("n_loops", 1),
