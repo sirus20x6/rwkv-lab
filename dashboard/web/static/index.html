@@ -40,6 +40,8 @@
                             grokfast_lamb:'', grokfast_alpha:'', readout_lr_mult:'',
                             sm_spectral_power:'', sm_scale:'', ddc_strength:'', pc_strength:'', llr_smax:'',
                             w_cos:'', w_cka:'', w_flow:'', w_bridge:'', agreement_gate:'' },
+                      ptDataset:'', ptMerge:'', ptRunA:'', ptRunB:'', ptPrompt:'', ptSeed:'0', ptMaxNew:'200', ptTemp:'0.8',
+                      ptOutA:'', ptOutB:'', ptChosen:'', ptBusy:false,
                       showLB:false, diffA:'', diffB:'' }"
       data-on:keydown__window="evt.key==='Escape' && ($showLB=false)">
   <!-- Open the live SSE stream on load (system header + run list + selected KPIs). -->
@@ -74,6 +76,7 @@
 	          <option value="distill_consolidate.py">distill_consolidate.py</option>
 	          <option value="drive_isolation.py">drive_isolation.py</option>
 	          <option value="train_mla_engram.py">train_mla_engram.py</option>
+	          <option value="posttrain_train.py">posttrain_train.py</option>
 	        </select>
         <input class="ctl-input" placeholder="args e.g. --layer 1 --out runs/x" data-bind="launchArgs" list="launch-history" />
         <datalist id="launch-history"></datalist>
@@ -119,6 +122,14 @@
           <span class="d-caret">▸</span>
         </summary>
         <div id="rlvr-body" class="rlvr-body"><div class="empty">expand to configure or inspect RLVR campaigns</div></div>
+      </details>
+
+      <details class="panel" id="posttraining-panel" data-on:toggle="evt.target.open && @get('/api/posttraining')">
+        <summary class="panel-title">post-training data &amp; behavior
+          <span class="sub">typed datasets · loss-mask preview · paired checkpoint comparison</span>
+          <span class="d-caret">▸</span>
+        </summary>
+        <div id="posttraining-body" class="exp-body"><div class="empty">expand to inspect data or compare model behavior</div></div>
       </details>
 
       <div id="run-header">

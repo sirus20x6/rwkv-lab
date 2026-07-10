@@ -669,3 +669,12 @@ details.arch-item[open] .lr-caret { transform: rotate(90deg); color: var(--accen
 
 /* disabled field inputs (LM levers / resume when not applicable) read as inactive, not "broken" */
 .field-tbl input:disabled, .lev-tbl input:disabled { opacity: .45; cursor: default; }
+
+/* post-training dataset preview + paired behavioral comparison */
+#posttraining-body { display: grid; gap: .75rem; padding: .5rem; color-scheme: dark; }
+#posttraining-inspect details { margin-top: .45rem; }
+.kpi-row { display: flex; flex-wrap: wrap; gap: .6rem 1.2rem; margin-bottom: .35rem; }
+.compare-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; }
+.compare-grid > div { min-width: 0; }
+.compare-grid .sample-out { min-height: 8rem; max-height: 28rem; overflow: auto; white-space: pre-wrap; }
+@media (max-width: 900px) { .compare-grid { grid-template-columns: 1fr; } }

@@ -16,7 +16,7 @@ import (
 var trainingScripts = []string{
 	"convert_train.py", "distill_consolidate.py", "drive_isolation.py",
 	"train_mla.py", "train_mla_engram.py", "rlvr_train.py", "rlvr_campaign.py",
-	"recursive_improve.py",
+	"recursive_improve.py", "posttrain_train.py",
 }
 
 var trainingModules = map[string]string{
@@ -28,6 +28,7 @@ var trainingModules = map[string]string{
 	"rlvr_train.py":          "rwkv_lab.rlvr_train",
 	"rlvr_campaign.py":       "rwkv_lab.rlvr_campaign",
 	"recursive_improve.py":   "rwkv_lab.recursive_improve",
+	"posttrain_train.py":     "rwkv_lab.posttrain_train",
 }
 
 // AllowedScript reports whether basename(path) is a recognized training
@@ -104,7 +105,7 @@ func readProcs(runsDir string) []Proc {
 
 		pr := Proc{PID: p.Pid, Script: script}
 
-		if v, ok := argValue(cmdline, "--out-dir", "--out"); ok {
+		if v, ok := argValue(cmdline, "--out-dir", "--out", "--output"); ok {
 			pr.RunName = filepath.Base(v)
 		}
 		if v, ok := argValue(cmdline, "--max-steps", "--steps"); ok {

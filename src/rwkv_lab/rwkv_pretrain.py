@@ -453,6 +453,12 @@ def main():
                     help="apply randomized Hadamard transforms before eligible NVFP4 GEMMs")
     ap.add_argument("--compile", action="store_true",
                     help="torch.compile the training forward (fuses fp8 cast+GEMM; ~2x on Blackwell)")
+    ap.add_argument("--distributed", default="none", choices=["none", "fsdp2"],
+                    help="torchrun backend; fsdp2 shards RWKV blocks, root params, optimizer, and checkpoints")
+    ap.add_argument("--activation-checkpointing", action="store_true",
+                    help="non-reentrant per-block activation checkpointing (works with FSDP2)")
+    ap.add_argument("--cpu-offload", action="store_true",
+                    help="FSDP2 parameter/gradient CPU offload (requires --distributed fsdp2)")
     add_muon_args(ap)
     ap.add_argument("--lr-schedule", default="cosine", choices=["constant", "cosine"])
     ap.add_argument("--decay-steps", type=int, default=0)   # cosine horizon; 0 => use --steps
@@ -516,11 +522,23 @@ def main():
             print("warn: --doc-offsets ignored with --ctx-buckets (rows are already packed)", flush=True)
             args.doc_offsets = ""
 
+    if args.cpu_offload and args.distributed != "fsdp2":
+        ap.error("--cpu-offload requires --distributed fsdp2")
+    if args.distributed == "fsdp2" and args.compile:
+        ap.error("--compile + FSDP2 is not enabled until graph/checkpoint parity is validated")
+    from rwkv_lab.distributed import DistributedContext, initialize
+    dist = initialize() if args.distributed != "none" else DistributedContext(
+        0, 1, 0, "cuda" if torch.cuda.is_available() else "cpu")
+    if args.distributed == "fsdp2" and dist.world_size == 1:
+        ap.error("--distributed fsdp2 must be launched with torchrun and WORLD_SIZE > 1")
     os.makedirs(args.out, exist_ok=True)
-    jl = open(os.path.join(args.out, "train.jsonl"), "w", buffering=1)
+    jl = open(os.path.join(args.out, "train.jsonl"), "w", buffering=1) if dist.is_primary \
+        else open(os.devnull, "w")
     emit = lambda r: jl.write(json.dumps(r) + "\n")
-    dev = "cuda"; T = args.seq_len
-    torch.manual_seed(args.seed); rng = np.random.default_rng(args.seed)
+    dev = dist.device; T = args.seq_len
+    # Every rank must construct identical parameters before FSDP shards them. Data/dropout streams
+    # diverge by rank only after construction (and are checkpointed per rank for exact resume).
+    torch.manual_seed(args.seed); rng = np.random.default_rng(args.seed + dist.rank)
 
     lk = loop_kwargs(args)
     u_mup_cfg = None
@@ -776,14 +794,32 @@ def main():
                                 bst_weight=args.bst_weight, jtp_weight=args.jtp_weight,
                                 lm_head=model.head).to(dev, torch.bfloat16)
         print(f"aux heads enabled={heads.enabled} extra_tokens={heads.extra_tokens}", flush=True)
+    if args.distributed == "fsdp2":
+        if heads is not None or ema is not None:
+            ap.error("FSDP2 currently requires auxiliary heads and EMA to be disabled")
+        from rwkv_lab.distributed import checkpoint_rwkv_blocks, fully_shard_rwkv
+        if args.activation_checkpointing:
+            checkpoint_rwkv_blocks(model)
+        fully_shard_rwkv(model, cpu_offload=args.cpu_offload)
+        print(f"fsdp2: world={dist.world_size} rank={dist.rank} local_rank={dist.local_rank} "
+              f"cpu_offload={args.cpu_offload} activation_ckpt={args.activation_checkpointing}", flush=True)
+    elif args.activation_checkpointing:
+        from rwkv_lab.distributed import checkpoint_rwkv_blocks
+        checkpoint_rwkv_blocks(model)
+        print("activation checkpointing: per RWKV block", flush=True)
     named = list(model.named_parameters()) + (list(heads.named_parameters()) if heads else [])
     opt = build_optimizer(named, args.optimizer, args.lr, args.weight_decay,
                           muon_opts=muon_opts_from(args), u_mup_config=u_mup_cfg)
     print(f"optimizer={args.optimizer} lr={args.lr} wd={args.weight_decay}", flush=True)
-    step = 0; resume_recall_rng = None
+    step = 0; resume_recall_rng = None; did_resume = False
     if args.resume and os.path.exists(args.resume):
-        ck = torch.load(args.resume, map_location=dev, weights_only=False)
-        model.load_state_dict(ck["model"]); opt.load_state_dict(ck["opt"]); step = ck.get("step", 0)
+        if args.distributed == "fsdp2":
+            from rwkv_lab.distributed import load_checkpoint
+            ck = load_checkpoint(args.resume, model, opt)
+            step = int(ck.get("step", 0))
+        else:
+            ck = torch.load(args.resume, map_location=dev, weights_only=False)
+            model.load_state_dict(ck["model"]); opt.load_state_dict(ck["opt"]); step = ck.get("step", 0)
         if heads is not None and ck.get("heads") is not None:
             heads.load_state_dict(ck["heads"])
         if ema is not None:                  # saved EMA if present, else re-seed from loaded weights
@@ -792,9 +828,13 @@ def main():
                 ema[n] = src[n].float().to(dev) if n in src else p.detach().float().clone()
         if ck.get("numpy_rng") is not None: rng.bit_generator.state = ck["numpy_rng"]
         if ck.get("torch_rng") is not None: torch.set_rng_state(ck["torch_rng"].cpu())
-        if ck.get("cuda_rng") is not None: torch.cuda.set_rng_state(ck["cuda_rng"].cpu(), device=dev)
+        if torch.cuda.is_available() and ck.get("cuda_rng") is not None:
+            torch.cuda.set_rng_state(ck["cuda_rng"].cpu(), device=dev)
         resume_recall_rng = ck.get("recall_numpy_rng")
+        did_resume = True
         print(f"resumed from {args.resume} @ step {step}", flush=True)
+    if args.distributed == "fsdp2" and not did_resume:
+        torch.manual_seed(args.seed + dist.rank)
     # Compiled handle for the TRAIN forward only: eager `model` still owns state_dict/params, so
     # checkpoints stay uncompiled (no `_orig_mod.` prefix) and the eval path (below) never toggles
     # the compiled graph's train/eval mode (which would force costly recompiles).
@@ -923,7 +963,11 @@ def main():
                 loss = loss + heads.compute(out[1], x, model.emb, model.head)["aux_total"]
             (loss / ga if ga > 1 else loss).backward()
             seen += xin.shape[0] * xin.shape[1]
-        gn = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+        if args.distributed == "fsdp2":
+            from rwkv_lab.distributed import clip_grad_norm
+            gn = clip_grad_norm(model, args.grad_clip)
+        else:
+            gn = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
         opt.step(); step += 1
         if ema is not None:
             ema_update()
@@ -935,15 +979,8 @@ def main():
         recall_pool.shutdown(wait=False, cancel_futures=True)
     emit({"kind": "checkpoint", "step": step})
     if args.save:
-        blob = {"model": model.state_dict(), "opt": opt.state_dict(), "step": step, "config": tag,
-                "heads": heads.state_dict() if heads is not None else None,
-                "numpy_rng": rng.bit_generator.state, "torch_rng": torch.get_rng_state(),
-                "cuda_rng": torch.cuda.get_rng_state(dev).cpu(),
-                "recall_numpy_rng": (recall_rng.bit_generator.state if lmb is not None and not use_gpu_data
-                                      else None),
-                # self-describing checkpoint: everything generate.py needs to rebuild the exact
-                # architecture without re-supplying CLI flags
-                "arch": {"d_model": args.d_model, "n_layers": args.n_layers,
+        # Self-describing architecture is shared by ordinary .pt and FSDP2/DCP checkpoints.
+        arch = {"d_model": args.d_model, "n_layers": args.n_layers,
                          "head_size": args.head_size, "seed_chain": seed_chain,
                          "deepembed": bool(args.deepembed) and not args.init_g1g,
                          "de_dim": args.de_dim, "de_mode": args.de_mode,
@@ -960,10 +997,23 @@ def main():
                          "engram": lmb is not None, "engram_sites": args.engram_sites,
                          "engram_drow": args.engram_drow, "engram_rows": args.engram_rows,
                          "engram_boundary_id": (lmb.boundary_id if lmb is not None else None),
-                         "loop_kw": lk}}
-        if ema is not None:
-            blob["ema"] = ema
-        torch.save(blob, args.save)
+                         "loop_kw": lk}
+        rng_extra = {"step": step, "config": tag, "arch": arch,
+                     "numpy_rng": rng.bit_generator.state,
+                     "recall_numpy_rng": (recall_rng.bit_generator.state
+                                           if lmb is not None and not use_gpu_data else None),
+                     "torch_rng": torch.get_rng_state()}
+        if torch.cuda.is_available():
+            rng_extra["cuda_rng"] = torch.cuda.get_rng_state(dev).cpu()
+        if args.distributed == "fsdp2":
+            from rwkv_lab.distributed import save_checkpoint
+            save_checkpoint(args.save, model, opt, extra=rng_extra)
+        else:
+            blob = {"model": model.state_dict(), "opt": opt.state_dict(),
+                    "heads": heads.state_dict() if heads is not None else None, **rng_extra}
+            if ema is not None:
+                blob["ema"] = ema
+            torch.save(blob, args.save)
         print(f"saved -> {args.save}", flush=True)
     print(f"DONE {tag}: {step} steps, final val {vl:.4f} (ppl {math.exp(vl):.2f})", flush=True)
 
