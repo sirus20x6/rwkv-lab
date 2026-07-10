@@ -172,6 +172,7 @@ def convert_layer_to_mla(
         has_qk_norm=mla_cfg.has_qk_norm,
         rope_position=gqa_cfg.rope_position,
         num_kv_rope_heads=mla_cfg.num_kv_rope_heads,
+        layer_idx=layer_idx,
     )
     missing, unexpected = mla.load_state_dict(mla_sd, strict=False)
     if unexpected:

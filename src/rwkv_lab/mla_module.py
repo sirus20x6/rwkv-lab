@@ -7,7 +7,9 @@ there loads directly via load_state_dict.
 Forward signature mirrors HF transformers attention modules so it can be
 hot-swapped into a decoder layer: accepts hidden_states, position_embeddings
 (cos/sin tuple), attention_mask, and returns (attn_output, attn_weights).
-Training only — no KV cache.
+Cached decoding stores the normalized latent KV representation plus the small
+rotary key and per-head K-normalization scale.  It never expands cached K/V to
+all attention heads.
 """
 
 from __future__ import annotations
@@ -48,6 +50,7 @@ class MLAAttention(nn.Module):
         has_qk_norm: bool = False,         # per-head-dim RMSNorm on Q and K
         rope_position: str = "last",       # "first" = Qwen, "last" = DeepSeek
         num_kv_rope_heads: int = 1,        # 1 = canonical shared k_rope, >1 = per-KV-head
+        layer_idx: Optional[int] = None,    # cache slot when used inside an HF decoder
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -68,6 +71,7 @@ class MLAAttention(nn.Module):
             f"num_heads ({num_heads}) must be a multiple of num_kv_rope_heads ({num_kv_rope_heads})"
         )
         self.num_kv_rope_heads = num_kv_rope_heads
+        self.layer_idx = layer_idx
         self.xsa_enabled = False
 
         def _norm(dim: int) -> nn.Module:
@@ -107,6 +111,80 @@ class MLAAttention(nn.Module):
             return self.q_proj(x)
         return self.q_b_proj(self.q_a_layernorm(self.q_a_proj(x)))
 
+    def _cache_components(self, kv_lat, k_rope_shared, k_raw, cos, sin):
+        """Return compact cache tensors: latent KV, weighted/rotated rope K, K RMS scale."""
+        B, T, Nh, _ = k_raw.shape
+        Dn, Dr = self.qk_nope_head_dim, self.qk_rope_head_dim
+        if self.has_qk_norm:
+            inv = torch.rsqrt(k_raw.float().square().mean(-1) + self.k_norm.eps).to(k_raw.dtype)
+            w = self.k_norm.weight.to(k_raw.dtype)
+            w_rope = w[:Dr] if self.rope_position == "first" else w[Dn:]
+        else:
+            inv = k_raw.new_ones(B, T, Nh)
+            w_rope = k_raw.new_ones(Dr)
+        rope = _apply_rope(
+            k_rope_shared * w_rope.view(1, 1, 1, Dr),
+            cos.unsqueeze(2), sin.unsqueeze(2),
+        )
+        return kv_lat, rope, inv
+
+    def _update_cache(self, past_key_value, kv_lat, rope, inv):
+        if self.layer_idx is None:
+            raise ValueError("MLAAttention needs layer_idx when past_key_value is supplied")
+        B, T, _, _ = rope.shape
+        packed = torch.cat((rope.reshape(B, T, -1), inv), dim=-1).unsqueeze(1)
+        latent = kv_lat.unsqueeze(1)
+        packed, latent = past_key_value.update(packed, latent, self.layer_idx)
+        packed, latent = packed.squeeze(1), latent.squeeze(1)
+        rope_width = self.num_kv_rope_heads * self.qk_rope_head_dim
+        rope_all = packed[..., :rope_width].view(
+            B, packed.shape[-2], self.num_kv_rope_heads, self.qk_rope_head_dim
+        )
+        inv_all = packed[..., rope_width:]
+        return latent, rope_all, inv_all
+
+    def _latent_cached_attention(self, q, kv_lat, rope, inv, attention_mask, past_len):
+        """Exact absorbed MLA attention over the compact latent cache."""
+        B, Q, Nh, _ = q.shape
+        Dn, Dr, R = self.qk_nope_head_dim, self.qk_rope_head_dim, self.kv_lora_rank
+        if self.rope_position == "first":
+            q_rope, q_nope = q[..., :Dr], q[..., Dr:]
+        else:
+            q_nope, q_rope = q[..., :Dn], q[..., Dn:]
+
+        weights = self.kv_b_proj.weight.view(Nh, Dn + self.v_head_dim, R)
+        wk, wv = weights[:, :Dn], weights[:, Dn:]
+        if self.has_qk_norm:
+            kw = self.k_norm.weight.to(q.dtype)
+            kw_nope = kw[Dr:] if self.rope_position == "first" else kw[:Dn]
+            q_nope = q_nope * kw_nope.view(1, 1, 1, Dn)
+        q_lat = torch.einsum("bthd,hdr->bhtr", q_nope, wk.to(q.dtype))
+        score = torch.einsum("bhqr,bkr->bhqk", q_lat, kv_lat.to(q.dtype))
+
+        repeat = Nh // self.num_kv_rope_heads
+        rope_h = rope.unsqueeze(3).expand(
+            B, rope.shape[1], self.num_kv_rope_heads, repeat, Dr
+        ).reshape(B, rope.shape[1], Nh, Dr)
+        score = score + torch.einsum("bqhd,bkhd->bhqk", q_rope, rope_h.to(q.dtype))
+        score = score * inv.transpose(1, 2).unsqueeze(2).to(score.dtype)
+        score = score * self.softmax_scale
+
+        if attention_mask is not None:
+            mask = attention_mask[..., -Q:, :score.shape[-1]]
+            if mask.dtype == torch.bool:
+                score = score.masked_fill(~mask, float("-inf"))
+            else:
+                score = score + mask.to(score.dtype)
+        elif Q > 1:
+            qi = torch.arange(Q, device=q.device) + past_len
+            ki = torch.arange(score.shape[-1], device=q.device)
+            score = score.masked_fill(ki.view(1, 1, 1, -1) > qi.view(1, 1, -1, 1), float("-inf"))
+        prob = torch.softmax(score.float(), dim=-1).to(q.dtype)
+        if self.training and self.attention_dropout:
+            prob = F.dropout(prob, p=self.attention_dropout)
+        ctx = torch.einsum("bhqk,bkr->bhqr", prob, kv_lat.to(prob.dtype))
+        return torch.einsum("bhqr,hdr->bqhd", ctx, wv.to(ctx.dtype))
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -114,12 +192,8 @@ class MLAAttention(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> tuple[torch.Tensor, None]:
-        if kwargs.get("past_key_value") is not None or kwargs.get("use_cache", False):
-            raise NotImplementedError(
-                "MLAAttention does not implement KV-cache decoding yet. "
-                "Use full-sequence prefill/eval, or implement cache-aware MLA "
-                "before calling generate()/use_cache=True."
-            )
+        past_key_value = kwargs.get("past_key_value")
+        use_cache = bool(kwargs.get("use_cache", False) or past_key_value is not None)
         B, T, _ = hidden_states.shape
         Nh = self.num_heads
         D_nope = self.qk_nope_head_dim
@@ -156,6 +230,7 @@ class MLAAttention(nn.Module):
             k = torch.cat([k_nope, k_rope_per_head], dim=-1)
 
         # QK-norm on the full per-head vector (matches Qwen's RMS semantics)
+        k_raw = k
         if self.has_qk_norm:
             q = self.q_norm(q)
             k = self.k_norm(k)
@@ -172,18 +247,42 @@ class MLAAttention(nn.Module):
             k_rope = _apply_rope(k[..., D_nope:], cos.unsqueeze(2), sin.unsqueeze(2))
             k = torch.cat([k[..., :D_nope], k_rope], dim=-1)
 
-        q_full = q.transpose(1, 2)
-        k_full = k.transpose(1, 2)
-        v_t = v.transpose(1, 2)
+        # Cache only c_KV, the shared rotary key, and one K RMS scalar/head/token.
+        # Prefill keeps the highly optimized SDPA path; calls with an existing
+        # cache use the exact absorbed formulation and never expand cached V.
+        cached = None
+        if use_cache:
+            c_lat, c_rope, c_inv = self._cache_components(
+                kv_lat, k_rope_shared, k_raw, cos, sin
+            )
+            past_len = 0
+            if past_key_value is not None:
+                try:
+                    past_len = past_key_value.get_seq_length(self.layer_idx)
+                except (AttributeError, TypeError):
+                    if self.layer_idx is not None and len(getattr(past_key_value, "key_cache", [])) > self.layer_idx:
+                        old = past_key_value.key_cache[self.layer_idx]
+                        past_len = 0 if not torch.is_tensor(old) or not old.numel() else old.shape[-2]
+                cached = self._update_cache(past_key_value, c_lat, c_rope, c_inv)
+            else:
+                cached = (c_lat, c_rope, c_inv)
 
-        attn = F.scaled_dot_product_attention(
-            q_full, k_full, v_t,
-            attn_mask=attention_mask,
-            dropout_p=self.attention_dropout if self.training else 0.0,
-            is_causal=(attention_mask is None),
-            scale=self.softmax_scale,
-        )
-        attn = attn.transpose(1, 2).contiguous().view(B, T, Nh * D_v)
+        if past_key_value is not None and past_len > 0:
+            attn_h = self._latent_cached_attention(q, *cached, attention_mask, past_len)
+            attn = attn_h.reshape(B, T, Nh * D_v)
+        else:
+            q_full = q.transpose(1, 2)
+            k_full = k.transpose(1, 2)
+            v_t = v.transpose(1, 2)
+
+            attn = F.scaled_dot_product_attention(
+                q_full, k_full, v_t,
+                attn_mask=attention_mask,
+                dropout_p=self.attention_dropout if self.training else 0.0,
+                is_causal=(attention_mask is None),
+                scale=self.softmax_scale,
+            )
+            attn = attn.transpose(1, 2).contiguous().view(B, T, Nh * D_v)
 
         if self.xsa_enabled:
             attn_h = attn.view(B, T, Nh, D_v)

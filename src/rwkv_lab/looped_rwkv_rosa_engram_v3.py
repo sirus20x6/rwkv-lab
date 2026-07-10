@@ -477,7 +477,7 @@ class DepthHiddenState:
 class ForwardDiagnostics:
     loops_executed: int
     halt_probs: Tensor
-    per_loop_logits: Tensor
+    per_loop_logits: Optional[Tensor] = None
     branch_probabilities: Optional[Tensor] = None
     hidden_states: Optional[Tensor] = None
     loop_memory_states: Optional[Tensor] = None
@@ -1112,6 +1112,7 @@ class LoopedRWKVLanguageModel(nn.Module):
         forced_loops: Optional[int] = None,
         adaptive_inference: bool = False,
         retain_alignment_tensors: bool = False,
+        return_loop_logits: bool = False,
     ) -> Tuple[
         Tensor,
         TokenTimeState,
@@ -1205,10 +1206,10 @@ class LoopedRWKVLanguageModel(nn.Module):
 
             loop_hidden = depth_state.layers[-1]
 
-            # [SRC-LT2] Emit logits at every loop for per-loop KD.
-            per_loop_logits.append(
-                self.lm_head(self.final_norm(loop_hidden))
-            )
+            # Per-loop vocabulary projection is useful for KD but dominates
+            # ordinary inference. Keep it entirely out of the fast path.
+            if return_loop_logits:
+                per_loop_logits.append(self.lm_head(self.final_norm(loop_hidden)))
 
             halt_prob = self.halting(loop_hidden)
             halt_probs.append(halt_prob)
@@ -1268,9 +1269,10 @@ class LoopedRWKVLanguageModel(nn.Module):
         )
 
         diagnostics = ForwardDiagnostics(
-            loops_executed=len(per_loop_logits),
+            loops_executed=len(halt_probs),
             halt_probs=torch.stack(halt_probs, dim=0),
-            per_loop_logits=torch.stack(per_loop_logits, dim=0),
+            per_loop_logits=(torch.stack(per_loop_logits, dim=0)
+                             if per_loop_logits else None),
             branch_probabilities=(
                 torch.stack(all_branch_probs, dim=0)
                 if all_branch_probs
@@ -1299,6 +1301,7 @@ class LoopedRWKVLanguageModel(nn.Module):
         rosa_retrievals: Optional[Tensor] = None,
         initial_state: Optional[TokenTimeState] = None,
         retain_alignment_tensors: bool = False,
+        return_loop_logits: bool = False,
     ) -> Tuple[
         Tensor,
         TokenTimeState,
@@ -1362,6 +1365,7 @@ class LoopedRWKVLanguageModel(nn.Module):
                 forced_loops=forced_loops,
                 adaptive_inference=adaptive_inference,
                 retain_alignment_tensors=retain_alignment_tensors,
+                return_loop_logits=return_loop_logits,
             )
 
             final_logits.append(logits)
@@ -1398,11 +1402,13 @@ class LoopedRWKVLanguageModel(nn.Module):
             # Input shapes:
             #   logits [loops, batch, vocab]
             #   halts [loops, batch]
-            loop_logits = pad_loop_tensor(
-                item.per_loop_logits,
-                max_loops,
-                loop_dim=0,
-            ).permute(1, 0, 2)
+            if item.per_loop_logits is not None:
+                loop_logits = pad_loop_tensor(
+                    item.per_loop_logits,
+                    max_loops,
+                    loop_dim=0,
+                ).permute(1, 0, 2)
+                per_token_loop_logits.append(loop_logits)
 
             halts = pad_loop_tensor(
                 item.halt_probs,
@@ -1410,14 +1416,9 @@ class LoopedRWKVLanguageModel(nn.Module):
                 loop_dim=0,
             ).permute(1, 0)
 
-            per_token_loop_logits.append(loop_logits)
             per_token_halts.append(halts)
 
         output_diagnostics: Dict[str, Tensor] = {
-            "per_loop_logits": torch.stack(
-                per_token_loop_logits,
-                dim=1,
-            ),
             "halt_probs": torch.stack(
                 per_token_halts,
                 dim=1,
@@ -1428,6 +1429,10 @@ class LoopedRWKVLanguageModel(nn.Module):
                 device=input_ids.device,
             ),
         }
+        if per_token_loop_logits:
+            output_diagnostics["per_loop_logits"] = torch.stack(
+                per_token_loop_logits, dim=1
+            )
 
         return (
             torch.stack(final_logits, dim=1),
@@ -1604,7 +1609,9 @@ def composite_training_loss(
         losses["proxy_final_kl"] = final_kl.detach()
 
     if proxy_per_loop_logits is not None:
-        student_per_loop = diagnostics["per_loop_logits"]
+        student_per_loop = diagnostics.get("per_loop_logits")
+        if student_per_loop is None:
+            raise ValueError("proxy_per_loop_logits requires model(..., return_loop_logits=True)")
 
         if student_per_loop.shape != proxy_per_loop_logits.shape:
             raise ValueError(
@@ -2283,6 +2290,7 @@ def smoke_test() -> None:
     final_logits, _, diagnostics = model(
         input_ids,
         forced_loops=loops,
+        return_loop_logits=True,
     )
 
     # Dummy proxy targets for plumbing verification only.
