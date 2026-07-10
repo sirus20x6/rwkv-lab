@@ -19,6 +19,7 @@ Every entry is an off-by-default lever with a paper and a CPU test. Full index i
 | **Memory / retrieval** | Engram lexical bank · ROSA suffix-automaton (+ golden reference) · Fast-weight Product-Key Memory · L³ large-lookup · WriteSAE state autoencoder | [`engram_lmb`](src/rwkv_lab/engram_lmb.py) · [`rosa_sam`](src/rwkv_lab/rosa_sam.py) · [`fwpkm`](src/rwkv_lab/fwpkm.py) · [`l3_lookup`](src/rwkv_lab/l3_lookup.py) · [`write_sae`](src/rwkv_lab/write_sae.py) |
 | **Optimizers & dynamics** | Muon (+ MuonClip) · 12 spectral-Muon levers (Muonᵖ, Aurora, MONA, DDC, RSAV, Hierarchical, Distance-Aware, ARO…) · PC-Layer preconditioning · layerwise-LR · grokking probes | [`spectral_muon`](src/rwkv_lab/spectral_muon.py) · [`muon_helpers`](src/rwkv_lab/muon_helpers.py) · [`pc_layer`](src/rwkv_lab/pc_layer.py) |
 | **Cross-arch conversion** | GDN ⊂ RWKV-7 **lossless** remap · RADLADS distillation (+ logit-KL) · Taylor-Calibrate init · Comba readout · Attention-to-Mamba | [`convert_gdn_lossless`](src/rwkv_lab/convert_gdn_lossless.py) · [`convert_train`](src/rwkv_lab/convert_train.py) · [`attn_L3_poc`](src/rwkv_lab/attn_L3_poc.py) |
+| **From-scratch lab** | Future-Seed cross-layer state chaining · DeepEmbed per-token FFN gates (output / BlinkDL-exact hidden / +shift / +emb-residual) · Engram-as-lever · semantic context-bucket packing + mixed-context training (reciprocal batch) · grad-accum / EMA / fp8 / 8-bit optimizers | [`rwkv_pretrain`](src/rwkv_lab/rwkv_pretrain.py) · [`experiment`](src/rwkv_lab/experiment.py) · [`build_corpus`](src/rwkv_lab/build_corpus.py) |
 
 All Python lives under `src/rwkv_lab/` (`python -m rwkv_lab.<module>`); a from-scratch Go + SQLite + [Pixi.js](https://pixijs.com/) dashboard ([`dashboard/`](dashboard/)) drives and monitors runs.
 
@@ -51,6 +52,26 @@ That collapses the conversion problem to just the **8 full-attention layers**, w
 
 ---
 
+## Validated lever results — from-scratch lab
+
+The first A/B-validated wins, measured with the lab's multi-seed harness on small from-scratch
+models (d256 · 4 layers) — synthetic diagnostics plus a 388M-token real corpus
+([Open-PerfectBlend](https://huggingface.co/datasets/mlabonne/open-perfectblend), chat/math/code,
+flattened + ztok-tokenized; ~25M tokens per run, so nothing repeats):
+
+| Lever | Benchmark | Result |
+|---|---|---|
+| **Future-Seed** `--seed-chain` (layer L's state scan starts from layer L−1's final state) | Open-PerfectBlend, 3k steps | **−9.2% val ppl** (86.2 vs 94.9) at identical params/FLOPs; on synthetic recall, length-gen acc@2× 0.82 → 0.98 with seed variance collapsing to zero |
+| **Engram LMB** `--engram` (token suffix-automaton recall → learned table + copy head) | induction:64, 4 seeds | **0.029 → 0.442** (baseline is at chance 1/32; Δ+0.414 SIGNIFICANT); recall:16 perfect incl. 2× length |
+| **DeepEmbed** `--deepembed --de-mode hidden --de-shift` (BlinkDL-exact FFN-hidden gate + separate gate token-shift) | both corpora | **−2.4% / −2.1% ppl**, replicated across corpora; the variant ordering (output gate loses, hidden ≈ parity, +shift wins) independently reproduces BlinkDL's report |
+| **Semantic context-bucket packing** (whole docs, best-fit-decreasing into 512…32k) | Open-PerfectBlend | **0.1% padding** (worst bucket 0.37%); mixed-context training holds tokens/step and activation VRAM constant via reciprocal batch (B = budget/T) |
+
+LM ppl rows are single-seed so far; the synthetic results are 4-seed with significance calls. All
+levers remain off-by-default and compose (seedchain + engram + de_shift launch together from the
+dashboard).
+
+---
+
 ## Screenshots
 
 Experiments are driven and monitored through **trainboard**, a from-scratch Go + SQLite + [Datastar](https://data-star.dev/) + [Pixi.js](https://pixijs.com/) dashboard ([`dashboard/`](dashboard/)) that ingests every run's `train.jsonl` and paints run state live — loss/PPL curves, per-layer conversion maps, and ablation sweeps across the levers above.
@@ -72,7 +93,7 @@ Experiments are driven and monitored through **trainboard**, a from-scratch Go +
 
 <p align="center">
   <img src="docs/images/experiments_card.png" width="100%" alt="Experiments card: config-driven A/B builder + registry results"><br>
-  <em>Experiments card — a config-driven lever lab. Campaigns retain every seed and rung, paired confidence intervals, learning curves, measured throughput/memory/energy, Pareto status, lineage, and fresh-seed confirmation. Successive halving and factorial interactions can be launched from the browser.</em>
+  <em>Experiments card — a config-driven lever lab: 20 lever checkboxes (loops, Future-Seed, Engram, the DeepEmbed variants, MTP heads), synthetic tasks + three LM corpora (incl. mixed-context buckets), and optimizer / fp8 / EMA / grad-accum controls. Campaigns retain every seed and rung, paired confidence intervals, learning curves, measured throughput/memory/energy, Pareto status, lineage, and fresh-seed confirmation. Successive halving and factorial interactions can be launched from the browser.</em>
 </p>
 
 ### Conclusive experiment campaigns
@@ -86,11 +107,34 @@ python -m rwkv_lab.experiment --task recall:16 \
 ```
 
 - Baseline and candidate seeds consume identical deterministic batch/evaluation tapes.
-- Arms pass through configurable successive-halving rungs before full budget.
+- Arms pass through configurable successive-halving rungs; promoted model, optimizer, RNG, data-tape
+  position, and learning curve resume from persistent rung checkpoints instead of restarting.
 - The registry stores every trial, curve, profile, RNG hash, resolved config, environment, package set, dataset identity, and compressed dirty Git patch.
-- Comparisons use paired bootstrap intervals, sign-flip permutation tests, effect sizes, Holm correction, and next-seed power guidance.
+- Comparisons use paired bootstrap intervals, sign-flip permutation tests, effect sizes, Holm correction,
+  next-seed power guidance, and pre-registered O'Brien–Fleming alpha spending across interim rung looks.
 - Evaluation covers a length grid, corruption stress, NLL, calibration, loop engagement, and actual time/memory/energy—not only approximate FLOPs.
 - Exploratory winners are rerun on unused seeds in a child confirmation campaign; only those results can receive the dashboard's **CONFIRMED** badge.
+
+The same normalized registry now owns synthetic, language-model, and conversion experiments. LM launches
+record each seed, JSONL curve, final checkpoint, and paired −validation-loss comparison. A declarative
+conversion campaign uses each layer/seed combination as a paired unit:
+
+```yaml
+name: loop-gate conversion A/B
+conversion:
+  model_dir: Qwen3.5-9B-Base
+  data: /path/to/qwen-token-cache
+  layers: [0, 1, 2]
+  args: {w_lmce: 1.0, w_block: 20.0, w_smt: 0.0, w_dmt: 0.0}
+seeds: 2
+train: {steps: 4000, seq_len: 1024, optimizer: schedulefree, eval_every: 100}
+configs:
+  baseline: {loop_count: 1}
+  loop4: {loop_count: 4, loop_gate: factored}
+```
+
+Run it with `python -m rwkv_lab.config run experiments/my_conversion.yaml`; it produces the same campaign,
+trial, comparison, artifact, and reproducibility records shown by trainboard.
 
 ---
 
@@ -139,6 +183,16 @@ Everything is a **drop-in `linear_attn` / attention module swap** on a HuggingFa
 | [`build_memory_targets.py`](src/rwkv_lab/build_memory_targets.py) | Extract frozen-teacher GDN state/block targets for the SMT/DMT caches. |
 | [`assemble_looped.py`](src/rwkv_lab/assemble_looped.py), [`drive_isolation.py`](src/rwkv_lab/drive_isolation.py), [`distill_consolidate.py`](src/rwkv_lab/distill_consolidate.py) | Assemble independently-converted layers into one looped model; drive the per-layer sweep; joint consolidation pass. |
 | [`load_converted.py`](src/rwkv_lab/load_converted.py), [`eval_baseline.py`](src/rwkv_lab/eval_baseline.py) | Load a converted stack; evaluate the untouched base for reference PPL. |
+
+### From-scratch pretraining lab
+| File | Role |
+|---|---|
+| [`rwkv_pretrain.py`](src/rwkv_lab/rwkv_pretrain.py) | From-scratch RWKV-7 LM trainer where every lever attaches natively: seed-chain, Engram, DeepEmbed (all variants), loops, aux heads; mixed context-length training (`--ctx-buckets`, reciprocal batch); grad-accum, fp32 EMA shadow weights, fp8, 8-bit optimizers; GPU-resident window sampling; fused LM-head CE. |
+| [`experiment.py`](src/rwkv_lab/experiment.py) / [`experiment_analysis.py`](src/rwkv_lab/experiment_analysis.py) | N-seed lever A/Bs (named `LEVERS`) with preflight gates, length-gen / noise eval grids, and paired bootstrap CIs + Holm correction. |
+| [`synthetic_tasks.py`](src/rwkv_lab/synthetic_tasks.py) | GPU-native copy / associative-recall / induction diagnostics (accuracy, not ±0.1-nat ppl noise). |
+| [`build_corpus.py`](src/rwkv_lab/build_corpus.py) | ztok corpora from local files or streamed HF datasets (chat records flattened to role-tagged text); doc offsets; semantic context-bucket packing (whole docs, best-fit-decreasing, ~0% padding). |
+| [`config.py`](src/rwkv_lab/config.py) | Declarative YAML campaigns; the corpora registry (`local` / `blend` / `blend-mix`) behind the dashboard's LM tasks. |
+| [`registry.py`](src/rwkv_lab/registry.py) / [`fused_ce.py`](src/rwkv_lab/fused_ce.py) | Campaign/trial SQLite registry; fused LM-head cross-entropy (flash CE, pad-masking). |
 
 ### Looped recurrence (recurrent depth)
 | File | Role |
@@ -263,6 +317,15 @@ Every technique is an **off-by-default flag** on `python -m rwkv_lab.convert_tra
 | `--grokfast` | Grokfast slow-gradient amplification | [2405.20233](https://arxiv.org/abs/2405.20233) |
 | `--logit-kl` (attn PoC) | top-k logit self-distillation | [RADLADS](https://arxiv.org/abs/2505.03005) |
 
+**From-scratch pretraining** — `python -m rwkv_lab.rwkv_pretrain` (all off by default; also launchable as dashboard lever checkboxes)
+| Flag | Turns on | Source |
+|---|---|---|
+| `--seed-chain` | Future-Seed: layer L's wkv scan starts from layer L−1's final state | [yanghu819/future-seed](https://github.com/yanghu819/future-seed) |
+| `--engram` (+`--engram-sites/-drow/-rows/-boundary-id`) | Engram lexical memory bank as a native lever (token-SAM recall, gated injection, copy head) | [DeepSeek Engram](https://github.com/deepseek-ai/Engram) |
+| `--deepembed` · `--de-mode hidden` · `--de-shift` · `--de-emb-res` | DeepEmbed per-token FFN gates — v1 output gate, BlinkDL-exact bilinear hidden gate, separate gate token-shift, emb-residual fold | [BlinkDL RWKV-LM](https://github.com/BlinkDL/RWKV-LM) (rwkv_v7a) |
+| `--ctx-buckets meta.json` | mixed context-length training over packed 512…32k buckets, reciprocal batch (B = budget/T), pad-masked loss, per-bucket val | — |
+| `--grad-accum N` / `--ema d` / `--fp8` / `--optimizer adamw8bit` | large-batch simulation · fp32 EMA shadow weights · torchao fp8 GEMMs · bitsandbytes 8-bit moments | — |
+
 **Prediction & memory objectives** are aux heads / standalone modules, not `convert_train` flags: the lookahead heads (L-MTP, Belief-State, JTP, TOP, NextLat, …) are wired via `lookahead_module.lookahead_from_args`; LLM-JEPA, Coconut, L³, FwPKM, and WriteSAE are standalone modules for a paired-data / SFT stage — see [References](#references).
 
 ---
@@ -275,9 +338,10 @@ Every technique is an **off-by-default flag** on `python -m rwkv_lab.convert_tra
 | Conversion: GDN → RWKV-7 lossless kernel (24 layers) | ✅ Proven (cosine 0.999995; +0.013% full-model PPL) |
 | Conversion: per-layer isolation sweep | ✅ 22/32 layers converted & accepted |
 | Conversion: full-attention → RWKV distillation (8 layers) | 🚧 In progress (RADLADS PoC floors at block-rel 0.234; RoPE/q-norm are the gap; two-stage logit-KL added) |
-| End-to-end integration + large-scale validation | 🔭 The honest gap — the levers are built and unit-tested, but **not yet A/B-validated at scale** |
+| From-scratch lever validation (lab scale) | ✅ First wins in — seedchain **−9.2% ppl** on a 388M-token corpus, Engram **15×** on induction (significant, 4 seeds), DeepEmbed de_shift **−2%** replicated across corpora ([results](#validated-lever-results--from-scratch-lab)) |
+| Large-model validation + end-to-end integration | 🔭 The remaining gap — the validated levers are small-model results; the next frontier is composing them at 100×+ scale |
 
-This is an active research codebase, not a released library — a **breadth-first toolbox**: each technique is implemented, cited, and unit-tested in isolation, with default flags reproducing the plain baseline so levers can be A/B'd. The next frontier is validation (running the sweeps), not more levers.
+This is an active research codebase, not a released library — a **breadth-first toolbox**: each technique is implemented, cited, and unit-tested in isolation, with default flags reproducing the plain baseline so levers can be A/B'd. Validation has begun (the table above); the next frontier is scale.
 
 ---
 
@@ -305,6 +369,11 @@ Only papers with a concrete implementation or adopted design decision in this re
 - [FPRM: Fixed-Point Reasoners](https://arxiv.org/abs/2606.18206) — two refinements on the DEQ loop: **k-window truncated BPTT** (`--loop-deq-window`, generalizes Neumann-1 to Neumann-k) and **fixed-point-residual halting** (`--loop-fp-halt`, stop when `‖out−prev‖/‖out‖ < τ` — a convergence-based alternative to PonderNet's learned halt) → [`looped_rwkv.py`](src/rwkv_lab/looped_rwkv.py)
 - [ChainGPT: Dual-Reasoning Model with Recurrent Depth and Multi-Rank State Updates](https://openreview.net/forum?id=kdZbxizwGK) — RWKV-Product: M low-rank delta sub-steps per token (effective rank-M state) through one wkv7 call → [`rwkv_product.py`](src/rwkv_lab/rwkv_product.py)
 - [PonderNet](https://arxiv.org/abs/2107.05407) / [ACT](https://arxiv.org/abs/1603.08983) — per-token adaptive loop depth via a halt head + halt-weighted output + ponder loss (the intended capability behind MoDr, which is actually a branch-router) → [`looped_rwkv.py`](src/rwkv_lab/looped_rwkv.py) (`--loop-adaptive-halt`)
+
+**From-scratch pretraining levers**
+- [Future-Seed](https://github.com/yanghu819/future-seed) — cross-layer recurrent-state chaining (s₀ of layer L = s_T of layer L−1); validated here for length generalization and −9.2% LM ppl → [`rwkv_pretrain.py`](src/rwkv_lab/rwkv_pretrain.py) (`--seed-chain`)
+- DeepEmbed ([BlinkDL RWKV-LM](https://github.com/BlinkDL/RWKV-LM), rwkv_v7a) — per-layer per-token FFN gates; our A/B independently reproduces BlinkDL's variant ordering (separate gate token-shift is the win) → [`rwkv_pretrain.py`](src/rwkv_lab/rwkv_pretrain.py) (`--deepembed`, `--de-mode hidden`, `--de-shift`, `--de-emb-res`)
+- [Fewer Truncations Improve Language Modeling](https://arxiv.org/abs/2404.10830) — the best-fit packing idea behind our semantic context-bucket packer (whole docs, standard context sizes, ~0% padding) → [`build_corpus.py`](src/rwkv_lab/build_corpus.py) (`pack_context_buckets`)
 
 **Memory (Engram / ROSA)**
 - [Engram](https://github.com/deepseek-ai/Engram) (DeepSeek; offline conditional memory) → [`engram_lmb.py`](src/rwkv_lab/engram_lmb.py)
@@ -345,6 +414,8 @@ Only papers with a concrete implementation or adopted design decision in this re
 | DeepSeek-V2/V3 | MLA formulation ([`mla_module.py`](src/rwkv_lab/mla_module.py)). |
 | [Qwen3.5 / Qwen](https://github.com/QwenLM) · [HF Transformers](https://github.com/huggingface/transformers) | Base model + modeling code. |
 | [Muon (Keller Jordan)](https://github.com/KellerJordan/Muon) · [schedule-free](https://github.com/facebookresearch/schedule_free) | Optimizer bases. |
+| [Open-PerfectBlend](https://huggingface.co/datasets/mlabonne/open-perfectblend) (mlabonne, Apache 2.0) | The lab's real LM corpus — 788k chat/math/code conversations → 388M ztok tokens (`blend` / `blend-mix`). |
+| [bitsandbytes](https://github.com/bitsandbytes-foundation/bitsandbytes) · [torchao](https://github.com/pytorch/ao) | 8-bit optimizer states · fp8 GEMMs (Blackwell/Hopper). |
 | [Datastar](https://data-star.dev/) · [Pixi.js](https://pixijs.com/) | trainboard front-end (hypermedia SSE + WebGL charts). |
 
 ---
