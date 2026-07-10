@@ -140,6 +140,10 @@ def run_lm(levers, model, train):
             cmd += ["--fp8"]
         if train.get("compile"):                           # torch.compile the train forward
             cmd += ["--compile"]
+        if int(train.get("grad_accum", 1) or 1) > 1:       # effective batch = batch * grad_accum
+            cmd += ["--grad-accum", str(int(train["grad_accum"]))]
+        if float(train.get("ema", 0.0) or 0.0) > 0:        # EMA shadow weights (eval + ckpt)
+            cmd += ["--ema", str(train["ema"])]
         m = train.get("muon")                              # Muon-variant flags -> rwkv_pretrain
         if m and train.get("optimizer") == "muon":
             cmd += ["--sm-scale", str(m["scale"]), "--sm-spectral-power", str(m["spectral_power"]),
@@ -179,6 +183,8 @@ def main():
     rl.add_argument("--warmup", type=int, default=0)
     rl.add_argument("--fp8", action="store_true")
     rl.add_argument("--compile", action="store_true")
+    rl.add_argument("--grad-accum", type=int, default=1)
+    rl.add_argument("--ema", type=float, default=0.0)
     from rwkv_lab.rwkv_pretrain import add_muon_args, muon_opts_from
     add_muon_args(rl)                                        # --sm-* Muon variants
     args = ap.parse_args()
@@ -188,7 +194,8 @@ def main():
                {"steps": args.steps, "minutes": args.minutes, "seq_len": args.seq_len,
                 "batch": args.batch, "lr": args.lr, "init_g1g": args.init_g1g, "resume": args.resume,
                 "optimizer": args.optimizer, "weight_decay": args.weight_decay, "warmup": args.warmup,
-                "fp8": args.fp8, "compile": args.compile, "muon": muon_opts_from(args)})
+                "fp8": args.fp8, "compile": args.compile, "grad_accum": args.grad_accum,
+                "ema": args.ema, "muon": muon_opts_from(args)})
     else:
         run(args.config)
 

@@ -300,6 +300,10 @@ def main():
     ap.add_argument("--engram-warmup", type=int, default=1000, help="steps to ramp injection 0 -> 1")
     ap.add_argument("--engram-boundary-id", type=int, default=-1,
                     help="EOD token id segmenting recall (-1 = none)")
+    ap.add_argument("--grad-accum", type=int, default=1,
+                    help="micro-batches accumulated per optimizer step (effective batch = batch * N)")
+    ap.add_argument("--ema", type=float, default=0.0,
+                    help="EMA decay for a shadow weight copy (e.g. 0.999); eval + checkpoint carry it. 0 = off")
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -380,14 +384,43 @@ def main():
             rows.append(np.asarray(toks[i:i + width], dtype=np.int64))
         return torch.from_numpy(np.stack(rows)).to(dev)
 
+    # EMA shadow weights, fp32 (bf16 ULP would swallow (1-decay)-sized updates at high decay).
+    # Eval and checkpoints carry the EMA copy; the live weights keep training unperturbed.
+    ema = {n: p.detach().float().clone() for n, p in model.named_parameters()} if args.ema > 0 else None
+    if ema is not None:
+        if not args.ema < 1.0:
+            raise ValueError(f"--ema must be in (0, 1), got {args.ema}")
+        print(f"ema: decay {args.ema} — eval + checkpoint use the EMA weights", flush=True)
+
+    def ema_update():
+        with torch.no_grad():
+            for n, p in model.named_parameters():
+                ema[n].mul_(args.ema).add_(p.float(), alpha=1.0 - args.ema)
+
+    def ema_swap():
+        """Swap EMA weights in for eval; returns the live backup for ema_restore."""
+        backup = {n: p.detach().clone() for n, p in model.named_parameters()}
+        with torch.no_grad():
+            for n, p in model.named_parameters():
+                p.copy_(ema[n].to(p.dtype))
+        return backup
+
+    def ema_restore(backup):
+        with torch.no_grad():
+            for n, p in model.named_parameters():
+                p.copy_(backup[n])
+
     def val_loss():
         model.eval()
+        bak = ema_swap() if ema is not None else None
         with torch.no_grad():
             tot = 0.0
             for i in range(0, args.val_windows, args.batch):
                 x = batch(val_toks, min(args.batch, args.val_windows - i))
                 lg = model(x[:, :T]).float()
                 tot += F.cross_entropy(lg.reshape(-1, lg.size(-1)), x[:, 1:T + 1].reshape(-1)).item()
+        if bak is not None:
+            ema_restore(bak)
         model.train()
         return tot / math.ceil(args.val_windows / args.batch)
 
@@ -406,6 +439,10 @@ def main():
     if args.resume and os.path.exists(args.resume):
         ck = torch.load(args.resume, map_location=dev)
         model.load_state_dict(ck["model"]); opt.load_state_dict(ck["opt"]); step = ck.get("step", 0)
+        if ema is not None:                  # saved EMA if present, else re-seed from loaded weights
+            src = ck.get("ema") or {}
+            for n, p in model.named_parameters():
+                ema[n] = src[n].float().to(dev) if n in src else p.detach().float().clone()
         print(f"resumed from {args.resume} @ step {step}", flush=True)
     # Compiled handle for the TRAIN forward only: eager `model` still owns state_dict/params, so
     # checkpoints stay uncompiled (no `_orig_mod.` prefix) and the eval path (below) never toggles
@@ -458,23 +495,30 @@ def main():
             g["lr"] = lr
         if lmb is not None:                  # ramp Engram injection in (gates learn on live recall)
             lmb.set_warmup(min(1.0, (step + 1) / max(args.engram_warmup, 1)))
-        x = sample_train()
-        out = fwd(x[:, :T], return_hidden=bool(heads))
-        lg = (out[0] if heads else out).float()
-        loss = F.cross_entropy(lg.reshape(-1, lg.size(-1)), x[:, 1:T + 1].reshape(-1))
-        if heads:                                            # + weighted aux (latent-prediction) loss
-            loss = loss + heads.compute(out[1], x, model.emb, model.head)["aux_total"]
-        opt.zero_grad(set_to_none=True); loss.backward()
+        opt.zero_grad(set_to_none=True)
+        ga = max(args.grad_accum, 1)
+        for _ in range(ga):                  # grad accumulation: effective batch = batch * ga
+            x = sample_train()
+            out = fwd(x[:, :T], return_hidden=bool(heads))
+            lg = (out[0] if heads else out).float()
+            loss = F.cross_entropy(lg.reshape(-1, lg.size(-1)), x[:, 1:T + 1].reshape(-1))
+            if heads:                                        # + weighted aux (latent-prediction) loss
+                loss = loss + heads.compute(out[1], x, model.emb, model.head)["aux_total"]
+            (loss / ga if ga > 1 else loss).backward()
         gn = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-        opt.step(); seen += args.batch * T; step += 1
+        opt.step(); seen += args.batch * T * ga; step += 1
+        if ema is not None:
+            ema_update()
         if step % args.log_every == 0:
             emit({"kind": "train", "step": step, "loss": float(loss), "gnorm": float(gn),
                   "lr": lr, "tok_per_sec": int(seen / max(time.time() - t0, 1e-6))})
     vl = val_loss(); emit({"kind": "eval", "step": step, "loss": vl, "val_loss": vl, "ppl": math.exp(vl)})
     emit({"kind": "checkpoint", "step": step})
     if args.save:
-        torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "step": step, "config": tag},
-                   args.save)
+        blob = {"model": model.state_dict(), "opt": opt.state_dict(), "step": step, "config": tag}
+        if ema is not None:
+            blob["ema"] = ema
+        torch.save(blob, args.save)
         print(f"saved -> {args.save}", flush=True)
     print(f"DONE {tag}: {step} steps, final val {vl:.4f} (ppl {math.exp(vl):.2f})", flush=True)
 
