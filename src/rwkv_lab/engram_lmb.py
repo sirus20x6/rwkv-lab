@@ -797,6 +797,8 @@ def attach_engram(model: nn.Module, lmb: LexicalMemoryBank,
         handles.append(layer.register_forward_pre_hook(make_pre(site), with_kwargs=True))
 
         la = getattr(layer, "linear_attn", None)
+        if la is None:                       # RWKV7Small Block (rwkv_pretrain) names the time-mix `att`
+            la = getattr(layer, "att", None)
         core = getattr(la, "core", la) if la is not None else None
         vmod = getattr(core, "value", None) if core is not None else None
         if vmod is not None:
