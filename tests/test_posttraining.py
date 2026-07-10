@@ -7,16 +7,20 @@ from torch import nn
 
 from rwkv_lab.adapters import (AdapterConfig, LoRALinear, active_adapters, base_fingerprint,
                                inject_lora, load_adapter, merge_adapter, save_adapter,
-                               unmerge_adapter)
+                               unmerge_adapter, unload_adapter)
 from rwkv_lab.distributed import fully_shard_rwkv, load_checkpoint, save_checkpoint
 from rwkv_lab.export_bundle import export_bundle, verify_bundle
 from rwkv_lab.posttrain_data import (IGNORE_INDEX, PostTrainingExample, dataset_manifest,
-                                     load_jsonl, render, tokenize, TokenizedExample,
-                                     TokenizedVariant, version_dataset)
+                                     cache_tokenized, load_jsonl, pack_variants, render, tokenize,
+                                     TokenizedExample, TokenizedVariant, version_dataset)
+from rwkv_lab.posttrain_campaign import assess, split_audit
 from rwkv_lab.posttrain_train import _train_loss
+from rwkv_lab.posttrain_kernels import score_preference_pairs
 from rwkv_lab.preference import (dpo_loss, kto_loss, orpo_loss, process_reward_loss,
-                                 OutcomeRewardHead, ProcessRewardHead, reward_model_loss,
+                                 binary_calibration, OutcomeRewardHead, ProcessRewardHead, reward_model_loss,
                                  sequence_logps, simpo_loss)
+from rwkv_lab.quantization import (NF4Linear, dequantize_model_nf4, qualify_linear_qlora,
+                                   quantize_model_nf4)
 
 
 class CharTokenizer:
@@ -61,6 +65,36 @@ def test_preference_and_feedback_validation_and_left_truncation():
     with pytest.raises(ValueError, match="boolean"):
         PostTrainingExample.from_dict({"kind": "feedback", "prompt": "x",
                                        "response": "y", "label": "yes"})
+
+
+def test_tool_calls_prm_steps_cache_and_packing_audit(tmp_path):
+    rows = [
+        {"id": "tool", "kind": "sft", "split": "train", "messages": [
+            {"role": "user", "content": "weather?"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "c1", "function": {"name": "weather", "arguments": {"city": "Austin"}}}]},
+            {"role": "tool", "name": "weather", "tool_call_id": "c1", "content": "sunny"},
+            {"role": "assistant", "content": "It is sunny."}]},
+        {"id": "prm", "kind": "prm", "split": "eval", "prompt": "prove it",
+         "steps": [{"text": "first", "label": True}, {"text": "bad", "label": False}],
+         "adversarial_steps": [{"text": "bad first", "label": False}]},
+    ]
+    path = tmp_path / "structured.jsonl"
+    path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    parsed, _ = load_jsonl(path)
+    tool_text = render(parsed[0]).variants["sft"].text
+    assert "<tool_call>" in tool_text and '"city":"Austin"' in tool_text
+    prm = tokenize(render(parsed[1]), CharTokenizer())
+    assert prm.variants["steps"].step_labels == (True, False)
+    assert len(prm.variants["steps"].step_positions) == 2
+    encoded, first = cache_tokenized(path, CharTokenizer(), tmp_path / "cache", max_length=512,
+                                     tokenizer_fingerprint="char-v1")
+    cached, second = cache_tokenized(path, CharTokenizer(), tmp_path / "cache", max_length=512,
+                                    tokenizer_fingerprint="char-v1")
+    assert encoded == cached and not first["cache_hit"] and second["cache_hit"]
+    packed, audit = pack_variants([(row.id, next(iter(row.variants.values()))) for row in encoded], 512,
+                                  separator_id=0)
+    assert packed and audit["loss_masks_preserved"] and audit["qualification_required"]
 
 
 def test_prompt_response_compatibility_and_split_leak_report(tmp_path):
@@ -158,6 +192,32 @@ def test_preference_losses_have_expected_direction_and_gradients():
                                                          [False, False, True, True, False]]))
     process = ProcessRewardHead(4)(hidden, torch.tensor([[1, 2], [2, 3]]))
     assert outcome.shape == (2,) and process.shape == (2, 2)
+    calibration = binary_calibration(torch.tensor([5.0, -5.0]), torch.tensor([1.0, 0.0]))
+    assert calibration["accuracy"] == 1.0 and calibration["ece"] < 0.01
+
+
+def test_native_nf4_storage_gradient_and_dense_merge_parity():
+    torch.manual_seed(23)
+    linear = nn.Linear(64, 32)
+    sample = torch.randn(3, 64)
+    quantized = NF4Linear(linear)
+    assert quantized.packed_weight.dtype == torch.uint8
+    assert quantized.storage_bytes() < linear.weight.numel() * linear.weight.element_size()
+    report = qualify_linear_qlora(linear, sample, base_tolerance=2.0)
+    assert report.gradient_finite and report.gradient_nonzero
+    assert report.zero_init_max_abs < 1e-6 and report.merged_max_abs < 1e-5
+    assert report.compression_ratio > 1.5 and report.passed
+    model = TinyModel()
+    quantize_model_nf4(model, exclude=())
+    inject_lora(model, AdapterConfig("q", rank=2, alpha=2, targets=("proj",)))
+    with torch.no_grad():
+        model.proj.adapters["q"].B.normal_(std=0.02)
+    x = torch.randn(2, 4)
+    expected = model(x)
+    unload_adapter(model, "q", merge=True)
+    dequantize_model_nf4(model)
+    assert isinstance(model.proj, nn.Linear)
+    assert torch.allclose(model(x), expected, atol=1e-5)
 
 
 def test_sequence_logps_respects_causal_mask():
@@ -168,13 +228,38 @@ def test_sequence_logps_respects_causal_mask():
     assert result.shape == (1,) and result.item() > -0.1
 
 
+def test_batched_recurrent_preference_scoring_matches_two_forwards():
+    class Scorer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embedding = nn.Embedding(16, 5)
+            self.head = nn.Linear(5, 16)
+
+        def forward(self, ids):
+            return self.head(self.embedding(ids))
+
+    model = Scorer()
+    chosen = torch.tensor([[1, 2, 3, 4], [1, 5, 6, 7]])
+    rejected = torch.tensor([[1, 2, 8, 9], [1, 5, 10, 11]])
+    chosen_labels, rejected_labels = chosen.clone(), rejected.clone()
+    chosen_labels[:, :2] = IGNORE_INDEX
+    rejected_labels[:, :2] = IGNORE_INDEX
+    expected = (sequence_logps(model(chosen), chosen_labels),
+                sequence_logps(model(rejected), rejected_labels))
+    actual = score_preference_pairs(model, chosen, chosen_labels, rejected, rejected_labels)
+    assert torch.allclose(actual[0], expected[0]) and torch.allclose(actual[1], expected[1])
+
+
 def test_executable_posttraining_objective_steps_are_finite():
     class ToyLM(nn.Module):
         def __init__(self):
-            super().__init__(); self.emb = nn.Embedding(8, 4); self.head = nn.Linear(4, 8)
+            super().__init__()
+            self.emb = nn.Embedding(8, 4)
+            self.head = nn.Linear(4, 8)
 
         def forward(self, ids, return_hidden=False):
-            hidden = self.emb(ids); logits = self.head(hidden)
+            hidden = self.emb(ids)
+            logits = self.head(hidden)
             return (logits, hidden) if return_hidden else logits
 
     variant_a = TokenizedVariant((1, 2, 3, 4), (IGNORE_INDEX, IGNORE_INDEX, 3, 4), ("",) * 4)
@@ -193,12 +278,37 @@ def test_executable_posttraining_objective_steps_are_finite():
                  TokenizedExample("b", "feedback", "train", {"response": variant_b}, {"label": False})], None),
         "reward": ([TokenizedExample("r", "preference", "train",
                                      {"chosen": variant_a, "rejected": variant_b}, {})], reward_head),
+        "prm": ([TokenizedExample("q", "prm", "train",
+                    {"steps": TokenizedVariant((1, 2, 3, 4), (IGNORE_INDEX,) * 4, ("",) * 4,
+                                               step_positions=(1, 3), step_labels=(True, False))}, {})],
+                ProcessRewardHead(4)),
     }
     for objective, (batch, head) in cases.items():
-        model.zero_grad(); reward_head.zero_grad()
+        model.zero_grad()
+        reward_head.zero_grad()
         loss, _ = _train_loss(model, head, batch, objective, "none", "cpu", 0.1, 1.0)
         assert torch.isfinite(loss), objective
         loss.backward()
+
+
+def test_posttrain_campaign_split_and_promotion_gates(tmp_path):
+    train = tmp_path / "train.jsonl"
+    heldout = tmp_path / "eval.jsonl"
+    train.write_text(json.dumps({"id": "train", "kind": "sft", "split": "train",
+                                 "prompt": "train", "response": "ok"}) + "\n")
+    heldout.write_text("\n".join(json.dumps({"id": f"e{i}", "kind": "sft", "split": "eval",
+                                              "prompt": f"heldout {i}", "response": "ok",
+                                              "metadata": {"family": "math"}}) for i in range(4)) + "\n")
+    audit = split_audit(str(train), str(heldout))
+    assert audit["passed"]
+    initial = [{"id": f"e{i}", "loss": 1.0, "family": "math"} for i in range(4)]
+    final = [{"id": f"e{i}", "loss": 0.5, "family": "math"} for i in range(4)]
+    result = {"objective": "sft", "steps": 5, "train_tokens": 105,
+              "initial_eval": {"per_example": initial}, "eval": {"per_example": final}}
+    promotion = assess(result, audit=audit, minimum_delta=0.1, maximum_family_regression=0,
+                       confidence=0.95, bootstrap_samples=200, seed=1, token_budget=100,
+                       budget_slack=10)
+    assert promotion["eligible"] and promotion["gates"]["equal_token_budget"]
 
 
 def test_distributed_checkpoint_single_rank_exact_resume(tmp_path):
@@ -206,12 +316,15 @@ def test_distributed_checkpoint_single_rank_exact_resume(tmp_path):
     model = nn.Linear(3, 2)
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)
     loss = model(torch.randn(4, 3)).square().mean()
-    loss.backward(); optimizer.step(); optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad()
     expected = {key: value.clone() for key, value in model.state_dict().items()}
     path = tmp_path / "dcp"
     save_checkpoint(path, model, optimizer, extra={"step": 7, "rng": torch.arange(4)})
     with torch.no_grad():
-        for parameter in model.parameters(): parameter.zero_()
+        for parameter in model.parameters():
+            parameter.zero_()
     extra = load_checkpoint(path, model, optimizer)
     assert extra["step"] == 7 and torch.equal(extra["rng"], torch.arange(4))
     for key, value in model.state_dict().items():
@@ -239,12 +352,15 @@ def test_fsdp2_wrap_forward_and_dcp_resume(tmp_path):
         model = fully_shard_rwkv(TinyRWKV())
         optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)
         x = torch.randn(3, 4)
-        model(x).square().mean().backward(); optimizer.step(); optimizer.zero_grad()
+        model(x).square().mean().backward()
+        optimizer.step()
+        optimizer.zero_grad()
         expected = model(x).detach().clone()
         checkpoint = tmp_path / "fsdp-dcp"
         save_checkpoint(checkpoint, model, optimizer, extra={"step": 3})
         with torch.no_grad():
-            for parameter in model.parameters(): parameter.zero_()
+            for parameter in model.parameters():
+                parameter.zero_()
         load_checkpoint(checkpoint, model, optimizer)
         assert torch.allclose(model(x), expected)
     finally:

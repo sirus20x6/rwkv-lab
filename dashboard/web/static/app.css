@@ -673,8 +673,11 @@ details.arch-item[open] .lr-caret { transform: rotate(90deg); color: var(--accen
 /* post-training dataset preview + paired behavioral comparison */
 #posttraining-body { display: grid; gap: .75rem; padding: .5rem; color-scheme: dark; }
 #posttraining-inspect details { margin-top: .45rem; }
+.pt-campaign-grid { display: grid; grid-template-columns: minmax(20rem, 32rem) minmax(24rem, 1fr); gap: 1rem; }
+.pt-campaign-results { min-width: 0; max-height: 38rem; overflow: auto; }
+.pt-campaign-grid .field-tbl input, .pt-campaign-grid .field-tbl select { width: 100%; }
 .kpi-row { display: flex; flex-wrap: wrap; gap: .6rem 1.2rem; margin-bottom: .35rem; }
 .compare-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; }
 .compare-grid > div { min-width: 0; }
 .compare-grid .sample-out { min-height: 8rem; max-height: 28rem; overflow: auto; white-space: pre-wrap; }
-@media (max-width: 900px) { .compare-grid { grid-template-columns: 1fr; } }
+@media (max-width: 900px) { .compare-grid, .pt-campaign-grid { grid-template-columns: 1fr; } }
