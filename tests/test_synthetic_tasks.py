@@ -38,6 +38,17 @@ def test_recall_answer_is_determined_by_context():
     assert m.sum().item() == 8                          # exactly one answer token per example
 
 
+def test_recall_distractor_distance_keeps_answer_well_defined():
+    from rwkv_lab.synthetic_tasks import AssocRecallTask
+    t = AssocRecallTask(n_pairs=5, distractors=20)
+    x, y, m = t.batch(4, "cpu")
+    assert x.shape[1] == 2 * t.n + t.distractors + 2
+    for b in range(4):
+        keys = x[b, :2*t.n:2].tolist(); vals = x[b, 1:2*t.n:2].tolist()
+        kq = int(x[b, -1]); answer = int(y[b][m[b] > 0])
+        assert vals[keys.index(kq)] == answer
+
+
 def test_induction_scores_final_continuation():
     t, x, y, m = _shapes_and_mask("induction:16")
     assert m.sum().item() == 4                          # one continuation per example
@@ -63,16 +74,14 @@ def test_length_generalization_spec():
     assert long.L == 32
 
 
-def test_experiment_significance_logic():
+def test_experiment_aggregation_and_paired_significance():
     from rwkv_lab.experiment import _agg
+    from rwkv_lab.experiment_analysis import paired_stats
     m, s = _agg([0.9, 0.92, 0.88])
     assert 0.88 <= m <= 0.92 and s > 0
-    # |Δmean| > pooled std => significant; a tiny gap within noise => not
-    base_m, base_s = _agg([0.90, 0.91])
-    hi_m, hi_s = _agg([0.50, 0.44])                     # clearly worse, low overlap
-    assert abs(hi_m - base_m) > (hi_s + base_s)          # SIGNIFICANT
-    near_m, near_s = _agg([0.89, 0.92])
-    assert abs(near_m - base_m) <= (near_s + base_s)     # within noise
+    base = [0.70,0.72,0.68,0.71,0.69,0.73,0.67,0.70]
+    st = paired_stats(base, [x+0.1 for x in base], bootstrap=500)
+    assert st["delta"] > 0 and st["ci_low"] > 0 and st["p_value"] < 0.05
 
 
 def test_registry_roundtrip(tmp_path):

@@ -29,6 +29,22 @@ CREATE TABLE IF NOT EXISTS runs (
   notes          TEXT DEFAULT '',
   tags_json      TEXT DEFAULT '[]'
 );
+CREATE TABLE IF NOT EXISTS run_rollups (
+  run_id            INTEGER PRIMARY KEY,
+  n_train           INTEGER NOT NULL DEFAULT 0,
+  n_eval            INTEGER NOT NULL DEFAULT 0,
+  n_ckpt            INTEGER NOT NULL DEFAULT 0,
+  latest_train_step INTEGER,
+  latest_train_loss REAL,
+  latest_eval_step  INTEGER,
+  latest_eval_ppl   REAL,
+  latest_eval_top1  REAL,
+  best_ppl          REAL,
+  best_top1         REAL,
+  has_horizons      INTEGER NOT NULL DEFAULT 0,
+  initialized       INTEGER NOT NULL DEFAULT 1,
+  FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS train_events (
   run_id      INTEGER NOT NULL,
   step        INTEGER NOT NULL,
@@ -140,6 +156,48 @@ CREATE TABLE IF NOT EXISTS layer_lib (
   codec_rel   REAL,
   accepted_ts REAL
 );
+
+CREATE TRIGGER IF NOT EXISTS rollup_run_insert AFTER INSERT ON runs BEGIN
+  INSERT OR IGNORE INTO run_rollups(run_id) VALUES(NEW.id);
+END;
+CREATE TRIGGER IF NOT EXISTS rollup_train_insert AFTER INSERT ON train_events BEGIN
+  INSERT INTO run_rollups(run_id,n_train,latest_train_step,latest_train_loss)
+  VALUES(NEW.run_id,1,NEW.step,NEW.loss)
+  ON CONFLICT(run_id) DO UPDATE SET
+    n_train=n_train+1,
+    latest_train_step=CASE WHEN latest_train_step IS NULL OR NEW.step>=latest_train_step THEN NEW.step ELSE latest_train_step END,
+    latest_train_loss=CASE WHEN latest_train_step IS NULL OR NEW.step>=latest_train_step THEN NEW.loss ELSE latest_train_loss END;
+END;
+CREATE TRIGGER IF NOT EXISTS rollup_train_update AFTER UPDATE ON train_events BEGIN
+  UPDATE run_rollups SET latest_train_loss=NEW.loss
+  WHERE run_id=NEW.run_id AND latest_train_step=NEW.step;
+END;
+CREATE TRIGGER IF NOT EXISTS rollup_eval_insert AFTER INSERT ON eval_events BEGIN
+  INSERT INTO run_rollups(run_id,n_eval,latest_eval_step,latest_eval_ppl,latest_eval_top1,best_ppl,best_top1,has_horizons)
+  VALUES(NEW.run_id,1,NEW.step,NEW.ppl,NEW.top1,NEW.ppl,NEW.top1,
+         CASE WHEN json_extract(NEW.extra_json,'$.h4_top1') IS NOT NULL THEN 1 ELSE 0 END)
+  ON CONFLICT(run_id) DO UPDATE SET
+    n_eval=n_eval+1,
+    latest_eval_step=CASE WHEN latest_eval_step IS NULL OR NEW.step>=latest_eval_step THEN NEW.step ELSE latest_eval_step END,
+    latest_eval_ppl=CASE WHEN latest_eval_step IS NULL OR NEW.step>=latest_eval_step THEN NEW.ppl ELSE latest_eval_ppl END,
+    latest_eval_top1=CASE WHEN latest_eval_step IS NULL OR NEW.step>=latest_eval_step THEN NEW.top1 ELSE latest_eval_top1 END,
+    best_ppl=CASE WHEN NEW.ppl IS NULL THEN best_ppl WHEN best_ppl IS NULL OR NEW.ppl<best_ppl THEN NEW.ppl ELSE best_ppl END,
+    best_top1=CASE WHEN NEW.top1 IS NULL THEN best_top1 WHEN best_top1 IS NULL OR NEW.top1>best_top1 THEN NEW.top1 ELSE best_top1 END,
+    has_horizons=MAX(has_horizons,CASE WHEN json_extract(NEW.extra_json,'$.h4_top1') IS NOT NULL THEN 1 ELSE 0 END);
+END;
+CREATE TRIGGER IF NOT EXISTS rollup_eval_update AFTER UPDATE ON eval_events BEGIN
+  UPDATE run_rollups SET
+    latest_eval_ppl=CASE WHEN latest_eval_step=NEW.step THEN NEW.ppl ELSE latest_eval_ppl END,
+    latest_eval_top1=CASE WHEN latest_eval_step=NEW.step THEN NEW.top1 ELSE latest_eval_top1 END,
+    best_ppl=(SELECT min(ppl) FROM eval_events WHERE run_id=NEW.run_id),
+    best_top1=(SELECT max(top1) FROM eval_events WHERE run_id=NEW.run_id),
+    has_horizons=MAX(has_horizons,CASE WHEN json_extract(NEW.extra_json,'$.h4_top1') IS NOT NULL THEN 1 ELSE 0 END)
+  WHERE run_id=NEW.run_id;
+END;
+CREATE TRIGGER IF NOT EXISTS rollup_ckpt_insert AFTER INSERT ON checkpoints BEGIN
+  INSERT INTO run_rollups(run_id,n_ckpt) VALUES(NEW.run_id,1)
+  ON CONFLICT(run_id) DO UPDATE SET n_ckpt=n_ckpt+1;
+END;
 `
 
 // Open opens (creating if needed) the SQLite database, applies WAL pragmas, and
@@ -165,6 +223,28 @@ func Open(path string) (*DB, error) {
 func (d *DB) migrate() error {
 	if _, err := d.Exec(schemaDDL); err != nil {
 		return fmt.Errorf("migrate: %w", err)
+	}
+	// Existing databases get one backfill. Thereafter the transactional triggers
+	// keep this O(runs) summary current without per-second event-history scans.
+	if _, err := d.Exec(`INSERT OR IGNORE INTO run_rollups(run_id,initialized)
+		SELECT id,0 FROM runs`); err != nil {
+		return fmt.Errorf("rollup rows: %w", err)
+	}
+	if _, err := d.Exec(`UPDATE run_rollups SET
+		n_train=(SELECT count(*) FROM train_events WHERE run_id=run_rollups.run_id),
+		n_eval=(SELECT count(*) FROM eval_events WHERE run_id=run_rollups.run_id),
+		n_ckpt=(SELECT count(*) FROM checkpoints WHERE run_id=run_rollups.run_id),
+		latest_train_step=(SELECT max(step) FROM train_events WHERE run_id=run_rollups.run_id),
+		latest_train_loss=(SELECT loss FROM train_events WHERE run_id=run_rollups.run_id ORDER BY step DESC LIMIT 1),
+		latest_eval_step=(SELECT max(step) FROM eval_events WHERE run_id=run_rollups.run_id),
+		latest_eval_ppl=(SELECT ppl FROM eval_events WHERE run_id=run_rollups.run_id ORDER BY step DESC LIMIT 1),
+		latest_eval_top1=(SELECT top1 FROM eval_events WHERE run_id=run_rollups.run_id ORDER BY step DESC LIMIT 1),
+		best_ppl=(SELECT min(ppl) FROM eval_events WHERE run_id=run_rollups.run_id),
+		best_top1=(SELECT max(top1) FROM eval_events WHERE run_id=run_rollups.run_id),
+		has_horizons=EXISTS(SELECT 1 FROM eval_events WHERE run_id=run_rollups.run_id
+		  AND json_extract(extra_json,'$.h4_top1') IS NOT NULL), initialized=1
+		WHERE initialized=0`); err != nil {
+		return fmt.Errorf("backfill rollups: %w", err)
 	}
 	return nil
 }

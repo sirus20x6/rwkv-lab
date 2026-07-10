@@ -4,11 +4,12 @@ The from-scratch sweeps were inconclusive because (a) single-seed runs have a ~0
 floor, (b) web-text ppl doesn't measure what the levers are for, and (c) bad configs burned full
 runs. This wraps the small-model harness with the three fixes:
 
-  1. N-seed sweeps + mean±std aggregation + a significance call (|Δmean| vs pooled std).
-  2. A preflight smoke gate — a few steps that reject diverging / NaN / non-learning configs in
-     seconds before the full run.
-  3. Synthetic-task training + eval (copy / associative-recall / induction) with ACCURACY, a
-     low-noise capability-relevant signal, plus length-generalization (train at L, eval at 2L).
+  1. Paired deterministic seed/data tapes with bootstrap confidence intervals, sign-flip tests,
+     effect sizes, Holm correction, and next-seed power guidance.
+  2. Preflight + successive-halving budget rungs that reject or eliminate weak arms early.
+  3. Capability matrices (length/noise/NLL/calibration), measured time/memory/energy, factorial
+     interaction arms, Pareto scoring, and fresh-seed confirmatory campaigns.
+  4. A normalized trial registry with curves, lineage, RNG hashes, and a reproducibility capsule.
 
 Levers are configured by name (baseline, loop2/3/4, hyper, cart, deq, ...); extend LEVERS below.
 
@@ -16,7 +17,7 @@ Levers are configured by name (baseline, loop2/3/4, hyper, cart, deq, ...); exte
         --seeds 4 --steps 3000 --d-model 256 --n-layers 4
 """
 from __future__ import annotations
-import argparse, json, math, statistics, time
+import argparse, hashlib, itertools, json, math, statistics, threading, time
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -26,6 +27,7 @@ from rwkv_lab.rwkv_pretrain import (RWKV7Small, build_optimizer, add_muon_args, 
 from rwkv_lab.synthetic_tasks import make_task, Task
 from rwkv_lab.looped_rwkv import LoopedRWKV
 from rwkv_lab import registry
+from rwkv_lab.experiment_analysis import paired_stats, holm_adjust, pareto_front
 
 # Lever configs. A lever mixes LoopedRWKV kwargs (recurrent depth) with LookaheadSystem aux weights
 # (latent-prediction training objectives, keys ending in _weight). {} = bare core baseline.
@@ -123,19 +125,73 @@ def loop_gate_stats(model) -> float:
     return sum(gs) / len(gs) if gs else 0.0
 
 
+def _seeded_batch(task, B, device, seed):
+    """Generate a batch from a seed without perturbing model/dropout RNG state."""
+    devs = [] if "cuda" not in str(device) else [torch.cuda.current_device()]
+    with torch.random.fork_rng(devices=devs):
+        torch.manual_seed(int(seed))
+        if devs:
+            torch.cuda.manual_seed_all(int(seed))
+        return task.batch(B, device, np.random.default_rng(int(seed)))
+
+
 @torch.no_grad()
-def _eval_acc(model, task, B, device, rng, iters=8):
-    model.eval(); tot = 0.0
-    for _ in range(iters):
-        x, y, m = task.batch(B, device, rng)
-        tot += Task.accuracy(model(x).float(), y, m)
+def _eval_metrics(model, task, B, device, *, eval_seed, iters=8, noise=0.0):
+    model.eval(); correct = n = 0.0; nll = 0.0; confs, oks = [], []
+    for i in range(iters):
+        x, y, m = _seeded_batch(task, B, device, eval_seed + i)
+        if noise > 0:
+            devs = [] if "cuda" not in str(device) else [torch.cuda.current_device()]
+            with torch.random.fork_rng(devices=devs):
+                torch.manual_seed(eval_seed + 100_000 + i)
+                corrupt = torch.rand(x.shape, device=x.device) < noise
+                replacement = torch.randint(2, task.vocab, x.shape, device=x.device)
+                x = torch.where(corrupt, replacement, x)
+        logits = model(x).float()
+        flat_mask = m.reshape(-1) > 0
+        flat_logits, flat_y = logits.reshape(-1, logits.shape[-1])[flat_mask], y.reshape(-1)[flat_mask]
+        prob = flat_logits.softmax(-1); confidence, pred = prob.max(-1)
+        ok = pred == flat_y
+        correct += ok.sum().item(); n += ok.numel()
+        nll += F.cross_entropy(flat_logits, flat_y, reduction="sum").item()
+        confs.append(confidence.cpu()); oks.append(ok.float().cpu())
+    conf, ok = torch.cat(confs), torch.cat(oks)
+    ece = 0.0
+    for lo in torch.linspace(0, 0.9, 10):
+        mask = (conf >= lo) & (conf < lo + 0.1)
+        if mask.any():
+            ece += float(mask.float().mean() * (conf[mask].mean() - ok[mask].mean()).abs())
     model.train()
-    return tot / iters
+    return {"acc": correct / max(n, 1), "nll": nll / max(n, 1), "ece": ece,
+            "finite": float(torch.isfinite(conf).all())}
+
+
+def _eval_acc(model, task, B, device, rng=None, iters=8, eval_seed=12345):
+    return _eval_metrics(model, task, B, device, eval_seed=eval_seed, iters=iters)["acc"]
+
+
+@torch.no_grad()
+def _copy_rollout_acc(model, task, B, device, seed):
+    """Free-running copy accuracy: generated tokens feed the next prediction."""
+    if not hasattr(task, "L") or not hasattr(task, "ns") or not task.name.startswith("copy"):
+        return None
+    devs = [] if "cuda" not in str(device) else [torch.cuda.current_device()]
+    with torch.random.fork_rng(devices=devs):
+        torch.manual_seed(seed)
+        target = torch.randint(2, 2 + task.ns, (B, task.L), device=device)
+    sep = torch.full((B,1), 1, dtype=torch.long, device=device)
+    prefix = torch.cat((target,sep),dim=1); generated=[]
+    model.eval()
+    for _ in range(task.L):
+        nxt = model(prefix).float()[:,-1].argmax(-1,keepdim=True)
+        generated.append(nxt); prefix=torch.cat((prefix,nxt),dim=1)
+    model.train()
+    return float((torch.cat(generated,dim=1)==target).float().mean())
 
 
 def preflight(task, d_model, n_layers, head_size, lever, device, batch, steps=20):
     """Reject diverging / NaN / non-learning configs before a full run. Returns (ok, reason)."""
-    torch.manual_seed(0); rng = np.random.default_rng(0)
+    torch.manual_seed(0)
     try:
         model = build(task, d_model, n_layers, head_size, lever, device)
     except Exception as e:
@@ -143,7 +199,7 @@ def preflight(task, d_model, n_layers, head_size, lever, device, batch, steps=20
     opt = torch.optim.AdamW(model.parameters(), lr=3e-3, fused=("cuda" in str(device)))
     losses = []
     for i in range(steps):
-        x, y, m = task.batch(batch, device, rng)
+        x, y, m = _seeded_batch(task, batch, device, 90_000 + i)
         loss = _masked_ce(model(x).float(), y, m)
         if not torch.isfinite(loss):
             return False, f"non-finite loss at step {i}"
@@ -151,32 +207,79 @@ def preflight(task, d_model, n_layers, head_size, lever, device, batch, steps=20
         gn = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         if not torch.isfinite(gn):
             return False, f"non-finite grad at step {i}"
-        opt.step(); losses.append(float(loss))
+        opt.step(); losses.append(float(loss.detach()))
     if losses[-1] > losses[0] + 0.5:
         return False, f"diverging (loss {losses[0]:.2f} -> {losses[-1]:.2f})"
     return True, f"ok (loss {losses[0]:.2f} -> {losses[-1]:.2f})"
 
 
-def _block_source(task, B, device, block):
+def _block_source(task, B, device, block, data_seed=0):
     """Amortize per-batch kernel launches for synthetic tasks: generate `block` batches' worth of
     examples in ONE task.batch() call, then serve them B at a time. All rows are iid, so this is
     distributionally identical to `block` separate calls but pays ~1/block the launch overhead.
     block<=1 disables (one generation per step)."""
+    block_i = 0
     while True:
         if block <= 1:
-            yield task.batch(B, device, None); continue
-        X, Y, M = task.batch(block * B, device, None)
+            yield _seeded_batch(task, B, device, data_seed + block_i); block_i += 1; continue
+        X, Y, M = _seeded_batch(task, block * B, device, data_seed + block_i)
+        block_i += 1
         for k in range(block):
             sl = slice(k * B, (k + 1) * B)
             yield X[sl], Y[sl], M[sl]
 
 
+class _PowerSampler:
+    def __init__(self, enabled=True):
+        self.samples, self.stop_event, self.thread = [], threading.Event(), None
+        self.nvml = self.handle = None
+        if enabled and "cuda" in str(torch.device("cuda" if torch.cuda.is_available() else "cpu")):
+            try:
+                import pynvml
+                pynvml.nvmlInit(); self.nvml = pynvml
+                self.handle = pynvml.nvmlDeviceGetHandleByIndex(torch.cuda.current_device())
+            except Exception:
+                self.nvml = None
+    def start(self):
+        if self.nvml is None: return
+        def sample():
+            while not self.stop_event.wait(0.2):
+                try: self.samples.append((time.perf_counter(), self.nvml.nvmlDeviceGetPowerUsage(self.handle) / 1000))
+                except Exception: return
+        self.thread = threading.Thread(target=sample, daemon=True); self.thread.start()
+    def finish(self):
+        self.stop_event.set()
+        if self.thread: self.thread.join(timeout=1)
+        return sum((t1-t0)*(p0+p1)/2 for (t0,p0),(t1,p1) in zip(self.samples, self.samples[1:]))
+
+
+def _profile_summary(event_rows, wall, tokens, first_step_s, device):
+    out = {"train_seconds": wall, "tokens": tokens, "tok_per_sec": tokens / max(wall, 1e-9),
+           "first_step_seconds": first_step_s}
+    if event_rows:
+        torch.cuda.synchronize()
+        names = ("input_ms", "forward_ms", "backward_ms", "optimizer_ms", "step_ms")
+        vals = {n: [] for n in names}
+        for ev in event_rows:
+            parts = [ev[i].elapsed_time(ev[i+1]) for i in range(4)]
+            for n, v in zip(names[:-1], parts): vals[n].append(v)
+            vals["step_ms"].append(sum(parts))
+        for n, xs in vals.items():
+            out[n + "_p50"] = float(np.percentile(xs, 50)); out[n + "_p95"] = float(np.percentile(xs, 95))
+        out["compile_overhead_seconds"] = max(0.0, first_step_s - out["step_ms_p50"] / 1000)
+        out["peak_alloc_mb"] = torch.cuda.max_memory_allocated(device) / 2**20
+        out["peak_reserved_mb"] = torch.cuda.max_memory_reserved(device) / 2**20
+    return out
+
+
 def train_eval(task, d_model, n_layers, head_size, lever, seed, device, steps, batch, lr, minutes=0.0,
                optimizer="adamw", weight_decay=0.01, warmup=0, muon_opts=None, fp8=False, do_compile=False,
-               gen_block=1):
+               gen_block=1, eval_factors=(0.5, 1, 2, 4, 8), eval_noise=(0.05, 0.10),
+               data_seed=None, profile=True):
     """Train one model on the task; return metrics incl. length-generalization accuracy. Budget is
     either a fixed step count (minutes=0) or wall-clock minutes (Karpathy-style fixed-time rounds)."""
-    torch.manual_seed(seed); rng = np.random.default_rng(seed)
+    torch.manual_seed(seed)
+    initial_rng_hash = hashlib.sha256(torch.get_rng_state().numpy().tobytes()).hexdigest()
     model = build(task, d_model, n_layers, head_size, lever, device)
     if fp8:
         apply_fp8(model)
@@ -189,36 +292,86 @@ def train_eval(task, d_model, n_layers, head_size, lever, seed, device, steps, b
     params = [p for _, p in named]
     opt = build_optimizer(named, optimizer, lr, weight_decay, muon_opts=muon_opts)
     warm = warmup if warmup > 0 else max(1, (steps or 2000) // 20)
-    t0 = time.time()
+    t0 = time.perf_counter()
     step = 0
     fwd = torch.compile(model) if do_compile else model   # compile the train forward; eval stays eager
-    src = _block_source(task, batch, device, gen_block)   # amortized synthetic batch generation
-    while (time.time() - t0 < minutes * 60) if minutes > 0 else (step < steps):
-        frac = min(1.0, (time.time() - t0) / (minutes * 60)) if minutes > 0 else step / max(steps, 1)
+    src = _block_source(task, batch, device, gen_block, data_seed=seed if data_seed is None else data_seed)
+    series, event_rows, first_step_s = [], [], 0.0
+    if "cuda" in str(device):
+        torch.cuda.reset_peak_memory_stats(device)
+    power = _PowerSampler(profile); power.start()
+    sample_every = max(1, (steps or 1000) // 100)
+    while (time.perf_counter() - t0 < minutes * 60) if minutes > 0 else (step < steps):
+        frac = min(1.0, (time.perf_counter() - t0) / (minutes * 60)) if minutes > 0 else step / max(steps, 1)
         w = min(1.0, (step + 1) / warm)                      # warmup
         cos = 0.5 * (1 + math.cos(math.pi * frac))           # 1 -> 0 over the budget
         for g in opt.param_groups:
             g["lr"] = lr * w * (0.1 + 0.9 * cos)             # warmup then cosine decay to 0.1x
         step += 1
+        measured = profile and "cuda" in str(device) and step % sample_every == 0
+        ev = [torch.cuda.Event(enable_timing=True) for _ in range(5)] if measured else None
+        if ev: ev[0].record()
+        wall_step = time.perf_counter()
         x, y, m = next(src)
+        if ev: ev[1].record()
         out = fwd(x, return_hidden=bool(heads))
         loss = _masked_ce((out[0] if heads else out).float(), y, m)
         if heads:                                            # within-sequence next-latent aux loss
             loss = loss + heads.compute(out[1], x, model.emb, model.head)["aux_total"]
+        if ev: ev[2].record()
         opt.zero_grad(set_to_none=True); loss.backward()
+        if ev: ev[3].record()
         torch.nn.utils.clip_grad_norm_(params, 1.0)
         opt.step()
-    acc = _eval_acc(model, task, batch, device, rng)
-    out = {"loss": float(loss), "acc": acc, "gate": loop_gate_stats(model)}
+        if ev: ev[4].record(); event_rows.append(ev)
+        if step == 1:
+            if "cuda" in str(device): torch.cuda.synchronize()
+            first_step_s = time.perf_counter() - wall_step
+        if step == 1 or step % sample_every == 0:
+            series.append({"step": step, "loss": float(loss.detach())})
+    if "cuda" in str(device): torch.cuda.synchronize()
+    wall = time.perf_counter() - t0
+    joules = power.finish()
+    base_eval = _eval_metrics(model, task, batch, device, eval_seed=1_000_000 + seed * 10_000)
+    out = {"loss": float(loss.detach()), **base_eval, "gate": loop_gate_stats(model)}
+    rollout = _copy_rollout_acc(model, task, batch, device, 1_500_000 + seed)
+    if rollout is not None: out["rollout_acc"] = rollout
     out.update(model_stats(model, LEVERS.get(lever, {}).get("n_loops", 1)))
-    # length-generalization: eval on a 2x-longer task of the same family (train short, test long)
+    # Capability matrix: multiple lengths plus corruption robustness.
     arg = getattr(task, "L", None) or getattr(task, "n", None)
     if arg:
-        long_spec = f"{task.name.rstrip('0123456789')}:{2 * arg}"
-        try:
-            out["acc_2x"] = _eval_acc(model, make_task(long_spec), batch, device, rng)
-        except Exception:
-            pass
+        stem = task.name.rstrip("0123456789")
+        for factor in eval_factors:
+            length = max(1, int(round(arg * factor)))
+            try:
+                met = _eval_metrics(model, make_task(f"{stem}:{length}"), batch, device,
+                                    eval_seed=2_000_000 + seed * 10_000 + length)
+                key = str(factor).replace(".", "_")
+                out[f"acc_len_{key}x"], out[f"nll_len_{key}x"] = met["acc"], met["nll"]
+                if factor == 2: out["acc_2x"] = met["acc"]
+            except Exception:
+                pass
+    for noise in eval_noise:
+        met = _eval_metrics(model, task, batch, device, eval_seed=3_000_000 + seed * 10_000 + int(noise*1000), noise=noise)
+        out[f"acc_noise_{int(noise*100):02d}"] = met["acc"]
+    if hasattr(task, "distractors"):
+        for mult in (1, 2, 4):
+            stressed = type(task)(task.n, task.nk, task.nv, distractors=task.n * mult)
+            met = _eval_metrics(model, stressed, batch, device,
+                                eval_seed=4_000_000 + seed * 10_000 + mult)
+            out[f"acc_recall_distractors_{mult}x"] = met["acc"]
+    prof = _profile_summary(event_rows, wall, step * batch * y.shape[1], first_step_s, device)
+    prof["energy_joules"] = joules; prof["joules_per_mtoken"] = joules * 1e6 / max(prof["tokens"], 1)
+    out.update(prof)
+    out["_series"], out["_profile"] = series, prof
+    final_rng_hash = hashlib.sha256(torch.get_rng_state().numpy().tobytes()).hexdigest()
+    cuda_rng_hash = None
+    if "cuda" in str(device):
+        cuda_rng_hash = hashlib.sha256(torch.cuda.get_rng_state().cpu().numpy().tobytes()).hexdigest()
+    out["_rng"] = {"model_seed": seed, "data_seed": seed if data_seed is None else data_seed,
+                   "eval_seed_base": 1_000_000 + seed * 10_000,
+                   "initial_cpu_rng_sha256": initial_rng_hash, "final_cpu_rng_sha256": final_rng_hash,
+                   "final_cuda_rng_sha256": cuda_rng_hash}
     return out
 
 
@@ -226,6 +379,41 @@ def _agg(vals):
     m = statistics.mean(vals)
     s = statistics.stdev(vals) if len(vals) > 1 else 0.0
     return m, s
+
+
+def factorial_configs(names, max_order=2):
+    """Generate compatible interaction arms from named lever factors."""
+    out = {n: dict(LEVERS[n]) for n in names}
+    for order in range(2, max_order + 1):
+        for combo in itertools.combinations(names, order):
+            merged, ok = {}, True
+            for name in combo:
+                for k, v in LEVERS[name].items():
+                    if k in merged and merged[k] != v: ok = False; break
+                    merged[k] = v
+                if not ok: break
+            if ok: out["+".join(combo)] = merged
+    return out
+
+
+def _aggregate_runs(runs):
+    keys = sorted(set.intersection(*(set(r) for r in runs)))
+    return {k: _agg([float(r[k]) for r in runs]) for k in keys
+            if not k.startswith("_") and all(isinstance(r[k], (int, float, bool)) for r in runs)}
+
+
+def _paired_comparisons(runs_by_arm, baseline="baseline", metric="acc", seed=0):
+    if baseline not in runs_by_arm:
+        return {}
+    base = runs_by_arm[baseline]
+    out = {}
+    for name, runs in runs_by_arm.items():
+        if name == baseline:
+            continue
+        n = min(len(base), len(runs))
+        if n:
+            out[name] = paired_stats([r[metric] for r in base[:n]], [r[metric] for r in runs[:n]], seed=seed)
+    return holm_adjust(out)
 
 
 def main():
@@ -251,48 +439,155 @@ def main():
     ap.add_argument("--head-size", type=int, default=64); ap.add_argument("--batch", type=int, default=64)
     ap.add_argument("--lr", type=float, default=3e-3)
     ap.add_argument("--out", default="")
+    ap.add_argument("--db", default=None, help="experiment registry path")
+    ap.add_argument("--campaign-name", default="")
+    ap.add_argument("--halving", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--halving-rungs", default="0.02,0.1,0.3,1.0")
+    ap.add_argument("--halving-eta", type=int, default=2)
+    ap.add_argument("--factorial", action="store_true", help="add compatible interaction arms")
+    ap.add_argument("--factorial-order", type=int, default=2)
+    ap.add_argument("--eval-lengths", default="0.5,1,2,4,8")
+    ap.add_argument("--eval-noise", default="0.05,0.10")
+    ap.add_argument("--confirm-top", type=int, default=1,
+                    help="fresh-seed confirmatory reruns for the top N exploratory arms; 0 disables")
+    ap.add_argument("--confirm-seeds", type=int, default=8)
+    ap.add_argument("--profile", action=argparse.BooleanOptionalAction, default=True)
     args = ap.parse_args()
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     task = make_task(args.task)
-    configs = args.configs.split(",")
-    print(f"task={task.name} vocab={task.vocab}  configs={configs}  seeds={args.seeds}  steps={args.steps}  dev={dev}", flush=True)
-
-    results = {}
+    requested = [x.strip() for x in args.configs.split(",") if x.strip()]
+    factors = [x for x in requested if x != "baseline"]
+    if args.factorial:
+        generated = factorial_configs(factors, args.factorial_order); LEVERS.update(generated)
+        configs = ["baseline", *generated]
+    else:
+        configs = ["baseline", *[x for x in requested if x != "baseline"]]
+    eval_factors = tuple(float(x) for x in args.eval_lengths.split(",") if x)
+    eval_noise = tuple(float(x) for x in args.eval_noise.split(",") if x)
+    rung_fracs = [1.0] if not args.halving else sorted({min(1.0, max(0.001, float(x)))
+                                                        for x in args.halving_rungs.split(",")})
+    if rung_fracs[-1] != 1.0: rung_fracs.append(1.0)
+    campaign_cfg = {**vars(args), "resolved_configs": {n: LEVERS.get(n) for n in configs},
+                    "device": dev, "rungs": rung_fracs,
+                    "decision_policy": {"primary_metric": "acc", "direction": "maximize",
+                                        "alpha": 0.05, "multiple_testing": "holm",
+                                        "exploration_rank": "mean_minus_standard_error",
+                                        "confirmation": "positive_delta_and_corrected_significance",
+                                        "fresh_seed_offset": 10_000}}
+    cid = registry.create_campaign(args.task, campaign_cfg, name=args.campaign_name,
+                                   capsule=registry.capture_capsule({"task": args.task}), db=args.db)
+    arm_ids, valid = {}, []
+    print(f"campaign={cid} task={task.name} configs={configs} seeds={args.seeds} dev={dev}", flush=True)
     for cfg in configs:
+        arm_ids[cfg] = registry.ensure_arm(cid, cfg, LEVERS.get(cfg, {}), db=args.db)
         ok, why = preflight(task, args.d_model, args.n_layers, args.head_size, cfg, dev, args.batch)
-        if not ok:
-            print(f"  [{cfg}] PREFLIGHT REJECTED: {why}", flush=True); continue
-        runs = []
-        t0 = time.time()
-        for s in range(args.seeds):
-            runs.append(train_eval(task, args.d_model, args.n_layers, args.head_size, cfg, s,
-                                   dev, args.steps, args.batch, args.lr, args.minutes,
-                                   args.optimizer, args.weight_decay, args.warmup, muon_opts_from(args),
-                                   fp8=args.fp8, do_compile=args.compile, gen_block=args.gen_block))
-        keys = runs[0].keys()
-        results[cfg] = {k: _agg([r[k] for r in runs if k in r]) for k in keys}
-        results[cfg]["_n"] = len(runs)
-        acc_m, acc_s = results[cfg]["acc"]
-        gate = results[cfg].get("gate", (0.0, 0.0))[0]
-        print(f"  [{cfg}] preflight {why} | acc {acc_m:.3f}±{acc_s:.3f}"
-              + (f" | acc_2x {results[cfg]['acc_2x'][0]:.3f}" if "acc_2x" in results[cfg] else "")
-              + (f" | loop_gate {gate:.3f}{' (INERT)' if gate < 0.02 else ''}" if cfg != "baseline" else "")
-              + f" | {results[cfg].get('params_m', (0,))[0]:.2f}M {results[cfg].get('flop_per_tok', (0,))[0]/1e6:.1f}MF/tok"
-              + f"  ({(time.time()-t0):.0f}s)", flush=True)
-        registry.record(args.task, cfg, args.seeds, args.steps,
-                        {k: list(v) for k, v in results[cfg].items() if isinstance(v, tuple)})
+        if ok:
+            valid.append(cfg); print(f"  [{cfg}] preflight {why}", flush=True)
+        else:
+            registry.set_arm_status(arm_ids[cfg], "preflight_rejected", db=args.db)
+            print(f"  [{cfg}] PREFLIGHT REJECTED: {why}", flush=True)
 
-    # significance vs baseline: |Δmean| > (s_a + s_b) is a real effect above the noise
-    if "baseline" in results:
-        bm, bs = results["baseline"]["acc"]
-        print(f"\n=== {task.name}: accuracy vs baseline ({bm:.3f}±{bs:.3f}), {args.seeds} seeds ===")
-        for cfg, r in results.items():
-            if cfg == "baseline":
-                continue
-            m, s = r["acc"]; d = m - bm; sig = abs(d) > (s + bs)
-            print(f"  {cfg:16} {m:.3f}±{s:.3f}   Δ{d:+.3f}   {'SIGNIFICANT' if sig else 'within noise'}")
+    active, final_runs = valid, {}
+    try:
+        for rung, frac in enumerate(rung_fracs):
+            if not active: break
+            budget_steps = max(1, int(round(args.steps * frac)))
+            budget_minutes = args.minutes * frac if args.minutes else 0.0
+            print(f"\n--- rung {rung+1}/{len(rung_fracs)} budget="
+                  f"{budget_minutes:.2f}min" if budget_minutes else f"\n--- rung {rung+1}/{len(rung_fracs)} budget={budget_steps} steps", flush=True)
+            rung_runs = {}
+            for cfg in list(active):
+                runs = []
+                for s in range(args.seeds):
+                    started = time.time()
+                    try:
+                        run = train_eval(task, args.d_model, args.n_layers, args.head_size, cfg, s, dev,
+                                         budget_steps, args.batch, args.lr, budget_minutes, args.optimizer,
+                                         args.weight_decay, args.warmup, muon_opts_from(args), fp8=args.fp8,
+                                         do_compile=args.compile, gen_block=args.gen_block,
+                                         eval_factors=eval_factors, eval_noise=eval_noise,
+                                         data_seed=500_000 + s, profile=args.profile)
+                        series, prof, rng_state = run.pop("_series"), run.pop("_profile"), run.pop("_rng")
+                        registry.record_trial(cid, arm_ids[cfg], s, rung,
+                                              budget_minutes * 60 if budget_minutes else budget_steps,
+                                              run, series=series, profile=prof, rng=rng_state,
+                                              started_ts=started, db=args.db)
+                        runs.append(run)
+                    except Exception as e:
+                        registry.record_trial(cid, arm_ids[cfg], s, rung,
+                                              budget_minutes * 60 if budget_minutes else budget_steps,
+                                              None, status="failed", error=f"{type(e).__name__}: {e}",
+                                              started_ts=started, db=args.db)
+                        print(f"  [{cfg} seed={s}] FAILED: {type(e).__name__}: {e}", flush=True)
+                if runs:
+                    rung_runs[cfg] = runs
+                    agg = _aggregate_runs(runs); am, ast = agg["acc"]
+                    print(f"  [{cfg}] acc {am:.3f}±{ast:.3f} tok/s {agg.get('tok_per_sec',(0,))[0]:.0f}", flush=True)
+            final_runs = rung_runs
+            if rung < len(rung_fracs) - 1:
+                challengers = [n for n in active if n != "baseline" and n in rung_runs]
+                ranked = sorted(challengers, key=lambda n: _aggregate_runs(rung_runs[n])["acc"][0]
+                                - _aggregate_runs(rung_runs[n])["acc"][1] / max(len(rung_runs[n])**0.5, 1), reverse=True)
+                keep = max(1, math.ceil(len(ranked) / max(args.halving_eta, 2))) if ranked else 0
+                promoted = ranked[:keep]
+                eliminated = set(challengers) - set(promoted)
+                for n in eliminated: registry.set_arm_status(arm_ids[n], f"eliminated_rung_{rung}", db=args.db)
+                active = (["baseline"] if "baseline" in rung_runs else []) + promoted
+                print(f"  promote -> {active}; eliminated -> {sorted(eliminated)}", flush=True)
+
+        results = {name: _aggregate_runs(runs) for name, runs in final_runs.items()}
+        comparisons = _paired_comparisons(final_runs, seed=cid)
+        for name, st in comparisons.items():
+            registry.record_comparison(cid, arm_ids[name], arm_ids["baseline"], "acc", "explore", st, db=args.db)
+            print(f"  Δ {name}: {st['delta']:+.4f} 95%CI[{st['ci_low']:+.4f},{st['ci_high']:+.4f}] "
+                  f"p_holm={st['p_adjusted']:.4g} dz={st['effect_size']:.2f} next_n={st['recommended_n']}", flush=True)
+        for name, agg in results.items():
+            registry.record(args.task, name, len(final_runs[name]), args.steps,
+                            {k: list(v) for k, v in agg.items()}, db=args.db)
+        rows = [{"name": n, **{k: v[0] for k,v in a.items()}} for n,a in results.items()]
+        for row, flag in zip(rows, pareto_front(rows)):
+            print(f"  {'PARETO' if flag else '      '} {row['name']:20} acc={row.get('acc',0):.3f} "
+                  f"time={row.get('train_seconds',0):.1f}s peak={row.get('peak_alloc_mb',0):.0f}MB", flush=True)
+
+        # Fresh, previously unused seeds: exploratory winners cannot confirm themselves.
+        challengers = sorted([n for n in results if n != "baseline"],
+                             key=lambda n: results[n]["acc"][0], reverse=True)[:args.confirm_top]
+        if challengers and args.confirm_seeds > 0:
+            confirm_cfg = {**campaign_cfg, "selected": challengers, "fresh_seed_offset": 10_000}
+            ccid = registry.create_campaign(args.task, confirm_cfg, name=(args.campaign_name + " confirm").strip(),
+                                            phase="confirm", parent_id=cid,
+                                            capsule=registry.capture_capsule({"parent_campaign": cid}), db=args.db)
+            c_names, c_arm, c_runs = ["baseline", *challengers], {}, {}
+            for name in c_names: c_arm[name] = registry.ensure_arm(ccid, name, LEVERS[name], db=args.db)
+            print(f"\n--- confirm campaign={ccid} arms={c_names} fresh_seeds={args.confirm_seeds} ---", flush=True)
+            for name in c_names:
+                c_runs[name] = []
+                for j in range(args.confirm_seeds):
+                    s = 10_000 + j; started = time.time()
+                    run = train_eval(task, args.d_model, args.n_layers, args.head_size, name, s, dev,
+                                     args.steps, args.batch, args.lr, args.minutes, args.optimizer,
+                                     args.weight_decay, args.warmup, muon_opts_from(args), fp8=args.fp8,
+                                     do_compile=args.compile, gen_block=args.gen_block,
+                                     eval_factors=eval_factors, eval_noise=eval_noise,
+                                     data_seed=600_000 + j, profile=args.profile)
+                    series, prof, rng_state = run.pop("_series"), run.pop("_profile"), run.pop("_rng")
+                    registry.record_trial(ccid, c_arm[name], s, 0, args.minutes*60 or args.steps, run,
+                                          series=series, profile=prof, rng=rng_state, phase="confirm",
+                                          started_ts=started, db=args.db); c_runs[name].append(run)
+            cstats = _paired_comparisons(c_runs, seed=ccid)
+            for name, st in cstats.items():
+                confirmed = bool(st["significant"] and st["delta"] > 0)
+                registry.record_comparison(ccid, c_arm[name], c_arm["baseline"], "acc", "confirm", st,
+                                           confirmed=confirmed, db=args.db)
+                print(f"  {name}: Δ{st['delta']:+.4f} CI[{st['ci_low']:+.4f},{st['ci_high']:+.4f}] "
+                      f"p_holm={st['p_adjusted']:.4g} {'CONFIRMED' if confirmed else 'not confirmed'}", flush=True)
+            registry.finish_campaign(ccid, db=args.db)
+        registry.finish_campaign(cid, db=args.db)
+    except BaseException:
+        registry.finish_campaign(cid, status="failed", db=args.db)
+        raise
     if args.out:
-        json.dump({c: {k: v for k, v in r.items()} for c, r in results.items()}, open(args.out, "w"))
+        json.dump({"campaign_id": cid, "results": results}, open(args.out, "w"))
         print(f"wrote {args.out}")
 
 
