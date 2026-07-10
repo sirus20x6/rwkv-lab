@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import itertools
 import math
+from statistics import NormalDist
 import numpy as np
 
 
@@ -56,6 +57,53 @@ def holm_adjust(items: dict[str, dict], alpha=0.05) -> dict[str, dict]:
         reject_chain = reject_chain and raw <= alpha / (m - rank)
         out[key]["p_adjusted"] = adjusted
         out[key]["significant"] = bool(out[key]["significant"] and reject_chain)
+    return out
+
+
+def alpha_spending(look: int, total_looks: int, *, alpha=0.05,
+                   method="obrien_fleming") -> dict:
+    """Return a valid per-look alpha allocation for repeated interim analyses.
+
+    ``cumulative`` is the alpha spent through this look and ``increment`` is the
+    amount available to this look.  Testing each look at its increment is a
+    conservative alpha-spending design (a union bound controls family-wise type-I
+    error even though successive rung measurements are correlated).
+    """
+    if total_looks < 1 or not 1 <= look <= total_looks:
+        raise ValueError("look must be in [1, total_looks]")
+    if not 0 < alpha < 1:
+        raise ValueError("alpha must be between zero and one")
+
+    def cumulative(k):
+        t = k / total_looks
+        if method in ("obrien_fleming", "obf"):
+            z = NormalDist().inv_cdf(1 - alpha / 2)
+            return min(alpha, 2 * (1 - NormalDist().cdf(z / math.sqrt(t))))
+        if method == "pocock":
+            return alpha * math.log(1 + (math.e - 1) * t)
+        if method in ("linear", "bonferroni"):
+            return alpha * t
+        raise ValueError(f"unknown alpha-spending method: {method}")
+
+    spent = cumulative(look)
+    previous = cumulative(look - 1) if look > 1 else 0.0
+    return {"look": look, "total_looks": total_looks, "information_fraction": look / total_looks,
+            "method": "obrien_fleming" if method == "obf" else method,
+            "family_alpha": float(alpha), "cumulative": float(spent),
+            "increment": float(max(spent - previous, np.finfo(float).eps))}
+
+
+def sequential_holm(items: dict[str, dict], look: int, total_looks: int, *,
+                    alpha=0.05, method="obrien_fleming") -> dict[str, dict]:
+    """Holm-correct one interim look using its pre-registered alpha spend."""
+    spend = alpha_spending(look, total_looks, alpha=alpha, method=method)
+    out = holm_adjust(items, alpha=spend["increment"])
+    for stats in out.values():
+        stats["sequential"] = dict(spend)
+        # holm_adjust also requires the CI to exclude zero. paired_stats should be
+        # called with this same look alpha so both pieces use the same boundary.
+        stats["significant"] = bool(stats["significant"] and
+                                    stats["p_adjusted"] <= spend["increment"])
     return out
 
 

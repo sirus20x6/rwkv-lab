@@ -17,7 +17,7 @@ Levers are configured by name (baseline, loop2/3/4, hyper, cart, deq, ...); exte
         --seeds 4 --steps 3000 --d-model 256 --n-layers 4
 """
 from __future__ import annotations
-import argparse, hashlib, itertools, json, math, statistics, threading, time
+import argparse, hashlib, itertools, json, math, os, statistics, threading, time
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -27,7 +27,7 @@ from rwkv_lab.rwkv_pretrain import (RWKV7Small, build_optimizer, add_muon_args, 
 from rwkv_lab.synthetic_tasks import make_task, Task
 from rwkv_lab.looped_rwkv import LoopedRWKV
 from rwkv_lab import registry
-from rwkv_lab.experiment_analysis import paired_stats, holm_adjust, pareto_front
+from rwkv_lab.experiment_analysis import paired_stats, holm_adjust, pareto_front, sequential_holm
 
 # Lever configs. A lever mixes LoopedRWKV kwargs (recurrent depth) with LookaheadSystem aux weights
 # (latent-prediction training objectives, keys ending in _weight). {} = bare core baseline.
@@ -55,11 +55,24 @@ LEVERS = {
     "lmtp":          dict(lmtp_weight=0.1),                  # leap multi-token prediction
     "bst":           dict(bst_weight=0.1),                   # belief-state (fwd+bwd) objective
     "jtp":           dict(jtp_weight=0.1),                   # joint multi-token prediction
+    # Scale/adaptation comparison arms for the LM trainer and trainboard. Sources:
+    # u-muP arXiv:2407.17465; Titans arXiv:2501.00663; MIRAS arXiv:2504.13173;
+    # ATLAS arXiv:2505.23735; Nested Learning arXiv:2512.24695; NVFP4
+    # arXiv:2509.25149 and TetraJet-v2 arXiv:2510.27527. Full URLs and adopted
+    # mechanisms live in u_mup.py, online_memory.py, nvfp4.py, and README.md.
+    "umup_256":      dict(u_mup_base_width=256, u_mup_base_depth=4),
+    "mem_titans":    dict(online_memory=True, online_memory_mode="titans"),
+    "mem_miras":     dict(online_memory=True, online_memory_mode="miras"),
+    "mem_atlas":     dict(online_memory=True, online_memory_mode="atlas"),
+    "mem_nested":    dict(online_memory=True, online_memory_mode="nested"),
+    "nvfp4":         dict(nvfp4=True),
+    "nvfp4_rht":     dict(nvfp4=True, nvfp4_rht=True),
 }
 
 # Levers whose objective needs a real token FUTURE — only valid on the LM path (rwkv_pretrain),
 # not the synthetic diagnostic tasks. The board disables these unless an LM corpus is selected.
-LM_ONLY = ("top", "lmtp", "bst", "jtp")
+LM_ONLY = ("top", "lmtp", "bst", "jtp", "umup_256", "mem_titans", "mem_miras",
+           "mem_atlas", "mem_nested", "nvfp4", "nvfp4_rht")
 
 _AUX_KEYS = ("nextlat_weight", "top_weight", "lmtp_weight", "bst_weight", "jtp_weight")
 
@@ -213,20 +226,22 @@ def preflight(task, d_model, n_layers, head_size, lever, device, batch, steps=20
     return True, f"ok (loss {losses[0]:.2f} -> {losses[-1]:.2f})"
 
 
-def _block_source(task, B, device, block, data_seed=0):
+def _block_source(task, B, device, block, data_seed=0, start_step=0):
     """Amortize per-batch kernel launches for synthetic tasks: generate `block` batches' worth of
     examples in ONE task.batch() call, then serve them B at a time. All rows are iid, so this is
     distributionally identical to `block` separate calls but pays ~1/block the launch overhead.
     block<=1 disables (one generation per step)."""
-    block_i = 0
+    block_i = start_step // max(block, 1)
+    first_offset = start_step % max(block, 1)
     while True:
         if block <= 1:
             yield _seeded_batch(task, B, device, data_seed + block_i); block_i += 1; continue
         X, Y, M = _seeded_batch(task, block * B, device, data_seed + block_i)
         block_i += 1
-        for k in range(block):
+        for k in range(first_offset, block):
             sl = slice(k * B, (k + 1) * B)
             yield X[sl], Y[sl], M[sl]
+        first_offset = 0
 
 
 class _PowerSampler:
@@ -275,7 +290,8 @@ def _profile_summary(event_rows, wall, tokens, first_step_s, device):
 def train_eval(task, d_model, n_layers, head_size, lever, seed, device, steps, batch, lr, minutes=0.0,
                optimizer="adamw", weight_decay=0.01, warmup=0, muon_opts=None, fp8=False, do_compile=False,
                gen_block=1, eval_factors=(0.5, 1, 2, 4, 8), eval_noise=(0.05, 0.10),
-               data_seed=None, profile=True):
+               data_seed=None, profile=True, resume_path=None, checkpoint_path=None,
+               schedule_steps=None, schedule_minutes=None):
     """Train one model on the task; return metrics incl. length-generalization accuracy. Budget is
     either a fixed step count (minutes=0) or wall-clock minutes (Karpathy-style fixed-time rounds)."""
     torch.manual_seed(seed)
@@ -291,18 +307,38 @@ def train_eval(task, d_model, n_layers, head_size, lever, seed, device, steps, b
     named = list(model.named_parameters()) + (list(heads.named_parameters()) if heads else [])
     params = [p for _, p in named]
     opt = build_optimizer(named, optimizer, lr, weight_decay, muon_opts=muon_opts)
-    warm = warmup if warmup > 0 else max(1, (steps or 2000) // 20)
+    schedule_steps = int(schedule_steps or steps)
+    schedule_minutes = float(schedule_minutes or minutes)
+    warm = warmup if warmup > 0 else max(1, (schedule_steps or 2000) // 20)
+    step, elapsed_before, prior_series, last_loss = 0, 0.0, [], None
+    resumed_from = None
+    if resume_path:
+        ck = torch.load(resume_path, map_location=device, weights_only=False)
+        model.load_state_dict(ck["model"])
+        if heads is not None and ck.get("heads") is not None:
+            heads.load_state_dict(ck["heads"])
+        opt.load_state_dict(ck["optimizer"])
+        step = int(ck.get("step", 0)); elapsed_before = float(ck.get("elapsed_seconds", 0.0))
+        prior_series = list(ck.get("series", [])); last_loss = ck.get("last_loss")
+        if ck.get("cpu_rng") is not None: torch.set_rng_state(ck["cpu_rng"].cpu())
+        if "cuda" in str(device) and ck.get("cuda_rng") is not None:
+            torch.cuda.set_rng_state(ck["cuda_rng"].cpu(), device=device)
+        resumed_from = os.path.abspath(resume_path)
     t0 = time.perf_counter()
-    step = 0
+    start_step = step
     fwd = torch.compile(model) if do_compile else model   # compile the train forward; eval stays eager
-    src = _block_source(task, batch, device, gen_block, data_seed=seed if data_seed is None else data_seed)
-    series, event_rows, first_step_s = [], [], 0.0
+    src = _block_source(task, batch, device, gen_block,
+                        data_seed=seed if data_seed is None else data_seed, start_step=step)
+    series, event_rows, first_step_s = prior_series, [], 0.0
     if "cuda" in str(device):
         torch.cuda.reset_peak_memory_stats(device)
     power = _PowerSampler(profile); power.start()
     sample_every = max(1, (steps or 1000) // 100)
-    while (time.perf_counter() - t0 < minutes * 60) if minutes > 0 else (step < steps):
-        frac = min(1.0, (time.perf_counter() - t0) / (minutes * 60)) if minutes > 0 else step / max(steps, 1)
+    while ((elapsed_before + time.perf_counter() - t0 < minutes * 60)
+           if minutes > 0 else (step < steps)):
+        elapsed_total = elapsed_before + time.perf_counter() - t0
+        frac = (min(1.0, elapsed_total / (schedule_minutes * 60)) if minutes > 0
+                else step / max(schedule_steps, 1))
         w = min(1.0, (step + 1) / warm)                      # warmup
         cos = 0.5 * (1 + math.cos(math.pi * frac))           # 1 -> 0 over the budget
         for g in opt.param_groups:
@@ -324,16 +360,18 @@ def train_eval(task, d_model, n_layers, head_size, lever, seed, device, steps, b
         torch.nn.utils.clip_grad_norm_(params, 1.0)
         opt.step()
         if ev: ev[4].record(); event_rows.append(ev)
-        if step == 1:
+        if step == start_step + 1:
             if "cuda" in str(device): torch.cuda.synchronize()
             first_step_s = time.perf_counter() - wall_step
         if step == 1 or step % sample_every == 0:
             series.append({"step": step, "loss": float(loss.detach())})
     if "cuda" in str(device): torch.cuda.synchronize()
-    wall = time.perf_counter() - t0
+    wall_increment = time.perf_counter() - t0
+    wall = elapsed_before + wall_increment
     joules = power.finish()
     base_eval = _eval_metrics(model, task, batch, device, eval_seed=1_000_000 + seed * 10_000)
-    out = {"loss": float(loss.detach()), **base_eval, "gate": loop_gate_stats(model)}
+    final_loss = float(loss.detach()) if step > start_step else float(last_loss or base_eval["nll"])
+    out = {"loss": final_loss, **base_eval, "gate": loop_gate_stats(model)}
     rollout = _copy_rollout_acc(model, task, batch, device, 1_500_000 + seed)
     if rollout is not None: out["rollout_acc"] = rollout
     out.update(model_stats(model, LEVERS.get(lever, {}).get("n_loops", 1)))
@@ -360,7 +398,10 @@ def train_eval(task, d_model, n_layers, head_size, lever, seed, device, steps, b
             met = _eval_metrics(model, stressed, batch, device,
                                 eval_seed=4_000_000 + seed * 10_000 + mult)
             out[f"acc_recall_distractors_{mult}x"] = met["acc"]
-    prof = _profile_summary(event_rows, wall, step * batch * y.shape[1], first_step_s, device)
+    tokens_per_step = int(getattr(task, "L", 0) or getattr(task, "n", 0) or 1)
+    if step > start_step:
+        tokens_per_step = y.shape[1]
+    prof = _profile_summary(event_rows, wall, step * batch * tokens_per_step, first_step_s, device)
     prof["energy_joules"] = joules; prof["joules_per_mtoken"] = joules * 1e6 / max(prof["tokens"], 1)
     out.update(prof)
     out["_series"], out["_profile"] = series, prof
@@ -371,7 +412,20 @@ def train_eval(task, d_model, n_layers, head_size, lever, seed, device, steps, b
     out["_rng"] = {"model_seed": seed, "data_seed": seed if data_seed is None else data_seed,
                    "eval_seed_base": 1_000_000 + seed * 10_000,
                    "initial_cpu_rng_sha256": initial_rng_hash, "final_cpu_rng_sha256": final_rng_hash,
-                   "final_cuda_rng_sha256": cuda_rng_hash}
+                   "final_cuda_rng_sha256": cuda_rng_hash, "resumed_from": resumed_from,
+                   "start_step": start_step, "final_step": step}
+    if checkpoint_path:
+        os.makedirs(os.path.dirname(os.path.abspath(checkpoint_path)), exist_ok=True)
+        blob = {"version": 1, "model": model.state_dict(),
+                "heads": heads.state_dict() if heads is not None else None,
+                "optimizer": opt.state_dict(), "step": step, "elapsed_seconds": wall,
+                "series": series, "last_loss": final_loss, "cpu_rng": torch.get_rng_state(),
+                "cuda_rng": torch.cuda.get_rng_state(device).cpu() if "cuda" in str(device) else None,
+                "lever": lever, "seed": seed,
+                "data_seed": seed if data_seed is None else data_seed}
+        tmp = checkpoint_path + ".tmp"
+        torch.save(blob, tmp); os.replace(tmp, checkpoint_path)
+        out["_checkpoint"] = os.path.abspath(checkpoint_path)
     return out
 
 
@@ -402,7 +456,9 @@ def _aggregate_runs(runs):
             if not k.startswith("_") and all(isinstance(r[k], (int, float, bool)) for r in runs)}
 
 
-def _paired_comparisons(runs_by_arm, baseline="baseline", metric="acc", seed=0):
+def _paired_comparisons(runs_by_arm, baseline="baseline", metric="acc", seed=0, *,
+                        look=None, total_looks=None, alpha=0.05,
+                        spending="obrien_fleming"):
     if baseline not in runs_by_arm:
         return {}
     base = runs_by_arm[baseline]
@@ -412,8 +468,16 @@ def _paired_comparisons(runs_by_arm, baseline="baseline", metric="acc", seed=0):
             continue
         n = min(len(base), len(runs))
         if n:
-            out[name] = paired_stats([r[metric] for r in base[:n]], [r[metric] for r in runs[:n]], seed=seed)
-    return holm_adjust(out)
+            look_alpha = alpha
+            if look is not None and total_looks is not None:
+                from rwkv_lab.experiment_analysis import alpha_spending
+                look_alpha = alpha_spending(look, total_looks, alpha=alpha,
+                                            method=spending)["increment"]
+            out[name] = paired_stats([r[metric] for r in base[:n]], [r[metric] for r in runs[:n]],
+                                     seed=seed, alpha=look_alpha)
+    if look is not None and total_looks is not None:
+        return sequential_holm(out, look, total_looks, alpha=alpha, method=spending)
+    return holm_adjust(out, alpha=alpha)
 
 
 def main():
@@ -444,6 +508,13 @@ def main():
     ap.add_argument("--halving", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--halving-rungs", default="0.02,0.1,0.3,1.0")
     ap.add_argument("--halving-eta", type=int, default=2)
+    ap.add_argument("--checkpoint-dir", default="runs/experiment_checkpoints",
+                    help="persistent rung checkpoints; promoted trials resume from the preceding rung")
+    ap.add_argument("--sequential", action=argparse.BooleanOptionalAction, default=True,
+                    help="control repeated rung looks with pre-registered alpha spending")
+    ap.add_argument("--alpha", type=float, default=0.05)
+    ap.add_argument("--alpha-spending", default="obrien_fleming",
+                    choices=["obrien_fleming", "pocock", "linear"])
     ap.add_argument("--factorial", action="store_true", help="add compatible interaction arms")
     ap.add_argument("--factorial-order", type=int, default=2)
     ap.add_argument("--eval-lengths", default="0.5,1,2,4,8")
@@ -470,7 +541,10 @@ def main():
     campaign_cfg = {**vars(args), "resolved_configs": {n: LEVERS.get(n) for n in configs},
                     "device": dev, "rungs": rung_fracs,
                     "decision_policy": {"primary_metric": "acc", "direction": "maximize",
-                                        "alpha": 0.05, "multiple_testing": "holm",
+                                        "alpha": args.alpha, "multiple_testing": "holm",
+                                        "sequential_testing": bool(args.sequential),
+                                        "alpha_spending": args.alpha_spending,
+                                        "planned_looks": len(rung_fracs),
                                         "exploration_rank": "mean_minus_standard_error",
                                         "confirmation": "positive_delta_and_corrected_significance",
                                         "fresh_seed_offset": 10_000}}
@@ -487,7 +561,7 @@ def main():
             registry.set_arm_status(arm_ids[cfg], "preflight_rejected", db=args.db)
             print(f"  [{cfg}] PREFLIGHT REJECTED: {why}", flush=True)
 
-    active, final_runs = valid, {}
+    active, final_runs, prior_checkpoints, final_comparisons = valid, {}, {}, {}
     try:
         for rung, frac in enumerate(rung_fracs):
             if not active: break
@@ -501,17 +575,30 @@ def main():
                 for s in range(args.seeds):
                     started = time.time()
                     try:
+                        ckpt_dir = os.path.join(args.checkpoint_dir, f"campaign_{cid}", cfg,
+                                                f"seed_{s:04d}")
+                        ckpt_path = os.path.join(ckpt_dir, f"rung_{rung:02d}.pt")
                         run = train_eval(task, args.d_model, args.n_layers, args.head_size, cfg, s, dev,
                                          budget_steps, args.batch, args.lr, budget_minutes, args.optimizer,
                                          args.weight_decay, args.warmup, muon_opts_from(args), fp8=args.fp8,
                                          do_compile=args.compile, gen_block=args.gen_block,
                                          eval_factors=eval_factors, eval_noise=eval_noise,
-                                         data_seed=500_000 + s, profile=args.profile)
+                                         data_seed=500_000 + s, profile=args.profile,
+                                         resume_path=prior_checkpoints.get((cfg, s)),
+                                         checkpoint_path=ckpt_path, schedule_steps=args.steps,
+                                         schedule_minutes=args.minutes)
                         series, prof, rng_state = run.pop("_series"), run.pop("_profile"), run.pop("_rng")
-                        registry.record_trial(cid, arm_ids[cfg], s, rung,
-                                              budget_minutes * 60 if budget_minutes else budget_steps,
-                                              run, series=series, profile=prof, rng=rng_state,
-                                              started_ts=started, db=args.db)
+                        saved_ckpt = run.pop("_checkpoint", None)
+                        tid = registry.record_trial(cid, arm_ids[cfg], s, rung,
+                                                    budget_minutes * 60 if budget_minutes else budget_steps,
+                                                    run, series=series, profile=prof, rng=rng_state,
+                                                    started_ts=started, db=args.db)
+                        if saved_ckpt:
+                            registry.record_artifact(cid, saved_ckpt, "training_checkpoint", trial_id=tid,
+                                                     metadata={"arm": cfg, "seed": s, "rung": rung,
+                                                               "resumes": prior_checkpoints.get((cfg, s))},
+                                                     db=args.db)
+                            prior_checkpoints[(cfg, s)] = saved_ckpt
                         runs.append(run)
                     except Exception as e:
                         registry.record_trial(cid, arm_ids[cfg], s, rung,
@@ -524,6 +611,17 @@ def main():
                     agg = _aggregate_runs(runs); am, ast = agg["acc"]
                     print(f"  [{cfg}] acc {am:.3f}±{ast:.3f} tok/s {agg.get('tok_per_sec',(0,))[0]:.0f}", flush=True)
             final_runs = rung_runs
+            look_kwargs = ({"look": rung + 1, "total_looks": len(rung_fracs),
+                            "alpha": args.alpha, "spending": args.alpha_spending}
+                           if args.sequential else {"alpha": args.alpha})
+            final_comparisons = _paired_comparisons(rung_runs, seed=cid + rung, **look_kwargs)
+            for name, st in final_comparisons.items():
+                registry.record_comparison(cid, arm_ids[name], arm_ids["baseline"], "acc",
+                                           f"explore_look_{rung + 1}", st, db=args.db)
+                seq = st.get("sequential", {})
+                boundary = f" α_look={seq['increment']:.3g}" if seq else ""
+                print(f"  look {rung+1}: {name} Δ{st['delta']:+.4f} "
+                      f"p_holm={st['p_adjusted']:.4g}{boundary}", flush=True)
             if rung < len(rung_fracs) - 1:
                 challengers = [n for n in active if n != "baseline" and n in rung_runs]
                 ranked = sorted(challengers, key=lambda n: _aggregate_runs(rung_runs[n])["acc"][0]
@@ -536,7 +634,7 @@ def main():
                 print(f"  promote -> {active}; eliminated -> {sorted(eliminated)}", flush=True)
 
         results = {name: _aggregate_runs(runs) for name, runs in final_runs.items()}
-        comparisons = _paired_comparisons(final_runs, seed=cid)
+        comparisons = final_comparisons or _paired_comparisons(final_runs, seed=cid, alpha=args.alpha)
         for name, st in comparisons.items():
             registry.record_comparison(cid, arm_ids[name], arm_ids["baseline"], "acc", "explore", st, db=args.db)
             print(f"  Δ {name}: {st['delta']:+.4f} 95%CI[{st['ci_low']:+.4f},{st['ci_high']:+.4f}] "
