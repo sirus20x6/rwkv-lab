@@ -44,6 +44,7 @@ LEVERS = {
     "loop3_nextlat": dict(n_loops=3, nextlat_weight=0.1),    # recurrent depth + next-latent
     "seedchain":     dict(seed_chain=True),                  # Future-Seed: s_0^L = s_T^{L-1} (no loops)
     "engram":        dict(engram=True),                      # Engram LMB: token-SAM recall + learned table
+    "deepembed":     dict(deepembed=True),                   # DeepEmbed: per-layer per-token FFN gate
     # LM-only latent objectives (need a real token future -> run via the LM path, not synthetic tasks)
     "top":           dict(top_weight=0.1),                   # token-order prediction (lookahead window)
     "lmtp":          dict(lmtp_weight=0.1),                  # leap multi-token prediction
@@ -79,8 +80,10 @@ def build(task: Task, d_model, n_layers, head_size, lever, device="cpu") -> RWKV
     loop, _ = _split_lever(LEVERS[lever])
     seed_chain = bool(loop.pop("seed_chain", False))         # model kwargs, not LoopedRWKV kwargs
     engram = bool(loop.pop("engram", False))
+    deepembed = bool(loop.pop("deepembed", False))
+    de_dim = int(loop.pop("de_dim", 0))
     m = RWKV7Small(task.vocab, d_model, n_layers, head_size, _norm_loopkw(loop),
-                   seed_chain=seed_chain).to(device, torch.bfloat16)
+                   seed_chain=seed_chain, deepembed=deepembed, de_dim=de_dim).to(device, torch.bfloat16)
     if engram:                                               # attach AFTER .to (fp32 growth params)
         from rwkv_lab.rwkv_pretrain import enable_engram
         enable_engram(m, task.vocab, d_model, head_size, n_layers,
