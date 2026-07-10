@@ -42,6 +42,7 @@ LEVERS = {
     "loop3_factor": dict(n_loops=3, gate_mode="factored"),
     "nextlat":       dict(nextlat_weight=0.1),               # next-latent prediction aux (light)
     "loop3_nextlat": dict(n_loops=3, nextlat_weight=0.1),    # recurrent depth + next-latent
+    "seedchain":     dict(seed_chain=True),                  # Future-Seed: s_0^L = s_T^{L-1} (no loops)
     # LM-only latent objectives (need a real token future -> run via the LM path, not synthetic tasks)
     "top":           dict(top_weight=0.1),                   # token-order prediction (lookahead window)
     "lmtp":          dict(lmtp_weight=0.1),                  # leap multi-token prediction
@@ -75,7 +76,9 @@ def _norm_loopkw(kw: dict) -> dict:
 
 def build(task: Task, d_model, n_layers, head_size, lever) -> RWKV7Small:
     loop, _ = _split_lever(LEVERS[lever])
-    return RWKV7Small(task.vocab, d_model, n_layers, head_size, _norm_loopkw(loop))
+    seed_chain = bool(loop.pop("seed_chain", False))         # model kwarg, not a LoopedRWKV kwarg
+    return RWKV7Small(task.vocab, d_model, n_layers, head_size, _norm_loopkw(loop),
+                      seed_chain=seed_chain)
 
 
 def _masked_ce(logits, y, m):

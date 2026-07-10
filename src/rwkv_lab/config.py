@@ -43,7 +43,7 @@ _LM_FLAG = {"n_loops": "--loop-count", "hyper_lanes": "--loop-hyper", "gate_mode
             "cart_anchor": "--loop-cart-anchor", "loop_deq": "--loop-deq", "fixed_point_halt": "--loop-fp-halt",
             "adaptive_halt": "--loop-adaptive-halt", "nextlat_weight": "--nextlat-weight",
             "top_weight": "--top-weight", "lmtp_weight": "--lmtp-weight", "bst_weight": "--bst-weight",
-            "jtp_weight": "--jtp-weight"}
+            "jtp_weight": "--jtp-weight", "seed_chain": "--seed-chain"}
 
 
 def _run_synthetic(task_spec, cfg):
@@ -96,10 +96,10 @@ def _run_lm(data, cfg):
         cmd += (["--steps", str(tr["steps"])] if "steps" in tr else ["--minutes", str(tr.get("minutes", 10))])
         if off_path:
             cmd += ["--doc-offsets", off_path]
-        if train.get("init_g1g"):                      # continued pretraining from pretrained g1g
-            cmd += ["--init-g1g", train["init_g1g"]]
-        elif train.get("resume"):                      # continue from a saved run checkpoint
-            cmd += ["--resume", train["resume"]]
+        if tr.get("init_g1g"):                         # continued pretraining from pretrained g1g
+            cmd += ["--init-g1g", tr["init_g1g"]]
+        elif tr.get("resume"):                         # continue from a saved run checkpoint
+            cmd += ["--resume", tr["resume"]]
         for k, v in lever.items():                     # translate lever kwargs -> CLI flags
             if k in _LM_FLAG:
                 cmd += [_LM_FLAG[k], str(int(v) if isinstance(v, bool) else v)]
