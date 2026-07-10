@@ -87,6 +87,7 @@ class RWKV8ChannelMixDeltaNet(nn.Module):
         cache_position=None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
+        hidden_gate: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
         if cache_params is not None:
@@ -104,6 +105,8 @@ class RWKV8ChannelMixDeltaNet(nn.Module):
         xk = self.x_k.to(dtype=hidden_states.dtype).view(1, 1, -1)
         mixed = hidden_states + (prev - hidden_states) * xk
         k = torch.square(F.relu(self.key(mixed)))
+        if hidden_gate is not None:              # DeepEmbed: per-token multiplicative gate on the
+            k = k * hidden_gate                  # FFN hidden (BlinkDL rwkv_v7a form); None = unchanged
         return self.value(k)
 
 

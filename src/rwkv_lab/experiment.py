@@ -44,7 +44,10 @@ LEVERS = {
     "loop3_nextlat": dict(n_loops=3, nextlat_weight=0.1),    # recurrent depth + next-latent
     "seedchain":     dict(seed_chain=True),                  # Future-Seed: s_0^L = s_T^{L-1} (no loops)
     "engram":        dict(engram=True),                      # Engram LMB: token-SAM recall + learned table
-    "deepembed":     dict(deepembed=True),                   # DeepEmbed: per-layer per-token FFN gate
+    "deepembed":     dict(deepembed=True),                   # DeepEmbed v1: gate the FFN output
+    "de_hidden":     dict(deepembed=True, de_mode="hidden"), # BlinkDL-exact: bilinear gate on FFN hidden
+    "de_shift":      dict(deepembed=True, de_mode="hidden", de_shift=True),   # + separate DE token-shift
+    "de_full":       dict(deepembed=True, de_mode="hidden", de_shift=True, de_emb_res=True),
     # LM-only latent objectives (need a real token future -> run via the LM path, not synthetic tasks)
     "top":           dict(top_weight=0.1),                   # token-order prediction (lookahead window)
     "lmtp":          dict(lmtp_weight=0.1),                  # leap multi-token prediction
@@ -82,8 +85,12 @@ def build(task: Task, d_model, n_layers, head_size, lever, device="cpu") -> RWKV
     engram = bool(loop.pop("engram", False))
     deepembed = bool(loop.pop("deepembed", False))
     de_dim = int(loop.pop("de_dim", 0))
+    de_mode = str(loop.pop("de_mode", "out"))
+    de_shift = bool(loop.pop("de_shift", False))
+    de_emb_res = bool(loop.pop("de_emb_res", False))
     m = RWKV7Small(task.vocab, d_model, n_layers, head_size, _norm_loopkw(loop),
-                   seed_chain=seed_chain, deepembed=deepembed, de_dim=de_dim).to(device, torch.bfloat16)
+                   seed_chain=seed_chain, deepembed=deepembed, de_dim=de_dim, de_mode=de_mode,
+                   de_shift=de_shift, de_emb_res=de_emb_res).to(device, torch.bfloat16)
     if engram:                                               # attach AFTER .to (fp32 growth params)
         from rwkv_lab.rwkv_pretrain import enable_engram
         enable_engram(m, task.vocab, d_model, head_size, n_layers,
