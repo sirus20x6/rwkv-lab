@@ -138,6 +138,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/runs/{name}/notes", s.handleNotes)
 	s.mux.HandleFunc("POST /api/runs/{name}/tags", s.handleTags)
 	s.mux.HandleFunc("POST /api/runs/{name}/control", s.handleSetControl)
+	s.mux.HandleFunc("POST /api/runs/{name}/sample", s.handleSample)
 	s.mux.HandleFunc("GET /api/runs/{name}/architecture", s.handleArchitecture)
 	s.mux.HandleFunc("POST /api/launch", s.handleLaunch)
 	s.mux.HandleFunc("POST /api/alerts/ack", s.handleAckAlert)

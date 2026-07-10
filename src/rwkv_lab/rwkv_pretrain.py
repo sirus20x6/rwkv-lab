@@ -790,7 +790,18 @@ def main():
                 "numpy_rng": rng.bit_generator.state, "torch_rng": torch.get_rng_state(),
                 "cuda_rng": torch.cuda.get_rng_state(dev).cpu(),
                 "recall_numpy_rng": (recall_rng.bit_generator.state if lmb is not None and not use_gpu_data
-                                      else None)}
+                                      else None),
+                # self-describing checkpoint: everything generate.py needs to rebuild the exact
+                # architecture without re-supplying CLI flags
+                "arch": {"d_model": args.d_model, "n_layers": args.n_layers,
+                         "head_size": args.head_size, "seed_chain": seed_chain,
+                         "deepembed": bool(args.deepembed) and not args.init_g1g,
+                         "de_dim": args.de_dim, "de_mode": args.de_mode,
+                         "de_shift": bool(args.de_shift), "de_emb_res": bool(args.de_emb_res),
+                         "engram": lmb is not None, "engram_sites": args.engram_sites,
+                         "engram_drow": args.engram_drow, "engram_rows": args.engram_rows,
+                         "engram_boundary_id": (lmb.boundary_id if lmb is not None else None),
+                         "loop_kw": lk}}
         if ema is not None:
             blob["ema"] = ema
         torch.save(blob, args.save)
