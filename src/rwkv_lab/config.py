@@ -53,6 +53,12 @@ def _run_synthetic(task_spec, cfg):
     from rwkv_lab import experiment as E, registry
     E.enable_fast_matmul()                              # TF32 tensor cores (free ~1.1-1.3x on fp32)
     E.LEVERS.update(cfg["configs"])                     # register the file's lever combos by name
+    fac = cfg.get("factorial", {})
+    if fac.get("enabled"):
+        factors = [n for n in cfg["configs"] if n != "baseline"]
+        generated = E.factorial_configs(factors, int(fac.get("max_order", 2)))
+        cfg = {**cfg, "configs": {"baseline": cfg["configs"].get("baseline", {}), **generated}}
+        E.LEVERS.update(generated)
     task = E.make_task(task_spec)
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     m, tr = cfg.get("model", {}), cfg.get("train", {})
@@ -62,29 +68,42 @@ def _run_synthetic(task_spec, cfg):
     minutes = float(tr.get("minutes", 0.0))             # wall-clock budget (0 = use steps)
     seeds = int(cfg.get("seeds", 3))
     print(f"[config] synthetic task={task.name} configs={list(cfg['configs'])} seeds={seeds} dev={dev}", flush=True)
-    results = {}
+    cid = registry.create_campaign(task_spec, cfg, name=str(cfg.get("name", "config campaign")),
+                                   capsule=registry.capture_capsule({"declarative_config": cfg}),
+                                   db=cfg.get("registry_db"))
+    arm_ids, results, raw_runs = {}, {}, {}
     for name in cfg["configs"]:
+        arm_ids[name] = registry.ensure_arm(cid, name, cfg["configs"][name], db=cfg.get("registry_db"))
         ok, why = E.preflight(task, dm, nl, hs, name, dev, batch)
         if not ok:
+            registry.set_arm_status(arm_ids[name], "preflight_rejected", db=cfg.get("registry_db"))
             print(f"  [{name}] PREFLIGHT REJECTED: {why}", flush=True); continue
         runs = [E.train_eval(task, dm, nl, hs, name, s, dev, steps, batch, lr, minutes,
                              tr.get("optimizer", "adamw"), float(tr.get("weight_decay", 0.01)),
                              int(tr.get("warmup", 0)), tr.get("muon"), fp8=bool(tr.get("fp8", False)),
                              do_compile=bool(tr.get("compile", False)),
-                             gen_block=int(tr.get("gen_block", 1))) for s in range(seeds)]
-        agg = {k: E._agg([r[k] for r in runs if k in r]) for k in runs[0]}
-        registry.record(task_spec, name, seeds, steps, {k: list(v) for k, v in agg.items()})
+                             gen_block=int(tr.get("gen_block", 1)),
+                             eval_factors=tuple(cfg.get("eval", {}).get("length_factors", (0.5,1,2,4,8))),
+                             eval_noise=tuple(cfg.get("eval", {}).get("noise", (0.05,0.10))),
+                             data_seed=500_000+s, profile=bool(tr.get("profile", True))) for s in range(seeds)]
+        for s, run in enumerate(runs):
+            series, prof, rng_state = run.pop("_series"), run.pop("_profile"), run.pop("_rng")
+            registry.record_trial(cid, arm_ids[name], s, 0, minutes*60 or steps, run,
+                                  series=series, profile=prof, rng=rng_state, db=cfg.get("registry_db"))
+        raw_runs[name] = runs
+        agg = E._aggregate_runs(runs)
+        registry.record(task_spec, name, seeds, steps, {k: list(v) for k, v in agg.items()},
+                        db=cfg.get("registry_db"))
         results[name] = agg
         print(f"  [{name}] acc {agg['acc'][0]:.3f}±{agg['acc'][1]:.3f}"
               + (f" gate {agg['gate'][0]:.3f}" if "gate" in agg and name != "baseline" else ""), flush=True)
-    if "baseline" in results:
-        bm, bs = results["baseline"]["acc"]
-        print(f"\n=== {task.name}: acc vs baseline ({bm:.3f}±{bs:.3f}) ===")
-        for name, r in results.items():
-            if name == "baseline":
-                continue
-            mm, ss = r["acc"]; d = mm - bm
-            print(f"  {name:16} {mm:.3f}±{ss:.3f}  Δ{d:+.3f} {'SIGNIFICANT' if abs(d) > ss + bs else 'ns'}")
+    comparisons = E._paired_comparisons(raw_runs, seed=cid)
+    for name, st in comparisons.items():
+        registry.record_comparison(cid, arm_ids[name], arm_ids["baseline"], "acc", "explore", st,
+                                   db=cfg.get("registry_db"))
+        print(f"  {name:16} Δ{st['delta']:+.3f} CI[{st['ci_low']:+.3f},{st['ci_high']:+.3f}] "
+              f"p_holm={st['p_adjusted']:.3g} next_n={st['recommended_n']}")
+    registry.finish_campaign(cid, db=cfg.get("registry_db"))
 
 
 def _run_lm(data, cfg):
@@ -115,22 +134,29 @@ def run(cfg_path: str):
     (_run_synthetic if kind == "synthetic" else _run_lm)(data, cfg)
 
 
-# Default local corpus for the board's LM-mode launches (code + docs, doc-boundary, cached).
+# Corpora for the board's LM-mode launches (doc-boundary, cached by spec hash).
 _LOCAL_LM_SPEC = {"sources": [{"kind": "local",
                                "patterns": ["/thearray/git/moe-mla/**/*.py", "/thearray/git/moe-mla/**/*.md"],
                                "weight": 1.0}], "cap_mb": 8.0, "doc_boundary": True}
+# Open-PerfectBlend (Apache 2.0): ~1.4M chat/math/code/instruction conversations (~1.5GB text,
+# ~450M World tokens) flattened to role-tagged plain text — real headroom for LM lever A/Bs.
+_BLEND_LM_SPEC = {"sources": [{"kind": "hf", "name": "mlabonne/open-perfectblend", "weight": 1.0}],
+                  "cap_mb": 1600.0, "doc_boundary": True}
+CORPORA = {"local": _LOCAL_LM_SPEC, "blend": _BLEND_LM_SPEC}
 
 
-def run_lm(levers, model, train):
-    """Run a set of named levers on the local LM corpus via rwkv_pretrain — used by the board's LM
+def run_lm(levers, model, train, corpus="local"):
+    """Run a set of named levers on an LM corpus via rwkv_pretrain — used by the board's LM
     mode so top/lmtp/bst/jtp (which need a token future) are launchable. Lever kwargs come from
-    experiment.LEVERS (single source of truth); each run appears in the main trainboard leaderboard."""
+    experiment.LEVERS (single source of truth); each run appears in the main trainboard leaderboard.
+    corpus: 'local' (repo code+docs, 1.9M tok) or 'blend' (Open-PerfectBlend, ~450M tok)."""
     from rwkv_lab.experiment import LEVERS
     from rwkv_lab.build_corpus import resolve_corpus
-    bin_path, off_path = resolve_corpus(_LOCAL_LM_SPEC)
+    bin_path, off_path = resolve_corpus(CORPORA[corpus])
     for name in levers:
         lever = LEVERS.get(name, {})
-        cmd = [sys.executable, "-m", "rwkv_lab.rwkv_pretrain", "--data", bin_path, "--out", f"runs/lm_{name}",
+        run_dir = f"runs/lm_{name}" if corpus == "local" else f"runs/lm_{corpus}_{name}"
+        cmd = [sys.executable, "-m", "rwkv_lab.rwkv_pretrain", "--data", bin_path, "--out", run_dir,
                "--d-model", str(model.get("d_model", 256)), "--n-layers", str(model.get("n_layers", 4)),
                "--head-size", str(model.get("head_size", 64)), "--batch", str(train.get("batch", 16)),
                "--seq-len", str(train.get("seq_len", 512)), "--lr", str(train.get("lr", 6e-4)),
@@ -187,6 +213,7 @@ def main():
     rl.add_argument("--compile", action="store_true")
     rl.add_argument("--grad-accum", type=int, default=1)
     rl.add_argument("--ema", type=float, default=0.0)
+    rl.add_argument("--corpus", default="local", choices=sorted(CORPORA))
     from rwkv_lab.rwkv_pretrain import add_muon_args, muon_opts_from
     add_muon_args(rl)                                        # --sm-* Muon variants
     args = ap.parse_args()
@@ -197,7 +224,7 @@ def main():
                 "batch": args.batch, "lr": args.lr, "init_g1g": args.init_g1g, "resume": args.resume,
                 "optimizer": args.optimizer, "weight_decay": args.weight_decay, "warmup": args.warmup,
                 "fp8": args.fp8, "compile": args.compile, "grad_accum": args.grad_accum,
-                "ema": args.ema, "muon": muon_opts_from(args)})
+                "ema": args.ema, "muon": muon_opts_from(args)}, corpus=args.corpus)
     else:
         run(args.config)
 
