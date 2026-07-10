@@ -1,0 +1,4 @@
+{"id":"heldout-add-1","split":"eval","prompt":"Compute 8 + 7. Return only the final integer, with no prose.","verifier":{"kind":"numeric","expected":15},"metadata":{"family":"arithmetic/+","difficulty":1}}
+{"id":"heldout-sub-1","split":"eval","prompt":"Compute 9 - 4. Return only the final integer, with no prose.","verifier":{"kind":"numeric","expected":5},"metadata":{"family":"arithmetic/-","difficulty":1}}
+{"id":"heldout-add-2","split":"eval","prompt":"Compute 38 + 27. Return only the final integer, with no prose.","verifier":{"kind":"numeric","expected":65},"metadata":{"family":"arithmetic/+","difficulty":2}}
+{"id":"heldout-mul-1","split":"eval","prompt":"Compute 7 * 6. Return only the final integer, with no prose.","verifier":{"kind":"numeric","expected":42},"metadata":{"family":"arithmetic/*","difficulty":2}}

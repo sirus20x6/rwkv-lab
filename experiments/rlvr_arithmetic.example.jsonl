@@ -1,0 +1,4 @@
+{"id":"arith-train-1","split":"train","prompt":"Compute 17 * 9. Return only the final integer, with no prose.","verifier":{"kind":"numeric","expected":153},"metadata":{"family":"arithmetic"}}
+{"id":"arith-train-2","split":"train","prompt":"Compute (41 - 13) * 4. Return only the final integer, with no prose.","verifier":{"kind":"numeric","expected":112},"metadata":{"family":"arithmetic"}}
+{"id":"arith-eval-1","split":"eval","prompt":"Compute 23 * 7. Return only the final integer, with no prose.","verifier":{"kind":"numeric","expected":161},"metadata":{"family":"arithmetic"}}
+{"id":"arith-eval-2","split":"eval","prompt":"Compute (52 + 19) - 8. Return only the final integer, with no prose.","verifier":{"kind":"numeric","expected":63},"metadata":{"family":"arithmetic"}}

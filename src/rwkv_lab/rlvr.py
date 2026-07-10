@@ -15,19 +15,19 @@ References and the exact pieces adopted here:
   arXiv:2505.03335, https://arxiv.org/abs/2505.03335 — programmatic verifier
   interface; task proposal/orchestration intentionally belongs to Adamaton.
 
-The module is deliberately rollout-engine agnostic. It owns the differentiable
-policy objectives and deterministic verifiers; Adamaton can supply curricula
-and RWKV-Lab generation can supply sampled responses.
+This module stays rollout-engine agnostic and owns the differentiable objectives
+and deterministic verifiers. ``rlvr_train`` closes the RWKV-Lab model-side loop;
+Adamaton can supply curricula and isolated external verification.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 import ast
 import math
+import re
 from typing import Callable, Sequence
 
 import torch
-import torch.nn.functional as F
 
 
 @dataclass
@@ -80,6 +80,7 @@ def policy_loss(
     clip_high: float = 0.2,
     reference_logp: torch.Tensor | None = None,
     kl_coef: float = 0.0,
+    token_normalizer: int | None = None,
 ) -> PolicyLossOutput:
     """GSPO, Dr.GRPO, or DAPO clipped policy objective.
 
@@ -109,7 +110,9 @@ def policy_loss(
         token_obj = torch.minimum(ratio_tok * adv[:, None], clipped * adv[:, None]) * m
         if algorithm == "dr_grpo":
             # Dr.GRPO uses a constant token normalizer, avoiding response-length bias.
-            denom = m.shape[-1]
+            denom = token_normalizer or m.shape[-1]
+            if denom <= 0:
+                raise ValueError("token_normalizer must be positive")
             objective = token_obj.sum(-1) / max(denom, 1)
         else:
             objective = token_obj.sum(-1) / lengths
@@ -118,13 +121,18 @@ def policy_loss(
 
     pg = -(objective * row_mask).sum() / row_mask.sum().clamp_min(1)
     if reference_logp is not None:
-        # Positive sampled reverse-KL estimator used as a stability diagnostic/penalty.
-        kl_rows = ((logp - reference_logp) * m).sum(-1) / lengths
+        # Non-negative exponential KL estimator used by GRPO-family trainers:
+        # exp(log p_ref - log p) - (log p_ref - log p) - 1. Unlike a raw
+        # sampled log-ratio, this cannot reward moving farther from the reference.
+        log_ratio = (reference_logp - logp) * m
+        kl_tok = log_ratio.exp() - log_ratio - 1.0
+        kl_rows = (kl_tok * m).sum(-1) / lengths
         kl = (kl_rows * row_mask).sum() / row_mask.sum().clamp_min(1)
         pg = pg + kl_coef * kl
     else:
-        kl = (((old_logp - logp) * m).sum(-1) / lengths * row_mask).sum() \
-            / row_mask.sum().clamp_min(1)
+        log_ratio = (old_logp - logp) * m
+        kl_tok = log_ratio.exp() - log_ratio - 1.0
+        kl = (((kl_tok * m).sum(-1) / lengths) * row_mask).sum() / row_mask.sum().clamp_min(1)
     return PolicyLossOutput(pg, adv, kl.detach(), clip_fraction.detach(), active)
 
 
@@ -169,14 +177,22 @@ class PythonExpressionVerifier:
             value = -value if isinstance(node.op, ast.USub) else value
         elif isinstance(node, ast.BinOp):
             left, right = self._evaluate(node.left), self._evaluate(node.right)
-            if isinstance(node.op, ast.Add): value = left + right
-            elif isinstance(node.op, ast.Sub): value = left - right
-            elif isinstance(node.op, ast.Mult): value = left * right
-            elif isinstance(node.op, ast.Div): value = left / right
-            elif isinstance(node.op, ast.FloorDiv): value = left // right
-            elif isinstance(node.op, ast.Mod): value = left % right
-            elif isinstance(node.op, ast.Pow) and abs(right) <= 12: value = left ** right
-            else: raise ValueError("operator is not verifier-safe")
+            if isinstance(node.op, ast.Add):
+                value = left + right
+            elif isinstance(node.op, ast.Sub):
+                value = left - right
+            elif isinstance(node.op, ast.Mult):
+                value = left * right
+            elif isinstance(node.op, ast.Div):
+                value = left / right
+            elif isinstance(node.op, ast.FloorDiv):
+                value = left // right
+            elif isinstance(node.op, ast.Mod):
+                value = left % right
+            elif isinstance(node.op, ast.Pow) and abs(right) <= 12:
+                value = left ** right
+            else:
+                raise ValueError("operator is not verifier-safe")
         else:
             raise ValueError("expression is not verifier-safe")
         if not math.isfinite(value) or abs(value) > 1e100:
@@ -194,6 +210,40 @@ class PythonExpressionVerifier:
             value = self._evaluate(tree)
             return float(math.isfinite(value) and abs(value - self.expected) <= self.atol)
         except Exception:
+            return 0.0
+
+
+class NumericAnswerVerifier:
+    """Verify the final numeric answer while tolerating short reasoning text.
+
+    The last finite decimal/fraction in the response is treated as the answer;
+    ``\\boxed{...}`` takes precedence. This is deterministic and does not execute
+    model output. Arithmetic expressions remain the stricter
+    ``PythonExpressionVerifier`` path.
+    """
+
+    _BOXED = re.compile(r"\\boxed\s*\{\s*([-+]?\d+(?:\.\d+)?(?:\s*/\s*[-+]?\d+(?:\.\d+)?)?)\s*\}")
+    _NUMBER = re.compile(r"(?<![\w.])[-+]?\d+(?:\.\d+)?(?:\s*/\s*[-+]?\d+(?:\.\d+)?)?(?![\w.])")
+
+    def __init__(self, expected: float, *, atol: float = 1e-6):
+        self.expected, self.atol = float(expected), float(atol)
+
+    @staticmethod
+    def _number(value: str) -> float:
+        if "/" in value:
+            a, b = value.split("/", 1)
+            return float(a) / float(b)
+        return float(value)
+
+    def __call__(self, response: str) -> float:
+        try:
+            boxed = self._BOXED.findall(response)
+            candidates = boxed or self._NUMBER.findall(response)
+            if not candidates:
+                return 0.0
+            value = self._number(candidates[-1].replace(" ", ""))
+            return float(math.isfinite(value) and abs(value - self.expected) <= self.atol)
+        except (ValueError, ZeroDivisionError, OverflowError):
             return 0.0
 
 
