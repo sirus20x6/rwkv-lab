@@ -37,24 +37,52 @@ def gather_local(patterns, cap_mb) -> list[str]:
     return docs
 
 
+_ROLE = {"human": "User", "user": "User", "gpt": "Assistant", "assistant": "Assistant",
+         "system": "System", "tool": "Tool", "function": "Tool"}
+
+
+def _doc_text(rec) -> str:
+    """Extract one document's text from an HF record. Plain-text fields first; chat datasets
+    (ShareGPT `conversations` [{from,value}] or OpenAI `messages` [{role,content}]) are flattened
+    to role-tagged plain text — the lab tokenizer has no chat special tokens."""
+    t = rec.get("text") or rec.get("content") or ""
+    if t:
+        return t
+    turns = rec.get("conversations") or rec.get("messages") or []
+    parts = []
+    for m in turns:
+        if not isinstance(m, dict):
+            continue
+        role = _ROLE.get(str(m.get("from") or m.get("role") or "").lower(), "User")
+        body = str(m.get("value") or m.get("content") or "").strip()
+        if body:
+            parts.append(f"{role}: {body}")
+    return "\n\n".join(parts)
+
+
 def gather_hf(name, cap_mb) -> list[str]:
     from datasets import load_dataset
     ds = load_dataset(name, split="train", streaming=True)
     docs, n = [], 0
     for rec in ds:
-        t = (rec.get("text") or rec.get("content") or "").replace("\x00", "")
+        t = _doc_text(rec).replace("\x00", "")
         if t.strip():
             docs.append(t); n += len(t)
+            if len(docs) % 100000 == 0:
+                print(f"  gather_hf {name}: {len(docs)} docs, {n/1e6:.0f} MB", flush=True)
             if n > cap_mb * 1e6:
                 break
     return docs
 
 
 def build(docs, out_prefix):
-    joined = "\x00".join(docs)
     bin_path = out_prefix + ".bin"
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
-        f.write(joined); tmp = f.name
+        for i, d in enumerate(docs):             # stream: no corpus-sized join in RAM
+            if i:
+                f.write("\x00")
+            f.write(d)
+        tmp = f.name
     try:
         subprocess.run([ZTOK, "tokenize-dataset", "--model", VOCAB, "--input", tmp,
                         "--output", bin_path, "--format", "bin", "--dtype", "u16",
