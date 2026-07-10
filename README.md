@@ -143,7 +143,9 @@ trial, comparison, artifact, and reproducibility records shown by trainboard.
 
 [`rlvr_train.py`](src/rwkv_lab/rlvr_train.py) closes the model-side RLVR loop: grouped rollouts,
 deterministic rewards, GSPO/Dr.GRPO/DAPO policy updates, a fixed or rollout reference policy,
-held-out evaluation, resumable optimizer state, and lineage-bearing checkpoints. The objectives follow
+held-out evaluation, resumable optimizer state, and lineage-bearing checkpoints. Sparse-reward
+cold starts can use trusted-answer SFT and staged curricula before a reward-diversity preflight,
+following [DeepSeek-R1](https://arxiv.org/abs/2501.12948). The objectives follow
 [Dr.GRPO](https://arxiv.org/abs/2503.20783), [DAPO](https://arxiv.org/abs/2503.14476),
 [GSPO](https://arxiv.org/abs/2507.18071), and the programmatic-verifier boundary from
 [Absolute Zero](https://arxiv.org/abs/2505.03335).
@@ -151,8 +153,14 @@ held-out evaluation, resumable optimizer state, and lineage-bearing checkpoints.
 ```bash
 python -m rwkv_lab.rlvr_train \
   --ckpt runs/lm/ckpt.pt --out runs/rlvr-gspo \
-  --algorithm gspo --steps 100 --prompts-per-step 2 --group-size 8
+  --algorithm gspo --steps 100 --prompts-per-step 2 --group-size 8 \
+  --curriculum-stages 1,2 --sft-steps 16 --preflight-prompts 8
 ```
+
+`--rollout-engine auto` batches each rollout group and uses [RWKV-7](https://arxiv.org/abs/2503.14456)
+constant-size recurrent state when the checkpoint is causally compatible. Future-Seed, looped,
+online-memory, and Engram checkpoints automatically use batched full-prefix recomputation so their
+semantics are not silently changed. Response scoring is length-bucketed and batched in both paths.
 
 For an equal-budget comparison, [`rlvr_campaign.py`](src/rwkv_lab/rlvr_campaign.py) runs isolated
 GSPO, Dr.GRPO, and DAPO arms over paired seeds, then atomically aggregates their held-out reward,
@@ -167,8 +175,9 @@ python -m rwkv_lab.rlvr_campaign \
 
 Trainboard's **verifiable-reward training** panel launches the same versioned campaign contract and
 renders the per-algorithm held-out mean/standard deviation, delta from the frozen parent, applied
-updates, and promotion count. It does not execute generated code: external verifier tasks retain the
-Adamaton sandbox boundary described below.
+RL/SFT updates, preflight passes, rollout budget, and promotion count. It also discovers bounded
+recursive-loop lineage. It does not execute generated code: external verifier tasks retain the Adamaton
+sandbox boundary described below.
 
 Without `--tasks`, the trainer creates disjoint deterministic arithmetic train/eval curricula. An
 Adamaton task producer can instead write [`rlvr_arithmetic.example.jsonl`](experiments/rlvr_arithmetic.example.jsonl):
@@ -182,9 +191,34 @@ answers. Generated code is never executed by RWKV-Lab. A task with `verifier.kin
 to `--verifier-command` in a versioned batch JSON request; Adamaton owns that command's sandbox,
 private tests, timeout policy, and verifier independence. The final `result.json`, `manifest.json`,
 `train.jsonl`, and `rlvr.pt` form the machine-readable return contract. The parent checkpoint is never
-overwritten: the trainer evaluates a fixed hidden set before and after RL, and `result.json` marks the
-candidate promotion-eligible only when an informative update occurred and held-out reward clears
-`--min-heldout-delta`; otherwise it names the untouched parent as the rollback target.
+overwritten. A separate `--heldout-tasks` file can keep evaluation prompts outside the proposal
+process; [`rlvr_heldout.example.jsonl`](experiments/rlvr_heldout.example.jsonl) only demonstrates the
+format and is not a secret benchmark. Exact ID/prompt leakage fails before training. Promotion requires
+an informative update, point improvement, a paired [bootstrap](https://doi.org/10.1214/aos/1176344552)
+lower bound, no task-family regression beyond policy, and token/time budget compliance. Any failed gate
+names the untouched parent as the rollback target.
+
+### Bounded recursive improvement
+
+[`recursive_improve.py`](src/rwkv_lab/recursive_improve.py) implements the first closed, reversible
+iteration inspired by [Absolute Zero](https://arxiv.org/abs/2505.03335) and
+[Self-Rewarding Language Models](https://arxiv.org/abs/2401.10020), while keeping rewards independent:
+
+```bash
+python -m rwkv_lab.recursive_improve \
+  --ckpt runs/lm/ckpt.pt --out runs/recursive-rlvr \
+  --heldout-tasks /secure/eval_tasks.jsonl \
+  --proposal-command '/thearray/git/adamaton/bin/propose-rwkv-tasks' \
+  --verifier-command '/thearray/git/adamaton/bin/verify-rwkv-batch' \
+  --rounds 3 --max-total-rollout-tokens 1000000
+```
+
+The versioned proposal request reveals the parent hash, accepted/rejected history, and immutable
+operator caps—but never the held-out file or private verifier results. Adamaton may return training
+tasks and a small allowlisted, cap-checked configuration. Each candidate runs in an isolated directory;
+only `rlvr_train`'s independent multi-gate decision can advance the parent pointer. The controller stops
+at its round, rollout-token, wall-clock, proposal-size, or consecutive-rejection limits and atomically
+persists `loop.json` for audited resume.
 
 ---
 
@@ -243,7 +277,7 @@ Everything is a **drop-in `linear_attn` / attention module swap** on a HuggingFa
 | [`build_corpus.py`](src/rwkv_lab/build_corpus.py) | ztok corpora from local files or streamed HF datasets (chat records flattened to role-tagged text); doc offsets; semantic context-bucket packing (whole docs, best-fit-decreasing, ~0% padding). |
 | [`config.py`](src/rwkv_lab/config.py) | Declarative YAML campaigns; the corpora registry (`local` / `blend` / `blend-mix`) behind the dashboard's LM tasks. |
 | [`registry.py`](src/rwkv_lab/registry.py) / [`fused_ce.py`](src/rwkv_lab/fused_ce.py) | Campaign/trial SQLite registry; fused LM-head cross-entropy (flash CE, pad-masking). |
-| [`rlvr.py`](src/rwkv_lab/rlvr.py) / [`rlvr_train.py`](src/rwkv_lab/rlvr_train.py) / [`rlvr_campaign.py`](src/rwkv_lab/rlvr_campaign.py) | GSPO/Dr.GRPO/DAPO objectives, the grouped-rollout trainer, and equal-budget multi-seed validation campaigns; local arithmetic verifiers plus an external Adamaton sandbox contract. |
+| [`rlvr.py`](src/rwkv_lab/rlvr.py) / [`rlvr_train.py`](src/rwkv_lab/rlvr_train.py) / [`rlvr_evaluation.py`](src/rwkv_lab/rlvr_evaluation.py) / [`rlvr_campaign.py`](src/rwkv_lab/rlvr_campaign.py) / [`recursive_improve.py`](src/rwkv_lab/recursive_improve.py) | GSPO/Dr.GRPO/DAPO objectives; cold-start/preflight training; recurrent batched rollouts; leakage, confidence, family-regression, and budget gates; equal-budget campaigns; and bounded Adamaton proposal lineage. |
 
 ### Looped recurrence (recurrent depth)
 | File | Role |
@@ -433,7 +467,7 @@ Only papers with a concrete implementation or adopted design decision in this re
 
 - [u-μP: The Unit-Scaled Maximal Update Parametrization](https://arxiv.org/abs/2407.17465) — unit-scaled initialization plus width-correct Adam learning-rate groups; recurrent CUDA operators retain their native parametrization → [`u_mup.py`](src/rwkv_lab/u_mup.py), [`rwkv_pretrain.py`](src/rwkv_lab/rwkv_pretrain.py) (`--u-mup-base-width`)
 - [Titans: Learning to Memorize at Test Time](https://arxiv.org/abs/2501.00663) · [It's All Connected / MIRAS](https://arxiv.org/abs/2504.13173) · [ATLAS](https://arxiv.org/abs/2505.23735) · [Nested Learning](https://arxiv.org/abs/2512.24695) — differentiable in-forward associative updates, configurable internal objective/retention, windowed updates, and a learned nested update controller → [`online_memory.py`](src/rwkv_lab/online_memory.py), [`rwkv_pretrain.py`](src/rwkv_lab/rwkv_pretrain.py) (`--online-memory`)
-- [Understanding R1-Zero-Like Training / Dr.GRPO](https://arxiv.org/abs/2503.20783) · [DAPO](https://arxiv.org/abs/2503.14476) · [GSPO](https://arxiv.org/abs/2507.18071) · [Absolute Zero](https://arxiv.org/abs/2505.03335) — group-relative policy objectives, asymmetric clipping/dynamic sampling, sequence-level importance ratios, and programmatic verifier interfaces → [`rlvr.py`](src/rwkv_lab/rlvr.py), [`rlvr_train.py`](src/rwkv_lab/rlvr_train.py). Adamaton owns proposal curricula and isolated code verification.
+- [Understanding R1-Zero-Like Training / Dr.GRPO](https://arxiv.org/abs/2503.20783) · [DAPO](https://arxiv.org/abs/2503.14476) · [GSPO](https://arxiv.org/abs/2507.18071) · [DeepSeek-R1](https://arxiv.org/abs/2501.12948) · [RWKV-7](https://arxiv.org/abs/2503.14456) · [Absolute Zero](https://arxiv.org/abs/2505.03335) · [Self-Rewarding Language Models](https://arxiv.org/abs/2401.10020) · [Efron's bootstrap](https://doi.org/10.1214/aos/1176344552) — group-relative objectives, cold-start SFT, constant-state batched decoding, bounded proposal curricula, and paired confidence-gated promotion → [`rlvr.py`](src/rwkv_lab/rlvr.py), [`rlvr_train.py`](src/rwkv_lab/rlvr_train.py), [`rlvr_evaluation.py`](src/rwkv_lab/rlvr_evaluation.py), [`recursive_improve.py`](src/rwkv_lab/recursive_improve.py). Adamaton owns proposals and isolated code verification; it cannot promote checkpoints.
 
 **P1 — data and distributed/numerical training systems**
 

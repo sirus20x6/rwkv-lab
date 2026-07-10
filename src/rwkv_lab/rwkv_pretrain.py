@@ -118,6 +118,59 @@ class Block(nn.Module):
             return x, v_first, seed_out
         return x, v_first
 
+    def forward_recurrent(self, x, v_first, state=None, *, ids=None, e0=None):
+        """Process one causal chunk and return exact time/shift carries.
+
+        RWKV-7's matrix state is constant-size (Peng et al., 2025,
+        https://arxiv.org/abs/2503.14456). Keeping both that state and the
+        TimeMix/ChannelMix token shifts makes chunked decoding equivalent to a
+        full-prefix forward for native, causal blocks.
+        """
+        if isinstance(self.att, LoopedRWKV):
+            raise ValueError("recurrent decoding does not support looped attention")
+        state = state or {}
+        if self.i == 0:
+            x = self.ln0(x)
+        a, wkv_state, att_shift, v_first = self.att(
+            self.ln1(x), v_first=v_first, return_v_first=True,
+            initial_state=state.get("wkv"), shift_state=state.get("att_shift"),
+            return_state=True)
+        x = x + a
+        xin = self.ln2(x)
+        de_shift = None
+        if self.de_mode == "hidden" and self.de_emb is not None and ids is not None:
+            h = xin
+            if self.de_xs is not None:
+                previous = torch.zeros_like(h)
+                if state.get("de_shift") is not None:
+                    previous[:, :1] = state["de_shift"].to(h.dtype).reshape(
+                        h.shape[0], 1, h.shape[-1])
+                if h.shape[1] > 1:
+                    previous[:, 1:] = h[:, :-1]
+                de_shift = h[:, -1:]
+                h = h + (previous - h) * self.de_xs.to(h.dtype)
+            E = self.de_emb(ids)
+            if self.de_er is not None and e0 is not None:
+                E = E + self.de_er(e0)
+            B, T = ids.shape
+            ss = torch.einsum("btr,btrs->bts", self.de_s1(h),
+                              E.view(B, T, self.de_r, self.de_r).to(h.dtype))
+            gate = 1.0 + self.de_s0.to(h.dtype) + self.de_s2(ss)
+            f, ffn_shift = self.ffn(xin, hidden_gate=gate,
+                                     shift_state=state.get("ffn_shift"), return_state=True)
+        else:
+            f, ffn_shift = self.ffn(xin, shift_state=state.get("ffn_shift"), return_state=True)
+            if self.de_emb is not None and ids is not None:
+                g = self.de_emb(ids)
+                if self.de_proj is not None:
+                    g = self.de_proj(g)
+                f = f * (1.0 + g)
+        x = x + f
+        next_state = {"wkv": wkv_state, "att_shift": att_shift, "ffn_shift": ffn_shift}
+        if de_shift is not None:
+            next_state["de_shift"] = de_shift
+        return x, v_first, next_state
+
 
 class RWKV7Small(nn.Module):
     def __init__(self, vocab, d, n_layers, head_size, loop_kw, att_kw=None, ffn_hidden=None,
@@ -182,6 +235,44 @@ class RWKV7Small(nn.Module):
         if eng is not None:                      # (exact no-op at init; see enable_engram)
             logits = eng.logit_bias(logits)
         return (logits, h) if return_hidden else logits
+
+    def recurrent_incompatibility(self) -> str | None:
+        """Return why exact state-carrying generation is unavailable, if any."""
+        if self.seed_chain:
+            return "Future-Seed depends on a whole-layer final state"
+        if any(isinstance(block.att, LoopedRWKV) for block in self.blocks):
+            return "looped attention has no unambiguous cross-chunk state contract"
+        if getattr(self, "online_memory", None) is not None:
+            return "online memory has no frozen inference-state contract"
+        if getattr(self, "engram", None) is not None:
+            return "Engram copy recall requires the complete token history"
+        return None
+
+    def forward_recurrent(self, ids, state=None):
+        """Exact causal chunk forward for native RWKV checkpoints.
+
+        Unsupported experimental levers are rejected explicitly so rollout
+        code can choose its batched full-prefix fallback without silently
+        changing semantics.
+        """
+        reason = self.recurrent_incompatibility()
+        if reason:
+            raise ValueError(f"checkpoint is not recurrent-generation compatible: {reason}")
+        if ids.ndim != 2 or ids.shape[1] < 1:
+            raise ValueError("recurrent input must have shape [batch,time] with time >= 1")
+        states = state if state is not None else [None] * len(self.blocks)
+        if len(states) != len(self.blocks):
+            raise ValueError("recurrent state does not match model depth")
+        x = self.emb(ids)
+        de_ids = ids if self.deepembed else None
+        e0 = x if (self.deepembed and self.de_emb_res) else None
+        v_first = None
+        next_states = []
+        for block, block_state in zip(self.blocks, states):
+            x, v_first, block_state = block.forward_recurrent(
+                x, v_first, block_state, ids=de_ids, e0=e0)
+            next_states.append(block_state)
+        return self.head(self.ln_out(x)), next_states
 
 
 def _adamw8bit(params, lr, wd, paged):

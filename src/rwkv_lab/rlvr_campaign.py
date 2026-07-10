@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -60,9 +61,13 @@ def _campaign_config(args) -> dict[str, Any]:
         for key, value in vars(args).items()
         if key not in {"out", "resume_existing"}
     }
-    for key in ("ckpt", "tasks", "reference_ckpt"):
+    for key in ("ckpt", "tasks", "heldout_tasks", "reference_ckpt"):
         if config.get(key):
             config[key] = str(Path(config[key]).resolve())
+    if config.get("verifier_command"):
+        config["verifier_command"] = hashlib.sha256(
+            str(config["verifier_command"]).encode()
+        ).hexdigest()
     return config
 
 
@@ -93,6 +98,13 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
             "updates_applied": sum(
                 int(r.get("promotion", {}).get("updates_applied", 0)) for r in rows
             ),
+            "sft_updates": sum(
+                int(r.get("promotion", {}).get("sft_updates", 0)) for r in rows
+            ),
+            "preflight_passes": sum(
+                bool(r.get("preflight", {}).get("passed")) for r in rows
+            ),
+            "rollout_tokens": sum(int(r.get("total_rollout_tokens", 0)) for r in rows),
         }
     return summary
 
@@ -122,6 +134,8 @@ def build_command(args, arm: Arm, run_dir: Path) -> list[str]:
         str(args.max_new),
         "--temperature",
         str(args.temperature),
+        "--rollout-engine",
+        args.rollout_engine,
         "--eval-temperature",
         str(args.eval_temperature),
         "--top-p",
@@ -148,8 +162,34 @@ def build_command(args, arm: Arm, run_dir: Path) -> list[str]:
         str(args.eval_group_size),
         "--min-heldout-delta",
         str(args.min_heldout_delta),
+        "--confidence",
+        str(args.confidence),
+        "--bootstrap-samples",
+        str(args.bootstrap_samples),
+        "--max-family-regression",
+        str(args.max_family_regression),
+        "--max-rollout-tokens",
+        str(args.max_rollout_tokens),
+        "--max-train-seconds",
+        str(args.max_train_seconds),
         "--difficulty",
         str(args.difficulty),
+        "--curriculum-stages",
+        args.curriculum_stages,
+        "--sft-steps",
+        str(args.sft_steps),
+        "--sft-batch-size",
+        str(args.sft_batch_size),
+        "--sft-lr",
+        str(args.sft_lr),
+        "--preflight-prompts",
+        str(args.preflight_prompts),
+        "--min-preflight-reward",
+        str(args.min_preflight_reward),
+        "--max-preflight-reward",
+        str(args.max_preflight_reward),
+        "--min-preflight-active-groups",
+        str(args.min_preflight_active_groups),
         "--device",
         args.device,
         "--save-every",
@@ -168,6 +208,11 @@ def build_command(args, arm: Arm, run_dir: Path) -> list[str]:
         ]
     if args.reference_ckpt:
         command += ["--reference-ckpt", args.reference_ckpt]
+    if args.heldout_tasks:
+        command += ["--heldout-tasks", args.heldout_tasks]
+    command.append(
+        "--require-confidence" if args.require_confidence else "--no-require-confidence"
+    )
     if args.verifier_command:
         command += [
             "--verifier-command",
@@ -186,6 +231,8 @@ def run_campaign(args) -> dict[str, Any]:
         raise ValueError(f"checkpoint does not exist: {args.ckpt}")
     if args.tasks and not Path(args.tasks).is_file():
         raise ValueError(f"task JSONL does not exist: {args.tasks}")
+    if args.heldout_tasks and not Path(args.heldout_tasks).is_file():
+        raise ValueError(f"held-out task JSONL does not exist: {args.heldout_tasks}")
     algorithms = _csv(args.algorithms)
     invalid = set(algorithms) - {"gspo", "dr_grpo", "dapo"}
     if not algorithms or invalid:
@@ -303,6 +350,7 @@ def main() -> None:
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--tasks", default="")
+    ap.add_argument("--heldout-tasks", default="")
     ap.add_argument("--algorithms", default="gspo,dr_grpo,dapo")
     ap.add_argument("--seeds", default="0,1,2")
     ap.add_argument("--steps", type=int, default=20)
@@ -310,6 +358,9 @@ def main() -> None:
     ap.add_argument("--group-size", type=int, default=8)
     ap.add_argument("--epochs", type=int, default=1)
     ap.add_argument("--max-new", type=int, default=32)
+    ap.add_argument(
+        "--rollout-engine", choices=["auto", "recurrent", "batched"], default="auto"
+    )
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--eval-temperature", type=float, default=0.7)
     ap.add_argument("--top-p", type=float, default=1.0)
@@ -327,9 +378,25 @@ def main() -> None:
     ap.add_argument("--eval-prompts", type=int, default=16)
     ap.add_argument("--eval-group-size", type=int, default=4)
     ap.add_argument("--min-heldout-delta", type=float, default=0.01)
+    ap.add_argument("--confidence", type=float, default=0.95)
+    ap.add_argument("--bootstrap-samples", type=int, default=10_000)
+    ap.add_argument(
+        "--require-confidence", action=argparse.BooleanOptionalAction, default=True
+    )
+    ap.add_argument("--max-family-regression", type=float, default=0.0)
+    ap.add_argument("--max-rollout-tokens", type=int, default=0)
+    ap.add_argument("--max-train-seconds", type=float, default=0.0)
     ap.add_argument("--train-tasks", type=int, default=4096)
     ap.add_argument("--eval-tasks", type=int, default=256)
     ap.add_argument("--difficulty", type=int, default=1)
+    ap.add_argument("--curriculum-stages", default="1,2")
+    ap.add_argument("--sft-steps", type=int, default=16)
+    ap.add_argument("--sft-batch-size", type=int, default=2)
+    ap.add_argument("--sft-lr", type=float, default=2e-5)
+    ap.add_argument("--preflight-prompts", type=int, default=8)
+    ap.add_argument("--min-preflight-reward", type=float, default=0.01)
+    ap.add_argument("--max-preflight-reward", type=float, default=0.99)
+    ap.add_argument("--min-preflight-active-groups", type=int, default=1)
     ap.add_argument("--save-every", type=int, default=5)
     ap.add_argument("--log-samples", type=int, default=2)
     ap.add_argument("--verifier-command", default="")

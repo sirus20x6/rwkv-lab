@@ -88,8 +88,10 @@ class RWKV8ChannelMixDeltaNet(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
         hidden_gate: Optional[torch.Tensor] = None,
+        shift_state: Optional[torch.Tensor] = None,
+        return_state: bool = False,
         **kwargs,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if cache_params is not None:
             has_previous = getattr(cache_params, "has_previous_state", None)
             if callable(has_previous) and has_previous():
@@ -99,6 +101,9 @@ class RWKV8ChannelMixDeltaNet(nn.Module):
                 )
 
         prev = torch.zeros_like(hidden_states)
+        if shift_state is not None:
+            prev[:, :1] = shift_state.to(hidden_states.dtype).reshape(
+                hidden_states.shape[0], 1, hidden_states.shape[-1])
         if hidden_states.shape[1] > 1:
             prev[:, 1:] = hidden_states[:, :-1]
 
@@ -107,7 +112,10 @@ class RWKV8ChannelMixDeltaNet(nn.Module):
         k = torch.square(F.relu(self.key(mixed)))
         if hidden_gate is not None:              # DeepEmbed: per-token multiplicative gate on the
             k = k * hidden_gate                  # FFN hidden (BlinkDL rwkv_v7a form); None = unchanged
-        return self.value(k)
+        out = self.value(k)
+        if return_state:
+            return out, hidden_states[:, -1:]
+        return out
 
 
 # ---------------------------------------------------------------------------
