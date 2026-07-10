@@ -44,7 +44,9 @@ cross-split leakage are refused. An explicit human choice may be
 appended to `datasets/trainboard_preferences.jsonl` as training data. Its allowlisted launcher runs
 equal-token, paired exploration seeds and fresh confirmation seeds through
 `rwkv_lab.posttrain_campaign`; result cards show phase-specific deltas/confidence intervals, promotion
-eligibility, and adapter-first recursive lineage. The panel cannot write hidden evaluation data, run
+eligibility, and adapter-first recursive lineage. It exposes qualified reset-mask packing, automatic
+portable/TorchAO NF4 selection, device slots, per-attempt timeouts, and retries; campaign state resumes
+completed command-identical arms after interruption. The panel cannot write hidden evaluation data, run
 an Adamaton proposal command, promote/merge a checkpoint, or publish a model. The underlying
 training methods are [LoRA](https://arxiv.org/abs/2106.09685),
 [QLoRA](https://arxiv.org/abs/2305.14314),

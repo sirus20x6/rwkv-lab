@@ -32,7 +32,8 @@ from rwkv_lab.preference import (dpo_loss, kto_loss, orpo_loss, reward_model_los
                                  OutcomeRewardHead, ProcessRewardHead, binary_calibration,
                                  adversarial_reward_audit, process_reward_loss, sequence_logps,
                                  simpo_loss)
-from rwkv_lab.quantization import model_storage_bytes, quantize_model_nf4
+from rwkv_lab.quantization import (model_storage_bytes, qualify_accelerated_nf4,
+                                   qualify_linear_qlora, quantize_model_nf4)
 
 
 RESULT_SCHEMA = "rwkv-lab.posttrain-result.v1"
@@ -51,6 +52,98 @@ def _batch_tokens(batch: list[TokenizedExample], objective: str) -> int:
              else ("response",) if objective == "kto" else ("steps",) if objective == "prm"
              else ("sft",))
     return sum(len(row.variants[name].input_ids) for row in batch for name in names)
+
+
+def _pack_groups(rows: list[TokenizedExample], names: tuple[str, ...], max_length: int
+                 ) -> list[list[TokenizedExample]]:
+    """Best-fit groups constrained independently for every objective variant."""
+    ordered = sorted(rows, key=lambda row: (-max(len(row.variants[name].input_ids)
+                                                    for name in names), row.id))
+    groups: list[list[TokenizedExample]] = []
+    sizes: list[dict[str, int]] = []
+    for row in ordered:
+        candidates = []
+        for index, totals in enumerate(sizes):
+            if all(totals[name] + len(row.variants[name].input_ids) <= max_length for name in names):
+                waste = sum(max_length - totals[name] - len(row.variants[name].input_ids)
+                            for name in names)
+                candidates.append((waste, index))
+        target = min(candidates)[1] if candidates else len(groups)
+        if target == len(groups):
+            groups.append([])
+            sizes.append({name: 0 for name in names})
+        groups[target].append(row)
+        for name in names:
+            sizes[target][name] += len(row.variants[name].input_ids)
+    return groups
+
+
+def _join_variants(rows: list[TokenizedExample], name: str) -> TokenizedVariant:
+    ids: list[int] = []
+    labels: list[int] = []
+    roles: list[str] = []
+    starts: list[int] = []
+    step_positions: list[int] = []
+    step_labels: list[bool] = []
+    truncated = 0
+    for row in rows:
+        value = row.variants[name]
+        offset = len(ids)
+        starts.append(offset)
+        ids.extend(value.input_ids)
+        labels.extend(value.labels)
+        # A causal sequence has no logit preceding its first token. Mask the boundary token just
+        # as separate padded rows do; otherwise the preceding segment would supply its predictor.
+        labels[offset] = IGNORE_INDEX
+        roles.extend(value.roles)
+        step_positions.extend(offset + position for position in value.step_positions)
+        step_labels.extend(value.step_labels)
+        truncated += value.truncated
+    return TokenizedVariant(tuple(ids), tuple(labels), tuple(roles), truncated,
+                            tuple(step_positions), tuple(step_labels), tuple(starts))
+
+
+def _packed_forward(model: nn.Module, variant: TokenizedVariant, device: str, *,
+                    return_hidden: bool = False):
+    ids = torch.tensor(variant.input_ids, dtype=torch.long, device=device)[None]
+    reset = torch.zeros_like(ids, dtype=torch.bool)
+    reset[0, list(variant.sequence_starts)] = True
+    return model(ids, reset_mask=reset, return_hidden=return_hidden)
+
+
+def _segmented_logps(logits: torch.Tensor, variant: TokenizedVariant, *,
+                     average: bool = False) -> torch.Tensor:
+    labels = torch.tensor(variant.labels, dtype=torch.long, device=logits.device)[None]
+    target = labels[:, 1:]
+    mask = target != IGNORE_INDEX
+    safe = target.masked_fill(~mask, 0)
+    values = logits[:, :-1].log_softmax(-1).gather(-1, safe.unsqueeze(-1)).squeeze(-1)[0]
+    results = []
+    starts = variant.sequence_starts
+    for index, start in enumerate(starts):
+        end = starts[index + 1] if index + 1 < len(starts) else len(variant.input_ids)
+        # labels at token position p are predicted by logits p-1.
+        selected = mask[0, start:max(0, end - 1)]
+        scores = values[start:max(0, end - 1)][selected]
+        if not scores.numel():
+            raise ValueError("every packed segment needs at least one supervised target")
+        results.append(scores.mean() if average else scores.sum())
+    return torch.stack(results)
+
+
+def _packed_outcome_rewards(head: OutcomeRewardHead, hidden: torch.Tensor,
+                            variant: TokenizedVariant) -> torch.Tensor:
+    labels = torch.tensor(variant.labels, device=hidden.device)
+    positions = []
+    for index, start in enumerate(variant.sequence_starts):
+        end = (variant.sequence_starts[index + 1] if index + 1 < len(variant.sequence_starts)
+               else len(variant.input_ids))
+        supervised = torch.nonzero(labels[start:end] != IGNORE_INDEX, as_tuple=False).flatten()
+        if not supervised.numel():
+            raise ValueError("packed reward segment has no response token")
+        positions.append(start + int(supervised[-1]))
+    chosen = hidden[0, torch.tensor(positions, device=hidden.device)]
+    return head.proj(chosen).squeeze(-1)
 
 
 def _collate(variants: list[TokenizedVariant], device: str) -> tuple[torch.Tensor, torch.Tensor]:
@@ -152,6 +245,109 @@ def _train_loss(model: nn.Module, reward_head: nn.Module | None, batch: list[Tok
     return result.loss.mean(), {"preference_margin": float(result.margin.mean())}
 
 
+def _packed_train_loss(model: nn.Module, reward_head: nn.Module | None,
+                       rows: list[TokenizedExample], objective: str, device: str,
+                       beta: float, gamma: float) -> tuple[torch.Tensor, dict[str, float]]:
+    """Train one reset-isolated multipack without cross-example recurrent state."""
+    if objective == "sft":
+        variant = _join_variants(rows, "sft")
+        logits = _packed_forward(model, variant, device)
+        labels = torch.tensor(variant.labels, device=device)[None]
+        loss = F.cross_entropy(logits[:, :-1].reshape(-1, logits.shape[-1]),
+                               labels[:, 1:].reshape(-1), ignore_index=IGNORE_INDEX)
+        return loss, {"sft_nll": float(loss.detach()), "packed_examples": len(rows)}
+
+    if objective == "prm":
+        if not isinstance(reward_head, ProcessRewardHead):
+            raise ValueError("PRM objective needs a process reward head")
+        variant = _join_variants(rows, "steps")
+        _, hidden = _packed_forward(model, variant, device, return_hidden=True)
+        positions = torch.tensor(variant.step_positions, dtype=torch.long, device=device)[None]
+        labels = torch.tensor(variant.step_labels, dtype=torch.float32, device=device)[None]
+        logits = reward_head(hidden, positions)
+        loss = process_reward_loss(logits, labels)
+        metrics = binary_calibration(logits.flatten(), labels.flatten())
+        return loss, {**{f"prm_{name}": value for name, value in metrics.items()},
+                      "packed_examples": len(rows)}
+
+    if objective == "kto":
+        variant = _join_variants(rows, "response")
+        policy = _segmented_logps(_packed_forward(model, variant, device), variant)
+        with torch.no_grad(), active_adapters(model, ()):
+            reference = _segmented_logps(_packed_forward(model, variant, device), variant)
+        desirable = torch.tensor([bool(row.metadata["label"]) for row in rows], device=device)
+        losses = kto_loss(policy, reference, desirable, beta=beta)
+        return losses.mean(), {"desirable_frac": float(desirable.float().mean()),
+                               "packed_examples": len(rows)}
+
+    chosen = _join_variants(rows, "chosen")
+    rejected = _join_variants(rows, "rejected")
+    if objective == "reward":
+        if not isinstance(reward_head, OutcomeRewardHead):
+            raise ValueError("reward objective needs an outcome reward head")
+        _, chosen_hidden = _packed_forward(model, chosen, device, return_hidden=True)
+        _, rejected_hidden = _packed_forward(model, rejected, device, return_hidden=True)
+        chosen_reward = _packed_outcome_rewards(reward_head, chosen_hidden, chosen)
+        rejected_reward = _packed_outcome_rewards(reward_head, rejected_hidden, rejected)
+        losses = reward_model_loss(chosen_reward, rejected_reward)
+        return losses.mean(), {"reward_margin": float((chosen_reward - rejected_reward).mean().detach()),
+                               "packed_examples": len(rows)}
+
+    average = objective in ("orpo", "simpo")
+    policy_chosen = _segmented_logps(_packed_forward(model, chosen, device), chosen, average=average)
+    policy_rejected = _segmented_logps(_packed_forward(model, rejected, device), rejected,
+                                       average=average)
+    if objective == "dpo":
+        with torch.no_grad(), active_adapters(model, ()):
+            reference_chosen = _segmented_logps(_packed_forward(model, chosen, device), chosen)
+            reference_rejected = _segmented_logps(_packed_forward(model, rejected, device), rejected)
+        result = dpo_loss(policy_chosen, policy_rejected, reference_chosen, reference_rejected,
+                          beta=beta)
+    elif objective == "orpo":
+        result = orpo_loss(policy_chosen, policy_rejected, -policy_chosen, beta=beta)
+    elif objective == "simpo":
+        result = simpo_loss(policy_chosen, policy_rejected, beta=beta, gamma=gamma)
+    else:
+        raise ValueError(f"unsupported packed objective {objective!r}")
+    return result.loss.mean(), {"preference_margin": float(result.margin.mean()),
+                                "packed_examples": len(rows)}
+
+
+def _qualify_reset_packing(model: nn.Module, reward_head: nn.Module | None,
+                           rows: list[TokenizedExample], objective: str, adapter_name: str,
+                           device: str, beta: float, gamma: float,
+                           parameters: list[nn.Parameter], tolerance: float = 3e-4) -> dict:
+    """Require unpacked/packed loss and trainable-gradient parity before adoption."""
+    model.zero_grad(set_to_none=True)
+    if reward_head is not None:
+        reward_head.zero_grad(set_to_none=True)
+    unpacked, _ = _train_loss(model, reward_head, rows, objective, adapter_name,
+                              device, beta, gamma)
+    unpacked_gradients = torch.autograd.grad(unpacked, parameters, allow_unused=True)
+    model.zero_grad(set_to_none=True)
+    if reward_head is not None:
+        reward_head.zero_grad(set_to_none=True)
+    packed, _ = _packed_train_loss(model, reward_head, rows, objective, device, beta, gamma)
+    packed_gradients = torch.autograd.grad(packed, parameters, allow_unused=True)
+    gradient_error = 0.0
+    for left, right in zip(unpacked_gradients, packed_gradients):
+        if left is None and right is None:
+            continue
+        if left is None or right is None:
+            gradient_error = float("inf")
+            break
+        gradient_error = max(gradient_error, float((left.float() - right.float()).abs().max()))
+    loss_error = abs(float(unpacked.detach()) - float(packed.detach()))
+    passed = loss_error <= tolerance and gradient_error <= tolerance
+    model.zero_grad(set_to_none=True)
+    if reward_head is not None:
+        reward_head.zero_grad(set_to_none=True)
+    return {"schema": "rwkv-lab.reset-pack-qualification.v1", "examples": len(rows),
+            "unpacked_loss": float(unpacked.detach()), "packed_loss": float(packed.detach()),
+            "loss_max_abs": loss_error, "gradient_max_abs": gradient_error,
+            "tolerance": tolerance, "passed": passed}
+
+
 def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
           adapter_name: str = "posttrain", rank: int = 16, alpha: float = 32.0,
           targets: tuple[str, ...] = (), steps: int = 100, batch_size: int = 2,
@@ -160,13 +356,15 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
           template: str = "", eval_data: str = "", token_cache: str = "",
           max_train_tokens: int = 0, packing: str = "audit",
           base_quantization: str = "none", quant_block_size: int = 64,
-          activation_offload: bool = False) -> dict:
+          quant_backend: str = "auto", activation_offload: bool = False) -> dict:
     from rwkv_lab.generate import WorldVocab, build_from_ckpt
 
     if objective not in ("sft", "dpo", "kto", "orpo", "simpo", "reward", "prm"):
         raise ValueError("unsupported post-training objective")
-    if base_quantization not in ("none", "nf4") or packing not in ("off", "audit"):
-        raise ValueError("base_quantization must be none/nf4 and packing must be off/audit")
+    if base_quantization not in ("none", "nf4") or packing not in ("off", "audit", "reset"):
+        raise ValueError("base_quantization must be none/nf4 and packing must be off/audit/reset")
+    if quant_backend not in ("auto", "portable", "torchao"):
+        raise ValueError("quant_backend must be auto, portable, or torchao")
     if steps <= 0 or batch_size <= 0 or max_length < 2:
         raise ValueError("steps/batch_size must be positive and max_length must be at least two")
     device = ("cuda" if torch.cuda.is_available() else "cpu") if device == "auto" else device
@@ -177,9 +375,34 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
         model = model.float()
     dense_storage = model_storage_bytes(model)
     quantized_modules: list[str] = []
+    quantization_qualification = None
+    selected_quant_backend = "none"
     if base_quantization == "nf4":
+        representative = next((module for path, module in model.named_modules()
+                               if isinstance(module, nn.Linear) and path and
+                               not path.startswith("head") and not path.startswith("emb")), None)
+        if representative is None:
+            raise ValueError("NF4 qualification found no eligible dense linear")
+        sample = torch.randn(2, representative.in_features, device=representative.weight.device,
+                             dtype=representative.weight.dtype)
+        portable_report = qualify_linear_qlora(
+            representative, sample, block_size=quant_block_size,
+            parity_tolerance=(2e-2 if representative.weight.dtype in (torch.bfloat16, torch.float16)
+                              else 2e-5))
+        accelerated_report = qualify_accelerated_nf4(representative, sample,
+                                                      block_size=quant_block_size)
+        quantization_qualification = {"portable": portable_report.__dict__,
+                                      "accelerated": accelerated_report}
+        selected_quant_backend = ("torchao" if quant_backend == "auto" and
+                                  accelerated_report.get("adopted") else
+                                  "portable" if quant_backend == "auto" else quant_backend)
+        if selected_quant_backend == "torchao" and not accelerated_report.get("adopted"):
+            raise ValueError(f"TorchAO NF4 failed parity/performance qualification: {accelerated_report}")
+        if not portable_report.passed:
+            raise ValueError(f"portable NF4 failed QLoRA qualification: {portable_report}")
         quantized_modules = quantize_model_nf4(model, block_size=quant_block_size,
-                                               exclude=("head", "emb"))
+                                               exclude=("head", "emb"),
+                                               backend=selected_quant_backend)
     base_storage = model_storage_bytes(model)
     config = AdapterConfig(adapter_name, rank, alpha, 0.0,
                            targets or ("receptance", "key", "value", "output", "up", "down"))
@@ -212,7 +435,7 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
                              truncate="left") for row in eval_rows]
     variant_name = {"sft": "sft", "kto": "response", "prm": "steps"}.get(objective, "chosen")
     packing_audit = None
-    if packing == "audit":
+    if packing in ("audit", "reset"):
         _, packing_audit = pack_variants([(row.id, row.variants[variant_name]) for row in encoded],
                                          max_length, separator_id=0)
     kto_pools = None
@@ -227,6 +450,32 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
                    ProcessRewardHead(int(blob["arch"]["d_model"]), bias=False).to(device)
                    if objective == "prm" else None)
     parameters = list(adapter_parameters(model)) + (list(reward_head.parameters()) if reward_head else [])
+    packed_groups: list[list[TokenizedExample]] = []
+    if packing == "reset":
+        reason = model.packing_incompatibility() if hasattr(model, "packing_incompatibility") else None
+        if reason:
+            raise ValueError(f"reset-mask packing is unavailable: {reason}")
+        pack_names = (("chosen", "rejected") if objective in ("dpo", "orpo", "simpo", "reward")
+                      else ("response",) if objective == "kto" else
+                      ("steps",) if objective == "prm" else ("sft",))
+        packed_groups = _pack_groups(encoded, pack_names, max_length)
+        qualification_rows = next((group for group in packed_groups if len(group) > 1), [])
+        if not qualification_rows:
+            raise ValueError("reset packing needs at least two examples that fit one context")
+        qualification = _qualify_reset_packing(model, reward_head, qualification_rows,
+                                                objective, adapter_name, device, beta, gamma,
+                                                parameters)
+        packed_tokens = sum(len(row.variants[name].input_ids) for group in packed_groups
+                            for row in group for name in pack_names)
+        packed_capacity = len(packed_groups) * max_length * len(pack_names)
+        packing_audit = {**(packing_audit or {}), "execution": "reset_mask",
+                         "groups": len(packed_groups), "qualification": qualification,
+                         "execution_utilization": packed_tokens / max(1, packed_capacity),
+                         "examples_per_group": [len(group) for group in packed_groups],
+                         "qualification_required": False,
+                         "recurrent_isolation": bool(qualification["passed"])}
+        if not qualification["passed"]:
+            raise ValueError(f"reset-mask packing parity failed: {qualification}")
     optimizer = torch.optim.AdamW(parameters, lr=learning_rate)
     root = Path(output)
     root.mkdir(parents=True, exist_ok=True)
@@ -288,10 +537,23 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
     train_tokens = 0
     completed_steps = 0
     for step in range(int(steps)):
-        if kto_pools is not None:
+        if packing == "reset" and objective != "kto":
+            batch = packed_groups[rng.randrange(len(packed_groups))]
+        elif kto_pools is not None:
             good, bad = kto_pools
             batch = [good[rng.randrange(len(good))], bad[rng.randrange(len(bad))]]
-            batch += [encoded[rng.randrange(len(encoded))] for _ in range(int(batch_size) - 2)]
+            candidates = [encoded[rng.randrange(len(encoded))] for _ in range(int(batch_size) - 2)]
+            if packing == "reset":
+                used = sum(len(row.variants["response"].input_ids) for row in batch)
+                for row in candidates:
+                    size = len(row.variants["response"].input_ids)
+                    if used + size <= max_length:
+                        batch.append(row)
+                        used += size
+                if used > max_length:
+                    raise ValueError("one good/bad KTO pair does not fit the packing context")
+            else:
+                batch += candidates
             rng.shuffle(batch)
         else:
             batch = [encoded[rng.randrange(len(encoded))] for _ in range(int(batch_size))]
@@ -299,8 +561,12 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
         offload = (torch.autograd.graph.save_on_cpu(pin_memory=True)
                    if activation_offload and device.startswith("cuda") else nullcontext())
         with offload:
-            loss, last_metrics = _train_loss(model, reward_head, batch, objective, adapter_name,
-                                             device, beta, gamma)
+            if packing == "reset":
+                loss, last_metrics = _packed_train_loss(model, reward_head, batch, objective,
+                                                        device, beta, gamma)
+            else:
+                loss, last_metrics = _train_loss(model, reward_head, batch, objective, adapter_name,
+                                                 device, beta, gamma)
         if not torch.isfinite(loss):
             raise FloatingPointError(f"non-finite {objective} loss at step {step}")
         loss.backward()
@@ -322,7 +588,8 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
                                     parent_checkpoint=str(Path(checkpoint).resolve()),
                                     metadata={"objective": objective,
                                               "base_quantization": base_quantization,
-                                              "quant_block_size": quant_block_size})
+                                              "quant_block_size": quant_block_size,
+                                              "quant_backend": selected_quant_backend})
     reward_version = None
     if reward_head is not None:
         from safetensors.torch import save_file
@@ -352,9 +619,11 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
                                if eval_data else None),
               "targets": selected, "seed": seed,
               "token_cache": cache_manifest, "packing": packing_audit,
-              "quantization": {"kind": base_quantization, "modules": quantized_modules,
+              "quantization": {"kind": base_quantization, "backend": selected_quant_backend,
+                               "modules": quantized_modules,
                                "dense_bytes": dense_storage, "stored_bytes": base_storage,
-                               "compression_ratio": dense_storage / max(1, base_storage)},
+                               "compression_ratio": dense_storage / max(1, base_storage),
+                               "qualification": quantization_qualification},
               "activation_offload": activation_offload, "reward_model": reward_version,
               "promotion": {"status": "unassessed", "reason": "training never implies promotion"}}
     (root / "posttrain-result.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
@@ -383,9 +652,10 @@ def main() -> None:
     parser.add_argument("--token-cache", default="", help="content-addressed token-cache root")
     parser.add_argument("--max-train-tokens", type=int, default=0,
                         help="equal-budget stop after at least this many scored input tokens")
-    parser.add_argument("--packing", choices=["off", "audit"], default="audit")
+    parser.add_argument("--packing", choices=["off", "audit", "reset"], default="audit")
     parser.add_argument("--base-quantization", choices=["none", "nf4"], default="none")
     parser.add_argument("--quant-block-size", type=int, default=64)
+    parser.add_argument("--quant-backend", choices=["auto", "portable", "torchao"], default="auto")
     parser.add_argument("--activation-offload", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="auto")

@@ -250,7 +250,10 @@ def base_fingerprint(model: nn.Module) -> str:
             continue
         name = name.replace(".base.", ".")
         digest.update(name.encode() + b"\0")
-        value = tensor.detach().cpu().contiguous()
+        value = tensor.detach()
+        if hasattr(value, "get_original_weight"):
+            value = value.get_original_weight()
+        value = value.cpu().contiguous()
         digest.update(str(value.dtype).encode() + str(tuple(value.shape)).encode())
         digest.update(value.view(torch.uint8).numpy().tobytes())
     return digest.hexdigest()

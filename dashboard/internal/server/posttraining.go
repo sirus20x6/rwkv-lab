@@ -152,6 +152,10 @@ func (s *Server) handlePosttraining(w http.ResponseWriter, r *http.Request) {
 	b.WriteString(`<tr><td class="f-l">explore / confirm</td><td><input data-bind="ptCampaignSeeds" value="0,1,2"><input data-bind="ptCampaignConfirm" value="100,101,102"></td></tr>`)
 	b.WriteString(`<tr><td class="f-l">token budget</td><td><input type="number" data-bind="ptCampaignBudget" value="100000"></td></tr>`)
 	b.WriteString(`<tr><td class="f-l">base</td><td><select data-bind="ptCampaignQuant"><option value="none">dense LoRA</option><option value="nf4">native NF4 QLoRA</option></select></td></tr>`)
+	b.WriteString(`<tr><td class="f-l">NF4 backend</td><td><select data-bind="ptCampaignBackend"><option value="auto">auto · parity + speed gate</option><option value="portable">portable reference</option><option value="torchao">require TorchAO</option></select></td></tr>`)
+	b.WriteString(`<tr><td class="f-l">packing</td><td><select data-bind="ptCampaignPacking"><option value="reset">reset-mask multipack</option><option value="audit">audit only</option><option value="off">off</option></select></td></tr>`)
+	b.WriteString(`<tr><td class="f-l">device slots</td><td><input data-bind="ptCampaignDevices" value="cuda:0" placeholder="cuda:0,cuda:1"></td></tr>`)
+	b.WriteString(`<tr><td class="f-l">timeout / retries</td><td><input data-bind="ptCampaignTimeout" value="0" title="seconds; 0 disables"><input type="number" data-bind="ptCampaignRetries" value="1" min="0" max="10"></td></tr>`)
 	b.WriteString(`</table><button class="btn" data-on:click="confirm('Launch paired post-training and confirmation campaign?') && @post('/api/posttraining/campaign')">▶ run campaign</button></div><div class="pt-campaign-results">`)
 	campaigns, loops := s.readPosttrainCampaigns()
 	if len(campaigns) == 0 {
@@ -336,6 +340,11 @@ func (s *Server) handleLaunchPosttrainingCampaign(w http.ResponseWriter, r *http
 		Confirm    string `json:"ptCampaignConfirm"`
 		Budget     string `json:"ptCampaignBudget"`
 		Quant      string `json:"ptCampaignQuant"`
+		Backend    string `json:"ptCampaignBackend"`
+		Packing    string `json:"ptCampaignPacking"`
+		Devices    string `json:"ptCampaignDevices"`
+		Timeout    string `json:"ptCampaignTimeout"`
+		Retries    string `json:"ptCampaignRetries"`
 	}
 	_ = datastar.ReadSignals(r, &sig)
 	sse := datastar.NewSSE(w, r)
@@ -400,10 +409,45 @@ func (s *Server) handleLaunchPosttrainingCampaign(w http.ResponseWriter, r *http
 		toastErr(sse, "campaign base must be dense or NF4")
 		return
 	}
+	if sig.Backend != "auto" && sig.Backend != "portable" && sig.Backend != "torchao" {
+		toastErr(sse, "NF4 backend must be auto, portable, or torchao")
+		return
+	}
+	if sig.Packing != "off" && sig.Packing != "audit" && sig.Packing != "reset" {
+		toastErr(sse, "packing must be off, audit, or reset")
+		return
+	}
+	deviceValues := strings.Split(sig.Devices, ",")
+	seenDevices := map[string]bool{}
+	for _, raw := range deviceValues {
+		value := strings.TrimSpace(raw)
+		valid := value == "auto" || value == "cpu" || value == "cuda"
+		if strings.HasPrefix(value, "cuda:") {
+			_, parseErr := strconv.Atoi(strings.TrimPrefix(value, "cuda:"))
+			valid = parseErr == nil
+		}
+		if !valid || seenDevices[value] {
+			toastErr(sse, "device slots must be unique auto, cpu, cuda, or cuda:N values")
+			return
+		}
+		seenDevices[value] = true
+	}
+	timeout, parseErr := strconv.ParseFloat(strings.TrimSpace(sig.Timeout), 64)
+	if parseErr != nil || timeout < 0 {
+		toastErr(sse, "arm timeout must be non-negative seconds")
+		return
+	}
+	retries, err := boundedInt(sig.Retries, 1, 0, 10)
+	if err != nil {
+		toastErr(sse, "campaign retries are invalid")
+		return
+	}
 	args := []string{"-m", "rwkv_lab.posttrain_campaign", "--checkpoint", checkpoint,
 		"--data", data, "--eval-data", eval, "--output", out, "--objectives", sig.Objectives,
 		"--seeds", sig.Seeds, "--confirm-seeds", sig.Confirm, "--token-budget", budget,
-		"--base-quantization", sig.Quant}
+		"--base-quantization", sig.Quant, "--quant-backend", sig.Backend,
+		"--packing", sig.Packing, "--devices", sig.Devices,
+		"--arm-timeout", strconv.FormatFloat(timeout, 'f', -1, 64), "--retries", retries}
 	pid, err := s.spawnPy(args, fmt.Sprintf("posttrain_campaign_%d.log", time.Now().Unix()))
 	if err != nil {
 		toastErr(sse, "post-training campaign launch failed: "+err.Error())

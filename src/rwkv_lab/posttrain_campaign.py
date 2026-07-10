@@ -9,6 +9,7 @@ gate uses Efron's bootstrap, https://doi.org/10.1214/aos/1176344552.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -103,7 +104,7 @@ def assess(result: dict[str, Any], *, audit: dict[str, Any], minimum_delta: floa
     return gates
 
 
-def build_command(args, objective: str, seed: int, run_dir: Path) -> list[str]:
+def build_command(args, objective: str, seed: int, run_dir: Path, *, device: str | None = None) -> list[str]:
     command = [sys.executable, "-m", "rwkv_lab.posttrain_train",
                "--checkpoint", args.checkpoint, "--data", args.data,
                "--output", str(run_dir), "--objective", objective,
@@ -112,9 +113,10 @@ def build_command(args, objective: str, seed: int, run_dir: Path) -> list[str]:
                "--batch-size", str(args.batch_size), "--learning-rate", str(args.learning_rate),
                "--beta", str(args.beta), "--gamma", str(args.gamma),
                "--max-length", str(args.max_length), "--seed", str(seed),
-               "--device", args.device, "--max-train-tokens", str(args.token_budget),
-               "--packing", "audit", "--base-quantization", args.base_quantization,
-               "--quant-block-size", str(args.quant_block_size)]
+               "--device", device or args.device, "--max-train-tokens", str(args.token_budget),
+               "--packing", args.packing, "--base-quantization", args.base_quantization,
+               "--quant-block-size", str(args.quant_block_size),
+               "--quant-backend", args.quant_backend]
     if args.eval_data:
         command += ["--eval-data", args.eval_data]
     if args.token_cache:
@@ -126,6 +128,81 @@ def build_command(args, objective: str, seed: int, run_dir: Path) -> list[str]:
     return command
 
 
+def _execute_arm(args, objective: str, seed: int, phase: str, run_dir: Path,
+                 device: str) -> dict[str, Any]:
+    """Run/recover one deterministic arm and persist attempt state atomically."""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    command = build_command(args, objective, seed, run_dir, device=device)
+    command_hash = hashlib.sha256(json.dumps(command, separators=(",", ":")).encode()).hexdigest()
+    state_path = run_dir / "arm-state.json"
+    result_path = run_dir / "posttrain-result.json"
+    state = json.loads(state_path.read_text()) if state_path.is_file() else {
+        "schema": "rwkv-lab.posttrain-arm-state.v1", "objective": objective,
+        "seed": seed, "phase": phase, "command_sha256": command_hash,
+        "device": device, "attempts": [], "status": "pending",
+    }
+    if state.get("command_sha256") != command_hash:
+        raise ValueError(f"saved arm command differs for {phase}/{objective}/seed-{seed}")
+    if args.resume and state.get("status") == "complete" and result_path.is_file():
+        result = json.loads(result_path.read_text())
+        if result.get("schema") == "rwkv-lab.posttrain-result.v1":
+            return {"result": result, "returncode": 0, "attempts": len(state["attempts"]),
+                    "resumed": True, "device": device}
+    last_returncode = 1
+    for retry in range(args.retries + 1):
+        attempt = len(state["attempts"]) + 1
+        result_path.unlink(missing_ok=True)
+        state.update({"status": "running", "device": device, "started_ts": time.time()})
+        state["attempts"].append({"attempt": attempt, "started_ts": time.time(),
+                                  "status": "running"})
+        _atomic_json(state_path, state)
+        log_path = run_dir / f"stdout-attempt-{attempt:02d}.log"
+        started = time.time()
+        timed_out = False
+        with log_path.open("w", buffering=1) as log:
+            try:
+                completed = subprocess.run(command, cwd=Path.cwd(),
+                                           env={**os.environ, "PYTHONPATH": "src"},
+                                           stdout=log, stderr=subprocess.STDOUT, check=False,
+                                           timeout=(args.arm_timeout if args.arm_timeout > 0 else None))
+                last_returncode = completed.returncode
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                last_returncode = 124
+                log.write(f"arm exceeded {args.arm_timeout}s timeout\n")
+        valid = False
+        result = None
+        if last_returncode == 0 and result_path.is_file():
+            try:
+                result = json.loads(result_path.read_text())
+                valid = (result.get("schema") == "rwkv-lab.posttrain-result.v1" and
+                         result.get("objective") == objective and int(result.get("seed")) == seed)
+            except (ValueError, TypeError, json.JSONDecodeError):
+                valid = False
+        attempt_row = state["attempts"][-1]
+        attempt_row.update({"finished_ts": time.time(), "elapsed_seconds": time.time() - started,
+                            "returncode": last_returncode, "timed_out": timed_out,
+                            "status": "complete" if valid else "failed", "log": str(log_path)})
+        state["status"] = "complete" if valid else "retrying" if retry < args.retries else "failed"
+        _atomic_json(state_path, state)
+        if valid:
+            return {"result": result, "returncode": 0, "attempts": len(state["attempts"]),
+                    "resumed": False, "device": device}
+        if retry < args.retries and args.retry_delay > 0:
+            time.sleep(args.retry_delay)
+    return {"result": None, "returncode": last_returncode, "attempts": len(state["attempts"]),
+            "resumed": False, "device": device}
+
+
+def _upsert_result(results: list[dict[str, Any]], row: dict[str, Any]) -> None:
+    key = (row["objective"], row["phase"], int(row["seed"]))
+    for index, existing in enumerate(results):
+        if (existing["objective"], existing["phase"], int(existing["seed"])) == key:
+            results[index] = row
+            return
+    results.append(row)
+
+
 def run_campaign(args) -> dict[str, Any]:
     objectives = _csv(args.objectives)
     seeds = _csv(args.seeds, int)
@@ -135,6 +212,8 @@ def run_campaign(args) -> dict[str, Any]:
         raise ValueError(f"invalid objectives or empty seed sets: {sorted(invalid)}")
     if set(seeds) & set(confirm_seeds):
         raise ValueError("exploration and confirmation seeds must be disjoint")
+    if args.retries < 0 or args.retry_delay < 0 or args.arm_timeout < 0 or args.max_parallel < 0:
+        raise ValueError("retry, timeout, and parallelism controls must be non-negative")
     for path in (args.checkpoint, args.data, args.eval_data):
         if path and not Path(path).is_file():
             raise ValueError(f"input does not exist: {path}")
@@ -143,63 +222,112 @@ def run_campaign(args) -> dict[str, Any]:
         raise ValueError(f"held-out split audit failed: {audit}")
     root = Path(args.output).resolve()
     root.mkdir(parents=True, exist_ok=True)
-    config = {key: value for key, value in vars(args).items() if key != "output"}
-    campaign_id = create_campaign("posttrain", config, name=args.name, db=args.db)
+    config = {key: value for key, value in vars(args).items() if key not in {"output", "resume"}}
     started = time.time()
-    manifest: dict[str, Any] = {"schema": SCHEMA, "status": "running", "campaign_id": campaign_id,
-                                "created_ts": started, "configuration": config,
-                                "objectives": objectives, "seeds": seeds,
-                                "confirmation_seeds": confirm_seeds, "split_audit": audit,
-                                "results": []}
     manifest_path = root / "posttrain-campaign.json"
+    if manifest_path.is_file():
+        if not args.resume:
+            raise ValueError("campaign output already exists; pass --resume or choose a new output")
+        manifest = json.loads(manifest_path.read_text())
+        if manifest.get("configuration") != config:
+            raise ValueError("saved campaign configuration differs; choose a new output")
+        if manifest.get("status") == "complete":
+            return manifest
+        campaign_id = int(manifest["campaign_id"])
+        manifest["status"] = "running"
+        manifest.pop("completed_ts", None)
+    else:
+        campaign_id = create_campaign("posttrain", config, name=args.name, db=args.db)
+        manifest = {"schema": SCHEMA, "status": "running", "campaign_id": campaign_id,
+                    "created_ts": started, "configuration": config,
+                    "objectives": objectives, "seeds": seeds,
+                    "confirmation_seeds": confirm_seeds, "split_audit": audit,
+                    "results": []}
     _atomic_json(manifest_path, manifest)
     failed = False
-    all_seeds = [("explore", seed) for seed in seeds] + [("confirm", seed) for seed in confirm_seeds]
+    devices = _csv(args.devices) if args.devices else [args.device]
+    if not devices or len(devices) != len(set(devices)):
+        raise ValueError("campaign devices must be a unique comma-separated list")
+    parallel = min(len(devices), max(1, int(args.max_parallel or len(devices))))
+    devices = devices[:parallel]
+    arm_ids = {}
     for objective in objectives:
         parent_arm = ensure_arm(campaign_id, f"parent:{objective}", {"frozen": True}, db=args.db)
         candidate_arm = ensure_arm(campaign_id, objective, {"objective": objective}, db=args.db)
-        phase_rows: dict[str, list[dict[str, Any]]] = {"explore": [], "confirm": []}
-        for phase, seed in all_seeds:
-            run_dir = root / phase / objective / f"seed-{seed:04d}"
-            run_dir.mkdir(parents=True, exist_ok=True)
-            command = build_command(args, objective, seed, run_dir)
-            with (run_dir / "stdout.log").open("w", buffering=1) as log:
-                completed = subprocess.run(command, cwd=Path.cwd(),
-                                           env={**os.environ, "PYTHONPATH": "src"},
-                                           stdout=log, stderr=subprocess.STDOUT, check=False)
-            result_path = run_dir / "posttrain-result.json"
-            if completed.returncode or not result_path.is_file():
-                failed = True
-                row = {"objective": objective, "seed": seed, "phase": phase, "status": "failed",
-                       "returncode": completed.returncode, "run_dir": str(run_dir)}
-                record_trial(campaign_id, candidate_arm, seed, 0, args.token_budget, None,
-                             phase=phase, status="failed", error="trainer failed", db=args.db)
-            else:
-                result = json.loads(result_path.read_text())
-                promotion = assess(result, audit=audit, minimum_delta=args.minimum_delta,
-                                   maximum_family_regression=args.maximum_family_regression,
-                                   confidence=args.confidence, bootstrap_samples=args.bootstrap_samples,
-                                   seed=seed, token_budget=args.token_budget,
-                                   budget_slack=2 * args.batch_size * args.max_length)
-                score0 = -float(result["initial_eval_loss"])
-                score1 = -float(result["final_eval_loss"])
-                record_trial(campaign_id, parent_arm, seed, 0, args.token_budget,
-                             {"score": score0}, phase=phase, db=args.db)
-                trial_id = record_trial(campaign_id, candidate_arm, seed, 0, args.token_budget,
-                                        {"score": score1, "delta": score1 - score0,
-                                         "eligible": promotion["eligible"],
-                                         "train_tokens": result["train_tokens"]},
-                                        profile=result.get("quantization"), phase=phase, db=args.db)
-                record_artifact(campaign_id, str(result_path), "posttrain-result",
-                                trial_id=trial_id, db=args.db)
-                row = {"objective": objective, "seed": seed, "phase": phase, "status": "complete",
-                       "run_dir": str(run_dir), "initial_score": score0, "final_score": score1,
-                       "delta": score1 - score0, "promotion": promotion,
-                       "adapter": result["adapter"], "result": str(result_path)}
-                phase_rows[phase].append(row)
-            manifest["results"].append(row)
-            _atomic_json(manifest_path, manifest)
-        for phase, rows in phase_rows.items():
+        arm_ids[objective] = (parent_arm, candidate_arm)
+    try:
+        for phase, phase_seeds in (("explore", seeds), ("confirm", confirm_seeds)):
+            jobs = [(objective, seed, root / phase / objective / f"seed-{seed:04d}")
+                    for objective in objectives for seed in phase_seeds]
+            for start in range(0, len(jobs), len(devices)):
+                batch = jobs[start:start + len(devices)]
+                with ThreadPoolExecutor(max_workers=len(batch)) as executor:
+                    futures = [executor.submit(_execute_arm, args, objective, seed, phase, run_dir,
+                                               devices[index])
+                               for index, (objective, seed, run_dir) in enumerate(batch)]
+                    outcomes = [future.result() for future in futures]
+                for (objective, seed, run_dir), outcome in zip(batch, outcomes):
+                    parent_arm, candidate_arm = arm_ids[objective]
+                    result_path = run_dir / "posttrain-result.json"
+                    result = outcome["result"]
+                    if result is None:
+                        failed = True
+                        row = {"objective": objective, "seed": seed, "phase": phase,
+                               "status": "failed", "returncode": outcome["returncode"],
+                               "attempts": outcome["attempts"], "device": outcome["device"],
+                               "run_dir": str(run_dir)}
+                        record_trial(campaign_id, candidate_arm, seed, 0, args.token_budget, None,
+                                     phase=phase, status="failed", error="trainer failed after retries",
+                                     db=args.db)
+                        _upsert_result(manifest["results"], row)
+                        _atomic_json(manifest_path, manifest)
+                        continue
+                    promotion = assess(result, audit=audit, minimum_delta=args.minimum_delta,
+                                       maximum_family_regression=args.maximum_family_regression,
+                                       confidence=args.confidence,
+                                       bootstrap_samples=args.bootstrap_samples,
+                                       seed=seed, token_budget=args.token_budget,
+                                       budget_slack=2 * args.batch_size * args.max_length)
+                    score0 = -float(result["initial_eval_loss"])
+                    score1 = -float(result["final_eval_loss"])
+                    record_trial(campaign_id, parent_arm, seed, 0, args.token_budget,
+                                 {"score": score0}, phase=phase, db=args.db)
+                    trial_id = record_trial(
+                        campaign_id, candidate_arm, seed, 0, args.token_budget,
+                        {"score": score1, "delta": score1 - score0,
+                         "eligible": promotion["eligible"],
+                         "train_tokens": result["train_tokens"]},
+                        profile=result.get("quantization"), phase=phase, db=args.db)
+                    record_artifact(campaign_id, str(result_path), "posttrain-result",
+                                    trial_id=trial_id, db=args.db)
+                    row = {"objective": objective, "seed": seed, "phase": phase,
+                           "status": "complete", "run_dir": str(run_dir),
+                           "initial_score": score0, "final_score": score1,
+                           "delta": score1 - score0, "promotion": promotion,
+                           "adapter": result["adapter"], "result": str(result_path),
+                           "attempts": outcome["attempts"], "resumed": outcome["resumed"],
+                           "device": outcome["device"]}
+                    _upsert_result(manifest["results"], row)
+                    _atomic_json(manifest_path, manifest)
+    except (KeyboardInterrupt, SystemExit):
+        manifest.update({"status": "interrupted", "interrupted_ts": time.time(),
+                         "elapsed_seconds": time.time() - started})
+        _atomic_json(manifest_path, manifest)
+        finish_campaign(campaign_id, "interrupted", db=args.db)
+        raise
+    except Exception as exc:
+        manifest.update({"status": "failed", "failed_ts": time.time(),
+                         "elapsed_seconds": time.time() - started, "error": repr(exc)})
+        _atomic_json(manifest_path, manifest)
+        finish_campaign(campaign_id, "failed", db=args.db)
+        raise
+
+    manifest["comparisons"] = {}
+    for objective in objectives:
+        parent_arm, candidate_arm = arm_ids[objective]
+        for phase in ("explore", "confirm"):
+            rows = [row for row in manifest["results"] if row["objective"] == objective
+                    and row["phase"] == phase and row["status"] == "complete"]
             if not rows:
                 continue
             stats = paired_stats([row["initial_score"] for row in rows],
@@ -264,9 +392,20 @@ def main() -> None:
     parser.add_argument("--bootstrap-samples", type=int, default=10_000)
     parser.add_argument("--base-quantization", choices=["none", "nf4"], default="none")
     parser.add_argument("--quant-block-size", type=int, default=64)
+    parser.add_argument("--quant-backend", choices=["auto", "portable", "torchao"], default="auto")
+    parser.add_argument("--packing", choices=["off", "audit", "reset"], default="reset")
     parser.add_argument("--activation-offload", action="store_true")
     parser.add_argument("--token-cache", default="")
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--devices", default="",
+                        help="comma-separated device slots, e.g. cuda:0,cuda:1")
+    parser.add_argument("--max-parallel", type=int, default=0,
+                        help="maximum concurrent arms; 0 uses one per listed device")
+    parser.add_argument("--arm-timeout", type=float, default=0.0,
+                        help="hard seconds per attempt; 0 disables")
+    parser.add_argument("--retries", type=int, default=1)
+    parser.add_argument("--retry-delay", type=float, default=0.0)
+    parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--name", default="")
     parser.add_argument("--db", default=None)
     print(json.dumps(run_campaign(parser.parse_args()), sort_keys=True))

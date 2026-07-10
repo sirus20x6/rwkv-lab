@@ -115,8 +115,10 @@ def materialize_parent(parent: str, adapter: str, output: Path, *, iteration: in
     raw_manifest = json.loads((Path(adapter) / "adapter.json").read_text())
     if raw_manifest.get("quantized_frozen_base"):
         from rwkv_lab.quantization import quantize_model_nf4
-        block_size = int((raw_manifest.get("metadata") or {}).get("quant_block_size", 64))
-        quantize_model_nf4(model, block_size=block_size, exclude=("head", "emb"))
+        metadata = raw_manifest.get("metadata") or {}
+        block_size = int(metadata.get("quant_block_size", 64))
+        backend = str(metadata.get("quant_backend") or "portable")
+        quantize_model_nf4(model, block_size=block_size, exclude=("head", "emb"), backend=backend)
     manifest = load_adapter(model, adapter, name="candidate", verify_base=True)
     replaced = unload_adapter(model, "candidate", merge=True)
     from rwkv_lab.quantization import dequantize_model_nf4
@@ -197,7 +199,9 @@ def run_loop(args) -> dict[str, Any]:
                             "--batch-size", str(args.batch_size), "--max-length", str(args.max_length),
                             "--minimum-delta", str(args.minimum_delta),
                             "--maximum-family-regression", str(args.maximum_family_regression),
-                            "--device", args.device, "--base-quantization", args.base_quantization]
+                            "--device", args.device, "--base-quantization", args.base_quantization,
+                            "--quant-backend", args.quant_backend, "--packing",
+                            (args.packing if len(proposal["examples"]) > 1 else "audit")]
         with (directory / "campaign.log").open("w", buffering=1) as log:
             completed = subprocess.run(campaign_command, cwd=Path.cwd(),
                                        env={**os.environ, "PYTHONPATH": "src"},
@@ -252,6 +256,8 @@ def main() -> None:
     parser.add_argument("--seeds", default="0,1,2")
     parser.add_argument("--confirm-seeds", default="100,101,102")
     parser.add_argument("--base-quantization", choices=["none", "nf4"], default="none")
+    parser.add_argument("--quant-backend", choices=["auto", "portable", "torchao"], default="auto")
+    parser.add_argument("--packing", choices=["off", "audit", "reset"], default="reset")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--materialize-device", default="cpu")
     parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
