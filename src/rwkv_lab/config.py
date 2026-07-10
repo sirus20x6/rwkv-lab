@@ -138,10 +138,12 @@ def run(cfg_path: str):
 _LOCAL_LM_SPEC = {"sources": [{"kind": "local",
                                "patterns": ["/thearray/git/moe-mla/**/*.py", "/thearray/git/moe-mla/**/*.md"],
                                "weight": 1.0}], "cap_mb": 8.0, "doc_boundary": True}
-# Open-PerfectBlend (Apache 2.0): ~1.4M chat/math/code/instruction conversations (~1.5GB text,
-# ~450M World tokens) flattened to role-tagged plain text — real headroom for LM lever A/Bs.
+# Open-PerfectBlend (Apache 2.0): ~788k chat/math/code/instruction conversations (~1.4GB text,
+# 388M World tokens) flattened to role-tagged plain text — real headroom for LM lever A/Bs.
+# doc_boundary False: median doc is 346 tok, so within-doc windows at seq 512 would drop most of
+# the corpus — flat PACKED windows (docs joined by the sep token) are the right shape for chat.
 _BLEND_LM_SPEC = {"sources": [{"kind": "hf", "name": "mlabonne/open-perfectblend", "weight": 1.0}],
-                  "cap_mb": 1600.0, "doc_boundary": True}
+                  "cap_mb": 1600.0, "doc_boundary": False}
 CORPORA = {"local": _LOCAL_LM_SPEC, "blend": _BLEND_LM_SPEC}
 
 
