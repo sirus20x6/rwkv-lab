@@ -171,6 +171,9 @@ class RWKV7Small(nn.Module):
                 x, v_first, seed = b(x, v_first, seed=seed, return_seed=True, ids=de_ids, e0=e0)
             else:                                # last layer consumes the seed but skips the unused s_T
                 x, v_first = b(x, v_first, seed=seed, ids=de_ids, e0=e0)
+        memory = getattr(self, "online_memory", None)
+        if memory is not None:
+            x = memory(x)
         h = self.ln_out(x)                       # post-norm final hidden (what aux heads read)
         if hidden_only:
             return h
@@ -193,7 +196,8 @@ def _adamw8bit(params, lr, wd, paged):
     return Opt(params, lr=lr, betas=(0.9, 0.95), weight_decay=wd)
 
 
-def build_optimizer(named_params, name, lr, wd, adam_lr=0.0, muon_opts=None):
+def build_optimizer(named_params, name, lr, wd, adam_lr=0.0, muon_opts=None,
+                    u_mup_config=None):
     """AdamW, 8-bit AdamW (bitsandbytes), or spectral_muon (Muon on 2D weight matrices, AdamW on
     embeds/norms/1D). Shared by the LM and synthetic harnesses so the card's optimizer dropdown
     drives both. adam_lr (0 = use lr) is the fallback LR for non-matrix params under Muon — Muon
@@ -203,6 +207,8 @@ def build_optimizer(named_params, name, lr, wd, adam_lr=0.0, muon_opts=None):
     fallback group is embeds/norms/1D — negligible state — so it stays fp32)."""
     named = [(n, p) for n, p in named_params if p.requires_grad]
     if name == "muon":
+        if u_mup_config is not None:
+            raise ValueError("u-muP optimizer scaling currently supports AdamW-family optimizers")
         from rwkv_lab.spectral_muon import SpectralMuon
         muon, adam = [], []
         for n, p in named:
@@ -212,11 +218,16 @@ def build_optimizer(named_params, name, lr, wd, adam_lr=0.0, muon_opts=None):
         groups = [{"params": muon, "use_muon": True, "lr": lr},
                   {"params": adam, "use_muon": False, "lr": adam_lr or lr}]
         return SpectralMuon(groups, weight_decay=wd, **(muon_opts or {}))
-    params = [p for _, p in named]
+    if u_mup_config is not None:
+        from rwkv_lab.u_mup import parameter_groups
+        params = parameter_groups(named, lr=lr, weight_decay=wd, config=u_mup_config)
+    else:
+        params = [p for _, p in named]
     if name in ("adamw8bit", "paged-adamw8bit"):
         return _adamw8bit(params, lr, wd, paged=(name == "paged-adamw8bit"))
     import torch as _t
-    fused = bool(params) and params[0].is_cuda      # fused AdamW = one fused CUDA kernel (CUDA-only)
+    first = params[0]["params"][0] if params and isinstance(params[0], dict) else (params[0] if params else None)
+    fused = first is not None and first.is_cuda     # fused AdamW = one fused CUDA kernel (CUDA-only)
     return _t.optim.AdamW(params, lr=lr, betas=(0.9, 0.95), weight_decay=wd, fused=fused)
 
 
@@ -345,6 +356,10 @@ def main():
     ap.add_argument("--weight-decay", type=float, default=0.1)
     ap.add_argument("--fp8", action="store_true",
                     help="run eligible Linear GEMMs in fp8 (torchao Float8Linear; Blackwell/Hopper)")
+    ap.add_argument("--nvfp4", action="store_true",
+                    help="simulated NVFP4 QAT (E2M1 block fake-quant; not a hardware speed path)")
+    ap.add_argument("--nvfp4-rht", action="store_true",
+                    help="apply randomized Hadamard transforms before eligible NVFP4 GEMMs")
     ap.add_argument("--compile", action="store_true",
                     help="torch.compile the training forward (fuses fp8 cast+GEMM; ~2x on Blackwell)")
     add_muon_args(ap)
@@ -384,6 +399,17 @@ def main():
                     help="hidden-mode: separate token-shift mix for the gate input (BlinkDL: 'very large')")
     ap.add_argument("--de-emb-res", type=int, default=0,
                     help="hidden-mode: fold the global token embedding into the per-token gate matrix")
+    ap.add_argument("--u-mup-base-width", type=int, default=0,
+                    help="enable u-muP scale transfer from this tuned base width (0 = off)")
+    ap.add_argument("--u-mup-base-depth", type=int, default=1)
+    ap.add_argument("--online-memory", type=int, default=0,
+                    help="attach in-forward associative memory (0 = off, 1 = on)")
+    ap.add_argument("--online-memory-mode", default="titans",
+                    choices=["titans", "miras", "atlas", "nested"])
+    ap.add_argument("--online-memory-dim", type=int, default=0)
+    ap.add_argument("--online-memory-lr", type=float, default=0.05)
+    ap.add_argument("--online-memory-retention", type=float, default=0.99)
+    ap.add_argument("--online-memory-window", type=int, default=4)
     ap.add_argument("--grad-accum", type=int, default=1,
                     help="micro-batches accumulated per optimizer step (effective batch = batch * N)")
     ap.add_argument("--ema", type=float, default=0.0,
@@ -406,6 +432,7 @@ def main():
     torch.manual_seed(args.seed); rng = np.random.default_rng(args.seed)
 
     lk = loop_kwargs(args)
+    u_mup_cfg = None
     if args.init_g1g:                                        # continued pretraining from pretrained g1g
         from rwkv_lab.native_g1g import load_g1g_native, add_loops
         model, ginfo = load_g1g_native(args.init_g1g, device=dev)
@@ -418,11 +445,29 @@ def main():
             print("warn: --seed-chain ignored for g1g init (from-scratch only)", flush=True)
         if args.deepembed:
             print("warn: --deepembed ignored for g1g init (from-scratch only)", flush=True)
+        if args.online_memory or args.u_mup_base_width:
+            print("warn: --online-memory/--u-mup ignored for g1g init (from-scratch only)", flush=True)
     else:
         model = RWKV7Small(65536, args.d_model, args.n_layers, args.head_size, lk,
                            seed_chain=bool(args.seed_chain), deepembed=bool(args.deepembed),
                            de_dim=args.de_dim, de_mode=args.de_mode, de_shift=bool(args.de_shift),
-                           de_emb_res=bool(args.de_emb_res)).to(dev, torch.bfloat16)
+                           de_emb_res=bool(args.de_emb_res))
+        if args.online_memory:
+            from rwkv_lab.online_memory import install_online_memory
+            mem = install_online_memory(model, d_memory=(args.online_memory_dim or None),
+                                        mode=args.online_memory_mode,
+                                        learning_rate=args.online_memory_lr,
+                                        retention=args.online_memory_retention,
+                                        atlas_window=args.online_memory_window)
+            print(f"online-memory: {mem.mode} d_memory={mem.d_memory}", flush=True)
+        if args.u_mup_base_width:
+            from rwkv_lab.u_mup import UMuPConfig, initialize_u_mup
+            u_mup_cfg = UMuPConfig(args.u_mup_base_width, args.d_model, args.n_layers,
+                                   args.u_mup_base_depth)
+            initialize_u_mup(model, u_mup_cfg)
+            print(f"u-muP: base d{args.u_mup_base_width}/L{args.u_mup_base_depth} -> "
+                  f"d{args.d_model}/L{args.n_layers}", flush=True)
+        model = model.to(dev, torch.bfloat16)
         if args.seed_chain:
             print("Future-Seed: cross-layer state chaining ON (s_0^L = s_T^{L-1})", flush=True)
         if args.deepembed:
@@ -440,6 +485,13 @@ def main():
     if args.fp8:
         n8 = apply_fp8(model)
         print(f"fp8: {n8} Linear layers -> Float8Linear (torchao)", flush=True)
+    if args.nvfp4:
+        if args.fp8:
+            ap.error("--fp8 and --nvfp4 are mutually exclusive operand formats")
+        from rwkv_lab.nvfp4 import convert_to_nvfp4_training
+        n4 = convert_to_nvfp4_training(model, rht=args.nvfp4_rht)
+        print(f"nvfp4-sim: {n4} Linear layers -> E2M1 block fake-quant"
+              + (" + RHT" if args.nvfp4_rht else ""), flush=True)
     lmb = None
     if args.engram:
         if args.init_g1g:
@@ -468,11 +520,17 @@ def main():
            + ("s" if args.de_shift and args.de_mode == "hidden" else "")
            + ("r" if args.de_emb_res and args.de_mode == "hidden" else "")
            if args.deepembed and not args.init_g1g else "") + \
+          (f"-umup{args.u_mup_base_width}" if u_mup_cfg is not None else "") + \
+          (f"-mem-{args.online_memory_mode}" if args.online_memory and not args.init_g1g else "") + \
+          ("-nvfp4" + ("rht" if args.nvfp4_rht else "") if args.nvfp4 else "") + \
           ("-mixctx" if args.ctx_buckets else "")
     print(f"model {tag}: {nparam/1e6:.1f}M params  loop_kw={lk}", flush=True)
     json.dump({"loop_count": args.loop_count, "n_layers": args.n_layers, "mode": tag,
                "seed_chain": seed_chain, "engram": lmb is not None,
                "deepembed": bool(args.deepembed) and not args.init_g1g,
+               "u_mup_base_width": args.u_mup_base_width if u_mup_cfg is not None else 0,
+               "online_memory": args.online_memory_mode if args.online_memory and not args.init_g1g else "",
+               "nvfp4": bool(args.nvfp4),
                "mixed_ctx": bool(args.ctx_buckets),
                "params_m": round(nparam / 1e6, 2)}, open(os.path.join(args.out, "loop_rw.json"), "w"))
 
@@ -628,7 +686,8 @@ def main():
                                 lm_head=model.head).to(dev, torch.bfloat16)
         print(f"aux heads enabled={heads.enabled} extra_tokens={heads.extra_tokens}", flush=True)
     named = list(model.named_parameters()) + (list(heads.named_parameters()) if heads else [])
-    opt = build_optimizer(named, args.optimizer, args.lr, args.weight_decay, muon_opts=muon_opts_from(args))
+    opt = build_optimizer(named, args.optimizer, args.lr, args.weight_decay,
+                          muon_opts=muon_opts_from(args), u_mup_config=u_mup_cfg)
     print(f"optimizer={args.optimizer} lr={args.lr} wd={args.weight_decay}", flush=True)
     step = 0; resume_recall_rng = None
     if args.resume and os.path.exists(args.resume):
@@ -744,7 +803,7 @@ def main():
         if args.lr_schedule == "cosine" and horizon:                    # then cosine decay to 0.1x
             lr *= 0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * min(step, horizon) / horizon))
         for g in opt.param_groups:
-            g["lr"] = lr
+            g["lr"] = lr * g.get("u_mup_lr_mult", 1.0)
         if lmb is not None:                  # ramp Engram injection in (gates learn on live recall)
             lmb.set_warmup(min(1.0, (step + 1) / max(args.engram_warmup, 1)))
         opt.zero_grad(set_to_none=True)
@@ -798,6 +857,15 @@ def main():
                          "deepembed": bool(args.deepembed) and not args.init_g1g,
                          "de_dim": args.de_dim, "de_mode": args.de_mode,
                          "de_shift": bool(args.de_shift), "de_emb_res": bool(args.de_emb_res),
+                         "u_mup_base_width": args.u_mup_base_width,
+                         "u_mup_base_depth": args.u_mup_base_depth,
+                         "online_memory": bool(args.online_memory) and not args.init_g1g,
+                         "online_memory_mode": args.online_memory_mode,
+                         "online_memory_dim": args.online_memory_dim,
+                         "online_memory_lr": args.online_memory_lr,
+                         "online_memory_retention": args.online_memory_retention,
+                         "online_memory_window": args.online_memory_window,
+                         "nvfp4": bool(args.nvfp4), "nvfp4_rht": bool(args.nvfp4_rht),
                          "engram": lmb is not None, "engram_sites": args.engram_sites,
                          "engram_drow": args.engram_drow, "engram_rows": args.engram_rows,
                          "engram_boundary_id": (lmb.boundary_id if lmb is not None else None),
