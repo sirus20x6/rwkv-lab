@@ -43,6 +43,7 @@ LEVERS = {
     "nextlat":       dict(nextlat_weight=0.1),               # next-latent prediction aux (light)
     "loop3_nextlat": dict(n_loops=3, nextlat_weight=0.1),    # recurrent depth + next-latent
     "seedchain":     dict(seed_chain=True),                  # Future-Seed: s_0^L = s_T^{L-1} (no loops)
+    "engram":        dict(engram=True),                      # Engram LMB: token-SAM recall + learned table
     # LM-only latent objectives (need a real token future -> run via the LM path, not synthetic tasks)
     "top":           dict(top_weight=0.1),                   # token-order prediction (lookahead window)
     "lmtp":          dict(lmtp_weight=0.1),                  # leap multi-token prediction
@@ -74,11 +75,17 @@ def _norm_loopkw(kw: dict) -> dict:
     return d
 
 
-def build(task: Task, d_model, n_layers, head_size, lever) -> RWKV7Small:
+def build(task: Task, d_model, n_layers, head_size, lever, device="cpu") -> RWKV7Small:
     loop, _ = _split_lever(LEVERS[lever])
-    seed_chain = bool(loop.pop("seed_chain", False))         # model kwarg, not a LoopedRWKV kwarg
-    return RWKV7Small(task.vocab, d_model, n_layers, head_size, _norm_loopkw(loop),
-                      seed_chain=seed_chain)
+    seed_chain = bool(loop.pop("seed_chain", False))         # model kwargs, not LoopedRWKV kwargs
+    engram = bool(loop.pop("engram", False))
+    m = RWKV7Small(task.vocab, d_model, n_layers, head_size, _norm_loopkw(loop),
+                   seed_chain=seed_chain).to(device, torch.bfloat16)
+    if engram:                                               # attach AFTER .to (fp32 growth params)
+        from rwkv_lab.rwkv_pretrain import enable_engram
+        enable_engram(m, task.vocab, d_model, head_size, n_layers,
+                      loop_count=loop.get("n_loops", 1) if loop else 1)
+    return m
 
 
 def _masked_ce(logits, y, m):
@@ -120,7 +127,7 @@ def preflight(task, d_model, n_layers, head_size, lever, device, batch, steps=20
     """Reject diverging / NaN / non-learning configs before a full run. Returns (ok, reason)."""
     torch.manual_seed(0); rng = np.random.default_rng(0)
     try:
-        model = build(task, d_model, n_layers, head_size, lever).to(device, torch.bfloat16)
+        model = build(task, d_model, n_layers, head_size, lever, device)
     except Exception as e:
         return False, f"build failed: {type(e).__name__}: {e}"
     opt = torch.optim.AdamW(model.parameters(), lr=3e-3, fused=("cuda" in str(device)))
@@ -160,7 +167,7 @@ def train_eval(task, d_model, n_layers, head_size, lever, seed, device, steps, b
     """Train one model on the task; return metrics incl. length-generalization accuracy. Budget is
     either a fixed step count (minutes=0) or wall-clock minutes (Karpathy-style fixed-time rounds)."""
     torch.manual_seed(seed); rng = np.random.default_rng(seed)
-    model = build(task, d_model, n_layers, head_size, lever).to(device, torch.bfloat16)
+    model = build(task, d_model, n_layers, head_size, lever, device)
     if fp8:
         apply_fp8(model)
     _, aux = _split_lever(LEVERS[lever])

@@ -104,6 +104,9 @@ class RWKV7Small(nn.Module):
                 x, v_first = b(x, v_first, seed=seed)
         h = self.ln_out(x)                       # post-norm final hidden (what aux heads read)
         logits = self.head(h)
+        eng = getattr(self, "engram", None)      # copy head: gated bonus on the recalled token
+        if eng is not None:                      # (exact no-op at init; see enable_engram)
+            logits = eng.logit_bias(logits)
         return (logits, h) if return_hidden else logits
 
 
@@ -132,7 +135,8 @@ def build_optimizer(named_params, name, lr, wd, adam_lr=0.0, muon_opts=None):
         from rwkv_lab.spectral_muon import SpectralMuon
         muon, adam = [], []
         for n, p in named:
-            is_mat = p.ndim == 2 and not any(k in n for k in ("emb", "head", "norm"))
+            # engram tables/projections are embedding-like: always AdamW (Muon LR-unit trap)
+            is_mat = p.ndim == 2 and not any(k in n for k in ("emb", "head", "norm", "engram"))
             (muon if is_mat else adam).append(p)
         groups = [{"params": muon, "use_muon": True, "lr": lr},
                   {"params": adam, "use_muon": False, "lr": adam_lr or lr}]
@@ -163,11 +167,43 @@ def apply_fp8(module):
     import torch.nn as _nn
 
     def keep(m, fqn):
-        return (isinstance(m, _nn.Linear) and "head" not in fqn.lower()
+        # engram excluded: its zero-init growth projections would fight fp8 dynamic scaling
+        return (isinstance(m, _nn.Linear) and "head" not in fqn.lower() and "engram" not in fqn.lower()
                 and m.in_features % 16 == 0 and m.out_features % 16 == 0)
 
     convert_to_float8_training(module, module_filter_fn=keep)
     return sum(isinstance(x, Float8Linear) for x in module.modules())
+
+
+def enable_engram(model, vocab, d_model, head_size, n_layers, loop_count=1,
+                  d_row=64, rows=4096, sites="auto", boundary_id=None):
+    """Attach an Engram Lexical Memory Bank (engram_lmb Path C: parameter-free token-SAM recall
+    over the raw ids reading a learned table; gated v-stream + inter-layer residual injection;
+    copy-head logit bias applied in RWKV7Small.forward) to a model ALREADY on its final
+    device/dtype. The bank is registered as `model.engram`, so parameters(), state_dict(),
+    grad clipping and checkpoints all include it — resume needs --engram, like --seed-chain.
+    Exact no-op at init (zero output projections). Returns (lmb, site_list)."""
+    from rwkv_lab.engram_lmb import (LexicalMemoryBank, attach_engram, float_growth_params,
+                                     install_input_ids_hook)
+    if sites == "auto":   # depth-scaled shallow+mid placement (the 9B {3,15}/32 profile)
+        site_list = sorted({min(max(1, n_layers // 8), n_layers - 1),
+                            min(max(1, n_layers // 2), n_layers - 1)})
+    else:
+        site_list = sorted({int(s) for s in str(sites).split(",")})
+        bad = [s for s in site_list if not 0 <= s < n_layers]
+        if bad:
+            raise ValueError(f"engram sites {bad} out of range for {n_layers} layers")
+    p0 = next(model.parameters())
+    lmb = LexicalMemoryBank(hidden_size=d_model, vocab_size=vocab, layer_sites=site_list,
+                            d_row=d_row, table_rows=min(rows, vocab),
+                            num_heads=d_model // head_size, max_loops=max(loop_count, 1),
+                            boundary_id=boundary_id)
+    lmb.to(device=p0.device, dtype=p0.dtype)
+    float_growth_params(lmb)              # 1-D gates/scales stay fp32 (bf16 ULP swallows growth)
+    attach_engram(model, lmb, resolve="blocks")
+    install_input_ids_hook(model, lmb)    # model pre-hook stashes ids for the recall
+    model.engram = lmb                    # registered submodule: optimizer/ckpt/clip see it
+    return lmb, site_list
 
 
 def enable_fast_matmul():
@@ -255,6 +291,15 @@ def main():
         ap.add_argument(f"--{f}", type=float, default=0.0)
     ap.add_argument("--seed-chain", type=int, default=0,   # int like the loop flags (lever-translatable)
                     help="Future-Seed: seed layer L's wkv scan with layer L-1's final state (from-scratch, no loops)")
+    # Engram Lexical Memory Bank (engram_lmb Path C) — from-scratch lever
+    ap.add_argument("--engram", type=int, default=0,
+                    help="attach an Engram LMB: token-SAM recall + learned table, gated injection + copy head")
+    ap.add_argument("--engram-sites", default="auto", help="comma layer indices, or auto (shallow+mid)")
+    ap.add_argument("--engram-drow", type=int, default=64, help="learned-table row width")
+    ap.add_argument("--engram-rows", type=int, default=4096, help="table rows (hashed; capped at vocab)")
+    ap.add_argument("--engram-warmup", type=int, default=1000, help="steps to ramp injection 0 -> 1")
+    ap.add_argument("--engram-boundary-id", type=int, default=-1,
+                    help="EOD token id segmenting recall (-1 = none)")
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -282,6 +327,19 @@ def main():
     if args.fp8:
         n8 = apply_fp8(model)
         print(f"fp8: {n8} Linear layers -> Float8Linear (torchao)", flush=True)
+    lmb = None
+    if args.engram:
+        if args.init_g1g:
+            print("warn: --engram ignored for g1g init (from-scratch only; dims come from g1g)", flush=True)
+        else:                                 # after fp8 so the engram Linears stay bf16
+            lmb, esites = enable_engram(model, 65536, args.d_model, args.head_size, args.n_layers,
+                                        loop_count=args.loop_count, d_row=args.engram_drow,
+                                        rows=args.engram_rows, sites=args.engram_sites,
+                                        boundary_id=(args.engram_boundary_id
+                                                     if args.engram_boundary_id >= 0 else None))
+            print(f"engram: LMB sites={esites} d_row={args.engram_drow} "
+                  f"rows={min(args.engram_rows, 65536)} "
+                  f"(+{sum(p.numel() for p in lmb.parameters())/1e6:.2f}M params)", flush=True)
     nparam = sum(p.numel() for p in model.parameters())
     seed_chain = bool(args.seed_chain) and not args.init_g1g  # g1g branch ignores the flag
     tag = f"scratch-L{args.n_layers}d{args.d_model}-loop{args.loop_count}" + \
@@ -289,10 +347,10 @@ def main():
            ("Q", args.loop_deq), ("F", args.loop_fp_halt), ("A", args.loop_adaptive_halt),
            ("R", args.loop_iter_readout)] if v) or "") + \
           (f"-{args.loop_gate}" if lk and args.loop_gate != "scalar" else "") + \
-          ("-seedchain" if seed_chain else "")
+          ("-seedchain" if seed_chain else "") + ("-engram" if lmb is not None else "")
     print(f"model {tag}: {nparam/1e6:.1f}M params  loop_kw={lk}", flush=True)
     json.dump({"loop_count": args.loop_count, "n_layers": args.n_layers, "mode": tag,
-               "seed_chain": seed_chain,
+               "seed_chain": seed_chain, "engram": lmb is not None,
                "params_m": round(nparam / 1e6, 2)}, open(os.path.join(args.out, "loop_rw.json"), "w"))
 
     toks = np.memmap(args.data, dtype=np.uint16, mode="r")
@@ -398,6 +456,8 @@ def main():
             lr *= 0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * min(step, horizon) / horizon))
         for g in opt.param_groups:
             g["lr"] = lr
+        if lmb is not None:                  # ramp Engram injection in (gates learn on live recall)
+            lmb.set_warmup(min(1.0, (step + 1) / max(args.engram_warmup, 1)))
         x = sample_train()
         out = fwd(x[:, :T], return_hidden=bool(heads))
         lg = (out[0] if heads else out).float()
