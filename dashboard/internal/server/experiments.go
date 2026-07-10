@@ -54,6 +54,7 @@ var knownLevers = []leverDef{
 
 const lmTask = "local-lm"
 const blendTask = "blend-lm"
+const blendMixTask = "blendmix-lm"
 
 type taskDef struct{ Name, Desc string }
 
@@ -62,10 +63,12 @@ var knownTasks = []taskDef{
 	{"copy", "state capacity (reproduce a sequence)"},
 	{"induction", "in-context pattern (A B … A → B)"},
 	{lmTask, "LM: local code+docs corpus, 1.9M tok (enables top/lmtp/bst/jtp → leaderboard)"},
-	{blendTask, "LM: Open-PerfectBlend chat/math/code, ~450M tok (real headroom; first launch builds the cache)"},
+	{blendTask, "LM: Open-PerfectBlend chat/math/code, 388M tok flat windows (first launch builds the cache)"},
+	{blendMixTask, "LM: Open-PerfectBlend packed into 512…32k context buckets — mixed-context training, batch scales 1/ctx (batch × context len = token budget/step)"},
 }
 
-func isLMTask(name string) bool { return name == lmTask || name == blendTask }
+// LM-corpus tasks all end in "-lm" (the Datastar expressions rely on the same suffix).
+func isLMTask(name string) bool { return strings.HasSuffix(name, "-lm") }
 
 func validTask(name string) bool {
 	for _, t := range knownTasks {
@@ -90,7 +93,7 @@ type campaignArm struct {
 	Acc, Std, TokPS, PeakMB, StepMS, EnergyJ float64
 	Delta, CILo, CIHi, PAdj                  float64
 	Significant, Confirmed, Pareto           bool
-	SeriesJSON                               string
+	SeriesJSONs                              []string
 	accs, toks, peaks, steps, energy         []float64
 }
 
@@ -232,9 +235,7 @@ func (s *Server) readCampaigns() ([]*campaignRow, error) {
 		a.steps = append(a.steps, m["step_ms_p50"])
 		a.energy = append(a.energy, m["energy_joules"])
 		a.Seeds++
-		if a.SeriesJSON == "" {
-			a.SeriesJSON = sj
-		}
+		a.SeriesJSONs = append(a.SeriesJSONs, sj)
 	}
 	tr.Close()
 	cr, err := db.Query(`SELECT p.campaign_id,a.name,p.delta,p.ci_low,p.ci_high,p.p_adjusted,
@@ -292,30 +293,56 @@ func (s *Server) readCampaigns() ([]*campaignRow, error) {
 	return order, nil
 }
 
-func lossSparkline(raw string) string {
+func lossSparkline(raws []string) string {
 	var pts []struct {
 		Step int     `json:"step"`
 		Loss float64 `json:"loss"`
 	}
-	if json.Unmarshal([]byte(raw), &pts) != nil || len(pts) < 2 {
+	var curves [][]float64
+	for _, raw := range raws {
+		if json.Unmarshal([]byte(raw), &pts) == nil && len(pts) >= 2 {
+			x := make([]float64, len(pts))
+			for i, p := range pts {
+				x[i] = p.Loss
+			}
+			curves = append(curves, x)
+		}
+	}
+	if len(curves) == 0 {
 		return "—"
 	}
-	lo, hi := pts[0].Loss, pts[0].Loss
-	for _, p := range pts {
-		if p.Loss < lo {
-			lo = p.Loss
+	n := len(curves[0])
+	means, stds := make([]float64, n), make([]float64, n)
+	for i := 0; i < n; i++ {
+		var xs []float64
+		for _, c := range curves {
+			if len(c) == n {
+				xs = append(xs, c[i])
+			}
 		}
-		if p.Loss > hi {
-			hi = p.Loss
-		}
+		means[i], stds[i] = meanStd(xs)
 	}
-	var xy []string
-	for i, p := range pts {
-		x := float64(i)*92/float64(len(pts)-1) + 2
-		y := 18 - (p.Loss-lo)/math.Max(hi-lo, 1e-9)*16
-		xy = append(xy, fmt.Sprintf("%.1f,%.1f", x, y))
+	lo, hi := means[0]-stds[0], means[0]+stds[0]
+	for i := range means {
+		lo = math.Min(lo, means[i]-stds[i])
+		hi = math.Max(hi, means[i]+stds[i])
 	}
-	return `<svg viewBox="0 0 96 20" width="96" height="20"><polyline fill="none" stroke="currentColor" stroke-width="1.5" points="` + strings.Join(xy, " ") + `"/></svg>`
+	coord := func(i int, v float64) string {
+		x := float64(i)*92/float64(n-1) + 2
+		y := 18 - (v-lo)/math.Max(hi-lo, 1e-9)*16
+		return fmt.Sprintf("%.1f,%.1f", x, y)
+	}
+	var xy, band []string
+	for i, v := range means {
+		xy = append(xy, coord(i, v))
+		band = append(band, coord(i, v+stds[i]))
+	}
+	for i := n - 1; i >= 0; i-- {
+		band = append(band, coord(i, means[i]-stds[i]))
+	}
+	return `<svg viewBox="0 0 96 20" width="96" height="20"><polygon fill="currentColor" opacity=".15" points="` +
+		strings.Join(band, " ") + `"/><polyline fill="none" stroke="currentColor" stroke-width="1.5" points="` +
+		strings.Join(xy, " ") + `"/></svg>`
 }
 
 func (s *Server) listConfigs() []string {
@@ -387,7 +414,7 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 	numField("head size", "headsize", "attention head width (1024/64 = 16 heads)", 64)
 	// live model-size estimate: params ≈ 2·V·d + L·12.1·d² (V=65536), matched to our arch within ~0.5%
 	b.WriteString(`<tr><td class="f-l">model size</td><td colspan="2" class="model-size" ` +
-		`data-text="$init==='g1g' ? 'g1g ≈ 1.5B (dims fixed)' : (($task==='` + lmTask + `' || $task==='` + blendTask + `') ` +
+		`data-text="$init==='g1g' ? 'g1g ≈ 1.5B (dims fixed)' : ($task.endsWith('-lm') ` +
 		`? ((2*65536*(+$dmodel)+(+$nlayers)*12.1*(+$dmodel)**2)/1e6).toFixed(0)+'M params  (' + ((+$nlayers)*12.1*(+$dmodel)**2/1e6).toFixed(0)+'M non-embed · vocab 65536)' ` +
 		`: ((+$nlayers)*12.1*(+$dmodel)**2/1e6).toFixed(0)+'M params  (synthetic · tiny vocab)')"></td></tr>`)
 	numField("batch", "batch", "sequences per step", 16)
@@ -461,7 +488,7 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 		}
 		gate := "" // LM-only levers: checkbox disabled (not selectable) unless the LM corpus is chosen
 		if lv.LMOnly {
-			gate = ` data-attr-disabled="$task !== '` + lmTask + `' && $task !== '` + blendTask + `'"`
+			gate = ` data-attr-disabled="!$task.endsWith('-lm')"`
 		}
 		fmt.Fprintf(&b, `<tr><td class="lev-c"><input type="checkbox" id="lev_%s" data-bind-lev_%s%s%s></td>`+
 			`<td class="lev-n"><label for="lev_%s"><code>%s</code></label></td>`+
@@ -510,7 +537,7 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 				decision += `<span class="sig">evidence ✓</span>`
 			}
 			fmt.Fprintf(&b, `<tr><td class="exp-cfgn">%s</td><td>%.3f±%.3f <span class="dim">n=%d</span></td><td>%s</td><td>%s</td>`+
-				`<td>%s</td><td>%sms</td><td>%sMB</td><td>%sJ</td><td>%s</td></tr>`, esc(a.Name), a.Acc, a.Std, a.Seeds, evidence, lossSparkline(a.SeriesJSON),
+				`<td>%s</td><td>%sms</td><td>%sMB</td><td>%sJ</td><td>%s</td></tr>`, esc(a.Name), a.Acc, a.Std, a.Seeds, evidence, lossSparkline(a.SeriesJSONs),
 				fnum(a.TokPS, 0), fnum(a.StepMS, 1), fnum(a.PeakMB, 0), fnum(a.EnergyJ, 0), decision)
 		}
 		b.WriteString(`</table></div>`)
@@ -635,6 +662,8 @@ func (s *Server) handleLaunchExperiment(w http.ResponseWriter, r *http.Request) 
 			"--batch", str("batch", "16"), "--seq-len", str("ctxlen", "1024")}, budget...)
 		if task == blendTask {
 			args = append(args, "--corpus", "blend")
+		} else if task == blendMixTask {
+			args = append(args, "--corpus", "blend-mix")
 		}
 		args = append(args, optArgs...)
 		if ga := str("gradaccum", "1"); ga != "" && ga != "1" { // effective batch = batch × N
