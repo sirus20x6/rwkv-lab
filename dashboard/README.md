@@ -35,6 +35,18 @@ RL/SFT updates, preflight passes, budget usage, and promotion eligibility. The s
 iterations. It launches model-side training only; proposal commands remain CLI-only and generated-code
 verification remains outside this repository in Adamaton's sandboxed verifier process.
 
+The **post-training data & behavior** panel validates the versioned SFT/preference/feedback/RLVR
+JSONL contract, shows rendered variants and their trainable spans, and compares two saved checkpoints
+under an identical prompt, seed, temperature, and generation budget. It can merge repository-confined
+sources into immutable content-addressed versions under `datasets/versions/`; duplicate content and
+cross-split leakage are refused. An explicit human choice may be
+appended to `datasets/trainboard_preferences.jsonl` as training data. The panel cannot write hidden
+evaluation data, launch arbitrary commands, promote a checkpoint, or publish a model. The underlying
+training methods are [LoRA](https://arxiv.org/abs/2106.09685),
+[DPO](https://arxiv.org/abs/2305.18290), [KTO](https://arxiv.org/abs/2402.01306),
+[ORPO](https://arxiv.org/abs/2403.07691), and [SimPO](https://arxiv.org/abs/2405.14734); paper links
+are also kept next to the Python implementations.
+
 ## Why v2
 
 - Real SQLite datastore (v1 re-parsed JSONL on every request).

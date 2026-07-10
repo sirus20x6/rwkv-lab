@@ -18,6 +18,7 @@ Every entry is an off-by-default lever with a paper and a CPU test. Full index i
 | **Latent prediction** | MTP · MuToR · TOP · NextLat · ConceptLM · FSP · L-MTP · Belief-State · JTP · LLM-JEPA · Coconut continuous-thought | [`lookahead_module`](src/rwkv_lab/lookahead_module.py) · [`llm_jepa`](src/rwkv_lab/llm_jepa.py) · [`coconut`](src/rwkv_lab/coconut.py) |
 | **Memory / retrieval** | Engram lexical bank · ROSA suffix-automaton (+ golden reference) · Fast-weight Product-Key Memory · L³ large-lookup · WriteSAE state autoencoder | [`engram_lmb`](src/rwkv_lab/engram_lmb.py) · [`rosa_sam`](src/rwkv_lab/rosa_sam.py) · [`fwpkm`](src/rwkv_lab/fwpkm.py) · [`l3_lookup`](src/rwkv_lab/l3_lookup.py) · [`write_sae`](src/rwkv_lab/write_sae.py) |
 | **Scale & online adaptation (P0)** | u-μP scale transfer · Titans/MIRAS/ATLAS/Nested Learning memory · GSPO/Dr.GRPO/DAPO RLVR + deterministic verifiers | [`u_mup`](src/rwkv_lab/u_mup.py) · [`online_memory`](src/rwkv_lab/online_memory.py) · [`rlvr`](src/rwkv_lab/rlvr.py) · [`rlvr_train`](src/rwkv_lab/rlvr_train.py) |
+| **Post-training platform** | typed SFT/preference/feedback/RLVR data · assistant-only masks · named RWKV LoRA · DPO/KTO/ORPO/SimPO · RM/PRM losses · FSDP2/DCP · safe exports | [`posttrain_data`](src/rwkv_lab/posttrain_data.py) · [`adapters`](src/rwkv_lab/adapters.py) · [`preference`](src/rwkv_lab/preference.py) · [`posttrain_train`](src/rwkv_lab/posttrain_train.py) · [`distributed`](src/rwkv_lab/distributed.py) · [`export_bundle`](src/rwkv_lab/export_bundle.py) |
 | **Training systems (P1)** | RegMix/MDE mixture surrogate · simulated NVFP4 QAT · Decoupled DiLoCo outer updates | [`data_mixture`](src/rwkv_lab/data_mixture.py) · [`nvfp4`](src/rwkv_lab/nvfp4.py) · [`diloco`](src/rwkv_lab/diloco.py) |
 | **Representation, serving & tracing (P2)** | BLT entropy byte patches · EAGLE-3 feature-fusion drafts and exact verification · recurrent attribution graphs | [`byte_patches`](src/rwkv_lab/byte_patches.py) · [`speculative`](src/rwkv_lab/speculative.py) · [`circuit_trace`](src/rwkv_lab/circuit_trace.py) |
 | **Optimizers & dynamics** | Muon (+ MuonClip) · 12 spectral-Muon levers (Muonᵖ, Aurora, MONA, DDC, RSAV, Hierarchical, Distance-Aware, ARO…) · PC-Layer preconditioning · layerwise-LR · grokking probes | [`spectral_muon`](src/rwkv_lab/spectral_muon.py) · [`muon_helpers`](src/rwkv_lab/muon_helpers.py) · [`pc_layer`](src/rwkv_lab/pc_layer.py) |
@@ -96,7 +97,12 @@ Experiments are driven and monitored through **trainboard**, a from-scratch Go +
 
 <p align="center">
   <img src="docs/images/experiments_card.png" width="100%" alt="Experiments card: config-driven A/B builder + registry results"><br>
-  <em>Experiments card — a config-driven lever lab. The current builder supports 27 comparison checkboxes (loops, Future-Seed, Engram, DeepEmbed, MTP, u-μP, four online-memory modes, and NVFP4), synthetic tasks + three LM corpora (incl. mixed-context buckets), and optimizer / fp8 / EMA / grad-accum controls; this screenshot predates the seven P0/P1 rows. Campaigns retain every seed and rung, paired confidence intervals, learning curves, measured throughput/memory/energy, Pareto status, lineage, and fresh-seed confirmation. Successive halving and factorial interactions can be launched from the browser.</em>
+  <em>Experiments card — the current config-driven builder exposes task/init/budget/model sizing, optimizer, precision, compilation, and batch controls before the lever matrix and accumulated registry evidence below. Campaigns retain every seed and rung, paired confidence intervals, learning curves, measured throughput/memory/energy, Pareto status, lineage, and fresh-seed confirmation.</em>
+</p>
+
+<p align="center">
+  <img src="docs/images/posttraining_panel.png" width="100%" alt="Post-training data and behavior panel"><br>
+  <em>Post-training data &amp; behavior — validate and version typed JSONL datasets, preview role-aware train masks, compare two checkpoints under identical sampling settings, and explicitly save a training-only preference. Paths stay repository-confined; held-out data and promotion remain outside this UI.</em>
 </p>
 
 ### Conclusive experiment campaigns
@@ -198,6 +204,95 @@ an informative update, point improvement, a paired [bootstrap](https://doi.org/1
 lower bound, no task-family regression beyond policy, and token/time budget compliance. Any failed gate
 names the untouched parent as the rollback target.
 
+### Structured adapter and preference post-training
+
+[`posttrain_data.py`](src/rwkv_lab/posttrain_data.py) defines one versioned JSONL contract for
+pretraining text, multi-turn SFT, preference pairs, binary feedback, and existing RLVR tasks. Chat
+rendering retains system/user/assistant/tool roles, emits an explicit token-level loss mask, and
+records both source and template hashes. Unlike the legacy corpus flattener, SFT trains only the
+assistant spans. The contract follows the typed data/template direction in
+[LLaMA-Factory](https://arxiv.org/abs/2403.13372), without importing its Transformer model registry.
+
+```json
+{"id":"s1","kind":"sft","split":"train","messages":[{"role":"user","content":"Compute 17*9."},{"role":"assistant","content":"153"}],"metadata":{}}
+{"id":"p1","kind":"preference","split":"train","messages":[{"role":"user","content":"Explain the result."}],"chosen":"17 groups of 9 equals 153.","rejected":"It is 162.","metadata":{}}
+{"id":"k1","kind":"feedback","split":"train","messages":[{"role":"user","content":"Be concise."}],"response":"Okay.","label":true,"metadata":{}}
+```
+
+Validate and preview the exact rendered variants before using them:
+
+```bash
+python -m rwkv_lab.posttrain_data datasets/posttrain.jsonl --json \
+  > datasets/posttrain.manifest.json
+```
+
+Multiple validated sources can be merged into an immutable content-addressed version; duplicate
+content and train/eval/test overlap are rejected:
+
+```bash
+python -m rwkv_lab.posttrain_data data/sft.jsonl data/preferences.jsonl \
+  --version-root datasets/versions --json
+```
+
+[`adapters.py`](src/rwkv_lab/adapters.py) implements frozen-base, zero-output-init
+[LoRA](https://arxiv.org/abs/2106.09685) for explicitly selected RWKV time/channel-mix linears. It
+supports multiple named adapters, activation/deactivation, deterministic merge/unmerge, base-model
+fingerprints, and safetensors artifacts. Quantized linear modules can be wrapped for
+[QLoRA](https://arxiv.org/abs/2305.14314), but quantization is deliberately caller-selected: the lab
+never swaps an RWKV kernel to an unsupported 4-bit backend implicitly.
+
+The executable trainer supports SFT and four preference paths plus an outcome reward head:
+
+```bash
+python -m rwkv_lab.posttrain_train \
+  --checkpoint runs/lm/ckpt.pt --data datasets/posttrain.jsonl \
+  --objective dpo --output runs/posttrain-dpo --rank 16 --alpha 32 --steps 500
+```
+
+The loss implementations map directly to [DPO](https://arxiv.org/abs/2305.18290),
+[KTO](https://arxiv.org/abs/2402.01306), [ORPO](https://arxiv.org/abs/2403.07691), and
+[SimPO](https://arxiv.org/abs/2405.14734). [`preference.py`](src/rwkv_lab/preference.py) also contains
+pairwise outcome-reward heads/losses following [InstructGPT](https://arxiv.org/abs/2203.02155) and
+step-position process-reward heads/masked losses following
+[Let's Verify Step by Step](https://arxiv.org/abs/2305.20050). Learned rewards do not bypass the existing
+hidden-split confidence and family-regression promotion gates.
+
+Trainboard's **post-training data & behavior** panel validates repository-confined JSONL, previews
+the rendered text and trainable spans, reports duplicates/split leakage, materializes validated
+content-addressed versions/merges, and performs base-versus-candidate generation with identical
+prompt, seed, temperature, and token budget. An explicit operator choice can append a training-only
+preference to `datasets/trainboard_preferences.jsonl`; it never modifies held-out evaluation data.
+
+### FSDP2 checkpoints and safe exports
+
+From-scratch pretraining has an opt-in [PyTorch FSDP2](https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html)
+path with bottom-up RWKV block sharding, collective gradient clipping, per-block activation
+checkpointing, optional CPU offload, and [Distributed Checkpoint](https://docs.pytorch.org/tutorials/recipes/distributed_checkpoint_recipe.html)
+model/optimizer/per-rank RNG state. Resuming at the same world size is exact; model and optimizer
+state can be resharded by DCP when the world size changes.
+
+```bash
+torchrun --standalone --nproc-per-node=4 -m rwkv_lab.rwkv_pretrain \
+  --distributed fsdp2 --activation-checkpointing \
+  --data models/corpus.bin --out runs/fsdp2 --steps 1000 --save runs/fsdp2.dcp
+
+torchrun --standalone --nproc-per-node=4 -m rwkv_lab.rwkv_pretrain \
+  --distributed fsdp2 --activation-checkpointing \
+  --data models/corpus.bin --out runs/fsdp2-resume --steps 2000 \
+  --resume runs/fsdp2.dcp --save runs/fsdp2-next.dcp
+```
+
+[`export_bundle.py`](src/rwkv_lab/export_bundle.py) converts a trusted self-describing single-process
+checkpoint to safetensors plus architecture, chat-template, tokenizer, adapter, dataset, lineage, and
+promotion receipts. Every file is hashed and re-opened for verification. Export does not publish or
+execute anything; external hub publication remains a separate manual operator action.
+
+```bash
+python -m rwkv_lab.export_bundle --checkpoint runs/lm/ckpt.pt \
+  --adapter runs/posttrain-dpo/adapter --dataset-manifest datasets/posttrain.manifest.json \
+  --promotion-receipt runs/posttrain-dpo/promotion.json --output exports/candidate
+```
+
 ### Bounded recursive improvement
 
 [`recursive_improve.py`](src/rwkv_lab/recursive_improve.py) implements the first closed, reversible
@@ -278,6 +373,9 @@ Everything is a **drop-in `linear_attn` / attention module swap** on a HuggingFa
 | [`config.py`](src/rwkv_lab/config.py) | Declarative YAML campaigns; the corpora registry (`local` / `blend` / `blend-mix`) behind the dashboard's LM tasks. |
 | [`registry.py`](src/rwkv_lab/registry.py) / [`fused_ce.py`](src/rwkv_lab/fused_ce.py) | Campaign/trial SQLite registry; fused LM-head cross-entropy (flash CE, pad-masking). |
 | [`rlvr.py`](src/rwkv_lab/rlvr.py) / [`rlvr_train.py`](src/rwkv_lab/rlvr_train.py) / [`rlvr_evaluation.py`](src/rwkv_lab/rlvr_evaluation.py) / [`rlvr_campaign.py`](src/rwkv_lab/rlvr_campaign.py) / [`recursive_improve.py`](src/rwkv_lab/recursive_improve.py) | GSPO/Dr.GRPO/DAPO objectives; cold-start/preflight training; recurrent batched rollouts; leakage, confidence, family-regression, and budget gates; equal-budget campaigns; and bounded Adamaton proposal lineage. |
+| [`posttrain_data.py`](src/rwkv_lab/posttrain_data.py) / [`posttrain_train.py`](src/rwkv_lab/posttrain_train.py) | Typed post-training JSONL, role-aware rendering, assistant-only token masks, validation/preview, and executable native-RWKV SFT/DPO/KTO/ORPO/SimPO/reward training. |
+| [`adapters.py`](src/rwkv_lab/adapters.py) / [`preference.py`](src/rwkv_lab/preference.py) | Named RWKV-aware LoRA lifecycle and reference-tested preference/outcome/process-reward losses. |
+| [`distributed.py`](src/rwkv_lab/distributed.py) / [`export_bundle.py`](src/rwkv_lab/export_bundle.py) | FSDP2 + DCP exact-resume state and verified safetensors export packages with lineage/promotion receipts. |
 
 ### Looped recurrence (recurrent depth)
 | File | Role |
@@ -471,6 +569,9 @@ Only papers with a concrete implementation or adopted design decision in this re
 
 **P1 — data and distributed/numerical training systems**
 
+- [LoRA](https://arxiv.org/abs/2106.09685) · [QLoRA](https://arxiv.org/abs/2305.14314) — frozen-base low-rank adaptation, named adapter artifacts, merge/unmerge, and guarded compatibility with caller-selected quantized linears → [`adapters.py`](src/rwkv_lab/adapters.py)
+- [DPO](https://arxiv.org/abs/2305.18290) · [KTO](https://arxiv.org/abs/2402.01306) · [ORPO](https://arxiv.org/abs/2403.07691) · [SimPO](https://arxiv.org/abs/2405.14734) · [InstructGPT outcome rewards](https://arxiv.org/abs/2203.02155) · [Let's Verify Step by Step process rewards](https://arxiv.org/abs/2305.20050) — paired, binary-feedback, monolithic, reference-free, outcome, and step-level reward training primitives → [`preference.py`](src/rwkv_lab/preference.py), [`posttrain_train.py`](src/rwkv_lab/posttrain_train.py)
+- [LLaMA-Factory](https://arxiv.org/abs/2403.13372) — the adopted design decision is a typed post-training dataset/template layer with explicit target masks; model-family abstraction and Transformer-specific kernels are not copied → [`posttrain_data.py`](src/rwkv_lab/posttrain_data.py)
 - [RegMix](https://arxiv.org/abs/2407.01492) · [Data Mixing Made Efficient](https://arxiv.org/abs/2502.15950) — ridge mixture surrogate, simplex search, and optional per-domain expert-loss interactions → [`data_mixture.py`](src/rwkv_lab/data_mixture.py)
 - [Pretraining Large Language Models with NVFP4](https://arxiv.org/abs/2509.25149) · [TetraJet-v2](https://arxiv.org/abs/2510.27527) — E2M1 block quantization, optional randomized Hadamard transform, and straight-through gradients over master weights → [`nvfp4.py`](src/rwkv_lab/nvfp4.py). This is a fake-quant correctness path; native Blackwell throughput still requires a fused backend.
 - [DiLoCo](https://arxiv.org/abs/2311.08105) · [Decoupled DiLoCo](https://arxiv.org/abs/2604.21428) — local displacement pseudo-gradients, token-weighted asynchronous merging, outer momentum, and staleness rejection → [`diloco.py`](src/rwkv_lab/diloco.py). Adamaton owns learner processes, leases, and recovery.
