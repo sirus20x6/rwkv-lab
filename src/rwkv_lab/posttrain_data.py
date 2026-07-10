@@ -360,6 +360,7 @@ class TokenizedVariant:
     truncated: int = 0
     step_positions: tuple[int, ...] = ()
     step_labels: tuple[bool, ...] = ()
+    sequence_starts: tuple[int, ...] = (0,)
 
 
 @dataclass(frozen=True)
@@ -421,7 +422,7 @@ def tokenize(rendered: RenderedExample, tokenizer: Tokenizer, *, max_length: int
         if rendered.kind == "prm" and not step_positions:
             raise ValueError(f"{rendered.id}/{name}: truncation removed every labeled step")
         variants[name] = TokenizedVariant(tuple(ids), tuple(labels), tuple(roles), removed,
-                                          tuple(step_positions), tuple(step_labels))
+                                          tuple(step_positions), tuple(step_labels), (0,))
     return TokenizedExample(rendered.id, rendered.kind, rendered.split, variants, rendered.metadata)
 
 
@@ -448,14 +449,15 @@ def load_jsonl(path: str | Path) -> tuple[list[PostTrainingExample], str]:
 class PackedVariant:
     """A loss-mask-preserving packed row plus explicit example boundaries.
 
-    RWKV has recurrent state rather than a block-diagonal attention mask. ``isolated`` therefore
-    stays false for multi-example rows until a reset-mask kernel proves parity; callers must not
-    silently claim Transformer-style cross-example isolation.
+    RWKV has recurrent state rather than a block-diagonal attention mask. ``starts`` drives the
+    explicit matrix/shift-state reset contract; the trainer still requires objective-level forward
+    and gradient parity before executing multi-example rows.
     """
     input_ids: tuple[int, ...]
     labels: tuple[int, ...]
     example_ids: tuple[str, ...]
     boundaries: tuple[int, ...]
+    starts: tuple[int, ...]
     isolated: bool
 
 
@@ -488,15 +490,17 @@ def pack_variants(items: Sequence[tuple[str, TokenizedVariant]], max_length: int
         ids: list[int] = []
         labels: list[int] = []
         boundaries: list[int] = []
+        starts: list[int] = []
         for index, (eid, variant) in enumerate(group):
             if index and separator_id is not None:
                 ids.append(separator_id)
                 labels.append(IGNORE_INDEX)
+            starts.append(len(ids))
             ids.extend(variant.input_ids)
             labels.extend(variant.labels)
             boundaries.append(len(ids))
         packed.append(PackedVariant(tuple(ids), tuple(labels), tuple(eid for eid, _ in group),
-                                    tuple(boundaries), len(group) == 1))
+                                    tuple(boundaries), tuple(starts), len(group) == 1))
     raw_tokens = sum(len(variant.input_ids) for _, variant in items)
     capacity = len(packed) * max_length
     audit = {"schema": "rwkv-lab.packing-audit.v1", "rows": len(packed),
@@ -504,8 +508,8 @@ def pack_variants(items: Sequence[tuple[str, TokenizedVariant]], max_length: int
              "utilization": raw_tokens / capacity if capacity else 0.0,
              "multi_example_rows": sum(len(row.example_ids) > 1 for row in packed),
              "loss_masks_preserved": True,
-             "recurrent_isolation": all(row.isolated for row in packed),
-             "qualification_required": any(not row.isolated for row in packed)}
+             "recurrent_isolation": "reset_mask",
+             "qualification_required": any(len(row.example_ids) > 1 for row in packed)}
     return packed, audit
 
 
@@ -550,7 +554,8 @@ def _tokenized_dict(row: TokenizedExample) -> dict[str, Any]:
             "variants": {name: {"input_ids": value.input_ids, "labels": value.labels,
                                   "roles": value.roles, "truncated": value.truncated,
                                   "step_positions": value.step_positions,
-                                  "step_labels": value.step_labels}
+                                  "step_labels": value.step_labels,
+                                  "sequence_starts": value.sequence_starts}
                          for name, value in row.variants.items()}}
 
 
@@ -558,7 +563,8 @@ def _tokenized_from_dict(value: dict[str, Any]) -> TokenizedExample:
     variants = {name: TokenizedVariant(tuple(row["input_ids"]), tuple(row["labels"]),
                                        tuple(row["roles"]), int(row.get("truncated", 0)),
                                        tuple(row.get("step_positions") or ()),
-                                       tuple(bool(x) for x in row.get("step_labels") or ()))
+                                       tuple(bool(x) for x in row.get("step_labels") or ()),
+                                       tuple(row.get("sequence_starts") or (0,)))
                 for name, row in value["variants"].items()}
     return TokenizedExample(value["id"], value["kind"], value["split"], variants,
                             dict(value.get("metadata") or {}))

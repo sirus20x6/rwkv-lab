@@ -243,22 +243,28 @@ opt-in native [QLoRA](https://arxiv.org/abs/2305.14314) correctness backend: pac
 per-block scales, a frozen recurrent base, adapter-gradient and zero-init checks, dense-merge parity,
 and measured stored bytes. Its NF4 table matches the primary
 [bitsandbytes implementation](https://github.com/bitsandbytes-foundation/bitsandbytes/blob/main/bitsandbytes/functional.py).
-It currently dequantizes for `F.linear`; this is real 4-bit storage and training semantics, not a
-claim of fused 4-bit throughput. Quantization is caller-selected with `--base-quantization nf4`.
+The portable path dequantizes for `F.linear`; the optional
+[TorchAO NF4Tensor](https://docs.pytorch.org/ao/stable/eager_tutorials/finetuning.html) path uses its
+accelerator/compile dispatch and double-quantized scales. `--quant-backend auto` adopts TorchAO only
+after representative-layer output, input-gradient, storage, and median-throughput qualification;
+otherwise it records the rejection and uses the portable backend. Explicit TorchAO requests fail
+closed when the same gate does not pass.
 
 The executable trainer supports SFT, four preference paths, outcome rewards, and full process-reward
 training. Tokenization may be streamed into a safe content-addressed cache; its receipt reports token
-length percentiles and truncation counts. Best-fit multipacking preserves target masks and records
-every boundary. Because RWKV recurrent state has no block-diagonal attention mask, multi-example EOS
-packing is audit-only until a reset-mask kernel passes a packed-vs-unpacked parity gate; the trainer
-does not silently enable a contaminated speed path.
+length percentiles and truncation counts. `--packing reset` best-fit packs examples, resets RWKV's
+matrix state, TimeMix/ChannelMix/DeepEmbed token shifts, and RoPE position at every boundary, and uses
+FLA cumulative sequence lengths on the accelerated kernel. Before the first optimizer step, the exact
+objective must pass unpacked-vs-packed loss and trainable-gradient parity. Unsupported stateful levers
+fail closed; `audit` remains available to inspect utilization without executing a pack.
 
 ```bash
 python -m rwkv_lab.posttrain_train \
   --checkpoint runs/lm/ckpt.pt --data datasets/posttrain.jsonl \
   --eval-data datasets/posttrain-heldout.jsonl --objective dpo \
   --output runs/posttrain-dpo --rank 16 --alpha 32 --steps 500 \
-  --token-cache caches/posttrain --base-quantization nf4
+  --token-cache caches/posttrain --packing reset \
+  --base-quantization nf4 --quant-backend auto
 ```
 
 The loss implementations map directly to [DPO](https://arxiv.org/abs/2305.18290),
@@ -278,14 +284,18 @@ python -m rwkv_lab.posttrain_campaign \
   --checkpoint runs/lm/ckpt.pt --data datasets/posttrain-train.jsonl \
   --eval-data datasets/posttrain-heldout.jsonl --output runs/posttrain-campaign \
   --objectives sft,dpo,kto,orpo,simpo --seeds 0,1,2 \
-  --confirm-seeds 100,101,102 --token-budget 100000
+  --confirm-seeds 100,101,102 --token-budget 100000 \
+  --devices cuda:0,cuda:1 --arm-timeout 14400 --retries 2
 ```
 
 Every arm receives the same scored-input-token budget and frozen-parent held-out examples. Per-example
 loss deltas are paired, bootstrapped, and checked for minimum gain, confidence lower bound, content/ID
 leakage, and task-family regression. Unused confirmation seeds are a distinct registry phase. Only a
 successful confirmation writes an eligible `rwkv-lab.posttrain-promotion.v1` receipt; each trained
-adapter remains preserved regardless of the decision.
+adapter remains preserved regardless of the decision. Every arm also writes an atomic command-hashed
+state/attempt history. Restarting the same campaign skips verified completed arms, retries failed or
+timed-out attempts with the original seed, refuses configuration drift, schedules at most one arm per
+listed device slot, and completes exploration before launching fresh-seed confirmation.
 
 [`adapter_recursive.py`](src/rwkv_lab/adapter_recursive.py) applies that receipt to recursive
 improvement. Following the proposer/solver lineage explored by
@@ -420,7 +430,7 @@ Everything is a **drop-in `linear_attn` / attention module swap** on a HuggingFa
 | [`config.py`](src/rwkv_lab/config.py) | Declarative YAML campaigns; the corpora registry (`local` / `blend` / `blend-mix`) behind the dashboard's LM tasks. |
 | [`registry.py`](src/rwkv_lab/registry.py) / [`fused_ce.py`](src/rwkv_lab/fused_ce.py) | Campaign/trial SQLite registry; fused LM-head cross-entropy (flash CE, pad-masking). |
 | [`rlvr.py`](src/rwkv_lab/rlvr.py) / [`rlvr_train.py`](src/rwkv_lab/rlvr_train.py) / [`rlvr_evaluation.py`](src/rwkv_lab/rlvr_evaluation.py) / [`rlvr_campaign.py`](src/rwkv_lab/rlvr_campaign.py) / [`recursive_improve.py`](src/rwkv_lab/recursive_improve.py) | GSPO/Dr.GRPO/DAPO objectives; cold-start/preflight training; recurrent batched rollouts; leakage, confidence, family-regression, and budget gates; equal-budget campaigns; and bounded Adamaton proposal lineage. |
-| [`posttrain_data.py`](src/rwkv_lab/posttrain_data.py) / [`posttrain_train.py`](src/rwkv_lab/posttrain_train.py) | Typed tool-aware post-training JSONL, streamed content-addressed token caches, loss-mask/packing/truncation audits, and executable native-RWKV SFT/DPO/KTO/ORPO/SimPO/ORM/PRM training. |
+| [`posttrain_data.py`](src/rwkv_lab/posttrain_data.py) / [`posttrain_train.py`](src/rwkv_lab/posttrain_train.py) | Typed tool-aware post-training JSONL, streamed content-addressed token caches, qualified reset-mask recurrent multipacking, and executable native-RWKV SFT/DPO/KTO/ORPO/SimPO/ORM/PRM training. |
 | [`adapters.py`](src/rwkv_lab/adapters.py) / [`quantization.py`](src/rwkv_lab/quantization.py) / [`preference.py`](src/rwkv_lab/preference.py) | Named RWKV-aware LoRA lifecycle, portable packed-NF4 QLoRA qualification, and reference-tested preference/outcome/process-reward losses. |
 | [`posttrain_campaign.py`](src/rwkv_lab/posttrain_campaign.py) / [`adapter_recursive.py`](src/rwkv_lab/adapter_recursive.py) / [`posttrain_kernels.py`](src/rwkv_lab/posttrain_kernels.py) | Equal-token paired/confirmation campaigns and receipts; adapter-first immutable recursive parents; parity-before-speed kernel and compile qualification. |
 | [`distributed.py`](src/rwkv_lab/distributed.py) / [`export_bundle.py`](src/rwkv_lab/export_bundle.py) | FSDP2 + DCP exact-resume state and verified safetensors export packages with lineage/promotion receipts. |

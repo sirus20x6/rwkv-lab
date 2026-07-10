@@ -75,7 +75,8 @@ class Block(nn.Module):
             else:                                # full width: zero-init table [V, d]
                 self.de_emb = nn.Embedding(de_vocab, d)
 
-    def forward(self, x, v_first, seed=None, return_seed=False, ids=None, e0=None):
+    def forward(self, x, v_first, seed=None, return_seed=False, ids=None, e0=None,
+                reset_mask=None):
         if self.i == 0:
             x = self.ln0(x)
         if seed is not None or return_seed:                  # Future-Seed: seed this layer's wkv scan
@@ -90,13 +91,17 @@ class Block(nn.Module):
                 a, v_first = self.att(self.ln1(x), v_first=v_first, return_v_first=True,
                                       initial_state=seed)
         else:
-            a, v_first = self.att(self.ln1(x), v_first=v_first, return_v_first=True)
+            a, v_first = self.att(self.ln1(x), v_first=v_first, return_v_first=True,
+                                  reset_mask=reset_mask)
         x = x + a
         xin = self.ln2(x)
         if self.de_mode == "hidden" and self.de_emb is not None and ids is not None:
             h = xin
             if self.de_xs is not None:                       # separate DE token-shift
-                hp = torch.zeros_like(h); hp[:, 1:] = h[:, :-1]
+                hp = torch.zeros_like(h)
+                hp[:, 1:] = h[:, :-1]
+                if reset_mask is not None:
+                    hp = hp.masked_fill(reset_mask[..., None], 0.0)
                 h = h + (hp - h) * self.de_xs.to(h.dtype)
             E = self.de_emb(ids)
             if self.de_er is not None and e0 is not None:    # emb-residual fold
@@ -105,9 +110,9 @@ class Block(nn.Module):
             ss = torch.einsum("btr,btrs->bts", self.de_s1(h),
                               E.view(B, T, self.de_r, self.de_r).to(h.dtype))
             gate = 1.0 + self.de_s0.to(h.dtype) + self.de_s2(ss)
-            f = _unwrap(self.ffn(xin, hidden_gate=gate))
+            f = _unwrap(self.ffn(xin, hidden_gate=gate, reset_mask=reset_mask))
         else:
-            f = _unwrap(self.ffn(xin))
+            f = _unwrap(self.ffn(xin, reset_mask=reset_mask))
             if self.de_emb is not None and ids is not None:  # v1: gate the FFN output
                 g = self.de_emb(ids)
                 if self.de_proj is not None:
@@ -213,7 +218,13 @@ class RWKV7Small(nn.Module):
         elif isinstance(m, nn.Embedding):
             nn.init.normal_(m.weight, std=0.02)
 
-    def forward(self, ids, return_hidden=False, hidden_only=False):
+    def forward(self, ids, return_hidden=False, hidden_only=False, reset_mask=None):
+        if reset_mask is not None:
+            reason = self.packing_incompatibility()
+            if reason:
+                raise ValueError(f"checkpoint is not reset-mask packing compatible: {reason}")
+            if reset_mask.shape != ids.shape or not torch.all(reset_mask[:, 0]):
+                raise ValueError("reset_mask must match ids and reset the first token")
         x = self.emb(ids)
         de_ids = ids if self.deepembed else None  # DeepEmbed blocks gate their FFN by token id
         e0 = x if (self.deepembed and self.de_emb_res) else None  # raw emb for the residual fold
@@ -223,7 +234,8 @@ class RWKV7Small(nn.Module):
             if self.seed_chain and j < len(self.blocks) - 1:
                 x, v_first, seed = b(x, v_first, seed=seed, return_seed=True, ids=de_ids, e0=e0)
             else:                                # last layer consumes the seed but skips the unused s_T
-                x, v_first = b(x, v_first, seed=seed, ids=de_ids, e0=e0)
+                x, v_first = b(x, v_first, seed=seed, ids=de_ids, e0=e0,
+                               reset_mask=reset_mask)
         memory = getattr(self, "online_memory", None)
         if memory is not None:
             x = memory(x)
@@ -235,6 +247,18 @@ class RWKV7Small(nn.Module):
         if eng is not None:                      # (exact no-op at init; see enable_engram)
             logits = eng.logit_bias(logits)
         return (logits, h) if return_hidden else logits
+
+    def packing_incompatibility(self) -> str | None:
+        """Return why exact reset-mask sequence packing is unavailable."""
+        if self.seed_chain:
+            return "Future-Seed depends on a whole-layer final state"
+        if any(isinstance(block.att, LoopedRWKV) for block in self.blocks):
+            return "looped attention has no per-segment state reset contract"
+        if getattr(self, "online_memory", None) is not None:
+            return "online memory has no per-segment reset contract"
+        if getattr(self, "engram", None) is not None:
+            return "Engram recall indexes complete token history"
+        return None
 
     def recurrent_incompatibility(self) -> str | None:
         """Return why exact state-carrying generation is unavailable, if any."""

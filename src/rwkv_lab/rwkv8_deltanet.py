@@ -89,6 +89,7 @@ class RWKV8ChannelMixDeltaNet(nn.Module):
         position_ids: Optional[torch.Tensor] = None,
         hidden_gate: Optional[torch.Tensor] = None,
         shift_state: Optional[torch.Tensor] = None,
+        reset_mask: Optional[torch.Tensor] = None,
         return_state: bool = False,
         **kwargs,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
@@ -106,6 +107,10 @@ class RWKV8ChannelMixDeltaNet(nn.Module):
                 hidden_states.shape[0], 1, hidden_states.shape[-1])
         if hidden_states.shape[1] > 1:
             prev[:, 1:] = hidden_states[:, :-1]
+        if reset_mask is not None:
+            if reset_mask.shape != hidden_states.shape[:2] or not torch.all(reset_mask[:, 0]):
+                raise ValueError("reset_mask must be [batch,time] and reset the first token")
+            prev = prev.masked_fill(reset_mask[..., None], 0.0)
 
         xk = self.x_k.to(dtype=hidden_states.dtype).view(1, 1, -1)
         mixed = hidden_states + (prev - hidden_states) * xk
@@ -142,6 +147,7 @@ def _rwkv7_python_ref(
     r: torch.Tensor, gk: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     a: torch.Tensor, b: torch.Tensor,
     initial_state: Optional[torch.Tensor] = None,
+    reset_mask: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pure-Python recurrent reference for the RWKV-7 wkv7 kernel (DPLR form).
 
@@ -171,6 +177,9 @@ def _rwkv7_python_ref(
         state = initial_state.to(device=r.device, dtype=torch.float32).clone()
     out = torch.empty_like(v, dtype=torch.float32)
     for t in range(T):
+        if reset_mask is not None:
+            reset = reset_mask[:, t].to(device=state.device, dtype=torch.bool)
+            state = state.masked_fill(reset[:, None, None, None], 0.0)
         rt = r[:, t].float()                                    # (B, H, Kd)
         gkt = gk[:, t].float()                                  # (B, H, Kd)
         kt = k[:, t].float()                                    # (B, H, Kd)
@@ -454,6 +463,7 @@ class RWKV8TimeMixDeltaNet(nn.Module):
         a: torch.Tensor, b: torch.Tensor,
         initial_state: Optional[torch.Tensor] = None,
         output_final_state: bool = False,
+        reset_mask: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Dispatch to fla's chunk_rwkv7 (Triton) or the slow Python ref.
 
@@ -467,11 +477,22 @@ class RWKV8TimeMixDeltaNet(nn.Module):
         recurrence (zeros when None). The fla path may return ``None`` for the
         state when ``output_final_state`` is False.
         """
+        cu_seqlens = None
+        if reset_mask is not None:
+            if reset_mask.shape != r.shape[:2] or not torch.all(reset_mask[:, 0]):
+                raise ValueError("reset_mask must be [batch,time] and reset the first token")
+            if r.shape[0] != 1:
+                raise ValueError("FLA packed reset execution requires a flattened batch of one")
+            starts = torch.nonzero(reset_mask[0], as_tuple=False).flatten().to(torch.int32)
+            cu_seqlens = torch.cat((starts, starts.new_tensor([r.shape[1]])))
+            if output_final_state:
+                raise ValueError("packed reset execution does not expose one ambiguous final state")
         if _HAS_FLA and os.environ.get("RWKV8_FORCE_PYREF") != "1":
             out, final = _fla_chunk_rwkv7(
                 r, gk, k, v, a, b, scale=1.0,
                 initial_state=initial_state,
                 output_final_state=output_final_state,
+                cu_seqlens=cu_seqlens,
             )
             return out, final
         global _PYREF_WARNED
@@ -486,7 +507,7 @@ class RWKV8TimeMixDeltaNet(nn.Module):
                       f"T-step Python wkv7 reference (~100x slower). Fix the fla install; convert_train "
                       f"refuses to launch in this state.", flush=True)
         out, final = _rwkv7_python_ref(
-            r, gk, k, v, a, b, initial_state=initial_state
+            r, gk, k, v, a, b, initial_state=initial_state, reset_mask=reset_mask
         )
         return out, (final if output_final_state else None)
 
@@ -525,6 +546,7 @@ class RWKV8TimeMixDeltaNet(nn.Module):
         return_state: bool = False,
         v_first: Optional[torch.Tensor] = None,
         return_v_first: bool = False,
+        reset_mask: Optional[torch.Tensor] = None,
         **kwargs,
     ):
         if cache_params is not None:
@@ -544,7 +566,15 @@ class RWKV8TimeMixDeltaNet(nn.Module):
         # "previous token" must come from the prior chunk (shift_state), or the
         # rollout would diverge from a full-sequence forward. shift_state is the
         # last hidden of the previous chunk, shape [B, 1, C] (or [B, C]).
-        if shift_state is None:
+        if reset_mask is not None:
+            if reset_mask.shape != (B, T) or not torch.all(reset_mask[:, 0]):
+                raise ValueError("reset_mask must be [batch,time] and reset the first token")
+            shifted = torch.zeros_like(x)
+            if T > 1:
+                shifted[:, 1:] = x[:, :-1]
+            shifted = shifted.masked_fill(reset_mask[..., None], 0.0)
+            xx = shifted - x
+        elif shift_state is None:
             xx = self.time_shift(x) - x
         else:
             prev = shift_state.to(dtype=x.dtype).reshape(B, 1, C)
@@ -589,6 +619,12 @@ class RWKV8TimeMixDeltaNet(nn.Module):
         # Comba mix above is rotation-equivariant (rotate(r - d*k) == rotate(r) - d*rotate(k)),
         # so applying rotary here is equivalent to rotating before the correction.
         if self.use_rope:
+            if reset_mask is not None and position_ids is None:
+                positions = torch.zeros_like(reset_mask, dtype=torch.long)
+                for token in range(1, T):
+                    positions[:, token] = torch.where(reset_mask[:, token], 0,
+                                                      positions[:, token - 1] + 1)
+                position_ids = positions
             cos, sin = self._rope_cos_sin(B, T, x.device, x.dtype, position_ids)
             r = self._apply_partial_rope(r.view(B, T, H, N), cos, sin, self.rope_dim).reshape(B, T, C)
             k = self._apply_partial_rope(k.view(B, T, H, N), cos, sin, self.rope_dim).reshape(B, T, C)
@@ -619,6 +655,7 @@ class RWKV8TimeMixDeltaNet(nn.Module):
             r_h, gk_h, k_h, v_h, a_h, b_h,
             initial_state=initial_state,
             output_final_state=return_state,
+            reset_mask=reset_mask,
         )                                                      # (B, T, H, N)
 
         # GroupNorm over channels (groups = H).

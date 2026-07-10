@@ -20,7 +20,8 @@ from rwkv_lab.preference import (dpo_loss, kto_loss, orpo_loss, process_reward_l
                                  binary_calibration, OutcomeRewardHead, ProcessRewardHead, reward_model_loss,
                                  sequence_logps, simpo_loss)
 from rwkv_lab.quantization import (NF4Linear, dequantize_model_nf4, qualify_linear_qlora,
-                                   quantize_model_nf4)
+                                   qualify_accelerated_nf4, quantize_model_nf4,
+                                   TorchAONF4Linear)
 
 
 class CharTokenizer:
@@ -218,6 +219,34 @@ def test_native_nf4_storage_gradient_and_dense_merge_parity():
     dequantize_model_nf4(model)
     assert isinstance(model.proj, nn.Linear)
     assert torch.allclose(model(x), expected, atol=1e-5)
+
+
+def test_torchao_nf4_matches_portable_output_and_input_gradients():
+    pytest.importorskip("torchao")
+    torch.manual_seed(29)
+    linear = nn.Linear(64, 32, bias=False).to(torch.bfloat16)
+    sample = torch.randn(4, 64, dtype=torch.bfloat16)
+    accelerated = TorchAONF4Linear(linear)
+    assert accelerated.storage_bytes() < linear.weight.numel() * linear.weight.element_size()
+    report = qualify_accelerated_nf4(linear, sample, repeats=2, minimum_speedup=0.0)
+    assert report["available"] and report["parity_passed"]
+    assert report["output_max_abs"] <= report["tolerance"]
+    assert report["input_gradient_max_abs"] <= report["tolerance"]
+    class Wide(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.proj = nn.Linear(64, 32, bias=False)
+
+        def forward(self, value):
+            return self.proj(value)
+
+    model = Wide().to(torch.bfloat16)
+    quantize_model_nf4(model, exclude=(), backend="torchao")
+    inject_lora(model, AdapterConfig("ao", rank=2, alpha=2, targets=("proj",)))
+    value = model(torch.randn(3, 64, dtype=torch.bfloat16)).float().sum()
+    value.backward()
+    assert model.proj.adapters["ao"].B.grad is not None
+    assert len(base_fingerprint(model)) == 64
 
 
 def test_sequence_logps_respects_causal_mask():
