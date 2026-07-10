@@ -44,7 +44,8 @@ _LM_FLAG = {"n_loops": "--loop-count", "hyper_lanes": "--loop-hyper", "gate_mode
             "adaptive_halt": "--loop-adaptive-halt", "nextlat_weight": "--nextlat-weight",
             "top_weight": "--top-weight", "lmtp_weight": "--lmtp-weight", "bst_weight": "--bst-weight",
             "jtp_weight": "--jtp-weight", "seed_chain": "--seed-chain", "engram": "--engram",
-            "deepembed": "--deepembed", "de_dim": "--de-dim"}
+            "deepembed": "--deepembed", "de_dim": "--de-dim", "de_mode": "--de-mode",
+            "de_shift": "--de-shift", "de_emb_res": "--de-emb-res"}
 
 
 def _run_synthetic(task_spec, cfg):

@@ -31,7 +31,7 @@ def _unwrap(o):
 
 class Block(nn.Module):
     def __init__(self, d, n_heads, head_size, i, n_layers, loop_kw, att_kw=None, ffn_hidden=None,
-                 de_vocab=0, de_dim=0):
+                 de_vocab=0, de_dim=0, de_mode="out", de_shift=False, de_emb_res=False):
         super().__init__()
         self.i = i
         if i == 0:
@@ -45,19 +45,37 @@ class Block(nn.Module):
                                     **(att_kw or {}))               # e.g. g1g LoRA dims
         self.att = LoopedRWKV(core, hidden_size=d, **loop_kw) if loop_kw else core
         self.ffn = RWKV8ChannelMixDeltaNet(d, ffn_hidden, layer_idx=i)
-        # DeepEmbed (BlinkDL, RWKV-8): per-layer per-token multiplicative gate on the FFN output,
-        # ffn_out * (1 + de(ids)). Sparse capacity — a huge per-layer token table whose lookup is
-        # ~free at inference. Parametrized additively around 1 so a zero table = exact identity
-        # (and zero-init trains in bf16, where updates to a literal 1.0 would round away).
-        self.de_emb = self.de_proj = None
-        if de_vocab:
+        # DeepEmbed (BlinkDL, RWKV-8): per-layer per-token multiplicative FFN gate — sparse capacity
+        # whose lookup is ~free at inference. Two forms, both parametrized additively around 1 so a
+        # zero output end = exact identity (and zero-init trains in bf16, where updates to a literal
+        # 1.0 would round away):
+        #   out    (v1): ffn_out * (1 + de(ids)) — purely token-dependent, full-width or low-rank
+        #   hidden (BlinkDL rwkv_v7a exact): gate the FFN HIDDEN k, input-dependent through s1:
+        #          ss = s1(xs) @ E_tok[r,r];  k *= 1 + s0 + s2(ss)
+        #          de_shift gives the gate input its own token-shift mix (BlinkDL: "very large");
+        #          de_emb_res folds the global token embedding into E_tok via a learned projection.
+        self.de_mode = de_mode
+        self.de_emb = self.de_proj = self.de_s1 = self.de_s2 = self.de_er = None
+        self.de_s0 = self.de_xs = None
+        if de_vocab and de_mode == "hidden":
+            self.de_r = r = de_dim if de_dim > 0 else 32
+            fh = self.ffn.ffn_hidden_size
+            self.de_emb = nn.Embedding(de_vocab, r * r)     # per-token r x r matrix
+            self.de_s1 = nn.Linear(d, r, bias=False)
+            self.de_s2 = nn.Linear(r, fh, bias=False)       # zero-init output end (identity gate)
+            self.de_s0 = nn.Parameter(torch.zeros(fh))
+            if de_shift:
+                self.de_xs = nn.Parameter(torch.zeros(d))   # xs = x + (x_prev - x) * x_s
+            if de_emb_res:
+                self.de_er = nn.Linear(d, r * r, bias=False)  # zero-init residual fold of emb(ids)
+        elif de_vocab:
             if de_dim and de_dim < d:            # low-rank: table [V, r] + zero-init proj r -> d
                 self.de_emb = nn.Embedding(de_vocab, de_dim)
                 self.de_proj = nn.Linear(de_dim, d, bias=False)
             else:                                # full width: zero-init table [V, d]
                 self.de_emb = nn.Embedding(de_vocab, d)
 
-    def forward(self, x, v_first, seed=None, return_seed=False, ids=None):
+    def forward(self, x, v_first, seed=None, return_seed=False, ids=None, e0=None):
         if self.i == 0:
             x = self.ln0(x)
         if seed is not None or return_seed:                  # Future-Seed: seed this layer's wkv scan
@@ -74,12 +92,27 @@ class Block(nn.Module):
         else:
             a, v_first = self.att(self.ln1(x), v_first=v_first, return_v_first=True)
         x = x + a
-        f = _unwrap(self.ffn(self.ln2(x)))
-        if self.de_emb is not None and ids is not None:      # DeepEmbed FFN gate
-            g = self.de_emb(ids)
-            if self.de_proj is not None:
-                g = self.de_proj(g)
-            f = f * (1.0 + g)
+        xin = self.ln2(x)
+        if self.de_mode == "hidden" and self.de_emb is not None and ids is not None:
+            h = xin
+            if self.de_xs is not None:                       # separate DE token-shift
+                hp = torch.zeros_like(h); hp[:, 1:] = h[:, :-1]
+                h = h + (hp - h) * self.de_xs.to(h.dtype)
+            E = self.de_emb(ids)
+            if self.de_er is not None and e0 is not None:    # emb-residual fold
+                E = E + self.de_er(e0)
+            B, T = ids.shape
+            ss = torch.einsum("btr,btrs->bts", self.de_s1(h),
+                              E.view(B, T, self.de_r, self.de_r).to(h.dtype))
+            gate = 1.0 + self.de_s0.to(h.dtype) + self.de_s2(ss)
+            f = _unwrap(self.ffn(xin, hidden_gate=gate))
+        else:
+            f = _unwrap(self.ffn(xin))
+            if self.de_emb is not None and ids is not None:  # v1: gate the FFN output
+                g = self.de_emb(ids)
+                if self.de_proj is not None:
+                    g = self.de_proj(g)
+                f = f * (1.0 + g)
         x = x + f
         if return_seed:
             return x, v_first, seed_out
@@ -88,24 +121,35 @@ class Block(nn.Module):
 
 class RWKV7Small(nn.Module):
     def __init__(self, vocab, d, n_layers, head_size, loop_kw, att_kw=None, ffn_hidden=None,
-                 seed_chain=False, deepembed=False, de_dim=0):
+                 seed_chain=False, deepembed=False, de_dim=0, de_mode="out", de_shift=False,
+                 de_emb_res=False):
         super().__init__()
         assert d % head_size == 0
         if seed_chain and loop_kw:
             raise ValueError("seed_chain (Future-Seed cross-layer state) is incompatible with loop "
                              "levers — run it without loops for a clean A/B")
+        if de_mode not in ("out", "hidden"):
+            raise ValueError(f"de_mode must be 'out' or 'hidden', got {de_mode!r}")
         self.seed_chain = seed_chain          # Future-Seed: layer L starts from layer L-1's final wkv state
         self.deepembed = deepembed            # DeepEmbed: per-layer per-token FFN gate (needs ids)
+        self.de_emb_res = de_emb_res          # hidden-mode: blocks also need the raw token embedding
         self.emb = nn.Embedding(vocab, d)
         self.blocks = nn.ModuleList([Block(d, d // head_size, head_size, i, n_layers, loop_kw,
                                            att_kw, ffn_hidden,
-                                           de_vocab=vocab if deepembed else 0, de_dim=de_dim)
+                                           de_vocab=vocab if deepembed else 0, de_dim=de_dim,
+                                           de_mode=de_mode, de_shift=de_shift, de_emb_res=de_emb_res)
                                      for i in range(n_layers)])
         self.ln_out = nn.LayerNorm(d)
         self.head = nn.Linear(d, vocab, bias=False)
         self.apply(self._init)
-        for b in self.blocks:                 # DeepEmbed identity-at-init: gate = 1 + 0 (the global
-            if b.de_emb is not None:          # _init above re-randomized the tables — zero the output end)
+        for b in self.blocks:                 # DeepEmbed identity-at-init: the global _init above
+            if b.de_emb is None:              # re-randomized the tables — re-zero each gate's OUTPUT
+                continue                      # end (bare Parameters like de_s0/de_xs are untouched)
+            if b.de_mode == "hidden":
+                b.de_s2.weight.data.zero_()
+                if b.de_er is not None:
+                    b.de_er.weight.data.zero_()
+            else:
                 (b.de_proj if b.de_proj is not None else b.de_emb).weight.data.zero_()
 
     def _init(self, m):
@@ -119,13 +163,14 @@ class RWKV7Small(nn.Module):
     def forward(self, ids, return_hidden=False):
         x = self.emb(ids)
         de_ids = ids if self.deepembed else None  # DeepEmbed blocks gate their FFN by token id
+        e0 = x if (self.deepembed and self.de_emb_res) else None  # raw emb for the residual fold
         v_first = None                           # layer 0 sets it; later layers lerp toward it
         seed = None                              # Future-Seed: s_T of layer L-1 -> s_0 of layer L (None => 0)
         for j, b in enumerate(self.blocks):
             if self.seed_chain and j < len(self.blocks) - 1:
-                x, v_first, seed = b(x, v_first, seed=seed, return_seed=True, ids=de_ids)
+                x, v_first, seed = b(x, v_first, seed=seed, return_seed=True, ids=de_ids, e0=e0)
             else:                                # last layer consumes the seed but skips the unused s_T
-                x, v_first = b(x, v_first, seed=seed, ids=de_ids)
+                x, v_first = b(x, v_first, seed=seed, ids=de_ids, e0=e0)
         h = self.ln_out(x)                       # post-norm final hidden (what aux heads read)
         logits = self.head(h)
         eng = getattr(self, "engram", None)      # copy head: gated bonus on the recalled token
@@ -191,9 +236,9 @@ def apply_fp8(module):
     import torch.nn as _nn
 
     def keep(m, fqn):
-        # engram/de_proj excluded: zero-init growth projections would fight fp8 dynamic scaling
+        # engram/DeepEmbed excluded: zero-init growth projections would fight fp8 dynamic scaling
         return (isinstance(m, _nn.Linear) and "head" not in fqn.lower() and "engram" not in fqn.lower()
-                and "de_proj" not in fqn and m.in_features % 16 == 0 and m.out_features % 16 == 0)
+                and ".de_" not in fqn and m.in_features % 16 == 0 and m.out_features % 16 == 0)
 
     convert_to_float8_training(module, module_filter_fn=keep)
     return sum(isinstance(x, Float8Linear) for x in module.modules())
@@ -327,7 +372,13 @@ def main():
     ap.add_argument("--deepembed", type=int, default=0,
                     help="DeepEmbed (RWKV-8): per-layer per-token FFN-output gate, 1 + emb(ids)")
     ap.add_argument("--de-dim", type=int, default=0,
-                    help="DeepEmbed low-rank width (0 = full d_model table per layer)")
+                    help="DeepEmbed width: out-mode low-rank r (0 = full d_model); hidden-mode rank r (0 = 32)")
+    ap.add_argument("--de-mode", default="out", choices=["out", "hidden"],
+                    help="out = gate FFN output (v1); hidden = BlinkDL rwkv_v7a exact (bilinear gate on FFN hidden)")
+    ap.add_argument("--de-shift", type=int, default=0,
+                    help="hidden-mode: separate token-shift mix for the gate input (BlinkDL: 'very large')")
+    ap.add_argument("--de-emb-res", type=int, default=0,
+                    help="hidden-mode: fold the global token embedding into the per-token gate matrix")
     ap.add_argument("--grad-accum", type=int, default=1,
                     help="micro-batches accumulated per optimizer step (effective batch = batch * N)")
     ap.add_argument("--ema", type=float, default=0.0,
@@ -356,13 +407,22 @@ def main():
     else:
         model = RWKV7Small(65536, args.d_model, args.n_layers, args.head_size, lk,
                            seed_chain=bool(args.seed_chain), deepembed=bool(args.deepembed),
-                           de_dim=args.de_dim).to(dev, torch.bfloat16)
+                           de_dim=args.de_dim, de_mode=args.de_mode, de_shift=bool(args.de_shift),
+                           de_emb_res=bool(args.de_emb_res)).to(dev, torch.bfloat16)
         if args.seed_chain:
             print("Future-Seed: cross-layer state chaining ON (s_0^L = s_T^{L-1})", flush=True)
         if args.deepembed:
-            r = args.de_dim if 0 < args.de_dim < args.d_model else args.d_model
-            print(f"DeepEmbed: per-layer FFN gate ON — {args.n_layers} tables of 65536x{r}"
-                  f" ({args.n_layers * 65536 * r / 1e6:.0f}M sparse params)", flush=True)
+            if args.de_mode == "hidden":
+                r = args.de_dim if args.de_dim > 0 else 32
+                w, what = r * r, f"hidden gate rank {r}"
+            else:
+                w = r = args.de_dim if 0 < args.de_dim < args.d_model else args.d_model
+                what = f"output gate width {r}"
+            print(f"DeepEmbed: {what}"
+                  + (" + de-shift" if args.de_shift and args.de_mode == "hidden" else "")
+                  + (" + emb-residual" if args.de_emb_res and args.de_mode == "hidden" else "")
+                  + f" — {args.n_layers} tables of 65536x{w}"
+                  f" ({args.n_layers * 65536 * w / 1e6:.0f}M sparse params)", flush=True)
     if args.fp8:
         n8 = apply_fp8(model)
         print(f"fp8: {n8} Linear layers -> Float8Linear (torchao)", flush=True)
@@ -387,7 +447,9 @@ def main():
            ("R", args.loop_iter_readout)] if v) or "") + \
           (f"-{args.loop_gate}" if lk and args.loop_gate != "scalar" else "") + \
           ("-seedchain" if seed_chain else "") + ("-engram" if lmb is not None else "") + \
-          ("-de" + (str(args.de_dim) if args.de_dim else "")
+          ("-de" + ("h" if args.de_mode == "hidden" else "") + (str(args.de_dim) if args.de_dim else "")
+           + ("s" if args.de_shift and args.de_mode == "hidden" else "")
+           + ("r" if args.de_emb_res and args.de_mode == "hidden" else "")
            if args.deepembed and not args.init_g1g else "")
     print(f"model {tag}: {nparam/1e6:.1f}M params  loop_kw={lk}", flush=True)
     json.dump({"loop_count": args.loop_count, "n_layers": args.n_layers, "mode": tag,
