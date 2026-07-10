@@ -144,7 +144,11 @@ _LOCAL_LM_SPEC = {"sources": [{"kind": "local",
 # the corpus — flat PACKED windows (docs joined by the sep token) are the right shape for chat.
 _BLEND_LM_SPEC = {"sources": [{"kind": "hf", "name": "mlabonne/open-perfectblend", "weight": 1.0}],
                   "cap_mb": 1600.0, "doc_boundary": False}
-CORPORA = {"local": _LOCAL_LM_SPEC, "blend": _BLEND_LM_SPEC}
+# blend-mix: the same corpus semantically packed into standard context buckets (whole docs,
+# best-fit-decreasing fill, pad-masked) for mixed context-length training with reciprocal batch
+# scaling (rwkv_pretrain --ctx-buckets). Bucket sizes follow the doc-length distribution.
+_BLEND_MIX_SPEC = {**_BLEND_LM_SPEC, "ctx_buckets": [512, 1024, 2048, 4096, 8192, 16384, 32768]}
+CORPORA = {"local": _LOCAL_LM_SPEC, "blend": _BLEND_LM_SPEC, "blend-mix": _BLEND_MIX_SPEC}
 
 
 def run_lm(levers, model, train, corpus="local"):
@@ -153,12 +157,17 @@ def run_lm(levers, model, train, corpus="local"):
     experiment.LEVERS (single source of truth); each run appears in the main trainboard leaderboard.
     corpus: 'local' (repo code+docs, 1.9M tok) or 'blend' (Open-PerfectBlend, ~450M tok)."""
     from rwkv_lab.experiment import LEVERS
-    from rwkv_lab.build_corpus import resolve_corpus
-    bin_path, off_path = resolve_corpus(CORPORA[corpus])
+    from rwkv_lab.build_corpus import resolve_corpus, resolve_buckets
+    spec = CORPORA[corpus]
+    if "ctx_buckets" in spec:                             # mixed context-length training
+        data_args, off_path = ["--ctx-buckets", resolve_buckets(spec)], None
+    else:
+        bin_path, off_path = resolve_corpus(spec)
+        data_args = ["--data", bin_path]
     for name in levers:
         lever = LEVERS.get(name, {})
         run_dir = f"runs/lm_{name}" if corpus == "local" else f"runs/lm_{corpus}_{name}"
-        cmd = [sys.executable, "-m", "rwkv_lab.rwkv_pretrain", "--data", bin_path, "--out", run_dir,
+        cmd = [sys.executable, "-m", "rwkv_lab.rwkv_pretrain", *data_args, "--out", run_dir,
                "--d-model", str(model.get("d_model", 256)), "--n-layers", str(model.get("n_layers", 4)),
                "--head-size", str(model.get("head_size", 64)), "--batch", str(train.get("batch", 16)),
                "--seq-len", str(train.get("seq_len", 512)), "--lr", str(train.get("lr", 6e-4)),
