@@ -49,7 +49,7 @@ func (s *Server) handleResearchCapabilities(w http.ResponseWriter, r *http.Reque
 		{"compressed convolutional attention", "attention oracle", "rwkv_lab.cca_attention", "arXiv:2510.04476"},
 		{"data-filter regime audit", "evaluation gate", "rwkv_lab.data_filter_audit", "arXiv:2605.19407 / Apple"},
 		{"runtime backend matrix", "qualification gate", "rwkv_lab.runtime_backends", "Albatross / vLLM / TT / JAX"},
-		{"full execution-plan qualification", "qualification gate", "rwkv_lab.execution_plan", "Megakernels / TileRT"},
+		{"native RWKV megakernel backend", "compiled + qualification-gated", "rwkv_lab.megakernel", "Megakernels / TileRT"},
 	}
 	var b strings.Builder
 	b.WriteString(`<div id="research-capabilities-body" class="exp-body"><table class="exp-tbl"><tr class="exp-hd"><td>capability</td><td>readiness</td><td>entry point</td><td>source</td></tr>`)

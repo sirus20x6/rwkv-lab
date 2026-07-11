@@ -195,9 +195,16 @@ implementation sources of record.
   [vLLM RWKV](https://github.com/vllm-project/vllm/pull/46269),
   [Tenstorrent WKV7](https://github.com/marty1885/ttWKV7), and
   [ROSA-JAX](https://github.com/ytfh44/rosa_gpu_jax); merely being installed never adopts a backend.
-- **Full execution-plan qualification:** [`execution_plan.py`](src/rwkv_lab/execution_plan.py)
-  extends callable qualification with whole-plan output/gradient parity, determinism, latency, and
-  a required launch-count reduction for [Megakernels](https://github.com/HazyResearch/Megakernels/tree/throughput)- or [TileRT](https://github.com/tile-ai/TileRT)-style candidates
+- **Native RWKV megakernel backend:** [`megakernel.py`](src/rwkv_lab/megakernel.py) executes the
+  one-token RWKV-7 DPLR state transition as one fp32-accumulating Triton kernel, compiles and
+  autotunes the surrounding fixed-shape model step with Inductor, then replays the complete plan
+  through a persistent CUDA Graph. Plans are cached by model/device/state geometry and can be
+  requested with `rwkv_lab.generate --engine megakernel`; `auto` adoption requires token parity,
+  warm throughput, and profiler-measured launch reduction from `rwkv_lab.production_kernels`.
+  The design follows [HazyResearch Megakernels](https://github.com/HazyResearch/Megakernels/tree/throughput)
+  and [TileRT](https://github.com/tile-ai/TileRT), but uses a native RWKV implementation because
+  their published runtimes target different model layouts. [`execution_plan.py`](src/rwkv_lab/execution_plan.py)
+  remains the generic fail-closed gate for other externally supplied plans
   ([community lead](https://discord.com/channels/992359628979568762/1084547464452907088/1507270209910734878)).
 
 ---
@@ -284,12 +291,12 @@ Experiments are driven and monitored through **trainboard**, a from-scratch Go +
 </p>
 
 <p align="center">
-  <img src="docs/images/qualification_panel.png" width="100%" alt="Production kernel qualification panel with backend and regression gates"><br>
-  <em>Production qualification — launch parity-before-speed kernel and serving checks, inspect adopted backends and regression gates, and retain machine-readable receipts under <code>runs/</code>. Backend adoption remains fail-closed; the dashboard cannot promote or publish a model.</em>
+  <img src="docs/images/qualification_panel.png?v=bdd0e60f61d4" width="100%" alt="Production kernel qualification panel with megakernel tuning and regression gates"><br>
+  <em>Production qualification — choose fast compilation or full megakernel plan autotuning; launch parity-before-speed kernel and serving checks; inspect adopted backends, CUDA launch reduction, cold compile cost, and regression gates; and retain checkpoint-bound machine-readable receipts under <code>runs/</code>. Backend adoption remains fail-closed; the dashboard cannot promote or publish a model.</em>
 </p>
 
 <p align="center">
-  <img src="docs/images/research_capabilities_panel.png?v=4f490d3d4a6b" width="100%" alt="Research capability inventory with readiness levels, entry points, and sources"><br>
+  <img src="docs/images/research_capabilities_panel.png?v=7424e2284252" width="100%" alt="Research capability inventory with readiness levels, entry points, and sources"><br>
   <em>Research capability inventory — one auditable index of the community-inspired decoding, recurrent-state, tokenizer, memory, optimizer, attention, data-filter, and runtime experiments in this repository, including each capability's readiness, executable entry point, and source. Experimental and oracle paths remain off by default.</em>
 </p>
 
@@ -526,6 +533,8 @@ python -m rwkv_lab.production_kernels --device cuda \
   --output runs/kernel-qualification.json
 python -m rwkv_lab.production_kernels --device cuda --checkpoint runs/lm/ckpt.pt \
   --prompt-ids 1,123,456 --max-new 64 --output runs/serving-qualification.json
+python -m rwkv_lab.generate --ckpt runs/lm/ckpt.pt --engine auto \
+  --megakernel-receipt runs/serving-qualification.json --prompt "Explain RWKV."
 ```
 
 - **NF4:** TorchAO remains opt-in and is adopted only after representative-layer output, input-gradient,
@@ -550,9 +559,19 @@ python -m rwkv_lab.production_kernels --device cuda --checkpoint runs/lm/ckpt.pt
   Numba CPU implementation as its exact oracle. Qualification includes throughput and projected
   long-context workspace fraction; allocation fails before launch when it would consume over half
   of currently free device memory.
-- **Serving:** `generate --engine auto` selects [RWKV-7](https://arxiv.org/abs/2503.14456)
-  constant-state decoding only for compatible checkpoints and reports tokens/s; otherwise it records
-  the reason for exact full-prefix fallback. The [EAGLE-3](https://arxiv.org/abs/2503.01840) verifier
+- **Megakernel serving:** `--engine megakernel` explicitly compiles a native RWKV plan; production
+  qualification separately records cold compilation, warm token throughput, exact tokens, and CUDA
+  launches before/after. `--engine auto --megakernel-receipt ...` adopts only an approved receipt
+  whose SHA-256 matches the checkpoint bytes and whose GPU compute capability, PyTorch, and Triton
+  versions match the current runtime, preventing stale evidence from authorizing another model or
+  machine. Inductor and Triton reuse their on-disk compiler caches; the process retains CUDA Graphs
+  by device, batch, dtype, and recurrent-state geometry. The implementation cites and follows the
+  execution-plan direction of [HazyResearch Megakernels](https://github.com/HazyResearch/Megakernels/tree/throughput)
+  and [TileRT](https://github.com/tile-ai/TileRT) without loading their model-specific binaries.
+- **Serving fallback:** without an adopted megakernel receipt, `generate --engine auto` selects
+  [RWKV-7](https://arxiv.org/abs/2503.14456) constant-state decoding only for compatible checkpoints
+  and reports tokens/s; otherwise it records the reason for exact full-prefix fallback. The
+  [EAGLE-3](https://arxiv.org/abs/2503.01840) verifier
   validates a whole draft in one target call, reports acceptance/target-call throughput, and cannot be
   adopted unless its output tokens exactly match ordinary target-greedy decoding. Its direct draft
   positions share one packed vocabulary GEMM (legacy per-position head checkpoints migrate on load).

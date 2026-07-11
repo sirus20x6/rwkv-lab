@@ -79,7 +79,11 @@ generation budgets, plus baseline speed and memory regression limits. The latest
 environment, available and adopted backends, parity, speedup, memory, and the baseline regression
 gate. This is the UI counterpart to the fail-closed parity-before-speed policy used for native
 [NVFP4](https://arxiv.org/abs/2509.25149), TorchAO NF4, and compiled serving paths; it does not install
-a backend, promote a checkpoint, or publish an artifact.
+a backend, promote a checkpoint, or publish an artifact. With a compatible checkpoint it also
+compiles and qualifies the native RWKV [Megakernels](https://github.com/HazyResearch/Megakernels/tree/throughput)-
+inspired backend: a fused Triton DPLR transition inside an Inductor-autotuned, CUDA-Graph-replayed
+decode plan. The UI exposes fast compilation or full autotuning and reports exact-token parity,
+warm speedup, CUDA launches before/after, cold compile cost, and whether the plan was adopted.
 
 The **research capability inventory** exposes the readiness and entry point of the community-derived
 reference paths: Recursal `balance_state`, rwkv-rlhf/OpenMOSE state adapters,

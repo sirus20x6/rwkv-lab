@@ -484,6 +484,17 @@ class RWKV8TimeMixDeltaNet(nn.Module):
         recurrence (zeros when None). The fla path may return ``None`` for the
         state when ``output_final_state`` is False.
         """
+        # Megakernel backend: fuse the complete one-token DPLR transition into
+        # one Triton program, then let its outer CUDA Graph own the full-model
+        # execution plan. Inspired by HazyResearch/Megakernels and TileRT;
+        # see rwkv_lab.megakernel for citations, qualification, and fallback.
+        if (getattr(self, "_megakernel_recurrent", False) and r.shape[1] == 1
+                and initial_state is not None and reset_mask is None
+                and r.is_cuda and not torch.is_grad_enabled()):
+            from rwkv_lab.megakernel import rwkv7_recurrent_step
+            out, final = rwkv7_recurrent_step(
+                r, gk, k, v, a, b, initial_state)
+            return out, (final if output_final_state else None)
         cu_seqlens = None
         if reset_mask is not None:
             if reset_mask.shape != r.shape[:2] or not torch.all(reset_mask[:, 0]):
