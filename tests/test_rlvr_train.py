@@ -12,6 +12,7 @@ from rwkv_lab.rlvr_train import (RLVRTask, Rollout, VERIFY_RESPONSE_SCHEMA,
                                  sample_response, sample_response_group,
                                  select_rollout_engine, split_task_pool,
                                  staged_arithmetic_curriculum,
+                                 supervised_warm_start,
                                  verify_rollouts)
 from rwkv_lab.rlvr_evaluation import audit_task_splits
 from rwkv_lab.rwkv_pretrain import RWKV7Small
@@ -135,6 +136,31 @@ def test_batched_group_sampler_matches_scalar_sampling():
         top_k=0, stop_token=99, device="cpu", seeds=seeds, engine="batched")
     assert actual == expected
     assert stats["engine"] == "batched" and stats["tokens"] == 20
+
+
+def test_supervised_warm_start_batches_examples_into_one_forward():
+    class CountingLM(ToyLM):
+        def __init__(self):
+            super().__init__(vocab=32)
+            self.calls = 0
+
+        def forward(self, ids):
+            self.calls += 1
+            return super().forward(ids)
+
+    class Tokenizer:
+        @staticmethod
+        def encode(text):
+            return [2 + ord(char) % 29 for char in text]
+
+    model = CountingLM()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    tasks = [RLVRTask(f"t{i}", f"{i}+1", {"kind": "numeric", "expected": i + 1})
+             for i in range(4)]
+    result = supervised_warm_start(
+        model, Tokenizer(), tasks, optimizer, steps=1, batch_size=4,
+        learning_rate=1e-3, grad_clip=1, stop_token=1, device="cpu", seed=3)
+    assert result["updates"] == 1 and model.calls == 1
 
 
 def test_native_rwkv_recurrent_chunks_match_full_forward(monkeypatch):

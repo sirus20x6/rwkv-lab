@@ -57,6 +57,7 @@ var knownLevers = []leverDef{
 	{"mem_nested", "Nested Learning controller for update rate + retention (arXiv:2512.24695; scratch LM)", true},
 	{"nvfp4", "simulated NVFP4 E2M1 block QAT (arXiv:2509.25149; correctness path, not native throughput)", true},
 	{"nvfp4_rht", "simulated NVFP4 + randomized Hadamard transform (TetraJet-v2, arXiv:2510.27527)", true},
+	{"nvfp4_native", "native Blackwell NVFP4 via Transformer Engine; parity + speed gate (arXiv:2509.25149)", true},
 }
 
 func isNewModelLever(name string) bool {

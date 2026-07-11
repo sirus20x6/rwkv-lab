@@ -183,16 +183,14 @@ def binary_calibration(logits: torch.Tensor, labels: torch.Tensor, *, bins: int 
     truth = labels.detach().float().flatten()
     accuracy = ((probabilities >= 0.5) == truth.bool()).float().mean()
     brier = (probabilities - truth).square().mean()
-    ece = torch.zeros((), dtype=torch.float32, device=probabilities.device)
-    edges = torch.linspace(0.0, 1.0, bins + 1, device=probabilities.device)
-    for index in range(bins):
-        selected = ((probabilities >= edges[index]) &
-                    (probabilities <= edges[index + 1] if index == bins - 1
-                     else probabilities < edges[index + 1]))
-        if torch.any(selected):
-            confidence = probabilities[selected].mean()
-            empirical = truth[selected].mean()
-            ece += selected.float().mean() * (confidence - empirical).abs()
+    bucket = (probabilities * bins).long().clamp_(0, bins - 1)
+    counts = torch.zeros(bins, device=probabilities.device).scatter_add_(
+        0, bucket, torch.ones_like(probabilities))
+    confidence = torch.zeros_like(counts).scatter_add_(0, bucket, probabilities)
+    empirical = torch.zeros_like(counts).scatter_add_(0, bucket, truth)
+    denom = counts.clamp_min(1)
+    ece = (counts / probabilities.numel() *
+           (confidence / denom - empirical / denom).abs()).sum()
     return {"accuracy": float(accuracy), "brier": float(brier), "ece": float(ece)}
 
 

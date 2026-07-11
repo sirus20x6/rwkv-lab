@@ -793,7 +793,8 @@ def _make_muonclip(student, text_cfg, args):
     )
     opt = _make_guarded_muonclip_class()(
         _ParamProxy(muon_named), text_cfg, muon_cfg,
-        max_muon_ratio=5e-4, max_adam_ratio=1e-4)
+        max_muon_ratio=5e-4, max_adam_ratio=1e-4,
+        guard_stats_every=args.log_every)
     # base MuonClip.flush_metrics has a latent AttributeError (writer never created
     # when log_dir is truthy); neutralize it (train_mla does the same).
     opt.flush_metrics = (lambda *a, **kw: None).__get__(opt, type(opt))

@@ -64,55 +64,51 @@ type recursiveLoop struct {
 	Created            float64 `json:"created_ts"`
 }
 
-func (s *Server) readRecursiveLoops() []recursiveLoop {
-	rows := []recursiveLoop{}
-	_ = filepath.WalkDir(s.cfg.RunsDir, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil || entry.IsDir() || entry.Name() != "loop.json" {
-			return nil
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil
-		}
-		var row recursiveLoop
-		if json.Unmarshal(data, &row) != nil || row.Status == "" {
-			return nil
-		}
-		rel, _ := filepath.Rel(s.cfg.RunsDir, filepath.Dir(path))
-		row.Path = filepath.ToSlash(rel)
-		rows = append(rows, row)
-		return nil
-	})
-	sort.Slice(rows, func(i, j int) bool { return rows[i].Created > rows[j].Created })
-	return rows
+type rlvrDiscovery struct {
+	loops     []recursiveLoop
+	campaigns []rlvrCampaign
 }
 
-func (s *Server) readRLVRCampaigns() []rlvrCampaign {
-	rows := []rlvrCampaign{}
-	_ = filepath.WalkDir(s.cfg.RunsDir, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil || entry.IsDir() || entry.Name() != "campaign.json" {
+func (s *Server) readRLVRDiscovery() rlvrDiscovery {
+	return s.cachedDiscovery("rlvr-campaigns", 2*time.Second, func() any {
+		value := rlvrDiscovery{}
+		_ = filepath.WalkDir(s.cfg.RunsDir, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil || entry.IsDir() || (entry.Name() != "loop.json" && entry.Name() != "campaign.json") {
+				return nil
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return nil
+			}
+			rel, _ := filepath.Rel(s.cfg.RunsDir, filepath.Dir(path))
+			if entry.Name() == "loop.json" {
+				var row recursiveLoop
+				if json.Unmarshal(data, &row) == nil && row.Status != "" {
+					row.Path = filepath.ToSlash(rel)
+					value.loops = append(value.loops, row)
+				}
+			} else {
+				var row rlvrCampaign
+				if json.Unmarshal(data, &row) == nil &&
+					(strings.HasPrefix(row.Status, "run") || row.Status == "complete" || row.Status == "failed") {
+					row.Path = filepath.ToSlash(rel)
+					value.campaigns = append(value.campaigns, row)
+				}
+			}
 			return nil
+		})
+		sort.Slice(value.loops, func(i, j int) bool { return value.loops[i].Created > value.loops[j].Created })
+		sort.Slice(value.campaigns, func(i, j int) bool { return value.campaigns[i].Created > value.campaigns[j].Created })
+		if len(value.campaigns) > 20 {
+			value.campaigns = value.campaigns[:20]
 		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil
-		}
-		var row rlvrCampaign
-		if json.Unmarshal(data, &row) != nil ||
-			(!strings.HasPrefix(row.Status, "run") && row.Status != "complete" && row.Status != "failed") {
-			return nil
-		}
-		rel, _ := filepath.Rel(s.cfg.RunsDir, filepath.Dir(path))
-		row.Path = filepath.ToSlash(rel)
-		rows = append(rows, row)
-		return nil
-	})
-	sort.Slice(rows, func(i, j int) bool { return rows[i].Created > rows[j].Created })
-	if len(rows) > 20 {
-		rows = rows[:20]
-	}
-	return rows
+		return value
+	}).(rlvrDiscovery)
 }
+
+func (s *Server) readRecursiveLoops() []recursiveLoop { return s.readRLVRDiscovery().loops }
+
+func (s *Server) readRLVRCampaigns() []rlvrCampaign { return s.readRLVRDiscovery().campaigns }
 
 func (s *Server) handleRLVR(w http.ResponseWriter, r *http.Request) {
 	sse := datastar.NewSSE(w, r)
