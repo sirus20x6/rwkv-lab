@@ -44,7 +44,7 @@ def _make_guarded_muonclip_class():
         prevents the corrected-RMS amplifier from blowing up early-step updates.
         """
         def __init__(self, *args, max_muon_ratio: float = 5e-4,
-                     max_adam_ratio: float = 1e-4, **kwargs):
+                     max_adam_ratio: float = 1e-4, guard_stats_every: int = 10, **kwargs):
             super().__init__(*args, **kwargs)
             assert not self.enable_clipping, (
                 "GuardedMuonClip assumes enable_clipping=False — QK-clipping is "
@@ -52,6 +52,7 @@ def _make_guarded_muonclip_class():
             )
             self.max_muon_ratio = float(max_muon_ratio)
             self.max_adam_ratio = float(max_adam_ratio)
+            self.guard_stats_every = max(1, int(guard_stats_every))
             # Per-step diagnostics — read by the train loop and logged.
             self.last_guard_saturation = {
                 "muon_sat": 0, "muon_total": 0,
@@ -65,11 +66,13 @@ def _make_guarded_muonclip_class():
                 with torch.enable_grad():
                     loss = closure()
 
-            # GPU accumulators: incremented in-loop without syncing, read once at end.
+            # Diagnostics materialize only at log-like cadence; scalar .item() otherwise
+            # serializes every optimizer step with the GPU.
             dev = next((p.device for g in self.param_groups for p in g["params"]
                         if p.requires_grad), torch.device("cpu"))
-            muon_sat_t = torch.zeros((), device=dev, dtype=torch.long)
-            adam_sat_t = torch.zeros((), device=dev, dtype=torch.long)
+            collect_stats = (getattr(self, "_step", 0) + 1) % self.guard_stats_every == 0
+            muon_sat_t = torch.zeros((), device=dev, dtype=torch.long) if collect_stats else None
+            adam_sat_t = torch.zeros((), device=dev, dtype=torch.long) if collect_stats else None
             muon_total = 0
             adam_total = 0
 
@@ -101,7 +104,8 @@ def _make_guarded_muonclip_class():
                         rho = lr * u_rms / p_rms
                         scale = torch.clamp(cap / rho.clamp_min(1e-12), max=1.0)
                         update.mul_(scale)
-                        muon_sat_t += (scale < 0.99).long()
+                        if collect_stats:
+                            muon_sat_t += (scale < 0.99).long()
                         muon_total += 1
                         if wd:
                             p.mul_(1 - lr * wd)
@@ -126,19 +130,20 @@ def _make_guarded_muonclip_class():
                         rho = lr * u_rms / p_rms
                         scale = torch.clamp(cap / rho.clamp_min(1e-12), max=1.0)
                         update.mul_(scale)
-                        adam_sat_t += (scale < 0.99).long()
+                        if collect_stats:
+                            adam_sat_t += (scale < 0.99).long()
                         adam_total += 1
                         if wd:
                             p.mul_(1 - lr * wd)
                         p.add_(update, alpha=-lr)
 
-            # Single sync per step for diagnostics.
-            self.last_guard_saturation = {
-                "muon_sat": int(muon_sat_t.item()),
-                "muon_total": muon_total,
-                "adam_sat": int(adam_sat_t.item()),
-                "adam_total": adam_total,
-            }
+            if collect_stats:
+                self.last_guard_saturation = {
+                    "muon_sat": int(muon_sat_t.item()),
+                    "muon_total": muon_total,
+                    "adam_sat": int(adam_sat_t.item()),
+                    "adam_total": adam_total,
+                }
             self._step += 1
             return loss
 

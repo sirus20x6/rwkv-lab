@@ -120,12 +120,16 @@ def test_declarative_lm_command_translates_new_flag_kinds():
     from rwkv_lab.experiment import LEVERS
     cmd = _lm_command(["--data", "x.bin"], None, "out", {}, {},
                       {"nvfp4": True, "nvfp4_rht": False, "online_memory": True,
-                       "online_memory_mode": "atlas", "u_mup_base_width": 256},
+                       "online_memory_mode": "atlas", "online_memory_kernel": "eager",
+                       "u_mup_base_width": 256},
                       0, "ckpt.pt")
     assert cmd.count("--nvfp4") == 1 and "--nvfp4-rht" not in cmd
     assert cmd[cmd.index("--online-memory") + 1] == "1"
     assert cmd[cmd.index("--online-memory-mode") + 1] == "atlas"
+    assert cmd[cmd.index("--online-memory-kernel") + 1] == "eager"
     atlas = _lm_command(["--data", "x.bin"], None, "out", {}, {}, LEVERS["mem_atlas"], 0, "c.pt")
     nv_rht = _lm_command(["--data", "x.bin"], None, "out", {}, {}, LEVERS["nvfp4_rht"], 0, "c.pt")
+    nv_native = _lm_command(["--data", "x.bin"], None, "out", {}, {}, LEVERS["nvfp4_native"], 0, "c.pt")
     assert atlas[atlas.index("--online-memory-mode") + 1] == "atlas"
     assert "--nvfp4" in nv_rht and "--nvfp4-rht" in nv_rht
+    assert nv_native[nv_native.index("--nvfp4-backend") + 1] == "transformer_engine"

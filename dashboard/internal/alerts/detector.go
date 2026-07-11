@@ -92,23 +92,35 @@ func (d *Detector) Run(ctx context.Context) {
 
 func (d *Detector) scan() {
 	procs := d.sampler.Latest().Procs
+	names := make([]string, 0, len(procs))
+	for _, p := range procs {
+		if p.RunName != "" {
+			names = append(names, p.RunName)
+		}
+	}
+	statsByRun, err := d.db.RecentTrainStatsByName(names, 50)
+	if err != nil {
+		return
+	}
+	pplByRun := map[string]*float64{}
+	if summaries, err := d.db.RunSummaries(float64(time.Now().UnixNano()) / 1e9); err == nil {
+		for _, summary := range summaries {
+			pplByRun[summary.Name] = summary.LatestPPL
+		}
+	}
 	for _, p := range procs {
 		if p.RunName == "" {
 			continue
 		}
-		d.scanRun(p)
+		row, ok := statsByRun[p.RunName]
+		if !ok {
+			continue
+		}
+		d.scanRun(p, row.RunID, row.Stats, pplByRun[p.RunName])
 	}
 }
 
-func (d *Detector) scanRun(p sysmon.Proc) {
-	runID, ok, err := d.db.RunID(p.RunName)
-	if err != nil || !ok {
-		return
-	}
-	stats, err := d.db.RecentTrainStats(runID, 50)
-	if err != nil {
-		return
-	}
+func (d *Detector) scanRun(p sysmon.Proc, runID int64, stats db.TrainStats, latestPPL *float64) {
 
 	// stall: process alive but log gone quiet
 	if p.LogAgeS != nil && *p.LogAgeS > stallSeconds {
@@ -137,9 +149,9 @@ func (d *Detector) scanRun(p sysmon.Proc) {
 			fmt.Sprintf("codec rel_rmse %.3f > %.2f — SMT/DMT targets likely garbage", *stats.CodecRel, codecRelWarn))
 	}
 	if d.baselinePPL > 0 {
-		if k, ok, _ := d.db.RunKPIsByName(p.RunName); ok && k.PPL != nil && *k.PPL > pplRegressRatio*d.baselinePPL {
+		if latestPPL != nil && *latestPPL > pplRegressRatio*d.baselinePPL {
 			d.raise(p, "ppl_regress", "warn", stats.LastStep,
-				fmt.Sprintf("eval ppl %.1f is %.1fx the original baseline %.1f", *k.PPL, *k.PPL/d.baselinePPL, d.baselinePPL))
+				fmt.Sprintf("eval ppl %.1f is %.1fx the original baseline %.1f", *latestPPL, *latestPPL/d.baselinePPL, d.baselinePPL))
 		}
 	}
 

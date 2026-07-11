@@ -14,7 +14,7 @@ from rwkv_lab.posttrain_data import (IGNORE_INDEX, PostTrainingExample, dataset_
                                      cache_tokenized, load_jsonl, pack_variants, render, tokenize,
                                      TokenizedExample, TokenizedVariant, version_dataset)
 from rwkv_lab.posttrain_campaign import assess, split_audit
-from rwkv_lab.posttrain_train import _train_loss
+from rwkv_lab.posttrain_train import _build_reference_cache, _train_loss
 from rwkv_lab.posttrain_kernels import score_preference_pairs
 from rwkv_lab.preference import (dpo_loss, kto_loss, orpo_loss, process_reward_loss,
                                  binary_calibration, OutcomeRewardHead, ProcessRewardHead, reward_model_loss,
@@ -318,6 +318,30 @@ def test_executable_posttraining_objective_steps_are_finite():
         loss, _ = _train_loss(model, head, batch, objective, "none", "cpu", 0.1, 1.0)
         assert torch.isfinite(loss), objective
         loss.backward()
+
+
+def test_dpo_frozen_reference_is_scored_once_then_reused():
+    class CountingModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embedding = nn.Embedding(16, 8)
+            self.head = nn.Linear(8, 16)
+            self.calls = 0
+
+        def forward(self, ids):
+            self.calls += 1
+            return self.head(self.embedding(ids))
+
+    chosen = TokenizedVariant((1, 2, 3, 4), (IGNORE_INDEX, IGNORE_INDEX, 3, 4), ("",) * 4)
+    rejected = TokenizedVariant((1, 2, 5, 6), (IGNORE_INDEX, IGNORE_INDEX, 5, 6), ("",) * 4)
+    row = TokenizedExample("p", "preference", "train",
+                           {"chosen": chosen, "rejected": rejected}, {})
+    model = CountingModel()
+    cache = _build_reference_cache(model, [row], "dpo", "cpu", 1)
+    assert model.calls == 1 and cache["p"]
+    loss, _ = _train_loss(model, None, [row], "dpo", "none", "cpu", .1, 1,
+                          reference_cache=cache, collect_metrics=False)
+    assert torch.isfinite(loss) and model.calls == 2
 
 
 def test_posttrain_campaign_split_and_promotion_gates(tmp_path):

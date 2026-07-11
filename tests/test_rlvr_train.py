@@ -5,13 +5,15 @@ import sys
 import torch
 import torch.nn as nn
 
-from rwkv_lab.rlvr import NumericAnswerVerifier, policy_loss
+from rwkv_lab.rlvr import NumericAnswerVerifier, group_advantages, policy_loss
 from rwkv_lab.rlvr_train import (RLVRTask, Rollout, VERIFY_RESPONSE_SCHEMA,
                                  arithmetic_curriculum, optimize_rollouts,
+                                 generate_rollouts,
                                  promotion_decision, response_log_probs,
                                  sample_response, sample_response_group,
                                  select_rollout_engine, split_task_pool,
                                  staged_arithmetic_curriculum,
+                                 supervised_warm_start,
                                  verify_rollouts)
 from rwkv_lab.rlvr_evaluation import audit_task_splits
 from rwkv_lab.rwkv_pretrain import RWKV7Small
@@ -89,6 +91,42 @@ def test_response_scoring_and_rlvr_update_are_differentiable():
     assert not torch.equal(before, model.head.weight)
 
 
+def test_response_scoring_combines_variable_lengths_with_exact_logps():
+    class CountingLM(ToyLM):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def forward(self, ids):
+            self.calls += 1
+            return super().forward(ids)
+
+    torch.manual_seed(11)
+    model = CountingLM()
+    task = RLVRTask("t", "prompt", {"kind": "numeric", "expected": 1})
+    rollouts = [Rollout(f"t:{i}", task, [2] * (i + 1), [3, 4][:1 + i % 2], "")
+                for i in range(4)]
+    actual, mask = response_log_probs(model, rollouts)
+    assert model.calls == 1
+    for row, rollout in enumerate(rollouts):
+        ids = torch.tensor([rollout.prompt_ids + rollout.response_ids])
+        logits = model.head(model.emb(ids[:, :-1]))
+        start, length = len(rollout.prompt_ids) - 1, len(rollout.response_ids)
+        expected = logits.log_softmax(-1)[0, start:start + length].gather(
+            -1, ids[:, 1:][0, start:start + length, None]).squeeze(-1)
+        assert torch.allclose(actual[row, :length], expected, atol=1e-6)
+        assert mask[row].sum() == length
+
+
+def test_group_advantages_vectorized_arbitrary_groups_and_constants():
+    rewards = torch.tensor([1.0, 4.0, 2.0, 4.0, 3.0, 4.0])
+    groups = torch.tensor([9, 2, 9, 2, 9, 2])
+    advantages, active = group_advantages(rewards, groups, drop_constant=True)
+    expected = torch.tensor([-1.2247449, 0.0, 0.0, 0.0, 1.2247449, 0.0])
+    assert torch.allclose(advantages, expected, atol=1e-6)
+    assert active.tolist() == [True, False, True, False, True, False]
+
+
 def test_reference_kl_estimator_is_non_negative():
     logp = torch.tensor([[-1.0, -0.5], [-0.2, -1.2]], requires_grad=True)
     old = logp.detach().clone()
@@ -135,6 +173,49 @@ def test_batched_group_sampler_matches_scalar_sampling():
         top_k=0, stop_token=99, device="cpu", seeds=seeds, engine="batched")
     assert actual == expected
     assert stats["engine"] == "batched" and stats["tokens"] == 20
+
+
+def test_rollout_scheduler_preserves_order_and_reports_workers():
+    class Tokenizer:
+        @staticmethod
+        def encode(_text): return [2, 3]
+        @staticmethod
+        def decode(tokens): return " ".join(map(str, tokens))
+
+    model = ToyLM()
+    tasks = [RLVRTask(f"t{i}", str(i), {"kind": "numeric", "expected": i})
+             for i in range(3)]
+    rollouts, stats = generate_rollouts(
+        model, Tokenizer(), tasks, group_size=2, max_new=2, temperature=0,
+        top_p=1, top_k=0, stop_token=99, device="cpu", seed=5,
+        engine="batched", return_stats=True, rollout_devices=("cpu",))
+    assert [row.id for row in rollouts] == [f"t{i}:{j}" for i in range(3) for j in range(2)]
+    assert stats["workers"] == 1 and stats["devices"] == ["cpu"]
+
+
+def test_supervised_warm_start_batches_examples_into_one_forward():
+    class CountingLM(ToyLM):
+        def __init__(self):
+            super().__init__(vocab=32)
+            self.calls = 0
+
+        def forward(self, ids):
+            self.calls += 1
+            return super().forward(ids)
+
+    class Tokenizer:
+        @staticmethod
+        def encode(text):
+            return [2 + ord(char) % 29 for char in text]
+
+    model = CountingLM()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    tasks = [RLVRTask(f"t{i}", f"{i}+1", {"kind": "numeric", "expected": i + 1})
+             for i in range(4)]
+    result = supervised_warm_start(
+        model, Tokenizer(), tasks, optimizer, steps=1, batch_size=4,
+        learning_rate=1e-3, grad_clip=1, stop_token=1, device="cpu", seed=3)
+    assert result["updates"] == 1 and model.calls == 1
 
 
 def test_native_rwkv_recurrent_chunks_match_full_forward(monkeypatch):

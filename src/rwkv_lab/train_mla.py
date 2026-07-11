@@ -1320,6 +1320,7 @@ def main() -> None:
                     muon_target, text_cfg, muon_cfg,
                     max_muon_ratio=cfg.guard_max_muon_ratio,
                     max_adam_ratio=cfg.guard_max_adam_ratio,
+                    guard_stats_every=cfg.log_every,
                 )
                 _opt_label = "GuardedMuonClip"
             else:

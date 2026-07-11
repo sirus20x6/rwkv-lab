@@ -49,6 +49,9 @@ type Server struct {
 
 	queueAuto atomic.Bool // opt-in: auto-start next queued run when GPU free (off by default)
 
+	discoveryMu sync.Mutex
+	discovery   map[string]discoveryEntry // short-lived filesystem discovery cache
+
 	// tick is the shared per-second snapshot every stream connection renders.
 	// Computed once by refreshLoop (tickcache.go) so N tabs cost one query suite.
 	tick atomic.Pointer[tickSnap]
@@ -62,11 +65,31 @@ const tabTTL = 10 * time.Minute
 func New(cfg Config) *Server {
 	s := &Server{
 		cfg: cfg, mux: http.NewServeMux(), db: cfg.DB, sampler: cfg.Sampler, detector: cfg.Detector,
-		selected: map[string]string{},
-		seen:     map[string]time.Time{},
+		selected:  map[string]string{},
+		seen:      map[string]time.Time{},
+		discovery: map[string]discoveryEntry{},
 	}
 	s.routes()
 	return s
+}
+
+type discoveryEntry struct {
+	expires time.Time
+	value   any
+}
+
+func (s *Server) cachedDiscovery(key string, ttl time.Duration, load func() any) any {
+	s.discoveryMu.Lock()
+	defer s.discoveryMu.Unlock()
+	if s.discovery == nil {
+		s.discovery = map[string]discoveryEntry{}
+	}
+	if cached, ok := s.discovery[key]; ok && time.Now().Before(cached.expires) {
+		return cached.value
+	}
+	value := load()
+	s.discovery[key] = discoveryEntry{expires: time.Now().Add(ttl), value: value}
+	return value
 }
 
 func tabKey(tabID string) string {

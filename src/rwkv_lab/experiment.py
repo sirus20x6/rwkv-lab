@@ -67,12 +67,14 @@ LEVERS = {
     "mem_nested":    dict(online_memory=True, online_memory_mode="nested"),
     "nvfp4":         dict(nvfp4=True),
     "nvfp4_rht":     dict(nvfp4=True, nvfp4_rht=True),
+    "nvfp4_native":  dict(nvfp4=True, nvfp4_rht=True,
+                            nvfp4_backend="transformer_engine"),
 }
 
 # Levers whose objective needs a real token FUTURE — only valid on the LM path (rwkv_pretrain),
 # not the synthetic diagnostic tasks. The board disables these unless an LM corpus is selected.
 LM_ONLY = ("top", "lmtp", "bst", "jtp", "umup_256", "mem_titans", "mem_miras",
-           "mem_atlas", "mem_nested", "nvfp4", "nvfp4_rht")
+           "mem_atlas", "mem_nested", "nvfp4", "nvfp4_rht", "nvfp4_native")
 
 _AUX_KEYS = ("nextlat_weight", "top_weight", "lmtp_weight", "bst_weight", "jtp_weight")
 
@@ -193,13 +195,16 @@ def _copy_rollout_acc(model, task, B, device, seed):
         torch.manual_seed(seed)
         target = torch.randint(2, 2 + task.ns, (B, task.L), device=device)
     sep = torch.full((B,1), 1, dtype=torch.long, device=device)
-    prefix = torch.cat((target,sep),dim=1); generated=[]
+    prefix_len = task.L + 1
+    tokens = torch.empty(B, prefix_len + task.L, dtype=torch.long, device=device)
+    tokens[:, :task.L] = target
+    tokens[:, task.L:prefix_len] = sep
     model.eval()
-    for _ in range(task.L):
-        nxt = model(prefix).float()[:,-1].argmax(-1,keepdim=True)
-        generated.append(nxt); prefix=torch.cat((prefix,nxt),dim=1)
+    for offset in range(task.L):
+        end = prefix_len + offset
+        tokens[:, end] = model(tokens[:, :end]).float()[:, -1].argmax(-1)
     model.train()
-    return float((torch.cat(generated,dim=1)==target).float().mean())
+    return float((tokens[:, prefix_len:] == target).float().mean())
 
 
 def preflight(task, d_model, n_layers, head_size, lever, device, batch, steps=20):

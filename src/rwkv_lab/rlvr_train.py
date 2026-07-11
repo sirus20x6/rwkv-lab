@@ -32,7 +32,7 @@ Commands are executed directly (never through a shell) with a timeout.
 from __future__ import annotations
 
 import argparse
-from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 import hashlib
 import json
@@ -50,7 +50,7 @@ import torch.nn.functional as F
 
 from rwkv_lab.rlvr import (ExactAnswerVerifier, NumericAnswerVerifier,
                            PythonExpressionVerifier, group_advantages,
-                           policy_loss, token_log_probs)
+                           policy_loss)
 from rwkv_lab.rlvr_evaluation import (audit_task_splits, curriculum_pool,
                                       promotion_gates, reward_diversity,
                                       stratified_tasks, task_reward_summary)
@@ -95,6 +95,15 @@ class Rollout:
     prompt_ids: list[int]
     response_ids: list[int]
     response: str
+
+
+@dataclass
+class PreparedRolloutScoring:
+    """Immutable CPU scoring batches reused by old/reference/current policy forwards."""
+
+    batches: list[tuple[list[int], torch.Tensor, torch.Tensor]]
+    count: int
+    max_response: int
 
 
 def load_task_jsonl(path: str | Path) -> tuple[list[RLVRTask], str]:
@@ -284,16 +293,21 @@ def sample_response(model, prompt_ids: Sequence[int], *, max_new: int, temperatu
     if not prompt_ids:
         raise ValueError("tokenized prompt is empty")
     generator = torch.Generator(device=device).manual_seed(int(seed))
-    tokens = torch.tensor([list(prompt_ids)], dtype=torch.long, device=device)
+    prompt = torch.tensor([list(prompt_ids)], dtype=torch.long, device=device)
+    tokens = torch.empty((1, len(prompt_ids) + max(1, int(max_new))),
+                         dtype=torch.long, device=device)
+    tokens[:, :len(prompt_ids)] = prompt
+    length = len(prompt_ids)
     response = []
     for _ in range(max(1, int(max_new))):
-        logits = _logits(model(tokens))[0, -1]
+        logits = _logits(model(tokens[:, :length]))[0, -1]
         nxt = _sample_token(logits, temperature=temperature, top_p=top_p,
                             top_k=top_k, generator=generator)
         response.append(nxt)
         if nxt == stop_token:
             break
-        tokens = torch.cat((tokens, tokens.new_tensor([[nxt]])), dim=1)
+        tokens[0, length] = nxt
+        length += 1
     return response
 
 
@@ -331,14 +345,21 @@ def sample_response_group(model, prompt_ids: Sequence[int], *, count: int, max_n
     prompt = torch.tensor([list(prompt_ids)], dtype=torch.long, device=device).expand(count, -1)
     responses: list[list[int]] = [[] for _ in range(count)]
     finished = [False] * count
-    tokens, state = prompt, None
+    if chosen == "batched":
+        tokens = torch.empty((count, len(prompt_ids) + max(1, int(max_new))),
+                             dtype=torch.long, device=device)
+        tokens[:, :len(prompt_ids)] = prompt
+        length = len(prompt_ids)
+    else:
+        tokens, length = prompt, len(prompt_ids)
+    state = None
     started = time.perf_counter()
     if chosen == "recurrent":
         logits, state = model.forward_recurrent(tokens)
         next_logits = logits[:, -1]
     for step in range(max(1, int(max_new))):
         if chosen == "batched":
-            next_logits = _logits(model(tokens))[:, -1]
+            next_logits = _logits(model(tokens[:, :length]))[:, -1]
         next_tokens = []
         for row in range(count):
             if finished[row]:
@@ -357,7 +378,8 @@ def sample_response_group(model, prompt_ids: Sequence[int], *, count: int, max_n
             logits, state = model.forward_recurrent(token_column, state)
             next_logits = logits[:, -1]
         else:
-            tokens = torch.cat((tokens, token_column), dim=1)
+            tokens[:, length:length + 1] = token_column
+            length += 1
     elapsed = time.perf_counter() - started
     generated = sum(len(row) for row in responses)
     return responses, {"engine": chosen, "fallback_reason": reason, "seconds": elapsed,
@@ -368,56 +390,139 @@ def sample_response_group(model, prompt_ids: Sequence[int], *, count: int, max_n
 def generate_rollouts(model, tokenizer, tasks: Sequence[RLVRTask], *, group_size: int,
                       max_new: int, temperature: float, top_p: float, top_k: int,
                       stop_token: int, device: str, seed: int, engine: str = "auto",
-                      return_stats: bool = False):
+                      return_stats: bool = False,
+                      rollout_devices: Sequence[str] = ()):
     model.eval()
-    out = []
-    stats = {"seconds": 0.0, "tokens": 0, "engine": "", "fallback_reason": ""}
-    for group, task in enumerate(tasks):
-        prompt = f"User: {task.prompt}\n\nAssistant:"
-        prompt_ids = tokenizer.encode(prompt)
-        seeds = [seed + group * 100_003 + k for k in range(int(group_size))]
-        responses, group_stats = sample_response_group(
-            model, prompt_ids, count=int(group_size), max_new=max_new,
-            temperature=temperature, top_p=top_p, top_k=top_k,
-            stop_token=stop_token, device=device, seeds=seeds, engine=engine)
-        stats["seconds"] += group_stats["seconds"]
-        stats["tokens"] += group_stats["tokens"]
-        stats["engine"] = group_stats["engine"]
-        stats["fallback_reason"] = group_stats["fallback_reason"]
-        for k, response_ids in enumerate(responses):
-            visible = response_ids[:-1] if response_ids and response_ids[-1] == stop_token else response_ids
-            out.append(Rollout(f"{task.id}:{k}", task, list(prompt_ids), response_ids,
-                               tokenizer.decode(visible)))
-    stats["tokens_per_second"] = stats["tokens"] / max(stats["seconds"], 1e-9)
+    devices = tuple(str(value) for value in rollout_devices if str(value)) or (str(device),)
+    indexed = list(enumerate(tasks))
+
+    def run_worker(worker_model, worker_device: str, work):
+        rows, tokens, engines, reasons = [], 0, set(), set()
+        for group, task in work:
+            prompt = f"User: {task.prompt}\n\nAssistant:"
+            prompt_ids = tokenizer.encode(prompt)
+            seeds = [seed + group * 100_003 + k for k in range(int(group_size))]
+            responses, group_stats = sample_response_group(
+                worker_model, prompt_ids, count=int(group_size), max_new=max_new,
+                temperature=temperature, top_p=top_p, top_k=top_k,
+                stop_token=stop_token, device=worker_device, seeds=seeds, engine=engine)
+            tokens += int(group_stats["tokens"])
+            engines.add(str(group_stats["engine"]))
+            if group_stats["fallback_reason"]:
+                reasons.add(str(group_stats["fallback_reason"]))
+            group_rows = []
+            for k, response_ids in enumerate(responses):
+                visible = (response_ids[:-1] if response_ids and response_ids[-1] == stop_token
+                           else response_ids)
+                group_rows.append(Rollout(f"{task.id}:{k}", task, list(prompt_ids), response_ids,
+                                          tokenizer.decode(visible)))
+            rows.append((group, group_rows))
+        return rows, tokens, engines, reasons
+
+    started = time.perf_counter()
+    if len(devices) == 1:
+        results = [run_worker(model, devices[0], indexed)]
+    else:
+        if any(not value.startswith("cuda") for value in devices):
+            raise ValueError("multi-device rollout workers require CUDA devices")
+        primary = str(next(model.parameters()).device)
+        if torch.device(devices[0]) != torch.device(primary):
+            raise ValueError(f"first rollout device {devices[0]} must hold the policy ({primary})")
+        replicas = torch.nn.parallel.replicate(
+            model, [torch.device(value) for value in devices], detach=True)
+        shards = [indexed[index::len(devices)] for index in range(len(devices))]
+        with ThreadPoolExecutor(max_workers=len(devices), thread_name_prefix="rlvr-rollout") as pool:
+            futures = [pool.submit(run_worker, replica, worker_device, shard)
+                       for replica, worker_device, shard in zip(replicas, devices, shards) if shard]
+            results = [future.result() for future in futures]
+    elapsed = time.perf_counter() - started
+    grouped, total_tokens, engines, reasons = [], 0, set(), set()
+    for rows, tokens, worker_engines, worker_reasons in results:
+        grouped.extend(rows)
+        total_tokens += tokens
+        engines.update(worker_engines)
+        reasons.update(worker_reasons)
+    out = [rollout for _, rows in sorted(grouped) for rollout in rows]
+    stats = {"seconds": elapsed, "tokens": total_tokens,
+             "engine": ",".join(sorted(engines)),
+             "fallback_reason": "; ".join(sorted(reasons)),
+             "workers": len(devices), "devices": list(devices)}
+    stats["tokens_per_second"] = total_tokens / max(elapsed, 1e-9)
     return (out, stats) if return_stats else out
 
 
-def response_log_probs(model, rollouts: Sequence[Rollout]) -> tuple[torch.Tensor, torch.Tensor]:
-    """Differentiably score only response tokens, padding to ``[rollouts,max_response]``."""
-
+def prepare_rollout_scoring(rollouts: Sequence[Rollout], *,
+                            max_batch_tokens: int = 65_536) -> PreparedRolloutScoring:
+    """Build reusable, token-budgeted CPU tensors without touching model state."""
     if not rollouts:
         raise ValueError("at least one rollout is required")
-    device = next(model.parameters()).device
     max_response = max(len(r.response_ids) for r in rollouts)
     if max_response <= 0:
         raise ValueError("rollouts must contain at least one policy token")
-    rows, masks = [None] * len(rollouts), [None] * len(rollouts)
-    buckets = defaultdict(list)
-    for index, rollout in enumerate(rollouts):
-        buckets[len(rollout.prompt_ids) + len(rollout.response_ids)].append((index, rollout))
-    for bucket in buckets.values():
-        ids = torch.tensor([r.prompt_ids + r.response_ids for _, r in bucket],
-                           dtype=torch.long, device=device)
-        logits, targets = _logits(model(ids[:, :-1])), ids[:, 1:]
-        for row_index, (output_index, rollout) in enumerate(bucket):
+    lengths = [len(r.prompt_ids) + len(r.response_ids) for r in rollouts]
+    budget = max(max(lengths), int(max_batch_tokens))
+    ordered = sorted(range(len(rollouts)), key=lengths.__getitem__)
+    index_batches, batch = [], []
+    for index in ordered:
+        prospective = batch + [index]
+        if batch and lengths[index] * len(prospective) > budget:
+            index_batches.append(batch)
+            batch = [index]
+        else:
+            batch = prospective
+    if batch:
+        index_batches.append(batch)
+    prepared = []
+    for indices in index_batches:
+        width = max(lengths[index] for index in indices)
+        cpu_ids = torch.zeros(len(indices), width, dtype=torch.long)
+        cpu_labels = torch.full((len(indices), width - 1), -100, dtype=torch.long)
+        for row_index, output_index in enumerate(indices):
+            rollout = rollouts[output_index]
+            sequence = torch.tensor(rollout.prompt_ids + rollout.response_ids, dtype=torch.long)
+            cpu_ids[row_index, :sequence.numel()] = sequence
             start, length = len(rollout.prompt_ids) - 1, len(rollout.response_ids)
-            logp = token_log_probs(logits[row_index, start:start + length],
-                                   targets[row_index, start:start + length])
-            pad = max_response - length
-            rows[output_index] = F.pad(logp, (0, pad))
-            masks[output_index] = F.pad(torch.ones_like(logp), (0, pad))
-    assert all(row is not None for row in rows) and all(mask is not None for mask in masks)
-    return torch.stack(rows), torch.stack(masks)
+            cpu_labels[row_index, start:start + length] = sequence[1:][start:start + length]
+        if torch.cuda.is_available():
+            cpu_ids, cpu_labels = cpu_ids.pin_memory(), cpu_labels.pin_memory()
+        prepared.append((indices, cpu_ids, cpu_labels))
+    return PreparedRolloutScoring(prepared, len(rollouts), max_response)
+
+
+def response_log_probs(model, rollouts: Sequence[Rollout], *,
+                       max_batch_tokens: int = 65_536,
+                       prepared: PreparedRolloutScoring | None = None
+                       ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Differentiably score response tokens with token-budgeted padded forwards.
+
+    Right padding cannot affect earlier positions in a causal model.  Packing nearby lengths into
+    one forward avoids the previous model call per exact sequence length, while the token budget
+    bounds padding/activation memory.  Cross entropy returns only selected-token log probabilities
+    instead of materializing a full-vocabulary ``log_softmax`` tensor.
+    """
+
+    device = next(model.parameters()).device
+    prepared = prepared or prepare_rollout_scoring(
+        rollouts, max_batch_tokens=max_batch_tokens)
+    if prepared.count != len(rollouts):
+        raise ValueError("prepared rollout scoring does not match rollout count")
+    rows = torch.zeros(len(rollouts), prepared.max_response, dtype=torch.float32, device=device)
+    masks = torch.zeros_like(rows)
+    for indices, cpu_ids, cpu_labels in prepared.batches:
+        if device.type == "cuda" and not cpu_ids.is_pinned():
+            cpu_ids, cpu_labels = cpu_ids.pin_memory(), cpu_labels.pin_memory()
+        ids = cpu_ids.to(device, non_blocking=True)
+        labels = cpu_labels.to(device, non_blocking=True)
+        logits = _logits(model(ids[:, :-1]))
+        selected = -F.cross_entropy(
+            logits.reshape(-1, logits.shape[-1]), labels.reshape(-1),
+            ignore_index=-100, reduction="none").reshape_as(labels)
+        for row_index, output_index in enumerate(indices):
+            rollout = rollouts[output_index]
+            start, length = len(rollout.prompt_ids) - 1, len(rollout.response_ids)
+            rows[output_index, :length] = selected[row_index, start:start + length]
+            masks[output_index, :length] = 1
+    return rows, masks
 
 
 def grouped_metrics(rewards: torch.Tensor, group_size: int) -> dict[str, float]:
@@ -459,11 +564,11 @@ def supervised_warm_start(model, tokenizer, tasks: Sequence[RLVRTask], optimizer
     old_lrs = [group["lr"] for group in optimizer.param_groups]
     for group in optimizer.param_groups:
         group["lr"] = learning_rate * group.get("u_mup_lr_mult", 1.0)
-    losses_seen, tokens_seen, started = [], 0, time.perf_counter()
+    loss_sum, tokens_seen, started = None, 0, time.perf_counter()
     model.train()
     for _ in range(steps):
         optimizer.zero_grad(set_to_none=True)
-        losses = []
+        examples = []
         for task, answer in rng.choices(eligible, k=max(1, batch_size)):
             key = (task.id, answer)
             if key not in cache:
@@ -471,23 +576,34 @@ def supervised_warm_start(model, tokenizer, tasks: Sequence[RLVRTask], optimizer
                 response = tokenizer.encode(" " + answer) + [stop_token]
                 cache[key] = (prompt, response)
             prompt_ids, response_ids = cache[key]
-            ids = torch.tensor(prompt_ids + response_ids, dtype=torch.long, device=device)
-            logits = _logits(model(ids[:-1].unsqueeze(0)))[0]
-            start = len(prompt_ids) - 1
-            target = ids[1:]
-            losses.append(F.cross_entropy(
-                logits[start:start + len(response_ids)].float(),
-                target[start:start + len(response_ids)]))
+            examples.append((prompt_ids, response_ids))
             tokens_seen += len(response_ids)
-        loss = torch.stack(losses).mean()
+        width = max(len(prompt) + len(response) for prompt, response in examples)
+        ids = torch.zeros(len(examples), width, dtype=torch.long)
+        labels = torch.full((len(examples), width - 1), -100, dtype=torch.long)
+        for row, (prompt_ids, response_ids) in enumerate(examples):
+            sequence = torch.tensor(prompt_ids + response_ids, dtype=torch.long)
+            ids[row, :sequence.numel()] = sequence
+            start = len(prompt_ids) - 1
+            labels[row, start:start + len(response_ids)] = sequence[1:][
+                start:start + len(response_ids)]
+        target_device = next(model.parameters()).device
+        if target_device.type == "cuda":
+            ids, labels = ids.pin_memory(), labels.pin_memory()
+        ids = ids.to(target_device, non_blocking=True)
+        labels = labels.to(target_device, non_blocking=True)
+        logits = _logits(model(ids[:, :-1]))
+        loss = F.cross_entropy(logits.float().reshape(-1, logits.shape[-1]), labels.reshape(-1),
+                               ignore_index=-100)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         optimizer.step()
-        losses_seen.append(float(loss.detach()))
+        detached = loss.detach()
+        loss_sum = detached if loss_sum is None else loss_sum + detached
     for group, old_lr in zip(optimizer.param_groups, old_lrs):
         group["lr"] = old_lr
     return {"updates": steps, "tokens": tokens_seen,
-            "mean_loss": sum(losses_seen) / len(losses_seen),
+            "mean_loss": float(loss_sum / steps),
             "seconds": time.perf_counter() - started}
 
 
@@ -506,18 +622,20 @@ def promotion_decision(baseline: dict[str, float], candidate: dict[str, float], 
 def optimize_rollouts(model, optimizer, rollouts: Sequence[Rollout], rewards: torch.Tensor, *,
                       group_size: int, algorithm: str, epochs: int, clip_low: float,
                       clip_high: float, kl_coef: float, grad_clip: float,
-                      reference_model=None, token_normalizer: int | None = None) -> dict[str, float]:
+                      reference_model=None, token_normalizer: int | None = None,
+                      prepared: PreparedRolloutScoring | None = None) -> dict[str, float]:
     """Apply one grouped RLVR update and return optimization diagnostics."""
 
     device = next(model.parameters()).device
+    prepared = prepared or prepare_rollout_scoring(rollouts)
     model.eval()
     with torch.no_grad():
-        old_logp, mask = response_log_probs(model, rollouts)
+        old_logp, mask = response_log_probs(model, rollouts, prepared=prepared)
         if reference_model is None:
             reference_logp = old_logp
         else:
             reference_model.eval()
-            reference_logp, _ = response_log_probs(reference_model, rollouts)
+            reference_logp, _ = response_log_probs(reference_model, rollouts, prepared=prepared)
     rewards = rewards.to(device)
     group_ids = torch.arange(len(rollouts) // group_size, device=device).repeat_interleave(group_size)
     advantages, active = group_advantages(rewards, group_ids,
@@ -533,7 +651,7 @@ def optimize_rollouts(model, optimizer, rollouts: Sequence[Rollout], rewards: to
     model.train()
     for _ in range(max(1, int(epochs))):
         optimizer.zero_grad(set_to_none=True)
-        logp, current_mask = response_log_probs(model, rollouts)
+        logp, current_mask = response_log_probs(model, rollouts, prepared=prepared)
         out = policy_loss(logp, old_logp, rewards, group_ids, current_mask,
                           algorithm=algorithm, clip_low=clip_low, clip_high=clip_high,
                           reference_logp=reference_logp, kl_coef=kl_coef,
@@ -658,6 +776,8 @@ def run(args) -> dict[str, Any]:
     external_command = shlex.split(args.verifier_command) if args.verifier_command else []
     if any(t.verifier.get("kind") == "external" for t in all_tasks) and not external_command:
         raise ValueError("external verifier tasks require --verifier-command")
+    rollout_devices = tuple(value.strip() for value in args.rollout_devices.split(",")
+                            if value.strip())
 
     arch = source_blob.get("arch") or {}
     u_mup_cfg = None
@@ -719,6 +839,7 @@ def run(args) -> dict[str, Any]:
             prior_rollout_tokens + final_eval_reserve > args.max_rollout_tokens):
         raise ValueError("remaining rollout budget cannot reserve one held-out evaluation")
     training_started = time.time()
+    verifier_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rlvr-verifier")
     if args.resume:
         sft = dict(prior_manifest.get("sft") or
                    {"updates": 0, "tokens": 0, "mean_loss": 0.0, "seconds": 0.0})
@@ -793,10 +914,14 @@ def run(args) -> dict[str, Any]:
             max_new=args.max_new, temperature=args.temperature,
             top_p=args.top_p, top_k=args.top_k, stop_token=args.stop_token,
             device=args.device, seed=args.seed + step * 1_000_003,
-            engine=args.rollout_engine, return_stats=True)
+            engine=args.rollout_engine, return_stats=True,
+            rollout_devices=rollout_devices)
         total_rollout_tokens += int(generation["tokens"])
-        rewards, verifier_details = verify_rollouts(rollouts, external_command=external_command,
-                                                    timeout=args.verifier_timeout)
+        verify_future = verifier_pool.submit(
+            verify_rollouts, rollouts, external_command=external_command,
+            timeout=args.verifier_timeout)
+        prepared_scoring = prepare_rollout_scoring(rollouts)
+        rewards, verifier_details = verify_future.result()
         lr = args.lr * min(1.0, (step + 1) / max(args.warmup, 1))
         for group in optimizer.param_groups:
             group["lr"] = lr * group.get("u_mup_lr_mult", 1.0)
@@ -806,7 +931,8 @@ def run(args) -> dict[str, Any]:
                                         epochs=args.epochs, clip_low=args.clip_low,
                                         clip_high=clip_high, kl_coef=(args.kl_coef if args.reference != "none" else 0),
                                         grad_clip=args.grad_clip, reference_model=ref,
-                                        token_normalizer=args.max_new)
+                                        token_normalizer=args.max_new,
+                                        prepared=prepared_scoring)
         metrics = {**grouped_metrics(rewards, args.group_size), **diagnostics}
         updates_applied += int(diagnostics["update_applied"] > 0)
         steps_completed = step + 1
@@ -846,6 +972,7 @@ def run(args) -> dict[str, Any]:
 
     if training_status == "running":
         training_status = "complete"
+    verifier_pool.shutdown(wait=True, cancel_futures=True)
     if (last_eval_step != steps_completed or
             (sft_ran and steps_completed == start_step) or not preflight["passed"]):
         last_eval, _ = evaluate_policy(model, vocab, fixed_eval, group_size=args.eval_group_size,
@@ -914,6 +1041,8 @@ def main() -> None:
     ap.add_argument("--epochs", type=int, default=1)
     ap.add_argument("--max-new", type=int, default=64)
     ap.add_argument("--rollout-engine", choices=["auto", "recurrent", "batched"], default="auto")
+    ap.add_argument("--rollout-devices", default="",
+                    help="optional comma-separated CUDA workers; first device must equal --device")
     ap.add_argument("--temperature", type=float, default=1.0,
                     help="1.0 is strictly on-policy; other values deliberately temper the behavior policy")
     ap.add_argument("--eval-temperature", type=float, default=0.7)

@@ -97,6 +97,35 @@ func (d *DB) RunSummaries(nowTs float64) ([]RunSummary, error) {
 	return out, nil
 }
 
+// LatestCodecRelByRun returns the newest non-null codec metric for every run in
+// one query. The conversion board calls this once per shared tick instead of
+// issuing KPI/count/stat queries independently for each of 32 layers.
+func (d *DB) LatestCodecRelByRun() (map[string]*float64, error) {
+	rows, err := d.Query(`SELECT r.name,
+		(SELECT json_extract(t.extra_json,'$.codec_rel')
+		 FROM train_events t WHERE t.run_id=r.id
+		   AND json_extract(t.extra_json,'$.codec_rel') IS NOT NULL
+		 ORDER BY t.step DESC LIMIT 1)
+		FROM runs r`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]*float64{}
+	for rows.Next() {
+		var name string
+		var value sql.NullFloat64
+		if err := rows.Scan(&name, &value); err != nil {
+			return nil, err
+		}
+		if value.Valid {
+			v := value.Float64
+			out[name] = &v
+		}
+	}
+	return out, rows.Err()
+}
+
 func (d *DB) eachCount(query string, byID map[int64]*RunSummary, set func(*RunSummary, int)) error {
 	rows, err := d.Query(query)
 	if err != nil {

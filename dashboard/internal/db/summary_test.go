@@ -24,7 +24,7 @@ func TestRunSummaryRollups(t *testing.T) {
 	if err := b.Train(rid, TrainRow{Step: 1, Loss: ptr(2), TS: 11}); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Train(rid, TrainRow{Step: 2, Loss: ptr(1), TS: 12}); err != nil {
+	if err := b.Train(rid, TrainRow{Step: 2, Loss: ptr(1), Extra: `{"codec_rel":0.125}`, TS: 12}); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.Eval(rid, EvalRow{Step: 2, PPL: ptr(4), Top1: ptr(.2), Extra: `{"h4_top1":0.1}`, TS: 12}); err != nil {
@@ -62,5 +62,14 @@ func TestRunSummaryRollups(t *testing.T) {
 	}
 	if s.BestPPL == nil || *s.BestPPL != 3 || !s.HasHorizons {
 		t.Fatalf("bad best/horizon: %+v", s)
+	}
+	codec, err := d.LatestCodecRelByRun()
+	if err != nil || codec["r1"] == nil || *codec["r1"] != .125 {
+		t.Fatalf("bad codec batch query: codec=%v err=%v", codec, err)
+	}
+	health, err := d.RecentTrainStatsByName([]string{"r1", "missing"}, 50)
+	if err != nil || health["r1"].RunID != rid || health["r1"].Stats.N != 2 ||
+		health["r1"].Stats.LastStep != 2 || health["r1"].Stats.CodecRel == nil {
+		t.Fatalf("bad batched health query: health=%v err=%v", health, err)
 	}
 }

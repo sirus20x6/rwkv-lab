@@ -1,7 +1,8 @@
 """Fast online-suffix-automaton retrieval for ROSA — the v2 kernel.
 
-Replaces rosa.py's naive O(R*T^2) Python reference with an O(R*T) amortized,
-numba-jitted ONLINE suffix automaton, run in parallel over routes. This is what
+Replaces rosa.py's naive O(R*T^2) Python reference with O(R*T) amortized online
+suffix automata: a device-native Numba-CUDA kernel for GPU training and a parallel
+Numba CPU oracle/fallback. This is what
 makes ROSA runnable at real scale (hidden C=4096 -> R=C/M routes, T=1024, several
 layers): pure Python was ~1e13 symbol-ops/forward (days); this is milliseconds.
 
@@ -20,13 +21,18 @@ CONVENTION — firstpos (earliest) vs the paper's most-recent:
   suffix match*; the model learns to use whichever source. A most-recent variant
   would need a per-prefix offline suffix-link-tree pass (deferred).
 """
+from collections import OrderedDict
+import threading
+
 import numpy as np
 
 try:
-    from numba import njit, prange
+    from numba import cuda, njit, prange
     HAVE_NUMBA = True
+    HAVE_CUDA = cuda.is_available()
 except Exception:                                              # pragma: no cover
     HAVE_NUMBA = False
+    HAVE_CUDA = False
 
     def njit(*args, **kwargs):
         if args and callable(args[0]):
@@ -36,6 +42,164 @@ except Exception:                                              # pragma: no cove
         return deco
 
     prange = range
+
+
+if HAVE_CUDA:
+    @cuda.jit(device=True, inline=True)
+    def _cuda_match_step(strans, slink, slen, route, state, mlen, symbol):
+        while state != 0 and strans[route, state, symbol] == -1:
+            state = slink[route, state]
+            mlen = slen[route, state]
+        nxt = strans[route, state, symbol]
+        if nxt != -1:
+            return nxt, mlen + 1
+        return 0, 0
+
+
+    @cuda.jit
+    def _cuda_retrieve_all_cf(aq, ak, K, M, tau, tau0, tau1,
+                              slen, slink, sfirst, strans):
+        """ROSA online SAM (arXiv:2602.02499), one independent route per GPU thread."""
+        route = cuda.grid(1)
+        B, T, R = aq.shape
+        routes = B * R
+        if route >= routes:
+            return
+        b, r = route // R, route % R
+        maxs = 2 * T + 5
+        for state in range(maxs):
+            slen[route, state] = 0
+            slink[route, state] = -1
+            sfirst[route, state] = 0
+            for symbol in range(K):
+                strans[route, state, symbol] = -1
+        size, last, mstate, mlen = 1, 0, 0, 0
+        for t in range(T):
+            tau[b, r, t] = -1
+            for j in range(M):
+                tau0[b, r, t, j] = -1
+                tau1[b, r, t, j] = -1
+
+            symbol = aq[b, t, r]
+            old_state, old_len = mstate, mlen
+            mstate, mlen = _cuda_match_step(
+                strans, slink, slen, route, mstate, mlen, symbol)
+            if mlen > 0:
+                source = sfirst[route, mstate] + 1
+                if source < t:
+                    tau[b, r, t] = source
+
+            for j in range(M):
+                bit = 1 << j
+                symbol0 = symbol ^ (symbol & bit)
+                symbol1 = symbol | bit
+                state0, len0 = _cuda_match_step(
+                    strans, slink, slen, route, old_state, old_len, symbol0)
+                state1, len1 = _cuda_match_step(
+                    strans, slink, slen, route, old_state, old_len, symbol1)
+                if len0 > 0:
+                    source0 = sfirst[route, state0] + 1
+                    if source0 < t:
+                        tau0[b, r, t, j] = source0
+                if len1 > 0:
+                    source1 = sfirst[route, state1] + 1
+                    if source1 < t:
+                        tau1[b, r, t, j] = source1
+
+            key_symbol = ak[b, t, r]
+            cur = size
+            size += 1
+            slen[route, cur] = slen[route, last] + 1
+            sfirst[route, cur] = t
+            slink[route, cur] = -1
+            parent = last
+            while parent != -1 and strans[route, parent, key_symbol] == -1:
+                strans[route, parent, key_symbol] = cur
+                parent = slink[route, parent]
+            if parent == -1:
+                slink[route, cur] = 0
+            else:
+                target = strans[route, parent, key_symbol]
+                if slen[route, parent] + 1 == slen[route, target]:
+                    slink[route, cur] = target
+                else:
+                    clone = size
+                    size += 1
+                    slen[route, clone] = slen[route, parent] + 1
+                    slink[route, clone] = slink[route, target]
+                    sfirst[route, clone] = sfirst[route, target]
+                    for k in range(K):
+                        strans[route, clone, k] = strans[route, target, k]
+                    while parent != -1 and strans[route, parent, key_symbol] == target:
+                        strans[route, parent, key_symbol] = clone
+                        parent = slink[route, parent]
+                    slink[route, target] = clone
+                    slink[route, cur] = clone
+            last = cur
+
+
+_CUDA_WORKSPACES = OrderedDict()
+_CUDA_WORKSPACE_LOCK = threading.Lock()
+_CUDA_WORKSPACE_LIMIT = 4
+
+
+def cuda_sam_workspace_bytes(batch: int, length: int, routes: int, alphabet: int) -> int:
+    """Bytes required for the four int32 online-SAM workspace tables."""
+    states = 2 * int(length) + 5
+    route_count = int(batch) * int(routes)
+    return route_count * states * (3 + int(alphabet)) * 4
+
+
+def _cuda_workspace(torch, *, device, stream_id: int, routes: int, states: int, alphabet: int):
+    key = (str(device), int(stream_id), int(routes), int(states), int(alphabet))
+    with _CUDA_WORKSPACE_LOCK:
+        workspace = _CUDA_WORKSPACES.pop(key, None)
+        if workspace is None:
+            base = torch.empty((routes, states), dtype=torch.int32, device=device)
+            workspace = (base, torch.empty_like(base), torch.empty_like(base),
+                         torch.empty((routes, states, alphabet), dtype=torch.int32, device=device))
+        _CUDA_WORKSPACES[key] = workspace
+        while len(_CUDA_WORKSPACES) > _CUDA_WORKSPACE_LIMIT:
+            _CUDA_WORKSPACES.popitem(last=False)
+        return workspace
+
+
+def cuda_sam_retrieve_cf(aq, ak, K, M):
+    """Device-native ROSA retrieval on PyTorch's current CUDA stream.
+
+    The workspace stores the independent online automaton for each route.  Outputs match
+    :func:`sam_retrieve_cf`; the CPU/Numba implementation remains the golden fallback.
+    """
+    if not HAVE_CUDA or not getattr(aq, "is_cuda", False):
+        raise RuntimeError("CUDA suffix-automaton retrieval is unavailable")
+    import torch
+    aq = aq.to(dtype=torch.int32).contiguous()
+    ak = ak.to(dtype=torch.int32).contiguous()
+    B, T, R = aq.shape
+    routes, maxs = B * R, 2 * T + 5
+    required = cuda_sam_workspace_bytes(B, T, R, K)
+    free_bytes, _ = torch.cuda.mem_get_info(aq.device)
+    if required > int(free_bytes * 0.5):
+        raise RuntimeError(
+            f"ROSA CUDA SAM needs {required / 2**30:.2f} GiB workspace, more than half of "
+            f"the currently free {free_bytes / 2**30:.2f} GiB; reduce context/batch/routes")
+    tau = torch.empty((B, R, T), dtype=torch.long, device=aq.device)
+    tau0 = torch.empty((B, R, T, M), dtype=torch.long, device=aq.device)
+    tau1 = torch.empty_like(tau0)
+    current_stream = torch.cuda.current_stream(aq.device)
+    slen, slink, sfirst, strans = _cuda_workspace(
+        torch, device=aq.device, stream_id=current_stream.cuda_stream,
+        routes=routes, states=maxs, alphabet=K)
+    stream = cuda.external_stream(current_stream.cuda_stream)
+    # Each route performs a long sequential SAM update and uses substantial register state; small
+    # blocks distribute route work across more SMs than the usual elementwise-kernel block size.
+    threads = 8
+    _cuda_retrieve_all_cf[(routes + threads - 1) // threads, threads, stream](
+        cuda.as_cuda_array(aq), cuda.as_cuda_array(ak), K, M,
+        cuda.as_cuda_array(tau), cuda.as_cuda_array(tau0), cuda.as_cuda_array(tau1),
+        cuda.as_cuda_array(slen), cuda.as_cuda_array(slink), cuda.as_cuda_array(sfirst),
+        cuda.as_cuda_array(strans))
+    return tau, tau0, tau1
 
 
 @njit(cache=True)

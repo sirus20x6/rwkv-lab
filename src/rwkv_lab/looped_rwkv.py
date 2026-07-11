@@ -486,6 +486,9 @@ class LoopedRWKV(nn.Module):
                 if loop_trace is not None:
                     loop_trace.append(out.detach())
                 fp_best, fp_bad = float("inf"), 0          # FPRM damped-patience state
+                # Dynamic early exit needs one host decision per pass. Keep training at static
+                # depth (compile/CUDA-graph friendly); apply convergence exit during inference.
+                dynamic_halt = self.fixed_point_halt and not torch.is_grad_enabled()
                 if self.fixed_point_halt:
                     self.last_halt_iters = self.n_loops
                 for i in range(1, self.n_loops):
@@ -504,7 +507,7 @@ class LoopedRWKV(nn.Module):
                             + self._gate(i).to(inc.dtype) * inc
                     else:
                         out = out + self._gate(i).to(inc.dtype) * inc
-                    if self.fixed_point_halt:                 # FPRM: fixed-point-residual halting
+                    if dynamic_halt:                          # FPRM: inference-time residual halting
                         res = float((out - prev).norm() / (out.norm() + 1e-6))
                         if res < fp_best - 1e-6:
                             fp_best, fp_bad = res, 0
