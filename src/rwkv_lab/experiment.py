@@ -65,6 +65,10 @@ LEVERS = {
     "mem_miras":     dict(online_memory=True, online_memory_mode="miras"),
     "mem_atlas":     dict(online_memory=True, online_memory_mode="atlas"),
     "mem_nested":    dict(online_memory=True, online_memory_mode="nested"),
+    # QRWKV7/Recursal balanced state update for GroupNorm stability at scale:
+    # https://huggingface.co/recursal/QRWKV7-7B-Instruct/blob/main/modeling_rwkv7qwen2.py
+    "balance_state": dict(balance_state=True),
+    "state_offset":  dict(state_offset=True, state_offset_interval=1),
     "nvfp4":         dict(nvfp4=True),
     "nvfp4_rht":     dict(nvfp4=True, nvfp4_rht=True),
     "nvfp4_native":  dict(nvfp4=True, nvfp4_rht=True,
@@ -74,7 +78,7 @@ LEVERS = {
 # Levers whose objective needs a real token FUTURE — only valid on the LM path (rwkv_pretrain),
 # not the synthetic diagnostic tasks. The board disables these unless an LM corpus is selected.
 LM_ONLY = ("top", "lmtp", "bst", "jtp", "umup_256", "mem_titans", "mem_miras",
-           "mem_atlas", "mem_nested", "nvfp4", "nvfp4_rht", "nvfp4_native")
+           "mem_atlas", "mem_nested", "state_offset", "nvfp4", "nvfp4_rht", "nvfp4_native")
 
 _AUX_KEYS = ("nextlat_weight", "top_weight", "lmtp_weight", "bst_weight", "jtp_weight")
 

@@ -21,6 +21,8 @@ from rwkv_lab.quantization import qualify_accelerated_nf4
 from rwkv_lab.rosa_sam import (HAVE_CUDA as HAVE_CUDA_ROSA,
                                cuda_sam_retrieve_cf, cuda_sam_workspace_bytes,
                                sam_retrieve_cf)
+from rwkv_lab.triangular_delta import (qualify_triangular_backend,
+                                       stable_triangular_inverse)
 
 
 def environment_report(device: str) -> dict:
@@ -243,6 +245,13 @@ def qualification_suite(*, device: str = "auto", compile_backend: str = "inducto
     online_memory = qualify_compiled_online_memory(
         memory, memory_sample, compile_backend=compile_backend, repeats=repeats,
         tolerance=(2e-2 if dtype == torch.bfloat16 else 2e-5))
+    triangular_sample = torch.eye(64, device=selected, dtype=dtype).repeat(4, 1, 1)
+    triangular_sample.add_(torch.tril(
+        torch.randn_like(triangular_sample) * 0.01, diagonal=-1))
+    triangular = qualify_triangular_backend(
+        triangular_sample,
+        lambda value: stable_triangular_inverse(value, method="neumann"),
+        repeats=repeats, tolerance=(2e-2 if dtype == torch.bfloat16 else 2e-4))
     def representative_training_step():
         memory.zero_grad(set_to_none=True)
         sample = memory_sample.detach().requires_grad_(True)
@@ -260,6 +269,7 @@ def qualification_suite(*, device: str = "auto", compile_backend: str = "inducto
             model, prompt_ids, device=device, max_new=max_new, repeats=repeats)
 
     reports = {"nf4": nf4, "nvfp4": nvfp4, "rosa": rosa,
+               "triangular_delta": triangular,
                "online_memory": online_memory, "recurrent_decode": recurrent,
                "eagle3": {
                    "available": True, "adopted": False,

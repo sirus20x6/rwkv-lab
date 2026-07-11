@@ -55,13 +55,15 @@ var knownLevers = []leverDef{
 	{"mem_miras", "MIRAS cosine-bias online memory (arXiv:2504.13173; scratch LM)", true},
 	{"mem_atlas", "ATLAS windowed online-memory updates (arXiv:2505.23735; scratch LM)", true},
 	{"mem_nested", "Nested Learning controller for update rate + retention (arXiv:2512.24695; scratch LM)", true},
+	{"balance_state", "QRWKV7 balanced write/forget recurrence for GroupNorm stability at scale (Recursal)", true},
+	{"state_offset", "State-offset Tuning — frozen base + FP32 recurrent offsets at every token (ACL 2025)", true},
 	{"nvfp4", "simulated NVFP4 E2M1 block QAT (arXiv:2509.25149; correctness path, not native throughput)", true},
 	{"nvfp4_rht", "simulated NVFP4 + randomized Hadamard transform (TetraJet-v2, arXiv:2510.27527)", true},
 	{"nvfp4_native", "native Blackwell NVFP4 via Transformer Engine; parity + speed gate (arXiv:2509.25149)", true},
 }
 
 func isNewModelLever(name string) bool {
-	return name == "umup_256" || strings.HasPrefix(name, "mem_") || strings.HasPrefix(name, "nvfp4")
+	return name == "umup_256" || name == "balance_state" || name == "state_offset" || strings.HasPrefix(name, "mem_") || strings.HasPrefix(name, "nvfp4")
 }
 
 const lmTask = "local-lm"
@@ -664,7 +666,7 @@ func (s *Server) handleLaunchExperiment(w http.ResponseWriter, r *http.Request) 
 	}
 	init := str("init", "scratch")
 	if newModelPicked && init != "scratch" {
-		toastErr(sse, "launch: u-muP, online memory, and NVFP4 comparison arms require from-scratch initialization")
+		toastErr(sse, "launch: u-muP, online memory, balance-state, and NVFP4 arms require from-scratch initialization")
 		return
 	}
 	if umupPicked && str("optimizer", "adamw") == "muon" {

@@ -63,6 +63,15 @@ def build_from_ckpt(ckpt_path: str, device: str = "cuda", use_ema: bool = False,
                    deepembed=bool(arch.get("deepembed")), de_dim=int(arch.get("de_dim") or 0),
                    de_mode=arch.get("de_mode") or "out", de_shift=bool(arch.get("de_shift")),
                    de_emb_res=bool(arch.get("de_emb_res")))
+    if arch.get("byte_aware"):
+        from rwkv_lab.tokenizer_experiments import install_byte_aware_embedding
+        # The checkpoint carries the byte lookup buffers; construct their
+        # geometry here, then load the exact saved tables below.
+        install_byte_aware_embedding(m, {}, max_bytes=int(arch.get("byte_aware_max_bytes") or 16),
+                                     byte_dim=int(arch.get("byte_aware_dim") or 0))
+    if arch.get("state_offset"):
+        from rwkv_lab.state_tuning import install_state_offset_adapter
+        install_state_offset_adapter(m, interval=int(arch.get("state_offset_interval") or 1))
     if arch.get("online_memory"):
         from rwkv_lab.online_memory import install_online_memory
         install_online_memory(m, d_memory=(int(arch.get("online_memory_dim") or 0) or None),

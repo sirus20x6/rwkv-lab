@@ -81,6 +81,21 @@ gate. This is the UI counterpart to the fail-closed parity-before-speed policy u
 [NVFP4](https://arxiv.org/abs/2509.25149), TorchAO NF4, and compiled serving paths; it does not install
 a backend, promote a checkpoint, or publish an artifact.
 
+The **research capability inventory** exposes the readiness and entry point of the community-derived
+reference paths: Recursal `balance_state`, rwkv-rlhf/OpenMOSE state adapters,
+[AUXStar/RWKV-Server](https://github.com/AUXStar/RWKV-Server)-inspired state paging,
+[stable triangular delta inversion](https://arxiv.org/abs/2605.21325),
+[offline sleep consolidation](https://arxiv.org/abs/2605.26099),
+[Reasoning Cache](https://arxiv.org/abs/2602.03773),
+[B³D-RWKV](https://arxiv.org/abs/2605.25969), and
+[HiLS-Attention](https://arxiv.org/abs/2607.02980). The panel labels portable oracles separately
+from dashboard launchers and qualified production paths. It also inventories the deterministic
+[decoding evaluation](https://arxiv.org/abs/2402.06925) matrix, launchable
+[State-offset Tuning](https://arxiv.org/abs/2503.03499), routed state banks, byte-aware and
+[SuperBPE](https://arxiv.org/abs/2503.13423) experiment boundaries, promotion-gated overnight
+adapter consolidation, and typed allowlisted decoding policies. Community-only proposals are
+explicitly labeled as such rather than presented as established paper results.
+
 ## Why v2
 
 - Real SQLite datastore (v1 re-parsed JSONL on every request).

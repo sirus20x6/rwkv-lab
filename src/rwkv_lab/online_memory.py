@@ -10,6 +10,8 @@ Primary references:
   Time", arXiv:2505.23735, https://arxiv.org/abs/2505.23735.
 * Behrouz et al., "Nested Learning: The Illusion of Deep Learning
   Architectures", arXiv:2512.24695, https://arxiv.org/abs/2512.24695.
+* Lee et al., "Do Language Models Need Sleep? Offline Recurrence for Improved
+  Online Inference", arXiv:2605.26099, https://arxiv.org/abs/2605.26099.
 
 The module implements their shared model-side mechanism: an associative-memory
 matrix is optimized *inside the forward pass*.  MIRAS choices are explicit:
@@ -152,6 +154,56 @@ class OnlineAssociativeMemory(nn.Module):
             }
         next_state = OnlineMemoryState(memory, mom, st.steps + T, tuple(history))
         return (out, next_state) if return_state else out
+
+    def sleep_consolidate(self, context: torch.Tensor, state: OnlineMemoryState | None = None,
+                          *, passes: int = 1, clear_history: bool = True) -> OnlineMemoryState:
+        """Run bounded offline recurrent consolidation without changing wake outputs.
+
+        Inspired by Lee et al. (2026), https://arxiv.org/abs/2605.26099. Their
+        sleep phase repeatedly revisits recent context to update persistent fast
+        weights, shifting extra compute away from latency-sensitive wake inference.
+        This reference implementation reuses the same cited local update rule as
+        the live memory and returns an explicit state; callers own scheduling and
+        budgets. ``passes=0`` is an exact no-op.
+        """
+        if passes < 0:
+            raise ValueError("sleep consolidation passes must be non-negative")
+        current = state or self.initial_state(context.shape[0], device=context.device)
+        for _ in range(int(passes)):
+            _, current = self(context, current, return_state=True, record_stats=False)
+        if clear_history and current.history:
+            current = OnlineMemoryState(current.memory, current.momentum, current.steps, ())
+        return current
+
+
+class SleepConsolidator:
+    """Bounded context buffer and scheduler for offline memory consolidation."""
+
+    def __init__(self, memory: OnlineAssociativeMemory, *, interval: int = 1024,
+                 passes: int = 2, max_context: int = 4096):
+        if interval < 1 or passes < 1 or max_context < 1:
+            raise ValueError("sleep interval, passes, and context bound must be positive")
+        self.memory, self.interval, self.passes = memory, int(interval), int(passes)
+        self.max_context = int(max_context)
+        self._chunks: list[torch.Tensor] = []
+        self._tokens = 0
+
+    def observe(self, hidden: torch.Tensor) -> None:
+        self._chunks.append(hidden.detach())
+        self._tokens += hidden.shape[1]
+        while sum(chunk.shape[1] for chunk in self._chunks) > self.max_context:
+            self._chunks.pop(0)
+
+    def due(self) -> bool:
+        return self._tokens >= self.interval and bool(self._chunks)
+
+    def consolidate(self, state: OnlineMemoryState | None = None) -> OnlineMemoryState:
+        if not self._chunks:
+            raise ValueError("sleep consolidator has no observed context")
+        context = torch.cat(self._chunks, dim=1)[:, -self.max_context:]
+        result = self.memory.sleep_consolidate(context, state, passes=self.passes)
+        self._chunks.clear(); self._tokens = 0
+        return result
 
 
 def install_online_memory(model: nn.Module, **kwargs) -> OnlineAssociativeMemory:
