@@ -284,16 +284,21 @@ def sample_response(model, prompt_ids: Sequence[int], *, max_new: int, temperatu
     if not prompt_ids:
         raise ValueError("tokenized prompt is empty")
     generator = torch.Generator(device=device).manual_seed(int(seed))
-    tokens = torch.tensor([list(prompt_ids)], dtype=torch.long, device=device)
+    prompt = torch.tensor([list(prompt_ids)], dtype=torch.long, device=device)
+    tokens = torch.empty((1, len(prompt_ids) + max(1, int(max_new))),
+                         dtype=torch.long, device=device)
+    tokens[:, :len(prompt_ids)] = prompt
+    length = len(prompt_ids)
     response = []
     for _ in range(max(1, int(max_new))):
-        logits = _logits(model(tokens))[0, -1]
+        logits = _logits(model(tokens[:, :length]))[0, -1]
         nxt = _sample_token(logits, temperature=temperature, top_p=top_p,
                             top_k=top_k, generator=generator)
         response.append(nxt)
         if nxt == stop_token:
             break
-        tokens = torch.cat((tokens, tokens.new_tensor([[nxt]])), dim=1)
+        tokens[0, length] = nxt
+        length += 1
     return response
 
 
@@ -331,14 +336,21 @@ def sample_response_group(model, prompt_ids: Sequence[int], *, count: int, max_n
     prompt = torch.tensor([list(prompt_ids)], dtype=torch.long, device=device).expand(count, -1)
     responses: list[list[int]] = [[] for _ in range(count)]
     finished = [False] * count
-    tokens, state = prompt, None
+    if chosen == "batched":
+        tokens = torch.empty((count, len(prompt_ids) + max(1, int(max_new))),
+                             dtype=torch.long, device=device)
+        tokens[:, :len(prompt_ids)] = prompt
+        length = len(prompt_ids)
+    else:
+        tokens, length = prompt, len(prompt_ids)
+    state = None
     started = time.perf_counter()
     if chosen == "recurrent":
         logits, state = model.forward_recurrent(tokens)
         next_logits = logits[:, -1]
     for step in range(max(1, int(max_new))):
         if chosen == "batched":
-            next_logits = _logits(model(tokens))[:, -1]
+            next_logits = _logits(model(tokens[:, :length]))[:, -1]
         next_tokens = []
         for row in range(count):
             if finished[row]:
@@ -357,7 +369,8 @@ def sample_response_group(model, prompt_ids: Sequence[int], *, count: int, max_n
             logits, state = model.forward_recurrent(token_column, state)
             next_logits = logits[:, -1]
         else:
-            tokens = torch.cat((tokens, token_column), dim=1)
+            tokens[:, length:length + 1] = token_column
+            length += 1
     elapsed = time.perf_counter() - started
     generated = sum(len(row) for row in responses)
     return responses, {"engine": chosen, "fallback_reason": reason, "seconds": elapsed,
@@ -463,7 +476,7 @@ def supervised_warm_start(model, tokenizer, tasks: Sequence[RLVRTask], optimizer
     model.train()
     for _ in range(steps):
         optimizer.zero_grad(set_to_none=True)
-        losses = []
+        examples = []
         for task, answer in rng.choices(eligible, k=max(1, batch_size)):
             key = (task.id, answer)
             if key not in cache:
@@ -471,15 +484,21 @@ def supervised_warm_start(model, tokenizer, tasks: Sequence[RLVRTask], optimizer
                 response = tokenizer.encode(" " + answer) + [stop_token]
                 cache[key] = (prompt, response)
             prompt_ids, response_ids = cache[key]
-            ids = torch.tensor(prompt_ids + response_ids, dtype=torch.long, device=device)
-            logits = _logits(model(ids[:-1].unsqueeze(0)))[0]
-            start = len(prompt_ids) - 1
-            target = ids[1:]
-            losses.append(F.cross_entropy(
-                logits[start:start + len(response_ids)].float(),
-                target[start:start + len(response_ids)]))
+            examples.append((prompt_ids, response_ids))
             tokens_seen += len(response_ids)
-        loss = torch.stack(losses).mean()
+        width = max(len(prompt) + len(response) for prompt, response in examples)
+        ids = torch.zeros(len(examples), width, dtype=torch.long, device=device)
+        labels = torch.full((len(examples), width - 1), -100,
+                            dtype=torch.long, device=device)
+        for row, (prompt_ids, response_ids) in enumerate(examples):
+            sequence = torch.tensor(prompt_ids + response_ids, dtype=torch.long, device=device)
+            ids[row, :sequence.numel()] = sequence
+            start = len(prompt_ids) - 1
+            labels[row, start:start + len(response_ids)] = sequence[1:][
+                start:start + len(response_ids)]
+        logits = _logits(model(ids[:, :-1]))
+        loss = F.cross_entropy(logits.float().reshape(-1, logits.shape[-1]), labels.reshape(-1),
+                               ignore_index=-100)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         optimizer.step()

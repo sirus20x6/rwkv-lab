@@ -1,10 +1,9 @@
 """Sample text from a rwkv_pretrain checkpoint — the lab's train→inspect closer.
 
-Full-recompute decoding: each new token re-runs the whole prefix through the normal training
-forward. That is O(T²) but lab models are tiny (ms per forward), and it makes every lever correct
-for free — seed-chain re-chains, DeepEmbed re-gates, and Engram's suffix-automaton recall re-runs
-over the grown sequence (including the just-generated tokens, so the copy head can point at them).
-No per-layer streaming-state API needed.
+``--engine auto`` uses exact constant-state RWKV decoding for compatible checkpoints. Experimental
+levers without a causal state contract fall back to full-prefix recomputation: seed-chain re-chains,
+Engram re-runs recall over generated history, and other levers retain their training semantics. The
+JSON output records the selected engine, fallback reason, elapsed time, and tokens/s.
 
 Tokenizer: encode shells out to ztok (its trie handles the RWKV world-vocab .txt); decode parses
 the vocab file locally (`idx 'literal' bytelen` per line → id→bytes table).
@@ -21,6 +20,7 @@ import ast
 import json
 import os
 import subprocess
+import time
 import torch
 
 ZTOK = os.environ.get("ZTOK", "/thearray/git/ztok/zig-out/bin/ztok")
@@ -73,7 +73,9 @@ def build_from_ckpt(ckpt_path: str, device: str = "cuda", use_ema: bool = False,
     m = m.to(device, torch.bfloat16)
     if arch.get("nvfp4"):
         from rwkv_lab.nvfp4 import convert_to_nvfp4_training
-        convert_to_nvfp4_training(m, rht=bool(arch.get("nvfp4_rht")))
+        convert_to_nvfp4_training(
+            m, rht=bool(arch.get("nvfp4_rht")),
+            backend=arch.get("nvfp4_backend") or "fake")
     if arch.get("engram"):
         enable_engram(m, 65536, arch["d_model"], arch["head_size"], arch["n_layers"],
                       loop_count=(arch.get("loop_kw") or {}).get("n_loops", 1),
@@ -94,37 +96,96 @@ def build_from_ckpt(ckpt_path: str, device: str = "cuda", use_ema: bool = False,
     return m, blob
 
 
+def _select_engine(model, requested: str) -> tuple[str, str]:
+    if requested not in ("auto", "recurrent", "prefix"):
+        raise ValueError("generation engine must be auto, recurrent, or prefix")
+    reason = "model does not expose forward_recurrent"
+    if hasattr(model, "recurrent_incompatibility"):
+        reason = model.recurrent_incompatibility() or ""
+    available = hasattr(model, "forward_recurrent") and not reason
+    if requested == "recurrent" and not available:
+        raise ValueError(f"recurrent generation unavailable: {reason}")
+    if requested == "auto":
+        return ("recurrent", "native constant-size recurrent state") if available else ("prefix", reason)
+    return requested, "native constant-size recurrent state" if requested == "recurrent" else reason
+
+
+def _sample_logits(logits: torch.Tensor, *, temperature: float, top_p: float,
+                   top_k: int) -> int:
+    logits = logits.float().clone()
+    logits[0] = -float("inf")                    # PAD is never a real continuation
+    if temperature <= 0:
+        return int(logits.argmax())
+    logits = logits / temperature
+    if top_k > 0:
+        kth = logits.topk(min(top_k, logits.numel())).values[-1]
+        logits = logits.masked_fill(logits < kth, -float("inf"))
+    if 0.0 < top_p < 1.0:
+        probs, idx = logits.softmax(-1).sort(descending=True)
+        keep = int((probs.cumsum(-1) < top_p).sum()) + 1
+        filtered = torch.full_like(logits, -float("inf"))
+        filtered[idx[:keep]] = logits[idx[:keep]]
+        logits = filtered
+    return int(torch.multinomial(logits.softmax(-1), 1))
+
+
 @torch.no_grad()
-def sample(model, ids: list[int], *, max_new: int = 200, temperature: float = 0.8,
-           top_p: float = 0.95, top_k: int = 0, stop_at_sep: bool = True,
-           device: str = "cuda", seed: int | None = None) -> list[int]:
-    """Autoregressive sampling by full-prefix recompute. Returns only the NEW token ids."""
+def sample_with_stats(model, ids: list[int], *, max_new: int = 200,
+                      temperature: float = 0.8, top_p: float = 0.95,
+                      top_k: int = 0, stop_at_sep: bool = True,
+                      device: str = "cuda", seed: int | None = None,
+                      engine: str = "auto") -> tuple[list[int], dict]:
+    """Decode through the exact recurrent path when qualified, else full-prefix."""
+
+    if not ids:
+        raise ValueError("generation prompt is empty")
     if seed is not None:
         torch.manual_seed(seed)
-    x = torch.tensor([ids], dtype=torch.long, device=device)
-    out = []
-    for _ in range(max_new):
-        logits = model(x)[0, -1].float()
-        logits[0] = -float("inf")                # PAD is never a real continuation
-        if temperature <= 0:                     # greedy
-            nxt = int(logits.argmax())
-        else:
-            logits = logits / temperature
-            if top_k > 0:
-                kth = logits.topk(min(top_k, logits.numel())).values[-1]
-                logits = logits.masked_fill(logits < kth, -float("inf"))
-            if 0.0 < top_p < 1.0:                # nucleus
-                probs, idx = logits.softmax(-1).sort(descending=True)
-                keep = int((probs.cumsum(-1) < top_p).sum()) + 1
-                mask = torch.full_like(logits, -float("inf"))
-                mask[idx[:keep]] = logits[idx[:keep]]
-                logits = mask
-            nxt = int(torch.multinomial(logits.softmax(-1), 1))
+    selected, reason = _select_engine(model, engine)
+    prompt = torch.tensor([ids], dtype=torch.long, device=device)
+    if selected == "prefix":
+        x = torch.empty((1, len(ids) + max_new), dtype=torch.long, device=device)
+        x[:, :len(ids)] = prompt
+        length = len(ids)
+    else:
+        x, length = prompt, len(ids)
+    out, state = [], None
+    started = time.perf_counter()
+    if selected == "recurrent":
+        logits, state = model.forward_recurrent(x)
+        next_logits = logits[0, -1]
+    for step in range(max_new):
+        if selected == "prefix":
+            next_logits = model(x[:, :length])[0, -1]
+        nxt = _sample_logits(next_logits, temperature=temperature, top_p=top_p, top_k=top_k)
         if stop_at_sep and nxt == SEP:
             break
         out.append(nxt)
-        x = torch.cat([x, torch.tensor([[nxt]], device=device)], dim=1)
-    return out
+        token = x.new_tensor([[nxt]])
+        if selected == "recurrent" and step + 1 < max_new:
+            logits, state = model.forward_recurrent(token, state)
+            next_logits = logits[0, -1]
+        elif selected == "prefix":
+            x[:, length:length + 1] = token
+            length += 1
+    elapsed = time.perf_counter() - started
+    stats = {"engine": selected, "fallback_reason": reason, "seconds": elapsed,
+             "tokens": len(out), "tokens_per_second": len(out) / max(elapsed, 1e-12)}
+    return out, stats
+
+
+@torch.no_grad()
+def sample(model, ids: list[int], *, max_new: int = 200, temperature: float = 0.8,
+           top_p: float = 0.95, top_k: int = 0, stop_at_sep: bool = True,
+           device: str = "cuda", seed: int | None = None,
+           engine: str = "auto") -> list[int]:
+    """Autoregressive sampling. Returns only newly generated token ids."""
+
+    return sample_with_stats(
+        model, ids, max_new=max_new, temperature=temperature, top_p=top_p,
+        top_k=top_k, stop_at_sep=stop_at_sep, device=device, seed=seed,
+        engine=engine,
+    )[0]
 
 
 def main():
@@ -141,6 +202,8 @@ def main():
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--no-stop-sep", action="store_true")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--engine", choices=("auto", "recurrent", "prefix"), default="auto",
+                    help="auto adopts exact constant-state decoding when compatible")
     ap.add_argument("--json", action="store_true", help="machine output (for the trainboard)")
     # fallback arch flags for pre-arch-record checkpoints
     ap.add_argument("--d-model", type=int, default=0)
@@ -155,13 +218,15 @@ def main():
     vocab = WorldVocab()
     text = args.prompt if args.raw else f"User: {args.prompt}\n\nAssistant:"
     ids = vocab.encode(text)
-    new = sample(model, ids, max_new=args.max_new, temperature=args.temperature,
-                 top_p=args.top_p, top_k=args.top_k, stop_at_sep=not args.no_stop_sep,
-                 device=args.device, seed=args.seed)
+    new, stats = sample_with_stats(
+        model, ids, max_new=args.max_new, temperature=args.temperature,
+        top_p=args.top_p, top_k=args.top_k, stop_at_sep=not args.no_stop_sep,
+        device=args.device, seed=args.seed, engine=args.engine)
     completion = vocab.decode(new)
     if args.json:
         print(json.dumps({"config": blob.get("config", ""), "step": blob.get("step", 0),
-                          "prompt": text, "completion": completion, "tokens": len(new)}))
+                          "prompt": text, "completion": completion, "tokens": len(new),
+                          "generation": stats}))
     else:
         print(f"[{blob.get('config', '?')} @ step {blob.get('step', '?')}"
               + (" · EMA" if args.use_ema else "") + f" · {len(new)} tokens]\n")

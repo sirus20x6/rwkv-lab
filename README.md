@@ -19,8 +19,8 @@ Every entry is an off-by-default lever with a paper and a CPU test. Full index i
 | **Memory / retrieval** | Engram lexical bank · ROSA suffix-automaton (+ golden reference) · Fast-weight Product-Key Memory · L³ large-lookup · WriteSAE state autoencoder | [`engram_lmb`](src/rwkv_lab/engram_lmb.py) · [`rosa_sam`](src/rwkv_lab/rosa_sam.py) · [`fwpkm`](src/rwkv_lab/fwpkm.py) · [`l3_lookup`](src/rwkv_lab/l3_lookup.py) · [`write_sae`](src/rwkv_lab/write_sae.py) |
 | **Scale & online adaptation (P0)** | u-μP scale transfer · Titans/MIRAS/ATLAS/Nested Learning memory · GSPO/Dr.GRPO/DAPO RLVR + deterministic verifiers | [`u_mup`](src/rwkv_lab/u_mup.py) · [`online_memory`](src/rwkv_lab/online_memory.py) · [`rlvr`](src/rwkv_lab/rlvr.py) · [`rlvr_train`](src/rwkv_lab/rlvr_train.py) |
 | **Post-training platform** | typed SFT/preference/feedback/PRM/RLVR + tool calls · cached tokenization/packing audits · named LoRA/native NF4 QLoRA · DPO/KTO/ORPO/SimPO · executable ORM/PRM · paired confirmation campaigns · adapter-first recursion · parity-gated kernels · FSDP2/DCP · safe exports | [`posttrain_data`](src/rwkv_lab/posttrain_data.py) · [`quantization`](src/rwkv_lab/quantization.py) · [`posttrain_train`](src/rwkv_lab/posttrain_train.py) · [`posttrain_campaign`](src/rwkv_lab/posttrain_campaign.py) · [`adapter_recursive`](src/rwkv_lab/adapter_recursive.py) · [`posttrain_kernels`](src/rwkv_lab/posttrain_kernels.py) |
-| **Training systems (P1)** | RegMix/MDE mixture surrogate · simulated NVFP4 QAT · Decoupled DiLoCo outer updates | [`data_mixture`](src/rwkv_lab/data_mixture.py) · [`nvfp4`](src/rwkv_lab/nvfp4.py) · [`diloco`](src/rwkv_lab/diloco.py) |
-| **Representation, serving & tracing (P2)** | BLT entropy byte patches · EAGLE-3 feature-fusion drafts and exact verification · recurrent attribution graphs | [`byte_patches`](src/rwkv_lab/byte_patches.py) · [`speculative`](src/rwkv_lab/speculative.py) · [`circuit_trace`](src/rwkv_lab/circuit_trace.py) |
+| **Training systems (P1)** | RegMix/MDE mixture surrogate · NVFP4 fake-quant oracle + parity-gated native Blackwell backend · Decoupled DiLoCo outer updates | [`data_mixture`](src/rwkv_lab/data_mixture.py) · [`nvfp4`](src/rwkv_lab/nvfp4.py) · [`production_kernels`](src/rwkv_lab/production_kernels.py) · [`diloco`](src/rwkv_lab/diloco.py) |
+| **Representation, serving & tracing (P2)** | BLT entropy byte patches · EAGLE-3 feature-fusion drafts and one-call exact verification · constant-state recurrent generation · recurrent attribution graphs | [`byte_patches`](src/rwkv_lab/byte_patches.py) · [`speculative`](src/rwkv_lab/speculative.py) · [`generate`](src/rwkv_lab/generate.py) · [`circuit_trace`](src/rwkv_lab/circuit_trace.py) |
 | **Optimizers & dynamics** | Muon (+ MuonClip) · 12 spectral-Muon levers (Muonᵖ, Aurora, MONA, DDC, RSAV, Hierarchical, Distance-Aware, ARO…) · PC-Layer preconditioning · layerwise-LR · grokking probes | [`spectral_muon`](src/rwkv_lab/spectral_muon.py) · [`muon_helpers`](src/rwkv_lab/muon_helpers.py) · [`pc_layer`](src/rwkv_lab/pc_layer.py) |
 | **Cross-arch conversion** | GDN ⊂ RWKV-7 **lossless** remap · RADLADS distillation (+ logit-KL) · Taylor-Calibrate init · Comba readout · Attention-to-Mamba | [`convert_gdn_lossless`](src/rwkv_lab/convert_gdn_lossless.py) · [`convert_train`](src/rwkv_lab/convert_train.py) · [`attn_L3_poc`](src/rwkv_lab/attn_L3_poc.py) |
 | **From-scratch lab** | Future-Seed cross-layer state chaining · DeepEmbed per-token FFN gates (output / BlinkDL-exact hidden / +shift / +emb-residual) · Engram-as-lever · semantic context-bucket packing + mixed-context training (reciprocal batch) · grad-accum / EMA / fp8 / 8-bit optimizers | [`rwkv_pretrain`](src/rwkv_lab/rwkv_pretrain.py) · [`experiment`](src/rwkv_lab/experiment.py) · [`build_corpus`](src/rwkv_lab/build_corpus.py) |
@@ -96,7 +96,7 @@ Experiments are driven and monitored through **trainboard**, a from-scratch Go +
 </p>
 
 <p align="center">
-  <img src="docs/images/experiments_card.png?v=e12af89" width="100%" alt="Experiments card: config-driven A/B builder + registry results"><br>
+  <img src="docs/images/experiments_card.png?v=02a53ee4d7e8" width="100%" alt="Experiments card: config-driven A/B builder + registry results"><br>
   <em>Experiments card — the current config-driven builder exposes task/init/budget/model sizing, optimizer, precision, compilation, and batch controls before the lever matrix and accumulated registry evidence below. Campaigns retain every seed and rung, paired confidence intervals, learning curves, measured throughput/memory/energy, Pareto status, lineage, and fresh-seed confirmation.</em>
 </p>
 
@@ -243,12 +243,13 @@ opt-in native [QLoRA](https://arxiv.org/abs/2305.14314) correctness backend: pac
 per-block scales, a frozen recurrent base, adapter-gradient and zero-init checks, dense-merge parity,
 and measured stored bytes. Its NF4 table matches the primary
 [bitsandbytes implementation](https://github.com/bitsandbytes-foundation/bitsandbytes/blob/main/bitsandbytes/functional.py).
-The portable path dequantizes for `F.linear`; the optional
+The portable path dequantizes for `F.linear` and is deliberately correctness-scale only; the optional
 [TorchAO NF4Tensor](https://docs.pytorch.org/ao/stable/eager_tutorials/finetuning.html) path uses its
 accelerator/compile dispatch and double-quantized scales. `--quant-backend auto` adopts TorchAO only
-after representative-layer output, input-gradient, storage, and median-throughput qualification;
-otherwise it records the rejection and uses the portable backend. Explicit TorchAO requests fail
-closed when the same gate does not pass.
+after representative-layer output, input-gradient, storage, and median-throughput qualification and
+fails closed when no accelerated backend passes. The dequantizing oracle must be requested explicitly
+with `--quant-backend portable`, preventing an apparently production run from silently taking the
+measured ~8×-slower reference path.
 
 The executable trainer supports SFT, four preference paths, outcome rewards, and full process-reward
 training. Tokenization may be streamed into a safe content-addressed cache; its receipt reports token
@@ -257,6 +258,9 @@ matrix state, TimeMix/ChannelMix/DeepEmbed token shifts, and RoPE position at ev
 FLA cumulative sequence lengths on the accelerated kernel. Before the first optimizer step, the exact
 objective must pass unpacked-vs-packed loss and trainable-gradient parity. Unsupported stateful levers
 fail closed; `audit` remains available to inspect utilization without executing a pack.
+Immutable tokenized examples are tensorized once and transferred as one padded batch. DPO/KTO frozen-base
+log-probabilities are cached once per example rather than recomputed every optimizer step; PRM calibration
+is evaluated at reporting cadence rather than introducing per-bin GPU synchronization into every update.
 
 ```bash
 python -m rwkv_lab.posttrain_train \
@@ -310,6 +314,38 @@ never sent to the proposal command.
 outcome/process reward heads, and batched recurrent preference scoring. A candidate is adopted only
 when output and gradient parity pass and median timing improves; activation offload uses PyTorch's
 [`save_on_cpu`](https://docs.pytorch.org/docs/stable/autograd.html#torch.autograd.graph.save_on_cpu).
+
+### Production kernel qualification
+
+[`production_kernels.py`](src/rwkv_lab/production_kernels.py) applies the same parity-before-speed
+policy to training and serving backends. It records the exact CUDA/device capability, backend
+availability, output/state/gradient errors, median timings, and adoption decision in one JSON receipt:
+
+```bash
+python -m rwkv_lab.production_kernels --device cuda --output runs/kernel-qualification.json
+python -m rwkv_lab.production_kernels --device cuda --checkpoint runs/lm/ckpt.pt \
+  --prompt-ids 1,123,456 --max-new 64 --output runs/serving-qualification.json
+```
+
+- **NF4:** TorchAO remains opt-in and is adopted only after representative-layer output, input-gradient,
+  storage, and throughput checks against the packed NF4 oracle.
+- **NVFP4:** `--nvfp4-backend transformer_engine` uses NVIDIA Transformer Engine's native Blackwell
+  E2M1 tensor-core recipe, including hierarchical scales and optional RHT, and fails closed unless it
+  beats the fake-quant oracle on parity and speed. This implements the production path described by
+  [NVFP4 pretraining](https://arxiv.org/abs/2509.25149) and
+  [TetraJet-v2](https://arxiv.org/abs/2510.27527) through the documented
+  [Transformer Engine NVFP4 API](https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/features/low_precision_training/nvfp4/nvfp4.html).
+- **Online memory:** fixed-size Titans/MIRAS/ATLAS/Nested scans can be qualified under
+  [`torch.compile`](https://docs.pytorch.org/docs/stable/generated/torch.compile.html). Recurrent
+  inference carries the memory matrix, momentum, and ATLAS key/value window across chunks and must
+  match a full-prefix scan. `--online-memory-kernel auto` installs the compiled live-parameter path only
+  after parity and throughput pass; the reference module remains the stateful oracle.
+- **Serving:** `generate --engine auto` selects [RWKV-7](https://arxiv.org/abs/2503.14456)
+  constant-state decoding only for compatible checkpoints and reports tokens/s; otherwise it records
+  the reason for exact full-prefix fallback. The [EAGLE-3](https://arxiv.org/abs/2503.01840) verifier
+  validates a whole draft in one target call, reports acceptance/target-call throughput, and cannot be
+  adopted unless its output tokens exactly match ordinary target-greedy decoding. Its direct draft
+  positions share one packed vocabulary GEMM (legacy per-position head checkpoints migrate on load).
 
 Trainboard's **post-training** panel validates repository-confined JSONL, previews
 the rendered text and trainable spans, reports duplicates/split leakage, materializes validated
@@ -432,7 +468,7 @@ Everything is a **drop-in `linear_attn` / attention module swap** on a HuggingFa
 | [`rlvr.py`](src/rwkv_lab/rlvr.py) / [`rlvr_train.py`](src/rwkv_lab/rlvr_train.py) / [`rlvr_evaluation.py`](src/rwkv_lab/rlvr_evaluation.py) / [`rlvr_campaign.py`](src/rwkv_lab/rlvr_campaign.py) / [`recursive_improve.py`](src/rwkv_lab/recursive_improve.py) | GSPO/Dr.GRPO/DAPO objectives; cold-start/preflight training; recurrent batched rollouts; leakage, confidence, family-regression, and budget gates; equal-budget campaigns; and bounded Adamaton proposal lineage. |
 | [`posttrain_data.py`](src/rwkv_lab/posttrain_data.py) / [`posttrain_train.py`](src/rwkv_lab/posttrain_train.py) | Typed tool-aware post-training JSONL, streamed content-addressed token caches, qualified reset-mask recurrent multipacking, and executable native-RWKV SFT/DPO/KTO/ORPO/SimPO/ORM/PRM training. |
 | [`adapters.py`](src/rwkv_lab/adapters.py) / [`quantization.py`](src/rwkv_lab/quantization.py) / [`preference.py`](src/rwkv_lab/preference.py) | Named RWKV-aware LoRA lifecycle, portable packed-NF4 QLoRA qualification, and reference-tested preference/outcome/process-reward losses. |
-| [`posttrain_campaign.py`](src/rwkv_lab/posttrain_campaign.py) / [`adapter_recursive.py`](src/rwkv_lab/adapter_recursive.py) / [`posttrain_kernels.py`](src/rwkv_lab/posttrain_kernels.py) | Equal-token paired/confirmation campaigns and receipts; adapter-first immutable recursive parents; parity-before-speed kernel and compile qualification. |
+| [`posttrain_campaign.py`](src/rwkv_lab/posttrain_campaign.py) / [`adapter_recursive.py`](src/rwkv_lab/adapter_recursive.py) / [`posttrain_kernels.py`](src/rwkv_lab/posttrain_kernels.py) / [`production_kernels.py`](src/rwkv_lab/production_kernels.py) | Equal-token paired/confirmation campaigns and receipts; adapter-first immutable recursive parents; parity-before-speed training and serving kernel qualification. |
 | [`distributed.py`](src/rwkv_lab/distributed.py) / [`export_bundle.py`](src/rwkv_lab/export_bundle.py) | FSDP2 + DCP exact-resume state and verified safetensors export packages with lineage/promotion receipts. |
 
 ### Looped recurrence (recurrent depth)
@@ -567,8 +603,8 @@ Every technique is an **off-by-default flag** on `python -m rwkv_lab.convert_tra
 | `--ctx-buckets meta.json` | mixed context-length training over packed 512…32k buckets, reciprocal batch (B = budget/T), pad-masked loss, per-bucket val | — |
 | `--grad-accum N` / `--ema d` / `--fp8` / `--optimizer adamw8bit` | large-batch simulation · fp32 EMA shadow weights · torchao fp8 GEMMs · bitsandbytes 8-bit moments | — |
 | `--u-mup-base-width W` (+ `--u-mup-base-depth L`) | u-μP initialization and AdamW LR groups for width/depth scale transfer | [u-μP](https://arxiv.org/abs/2407.17465) |
-| `--online-memory 1` (+ `--online-memory-mode`) | in-forward associative memory; Titans, MIRAS, ATLAS, and learned nested-controller modes | [Titans](https://arxiv.org/abs/2501.00663) · [MIRAS](https://arxiv.org/abs/2504.13173) · [ATLAS](https://arxiv.org/abs/2505.23735) · [Nested Learning](https://arxiv.org/abs/2512.24695) |
-| `--nvfp4` (+ `--nvfp4-rht`) | E2M1 block fake-quant over master weights; reference QAT path, not native NVFP4 throughput | [NVFP4 pretraining](https://arxiv.org/abs/2509.25149) · [TetraJet-v2](https://arxiv.org/abs/2510.27527) |
+| `--online-memory 1` (+ `--online-memory-mode`, `--online-memory-kernel`) | in-forward associative memory; Titans, MIRAS, ATLAS, and learned nested-controller modes; parity-gated compiled scan | [Titans](https://arxiv.org/abs/2501.00663) · [MIRAS](https://arxiv.org/abs/2504.13173) · [ATLAS](https://arxiv.org/abs/2505.23735) · [Nested Learning](https://arxiv.org/abs/2512.24695) |
+| `--nvfp4` (+ `--nvfp4-rht`, `--nvfp4-backend`) | E2M1 fake-quant oracle or parity-gated native Transformer Engine NVFP4 on Blackwell | [NVFP4 pretraining](https://arxiv.org/abs/2509.25149) · [TetraJet-v2](https://arxiv.org/abs/2510.27527) |
 
 **Prediction & memory objectives** are aux heads / standalone modules, not `convert_train` flags: the lookahead heads (L-MTP, Belief-State, JTP, TOP, NextLat, …) are wired via `lookahead_module.lookahead_from_args`; LLM-JEPA, Coconut, L³, FwPKM, and WriteSAE are standalone modules for a paired-data / SFT stage — see [References](#references).
 
@@ -631,7 +667,7 @@ Only papers with a concrete implementation or adopted design decision in this re
 - [DPO](https://arxiv.org/abs/2305.18290) · [KTO](https://arxiv.org/abs/2402.01306) · [ORPO](https://arxiv.org/abs/2403.07691) · [SimPO](https://arxiv.org/abs/2405.14734) · [InstructGPT outcome rewards](https://arxiv.org/abs/2203.02155) · [Let's Verify Step by Step process rewards](https://arxiv.org/abs/2305.20050) — paired, binary-feedback, monolithic, reference-free, outcome, and step-level reward training primitives → [`preference.py`](src/rwkv_lab/preference.py), [`posttrain_train.py`](src/rwkv_lab/posttrain_train.py)
 - [LLaMA-Factory](https://arxiv.org/abs/2403.13372) — the adopted design decision is a typed post-training dataset/template layer with explicit target masks; model-family abstraction and Transformer-specific kernels are not copied → [`posttrain_data.py`](src/rwkv_lab/posttrain_data.py)
 - [RegMix](https://arxiv.org/abs/2407.01492) · [Data Mixing Made Efficient](https://arxiv.org/abs/2502.15950) — ridge mixture surrogate, simplex search, and optional per-domain expert-loss interactions → [`data_mixture.py`](src/rwkv_lab/data_mixture.py)
-- [Pretraining Large Language Models with NVFP4](https://arxiv.org/abs/2509.25149) · [TetraJet-v2](https://arxiv.org/abs/2510.27527) — E2M1 block quantization, optional randomized Hadamard transform, and straight-through gradients over master weights → [`nvfp4.py`](src/rwkv_lab/nvfp4.py). This is a fake-quant correctness path; native Blackwell throughput still requires a fused backend.
+- [Pretraining Large Language Models with NVFP4](https://arxiv.org/abs/2509.25149) · [TetraJet-v2](https://arxiv.org/abs/2510.27527) — E2M1 block quantization, optional randomized Hadamard transform, and straight-through gradients over master weights → [`nvfp4.py`](src/rwkv_lab/nvfp4.py). The fake-quant path is the correctness oracle; the optional Transformer Engine path executes native Blackwell NVFP4 only after parity and throughput qualification.
 - [DiLoCo](https://arxiv.org/abs/2311.08105) · [Decoupled DiLoCo](https://arxiv.org/abs/2604.21428) — local displacement pseudo-gradients, token-weighted asynchronous merging, outer momentum, and staleness rejection → [`diloco.py`](src/rwkv_lab/diloco.py). Adamaton owns learner processes, leases, and recovery.
 
 **P2 — bytes, speculative serving, and interpretability**
@@ -680,7 +716,7 @@ Only papers with a concrete implementation or adopted design decision in this re
 | [Qwen3.5 / Qwen](https://github.com/QwenLM) · [HF Transformers](https://github.com/huggingface/transformers) | Base model + modeling code. |
 | [Muon (Keller Jordan)](https://github.com/KellerJordan/Muon) · [schedule-free](https://github.com/facebookresearch/schedule_free) | Optimizer bases. |
 | [Open-PerfectBlend](https://huggingface.co/datasets/mlabonne/open-perfectblend) (mlabonne, Apache 2.0) | The lab's real LM corpus — 788k chat/math/code conversations → 388M ztok tokens (`blend` / `blend-mix`). |
-| [bitsandbytes](https://github.com/bitsandbytes-foundation/bitsandbytes) · [torchao](https://github.com/pytorch/ao) | 8-bit optimizer states · fp8 GEMMs (Blackwell/Hopper). |
+| [bitsandbytes](https://github.com/bitsandbytes-foundation/bitsandbytes) · [torchao](https://github.com/pytorch/ao) · [Transformer Engine](https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/) | 8-bit optimizer states · FP8/NF4 · native Blackwell NVFP4. Hardware backends are adopted only through qualification receipts. |
 | [Datastar](https://data-star.dev/) · [Pixi.js](https://pixijs.com/) | trainboard front-end (hypermedia SSE + WebGL charts). |
 
 ---

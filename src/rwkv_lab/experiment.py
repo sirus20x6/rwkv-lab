@@ -67,12 +67,14 @@ LEVERS = {
     "mem_nested":    dict(online_memory=True, online_memory_mode="nested"),
     "nvfp4":         dict(nvfp4=True),
     "nvfp4_rht":     dict(nvfp4=True, nvfp4_rht=True),
+    "nvfp4_native":  dict(nvfp4=True, nvfp4_rht=True,
+                            nvfp4_backend="transformer_engine"),
 }
 
 # Levers whose objective needs a real token FUTURE — only valid on the LM path (rwkv_pretrain),
 # not the synthetic diagnostic tasks. The board disables these unless an LM corpus is selected.
 LM_ONLY = ("top", "lmtp", "bst", "jtp", "umup_256", "mem_titans", "mem_miras",
-           "mem_atlas", "mem_nested", "nvfp4", "nvfp4_rht")
+           "mem_atlas", "mem_nested", "nvfp4", "nvfp4_rht", "nvfp4_native")
 
 _AUX_KEYS = ("nextlat_weight", "top_weight", "lmtp_weight", "bst_weight", "jtp_weight")
 
