@@ -17,15 +17,88 @@ Every entry is an off-by-default lever with a paper and a CPU test. Full index i
 | **Recurrent-depth loops** | weight-tied loops · hyper-connections · per-iterate readout · PonderNet halt · CART contractive gate · HRM DEQ / Neumann-k gradient · FPRM fixed-point halt · RWKV-Product multi-substep | [`looped_rwkv`](src/rwkv_lab/looped_rwkv.py) · [`rwkv_product`](src/rwkv_lab/rwkv_product.py) |
 | **Latent prediction** | MTP · MuToR · TOP · NextLat · ConceptLM · FSP · L-MTP · Belief-State · JTP · LLM-JEPA · Coconut continuous-thought | [`lookahead_module`](src/rwkv_lab/lookahead_module.py) · [`llm_jepa`](src/rwkv_lab/llm_jepa.py) · [`coconut`](src/rwkv_lab/coconut.py) |
 | **Memory / retrieval** | Engram lexical bank · ROSA suffix-automaton (+ golden reference) · Fast-weight Product-Key Memory · L³ large-lookup · WriteSAE state autoencoder | [`engram_lmb`](src/rwkv_lab/engram_lmb.py) · [`rosa_sam`](src/rwkv_lab/rosa_sam.py) · [`fwpkm`](src/rwkv_lab/fwpkm.py) · [`l3_lookup`](src/rwkv_lab/l3_lookup.py) · [`write_sae`](src/rwkv_lab/write_sae.py) |
-| **Scale & online adaptation (P0)** | u-μP scale transfer · Titans/MIRAS/ATLAS/Nested Learning memory · GSPO/Dr.GRPO/DAPO RLVR + deterministic verifiers | [`u_mup`](src/rwkv_lab/u_mup.py) · [`online_memory`](src/rwkv_lab/online_memory.py) · [`rlvr`](src/rwkv_lab/rlvr.py) · [`rlvr_train`](src/rwkv_lab/rlvr_train.py) |
-| **Post-training platform** | typed SFT/preference/feedback/PRM/RLVR + tool calls · cached tokenization/packing audits · named LoRA/native NF4 QLoRA · DPO/KTO/ORPO/SimPO · executable ORM/PRM · paired confirmation campaigns · adapter-first recursion · parity-gated kernels · FSDP2/DCP · safe exports | [`posttrain_data`](src/rwkv_lab/posttrain_data.py) · [`quantization`](src/rwkv_lab/quantization.py) · [`posttrain_train`](src/rwkv_lab/posttrain_train.py) · [`posttrain_campaign`](src/rwkv_lab/posttrain_campaign.py) · [`adapter_recursive`](src/rwkv_lab/adapter_recursive.py) · [`posttrain_kernels`](src/rwkv_lab/posttrain_kernels.py) |
-| **Training systems (P1)** | RegMix/MDE mixture surrogate · NVFP4 fake-quant oracle + parity-gated native Blackwell backend · Decoupled DiLoCo outer updates | [`data_mixture`](src/rwkv_lab/data_mixture.py) · [`nvfp4`](src/rwkv_lab/nvfp4.py) · [`production_kernels`](src/rwkv_lab/production_kernels.py) · [`diloco`](src/rwkv_lab/diloco.py) |
-| **Representation, serving & tracing (P2)** | BLT entropy byte patches · EAGLE-3 feature-fusion drafts and one-call exact verification · constant-state recurrent generation · recurrent attribution graphs | [`byte_patches`](src/rwkv_lab/byte_patches.py) · [`speculative`](src/rwkv_lab/speculative.py) · [`generate`](src/rwkv_lab/generate.py) · [`circuit_trace`](src/rwkv_lab/circuit_trace.py) |
+| **Scale & online adaptation (P0)** | u-μP · Titans/MIRAS/ATLAS/Nested memory · offline sleep and guarded adapter consolidation · GSPO/Dr.GRPO/DAPO RLVR · bounded Reasoning Cache | [`u_mup`](src/rwkv_lab/u_mup.py) · [`online_memory`](src/rwkv_lab/online_memory.py) · [`adapter_consolidation`](src/rwkv_lab/adapter_consolidation.py) · [`reasoning_cache`](src/rwkv_lab/reasoning_cache.py) |
+| **Post-training platform** | typed SFT/preference/feedback/PRM/RLVR · named LoRA/NF4 QLoRA · initial-state and per-token state-offset adapters · routed state bank · paired confirmation · safe exports | [`posttrain_data`](src/rwkv_lab/posttrain_data.py) · [`adapters`](src/rwkv_lab/adapters.py) · [`state_tuning`](src/rwkv_lab/state_tuning.py) · [`state_bank`](src/rwkv_lab/state_bank.py) |
+| **Training systems (P1)** | RegMix/MDE · NVFP4 · Decoupled DiLoCo · stable triangular delta-rule inversion oracle/qualification | [`data_mixture`](src/rwkv_lab/data_mixture.py) · [`nvfp4`](src/rwkv_lab/nvfp4.py) · [`diloco`](src/rwkv_lab/diloco.py) · [`triangular_delta`](src/rwkv_lab/triangular_delta.py) |
+| **Representation, decoding, serving & tracing (P2)** | BLT · byte-aware/SuperBPE experiments · decoder matrix · typed policies · EAGLE-3 · paged state forks · B³D-RWKV · HiLS · recurrent attribution | [`byte_patches`](src/rwkv_lab/byte_patches.py) · [`tokenizer_experiments`](src/rwkv_lab/tokenizer_experiments.py) · [`decoding_eval`](src/rwkv_lab/decoding_eval.py) · [`decoding_policy`](src/rwkv_lab/decoding_policy.py) · [`recurrent_serving`](src/rwkv_lab/recurrent_serving.py) |
 | **Optimizers & dynamics** | Muon (+ MuonClip) · 12 spectral-Muon levers (Muonᵖ, Aurora, MONA, DDC, RSAV, Hierarchical, Distance-Aware, ARO…) · PC-Layer preconditioning · layerwise-LR · grokking probes | [`spectral_muon`](src/rwkv_lab/spectral_muon.py) · [`muon_helpers`](src/rwkv_lab/muon_helpers.py) · [`pc_layer`](src/rwkv_lab/pc_layer.py) |
-| **Cross-arch conversion** | GDN ⊂ RWKV-7 **lossless** remap · RADLADS distillation (+ logit-KL) · Taylor-Calibrate init · Comba readout · Attention-to-Mamba | [`convert_gdn_lossless`](src/rwkv_lab/convert_gdn_lossless.py) · [`convert_train`](src/rwkv_lab/convert_train.py) · [`attn_L3_poc`](src/rwkv_lab/attn_L3_poc.py) |
+| **Cross-arch conversion** | GDN ⊂ RWKV-7 **lossless** remap · RADLADS · QRWKV7 `balance_state` · Taylor-Calibrate · Comba · Attention-to-Mamba | [`convert_gdn_lossless`](src/rwkv_lab/convert_gdn_lossless.py) · [`convert_train`](src/rwkv_lab/convert_train.py) · [`rwkv8_deltanet`](src/rwkv_lab/rwkv8_deltanet.py) |
 | **From-scratch lab** | Future-Seed cross-layer state chaining · DeepEmbed per-token FFN gates (output / BlinkDL-exact hidden / +shift / +emb-residual) · Engram-as-lever · semantic context-bucket packing + mixed-context training (reciprocal batch) · grad-accum / EMA / fp8 / 8-bit optimizers | [`rwkv_pretrain`](src/rwkv_lab/rwkv_pretrain.py) · [`experiment`](src/rwkv_lab/experiment.py) · [`build_corpus`](src/rwkv_lab/build_corpus.py) |
 
 All Python lives under `src/rwkv_lab/` (`python -m rwkv_lab.<module>`); a from-scratch Go + SQLite + [Pixi.js](https://pixijs.com/) dashboard ([`dashboard/`](dashboard/)) drives and monitors runs.
+
+### RWKV community research additions
+
+The following off-by-default capabilities came from a July 2026 review of the RWKV community's
+technical channels. Discord posts are treated as leads; paper and repository links below are the
+implementation sources of record.
+
+- **Balanced conversion state:** `--balance-state` implements the alternate normalized-key and
+  write/forget scaling path in [Recursal's QRWKV7 implementation](https://huggingface.co/recursal/QRWKV7-7B-Instruct/blob/main/modeling_rwkv7qwen2.py), motivated by its reported large-model GroupNorm stability behavior. Existing recurrence remains the default.
+- **RWKV state adapters:** [`state_tuning.py`](src/rwkv_lab/state_tuning.py) learns named initial WKV
+  and token-shift states with frozen weights, inspired by
+  [rwkv-rlhf](https://github.com/wc2395082443-del/rwkv-rlhf) and
+  [OpenMOSE/RWKV-LM-RLHF](https://github.com/OpenMOSE/RWKV-LM-RLHF).
+- **Paged recurrent serving:** [`recurrent_serving.py`](src/rwkv_lab/recurrent_serving.py) provides
+  request-isolated CPU paging, prefix-state forks, continuous-batch stack/split, and asynchronous
+  device transfer primitives inspired by [AUXStar/RWKV-Server](https://github.com/AUXStar/RWKV-Server).
+- **Stable delta-rule inversion:** [`triangular_delta.py`](src/rwkv_lab/triangular_delta.py) implements
+  direct and unit-lower Neumann oracles plus parity/speed receipts from
+  [Fast and Stable Triangular Inversion for Delta-Rule Linear Transformers](https://arxiv.org/abs/2605.21325)
+  ([local PDF](research/conversion-core/Fast%20and%20Stable%20Triangular%20Inversion%20for%20Delta-Rule%20Linear%20Transformers.pdf)).
+- **Offline consolidation:** [`online_memory.py`](src/rwkv_lab/online_memory.py) adds explicitly
+  budgeted, bounded sleep passes following
+  [Do Language Models Need Sleep?](https://arxiv.org/abs/2605.26099)
+  ([local PDF](research/self-improvement/Do%20Language%20Models%20Need%20Sleep%20-%20Offline%20Recurrence%20for%20Improved%20Online%20Inference.pdf)).
+- **Reasoning Cache:** [`reasoning_cache.py`](src/rwkv_lab/reasoning_cache.py) implements bounded
+  response→summary→response iteration and auditable short-horizon training pairs following
+  [Reasoning Cache](https://arxiv.org/abs/2602.03773)
+  ([local PDF](research/self-improvement/Reasoning%20Cache%20-%20Continual%20Improvement%20Over%20Long%20Horizons%20via%20Short-Horizon%20RL.pdf)). It does not execute generated code.
+- **Parallel decoding:** [`diffusion_rwkv.py`](src/rwkv_lab/diffusion_rwkv.py) is an isolated
+  triplet-block bidirectional diffusion head following
+  [B³D-RWKV](https://arxiv.org/abs/2605.25969) and its
+  [official repository](https://github.com/leonardodalinky/B3D-RWKV)
+  ([local PDF](research/mtp-lookahead/Triplet-Block%20Diffusion%20RWKV.pdf)).
+- **Sparse hybrid layers:** [`hils_attention.py`](src/rwkv_lab/hils_attention.py) is a causal,
+  CPU-readable compressed-landmark/chunk-fusion oracle following
+  [HiLS-Attention](https://arxiv.org/abs/2607.02980) and its
+  [official implementation](https://github.com/Tencent-Hunyuan/HiLS-Attention). Production adoption
+  waits for a qualified sparse kernel and long-context evidence
+  ([local PDF](research/conversion-methodology/Hierarchical%20Sparse%20Attention%20Done%20Right%20-%20Toward%20Infinite%20Context%20Modeling.pdf)).
+- **Decoder-as-evaluation:** [`decoding_eval.py`](src/rwkv_lab/decoding_eval.py) runs paired,
+  deterministic greedy/top-k/top-p/typical/Mirostat tapes and records task score, entropy, loops,
+  throughput, and recurrent-state divergence. The matrix follows
+  [A Thorough Examination of Decoding Methods in the Era of LLMs](https://arxiv.org/abs/2402.06925)
+  ([local PDF](research/decoding/A%20Thorough%20Examination%20of%20Decoding%20Methods%20in%20the%20Era%20of%20LLMs.pdf)); the RWKV-specific state-drift criterion came from the
+  [community decoding discussion](https://discord.com/channels/992359628979568762/1076020543205163118/1236635292665118822).
+- **State-offset tuning:** [`state_tuning.py`](src/rwkv_lab/state_tuning.py) adds frozen-base FP32
+  matrix/shift offsets at every recurrent token, with an optional scheduled-offset ablation and an
+  exact slow chunk oracle, following the ACL 2025
+  [State-offset Tuning](https://arxiv.org/abs/2503.03499) paper
+  ([local PDF](research/state-tuning/State-offset%20Tuning%20-%20State-based%20Parameter-Efficient%20Fine-Tuning%20for%20State%20Space%20Models.pdf)). It is launchable as the scratch-LM `state_offset` arm or `--state-offset 1`.
+- **Routed state bank:** [`state_bank.py`](src/rwkv_lab/state_bank.py) learns soft/hard routing over
+  reusable constant-size state slots, optionally adds a bounded hypernetwork residual, and reports
+  entropy/collapse telemetry. This is a correctness oracle for the community's
+  [dynamic-state](https://discord.com/channels/992359628979568762/992359629419991142/1458334147058733106) and
+  [document-state retrieval](https://discord.com/channels/992359628979568762/992372861924823080/1103114894439628871) proposals, not a performance claim.
+- **Byte-aware and superword experiments:** [`tokenizer_experiments.py`](src/rwkv_lab/tokenizer_experiments.py)
+  provides exact-no-op token-length and position-specific UTF-8 byte embeddings based on
+  [BlinkDL's proposal](https://discord.com/channels/992359628979568762/992372861924823080/1098006666986930276), plus an auditable builder for
+  [SuperBPE](https://arxiv.org/abs/2503.13423)
+  ([local PDF](research/tokenization/SuperBPE%20-%20Space%20Travel%20for%20Language%20Models.pdf)) and
+  [Faster Superword Tokenization](https://arxiv.org/abs/2604.05192)
+  ([local PDF](research/tokenization/Faster%20Superword%20Tokenization.pdf)) corpus arms. The actual
+  tokenizer trainer/runtime is implemented in [`ztok`](https://github.com/sirus20x6/ztok) as
+  `ztok train --kind superbpe`; RWKV-Lab owns tokenizer fingerprints and model A/B evidence.
+- **Guarded adapter consolidation:** [`adapter_consolidation.py`](src/rwkv_lab/adapter_consolidation.py)
+  turns the community's
+  [day-state/SDFT proposal](https://discord.com/channels/992359628979568762/992359629419991142/1503014794171514964)
+  into immutable daily snapshots, a hard training-token cap, held-out improvement/regression gates,
+  preserved receipts, and an explicit human-only promotion step.
+- **Typed decoding policies:** [`decoding_policy.py`](src/rwkv_lab/decoding_policy.py) narrows the
+  community's [self-controlled sampling proposal](https://discord.com/channels/992359628979568762/1076020543205163118/1140560536313004084)
+  to allowlisted named modes, bounded nesting/transitions, and optional grammar labels; generated
+  tokens cannot invent parameters or bypass operator policy.
 
 ---
 
@@ -358,6 +431,10 @@ python -m rwkv_lab.production_kernels --device cuda --checkpoint runs/lm/ckpt.pt
   inference carries the memory matrix, momentum, and ATLAS key/value window across chunks and must
   match a full-prefix scan. `--online-memory-kernel auto` installs the compiled live-parameter path only
   after parity and throughput pass; the reference module remains the stateful oracle.
+- **Triangular delta rule:** direct float64/float32 triangular solves remain the correctness oracle;
+  iterative or hardware implementations inspired by
+  [Sobczyk et al.](https://arxiv.org/abs/2605.21325) are adopted only after inverse/residual parity
+  and measured speed pass.
 - **Hard ROSA:** the [ROSA-Tuning](https://arxiv.org/abs/2602.02499) online suffix automaton runs
   entirely on the current CUDA stream, reuses a stream/shape-isolated workspace, and retains the
   Numba CPU implementation as its exact oracle. Qualification includes throughput and projected
@@ -697,6 +774,8 @@ Only papers with a concrete implementation or adopted design decision in this re
 **P2 — bytes, speculative serving, and interpretability**
 
 - [Byte Latent Transformer](https://arxiv.org/abs/2412.09871) — next-byte-entropy patch boundaries plus exact patch pool/unpool mapping around a replaceable local byte encoder → [`byte_patches.py`](src/rwkv_lab/byte_patches.py)
+- [SuperBPE](https://arxiv.org/abs/2503.13423) · [Faster Superword Tokenization](https://arxiv.org/abs/2604.05192) — explicit [`ztok`](https://github.com/sirus20x6/ztok) SuperBPE corpus arms and a zero-init byte-aware embedding wrapper → [`tokenizer_experiments.py`](src/rwkv_lab/tokenizer_experiments.py)
+- [A Thorough Examination of Decoding Methods in the Era of LLMs](https://arxiv.org/abs/2402.06925) — deterministic decoding matrices with free-running quality, robustness, speed, entropy/loop, and recurrent-state divergence metrics → [`decoding_eval.py`](src/rwkv_lab/decoding_eval.py)
 - [EAGLE-3](https://arxiv.org/abs/2503.01840) — low/middle/high feature-fusion draft heads, top-k tree candidates, and conservative target-greedy verification → [`speculative.py`](src/rwkv_lab/speculative.py)
 - [Circuit Tracing: Revealing Computational Graphs in Language Models](https://transformer-circuits.pub/2025/attribution-graphs/methods.html) — attribution-graph framing adapted to exact per-write contribution propagation through a linear recurrent state → [`circuit_trace.py`](src/rwkv_lab/circuit_trace.py). The exact recurrence decomposition is an algebraic trace, not by itself a causal feature interpretation.
 

@@ -53,7 +53,13 @@ _LM_FLAG = {"n_loops": "--loop-count", "hyper_lanes": "--loop-hyper", "gate_mode
             "online_memory_retention": "--online-memory-retention",
             "online_memory_window": "--online-memory-window",
             "online_memory_kernel": "--online-memory-kernel", "nvfp4": "--nvfp4",
-            "nvfp4_rht": "--nvfp4-rht", "nvfp4_backend": "--nvfp4-backend"}
+            "nvfp4_rht": "--nvfp4-rht", "nvfp4_backend": "--nvfp4-backend",
+            "balance_state": "--balance-state"}
+_LM_FLAG.update({"state_offset": "--state-offset",
+                 "state_offset_interval": "--state-offset-interval",
+                 "byte_aware_vocab": "--byte-aware-vocab",
+                 "byte_aware_max_bytes": "--byte-aware-max-bytes",
+                 "byte_aware_dim": "--byte-aware-dim"})
 
 
 def _read_train_log(path: str, mode: str) -> tuple[dict, list, dict]:
@@ -219,7 +225,7 @@ def _lm_command(data_args, off_path, out_dir, model, train, lever, seed, save_pa
             cmd += [f"--sm-{key.replace('_', '-')}", str(int(value) if isinstance(value, bool) else value)]
     for key, value in lever.items():
         if key in _LM_FLAG:
-            if key in ("nvfp4", "nvfp4_rht"):
+            if key in ("nvfp4", "nvfp4_rht", "balance_state"):
                 if value: cmd += [_LM_FLAG[key]]
             else:
                 cmd += [_LM_FLAG[key], str(int(value) if isinstance(value, bool) else value)]

@@ -219,6 +219,11 @@ class RWKV7Small(nn.Module):
             nn.init.normal_(m.weight, std=0.02)
 
     def forward(self, ids, return_hidden=False, hidden_only=False, reset_mask=None):
+        if getattr(self, "state_offset_adapter", None) is not None:
+            if reset_mask is not None or return_hidden or hidden_only:
+                raise ValueError("state-offset tuning uses the recurrent LM-loss path without "
+                                 "packing or auxiliary hidden-state objectives")
+            return self.forward_recurrent(ids)[0]
         if reset_mask is not None:
             reason = self.packing_incompatibility()
             if reason:
@@ -255,6 +260,8 @@ class RWKV7Small(nn.Module):
 
     def packing_incompatibility(self) -> str | None:
         """Return why exact reset-mask sequence packing is unavailable."""
+        if getattr(self, "state_offset_adapter", None) is not None:
+            return "state offsets require explicit per-sequence recurrent state"
         if self.seed_chain:
             return "Future-Seed depends on a whole-layer final state"
         if any(isinstance(block.att, LoopedRWKV) for block in self.blocks):
@@ -287,6 +294,16 @@ class RWKV7Small(nn.Module):
             raise ValueError(f"checkpoint is not recurrent-generation compatible: {reason}")
         if ids.ndim != 2 or ids.shape[1] < 1:
             raise ValueError("recurrent input must have shape [batch,time] with time >= 1")
+        offset_adapter = getattr(self, "state_offset_adapter", None)
+        if offset_adapter is not None and ids.shape[1] > 1:
+            # State-offset Tuning modifies state at every timestep (Kang et al.,
+            # ACL 2025, https://arxiv.org/abs/2503.03499). Splitting a chunk is
+            # the slow, exact oracle; a fused scan must qualify against it.
+            outputs = []
+            for position in range(ids.shape[1]):
+                logits, state = self.forward_recurrent(ids[:, position:position + 1], state)
+                outputs.append(logits)
+            return torch.cat(outputs, dim=1), state
         memory = getattr(self, "online_memory", None)
         if isinstance(state, dict):
             states = state.get("blocks")
@@ -294,6 +311,14 @@ class RWKV7Small(nn.Module):
         else:
             states = state
             memory_state = None
+        state_adapter = getattr(self, "state_adapter", None)
+        if states is None and state_adapter is not None:
+            # RWKV-native state tuning; implementation and community sources:
+            # src/rwkv_lab/state_tuning.py and https://github.com/wc2395082443-del/rwkv-rlhf
+            states = state_adapter.expanded(ids.shape[0])
+        if offset_adapter is not None:
+            step = int(state.get("offset_step", 0)) if isinstance(state, dict) else 0
+            states = offset_adapter.apply(states, ids.shape[0], step=step)
         states = states if states is not None else [None] * len(self.blocks)
         if len(states) != len(self.blocks):
             raise ValueError("recurrent state does not match model depth")
@@ -314,7 +339,11 @@ class RWKV7Small(nn.Module):
                 x, memory_state, return_state=True, record_stats=False)
             return self.head(self.ln_out(x)), {
                 "blocks": next_states, "online_memory": next_memory_state,
+                **({"offset_step": step + ids.shape[1]} if offset_adapter is not None else {}),
             }
+        if offset_adapter is not None:
+            return self.head(self.ln_out(x)), {"blocks": next_states,
+                                               "offset_step": step + ids.shape[1]}
         return self.head(self.ln_out(x)), next_states
 
 
@@ -558,6 +587,16 @@ def main():
     ap.add_argument("--online-memory-kernel", default="auto",
                     choices=("auto", "eager", "compile"),
                     help="parity/speed-gated compiled associative-memory scan")
+    ap.add_argument("--balance-state", action="store_true",
+                    help="QRWKV7 balanced write/forget recurrence for large-scale conversion stability")
+    ap.add_argument("--state-offset", type=int, default=0,
+                    help="ACL'25 State-offset Tuning oracle; freeze base and learn FP32 recurrent offsets")
+    ap.add_argument("--state-offset-interval", type=int, default=1,
+                    help="inject state offsets every N recurrent tokens (paper-faithful default: 1)")
+    ap.add_argument("--byte-aware-vocab", default="",
+                    help="world-vocab file enabling zero-init token-length + UTF-8 byte-position embeddings")
+    ap.add_argument("--byte-aware-max-bytes", type=int, default=16)
+    ap.add_argument("--byte-aware-dim", type=int, default=0)
     ap.add_argument("--grad-accum", type=int, default=1,
                     help="micro-batches accumulated per optimizer step (effective batch = batch * N)")
     ap.add_argument("--ema", type=float, default=0.0,
@@ -611,9 +650,25 @@ def main():
             print("warn: --online-memory/--u-mup ignored for g1g init (from-scratch only)", flush=True)
     else:
         model = RWKV7Small(65536, args.d_model, args.n_layers, args.head_size, lk,
+                           att_kw={"balance_state": args.balance_state},
                            seed_chain=bool(args.seed_chain), deepembed=bool(args.deepembed),
                            de_dim=args.de_dim, de_mode=args.de_mode, de_shift=bool(args.de_shift),
                            de_emb_res=bool(args.de_emb_res))
+        if args.byte_aware_vocab:
+            from rwkv_lab.tokenizer_experiments import (install_byte_aware_embedding,
+                                                         load_world_token_bytes)
+            install_byte_aware_embedding(model, load_world_token_bytes(args.byte_aware_vocab),
+                                         max_bytes=args.byte_aware_max_bytes,
+                                         byte_dim=args.byte_aware_dim)
+            print(f"byte-aware embeddings: max_bytes={args.byte_aware_max_bytes} "
+                  f"dim={args.byte_aware_dim or args.d_model}", flush=True)
+        if args.state_offset:
+            if any(w > 0 for w in [args.nextlat_weight, args.top_weight, args.lmtp_weight,
+                                   args.bst_weight, args.jtp_weight]):
+                ap.error("--state-offset does not support auxiliary hidden-state objectives")
+            from rwkv_lab.state_tuning import install_state_offset_adapter
+            install_state_offset_adapter(model, interval=args.state_offset_interval)
+            print(f"state-offset tuning: interval={args.state_offset_interval}; base frozen", flush=True)
         if args.online_memory:
             from rwkv_lab.online_memory import install_online_memory
             mem = install_online_memory(model, d_memory=(args.online_memory_dim or None),
@@ -720,6 +775,8 @@ def main():
            if args.deepembed and not args.init_g1g else "") + \
           (f"-umup{args.u_mup_base_width}" if u_mup_cfg is not None else "") + \
           (f"-mem-{args.online_memory_mode}" if args.online_memory and not args.init_g1g else "") + \
+          ("-stateoffset" if args.state_offset and not args.init_g1g else "") + \
+          ("-byteaware" if args.byte_aware_vocab and not args.init_g1g else "") + \
           ("-nvfp4" + ("rht" if args.nvfp4_rht else "")
            + ("-te" if args.nvfp4_backend == "transformer_engine" else "")
            if args.nvfp4 else "") + \
@@ -730,6 +787,8 @@ def main():
                "deepembed": bool(args.deepembed) and not args.init_g1g,
                "u_mup_base_width": args.u_mup_base_width if u_mup_cfg is not None else 0,
                "online_memory": args.online_memory_mode if args.online_memory and not args.init_g1g else "",
+               "state_offset": bool(args.state_offset) and not args.init_g1g,
+               "byte_aware": bool(args.byte_aware_vocab) and not args.init_g1g,
                "nvfp4": bool(args.nvfp4),
                "mixed_ctx": bool(args.ctx_buckets),
                "params_m": round(nparam / 1e6, 2)}, open(os.path.join(args.out, "loop_rw.json"), "w"))
@@ -1086,6 +1145,12 @@ def main():
                          "online_memory_lr": args.online_memory_lr,
                          "online_memory_retention": args.online_memory_retention,
                          "online_memory_window": args.online_memory_window,
+                         "balance_state": bool(args.balance_state),
+                         "state_offset": bool(args.state_offset) and not args.init_g1g,
+                         "state_offset_interval": args.state_offset_interval,
+                         "byte_aware": bool(args.byte_aware_vocab) and not args.init_g1g,
+                         "byte_aware_max_bytes": args.byte_aware_max_bytes,
+                         "byte_aware_dim": args.byte_aware_dim,
                          "nvfp4": bool(args.nvfp4), "nvfp4_rht": bool(args.nvfp4_rht),
                          "nvfp4_backend": args.nvfp4_backend,
                          "engram": lmb is not None, "engram_sites": args.engram_sites,
