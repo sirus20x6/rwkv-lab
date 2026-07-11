@@ -91,6 +91,7 @@ func (s *Server) handleQualification(w http.ResponseWriter, r *http.Request) {
 	b.WriteString(`<tr><td class="f-l">device</td><td><input data-bind="qualDevice" value="cuda"></td><td class="f-d">auto, cpu, cuda, or cuda:N</td></tr>`)
 	b.WriteString(`<tr><td class="f-l">checkpoint</td><td><input data-bind="qualCheckpoint" placeholder="optional runs/name/ckpt.pt"></td><td class="f-d">enables recurrent serving qualification</td></tr>`)
 	b.WriteString(`<tr><td class="f-l">prompt ids</td><td><input data-bind="qualPrompt" value="1,2,3,4"></td><td class="f-d">integer recurrent-decoding prompt</td></tr>`)
+	b.WriteString(`<tr><td class="f-l">megakernel tuning</td><td><select data-bind="qualMegakernelMode"><option value="max-autotune-no-cudagraphs">max autotune</option><option value="default">fast compile</option></select></td><td class="f-d">Inductor plan search; the outer CUDA Graph is always captured</td></tr>`)
 	b.WriteString(`<tr><td class="f-l">repeats / max new</td><td><input type="number" min="1" max="20" data-bind="qualRepeats" value="5"><input type="number" min="1" max="2048" data-bind="qualMaxNew" value="32"></td><td class="f-d">median timing samples · serving token budget</td></tr>`)
 	b.WriteString(`<tr><td class="f-l">baseline</td><td><input data-bind="qualBaseline" placeholder="optional prior receipt JSON"></td><td class="f-d">fails on lost adoption or performance regression</td></tr>`)
 	b.WriteString(`<tr><td class="f-l">regression limits</td><td><input data-bind="qualThroughput" value="0.05" title="throughput"><input data-bind="qualMemory" value="0.10" title="memory"><input data-bind="qualKernels" value="0.10" title="kernel count"></td><td class="f-d">fractional throughput · memory · launch limits</td></tr>`)
@@ -117,7 +118,7 @@ func (s *Server) handleQualification(w http.ResponseWriter, r *http.Request) {
 		}
 		fmt.Fprintf(&b, `<div class="rlvr-campaign"><div class="exp-tname"><code>%s</code> <span class="%s">%s</span><span class="dim"> · %s · adopted %s</span></div>`,
 			esc(receipt.Path), gateClass, gate, esc(device), esc(strings.Join(receipt.Report.Adopted, ", ")))
-		b.WriteString(`<table class="exp-tbl"><tr class="exp-hd"><td>backend</td><td>available</td><td>parity/exact</td><td>speedup</td><td>memory</td><td>adopted</td></tr>`)
+		b.WriteString(`<table class="exp-tbl"><tr class="exp-hd"><td>backend</td><td>available</td><td>parity/exact</td><td>speedup</td><td>launches</td><td>compile</td><td>memory</td><td>adopted</td></tr>`)
 		names := make([]string, 0, len(receipt.Report.Reports))
 		for name := range receipt.Report.Reports {
 			names = append(names, name)
@@ -142,8 +143,20 @@ func (s *Server) handleQualification(w http.ResponseWriter, r *http.Request) {
 			if value, ok := metricFloat(report, "production_memory_fraction"); ok {
 				memory = fmt.Sprintf("%.2f%%", value*100)
 			}
-			fmt.Fprintf(&b, `<tr><td><code>%s</code></td><td>%t</td><td>%v</td><td>%s</td><td>%s</td><td class="%s">%t</td></tr>`,
-				esc(name), available, parity, speed, memory, map[bool]string{true: "sig", false: "ns"}[adopted], adopted)
+			launches := "—"
+			if before, beforeOK := metricFloat(report, "cuda_kernels_before"); beforeOK {
+				if after, afterOK := metricFloat(report, "cuda_kernels_after"); afterOK {
+					launches = fmt.Sprintf("%.0f→%.0f", before, after)
+				}
+			}
+			compile := "—"
+			if plan, ok := report["plan"].(map[string]any); ok {
+				if seconds, secondsOK := metricFloat(plan, "compile_seconds"); secondsOK {
+					compile = fmt.Sprintf("%.1fs", seconds)
+				}
+			}
+			fmt.Fprintf(&b, `<tr><td><code>%s</code></td><td>%t</td><td>%v</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td class="%s">%t</td></tr>`,
+				esc(name), available, parity, speed, launches, compile, memory, map[bool]string{true: "sig", false: "ns"}[adopted], adopted)
 		}
 		b.WriteString(`</table></div>`)
 	}
@@ -156,6 +169,7 @@ func (s *Server) handleRunQualification(w http.ResponseWriter, r *http.Request) 
 		Device     string `json:"qualDevice"`
 		Checkpoint string `json:"qualCheckpoint"`
 		Prompt     string `json:"qualPrompt"`
+		MegaMode   string `json:"qualMegakernelMode"`
 		Repeats    string `json:"qualRepeats"`
 		MaxNew     string `json:"qualMaxNew"`
 		Baseline   string `json:"qualBaseline"`
@@ -176,6 +190,14 @@ func (s *Server) handleRunQualification(w http.ResponseWriter, r *http.Request) 
 			toastErr(sse, "qualification CUDA device index invalid")
 			return
 		}
+	}
+	megaMode := strings.TrimSpace(signals.MegaMode)
+	if megaMode == "" {
+		megaMode = "max-autotune-no-cudagraphs"
+	}
+	if megaMode != "default" && megaMode != "max-autotune-no-cudagraphs" {
+		toastErr(sse, "megakernel tuning mode invalid")
+		return
 	}
 	for _, token := range strings.Split(strings.TrimSpace(signals.Prompt), ",") {
 		if _, parseErr := strconv.Atoi(strings.TrimSpace(token)); parseErr != nil {
@@ -209,7 +231,7 @@ func (s *Server) handleRunQualification(w http.ResponseWriter, r *http.Request) 
 	}
 	args := []string{"-m", "rwkv_lab.production_kernels", "--device", device,
 		"--repeats", repeats, "--prompt-ids", strings.TrimSpace(signals.Prompt),
-		"--max-new", maxNew, "--output", output}
+		"--max-new", maxNew, "--megakernel-compile-mode", megaMode, "--output", output}
 	if strings.TrimSpace(signals.Checkpoint) != "" {
 		checkpoint, pathErr := s.pathUnderRepo(signals.Checkpoint, true)
 		if pathErr != nil {

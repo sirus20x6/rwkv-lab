@@ -23,7 +23,7 @@ func TestResearchCapabilityInventoryExposesAllReadinessRows(t *testing.T) {
 		"distillation expert merge", "guarded test-time training", "ROSA+ fallback",
 		"tool-use length generalization", "energy-based refinement",
 		"compressed convolutional attention", "data-filter regime audit",
-		"runtime backend matrix", "full execution-plan qualification"} {
+		"runtime backend matrix", "native RWKV megakernel backend"} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("capability panel missing %q", expected)
 		}

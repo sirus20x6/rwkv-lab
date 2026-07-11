@@ -1,9 +1,11 @@
 """Sample text from a rwkv_pretrain checkpoint — the lab's train→inspect closer.
 
-``--engine auto`` uses exact constant-state RWKV decoding for compatible checkpoints. Experimental
-levers without a causal state contract fall back to full-prefix recomputation: seed-chain re-chains,
-Engram re-runs recall over generated history, and other levers retain their training semantics. The
-JSON output records the selected engine, fallback reason, elapsed time, and tokens/s.
+``--engine megakernel`` uses the locally compiled Triton/Inductor/CUDA-Graph execution plan;
+``--engine auto`` selects it only after local production qualification, otherwise using exact
+constant-state RWKV decoding for compatible checkpoints. Experimental levers without a causal state
+contract fall back to full-prefix recomputation: seed-chain re-chains, Engram re-runs recall over
+generated history, and other levers retain their training semantics. The JSON output records the
+selected engine, fallback reason, plan identity, compile time, elapsed time, and tokens/s.
 
 Tokenizer: encode shells out to ztok (its trie handles the RWKV world-vocab .txt); decode parses
 the vocab file locally (`idx 'literal' bytelen` per line → id→bytes table).
@@ -110,16 +112,24 @@ def build_from_ckpt(ckpt_path: str, device: str = "cuda", use_ema: bool = False,
     return m, blob
 
 
-def _select_engine(model, requested: str) -> tuple[str, str]:
-    if requested not in ("auto", "recurrent", "prefix"):
-        raise ValueError("generation engine must be auto, recurrent, or prefix")
+def _select_engine(model, requested: str, device: str = "cuda") -> tuple[str, str]:
+    if requested not in ("auto", "megakernel", "recurrent", "prefix"):
+        raise ValueError("generation engine must be auto, megakernel, recurrent, or prefix")
     reason = "model does not expose forward_recurrent"
     if hasattr(model, "recurrent_incompatibility"):
         reason = model.recurrent_incompatibility() or ""
     available = hasattr(model, "forward_recurrent") and not reason
     if requested == "recurrent" and not available:
         raise ValueError(f"recurrent generation unavailable: {reason}")
+    if requested == "megakernel":
+        from rwkv_lab.megakernel import megakernel_incompatibility
+        mega_reason = megakernel_incompatibility(model, device)
+        if mega_reason:
+            raise ValueError(f"megakernel generation unavailable: {mega_reason}")
+        return "megakernel", "compiled Triton + Inductor + CUDA Graph execution plan"
     if requested == "auto":
+        if getattr(model, "_megakernel_adopted", False):
+            return "megakernel", "locally parity/performance-qualified execution plan"
         return ("recurrent", "native constant-size recurrent state") if available else ("prefix", reason)
     return requested, "native constant-size recurrent state" if requested == "recurrent" else reason
 
@@ -155,7 +165,7 @@ def sample_with_stats(model, ids: list[int], *, max_new: int = 200,
         raise ValueError("generation prompt is empty")
     if seed is not None:
         torch.manual_seed(seed)
-    selected, reason = _select_engine(model, engine)
+    selected, reason = _select_engine(model, engine, device)
     prompt = torch.tensor([ids], dtype=torch.long, device=device)
     if selected == "prefix":
         x = torch.empty((1, len(ids) + max_new), dtype=torch.long, device=device)
@@ -163,9 +173,14 @@ def sample_with_stats(model, ids: list[int], *, max_new: int = 200,
         length = len(ids)
     else:
         x, length = prompt, len(ids)
-    out, state = [], None
+    out, state, megakernel = [], None, None
     started = time.perf_counter()
-    if selected == "recurrent":
+    if selected == "megakernel":
+        from rwkv_lab.megakernel import get_megakernel_backend
+        megakernel = get_megakernel_backend(model, device=device)
+        logits = megakernel.prefill(x)
+        next_logits = logits[0, -1]
+    elif selected == "recurrent":
         logits, state = model.forward_recurrent(x)
         next_logits = logits[0, -1]
     for step in range(max_new):
@@ -176,7 +191,10 @@ def sample_with_stats(model, ids: list[int], *, max_new: int = 200,
             break
         out.append(nxt)
         token = x.new_tensor([[nxt]])
-        if selected == "recurrent" and step + 1 < max_new:
+        if selected == "megakernel" and step + 1 < max_new:
+            logits = megakernel.step(token)
+            next_logits = logits[0, -1]
+        elif selected == "recurrent" and step + 1 < max_new:
             logits, state = model.forward_recurrent(token, state)
             next_logits = logits[0, -1]
         elif selected == "prefix":
@@ -185,6 +203,8 @@ def sample_with_stats(model, ids: list[int], *, max_new: int = 200,
     elapsed = time.perf_counter() - started
     stats = {"engine": selected, "fallback_reason": reason, "seconds": elapsed,
              "tokens": len(out), "tokens_per_second": len(out) / max(elapsed, 1e-12)}
+    if megakernel is not None:
+        stats["megakernel"] = megakernel.receipt()
     return out, stats
 
 
@@ -216,8 +236,11 @@ def main():
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--no-stop-sep", action="store_true")
     ap.add_argument("--device", default="cuda")
-    ap.add_argument("--engine", choices=("auto", "recurrent", "prefix"), default="auto",
-                    help="auto adopts exact constant-state decoding when compatible")
+    ap.add_argument("--engine", choices=("auto", "megakernel", "recurrent", "prefix"),
+                    default="auto", help="megakernel uses a compiled Triton/Inductor/CUDA-Graph "
+                    "plan; auto adopts it only after local qualification")
+    ap.add_argument("--megakernel-receipt", default="",
+                    help="persisted production qualification receipt, checkpoint-hash verified")
     ap.add_argument("--json", action="store_true", help="machine output (for the trainboard)")
     # fallback arch flags for pre-arch-record checkpoints
     ap.add_argument("--d-model", type=int, default=0)
@@ -229,6 +252,9 @@ def main():
                 if args.d_model and args.n_layers else None)
     model, blob = build_from_ckpt(args.ckpt, args.device, use_ema=args.use_ema,
                                   arch_override=override)
+    if args.megakernel_receipt:
+        from rwkv_lab.megakernel import adopt_megakernel_receipt
+        adopt_megakernel_receipt(model, args.megakernel_receipt, args.ckpt)
     vocab = WorldVocab()
     text = args.prompt if args.raw else f"User: {args.prompt}\n\nAssistant:"
     ids = vocab.encode(text)

@@ -112,8 +112,8 @@ def qualify_cuda_rosa(*, device: str, repeats: int = 3, length: int = 1024,
     for _ in range(max(1, repeats)):
         started = time.perf_counter()
         q_cpu, k_cpu = gpu_query.cpu().numpy(), gpu_key.cpu().numpy()
-        old = tuple(torch.from_numpy(value).to(selected)
-                    for value in sam_retrieve_cf(q_cpu, k_cpu, alphabet, route_width))
+        _old = tuple(torch.from_numpy(value).to(selected)
+                     for value in sam_retrieve_cf(q_cpu, k_cpu, alphabet, route_width))
         torch.cuda.synchronize(selected)
         blocking.append(time.perf_counter() - started)
         started = time.perf_counter()
@@ -214,6 +214,7 @@ def profile_kernel_evidence(work, *, device: torch.device) -> dict:
 
 
 def qualification_suite(*, device: str = "auto", compile_backend: str = "inductor",
+                        megakernel_compile_mode: str = "max-autotune-no-cudagraphs",
                         repeats: int = 5, checkpoint: str = "",
                         prompt_ids: Sequence[int] = (1, 2, 3, 4),
                         max_new: int = 32) -> dict:
@@ -262,15 +263,25 @@ def qualification_suite(*, device: str = "auto", compile_backend: str = "inducto
     recurrent = {"schema": "rwkv-lab.recurrent-serving-qualification.v1",
                  "available": False, "adopted": False,
                  "error": "pass --checkpoint to benchmark a real model"}
+    megakernel = {"schema": "rwkv-lab.megakernel-qualification.v1",
+                  "available": False, "adopted": False,
+                  "error": "pass --checkpoint to compile and qualify a real model"}
     if checkpoint:
         from rwkv_lab.generate import build_from_ckpt
+        from rwkv_lab.megakernel import file_sha256, qualify_megakernel_generation
         model, _ = build_from_ckpt(checkpoint, device)
+        checkpoint_digest = file_sha256(checkpoint)
         recurrent = qualify_recurrent_generation(
             model, prompt_ids, device=device, max_new=max_new, repeats=repeats)
+        megakernel = qualify_megakernel_generation(
+            model, prompt_ids, device=device, max_new=max_new, repeats=repeats,
+            compile_mode=megakernel_compile_mode,
+            checkpoint_sha256=checkpoint_digest)
 
     reports = {"nf4": nf4, "nvfp4": nvfp4, "rosa": rosa,
                "triangular_delta": triangular,
                "online_memory": online_memory, "recurrent_decode": recurrent,
+               "megakernel_decode": megakernel,
                "eagle3": {
                    "available": True, "adopted": False,
                    "qualification_api": "rwkv_lab.speculative.qualify_speculative_greedy",
@@ -291,6 +302,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Qualify production training/serving kernels")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--compile-backend", default="inductor")
+    parser.add_argument("--megakernel-compile-mode",
+                        choices=("default", "max-autotune-no-cudagraphs"),
+                        default="max-autotune-no-cudagraphs")
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--checkpoint", default="")
     parser.add_argument("--prompt-ids", default="1,2,3,4")
@@ -305,6 +319,7 @@ def main() -> None:
     prompt_ids = tuple(int(value) for value in args.prompt_ids.split(",") if value.strip())
     report = qualification_suite(
         device=args.device, compile_backend=args.compile_backend, repeats=args.repeats,
+        megakernel_compile_mode=args.megakernel_compile_mode,
         checkpoint=args.checkpoint, prompt_ids=prompt_ids, max_new=args.max_new)
     if args.baseline:
         baseline = json.loads(Path(args.baseline).read_text())
