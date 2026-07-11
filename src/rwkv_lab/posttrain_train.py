@@ -18,6 +18,7 @@ import json
 from pathlib import Path
 import random
 import copy
+from functools import lru_cache
 
 import torch
 import torch.nn.functional as F
@@ -146,15 +147,25 @@ def _packed_outcome_rewards(head: OutcomeRewardHead, hidden: torch.Tensor,
     return head.proj(chosen).squeeze(-1)
 
 
+@lru_cache(maxsize=8192)
+def _variant_cpu_tensors(variant: TokenizedVariant) -> tuple[torch.Tensor, torch.Tensor]:
+    """Tensorize immutable token records once; batching performs one device copy."""
+    return (torch.tensor(variant.input_ids, dtype=torch.long),
+            torch.tensor(variant.labels, dtype=torch.long))
+
+
 def _collate(variants: list[TokenizedVariant], device: str) -> tuple[torch.Tensor, torch.Tensor]:
     width = max(len(v.input_ids) for v in variants)
-    ids = torch.zeros(len(variants), width, dtype=torch.long, device=device)
-    labels = torch.full((len(variants), width), IGNORE_INDEX, dtype=torch.long, device=device)
+    ids = torch.zeros(len(variants), width, dtype=torch.long)
+    labels = torch.full((len(variants), width), IGNORE_INDEX, dtype=torch.long)
     for i, variant in enumerate(variants):
         n = len(variant.input_ids)
-        ids[i, :n] = torch.tensor(variant.input_ids, device=device)
-        labels[i, :n] = torch.tensor(variant.labels, device=device)
-    return ids, labels
+        source_ids, source_labels = _variant_cpu_tensors(variant)
+        ids[i, :n] = source_ids
+        labels[i, :n] = source_labels
+    if torch.device(device).type == "cuda":
+        ids, labels = ids.pin_memory(), labels.pin_memory()
+    return (ids.to(device, non_blocking=True), labels.to(device, non_blocking=True))
 
 
 def _lm_logps(model: nn.Module, variants: list[TokenizedVariant], device: str, *,
@@ -175,35 +186,44 @@ def _paired_logps(model: nn.Module, chosen: list[TokenizedVariant], rejected: li
 def _collate_steps(variants: list[TokenizedVariant], device: str):
     ids, labels = _collate(variants, device)
     width = max(len(value.step_positions) for value in variants)
-    positions = torch.zeros(len(variants), width, dtype=torch.long, device=device)
-    step_labels = torch.zeros(len(variants), width, dtype=torch.float32, device=device)
-    mask = torch.zeros(len(variants), width, dtype=torch.bool, device=device)
+    positions = torch.zeros(len(variants), width, dtype=torch.long)
+    step_labels = torch.zeros(len(variants), width, dtype=torch.float32)
+    mask = torch.zeros(len(variants), width, dtype=torch.bool)
     for index, value in enumerate(variants):
         count = len(value.step_positions)
-        positions[index, :count] = torch.tensor(value.step_positions, device=device)
-        step_labels[index, :count] = torch.tensor(value.step_labels, dtype=torch.float32, device=device)
+        positions[index, :count] = torch.tensor(value.step_positions)
+        step_labels[index, :count] = torch.tensor(value.step_labels, dtype=torch.float32)
         mask[index, :count] = True
-    return ids, labels, positions, step_labels, mask
+    if torch.device(device).type == "cuda":
+        positions, step_labels, mask = positions.pin_memory(), step_labels.pin_memory(), mask.pin_memory()
+    return (ids, labels, positions.to(device, non_blocking=True),
+            step_labels.to(device, non_blocking=True), mask.to(device, non_blocking=True))
 
 
 def _train_loss(model: nn.Module, reward_head: nn.Module | None, batch: list[TokenizedExample],
                 objective: str, adapter_name: str, device: str, beta: float,
-                gamma: float) -> tuple[torch.Tensor, dict[str, float]]:
+                gamma: float, *, reference_cache: dict | None = None,
+                collect_metrics: bool = True) -> tuple[torch.Tensor, dict[str, float]]:
     if objective == "sft":
         ids, labels = _collate([row.variants["sft"] for row in batch], device)
         logits = model(ids)
         loss = F.cross_entropy(logits[:, :-1].reshape(-1, logits.shape[-1]),
                                labels[:, 1:].reshape(-1), ignore_index=IGNORE_INDEX)
-        return loss, {"sft_nll": float(loss.detach())}
+        return loss, ({"sft_nll": float(loss.detach())} if collect_metrics else {})
 
     if objective == "kto":
         variants = [row.variants["response"] for row in batch]
         policy, _ = _lm_logps(model, variants, device)
-        with torch.no_grad(), active_adapters(model, ()):
-            reference, _ = _lm_logps(model, variants, device)
+        if reference_cache is None:
+            with torch.no_grad(), active_adapters(model, ()):
+                reference, _ = _lm_logps(model, variants, device)
+        else:
+            reference = torch.tensor([reference_cache[row.id][0] for row in batch],
+                                     device=device, dtype=policy.dtype)
         desirable = torch.tensor([bool(row.metadata["label"]) for row in batch], device=device)
         losses = kto_loss(policy, reference, desirable, beta=beta)
-        return losses.mean(), {"desirable_frac": float(desirable.float().mean())}
+        return losses.mean(), ({"desirable_frac": float(desirable.float().mean())}
+                               if collect_metrics else {})
 
     if objective == "prm":
         if not isinstance(reward_head, ProcessRewardHead):
@@ -213,7 +233,8 @@ def _train_loss(model: nn.Module, reward_head: nn.Module | None, batch: list[Tok
         _, hidden = model(ids, return_hidden=True)
         logits = reward_head(hidden, positions)
         loss = process_reward_loss(logits, step_labels, step_mask)
-        metrics = binary_calibration(logits[step_mask], step_labels[step_mask])
+        metrics = (binary_calibration(logits[step_mask], step_labels[step_mask])
+                   if collect_metrics else {})
         return loss, {f"prm_{name}": value for name, value in metrics.items()}
 
     chosen = [row.variants["chosen"] for row in batch]
@@ -227,13 +248,20 @@ def _train_loss(model: nn.Module, reward_head: nn.Module | None, batch: list[Tok
         cr = reward_head(hidden[:count], labels[:count] != IGNORE_INDEX)
         rr = reward_head(hidden[count:], labels[count:] != IGNORE_INDEX)
         losses = reward_model_loss(cr, rr)
-        return losses.mean(), {"reward_margin": float((cr - rr).detach().mean())}
+        return losses.mean(), ({"reward_margin": float((cr - rr).detach().mean())}
+                               if collect_metrics else {})
 
     average = objective in ("orpo", "simpo")
     policy_chosen, policy_rejected = _paired_logps(model, chosen, rejected, device, average=average)
     if objective == "dpo":
-        with torch.no_grad(), active_adapters(model, ()):
-            reference_chosen, reference_rejected = _paired_logps(model, chosen, rejected, device)
+        if reference_cache is None:
+            with torch.no_grad(), active_adapters(model, ()):
+                reference_chosen, reference_rejected = _paired_logps(model, chosen, rejected, device)
+        else:
+            reference_chosen = torch.tensor([reference_cache[row.id][0] for row in batch],
+                                            device=device, dtype=policy_chosen.dtype)
+            reference_rejected = torch.tensor([reference_cache[row.id][1] for row in batch],
+                                              device=device, dtype=policy_rejected.dtype)
         result = dpo_loss(policy_chosen, policy_rejected, reference_chosen, reference_rejected,
                           beta=beta)
     elif objective == "orpo":
@@ -242,12 +270,14 @@ def _train_loss(model: nn.Module, reward_head: nn.Module | None, batch: list[Tok
         result = simpo_loss(policy_chosen, policy_rejected, beta=beta, gamma=gamma)
     else:
         raise ValueError(f"unsupported objective {objective!r}")
-    return result.loss.mean(), {"preference_margin": float(result.margin.mean())}
+    return result.loss.mean(), ({"preference_margin": float(result.margin.mean())}
+                                if collect_metrics else {})
 
 
 def _packed_train_loss(model: nn.Module, reward_head: nn.Module | None,
                        rows: list[TokenizedExample], objective: str, device: str,
-                       beta: float, gamma: float) -> tuple[torch.Tensor, dict[str, float]]:
+                       beta: float, gamma: float, *, reference_cache: dict | None = None,
+                       collect_metrics: bool = True) -> tuple[torch.Tensor, dict[str, float]]:
     """Train one reset-isolated multipack without cross-example recurrent state."""
     if objective == "sft":
         variant = _join_variants(rows, "sft")
@@ -255,7 +285,8 @@ def _packed_train_loss(model: nn.Module, reward_head: nn.Module | None,
         labels = torch.tensor(variant.labels, device=device)[None]
         loss = F.cross_entropy(logits[:, :-1].reshape(-1, logits.shape[-1]),
                                labels[:, 1:].reshape(-1), ignore_index=IGNORE_INDEX)
-        return loss, {"sft_nll": float(loss.detach()), "packed_examples": len(rows)}
+        return loss, ({"sft_nll": float(loss.detach()), "packed_examples": len(rows)}
+                      if collect_metrics else {})
 
     if objective == "prm":
         if not isinstance(reward_head, ProcessRewardHead):
@@ -266,19 +297,23 @@ def _packed_train_loss(model: nn.Module, reward_head: nn.Module | None,
         labels = torch.tensor(variant.step_labels, dtype=torch.float32, device=device)[None]
         logits = reward_head(hidden, positions)
         loss = process_reward_loss(logits, labels)
-        metrics = binary_calibration(logits.flatten(), labels.flatten())
+        metrics = binary_calibration(logits.flatten(), labels.flatten()) if collect_metrics else {}
         return loss, {**{f"prm_{name}": value for name, value in metrics.items()},
                       "packed_examples": len(rows)}
 
     if objective == "kto":
         variant = _join_variants(rows, "response")
         policy = _segmented_logps(_packed_forward(model, variant, device), variant)
-        with torch.no_grad(), active_adapters(model, ()):
-            reference = _segmented_logps(_packed_forward(model, variant, device), variant)
+        if reference_cache is None:
+            with torch.no_grad(), active_adapters(model, ()):
+                reference = _segmented_logps(_packed_forward(model, variant, device), variant)
+        else:
+            reference = torch.tensor([reference_cache[row.id][0] for row in rows],
+                                     device=device, dtype=policy.dtype)
         desirable = torch.tensor([bool(row.metadata["label"]) for row in rows], device=device)
         losses = kto_loss(policy, reference, desirable, beta=beta)
-        return losses.mean(), {"desirable_frac": float(desirable.float().mean()),
-                               "packed_examples": len(rows)}
+        return losses.mean(), ({"desirable_frac": float(desirable.float().mean()),
+                                "packed_examples": len(rows)} if collect_metrics else {})
 
     chosen = _join_variants(rows, "chosen")
     rejected = _join_variants(rows, "rejected")
@@ -290,17 +325,23 @@ def _packed_train_loss(model: nn.Module, reward_head: nn.Module | None,
         chosen_reward = _packed_outcome_rewards(reward_head, chosen_hidden, chosen)
         rejected_reward = _packed_outcome_rewards(reward_head, rejected_hidden, rejected)
         losses = reward_model_loss(chosen_reward, rejected_reward)
-        return losses.mean(), {"reward_margin": float((chosen_reward - rejected_reward).mean().detach()),
-                               "packed_examples": len(rows)}
+        return losses.mean(), ({"reward_margin": float((chosen_reward - rejected_reward).mean().detach()),
+                                "packed_examples": len(rows)} if collect_metrics else {})
 
     average = objective in ("orpo", "simpo")
     policy_chosen = _segmented_logps(_packed_forward(model, chosen, device), chosen, average=average)
     policy_rejected = _segmented_logps(_packed_forward(model, rejected, device), rejected,
                                        average=average)
     if objective == "dpo":
-        with torch.no_grad(), active_adapters(model, ()):
-            reference_chosen = _segmented_logps(_packed_forward(model, chosen, device), chosen)
-            reference_rejected = _segmented_logps(_packed_forward(model, rejected, device), rejected)
+        if reference_cache is None:
+            with torch.no_grad(), active_adapters(model, ()):
+                reference_chosen = _segmented_logps(_packed_forward(model, chosen, device), chosen)
+                reference_rejected = _segmented_logps(_packed_forward(model, rejected, device), rejected)
+        else:
+            reference_chosen = torch.tensor([reference_cache[row.id][0] for row in rows],
+                                            device=device, dtype=policy_chosen.dtype)
+            reference_rejected = torch.tensor([reference_cache[row.id][1] for row in rows],
+                                              device=device, dtype=policy_rejected.dtype)
         result = dpo_loss(policy_chosen, policy_rejected, reference_chosen, reference_rejected,
                           beta=beta)
     elif objective == "orpo":
@@ -309,25 +350,55 @@ def _packed_train_loss(model: nn.Module, reward_head: nn.Module | None,
         result = simpo_loss(policy_chosen, policy_rejected, beta=beta, gamma=gamma)
     else:
         raise ValueError(f"unsupported packed objective {objective!r}")
-    return result.loss.mean(), {"preference_margin": float(result.margin.mean()),
-                                "packed_examples": len(rows)}
+    return result.loss.mean(), ({"preference_margin": float(result.margin.mean()),
+                                 "packed_examples": len(rows)} if collect_metrics else {})
+
+
+@torch.no_grad()
+def _build_reference_cache(model: nn.Module, rows: list[TokenizedExample], objective: str,
+                           device: str, batch_size: int) -> dict[str, tuple[float, ...]]:
+    """Score the immutable frozen base once instead of once per optimizer step."""
+    if objective not in ("dpo", "kto"):
+        return {}
+    cache: dict[str, tuple[float, ...]] = {}
+    with active_adapters(model, ()):
+        for start in range(0, len(rows), max(1, int(batch_size))):
+            batch = rows[start:start + max(1, int(batch_size))]
+            if objective == "kto":
+                values, _ = _lm_logps(
+                    model, [row.variants["response"] for row in batch], device)
+                cpu = values.detach().float().cpu().tolist()
+                cache.update((row.id, (float(value),)) for row, value in zip(batch, cpu))
+            else:
+                chosen, rejected = _paired_logps(
+                    model, [row.variants["chosen"] for row in batch],
+                    [row.variants["rejected"] for row in batch], device)
+                chosen_cpu = chosen.detach().float().cpu().tolist()
+                rejected_cpu = rejected.detach().float().cpu().tolist()
+                cache.update((row.id, (float(left), float(right)))
+                             for row, left, right in zip(batch, chosen_cpu, rejected_cpu))
+    return cache
 
 
 def _qualify_reset_packing(model: nn.Module, reward_head: nn.Module | None,
                            rows: list[TokenizedExample], objective: str, adapter_name: str,
                            device: str, beta: float, gamma: float,
-                           parameters: list[nn.Parameter], tolerance: float = 3e-4) -> dict:
+                           parameters: list[nn.Parameter], tolerance: float = 3e-4,
+                           reference_cache: dict | None = None) -> dict:
     """Require unpacked/packed loss and trainable-gradient parity before adoption."""
     model.zero_grad(set_to_none=True)
     if reward_head is not None:
         reward_head.zero_grad(set_to_none=True)
     unpacked, _ = _train_loss(model, reward_head, rows, objective, adapter_name,
-                              device, beta, gamma)
+                              device, beta, gamma, reference_cache=reference_cache,
+                              collect_metrics=False)
     unpacked_gradients = torch.autograd.grad(unpacked, parameters, allow_unused=True)
     model.zero_grad(set_to_none=True)
     if reward_head is not None:
         reward_head.zero_grad(set_to_none=True)
-    packed, _ = _packed_train_loss(model, reward_head, rows, objective, device, beta, gamma)
+    packed, _ = _packed_train_loss(
+        model, reward_head, rows, objective, device, beta, gamma,
+        reference_cache=reference_cache, collect_metrics=False)
     packed_gradients = torch.autograd.grad(packed, parameters, allow_unused=True)
     gradient_error = 0.0
     for left, right in zip(unpacked_gradients, packed_gradients):
@@ -356,7 +427,8 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
           template: str = "", eval_data: str = "", token_cache: str = "",
           max_train_tokens: int = 0, packing: str = "audit",
           base_quantization: str = "none", quant_block_size: int = 64,
-          quant_backend: str = "auto", activation_offload: bool = False) -> dict:
+          quant_backend: str = "auto", activation_offload: bool = False,
+          log_every: int = 10) -> dict:
     from rwkv_lab.generate import WorldVocab, build_from_ckpt
 
     if objective not in ("sft", "dpo", "kto", "orpo", "simpo", "reward", "prm"):
@@ -365,7 +437,7 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
         raise ValueError("base_quantization must be none/nf4 and packing must be off/audit/reset")
     if quant_backend not in ("auto", "portable", "torchao"):
         raise ValueError("quant_backend must be auto, portable, or torchao")
-    if steps <= 0 or batch_size <= 0 or max_length < 2:
+    if steps <= 0 or batch_size <= 0 or max_length < 2 or log_every <= 0:
         raise ValueError("steps/batch_size must be positive and max_length must be at least two")
     device = ("cuda" if torch.cuda.is_available() else "cpu") if device == "auto" else device
     torch.manual_seed(seed)
@@ -393,9 +465,11 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
                                                       block_size=quant_block_size)
         quantization_qualification = {"portable": portable_report.__dict__,
                                       "accelerated": accelerated_report}
-        selected_quant_backend = ("torchao" if quant_backend == "auto" and
-                                  accelerated_report.get("adopted") else
-                                  "portable" if quant_backend == "auto" else quant_backend)
+        if quant_backend == "auto" and not accelerated_report.get("adopted"):
+            raise ValueError("automatic NF4 requires an adopted accelerated backend; "
+                             "use --quant-backend portable only for correctness-scale runs: "
+                             f"{accelerated_report}")
+        selected_quant_backend = ("torchao" if quant_backend == "auto" else quant_backend)
         if selected_quant_backend == "torchao" and not accelerated_report.get("adopted"):
             raise ValueError(f"TorchAO NF4 failed parity/performance qualification: {accelerated_report}")
         if not portable_report.passed:
@@ -433,6 +507,8 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
                             truncate="left") for row in train_rows]
     encoded_eval = [tokenize(render(row, chat_template), tokenizer, max_length=max_length,
                              truncate="left") for row in eval_rows]
+    reference_cache = _build_reference_cache(
+        model, encoded + encoded_eval, objective, device, batch_size)
     variant_name = {"sft": "sft", "kto": "response", "prm": "steps"}.get(objective, "chosen")
     packing_audit = None
     if packing in ("audit", "reset"):
@@ -464,7 +540,7 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
             raise ValueError("reset packing needs at least two examples that fit one context")
         qualification = _qualify_reset_packing(model, reward_head, qualification_rows,
                                                 objective, adapter_name, device, beta, gamma,
-                                                parameters)
+                                                parameters, reference_cache=reference_cache)
         packed_tokens = sum(len(row.variants[name].input_ids) for group in packed_groups
                             for row in group for name in pack_names)
         packed_capacity = len(packed_groups) * max_length * len(pack_names)
@@ -492,7 +568,8 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
         with torch.no_grad():
             for row in encoded_eval:
                 value, _ = _train_loss(model, reward_head, [row],
-                                       objective, adapter_name, device, beta, gamma)
+                                       objective, adapter_name, device, beta, gamma,
+                                       reference_cache=reference_cache)
                 values.append(float(value))
                 per_example.append({"id": row.id, "loss": float(value),
                                     "family": str(row.metadata.get("family") or "default")})
@@ -532,7 +609,10 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
         log.write(json.dumps({"kind": "eval", "step": 0, "loss": initial_eval,
                               "objective": objective}) + "\n")
     model.train()
-    losses = []
+    loss_sum_t = torch.zeros((), dtype=torch.float32, device=device)
+    last_loss_t = loss_sum_t
+    finite_window_t = torch.ones((), dtype=torch.bool, device=device)
+    scalar_losses: list[float] = []
     last_metrics: dict[str, float] = {}
     train_tokens = 0
     completed_steps = 0
@@ -561,24 +641,62 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
         offload = (torch.autograd.graph.save_on_cpu(pin_memory=True)
                    if activation_offload and device.startswith("cuda") else nullcontext())
         with offload:
+            collect_metrics = (step == 0 or step + 1 == steps or (step + 1) % log_every == 0)
             if packing == "reset":
                 loss, last_metrics = _packed_train_loss(model, reward_head, batch, objective,
-                                                        device, beta, gamma)
+                                                        device, beta, gamma,
+                                                        reference_cache=reference_cache,
+                                                        collect_metrics=collect_metrics)
             else:
                 loss, last_metrics = _train_loss(model, reward_head, batch, objective, adapter_name,
-                                                 device, beta, gamma)
-        if not torch.isfinite(loss):
-            raise FloatingPointError(f"non-finite {objective} loss at step {step}")
+                                                 device, beta, gamma,
+                                                 reference_cache=reference_cache,
+                                                 collect_metrics=collect_metrics)
         loss.backward()
+        finite = torch.isfinite(loss.detach())
+        finite_window_t.logical_and_(finite)
+        # Keep a bad update from poisoning adapter/reward-head state while deferring the host
+        # status read to telemetry cadence.  Adapter training has few gradient tensors, so these
+        # device-side passes cost less than a full CUDA-stream synchronization every step.
+        gradients = [parameter.grad for parameter in parameters if parameter.grad is not None]
+        for gradient in gradients:
+            gradient.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
+        gradient_groups: dict[tuple[torch.device, torch.dtype], list[torch.Tensor]] = {}
+        for gradient in gradients:
+            gradient_groups.setdefault((gradient.device, gradient.dtype), []).append(gradient)
+        for (_, dtype), group in gradient_groups.items():
+            torch._foreach_mul_(group, finite.to(dtype=dtype))
         torch.nn.utils.clip_grad_norm_(parameters, 1.0)
         optimizer.step()
         train_tokens += _batch_tokens(batch, objective)
         completed_steps = step + 1
-        losses.append(float(loss.detach()))
-        log.write(json.dumps({"kind": "train", "step": step + 1, "loss": losses[-1],
-                              "objective": objective, **last_metrics}) + "\n")
+        safe_loss = torch.where(finite, loss.detach().float(), torch.zeros_like(loss.detach().float()))
+        loss_sum_t.add_(safe_loss)
+        last_loss_t = safe_loss
+        telemetry_due = (completed_steps == steps or completed_steps % log_every == 0)
+        if telemetry_due:
+            if not bool(finite_window_t):
+                raise FloatingPointError(
+                    f"non-finite {objective} loss in steps "
+                    f"{max(1, completed_steps - log_every + 1)}..{completed_steps}")
+            scalar_loss = float(last_loss_t)
+            scalar_losses.append(scalar_loss)
+            log.write(json.dumps({"kind": "train", "step": completed_steps,
+                                  "loss": scalar_loss, "objective": objective,
+                                  "telemetry_steps": min(log_every, completed_steps),
+                                  **last_metrics}) + "\n")
+            finite_window_t.fill_(True)
         if max_train_tokens and train_tokens >= max_train_tokens:
             break
+    if completed_steps and completed_steps % log_every:
+        if not bool(finite_window_t):
+            raise FloatingPointError(f"non-finite {objective} loss before step {completed_steps}")
+        scalar_loss = float(last_loss_t)
+        scalar_losses.append(scalar_loss)
+        log.write(json.dumps({"kind": "train", "step": completed_steps,
+                              "loss": scalar_loss, "objective": objective,
+                              "telemetry_steps": completed_steps % log_every,
+                              **last_metrics}) + "\n")
     final_eval = evaluate()
     if final_eval is not None:
         log.write(json.dumps({"kind": "eval", "step": completed_steps, "loss": final_eval,
@@ -607,9 +725,11 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
                           "promotion": "unassessed"}
         (root / "reward-model.json").write_text(json.dumps(reward_version, indent=2,
                                                             sort_keys=True) + "\n")
+    final_loss = float(last_loss_t)
+    mean_loss = float(loss_sum_t / max(1, completed_steps))
     result = {"schema": RESULT_SCHEMA, "objective": objective, "steps": completed_steps,
-              "examples": len(encoded), "final_loss": losses[-1],
-              "mean_loss": sum(losses) / len(losses), "metrics": last_metrics,
+              "examples": len(encoded), "final_loss": final_loss,
+              "mean_loss": mean_loss, "metrics": last_metrics,
               "eval_examples": len(encoded_eval), "initial_eval_loss": initial_eval,
               "final_eval_loss": final_eval,
               "initial_eval": initial_eval_details, "eval": eval_details,
@@ -624,7 +744,8 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
                                "dense_bytes": dense_storage, "stored_bytes": base_storage,
                                "compression_ratio": dense_storage / max(1, base_storage),
                                "qualification": quantization_qualification},
-              "activation_offload": activation_offload, "reward_model": reward_version,
+              "activation_offload": activation_offload, "log_every": log_every,
+              "reward_model": reward_version,
               "promotion": {"status": "unassessed", "reason": "training never implies promotion"}}
     (root / "posttrain-result.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     return result
@@ -657,6 +778,8 @@ def main() -> None:
     parser.add_argument("--quant-block-size", type=int, default=64)
     parser.add_argument("--quant-backend", choices=["auto", "portable", "torchao"], default="auto")
     parser.add_argument("--activation-offload", action="store_true")
+    parser.add_argument("--log-every", type=int, default=10,
+                        help="materialize train loss/non-finite status every N updates")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="auto")
     args = parser.parse_args()

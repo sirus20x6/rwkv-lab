@@ -51,8 +51,9 @@ _LM_FLAG = {"n_loops": "--loop-count", "hyper_lanes": "--loop-hyper", "gate_mode
             "online_memory": "--online-memory", "online_memory_mode": "--online-memory-mode",
             "online_memory_dim": "--online-memory-dim", "online_memory_lr": "--online-memory-lr",
             "online_memory_retention": "--online-memory-retention",
-            "online_memory_window": "--online-memory-window", "nvfp4": "--nvfp4",
-            "nvfp4_rht": "--nvfp4-rht"}
+            "online_memory_window": "--online-memory-window",
+            "online_memory_kernel": "--online-memory-kernel", "nvfp4": "--nvfp4",
+            "nvfp4_rht": "--nvfp4-rht", "nvfp4_backend": "--nvfp4-backend"}
 
 
 def _read_train_log(path: str, mode: str) -> tuple[dict, list, dict]:

@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"sync"
+	"time"
 
 	"trainboard/internal/db"
 	"trainboard/internal/sysmon"
@@ -38,6 +39,12 @@ var (
 		layer int
 		ok    bool
 	}{}
+	sidecarCache = map[string]struct {
+		dirMtime float64
+		path     string
+		mtime    float64
+		expires  time.Time
+	}{}
 )
 
 // Scan builds the per-layer map for nLayers layers. summaries are the run
@@ -45,6 +52,11 @@ var (
 func Scan(database *db.DB, libDir, runsDir string, summaries []db.RunSummary, procs []sysmon.Proc, nLayers int) []LayerStatus {
 	accepted := scanLib(libDir)                // layer -> (sizeGB, mtime)
 	runByLayer := scanRuns(runsDir, summaries) // layer -> run name (latest)
+	summaryByRun := make(map[string]db.RunSummary, len(summaries))
+	for _, summary := range summaries {
+		summaryByRun[summary.Name] = summary
+	}
+	codecByRun, _ := database.LatestCodecRelByRun()
 
 	// layers actively converting (live proc whose run maps to a layer)
 	converting := map[int]string{}
@@ -63,20 +75,14 @@ func Scan(database *db.DB, libDir, runsDir string, summaries []db.RunSummary, pr
 		if run, ok := runByLayer[L]; ok {
 			ls.RunName = run
 			ls.Status = "attempted"
-			if k, ok, _ := database.RunKPIsByName(run); ok {
-				// prefer the run's best (min) eval ppl — the layer's quality, and
-				// what best/best.json records — over the latest noisy eval.
-				if k.BestPPL != nil {
-					ls.PPL = k.BestPPL
+			if summary, found := summaryByRun[run]; found {
+				if summary.BestPPL != nil {
+					ls.PPL = summary.BestPPL
 				} else {
-					ls.PPL = k.PPL
+					ls.PPL = summary.LatestPPL
 				}
 			}
-			if rid, ok, _ := database.RunID(run); ok {
-				if st, err := database.RecentTrainStats(rid, 50); err == nil {
-					ls.CodecRel = st.CodecRel
-				}
-			}
+			ls.CodecRel = codecByRun[run]
 		}
 		if lib, ok := accepted[L]; ok {
 			ls.Status = "accepted"
@@ -170,6 +176,18 @@ func runLayer(runDir string) (int, bool) {
 }
 
 func latestSidecar(runDir string) (string, float64) {
+	dirInfo, err := os.Stat(runDir)
+	if err != nil {
+		return "", 0
+	}
+	dirMtime := float64(dirInfo.ModTime().UnixNano()) / 1e9
+	layerCacheMu.Lock()
+	if cached, ok := sidecarCache[runDir]; ok && cached.dirMtime == dirMtime &&
+		time.Now().Before(cached.expires) {
+		layerCacheMu.Unlock()
+		return cached.path, cached.mtime
+	}
+	layerCacheMu.Unlock()
 	entries, err := os.ReadDir(runDir)
 	if err != nil {
 		return "", 0
@@ -191,6 +209,14 @@ func latestSidecar(runDir string) (string, float64) {
 			best = p
 		}
 	}
+	layerCacheMu.Lock()
+	sidecarCache[runDir] = struct {
+		dirMtime float64
+		path     string
+		mtime    float64
+		expires  time.Time
+	}{dirMtime, best, bestMtime, time.Now().Add(5 * time.Second)}
+	layerCacheMu.Unlock()
 	return best, bestMtime
 }
 

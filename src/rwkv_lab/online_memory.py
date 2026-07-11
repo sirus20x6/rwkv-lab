@@ -25,7 +25,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from collections import deque
+import copy
 import math
+import time
 
 import torch
 import torch.nn as nn
@@ -37,9 +39,13 @@ class OnlineMemoryState:
     memory: torch.Tensor
     momentum: torch.Tensor
     steps: int = 0
+    history: tuple[tuple[torch.Tensor, torch.Tensor], ...] = ()
 
     def detach(self) -> "OnlineMemoryState":
-        return OnlineMemoryState(self.memory.detach(), self.momentum.detach(), self.steps)
+        return OnlineMemoryState(
+            self.memory.detach(), self.momentum.detach(), self.steps,
+            tuple((key.detach(), value.detach()) for key, value in self.history),
+        )
 
 
 class OnlineAssociativeMemory(nn.Module):
@@ -90,7 +96,7 @@ class OnlineAssociativeMemory(nn.Module):
         return target - pred
 
     def forward(self, hidden: torch.Tensor, state: OnlineMemoryState | None = None,
-                *, return_state: bool = False):
+                *, return_state: bool = False, record_stats: bool = True):
         if hidden.ndim != 3:
             raise ValueError("hidden must have shape [batch,time,channels]")
         B, T, _ = hidden.shape
@@ -104,7 +110,8 @@ class OnlineAssociativeMemory(nn.Module):
             raise ValueError("online-memory state geometry does not match this module")
 
         outputs, surprises = [], []
-        history: deque[tuple[torch.Tensor, torch.Tensor]] = deque(maxlen=self.atlas_window)
+        history: deque[tuple[torch.Tensor, torch.Tensor]] = deque(
+            st.history, maxlen=self.atlas_window)
         for t in range(T):
             qt, kt, vt = q[:, t], k[:, t], v[:, t]
             pred = torch.einsum("bi,bij->bj", qt, memory)
@@ -137,12 +144,13 @@ class OnlineAssociativeMemory(nn.Module):
         gate = torch.sigmoid(self.gate(x))
         out = hidden + gate * self.out_proj(recalled)
         ss = torch.cat(surprises, dim=1)
-        self.last_stats = {
-            "surprise_mean": float(ss.detach().mean()),
-            "memory_norm": float(memory.detach().norm(dim=(-2, -1)).mean()),
-            "gate_mean": float(gate.detach().mean()),
-        }
-        next_state = OnlineMemoryState(memory, mom, st.steps + T)
+        if record_stats:
+            self.last_stats = {
+                "surprise_mean": float(ss.detach().mean()),
+                "memory_norm": float(memory.detach().norm(dim=(-2, -1)).mean()),
+                "gate_mean": float(gate.detach().mean()),
+            }
+        next_state = OnlineMemoryState(memory, mom, st.steps + T, tuple(history))
         return (out, next_state) if return_state else out
 
 
@@ -157,3 +165,105 @@ def install_online_memory(model: nn.Module, **kwargs) -> OnlineAssociativeMemory
     mem.to(device=p.device, dtype=p.dtype)
     model.online_memory = mem
     return mem
+
+
+class _OnlineMemoryKernel(nn.Module):
+    """Tensor-only wrapper suitable for ``torch.compile(fullgraph=True)``."""
+
+    def __init__(self, memory: OnlineAssociativeMemory):
+        super().__init__()
+        self.memory = memory
+
+    def forward(self, hidden: torch.Tensor, matrix: torch.Tensor, momentum: torch.Tensor):
+        output, state = self.memory(
+            hidden, OnlineMemoryState(matrix, momentum), return_state=True,
+            record_stats=False)
+        return output, state.memory, state.momentum
+
+
+def compile_online_memory(memory: OnlineAssociativeMemory, *, backend: str = "inductor"):
+    """Compile the live module while retaining the eager stateful path as oracle."""
+    return torch.compile(_OnlineMemoryKernel(memory), backend=backend, fullgraph=True)
+
+
+def install_compiled_online_memory(model: nn.Module, *, backend: str = "inductor"):
+    """Attach a compiled callable without registering duplicate module parameters."""
+    memory = getattr(model, "online_memory", None)
+    if not isinstance(memory, OnlineAssociativeMemory):
+        raise ValueError("model has no OnlineAssociativeMemory to compile")
+    kernel = compile_online_memory(memory, backend=backend)
+    object.__setattr__(model, "_online_memory_kernel", kernel)
+    return kernel
+
+
+def qualify_compiled_online_memory(memory: OnlineAssociativeMemory, sample: torch.Tensor, *,
+                                   compile_backend: str = "inductor",
+                                   tolerance: float = 2e-5,
+                                   minimum_speedup: float = 1.02,
+                                   repeats: int = 10) -> dict:
+    """Gate a compiled update scan on output/state/gradient parity before speed.
+
+    ``torch.compile`` is the supported PyTorch graph compiler rather than a
+    handwritten kernel ABI: https://docs.pytorch.org/docs/stable/generated/torch.compile.html
+    Fixed serving chunk sizes avoid recompilation and let Inductor fuse the
+    projection/update scan while the eager module remains the correctness oracle.
+    """
+
+    if sample.ndim != 3:
+        raise ValueError("online-memory qualification sample must be [batch,time,channels]")
+    try:
+        eager = _OnlineMemoryKernel(copy.deepcopy(memory)).to(sample.device)
+        candidate_base = _OnlineMemoryKernel(copy.deepcopy(memory)).to(sample.device)
+        candidate = compile_online_memory(candidate_base.memory, backend=compile_backend)
+    except Exception as exc:
+        return {"schema": "rwkv-lab.online-memory-kernel-qualification.v1",
+                "backend": compile_backend, "available": False, "adopted": False,
+                "error": repr(exc)}
+    state = memory.initial_state(sample.shape[0], device=sample.device)
+    x0 = sample.detach().clone().requires_grad_(True)
+    x1 = sample.detach().clone().requires_grad_(True)
+    inputs0 = (x0, state.memory.clone(), state.momentum.clone())
+    inputs1 = (x1, state.memory.clone(), state.momentum.clone())
+    try:
+        out0, out1 = eager(*inputs0), candidate(*inputs1)
+        output_error = max(float((left.detach().float() - right.detach().float()).abs().max())
+                           for left, right in zip(out0, out1))
+        params0 = tuple(eager.parameters())
+        params1 = tuple(candidate_base.parameters())
+        grad0 = torch.autograd.grad(sum(value.float().sum() for value in out0), (x0,) + params0)
+        grad1 = torch.autograd.grad(sum(value.float().sum() for value in out1), (x1,) + params1)
+        gradient_error = max(float((left.float() - right.float()).abs().max())
+                             for left, right in zip(grad0, grad1))
+
+        def median_ms(fn, inputs) -> float:
+            for _ in range(2):
+                fn(*inputs)
+            if sample.is_cuda:
+                torch.cuda.synchronize(sample.device)
+            timings = []
+            for _ in range(repeats):
+                started = time.perf_counter()
+                fn(*inputs)
+                if sample.is_cuda:
+                    torch.cuda.synchronize(sample.device)
+                timings.append((time.perf_counter() - started) * 1000)
+            return sorted(timings)[len(timings) // 2]
+
+        timing_inputs = (sample.detach(), state.memory, state.momentum)
+        eager_ms = median_ms(eager, timing_inputs)
+        candidate_ms = median_ms(candidate, timing_inputs)
+    except Exception as exc:
+        return {"schema": "rwkv-lab.online-memory-kernel-qualification.v1",
+                "backend": compile_backend, "available": False, "adopted": False,
+                "error": repr(exc)}
+    speedup = eager_ms / max(candidate_ms, 1e-12)
+    parity = output_error <= tolerance and gradient_error <= tolerance
+    performance = speedup >= minimum_speedup
+    return {"schema": "rwkv-lab.online-memory-kernel-qualification.v1",
+            "backend": compile_backend, "available": True,
+            "output_max_abs": output_error, "gradient_max_abs": gradient_error,
+            "tolerance": tolerance, "eager_ms": eager_ms,
+            "candidate_ms": candidate_ms, "speedup": speedup,
+            "minimum_speedup": minimum_speedup, "parity_passed": parity,
+            "performance_passed": performance,
+            "adopted": bool(parity and performance)}

@@ -744,7 +744,8 @@ def _make_spectral_muon(student, codec, args, rosa_soft=None, lookahead=None):
                        rsav_cap=args.sm_rsav_cap, rsav_relax=args.sm_rsav_relax,
                        tile_size=args.sm_tile_size, da_muon=bool(args.sm_da_muon),
                        da_eta_max=args.sm_da_eta_max, da_r0=args.sm_da_r0,
-                       aro=bool(args.sm_aro), aro_sink_iters=args.sm_aro_iters)
+                       aro=bool(args.sm_aro), aro_sink_iters=args.sm_aro_iters,
+                       aro_compile=bool(args.sm_aro_compile))
     if loop_p:
         print(f"  + rwkv_loop: {sum(p.numel() for p in loop_p)} gate(s) on AdamW fallback "
               f"@ base lr={args.muon_adam_lr:.1e} x loop_lr_mult={args.loop_lr_mult:g} (live)", flush=True)
@@ -793,7 +794,8 @@ def _make_muonclip(student, text_cfg, args):
     )
     opt = _make_guarded_muonclip_class()(
         _ParamProxy(muon_named), text_cfg, muon_cfg,
-        max_muon_ratio=5e-4, max_adam_ratio=1e-4)
+        max_muon_ratio=5e-4, max_adam_ratio=1e-4,
+        guard_stats_every=args.log_every)
     # base MuonClip.flush_metrics has a latent AttributeError (writer never created
     # when log_dir is truthy); neutralize it (train_mla does the same).
     opt.flush_metrics = (lambda *a, **kw: None).__get__(opt, type(opt))
@@ -1196,6 +1198,7 @@ def train(args):
     loop_mult_eff = loop_mult      # x anneal factor once gates escape (--loop-anneal-rw)
     rosa_lmce_warned = False       # warn-once for the live w_lmce<=0 rosa guard
     dmt_graph = None               # --dmt-cuda-graph runner, built lazily at first DMT step
+    finite_window = torch.ones((), dtype=torch.bool, device=dev)
     for step in range(args.steps):
         if (not switched and args.muon_to_adamw_frac > 0.0
                 and args.optimizer in ("muonclip", "spectral_muon")
@@ -1536,13 +1539,19 @@ def train(args):
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
-        # NaN/Inf skip guard: must sit AFTER backward (a pre-backward isfinite() check
-        # syncs and drains the kernel queue between fwd and bwd every step) and BEFORE
-        # GrokFast (a non-finite gradient must never enter the gf_ema slow-grad average).
-        if not torch.isfinite(loss):
-            print(f"step {step}: NON-FINITE loss -> skip", flush=True)
-            opt.zero_grad(set_to_none=True)
-            continue
+        # Device-side finite guard: sanitize before GrokFast/optimizer state, but defer the
+        # Python status read to log cadence so the CUDA queue is not drained every update.
+        step_finite = torch.isfinite(loss.detach())
+        gradients = [p.grad for p in opt_params if p.grad is not None]
+        for gradient in gradients:
+            step_finite.logical_and_(torch.isfinite(gradient).all())
+            gradient.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
+        gradient_groups = {}
+        for gradient in gradients:
+            gradient_groups.setdefault((gradient.device, gradient.dtype), []).append(gradient)
+        for (_, dtype), group in gradient_groups.items():
+            torch._foreach_mul_(group, step_finite.to(dtype=dtype))
+        finite_window.logical_and_(step_finite)
         # ROSA-soft probe -> scale calibration. Processed after backward so the telemetry
         # .cpu() syncs overlap the queued backward work instead of draining the fwd queue.
         if rosa_ctl is not None and rosa_soft.last_telemetry is not None:
@@ -1613,6 +1622,11 @@ def train(args):
             block_val_now = _finite_float(block)
             block_ema = block_val_now if block_ema is None else 0.98 * block_ema + 0.02 * block_val_now
         if step % log_every == 0 or step == args.steps - 1:
+            if not bool(finite_window):
+                raise FloatingPointError(
+                    f"non-finite conversion loss/gradient in steps "
+                    f"{max(0, step - log_every + 1)}..{step}")
+            finite_window.fill_(True)
             rec = {"kind": "train", "step": step, "loss": _finite_float(loss),
                    "lr": _cur_lr(opt), "lm_ce": _finite_float(lm_ce),
                    "block": _finite_float(block), "smt_mem": _finite_float(smt["smt_memory"]),
@@ -1999,6 +2013,8 @@ def main():
                     help="ARO-Sinkhorn (2602.09006): replace NS orthogonalization with a learned rotation + "
                          "Sinkhorn base optimizer (non-orthonormal update). 0=off. Adds an m×m rotation state.")
     ap.add_argument("--sm-aro-iters", type=int, default=5, help="ARO Sinkhorn row/col-normalization rounds (paper: 5).")
+    ap.add_argument("--sm-aro-compile", type=int, default=0,
+                    help="compile the stable ARO tensor subgraph after parity qualification")
     ap.add_argument("--pc-layer", type=int, default=0,
                     help="PC-Layer (2606.06470): polynomial spectral weight-preconditioning level (degree grows with it; "
                          "0=off, 2-4 typical). Reparam on student Linears, mergeable at inference. Costs extra forward VRAM.")

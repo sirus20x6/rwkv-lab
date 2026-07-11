@@ -30,17 +30,15 @@ INTEGRATION (per the paper, §6, and our project):
    layers (RWKV-7 already carries rich global state, so ROSA there is redundant).
 
 -------------------------------------------------------------------------------
-THIS FILE = v1 REFERENCE (correctness over speed). What is faithful vs deferred:
+THIS FILE keeps the reference and production paths together. What is faithful vs deferred:
   FAITHFUL forward: binarize -> route-pack -> longest-suffix retrieval -> read ->
-    unpack -> affine -> W_out.  (Retrieval uses a naive O(T^2) most-recent
-    longest-suffix matcher — same RESULT as the SAM, just slower.)
-  EXACT gradients: e0, e1, W_out (autograd) and W_v via the destination-scatter
-    counterfactual (Eq. 24).
-  DEFERRED to v2 (clearly marked TODO):
-    - online suffix-automaton + RLE kernel (perf; replaces the naive matcher)
-    - Q/K counterfactual gradients (Eqs. 25-26) so W_q,W_k train (v1 freezes the
-      query/key discretizer at init -> retrieval matches on fixed random features)
-    - async D2H->CPU-retrieve->H2D overlap pipeline (§4.2)
+    unpack -> affine -> W_out. CUDA runs a device-native online suffix automaton;
+    CPU uses the Numba implementation as its exact oracle, with the O(T^2) matcher
+    retained only as a dependency-free fallback.
+  EXACT gradients: e0, e1, W_out (autograd), W_v via destination scatter (Eq. 24),
+    and W_q via counterfactual query-bit destinations (Eq. 25).
+  DEFERRED: K counterfactual gradients (Eq. 26), whose mutation changes the global
+    automaton rather than one local query transition.
 Paper: Zheng/Wang/Ren/Chen, "ROSA-Tuning: Enhancing Long-Context Modeling via
 Suffix Matching", 2602.02499v2; ref impl github.com/zyaaa-ux/ROSA-Tuning.
 """
@@ -91,10 +89,14 @@ def retrieve_routes(aq: torch.Tensor, ak: torch.Tensor, max_match: int = 64) -> 
 
 
 try:
-    from .rosa_sam import sam_retrieve as _sam_retrieve, sam_retrieve_cf as _sam_retrieve_cf
+    from .rosa_sam import (HAVE_CUDA as _HAVE_CUDA_SAM,
+                           cuda_sam_retrieve_cf as _cuda_sam_retrieve_cf,
+                           sam_retrieve as _sam_retrieve,
+                           sam_retrieve_cf as _sam_retrieve_cf)
     _HAVE_SAM = True                                          # fast numba online-SAM kernel (v2)
 except Exception:                                            # pragma: no cover
     _HAVE_SAM = False
+    _HAVE_CUDA_SAM = False
 
 
 def _retrieve(aq: torch.Tensor, ak: torch.Tensor, M: int) -> torch.Tensor:
@@ -133,7 +135,11 @@ class _RosaRetrieve(torch.autograd.Function):
         aq = _pack_bits(qb, M)
         ak = _pack_bits(kb, M)
         av = _pack_bits(vb, M)                                  # [B,T,R] value symbols
-        if _HAVE_SAM:                                           # forward + Eq.25 counterfactual tables
+        if q_vec.is_cuda and _HAVE_CUDA_SAM:
+            # Device-native online SAM; exact CPU parity is covered against the cited ROSA
+            # construction (arXiv:2602.02499) in the regression suite.
+            tau, tau0, tau1 = _cuda_sam_retrieve_cf(aq, ak, 1 << M, M)
+        elif _HAVE_SAM:                                         # forward + Eq.25 counterfactual tables
             t_np, t0_np, t1_np = _sam_retrieve_cf(aq.detach().cpu().numpy(),
                                                   ak.detach().cpu().numpy(), 1 << M, M)
             tau = torch.from_numpy(t_np).to(q_vec.device)

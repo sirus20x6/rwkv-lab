@@ -238,7 +238,12 @@ class RWKV7Small(nn.Module):
                                reset_mask=reset_mask)
         memory = getattr(self, "online_memory", None)
         if memory is not None:
-            x = memory(x)
+            kernel = getattr(self, "_online_memory_kernel", None)
+            if kernel is None:
+                x = memory(x, record_stats=False)
+            else:
+                state = memory.initial_state(x.shape[0], device=x.device)
+                x, _, _ = kernel(x, state.memory, state.momentum)
         h = self.ln_out(x)                       # post-norm final hidden (what aux heads read)
         if hidden_only:
             return h
@@ -266,8 +271,6 @@ class RWKV7Small(nn.Module):
             return "Future-Seed depends on a whole-layer final state"
         if any(isinstance(block.att, LoopedRWKV) for block in self.blocks):
             return "looped attention has no unambiguous cross-chunk state contract"
-        if getattr(self, "online_memory", None) is not None:
-            return "online memory has no frozen inference-state contract"
         if getattr(self, "engram", None) is not None:
             return "Engram copy recall requires the complete token history"
         return None
@@ -284,7 +287,14 @@ class RWKV7Small(nn.Module):
             raise ValueError(f"checkpoint is not recurrent-generation compatible: {reason}")
         if ids.ndim != 2 or ids.shape[1] < 1:
             raise ValueError("recurrent input must have shape [batch,time] with time >= 1")
-        states = state if state is not None else [None] * len(self.blocks)
+        memory = getattr(self, "online_memory", None)
+        if isinstance(state, dict):
+            states = state.get("blocks")
+            memory_state = state.get("online_memory")
+        else:
+            states = state
+            memory_state = None
+        states = states if states is not None else [None] * len(self.blocks)
         if len(states) != len(self.blocks):
             raise ValueError("recurrent state does not match model depth")
         x = self.emb(ids)
@@ -296,6 +306,15 @@ class RWKV7Small(nn.Module):
             x, v_first, block_state = block.forward_recurrent(
                 x, v_first, block_state, ids=de_ids, e0=e0)
             next_states.append(block_state)
+        if memory is not None:
+            # Titans/MIRAS/ATLAS memory is itself a causal recurrent state.  Carrying
+            # its matrix and momentum across chunks is exactly equivalent to the
+            # full-prefix scan; see online_memory.py for the cited update rules.
+            x, next_memory_state = memory(
+                x, memory_state, return_state=True, record_stats=False)
+            return self.head(self.ln_out(x)), {
+                "blocks": next_states, "online_memory": next_memory_state,
+            }
         return self.head(self.ln_out(x)), next_states
 
 
@@ -472,7 +491,10 @@ def main():
     ap.add_argument("--fp8", action="store_true",
                     help="run eligible Linear GEMMs in fp8 (torchao Float8Linear; Blackwell/Hopper)")
     ap.add_argument("--nvfp4", action="store_true",
-                    help="simulated NVFP4 QAT (E2M1 block fake-quant; not a hardware speed path)")
+                    help="NVFP4 QAT; backend defaults to the portable fake-quant oracle")
+    ap.add_argument("--nvfp4-backend", default="fake",
+                    choices=("fake", "transformer_engine"),
+                    help="native Transformer Engine is fail-closed on parity and throughput")
     ap.add_argument("--nvfp4-rht", action="store_true",
                     help="apply randomized Hadamard transforms before eligible NVFP4 GEMMs")
     ap.add_argument("--compile", action="store_true",
@@ -531,11 +553,16 @@ def main():
     ap.add_argument("--online-memory-lr", type=float, default=0.05)
     ap.add_argument("--online-memory-retention", type=float, default=0.99)
     ap.add_argument("--online-memory-window", type=int, default=4)
+    ap.add_argument("--online-memory-kernel", default="auto",
+                    choices=("auto", "eager", "compile"),
+                    help="parity/speed-gated compiled associative-memory scan")
     ap.add_argument("--grad-accum", type=int, default=1,
                     help="micro-batches accumulated per optimizer step (effective batch = batch * N)")
     ap.add_argument("--ema", type=float, default=0.0,
                     help="EMA decay for a shadow weight copy (e.g. 0.999); eval + checkpoint carry it. 0 = off")
     args = ap.parse_args()
+    if not args.nvfp4 and (args.nvfp4_rht or args.nvfp4_backend != "fake"):
+        ap.error("--nvfp4-rht/--nvfp4-backend require --nvfp4")
     if not args.data and not args.ctx_buckets:
         ap.error("one of --data or --ctx-buckets is required")
     if args.ctx_buckets:                       # mixed-context mode: fixed-width features rejected
@@ -621,9 +648,24 @@ def main():
     if args.nvfp4:
         if args.fp8:
             ap.error("--fp8 and --nvfp4 are mutually exclusive operand formats")
-        from rwkv_lab.nvfp4 import convert_to_nvfp4_training
-        n4 = convert_to_nvfp4_training(model, rht=args.nvfp4_rht)
-        print(f"nvfp4-sim: {n4} Linear layers -> E2M1 block fake-quant"
+        from rwkv_lab.nvfp4 import convert_to_nvfp4_training, qualify_native_nvfp4
+        if args.nvfp4_backend == "transformer_engine":
+            representative = next((layer for layer in model.modules()
+                                   if isinstance(layer, nn.Linear) and
+                                   layer.in_features % 16 == 0 and
+                                   layer.out_features % 16 == 0), None)
+            if representative is None:
+                ap.error("native NVFP4 found no aligned Linear to qualify")
+            sample = torch.randn(8, representative.in_features, device=dev,
+                                 dtype=representative.weight.dtype)
+            report = qualify_native_nvfp4(
+                representative, sample, rht=args.nvfp4_rht)
+            if not report.get("adopted"):
+                ap.error(f"native NVFP4 failed parity/performance qualification: {report}")
+            emit({"kind": "kernel_qualification", "step": 0, "report": report})
+        n4 = convert_to_nvfp4_training(
+            model, rht=args.nvfp4_rht, backend=args.nvfp4_backend)
+        print(f"nvfp4-{args.nvfp4_backend}: {n4} Linear layers"
               + (" + RHT" if args.nvfp4_rht else ""), flush=True)
     lmb = None
     if args.engram:
@@ -641,6 +683,27 @@ def main():
             print(f"engram: LMB sites={esites} d_row={args.engram_drow} "
                   f"rows={min(args.engram_rows, 65536)} boundary_id={bid} "
                   f"(+{sum(p.numel() for p in lmb.parameters())/1e6:.2f}M params)", flush=True)
+    if args.online_memory and not args.init_g1g and args.online_memory_kernel != "eager":
+        if args.compile or args.distributed == "fsdp2":
+            message = ("owned by whole-model torch.compile" if args.compile
+                       else "kept eager until FSDP2 graph parity is qualified")
+            print(f"online-memory kernel: {message}", flush=True)
+        else:
+            from rwkv_lab.online_memory import (install_compiled_online_memory,
+                                                 qualify_compiled_online_memory)
+            probe = torch.randn(min(args.batch, 2), min(args.seq_len, 128), args.d_model,
+                                device=dev, dtype=torch.bfloat16)
+            report = qualify_compiled_online_memory(
+                model.online_memory, probe, tolerance=2e-2, repeats=3)
+            emit({"kind": "kernel_qualification", "step": 0, "report": report})
+            if report.get("adopted"):
+                install_compiled_online_memory(model)
+                print(f"online-memory kernel: compiled ({report['speedup']:.2f}x probe speedup)",
+                      flush=True)
+            elif args.online_memory_kernel == "compile":
+                ap.error(f"compiled online memory failed parity/performance qualification: {report}")
+            else:
+                print(f"online-memory kernel: eager (compiled candidate rejected: {report})", flush=True)
     nparam = sum(p.numel() for p in model.parameters())
     seed_chain = bool(args.seed_chain) and not args.init_g1g  # g1g branch ignores the flag
     tag = f"scratch-L{args.n_layers}d{args.d_model}-loop{args.loop_count}" + \
@@ -655,7 +718,9 @@ def main():
            if args.deepembed and not args.init_g1g else "") + \
           (f"-umup{args.u_mup_base_width}" if u_mup_cfg is not None else "") + \
           (f"-mem-{args.online_memory_mode}" if args.online_memory and not args.init_g1g else "") + \
-          ("-nvfp4" + ("rht" if args.nvfp4_rht else "") if args.nvfp4 else "") + \
+          ("-nvfp4" + ("rht" if args.nvfp4_rht else "")
+           + ("-te" if args.nvfp4_backend == "transformer_engine" else "")
+           if args.nvfp4 else "") + \
           ("-mixctx" if args.ctx_buckets else "")
     print(f"model {tag}: {nparam/1e6:.1f}M params  loop_kw={lk}", flush=True)
     json.dump({"loop_count": args.loop_count, "n_layers": args.n_layers, "mode": tag,
@@ -735,6 +800,8 @@ def main():
     # EMA shadow weights, fp32 (bf16 ULP would swallow (1-decay)-sized updates at high decay).
     # Eval and checkpoints carry the EMA copy; the live weights keep training unperturbed.
     ema = {n: p.detach().float().clone() for n, p in model.named_parameters()} if args.ema > 0 else None
+    ema_named = list(model.named_parameters()) if ema is not None else []
+    ema_values = [ema[name] for name, _ in ema_named]
     if ema is not None:
         if not args.ema < 1.0:
             raise ValueError(f"--ema must be in (0, 1), got {args.ema}")
@@ -742,20 +809,20 @@ def main():
 
     def ema_update():
         with torch.no_grad():
-            for n, p in model.named_parameters():
-                ema[n].mul_(args.ema).add_(p.float(), alpha=1.0 - args.ema)
+            live_fp32 = [p.detach().float() for _, p in ema_named]
+            torch._foreach_lerp_(ema_values, live_fp32, 1.0 - args.ema)
 
     def ema_swap():
         """Swap EMA weights in for eval; returns the live backup for ema_restore."""
-        backup = {n: p.detach().clone() for n, p in model.named_parameters()}
+        backup = {n: p.detach().clone() for n, p in ema_named}
         with torch.no_grad():
-            for n, p in model.named_parameters():
+            for n, p in ema_named:
                 p.copy_(ema[n].to(p.dtype))
         return backup
 
     def ema_restore(backup):
         with torch.no_grad():
-            for n, p in model.named_parameters():
+            for n, p in ema_named:
                 p.copy_(backup[n])
 
     def val_loss():
@@ -849,7 +916,7 @@ def main():
         if ema is not None:                  # saved EMA if present, else re-seed from loaded weights
             src = ck.get("ema") or {}
             for n, p in model.named_parameters():
-                ema[n] = src[n].float().to(dev) if n in src else p.detach().float().clone()
+                ema[n].copy_(src[n].float().to(dev) if n in src else p.detach().float())
         if ck.get("numpy_rng") is not None: rng.bit_generator.state = ck["numpy_rng"]
         if ck.get("torch_rng") is not None: torch.set_rng_state(ck["torch_rng"].cpu())
         if torch.cuda.is_available() and ck.get("cuda_rng") is not None:
@@ -1018,6 +1085,7 @@ def main():
                          "online_memory_retention": args.online_memory_retention,
                          "online_memory_window": args.online_memory_window,
                          "nvfp4": bool(args.nvfp4), "nvfp4_rht": bool(args.nvfp4_rht),
+                         "nvfp4_backend": args.nvfp4_backend,
                          "engram": lmb is not None, "engram_sites": args.engram_sites,
                          "engram_drow": args.engram_drow, "engram_rows": args.engram_rows,
                          "engram_boundary_id": (lmb.boundary_id if lmb is not None else None),

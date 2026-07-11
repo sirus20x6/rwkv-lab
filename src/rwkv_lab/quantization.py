@@ -178,8 +178,10 @@ def dequantize_model_nf4(model: nn.Module) -> list[str]:
     for path, module in list(model.named_modules()):
         if not path or not isinstance(module, (NF4Linear, TorchAONF4Linear)):
             continue
+        device = (module.packed_weight.device if isinstance(module, NF4Linear)
+                  else module.weight.device)
         dense = nn.Linear(module.in_features, module.out_features, bias=module.bias is not None,
-                          device=module.packed_weight.device, dtype=torch.float32)
+                          device=device, dtype=torch.float32)
         dense.weight.copy_(module.dequantized_weight(dtype=torch.float32))
         if module.bias is not None:
             dense.bias.copy_(module.bias.float())

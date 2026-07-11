@@ -64,55 +64,51 @@ type recursiveLoop struct {
 	Created            float64 `json:"created_ts"`
 }
 
-func (s *Server) readRecursiveLoops() []recursiveLoop {
-	rows := []recursiveLoop{}
-	_ = filepath.WalkDir(s.cfg.RunsDir, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil || entry.IsDir() || entry.Name() != "loop.json" {
-			return nil
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil
-		}
-		var row recursiveLoop
-		if json.Unmarshal(data, &row) != nil || row.Status == "" {
-			return nil
-		}
-		rel, _ := filepath.Rel(s.cfg.RunsDir, filepath.Dir(path))
-		row.Path = filepath.ToSlash(rel)
-		rows = append(rows, row)
-		return nil
-	})
-	sort.Slice(rows, func(i, j int) bool { return rows[i].Created > rows[j].Created })
-	return rows
+type rlvrDiscovery struct {
+	loops     []recursiveLoop
+	campaigns []rlvrCampaign
 }
 
-func (s *Server) readRLVRCampaigns() []rlvrCampaign {
-	rows := []rlvrCampaign{}
-	_ = filepath.WalkDir(s.cfg.RunsDir, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil || entry.IsDir() || entry.Name() != "campaign.json" {
+func (s *Server) readRLVRDiscovery() rlvrDiscovery {
+	return s.cachedDiscovery("rlvr-campaigns", 2*time.Second, func() any {
+		value := rlvrDiscovery{}
+		_ = filepath.WalkDir(s.cfg.RunsDir, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil || entry.IsDir() || (entry.Name() != "loop.json" && entry.Name() != "campaign.json") {
+				return nil
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return nil
+			}
+			rel, _ := filepath.Rel(s.cfg.RunsDir, filepath.Dir(path))
+			if entry.Name() == "loop.json" {
+				var row recursiveLoop
+				if json.Unmarshal(data, &row) == nil && row.Status != "" {
+					row.Path = filepath.ToSlash(rel)
+					value.loops = append(value.loops, row)
+				}
+			} else {
+				var row rlvrCampaign
+				if json.Unmarshal(data, &row) == nil &&
+					(strings.HasPrefix(row.Status, "run") || row.Status == "complete" || row.Status == "failed") {
+					row.Path = filepath.ToSlash(rel)
+					value.campaigns = append(value.campaigns, row)
+				}
+			}
 			return nil
+		})
+		sort.Slice(value.loops, func(i, j int) bool { return value.loops[i].Created > value.loops[j].Created })
+		sort.Slice(value.campaigns, func(i, j int) bool { return value.campaigns[i].Created > value.campaigns[j].Created })
+		if len(value.campaigns) > 20 {
+			value.campaigns = value.campaigns[:20]
 		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil
-		}
-		var row rlvrCampaign
-		if json.Unmarshal(data, &row) != nil ||
-			(!strings.HasPrefix(row.Status, "run") && row.Status != "complete" && row.Status != "failed") {
-			return nil
-		}
-		rel, _ := filepath.Rel(s.cfg.RunsDir, filepath.Dir(path))
-		row.Path = filepath.ToSlash(rel)
-		rows = append(rows, row)
-		return nil
-	})
-	sort.Slice(rows, func(i, j int) bool { return rows[i].Created > rows[j].Created })
-	if len(rows) > 20 {
-		rows = rows[:20]
-	}
-	return rows
+		return value
+	}).(rlvrDiscovery)
 }
+
+func (s *Server) readRecursiveLoops() []recursiveLoop { return s.readRLVRDiscovery().loops }
+
+func (s *Server) readRLVRCampaigns() []rlvrCampaign { return s.readRLVRDiscovery().campaigns }
 
 func (s *Server) handleRLVR(w http.ResponseWriter, r *http.Request) {
 	sse := datastar.NewSSE(w, r)
@@ -147,6 +143,8 @@ func (s *Server) handleRLVR(w http.ResponseWriter, r *http.Request) {
 	row("rollout engine", `<select data-bind-rlvrengine><option value="auto">auto</option>`+
 		`<option value="recurrent">recurrent only</option><option value="batched">batched prefix</option></select>`,
 		"auto uses constant-state RWKV decoding with an exact lever-safe fallback")
+	row("rollout devices", `<input type="text" data-bind-rlvrdevices value="" placeholder="cuda:0,cuda:1">`,
+		"optional inference replicas; first entry must match the policy device")
 	row("curriculum", `<input type="text" data-bind-rlvrcurriculum value="1,2">`,
 		"comma-separated difficulty stages")
 	row("SFT warm-start", `<input type="number" min="0" max="10000" data-bind-rlvrsft value="16">`,
@@ -422,6 +420,17 @@ func (s *Server) handleLaunchRLVR(w http.ResponseWriter, r *http.Request) {
 		toastErr(sse, "RLVR device must be cuda or cpu")
 		return
 	}
+	rolloutDevices := strings.TrimSpace(str("rlvrdevices", ""))
+	if rolloutDevices != "" {
+		for _, raw := range strings.Split(rolloutDevices, ",") {
+			value := strings.TrimSpace(raw)
+			index, err := strconv.Atoi(strings.TrimPrefix(value, "cuda:"))
+			if !strings.HasPrefix(value, "cuda:") || err != nil || index < 0 {
+				toastErr(sse, "RLVR rollout devices must be comma-separated cuda:N values")
+				return
+			}
+		}
+	}
 	args := []string{"-m", "rwkv_lab.rlvr_campaign", "--ckpt", ckpt, "--out", out,
 		"--algorithms", str("rlvralgorithms", "gspo,dr_grpo,dapo"),
 		"--seeds", str("rlvrseeds", "0,1,2"), "--steps", steps,
@@ -435,6 +444,9 @@ func (s *Server) handleLaunchRLVR(w http.ResponseWriter, r *http.Request) {
 		"--max-family-regression", str("rlvrfamilyreg", "0"),
 		"--max-rollout-tokens", tokenBudget, "--max-train-seconds", str("rlvrtimebudget", "0"),
 		"--device", device}
+	if rolloutDevices != "" {
+		args = append(args, "--rollout-devices", rolloutDevices)
+	}
 	if tasks != "" {
 		args = append(args, "--tasks", tasks)
 	}

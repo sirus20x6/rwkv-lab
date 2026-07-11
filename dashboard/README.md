@@ -12,14 +12,21 @@ go -C /thearray/git/moe-mla/dashboard run ./cmd/trainboard
 
 Reads `/thearray/git/moe-mla/runs/`. Ingests all `train.jsonl` logs + system telemetry into a local
 SQLite DB (`trainboard.db`). GPU-light — safe to run alongside live training.
+The one-second shared snapshot reads conversion quality from ingestion-time rollups plus one batched
+codec query; it does not fan out KPI/count queries per layer. Run-sidecar and campaign/dataset discovery
+are cached, so multiple panels and browser tabs do not repeatedly walk the 1TB-scale `runs/` tree.
+The health detector likewise fetches every live run's bounded training window and latest rollup in
+two batch queries per scan instead of resolving IDs, statistics, and PPL independently per process.
 
 The experiment builder exposes trainer-native P0/P1 comparison arms for
 [u-μP](https://arxiv.org/abs/2407.17465), [Titans](https://arxiv.org/abs/2501.00663) /
 [MIRAS](https://arxiv.org/abs/2504.13173) / [ATLAS](https://arxiv.org/abs/2505.23735) /
-[Nested Learning](https://arxiv.org/abs/2512.24695) online memory, and simulated
+[Nested Learning](https://arxiv.org/abs/2512.24695) online memory, and
 [NVFP4](https://arxiv.org/abs/2509.25149) with optional
-[TetraJet-v2](https://arxiv.org/abs/2510.27527) randomized Hadamard transforms. These arms are
-scratch-LM-only; the builder rejects u-μP+Muon and NVFP4+FP8 combinations.
+[TetraJet-v2](https://arxiv.org/abs/2510.27527) randomized Hadamard transforms. NVFP4 arms include
+the fake-quant correctness oracle and a fail-closed native Blackwell Transformer Engine arm that must
+pass parity and throughput qualification. These arms are scratch-LM-only; the builder rejects
+u-μP+Muon and NVFP4+FP8 combinations.
 
 The dedicated **verifiable-reward training** panel launches equal-budget, paired-seed campaigns and
 reads their versioned `campaign.json` evidence directly from `runs/`. It compares the sequence-level
@@ -44,8 +51,9 @@ cross-split leakage are refused. An explicit human choice may be
 appended to `datasets/trainboard_preferences.jsonl` as training data. Its allowlisted launcher runs
 equal-token, paired exploration seeds and fresh confirmation seeds through
 `rwkv_lab.posttrain_campaign`; result cards show phase-specific deltas/confidence intervals, promotion
-eligibility, and adapter-first recursive lineage. It exposes qualified reset-mask packing, automatic
-portable/TorchAO NF4 selection, device slots, per-attempt timeouts, and retries; campaign state resumes
+eligibility, and adapter-first recursive lineage. It exposes qualified reset-mask packing, fail-closed
+automatic TorchAO NF4 qualification (with an explicit portable correctness oracle), device slots,
+per-attempt timeouts, and retries; campaign state resumes
 completed command-identical arms after interruption. The panel cannot write hidden evaluation data, run
 an Adamaton proposal command, promote/merge a checkpoint, or publish a model. The underlying
 training methods are [LoRA](https://arxiv.org/abs/2106.09685),

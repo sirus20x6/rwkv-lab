@@ -94,42 +94,50 @@ type adapterLoopRow struct {
 	} `json:"iterations"`
 }
 
+type posttrainDiscovery struct {
+	campaigns []posttrainCampaign
+	loops     []adapterLoopRow
+}
+
 func (s *Server) readPosttrainCampaigns() ([]posttrainCampaign, []adapterLoopRow) {
-	campaigns := []posttrainCampaign{}
-	loops := []adapterLoopRow{}
-	_ = filepath.WalkDir(s.cfg.RunsDir, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil || entry.IsDir() {
-			return nil
-		}
-		if entry.Name() != "posttrain-campaign.json" && entry.Name() != "adapter-loop.json" {
-			return nil
-		}
-		data, readErr := os.ReadFile(path)
-		if readErr != nil {
-			return nil
-		}
-		rel, _ := filepath.Rel(s.cfg.RunsDir, filepath.Dir(path))
-		if entry.Name() == "posttrain-campaign.json" {
-			var row posttrainCampaign
-			if json.Unmarshal(data, &row) == nil && row.Status != "" {
-				row.Path = filepath.ToSlash(rel)
-				campaigns = append(campaigns, row)
+	value := s.cachedDiscovery("posttrain-campaigns", 2*time.Second, func() any {
+		campaigns := []posttrainCampaign{}
+		loops := []adapterLoopRow{}
+		_ = filepath.WalkDir(s.cfg.RunsDir, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil || entry.IsDir() {
+				return nil
 			}
-		}
-		if entry.Name() == "adapter-loop.json" {
-			var row adapterLoopRow
-			if json.Unmarshal(data, &row) == nil && row.Status != "" {
-				row.Path = filepath.ToSlash(rel)
-				loops = append(loops, row)
+			if entry.Name() != "posttrain-campaign.json" && entry.Name() != "adapter-loop.json" {
+				return nil
 			}
+			data, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return nil
+			}
+			rel, _ := filepath.Rel(s.cfg.RunsDir, filepath.Dir(path))
+			if entry.Name() == "posttrain-campaign.json" {
+				var row posttrainCampaign
+				if json.Unmarshal(data, &row) == nil && row.Status != "" {
+					row.Path = filepath.ToSlash(rel)
+					campaigns = append(campaigns, row)
+				}
+			}
+			if entry.Name() == "adapter-loop.json" {
+				var row adapterLoopRow
+				if json.Unmarshal(data, &row) == nil && row.Status != "" {
+					row.Path = filepath.ToSlash(rel)
+					loops = append(loops, row)
+				}
+			}
+			return nil
+		})
+		sort.Slice(campaigns, func(i, j int) bool { return campaigns[i].Created > campaigns[j].Created })
+		if len(campaigns) > 20 {
+			campaigns = campaigns[:20]
 		}
-		return nil
-	})
-	sort.Slice(campaigns, func(i, j int) bool { return campaigns[i].Created > campaigns[j].Created })
-	if len(campaigns) > 20 {
-		campaigns = campaigns[:20]
-	}
-	return campaigns, loops
+		return posttrainDiscovery{campaigns: campaigns, loops: loops}
+	}).(posttrainDiscovery)
+	return value.campaigns, value.loops
 }
 
 func (s *Server) handlePosttraining(w http.ResponseWriter, r *http.Request) {
@@ -205,27 +213,29 @@ func (s *Server) handlePosttraining(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) posttrainDatasets() []string {
-	var paths []string
-	for _, base := range []string{"datasets", "data"} {
-		root := filepath.Join(s.cfg.RepoRoot, base)
-		_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-			if err != nil || entry == nil {
-				return nil
-			}
-			if entry.IsDir() && strings.Count(strings.TrimPrefix(path, root), string(filepath.Separator)) > 3 {
-				return filepath.SkipDir
-			}
-			if !entry.IsDir() && strings.HasSuffix(strings.ToLower(entry.Name()), ".jsonl") {
-				rel, relErr := filepath.Rel(s.cfg.RepoRoot, path)
-				if relErr == nil {
-					paths = append(paths, filepath.ToSlash(rel))
+	return s.cachedDiscovery("posttrain-datasets", 2*time.Second, func() any {
+		var paths []string
+		for _, base := range []string{"datasets", "data"} {
+			root := filepath.Join(s.cfg.RepoRoot, base)
+			_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+				if err != nil || entry == nil {
+					return nil
 				}
-			}
-			return nil
-		})
-	}
-	sort.Strings(paths)
-	return paths
+				if entry.IsDir() && strings.Count(strings.TrimPrefix(path, root), string(filepath.Separator)) > 3 {
+					return filepath.SkipDir
+				}
+				if !entry.IsDir() && strings.HasSuffix(strings.ToLower(entry.Name()), ".jsonl") {
+					rel, relErr := filepath.Rel(s.cfg.RepoRoot, path)
+					if relErr == nil {
+						paths = append(paths, filepath.ToSlash(rel))
+					}
+				}
+				return nil
+			})
+		}
+		sort.Strings(paths)
+		return paths
+	}).([]string)
 }
 
 func (s *Server) handleInspectPosttraining(w http.ResponseWriter, r *http.Request) {
