@@ -100,6 +100,38 @@ def test_aro_sinkhorn():
     print("[aro] Sinkhorn + Cholesky-QR rotation; converges, zero-grad-safe — OK")
 
 
+def test_foreach_adam_fallback_resumes_exactly():
+    p = torch.nn.Parameter(torch.randn(7))
+    opt = _opt(p)
+    for seed in (21, 22):
+        torch.manual_seed(seed); p.grad = torch.randn_like(p); opt.step(); p.grad = None
+    saved_param, saved_opt = p.detach().clone(), copy.deepcopy(opt.state_dict())
+    restored = torch.nn.Parameter(saved_param.clone())
+    resumed = _opt(restored)
+    resumed.load_state_dict(saved_opt)
+    torch.manual_seed(23)
+    grad = torch.randn_like(p)
+    p.grad = grad.clone(); restored.grad = grad.clone()
+    opt.step(); resumed.step()
+    assert torch.equal(p, restored)
+    for key in ("exp_avg", "exp_sq"):
+        assert torch.equal(opt.state[p][key], resumed.state[restored][key])
+
+
+def test_compiled_aro_matches_eager_when_cuda_available():
+    if not torch.cuda.is_available():
+        return
+    torch.manual_seed(29)
+    eager_p = torch.nn.Parameter(torch.randn(12, 12, device="cuda"))
+    compiled_p = torch.nn.Parameter(eager_p.detach().clone())
+    eager = _opt(eager_p, aro=True)
+    compiled = _opt(compiled_p, aro=True, aro_compile=True)
+    grad = torch.randn_like(eager_p)
+    eager_p.grad = grad.clone(); compiled_p.grad = grad.clone()
+    eager.step(); compiled.step()
+    assert torch.allclose(eager_p, compiled_p, atol=2e-6, rtol=2e-6)
+
+
 if __name__ == "__main__":
     test_all_off_identical()
     test_himuon_tiling()

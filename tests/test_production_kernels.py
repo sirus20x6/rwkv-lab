@@ -4,7 +4,9 @@ import torch
 
 from rwkv_lab.generate import sample_with_stats
 from rwkv_lab.online_memory import install_compiled_online_memory, install_online_memory
-from rwkv_lab.production_kernels import qualify_recurrent_generation
+from rwkv_lab.production_kernels import (compare_performance_baseline,
+                                         qualify_cuda_rosa,
+                                         qualify_recurrent_generation)
 from rwkv_lab.rwkv_pretrain import RWKV7Small
 from rwkv_lab.speculative import (qualify_speculative_greedy,
                                   EAGLE3DraftHead,
@@ -134,3 +136,20 @@ def test_generation_engine_and_recurrent_qualification_are_token_exact():
     report = qualify_recurrent_generation(
         model, [1, 2, 3], device="cpu", max_new=8, repeats=1)
     assert report["available"] and report["exact_tokens"]
+
+
+def test_performance_baseline_rejects_throughput_memory_and_adoption_regressions():
+    baseline = {"adopted": ["memory"], "metrics": {"peak_memory_bytes": 100},
+                "reports": {"decode": {"tokens_per_second": 100}}}
+    good = {"adopted": ["memory"], "metrics": {"peak_memory_bytes": 105},
+            "reports": {"decode": {"tokens_per_second": 98}}}
+    assert compare_performance_baseline(good, baseline)["passed"]
+    bad = {"adopted": [], "metrics": {"peak_memory_bytes": 125},
+           "reports": {"decode": {"tokens_per_second": 80}}}
+    gate = compare_performance_baseline(bad, baseline)
+    assert not gate["passed"] and len(gate["reasons"]) == 3
+
+
+def test_rosa_qualification_fails_closed_without_cuda():
+    report = qualify_cuda_rosa(device="cpu", repeats=1)
+    assert not report["available"] and not report["adopted"]

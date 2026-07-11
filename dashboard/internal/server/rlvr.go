@@ -143,6 +143,8 @@ func (s *Server) handleRLVR(w http.ResponseWriter, r *http.Request) {
 	row("rollout engine", `<select data-bind-rlvrengine><option value="auto">auto</option>`+
 		`<option value="recurrent">recurrent only</option><option value="batched">batched prefix</option></select>`,
 		"auto uses constant-state RWKV decoding with an exact lever-safe fallback")
+	row("rollout devices", `<input type="text" data-bind-rlvrdevices value="" placeholder="cuda:0,cuda:1">`,
+		"optional inference replicas; first entry must match the policy device")
 	row("curriculum", `<input type="text" data-bind-rlvrcurriculum value="1,2">`,
 		"comma-separated difficulty stages")
 	row("SFT warm-start", `<input type="number" min="0" max="10000" data-bind-rlvrsft value="16">`,
@@ -418,6 +420,17 @@ func (s *Server) handleLaunchRLVR(w http.ResponseWriter, r *http.Request) {
 		toastErr(sse, "RLVR device must be cuda or cpu")
 		return
 	}
+	rolloutDevices := strings.TrimSpace(str("rlvrdevices", ""))
+	if rolloutDevices != "" {
+		for _, raw := range strings.Split(rolloutDevices, ",") {
+			value := strings.TrimSpace(raw)
+			index, err := strconv.Atoi(strings.TrimPrefix(value, "cuda:"))
+			if !strings.HasPrefix(value, "cuda:") || err != nil || index < 0 {
+				toastErr(sse, "RLVR rollout devices must be comma-separated cuda:N values")
+				return
+			}
+		}
+	}
 	args := []string{"-m", "rwkv_lab.rlvr_campaign", "--ckpt", ckpt, "--out", out,
 		"--algorithms", str("rlvralgorithms", "gspo,dr_grpo,dapo"),
 		"--seeds", str("rlvrseeds", "0,1,2"), "--steps", steps,
@@ -431,6 +444,9 @@ func (s *Server) handleLaunchRLVR(w http.ResponseWriter, r *http.Request) {
 		"--max-family-regression", str("rlvrfamilyreg", "0"),
 		"--max-rollout-tokens", tokenBudget, "--max-train-seconds", str("rlvrtimebudget", "0"),
 		"--device", device}
+	if rolloutDevices != "" {
+		args = append(args, "--rollout-devices", rolloutDevices)
+	}
 	if tasks != "" {
 		args = append(args, "--tasks", tasks)
 	}

@@ -168,28 +168,25 @@ def _sinkhorn_normalize(X, iters=5):
 
 def _cholesky_qr(A, eps=1e-6):
     """Shifted Cholesky-QR: Q-factor of A [m,m] via P=AᵀA+εI=LLᵀ, Q=A·L⁻ᵀ. Returns an ORTHONORMAL
-    Q; falls back to dense QR, and to identity if A is degenerate (e.g. a zero-gradient step, where
-    a naive Cholesky-QR returns an all-zero — finite but NOT orthonormal — Q that would poison the
-    persistent rotation)."""
+    Q. Degenerate inputs select identity entirely on-device, keeping the per-matrix optimizer path
+    free of Python tensor predicates and CUDA stream synchronization."""
     m = A.shape[-1]
     Im = torch.eye(m, device=A.device, dtype=A.dtype)
-    def _ortho(Q):
-        return Q is not None and torch.isfinite(Q).all() and \
-            (Q.transpose(-1, -2) @ Q - Im).abs().amax() < 1e-2
-    try:
-        L = torch.linalg.cholesky(A.transpose(-1, -2) @ A + eps * Im)
-        Q = torch.linalg.solve_triangular(L, A.transpose(-1, -2), upper=False).transpose(-1, -2)
-        if _ortho(Q):
-            return Q
-    except Exception:
-        pass
-    try:
-        Q = torch.linalg.qr(A).Q
-        if _ortho(Q):
-            return Q
-    except Exception:
-        pass
-    return Im                                       # degenerate (e.g. zero A): keep a valid rotation
+    gram = A.transpose(-1, -2) @ A
+    L, info = torch.linalg.cholesky_ex(gram + eps * Im, check_errors=False)
+    Q = torch.linalg.solve_triangular(L, A.transpose(-1, -2), upper=False).transpose(-1, -2)
+    # One polar Newton correction repairs the small orthogonality error introduced by the shift.
+    Q = Q @ (1.5 * Im - 0.5 * (Q.transpose(-1, -2) @ Q))
+    valid = (info == 0) & torch.isfinite(Q).all() & (gram.abs().amax() > eps)
+    return torch.where(valid, Q, Im)
+
+
+def _aro_core(M, R, sink_iters: int):
+    """Stable ARO tensor subgraph, separated so qualified CUDA runs can compile it."""
+    z_prev = _sinkhorn_normalize(R.t() @ M, sink_iters)
+    new_R = _cholesky_qr(M @ z_prev.t())
+    dW = new_R @ _sinkhorn_normalize(new_R.t() @ M, sink_iters)
+    return new_R, dW / (dW.norm() + 1e-12)
 
 
 class SpectralMuon(Optimizer):
@@ -201,7 +198,7 @@ class SpectralMuon(Optimizer):
                  ddc_strength=0.0, ddc_mode="both",
                  rsav=False, rsav_c=1.0, rsav_cap=0.2, rsav_relax=0.0,
                  tile_size=0, da_muon=False, da_eta_max=0.01, da_r0=1e-3,
-                 aro=False, aro_sink_iters=5,
+                 aro=False, aro_sink_iters=5, aro_compile=False,
                  weight_decay=0.0, adam_betas=(0.9, 0.95), adam_eps=1e-8):
         defaults = dict(momentum=momentum, nesterov=nesterov, ns_steps=ns_steps, cubic=cubic,
                         spectral_power=spectral_power, power_method=power_method, second_moment=second_moment,
@@ -223,6 +220,8 @@ class SpectralMuon(Optimizer):
         self._rsav_r = None          # fp32 scalar tensor once seen
         self._rsav_dE = None         # per-step energy-change accumulator (fp32 scalar)
         self._rsav_last_xi = 1.0     # diagnostics / tests
+        self.aro_compile = bool(aro_compile)
+        self._compiled_aro_core = None
 
     def load_state_dict(self, state_dict):
         # Optimizer.load_state_dict casts float state to each param's dtype (bf16 for a
@@ -262,13 +261,15 @@ class SpectralMuon(Optimizer):
                 self._rsav_dE = torch.zeros((), dtype=torch.float32, device=sqrt_Et.device)
             self._rsav_last_xi = xi
         for grp in self.param_groups:
+            adam_params = []
             for p in grp["params"]:
                 if p.grad is None:
                     continue
                 if self._is_muon(grp, p):
                     self._muon_step(p, p.grad, grp, self.state[p], xi)
                 else:
-                    self._adam_step(p, p.grad, grp, self.state[p])
+                    adam_params.append(p)
+            self._adam_group_step(adam_params, grp)
         # --- RSAV post-step: evolve r by the SAV chain rule, then relax toward √(E+C) ---
         if self.rsav and sqrt_Et is not None:
             r = self._rsav_r + self._rsav_dE / (2.0 * sqrt_Et)
@@ -361,21 +362,64 @@ class SpectralMuon(Optimizer):
             st["aro_R"] = torch.eye(m_dim, device=M.device, dtype=torch.float32)
         R = st["aro_R"]
         it = int(grp["aro_sink_iters"])
-        z_prev = _sinkhorn_normalize(R.t() @ M, it)          # base-opt output in the OLD frame
-        R = _cholesky_qr(M @ z_prev.t())                     # new rotation (SO(m))
+        if self.aro_compile and M.is_cuda:
+            if self._compiled_aro_core is None:
+                self._compiled_aro_core = torch.compile(_aro_core, dynamic=False)
+            R, dW = self._compiled_aro_core(M, R, it)
+        else:
+            R, dW = _aro_core(M, R, it)
         st["aro_R"].copy_(R)
-        dW = R @ _sinkhorn_normalize(R.t() @ M, it)          # rotate → f_Sink → rotate back
-        dW = dW / (dW.norm() + 1e-12)                        # unit Frobenius
         base_scale = 0.2 * float(M.shape[0] * M.shape[1]) ** 0.5   # ARO's AdamW-budget RMS match
         return dW.to(p.dtype), base_scale
 
-    def _adam_step(self, p, g, grp, st):
+    def _adam_group_step(self, params, grp):
+        """Foreach AdamW fallback; DDC matrices retain their per-parameter projection."""
+        if not params:
+            return
+        ordinary = []
+        for p in params:
+            st = self.state[p]
+            if "exp_avg" not in st:
+                st["exp_avg"] = torch.zeros_like(p.grad, dtype=torch.float32)
+                st["exp_sq"] = torch.zeros_like(p.grad, dtype=torch.float32)
+                st["t"] = 0
+            st["t"] += 1
+            if grp["ddc_strength"] > 0.0 and p.ndim == 2 and min(p.shape) > 1:
+                self._adam_step(p, p.grad, grp, st, increment=False)
+            else:
+                ordinary.append(p)
+        buckets = {}
+        for p in ordinary:
+            st = self.state[p]
+            buckets.setdefault((p.device, st["t"]), []).append(p)
+        b1, b2 = grp["adam_betas"]
+        for (_, step), bucket in buckets.items():
+            grads = [p.grad.float() for p in bucket]
+            exp_avg = [self.state[p]["exp_avg"] for p in bucket]
+            exp_sq = [self.state[p]["exp_sq"] for p in bucket]
+            torch._foreach_mul_(exp_avg, b1)
+            torch._foreach_add_(exp_avg, grads, alpha=1 - b1)
+            torch._foreach_mul_(exp_sq, b2)
+            torch._foreach_addcmul_(exp_sq, grads, grads, value=1 - b2)
+            denom = torch._foreach_sqrt(exp_sq)
+            torch._foreach_div_(denom, (1 - b2 ** step) ** 0.5)
+            torch._foreach_add_(denom, grp["adam_eps"])
+            updates = torch._foreach_div(exp_avg, 1 - b1 ** step)
+            torch._foreach_div_(updates, denom)
+            if grp["weight_decay"]:
+                torch._foreach_mul_(bucket, 1.0 - grp["lr"] * grp["weight_decay"])
+            for p, update in zip(bucket, updates):
+                p.add_(update.to(p.dtype), alpha=-grp["lr"])
+
+    def _adam_step(self, p, g, grp, st, *, increment=True):
         b1, b2 = grp["adam_betas"]; eps = grp["adam_eps"]; lr = grp["lr"]
         if "exp_avg" not in st:
             st["exp_avg"] = torch.zeros_like(g, dtype=torch.float32)  # fp32: bf16 moments
             st["exp_sq"] = torch.zeros_like(g, dtype=torch.float32)   # quantize away fine updates
             st["t"] = 0
-        st["t"] += 1; t = st["t"]
+        if increment:
+            st["t"] += 1
+        t = st["t"]
         ea, es = st["exp_avg"], st["exp_sq"]
         ea.mul_(b1).add_(g, alpha=1 - b1)
         es.mul_(b2).addcmul_(g, g, value=1 - b2)

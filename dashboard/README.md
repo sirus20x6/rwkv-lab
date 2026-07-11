@@ -15,6 +15,8 @@ SQLite DB (`trainboard.db`). GPU-light — safe to run alongside live training.
 The one-second shared snapshot reads conversion quality from ingestion-time rollups plus one batched
 codec query; it does not fan out KPI/count queries per layer. Run-sidecar and campaign/dataset discovery
 are cached, so multiple panels and browser tabs do not repeatedly walk the 1TB-scale `runs/` tree.
+The health detector likewise fetches every live run's bounded training window and latest rollup in
+two batch queries per scan instead of resolving IDs, statistics, and PPL independently per process.
 
 The experiment builder exposes trainer-native P0/P1 comparison arms for
 [u-μP](https://arxiv.org/abs/2407.17465), [Titans](https://arxiv.org/abs/2501.00663) /

@@ -52,19 +52,26 @@ def group_advantages(rewards: torch.Tensor, group_ids: torch.Tensor, *,
 
     if rewards.ndim != 1 or group_ids.shape != rewards.shape:
         raise ValueError("rewards and group_ids must be equal 1-D tensors")
-    adv = torch.zeros_like(rewards, dtype=torch.float32)
-    active = torch.ones_like(rewards, dtype=torch.bool)
-    for gid in torch.unique(group_ids):
-        idx = group_ids == gid
-        vals = rewards[idx].float()
-        constant = bool((vals.max() - vals.min()).abs() <= eps)
-        if drop_constant and constant:
-            active[idx] = False
-            continue
-        centered = vals - vals.mean()
-        if standardize and not constant:
-            centered = centered / vals.std(unbiased=False).clamp_min(eps)
-        adv[idx] = centered
+    if rewards.numel() == 0:
+        return rewards.float(), torch.ones_like(rewards, dtype=torch.bool)
+    values = rewards.float()
+    unique_groups, inverse = torch.unique(group_ids, sorted=False, return_inverse=True)
+    groups = unique_groups.numel()
+    counts = torch.zeros(groups, dtype=values.dtype, device=values.device)
+    sums = torch.zeros_like(counts)
+    sumsq = torch.zeros_like(counts)
+    counts.scatter_add_(0, inverse, torch.ones_like(values))
+    sums.scatter_add_(0, inverse, values)
+    sumsq.scatter_add_(0, inverse, values.square())
+    means = sums / counts.clamp_min(1)
+    centered = values - means[inverse]
+    variance = (sumsq / counts.clamp_min(1) - means.square()).clamp_min(0)
+    constant = variance <= eps * eps
+    if standardize:
+        centered = centered / variance.sqrt().clamp_min(eps)[inverse]
+        centered = torch.where(constant[inverse], values - means[inverse], centered)
+    active = ~constant[inverse] if drop_constant else torch.ones_like(rewards, dtype=torch.bool)
+    adv = torch.where(active, centered, torch.zeros_like(centered))
     return adv, active
 
 
