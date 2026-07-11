@@ -35,6 +35,16 @@ full = [
     "pynvml>=11.5",
     "psutil>=6.0",
 ]
+test = [
+    "pytest>=8",
+    "pytest-xdist>=3.6",
+]
+# NVIDIA's Operator API is optional: ordinary CUDA and CPU installs retain the
+# cuBLAS/Triton fallback. Native adoption additionally requires an SM120 kernel
+# in the installed registry and a parity/latency qualification receipt.
+sm120 = [
+    "nvidia-cutlass-operators>=0.1.0",
+]
 
 [project.urls]
 Repository = "https://github.com/sirus20x6/rwkv-lab"
@@ -47,3 +57,6 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "gpu: uses a CUDA device and must run in the serialized GPU phase",
+]

@@ -196,9 +196,38 @@ implementation sources of record.
   [Tenstorrent WKV7](https://github.com/marty1885/ttWKV7), and
   [ROSA-JAX](https://github.com/ytfh44/rosa_gpu_jax); merely being installed never adopts a backend.
 - **Native RWKV megakernel backend:** [`megakernel.py`](src/rwkv_lab/megakernel.py) executes the
-  one-token RWKV-7 DPLR state transition as one fp32-accumulating Triton kernel, compiles and
-  autotunes the surrounding fixed-shape model step with Inductor, then replays the complete plan
-  through a persistent CUDA Graph. Plans are cached by model/device/state geometry and can be
+  one-token RWKV-7 DPLR state transition in-place with mutation-safe autotuning over batch/head/state
+  geometry. A separately timed candidate fuses the fp32 state update directly through GroupNorm,
+  the RWKV bonus, and output gating. [`megakernel_ops.py`](src/rwkv_lab/megakernel_ops.py) supplies
+  `ln1 + six TimeMix branches`, `attention add + ln2 + ChannelMix`, and the final residual plus
+  output norm. All are compiler-visible [`triton_op`](https://docs.pytorch.org/tutorials/recipes/torch_compile_user_defined_triton_kernel_tutorial.html)
+  operations and are adopted independently only when whole-layer timing improves. Fixed-budget
+  greedy plans unroll the entire
+  device-side token/EOS loop into one CUDA Graph replay instead of one host replay per token.
+  Exact-shape prompt plans are compiled/captured, and both decode and prompt shapes can be serialized
+  with experimental [PyTorch AOT compilation](https://docs.pytorch.org/docs/main/user_guide/torch_compiler/torch.compiler_aot_compile.html).
+  Following the Apache-2.0 [Albatross `faster3b` implementation](https://github.com/BlinkDL/Albatross),
+  block 0 normalization is folded once into an immutable inference embedding table; the prepared
+  buffer is part of the plan hash. Its GPU-specific GEMV layouts, worker-role executor, sparse FFN,
+  and reduced-precision recurrent-state variants inspired separately qualified candidates in
+  [`megakernel_linear.py`](src/rwkv_lab/megakernel_linear.py); they remain on cuBLAS unless local
+  parity, determinism, and speed gates pass. A serving-only preparation can replace the raw embedding
+  with its folded table and release the duplicate, while refusing DeepEmbed modes that still need it.
+  [`sm120_kernels.py`](src/rwkv_lab/sm120_kernels.py) adds an RTX PRO 6000-specific lane: its
+  persistent RWKV state scheduler caps the resident grid at the card's 188 SMs and consumes multiple
+  disjoint state tiles per CTA; its CC12.0 plan uses 2-warp, 8-column tiles against Blackwell's
+  48-warp/SM occupancy envelope; and its CUDA access-policy controller can reserve and target the
+  device-reported persisting-L2 window on the packed R/K/V or folded-embedding buffer. The window is
+  reapplied to private CUDA Graph capture streams and retained only when end-to-end timing improves.
+  These settings follow NVIDIA's [Blackwell tuning guide](https://docs.nvidia.com/cuda/blackwell-tuning-guide/index.html)
+  and [L2 persistence guidance](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#l2-access-properties).
+  An optional `pip install -e '.[sm120]'` enables NVIDIA's
+  [CUTLASS Operator API](https://docs.nvidia.com/cutlass/latest/media/docs/operators/overview.html)
+  projection adapter. It rejects portable SM80 results: the receipt calls a projection native only
+  when CUTLASS metadata explicitly advertises SM120. As of Operator API 0.1.0, BF16 discovery on this
+  machine returns portable SM80 kernels, so projection execution correctly remains on cuBLAS while
+  the adapter is ready for a native registry release.
+  Plans are cached by model/device/state geometry and can be
   requested with `rwkv_lab.generate --engine megakernel`; `auto` adoption requires token parity,
   warm throughput, and profiler-measured launch reduction from `rwkv_lab.production_kernels`.
   The design follows [HazyResearch Megakernels](https://github.com/HazyResearch/Megakernels/tree/throughput)
@@ -291,7 +320,7 @@ Experiments are driven and monitored through **trainboard**, a from-scratch Go +
 </p>
 
 <p align="center">
-  <img src="docs/images/qualification_panel.png?v=bdd0e60f61d4" width="100%" alt="Production kernel qualification panel with megakernel tuning and regression gates"><br>
+  <img src="docs/images/qualification_panel.png?v=7a1e2bddf99c" width="100%" alt="Production kernel qualification panel with megakernel tuning and regression gates"><br>
   <em>Production qualification — choose fast compilation or full megakernel plan autotuning; launch parity-before-speed kernel and serving checks; inspect adopted backends, CUDA launch reduction, cold compile cost, and regression gates; and retain checkpoint-bound machine-readable receipts under <code>runs/</code>. Backend adoption remains fail-closed; the dashboard cannot promote or publish a model.</em>
 </p>
 
@@ -532,9 +561,14 @@ python -m rwkv_lab.production_kernels --device cuda \
   --max-kernel-regression 0.10 \
   --output runs/kernel-qualification.json
 python -m rwkv_lab.production_kernels --device cuda --checkpoint runs/lm/ckpt.pt \
-  --prompt-ids 1,123,456 --max-new 64 --output runs/serving-qualification.json
+  --prompt-ids 1,123,456 --max-new 64 \
+  --megakernel-artifact runs/qualification/rwkv-megakernel.pt2 \
+  --output runs/serving-qualification.json
 python -m rwkv_lab.generate --ckpt runs/lm/ckpt.pt --engine auto \
-  --megakernel-receipt runs/serving-qualification.json --prompt "Explain RWKV."
+  --megakernel-receipt runs/serving-qualification.json \
+  --megakernel-artifact runs/qualification/rwkv-megakernel.pt2 \
+  --megakernel-serving-prepare \
+  --prompt "Explain RWKV."
 ```
 
 - **NF4:** TorchAO remains opt-in and is adopted only after representative-layer output, input-gradient,
@@ -560,14 +594,37 @@ python -m rwkv_lab.generate --ckpt runs/lm/ckpt.pt --engine auto \
   long-context workspace fraction; allocation fails before launch when it would consume over half
   of currently free device memory.
 - **Megakernel serving:** `--engine megakernel` explicitly compiles a native RWKV plan; production
-  qualification separately records cold compilation, warm token throughput, exact tokens, and CUDA
-  launches before/after. `--engine auto --megakernel-receipt ...` adopts only an approved receipt
+  qualification separately records cold compilation, warm token throughput, exact tokens, and a
+  four-stage eager → fused-state/epilogue → compiled-fullgraph → CUDA-Graph latency/launch ablation.
+  `--engine auto --megakernel-receipt ...` adopts only an approved receipt
   whose SHA-256 matches the checkpoint bytes and whose GPU compute capability, PyTorch, and Triton
   versions match the current runtime, preventing stale evidence from authorizing another model or
   machine. Inductor and Triton reuse their on-disk compiler caches; the process retains CUDA Graphs
   by device, batch, dtype, and recurrent-state geometry. The implementation cites and follows the
   execution-plan direction of [HazyResearch Megakernels](https://github.com/HazyResearch/Megakernels/tree/throughput)
-  and [TileRT](https://github.com/tile-ai/TileRT) without loading their model-specific binaries.
+  and [TileRT](https://github.com/tile-ai/TileRT), plus Albatross's
+  [folded block-0 normalization](https://github.com/BlinkDL/Albatross/tree/main/faster3b_2606),
+  without loading their model-specific binaries.
+  `--megakernel-artifact` loads an adjacent hash-checked `.pt2.json` manifest and AOT plan whose
+  checkpoint, plan geometry, compute capability, PyTorch, and Triton identities must all match.
+  Exact prompt shapes use adjacent `*.prefill-bN-tN.pt2` artifacts when available. Qualification
+  receipts include per-path GPU time, allocation traffic, and the hottest CUDA kernels—not just
+  launch counts—plus separately gated row-one GEMV, distinct-input packed R/K/V, and exact
+  squared-ReLU/value candidates. `--megakernel-serving-prepare` is deliberately destructive and
+  requires an adopted receipt; use it only for an immutable serving process.
+- **SM120 evidence:** on compute capability 12.0, the megakernel receipt also includes the
+  physical-SM persistent-scheduler plan, CC12 occupancy geometry, native-versus-portable CUTLASS
+  metadata, and the measured persisting-L2 window. State parity and median latency gate the
+  scheduler, full-model parity and latency gate the L2 window, and projection requires an actual
+  native-SM120 operator—being on a Blackwell GPU alone adopts nothing.
+
+  On the local RTX PRO 6000 Blackwell qualification model (batch 1, d256, four layers, 1,024-token
+  synthetic vocabulary), exact greedy decode measured 6,710 → 5,379 → 2,116 → 130 µs across those
+  four paths and 153 → 11,556 end-to-end tokens/s with one-replay 32-token generation. Profiler
+  events fell from 313 to 101. The combined state/epilogue passed at 1.02×; portable layer-boundary
+  fusion (0.93×) and generic row/RKV/FFN candidates (0.34–0.50×) correctly remained disabled.
+  This is a reproducible systems smoke test, not a quality or full-scale-model
+  throughput claim; every real checkpoint must produce its own bound receipt.
 - **Serving fallback:** without an adopted megakernel receipt, `generate --engine auto` selects
   [RWKV-7](https://arxiv.org/abs/2503.14456) constant-state decoding only for compatible checkpoints
   and reports tokens/s; otherwise it records the reason for exact full-prefix fallback. The
@@ -743,7 +800,7 @@ Everything is a **drop-in `linear_attn` / attention module swap** on a HuggingFa
 | [`live_controls.py`](src/rwkv_lab/live_controls.py) | Trainer-side consumer of the dashboard's live-tuning panel. |
 | [`safe_torch.py`](src/rwkv_lab/safe_torch.py) | Safer torch-serialization load wrappers. |
 | [`build_qwen35_data.py`](src/rwkv_lab/build_qwen35_data.py) | Build Qwen3.5-tokenized DCLM + FineWeb-Edu caches. |
-| [`tests/`](tests/) | CPU/GPU invariant + feature tests (loops, lookahead, Engram, ROSA, the SOTA levers). Run `pytest tests/`. |
+| [`tests/`](tests/) | CPU/GPU invariant + feature tests (loops, lookahead, Engram, ROSA, the SOTA levers). Run `scripts/test_parallel.sh` for process-parallel CPU tests with bounded native thread pools plus serialized CUDA tests (`PYTEST_WORKERS` and `PYTEST_NATIVE_THREADS` tune the split). Set `RWKV_GPU_STRESS=1` to append the idle-GPU compile-core and DMT graph programs. |
 | [`scripts/`](scripts/) | Overnight sweep / A-B drivers (`gate_ab.sh`, `gdn_sweep.sh`, `rel_sweep.sh`, `supervisor_night.sh`). |
 | [`legacy/`](legacy/) | Retired v1 dashboard + earlier trainer snapshots, kept for provenance. |
 
@@ -754,7 +811,7 @@ Everything is a **drop-in `linear_attn` / attention module swap** on a HuggingFa
 ```bash
 # 0. install Python deps, then install CUDA-specific torch + fla separately
 pip install -r requirements.txt
-pip install -e .          # makes the src/rwkv_lab package importable
+pip install -e '.[test]'  # package + pytest/xdist parallel test runner
 #                          use a venv (e.g. python -m venv --system-site-packages .venv) for the
 #                          CUDA torch/fla stack; tests also run without this via tests/conftest.py
 

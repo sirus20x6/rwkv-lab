@@ -84,7 +84,8 @@ class Block(nn.Module):
 
     def forward(self, x, v_first, seed=None, return_seed=False, ids=None, e0=None,
                 reset_mask=None):
-        if self.i == 0:
+        if (self.i == 0 and not getattr(self, "_megakernel_skip_ln0", False)
+                and not getattr(self, "_megakernel_skip_ln0_permanent", False)):
             x = self.ln0(x)
         if seed is not None or return_seed:                  # Future-Seed: seed this layer's wkv scan
             if isinstance(self.att, LoopedRWKV):
@@ -130,7 +131,8 @@ class Block(nn.Module):
             return x, v_first, seed_out
         return x, v_first
 
-    def forward_recurrent(self, x, v_first, state=None, *, ids=None, e0=None):
+    def forward_recurrent(self, x, v_first, state=None, *, ids=None, e0=None,
+                          return_ffn_parts=False):
         """Process one causal chunk and return exact time/shift carries.
 
         RWKV-7's matrix state is constant-size (Peng et al., 2025,
@@ -141,14 +143,48 @@ class Block(nn.Module):
         if isinstance(self.att, LoopedRWKV):
             raise ValueError("recurrent decoding does not support looped attention")
         state = state or {}
-        if self.i == 0:
+        if (self.i == 0 and not getattr(self, "_megakernel_skip_ln0", False)
+                and not getattr(self, "_megakernel_skip_ln0_permanent", False)):
             x = self.ln0(x)
-        a, wkv_state, att_shift, v_first = self.att(
-            self.ln1(x), v_first=v_first, return_v_first=True,
-            initial_state=state.get("wkv"), shift_state=state.get("att_shift"),
-            return_state=True)
-        x = x + a
-        xin = self.ln2(x)
+        fused_boundaries = (
+            getattr(self, "_megakernel_boundaries", False)
+            and x.shape[1] == 1 and x.is_cuda and not torch.is_grad_enabled()
+            and isinstance(self.att, RWKV8TimeMixDeltaNet)
+            and isinstance(self.ffn, RWKV8ChannelMixDeltaNet)
+        )
+        if fused_boundaries:
+            from rwkv_lab.megakernel_ops import layer_norm_six_mix
+            previous = state.get("att_shift")
+            if previous is None:
+                previous = torch.zeros_like(x)
+            coefficients = torch.stack((
+                self.att.x_r, self.att.x_w, self.att.x_k,
+                self.att.x_v, self.att.x_a, self.att.x_g,
+            )).reshape(6, x.shape[-1])
+            time_mixed, normalized = layer_norm_six_mix(
+                x, previous.to(x.dtype), coefficients,
+                self.ln1.weight, self.ln1.bias, eps=self.ln1.eps)
+            a, wkv_state, att_shift, v_first = self.att(
+                normalized, v_first=v_first, return_v_first=True,
+                initial_state=state.get("wkv"), return_state=True,
+                _megakernel_time_mix=time_mixed,
+                _megakernel_time_shift=normalized)
+        else:
+            a, wkv_state, att_shift, v_first = self.att(
+                self.ln1(x), v_first=v_first, return_v_first=True,
+                initial_state=state.get("wkv"), shift_state=state.get("att_shift"),
+                return_state=True)
+        if fused_boundaries:
+            from rwkv_lab.megakernel_ops import residual_add_layer_norm_channel_mix
+            previous = state.get("ffn_shift")
+            if previous is None:
+                previous = torch.zeros_like(x)
+            x, channel_mixed, xin = residual_add_layer_norm_channel_mix(
+                x, a, previous.to(x.dtype), self.ffn.x_k,
+                self.ln2.weight, self.ln2.bias, eps=self.ln2.eps)
+        else:
+            x = x + a
+            xin = self.ln2(x)
         de_shift = None
         if self.de_mode == "hidden" and self.de_emb is not None and ids is not None:
             h = xin
@@ -168,10 +204,14 @@ class Block(nn.Module):
             ss = torch.einsum("btr,btrs->bts", self.de_s1(h),
                               E.view(B, T, self.de_r, self.de_r).to(h.dtype))
             gate = 1.0 + self.de_s0.to(h.dtype) + self.de_s2(ss)
-            f, ffn_shift = self.ffn(xin, hidden_gate=gate,
-                                     shift_state=state.get("ffn_shift"), return_state=True)
+            f, ffn_shift = self.ffn(
+                xin, hidden_gate=gate, shift_state=state.get("ffn_shift"),
+                return_state=True,
+                _megakernel_channel_mix=(channel_mixed if fused_boundaries else None))
         else:
-            ffn_result = self.ffn(xin, shift_state=state.get("ffn_shift"), return_state=True)
+            ffn_result = self.ffn(
+                xin, shift_state=state.get("ffn_shift"), return_state=True,
+                _megakernel_channel_mix=(channel_mixed if fused_boundaries else None))
             if isinstance(ffn_result, tuple):
                 f, ffn_shift = ffn_result
             else:  # Routing-Free MoE is token-wise and has no shift carry.
@@ -181,11 +221,11 @@ class Block(nn.Module):
                 if self.de_proj is not None:
                     g = self.de_proj(g)
                 f = f * (1.0 + g)
-        x = x + f
+        output = (x, f) if return_ffn_parts else x + f
         next_state = {"wkv": wkv_state, "att_shift": att_shift, "ffn_shift": ffn_shift}
         if de_shift is not None:
             next_state["de_shift"] = de_shift
-        return x, v_first, next_state
+        return output, v_first, next_state
 
 
 class RWKV7Small(nn.Module):
@@ -244,9 +284,17 @@ class RWKV7Small(nn.Module):
                 raise ValueError(f"checkpoint is not reset-mask packing compatible: {reason}")
             if reset_mask.shape != ids.shape or not torch.all(reset_mask[:, 0]):
                 raise ValueError("reset_mask must match ids and reset the first token")
-        x = self.emb(ids)
+        folded_embedding = getattr(self, "_megakernel_folded_embedding", None)
+        use_folded_embedding = (getattr(self, "_megakernel_use_folded_embedding", False)
+                                and folded_embedding is not None)
+        if use_folded_embedding:
+            x = F.embedding(ids, folded_embedding)
+        else:
+            x = self.emb(ids)
         de_ids = ids if self.deepembed else None  # DeepEmbed blocks gate their FFN by token id
-        e0 = x if (self.deepembed and self.de_emb_res) else None  # raw emb for the residual fold
+        e0 = None
+        if self.deepembed and self.de_emb_res:     # DeepEmbed residual requires the raw embedding
+            e0 = self.emb(ids) if use_folded_embedding else x
         v_first = None                           # layer 0 sets it; later layers lerp toward it
         seed = None                              # Future-Seed: s_T of layer L-1 -> s_0 of layer L (None => 0)
         for j, b in enumerate(self.blocks):
@@ -336,14 +384,35 @@ class RWKV7Small(nn.Module):
         states = states if states is not None else [None] * len(self.blocks)
         if len(states) != len(self.blocks):
             raise ValueError("recurrent state does not match model depth")
-        x = self.emb(ids)
+        folded_embedding = getattr(self, "_megakernel_folded_embedding", None)
+        use_folded_embedding = (getattr(self, "_megakernel_use_folded_embedding", False)
+                                and folded_embedding is not None)
+        if use_folded_embedding:
+            x = F.embedding(ids, folded_embedding)
+        else:
+            x = self.emb(ids)
         de_ids = ids if self.deepembed else None
-        e0 = x if (self.deepembed and self.de_emb_res) else None
+        e0 = None
+        if self.deepembed and self.de_emb_res:
+            e0 = self.emb(ids) if use_folded_embedding else x
         v_first = None
         next_states = []
-        for block, block_state in zip(self.blocks, states):
+        fused_final_norm = (
+            getattr(self, "_megakernel_final_norm", False)
+            and ids.shape[1] == 1 and ids.is_cuda and not torch.is_grad_enabled()
+        )
+        prefused_hidden = None
+        for index, (block, block_state) in enumerate(zip(self.blocks, states)):
+            last = fused_final_norm and index == len(self.blocks) - 1
             x, v_first, block_state = block.forward_recurrent(
-                x, v_first, block_state, ids=de_ids, e0=e0)
+                x, v_first, block_state, ids=de_ids, e0=e0,
+                return_ffn_parts=last)
+            if last:
+                from rwkv_lab.megakernel_ops import residual_add_layer_norm
+                residual, update = x
+                x, prefused_hidden = residual_add_layer_norm(
+                    residual, update, self.ln_out.weight, self.ln_out.bias,
+                    eps=self.ln_out.eps)
             next_states.append(block_state)
         if memory is not None:
             # Titans/MIRAS/ATLAS memory is itself a causal recurrent state.  Carrying
@@ -358,7 +427,14 @@ class RWKV7Small(nn.Module):
         if offset_adapter is not None:
             return self.head(self.ln_out(x)), {"blocks": next_states,
                                                "offset_step": step + ids.shape[1]}
-        return self.head(self.ln_out(x)), next_states
+        hidden = prefused_hidden if prefused_hidden is not None else self.ln_out(x)
+        if (getattr(self, "_megakernel_row_one", False) and ids.shape[1] == 1
+                and not torch.is_grad_enabled()):
+            from rwkv_lab.megakernel_linear import row_one_linear
+            logits = row_one_linear(hidden, self.head.weight, use_candidate=True)
+        else:
+            logits = self.head(hidden)
+        return logits, next_states
 
 
 def _adamw8bit(params, lr, wd, paged):

@@ -5,6 +5,7 @@ import torch
 from rwkv_lab.generate import sample_with_stats
 from rwkv_lab.online_memory import install_compiled_online_memory, install_online_memory
 from rwkv_lab.production_kernels import (compare_performance_baseline,
+                                         profile_kernel_evidence,
                                          qualify_cuda_rosa,
                                          qualify_recurrent_generation)
 from rwkv_lab.rwkv_pretrain import RWKV7Small
@@ -139,17 +140,33 @@ def test_generation_engine_and_recurrent_qualification_are_token_exact():
 
 
 def test_performance_baseline_rejects_throughput_memory_and_adoption_regressions():
-    baseline = {"adopted": ["memory"], "metrics": {"peak_memory_bytes": 100},
+    baseline = {"adopted": ["memory"], "metrics": {
+                    "peak_memory_bytes": 100,
+                    "profile": {"cuda_time_us": 10,
+                                "positive_device_allocation_bytes": 100}},
                 "reports": {"decode": {"tokens_per_second": 100}}}
-    good = {"adopted": ["memory"], "metrics": {"peak_memory_bytes": 105},
+    good = {"adopted": ["memory"], "metrics": {
+                "peak_memory_bytes": 105,
+                "profile": {"cuda_time_us": 10.1,
+                            "positive_device_allocation_bytes": 105}},
             "reports": {"decode": {"tokens_per_second": 98}}}
     assert compare_performance_baseline(good, baseline)["passed"]
-    bad = {"adopted": [], "metrics": {"peak_memory_bytes": 125},
+    bad = {"adopted": [], "metrics": {
+               "peak_memory_bytes": 125,
+               "profile": {"cuda_time_us": 12,
+                           "positive_device_allocation_bytes": 125}},
            "reports": {"decode": {"tokens_per_second": 80}}}
     gate = compare_performance_baseline(bad, baseline)
-    assert not gate["passed"] and len(gate["reasons"]) == 3
+    assert not gate["passed"] and len(gate["reasons"]) == 5
 
 
 def test_rosa_qualification_fails_closed_without_cuda():
     report = qualify_cuda_rosa(device="cpu", repeats=1)
     assert not report["available"] and not report["adopted"]
+
+
+def test_kernel_evidence_has_stable_cpu_fail_closed_schema():
+    report = profile_kernel_evidence(lambda: None, device=torch.device("cpu"))
+    assert not report["available"]
+    assert report["cuda_time_us"] == 0
+    assert report["top_cuda_kernels"] == []

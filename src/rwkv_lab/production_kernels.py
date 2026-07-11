@@ -170,12 +170,13 @@ def compare_performance_baseline(current: dict, baseline: dict, *,
             compared.append({"metric": path, "baseline": old, "current": new, "ratio": ratio})
             if ratio < 1 - max_throughput_regression:
                 reasons.append(f"{path} throughput regressed {(1-ratio)*100:.1f}%")
-        elif path.endswith("device_native_seconds"):
+        elif path.endswith(("device_native_seconds", "cuda_time_us")):
             ratio = old / max(new, 1e-12)
             compared.append({"metric": path, "baseline": old, "current": new, "ratio": ratio})
             if ratio < 1 - max_throughput_regression:
                 reasons.append(f"{path} latency regressed {(1-ratio)*100:.1f}%")
-        elif path.endswith(("peak_memory_bytes", "production_workspace_bytes")):
+        elif path.endswith(("peak_memory_bytes", "production_workspace_bytes",
+                            "positive_device_allocation_bytes")):
             ratio = new / old
             compared.append({"metric": path, "baseline": old, "current": new, "ratio": ratio})
             if ratio > 1 + max_memory_regression:
@@ -196,25 +197,45 @@ def compare_performance_baseline(current: dict, baseline: dict, *,
 
 
 def profile_kernel_evidence(work, *, device: torch.device) -> dict:
-    """Count representative operators/CUDA kernels for persisted launch-regression evidence."""
+    """Persist launch, device-time, and allocation evidence for roofline triage."""
     if device.type != "cuda":
-        return {"available": False, "operator_count": 0, "cuda_kernel_count": 0}
+        return {"available": False, "operator_count": 0, "cuda_kernel_count": 0,
+                "cuda_time_us": 0.0, "positive_device_allocation_bytes": 0,
+                "top_cuda_kernels": []}
     from torch.profiler import ProfilerActivity, profile
     work()
     torch.cuda.synchronize(device)
-    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as trace:
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                 profile_memory=True) as trace:
         work()
         torch.cuda.synchronize(device)
     events = trace.events()
+    cuda_events = [event for event in events
+                   if event.device_type == torch.autograd.DeviceType.CUDA]
+    kernels: dict[str, dict] = {}
+    for event in cuda_events:
+        row = kernels.setdefault(event.name, {"name": event.name, "calls": 0,
+                                              "total_us": 0.0, "max_us": 0.0})
+        elapsed = float(getattr(event, "device_time_total", 0.0))
+        row["calls"] += 1
+        row["total_us"] += elapsed
+        row["max_us"] = max(row["max_us"], elapsed)
+    top_kernels = sorted(kernels.values(), key=lambda row: row["total_us"], reverse=True)[:16]
     return {"available": True,
             "operator_count": sum(event.device_type == torch.autograd.DeviceType.CPU
                                   for event in events),
-            "cuda_kernel_count": sum(event.device_type == torch.autograd.DeviceType.CUDA
-                                     for event in events)}
+            "cuda_kernel_count": len(cuda_events),
+            "cuda_time_us": sum(float(getattr(event, "device_time_total", 0.0))
+                                for event in cuda_events),
+            "positive_device_allocation_bytes": sum(
+                max(0, int(getattr(event, "device_memory_usage", 0)))
+                for event in events),
+            "top_cuda_kernels": top_kernels}
 
 
 def qualification_suite(*, device: str = "auto", compile_backend: str = "inductor",
                         megakernel_compile_mode: str = "max-autotune-no-cudagraphs",
+                        megakernel_artifact: str = "",
                         repeats: int = 5, checkpoint: str = "",
                         prompt_ids: Sequence[int] = (1, 2, 3, 4),
                         max_new: int = 32) -> dict:
@@ -277,6 +298,25 @@ def qualification_suite(*, device: str = "auto", compile_backend: str = "inducto
             model, prompt_ids, device=device, max_new=max_new, repeats=repeats,
             compile_mode=megakernel_compile_mode,
             checkpoint_sha256=checkpoint_digest)
+        if megakernel.get("adopted") and megakernel_artifact:
+            from rwkv_lab.megakernel import (get_megakernel_backend,
+                                             prefill_artifact_path)
+            backend = get_megakernel_backend(
+                model, device=device, compile_mode=megakernel_compile_mode)
+            megakernel["aot_artifact"] = backend.plan.export_aot(
+                megakernel_artifact, checkpoint_sha256=checkpoint_digest)
+            if backend.prefill_plans:
+                prefill_plan = next(iter(backend.prefill_plans.values()))
+                prefill_path = prefill_artifact_path(
+                    megakernel_artifact, *prefill_plan.static_ids.shape)
+                try:
+                    megakernel["prefill_aot_artifact"] = prefill_plan.export_aot(
+                        prefill_path, checkpoint_sha256=checkpoint_digest)
+                except Exception as exc:  # experimental PyTorch AOT may reject FLA partitions
+                    megakernel["prefill_aot_artifact"] = {
+                        "adopted": False, "error": repr(exc),
+                        "path": str(prefill_path),
+                    }
 
     reports = {"nf4": nf4, "nvfp4": nvfp4, "rosa": rosa,
                "triangular_delta": triangular,
@@ -305,6 +345,8 @@ def main() -> None:
     parser.add_argument("--megakernel-compile-mode",
                         choices=("default", "max-autotune-no-cudagraphs"),
                         default="max-autotune-no-cudagraphs")
+    parser.add_argument("--megakernel-artifact", default="",
+                        help="optional .pt2 AOT decode artifact, written only after adoption")
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--checkpoint", default="")
     parser.add_argument("--prompt-ids", default="1,2,3,4")
@@ -320,6 +362,7 @@ def main() -> None:
     report = qualification_suite(
         device=args.device, compile_backend=args.compile_backend, repeats=args.repeats,
         megakernel_compile_mode=args.megakernel_compile_mode,
+        megakernel_artifact=args.megakernel_artifact,
         checkpoint=args.checkpoint, prompt_ids=prompt_ids, max_new=args.max_new)
     if args.baseline:
         baseline = json.loads(Path(args.baseline).read_text())

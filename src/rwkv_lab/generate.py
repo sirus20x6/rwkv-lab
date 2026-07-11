@@ -1,6 +1,8 @@
 """Sample text from a rwkv_pretrain checkpoint — the lab's train→inspect closer.
 
-``--engine megakernel`` uses the locally compiled Triton/Inductor/CUDA-Graph execution plan;
+``--engine megakernel`` uses the locally compiled Triton/Inductor/CUDA-Graph execution plan, with
+device-side greedy feedback and exact-shape compiled prefill; an optional checkpoint-bound ``.pt2``
+AOT artifact skips decode compilation on a matching GPU/compiler runtime.
 ``--engine auto`` selects it only after local production qualification, otherwise using exact
 constant-state RWKV decoding for compatible checkpoints. Experimental levers without a causal state
 contract fall back to full-prefix recomputation: seed-chain re-chains, Engram re-runs recall over
@@ -178,6 +180,21 @@ def sample_with_stats(model, ids: list[int], *, max_new: int = 200,
     if selected == "megakernel":
         from rwkv_lab.megakernel import get_megakernel_backend
         megakernel = get_megakernel_backend(model, device=device)
+        if temperature <= 0:
+            generated = megakernel.generate_greedy(
+                x, max_new=max_new,
+                stop_token_id=(SEP if stop_at_sep else None),
+            )[0].tolist()
+            if stop_at_sep and SEP in generated:
+                generated = generated[:generated.index(SEP)]
+            elapsed = time.perf_counter() - started
+            stats = {
+                "engine": selected, "fallback_reason": reason, "seconds": elapsed,
+                "tokens": len(generated),
+                "tokens_per_second": len(generated) / max(elapsed, 1e-12),
+                "device_side_greedy": True, "megakernel": megakernel.receipt(),
+            }
+            return generated, stats
         logits = megakernel.prefill(x)
         next_logits = logits[0, -1]
     elif selected == "recurrent":
@@ -241,6 +258,10 @@ def main():
                     "plan; auto adopts it only after local qualification")
     ap.add_argument("--megakernel-receipt", default="",
                     help="persisted production qualification receipt, checkpoint-hash verified")
+    ap.add_argument("--megakernel-artifact", default="",
+                    help="qualified .pt2 AOT plan plus adjacent .pt2.json manifest")
+    ap.add_argument("--megakernel-serving-prepare", action="store_true",
+                    help="serving-only: fold ln0 into emb.weight and release its duplicate")
     ap.add_argument("--json", action="store_true", help="machine output (for the trainboard)")
     # fallback arch flags for pre-arch-record checkpoints
     ap.add_argument("--d-model", type=int, default=0)
@@ -255,6 +276,12 @@ def main():
     if args.megakernel_receipt:
         from rwkv_lab.megakernel import adopt_megakernel_receipt
         adopt_megakernel_receipt(model, args.megakernel_receipt, args.ckpt)
+    if args.megakernel_artifact:
+        from rwkv_lab.megakernel import adopt_megakernel_artifact
+        adopt_megakernel_artifact(model, args.megakernel_artifact, args.ckpt)
+    if args.megakernel_serving_prepare:
+        from rwkv_lab.megakernel import finalize_megakernel_serving_embedding
+        finalize_megakernel_serving_embedding(model)
     vocab = WorldVocab()
     text = args.prompt if args.raw else f"User: {args.prompt}\n\nAssistant:"
     ids = vocab.encode(text)

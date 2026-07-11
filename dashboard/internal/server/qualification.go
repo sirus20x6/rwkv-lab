@@ -92,6 +92,7 @@ func (s *Server) handleQualification(w http.ResponseWriter, r *http.Request) {
 	b.WriteString(`<tr><td class="f-l">checkpoint</td><td><input data-bind="qualCheckpoint" placeholder="optional runs/name/ckpt.pt"></td><td class="f-d">enables recurrent serving qualification</td></tr>`)
 	b.WriteString(`<tr><td class="f-l">prompt ids</td><td><input data-bind="qualPrompt" value="1,2,3,4"></td><td class="f-d">integer recurrent-decoding prompt</td></tr>`)
 	b.WriteString(`<tr><td class="f-l">megakernel tuning</td><td><select data-bind="qualMegakernelMode"><option value="max-autotune-no-cudagraphs">max autotune</option><option value="default">fast compile</option></select></td><td class="f-d">Inductor plan search; the outer CUDA Graph is always captured</td></tr>`)
+	b.WriteString(`<tr><td class="f-l">AOT artifact</td><td><input data-bind="qualMegakernelArtifact" value="runs/qualification/rwkv-megakernel.pt2"></td><td class="f-d">checkpoint-bound compiled plan; written only after adoption</td></tr>`)
 	b.WriteString(`<tr><td class="f-l">repeats / max new</td><td><input type="number" min="1" max="20" data-bind="qualRepeats" value="5"><input type="number" min="1" max="2048" data-bind="qualMaxNew" value="32"></td><td class="f-d">median timing samples · serving token budget</td></tr>`)
 	b.WriteString(`<tr><td class="f-l">baseline</td><td><input data-bind="qualBaseline" placeholder="optional prior receipt JSON"></td><td class="f-d">fails on lost adoption or performance regression</td></tr>`)
 	b.WriteString(`<tr><td class="f-l">regression limits</td><td><input data-bind="qualThroughput" value="0.05" title="throughput"><input data-bind="qualMemory" value="0.10" title="memory"><input data-bind="qualKernels" value="0.10" title="kernel count"></td><td class="f-d">fractional throughput · memory · launch limits</td></tr>`)
@@ -118,7 +119,7 @@ func (s *Server) handleQualification(w http.ResponseWriter, r *http.Request) {
 		}
 		fmt.Fprintf(&b, `<div class="rlvr-campaign"><div class="exp-tname"><code>%s</code> <span class="%s">%s</span><span class="dim"> · %s · adopted %s</span></div>`,
 			esc(receipt.Path), gateClass, gate, esc(device), esc(strings.Join(receipt.Report.Adopted, ", ")))
-		b.WriteString(`<table class="exp-tbl"><tr class="exp-hd"><td>backend</td><td>available</td><td>parity/exact</td><td>speedup</td><td>launches</td><td>compile</td><td>memory</td><td>adopted</td></tr>`)
+		b.WriteString(`<table class="exp-tbl"><tr class="exp-hd"><td>backend</td><td>available</td><td>parity/exact</td><td>speedup</td><td>launches</td><td>path µs</td><td>GPU µs/top</td><td>compile</td><td>memory</td><td>adopted</td></tr>`)
 		names := make([]string, 0, len(receipt.Report.Reports))
 		for name := range receipt.Report.Reports {
 			names = append(names, name)
@@ -155,8 +156,38 @@ func (s *Server) handleQualification(w http.ResponseWriter, r *http.Request) {
 					compile = fmt.Sprintf("%.1fs", seconds)
 				}
 			}
-			fmt.Fprintf(&b, `<tr><td><code>%s</code></td><td>%t</td><td>%v</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td class="%s">%t</td></tr>`,
-				esc(name), available, parity, speed, launches, compile, memory, map[bool]string{true: "sig", false: "ns"}[adopted], adopted)
+			pathLatency := "—"
+			kernelEvidence := "—"
+			if ablation, ok := report["ablation"].(map[string]any); ok {
+				if paths, pathsOK := ablation["paths"].(map[string]any); pathsOK {
+					values := make([]string, 0, 4)
+					for _, pathName := range []string{"eager_reference", "fused_state_epilogue", "compiled_fullgraph", "cuda_graph"} {
+						path, pathOK := paths[pathName].(map[string]any)
+						if micros, microsOK := metricFloat(path, "median_us"); pathOK && microsOK {
+							values = append(values, fmt.Sprintf("%.0f", micros))
+						}
+					}
+					if len(values) == 4 {
+						pathLatency = strings.Join(values, "→")
+					}
+					if graph, graphOK := paths["cuda_graph"].(map[string]any); graphOK {
+						if micros, microsOK := metricFloat(graph, "cuda_time_us"); microsOK {
+							kernelEvidence = fmt.Sprintf("%.0f", micros)
+							if top, topOK := graph["top_cuda_kernels"].([]any); topOK && len(top) > 0 {
+								if first, firstOK := top[0].(map[string]any); firstOK {
+									name := fmt.Sprint(first["name"])
+									if len(name) > 28 {
+										name = name[:28] + "…"
+									}
+									kernelEvidence += " · " + name
+								}
+							}
+						}
+					}
+				}
+			}
+			fmt.Fprintf(&b, `<tr><td><code>%s</code></td><td>%t</td><td>%v</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td class="%s">%t</td></tr>`,
+				esc(name), available, parity, speed, launches, pathLatency, esc(kernelEvidence), compile, memory, map[bool]string{true: "sig", false: "ns"}[adopted], adopted)
 		}
 		b.WriteString(`</table></div>`)
 	}
@@ -170,6 +201,7 @@ func (s *Server) handleRunQualification(w http.ResponseWriter, r *http.Request) 
 		Checkpoint string `json:"qualCheckpoint"`
 		Prompt     string `json:"qualPrompt"`
 		MegaMode   string `json:"qualMegakernelMode"`
+		MegaAOT    string `json:"qualMegakernelArtifact"`
 		Repeats    string `json:"qualRepeats"`
 		MaxNew     string `json:"qualMaxNew"`
 		Baseline   string `json:"qualBaseline"`
@@ -232,6 +264,19 @@ func (s *Server) handleRunQualification(w http.ResponseWriter, r *http.Request) 
 	args := []string{"-m", "rwkv_lab.production_kernels", "--device", device,
 		"--repeats", repeats, "--prompt-ids", strings.TrimSpace(signals.Prompt),
 		"--max-new", maxNew, "--megakernel-compile-mode", megaMode, "--output", output}
+	if strings.TrimSpace(signals.MegaAOT) != "" {
+		artifact, pathErr := s.pathUnderRepo(signals.MegaAOT, false)
+		if pathErr != nil || !strings.HasSuffix(strings.ToLower(artifact), ".pt2") {
+			toastErr(sse, "megakernel artifact must be a repository-confined .pt2 path")
+			return
+		}
+		artifactRel, _ := filepath.Rel(s.cfg.RunsDir, artifact)
+		if artifactRel == "." || artifactRel == ".." || strings.HasPrefix(artifactRel, ".."+string(filepath.Separator)) {
+			toastErr(sse, "megakernel artifact must be under runs/")
+			return
+		}
+		args = append(args, "--megakernel-artifact", artifact)
+	}
 	if strings.TrimSpace(signals.Checkpoint) != "" {
 		checkpoint, pathErr := s.pathUnderRepo(signals.Checkpoint, true)
 		if pathErr != nil {

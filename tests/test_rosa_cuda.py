@@ -6,6 +6,8 @@ import rwkv_lab.rosa_sam as rosa_sam
 from rwkv_lab.rosa_sam import (HAVE_CUDA, cuda_sam_retrieve_cf,
                                cuda_sam_workspace_bytes, sam_retrieve_cf)
 
+pytestmark = pytest.mark.gpu
+
 
 @pytest.mark.skipif(not torch.cuda.is_available() or not HAVE_CUDA,
                     reason="Numba CUDA suffix automaton unavailable")
