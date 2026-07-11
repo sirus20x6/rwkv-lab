@@ -67,4 +67,9 @@ func TestRunSummaryRollups(t *testing.T) {
 	if err != nil || codec["r1"] == nil || *codec["r1"] != .125 {
 		t.Fatalf("bad codec batch query: codec=%v err=%v", codec, err)
 	}
+	health, err := d.RecentTrainStatsByName([]string{"r1", "missing"}, 50)
+	if err != nil || health["r1"].RunID != rid || health["r1"].Stats.N != 2 ||
+		health["r1"].Stats.LastStep != 2 || health["r1"].Stats.CodecRel == nil {
+		t.Fatalf("bad batched health query: health=%v err=%v", health, err)
+	}
 }

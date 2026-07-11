@@ -427,7 +427,8 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
           template: str = "", eval_data: str = "", token_cache: str = "",
           max_train_tokens: int = 0, packing: str = "audit",
           base_quantization: str = "none", quant_block_size: int = 64,
-          quant_backend: str = "auto", activation_offload: bool = False) -> dict:
+          quant_backend: str = "auto", activation_offload: bool = False,
+          log_every: int = 10) -> dict:
     from rwkv_lab.generate import WorldVocab, build_from_ckpt
 
     if objective not in ("sft", "dpo", "kto", "orpo", "simpo", "reward", "prm"):
@@ -436,7 +437,7 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
         raise ValueError("base_quantization must be none/nf4 and packing must be off/audit/reset")
     if quant_backend not in ("auto", "portable", "torchao"):
         raise ValueError("quant_backend must be auto, portable, or torchao")
-    if steps <= 0 or batch_size <= 0 or max_length < 2:
+    if steps <= 0 or batch_size <= 0 or max_length < 2 or log_every <= 0:
         raise ValueError("steps/batch_size must be positive and max_length must be at least two")
     device = ("cuda" if torch.cuda.is_available() else "cpu") if device == "auto" else device
     torch.manual_seed(seed)
@@ -608,7 +609,10 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
         log.write(json.dumps({"kind": "eval", "step": 0, "loss": initial_eval,
                               "objective": objective}) + "\n")
     model.train()
-    losses = []
+    loss_sum_t = torch.zeros((), dtype=torch.float32, device=device)
+    last_loss_t = loss_sum_t
+    finite_window_t = torch.ones((), dtype=torch.bool, device=device)
+    scalar_losses: list[float] = []
     last_metrics: dict[str, float] = {}
     train_tokens = 0
     completed_steps = 0
@@ -637,7 +641,7 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
         offload = (torch.autograd.graph.save_on_cpu(pin_memory=True)
                    if activation_offload and device.startswith("cuda") else nullcontext())
         with offload:
-            collect_metrics = (step == 0 or step + 1 == steps or (step + 1) % 10 == 0)
+            collect_metrics = (step == 0 or step + 1 == steps or (step + 1) % log_every == 0)
             if packing == "reset":
                 loss, last_metrics = _packed_train_loss(model, reward_head, batch, objective,
                                                         device, beta, gamma,
@@ -648,18 +652,51 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
                                                  device, beta, gamma,
                                                  reference_cache=reference_cache,
                                                  collect_metrics=collect_metrics)
-        if not torch.isfinite(loss):
-            raise FloatingPointError(f"non-finite {objective} loss at step {step}")
         loss.backward()
+        finite = torch.isfinite(loss.detach())
+        finite_window_t.logical_and_(finite)
+        # Keep a bad update from poisoning adapter/reward-head state while deferring the host
+        # status read to telemetry cadence.  Adapter training has few gradient tensors, so these
+        # device-side passes cost less than a full CUDA-stream synchronization every step.
+        gradients = [parameter.grad for parameter in parameters if parameter.grad is not None]
+        for gradient in gradients:
+            gradient.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
+        gradient_groups: dict[tuple[torch.device, torch.dtype], list[torch.Tensor]] = {}
+        for gradient in gradients:
+            gradient_groups.setdefault((gradient.device, gradient.dtype), []).append(gradient)
+        for (_, dtype), group in gradient_groups.items():
+            torch._foreach_mul_(group, finite.to(dtype=dtype))
         torch.nn.utils.clip_grad_norm_(parameters, 1.0)
         optimizer.step()
         train_tokens += _batch_tokens(batch, objective)
         completed_steps = step + 1
-        losses.append(float(loss.detach()))
-        log.write(json.dumps({"kind": "train", "step": step + 1, "loss": losses[-1],
-                              "objective": objective, **last_metrics}) + "\n")
+        safe_loss = torch.where(finite, loss.detach().float(), torch.zeros_like(loss.detach().float()))
+        loss_sum_t.add_(safe_loss)
+        last_loss_t = safe_loss
+        telemetry_due = (completed_steps == steps or completed_steps % log_every == 0)
+        if telemetry_due:
+            if not bool(finite_window_t):
+                raise FloatingPointError(
+                    f"non-finite {objective} loss in steps "
+                    f"{max(1, completed_steps - log_every + 1)}..{completed_steps}")
+            scalar_loss = float(last_loss_t)
+            scalar_losses.append(scalar_loss)
+            log.write(json.dumps({"kind": "train", "step": completed_steps,
+                                  "loss": scalar_loss, "objective": objective,
+                                  "telemetry_steps": min(log_every, completed_steps),
+                                  **last_metrics}) + "\n")
+            finite_window_t.fill_(True)
         if max_train_tokens and train_tokens >= max_train_tokens:
             break
+    if completed_steps and completed_steps % log_every:
+        if not bool(finite_window_t):
+            raise FloatingPointError(f"non-finite {objective} loss before step {completed_steps}")
+        scalar_loss = float(last_loss_t)
+        scalar_losses.append(scalar_loss)
+        log.write(json.dumps({"kind": "train", "step": completed_steps,
+                              "loss": scalar_loss, "objective": objective,
+                              "telemetry_steps": completed_steps % log_every,
+                              **last_metrics}) + "\n")
     final_eval = evaluate()
     if final_eval is not None:
         log.write(json.dumps({"kind": "eval", "step": completed_steps, "loss": final_eval,
@@ -688,9 +725,11 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
                           "promotion": "unassessed"}
         (root / "reward-model.json").write_text(json.dumps(reward_version, indent=2,
                                                             sort_keys=True) + "\n")
+    final_loss = float(last_loss_t)
+    mean_loss = float(loss_sum_t / max(1, completed_steps))
     result = {"schema": RESULT_SCHEMA, "objective": objective, "steps": completed_steps,
-              "examples": len(encoded), "final_loss": losses[-1],
-              "mean_loss": sum(losses) / len(losses), "metrics": last_metrics,
+              "examples": len(encoded), "final_loss": final_loss,
+              "mean_loss": mean_loss, "metrics": last_metrics,
               "eval_examples": len(encoded_eval), "initial_eval_loss": initial_eval,
               "final_eval_loss": final_eval,
               "initial_eval": initial_eval_details, "eval": eval_details,
@@ -705,7 +744,8 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
                                "dense_bytes": dense_storage, "stored_bytes": base_storage,
                                "compression_ratio": dense_storage / max(1, base_storage),
                                "qualification": quantization_qualification},
-              "activation_offload": activation_offload, "reward_model": reward_version,
+              "activation_offload": activation_offload, "log_every": log_every,
+              "reward_model": reward_version,
               "promotion": {"status": "unassessed", "reason": "training never implies promotion"}}
     (root / "posttrain-result.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     return result
@@ -738,6 +778,8 @@ def main() -> None:
     parser.add_argument("--quant-block-size", type=int, default=64)
     parser.add_argument("--quant-backend", choices=["auto", "portable", "torchao"], default="auto")
     parser.add_argument("--activation-offload", action="store_true")
+    parser.add_argument("--log-every", type=int, default=10,
+                        help="materialize train loss/non-finite status every N updates")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="auto")
     args = parser.parse_args()

@@ -166,7 +166,13 @@ python -m rwkv_lab.rlvr_train \
 `--rollout-engine auto` batches each rollout group and uses [RWKV-7](https://arxiv.org/abs/2503.14456)
 constant-size recurrent state when the checkpoint is causally compatible. Future-Seed, looped,
 online-memory, and Engram checkpoints automatically use batched full-prefix recomputation so their
-semantics are not silently changed. Response scoring is length-bucketed and batched in both paths.
+semantics are not silently changed. Response scoring combines nearby lengths into token-budgeted
+padded forwards, uses fused selected-token cross entropy instead of a full-vocabulary log-softmax
+buffer, and computes group-relative statistics with device-side scatter reductions.
+The immutable scoring layout is built once per rollout set and reused for old-policy,
+frozen-reference, and every current-policy epoch. External verification overlaps that CPU
+preparation. Optional `--rollout-devices cuda:0,cuda:1,...` creates fresh inference replicas from
+the current policy each step, deterministically shards prompt groups, and reports wall-clock tokens/s.
 
 For an equal-budget comparison, [`rlvr_campaign.py`](src/rwkv_lab/rlvr_campaign.py) runs isolated
 GSPO, Dr.GRPO, and DAPO arms over paired seeds, then atomically aggregates their held-out reward,
@@ -261,6 +267,8 @@ fail closed; `audit` remains available to inspect utilization without executing 
 Immutable tokenized examples are tensorized once and transferred as one padded batch. DPO/KTO frozen-base
 log-probabilities are cached once per example rather than recomputed every optimizer step; PRM calibration
 is evaluated at reporting cadence rather than introducing per-bin GPU synchronization into every update.
+`--log-every N` also batches scalar loss/non-finite telemetry; gradients are sanitized on-device each
+step so a bad update cannot poison adapter state before the next fail-fast telemetry boundary.
 
 ```bash
 python -m rwkv_lab.posttrain_train \
@@ -323,6 +331,11 @@ availability, output/state/gradient errors, median timings, and adoption decisio
 
 ```bash
 python -m rwkv_lab.production_kernels --device cuda --output runs/kernel-qualification.json
+python -m rwkv_lab.production_kernels --device cuda \
+  --baseline runs/kernel-qualification.baseline.json \
+  --max-throughput-regression 0.05 --max-memory-regression 0.10 \
+  --max-kernel-regression 0.10 \
+  --output runs/kernel-qualification.json
 python -m rwkv_lab.production_kernels --device cuda --checkpoint runs/lm/ckpt.pt \
   --prompt-ids 1,123,456 --max-new 64 --output runs/serving-qualification.json
 ```
@@ -340,6 +353,11 @@ python -m rwkv_lab.production_kernels --device cuda --checkpoint runs/lm/ckpt.pt
   inference carries the memory matrix, momentum, and ATLAS key/value window across chunks and must
   match a full-prefix scan. `--online-memory-kernel auto` installs the compiled live-parameter path only
   after parity and throughput pass; the reference module remains the stateful oracle.
+- **Hard ROSA:** the [ROSA-Tuning](https://arxiv.org/abs/2602.02499) online suffix automaton runs
+  entirely on the current CUDA stream, reuses a stream/shape-isolated workspace, and retains the
+  Numba CPU implementation as its exact oracle. Qualification includes throughput and projected
+  long-context workspace fraction; allocation fails before launch when it would consume over half
+  of currently free device memory.
 - **Serving:** `generate --engine auto` selects [RWKV-7](https://arxiv.org/abs/2503.14456)
   constant-state decoding only for compatible checkpoints and reports tokens/s; otherwise it records
   the reason for exact full-prefix fallback. The [EAGLE-3](https://arxiv.org/abs/2503.01840) verifier
@@ -447,7 +465,7 @@ Everything is a **drop-in `linear_attn` / attention module swap** on a HuggingFa
 |---|---|
 | [`rwkv8_deltanet.py`](src/rwkv_lab/rwkv8_deltanet.py) | RWKV-7/8 time-mix + channel-mix modules (port of BlinkDL's `RWKV_Tmix_x070`), using `fla`'s Triton `wkv7` kernel with a Python reference fallback. The swap target. |
 | [`convert_gdn_lossless.py`](src/rwkv_lab/convert_gdn_lossless.py) | The lossless GDN→RWKV-7 kernel remap (proven above). Weight-preserving, zero training. |
-| [`convert_train.py`](src/rwkv_lab/convert_train.py) | Single-layer conversion trainer: block-MSE + logit-KL + SMT/DMT state distillation, stability guards, spectral-optimizer levers. See [`TRAINING_LEVERS.md`](TRAINING_LEVERS.md). |
+| [`convert_train.py`](src/rwkv_lab/convert_train.py) | Single-layer conversion trainer: block-MSE + logit-KL + SMT/DMT state distillation, device-side non-finite gradient guards with cadence-based host telemetry, spectral-optimizer levers. See [`TRAINING_LEVERS.md`](TRAINING_LEVERS.md). |
 | [`smt_dmt.py`](src/rwkv_lab/smt_dmt.py) | Supervised (one-step) + Dynamical (closed-loop rollout) Memory Training + the bilinear state codec. |
 | [`distill_objectives.py`](src/rwkv_lab/distill_objectives.py) | Alignment-invariant / relational distillation losses (CKA, relative-L2). |
 | [`attn_L3_poc.py`](src/rwkv_lab/attn_L3_poc.py) | Full-attention→RWKV proof-of-concept (RADLADS init + freeze-most), self-contained. |
@@ -483,7 +501,7 @@ Everything is a **drop-in `linear_attn` / attention module swap** on a HuggingFa
 |---|---|
 | [`engram_lmb.py`](src/rwkv_lab/engram_lmb.py), [`engram_lmb_build.py`](src/rwkv_lab/engram_lmb_build.py) | Lexical Memory Bank — a suffix-automaton-recalled embedding memory (offline builder + runtime module). |
 | [`engram_integration.py`](src/rwkv_lab/engram_integration.py), [`build_engram_patch.py`](src/rwkv_lab/build_engram_patch.py), [`gpu_engram_prefill.py`](src/rwkv_lab/gpu_engram_prefill.py) | Wiring, patch builder, GPU prefill of the memory table. |
-| [`rosa.py`](src/rwkv_lab/rosa.py), [`rosa_sam.py`](src/rwkv_lab/rosa_sam.py), [`rosa_soft_layer.py`](src/rwkv_lab/rosa_soft_layer.py) | ROSA suffix-matching retrieval (v1 drop-in, online suffix-automaton kernel, soft-retrieval layer). |
+| [`rosa.py`](src/rwkv_lab/rosa.py), [`rosa_sam.py`](src/rwkv_lab/rosa_sam.py), [`rosa_soft_layer.py`](src/rwkv_lab/rosa_soft_layer.py) | ROSA suffix-matching retrieval (v1 drop-in, device-native online suffix-automaton kernel with CPU oracle, soft-retrieval layer). |
 | [`verify_engram.py`](src/rwkv_lab/verify_engram.py), [`load_mla_engram.py`](src/rwkv_lab/load_mla_engram.py) | Verification + combined MLA+Engram loader. |
 
 ### MLA (Multi-head Latent Attention)
@@ -584,6 +602,7 @@ Every technique is an **off-by-default flag** on `python -m rwkv_lab.convert_tra
 | `--sm-tile-size T` | Hierarchical / tiled Newton–Schulz | [2606.27216](https://arxiv.org/abs/2606.27216) |
 | `--sm-da-muon` | Distance-Aware adaptive radius | [2605.18999](https://arxiv.org/abs/2605.18999) |
 | `--sm-aro` | ARO-Sinkhorn (replaces orthogonalization) | [2602.09006](https://arxiv.org/abs/2602.09006) |
+| `--sm-aro-compile 1` | parity-tested compiled ARO tensor subgraph; foreach Adam fallback stays exact-resumable | [2602.09006](https://arxiv.org/abs/2602.09006) |
 | `--sm-ddc-strength` | Dead-Direction Conditioner | [2606.29176](https://arxiv.org/abs/2606.29176) |
 
 **Distillation & grokking**

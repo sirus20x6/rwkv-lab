@@ -1,6 +1,10 @@
 package db
 
-import "database/sql"
+import (
+	"database/sql"
+	"fmt"
+	"strings"
+)
 
 // Alert is one health/divergence finding.
 type Alert struct {
@@ -67,6 +71,102 @@ type TrainStats struct {
 	CodecRel      *float64
 	RosaInjRMS    *float64 // latest ROSA injection RMS (nil if the run has no ROSA)
 	EngramInjRMS  *float64 // latest Engram injection RMS (nil if the run has no Engram)
+}
+
+type RunTrainStats struct {
+	RunID int64
+	Stats TrainStats
+}
+
+// RecentTrainStatsByName fetches every live run's bounded train window in one query.
+func (d *DB) RecentTrainStatsByName(names []string, n int) (map[string]RunTrainStats, error) {
+	out := make(map[string]RunTrainStats, len(names))
+	if len(names) == 0 {
+		return out, nil
+	}
+	marks := strings.TrimSuffix(strings.Repeat("?,", len(names)), ",")
+	args := make([]any, 0, len(names)+1)
+	for _, name := range names {
+		args = append(args, name)
+	}
+	args = append(args, n)
+	// Keep the SQL straightforward rather than depending on generated column aliases.
+	query := fmt.Sprintf(`WITH ranked AS (
+		SELECT r.id, r.name, e.step, e.gnorm, e.skipped, e.tok_per_sec, e.loss,
+		       json_extract(e.extra_json,'$.codec_rel') AS codec,
+		       json_extract(e.extra_json,'$.rosa_inj_rms') AS rosa,
+		       json_extract(e.extra_json,'$.engram_inj_rms') AS engram,
+		       ROW_NUMBER() OVER (PARTITION BY r.id ORDER BY e.step DESC) AS rn
+		FROM runs r JOIN train_events e ON e.run_id=r.id WHERE r.name IN (%s))
+		SELECT id,name,step,gnorm,skipped,tok_per_sec,loss,codec,rosa,engram
+		FROM ranked WHERE rn<=? ORDER BY name,step DESC`, marks)
+	rows, err := d.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type accumulator struct {
+		id    int64
+		ts    TrainStats
+		skips int
+		tps   []float64
+	}
+	acc := map[string]*accumulator{}
+	for rows.Next() {
+		var id, step int64
+		var name string
+		var gnorm, tokPerSec, loss, codec, rosa, engram sql.NullFloat64
+		var skipped sql.NullInt64
+		if err := rows.Scan(&id, &name, &step, &gnorm, &skipped, &tokPerSec, &loss,
+			&codec, &rosa, &engram); err != nil {
+			return nil, err
+		}
+		a := acc[name]
+		if a == nil {
+			a = &accumulator{id: id}
+			acc[name] = a
+			a.ts.LastStep, a.ts.LastTokPerSec, a.ts.LastLoss = step, nzf(tokPerSec), nzf(loss)
+			if codec.Valid {
+				v := codec.Float64
+				a.ts.CodecRel = &v
+			}
+			if rosa.Valid {
+				v := rosa.Float64
+				a.ts.RosaInjRMS = &v
+			}
+			if engram.Valid {
+				v := engram.Float64
+				a.ts.EngramInjRMS = &v
+			}
+		}
+		if loss.Valid {
+			a.ts.OldestLoss = loss.Float64
+		}
+		if gnorm.Valid && gnorm.Float64 > a.ts.MaxGnorm {
+			a.ts.MaxGnorm = gnorm.Float64
+		}
+		if skipped.Valid && skipped.Int64 != 0 {
+			a.skips++
+		}
+		if tokPerSec.Valid && tokPerSec.Float64 > 0 {
+			a.tps = append(a.tps, tokPerSec.Float64)
+		}
+		a.ts.N++
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for name, a := range acc {
+		if a.ts.N > 0 {
+			a.ts.SkipFrac = float64(a.skips) / float64(a.ts.N)
+		}
+		if len(a.tps) > 0 {
+			sortFloats(a.tps)
+			a.ts.MedTokPerSec = a.tps[len(a.tps)/2]
+		}
+		out[name] = RunTrainStats{RunID: a.id, Stats: a.ts}
+	}
+	return out, nil
 }
 
 // RecentTrainStats aggregates the last n train rows for a run.

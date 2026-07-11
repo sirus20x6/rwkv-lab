@@ -208,6 +208,8 @@ def build_command(args, arm: Arm, run_dir: Path) -> list[str]:
         ]
     if args.reference_ckpt:
         command += ["--reference-ckpt", args.reference_ckpt]
+    if getattr(args, "rollout_devices", ""):
+        command += ["--rollout-devices", args.rollout_devices]
     if args.heldout_tasks:
         command += ["--heldout-tasks", args.heldout_tasks]
     command.append(
@@ -361,6 +363,8 @@ def main() -> None:
     ap.add_argument(
         "--rollout-engine", choices=["auto", "recurrent", "batched"], default="auto"
     )
+    ap.add_argument("--rollout-devices", default="",
+                    help="optional comma-separated CUDA rollout workers")
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--eval-temperature", type=float, default=0.7)
     ap.add_argument("--top-p", type=float, default=1.0)

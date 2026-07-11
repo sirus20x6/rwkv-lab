@@ -195,13 +195,16 @@ def _copy_rollout_acc(model, task, B, device, seed):
         torch.manual_seed(seed)
         target = torch.randint(2, 2 + task.ns, (B, task.L), device=device)
     sep = torch.full((B,1), 1, dtype=torch.long, device=device)
-    prefix = torch.cat((target,sep),dim=1); generated=[]
+    prefix_len = task.L + 1
+    tokens = torch.empty(B, prefix_len + task.L, dtype=torch.long, device=device)
+    tokens[:, :task.L] = target
+    tokens[:, task.L:prefix_len] = sep
     model.eval()
-    for _ in range(task.L):
-        nxt = model(prefix).float()[:,-1].argmax(-1,keepdim=True)
-        generated.append(nxt); prefix=torch.cat((prefix,nxt),dim=1)
+    for offset in range(task.L):
+        end = prefix_len + offset
+        tokens[:, end] = model(tokens[:, :end]).float()[:, -1].argmax(-1)
     model.train()
-    return float((torch.cat(generated,dim=1)==target).float().mean())
+    return float((tokens[:, prefix_len:] == target).float().mean())
 
 
 def preflight(task, d_model, n_layers, head_size, lever, device, batch, steps=20):
