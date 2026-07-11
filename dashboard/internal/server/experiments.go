@@ -480,7 +480,9 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 	mvRow("sm_second_moment", "Aurora", "Adam-style second moment on the orthogonalized update")
 	mvRow("sm_rsav", "RSAV", "gradient-energy variance gate (two-pass, ξ-clamped scalar)")
 	mvRow("sm_da_muon", "DA-Muon", "distance-aware adaptive step from the update radius")
+	// ARO-Sinkhorn and its exposed compiled tensor path: https://arxiv.org/abs/2602.09006
 	mvRow("sm_aro", "ARO", "approximate row orthogonalization (Sinkhorn iterations)")
+	mvRow("sm_aro_compile", "ARO compile", "compile the stable ARO tensor subgraph after parity checks")
 	msf := func(label, sig, hint, def string) {
 		fmt.Fprintf(&b, `<tr%s><td class="f-l">%s</td><td><input type="text" data-bind-%s value="%s"></td>`+
 			`<td class="f-d">%s</td></tr>`, moff, label, sig, def, esc(hint))
@@ -489,6 +491,14 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 	msf("Muon^p", "sm_spectral_power", "spectral power p (0 = plain Muon)", "0.0")
 	msf("DDC", "sm_ddc_strength", "dual-descent correction strength (0 = off)", "0.0")
 	msf("NS steps", "sm_ns_steps", "Newton–Schulz iterations", "5")
+	b.WriteString(`<tr><td colspan="3"><details class="advanced-fields"><summary>advanced LM systems</summary><table class="field-tbl">`)
+	b.WriteString(`<tr><td class="f-l">distributed</td><td><select data-bind-distributed><option value="none">single process</option><option value="fsdp2">FSDP2</option></select></td><td class="f-d">FSDP2 launches through torchrun</td></tr>`)
+	numField("world size", "worldsize", "local FSDP2 worker count", 2)
+	b.WriteString(`<tr><td class="f-l">activation checkpointing</td><td><input type="checkbox" data-bind-actckpt></td><td class="f-d">non-reentrant block checkpointing</td></tr>`)
+	b.WriteString(`<tr><td class="f-l">CPU offload</td><td><input type="checkbox" data-bind-cpuoffload></td><td class="f-d">FSDP2 parameter/gradient offload</td></tr>`)
+	b.WriteString(`<tr><td class="f-l">LR schedule</td><td><select data-bind-lrschedule><option value="cosine">cosine</option><option value="constant">constant</option></select></td><td class="f-d">optimizer schedule</td></tr>`)
+	b.WriteString(`<tr><td class="f-l">decay steps</td><td><input type="number" min="0" data-bind-decaysteps value="0"></td><td class="f-d">cosine horizon; 0 uses total steps</td></tr>`)
+	b.WriteString(`</table></details></td></tr>`)
 	numField("seeds", "seeds", "runs averaged → error bars (1 for big-model research; ↑ for cheap synthetic A/Bs)", 1)
 	b.WriteString(`<tr><td class="f-l">successive halving</td><td><input type="checkbox" checked data-bind-halving></td>` +
 		`<td class="f-d">promote arms through 2% → 10% → 30% → 100% confidence-adjusted budget rungs</td></tr>`)
@@ -681,7 +691,8 @@ func (s *Server) handleLaunchExperiment(w http.ResponseWriter, r *http.Request) 
 			"--sm-ddc-strength", str("sm_ddc_strength", "0.0"), "--sm-ns-steps", str("sm_ns_steps", "5"))
 		for _, t := range []struct{ Sig, Flag string }{
 			{"sm_mona", "--sm-mona"}, {"sm_second_moment", "--sm-second-moment"},
-			{"sm_rsav", "--sm-rsav"}, {"sm_da_muon", "--sm-da-muon"}, {"sm_aro", "--sm-aro"}} {
+			{"sm_rsav", "--sm-rsav"}, {"sm_da_muon", "--sm-da-muon"}, {"sm_aro", "--sm-aro"},
+			{"sm_aro_compile", "--sm-aro-compile"}} {
 			if on, _ := sig[t.Sig].(bool); on {
 				optArgs = append(optArgs, t.Flag, "1")
 			}
@@ -699,6 +710,41 @@ func (s *Server) handleLaunchExperiment(w http.ResponseWriter, r *http.Request) 
 	}
 	// LM path: an LM corpus task, OR a continuation (g1g / resume) which is inherently an LM.
 	if isLMTask(task) || init == "g1g" || init == "resume" {
+		distributed := str("distributed", "none")
+		if distributed != "none" && distributed != "fsdp2" {
+			toastErr(sse, "launch: invalid distributed backend")
+			return
+		}
+		worldSize, parseErr := boundedInt(str("worldsize", "2"), 2, 1, 128)
+		if parseErr != nil {
+			toastErr(sse, "launch: invalid world size")
+			return
+		}
+		actCkpt, _ := sig["actckpt"].(bool)
+		cpuOffload, _ := sig["cpuoffload"].(bool)
+		compileOn, _ := sig["docompile"].(bool)
+		if distributed == "fsdp2" && worldSize == "1" {
+			toastErr(sse, "launch: FSDP2 needs world size > 1")
+			return
+		}
+		if distributed == "fsdp2" && compileOn {
+			toastErr(sse, "launch: compile + FSDP2 is not parity-qualified")
+			return
+		}
+		if cpuOffload && distributed != "fsdp2" {
+			toastErr(sse, "launch: CPU offload requires FSDP2")
+			return
+		}
+		lrSchedule := str("lrschedule", "cosine")
+		if lrSchedule != "cosine" && lrSchedule != "constant" {
+			toastErr(sse, "launch: invalid LR schedule")
+			return
+		}
+		decaySteps, parseErr := boundedInt(str("decaysteps", "0"), 0, 0, 2_000_000_000)
+		if parseErr != nil {
+			toastErr(sse, "launch: invalid decay horizon")
+			return
+		}
 		args := append([]string{"-m", "rwkv_lab.config", "run-lm", "--levers", strings.Join(configs, ","),
 			"--d-model", str("dmodel", "1024"), "--n-layers", str("nlayers", "18"), "--head-size", str("headsize", "64"),
 			"--batch", str("batch", "16"), "--seq-len", str("ctxlen", "1024"),
@@ -709,6 +755,14 @@ func (s *Server) handleLaunchExperiment(w http.ResponseWriter, r *http.Request) 
 			args = append(args, "--corpus", "blend-mix")
 		}
 		args = append(args, optArgs...)
+		args = append(args, "--distributed", distributed, "--world-size", worldSize,
+			"--lr-schedule", lrSchedule, "--decay-steps", decaySteps)
+		if actCkpt {
+			args = append(args, "--activation-checkpointing")
+		}
+		if cpuOffload {
+			args = append(args, "--cpu-offload")
+		}
 		if ga := str("gradaccum", "1"); ga != "" && ga != "1" { // effective batch = batch × N
 			args = append(args, "--grad-accum", ga)
 		}

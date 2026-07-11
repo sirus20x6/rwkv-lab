@@ -173,7 +173,19 @@ func (s *Server) handleRLVR(w http.ResponseWriter, r *http.Request) {
 		"hard candidate seconds cap; 0 = unlimited")
 	row("device", `<select data-bind-rlvrdevice><option value="cuda">cuda</option><option value="cpu">cpu</option></select>`,
 		"CUDA is required for practical campaigns")
-	b.WriteString(`</table><button class="btn" data-on:click="@post('/api/rlvr/launch')">▶ run RLVR campaign</button></div>`)
+	b.WriteString(`</table><details class="advanced-fields"><summary>advanced optimization &amp; sampling</summary><table class="field-tbl">`)
+	row("epochs", `<input type="number" min="1" max="32" data-bind-rlvrepochs value="1">`, "policy passes over each rollout set")
+	row("temperature / eval", `<input data-bind-rlvrtemp value="1.0"><input data-bind-rlvrevaltemp value="0.7">`, "on-policy sampling · held-out sampling")
+	row("top-p / top-k", `<input data-bind-rlvrtopp value="1.0"><input type="number" min="0" data-bind-rlvrtopk value="0">`, "sampling truncation; 1/0 is strictly on-policy")
+	row("weight decay / warmup", `<input data-bind-rlvrwd value="0"><input type="number" min="0" data-bind-rlvrwarmup value="2">`, "optimizer regularization · warmup updates")
+	row("grad clip", `<input data-bind-rlvrgradclip value="1.0">`, "global policy gradient norm")
+	row("reference checkpoint", `<input data-bind-rlvrrefckpt value="" placeholder="optional fixed reference checkpoint">`, "used when reference = initial")
+	row("eval group / bootstrap", `<input type="number" min="1" data-bind-rlvrevalgroup value="4"><input type="number" min="100" data-bind-rlvrbootstrap value="10000">`, "held-out samples per prompt · paired bootstrap draws")
+	row("SFT batch / LR", `<input type="number" min="1" data-bind-rlvrsftbatch value="2"><input data-bind-rlvrsftlr value="2e-5">`, "trusted-answer cold-start batch and learning rate")
+	row("preflight reward range", `<input data-bind-rlvrpreflightmin value="0.01"><input data-bind-rlvrpreflightmax value="0.99">`, "reject constant or saturated verifier rewards")
+	row("active groups", `<input type="number" min="1" data-bind-rlvractivegroups value="1">`, "minimum informative preflight groups")
+	row("save every / log samples", `<input type="number" min="0" data-bind-rlvrsaveevery value="5"><input type="number" min="0" data-bind-rlvrlogsamples value="2">`, "checkpoint cadence · bounded sample evidence")
+	b.WriteString(`</table></details><button class="btn" data-on:click="@post('/api/rlvr/launch')">▶ run RLVR campaign</button></div>`)
 	b.WriteString(`<div class="rlvr-results"><div class="exp-h">campaign evidence ` +
 		`<button class="btn sm" data-on:click="@get('/api/rlvr')">refresh</button></div>`)
 	rows := s.readRLVRCampaigns()
@@ -383,6 +395,77 @@ func (s *Server) handleLaunchRLVR(w http.ResponseWriter, r *http.Request) {
 		toastErr(sse, "RLVR eval prompts: "+err.Error())
 		return
 	}
+	epochs, err := boundedInt(str("rlvrepochs", "1"), 1, 1, 32)
+	if err != nil {
+		toastErr(sse, "RLVR epochs invalid")
+		return
+	}
+	topK, err := boundedInt(str("rlvrtopk", "0"), 0, 0, 100000)
+	if err != nil {
+		toastErr(sse, "RLVR top-k invalid")
+		return
+	}
+	warmup, err := boundedInt(str("rlvrwarmup", "2"), 2, 0, 100000)
+	if err != nil {
+		toastErr(sse, "RLVR warmup invalid")
+		return
+	}
+	evalGroup, err := boundedInt(str("rlvrevalgroup", "4"), 4, 1, 64)
+	if err != nil {
+		toastErr(sse, "RLVR eval group invalid")
+		return
+	}
+	bootstrap, err := boundedInt(str("rlvrbootstrap", "10000"), 10000, 100, 1_000_000)
+	if err != nil {
+		toastErr(sse, "RLVR bootstrap count invalid")
+		return
+	}
+	sftBatch, err := boundedInt(str("rlvrsftbatch", "2"), 2, 1, 1024)
+	if err != nil {
+		toastErr(sse, "RLVR SFT batch invalid")
+		return
+	}
+	activeGroups, err := boundedInt(str("rlvractivegroups", "1"), 1, 1, 512)
+	if err != nil {
+		toastErr(sse, "RLVR active groups invalid")
+		return
+	}
+	saveEvery, err := boundedInt(str("rlvrsaveevery", "5"), 5, 0, 100000)
+	if err != nil {
+		toastErr(sse, "RLVR save cadence invalid")
+		return
+	}
+	logSamples, err := boundedInt(str("rlvrlogsamples", "2"), 2, 0, 1000)
+	if err != nil {
+		toastErr(sse, "RLVR sample logging invalid")
+		return
+	}
+	advancedFloats := map[string]struct {
+		value    string
+		min, max float64
+	}{
+		"temperature":       {str("rlvrtemp", "1.0"), 0, 100},
+		"eval temperature":  {str("rlvrevaltemp", "0.7"), 0, 100},
+		"top-p":             {str("rlvrtopp", "1.0"), 1e-12, 1},
+		"weight decay":      {str("rlvrwd", "0"), 0, 100},
+		"gradient clip":     {str("rlvrgradclip", "1.0"), 0, 1e9},
+		"SFT learning rate": {str("rlvrsftlr", "2e-5"), 0, 1},
+		"preflight minimum": {str("rlvrpreflightmin", "0.01"), 0, 1},
+		"preflight maximum": {str("rlvrpreflightmax", "0.99"), 0, 1},
+	}
+	for name, spec := range advancedFloats {
+		value, parseErr := strconv.ParseFloat(strings.TrimSpace(spec.value), 64)
+		if parseErr != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < spec.min || value > spec.max {
+			toastErr(sse, "RLVR "+name+" is outside its allowed range")
+			return
+		}
+	}
+	preflightMin, _ := strconv.ParseFloat(strings.TrimSpace(str("rlvrpreflightmin", "0.01")), 64)
+	preflightMax, _ := strconv.ParseFloat(strings.TrimSpace(str("rlvrpreflightmax", "0.99")), 64)
+	if preflightMin >= preflightMax {
+		toastErr(sse, "RLVR preflight minimum must be below maximum")
+		return
+	}
 	for name, value := range map[string]string{"learning rate": str("rlvrlr", "1e-6"),
 		"KL coefficient": str("rlvrkl", "0.01"), "promotion delta": str("rlvrmindelta", "0.01"),
 		"family regression": str("rlvrfamilyreg", "0"), "time budget": str("rlvrtimebudget", "0")} {
@@ -415,6 +498,14 @@ func (s *Server) handleLaunchRLVR(w http.ResponseWriter, r *http.Request) {
 		toastErr(sse, "RLVR reference must be rollout, initial, or none")
 		return
 	}
+	referenceCheckpoint := ""
+	if strings.TrimSpace(str("rlvrrefckpt", "")) != "" {
+		referenceCheckpoint, err = s.pathUnderRepo(str("rlvrrefckpt", ""), true)
+		if err != nil {
+			toastErr(sse, "RLVR reference checkpoint invalid")
+			return
+		}
+	}
 	device := str("rlvrdevice", "cuda")
 	if device != "cuda" && device != "cpu" {
 		toastErr(sse, "RLVR device must be cuda or cpu")
@@ -434,16 +525,21 @@ func (s *Server) handleLaunchRLVR(w http.ResponseWriter, r *http.Request) {
 	args := []string{"-m", "rwkv_lab.rlvr_campaign", "--ckpt", ckpt, "--out", out,
 		"--algorithms", str("rlvralgorithms", "gspo,dr_grpo,dapo"),
 		"--seeds", str("rlvrseeds", "0,1,2"), "--steps", steps,
-		"--prompts-per-step", prompts, "--group-size", group, "--max-new", maxNew,
+		"--prompts-per-step", prompts, "--group-size", group, "--epochs", epochs, "--max-new", maxNew,
 		"--rollout-engine", engine, "--curriculum-stages", curriculum,
-		"--sft-steps", sftSteps, "--preflight-prompts", preflightPrompts,
-		"--lr", str("rlvrlr", "1e-6"), "--kl-coef", str("rlvrkl", "0.01"),
-		"--reference", reference, "--eval-every", evalEvery, "--eval-prompts", evalPrompts,
+		"--temperature", str("rlvrtemp", "1.0"), "--eval-temperature", str("rlvrevaltemp", "0.7"),
+		"--top-p", str("rlvrtopp", "1.0"), "--top-k", topK,
+		"--sft-steps", sftSteps, "--sft-batch-size", sftBatch, "--sft-lr", str("rlvrsftlr", "2e-5"),
+		"--preflight-prompts", preflightPrompts, "--min-preflight-reward", str("rlvrpreflightmin", "0.01"),
+		"--max-preflight-reward", str("rlvrpreflightmax", "0.99"), "--min-preflight-active-groups", activeGroups,
+		"--lr", str("rlvrlr", "1e-6"), "--weight-decay", str("rlvrwd", "0"), "--warmup", warmup,
+		"--grad-clip", str("rlvrgradclip", "1.0"), "--kl-coef", str("rlvrkl", "0.01"),
+		"--reference", reference, "--eval-every", evalEvery, "--eval-prompts", evalPrompts, "--eval-group-size", evalGroup,
 		"--min-heldout-delta", str("rlvrmindelta", "0.01"),
-		"--confidence", str("rlvrconfidence", "0.95"), "--require-confidence",
+		"--confidence", str("rlvrconfidence", "0.95"), "--bootstrap-samples", bootstrap, "--require-confidence",
 		"--max-family-regression", str("rlvrfamilyreg", "0"),
 		"--max-rollout-tokens", tokenBudget, "--max-train-seconds", str("rlvrtimebudget", "0"),
-		"--device", device}
+		"--save-every", saveEvery, "--log-samples", logSamples, "--device", device}
 	if rolloutDevices != "" {
 		args = append(args, "--rollout-devices", rolloutDevices)
 	}
@@ -452,6 +548,9 @@ func (s *Server) handleLaunchRLVR(w http.ResponseWriter, r *http.Request) {
 	}
 	if heldout != "" {
 		args = append(args, "--heldout-tasks", heldout)
+	}
+	if referenceCheckpoint != "" {
+		args = append(args, "--reference-ckpt", referenceCheckpoint)
 	}
 	pid, err := s.spawnPy(args, fmt.Sprintf("rlvr_campaign_%d.log", time.Now().Unix()))
 	if err != nil {

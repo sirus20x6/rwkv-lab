@@ -186,7 +186,12 @@ def _run_synthetic(task_spec, cfg):
 
 
 def _lm_command(data_args, off_path, out_dir, model, train, lever, seed, save_path):
-    cmd = [sys.executable, "-m", "rwkv_lab.rwkv_pretrain", *data_args, "--out", out_dir,
+    distributed = str(train.get("distributed", "none"))
+    prefix = ([sys.executable, "-m", "torch.distributed.run", "--standalone",
+               "--nproc-per-node", str(train.get("world_size", 2)),
+               "-m", "rwkv_lab.rwkv_pretrain"] if distributed == "fsdp2"
+              else [sys.executable, "-m", "rwkv_lab.rwkv_pretrain"])
+    cmd = [*prefix, *data_args, "--out", out_dir,
            "--d-model", str(model.get("d_model", 512)), "--n-layers", str(model.get("n_layers", 8)),
            "--head-size", str(model.get("head_size", 64)), "--batch", str(train.get("batch", 16)),
            "--seq-len", str(train.get("seq_len", 1024)), "--lr", str(train.get("lr", 6e-4)),
@@ -201,6 +206,11 @@ def _lm_command(data_args, off_path, out_dir, model, train, lever, seed, save_pa
     if train.get("warmup"): cmd += ["--warmup", str(train["warmup"])]
     if train.get("fp8"): cmd += ["--fp8"]
     if train.get("compile"): cmd += ["--compile"]
+    if distributed != "none": cmd += ["--distributed", distributed]
+    if train.get("activation_checkpointing"): cmd += ["--activation-checkpointing"]
+    if train.get("cpu_offload"): cmd += ["--cpu-offload"]
+    if train.get("lr_schedule"): cmd += ["--lr-schedule", str(train["lr_schedule"])]
+    if int(train.get("decay_steps", 0) or 0) > 0: cmd += ["--decay-steps", str(train["decay_steps"])]
     if int(train.get("grad_accum", 1) or 1) > 1: cmd += ["--grad-accum", str(train["grad_accum"])]
     if float(train.get("ema", 0.0) or 0.0) > 0: cmd += ["--ema", str(train["ema"])]
     muon = train.get("muon")
@@ -411,6 +421,12 @@ def main():
     rl.add_argument("--warmup", type=int, default=0)
     rl.add_argument("--fp8", action="store_true")
     rl.add_argument("--compile", action="store_true")
+    rl.add_argument("--distributed", default="none", choices=("none", "fsdp2"))
+    rl.add_argument("--world-size", type=int, default=2)
+    rl.add_argument("--activation-checkpointing", action="store_true")
+    rl.add_argument("--cpu-offload", action="store_true")
+    rl.add_argument("--lr-schedule", default="cosine", choices=("constant", "cosine"))
+    rl.add_argument("--decay-steps", type=int, default=0)
     rl.add_argument("--grad-accum", type=int, default=1)
     rl.add_argument("--ema", type=float, default=0.0)
     rl.add_argument("--corpus", default="local", choices=sorted(CORPORA))
@@ -424,6 +440,10 @@ def main():
                 "batch": args.batch, "lr": args.lr, "init_g1g": args.init_g1g, "resume": args.resume,
                 "optimizer": args.optimizer, "weight_decay": args.weight_decay, "warmup": args.warmup,
                 "fp8": args.fp8, "compile": args.compile, "grad_accum": args.grad_accum,
+                "distributed": args.distributed, "world_size": args.world_size,
+                "activation_checkpointing": args.activation_checkpointing,
+                "cpu_offload": args.cpu_offload, "lr_schedule": args.lr_schedule,
+                "decay_steps": args.decay_steps,
                 "ema": args.ema, "muon": muon_opts_from(args)}, corpus=args.corpus,
                seeds=args.seeds, db=args.db, campaign_name=args.campaign_name)
     else:

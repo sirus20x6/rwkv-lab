@@ -26,7 +26,10 @@ The experiment builder exposes trainer-native P0/P1 comparison arms for
 [TetraJet-v2](https://arxiv.org/abs/2510.27527) randomized Hadamard transforms. NVFP4 arms include
 the fake-quant correctness oracle and a fail-closed native Blackwell Transformer Engine arm that must
 pass parity and throughput qualification. These arms are scratch-LM-only; the builder rejects
-u-μP+Muon and NVFP4+FP8 combinations.
+u-μP+Muon and NVFP4+FP8 combinations. Its advanced systems controls also expose opt-in FSDP2
+multi-process launch, activation checkpointing, CPU offload, learning-rate schedules, and the
+parity-tested compiled [ARO-Sinkhorn](https://arxiv.org/abs/2602.09006) tensor path while preserving
+the exact-resumable optimizer fallback.
 
 The dedicated **verifiable-reward training** panel launches equal-budget, paired-seed campaigns and
 reads their versioned `campaign.json` evidence directly from `runs/`. It compares the sequence-level
@@ -41,6 +44,11 @@ RL/SFT updates, preflight passes, budget usage, and promotion eligibility. The s
 `loop.json` lineage from [Absolute Zero](https://arxiv.org/abs/2505.03335)-inspired bounded recursive
 iterations. It launches model-side training only; proposal commands remain CLI-only and generated-code
 verification remains outside this repository in Adamaton's sandboxed verifier process.
+
+Advanced RLVR controls expose rollout/evaluation sampling, optimizer and warmup settings, reference
+checkpoints, bootstrap group counts, SFT phase sizing, preflight thresholds, active-group safeguards,
+and checkpoint/log cadence. Every value is validated by the server and translated into the
+allowlisted campaign command; arbitrary verifier commands deliberately remain CLI-only.
 
 The **post-training** panel validates the versioned SFT/preference/feedback/PRM/RLVR
 JSONL contract (including structured tool calls), shows rendered variants and their trainable spans,
@@ -64,6 +72,14 @@ are also kept next to the Python implementations. Process-reward training and ca
 [Let's Verify Step by Step](https://arxiv.org/abs/2305.20050); recursive adapter lineage follows the
 bounded proposer/solver direction of [Absolute Zero](https://arxiv.org/abs/2505.03335) while keeping
 promotion independent.
+
+The **production qualification** panel launches the allowlisted kernel/serving qualification runner
+and reads its versioned receipts from `runs/`. It exposes device, checkpoint/prompt, repetition and
+generation budgets, plus baseline speed and memory regression limits. The latest receipt reports the
+environment, available and adopted backends, parity, speedup, memory, and the baseline regression
+gate. This is the UI counterpart to the fail-closed parity-before-speed policy used for native
+[NVFP4](https://arxiv.org/abs/2509.25149), TorchAO NF4, and compiled serving paths; it does not install
+a backend, promote a checkpoint, or publish an artifact.
 
 ## Why v2
 

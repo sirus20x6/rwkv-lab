@@ -116,7 +116,8 @@ def build_command(args, objective: str, seed: int, run_dir: Path, *, device: str
                "--device", device or args.device, "--max-train-tokens", str(args.token_budget),
                "--packing", args.packing, "--base-quantization", args.base_quantization,
                "--quant-block-size", str(args.quant_block_size),
-               "--quant-backend", args.quant_backend]
+               "--quant-backend", args.quant_backend,
+               "--log-every", str(getattr(args, "log_every", 10))]
     if args.eval_data:
         command += ["--eval-data", args.eval_data]
     if args.token_cache:
@@ -125,6 +126,8 @@ def build_command(args, objective: str, seed: int, run_dir: Path, *, device: str
         command += ["--targets", args.targets]
     if args.activation_offload:
         command.append("--activation-offload")
+    if getattr(args, "template", ""):
+        command += ["--template", args.template]
     return command
 
 
@@ -395,6 +398,8 @@ def main() -> None:
     parser.add_argument("--quant-backend", choices=["auto", "portable", "torchao"], default="auto")
     parser.add_argument("--packing", choices=["off", "audit", "reset"], default="reset")
     parser.add_argument("--activation-offload", action="store_true")
+    parser.add_argument("--log-every", type=int, default=10)
+    parser.add_argument("--template", default="")
     parser.add_argument("--token-cache", default="")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--devices", default="",

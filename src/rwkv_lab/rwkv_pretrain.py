@@ -443,13 +443,15 @@ def add_muon_args(ap):
     ap.add_argument("--sm-plus-norm", default="none")
     for f in ["mona", "second-moment", "rsav", "da-muon", "aro"]:
         ap.add_argument(f"--sm-{f}", type=int, default=0)
+    ap.add_argument("--sm-aro-compile", type=int, default=0)
 
 
 def muon_opts_from(a):
     return dict(scale=a.sm_scale, spectral_power=a.sm_spectral_power, ddc_strength=a.sm_ddc_strength,
                 ns_steps=a.sm_ns_steps, tile_size=a.sm_tile_size, plus_norm=a.sm_plus_norm,
                 mona=bool(a.sm_mona), second_moment=bool(a.sm_second_moment), rsav=bool(a.sm_rsav),
-                da_muon=bool(a.sm_da_muon), aro=bool(a.sm_aro))
+                da_muon=bool(a.sm_da_muon), aro=bool(a.sm_aro),
+                aro_compile=bool(a.sm_aro_compile))
 
 
 def loop_kwargs(a):

@@ -2,8 +2,10 @@ package server
 
 import (
 	"encoding/json"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -73,5 +75,12 @@ func TestPosttrainingCampaignAndAdapterLineageDiscovery(t *testing.T) {
 	}
 	if len(loops) != 1 || len(loops[0].Iterations) != 1 || !loops[0].Iterations[0].Accepted {
 		t.Fatalf("loops: %#v", loops)
+	}
+	recorder := httptest.NewRecorder()
+	s.handlePosttraining(recorder, httptest.NewRequest("GET", "/api/posttraining", nil))
+	body := recorder.Body.String()
+	if !strings.Contains(body, "ptCampaignRank") || !strings.Contains(body, "ptCampaignOffload") ||
+		!strings.Contains(body, "ptCampaignBootstrap") {
+		t.Fatalf("advanced post-training controls missing: %s", body)
 	}
 }

@@ -666,6 +666,12 @@ details.arch-item[open] .lr-caret { transform: rotate(90deg); color: var(--accen
 .rlvr-status.complete { color: var(--ok); border-color: var(--ok); }
 .rlvr-status.failed { color: var(--err); border-color: var(--err); }
 .rlvr-status.running { color: var(--accent); border-color: var(--accent); }
+.qualification-body { display:flex; flex-wrap:wrap; gap:1.5rem; padding:.5rem; color-scheme:dark; }
+.qual-build { flex:0 1 44rem; }
+.qual-results { flex:1 1 38rem; min-width:320px; }
+.advanced-fields { margin:.55rem 0; border:1px solid var(--border); border-radius:5px; padding:.35rem .5rem; }
+.advanced-fields > summary { cursor:pointer; color:var(--accent); font-family:var(--mono); font-size:var(--fs-xs); }
+.advanced-fields .field-tbl { margin-top:.45rem; width:100%; }
 
 /* disabled field inputs (LM levers / resume when not applicable) read as inactive, not "broken" */
 .field-tbl input:disabled, .lev-tbl input:disabled { opacity: .45; cursor: default; }
