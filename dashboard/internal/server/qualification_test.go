@@ -30,7 +30,7 @@ func TestQualificationReceiptDiscoveryAndPanel(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	s.handleQualification(recorder, httptest.NewRequest("GET", "/api/qualification", nil))
 	body := recorder.Body.String()
-	for _, expected := range []string{"qualDevice", "qualMegakernelMode", "qualBaseline", "baseline passed", "1.50x", "test GPU"} {
+	for _, expected := range []string{"qualDevice", "qualMegakernelMode", "qualMegakernelArtifact", "qualBaseline", "GPU µs/top", "baseline passed", "1.50x", "test GPU"} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("missing %q in panel: %s", expected, body)
 		}

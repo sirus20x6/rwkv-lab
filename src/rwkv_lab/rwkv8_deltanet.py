@@ -101,23 +101,39 @@ class RWKV8ChannelMixDeltaNet(nn.Module):
                     "only; recurrent cache decoding is not implemented."
                 )
 
-        prev = torch.zeros_like(hidden_states)
-        if shift_state is not None:
-            prev[:, :1] = shift_state.to(hidden_states.dtype).reshape(
-                hidden_states.shape[0], 1, hidden_states.shape[-1])
-        if hidden_states.shape[1] > 1:
-            prev[:, 1:] = hidden_states[:, :-1]
-        if reset_mask is not None:
-            if reset_mask.shape != hidden_states.shape[:2] or not torch.all(reset_mask[:, 0]):
-                raise ValueError("reset_mask must be [batch,time] and reset the first token")
-            prev = prev.masked_fill(reset_mask[..., None], 0.0)
+        prepared_mixed = kwargs.pop("_megakernel_channel_mix", None)
+        if prepared_mixed is not None:
+            if prepared_mixed.shape != hidden_states.shape:
+                raise ValueError("prepared ChannelMix input must match hidden states")
+            mixed = prepared_mixed
+        else:
+            prev = torch.zeros_like(hidden_states)
+            if shift_state is not None:
+                prev[:, :1] = shift_state.to(hidden_states.dtype).reshape(
+                    hidden_states.shape[0], 1, hidden_states.shape[-1])
+            if hidden_states.shape[1] > 1:
+                prev[:, 1:] = hidden_states[:, :-1]
+            if reset_mask is not None:
+                if reset_mask.shape != hidden_states.shape[:2] or not torch.all(reset_mask[:, 0]):
+                    raise ValueError("reset_mask must be [batch,time] and reset the first token")
+                prev = prev.masked_fill(reset_mask[..., None], 0.0)
 
-        xk = self.x_k.to(dtype=hidden_states.dtype).view(1, 1, -1)
-        mixed = hidden_states + (prev - hidden_states) * xk
-        k = torch.square(F.relu(self.key(mixed)))
-        if hidden_gate is not None:              # DeepEmbed: per-token multiplicative gate on the
-            k = k * hidden_gate                  # FFN hidden (BlinkDL rwkv_v7a form); None = unchanged
-        out = self.value(k)
+            xk = self.x_k.to(dtype=hidden_states.dtype).view(1, 1, -1)
+            mixed = hidden_states + (prev - hidden_states) * xk
+        use_ffn_candidate = (
+            getattr(self, "_megakernel_ffn_candidate", False)
+            and hidden_gate is None and mixed.shape[1] == 1
+            and not torch.is_grad_enabled()
+        )
+        if use_ffn_candidate:
+            from rwkv_lab.megakernel_linear import ffn_squared_relu_value
+            out = ffn_squared_relu_value(
+                mixed, self.key.weight, self.value.weight, use_candidate=True)
+        else:
+            k = torch.square(F.relu(self.key(mixed)))
+            if hidden_gate is not None:          # DeepEmbed: per-token multiplicative gate on the
+                k = k * hidden_gate              # FFN hidden; None = unchanged
+            out = self.value(k)
         if return_state:
             return out, hidden_states[:, -1:]
         return out
@@ -493,7 +509,10 @@ class RWKV8TimeMixDeltaNet(nn.Module):
                 and r.is_cuda and not torch.is_grad_enabled()):
             from rwkv_lab.megakernel import rwkv7_recurrent_step
             out, final = rwkv7_recurrent_step(
-                r, gk, k, v, a, b, initial_state)
+                r, gk, k, v, a, b, initial_state,
+                inplace=bool(getattr(self, "_megakernel_inplace_state", False)),
+                persistent_sm120=bool(getattr(
+                    self, "_megakernel_persistent_sm120", False)))
             return out, (final if output_final_state else None)
         cu_seqlens = None
         if reset_mask is not None:
@@ -575,6 +594,8 @@ class RWKV8TimeMixDeltaNet(nn.Module):
                     "only; recurrent cache decoding is not implemented."
                 )
 
+        prepared_mix = kwargs.pop("_megakernel_time_mix", None)
+        prepared_shift = kwargs.pop("_megakernel_time_shift", None)
         x = hidden_states
         B, T, C = x.shape
         H = self.num_heads
@@ -584,7 +605,13 @@ class RWKV8TimeMixDeltaNet(nn.Module):
         # "previous token" must come from the prior chunk (shift_state), or the
         # rollout would diverge from a full-sequence forward. shift_state is the
         # last hidden of the previous chunk, shape [B, 1, C] (or [B, C]).
-        if reset_mask is not None:
+        if prepared_mix is not None:
+            if (T != 1 or prepared_mix.shape != (B, 1, 6, C)
+                    or prepared_shift is None or prepared_shift.shape != x.shape):
+                raise ValueError("prepared TimeMix geometry must be [B,1,6,C]")
+            xr, xw, xk, xv, xa, xg = prepared_mix.unbind(dim=2)
+            new_shift_state = prepared_shift
+        elif reset_mask is not None:
             if reset_mask.shape != (B, T) or not torch.all(reset_mask[:, 0]):
                 raise ValueError("reset_mask must be [batch,time] and reset the first token")
             shifted = torch.zeros_like(x)
@@ -598,23 +625,34 @@ class RWKV8TimeMixDeltaNet(nn.Module):
             prev = shift_state.to(dtype=x.dtype).reshape(B, 1, C)
             shifted = torch.cat([prev, x[:, :-1]], dim=1)
             xx = shifted - x
-        new_shift_state = x[:, -1:]
+        if prepared_mix is None:
+            new_shift_state = x[:, -1:]
+            xr = x + xx * self.x_r
+            xw = x + xx * self.x_w
+            xk = x + xx * self.x_k
+            xv = x + xx * self.x_v
+            xa = x + xx * self.x_a
+            xg = x + xx * self.x_g
 
-        xr = x + xx * self.x_r
-        xw = x + xx * self.x_w
-        xk = x + xx * self.x_k
-        xv = x + xx * self.x_v
-        xa = x + xx * self.x_a
-        xg = x + xx * self.x_g
-
-        r = self.receptance(xr)
+        packed_rkv = (getattr(self, "_megakernel_packed_rkv", False)
+                      and T == 1 and not torch.is_grad_enabled()
+                      and hasattr(self, "_megakernel_rkv_weight"))
+        if packed_rkv:
+            from rwkv_lab.megakernel_linear import packed_rkv_projection
+            projected = packed_rkv_projection(
+                torch.stack((xr, xk, xv), dim=2), self._megakernel_rkv_weight,
+                use_candidate=True)
+            r, k, v = projected.unbind(dim=2)
+        else:
+            r = self.receptance(xr)
         w = -F.softplus(-(self.w0 + torch.tanh(xw @ self.w1) @ self.w2)) - 0.5
         if self.decay_cap_delta > 0.0:
             # Floor w so exp(gk) = exp(-exp(w)) <= 1 - decay_cap_delta, keeping
             # the per-step decay strictly contractive (no integrator drift).
             w = w.clamp_min(self._w_floor)
-        k = self.key(xk)
-        v = self.value(xv)
+        if not packed_rkv:
+            k = self.key(xk)
+            v = self.value(xv)
         # RWKV-7 cross-layer value residual: layer 0 defines the shared v_first; every later
         # layer lerps its own v toward that layer-0 value, gated by the v-LoRA. This is the
         # native g070 mechanism; v0/v1/v2 are the residual gate's params.
@@ -675,25 +713,54 @@ class RWKV8TimeMixDeltaNet(nn.Module):
         if self.comba_decouple:                                # Comba: decouple removal strength
             b_h = b_h * torch.sigmoid(self.comba_b).view(1, 1, H, 1)
 
-        out, final_state = self._wkv7(
-            r_h, gk_h, k_h, v_h, a_h, b_h,
-            initial_state=initial_state,
-            output_final_state=return_state,
-            reset_mask=reset_mask,
-        )                                                      # (B, T, H, N)
+        combined_megakernel = (
+            getattr(self, "_megakernel_recurrent", False) and T == 1
+            and getattr(self, "_megakernel_combined_epilogue", False)
+            and initial_state is not None and reset_mask is None
+            and r_h.is_cuda and not torch.is_grad_enabled()
+        )
+        if combined_megakernel:
+            # One compiler-visible kernel now owns the fp32 DPLR update,
+            # GroupNorm, RWKV bonus, and gate without materializing WKV output.
+            from rwkv_lab.megakernel import rwkv7_recurrent_step_epilogue
+            mixed_h, final_state = rwkv7_recurrent_step_epilogue(
+                r_h, gk_h, k_h, v_h, a_h, b_h, initial_state,
+                self.r_k, g.view(B, T, H, N), self.ln_x.weight,
+                self.ln_x.bias, eps=self.ln_x.eps,
+                inplace=bool(getattr(self, "_megakernel_inplace_state", False)),
+            )
+            mixed = mixed_h.view(B, T, C)
+            if getattr(self, "_megakernel_row_one", False):
+                from rwkv_lab.megakernel_linear import row_one_linear
+                y = row_one_linear(mixed, self.output.weight, use_candidate=True)
+            else:
+                y = self.output(mixed)
+        else:
+            out, final_state = self._wkv7(
+                r_h, gk_h, k_h, v_h, a_h, b_h,
+                initial_state=initial_state,
+                output_final_state=return_state,
+                reset_mask=reset_mask,
+            )                                                  # (B, T, H, N)
+            # GroupNorm over channels (groups = H).
+            out = out.reshape(B * T, C)
+            out = self.ln_x(out).view(B, T, C)
 
-        # GroupNorm over channels (groups = H).
-        out = out.reshape(B * T, C)
-        out = self.ln_x(out).view(B, T, C)
+            # r_k bonus residual. Uses k_eff (the k_a-updated key), matching BlinkDL x070 which
+            # reassigns k = k*(1+(a-1)*k_a) before the bonus — NOT the raw key (was a port bug).
+            bonus = (
+                (r.view(B, T, H, N) * k_eff.view(B, T, H, N) * self.r_k.view(1, 1, H, N))
+                .sum(dim=-1, keepdim=True) * v.view(B, T, H, N)
+            ).view(B, T, C)
 
-        # r_k bonus residual. Uses k_eff (the k_a-updated key), matching BlinkDL x070 which
-        # reassigns k = k*(1+(a-1)*k_a) before the bonus — NOT the raw key (was a port bug).
-        bonus = (
-            (r.view(B, T, H, N) * k_eff.view(B, T, H, N) * self.r_k.view(1, 1, H, N))
-            .sum(dim=-1, keepdim=True) * v.view(B, T, H, N)
-        ).view(B, T, C)
-
-        y = self.output((out + bonus) * g)
+            projected_output = (out + bonus) * g
+            if (getattr(self, "_megakernel_row_one", False) and T == 1
+                    and not torch.is_grad_enabled()):
+                from rwkv_lab.megakernel_linear import row_one_linear
+                y = row_one_linear(
+                    projected_output, self.output.weight, use_candidate=True)
+            else:
+                y = self.output(projected_output)
         if return_v_first:                                     # native-stack threading (opt-in)
             if return_state:
                 return y, final_state, new_shift_state, v_first_out

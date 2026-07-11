@@ -4,6 +4,7 @@ Hierarchical/Tiled Muon (tile_size), Distance-Aware Muon (da_muon), ARO-Sinkhorn
 Run: python test_muon_levers.py
 """
 import copy
+import pytest
 import torch
 from rwkv_lab.spectral_muon import SpectralMuon, himuon_orthogonalize, orthogonalize, _sinkhorn_normalize, _cholesky_qr
 
@@ -118,6 +119,7 @@ def test_foreach_adam_fallback_resumes_exactly():
         assert torch.equal(opt.state[p][key], resumed.state[restored][key])
 
 
+@pytest.mark.gpu
 def test_compiled_aro_matches_eager_when_cuda_available():
     if not torch.cuda.is_available():
         return

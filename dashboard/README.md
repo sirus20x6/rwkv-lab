@@ -81,9 +81,19 @@ gate. This is the UI counterpart to the fail-closed parity-before-speed policy u
 [NVFP4](https://arxiv.org/abs/2509.25149), TorchAO NF4, and compiled serving paths; it does not install
 a backend, promote a checkpoint, or publish an artifact. With a compatible checkpoint it also
 compiles and qualifies the native RWKV [Megakernels](https://github.com/HazyResearch/Megakernels/tree/throughput)-
-inspired backend: a fused Triton DPLR transition inside an Inductor-autotuned, CUDA-Graph-replayed
-decode plan. The UI exposes fast compilation or full autotuning and reports exact-token parity,
-warm speedup, CUDA launches before/after, cold compile cost, and whether the plan was adopted.
+inspired backend: an in-place autotuned Triton DPLR transition plus fused TimeMix epilogue inside a
+strict Inductor fullgraph and CUDA-Graph-replayed decode plan. Greedy feedback stays on-device;
+fixed-budget generation is unrolled into one host replay with device-side EOS masks. Portable
+Triton boundary candidates cover TimeMix/ChannelMix normalization and shifts, while exact-shape prefill graphs
+and checkpoint-bound decode/prefill AOT artifacts avoid repeated prompt/cold compilation.
+The captured inference path also folds block 0 normalization into its embedding table following
+[Albatross `faster3b`](https://github.com/BlinkDL/Albatross/tree/main/faster3b_2606); the folded buffer
+is plan-hashed, and Albatross's device-specific layouts remain subject to independent qualification.
+The UI exposes fast compilation or full autotuning and reports exact-token parity, the four-stage
+path-latency ablation, warm speedup, CUDA launches before/after, top-kernel GPU time, cold compile
+cost, and adoption. Every boundary plus generic row-one GEMV, distinct-input packed R/K/V, and exact
+FFN candidate stays on the established path unless its GPU/model-bound parity, determinism, and
+incremental speed receipt passes.
 
 The **research capability inventory** exposes the readiness and entry point of the community-derived
 reference paths: Recursal `balance_state`, rwkv-rlhf/OpenMOSE state adapters,
