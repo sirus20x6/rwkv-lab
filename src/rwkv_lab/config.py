@@ -57,6 +57,11 @@ _LM_FLAG = {"n_loops": "--loop-count", "hyper_lanes": "--loop-hyper", "gate_mode
             "balance_state": "--balance-state"}
 _LM_FLAG.update({"state_offset": "--state-offset",
                  "state_offset_interval": "--state-offset-interval",
+                 "routing_free_moe": "--routing-free-moe",
+                 "routing_free_experts": "--routing-free-experts",
+                 "routing_free_rank": "--routing-free-rank",
+                 "routing_free_threshold": "--routing-free-threshold",
+                 "routing_free_balance": "--routing-free-balance",
                  "byte_aware_vocab": "--byte-aware-vocab",
                  "byte_aware_max_bytes": "--byte-aware-max-bytes",
                  "byte_aware_dim": "--byte-aware-dim"})

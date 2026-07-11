@@ -62,7 +62,12 @@ def build_from_ckpt(ckpt_path: str, device: str = "cuda", use_ema: bool = False,
                    seed_chain=bool(arch.get("seed_chain")),
                    deepembed=bool(arch.get("deepembed")), de_dim=int(arch.get("de_dim") or 0),
                    de_mode=arch.get("de_mode") or "out", de_shift=bool(arch.get("de_shift")),
-                   de_emb_res=bool(arch.get("de_emb_res")))
+                   de_emb_res=bool(arch.get("de_emb_res")),
+                   routing_free_kw=({"n_experts": int(arch.get("routing_free_experts") or 4),
+                                     "rank": int(arch.get("routing_free_rank") or 32),
+                                     "threshold": float(arch.get("routing_free_threshold", 0.2)),
+                                     "balance_interpolation": float(arch.get("routing_free_balance", 0.5))}
+                                    if arch.get("routing_free_moe") else None))
     if arch.get("byte_aware"):
         from rwkv_lab.tokenizer_experiments import install_byte_aware_embedding
         # The checkpoint carries the byte lookup buffers; construct their

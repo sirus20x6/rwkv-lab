@@ -31,7 +31,8 @@ def _unwrap(o):
 
 class Block(nn.Module):
     def __init__(self, d, n_heads, head_size, i, n_layers, loop_kw, att_kw=None, ffn_hidden=None,
-                 de_vocab=0, de_dim=0, de_mode="out", de_shift=False, de_emb_res=False):
+                 de_vocab=0, de_dim=0, de_mode="out", de_shift=False, de_emb_res=False,
+                 routing_free_kw=None):
         super().__init__()
         self.i = i
         if i == 0:
@@ -44,7 +45,13 @@ class Block(nn.Module):
                                     out_correct=False,              # clean native g070
                                     **(att_kw or {}))               # e.g. g1g LoRA dims
         self.att = LoopedRWKV(core, hidden_size=d, **loop_kw) if loop_kw else core
-        self.ffn = RWKV8ChannelMixDeltaNet(d, ffn_hidden, layer_idx=i)
+        if routing_free_kw:
+            # Liu et al. (2026), https://arxiv.org/abs/2604.00801 and official code:
+            # https://github.com/liuyilun2000/RoutingFreeMoE/tree/release
+            from rwkv_lab.routing_free_moe import RoutingFreeMoE
+            self.ffn = RoutingFreeMoE(d, hidden_dim=ffn_hidden, **routing_free_kw)
+        else:
+            self.ffn = RWKV8ChannelMixDeltaNet(d, ffn_hidden, layer_idx=i)
         # DeepEmbed (BlinkDL, RWKV-8): per-layer per-token multiplicative FFN gate — sparse capacity
         # whose lookup is ~free at inference. Two forms, both parametrized additively around 1 so a
         # zero output end = exact identity (and zero-init trains in bf16, where updates to a literal
@@ -164,7 +171,11 @@ class Block(nn.Module):
             f, ffn_shift = self.ffn(xin, hidden_gate=gate,
                                      shift_state=state.get("ffn_shift"), return_state=True)
         else:
-            f, ffn_shift = self.ffn(xin, shift_state=state.get("ffn_shift"), return_state=True)
+            ffn_result = self.ffn(xin, shift_state=state.get("ffn_shift"), return_state=True)
+            if isinstance(ffn_result, tuple):
+                f, ffn_shift = ffn_result
+            else:  # Routing-Free MoE is token-wise and has no shift carry.
+                f, ffn_shift = ffn_result, None
             if self.de_emb is not None and ids is not None:
                 g = self.de_emb(ids)
                 if self.de_proj is not None:
@@ -180,7 +191,7 @@ class Block(nn.Module):
 class RWKV7Small(nn.Module):
     def __init__(self, vocab, d, n_layers, head_size, loop_kw, att_kw=None, ffn_hidden=None,
                  seed_chain=False, deepembed=False, de_dim=0, de_mode="out", de_shift=False,
-                 de_emb_res=False):
+                 de_emb_res=False, routing_free_kw=None):
         super().__init__()
         assert d % head_size == 0
         if seed_chain and loop_kw:
@@ -188,6 +199,8 @@ class RWKV7Small(nn.Module):
                              "levers — run it without loops for a clean A/B")
         if de_mode not in ("out", "hidden"):
             raise ValueError(f"de_mode must be 'out' or 'hidden', got {de_mode!r}")
+        if deepembed and routing_free_kw:
+            raise ValueError("DeepEmbed and Routing-Free MoE are alternative FFN designs")
         self.seed_chain = seed_chain          # Future-Seed: layer L starts from layer L-1's final wkv state
         self.deepembed = deepembed            # DeepEmbed: per-layer per-token FFN gate (needs ids)
         self.de_emb_res = de_emb_res          # hidden-mode: blocks also need the raw token embedding
@@ -195,7 +208,8 @@ class RWKV7Small(nn.Module):
         self.blocks = nn.ModuleList([Block(d, d // head_size, head_size, i, n_layers, loop_kw,
                                            att_kw, ffn_hidden,
                                            de_vocab=vocab if deepembed else 0, de_dim=de_dim,
-                                           de_mode=de_mode, de_shift=de_shift, de_emb_res=de_emb_res)
+                                           de_mode=de_mode, de_shift=de_shift, de_emb_res=de_emb_res,
+                                           routing_free_kw=routing_free_kw)
                                      for i in range(n_layers)])
         self.ln_out = nn.LayerNorm(d)
         self.head = nn.Linear(d, vocab, bias=False)
@@ -593,6 +607,14 @@ def main():
                     help="ACL'25 State-offset Tuning oracle; freeze base and learn FP32 recurrent offsets")
     ap.add_argument("--state-offset-interval", type=int, default=1,
                     help="inject state offsets every N recurrent tokens (paper-faithful default: 1)")
+    ap.add_argument("--routing-free-moe", type=int, default=0,
+                    help="replace ChannelMix with router/softmax/top-k-free self-activating experts")
+    ap.add_argument("--routing-free-experts", type=int, default=4)
+    ap.add_argument("--routing-free-rank", type=int, default=32)
+    ap.add_argument("--routing-free-threshold", type=float, default=0.2)
+    ap.add_argument("--routing-free-balance", type=float, default=0.5,
+                    help="0=token balancing, 1=expert balancing")
+    ap.add_argument("--routing-free-aux-weight", type=float, default=0.01)
     ap.add_argument("--byte-aware-vocab", default="",
                     help="world-vocab file enabling zero-init token-length + UTF-8 byte-position embeddings")
     ap.add_argument("--byte-aware-max-bytes", type=int, default=16)
@@ -602,6 +624,10 @@ def main():
     ap.add_argument("--ema", type=float, default=0.0,
                     help="EMA decay for a shadow weight copy (e.g. 0.999); eval + checkpoint carry it. 0 = off")
     args = ap.parse_args()
+    if args.routing_free_moe and args.deepembed:
+        ap.error("--routing-free-moe and --deepembed are alternative FFN designs")
+    if not 0 <= args.routing_free_balance <= 1:
+        ap.error("--routing-free-balance must be in [0,1]")
     if not args.nvfp4 and (args.nvfp4_rht or args.nvfp4_backend != "fake"):
         ap.error("--nvfp4-rht/--nvfp4-backend require --nvfp4")
     if not args.data and not args.ctx_buckets:
@@ -653,7 +679,12 @@ def main():
                            att_kw={"balance_state": args.balance_state},
                            seed_chain=bool(args.seed_chain), deepembed=bool(args.deepembed),
                            de_dim=args.de_dim, de_mode=args.de_mode, de_shift=bool(args.de_shift),
-                           de_emb_res=bool(args.de_emb_res))
+                           de_emb_res=bool(args.de_emb_res),
+                           routing_free_kw=({"n_experts": args.routing_free_experts,
+                                             "rank": args.routing_free_rank,
+                                             "threshold": args.routing_free_threshold,
+                                             "balance_interpolation": args.routing_free_balance}
+                                            if args.routing_free_moe else None))
         if args.byte_aware_vocab:
             from rwkv_lab.tokenizer_experiments import (install_byte_aware_embedding,
                                                          load_world_token_bytes)
@@ -776,6 +807,7 @@ def main():
           (f"-umup{args.u_mup_base_width}" if u_mup_cfg is not None else "") + \
           (f"-mem-{args.online_memory_mode}" if args.online_memory and not args.init_g1g else "") + \
           ("-stateoffset" if args.state_offset and not args.init_g1g else "") + \
+          ("-rfmoe" if args.routing_free_moe and not args.init_g1g else "") + \
           ("-byteaware" if args.byte_aware_vocab and not args.init_g1g else "") + \
           ("-nvfp4" + ("rht" if args.nvfp4_rht else "")
            + ("-te" if args.nvfp4_backend == "transformer_engine" else "")
@@ -788,6 +820,7 @@ def main():
                "u_mup_base_width": args.u_mup_base_width if u_mup_cfg is not None else 0,
                "online_memory": args.online_memory_mode if args.online_memory and not args.init_g1g else "",
                "state_offset": bool(args.state_offset) and not args.init_g1g,
+               "routing_free_moe": bool(args.routing_free_moe) and not args.init_g1g,
                "byte_aware": bool(args.byte_aware_vocab) and not args.init_g1g,
                "nvfp4": bool(args.nvfp4),
                "mixed_ctx": bool(args.ctx_buckets),
@@ -1113,6 +1146,11 @@ def main():
                                        ignore_index=(0 if buckets is not None else -100))
             if heads:                                        # + weighted aux (latent-prediction) loss
                 loss = loss + heads.compute(out[1], x, model.emb, model.head)["aux_total"]
+            if args.routing_free_moe and not args.init_g1g:
+                root = model.module if hasattr(model, "module") else model
+                loss = loss + args.routing_free_aux_weight * sum(
+                    (block.ffn.aux_loss.to(loss.device) for block in root.blocks),
+                    loss.new_zeros(()))
             (loss / ga if ga > 1 else loss).backward()
             seen += xin.shape[0] * xin.shape[1]
         if args.distributed == "fsdp2":
@@ -1148,6 +1186,11 @@ def main():
                          "balance_state": bool(args.balance_state),
                          "state_offset": bool(args.state_offset) and not args.init_g1g,
                          "state_offset_interval": args.state_offset_interval,
+                         "routing_free_moe": bool(args.routing_free_moe) and not args.init_g1g,
+                         "routing_free_experts": args.routing_free_experts,
+                         "routing_free_rank": args.routing_free_rank,
+                         "routing_free_threshold": args.routing_free_threshold,
+                         "routing_free_balance": args.routing_free_balance,
                          "byte_aware": bool(args.byte_aware_vocab) and not args.init_g1g,
                          "byte_aware_max_bytes": args.byte_aware_max_bytes,
                          "byte_aware_dim": args.byte_aware_dim,

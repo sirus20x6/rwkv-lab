@@ -99,6 +99,106 @@ implementation sources of record.
   community's [self-controlled sampling proposal](https://discord.com/channels/992359628979568762/1076020543205163118/1140560536313004084)
   to allowlisted named modes, bounded nesting/transitions, and optional grammar labels; generated
   tokens cannot invent parameters or bypass operator policy.
+- **Post-training state expansion:** [`state_expansion.py`](src/rwkv_lab/state_expansion.py)
+  implements StateX's uniform layer selection, actual single-head RWKV TimeMix replacement,
+  block-diagonal runtime-state oracle, paper-recommended mixer reinitialization, and auditable capacity receipt from
+  [StateX](https://arxiv.org/abs/2509.22630)
+  ([local PDF](research/recurrent-training/StateX%20-%20Enhancing%20RNN%20Recall%20via%20Post-training%20State%20Expansion.pdf)); the generic kernel can execute the expanded geometry, while production adoption still requires long-context parity, memory, and throughput qualification. Community lead:
+  [RWKV Discord](https://discord.com/channels/992359628979568762/992359629419991142/1524895529341816847).
+- **Supervised Memory Training:** [`supervised_memory.py`](src/rwkv_lab/supervised_memory.py)
+  provides the time-parallel one-step `(memory, next input) → next memory` loss, predictive-future
+  composition, anti-collapse uniformity term, detached offline-label mode, and rollout-drift
+  diagnostic from [Pretraining Recurrent Networks without Recurrence](https://arxiv.org/abs/2606.06479)
+  ([local PDF](research/recurrent-training/Pretraining%20Recurrent%20Networks%20without%20Recurrence.pdf)). Community lead: [RWKV Discord](https://discord.com/channels/992359628979568762/992362722035507270/1516721026589786122).
+- **Routing-Free MoE:** [`routing_free_moe.py`](src/rwkv_lab/routing_free_moe.py) replaces the FFN
+  with independently self-activating experts—no router, softmax, or top-k—and exposes the paper's
+  interpolated token/expert balancing objective as the `routing_free_moe` arm or
+  `--routing-free-moe 1`. Sources: [paper](https://arxiv.org/abs/2604.00801),
+  [official code](https://github.com/liuyilun2000/RoutingFreeMoE/tree/release),
+  [local PDF](research/recurrent-training/Routing-Free%20Mixture-of-Experts.pdf), and
+  [community lead](https://discord.com/channels/992359628979568762/992359629419991142/1525186839227400242).
+- **Rapid dense-to-sparse transfer:** [`sparse_transfer.py`](src/rwkv_lab/sparse_transfer.py)
+  implements retrieval-head calibration, trainable 16-D pre-RoPE indexers, query-adaptive top-p
+  support, exact full-dimensional attention on that support, and teacher-top-logit distillation
+  from [RTPurbo](https://arxiv.org/abs/2605.16928)
+  ([local PDF](research/sparse-transfer/Full%20Attention%20Strikes%20Back%20-%20Transferring%20Full%20Attention%20into%20Sparse%20within%20Hundred%20Training%20Steps.pdf)). Community lead: [RWKV Discord](https://discord.com/channels/992359628979568762/992362722035507270/1508496234585784390). The module is an exact small oracle; production sparse decoding still needs a qualified block kernel.
+- **External kernel-candidate qualification:** [`kernel_candidates.py`](src/rwkv_lab/kernel_candidates.py)
+  accepts already-imported candidates from systems such as
+  [Mirage](https://arxiv.org/abs/2405.05751), then gates adoption on randomized output/gradient
+  parity, determinism, and median speedup. It deliberately never executes generated source or shell
+  commands ([local PDF](research/kernels/Mirage%20-%20A%20Multi-Level%20Superoptimizer%20for%20Tensor%20Programs.pdf); [community lead](https://discord.com/channels/992359628979568762/992362493055881276/1524695625336225852)).
+- **ROSA backend qualification:** [`rosa_backends.py`](src/rwkv_lab/rosa_backends.py) registers
+  CPU/CUDA/JAX/FPGA callables behind one exact suffix-matching contract and compares each with the
+  independent CPU oracle before adoption. The semantics come from
+  [ROSA-Tuning](https://arxiv.org/abs/2602.02499); the hardware interface is inspired by
+  [ROSA-FPGA](https://github.com/KakaruHayate/ROSA-FPGA) and its
+  [community report](https://discord.com/channels/992359628979568762/1426889957221466153/1523691227957170358). Reported energy/throughput metadata is not treated as locally reproduced evidence.
+- **Action-conditioned JEPA diagnostics:** [`llm_jepa.py`](src/rwkv_lab/llm_jepa.py) now includes
+  a multi-step action-conditioned latent predictor, variance regularization, and SVD rank/dimension
+  residual curves based on [A Generalization Theory for JEPA-Based World Models](https://arxiv.org/abs/2606.27014)
+  ([local PDF](research/jepa/A%20Generalization%20Theory%20for%20JEPA-Based%20World%20Models.pdf)). The diagnostic reports empirical low-rank approximation trade-offs without claiming planning-regret guarantees outside the paper's assumptions.
+- **Key-Value Means:** [`key_value_means.py`](src/rwkv_lab/key_value_means.py) provides fixed,
+  square-root-growing, and saturating state budgets; least-redundant append; winner-take-all
+  cosine merging; fixed value radii; JIT normalization; and joint state/window readout from
+  [KVM](https://arxiv.org/abs/2605.09877) and its [official code](https://github.com/recursal/KVM-paper)
+  ([local PDF](research/recurrent-architectures/Key-Value%20Means.pdf); [community lead](https://discord.com/channels/992359628979568762/992362722035507270/1503948385940672553)).
+- **Neural Procedural Memory:** [`procedural_memory.py`](src/rwkv_lab/procedural_memory.py) stores
+  inter/intra-trajectory activation contrasts, retrieves them by task, synthesizes a consensus
+  direction, and applies an explicitly bounded residual intervention following
+  [NPM](https://arxiv.org/abs/2606.29824)
+  ([local PDF](research/agent-memory/Neural%20Procedural%20Memory.pdf); [community lead](https://discord.com/channels/992359628979568762/992362722035507270/1521742648812244994)).
+- **Mamba-3 recurrence ablations:** [`mamba3_recurrence.py`](src/rwkv_lab/mamba3_recurrence.py)
+  isolates exponential SSM discretization, complex-valued state rotation, and MIMO state lanes
+  from [Mamba-3](https://arxiv.org/abs/2603.15569)
+  ([local PDF](research/recurrent-architectures/Mamba-3.pdf); [community lead](https://discord.com/channels/992359628979568762/992362722035507270/1483679154481266729)).
+- **Nonlinear matrix state:** [`m2rnn.py`](src/rwkv_lab/m2rnn.py) is a small matrix-to-matrix
+  nonlinear recurrence suitable for isolated hybrid-layer experiments, based on
+  [M²RNN](https://arxiv.org/abs/2603.14360)
+  ([local PDF](research/recurrent-architectures/M2RNN.pdf); [community lead](https://discord.com/channels/992359628979568762/992362722035507270/1484506344588574881)).
+- **Compositional Muon:** [`compositional_muon.py`](src/rwkv_lab/compositional_muon.py) implements
+  partner-whitened steepest-descent updates for paired factors such as QK and OV, with an operator
+  update receipt, from the [Apache-2.0 reference](https://github.com/tilde-research/comp-muon-release)
+  and [community lead](https://discord.com/channels/992359628979568762/992362722035507270/1512505466549174352).
+- **Distillation merge stage:** [`distillation_merge.py`](src/rwkv_lab/distillation_merge.py)
+  adds weighted expert-state merging, ensemble-logit alignment, and tolerance-corrected win/tie
+  evaluation from [Effective Distillation to Hybrid xLSTM Architectures](https://arxiv.org/abs/2603.15590)
+  ([local PDF](research/distillation/Effective%20Distillation%20to%20Hybrid%20xLSTM%20Architectures.pdf); [community lead](https://discord.com/channels/992359628979568762/992362722035507270/1483557410512699473)).
+- **Guarded test-time training:** [`test_time_training.py`](src/rwkv_lab/test_time_training.py)
+  wraps inference-time next-token adaptation in an explicit parameter/step budget, held-out
+  regression gate, immutable snapshot, and automatic rollback. It follows
+  [TTT-E2E](https://test-time-training.github.io/e2e.pdf) and its
+  [official code](https://github.com/test-time-training/e2e)
+  ([local PDF](research/test-time-training/End-to-End%20Test-Time%20Training%20for%20Long%20Context.pdf)). Baseline inference never mutates weights.
+- **ROSA+ fallback:** [`rosa_plus.py`](src/rwkv_lab/rosa_plus.py) supplies an independently written,
+  token-generic interpolated Witten–Bell distribution only when exact ROSA has no match, inspired
+  by [bcml-labs/rosa-plus](https://github.com/bcml-labs/rosa-plus) without copying its GPL code
+  ([community lead](https://discord.com/channels/992359628979568762/992362722035507270/1426732439266656359)).
+- **Tool-use length generalization:** [`tool_length_generalization.py`](src/rwkv_lab/tool_length_generalization.py)
+  builds inert, allowlisted tool tapes and extrapolation curves following
+  [Malach et al.](https://arxiv.org/abs/2510.14826)
+  ([local PDF](research/agent-tools/Tool-Use%20Unlocks%20Length%20Generalization%20in%20State%20Space%20Models.pdf); [community lead](https://discord.com/channels/992359628979568762/1426889957221466153/1492868620831821894)). Adamaton exclusively owns execution.
+- **Energy-based refinement:** [`energy_refinement.py`](src/rwkv_lab/energy_refinement.py) adds a
+  contrastive compatibility-energy head and norm-bounded candidate-latent descent from
+  [Energy-Based Transformers](https://arxiv.org/abs/2507.02092)
+  ([local PDF](research/energy-models/Energy-Based%20Transformers%20are%20Scalable%20Learners%20and%20Thinkers.pdf); [community discussion](https://discord.com/channels/992359628979568762/992359629419991142/1521434262778286160)). Model weights remain fixed during refinement.
+- **Compressed Convolutional Attention:** [`cca_attention.py`](src/rwkv_lab/cca_attention.py) is a
+  causal oracle that projects Q/K/V and performs convolution plus attention entirely at latent
+  width, following [CCA](https://arxiv.org/abs/2510.04476)
+  ([local PDF](research/attention/Compressed%20Convolutional%20Attention.pdf); [community lead](https://discord.com/channels/992359628979568762/1426889957221466153/1511375668875890688)).
+- **Compute-aware data filtering:** [`data_filter_audit.py`](src/rwkv_lab/data_filter_audit.py)
+  permits raw-versus-filter comparisons only inside matched parameter/token/compute cells, based on
+  [A Bitter Lesson for Data Filtering](https://arxiv.org/abs/2605.19407) and
+  [Apple's quality-filter analysis](https://machinelearning.apple.com/research/data-quality-illusion)
+  ([local PDF](research/data/A%20Bitter%20Lesson%20for%20Data%20Filtering.pdf); [community lead](https://discord.com/channels/992359628979568762/1426889957221466153/1513070964446068769)).
+- **Runtime backend matrix:** [`runtime_backends.py`](src/rwkv_lab/runtime_backends.py) applies the
+  common parity/gradient/determinism/speed gate to [Albatross](https://github.com/BlinkDL/Albatross),
+  [vLLM RWKV](https://github.com/vllm-project/vllm/pull/46269),
+  [Tenstorrent WKV7](https://github.com/marty1885/ttWKV7), and
+  [ROSA-JAX](https://github.com/ytfh44/rosa_gpu_jax); merely being installed never adopts a backend.
+- **Full execution-plan qualification:** [`execution_plan.py`](src/rwkv_lab/execution_plan.py)
+  extends callable qualification with whole-plan output/gradient parity, determinism, latency, and
+  a required launch-count reduction for [Megakernels](https://github.com/HazyResearch/Megakernels/tree/throughput)- or [TileRT](https://github.com/tile-ai/TileRT)-style candidates
+  ([community lead](https://discord.com/channels/992359628979568762/1084547464452907088/1507270209910734878)).
 
 ---
 
@@ -174,6 +274,11 @@ Experiments are driven and monitored through **trainboard**, a from-scratch Go +
 </p>
 
 <p align="center">
+  <img src="docs/images/rlvr_panel.png?v=c36f700b1de8" width="100%" alt="Verifiable-reward training campaign builder, evidence, and recursive lineage"><br>
+  <em>Verifiable-reward training — configure cold-start and recurrent GSPO/Dr.GRPO/DAPO campaigns, rollout and evaluation budgets, promotion gates, and distributed rollout devices; inspect per-algorithm held-out evidence and the recursive checkpoint lineage. Promotion remains evidence-gated and never overwrites the parent checkpoint.</em>
+</p>
+
+<p align="center">
   <img src="docs/images/posttraining_panel.png" width="100%" alt="Post-training campaigns and data panel"><br>
   <em>Post-training — validate/version typed JSONL and role-aware masks; launch equal-token paired-seed campaigns with fresh confirmation; inspect confidence intervals, promotion receipts, and adapter-recursive lineage; compare checkpoints and save explicit training-only preferences. Paths stay repository-confined, and Trainboard itself cannot promote a checkpoint.</em>
 </p>
@@ -181,6 +286,11 @@ Experiments are driven and monitored through **trainboard**, a from-scratch Go +
 <p align="center">
   <img src="docs/images/qualification_panel.png" width="100%" alt="Production kernel qualification panel with backend and regression gates"><br>
   <em>Production qualification — launch parity-before-speed kernel and serving checks, inspect adopted backends and regression gates, and retain machine-readable receipts under <code>runs/</code>. Backend adoption remains fail-closed; the dashboard cannot promote or publish a model.</em>
+</p>
+
+<p align="center">
+  <img src="docs/images/research_capabilities_panel.png?v=4f490d3d4a6b" width="100%" alt="Research capability inventory with readiness levels, entry points, and sources"><br>
+  <em>Research capability inventory — one auditable index of the community-inspired decoding, recurrent-state, tokenizer, memory, optimizer, attention, data-filter, and runtime experiments in this repository, including each capability's readiness, executable entry point, and source. Experimental and oracle paths remain off by default.</em>
 </p>
 
 ### Conclusive experiment campaigns

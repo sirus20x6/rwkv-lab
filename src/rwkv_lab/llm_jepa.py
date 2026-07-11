@@ -84,3 +84,47 @@ class LLMJEPA(nn.Module):
         pred = self.predict(text_input_embeds, model_body, text_mask)
         target = last_token_embedding(code_hidden, code_mask)
         return cosine_jepa_loss(pred, target)
+
+
+class ActionConditionedJEPA(nn.Module):
+    """Action-conditioned latent transition model and dimension diagnostic.
+
+    Motivated by Lu et al., *A Generalization Theory for JEPA-Based World
+    Models* (2026), https://arxiv.org/abs/2606.27014: the spectral JEPA
+    objective is a low-rank factorization of an action-conditioned co-occurrence
+    matrix. This module measures that approximation trade-off; it does not claim
+    the paper's planning-regret guarantees without their assumptions.
+    """
+    def __init__(self, observation_dim: int, action_dim: int, latent_dim: int):
+        super().__init__()
+        self.encoder = nn.Linear(observation_dim, latent_dim)
+        self.action_encoder = nn.Linear(action_dim, latent_dim)
+        self.predictor = nn.GRUCell(latent_dim, latent_dim)
+
+    def forward(self, observation: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+        state = self.encoder(observation)
+        for step in range(actions.shape[-2]):
+            state = self.predictor(self.action_encoder(actions[..., step, :]), state)
+        return state
+
+    def loss(self, observation: torch.Tensor, actions: torch.Tensor,
+             future_observation: torch.Tensor, variance_weight: float = 0.01) -> torch.Tensor:
+        prediction = self(observation, actions)
+        target = self.encoder(future_observation).detach()
+        variance = F.relu(1.0 - prediction.float().std(dim=0, unbiased=False)).mean()
+        return F.mse_loss(prediction.float(), target.float()) + variance_weight * variance
+
+
+def action_conditioned_rank_diagnostic(current: torch.Tensor, action: torch.Tensor,
+                                       future: torch.Tensor,
+                                       dimensions: tuple[int, ...] = (4, 8, 16, 32)) -> list[dict]:
+    """SVD residual curve for the empirical [state, action]→future cross-covariance."""
+    if current.shape[0] != action.shape[0] or current.shape[0] != future.shape[0]:
+        raise ValueError("current, action, and future must share sample dimension")
+    source = torch.cat((current.float(), action.float()), -1)
+    source, target = source - source.mean(0), future.float() - future.float().mean(0)
+    singular = torch.linalg.svdvals(source.T @ target / max(source.shape[0], 1))
+    total = singular.square().sum().clamp_min(1e-12)
+    return [{"dimension": int(d), "captured_fraction": float(singular[:d].square().sum() / total),
+             "approximation_residual": float(singular[d:].square().sum() / total)}
+            for d in dimensions if d > 0]

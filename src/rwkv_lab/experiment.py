@@ -69,6 +69,10 @@ LEVERS = {
     # https://huggingface.co/recursal/QRWKV7-7B-Instruct/blob/main/modeling_rwkv7qwen2.py
     "balance_state": dict(balance_state=True),
     "state_offset":  dict(state_offset=True, state_offset_interval=1),
+    # Liu et al. (2026), https://arxiv.org/abs/2604.00801
+    "routing_free_moe": dict(routing_free_moe=True, routing_free_experts=4,
+                              routing_free_rank=32, routing_free_threshold=0.2,
+                              routing_free_balance=0.5),
     "nvfp4":         dict(nvfp4=True),
     "nvfp4_rht":     dict(nvfp4=True, nvfp4_rht=True),
     "nvfp4_native":  dict(nvfp4=True, nvfp4_rht=True,
@@ -78,7 +82,8 @@ LEVERS = {
 # Levers whose objective needs a real token FUTURE — only valid on the LM path (rwkv_pretrain),
 # not the synthetic diagnostic tasks. The board disables these unless an LM corpus is selected.
 LM_ONLY = ("top", "lmtp", "bst", "jtp", "umup_256", "mem_titans", "mem_miras",
-           "mem_atlas", "mem_nested", "state_offset", "nvfp4", "nvfp4_rht", "nvfp4_native")
+           "mem_atlas", "mem_nested", "state_offset", "routing_free_moe",
+           "nvfp4", "nvfp4_rht", "nvfp4_native")
 
 _AUX_KEYS = ("nextlat_weight", "top_weight", "lmtp_weight", "bst_weight", "jtp_weight")
 
@@ -109,9 +114,19 @@ def build(task: Task, d_model, n_layers, head_size, lever, device="cpu") -> RWKV
     de_mode = str(loop.pop("de_mode", "out"))
     de_shift = bool(loop.pop("de_shift", False))
     de_emb_res = bool(loop.pop("de_emb_res", False))
+    routing_free = bool(loop.pop("routing_free_moe", False))
+    routing_free_kw = None
+    if routing_free:
+        routing_free_kw = {
+            "n_experts": int(loop.pop("routing_free_experts", 4)),
+            "rank": int(loop.pop("routing_free_rank", 32)),
+            "threshold": float(loop.pop("routing_free_threshold", 0.2)),
+            "balance_interpolation": float(loop.pop("routing_free_balance", 0.5)),
+        }
     m = RWKV7Small(task.vocab, d_model, n_layers, head_size, _norm_loopkw(loop),
                    seed_chain=seed_chain, deepembed=deepembed, de_dim=de_dim, de_mode=de_mode,
-                   de_shift=de_shift, de_emb_res=de_emb_res).to(device, torch.bfloat16)
+                   de_shift=de_shift, de_emb_res=de_emb_res,
+                   routing_free_kw=routing_free_kw).to(device, torch.bfloat16)
     if engram:                                               # attach AFTER .to (fp32 growth params)
         from rwkv_lab.rwkv_pretrain import enable_engram
         enable_engram(m, task.vocab, d_model, head_size, n_layers,
