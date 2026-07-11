@@ -132,6 +132,14 @@
         <div id="posttraining-body" class="exp-body"><div class="empty">expand to inspect data or compare model behavior</div></div>
       </details>
 
+      <details class="panel" id="qualification-panel" data-on:toggle="evt.target.open && @get('/api/qualification')">
+        <summary class="panel-title">production qualification
+          <span class="sub">parity · throughput · peak memory · kernel count · regression baselines</span>
+          <span class="d-caret">▸</span>
+        </summary>
+        <div id="qualification-body" class="qualification-body"><div class="empty">expand to qualify hardware backends or inspect receipts</div></div>
+      </details>
+
       <div id="run-header">
         <h1>select a run</h1>
         <div class="sub">live system + run metrics stream every second</div>

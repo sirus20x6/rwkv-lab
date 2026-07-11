@@ -1,6 +1,7 @@
 """Fast invariants for the P0-P2 model/training research levers."""
 from __future__ import annotations
 
+import sys
 import numpy as np
 import torch
 import torch.nn as nn
@@ -133,3 +134,18 @@ def test_declarative_lm_command_translates_new_flag_kinds():
     assert atlas[atlas.index("--online-memory-mode") + 1] == "atlas"
     assert "--nvfp4" in nv_rht and "--nvfp4-rht" in nv_rht
     assert nv_native[nv_native.index("--nvfp4-backend") + 1] == "transformer_engine"
+
+
+def test_lm_command_uses_torchrun_for_fsdp2_and_system_controls():
+    from rwkv_lab.config import _lm_command
+    command = _lm_command(
+        ["--data", "x.bin"], None, "out", {},
+        {"distributed": "fsdp2", "world_size": 4, "activation_checkpointing": True,
+         "cpu_offload": True, "lr_schedule": "constant", "decay_steps": 99,
+         "optimizer": "muon", "muon": {"aro": True, "aro_compile": True}},
+        {}, 0, "ckpt.pt")
+    assert command[:4] == [sys.executable, "-m", "torch.distributed.run", "--standalone"]
+    assert command[command.index("--nproc-per-node") + 1] == "4"
+    for flag in ("--distributed", "--activation-checkpointing", "--cpu-offload",
+                 "--lr-schedule", "--decay-steps", "--sm-aro", "--sm-aro-compile"):
+        assert flag in command

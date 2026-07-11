@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -164,7 +165,18 @@ func (s *Server) handlePosttraining(w http.ResponseWriter, r *http.Request) {
 	b.WriteString(`<tr><td class="f-l">packing</td><td><select data-bind="ptCampaignPacking"><option value="reset">reset-mask multipack</option><option value="audit">audit only</option><option value="off">off</option></select></td></tr>`)
 	b.WriteString(`<tr><td class="f-l">device slots</td><td><input data-bind="ptCampaignDevices" value="cuda:0" placeholder="cuda:0,cuda:1"></td></tr>`)
 	b.WriteString(`<tr><td class="f-l">timeout / retries</td><td><input data-bind="ptCampaignTimeout" value="0" title="seconds; 0 disables"><input type="number" data-bind="ptCampaignRetries" value="1" min="0" max="10"></td></tr>`)
-	b.WriteString(`</table><button class="btn" data-on:click="confirm('Launch paired post-training and confirmation campaign?') && @post('/api/posttraining/campaign')">▶ run campaign</button></div><div class="pt-campaign-results">`)
+	b.WriteString(`</table><details class="advanced-fields"><summary>advanced adapter, objective &amp; evidence controls</summary><table class="field-tbl">`)
+	b.WriteString(`<tr><td class="f-l">batch / rank / alpha</td><td><input type="number" min="1" data-bind="ptCampaignBatch" value="2"><input type="number" min="1" data-bind="ptCampaignRank" value="16"><input data-bind="ptCampaignAlpha" value="32"></td></tr>`)
+	b.WriteString(`<tr><td class="f-l">LR / beta / gamma</td><td><input data-bind="ptCampaignLR" value="2e-4"><input data-bind="ptCampaignBeta" value="0.1"><input data-bind="ptCampaignGamma" value="1.0"></td></tr>`)
+	b.WriteString(`<tr><td class="f-l">max length / quant block</td><td><input type="number" min="2" data-bind="ptCampaignMaxLength" value="2048"><input type="number" min="1" data-bind="ptCampaignQuantBlock" value="64"></td></tr>`)
+	b.WriteString(`<tr><td class="f-l">targets</td><td><input data-bind="ptCampaignTargets" placeholder="optional comma-separated module suffixes"></td></tr>`)
+	b.WriteString(`<tr><td class="f-l">template / token cache</td><td><input data-bind="ptCampaignTemplate" placeholder="optional template JSON"><input data-bind="ptCampaignCache" placeholder="optional cache directory"></td></tr>`)
+	b.WriteString(`<tr><td class="f-l">activation offload</td><td><input type="checkbox" data-bind="ptCampaignOffload"></td></tr>`)
+	b.WriteString(`<tr><td class="f-l">promotion Δ / family regression</td><td><input data-bind="ptCampaignMinDelta" value="0"><input data-bind="ptCampaignFamily" value="0"></td></tr>`)
+	b.WriteString(`<tr><td class="f-l">confidence / bootstrap</td><td><input data-bind="ptCampaignConfidence" value="0.95"><input type="number" min="100" data-bind="ptCampaignBootstrap" value="10000"></td></tr>`)
+	b.WriteString(`<tr><td class="f-l">parallel / retry delay</td><td><input type="number" min="0" data-bind="ptCampaignParallel" value="0"><input data-bind="ptCampaignRetryDelay" value="0"></td></tr>`)
+	b.WriteString(`<tr><td class="f-l">telemetry every</td><td><input type="number" min="1" data-bind="ptCampaignLogEvery" value="10"></td></tr>`)
+	b.WriteString(`</table></details><button class="btn" data-on:click="confirm('Launch paired post-training and confirmation campaign?') && @post('/api/posttraining/campaign')">▶ run campaign</button></div><div class="pt-campaign-results">`)
 	campaigns, loops := s.readPosttrainCampaigns()
 	if len(campaigns) == 0 {
 		b.WriteString(`<div class="empty">no post-training campaigns yet</div>`)
@@ -355,6 +367,25 @@ func (s *Server) handleLaunchPosttrainingCampaign(w http.ResponseWriter, r *http
 		Devices    string `json:"ptCampaignDevices"`
 		Timeout    string `json:"ptCampaignTimeout"`
 		Retries    string `json:"ptCampaignRetries"`
+		Batch      string `json:"ptCampaignBatch"`
+		Rank       string `json:"ptCampaignRank"`
+		Alpha      string `json:"ptCampaignAlpha"`
+		LR         string `json:"ptCampaignLR"`
+		Beta       string `json:"ptCampaignBeta"`
+		Gamma      string `json:"ptCampaignGamma"`
+		MaxLength  string `json:"ptCampaignMaxLength"`
+		QuantBlock string `json:"ptCampaignQuantBlock"`
+		Targets    string `json:"ptCampaignTargets"`
+		Template   string `json:"ptCampaignTemplate"`
+		Cache      string `json:"ptCampaignCache"`
+		Offload    bool   `json:"ptCampaignOffload"`
+		MinDelta   string `json:"ptCampaignMinDelta"`
+		Family     string `json:"ptCampaignFamily"`
+		Confidence string `json:"ptCampaignConfidence"`
+		Bootstrap  string `json:"ptCampaignBootstrap"`
+		Parallel   string `json:"ptCampaignParallel"`
+		RetryDelay string `json:"ptCampaignRetryDelay"`
+		LogEvery   string `json:"ptCampaignLogEvery"`
 	}
 	_ = datastar.ReadSignals(r, &sig)
 	sse := datastar.NewSSE(w, r)
@@ -452,12 +483,96 @@ func (s *Server) handleLaunchPosttrainingCampaign(w http.ResponseWriter, r *http
 		toastErr(sse, "campaign retries are invalid")
 		return
 	}
+	batch, err := boundedInt(sig.Batch, 2, 1, 4096)
+	if err != nil {
+		toastErr(sse, "campaign batch size invalid")
+		return
+	}
+	rank, err := boundedInt(sig.Rank, 16, 1, 4096)
+	if err != nil {
+		toastErr(sse, "campaign adapter rank invalid")
+		return
+	}
+	maxLength, err := boundedInt(sig.MaxLength, 2048, 2, 1_000_000)
+	if err != nil {
+		toastErr(sse, "campaign max length invalid")
+		return
+	}
+	quantBlock, err := boundedInt(sig.QuantBlock, 64, 1, 65536)
+	if err != nil {
+		toastErr(sse, "campaign quant block invalid")
+		return
+	}
+	bootstrap, err := boundedInt(sig.Bootstrap, 10000, 100, 1_000_000)
+	if err != nil {
+		toastErr(sse, "campaign bootstrap count invalid")
+		return
+	}
+	parallel, err := boundedInt(sig.Parallel, 0, 0, 128)
+	if err != nil {
+		toastErr(sse, "campaign parallelism invalid")
+		return
+	}
+	logEvery, err := boundedInt(sig.LogEvery, 10, 1, 100000)
+	if err != nil {
+		toastErr(sse, "campaign telemetry cadence invalid")
+		return
+	}
+	advanced := map[string]struct {
+		raw      string
+		min, max float64
+	}{
+		"alpha": {sig.Alpha, 0, 1e9}, "learning rate": {sig.LR, 0, 1},
+		"beta": {sig.Beta, 0, 1e6}, "gamma": {sig.Gamma, 0, 1e6},
+		"minimum delta": {sig.MinDelta, 0, 1}, "family regression": {sig.Family, 0, 1},
+		"confidence": {sig.Confidence, 1e-12, 1 - 1e-12}, "retry delay": {sig.RetryDelay, 0, 1e9},
+	}
+	for name, spec := range advanced {
+		value, parseErr := strconv.ParseFloat(strings.TrimSpace(spec.raw), 64)
+		if parseErr != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < spec.min || value > spec.max {
+			toastErr(sse, "campaign "+name+" is outside its allowed range")
+			return
+		}
+	}
+	template, cache := "", ""
+	if strings.TrimSpace(sig.Template) != "" {
+		template, err = s.pathUnderRepo(sig.Template, true)
+		if err != nil || !strings.HasSuffix(strings.ToLower(template), ".json") {
+			toastErr(sse, "campaign template must be an existing JSON file")
+			return
+		}
+	}
+	if strings.TrimSpace(sig.Cache) != "" {
+		cache, err = s.pathUnderRepo(sig.Cache, false)
+		if err != nil {
+			toastErr(sse, "campaign token cache path invalid")
+			return
+		}
+	}
 	args := []string{"-m", "rwkv_lab.posttrain_campaign", "--checkpoint", checkpoint,
 		"--data", data, "--eval-data", eval, "--output", out, "--objectives", sig.Objectives,
 		"--seeds", sig.Seeds, "--confirm-seeds", sig.Confirm, "--token-budget", budget,
 		"--base-quantization", sig.Quant, "--quant-backend", sig.Backend,
 		"--packing", sig.Packing, "--devices", sig.Devices,
-		"--arm-timeout", strconv.FormatFloat(timeout, 'f', -1, 64), "--retries", retries}
+		"--arm-timeout", strconv.FormatFloat(timeout, 'f', -1, 64), "--retries", retries,
+		"--batch-size", batch, "--rank", rank, "--adapter-alpha", sig.Alpha,
+		"--learning-rate", sig.LR, "--beta", sig.Beta, "--gamma", sig.Gamma,
+		"--max-length", maxLength, "--quant-block-size", quantBlock,
+		"--minimum-delta", sig.MinDelta, "--maximum-family-regression", sig.Family,
+		"--confidence", sig.Confidence, "--bootstrap-samples", bootstrap,
+		"--max-parallel", parallel, "--retry-delay", sig.RetryDelay, "--log-every", logEvery}
+	if strings.TrimSpace(sig.Targets) != "" {
+		args = append(args, "--targets", strings.TrimSpace(sig.Targets))
+	}
+	if template != "" {
+		args = append(args, "--template", template)
+	}
+	if cache != "" {
+		args = append(args, "--token-cache", cache)
+	}
+	if sig.Offload {
+		args = append(args, "--activation-offload")
+	}
 	pid, err := s.spawnPy(args, fmt.Sprintf("posttrain_campaign_%d.log", time.Now().Unix()))
 	if err != nil {
 		toastErr(sse, "post-training campaign launch failed: "+err.Error())

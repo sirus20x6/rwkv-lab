@@ -105,6 +105,11 @@ Experiments are driven and monitored through **trainboard**, a from-scratch Go +
   <em>Post-training — validate/version typed JSONL and role-aware masks; launch equal-token paired-seed campaigns with fresh confirmation; inspect confidence intervals, promotion receipts, and adapter-recursive lineage; compare checkpoints and save explicit training-only preferences. Paths stay repository-confined, and Trainboard itself cannot promote a checkpoint.</em>
 </p>
 
+<p align="center">
+  <img src="docs/images/qualification_panel.png" width="100%" alt="Production kernel qualification panel with backend and regression gates"><br>
+  <em>Production qualification — launch parity-before-speed kernel and serving checks, inspect adopted backends and regression gates, and retain machine-readable receipts under <code>runs/</code>. Backend adoption remains fail-closed; the dashboard cannot promote or publish a model.</em>
+</p>
+
 ### Conclusive experiment campaigns
 
 `python -m rwkv_lab.experiment` now treats a sweep as a reproducible campaign rather than a table of final averages:
