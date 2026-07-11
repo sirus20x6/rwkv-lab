@@ -243,6 +243,7 @@ class RWKV8TimeMixDeltaNet(nn.Module):
         rope_frac: float = 0.25,
         comba_decouple: bool = False,
         out_correct: bool = True,
+        balance_state: bool = False,
     ) -> None:
         super().__init__()
         if num_heads * head_size != hidden_size:
@@ -283,6 +284,12 @@ class RWKV8TimeMixDeltaNet(nn.Module):
         # Comba r-d*k output-correction is a conversion lever, NOT part of native g070.
         # out_correct=False omits it entirely => clean native RWKV-7 forward.
         self.out_correct = bool(out_correct)
+        # QRWKV7 balance_state stabilizer used by the Recursal conversion path:
+        # https://huggingface.co/recursal/QRWKV7-7B-Instruct/blob/main/modeling_rwkv7qwen2.py
+        # Community scaling context (27B GroupNorm instability):
+        # https://discord.com/channels/992359628979568762/992362278324293716/1522281628217643153
+        # Off by default so existing checkpoints and the native g070 baseline stay exact.
+        self.balance_state = bool(balance_state)
         if self.comba_decouple:
             self.comba_b = nn.Parameter(torch.zeros(num_heads))    # sigmoid(0)=0.5
         # Structural stability cap: floor w so the effective per-step decay
@@ -631,9 +638,15 @@ class RWKV8TimeMixDeltaNet(nn.Module):
         a = self._a_scale * torch.sigmoid(self.a0 + (xa @ self.a1) @ self.a2)
         g = torch.sigmoid(xg @ self.g1) @ self.g2
 
-        kk = k * self.k_k
+        kk = k if self.balance_state else k * self.k_k
         kk = F.normalize(kk.view(B, T, H, N), dim=-1, p=2.0).view(B, T, C)
-        k_eff = k * (1 + (a - 1) * self.k_a)
+        if self.balance_state:
+            # The reference scales writes by the amount forgotten plus the removal gate.
+            # ``gk`` below is log(decay), hence decay = exp(-exp(w)).
+            decay = torch.exp(-torch.exp(w))
+            k_eff = k * (1 - decay + a)
+        else:
+            k_eff = k * (1 + (a - 1) * self.k_a)
 
         # BlinkDL's CUDA kernel uses w as a "pre-log decay" and applies
         # ``decay = exp(-exp(w))`` internally. fla's chunk_rwkv7 instead

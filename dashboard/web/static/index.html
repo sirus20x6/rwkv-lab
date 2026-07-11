@@ -140,6 +140,14 @@
         <div id="qualification-body" class="qualification-body"><div class="empty">expand to qualify hardware backends or inspect receipts</div></div>
       </details>
 
+      <details class="panel" id="research-capabilities-panel" data-on:toggle="evt.target.open && @get('/api/research-capabilities')">
+        <summary class="panel-title">research capability inventory
+          <span class="sub">RWKV community leads · decoding/state/tokenizer experiments · readiness · entry points</span>
+          <span class="d-caret">▸</span>
+        </summary>
+        <div id="research-capabilities-body" class="exp-body"><div class="empty">expand to inspect experimental capability readiness</div></div>
+      </details>
+
       <div id="run-header">
         <h1>select a run</h1>
         <div class="sub">live system + run metrics stream every second</div>
