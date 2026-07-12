@@ -524,6 +524,12 @@ class RWKV8TimeMixDeltaNet(nn.Module):
             cu_seqlens = torch.cat((starts, starts.new_tensor([r.shape[1]])))
             if output_final_state:
                 raise ValueError("packed reset execution does not expose one ambiguous final state")
+            if initial_state is not None and initial_state.shape[0] != cu_seqlens.numel() - 1:
+                raise ValueError(
+                    f"packed reset execution needs a PER-SEQUENCE initial_state "
+                    f"[num_seqs={cu_seqlens.numel() - 1}, H, K, V]; got leading dim "
+                    f"{initial_state.shape[0]} — a [B,H,K,V] state would seed only the "
+                    f"first packed document")
         if _HAS_FLA and os.environ.get("RWKV8_FORCE_PYREF") != "1":
             out, final = _fla_chunk_rwkv7(
                 r, gk, k, v, a, b, scale=1.0,

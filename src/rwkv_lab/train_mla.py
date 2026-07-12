@@ -7,8 +7,10 @@ out of ~36B). Streams random windows from engram_tokens.bin (Qwen-tokenized).
 Design choices:
 - Single GPU, bf16 mixed precision, activation checkpointing on the frozen
   decoder layers so forward memory stays ~flat across seq_len.
-- AdamW on fp32 master copies of the MLA params only. For 1.1B trainable
-  params that's ~9GB of optimizer state.
+- Optimizer over the MLA params only (default: bnb AdamW8bit directly on the
+  bf16 params; --optimizer muon/muonclip for the Muon variants). No fp32
+  master copies are kept — see feedback_bf16_optimizer_masters before relying
+  on fine-grained distill updates here.
 - Random-window sampling: each microbatch picks uniform random offsets into
   the training range (reserving the last --eval-tokens for held-out PPL).
   Good enough mixing for a short finetune; proper per-document boundaries
@@ -554,6 +556,21 @@ class _PlateauLRController:
         self.mult = 1.0
         self.n_drops = 0
 
+    # Persisted in checkpoints: without this, resume resets mult to 1.0 and
+    # restores full-envelope LR after a plateau drop (on top of the resume
+    # re-warmup) — the exact overshoot ROP exists to prevent.
+    def state_dict(self) -> dict:
+        return {"best": self.best, "bad_count": self.bad_count,
+                "cooldown": self.cooldown, "mult": self.mult,
+                "n_drops": self.n_drops}
+
+    def load_state_dict(self, state: dict) -> None:
+        self.best = float(state.get("best", self.best))
+        self.bad_count = int(state.get("bad_count", self.bad_count))
+        self.cooldown = int(state.get("cooldown", self.cooldown))
+        self.mult = float(state.get("mult", self.mult))
+        self.n_drops = int(state.get("n_drops", self.n_drops))
+
     def step(self, eval_ppl: float, train_step: int) -> tuple[float, bool]:
         """Return (current_mult, dropped_this_eval)."""
         if not self.enabled:
@@ -709,9 +726,14 @@ def multi_horizon_eval(model, arr: np.memmap, eval_start: int, eval_end: int,
                     break
                 h_in = h_prev[:, :seg]
                 ids_in = w_full[:, k - 1:L - 1]
-                pos_in = full_pos[:, k - 1:L - 1]
-                cos_in = cos_all[:, k - 1:L - 1]
-                sin_in = sin_all[:, k - 1:L - 1]
+                # Position convention must match the training chain: there,
+                # chain step k-2 (this horizon) pairs the input token with
+                # position id (token's abs pos - 1). Using k-1 here trained
+                # one convention and measured another (off-by-one at every
+                # horizon >= 2).
+                pos_in = full_pos[:, k - 2:L - 2]
+                cos_in = cos_all[:, k - 2:L - 2]
+                sin_in = sin_all[:, k - 2:L - 2]
 
                 mtp_out = mtp(
                     input_ids=ids_in,
@@ -775,7 +797,8 @@ def _prune_old_checkpoints(out_dir: Path, keep: int) -> None:
 
 def save_checkpoint(step: int, mla_modules: list[MLAAttention], optimizer, cfg: TrainConfig,
                     model=None, engram_modules: list | None = None,
-                    optimizer_host=None, optimizer_aux=None) -> None:
+                    optimizer_host=None, optimizer_aux=None,
+                    plateau_state: dict | None = None) -> None:
     # Write to a dot-prefixed temp dir first, then rename. Makes the save
     # atomic: a kill mid-write leaves a .step_XXXXXX.tmp/ that the resume
     # code ignores (only step_XXXXXX/ dirs match the glob).
@@ -819,6 +842,8 @@ def save_checkpoint(step: int, mla_modules: list[MLAAttention], optimizer, cfg: 
         "optimizer_state": optimizer.state_dict(),
         "config": asdict(cfg),
     }
+    if plateau_state is not None:
+        payload["plateau_state"] = plateau_state
     if mtp_extra_sd is not None:
         payload["mtp_extra_state_dict"] = mtp_extra_sd
 
@@ -1399,6 +1424,7 @@ def main() -> None:
     # dicts on top of the patch-init, then the optimizer state, then starts the
     # step counter where we left off so the LR cosine schedule continues cleanly.
     start_step = 0
+    _resume_plateau_state = None
     if cfg.resume:
         print(f"resuming from: {cfg.resume}")
         ckpt = safe_torch_load(cfg.resume, map_location="cpu")
@@ -1424,6 +1450,13 @@ def main() -> None:
             missing, unexpected = m.load_state_dict(sd, strict=False)
             if unexpected:
                 raise RuntimeError(f"resume: unexpected keys in {key}: {unexpected}")
+            if missing:
+                raise RuntimeError(
+                    f"resume: MISSING keys in {key}: {missing} — these tensors "
+                    f"would silently keep patch-init values while being reported "
+                    f"as restored. The ckpt predates a module change; re-save or "
+                    f"handle the migration explicitly."
+                )
             loaded_mla += 1
         print(f"resume: loaded {loaded_mla}/{len(mla_modules)} MLA modules "
               f"({'all' if not skipped_mla else 'missing keys: ' + ','.join(skipped_mla)})")
@@ -1587,7 +1620,14 @@ def main() -> None:
                   "stats are for the prior MLA weights, not the fresh patch)")
         else:
             try:
+                # load_state_dict overwrites group hyperparameters — including
+                # our peak_lr captured at construction from the CURRENT cfg.lr.
+                # Without re-asserting it, a resume with a changed --lr silently
+                # trains at the ckpt's old peak (logs still show the new value).
+                _peaks = [g.get("peak_lr", g.get("lr", cfg.lr)) for g in optimizer.param_groups]
                 optimizer.load_state_dict(ckpt["optimizer_state"])
+                for g, _pk in zip(optimizer.param_groups, _peaks):
+                    g["peak_lr"] = _pk
                 print("optimizer state restored from checkpoint")
             except (ValueError, KeyError, RuntimeError) as e:
                 print(f"optimizer state skipped (incompatible with current training "
@@ -1600,11 +1640,16 @@ def main() -> None:
                 print(f"optimizer_host state skipped: {e}")
         if "optimizer_state_aux" in ckpt and optimizer_aux is not None:
             try:
+                _aux_peaks = [g.get("peak_lr", g.get("lr", cfg.lr))
+                              for g in optimizer_aux.param_groups]
                 optimizer_aux.load_state_dict(ckpt["optimizer_state_aux"])
+                for g, _pk in zip(optimizer_aux.param_groups, _aux_peaks):
+                    g["peak_lr"] = _pk
                 print("optimizer_aux (Prodigy) state restored from checkpoint")
             except (ValueError, KeyError, RuntimeError) as e:
                 print(f"optimizer_aux state skipped: {e}")
         start_step = int(ckpt["step"])
+        _resume_plateau_state = ckpt.get("plateau_state")
         print(f"resumed at step {start_step}")
         del ckpt
 
@@ -1615,6 +1660,10 @@ def main() -> None:
 
     # Reduce-on-Plateau LR controller (no-op when --rop-enable=0).
     plateau_ctrl = _PlateauLRController(cfg)
+    if _resume_plateau_state is not None:
+        plateau_ctrl.load_state_dict(_resume_plateau_state)
+        print(f"ROP: restored from ckpt (mult={plateau_ctrl.mult} "
+              f"best={plateau_ctrl.best:.4f} drops={plateau_ctrl.n_drops})")
     if plateau_ctrl.enabled:
         print(f"ROP: patience={plateau_ctrl.patience} factor={plateau_ctrl.factor} "
               f"rel_threshold={plateau_ctrl.rel_threshold} min_mult={plateau_ctrl.min_mult} "
@@ -1679,8 +1728,12 @@ def main() -> None:
     # bottleneck was page-fault latency on random-access reads, not throughput.
     # Python 3.14's default forkserver has a handshake bug with torch DataLoader,
     # so we force fork. The worker doesn't touch CUDA, so fork is safe.
+    # Fold start_step into the stream seed: a plain `seed` resume re-draws
+    # exactly the windows already consumed in steps 0..start_step (same rng,
+    # same order) — silently double-training on them.
     _train_loader = torch.utils.data.DataLoader(
-        _TrainWindowIter(cfg.tokens_bin, 0, train_end, cfg.seq_len, seed=cfg.seed),
+        _TrainWindowIter(cfg.tokens_bin, 0, train_end, cfg.seq_len,
+                         seed=cfg.seed + start_step),
         batch_size=cfg.micro_batch_size,
         num_workers=1,
         pin_memory=True,
@@ -1705,6 +1758,7 @@ def main() -> None:
     running_loss_t = None
     running_tokens = 0
     last_gnorm_t = None
+    last_log_step = start_step  # first post-resume window may span < log_every steps
     t_win = time.time()
     last_save_time = time.time()
     if cfg.save_every_seconds > 0:
@@ -2002,10 +2056,12 @@ def main() -> None:
         if step % cfg.log_every == 0:
             dt = time.time() - t_win
             tps = running_tokens / dt
+            n_log_steps = max(1, step - last_log_step)
             avg = (
-                float((running_loss_t / cfg.log_every).item())
+                float((running_loss_t / n_log_steps).item())
                 if running_loss_t is not None else 0.0
             )
+            last_log_step = step
             gnorm = float(last_gnorm_t.item()) if last_gnorm_t is not None else None
             gnorm_s = f"{gnorm:.2f}" if gnorm is not None else "n/a"
             # Guard saturation diagnostic (only present on GuardedMuonClip).
@@ -2044,7 +2100,8 @@ def main() -> None:
             print(f"  [ckpt] saving at step {step} ({reason})...")
             save_checkpoint(step, mla_modules, optimizer, cfg, model=model,
                             engram_modules=engram_modules, optimizer_host=optimizer_host,
-                            optimizer_aux=optimizer_aux)
+                            optimizer_aux=optimizer_aux,
+                            plateau_state=plateau_ctrl.state_dict())
             _prune_old_checkpoints(Path(cfg.out_dir), cfg.max_saved_checkpoints)
             log({"step": step, "kind": "checkpoint"})
             last_save_time = time.time()
@@ -2055,7 +2112,8 @@ def main() -> None:
             print(f"[interrupt] saving at step {step} before exit...")
             save_checkpoint(step, mla_modules, optimizer, cfg, model=model,
                             engram_modules=engram_modules, optimizer_host=optimizer_host,
-                            optimizer_aux=optimizer_aux)
+                            optimizer_aux=optimizer_aux,
+                            plateau_state=plateau_ctrl.state_dict())
             log({"step": step, "kind": "checkpoint", "reason": "interrupt"})
             log_f.close()
             print(f"[interrupt] saved -> {cfg.out_dir}/step_{step:06d}. bye.")
@@ -2065,7 +2123,8 @@ def main() -> None:
     do_eval(step, prefix="final ")
     save_checkpoint(step, mla_modules, optimizer, cfg, model=model,
                     engram_modules=engram_modules, optimizer_host=optimizer_host,
-                    optimizer_aux=optimizer_aux)
+                    optimizer_aux=optimizer_aux,
+                    plateau_state=plateau_ctrl.state_dict())
     log_f.close()
     print(f"done. step {step} / {cfg.max_steps}  ckpt -> {cfg.out_dir}/step_{step:06d}")
 

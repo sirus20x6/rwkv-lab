@@ -223,7 +223,11 @@ def gqa_to_mla_svd(
         shape[head_axis + 1] = expand
         expanded = base.expand(*shape).contiguous()
         if noise_std > 0 and expand > 1:
-            noise = torch.randn(expanded.shape, generator=gen) * noise_std
+            noise = (
+                torch.randn(expanded.shape, generator=gen)
+                .to(expanded.device, expanded.dtype)
+                * noise_std
+            )
             # Keep the first replica un-noised so at zero-noise-limit we recover exact init.
             noise[(slice(None),) * (head_axis + 1) + (0,)] = 0
             expanded = expanded + noise
@@ -301,16 +305,12 @@ def gqa_to_mla_svd(
     if gqa_cfg.has_qk_norm and mla_cfg.has_qk_norm:
         q_norm_raw = gqa_sd[q_key.replace("q_proj.weight", "q_norm.weight")]
         k_norm_raw = gqa_sd[k_key.replace("k_proj.weight", "k_norm.weight")]
-        # Qwen's original layout: rope occupies first D_rope dims, nope the rest.
-        # MLA's internal per-head layout is [rope | nope] for rope_position="first"
-        # or [nope | rope] for "last" -- identical to Qwen for "first", flipped for "last".
-        if gqa_cfg.rope_position == "first":
-            out["q_norm.weight"] = q_norm_raw.contiguous().to(dtype)
-            out["k_norm.weight"] = k_norm_raw.contiguous().to(dtype)
-        else:
-            # reorder: original is [rope(D_rope), nope(D_nope)]; MLA wants [nope, rope].
-            out["q_norm.weight"] = torch.cat([q_norm_raw[D_rope:], q_norm_raw[:D_rope]]).contiguous().to(dtype)
-            out["k_norm.weight"] = torch.cat([k_norm_raw[D_rope:], k_norm_raw[:D_rope]]).contiguous().to(dtype)
+        # The MLA per-head layout mirrors the source's rope_position convention
+        # (see mla_rope_position above): "first" -> [rope | nope] on both sides,
+        # "last" -> [nope | rope] on both sides. Either way the norm weight
+        # carries over unchanged.
+        out["q_norm.weight"] = q_norm_raw.contiguous().to(dtype)
+        out["k_norm.weight"] = k_norm_raw.contiguous().to(dtype)
 
     # --- Output projection ---
     W_O_heads = W_O.view(H, Nq, D_v)
@@ -357,15 +357,20 @@ def reconstruction_error(
     V_gqa_full = x @ W_V_full
 
     K_gqa_heads = K_gqa_full.view(batch_tokens, Nq, gqa_cfg.head_dim)
-    K_gqa_nope = K_gqa_heads[:, :, :D_nope].reshape(batch_tokens, Nq * D_nope)
-    K_gqa_rope = K_gqa_heads[:, :, D_nope:]  # [T, Nq, D_rope]
+    if gqa_cfg.rope_position == "first":
+        K_gqa_rope = K_gqa_heads[:, :, :D_rope]  # [T, Nq, D_rope]
+        K_gqa_nope = K_gqa_heads[:, :, D_rope:].reshape(batch_tokens, Nq * D_nope)
+    else:
+        K_gqa_nope = K_gqa_heads[:, :, :D_nope].reshape(batch_tokens, Nq * D_nope)
+        K_gqa_rope = K_gqa_heads[:, :, D_nope:]  # [T, Nq, D_rope]
 
     # ---- MLA forward. Take one replica per original head for head-by-head comparison. ----
-    kv_a = mla_sd["kv_a_proj_with_mqa.weight"].float().T  # [H, R+D_rope]
+    kv_a = mla_sd["kv_a_proj_with_mqa.weight"].float().T  # [H, R+Nkr*D_rope]
     kv_b = mla_sd["kv_b_proj.weight"].float().T           # [R, Nh*(D_nope+D_v)]
     kv_a_out = x @ kv_a
     kv_lat = kv_a_out[:, :R]
-    k_rope_shared = kv_a_out[:, R:]
+    Nkr = mla_cfg.num_kv_rope_heads
+    k_rope_heads = kv_a_out[:, R:].view(batch_tokens, Nkr, D_rope)
 
     # Select the first replica of each original head (replica 0 is noise-free by construction).
     kv_b_heads = kv_b.view(R, Nq, expand, D_nope + D_v)[:, :, 0, :]  # [R, Nq, D_nope+D_v]
@@ -374,7 +379,13 @@ def reconstruction_error(
 
     K_mla_nope = kv_lat @ UK
     V_mla = kv_lat @ UV
-    K_mla_rope = k_rope_shared.unsqueeze(1).expand(batch_tokens, Nq, D_rope)
+    # Expand rope heads to one per original query head, mirroring _expand_gqa's
+    # KV->Q head mapping (each rope head serves Nq // Nkr consecutive q heads).
+    K_mla_rope = (
+        k_rope_heads.unsqueeze(2)
+        .expand(batch_tokens, Nkr, Nq // Nkr, D_rope)
+        .reshape(batch_tokens, Nq, D_rope)
+    )
 
     def rel_err(a: torch.Tensor, b: torch.Tensor) -> float:
         return (a - b).norm().item() / (b.norm().item() + 1e-9)
@@ -416,7 +427,10 @@ def kv_rank_spectrum(
     W_V = gqa_sd[v_key].float().T
     W_K_full = _expand_gqa(W_K, gqa_cfg.num_kv_heads, Nq, d)
     W_V_full = _expand_gqa(W_V, gqa_cfg.num_kv_heads, Nq, d)
-    W_K_nope = W_K_full.view(H, Nq, d)[:, :, :D_nope].reshape(H, Nq * D_nope)
+    if gqa_cfg.rope_position == "first":
+        W_K_nope = W_K_full.view(H, Nq, d)[:, :, d - D_nope:].reshape(H, Nq * D_nope)
+    else:
+        W_K_nope = W_K_full.view(H, Nq, d)[:, :, :D_nope].reshape(H, Nq * D_nope)
     W_combined = torch.cat([W_K_nope, W_V_full], dim=1)    # [H, Nq*(D_nope+D_v)]
 
     _, S, _ = torch.linalg.svd(W_combined, full_matrices=False)

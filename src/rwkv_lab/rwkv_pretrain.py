@@ -700,6 +700,9 @@ def main():
     ap.add_argument("--ema", type=float, default=0.0,
                     help="EMA decay for a shadow weight copy (e.g. 0.999); eval + checkpoint carry it. 0 = off")
     args = ap.parse_args()
+    if args.loop_iter_readout:
+        ap.error("--loop-iter-readout is only supported in convert_train.py "
+                 "(this harness implements no per-iteration readout loss)")
     if args.routing_free_moe and args.deepembed:
         ap.error("--routing-free-moe and --deepembed are alternative FFN designs")
     if not 0 <= args.routing_free_balance <= 1:
@@ -902,6 +905,17 @@ def main():
                "mixed_ctx": bool(args.ctx_buckets),
                "params_m": round(nparam / 1e6, 2)}, open(os.path.join(args.out, "loop_rw.json"), "w"))
 
+    heads = None
+    if any(w > 0 for w in [args.nextlat_weight, args.top_weight, args.lmtp_weight,
+                           args.bst_weight, args.jtp_weight]):
+        heads = LookaheadSystem(args.d_model, 65536, nextlat_weight=args.nextlat_weight,
+                                top_weight=args.top_weight, lmtp_weight=args.lmtp_weight,
+                                bst_weight=args.bst_weight, jtp_weight=args.jtp_weight,
+                                lm_head=model.head).to(dev, torch.bfloat16)
+        print(f"aux heads enabled={heads.enabled} extra_tokens={heads.extra_tokens}", flush=True)
+    # Widest window any train batch samples: T+1 targets plus the aux heads' future-token fetch.
+    width = T + 1 + (heads.extra_tokens if heads else 0)
+
     # Mixed context-length training: packed [rows, T] buckets at standard context sizes with
     # RECIPROCAL batch scaling — B_bucket = (batch * seq_len) / T_bucket — so a short-context step
     # runs high-batch and a long-context step low-batch, holding tokens/step and activation VRAM
@@ -933,16 +947,19 @@ def main():
         val_toks, train_docs = toks, None
     else:
         toks = np.memmap(args.data, dtype=np.uint16, mode="r")
-        n_val = args.val_windows * T
+        n_val = args.val_windows * (T + 1)                 # eval windows are T+1 wide
         val_toks, train_toks = toks[:n_val], toks[n_val:]
+        # FIXED val windows: deterministic evenly-spaced offsets, computed once — evals never
+        # consume the training RNG and always score the same windows.
+        val_offsets = np.linspace(0, len(val_toks) - (T + 1), args.val_windows).astype(np.int64)
         print(f"tokens: {len(toks)/1e6:.1f}M (val {len(val_toks)}, train {len(train_toks)/1e6:.1f}M)", flush=True)
 
     train_docs = None
     if args.doc_offsets:                                       # within-doc windows (no mid-doc cuts)
         allo = np.load(args.doc_offsets).astype(np.int64)
         ends = np.append(allo[1:], len(toks))
-        train_docs = [(int(s), int(e)) for s, e in zip(allo, ends) if s >= n_val and e - s >= T + 1]
-        print(f"doc-boundary batching: {len(train_docs)} train docs >= {T+1} tok", flush=True)
+        train_docs = [(int(s), int(e)) for s, e in zip(allo, ends) if s >= n_val and e - s >= width]
+        print(f"doc-boundary batching: {len(train_docs)} train docs >= {width} tok", flush=True)
 
     def batch_cpu(src, n, width=T + 1, sampler_rng=None):
         rgen = rng if sampler_rng is None else sampler_rng
@@ -960,6 +977,9 @@ def main():
         rows = []
         for _ in range(n):
             s, e = train_docs[int(rgen.integers(0, len(train_docs)))]
+            if e - s < width:                             # train_docs is pre-filtered; never silent
+                raise ValueError(f"doc [{s},{e}) shorter than sample width {width} — "
+                                 f"train_docs filter out of sync with batch width")
             i = int(rgen.integers(s, e - width + 1))
             rows.append(np.asarray(toks[i:i + width], dtype=np.int64))
         return torch.from_numpy(np.stack(rows))
@@ -1001,7 +1021,9 @@ def main():
         with torch.no_grad():
             tot = 0.0
             for i in range(0, args.val_windows, args.batch):
-                xc = batch_cpu(val_toks, min(args.batch, args.val_windows - i))
+                offs = val_offsets[i:i + args.batch]      # fixed windows: no training-RNG draw
+                xc = torch.from_numpy(np.stack(
+                    [np.asarray(val_toks[o:o + T + 1], dtype=np.int64) for o in offs]))
                 recall = None
                 if lmb is not None:
                     from rwkv_lab.engram_lmb import token_rosa_recall, RecallResult
@@ -1047,14 +1069,6 @@ def main():
             model.train()
             return tot / max(cnt, 1)
 
-    heads = None
-    if any(w > 0 for w in [args.nextlat_weight, args.top_weight, args.lmtp_weight,
-                           args.bst_weight, args.jtp_weight]):
-        heads = LookaheadSystem(args.d_model, 65536, nextlat_weight=args.nextlat_weight,
-                                top_weight=args.top_weight, lmtp_weight=args.lmtp_weight,
-                                bst_weight=args.bst_weight, jtp_weight=args.jtp_weight,
-                                lm_head=model.head).to(dev, torch.bfloat16)
-        print(f"aux heads enabled={heads.enabled} extra_tokens={heads.extra_tokens}", flush=True)
     if args.distributed == "fsdp2":
         if heads is not None or ema is not None:
             ap.error("FSDP2 currently requires auxiliary heads and EMA to be disabled")
@@ -1106,7 +1120,6 @@ def main():
     # sampling is a pure GPU gather — no per-step CPU gather, no H2D. This lets tiny models run
     # data-unbound at very high step rates (the memmap CPU path serializes the GPU behind Python).
     # Falls back to the CPU memmap sampler for corpora too large for VRAM.
-    width = T + 1 + (heads.extra_tokens if heads else 0)
     gpu_gb = len(train_toks) * 4 / 1e9
     use_gpu_data = buckets is None and (args.gpu_data == "on"
                                         or (args.gpu_data == "auto" and gpu_gb <= args.gpu_data_cap_gb
@@ -1129,9 +1142,11 @@ def main():
         if train_docs:                                          # doc-boundary: sample doc, then offset
             ds = torch.tensor([s - n_val for s, e in train_docs], device=dev)
             dl = torch.tensor([e - s for s, e in train_docs], device=dev)
+            if int(dl.min()) < width:                     # filter guarantees this; never read past doc end
+                raise ValueError(f"doc-boundary GPU sampler: doc shorter than width {width}")
             def sample_train():
                 di = torch.randint(0, ds.numel(), (args.batch,), device=dev)
-                maxoff = (dl[di] - width).clamp(min=0)
+                maxoff = dl[di] - width                    # >= 0: docs pre-filtered to >= width tokens
                 off = (torch.rand(args.batch, device=dev) * (maxoff + 1).float()).long().minimum(maxoff)
                 return tg[(ds[di] + off)[:, None] + ar[None, :]].long()
         else:                                                  # flat: uniform window over the corpus
@@ -1233,7 +1248,7 @@ def main():
             from rwkv_lab.distributed import clip_grad_norm
             gn = clip_grad_norm(model, args.grad_clip)
         else:
-            gn = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            gn = torch.nn.utils.clip_grad_norm_([p for _, p in named], args.grad_clip)
         opt.step(); step += 1
         if ema is not None:
             ema_update()
