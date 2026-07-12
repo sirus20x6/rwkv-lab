@@ -119,8 +119,15 @@ def _run(args: list[str]) -> str:
         return ""
 
 
+def _run_bytes(args: list[str]) -> bytes:
+    try:
+        return subprocess.check_output(args, stderr=subprocess.DEVNULL)
+    except Exception:
+        return b""
+
+
 def _compressed_git_diff() -> dict:
-    raw = _run(["git", "diff", "--binary", "HEAD"]).encode()
+    raw = _run_bytes(["git", "diff", "--binary", "HEAD"])
     # `git diff` omits untracked source files; include them verbatim with clear
     # boundaries so a dirty campaign really is reconstructable.
     for rel in _run(["git", "ls-files", "--others", "--exclude-standard"]).splitlines():
@@ -215,11 +222,12 @@ def record_trial(campaign_id: int, arm_id: int, seed: int, rung: int, budget: fl
         finished_ts,metrics_json,series_json,profile_json,rng_json,error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(campaign_id,arm_id,seed,rung,phase) DO UPDATE SET status=excluded.status,
         finished_ts=excluded.finished_ts,metrics_json=excluded.metrics_json,series_json=excluded.series_json,
-        profile_json=excluded.profile_json,rng_json=excluded.rng_json,error=excluded.error""",
+        profile_json=excluded.profile_json,rng_json=excluded.rng_json,error=excluded.error
+        RETURNING id""",
         (campaign_id, arm_id, seed, rung, float(budget), phase, status, started_ts or time.time(), time.time(),
          json.dumps(metrics) if metrics is not None else None, json.dumps(series or []),
          json.dumps(profile or {}), json.dumps(rng or {}), error or None))
-    tid = int(cur.lastrowid or 0); c.commit(); c.close(); return tid
+    tid = int(cur.fetchone()[0]); c.commit(); c.close(); return tid
 
 
 def record_comparison(campaign_id: int, arm_id: int, baseline_arm_id: int, metric: str,
@@ -228,7 +236,8 @@ def record_comparison(campaign_id: int, arm_id: int, baseline_arm_id: int, metri
     c.execute("""INSERT INTO comparisons(campaign_id,arm_id,baseline_arm_id,metric,phase,n,delta,
         ci_low,ci_high,p_value,effect_size,p_adjusted,significant,confirmed,details_json)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        ON CONFLICT(campaign_id,arm_id,metric,phase) DO UPDATE SET n=excluded.n,delta=excluded.delta,
+        ON CONFLICT(campaign_id,arm_id,metric,phase) DO UPDATE SET
+        baseline_arm_id=excluded.baseline_arm_id,n=excluded.n,delta=excluded.delta,
         ci_low=excluded.ci_low,ci_high=excluded.ci_high,p_value=excluded.p_value,
         effect_size=excluded.effect_size,p_adjusted=excluded.p_adjusted,
         significant=excluded.significant,confirmed=excluded.confirmed,details_json=excluded.details_json""",
@@ -278,12 +287,14 @@ def latest_by_config(task: str, metric: str = "acc", db: str | None = None) -> d
     rows = c.execute("SELECT ts,git_sha,config,seeds,metrics_json FROM results WHERE task=? ORDER BY ts",
                      (task,)).fetchall()
     c.close()
+    latest = {}
+    for row in rows:                                        # later rows overwrite -> keep latest
+        latest[row[2]] = row
     out = {}
-    for ts, sha, config, seeds, mj in rows:                 # later rows overwrite -> keep latest
+    for config, (ts, sha, _cfg, seeds, mj) in latest.items():
         m = json.loads(mj)
-        if metric in m:
-            mean, std = m[metric][0], m[metric][1]
-            out[config] = (mean, std, sha, ts, seeds)
+        if metric in m:                                     # newest row lacks metric -> absent
+            out[config] = (m[metric][0], m[metric][1], sha, ts, seeds)
     return out
 
 

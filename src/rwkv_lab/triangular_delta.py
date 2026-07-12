@@ -46,7 +46,8 @@ def qualify_triangular_backend(matrix: torch.Tensor, candidate: Callable[[torch.
         proposed = candidate(matrix).float()
         error = float((oracle - proposed).abs().max())
         identity = torch.eye(matrix.shape[-1], device=matrix.device).expand_as(matrix)
-        residual = float((matrix.float() @ proposed - identity).abs().max())
+        # Residual uses the same operand the oracle inverts: tril(matrix).
+        residual = float((torch.tril(matrix.float()) @ proposed - identity).abs().max())
 
         def median(fn):
             values = []

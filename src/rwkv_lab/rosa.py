@@ -55,9 +55,11 @@ import torch.nn as nn
 def retrieve_routes(aq: torch.Tensor, ak: torch.Tensor, max_match: int = 64) -> torch.Tensor:
     """aq, ak: int symbol streams [B, T, R] (query / key). Returns tau [B, R, T] long.
 
-    For each (b, r, t): find the LONGEST L (<= max_match) such that the query suffix
-    aq[b, t-L+1 : t+1, r] occurs as a contiguous run in the keys ak[b, 0:t, r] ending
-    at some e < t; pick the MOST RECENT such e; tau = e + 1 (the successor, Eq. 16).
+    Mirrors rosa_sam / rosa_reference exactly: for each (b, r, t) find the LONGEST L
+    (<= max_match) such that the query suffix aq[b, t-L+1 : t+1, r] occurs as a
+    contiguous run in the keys ak[b, 0:t-1+1, r] ending at some e in [L-1, t-1]; take
+    the EARLIEST such e (firstpos); tau = e + 1 (the successor, Eq. 16), reported only
+    if it is STRICTLY causal (tau < t) — no fallback to a shorter suffix otherwise.
     tau is left at -1 when no match exists. max_match caps L for the naive search
     (the SAM finds the true longest; the cap only matters for very long exact repeats)."""
     B, T, R = aq.shape
@@ -74,16 +76,16 @@ def retrieve_routes(aq: torch.Tensor, ak: torch.Tensor, max_match: int = 64) -> 
                 # longest suffix first; stop at the first L that has any occurrence
                 for L in range(upper, 0, -1):
                     pat = qcol[t - L + 1:t + 1]
-                    # scan key end-positions e in [L-1, t-1] for the MOST RECENT match
-                    for e in range(t - 1, L - 2, -1):
+                    # scan key end-positions e in [L-1, t-1] for the EARLIEST match
+                    for e in range(L - 1, t):
                         if kcol[e - L + 1:e + 1] == pat:
                             best_e = e
                             break
                     if best_e >= 0:
                         break
                 if best_e >= 0:
-                    s = best_e + 1            # successor position
-                    if s <= t:                # causal: read at or before current step
+                    s = best_e + 1            # successor of the earliest occurrence
+                    if s < t:                 # causal gate: strictly historical (matches rosa_sam)
                         tau[b][r][t] = s
     return torch.tensor(tau, dtype=torch.long, device=aq.device)
 
@@ -97,6 +99,8 @@ try:
 except Exception:                                            # pragma: no cover
     _HAVE_SAM = False
     _HAVE_CUDA_SAM = False
+
+_WARNED_FALLBACK = False                                     # one-time naive-fallback warning
 
 
 def _retrieve(aq: torch.Tensor, ak: torch.Tensor, M: int) -> torch.Tensor:
@@ -115,8 +119,10 @@ def _pack_bits(bits: torch.Tensor, M: int) -> torch.Tensor:
     bits packed little-endian into an integer in {0..2^M-1}  (Eqs. 13-15)."""
     B, T, C = bits.shape
     R = C // M
-    w = (2 ** torch.arange(M, device=bits.device)).to(bits.dtype)       # [M]
-    return (bits.view(B, T, R, M) * w).sum(-1).long()                   # [B, T, R]
+    # Sum in an exact integer dtype: activation dtypes like bf16 cannot represent
+    # all integers > 256, which would corrupt packed symbols for M >= 9.
+    w = 2 ** torch.arange(M, device=bits.device, dtype=torch.long)      # [M]
+    return (bits.view(B, T, R, M).long() * w).sum(-1)                   # [B, T, R]
 
 
 class _RosaRetrieve(torch.autograd.Function):
@@ -126,7 +132,7 @@ class _RosaRetrieve(torch.autograd.Function):
     learned affine (e0,e1,W_out) is applied OUTSIDE so autograd handles it exactly."""
 
     @staticmethod
-    def forward(ctx, q_vec, k_vec, v_vec, M, max_match):
+    def forward(ctx, q_vec, k_vec, v_vec, M, max_match, needs_grad=False):
         B, T, C = q_vec.shape
         R = C // M
         qb = (q_vec > 0).to(q_vec.dtype)
@@ -146,8 +152,25 @@ class _RosaRetrieve(torch.autograd.Function):
             tau0 = torch.from_numpy(t0_np).to(q_vec.device)    # [B,R,T,M] dest if query bit j = 0
             tau1 = torch.from_numpy(t1_np).to(q_vec.device)    # [B,R,T,M] dest if query bit j = 1
         else:
+            # The naive matcher has no counterfactual (Eq. 25) tables: recomputing the
+            # retrieval with each query bit flipped would be another O(M*R*T^2) pass.
+            # Refuse silently-zero W_q gradients in training; allow inference only.
+            # (needs_grad is computed by the caller: inside Function.forward grad mode
+            # is off and inputs are detached, so requires_grad can't be read here.)
+            if needs_grad:
+                raise RuntimeError(
+                    "ROSA fallback matcher cannot provide counterfactual W_q gradients "
+                    "(Eq. 25); install numba so the SAM kernel (rosa_sam) is available, "
+                    "or run under torch.no_grad() for inference.")
+            global _WARNED_FALLBACK
+            if not _WARNED_FALLBACK:
+                _WARNED_FALLBACK = True
+                import warnings
+                warnings.warn("ROSA: numba SAM kernel unavailable; using the naive "
+                              "O(T^2) matcher (forward-only, no counterfactual "
+                              "gradients — NOT equivalent to the SAM for training).")
             tau = retrieve_routes(aq, ak)
-            tau0 = tau.new_full((B, R, T, M), -1)              # no CF -> Q grad = 0 (fallback)
+            tau0 = tau.new_full((B, R, T, M), -1)              # inference-only: Q grad path unused
             tau1 = tau.new_full((B, R, T, M), -1)
         m = (tau >= 0)                                          # [B,R,T]
         av_rt = torch.gather(av.transpose(1, 2), 2, tau.clamp(min=0)) * m   # a^(v) at tau
@@ -188,7 +211,7 @@ class _RosaRetrieve(torch.autograd.Function):
         sig_q = torch.sigmoid(q_vec)
         gq = contrib * (sig_q * (1 - sig_q))
         # K gradient (Eq. 26) deferred: run-level counterfactual mutates the SAM globally (App. C.6)
-        return gq, None, gv, None, None
+        return gq, None, gv, None, None, None
 
 
 class RosaLayer(nn.Module):
@@ -220,7 +243,13 @@ class RosaLayer(nn.Module):
     def injection(self, H: torch.Tensor) -> torch.Tensor:
         """inj = ROSA(H), shape [B,T,C]. Exact no-op while e0==e1 (start of training)."""
         U = self.norm(H)
-        bits, mC = _RosaRetrieve.apply(self.Wq(U), self.Wk(U), self.Wv(U), self.M, self.max_match)
+        qv, kv, vv = self.Wq(U), self.Wk(U), self.Wv(U)
+        # Only the counterfactual W_q gradient (Eq. 25, via tau0/tau1) is
+        # missing on the fallback path; value-path grads (e0/e1/Wout/Wv) are
+        # exact there. Gate the fallback's hard error on qv alone so
+        # value-only training still runs without numba.
+        needs_grad = torch.is_grad_enabled() and qv.requires_grad
+        bits, mC = _RosaRetrieve.apply(qv, kv, vv, self.M, self.max_match, needs_grad)
         delta = self.e1 - self.e0
         y = mC * (self.e0 + delta * bits)                      # affine readout       (Eqs. 20-21)
         out = self.Wout(y)                                     #                       (Eq. 22)
@@ -268,7 +297,16 @@ def attach_rosa(model, layer_indices, hidden_size, *, M=4, mode="post",
     an nn.ModuleDict {str(idx): RosaLayer}. No-op at init (inj==0 while e0==e1==0).
 
     The hook adds inj to the layer OUTPUT (after attn+MLP); the paper's exact spot is
-    after attn, before MLP (Eqs.1-3) — fold into the block forward if you want that."""
+    after attn, before MLP (Eqs.1-3) — fold into the block forward if you want that.
+
+    Only mode="post" is supported here: the pre-attn time-mix (Eqs. 4-7, RosaLayer.forward
+    with mode="pre") must rewrite the ATTENTION INPUT, which a forward (output) hook cannot
+    do — fold RosaLayer into the block forward for that."""
+    if mode != "post":
+        raise NotImplementedError(
+            "attach_rosa only supports mode='post'; mode='pre' needs the alpha0 time-mix "
+            "applied to the attention input (RosaLayer.forward), which cannot be done from "
+            "a forward hook — integrate RosaLayer into the block forward instead.")
     import torch.nn as _nn
     mod = model
     for part in resolve.split("."):

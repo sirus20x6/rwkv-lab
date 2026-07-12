@@ -147,11 +147,22 @@ def load_checkpoint(path: str | Path, model: nn.Module, optimizer: torch.optim.O
     model_state, optim_state = get_state_dict(model, optimizer, options=options)
     rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
     saved_world = int(manifest.get("world_size", 1))
-    source_rank = rank if rank < saved_world else 0
-    payload = manifest.get("rank_extras", [{}])[source_rank]
-    tensor_extra = {f"rank_{source_rank}.{key}": torch.empty(
-                        spec["shape"], dtype=_dtype(spec["dtype"]))
-                    for key, spec in payload.get("tensors", {}).items()}
+    if rank < saved_world:
+        payload = manifest.get("rank_extras", [{}])[rank]
+        tensor_extra = {f"rank_{rank}.{key}": torch.empty(
+                            spec["shape"], dtype=_dtype(spec["dtype"]))
+                        for key, spec in payload.get("tensors", {}).items()}
+    else:
+        # Resuming into a LARGER world: this rank has no saved per-rank state.
+        # Take only the (shared) JSON extras from rank 0; do NOT copy rank-0's
+        # per-rank tensor extras (e.g. RNG state), which would give duplicated /
+        # correlated random streams — leave this rank's fresh harness-seeded RNG.
+        payload = {"json": manifest.get("rank_extras", [{}])[0].get("json", {}),
+                   "tensors": {}}
+        tensor_extra = {}
+        print(f"[rwkv_lab.distributed] rank {rank} >= saved world_size {saved_world}: "
+              "loading shared JSON extras from rank 0 and skipping per-rank tensor "
+              "extras (fresh per-rank RNG kept)", flush=True)
     state = {"model": model_state, "optimizer": optim_state, "extra": tensor_extra}
     dcp.load(state, checkpoint_id=str(source))
     set_state_dict(model, optimizer, model_state_dict=state["model"],
