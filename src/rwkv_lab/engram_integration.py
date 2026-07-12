@@ -20,6 +20,7 @@ from inside that scope.
 from __future__ import annotations
 
 import sys
+import warnings
 from pathlib import Path
 from typing import Any, Callable
 
@@ -31,6 +32,10 @@ if str(_ENGRAM_PATH) not in sys.path:
     sys.path.insert(0, str(_ENGRAM_PATH))
 
 from engram_ext.engram_module import EngramConfig, EngramModule  # noqa: E402
+
+# Once-per-run flag: warn loudly (once) when a forward carries no token ids
+# and Engram is therefore silently inactive for that forward.
+_ENGRAM_NO_IDS_WARNED = False
 
 
 # ---------------------------------------------------------------------------
@@ -171,8 +176,23 @@ def install_engram(
     orig_base_forward: Callable[..., Any] = base.forward
 
     def base_forward_with_stash(*args, **kwargs):
-        # HF Qwen3.5 model forward uses `input_ids` as a named arg.
+        # HF Qwen3.5 model forward uses `input_ids` as a named arg, but also
+        # accept a positional first argument that looks like token ids.
         ids = kwargs.get("input_ids", None)
+        if ids is None and args:
+            cand = args[0]
+            if (torch.is_tensor(cand) and cand.dim() == 2
+                    and not cand.is_floating_point() and not cand.is_complex()):
+                ids = cand
+        if ids is None:
+            global _ENGRAM_NO_IDS_WARNED
+            if not _ENGRAM_NO_IDS_WARNED:
+                _ENGRAM_NO_IDS_WARNED = True
+                warnings.warn(
+                    "Engram: forward received no token ids (inputs_embeds-only "
+                    "call?) — Engram modules are INACTIVE for such forwards. "
+                    "This warning is emitted once per run.",
+                    RuntimeWarning, stacklevel=2)
         # We intentionally do NOT clear this in a finally block. Gradient
         # checkpointing re-executes layer forwards during backward, and the
         # Engram-wrapped layer reads this attribute — if we nulled it out

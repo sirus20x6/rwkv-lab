@@ -391,6 +391,10 @@ def run_loop(args) -> dict[str, Any]:
         _atomic_json(iteration_dir / "proposal_receipt.json", receipt)
 
         candidate_dir = iteration_dir / "candidate"
+        result_path = candidate_dir / "result.json"
+        if result_path.exists():                    # stale result from an aborted prior attempt:
+            result_path.rename(                     # move aside so only THIS run can produce one
+                result_path.with_name(f"result.stale.{int(time.time())}.json"))
         command = build_train_command(
             args,
             proposal,
@@ -415,7 +419,6 @@ def run_loop(args) -> dict[str, Any]:
             except subprocess.TimeoutExpired:
                 log.write(f"trainer exceeded hard {args.max_round_seconds}s controller timeout\n")
                 returncode = 124
-        result_path = candidate_dir / "result.json"
         result = (
             json.loads(result_path.read_text())
             if result_path.exists()

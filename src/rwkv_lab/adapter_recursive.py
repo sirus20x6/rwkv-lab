@@ -203,13 +203,18 @@ def run_loop(args) -> dict[str, Any]:
                             "--quant-backend", args.quant_backend, "--packing",
                             (args.packing if len(proposal["examples"]) > 1 else "audit")]
         with (directory / "campaign.log").open("w", buffering=1) as log:
-            completed = subprocess.run(campaign_command, cwd=Path.cwd(),
-                                       env={**os.environ, "PYTHONPATH": "src"},
-                                       stdout=log, stderr=subprocess.STDOUT, check=False,
-                                       timeout=args.round_timeout)
+            try:
+                completed = subprocess.run(campaign_command, cwd=Path.cwd(),
+                                           env={**os.environ, "PYTHONPATH": "src"},
+                                           stdout=log, stderr=subprocess.STDOUT, check=False,
+                                           timeout=args.round_timeout)
+                returncode = completed.returncode
+            except subprocess.TimeoutExpired:
+                log.write(f"campaign exceeded hard {args.round_timeout}s controller timeout\n")
+                returncode = 124
         promotion_path = campaign_dir / f"promotion-{proposal['objective']}.json"
         promotion = json.loads(promotion_path.read_text()) if promotion_path.is_file() else {}
-        accepted = completed.returncode == 0 and bool(promotion.get("eligible"))
+        accepted = returncode == 0 and bool(promotion.get("eligible"))
         lineage = None
         if accepted:
             parent_path = directory / "promoted-parent.pt"
@@ -221,7 +226,9 @@ def run_loop(args) -> dict[str, Any]:
                                for name, passed in (run.get("promotion") or {}).get("gates", {}).items()
                                if not passed})
         state["iterations"].append({"iteration": iteration, "proposal": receipt,
-                                    "accepted": accepted, "failed_gates": failed_gates,
+                                    "accepted": accepted, "returncode": returncode,
+                                    "timed_out": returncode == 124,
+                                    "failed_gates": failed_gates,
                                     "campaign": str(campaign_dir / "posttrain-campaign.json"),
                                     "promotion_receipt": str(promotion_path), "lineage": lineage,
                                     "preserved_adapter": promotion.get("selected_adapter", "")})

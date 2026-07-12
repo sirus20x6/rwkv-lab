@@ -21,7 +21,12 @@ class KVMState:
 def state_budget(step: int, initial: int, mode: str = "fixed", maximum: int | None = None) -> int:
     if mode == "fixed": value = initial
     elif mode == "sqrt": value = initial + int(math.sqrt(max(step, 0)))
-    elif mode == "saturating": value = initial + int(math.sqrt(max(step, 0)))
+    elif mode == "saturating":
+        # Approaches `maximum` asymptotically: initial + cap*(1 - exp(-step/cap)).
+        if maximum is None:
+            raise ValueError("saturating budget mode requires maximum")
+        cap = max(maximum - initial, 0)
+        value = initial + round(cap * (1.0 - math.exp(-max(step, 0) / max(cap, 1))))
     else: raise ValueError("mode must be fixed, sqrt, or saturating")
     return min(value, maximum) if maximum is not None else value
 
