@@ -33,6 +33,7 @@ class Qualification:
     parity_passed: bool
     performance_passed: bool
     adopted: bool
+    parameter_gradient_max_abs: float = 0.0
 
 
 def _timed(fn: Callable, inputs: tuple, *, warmup: int = 3, repeats: int = 10) -> float:
@@ -51,7 +52,8 @@ def _timed(fn: Callable, inputs: tuple, *, warmup: int = 3, repeats: int = 10) -
 
 
 def qualify_callable(name: str, eager: Callable, candidate: Callable, inputs: tuple, *,
-                     tolerance: float = 2e-5, minimum_speedup: float = 1.02) -> Qualification:
+                     tolerance: float = 2e-5, minimum_speedup: float = 1.02,
+                     params: tuple[torch.Tensor, ...] | None = None) -> Qualification:
     detached = tuple(value.detach().clone().requires_grad_(value.requires_grad)
                      if isinstance(value, torch.Tensor) else value for value in inputs)
     eager_out = eager(*inputs)
@@ -66,13 +68,50 @@ def qualify_callable(name: str, eager: Callable, candidate: Callable, inputs: tu
                                              retain_graph=True)
         gradient_error = max(float((left.float() - right.float()).abs().max())
                              for left, right in zip(eager_grad, candidate_grad))
+    # Pair each eager parameter with its candidate counterpart. A shared-param
+    # candidate (torch.compile wrapper) pairs a param with itself; a candidate
+    # with its OWN copied parameters (handwritten kernel) pairs by name —
+    # differentiating the union instead would give one-sided None grads and
+    # unconditionally fail parity for exactly that case.
+    if params is not None:
+        param_pairs = [(p, p) for p in params]
+    elif isinstance(eager, nn.Module) and isinstance(candidate, nn.Module):
+        def _named(mod: nn.Module) -> dict[str, torch.Tensor]:
+            return {k.removeprefix("_orig_mod."): v for k, v in mod.named_parameters()
+                    if v.requires_grad}
+        e_named, c_named = _named(eager), _named(candidate)
+        param_pairs = [(e_named[k], c_named[k]) for k in e_named if k in c_named]
+    elif isinstance(eager, nn.Module):
+        param_pairs = [(p, p) for p in eager.parameters() if p.requires_grad]
+    elif isinstance(candidate, nn.Module):
+        param_pairs = [(p, p) for p in candidate.parameters() if p.requires_grad]
+    else:
+        param_pairs = []
+    param_gradient_error = 0.0
+    if param_pairs and eager_out.requires_grad and candidate_out.requires_grad:
+        eager_pgrad = torch.autograd.grad(eager_out.float().sum(),
+                                          [e for e, _ in param_pairs],
+                                          retain_graph=True, allow_unused=True)
+        candidate_pgrad = torch.autograd.grad(candidate_out.float().sum(),
+                                              [c for _, c in param_pairs],
+                                              retain_graph=True, allow_unused=True)
+        for left, right in zip(eager_pgrad, candidate_pgrad):
+            if left is None and right is None:
+                continue
+            if left is None or right is None:
+                param_gradient_error = float("inf")
+                continue
+            param_gradient_error = max(param_gradient_error,
+                                       float((left.float() - right.float()).abs().max()))
     eager_ms = _timed(eager, inputs)
     candidate_ms = _timed(candidate, detached)
     speedup = eager_ms / max(candidate_ms, 1e-12)
-    parity = max_abs <= tolerance and gradient_error <= tolerance
+    parity = (max_abs <= tolerance and gradient_error <= tolerance
+              and param_gradient_error <= tolerance)
     performance = speedup >= minimum_speedup
     return Qualification(name, max_abs, gradient_error, eager_ms, candidate_ms, speedup,
-                         parity, performance, parity and performance)
+                         parity, performance, parity and performance,
+                         parameter_gradient_max_abs=param_gradient_error)
 
 
 def score_preference_pairs(model: nn.Module, chosen_ids: torch.Tensor, chosen_labels: torch.Tensor,

@@ -225,13 +225,26 @@ class SpectralMuon(Optimizer):
 
     def load_state_dict(self, state_dict):
         # Optimizer.load_state_dict casts float state to each param's dtype (bf16 for a
-        # bf16 model), silently re-quantizing the fp32 state on every resume; undo it.
-        # Old bf16-state ckpts upcast losslessly through the same path.
+        # bf16 model) BEFORE any post-hook can run, silently re-quantizing the fp32
+        # state on every resume. Upcasting afterwards cannot restore the lost bits, so
+        # re-install the ORIGINAL tensors (as fp32, on the param's device) after the
+        # parent load. Old bf16-state ckpts upcast losslessly through the same path.
+        saved_state = {k: dict(v) for k, v in state_dict.get("state", {}).items()}
         super().load_state_dict(state_dict)
-        for st in self.state.values():
+        id_map = {
+            old_id: p
+            for old_ids, g in zip(
+                (sg["params"] for sg in state_dict["param_groups"]), self.param_groups
+            )
+            for old_id, p in zip(old_ids, g["params"])
+        }
+        for old_id, st in saved_state.items():
+            p = id_map.get(old_id)
+            if p is None or p not in self.state:
+                continue
             for k, v in st.items():
-                if torch.is_tensor(v) and v.is_floating_point() and v.dtype != torch.float32:
-                    st[k] = v.float()
+                if torch.is_tensor(v) and v.is_floating_point():
+                    self.state[p][k] = v.to(device=p.device, dtype=torch.float32)
 
     @staticmethod
     def _is_muon(grp, p):

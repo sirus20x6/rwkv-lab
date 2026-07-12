@@ -930,7 +930,7 @@ class SharedDepthCore(nn.Module):
     ]:
         mixer_kind = self.mixer_for_loop(loop_index)
 
-        x = depth_state.layers[0]
+        x = depth_state.layers[-1]
         new_hidden_layers: List[Tensor] = []
         new_memory_layers: List[Tensor] = []
         branch_probs: List[Tensor] = []
@@ -1584,7 +1584,12 @@ def composite_training_loss(
             )
         hard_per_token = hard_per_token * sample_weights
 
-    hard_nll = hard_per_token[valid_mask].mean()
+    if valid_mask.any():
+        hard_nll = hard_per_token[valid_mask].mean()
+    else:
+        # All-ignored batch: mean over an empty selection is NaN and would
+        # poison the total loss; use a graph-connected zero instead.
+        hard_nll = hard_per_token.sum() * 0.0
 
     total = cfg.hard_nll_weight * hard_nll
     losses: Dict[str, Tensor] = {

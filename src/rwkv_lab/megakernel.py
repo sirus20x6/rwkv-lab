@@ -139,7 +139,7 @@ if _HAVE_TRITON:
         channel = head * N + offs
         wkv = tl.load(wkv_ptr + base, mask=mask, other=0.0).to(tl.float32)
         mean = tl.sum(wkv, axis=0) / N
-        centered = wkv - mean
+        centered = tl.where(mask, wkv - mean, 0.0)
         variance = tl.sum(centered * centered, axis=0) / N
         normalized = centered * tl.rsqrt(variance + EPS)
         weight = tl.load(norm_weight_ptr + channel, mask=mask, other=0.0).to(tl.float32)
@@ -217,7 +217,7 @@ if _HAVE_TRITON:
                  mask=mask_k[:, None] & mask_v[None, :])
 
         mean = tl.sum(wkv, axis=0) / V
-        centered = wkv - mean
+        centered = tl.where(mask_v, wkv - mean, 0.0)
         variance = tl.sum(centered * centered, axis=0) / V
         channel = head * V + offs_v
         weight = tl.load(norm_weight_ptr + channel, mask=mask_v, other=0.0).to(tl.float32)

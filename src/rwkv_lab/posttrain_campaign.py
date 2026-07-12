@@ -147,10 +147,18 @@ def _execute_arm(args, objective: str, seed: int, phase: str, run_dir: Path,
     if state.get("command_sha256") != command_hash:
         raise ValueError(f"saved arm command differs for {phase}/{objective}/seed-{seed}")
     if args.resume and state.get("status") == "complete" and result_path.is_file():
-        result = json.loads(result_path.read_text())
-        if result.get("schema") == "rwkv-lab.posttrain-result.v1":
+        try:
+            result = json.loads(result_path.read_text())
+            cached_valid = (result.get("schema") == "rwkv-lab.posttrain-result.v1" and
+                            result.get("objective") == objective and
+                            int(result.get("seed")) == seed)
+        except (ValueError, TypeError, json.JSONDecodeError):
+            cached_valid = False
+        if cached_valid:
             return {"result": result, "returncode": 0, "attempts": len(state["attempts"]),
                     "resumed": True, "device": device}
+        print(f"resume: cached posttrain-result.json for {phase}/{objective}/seed-{seed} "
+              f"failed objective/seed validation; ignoring cache and rerunning", flush=True)
     last_returncode = 1
     for retry in range(args.retries + 1):
         attempt = len(state["attempts"]) + 1

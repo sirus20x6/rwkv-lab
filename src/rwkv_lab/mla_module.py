@@ -252,6 +252,15 @@ class MLAAttention(nn.Module):
         # cache use the exact absorbed formulation and never expand cached V.
         cached = None
         if use_cache:
+            if past_key_value is None:
+                # forward returns (output, None) — there is no return slot to hand a
+                # fresh cache back through, so honoring use_cache requires a mutable
+                # Cache object; silently dropping the request would be a no-op cache.
+                raise ValueError(
+                    "use_cache=True requires a Cache object in past_key_value; "
+                    "MLAAttention cannot return a new cache (its return contract is "
+                    "(output, None))"
+                )
             c_lat, c_rope, c_inv = self._cache_components(
                 kv_lat, k_rope_shared, k_raw, cos, sin
             )
@@ -264,8 +273,6 @@ class MLAAttention(nn.Module):
                         old = past_key_value.key_cache[self.layer_idx]
                         past_len = 0 if not torch.is_tensor(old) or not old.numel() else old.shape[-2]
                 cached = self._update_cache(past_key_value, c_lat, c_rope, c_inv)
-            else:
-                cached = (c_lat, c_rope, c_inv)
 
         if past_key_value is not None and past_len > 0:
             attn_h = self._latent_cached_attention(q, *cached, attention_mask, past_len)

@@ -40,17 +40,28 @@ class HiLSAttention(nn.Module):
         q, k, v = self.qkv(hidden).chunk(3, dim=-1)
         q, k, v = [item.view(B, T, H, D).transpose(1, 2) for item in (q, k, v)]
         chunks = (T + C - 1) // C
+        lk = self.landmark_k(k)  # B,H,T,L
         landmark = []
+        prefix = torch.empty_like(lk)  # causal prefix mean within each chunk
         for index in range(chunks):
             start, end = index * C, min(T, (index + 1) * C)
-            landmark.append(self.landmark_k(k[:, :, start:end]).mean(dim=2))
+            segment = lk[:, :, start:end]
+            landmark.append(segment.mean(dim=2))
+            counts = torch.arange(1, end - start + 1, device=lk.device,
+                                  dtype=lk.dtype).view(1, 1, -1, 1)
+            prefix[:, :, start:end] = segment.cumsum(dim=2) / counts
         landmarks = torch.stack(landmark, dim=2)  # B,H,chunks,L
         outputs = []
         scale = 1.0 / math.sqrt(D)
         for token in range(T):
             current = token // C
+            # Completed chunks keep their full-chunk mean; the token's own
+            # (partial) chunk uses the prefix mean over positions <= token so
+            # no future landmark keys leak into retrieval or fusion weights.
+            visible = torch.cat((landmarks[:, :, :current],
+                                 prefix[:, :, token].unsqueeze(2)), dim=2)
             retrieval = torch.einsum("bhl,bhcl->bhc", self.landmark_q(q[:, :, token]),
-                                     landmarks[:, :, :current + 1])
+                                     visible)
             selected = retrieval.topk(min(self.top_chunks, current + 1), dim=-1).indices
             per_chunk, chunk_scores = [], []
             for rank in range(selected.shape[-1]):
