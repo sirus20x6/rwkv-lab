@@ -15,6 +15,7 @@ Emits the dashboard schema to runs/<run-name>/ (train = distill loss, eval = ppl
 """
 from __future__ import annotations
 
+import os
 import sys
 sys.modules.setdefault("torchvision", None)
 
@@ -89,7 +90,11 @@ def load_student(model_dir, rwkv_ckpt, decay_cap_delta, device, dtype, force_hyp
         if meta_lc > 1:
             raise SystemExit(f"loop_count={meta_lc} but layer state dicts are bare (no core.*)")
         looped, loop_count = False, 0
-    aneg = bool(ck.get("allow_neg_eigval", False))     # constructor state (_a_scale), NOT in state_dict
+    if "allow_neg_eigval" not in ck:
+        print("WARNING: artifact metadata has no 'allow_neg_eigval' key; ASSUMING True to match "
+              "convert_train's training-side default (a-scale 2). If these layers were trained "
+              "with allow_neg_eigval=False this silently changes the layer function.", flush=True)
+    aneg = bool(ck.get("allow_neg_eigval", True))      # constructor state (_a_scale), NOT in state_dict
     gate_cap = float(ck.get("gate_cap", 0.0) or 0.0)   # constructor state too (assemble_looped records it)
 
     def _gate_mode_of(sd):
@@ -441,7 +446,10 @@ def main():
                     blob.update(converted=list(converted), loop_count=loop_count,
                                 gate_cap=gate_cap, allow_neg_eigval=aneg,
                                 stream_cursor=0, batch=1)
-                torch.save(blob, args.out)
+                out_path = Path(args.out)
+                tmp_path = out_path.with_name(out_path.name + ".tmp")
+                torch.save(blob, tmp_path)
+                os.replace(tmp_path, out_path)
                 if la is not None:  # training-only aux heads, sidecar for resume/inspection
                     # CPU tensors (codex #5); non-.pt name so layer-ckpt globs
                     # like assemble_looped's `*.pt` never sweep it up (codex #6)

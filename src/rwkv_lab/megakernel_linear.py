@@ -100,7 +100,7 @@ if _HAVE_TRITON:
         offs_k = tl.arange(0, BLOCK_K)
         mask_n = offs_n < N
         mask_k = offs_k < K
-        x = tl.load(x_ptr + batch * K + offs_k, mask=mask_k, other=0.0)
+        x = tl.load(x_ptr + batch * K + offs_k, mask=mask_k, other=0.0).to(tl.float32)
         if TRANSPOSED:
             offsets = offs_k[:, None] * N + offs_n[None, :]
         else:
@@ -108,11 +108,12 @@ if _HAVE_TRITON:
         weight = tl.load(
             weight_ptr + offsets,
             mask=mask_k[:, None] & mask_n[None, :], other=0.0,
-        )
+        ).to(tl.float32)
         result = tl.sum(x[:, None] * weight, axis=0)
         if HAS_BIAS:
-            result += tl.load(bias_ptr + offs_n, mask=mask_n, other=0.0)
-        tl.store(out_ptr + batch * N + offs_n, result, mask=mask_n)
+            result += tl.load(bias_ptr + offs_n, mask=mask_n, other=0.0).to(tl.float32)
+        tl.store(out_ptr + batch * N + offs_n,
+                 result.to(out_ptr.dtype.element_ty), mask=mask_n)
 
     def _launch_gemv(
         x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, *,
@@ -179,7 +180,7 @@ if _HAVE_TRITON:
         input_row = batch * K
         if DISTINCT_INPUT:
             input_row = (batch * 3 + projection) * K
-        mixed = tl.load(x_ptr + input_row + offs_k, mask=mask_k, other=0.0)
+        mixed = tl.load(x_ptr + input_row + offs_k, mask=mask_k, other=0.0).to(tl.float32)
         weight_offsets = (
             projection * N * K
             + offs_n[None, :] * K + offs_k[:, None]
@@ -187,13 +188,15 @@ if _HAVE_TRITON:
         weight = tl.load(
             weight_ptr + weight_offsets,
             mask=mask_n[None, :] & mask_k[:, None], other=0.0,
-        )
+        ).to(tl.float32)
         result = tl.sum(mixed[:, None] * weight, axis=0)
         if HAS_BIAS:
             result += tl.load(
-                bias_ptr + projection * N + offs_n, mask=mask_n, other=0.0)
+                bias_ptr + projection * N + offs_n, mask=mask_n, other=0.0
+            ).to(tl.float32)
         output_row = (batch * 3 + projection) * N
-        tl.store(out_ptr + output_row + offs_n, result, mask=mask_n)
+        tl.store(out_ptr + output_row + offs_n,
+                 result.to(out_ptr.dtype.element_ty), mask=mask_n)
 
     @triton.autotune(configs=_GEMV_CONFIGS, key=["K", "N"], cache_results=True)
     @triton.jit
@@ -209,17 +212,18 @@ if _HAVE_TRITON:
         mask_n = offs_n < N
         mask_k = offs_k < K
         hidden = tl.load(
-            hidden_ptr + batch * K + offs_k, mask=mask_k, other=0.0)
+            hidden_ptr + batch * K + offs_k, mask=mask_k, other=0.0).to(tl.float32)
         hidden = tl.maximum(hidden, 0.0)
         hidden *= hidden
         weight = tl.load(
             weight_ptr + offs_n[None, :] * K + offs_k[:, None],
             mask=mask_n[None, :] & mask_k[:, None], other=0.0,
-        )
+        ).to(tl.float32)
         result = tl.sum(hidden[:, None] * weight, axis=0)
         if HAS_BIAS:
-            result += tl.load(bias_ptr + offs_n, mask=mask_n, other=0.0)
-        tl.store(out_ptr + batch * N + offs_n, result, mask=mask_n)
+            result += tl.load(bias_ptr + offs_n, mask=mask_n, other=0.0).to(tl.float32)
+        tl.store(out_ptr + batch * N + offs_n,
+                 result.to(out_ptr.dtype.element_ty), mask=mask_n)
 
     @torch.library.triton_op("rwkv_lab::ffn_sqrelu_value", mutates_args={})
     def _ffn_sqrelu_value_op(
@@ -268,6 +272,7 @@ def row_one_linear(
     if bias is not None and bias.shape != (out_features,):
         raise ValueError("row-one bias must match out_features")
     if use_candidate and _cuda_candidate_available(x):
+        x = x if x.is_contiguous() else x.contiguous()
         candidate_bias = bias if bias is not None else _empty_bias(x)
         if layout == "in_out":
             return _row_one_linear_transposed_op(x, raw, candidate_bias)
@@ -305,6 +310,7 @@ def packed_rkv_projection(
     if any(t.device != x.device or t.dtype != x.dtype for t in tensors):
         raise ValueError("packed R/K/V inputs, weights, and bias must share device/dtype")
     if use_candidate and _cuda_candidate_available(x):
+        x = x if x.is_contiguous() else x.contiguous()
         return _packed_rkv_op(
             x, weights.contiguous(),
             biases.contiguous() if biases is not None else _empty_bias(x),
@@ -341,6 +347,7 @@ def ffn_squared_relu_value(
     if key_weight.shape[1] != x.shape[-1] or value_weight.shape[1] != key_weight.shape[0]:
         raise ValueError("FFN key/value projection geometry mismatch")
     if use_candidate and _cuda_candidate_available(x):
+        x = x if x.is_contiguous() else x.contiguous()
         return _ffn_sqrelu_value_op(
             x, key_weight.contiguous(), value_weight.contiguous(),
             key_bias.contiguous() if key_bias is not None else _empty_bias(x),

@@ -74,6 +74,14 @@ def rwkv_readout(layer, S: torch.Tensor, h: torch.Tensor,
     grounding matches the real rollout's readout. h_prev = the previous token's hidden
     (fit_codec passes cache.h[:, pos-1]); if None, falls back to the no-shift static
     probe (legacy). Reuses the layer's own params."""
+    if getattr(layer, "use_rope", False):
+        # forward rotates r and the write-key k with position-dependent partial RoPE
+        # (rwkv8_deltanet.py, "RAD-RWKV7 RoPE"); this readout has no position input,
+        # so it would silently fit the WRONG (unrotated) read function.
+        raise NotImplementedError(
+            "rwkv_readout does not support use_rope=True layers: it has no position "
+            "input, so it cannot apply the partial-RoPE rotation of r/k that "
+            "forward applies — codec fitting doesn't support RoPE layers yet")
     B, C = h.shape
     H, N = layer.num_heads, layer.head_size
     if h_prev is not None:
@@ -139,6 +147,11 @@ def fit_codec(layer, cache_dir: str, *, steps=400, lr=1e-3, weight_decay=1e-4,
     output/r_k are updated too -> principled read-side init (Stage 0+ functional).
     """
     import numpy as np
+    if getattr(layer, "use_rope", False):
+        raise NotImplementedError(
+            "fit_codec doesn't support use_rope=True layers: rwkv_readout cannot "
+            "apply the position-dependent partial-RoPE rotation of r/k that the "
+            "layer's forward applies (no position input)")
     cache = MemoryTargetCache(cache_dir)
     codec = BilinearStateCodec(
         gdn_heads=cache.m["num_v_heads"], gdn_dk=cache.m["head_k_dim"], gdn_dv=cache.m["head_v_dim"],

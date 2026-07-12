@@ -191,8 +191,9 @@ def _eval_metrics(model, task, B, device, *, eval_seed, iters=8, noise=0.0):
         confs.append(confidence.cpu()); oks.append(ok.float().cpu())
     conf, ok = torch.cat(confs), torch.cat(oks)
     ece = 0.0
-    for lo in torch.linspace(0, 0.9, 10):
-        mask = (conf >= lo) & (conf < lo + 0.1)
+    for i, lo in enumerate(torch.linspace(0, 0.9, 10)):
+        # last bin is inclusive of 1.0 so confidence == 1.0 isn't dropped
+        mask = (conf >= lo) & ((conf <= lo + 0.1) if i == 9 else (conf < lo + 0.1))
         if mask.any():
             ece += float(mask.float().mean() * (conf[mask].mean() - ok[mask].mean()).abs())
     model.train()
@@ -272,7 +273,7 @@ class _PowerSampler:
     def __init__(self, enabled=True):
         self.samples, self.stop_event, self.thread = [], threading.Event(), None
         self.nvml = self.handle = None
-        if enabled and "cuda" in str(torch.device("cuda" if torch.cuda.is_available() else "cpu")):
+        if enabled and torch.cuda.is_available():
             try:
                 import pynvml
                 pynvml.nvmlInit(); self.nvml = pynvml
@@ -356,7 +357,9 @@ def train_eval(task, d_model, n_layers, head_size, lever, seed, device, steps, b
     series, event_rows, first_step_s = prior_series, [], 0.0
     if "cuda" in str(device):
         torch.cuda.reset_peak_memory_stats(device)
-    power = _PowerSampler(profile); power.start()
+    # Only sample GPU power when this trial actually runs on CUDA — a CPU run on
+    # a GPU machine would otherwise record the idle power of an unused GPU.
+    power = _PowerSampler(profile and "cuda" in str(device)); power.start()
     sample_every = max(1, (steps or 1000) // 100)
     while ((elapsed_before + time.perf_counter() - t0 < minutes * 60)
            if minutes > 0 else (step < steps)):
