@@ -425,6 +425,12 @@ class LoopedRWKV(nn.Module):
                    and not skip_refine and self.n_loops > 1)
         consist = collect and self.iter_consist       # consistency loss only when requested
         iters = [out] if collect else None            # NON-detached (unlike loop_trace)
+        # Refinement passes re-run the core WITHOUT initial_state/shift_state (each pass
+        # re-reads the window from a zero state — see the skip_refine docstring) and never
+        # request state returns themselves; everything else the caller threaded through
+        # (reset_mask, position_ids, attention_mask, ...) must reach every pass, not just pass 1.
+        refine_kwargs = {k: v for k, v in kwargs.items()
+                         if k not in ("initial_state", "shift_state", "return_state")}
         deq = (self.loop_deq and torch.is_grad_enabled() and not skip_refine and self.n_loops > 1)
         if deq and (self.iter_consist or keep_iters):
             raise ValueError("loop_deq is incompatible with iter_consist / keep_iterates: the 1-step "
@@ -441,20 +447,25 @@ class LoopedRWKV(nn.Module):
                         inp = inp + self.loop_index_embed[i].to(inp.dtype)
                     if self.lora_rank:
                         self._lora_pass = i
-                    inc = self._t(self.core(self.iter_norm(inp), v_first=self._loop_v_first))
+                    inc = self._t(self.core(self.iter_norm(inp), *args,
+                                            v_first=self._loop_v_first, **refine_kwargs))
                     if self.cart_anchor:
                         return torch.sigmoid(self.cart_gate).to(inc.dtype) * o \
                             + self._gate(i).to(inc.dtype) * inc
                     return o + self._gate(i).to(inc.dtype) * inc
+                if loop_trace is not None:             # pass-1 output, matching the plain path
+                    loop_trace.append(out.detach())
                 w = min(self.deq_window, self.n_loops - 1)   # graded window ≤ #refinement passes
                 with torch.no_grad():                  # detached approach to equilibrium
                     for i in range(1, self.n_loops - w):
                         out = _deq_step(out, i)
+                        if loop_trace is not None:
+                            loop_trace.append(out.detach())
                 out = out.detach()                     # cut history: grad only through the last w steps
                 for i in range(self.n_loops - w, self.n_loops):   # graded k-window (Neumann-k, FPRM)
-                    if loop_trace is not None:
-                        loop_trace.append(out.detach())
                     out = _deq_step(out, i)
+                    if loop_trace is not None:         # POST-step, matching the plain path
+                        loop_trace.append(out.detach())
             elif self.hyper_lanes and not skip_refine and self.n_loops > 1:
                 # Hyper-connection lanes: K copies of the running output, mixed per pass.
                 # At init (one-hot alpha, identity mix, zero gates, uniform read) this is
@@ -472,7 +483,8 @@ class LoopedRWKV(nn.Module):
                         inp = inp + self.loop_index_embed[i].to(inp.dtype)
                     if self.lora_rank:
                         self._lora_pass = i               # per-pass adapters on the shared core
-                    inc = self._t(self.core(self.iter_norm(inp), v_first=self._loop_v_first))
+                    inc = self._t(self.core(self.iter_norm(inp), *args,
+                                            v_first=self._loop_v_first, **refine_kwargs))
                     ginc = self._gate(i).to(inc.dtype) * inc
                     M = self.hyper_mix[i].to(out.dtype)
                     w = self.hyper_write[i].to(out.dtype)
@@ -501,7 +513,8 @@ class LoopedRWKV(nn.Module):
                         inp = inp + self.loop_index_embed[i].to(inp.dtype)
                     if self.lora_rank:
                         self._lora_pass = i
-                    inc = self._t(self.core(self.iter_norm(inp), v_first=self._loop_v_first))
+                    inc = self._t(self.core(self.iter_norm(inp), *args,
+                                            v_first=self._loop_v_first, **refine_kwargs))
                     if self.cart_anchor:                      # CART contractive LTI gate (ϱ<1)
                         out = torch.sigmoid(self.cart_gate).to(inc.dtype) * out \
                             + self._gate(i).to(inc.dtype) * inc

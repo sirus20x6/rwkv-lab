@@ -55,15 +55,28 @@ def qualify_kernel_candidate(reference: Callable, candidate: Callable,
         can_loss = sum((x.float().sum() for x in can_leaves if x.is_floating_point()),
                        can_args[0].new_zeros((), dtype=torch.float32))
         if ref_loss.requires_grad:
-            ref_loss.backward(); can_loss.backward()
-            for a, b in zip(ref_args, can_args):
-                if a.grad is not None:
-                    gradient &= b.grad is not None and torch.allclose(a.grad, b.grad, atol=atol, rtol=rtol)
+            # Fail-closed: a candidate whose output does not participate in
+            # autograd (or whose backward raises) is rejected, not raised.
+            try:
+                ref_loss.backward()
+                if not can_loss.requires_grad:
+                    gradient = False
+                else:
+                    can_loss.backward()
+                    for a, b in zip(ref_args, can_args):
+                        if a.grad is not None:
+                            gradient &= b.grad is not None and torch.allclose(a.grad, b.grad, atol=atol, rtol=rtol)
+            except RuntimeError:
+                gradient = False
 
     def median_latency(fn):
+        warm_args = tuple(x.detach().clone() for x in probes[0])
+        for _ in range(2):  # untimed warmup absorbs JIT/compile cost
+            fn(*warm_args)
         timings = []
         for _ in range(max(1, repeats)):
             args = tuple(x.detach().clone() for x in probes[0])
+            if probes[0][0].is_cuda: torch.cuda.synchronize(probes[0][0].device)
             started = time.perf_counter(); fn(*args)
             if probes[0][0].is_cuda: torch.cuda.synchronize(probes[0][0].device)
             timings.append(time.perf_counter() - started)

@@ -807,150 +807,192 @@ def run(args) -> dict[str, Any]:
     rng = random.Random(args.seed)
     if args.resume and source_blob.get("rlvr_python_rng"):
         rng.setstate(source_blob["rlvr_python_rng"])
+    if args.resume and source_blob.get("rlvr_torch_rng") is not None:
+        torch_rng = source_blob["rlvr_torch_rng"]
+        if isinstance(torch_rng, torch.Tensor):
+            torch_rng = torch_rng.to(device="cpu", dtype=torch.uint8)
+        torch.set_rng_state(torch_rng)
     clip_high = (0.28 if args.algorithm == "dapo" else 0.2) if args.clip_high < 0 else args.clip_high
     log = open(out_dir / "train.jsonl", "a" if args.resume else "w", buffering=1)
-    def emit(row):
-        return log.write(json.dumps(row, sort_keys=True) + "\n")
-    fixed_eval = stratified_tasks(eval_tasks, min(args.eval_prompts, len(eval_tasks)),
-                                  seed=args.seed + 8_000_003)
-    final_eval_reserve = len(fixed_eval) * args.eval_group_size * args.max_new
-    if args.max_rollout_tokens > 0 and final_eval_reserve > args.max_rollout_tokens:
-        raise ValueError("rollout budget is smaller than one fixed held-out evaluation")
-    stored_baseline = (source_blob.get("rlvr") or {}).get("baseline_heldout") if args.resume else None
-    if stored_baseline and stored_baseline.get("task_rewards"):
-        baseline_eval = dict(stored_baseline)
-    elif args.resume:
-        raise ValueError("resumed checkpoint predates paired held-out evidence; start a fresh RLVR run")
-    else:
-        baseline_eval, _ = evaluate_policy(
-            model, vocab, fixed_eval, group_size=args.eval_group_size,
-            max_new=args.max_new, temperature=args.eval_temperature, top_p=args.top_p,
-            top_k=args.top_k, stop_token=args.stop_token, device=args.device,
-            seed=args.seed + 9_000_001, external_command=external_command,
-            verifier_timeout=args.verifier_timeout, engine=args.rollout_engine)
-    manifest["baseline_heldout"] = baseline_eval
-    _atomic_json(out_dir / "manifest.json", manifest)
-    emit({"kind": "eval", "step": start_step, "split": "heldout",
-          "phase": "baseline", **baseline_eval})
-    prior_manifest = source_blob.get("rlvr") or {}
-    prior_elapsed = float(prior_manifest.get("elapsed_seconds", 0)) if args.resume else 0.0
-    prior_rollout_tokens = int(prior_manifest.get("total_rollout_tokens", 0)) if args.resume else 0
-    if (args.max_rollout_tokens > 0 and
-            prior_rollout_tokens + final_eval_reserve > args.max_rollout_tokens):
-        raise ValueError("remaining rollout budget cannot reserve one held-out evaluation")
-    training_started = time.time()
-    verifier_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rlvr-verifier")
-    if args.resume:
-        sft = dict(prior_manifest.get("sft") or
-                   {"updates": 0, "tokens": 0, "mean_loss": 0.0, "seconds": 0.0})
-    else:
-        sft = supervised_warm_start(
-            model, vocab, train_tasks, optimizer, steps=args.sft_steps,
-            batch_size=args.sft_batch_size, learning_rate=args.sft_lr,
-            grad_clip=args.grad_clip, stop_token=args.stop_token,
-            device=args.device, seed=args.seed + 7_000_001)
-    sft_ran = not args.resume and int(sft["updates"]) > 0
-    emit({"kind": "sft", "step": start_step, **sft})
-
-    total_rollout_tokens = prior_rollout_tokens
-    preflight = {"passed": True, "disabled": True}
-    preflight_budget_exhausted = False
-    if not args.resume and args.preflight_prompts > 0:
-        pool = curriculum_pool(train_tasks, step=0, total_steps=max(args.steps, 1),
-                               stages=curriculum_stages)
-        preflight_tasks = stratified_tasks(
-            pool, min(args.preflight_prompts, len(pool)), seed=args.seed + 6_000_007)
-        preflight_reserve = len(preflight_tasks) * args.group_size * args.max_new
-        if (args.max_rollout_tokens > 0 and
-                total_rollout_tokens + preflight_reserve + final_eval_reserve >
-                args.max_rollout_tokens):
-            preflight = {"passed": False, "budget_exhausted": True,
-                         "reason": "preflight plus held-out reserve exceeds rollout budget"}
-            preflight_budget_exhausted = True
+    try:
+        def emit(row):
+            return log.write(json.dumps(row, sort_keys=True) + "\n")
+        fixed_eval = stratified_tasks(eval_tasks, min(args.eval_prompts, len(eval_tasks)),
+                                      seed=args.seed + 8_000_003)
+        final_eval_reserve = len(fixed_eval) * args.eval_group_size * args.max_new
+        if args.max_rollout_tokens > 0 and final_eval_reserve > args.max_rollout_tokens:
+            raise ValueError("rollout budget is smaller than one fixed held-out evaluation")
+        stored_baseline = (source_blob.get("rlvr") or {}).get("baseline_heldout") if args.resume else None
+        if stored_baseline and stored_baseline.get("task_rewards"):
+            baseline_eval = dict(stored_baseline)
+        elif args.resume:
+            raise ValueError("resumed checkpoint predates paired held-out evidence; start a fresh RLVR run")
         else:
-            preflight_rollouts, preflight_generation = generate_rollouts(
-                model, vocab, preflight_tasks, group_size=args.group_size,
-                max_new=args.max_new, temperature=args.temperature, top_p=args.top_p,
+            baseline_eval, _ = evaluate_policy(
+                model, vocab, fixed_eval, group_size=args.eval_group_size,
+                max_new=args.max_new, temperature=args.eval_temperature, top_p=args.top_p,
                 top_k=args.top_k, stop_token=args.stop_token, device=args.device,
-                seed=args.seed + 6_000_011, engine=args.rollout_engine, return_stats=True)
-            preflight_rewards, _ = verify_rollouts(
-                preflight_rollouts, external_command=external_command,
-                timeout=args.verifier_timeout)
-            total_rollout_tokens += int(preflight_generation["tokens"])
-            preflight = reward_diversity(
-                preflight_rewards.tolist(), args.group_size,
-                minimum_rate=args.min_preflight_reward,
-                maximum_rate=args.max_preflight_reward,
-                minimum_active_groups=args.min_preflight_active_groups)
-            preflight["generation"] = preflight_generation
-    manifest["sft"] = sft
-    manifest["preflight"] = preflight
-    emit({"kind": "preflight", "step": start_step, **preflight})
-    _atomic_json(out_dir / "manifest.json", manifest)
-
-    last_eval: dict[str, Any] = dict(baseline_eval)
-    last_eval_step = start_step
-    updates_applied = int((source_blob.get("rlvr") or {}).get("updates_applied", 0)) if args.resume else 0
-    checkpoint_path = out_dir / "rlvr.pt"
-    steps_completed = start_step
-    training_status = ("rollout_budget_exhausted" if preflight_budget_exhausted else
-                       "running" if preflight["passed"] else "preflight_rejected")
-
-    for step in range(start_step, args.steps if preflight["passed"] else start_step):
-        elapsed = prior_elapsed + time.time() - training_started
-        estimate = args.prompts_per_step * args.group_size * args.max_new
+                seed=args.seed + 9_000_001, external_command=external_command,
+                verifier_timeout=args.verifier_timeout, engine=args.rollout_engine)
+        manifest["baseline_heldout"] = baseline_eval
+        _atomic_json(out_dir / "manifest.json", manifest)
+        emit({"kind": "eval", "step": start_step, "split": "heldout",
+              "phase": "baseline", **baseline_eval})
+        prior_manifest = source_blob.get("rlvr") or {}
+        prior_elapsed = float(prior_manifest.get("elapsed_seconds", 0)) if args.resume else 0.0
+        prior_rollout_tokens = int(prior_manifest.get("total_rollout_tokens", 0)) if args.resume else 0
         if (args.max_rollout_tokens > 0 and
-                total_rollout_tokens + estimate + final_eval_reserve > args.max_rollout_tokens):
-            training_status = "rollout_budget_exhausted"
-            break
-        if args.max_train_seconds > 0 and elapsed >= args.max_train_seconds:
-            training_status = "time_budget_exhausted"
-            break
-        pool = curriculum_pool(train_tasks, step=step, total_steps=args.steps,
-                               stages=curriculum_stages)
-        chosen = rng.sample(pool, min(args.prompts_per_step, len(pool)))
-        rollouts, generation = generate_rollouts(
-            model, vocab, chosen, group_size=args.group_size,
-            max_new=args.max_new, temperature=args.temperature,
-            top_p=args.top_p, top_k=args.top_k, stop_token=args.stop_token,
-            device=args.device, seed=args.seed + step * 1_000_003,
-            engine=args.rollout_engine, return_stats=True,
-            rollout_devices=rollout_devices)
-        total_rollout_tokens += int(generation["tokens"])
-        verify_future = verifier_pool.submit(
-            verify_rollouts, rollouts, external_command=external_command,
-            timeout=args.verifier_timeout)
-        prepared_scoring = prepare_rollout_scoring(rollouts)
-        rewards, verifier_details = verify_future.result()
-        lr = args.lr * min(1.0, (step + 1) / max(args.warmup, 1))
-        for group in optimizer.param_groups:
-            group["lr"] = lr * group.get("u_mup_lr_mult", 1.0)
-        ref = reference_model if args.reference == "initial" else None
-        diagnostics = optimize_rollouts(model, optimizer, rollouts, rewards,
-                                        group_size=args.group_size, algorithm=args.algorithm,
-                                        epochs=args.epochs, clip_low=args.clip_low,
-                                        clip_high=clip_high, kl_coef=(args.kl_coef if args.reference != "none" else 0),
-                                        grad_clip=args.grad_clip, reference_model=ref,
-                                        token_normalizer=args.max_new,
-                                        prepared=prepared_scoring)
-        metrics = {**grouped_metrics(rewards, args.group_size), **diagnostics}
-        updates_applied += int(diagnostics["update_applied"] > 0)
-        steps_completed = step + 1
-        row = {"kind": "train", "step": step + 1, "lr": lr,
-               "rollout_tokens": sum(len(r.response_ids) for r in rollouts),
-               "total_rollout_tokens": total_rollout_tokens,
-               "generation": generation,
-               "curriculum_pool": len(pool),
-               "elapsed_seconds": time.time() - training_started, **metrics}
-        if args.log_samples:
-            row["samples"] = [{"task_id": r.task.id, "reward": float(rewards[i]),
-                               "response": r.response[:500], "verifier": verifier_details[i]}
-                              for i, r in enumerate(rollouts[:args.log_samples])]
-        emit(row)
-        print(f"[{step + 1}] reward={metrics['reward']:.3f} pass@k={metrics['pass_at_k']:.3f} "
-              f"loss={metrics['loss']:.4f} kl={metrics['approx_kl']:.4g}", flush=True)
+                prior_rollout_tokens + final_eval_reserve > args.max_rollout_tokens):
+            raise ValueError("remaining rollout budget cannot reserve one held-out evaluation")
+        training_started = time.time()
+        verifier_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rlvr-verifier")
+        if args.resume:
+            sft = dict(prior_manifest.get("sft") or
+                       {"updates": 0, "tokens": 0, "mean_loss": 0.0, "seconds": 0.0})
+        else:
+            sft = supervised_warm_start(
+                model, vocab, train_tasks, optimizer, steps=args.sft_steps,
+                batch_size=args.sft_batch_size, learning_rate=args.sft_lr,
+                grad_clip=args.grad_clip, stop_token=args.stop_token,
+                device=args.device, seed=args.seed + 7_000_001)
+        sft_ran = not args.resume and int(sft["updates"]) > 0
+        emit({"kind": "sft", "step": start_step, **sft})
 
-        if args.eval_every and ((step + 1) % args.eval_every == 0 or step + 1 == args.steps):
+        total_rollout_tokens = prior_rollout_tokens
+        preflight = {"passed": True, "disabled": True}
+        preflight_budget_exhausted = False
+        if not args.resume and args.preflight_prompts > 0:
+            pool = curriculum_pool(train_tasks, step=0, total_steps=max(args.steps, 1),
+                                   stages=curriculum_stages)
+            preflight_tasks = stratified_tasks(
+                pool, min(args.preflight_prompts, len(pool)), seed=args.seed + 6_000_007)
+            preflight_reserve = len(preflight_tasks) * args.group_size * args.max_new
+            if (args.max_rollout_tokens > 0 and
+                    total_rollout_tokens + preflight_reserve + final_eval_reserve >
+                    args.max_rollout_tokens):
+                preflight = {"passed": False, "budget_exhausted": True,
+                             "reason": "preflight plus held-out reserve exceeds rollout budget"}
+                preflight_budget_exhausted = True
+            else:
+                preflight_rollouts, preflight_generation = generate_rollouts(
+                    model, vocab, preflight_tasks, group_size=args.group_size,
+                    max_new=args.max_new, temperature=args.temperature, top_p=args.top_p,
+                    top_k=args.top_k, stop_token=args.stop_token, device=args.device,
+                    seed=args.seed + 6_000_011, engine=args.rollout_engine, return_stats=True)
+                preflight_rewards, _ = verify_rollouts(
+                    preflight_rollouts, external_command=external_command,
+                    timeout=args.verifier_timeout)
+                total_rollout_tokens += int(preflight_generation["tokens"])
+                preflight = reward_diversity(
+                    preflight_rewards.tolist(), args.group_size,
+                    minimum_rate=args.min_preflight_reward,
+                    maximum_rate=args.max_preflight_reward,
+                    minimum_active_groups=args.min_preflight_active_groups)
+                preflight["generation"] = preflight_generation
+        manifest["sft"] = sft
+        manifest["preflight"] = preflight
+        emit({"kind": "preflight", "step": start_step, **preflight})
+        _atomic_json(out_dir / "manifest.json", manifest)
+
+        last_eval: dict[str, Any] = dict(baseline_eval)
+        last_eval_step = start_step
+        updates_applied = int((source_blob.get("rlvr") or {}).get("updates_applied", 0)) if args.resume else 0
+        checkpoint_path = out_dir / "rlvr.pt"
+        steps_completed = start_step
+        training_status = ("rollout_budget_exhausted" if preflight_budget_exhausted else
+                           "running" if preflight["passed"] else "preflight_rejected")
+
+        for step in range(start_step, args.steps if preflight["passed"] else start_step):
+            elapsed = prior_elapsed + time.time() - training_started
+            estimate = args.prompts_per_step * args.group_size * args.max_new
+            if (args.max_rollout_tokens > 0 and
+                    total_rollout_tokens + estimate + final_eval_reserve > args.max_rollout_tokens):
+                training_status = "rollout_budget_exhausted"
+                break
+            if args.max_train_seconds > 0 and elapsed >= args.max_train_seconds:
+                training_status = "time_budget_exhausted"
+                break
+            pool = curriculum_pool(train_tasks, step=step, total_steps=args.steps,
+                                   stages=curriculum_stages)
+            chosen = rng.sample(pool, min(args.prompts_per_step, len(pool)))
+            rollouts, generation = generate_rollouts(
+                model, vocab, chosen, group_size=args.group_size,
+                max_new=args.max_new, temperature=args.temperature,
+                top_p=args.top_p, top_k=args.top_k, stop_token=args.stop_token,
+                device=args.device, seed=args.seed + step * 1_000_003,
+                engine=args.rollout_engine, return_stats=True,
+                rollout_devices=rollout_devices)
+            total_rollout_tokens += int(generation["tokens"])
+            verify_future = verifier_pool.submit(
+                verify_rollouts, rollouts, external_command=external_command,
+                timeout=args.verifier_timeout)
+            prepared_scoring = prepare_rollout_scoring(rollouts)
+            rewards, verifier_details = verify_future.result()
+            lr = args.lr * min(1.0, (step + 1) / max(args.warmup, 1))
+            for group in optimizer.param_groups:
+                group["lr"] = lr * group.get("u_mup_lr_mult", 1.0)
+            ref = reference_model if args.reference == "initial" else None
+            diagnostics = optimize_rollouts(model, optimizer, rollouts, rewards,
+                                            group_size=args.group_size, algorithm=args.algorithm,
+                                            epochs=args.epochs, clip_low=args.clip_low,
+                                            clip_high=clip_high, kl_coef=(args.kl_coef if args.reference != "none" else 0),
+                                            grad_clip=args.grad_clip, reference_model=ref,
+                                            token_normalizer=args.max_new,
+                                            prepared=prepared_scoring)
+            metrics = {**grouped_metrics(rewards, args.group_size), **diagnostics}
+            updates_applied += int(diagnostics["update_applied"] > 0)
+            steps_completed = step + 1
+            row = {"kind": "train", "step": step + 1, "lr": lr,
+                   "rollout_tokens": sum(len(r.response_ids) for r in rollouts),
+                   "total_rollout_tokens": total_rollout_tokens,
+                   "generation": generation,
+                   "curriculum_pool": len(pool),
+                   "elapsed_seconds": time.time() - training_started, **metrics}
+            if args.log_samples:
+                row["samples"] = [{"task_id": r.task.id, "reward": float(rewards[i]),
+                                   "response": r.response[:500], "verifier": verifier_details[i]}
+                                  for i, r in enumerate(rollouts[:args.log_samples])]
+            emit(row)
+            print(f"[{step + 1}] reward={metrics['reward']:.3f} pass@k={metrics['pass_at_k']:.3f} "
+                  f"loss={metrics['loss']:.4f} kl={metrics['approx_kl']:.4g}", flush=True)
+
+            if args.eval_every and ((step + 1) % args.eval_every == 0 or step + 1 == args.steps):
+                # A mid-training periodic eval costs ~final_eval_reserve tokens on top of the
+                # still-reserved final eval; skip it (with a log line) rather than blow past
+                # --max-rollout-tokens. The step == args.steps eval doubles as the final eval
+                # and is already covered by final_eval_reserve.
+                if (args.max_rollout_tokens > 0 and step + 1 != args.steps and
+                        total_rollout_tokens + 2 * final_eval_reserve > args.max_rollout_tokens):
+                    emit({"kind": "eval_skipped", "step": step + 1, "split": "heldout",
+                          "reason": "would exceed --max-rollout-tokens",
+                          "total_rollout_tokens": total_rollout_tokens})
+                    print(f"  skipping periodic heldout eval at step {step + 1}: "
+                          f"would exceed --max-rollout-tokens", flush=True)
+                else:
+                    last_eval, _ = evaluate_policy(model, vocab, fixed_eval, group_size=args.eval_group_size,
+                                                   max_new=args.max_new, temperature=args.eval_temperature,
+                                                   top_p=args.top_p, top_k=args.top_k, stop_token=args.stop_token,
+                                                   device=args.device, seed=args.seed + 9_000_001,
+                                                   external_command=external_command,
+                                                   verifier_timeout=args.verifier_timeout,
+                                                   engine=args.rollout_engine)
+                    total_rollout_tokens += int(last_eval["generation"]["tokens"])
+                    last_eval_step = step + 1
+                    emit({"kind": "eval", "step": step + 1, "split": "heldout",
+                          "phase": "candidate", **last_eval})
+                    print(f"  heldout reward={last_eval['reward']:.3f} pass@k={last_eval['pass_at_k']:.3f}", flush=True)
+            if args.save_every and (step + 1) % args.save_every == 0:
+                manifest["updates_applied"] = updates_applied
+                manifest["total_rollout_tokens"] = total_rollout_tokens
+                manifest["elapsed_seconds"] = prior_elapsed + time.time() - training_started
+                save_checkpoint(checkpoint_path, model, optimizer, source_blob, step=step + 1,
+                                manifest=manifest, rng=rng)
+
+        if training_status == "running":
+            training_status = "complete"
+        verifier_pool.shutdown(wait=True, cancel_futures=True)
+        if (last_eval_step != steps_completed or
+                (sft_ran and steps_completed == start_step) or not preflight["passed"]):
             last_eval, _ = evaluate_policy(model, vocab, fixed_eval, group_size=args.eval_group_size,
                                            max_new=args.max_new, temperature=args.eval_temperature,
                                            top_p=args.top_p, top_k=args.top_k, stop_token=args.stop_token,
@@ -959,71 +1001,48 @@ def run(args) -> dict[str, Any]:
                                            verifier_timeout=args.verifier_timeout,
                                            engine=args.rollout_engine)
             total_rollout_tokens += int(last_eval["generation"]["tokens"])
-            last_eval_step = step + 1
-            emit({"kind": "eval", "step": step + 1, "split": "heldout",
+            emit({"kind": "eval", "step": steps_completed, "split": "heldout",
                   "phase": "candidate", **last_eval})
-            print(f"  heldout reward={last_eval['reward']:.3f} pass@k={last_eval['pass_at_k']:.3f}", flush=True)
-        if args.save_every and (step + 1) % args.save_every == 0:
-            manifest["updates_applied"] = updates_applied
-            manifest["total_rollout_tokens"] = total_rollout_tokens
-            manifest["elapsed_seconds"] = prior_elapsed + time.time() - training_started
-            save_checkpoint(checkpoint_path, model, optimizer, source_blob, step=step + 1,
-                            manifest=manifest, rng=rng)
-
-    if training_status == "running":
-        training_status = "complete"
-    verifier_pool.shutdown(wait=True, cancel_futures=True)
-    if (last_eval_step != steps_completed or
-            (sft_ran and steps_completed == start_step) or not preflight["passed"]):
-        last_eval, _ = evaluate_policy(model, vocab, fixed_eval, group_size=args.eval_group_size,
-                                       max_new=args.max_new, temperature=args.eval_temperature,
-                                       top_p=args.top_p, top_k=args.top_k, stop_token=args.stop_token,
-                                       device=args.device, seed=args.seed + 9_000_001,
-                                       external_command=external_command,
-                                       verifier_timeout=args.verifier_timeout,
-                                       engine=args.rollout_engine)
-        total_rollout_tokens += int(last_eval["generation"]["tokens"])
-        emit({"kind": "eval", "step": steps_completed, "split": "heldout",
-              "phase": "candidate", **last_eval})
-    manifest["updates_applied"] = updates_applied
-    manifest["sft_updates"] = int(sft["updates"])
-    manifest["training_status"] = training_status
-    manifest["total_rollout_tokens"] = total_rollout_tokens
-    elapsed_seconds = prior_elapsed + time.time() - training_started
-    manifest["elapsed_seconds"] = elapsed_seconds
-    save_checkpoint(checkpoint_path, model, optimizer, source_blob, step=steps_completed,
-                    manifest=manifest, rng=rng)
-    promotion = promotion_gates(
-        baseline_eval, last_eval, minimum_delta=args.min_heldout_delta,
-        updates_applied=updates_applied + int(sft["updates"]),
-        maximum_family_regression=args.max_family_regression,
-        require_confidence=args.require_confidence,
-        bootstrap_samples=args.bootstrap_samples, confidence=args.confidence,
-        seed=args.seed + 5_000_011, split_audit=split_audit,
-        rollout_tokens=total_rollout_tokens, elapsed_seconds=elapsed_seconds,
-        maximum_rollout_tokens=args.max_rollout_tokens,
-        maximum_train_seconds=args.max_train_seconds)
-    promotion.update({
-        "heldout_delta": float(last_eval["reward"] - baseline_eval["reward"]),
-        "minimum_delta": args.min_heldout_delta,
-        "updates_applied": updates_applied,
-        "sft_updates": int(sft["updates"]),
-        "candidate_checkpoint": str(checkpoint_path.resolve()),
-        "rollback_checkpoint": str(Path(source_path).resolve()),
-    })
-    failed_gates = [name for name, passed in promotion["gates"].items() if not passed]
-    promotion["reason"] = ("all independent promotion gates passed" if promotion["eligible"]
-                           else "failed gates: " + ", ".join(failed_gates))
-    result = {"schema": RESULT_SCHEMA, "status": "complete", "steps": args.steps,
-              "steps_completed": steps_completed, "training_status": training_status,
-              "checkpoint": str(checkpoint_path.resolve()), "checkpoint_parent_sha256": parent_hash,
-              "task_sha256": task_hash, "baseline_heldout": baseline_eval, "heldout": last_eval,
-              "split_audit": split_audit, "sft": sft, "preflight": preflight,
-              "total_rollout_tokens": total_rollout_tokens, "promotion": promotion,
-              "elapsed_seconds": elapsed_seconds}
-    _atomic_json(out_dir / "result.json", result)
-    log.close()
-    return result
+        manifest["updates_applied"] = updates_applied
+        manifest["sft_updates"] = int(sft["updates"])
+        manifest["training_status"] = training_status
+        manifest["total_rollout_tokens"] = total_rollout_tokens
+        elapsed_seconds = prior_elapsed + time.time() - training_started
+        manifest["elapsed_seconds"] = elapsed_seconds
+        save_checkpoint(checkpoint_path, model, optimizer, source_blob, step=steps_completed,
+                        manifest=manifest, rng=rng)
+        promotion = promotion_gates(
+            baseline_eval, last_eval, minimum_delta=args.min_heldout_delta,
+            updates_applied=updates_applied + int(sft["updates"]),
+            maximum_family_regression=args.max_family_regression,
+            require_confidence=args.require_confidence,
+            bootstrap_samples=args.bootstrap_samples, confidence=args.confidence,
+            seed=args.seed + 5_000_011, split_audit=split_audit,
+            rollout_tokens=total_rollout_tokens, elapsed_seconds=elapsed_seconds,
+            maximum_rollout_tokens=args.max_rollout_tokens,
+            maximum_train_seconds=args.max_train_seconds)
+        promotion.update({
+            "heldout_delta": float(last_eval["reward"] - baseline_eval["reward"]),
+            "minimum_delta": args.min_heldout_delta,
+            "updates_applied": updates_applied,
+            "sft_updates": int(sft["updates"]),
+            "candidate_checkpoint": str(checkpoint_path.resolve()),
+            "rollback_checkpoint": str(Path(source_path).resolve()),
+        })
+        failed_gates = [name for name, passed in promotion["gates"].items() if not passed]
+        promotion["reason"] = ("all independent promotion gates passed" if promotion["eligible"]
+                               else "failed gates: " + ", ".join(failed_gates))
+        result = {"schema": RESULT_SCHEMA, "status": "complete", "steps": args.steps,
+                  "steps_completed": steps_completed, "training_status": training_status,
+                  "checkpoint": str(checkpoint_path.resolve()), "checkpoint_parent_sha256": parent_hash,
+                  "task_sha256": task_hash, "baseline_heldout": baseline_eval, "heldout": last_eval,
+                  "split_audit": split_audit, "sft": sft, "preflight": preflight,
+                  "total_rollout_tokens": total_rollout_tokens, "promotion": promotion,
+                  "elapsed_seconds": elapsed_seconds}
+        _atomic_json(out_dir / "result.json", result)
+        return result
+    finally:
+        log.close()
 
 
 def main() -> None:

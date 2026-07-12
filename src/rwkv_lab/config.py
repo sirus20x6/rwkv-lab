@@ -41,6 +41,7 @@ def resolve_data(cfg: dict):
 
 # lever kwarg -> rwkv_pretrain CLI flag (for LM runs)
 _LM_FLAG = {"n_loops": "--loop-count", "hyper_lanes": "--loop-hyper", "gate_mode": "--loop-gate",
+            "gate_cap": "--loop-gate-cap", "deq_window": "--loop-deq-window",
             "cart_anchor": "--loop-cart-anchor", "loop_deq": "--loop-deq", "fixed_point_halt": "--loop-fp-halt",
             "adaptive_halt": "--loop-adaptive-halt", "nextlat_weight": "--nextlat-weight",
             "top_weight": "--top-weight", "lmtp_weight": "--lmtp-weight", "bst_weight": "--bst-weight",
@@ -229,11 +230,12 @@ def _lm_command(data_args, off_path, out_dir, model, train, lever, seed, save_pa
         for key, value in muon.items():
             cmd += [f"--sm-{key.replace('_', '-')}", str(int(value) if isinstance(value, bool) else value)]
     for key, value in lever.items():
-        if key in _LM_FLAG:
-            if key in ("nvfp4", "nvfp4_rht", "balance_state"):
-                if value: cmd += [_LM_FLAG[key]]
-            else:
-                cmd += [_LM_FLAG[key], str(int(value) if isinstance(value, bool) else value)]
+        if key not in _LM_FLAG:
+            raise ValueError(f"unknown lever key {key!r}: no rwkv_pretrain CLI flag in _LM_FLAG")
+        if key in ("nvfp4", "nvfp4_rht", "balance_state"):
+            if value: cmd += [_LM_FLAG[key]]
+        else:
+            cmd += [_LM_FLAG[key], str(int(value) if isinstance(value, bool) else value)]
     return cmd
 
 

@@ -29,7 +29,7 @@ class RoutingFreeExpert(nn.Module):
         weight = F.relu(proxy - threshold).to(x.dtype)
         value = self.out(F.silu(self.up(internal)) * self.gate(x))
         active = proxy > threshold
-        return value * weight.unsqueeze(-1), weight, active
+        return value * weight.unsqueeze(-1), weight, active, proxy.to(x.dtype)
 
 
 class RoutingFreeMoE(nn.Module):
@@ -47,9 +47,11 @@ class RoutingFreeMoE(nn.Module):
 
     def forward(self, x: torch.Tensor, **_kwargs) -> torch.Tensor:
         triples = [expert(x, self.threshold) for expert in self.experts]
-        values = torch.stack([v for v, _, _ in triples], dim=-2)
-        proxy = torch.stack([w for _, w, _ in triples], dim=-1)
-        active = torch.stack([a for _, _, a in triples], dim=-1)
+        values = torch.stack([v for v, _, _, _ in triples], dim=-2)
+        # Pre-ReLU proxy: differentiable even for inactive experts, so
+        # under-used experts still receive balance-loss gradient (§3.2).
+        proxy = torch.stack([p for _, _, _, p in triples], dim=-1)
+        active = torch.stack([a for _, _, a, _ in triples], dim=-1)
         # Dot products between detached binary load and differentiable proxy,
         # interpolating expert- and token-balancing (§3.2, eqs. 13–15).
         target = active.float().mean().detach()

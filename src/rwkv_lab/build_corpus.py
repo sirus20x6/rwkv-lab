@@ -91,6 +91,19 @@ def build(docs, out_prefix):
         os.unlink(tmp)
     toks = np.fromfile(bin_path, dtype=np.uint16)
     sep = np.where(toks == SEP_TOKEN)[0]                        # boundaries -> doc starts
+    # Enforce the recovery-by-scan assumption: docs are \x00-joined (with \x00
+    # stripped from doc text upstream), so the tokenizer must emit EXACTLY one
+    # SEP_TOKEN per boundary — len(docs)-1 total. Any other count means token
+    # id SEP_TOKEN appeared inside a document (or a boundary was merged away)
+    # and the offsets below would be wrong.
+    if len(sep) != len(docs) - 1:
+        raise ValueError(
+            f"{bin_path}: found {len(sep)} occurrences of SEP_TOKEN={SEP_TOKEN} "
+            f"but expected {len(docs) - 1} (docs-1). The tokenizer emitted the "
+            "separator token inside a document (or dropped a boundary); doc "
+            "offsets recovered by scanning for SEP_TOKEN would be corrupt. "
+            "Check that doc text is \\x00-free and that \\x00 tokenizes to "
+            f"exactly token {SEP_TOKEN}.")
     offsets = np.concatenate([[0], sep + 1]).astype(np.uint64)
     off_path = out_prefix + ".off.npy"
     np.save(off_path, offsets)

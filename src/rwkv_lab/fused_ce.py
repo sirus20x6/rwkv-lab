@@ -30,19 +30,19 @@ def lmhead_cross_entropy(
     """Apply ``lm_head`` and return mean CE without an fp32 full-logit copy.
 
     ignore_index: positions whose label equals it are excluded from the mean (packed-row padding);
-    None keeps the plain all-positions mean."""
+    None defaults to -100, so -100-labelled positions are always excluded from
+    both the CE sum and the denominator (masked mean) in both paths."""
     flat_h = hidden.reshape(-1, hidden.shape[-1])
     flat_labels = labels.reshape(-1)
     weight = lm_head.weight
     bias = getattr(lm_head, "bias", None)
+    effective_ignore = -100 if ignore_index is None else ignore_index
 
     if fused and HAS_FUSED_CE and flat_h.is_cuda:
         logits = F.linear(flat_h.to(weight.dtype), weight, bias)
         losses, _ = _flash_ce(logits, flat_labels, inplace_backward=True)
-        if ignore_index is not None:
-            mask = flat_labels != ignore_index
-            return (losses.float() * mask).sum() / mask.sum().clamp_min(1)
-        return losses.float().mean()
+        mask = flat_labels != effective_ignore
+        return (losses.float() * mask).sum() / mask.sum().clamp_min(1)
 
     total = hidden.new_zeros((), dtype=torch.float32)
     for start in range(0, flat_h.shape[0], chunk):
@@ -50,8 +50,7 @@ def lmhead_cross_entropy(
         logits = F.linear(flat_h[start:end].to(weight.dtype), weight, bias)
         total = total + F.cross_entropy(
             logits.float(), flat_labels[start:end], reduction="sum",
-            ignore_index=(-100 if ignore_index is None else ignore_index),
+            ignore_index=effective_ignore,
         )
-    denom = (flat_labels != ignore_index).sum().clamp_min(1) if ignore_index is not None \
-        else flat_h.shape[0]
+    denom = (flat_labels != effective_ignore).sum().clamp_min(1)
     return total / denom

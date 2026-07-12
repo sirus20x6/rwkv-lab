@@ -116,9 +116,18 @@ def main():
 
     print(f"loading {args.model} into fla RWKV7 ...", flush=True)
     model = load_g1g_fla(args.model, device=dev)
+    # NOTE: token .bin is assumed uint16 (World vocab = 65536 ids fits exactly).
+    # A file written with a wider dtype (e.g. u32) read as u16 shows up as every
+    # 2nd halfword being zero — detect that instead of training on garbage.
     toks = np.memmap(args.data, dtype=np.uint16, mode="r")
+    _sample = np.asarray(toks[: min(len(toks), 1 << 20)])
+    if len(_sample) >= 4 and not _sample[1::2].any():
+        raise ValueError(f"{args.data}: every 2nd uint16 is zero — file looks like "
+                         "u32 tokens read as u16; re-export with --dtype u16")
     n_val = args.val_windows * T
     val_toks, train_toks = toks[:n_val], toks[n_val:]                 # fixed held-out val prefix
+    # Fixed, evenly-spaced val windows: deterministic evals that never touch the training RNG.
+    val_offsets = np.linspace(0, len(val_toks) - (T + 1), args.val_windows).astype(np.int64)
     print(f"tokens: {len(toks)/1e6:.1f}M  (val {len(val_toks)}, train {len(train_toks)/1e6:.1f}M)", flush=True)
     json.dump({"loop_count": 1, "n_layers": 24, "mode": f"g1g-ft-{args.optimizer}"},
               open(os.path.join(args.out, "loop_rw.json"), "w"))
@@ -131,13 +140,17 @@ def main():
     def val_loss():
         model.eval()
         with torch.no_grad():
-            tot = 0.0
+            tot, n_tok = 0.0, 0
             for i in range(0, args.val_windows, args.batch):
-                x = batch(val_toks, min(args.batch, args.val_windows - i))
+                offs = val_offsets[i:i + args.batch]      # fixed windows: no training-RNG draw
+                x = torch.from_numpy(np.stack(
+                    [np.asarray(val_toks[o:o + T + 1], dtype=np.int64) for o in offs])).to(dev)
                 lg = model(x[:, :T]).logits.float()
-                tot += F.cross_entropy(lg.reshape(-1, lg.size(-1)), x[:, 1:T + 1].reshape(-1)).item()
+                tot += F.cross_entropy(lg.reshape(-1, lg.size(-1)), x[:, 1:T + 1].reshape(-1),
+                                       reduction="sum").item()
+                n_tok += x.shape[0] * T
         model.train()
-        return tot / math.ceil(args.val_windows / args.batch)
+        return tot / max(1, n_tok)
 
     opt = build_optimizer(model, args); model.train()
     print(f"optimizer={args.optimizer}  budget={'%.1f min' % args.minutes if not args.steps else str(args.steps)+' steps'}", flush=True)

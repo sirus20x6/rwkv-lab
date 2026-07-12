@@ -143,6 +143,11 @@ def _sample_batch(arr: np.memmap, total_tokens: int, batch_size: int,
     # Clamp total_tokens to the actual mmap size to avoid index-out-of-bounds
     # when the user's declared total overshoots the file (e.g. due to rounding).
     effective_total = min(total_tokens, arr.shape[0])
+    if effective_total < seq_len + 2:
+        raise ValueError(
+            f"corpus too small to sample: effective total {effective_total} tokens "
+            f"(declared {total_tokens}, file has {arr.shape[0]}) but at least "
+            f"seq_len+2={seq_len + 2} tokens are required for one [seq_len+1] window")
     max_start = effective_total - seq_len - 1
     starts = rng.integers(0, max_start, size=batch_size)
     offsets = np.arange(seq_len + 1, dtype=np.int64)
@@ -182,6 +187,14 @@ def train_on_corpus(
 ) -> int:
     """Run `steps` optimizer updates on the given corpus. Returns new step_global."""
     arr = np.memmap(str(corpus_path), dtype=np.uint32, mode="r")
+    actual_tokens = int(arr.shape[0])
+    if total_tokens > actual_tokens:
+        print(f"WARNING: declared token count {total_tokens} for {corpus_path.name} exceeds the "
+              f"actual file size ({actual_tokens} tokens); clamping to the file size.", flush=True)
+    elif total_tokens < max(1, actual_tokens // 100):
+        print(f"WARNING: declared token count {total_tokens} for {corpus_path.name} is <1% of the "
+              f"actual file size ({actual_tokens} tokens) — likely a typo'd PATH:count; only the "
+              f"first {total_tokens} tokens will be sampled.", flush=True)
     rng = np.random.default_rng(rng_seed)
     step_global = step_global_start
 

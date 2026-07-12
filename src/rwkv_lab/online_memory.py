@@ -186,23 +186,31 @@ class SleepConsolidator:
         self.memory, self.interval, self.passes = memory, int(interval), int(passes)
         self.max_context = int(max_context)
         self._chunks: list[torch.Tensor] = []
-        self._tokens = 0
+        self._tokens = 0            # retained tokens (buffer occupancy)
+        self._observed = 0          # tokens seen since last consolidate — drives due()
 
     def observe(self, hidden: torch.Tensor) -> None:
-        self._chunks.append(hidden.detach())
-        self._tokens += hidden.shape[1]
-        while sum(chunk.shape[1] for chunk in self._chunks) > self.max_context:
+        chunk = hidden.detach()
+        self._observed += chunk.shape[1]
+        if chunk.shape[1] > self.max_context:              # oversize: keep the newest tokens
+            chunk = chunk[:, -self.max_context:]
+        self._chunks.append(chunk)
+        while len(self._chunks) > 1 and sum(c.shape[1] for c in self._chunks) > self.max_context:
             self._chunks.pop(0)
+        self._tokens = sum(c.shape[1] for c in self._chunks)   # count only retained tokens
 
     def due(self) -> bool:
-        return self._tokens >= self.interval and bool(self._chunks)
+        # Cumulative observed count, not retained-buffer occupancy: occupancy
+        # is capped at max_context, so interval > max_context would otherwise
+        # make due() permanently False and consolidation silently never run.
+        return self._observed >= self.interval and bool(self._chunks)
 
     def consolidate(self, state: OnlineMemoryState | None = None) -> OnlineMemoryState:
         if not self._chunks:
             raise ValueError("sleep consolidator has no observed context")
         context = torch.cat(self._chunks, dim=1)[:, -self.max_context:]
         result = self.memory.sleep_consolidate(context, state, passes=self.passes)
-        self._chunks.clear(); self._tokens = 0
+        self._chunks.clear(); self._tokens = 0; self._observed = 0
         return result
 
 
@@ -226,11 +234,27 @@ class _OnlineMemoryKernel(nn.Module):
         super().__init__()
         self.memory = memory
 
-    def forward(self, hidden: torch.Tensor, matrix: torch.Tensor, momentum: torch.Tensor):
+    def forward(self, hidden: torch.Tensor, matrix: torch.Tensor, momentum: torch.Tensor,
+                history_k: torch.Tensor | None = None, history_v: torch.Tensor | None = None):
+        """``history_k``/``history_v`` ([n, batch, d_memory], n <= atlas_window) carry the
+        ATLAS sliding window across chunks; omit them ONLY for a fresh state (otherwise
+        mode="atlas" silently restarts the window and diverges from eager). When passed
+        (empty tensors are fine for chunk 0), the updated window is returned as two extra
+        outputs to thread into the next call."""
+        history: tuple[tuple[torch.Tensor, torch.Tensor], ...] = ()
+        if history_k is not None:
+            history = tuple((history_k[i], history_v[i]) for i in range(history_k.shape[0]))
         output, state = self.memory(
-            hidden, OnlineMemoryState(matrix, momentum), return_state=True,
+            hidden, OnlineMemoryState(matrix, momentum, 0, history), return_state=True,
             record_stats=False)
-        return output, state.memory, state.momentum
+        if history_k is None:
+            return output, state.memory, state.momentum
+        if state.history:
+            new_k = torch.stack([key for key, _ in state.history])
+            new_v = torch.stack([value for _, value in state.history])
+        else:
+            new_k, new_v = history_k[:0], history_v[:0]
+        return output, state.memory, state.momentum, new_k, new_v
 
 
 def compile_online_memory(memory: OnlineAssociativeMemory, *, backend: str = "inductor"):
@@ -286,6 +310,25 @@ def qualify_compiled_online_memory(memory: OnlineAssociativeMemory, sample: torc
         grad1 = torch.autograd.grad(sum(value.float().sum() for value in out1), (x1,) + params1)
         gradient_error = max(float((left.float() - right.float()).abs().max())
                              for left, right in zip(grad0, grad1))
+
+        # Multi-chunk carried-state parity: the stateful eager module is the oracle;
+        # the kernel must thread the ATLAS window (history) across chunks, not drop it.
+        half = sample.shape[1] // 2
+        if half:
+            oracle_state = eager.memory.initial_state(sample.shape[0], device=sample.device)
+            mat, mom = state.memory.clone(), state.momentum.clone()
+            hk = torch.zeros(0, sample.shape[0], memory.d_memory,
+                             device=sample.device, dtype=torch.float32)
+            hv = hk.clone()
+            for chunk in (sample.detach()[:, :half], sample.detach()[:, half:]):
+                ref_out, oracle_state = eager.memory(chunk, oracle_state,
+                                                     return_state=True, record_stats=False)
+                cand_out, mat, mom, hk, hv = candidate(chunk, mat, mom, hk, hv)
+                chunk_error = max(
+                    float((ref_out.detach().float() - cand_out.detach().float()).abs().max()),
+                    float((oracle_state.memory.detach().float() - mat.detach().float()).abs().max()),
+                    float((oracle_state.momentum.detach().float() - mom.detach().float()).abs().max()))
+                output_error = max(output_error, chunk_error)
 
         def median_ms(fn, inputs) -> float:
             for _ in range(2):

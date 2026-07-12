@@ -23,9 +23,12 @@ def contrastive_energy_loss(model, context, positive, negative, margin: float = 
 
 def refine_latent(model, context, initial, *, steps=4, step_size=0.05, max_delta=1.0):
     """Optimize only the candidate latent; model weights remain unchanged."""
-    value = initial.detach().clone()
+    initial = initial.detach()
+    value = initial.clone()
     for _ in range(steps):
-        value.requires_grad_(True); energy = model(context, value).sum()
+        # Detach each iteration so the projected (non-leaf) value from the
+        # previous step becomes a fresh leaf; otherwise requires_grad_ raises.
+        value = value.detach().requires_grad_(True); energy = model(context, value).sum()
         grad, = torch.autograd.grad(energy, value)
         value = (value - step_size*grad).detach()
         delta = value - initial

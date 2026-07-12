@@ -7,7 +7,7 @@ in the next tau positions" as a distributional future summary, via weighted
 binary cross-entropy.
 
 Loss: L_FSP = sum_p w_i · BCE( sigmoid(lm_head(hidden[p] + fsp_bias))_i,
-                                1{token i in y[p+1 : p+tau]} )
+                                1{token i in window [p+2, p+tau]} )
 
 where `fsp_bias` is a small learnable per-dim bias that tells the shared
 lm_head "you are in FSP mode, not NTP mode" and keeps the two losses from
@@ -66,14 +66,19 @@ def build_future_multihot(
     tau: int,
     vocab_size: int,
     dtype: torch.dtype = torch.float32,
+    pad_id: Optional[int] = None,
 ) -> torch.Tensor:
     """Build a [B, K, V] multi-hot target: entry (b,k,v) = 1 iff token v
-    appears in y[b, positions[b,k] : positions[b,k] + tau - 1].
+    appears in y[b, p+2 : p+tau+1] for p = positions[b,k] (offsets 2..tau,
+    a window of tau-1 tokens).
 
-    Note: y[p] corresponds to x_full[p+1], so y[p : p + tau - 1] is the range
-    of tokens at absolute positions [p+1, p+tau-1]. We use this as the
-    "future summary" window. (The paper uses [p+2, p+tau]; close enough for
-    our purposes — one position offset.)
+    Note: this matches the paper's future-summary window [p+2, p+tau]: it
+    deliberately EXCLUDES y[p+1] — the offset-1 token, which the NTP loss at
+    the sampled position already supervises — and starts the bag two steps
+    ahead.
+
+    If pad_id is not None, occurrences of pad_id in the window are excluded
+    from the multi-hot target (they are padding, not real future tokens).
     """
     B, T = y.shape
     K = positions.shape[1]
@@ -83,13 +88,25 @@ def build_future_multihot(
     target = torch.zeros((B, K, vocab_size), dtype=dtype, device=device)
     w = min(tau - 1, T)
     # Build index tensor of [B, K, w] token ids from y
-    # Position + offset table: [K, w]
-    off = torch.arange(1, w + 1, device=device).unsqueeze(0).expand(K, -1)  # [K, w]
+    # Position + offset table: [K, w] — offsets 2..tau (paper window [p+2, p+tau])
+    off = torch.arange(2, w + 2, device=device).unsqueeze(0).expand(K, -1)  # [K, w]
     # [B, K, w] indices into y's T dimension, clamped to T-1
     idx = (positions.unsqueeze(-1) + off).clamp(max=T - 1)   # [B, K, w]
     tok = torch.gather(y.unsqueeze(1).expand(-1, K, -1), 2, idx)  # [B, K, w]
-    # Scatter 1s into target at (batch, register, token_id)
-    target.scatter_(2, tok, 1.0)
+    # Scatter 1s into target at (batch, register, token_id); pad tokens (if a
+    # pad_id is given) contribute 0 so padding never enters the future bag.
+    if pad_id is None:
+        target.scatter_(2, tok, 1.0)
+    else:
+        # Pad entries must neither index with a possibly-negative pad_id (e.g.
+        # -100 would crash scatter_) nor overwrite a genuine hit at the same
+        # index (duplicate-index scatter_ is order-undefined). Route them to
+        # index 0 with value 0 and combine via amax so a real 1 always wins.
+        # Exclude out-of-range ids too (e.g. -100 ignore labels coexisting
+        # with a 0 pad id) — any of them would crash or corrupt the scatter.
+        valid = (tok != pad_id) & (tok >= 0) & (tok < vocab_size)
+        tok_safe = torch.where(valid, tok, torch.zeros_like(tok))
+        target.scatter_reduce_(2, tok_safe, valid.to(dtype), reduce="amax")
     return target
 
 
@@ -102,16 +119,23 @@ def fsp_loss(
     tau: int = 12,
     chunk: int = 128,
     rng: Optional[torch.Generator] = None,
+    pad_id: Optional[int] = None,
 ) -> tuple[torch.Tensor, int]:
     """Sample K positions per batch, build the future-multihot target, and
     compute mean BCE-with-logits (optionally reweighted by vocab_w). Returns
     (mean_loss, n_valid).
+
+    If pad_id is not None (packed/padded batches), sampled query positions
+    where y == pad_id are excluded from the loss (zero-weighted, not counted
+    in n_valid) and pad tokens never enter the future-token bag.
     """
     B, T, H = hidden.shape
     V = lm_head.weight.shape[0]
     device = hidden.device
 
-    max_valid_p = T - tau
+    # Window is [p+2, p+tau] (offsets 2..tau), so the last fully-in-range
+    # query position is T - tau - 1.
+    max_valid_p = T - tau - 1
     if max_valid_p < 0 or num_positions <= 0:
         return hidden.new_zeros((), dtype=torch.float32), 0
     K = int(min(num_positions, max_valid_p + 1))
@@ -121,7 +145,15 @@ def fsp_loss(
     else:
         pos_bt = torch.randint(0, max_valid_p + 1, (B, K), device=device, generator=rng)
 
-    target = build_future_multihot(y, pos_bt, tau, V, dtype=torch.float32)  # [B, K, V]
+    target = build_future_multihot(y, pos_bt, tau, V, dtype=torch.float32,
+                                   pad_id=pad_id)  # [B, K, V]
+
+    # Per-query validity: a sampled position whose own target token is pad is
+    # a padded region — do not supervise it.
+    flat_valid: Optional[torch.Tensor] = None
+    if pad_id is not None:
+        q_valid = torch.gather(y, 1, pos_bt).ne(pad_id)        # [B, K]
+        flat_valid = q_valid.reshape(-1).to(torch.float32)     # [B*K]
 
     # Gather hidden[p] and add the learnable FSP bias
     idx_bt = pos_bt.unsqueeze(-1).expand(-1, -1, H)
@@ -142,7 +174,12 @@ def fsp_loss(
         logits = F.linear(flat_h[i:end].to(W.dtype), W, bias).float()   # [chunk, V]
         tc = flat_t[i:end]
         # BCE with logits, sum over vocab then mean over positions
-        if has_w:
+        if flat_valid is not None:
+            per_pos = F.binary_cross_entropy_with_logits(
+                logits, tc, weight=vw if has_w else None,
+                reduction="none").sum(dim=1)                 # [chunk]
+            loss_chunk = (per_pos * flat_valid[i:end]).sum()
+        elif has_w:
             loss_chunk = F.binary_cross_entropy_with_logits(
                 logits, tc, weight=vw, reduction="sum")
         else:
@@ -150,4 +187,5 @@ def fsp_loss(
                 logits, tc, reduction="sum")
         # Normalize by vocab size so per-position loss is not V-scaled
         total = total + loss_chunk / V
-    return total / max(1, N), N
+    n_valid = N if flat_valid is None else int(flat_valid.sum().item())
+    return total / max(1, n_valid), n_valid
