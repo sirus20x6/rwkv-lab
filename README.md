@@ -1,74 +1,248 @@
 # RWKV-Lab
 
-## MoonViT → RWKV vision captioning
+[![tests](https://github.com/sirus20x6/rwkv-lab/actions/workflows/tests.yml/badge.svg)](https://github.com/sirus20x6/rwkv-lab/actions/workflows/tests.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-2ea44f.svg)](LICENSE)
 
-`rwkv_lab.vision_train` freezes the downloaded 416.9M-parameter Kimi K2.6
-MoonViT tower, learns a 64-token bridge into the G1H 2.9B RWKV embedding
-space, and masks loss on both image-prefix and prompt tokens.  Its JSONL input
-uses `{"image": "relative/or/absolute/path.jpg", "text": "caption"}` rows;
-the curated grid, anime, and matched Joy manifests already follow that format.
+**A reproducible research workbench for RWKV language models, multimodal
+captioning, recurrent-depth training, memory, post-training, kernels, and
+cross-architecture conversion.**
+
+RWKV-Lab turns research ideas into isolated, measurable implementations. Most
+language-model levers are off by default, carry an explicit configuration, and
+have a CPU correctness test or reference oracle. Hardware-specific paths must
+pass parity before they are allowed to claim a speedup. Training runs preserve
+their configuration, data fingerprints, checkpoints, evaluation artifacts,
+and resume state so that a promising graph is evidence—not just a screenshot.
+
+> [!IMPORTANT]
+> This is an active research repository, not a packaged pretrained model.
+> Weights, datasets, generated manifests, caches, and run directories are
+> intentionally excluded from Git. Reproducing a model run requires supplying
+> those artifacts and using the same fingerprints recorded by the launcher.
+
+## At a glance
+
+| Track | What is implemented | Maturity |
+|---|---|---|
+| **Multimodal RWKV** | Frozen MoonViT and RWKV backbones; trainable visual bridge/resampler; optional SigLIP2 + DINOv2 + SAM fusion; grounding losses; recurrent loops; NextLat; Engram; qualitative eval artifacts | Active experiment pipeline |
+| **Cross-architecture conversion** | Exact Gated DeltaNet → RWKV-7 remap plus isolated attention-layer distillation, assembly, and consolidation | GDN remap validated; attention conversion experimental |
+| **RWKV training research** | Recurrent depth, latent prediction, lexical and online memory, Muon-family optimizers, mixed-context training, and typed post-training | Reference implementations and A/B tooling |
+| **Training systems** | Exact-resume checkpoints, immutable receipts, watchdogs, kernel qualification, and a Go/SQLite/Pixi dashboard | Operational research infrastructure |
+
+The long-term multimodal design—compress several frozen vision teachers into
+one RWKV-native vision student—is documented in
+[`MULTI_TEACHER_VISION_DISTILLATION.md`](docs/MULTI_TEACHER_VISION_DISTILLATION.md).
+
+## Start here
+
+| Goal | Entry point |
+|---|---|
+| Understand the available research levers | [What's in the box](#whats-in-the-box) · [`TRAINING_LEVERS.md`](TRAINING_LEVERS.md) |
+| Train the image captioner | [Multimodal captioning](#multimodal-captioning) · [`vision_train.py`](src/rwkv_lab/vision_train.py) |
+| Run a conversion experiment | [Conversion pipeline](#pipeline) · [validated conversion result](#highlight-result-gdn-rwkv-7-lossless-conversion) |
+| Monitor training | [`dashboard/README.md`](dashboard/README.md) |
+| Prepare or deduplicate image data | [`UNLABELED_IMAGE_DEDUP.md`](docs/UNLABELED_IMAGE_DEDUP.md) · [`scripts/`](scripts/) |
+| Run tests | [Quick start](#quick-start) · [`scripts/test_parallel.sh`](scripts/test_parallel.sh) |
+| Check project claims and maturity | [Status](#status) · [References](#references) |
+
+## Quick start
+
+CPU installation is sufficient for the Python correctness suite. Install the
+PyTorch build appropriate for your platform first; CUDA training additionally
+requires a compatible CUDA PyTorch stack and `fla`/flash-linear-attention. The
+last command below also requires Go and validates the dashboard separately.
 
 ```bash
-PYTHONPATH=src python -m rwkv_lab.vision_train \
-  --data curated_vision/vision_stage1_mix.jsonl \
-  --steps 16000 --batch 8 --out runs/moonvit_rwkv_stage1_v3
+git clone https://github.com/sirus20x6/rwkv-lab.git
+cd rwkv-lab
+
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+
+# Example CPU-only PyTorch installation. Use the matching CUDA build for training.
+python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+python -m pip install -e '.[vision,test]'
+
+pytest -q -m 'not gpu'
+go -C dashboard test ./...
 ```
 
-### Kimi K2.6 teacher captions
+The package uses a `src/` layout, so installed entry points run as
+`python -m rwkv_lab.<module>`. For development without an editable install,
+prefix commands with `PYTHONPATH=src`.
 
-The clean Kimi teacher queue ranks i1 Pexels images primarily by the amount of
-useful information in their existing captions. It applies only small penalties
-to concatenated descriptions and image-generation boilerplate. The old caption
-is used for selection only and is never included in the Kimi request. Clean i1
-Pexels and Midjourney evaluation rows are queued first; adult, Civitai, and Joy
-rows are excluded.
+## Multimodal captioning
+
+The current captioner adapts Kimi K2.6's MoonViT representation to a 2.9B RWKV
+G1H language model. Both pretrained backbones remain frozen. The baseline trains
+only a visual prefix projector; research configurations can add a resampler,
+intermediate-layer injection, multi-teacher residual fusion, recurrent-depth
+adapters, NextLat, grounding objectives, and Engram memory.
+
+```mermaid
+flowchart LR
+    I[Image] --> M[MoonViT<br/>frozen]
+    I --> S[SigLIP2<br/>optional, frozen]
+    I --> D[DINOv2<br/>optional, frozen]
+    I --> A[SAM<br/>optional, frozen]
+    M --> P[Visual bridge / resampler]
+    S --> F[Teacher fusion adapter]
+    D --> F
+    A --> F
+    F --> P
+    P --> R[RWKV G1H 2.9B<br/>frozen backbone]
+    R --> C[Caption tokens]
+    N[NextLat · loops · Engram<br/>optional trainable levers] --> R
+```
+
+### What trains and what stays frozen
+
+| Component | Baseline | Advanced configuration |
+|---|---:|---:|
+| MoonViT | Frozen | Frozen |
+| RWKV G1H backbone and LM head | Frozen | Frozen |
+| Prefix projector | Trainable | Trainable |
+| Vision resampler and layer/deep-vision adapters | Disabled | Trainable when enabled |
+| SigLIP2 + DINOv2 + SAM towers | Disabled | Frozen; features may be cached |
+| Fusion residual, loop adapters, loop-index embedding | Disabled | Trainable when enabled |
+| NextLat head and Engram memory | Disabled | Trainable when enabled |
+
+### Data contract
+
+Training and explicit evaluation data are JSONL files with one image-caption
+pair per line:
+
+```json
+{"image":"images/000001.jpg","text":"Two red kites fly above a calm blue sea.","source":"example"}
+```
+
+- `image` may be absolute or relative to the repository root.
+- `text` is the target caption; prompts and image-prefix positions are masked
+  from caption cross-entropy.
+- An optional per-row `prompt` overrides the default `Describe this image:`.
+- Explicit evaluation manifests must be image-disjoint from training data.
+- Exact image-caption duplicates are removed before sampling.
+
+Generated manifests are local artifacts and are not checked into Git. The
+curation scripts under [`scripts/`](scripts/) build them from source datasets.
+
+### Minimal bridge baseline
+
+Supply the RWKV World vocabulary, the two model checkpoints, and your own
+train/eval manifests. This command disables the experimental recurrent and
+latent levers so the result is a clean visual-bridge baseline:
 
 ```bash
-PYTHONPATH=src python -m rwkv_lab.kimi_teacher select
+export VOCAB=/path/to/rwkv_vocab_v20230424.txt
 
-# This second command is intentionally inert without both the environment key
-# and --execute. It resumes from atomic per-image response receipts.
-OPENROUTER_API_KEY=... PYTHONPATH=src python -m rwkv_lab.kimi_teacher caption \
+python -m rwkv_lab.vision_train \
+  --data /path/to/train.jsonl \
+  --eval-data /path/to/eval.jsonl \
+  --rwkv /path/to/rwkv7-g1h-2.9b-20260710-ctx10240.pth \
+  --moonvit /path/to/model-00064-of-000064.safetensors \
+  --feature-cache /path/to/moonvit-cache \
+  --out runs/vision-bridge-baseline \
+  --prefix-tokens 64 --loop-count 1 --no-loop-index \
+  --nextlat-weight 0 --resume auto
+```
+
+`--resume auto` restores `last.pt`, including optimizer, sampler, and RNG state.
+The trainer refuses to overwrite an existing run that lacks a recoverable
+checkpoint; `--fresh --resume none` is the explicit destructive-new-run path.
+
+### Advanced multi-teacher run
+
+[`prepare_vision_next_levers.sh`](scripts/prepare_vision_next_levers.sh) caches
+MoonViT taps and aligned SigLIP2/DINOv2/SAM features, verifies capacity, and
+writes a manifest-bound receipt. [`run_vision_next_levers.sh`](scripts/run_vision_next_levers.sh)
+refuses to launch if that receipt, its cache counts, fingerprints, or mtimes do
+not match.
+
+```bash
+# Set VISION_NEXT_* paths for your machine before running these scripts.
+scripts/prepare_vision_next_levers.sh
+scripts/run_vision_next_levers.sh
+```
+
+The checked-in advanced launcher uses 128 visual tokens, three MoonViT taps,
+three RWKV injection sites, full-frame plus quadrant views, a two-layer visual
+resampler, early-token grounding weight, image-text contrastive loss, two
+factored recurrent passes, loop-index embeddings, NextLat, and two Engram sites.
+These are experimental choices, not universal defaults.
+
+### Evaluation and observability
+
+Evaluation loss and perplexity are teacher-forced monitoring metrics; they do
+not update model weights. Qualitative evaluation runs greedy decoding on a
+stable, source-filtered held-out set and stores the image, prompt, generated
+caption, reference, termination reason, and token count as run artifacts.
+Trainboard ingests those artifacts so each evaluation point can be inspected
+alongside loop, NextLat, Engram, throughput, GPU, and checkpoint telemetry.
+
+```bash
+go -C dashboard run ./cmd/trainboard \
+  -repo "$PWD" -runs "$PWD/runs" -addr 127.0.0.1:9124
+# open http://127.0.0.1:9124
+```
+
+### Optional Kimi teacher captions
+
+[`kimi_teacher.py`](src/rwkv_lab/kimi_teacher.py) can rank a clean candidate
+queue and request long-form Kimi K2.6 captions through OpenRouter. Existing
+captions influence selection only; they are not sent as hints. Network execution
+is deliberately gated by both an API key and `--execute`.
+
+```bash
+python -m rwkv_lab.kimi_teacher select
+
+OPENROUTER_API_KEY=... python -m rwkv_lab.kimi_teacher caption \
   --budget-usd 3.80 --execute
 ```
 
-The request asks for an exhaustive natural caption and lets the model stop at
-EOS; it does not target a fixed caption length. The default 2048-token value is
-only a runaway-spend guard. Any completion that actually reaches that guard is
-retained for diagnosis but excluded from the training manifest. Set
-`--max-completion-tokens 0` to omit even that guard. Original full-frame pixels
-are sent by default, with no crop or resize. Each raw receipt preserves the
-complete OpenRouter response, including chosen-token log probabilities, the top
-20 alternatives at every position, token bytes when returned, usage, provider,
-and cost. Accepted EOS-complete rows are materialized as
-`datasets/kimi_k26_teacher/{train,eval}.jsonl`.
+Every response is written atomically and preserves model/provider metadata,
+usage, cost, chosen-token log probabilities, and returned alternatives. The
+completion limit is a runaway-spend guard rather than a desired caption length;
+guard-truncated responses remain available for diagnosis but are excluded from
+the accepted training manifest.
 
-The default routing allowlist uses Kimi endpoints that advertise both logprobs
-and top-logprobs, with provider fallback enabled. Decart is temporarily excluded:
-its July 2026 OpenRouter endpoint advertises Kimi K2.6 as multimodal but returns
-an upstream `does not support image input` error for actual image requests.
+### Image acquisition and deduplication
 
-Only the bridge, per-TimeMix 2-pass factored-loop adapters, zero-init loop-index
-embeddings, the training-only NextLat head, and an optional `--engram` lexical
-memory bank are optimized; both pretrained models stay frozen. The loop starts
-after a 250-step bridge warmup and is an
-exact zero-impact adapter when enabled. Captions end in EOD, are length-bucketed
-without replacement, and use a stable held-out split. Atomic checkpoints include
-optimizer, sampler, and RNG state; rerunning the same command resumes `last.pt`
-automatically instead of overwriting the run. Use `--loop-count 1
---nextlat-weight 0` for the plain bridge baseline.
+- [`build_unlabeled_image_manifest.py`](scripts/build_unlabeled_image_manifest.py)
+  inventories still images into resumable SQLite state, removes exact and
+  conservative perceptual duplicates, and keeps the strongest representative.
+- [`fetch_doclingmatix.py`](scripts/fetch_doclingmatix.py) downloads a pinned,
+  resumable OCR-rich DoclingMatix tranche and writes an exact row/byte receipt.
+- [`fetch_i1_sources.py`](scripts/fetch_i1_sources.py) and
+  [`repair_midjourney_i1_alignment.py`](scripts/repair_midjourney_i1_alignment.py)
+  acquire and validate i1 source/caption alignment.
+- [`vision_cache.py`](src/rwkv_lab/vision_cache.py),
+  [`vision_fusion_cache.py`](src/rwkv_lab/vision_fusion_cache.py), and
+  [`vision_sam_dense_cache.py`](src/rwkv_lab/vision_sam_dense_cache.py) use
+  temporary-write plus atomic-rename cache entries and validate payload shape,
+  dtype, finiteness, and archive integrity.
 
-[![tests](https://github.com/sirus20x6/rwkv-lab/actions/workflows/tests.yml/badge.svg)](https://github.com/sirus20x6/rwkv-lab/actions/workflows/tests.yml)
+### Reproducibility and artifact boundaries
 
-**An experimental toolbox for state-of-the-art LLM techniques on RWKV linear-attention cores.**
+The repository contains code, tests, launch contracts, and documentation. It
+does **not** contain third-party datasets, model weights, generated captions,
+feature caches, checkpoints, logs, dashboard databases, or review packs. Those
+paths are ignored because they are large, machine-specific, or may carry local
+absolute paths and upstream license constraints.
 
-RWKV-Lab implements a broad, growing set of recent research techniques — recurrent-depth **loops**, **latent-prediction** objectives, **memory / retrieval** modules, **Muon-family optimizers**, and cross-architecture **conversion** — as composable, unit-tested, **off-by-default** levers on RWKV-7/8 cores. Every technique maps to a paper (linked in [References](#references)) and a test; at default flags the code reproduces the plain baseline, so each lever can be A/B'd in isolation.
-
-The lab grew out of one concrete goal — losslessly turning a pretrained Transformer / gated-linear-attention model into RWKV *without* pretraining from scratch — and kept absorbing SOTA ideas from the RWKV research community and the literature. That conversion track is still here (and produced a clean lossless result, below); it's now one capability among several.
+For reproducible experiments, preserve the run's `config.json`, `train.jsonl`,
+`status.json`, `last.pt`, `best/`, dataset/cache receipts, and qualitative eval
+artifacts together. A checkpoint without its data and cache fingerprints is not
+enough to reconstruct the experiment.
 
 ## What's in the box
 
-Every entry is an off-by-default lever with a paper and a CPU test. Full index in [References](#references).
+The table below is the fastest map from a research question to its implementation.
+Most experimental levers are off by default; paper links, reference oracles, and
+tests are cataloged in [References](#references). A listed implementation is not
+automatically a claim of production readiness—see [Status](#status) for the
+evidence boundary.
 
 | Area | Techniques | Modules |
 |---|---|---|
@@ -84,6 +258,9 @@ Every entry is an off-by-default lever with a paper and a CPU test. Full index i
 | **From-scratch lab** | Future-Seed cross-layer state chaining · DeepEmbed per-token FFN gates (output / BlinkDL-exact hidden / +shift / +emb-residual) · Engram-as-lever · semantic context-bucket packing + mixed-context training (reciprocal batch) · grad-accum / EMA / fp8 / 8-bit optimizers | [`rwkv_pretrain`](src/rwkv_lab/rwkv_pretrain.py) · [`experiment`](src/rwkv_lab/experiment.py) · [`build_corpus`](src/rwkv_lab/build_corpus.py) |
 
 All Python lives under `src/rwkv_lab/` (`python -m rwkv_lab.<module>`); a from-scratch Go + SQLite + [Pixi.js](https://pixijs.com/) dashboard ([`dashboard/`](dashboard/)) drives and monitors runs.
+
+<details>
+<summary><strong>RWKV community research additions and implementation notes</strong></summary>
 
 ### RWKV community research additions
 
@@ -102,38 +279,33 @@ implementation sources of record.
   device transfer primitives inspired by [AUXStar/RWKV-Server](https://github.com/AUXStar/RWKV-Server).
 - **Stable delta-rule inversion:** [`triangular_delta.py`](src/rwkv_lab/triangular_delta.py) implements
   direct and unit-lower Neumann oracles plus parity/speed receipts from
-  [Fast and Stable Triangular Inversion for Delta-Rule Linear Transformers](https://arxiv.org/abs/2605.21325)
-  ([local PDF](research/conversion-core/Fast%20and%20Stable%20Triangular%20Inversion%20for%20Delta-Rule%20Linear%20Transformers.pdf)).
+  [Fast and Stable Triangular Inversion for Delta-Rule Linear Transformers](https://arxiv.org/abs/2605.21325).
 - **Offline consolidation:** [`online_memory.py`](src/rwkv_lab/online_memory.py) adds explicitly
   budgeted, bounded sleep passes following
-  [Do Language Models Need Sleep?](https://arxiv.org/abs/2605.26099)
-  ([local PDF](research/self-improvement/Do%20Language%20Models%20Need%20Sleep%20-%20Offline%20Recurrence%20for%20Improved%20Online%20Inference.pdf)).
+  [Do Language Models Need Sleep?](https://arxiv.org/abs/2605.26099).
 - **Reasoning Cache:** [`reasoning_cache.py`](src/rwkv_lab/reasoning_cache.py) implements bounded
   response→summary→response iteration and auditable short-horizon training pairs following
-  [Reasoning Cache](https://arxiv.org/abs/2602.03773)
-  ([local PDF](research/self-improvement/Reasoning%20Cache%20-%20Continual%20Improvement%20Over%20Long%20Horizons%20via%20Short-Horizon%20RL.pdf)). It does not execute generated code.
+  [Reasoning Cache](https://arxiv.org/abs/2602.03773). It does not execute generated code.
 - **Parallel decoding:** [`diffusion_rwkv.py`](src/rwkv_lab/diffusion_rwkv.py) is an isolated
   triplet-block bidirectional diffusion head following
   [B³D-RWKV](https://arxiv.org/abs/2605.25969) and its
-  [official repository](https://github.com/leonardodalinky/B3D-RWKV)
-  ([local PDF](research/mtp-lookahead/Triplet-Block%20Diffusion%20RWKV.pdf)).
+  [official repository](https://github.com/leonardodalinky/B3D-RWKV).
 - **Sparse hybrid layers:** [`hils_attention.py`](src/rwkv_lab/hils_attention.py) is a causal,
   CPU-readable compressed-landmark/chunk-fusion oracle following
   [HiLS-Attention](https://arxiv.org/abs/2607.02980) and its
   [official implementation](https://github.com/Tencent-Hunyuan/HiLS-Attention). Production adoption
-  waits for a qualified sparse kernel and long-context evidence
-  ([local PDF](research/conversion-methodology/Hierarchical%20Sparse%20Attention%20Done%20Right%20-%20Toward%20Infinite%20Context%20Modeling.pdf)).
+  waits for a qualified sparse kernel and long-context evidence.
 - **Decoder-as-evaluation:** [`decoding_eval.py`](src/rwkv_lab/decoding_eval.py) runs paired,
   deterministic greedy/top-k/top-p/typical/Mirostat tapes and records task score, entropy, loops,
   throughput, and recurrent-state divergence. The matrix follows
-  [A Thorough Examination of Decoding Methods in the Era of LLMs](https://arxiv.org/abs/2402.06925)
-  ([local PDF](research/decoding/A%20Thorough%20Examination%20of%20Decoding%20Methods%20in%20the%20Era%20of%20LLMs.pdf)); the RWKV-specific state-drift criterion came from the
+  [A Thorough Examination of Decoding Methods in the Era of LLMs](https://arxiv.org/abs/2402.06925);
+  the RWKV-specific state-drift criterion came from the
   [community decoding discussion](https://discord.com/channels/992359628979568762/1076020543205163118/1236635292665118822).
 - **State-offset tuning:** [`state_tuning.py`](src/rwkv_lab/state_tuning.py) adds frozen-base FP32
   matrix/shift offsets at every recurrent token, with an optional scheduled-offset ablation and an
   exact slow chunk oracle, following the ACL 2025
-  [State-offset Tuning](https://arxiv.org/abs/2503.03499) paper
-  ([local PDF](research/state-tuning/State-offset%20Tuning%20-%20State-based%20Parameter-Efficient%20Fine-Tuning%20for%20State%20Space%20Models.pdf)). It is launchable as the scratch-LM `state_offset` arm or `--state-offset 1`.
+  [State-offset Tuning](https://arxiv.org/abs/2503.03499) paper. It is launchable
+  as the scratch-LM `state_offset` arm or `--state-offset 1`.
 - **Routed state bank:** [`state_bank.py`](src/rwkv_lab/state_bank.py) learns soft/hard routing over
   reusable constant-size state slots, optionally adds a bounded hypernetwork residual, and reports
   entropy/collapse telemetry. This is a correctness oracle for the community's
@@ -142,10 +314,8 @@ implementation sources of record.
 - **Byte-aware and superword experiments:** [`tokenizer_experiments.py`](src/rwkv_lab/tokenizer_experiments.py)
   provides exact-no-op token-length and position-specific UTF-8 byte embeddings based on
   [BlinkDL's proposal](https://discord.com/channels/992359628979568762/992372861924823080/1098006666986930276), plus an auditable builder for
-  [SuperBPE](https://arxiv.org/abs/2503.13423)
-  ([local PDF](research/tokenization/SuperBPE%20-%20Space%20Travel%20for%20Language%20Models.pdf)) and
-  [Faster Superword Tokenization](https://arxiv.org/abs/2604.05192)
-  ([local PDF](research/tokenization/Faster%20Superword%20Tokenization.pdf)) corpus arms. The actual
+  [SuperBPE](https://arxiv.org/abs/2503.13423) and
+  [Faster Superword Tokenization](https://arxiv.org/abs/2604.05192) corpus arms. The actual
   tokenizer trainer/runtime is implemented in [`ztok`](https://github.com/sirus20x6/ztok) as
   `ztok train --kind superbpe`; RWKV-Lab owns tokenizer fingerprints and model A/B evidence.
 - **Guarded adapter consolidation:** [`adapter_consolidation.py`](src/rwkv_lab/adapter_consolidation.py)
@@ -160,31 +330,32 @@ implementation sources of record.
 - **Post-training state expansion:** [`state_expansion.py`](src/rwkv_lab/state_expansion.py)
   implements StateX's uniform layer selection, actual single-head RWKV TimeMix replacement,
   block-diagonal runtime-state oracle, paper-recommended mixer reinitialization, and auditable capacity receipt from
-  [StateX](https://arxiv.org/abs/2509.22630)
-  ([local PDF](research/recurrent-training/StateX%20-%20Enhancing%20RNN%20Recall%20via%20Post-training%20State%20Expansion.pdf)); the generic kernel can execute the expanded geometry, while production adoption still requires long-context parity, memory, and throughput qualification. Community lead:
+  [StateX](https://arxiv.org/abs/2509.22630); the generic kernel can execute the
+  expanded geometry, while production adoption still requires long-context parity,
+  memory, and throughput qualification. Community lead:
   [RWKV Discord](https://discord.com/channels/992359628979568762/992359629419991142/1524895529341816847).
 - **Supervised Memory Training:** [`supervised_memory.py`](src/rwkv_lab/supervised_memory.py)
   provides the time-parallel one-step `(memory, next input) → next memory` loss, predictive-future
   composition, anti-collapse uniformity term, detached offline-label mode, and rollout-drift
-  diagnostic from [Pretraining Recurrent Networks without Recurrence](https://arxiv.org/abs/2606.06479)
-  ([local PDF](research/recurrent-training/Pretraining%20Recurrent%20Networks%20without%20Recurrence.pdf)). Community lead: [RWKV Discord](https://discord.com/channels/992359628979568762/992362722035507270/1516721026589786122).
+  diagnostic from [Pretraining Recurrent Networks without Recurrence](https://arxiv.org/abs/2606.06479).
+  Community lead: [RWKV Discord](https://discord.com/channels/992359628979568762/992362722035507270/1516721026589786122).
 - **Routing-Free MoE:** [`routing_free_moe.py`](src/rwkv_lab/routing_free_moe.py) replaces the FFN
   with independently self-activating experts—no router, softmax, or top-k—and exposes the paper's
   interpolated token/expert balancing objective as the `routing_free_moe` arm or
   `--routing-free-moe 1`. Sources: [paper](https://arxiv.org/abs/2604.00801),
   [official code](https://github.com/liuyilun2000/RoutingFreeMoE/tree/release),
-  [local PDF](research/recurrent-training/Routing-Free%20Mixture-of-Experts.pdf), and
   [community lead](https://discord.com/channels/992359628979568762/992359629419991142/1525186839227400242).
 - **Rapid dense-to-sparse transfer:** [`sparse_transfer.py`](src/rwkv_lab/sparse_transfer.py)
   implements retrieval-head calibration, trainable 16-D pre-RoPE indexers, query-adaptive top-p
   support, exact full-dimensional attention on that support, and teacher-top-logit distillation
-  from [RTPurbo](https://arxiv.org/abs/2605.16928)
-  ([local PDF](research/sparse-transfer/Full%20Attention%20Strikes%20Back%20-%20Transferring%20Full%20Attention%20into%20Sparse%20within%20Hundred%20Training%20Steps.pdf)). Community lead: [RWKV Discord](https://discord.com/channels/992359628979568762/992362722035507270/1508496234585784390). The module is an exact small oracle; production sparse decoding still needs a qualified block kernel.
+  from [RTPurbo](https://arxiv.org/abs/2605.16928). Community lead:
+  [RWKV Discord](https://discord.com/channels/992359628979568762/992362722035507270/1508496234585784390).
+  The module is an exact small oracle; production sparse decoding still needs a qualified block kernel.
 - **External kernel-candidate qualification:** [`kernel_candidates.py`](src/rwkv_lab/kernel_candidates.py)
   accepts already-imported candidates from systems such as
   [Mirage](https://arxiv.org/abs/2405.05751), then gates adoption on randomized output/gradient
   parity, determinism, and median speedup. It deliberately never executes generated source or shell
-  commands ([local PDF](research/kernels/Mirage%20-%20A%20Multi-Level%20Superoptimizer%20for%20Tensor%20Programs.pdf); [community lead](https://discord.com/channels/992359628979568762/992362493055881276/1524695625336225852)).
+  commands ([community lead](https://discord.com/channels/992359628979568762/992362493055881276/1524695625336225852)).
 - **ROSA backend qualification:** [`rosa_backends.py`](src/rwkv_lab/rosa_backends.py) registers
   CPU/CUDA/JAX/FPGA callables behind one exact suffix-matching contract and compares each with the
   independent CPU oracle before adoption. The semantics come from
@@ -193,26 +364,27 @@ implementation sources of record.
   [community report](https://discord.com/channels/992359628979568762/1426889957221466153/1523691227957170358). Reported energy/throughput metadata is not treated as locally reproduced evidence.
 - **Action-conditioned JEPA diagnostics:** [`llm_jepa.py`](src/rwkv_lab/llm_jepa.py) now includes
   a multi-step action-conditioned latent predictor, variance regularization, and SVD rank/dimension
-  residual curves based on [A Generalization Theory for JEPA-Based World Models](https://arxiv.org/abs/2606.27014)
-  ([local PDF](research/jepa/A%20Generalization%20Theory%20for%20JEPA-Based%20World%20Models.pdf)). The diagnostic reports empirical low-rank approximation trade-offs without claiming planning-regret guarantees outside the paper's assumptions.
+  residual curves based on [A Generalization Theory for JEPA-Based World Models](https://arxiv.org/abs/2606.27014).
+  The diagnostic reports empirical low-rank approximation trade-offs without
+  claiming planning-regret guarantees outside the paper's assumptions.
 - **Key-Value Means:** [`key_value_means.py`](src/rwkv_lab/key_value_means.py) provides fixed,
   square-root-growing, and saturating state budgets; least-redundant append; winner-take-all
   cosine merging; fixed value radii; JIT normalization; and joint state/window readout from
   [KVM](https://arxiv.org/abs/2605.09877) and its [official code](https://github.com/recursal/KVM-paper)
-  ([local PDF](research/recurrent-architectures/Key-Value%20Means.pdf); [community lead](https://discord.com/channels/992359628979568762/992362722035507270/1503948385940672553)).
+  ([community lead](https://discord.com/channels/992359628979568762/992362722035507270/1503948385940672553)).
 - **Neural Procedural Memory:** [`procedural_memory.py`](src/rwkv_lab/procedural_memory.py) stores
   inter/intra-trajectory activation contrasts, retrieves them by task, synthesizes a consensus
   direction, and applies an explicitly bounded residual intervention following
   [NPM](https://arxiv.org/abs/2606.29824)
-  ([local PDF](research/agent-memory/Neural%20Procedural%20Memory.pdf); [community lead](https://discord.com/channels/992359628979568762/992362722035507270/1521742648812244994)).
+  ([community lead](https://discord.com/channels/992359628979568762/992362722035507270/1521742648812244994)).
 - **Mamba-3 recurrence ablations:** [`mamba3_recurrence.py`](src/rwkv_lab/mamba3_recurrence.py)
   isolates exponential SSM discretization, complex-valued state rotation, and MIMO state lanes
   from [Mamba-3](https://arxiv.org/abs/2603.15569)
-  ([local PDF](research/recurrent-architectures/Mamba-3.pdf); [community lead](https://discord.com/channels/992359628979568762/992362722035507270/1483679154481266729)).
+  ([community lead](https://discord.com/channels/992359628979568762/992362722035507270/1483679154481266729)).
 - **Nonlinear matrix state:** [`m2rnn.py`](src/rwkv_lab/m2rnn.py) is a small matrix-to-matrix
   nonlinear recurrence suitable for isolated hybrid-layer experiments, based on
   [M²RNN](https://arxiv.org/abs/2603.14360)
-  ([local PDF](research/recurrent-architectures/M2RNN.pdf); [community lead](https://discord.com/channels/992359628979568762/992362722035507270/1484506344588574881)).
+  ([community lead](https://discord.com/channels/992359628979568762/992362722035507270/1484506344588574881)).
 - **Compositional Muon:** [`compositional_muon.py`](src/rwkv_lab/compositional_muon.py) implements
   partner-whitened steepest-descent updates for paired factors such as QK and OV, with an operator
   update receipt, from the [Apache-2.0 reference](https://github.com/tilde-research/comp-muon-release)
@@ -220,13 +392,13 @@ implementation sources of record.
 - **Distillation merge stage:** [`distillation_merge.py`](src/rwkv_lab/distillation_merge.py)
   adds weighted expert-state merging, ensemble-logit alignment, and tolerance-corrected win/tie
   evaluation from [Effective Distillation to Hybrid xLSTM Architectures](https://arxiv.org/abs/2603.15590)
-  ([local PDF](research/distillation/Effective%20Distillation%20to%20Hybrid%20xLSTM%20Architectures.pdf); [community lead](https://discord.com/channels/992359628979568762/992362722035507270/1483557410512699473)).
+  ([community lead](https://discord.com/channels/992359628979568762/992362722035507270/1483557410512699473)).
 - **Guarded test-time training:** [`test_time_training.py`](src/rwkv_lab/test_time_training.py)
   wraps inference-time next-token adaptation in an explicit parameter/step budget, held-out
   regression gate, immutable snapshot, and automatic rollback. It follows
   [TTT-E2E](https://test-time-training.github.io/e2e.pdf) and its
-  [official code](https://github.com/test-time-training/e2e)
-  ([local PDF](research/test-time-training/End-to-End%20Test-Time%20Training%20for%20Long%20Context.pdf)). Baseline inference never mutates weights.
+  [official code](https://github.com/test-time-training/e2e). Baseline inference
+  never mutates weights.
 - **ROSA+ fallback:** [`rosa_plus.py`](src/rwkv_lab/rosa_plus.py) supplies an independently written,
   token-generic interpolated Witten–Bell distribution only when exact ROSA has no match, inspired
   by [bcml-labs/rosa-plus](https://github.com/bcml-labs/rosa-plus) without copying its GPL code
@@ -234,20 +406,22 @@ implementation sources of record.
 - **Tool-use length generalization:** [`tool_length_generalization.py`](src/rwkv_lab/tool_length_generalization.py)
   builds inert, allowlisted tool tapes and extrapolation curves following
   [Malach et al.](https://arxiv.org/abs/2510.14826)
-  ([local PDF](research/agent-tools/Tool-Use%20Unlocks%20Length%20Generalization%20in%20State%20Space%20Models.pdf); [community lead](https://discord.com/channels/992359628979568762/1426889957221466153/1492868620831821894)). Adamaton exclusively owns execution.
+  ([community lead](https://discord.com/channels/992359628979568762/1426889957221466153/1492868620831821894)).
+  Adamaton exclusively owns execution.
 - **Energy-based refinement:** [`energy_refinement.py`](src/rwkv_lab/energy_refinement.py) adds a
   contrastive compatibility-energy head and norm-bounded candidate-latent descent from
   [Energy-Based Transformers](https://arxiv.org/abs/2507.02092)
-  ([local PDF](research/energy-models/Energy-Based%20Transformers%20are%20Scalable%20Learners%20and%20Thinkers.pdf); [community discussion](https://discord.com/channels/992359628979568762/992359629419991142/1521434262778286160)). Model weights remain fixed during refinement.
+  ([community discussion](https://discord.com/channels/992359628979568762/992359629419991142/1521434262778286160)).
+  Model weights remain fixed during refinement.
 - **Compressed Convolutional Attention:** [`cca_attention.py`](src/rwkv_lab/cca_attention.py) is a
   causal oracle that projects Q/K/V and performs convolution plus attention entirely at latent
   width, following [CCA](https://arxiv.org/abs/2510.04476)
-  ([local PDF](research/attention/Compressed%20Convolutional%20Attention.pdf); [community lead](https://discord.com/channels/992359628979568762/1426889957221466153/1511375668875890688)).
+  ([community lead](https://discord.com/channels/992359628979568762/1426889957221466153/1511375668875890688)).
 - **Compute-aware data filtering:** [`data_filter_audit.py`](src/rwkv_lab/data_filter_audit.py)
   permits raw-versus-filter comparisons only inside matched parameter/token/compute cells, based on
   [A Bitter Lesson for Data Filtering](https://arxiv.org/abs/2605.19407) and
   [Apple's quality-filter analysis](https://machinelearning.apple.com/research/data-quality-illusion)
-  ([local PDF](research/data/A%20Bitter%20Lesson%20for%20Data%20Filtering.pdf); [community lead](https://discord.com/channels/992359628979568762/1426889957221466153/1513070964446068769)).
+  ([community lead](https://discord.com/channels/992359628979568762/1426889957221466153/1513070964446068769)).
 - **Runtime backend matrix:** [`runtime_backends.py`](src/rwkv_lab/runtime_backends.py) applies the
   common parity/gradient/determinism/speed gate to [Albatross](https://github.com/BlinkDL/Albatross),
   [vLLM RWKV](https://github.com/vllm-project/vllm/pull/46269),
@@ -296,6 +470,8 @@ implementation sources of record.
 
 ---
 
+</details>
+
 ## Highlight result — GDN ⊂ RWKV-7 (lossless conversion)
 
 The conversion track's anchor result. Qwen3.5's linear-attention layers are **gated DeltaNet (GDN)**. We proved — algebraically and end-to-end — that **GDN's gated-delta recurrence is an exact special case of the RWKV-7 `wkv7` kernel** at matched head dimensions:
@@ -312,13 +488,13 @@ Given GDN kernel inputs (q, k, v, g, β), with q/k L2-normalized:
 
 Feeding a GDN layer's own activations through this map reproduces its output at **cosine 0.999995**. Patching all 24 GDN layers of the full 9B model changes perplexity by **+0.013%** (8.4898 → 8.4908) — with **zero training**. See [`convert_gdn_lossless.py`](src/rwkv_lab/convert_gdn_lossless.py).
 
-That collapses the conversion problem to just the **8 full-attention layers**, which are *not* a linear-attention subset and need distillation ([RADLADS](#code--upstream-references)-style block-alignment + logit-KD). The `attn_L3_poc.py` proof-of-concept and the `convert_train.py` per-layer trainer target exactly those.
+That collapses the conversion problem to just the **8 full-attention layers**, which are *not* a linear-attention subset and need distillation ([RADLADS](#code-upstream-references)-style block-alignment + logit-KD). The `attn_L3_poc.py` proof-of-concept and the `convert_train.py` per-layer trainer target exactly those.
 
 > **Why this matters:** an earlier version of this project built the RWKV core at head-size 64 against GDN's 32×128, a self-imposed 2:1 state compression that *forced* a whole distillation-and-codec pipeline. The matched-dimension remap makes 24 of 32 layers free. The "RWKV-7 decay floor" that dogged early runs turned out to be a parametrization artifact, not a kernel limit.
 
 <p align="center">
-  <img src="docs/images/conversion_map.png" width="100%" alt="Per-layer conversion map: 22 of 32 layers accepted"><br>
-  <em>Live conversion map — 22/32 layers converted to RWKV and accepted. The 8 dashed cells are the full-attention layers still being distilled; the green cells are the gated-delta-net layers, which convert <strong>losslessly</strong>.</em>
+  <img src="docs/images/conversion_map.png" width="100%" alt="Historical per-layer conversion map with 22 of 32 layers accepted"><br>
+  <em>Historical dashboard snapshot at 22/32 accepted layers. The 8 dashed cells are the full-attention layers still being distilled; the green gated-delta-net layers were subsequently validated as a 24-layer <strong>lossless</strong> remap.</em>
 </p>
 
 ---
@@ -740,8 +916,8 @@ iteration inspired by [Absolute Zero](https://arxiv.org/abs/2505.03335) and
 python -m rwkv_lab.recursive_improve \
   --ckpt runs/lm/ckpt.pt --out runs/recursive-rlvr \
   --heldout-tasks /secure/eval_tasks.jsonl \
-  --proposal-command '/thearray/git/adamaton/bin/propose-rwkv-tasks' \
-  --verifier-command '/thearray/git/adamaton/bin/verify-rwkv-batch' \
+  --proposal-command '/path/to/propose-rwkv-tasks' \
+  --verifier-command '/path/to/verify-rwkv-batch' \
   --rounds 3 --max-total-rollout-tokens 1000000
 ```
 
@@ -769,10 +945,16 @@ A second track targets **Qwen3.6-35B-A3B** (a Mixture-of-Experts model) for the 
 
 ## What you need locally
 
-This repo does not contain model weights, token caches, run logs, or checkpoints. The scripts assume those exist on disk and expose flags for the paths:
+This repo does not contain model weights, datasets, generated manifests,
+feature/token caches, run logs, or checkpoints. Supply the artifacts required
+by the track you are running and keep their upstream licenses with them:
 
 | Input | Used by | Notes |
 |---|---|---|
+| RWKV G1H checkpoint + World vocabulary | multimodal captioning | Pass the checkpoint with `--rwkv`; set `VOCAB` to `rwkv_vocab_v20230424.txt`. The checked-in experiment defaults target the 2.9B G1H model. |
+| Kimi K2.6 MoonViT shard | multimodal captioning and vision caches | Pass `model-00064-of-000064.safetensors` with `--moonvit`; the other Kimi language-model shards are not required for the frozen vision tower. |
+| Image-caption JSONL | multimodal training/evaluation | Use the [documented schema](#data-contract), with disjoint explicit train/eval manifests. Images remain external to Git. |
+| Optional SigLIP2, DINOv2, and SAM weights | multi-teacher vision experiments | Frozen towers used by the advanced cache/fusion path; set the corresponding `VISION_NEXT_*` paths before preparation. |
 | Qwen3.5-9B-Base weights | conversion, baseline eval, target extraction | Pass with `--model-dir`, or put the HF snapshot at `Qwen3.5-9B-Base`. |
 | Tokenized eval/train stream | `eval_baseline.py`, `build_memory_targets.py`, `convert_train.py` | `--data` may be a cache directory or a flat `tokens.bin` accepted by `build_memory_targets.load_token_stream`. |
 | CUDA Torch + `fla` | RWKV-7 kernel path | Install these for your CUDA stack; `requirements.txt` only covers the regular Python deps. |
@@ -784,7 +966,13 @@ For a small data-format smoke test, `build_qwen35_data.py --max-docs 1000 --out_
 
 ## Repository layout
 
-Everything is a **drop-in `linear_attn` / attention module swap** on a HuggingFace decoder layer, plus trainers and offline builders around them. Python source lives under `src/rwkv_lab/`; entrypoints run as `python -m rwkv_lab.<module>`. Model weights, datasets, checkpoints, and the paper PDFs are **git-ignored** (>1.5 TB locally) — this repo is the *code*.
+Python source lives under `src/rwkv_lab/`; entry points run as
+`python -m rwkv_lab.<module>`. Conversion components are generally drop-in
+`linear_attn` or attention-module swaps, while the vision, pretraining,
+post-training, and serving tracks provide their own explicit trainers and
+contracts. Model weights, datasets, checkpoints, generated manifests, caches,
+and local paper archives are git-ignored—the repository publishes source and
+reproducibility machinery, not third-party artifacts.
 
 ### Conversion core
 | File | Role |
@@ -860,7 +1048,6 @@ Everything is a **drop-in `linear_attn` / attention module swap** on a HuggingFa
 | [`build_qwen35_data.py`](src/rwkv_lab/build_qwen35_data.py) | Build Qwen3.5-tokenized DCLM + FineWeb-Edu caches. |
 | [`tests/`](tests/) | CPU/GPU invariant + feature tests (loops, lookahead, Engram, ROSA, the SOTA levers). Run `scripts/test_parallel.sh` for process-parallel CPU tests with bounded native thread pools plus serialized CUDA tests (`PYTEST_WORKERS` and `PYTEST_NATIVE_THREADS` tune the split). Set `RWKV_GPU_STRESS=1` to append the idle-GPU compile-core and DMT graph programs. |
 | [`scripts/`](scripts/) | Overnight sweep / A-B drivers (`gate_ab.sh`, `gdn_sweep.sh`, `rel_sweep.sh`, `supervisor_night.sh`). |
-| [`legacy/`](legacy/) | Retired v1 dashboard + earlier trainer snapshots, kept for provenance. |
 
 ---
 
@@ -900,13 +1087,21 @@ python -m rwkv_lab.distill_consolidate --model-dir "$MODEL_DIR" --data "$DATA" \
 go -C dashboard run ./cmd/trainboard   # http://127.0.0.1:9124
 ```
 
-> Many script defaults point at the author's local layout (`/thearray/git/moe-mla/...`). Treat those as examples and pass explicit paths. Every training lever defaults **off** — at default flags the trainers reproduce the plain baseline. See [`TRAINING_LEVERS.md`](TRAINING_LEVERS.md).
+> Some research scripts retain machine-local defaults as convenience examples;
+> pass explicit paths or the documented environment variables on another host.
+> Conversion levers described below default off, while specialized experiment
+> launchers explicitly opt into named bundles. See
+> [`TRAINING_LEVERS.md`](TRAINING_LEVERS.md).
 
 ---
 
 ## Levers & flags
 
-Every technique is an **off-by-default flag** on `python -m rwkv_lab.convert_train` — 150 in all; at default flags the trainer *is* the plain baseline, so turning one on gives a clean A/B. Many are **live-tunable** mid-run from the trainboard panel (no restart). The complete manual — defaults, sources, and "when to use" for each — is [`TRAINING_LEVERS.md`](TRAINING_LEVERS.md); the headline levers:
+`python -m rwkv_lab.convert_train` exposes a large set of optional research
+levers; its documented baseline leaves them disabled so each can be evaluated
+in a controlled A/B. Many are live-tunable from trainboard without restarting a
+run. The complete manual—defaults, sources, compatibility constraints, and when
+to use each lever—is [`TRAINING_LEVERS.md`](TRAINING_LEVERS.md). Headline levers:
 
 **Recurrent-depth loops** — wrap the RWKV layer in `LoopedRWKV`
 | Flag | Turns on | Paper |
@@ -957,16 +1152,20 @@ Every technique is an **off-by-default flag** on `python -m rwkv_lab.convert_tra
 
 ## Status
 
-| Area | State |
+| Area | Evidence boundary |
 |---|---|
-| **Technique levers** (loops, latent prediction, memory, optimizers) | ✅ 35+ implemented as off-by-default levers; **CPU unit tests green in CI** |
-| Conversion: GDN → RWKV-7 lossless kernel (24 layers) | ✅ Proven (cosine 0.999995; +0.013% full-model PPL) |
-| Conversion: per-layer isolation sweep | ✅ 22/32 layers converted & accepted |
-| Conversion: full-attention → RWKV distillation (8 layers) | 🚧 In progress (RADLADS PoC floors at block-rel 0.234; RoPE/q-norm are the gap; two-stage logit-KL added) |
-| From-scratch lever validation (lab scale) | ✅ First wins in — seedchain **−9.2% ppl** on a 388M-token corpus, Engram **15×** on induction (significant, 4 seeds), DeepEmbed de_shift **−2%** replicated across corpora ([results](#validated-lever-results--from-scratch-lab)) |
-| Large-model validation + end-to-end integration | 🔭 The remaining gap — the validated levers are small-model results; the next frontier is composing them at 100×+ scale |
+| Multimodal MoonViT → RWKV training | Implemented with exact resume, explicit train/eval separation, qualitative artifacts, cache receipts, and CPU-tested contracts; caption quality and large-scale convergence remain experimental |
+| Multi-teacher vision compressor/student | Architecture and cache contracts designed; the first teacher shard is an experiment input, not evidence that the proposed deployable student has been trained |
+| GDN → RWKV-7 conversion (24 layers) | Validated exact remap: cosine 0.999995 and +0.013% full-model perplexity change |
+| Full-attention → RWKV conversion (8 layers) | Active distillation work; the RADLADS proof of concept and two-stage logit-KL path do not yet constitute an end-to-end converted release |
+| From-scratch lever validation | Lab-scale wins include seed-chain **−9.2% PPL**, Engram **15×** induction accuracy across four seeds, and DeepEmbed `de_shift` **−2%** replicated across corpora ([results](#validated-lever-results-from-scratch-lab)) |
+| Dashboard and run infrastructure | Go tests, ingestion/schema tests, eval-artifact tests, exact-resume contracts, and fail-closed launcher checks are implemented; operational behavior still depends on the local CUDA/filesystem stack |
+| Large-model composition | Open problem: isolated or small-model wins must still survive joint training and substantially larger compute budgets |
 
-This is an active research codebase, not a released library — a **breadth-first toolbox**: each technique is implemented, cited, and unit-tested in isolation, with default flags reproducing the plain baseline so levers can be A/B'd. Validation has begun (the table above); the next frontier is scale.
+The rule throughout the repository is to label an implementation, a local
+measurement, and a production-ready result as three different things. Claims
+above are intentionally bounded by the evidence that is checked into source or
+described by a reproducible receipt.
 
 ---
 
