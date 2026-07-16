@@ -778,11 +778,13 @@ def test_download_escalation_uses_the_same_bounded_signal_sequence(monkeypatch):
     stage, at, sig = watchdog.escalate_stalled_processes(
         [12], stage=0, signaled_at=None)
     assert (stage, sig) == (1, signal.SIGINT) and at is not None
-    monkeypatch.setattr(watchdog.time, "monotonic", lambda: at + 120)
+    # A margin above the 120s threshold: with a large monotonic base,
+    # (at + 120) - at rounds below 120 and the escalation would not fire.
+    monkeypatch.setattr(watchdog.time, "monotonic", lambda: at + 121)
     stage, at, sig = watchdog.escalate_stalled_processes(
         [12], stage=stage, signaled_at=at)
     assert (stage, sig) == (2, signal.SIGTERM)
-    monkeypatch.setattr(watchdog.time, "monotonic", lambda: at + 120)
+    monkeypatch.setattr(watchdog.time, "monotonic", lambda: at + 121)
     stage, _, sig = watchdog.escalate_stalled_processes(
         [12], stage=stage, signaled_at=at)
     assert (stage, sig) == (3, signal.SIGKILL)
