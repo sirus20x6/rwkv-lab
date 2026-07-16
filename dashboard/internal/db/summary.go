@@ -12,6 +12,7 @@ type RunSummary struct {
 	LatestPPL    *float64 `json:"latest_ppl"`
 	LatestTop1   *float64 `json:"latest_top1"`
 	BestPPL      *float64 `json:"best_ppl"`
+	BestPPLStep  *int64   `json:"best_ppl_step"`
 	BestTop1     *float64 `json:"best_top1"`
 	NTrain       int      `json:"n_train"`
 	NEval        int      `json:"n_eval"`
@@ -29,6 +30,8 @@ func (d *DB) RunSummaries(nowTs float64) ([]RunSummary, error) {
 		COALESCE(x.n_train,0), COALESCE(x.n_eval,0), COALESCE(x.n_ckpt,0),
 		x.latest_train_step, x.latest_train_loss, x.latest_eval_step,
 		x.latest_eval_ppl, x.latest_eval_top1, x.best_ppl, x.best_top1,
+		(SELECT e.step FROM eval_events e WHERE e.run_id=r.id AND e.ppl IS NOT NULL
+		 ORDER BY e.ppl ASC, e.step ASC LIMIT 1),
 		COALESCE(x.has_horizons,0)
 		FROM runs r LEFT JOIN run_rollups x ON x.run_id=r.id`)
 	if err != nil {
@@ -39,12 +42,12 @@ func (d *DB) RunSummaries(nowTs float64) ([]RunSummary, error) {
 	var order []*RunSummary
 	for rows.Next() {
 		s := &RunSummary{}
-		var trainStep, evalStep sql.NullInt64
+		var trainStep, evalStep, bestPPLStep sql.NullInt64
 		var trainLoss, evalPPL, evalTop1, bestPPL, bestTop1 sql.NullFloat64
 		var hasHorizons int
 		if err := rows.Scan(&s.ID, &s.Name, &s.LastUpdateTs, &s.TagsJSON,
 			&s.NTrain, &s.NEval, &s.NCkpt, &trainStep, &trainLoss, &evalStep,
-			&evalPPL, &evalTop1, &bestPPL, &bestTop1, &hasHorizons); err != nil {
+			&evalPPL, &evalTop1, &bestPPL, &bestTop1, &bestPPLStep, &hasHorizons); err != nil {
 			return nil, err
 		}
 		if trainStep.Valid {
@@ -70,6 +73,10 @@ func (d *DB) RunSummaries(nowTs float64) ([]RunSummary, error) {
 		if bestPPL.Valid {
 			v := bestPPL.Float64
 			s.BestPPL = &v
+		}
+		if bestPPLStep.Valid {
+			v := bestPPLStep.Int64
+			s.BestPPLStep = &v
 		}
 		if bestTop1.Valid {
 			v := bestTop1.Float64
@@ -103,7 +110,7 @@ func (d *DB) RunSummaries(nowTs float64) ([]RunSummary, error) {
 func (d *DB) LatestCodecRelByRun() (map[string]*float64, error) {
 	rows, err := d.Query(`SELECT r.name,
 		(SELECT json_extract(t.extra_json,'$.codec_rel')
-		 FROM train_events t WHERE t.run_id=r.id
+		 FROM train_events t INDEXED BY idx_train_codec_rel WHERE t.run_id=r.id
 		   AND json_extract(t.extra_json,'$.codec_rel') IS NOT NULL
 		 ORDER BY t.step DESC LIMIT 1)
 		FROM runs r`)

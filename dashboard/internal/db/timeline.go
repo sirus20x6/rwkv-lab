@@ -30,7 +30,8 @@ type Timeline struct {
 func (d *DB) stepAtTs(runID int64, ts float64) int64 {
 	var step sql.NullInt64
 	_ = d.QueryRow(
-		`SELECT step FROM train_events WHERE run_id=? AND ts<=? ORDER BY ts DESC LIMIT 1`,
+		`SELECT step FROM train_events WHERE run_id=? AND ts<=?
+		 ORDER BY ts DESC, step DESC LIMIT 1`,
 		runID, ts).Scan(&step)
 	if step.Valid {
 		return step.Int64

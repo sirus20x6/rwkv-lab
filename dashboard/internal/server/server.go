@@ -154,6 +154,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/timeline/{run}", s.handleTimeline)
 	// Metric catalog (known cols + extra_json keys) for the dynamic metric picker.
 	s.mux.HandleFunc("GET /api/metrics/{run}", s.handleMetrics)
+	// Qualitative image/reference/generated-caption snapshot for an eval point.
+	s.mux.HandleFunc("GET /api/runs/{name}/eval-samples/{step}", s.handleEvalSamples)
+	s.mux.HandleFunc("GET /api/runs/{name}/eval-samples/{step}/image/{index}", s.handleEvalSampleImage)
 
 	// Control actions (confirm-gated client-side, validated + audited here).
 	s.mux.HandleFunc("POST /api/runs/{name}/stop", s.handleStop)

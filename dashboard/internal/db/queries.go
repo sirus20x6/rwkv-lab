@@ -38,9 +38,11 @@ type CkptRow struct {
 
 // Cursor tracks how far we've ingested a single train.jsonl file.
 type Cursor struct {
-	Offset int64
-	Size   int64
-	Mtime  float64
+	Offset   int64
+	Size     int64
+	Mtime    float64
+	TailHash string
+	FileID   string
 }
 
 // ---- run identity ----
@@ -62,7 +64,13 @@ func (d *DB) EnsureRun(name, path string, createdTs float64) (int64, error) {
 
 // TouchRun updates a run's last-seen timestamp.
 func (d *DB) TouchRun(id int64, lastUpdateTs float64) error {
-	_, err := d.Exec(`UPDATE runs SET last_update_ts=? WHERE id=?`, lastUpdateTs, id)
+	// last_update_ts doubles as the browser's data revision. A restored log can
+	// have an older (or identical) filesystem mtime; always advance by at least
+	// ten milliseconds (safely above float64 epoch-time resolution) so a
+	// rewrite/reset cannot be invisible to an open chart after JS ms rounding.
+	_, err := d.Exec(`UPDATE runs SET last_update_ts=CASE
+		WHEN ?<COALESCE(last_update_ts,0)+0.01 THEN COALESCE(last_update_ts,0)+0.01
+		ELSE ? END WHERE id=?`, lastUpdateTs, lastUpdateTs, id)
 	return err
 }
 
@@ -84,8 +92,9 @@ func (d *DB) RunID(name string) (int64, bool, error) {
 // GetCursor returns the stored cursor for a path (zero value if none).
 func (d *DB) GetCursor(path string) (Cursor, error) {
 	var c Cursor
-	err := d.QueryRow(`SELECT offset, size, mtime FROM ingest_cursors WHERE path=?`, path).
-		Scan(&c.Offset, &c.Size, &c.Mtime)
+	err := d.QueryRow(`SELECT offset, size, mtime, coalesce(tail_hash,''), coalesce(file_id,'')
+		FROM ingest_cursors WHERE path=?`, path).
+		Scan(&c.Offset, &c.Size, &c.Mtime, &c.TailHash, &c.FileID)
 	if err == sql.ErrNoRows {
 		return Cursor{}, nil
 	}
@@ -95,10 +104,110 @@ func (d *DB) GetCursor(path string) (Cursor, error) {
 // SaveCursor upserts the cursor for a path.
 func (d *DB) SaveCursor(path string, c Cursor) error {
 	_, err := d.Exec(
-		`INSERT INTO ingest_cursors(path, offset, size, mtime) VALUES(?,?,?,?)
-		 ON CONFLICT(path) DO UPDATE SET offset=excluded.offset, size=excluded.size, mtime=excluded.mtime`,
-		path, c.Offset, c.Size, c.Mtime)
+		`INSERT INTO ingest_cursors(path, offset, size, mtime, tail_hash, file_id) VALUES(?,?,?,?,?,?)
+		 ON CONFLICT(path) DO UPDATE SET offset=excluded.offset, size=excluded.size,
+		 mtime=excluded.mtime, tail_hash=excluded.tail_hash, file_id=excluded.file_id`,
+		path, c.Offset, c.Size, c.Mtime, c.TailHash, c.FileID)
 	return err
+}
+
+// PublishCursor atomically exposes a newly ingested file prefix to both sides
+// of the dashboard protocol: last_update_ts wakes open browsers, and the cursor
+// prevents the ingester from replaying that prefix.  The cursor is the commit
+// marker.  Keeping these writes in separate transactions could permanently
+// hide already-committed events if the process died after SaveCursor but before
+// TouchRun: on restart the EOF cursor made the ingester return without ever
+// advancing the browser's version token.
+func (d *DB) PublishCursor(runID int64, lastUpdateTs float64, path string, c Cursor) error {
+	tx, err := d.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := publishCursorTx(tx, runID, lastUpdateTs, path, c); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func publishCursorTx(tx *sql.Tx, runID int64, lastUpdateTs float64, path string, c Cursor) error {
+	result, err := tx.Exec(`UPDATE runs SET last_update_ts=CASE
+		WHEN ?<COALESCE(last_update_ts,0)+0.01 THEN COALESCE(last_update_ts,0)+0.01
+		ELSE ? END WHERE id=?`, lastUpdateTs, lastUpdateTs, runID)
+	if err != nil {
+		return err
+	}
+	if changed, rowsErr := result.RowsAffected(); rowsErr != nil {
+		return rowsErr
+	} else if changed != 1 {
+		return fmt.Errorf("publish cursor: unknown run id %d", runID)
+	}
+	if _, err = tx.Exec(
+		`INSERT INTO ingest_cursors(path, offset, size, mtime, tail_hash, file_id) VALUES(?,?,?,?,?,?)
+		 ON CONFLICT(path) DO UPDATE SET offset=excluded.offset, size=excluded.size,
+		 mtime=excluded.mtime, tail_hash=excluded.tail_hash, file_id=excluded.file_id`,
+		path, c.Offset, c.Size, c.Mtime, c.TailHash, c.FileID); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ResetRunEvents removes rows derived from a log that was truncated during
+// checkpoint recovery. Upserts alone cannot remove stale steps beyond the new
+// end of file, which leaves the dashboard counter pinned in the future.
+func (d *DB) ResetRunEvents(runID int64) error {
+	tx, err := d.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := resetRunEventsTx(tx, runID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func resetRunEventsTx(tx *sql.Tx, runID int64) error {
+	for _, table := range []string{"train_events", "eval_events", "checkpoints"} {
+		if _, err := tx.Exec(`DELETE FROM `+table+` WHERE run_id=?`, runID); err != nil {
+			return err
+		}
+	}
+	_, err := tx.Exec(`UPDATE run_rollups SET
+		n_train=0,n_eval=0,n_ckpt=0,
+		latest_train_step=NULL,latest_train_loss=NULL,
+		latest_eval_step=NULL,latest_eval_ppl=NULL,latest_eval_top1=NULL,
+		best_ppl=NULL,best_top1=NULL,has_horizons=0
+		WHERE run_id=?`, runID)
+	if err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`UPDATE runs SET event_generation=event_generation+1
+		WHERE id=?`, runID); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ResetRunEventsAndPublish commits every externally observable part of a file
+// generation change together: old derived rows disappear, rollups reset, the
+// generation advances, the browser revision advances, and the cursor starts at
+// the replacement prefix. This prevents a process failure from exposing a
+// half-reset run to either the next ingester scan or an open client.
+func (d *DB) ResetRunEventsAndPublish(runID int64, lastUpdateTs float64,
+	path string, c Cursor) error {
+	tx, err := d.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := resetRunEventsTx(tx, runID); err != nil {
+		return err
+	}
+	if err := publishCursorTx(tx, runID, lastUpdateTs, path, c); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ---- batched event ingest (one tx per file scan) ----

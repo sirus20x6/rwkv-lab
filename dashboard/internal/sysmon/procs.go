@@ -17,6 +17,7 @@ var trainingScripts = []string{
 	"convert_train.py", "distill_consolidate.py", "drive_isolation.py",
 	"train_mla.py", "train_mla_engram.py", "rlvr_train.py", "rlvr_campaign.py",
 	"recursive_improve.py", "adapter_recursive.py", "posttrain_train.py", "posttrain_campaign.py",
+	"vision_train.py", "vision_cache.py",
 }
 
 var trainingModules = map[string]string{
@@ -31,6 +32,8 @@ var trainingModules = map[string]string{
 	"posttrain_train.py":     "rwkv_lab.posttrain_train",
 	"posttrain_campaign.py":  "rwkv_lab.posttrain_campaign",
 	"adapter_recursive.py":   "rwkv_lab.adapter_recursive",
+	"vision_train.py":        "rwkv_lab.vision_train",
+	"vision_cache.py":        "rwkv_lab.vision_cache",
 }
 
 // AllowedScript reports whether basename(path) is a recognized training
@@ -110,13 +113,21 @@ func readProcs(runsDir string) []Proc {
 		if v, ok := argValue(cmdline, "--out-dir", "--out", "--output"); ok {
 			pr.RunName = filepath.Base(v)
 		}
+		if script == "vision_cache.py" {
+			if v, ok := argValue(cmdline, "--cache"); ok {
+				pr.RunName = "cache: " + filepath.Base(v)
+			} else {
+				pr.RunName = "vision cache"
+			}
+		}
 		if v, ok := argValue(cmdline, "--max-steps", "--steps"); ok {
 			if n, err := strconv.Atoi(v); err == nil {
 				pr.MaxSteps = &n
 			}
 		}
 		if ct, err := p.CreateTime(); err == nil {
-			pr.RuntimeS = now - float64(ct)/1000.0
+			pr.StartedTS = float64(ct) / 1000.0
+			pr.RuntimeS = now - pr.StartedTS
 		}
 		if cp, err := p.CPUPercent(); err == nil {
 			pr.CPUPct = cp
@@ -128,7 +139,13 @@ func readProcs(runsDir string) []Proc {
 			pr.NumThreads = nt
 		}
 
-		pr.LogAgeS, pr.State = liveness(runsDir, pr.RunName, now)
+		if script == "vision_cache.py" {
+			// Cache prefill has no train.jsonl, but it is still a live GPU job and
+			// must appear in the header (and keep the launch queue from competing).
+			pr.State = "healthy"
+		} else {
+			pr.LogAgeS, pr.State = liveness(runsDir, pr.RunName, now)
+		}
 		out = append(out, pr)
 	}
 	return out
@@ -181,16 +198,25 @@ func looksPython(cmdline []string) bool {
 	return false
 }
 
-// liveness returns (log_age_seconds, state) from the run's train.jsonl mtime.
+// liveness returns age/state from the newest trainer heartbeat. Vision eval can
+// spend minutes decoding at one step, so status.json keeps it visibly alive.
 func liveness(runsDir, runName string, now float64) (*float64, string) {
 	if runName == "" {
 		return nil, "unknown"
 	}
-	st, err := os.Stat(filepath.Join(runsDir, runName, "train.jsonl"))
-	if err != nil {
+	newest := float64(0)
+	for _, name := range []string{"train.jsonl", "status.json"} {
+		if st, err := os.Stat(filepath.Join(runsDir, runName, name)); err == nil {
+			modified := float64(st.ModTime().UnixNano()) / 1e9
+			if modified > newest {
+				newest = modified
+			}
+		}
+	}
+	if newest == 0 {
 		return nil, "unknown"
 	}
-	age := now - float64(st.ModTime().UnixNano())/1e9
+	age := now - newest
 	switch {
 	case age < HealthyWindow:
 		return &age, "healthy"
