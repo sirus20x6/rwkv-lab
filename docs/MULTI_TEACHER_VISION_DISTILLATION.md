@@ -147,9 +147,21 @@ not a separately deployed compatibility adapter. Making every internal layer
 1. Cache MoonViT and aligned fusion features in bounded shards.
 2. The first shard contains 40,000 training images plus all 384 stable eval
    images.
-3. Preserve SAM's native `256 × 64 × 64` image embeddings for the first shard.
-4. Do not delete raw teacher features until the compressor architecture and
+3. Add a separate 4,445-image DoclingMatix OCR supplement, making document
+   images 10% of the combined training mixture, plus 64 document-only eval
+   images. Use a distinct transcription prompt and plain reading-order targets;
+   do not teach Docling's coordinate syntax to the general captioner. Select
+   only complete transcriptions that fit within 700 RWKV World tokens rather
+   than truncating long pages at the trainer's 768-token ceiling.
+4. Preserve SAM's native `256 × 64 × 64` image embeddings for the first shard.
+5. Do not delete raw teacher features until the compressor architecture and
    latent schema are frozen and validated.
+
+The 10% OCR share is an initial ceiling, not a permanent constant. It is large
+enough to expose typography, tables, forms, and dense reading-order structure,
+while keeping 90% of Phase-1 images in the natural/synthetic image distribution.
+Track document OCR and ordinary caption evaluation separately; lower the share
+if ordinary caption omission or document-style output leakage worsens.
 
 ### Phase 1: Train the teacher compressor
 

@@ -214,6 +214,12 @@ the accepted training manifest.
   conservative perceptual duplicates, and keeps the strongest representative.
 - [`fetch_doclingmatix.py`](scripts/fetch_doclingmatix.py) downloads a pinned,
   resumable OCR-rich DoclingMatix tranche and writes an exact row/byte receipt.
+- [`build_doclingmatix_ocr_mix.py`](scripts/build_doclingmatix_ocr_mix.py)
+  materializes a deterministic 10% OCR supplement with plain reading-order
+  targets, exact World-token limits, and image-disjoint document evaluation.
+- [`assemble_vision_cache_overlay.py`](scripts/assemble_vision_cache_overlay.py)
+  combines immutable teacher-cache shards as a same-filesystem hard-link view,
+  avoiding duplicate feature storage while preserving a manifest-bound receipt.
 - [`fetch_i1_sources.py`](scripts/fetch_i1_sources.py) and
   [`repair_midjourney_i1_alignment.py`](scripts/repair_midjourney_i1_alignment.py)
   acquire and validate i1 source/caption alignment.
