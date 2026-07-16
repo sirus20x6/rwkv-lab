@@ -164,6 +164,40 @@ func effectiveStatus(s db.RunSummary, procByRun map[string]sysmon.Proc) string {
 	return s.Status
 }
 
+// applyEvalContractSummary removes aggregate claims that span an abandoned
+// eval contract. Historical rows remain available in charts, but headline
+// winner surfaces must follow the trainer's active best artifact.
+func applyEvalContractSummary(s *db.RunSummary, best BestInfo) {
+	if !best.ContractReset {
+		return
+	}
+	s.BestTop1 = nil
+	s.HasHorizons = false
+	if !best.Exists {
+		s.LatestPPL = nil
+		s.LatestTop1 = nil
+		s.BestPPL = nil
+		s.BestPPLStep = nil
+		return
+	}
+	ppl, step := best.PPL, best.Step
+	s.BestPPL, s.BestPPLStep = &ppl, &step
+}
+
+func applyEvalContractKPIs(k *db.RunKPIs, best BestInfo) {
+	if !best.ContractReset {
+		return
+	}
+	k.BestTop1, k.BestTop1Step = nil, nil
+	if !best.Exists {
+		k.PPL, k.Top1 = nil, nil
+		k.BestPPL, k.BestPPLStep = nil, nil
+		return
+	}
+	ppl, step := best.PPL, best.Step
+	k.BestPPL, k.BestPPLStep = &ppl, &step
+}
+
 func renderRunList(summaries []db.RunSummary, procByRun map[string]sysmon.Proc, nowTs float64) string {
 	// Most-recently-updated first.
 	sort.SliceStable(summaries, func(i, j int) bool {
@@ -240,9 +274,35 @@ func renderRunHeader(s db.RunSummary, proc *sysmon.Proc, best BestInfo, nowTs fl
 	}
 	age := nowTs - s.LastUpdateTs
 	bestStr := ""
-	if best.Exists {
-		// authoritative best convert_train saved + restarts from (best/best.json)
-		bestStr = fmt.Sprintf(` · <span class="best">★ best ppl %.3f @ step %d (restartable)</span>`, best.PPL, best.Step)
+	// Contract-changing resumes preserve old eval rows for history but quarantine
+	// their checkpoint.  In that state the active best artifact is authoritative:
+	// an abandoned branch's lower SQLite minimum must never be claimed as the
+	// current winner.
+	if best.ContractReset {
+		if best.Exists {
+			bestStr = fmt.Sprintf(` · <span class="best">★ best eval ppl %.3f @ step %d · restartable</span>`, best.PPL, best.Step)
+		} else {
+			bestStr = ` · <span class="best">eval contract reset · no winner yet</span>`
+		}
+	}
+	// The checkpoint manifest is published durably before its eval log record.
+	// If the process/host dies in that narrow interval, the restartable winner
+	// must not be hidden indefinitely behind an older SQLite rollup.
+	checkpointAhead := !best.ContractReset && best.Exists && (!nz(s.BestPPL) || best.PPL < *s.BestPPL-1e-9)
+	if checkpointAhead {
+		bestStr = fmt.Sprintf(` · <span class="best">★ checkpoint ppl %.3f @ step %d · restartable</span>`, best.PPL, best.Step)
+	} else if !best.ContractReset && nz(s.BestPPL) {
+		step := ""
+		if s.BestPPLStep != nil {
+			step = fmt.Sprintf(" @ step %d", *s.BestPPLStep)
+		}
+		restartable := ""
+		if best.Exists && math.Abs(best.PPL-*s.BestPPL) < 1e-9 &&
+			(s.BestPPLStep == nil || best.Step == *s.BestPPLStep) {
+			restartable = " · restartable"
+		}
+		bestStr = fmt.Sprintf(` · <span class="best">★ best eval ppl %.3f%s%s</span>`,
+			*s.BestPPL, step, restartable)
 	}
 	return fmt.Sprintf(
 		`<div id="run-header"><div class="run-title-row">`+

@@ -571,7 +571,11 @@ class EngramSite(nn.Module):
         self._len_r = None
         self._dist_r = None
         self._shape = None
-        self.stats: Dict[str, float] = {}
+        self.last_inj_v_rms = None
+        self.last_inj_h_rms = None
+        self.last_gate_v_mean = None
+        self.last_gate_h_mean = None
+        self.stats: Dict[str, float | torch.Tensor] = {}
 
     def set_depth_gain(self, gain: torch.Tensor) -> None:
         """Init out scales from an effective-depth profile (per-channel or scalar)."""
@@ -591,7 +595,9 @@ class EngramSite(nn.Module):
         self._h_r = self.h_c(m_c) * vmask
         self._len_r = torch.log1p(recall.mlen.to(m_c.dtype)).unsqueeze(-1)
         self._dist_r = torch.log1p(recall.dist.to(m_c.dtype)).unsqueeze(-1)
-        self.stats["rosa_valid_rate"] = float(recall.valid.float().mean())
+        # Keep telemetry device-resident in the hot forward path. Converting a
+        # CUDA scalar to Python here would synchronize before RWKV can launch.
+        self.stats["rosa_valid_rate"] = recall.valid.float().mean()
         self._shape = tuple(m_c.shape[:2])
         self.warmup = float(warmup)
         self.loop_i = 0
@@ -602,6 +608,8 @@ class EngramSite(nn.Module):
     def invalidate(self) -> None:
         self._k_r = self._v_r = self._h_r = self._len_r = self._dist_r = None
         self._shape = None
+        self.last_inj_v_rms = self.last_inj_h_rms = None
+        self.last_gate_v_mean = self.last_gate_h_mean = None
 
     def _gate(self, query: torch.Tensor, q_scale: torch.Tensor,
               bias_c: torch.Tensor, bias_h: torch.Tensor,
@@ -624,8 +632,12 @@ class EngramSite(nn.Module):
                           self.len_scale_vc, self.dist_scale_vc)
         scale = self.warmup * (1.0 + self.loop_scale[i].to(xv.dtype))
         out = scale * gate * self._v_r.to(xv.dtype) * self.out_scale_v.to(xv.dtype)
+        # Keep only scalar device tensors here. Consumers can synchronize when
+        # they log, rather than forcing a CPU/GPU barrier inside the layer.
+        self.last_inj_v_rms = out.detach().float().square().mean().sqrt()
+        self.last_gate_v_mean = gate.detach().float().mean()
         if not self.training:
-            self.stats["gate_vc_mean"] = float(gate.mean())
+            self.stats["gate_vc_mean"] = gate.detach().float().mean()
         return out
 
     def inj_h(self, h: torch.Tensor) -> Optional[torch.Tensor]:
@@ -635,8 +647,10 @@ class EngramSite(nn.Module):
         gate = self._gate(h, self.q_scale_h, self.gate_bias_hc, self.head_bias_h,
                           self.len_scale_hc, self.dist_scale_hc)
         out = self.warmup * gate * self._h_r.to(h.dtype) * self.out_scale_h.to(h.dtype)
+        self.last_inj_h_rms = out.detach().float().square().mean().sqrt()
+        self.last_gate_h_mean = gate.detach().float().mean()
         if not self.training:
-            self.stats["gate_hc_mean"] = float(gate.mean())
+            self.stats["gate_hc_mean"] = gate.detach().float().mean()
         return out
 
 
@@ -719,7 +733,6 @@ class LexicalMemoryBank(nn.Module):
         elif rr.recalled.device != ids.device:
             rr = RecallResult(*(x.to(ids.device, non_blocking=True) for x in rr))
         self.last_recall = rr
-        self._update_recall_stats(rr)
         m_c = self.read_recalled(rr.recalled, rr.valid)
         for site in self.sites.values():
             site.prepare(m_c, rr, self._warmup)
@@ -739,33 +752,82 @@ class LexicalMemoryBank(nn.Module):
             return logits
         if rr.valid.shape != logits.shape[:2]:
             return logits
+        batch, positions = torch.meshgrid(
+            torch.arange(logits.shape[0], device=logits.device),
+            torch.arange(logits.shape[1], device=logits.device),
+            indexing="ij",
+        )
+        biased = self.logit_bias_at(
+            logits.flatten(0, 1), batch.flatten(), positions.flatten())
+        return biased.view_as(logits)
+
+    def logit_bias_at(self, logits: torch.Tensor, batch: torch.Tensor,
+                      positions: torch.Tensor, *, inplace: bool = False) -> torch.Tensor:
+        """Apply the copy head to selected sequence positions only.
+
+        ``logits`` is ``[N,V]`` and each row corresponds to
+        ``last_recall[batch[i], positions[i]]``. This lets trainers score only
+        supervised caption tokens instead of materializing a full ``[B,T,V]``
+        tensor while keeping the copy-head alignment identical to
+        :meth:`logit_bias`.
+        """
+        rr = self.last_recall
+        if rr is None or not self.ctx.enabled:
+            return logits
+        if logits.ndim != 2:
+            raise ValueError("selected Engram logits must have shape [N,V]")
+        batch = batch.to(device=rr.valid.device, dtype=torch.long)
+        positions = positions.to(device=rr.valid.device, dtype=torch.long)
+        if batch.ndim != 1 or positions.ndim != 1 or len(batch) != len(logits) \
+                or len(positions) != len(logits):
+            raise ValueError("Engram logit selectors must be one row per logit")
+        if len(logits) == 0:
+            return logits
+        valid = rr.valid[batch, positions]
+        recalled = rr.recalled[batch, positions]
+        mlen = rr.mlen[batch, positions]
+        dist = rr.dist[batch, positions]
         f = self.logit_feat.to(logits.dtype)
         conf = torch.sigmoid(f[0]
-                             + f[1] * torch.log1p(rr.mlen.to(logits.dtype))
-                             + f[2] * torch.log1p(rr.dist.to(logits.dtype)))
+                             + f[1] * torch.log1p(mlen.to(logits.dtype))
+                             + f[2] * torch.log1p(dist.to(logits.dtype)))
         bonus = self._warmup * self.logit_scale.to(logits.dtype) \
-            * conf * rr.valid.to(logits.dtype)
-        return logits.scatter_add(-1, rr.recalled.unsqueeze(-1),
+            * conf * valid.to(logits.dtype)
+        # Autocast may promote the elementwise copy-head expression even when
+        # its operands were explicitly converted. scatter_add requires an
+        # exact dtype match between the destination and source tensors.
+        bonus = bonus.to(dtype=logits.dtype)
+        if inplace:
+            return logits.scatter_add_(-1, recalled.unsqueeze(-1),
+                                       bonus.unsqueeze(-1))
+        return logits.scatter_add(-1, recalled.unsqueeze(-1),
                                   bonus.unsqueeze(-1))
 
     def _update_recall_stats(self, rr: RecallResult) -> None:
+        """Materialize Python telemetry only when a consumer asks for it."""
+        # Stack every scalar and materialize with one .tolist(): per-field
+        # float() calls each forced a separate device synchronization.
         v = rr.valid
-        stats = {"valid_rate": float(v.float().mean())}
+        names = ["valid_rate"]
+        values = [v.float().mean()]
         if bool(v.any()):
             d = rr.dist[v].float()
             m = rr.mlen[v].float()
-            stats.update({
-                "dist_p50": float(d.median()),
-                "dist_p90": float(d.quantile(0.9)),
-                # the decision metric vs ROSA-soft: recalls beyond its window
-                "frac_beyond_32": float((d > 32).float().mean()),
-                "mlen_p50": float(m.median()),
-                "mlen_max": float(m.max()),
-            })
-        self.recall_stats = stats
+            names += ["dist_p50", "dist_p90",
+                      # the decision metric vs ROSA-soft: recalls beyond its window
+                      "frac_beyond_32", "mlen_p50", "mlen_max"]
+            values += [d.median(), d.quantile(0.9),
+                       (d > 32).float().mean(), m.median(), m.max()]
+        rendered = torch.stack([value.float() for value in values]).tolist()
+        self.recall_stats = dict(zip(names, rendered))
 
     def telemetry(self) -> Dict[str, Dict[str, float]]:
-        out = {l: dict(s.stats) for l, s in self.sites.items()}
+        if self.last_recall is not None:
+            self._update_recall_stats(self.last_recall)
+        out = {layer: {
+            name: float(value)
+            for name, value in site.stats.items()
+        } for layer, site in self.sites.items()}
         out["recall"] = dict(self.recall_stats)
         return out
 
@@ -787,7 +849,8 @@ def attach_engram(model: nn.Module, lmb: LexicalMemoryBank,
 
     Per site layer:
       pre-hook          ensure_features() + reset loop counter
-      value-Linear hook v += inj_v(xv)   (found at linear_attn[.core].value;
+      value-Linear hook v += inj_v(xv)   (found at linear_attn[.core].value or
+                        FLA attn.v_proj;
                         fires once per loop pass; skipped when the layer has no
                         RWKV time-mix — e.g. full-attention layers get residual-only)
       output hook       out += inj_h(layer_input)   (tuple-safe, rosa pattern)
@@ -807,15 +870,26 @@ def attach_engram(model: nn.Module, lmb: LexicalMemoryBank,
         handles.append(layer.register_forward_pre_hook(make_pre(site), with_kwargs=True))
 
         la = getattr(layer, "linear_attn", None)
+        if la is None:                       # FLA RWKV7DecoderLayer names the time-mix `attn`
+            la = getattr(layer, "attn", None)
         if la is None:                       # RWKV7Small Block (rwkv_pretrain) names the time-mix `att`
             la = getattr(layer, "att", None)
         core = getattr(la, "core", la) if la is not None else None
         vmod = getattr(core, "value", None) if core is not None else None
+        if vmod is None and core is not None:
+            # FLA RWKV-7 follows HF projection names. This is the same value
+            # seam as native RWKV's `.value` and must be hooked before the
+            # module is placed inside the factored-loop wrapper.
+            vmod = getattr(core, "v_proj", None)
         if vmod is not None:
             def make_v(site: EngramSite):
                 def vhook(module, inputs, output):
                     inj = site.inj_v(inputs[0])
-                    return None if inj is None else output + inj
+                    # Under CUDA autocast FLA's projection input can remain
+                    # fp32 while the Linear output (and v_first) is bf16. Keep
+                    # the injected value stream in the projection's dtype.
+                    return None if inj is None else output + inj.to(
+                        device=output.device, dtype=output.dtype)
                 return vhook
             handles.append(vmod.register_forward_hook(make_v(site)))
         else:
@@ -853,6 +927,11 @@ def install_input_ids_hook(model: nn.Module, lmb: LexicalMemoryBank
             ids = args[0]
         if ids is not None:
             lmb.set_input_ids(ids.long(), recall=recall)
+        else:
+            # An inputs_embeds-only call must not reuse lexical state from the
+            # previous token-ID forward. Stale recall would inject a different
+            # sequence whenever its shape happened to match.
+            lmb.ctx.clear()
         return args, kwargs
     return model.register_forward_pre_hook(pre, with_kwargs=True)
 

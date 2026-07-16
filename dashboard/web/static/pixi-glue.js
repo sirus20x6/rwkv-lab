@@ -3,8 +3,8 @@
 // Each Chart owns a PIXI.Application on a <canvas>, holds its own data, and
 // redraws on the GPU. The ChartController fetches /api/series for the selected
 // run (one union request), distributes columns to charts, and on each
-// runVersion bump fetches ?since=<lastStep> and APPENDS only new points — no
-// full re-render of the existing curve. Interactions: wheel = zoom-x,
+// runVersion bump overlaps the current tip, UPSERTS corrections there, and
+// appends newer points — no full re-render of the existing curve. Interactions: wheel = zoom-x,
 // drag = pan-x, double-click = reset, hover = crosshair + readout.
 //
 // Pixi v8 API notes (see STACK.md): new Application(); await app.init({...});
@@ -106,7 +106,7 @@
     if (!s || !Array.isArray(s.step) || !s.step.length) return null;
     const n = s.step.length;
     const idx = Array.from({ length: n }, (_, i) => i).sort((a, b) => s.step[a] - s.step[b]);
-    const step = [], ts = [], cols = {};
+    const step = [], ts = [], cols = Object.create(null);
     for (const k in (s.cols || {})) cols[k] = [];
     let last = -Infinity;
     for (const i of idx) {
@@ -117,6 +117,51 @@
       for (const k in cols) cols[k].push(s.cols[k][i]);
     }
     return { step, ts, cols };
+  }
+
+  function cloneSeries(s) {
+    if (!s) return null;
+    const cols = Object.create(null);
+    for (const k in (s.cols || {})) cols[k] = s.cols[k].slice();
+    return { step: s.step.slice(), ts: (s.ts || []).slice(), cols };
+  }
+
+  function appendSeries(cur, inc) {
+    if (!inc || !inc.step || !inc.step.length) return cur;
+    if (!cur) return monotonicSeries(inc);
+    let maxStep = cur.step.length ? cur.step[cur.step.length - 1] : -Infinity;
+    for (let i = 0; i < inc.step.length; i++) {
+      const st = inc.step[i];
+      if (st < maxStep) continue;
+      if (st === maxStep && cur.step.length) {
+        // The log may append a corrected row for its current step. SQLite
+        // upserts it, so an append-only client must replace that tip rather
+        // than silently keeping the value loaded before the correction.
+        const at = cur.step.length - 1;
+        if (!cur.ts) cur.ts = new Array(cur.step.length).fill(0);
+        cur.ts[at] = inc.ts ? (inc.ts[i] || 0) : 0;
+        for (const k in inc.cols) {
+          if (!cur.cols[k]) cur.cols[k] = new Array(cur.step.length).fill(null);
+          cur.cols[k][at] = inc.cols[k][i];
+        }
+        continue;
+      }
+      maxStep = st;
+      const oldLength = cur.step.length;
+      cur.step.push(st);
+      if (!cur.ts) cur.ts = new Array(oldLength).fill(0);
+      cur.ts.push(inc.ts ? (inc.ts[i] || 0) : 0);
+      for (const k in cur.cols) {
+        cur.cols[k].push(Object.prototype.hasOwnProperty.call(inc.cols, k)
+          ? inc.cols[k][i] : null);
+      }
+      for (const k in inc.cols) {
+        if (cur.cols[k]) continue;
+        cur.cols[k] = new Array(oldLength).fill(null);
+        cur.cols[k].push(inc.cols[k][i]);
+      }
+    }
+    return cur;
   }
 
   // ---- one chart ----
@@ -131,6 +176,7 @@
       this._markHits = [];
       this.compare = null;
       this.compareLabel = "";
+      this.suppressBest = false;
       this.data = { train: null, eval: null, baseline: null };
       this.view = null;            // {min,max} zoom window over x (step), null = full
       this.scales = null;          // computed in drawStatic, used by overlay
@@ -236,8 +282,15 @@
     }
 
     setData(d) {
-      this._fullData = d;
-      this.data = { train: monotonicSeries(d.train), eval: monotonicSeries(d.eval), baseline: d.baseline || null };
+      this.suppressBest = !!d.suppress_best;
+      this._fullData = {
+        train: monotonicSeries(d.train), eval: monotonicSeries(d.eval),
+        baseline: d.baseline || null,
+      };
+      this.data = {
+        train: cloneSeries(this._fullData.train), eval: cloneSeries(this._fullData.eval),
+        baseline: this._fullData.baseline,
+      };
       this._t0 = firstTs(this.data.train, this.data.eval);
       this.view = null;
       this.drawStatic();
@@ -246,6 +299,7 @@
     // setWindow swaps in a full-resolution slice for the current zoom (keeps view
     // AND the run's t0, so elapsed-x coordinates stay in the same frame).
     setWindow(d) {
+      this.suppressBest = !!d.suppress_best;
       const base = this.data ? this.data.baseline : null;
       this.data = { train: monotonicSeries(d.train), eval: monotonicSeries(d.eval), baseline: (d.baseline || base) || null };
       this.drawStatic();
@@ -254,7 +308,7 @@
     restoreFull() {
       if (!this._fullData) { this.view = null; this.drawStatic(); return; }
       const d = this._fullData;
-      this.data = { train: monotonicSeries(d.train), eval: monotonicSeries(d.eval), baseline: d.baseline || null };
+      this.data = { train: cloneSeries(d.train), eval: cloneSeries(d.eval), baseline: d.baseline || null };
       this._t0 = firstTs(this.data.train, this.data.eval);
       this.view = null;
       this.drawStatic();
@@ -262,27 +316,15 @@
 
     _emitView() { if (this.onView && this.view) this.onView(this.view); }
 
-    // Append incremental rows, keeping the step axis strictly increasing: skip any
-    // row whose step is <= the current tip (duplicate restart row / overlapping fetch).
+    // Upsert incremental rows while keeping the step axis strictly increasing:
+    // replace a corrected current tip and append only genuinely newer steps.
     append(d) {
+      this.suppressBest = !!d.suppress_best;
       for (const src of ["train", "eval"]) {
         const inc = d[src];
         if (!inc || !inc.step || !inc.step.length) continue;
-        const cur = this.data[src];
-        if (!cur) { this.data[src] = monotonicSeries(inc); continue; }
-        let maxStep = cur.step.length ? cur.step[cur.step.length - 1] : -Infinity;
-        for (let i = 0; i < inc.step.length; i++) {
-          const st = inc.step[i];
-          if (!(st > maxStep)) continue;
-          maxStep = st;
-          cur.step.push(st);
-          if (!cur.ts) cur.ts = new Array(cur.step.length - 1).fill(0);
-          cur.ts.push(inc.ts ? (inc.ts[i] || 0) : 0);
-          for (const k in inc.cols) {
-            if (!cur.cols[k]) cur.cols[k] = [];
-            cur.cols[k].push(inc.cols[k][i]);
-          }
-        }
+        this._fullData[src] = appendSeries(this._fullData[src], inc);
+        this.data[src] = appendSeries(this.data[src], inc);
       }
       if (!this._t0) this._t0 = firstTs(this.data.train, this.data.eval);
       this.drawStatic();
@@ -478,6 +520,7 @@
     // ★ at the best (min) point of any series flagged best:"min" — ties the
     // curve to the "best ppl" the KPI strip reports
     _drawBest(sy, sy1, xpx, xmin, xmax) {
+      if (this.suppressBest) return;
       for (const sp of this.spec.series) {
         if (sp.best !== "min" || sp.horizontal || this.hidden.has(sp.label)) continue;
         const s = this.data[sp.src];
@@ -685,10 +728,25 @@
       return xmin + (xmax - xmin) * (px - PAD.l) / (W - PAD.l - PAD.r);
     }
 
+    _evalPointAt(px, py) {
+      if (!this.scales) return null;
+      const sp = this.spec.series.find(s => s.src === "eval" && s.key === "ppl");
+      const s = sp && this.data.eval;
+      const col = s && s.cols && s.cols.ppl;
+      const scale = sp && (sp.axis === "y1" ? this.scales.sy1 : this.scales.sy);
+      if (!sp || !s || !col || !col.length || !scale) return null;
+      const xs = this._xa("eval"), i = nearestIdx(xs, this._xAt(px));
+      const v = col[i];
+      if (v == null || !isFinite(v)) return null;
+      const x = this.scales.xpx(xs[i]), y = scale.px(v);
+      return Math.hypot(x - px, y - py) <= 12 ? { step: s.step[i], ppl: v } : null;
+    }
+
     _wire() {
       const cv = this.canvas;
       let dragging = false, dragX = 0, dragDom = null;
       let boxing = false, boxX0 = 0;
+      let evalCand = null, downX = 0, downY = 0;
       cv.addEventListener("wheel", (e) => {
         e.preventDefault();
         const [xmin, xmax] = this._xDomain();
@@ -710,10 +768,23 @@
             saveHidden(this.id, this.hidden); this.drawStatic(); return;
           }
         }
+        // A press near an eval marker is only a *candidate* click: opening on
+        // pointerdown would steal drags/box-zooms that start within the 12px
+        // hit radius. Decide on pointerup, when movement is known.
+        evalCand = e.shiftKey ? null : this._evalPointAt(px, py);
+        downX = e.clientX; downY = e.clientY;
         if (e.shiftKey) { boxing = true; boxX0 = px; return; }   // shift+drag = box zoom (x)
         dragging = true; dragX = e.clientX; dragDom = this._xDomain();
       });
       window.addEventListener("pointerup", (e) => {
+        const cand = evalCand; evalCand = null;
+        if (cand && !boxing &&
+            Math.hypot(e.clientX - downX, e.clientY - downY) < 4 &&
+            window.trainboard && window.trainboard.openEvalSamples) {
+          dragging = false;
+          window.trainboard.openEvalSamples(curRun, cand.step, cand.ppl);
+          return;
+        }
         if (boxing) {
           boxing = false;
           const r = cv.getBoundingClientRect();
@@ -752,7 +823,7 @@
       });
       cv.addEventListener("pointerleave", () => { this.gOverlay.clear(); clearKids(this.tip); this._render(); });
       cv.addEventListener("dblclick", () => { this.view = null; this.drawStatic(); if (this.onReset) this.onReset(); });
-      cv.title = "scroll: zoom-x · drag: pan · shift+drag: box zoom · dbl-click: reset";
+      cv.title = "click eval ppl: view captions · scroll: zoom-x · drag: pan · shift+drag: box zoom · dbl-click: reset";
     }
 
     _hover(mouseX, mouseY) {
@@ -895,6 +966,16 @@
       ],
     },
     {
+      id: "chart-grounding", panel: "grounding-panel",
+      requires: { src: "train", key: "grounding_contrastive_loss" },
+      series: [
+        { src: "train", key: "ce_loss", label: "raw CE", color: OI.gray, axis: "y", type: "line", smooth: 0.1, robust: true },
+        { src: "train", key: "grounded_ce_loss", label: "opening-weighted CE", color: OI.sky, axis: "y", type: "line", smooth: 0.1, robust: true, width: 2 },
+        { src: "train", key: "grounding_contrastive_loss", label: "image/text contrastive", color: OI.vermillion, axis: "y", type: "line", smooth: 0.1, robust: true },
+        { src: "train", key: "grounding_retrieval_accuracy", label: "batch retrieval", color: OI.green, axis: "y1", type: "line", smooth: 0.1 },
+      ],
+    },
+    {
       // grokking: ROSA/Engram recall paths are identity-init no-ops that "grok on"
       // (injection RMS rises off ~0). Panel hides until a run emits rosa_inj_rms.
       id: "chart-memact", panel: "memact-panel",
@@ -920,7 +1001,9 @@
 
   // union of fields to fetch in one request
   const TRAIN_FIELDS = ["loss", "tok_per_sec", "gnorm", "lr", "lm_ce", "block", "smt_mem", "dmt_mem",
-    "rosa_inj_rms", "engram_inj_rms", "rosa_e_gap", "wnorm_rms", "stable_rank"];
+    "rosa_inj_rms", "engram_inj_rms", "rosa_e_gap", "wnorm_rms", "stable_rank",
+    "ce_loss", "grounded_ce_loss", "grounding_contrastive_loss", "grounding_retrieval_accuracy",
+    "deep_vision_inj_rms"];
   const EVAL_FIELDS = ["loss", "ppl", "top1", "top5",
     "h1_top1", "h2_top1", "h3_top1", "h4_top1",
     "h1_top5", "h2_top5", "h3_top5", "h4_top5", "h1_ppl", "h4_ppl",
@@ -978,19 +1061,25 @@
     }
   }
 
-  let customGen = 0;
+  let customGen = 0, customRun = "", customTrainStep = -1, customEvalStep = -1;
+  let customAppendRequest = 0, customAppendApplied = 0;
   async function applyCustom() {
     const box = document.getElementById("custom-chartbox");
     if (!customChart) return;
     const sel = [...selectedMetrics];
-    if (!sel.length || !curRun) { if (box) box.style.display = "none"; return; }
+    const gen = ++customGen;
+    if (!sel.length || !curRun) {
+      customRun = "";
+      if (box) box.style.display = "none";
+      return;
+    }
     if (box) box.style.display = "";            // show as soon as there's a selection
-    const gen = ++customGen, run = curRun;
+    const run = curRun;
     const trainF = sel.filter(m => m.startsWith("train:")).map(m => m.slice(6));
     const evalF = sel.filter(m => m.startsWith("eval:")).map(m => m.slice(5));
     const url = `/api/series/${encodeURIComponent(run)}?train=${trainF.join(",")}&eval=${evalF.join(",")}`;
-    const data = await fetch(url).then(r => r.json()).catch(() => null);
-    if (!data || gen !== customGen) return;     // stale (newer selection or run switch)
+    const data = await fetchJSON(url).catch(() => null);
+    if (!data || gen !== customGen || run !== curRun) return;
     let ci = 0; const series = [];
     for (const m of sel) {
       const src = m.startsWith("train:") ? "train" : "eval";
@@ -1001,16 +1090,40 @@
     customChart.hidden = new Set();
     if (customChart._resize) customChart._resize();
     customChart.setData(data);
+    customRun = run;
+    customTrainStep = seriesTip(data.train, -1);
+    customEvalStep = seriesTip(data.eval, -1);
+  }
+
+  async function appendCustom(run) {
+    const sel = [...selectedMetrics];
+    if (!sel.length || !customChart || customRun !== run) return;
+    const gen = customGen;
+    const request = ++customAppendRequest;
+    const trainF = sel.filter(m => m.startsWith("train:")).map(m => m.slice(6));
+    const evalF = sel.filter(m => m.startsWith("eval:")).map(m => m.slice(5));
+    const url = `/api/series/${encodeURIComponent(run)}?train=${trainF.join(",")}&eval=${evalF.join(",")}`
+      + `&train_since=${customTrainStep - 1}&eval_since=${customEvalStep - 1}`;
+    const data = await fetchJSON(url).catch(() => null);
+    if (!data || gen !== customGen || run !== customRun || request < customAppendApplied) return;
+    customChart.append(data);
+    // Commit cursors only after the chart accepts the rows. Several main-series
+    // ticks can have custom fetches in flight at once, so they are monotonic too.
+    customTrainStep = Math.max(customTrainStep, seriesTip(data.train, customTrainStep));
+    customEvalStep = Math.max(customEvalStep, seriesTip(data.eval, customEvalStep));
+    customAppendApplied = request;
   }
 
   function persistCompare(name) { try { localStorage.setItem("tb_compare", name || ""); } catch (e) {} }
   function loadCompare() { try { return localStorage.getItem("tb_compare") || ""; } catch (e) { return ""; } }
+  let compareGen = 0;
   async function setCompareRun(name) {
+    const gen = ++compareGen;
     persistCompare(name);
     if (!name || name === curRun) { for (const id in charts) charts[id].setCompare(null); return; }
     const url = `/api/series/${encodeURIComponent(name)}?train=${TRAIN_FIELDS.join(",")}&eval=${EVAL_FIELDS.join(",")}`;
-    const data = await fetch(url).then(r => r.json()).catch(() => null);
-    if (!data) return;
+    const data = await fetchJSON(url).catch(() => null);
+    if (!data || gen !== compareGen || name !== loadCompare()) return;
     for (const id in charts) charts[id].setCompare(data, name);
   }
   function populateCompareOptions() {
@@ -1028,8 +1141,9 @@
   }
 
   async function loadCatalog(run) {
-    const cat = await fetch(`/api/metrics/${encodeURIComponent(run)}`).then(r => r.json()).catch(() => null);
-    if (!cat) return;
+    const gen = loadGen;
+    const cat = await fetchJSON(`/api/metrics/${encodeURIComponent(run)}`).catch(() => null);
+    if (!cat || run !== curRun || gen !== loadGen) return;
     renderCatalog(cat);
     applyCustom();
   }
@@ -1112,8 +1226,34 @@
     updateTailChips();
   }
 
-  let curRun = null, lastStep = 0, loading = false;
+  let curRun = null, lastStep = 0, lastTrainStep = -1, lastEvalStep = -1;
+  let lastGeneration = -1;
+  let lastVersion = 0, pendingVersion = 0, loading = false, loadGen = 0;
+  let runLoaded = false;
+  let seriesRetryMs = 500, seriesRetryTimer = null;
+  let shownEvalSampleStep = -1;
+  let timelineGen = 0;
   let zoomTimer = null, zoomGen = 0;
+  async function fetchJSON(url, timeoutMs = 8000) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, { signal: ac.signal });
+      if (!response.ok) throw new Error(`request failed (${response.status})`);
+      return await response.json();
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  function scheduleSeriesRetry(run, callback, immediate = false) {
+    clearTimeout(seriesRetryTimer);
+    const delay = immediate ? 0 : seriesRetryMs;
+    if (!immediate) seriesRetryMs = Math.min(seriesRetryMs * 2, 8000);
+    seriesRetryTimer = setTimeout(() => {
+      seriesRetryTimer = null;
+      if (run === curRun) callback();
+    }, delay);
+  }
   function syncView(view) {
     for (const id in charts) {
       if (id === "chart-custom") continue;          // custom chart manages its own data
@@ -1128,6 +1268,7 @@
     clearTimeout(zoomTimer);
     zoomTimer = setTimeout(async () => {
       if (!curRun) return;
+      const run = curRun, runGen = loadGen;
       // view is in the active x-unit; the API window is steps — map back if needed
       const primary = charts["chart-loss"];
       let from, to;
@@ -1135,9 +1276,9 @@
       else { from = Math.floor(view.min); to = Math.ceil(view.max); }
       from = Math.max(0, from);
       if (to - from < 2) return;
-      const url = `/api/series/${encodeURIComponent(curRun)}?train=${TRAIN_FIELDS.join(",")}&eval=${EVAL_FIELDS.join(",")}&from=${from}&to=${to}`;
-      const data = await fetch(url).then(r => r.json()).catch(() => null);
-      if (!data || gen !== zoomGen) return;          // stale (newer zoom or run switch)
+      const url = `/api/series/${encodeURIComponent(run)}?train=${TRAIN_FIELDS.join(",")}&eval=${EVAL_FIELDS.join(",")}&from=${from}&to=${to}`;
+      const data = await fetchJSON(url).catch(() => null);
+      if (!data || gen !== zoomGen || run !== curRun || runGen !== loadGen) return;
       for (const id in charts) { if (id !== "chart-custom") charts[id].setWindow(data); }
     }, 260);
   }
@@ -1152,16 +1293,65 @@
     return data;
   }
 
-  async function loadRun(run) {
+  function seriesTip(series, fallback) {
+    return series && series.step && series.step.length
+      ? series.step[series.step.length - 1] : fallback;
+  }
+
+  function showNewestEvalSample(run, series) {
+    if (!series || !series.step || !series.step.length || !series.cols || !series.cols.ppl) return;
+    for (let i = series.step.length - 1; i >= 0; i--) {
+      const ppl = series.cols.ppl[i];
+      if (ppl == null || !isFinite(ppl)) continue;
+      const step = series.step[i];
+      if (step === shownEvalSampleStep) return;
+      shownEvalSampleStep = step;
+      if (window.trainboard && window.trainboard.openEvalSamples) {
+        window.trainboard.openEvalSamples(run, step, ppl);
+      }
+      return;
+    }
+  }
+
+  async function loadRun(run, version) {
+    const gen = ++loadGen;
+    ++timelineGen; // invalidate timeline responses launched by the old view
+    const switching = run !== curRun;
+    curRun = run;
+    runLoaded = false;
+    customGen++; customRun = ""; // invalidate custom appends on rewinds too
+    if (switching) {
+      clearTimeout(seriesRetryTimer); seriesRetryTimer = null;
+      lastStep = 0; lastTrainStep = -1; lastEvalStep = -1;
+      lastGeneration = -1;
+      lastVersion = 0; pendingVersion = 0; seriesRetryMs = 500;
+      compareGen++;
+    }
+    shownEvalSampleStep = -1;
+    if (window.trainboard && window.trainboard.resetEvalSamples) {
+      window.trainboard.resetEvalSamples(run);
+    }
+    pendingVersion = version || 0;
     loading = true;
     const url = `/api/series/${encodeURIComponent(run)}?train=${TRAIN_FIELDS.join(",")}&eval=${EVAL_FIELDS.join(",")}`;
     const [data, tl] = await Promise.all([
-      fetch(url).then(r => r.json()).catch(() => null),
-      fetch(`/api/timeline/${encodeURIComponent(run)}`).then(r => r.json()).catch(() => ({ events: [] })),
+      fetchJSON(url).catch(() => null),
+      fetchJSON(`/api/timeline/${encodeURIComponent(run)}`).catch(() => ({ events: [] })),
     ]);
+    if (gen !== loadGen) return;
     loading = false;
-    if (!data) return;
-    curRun = run; lastStep = data.max_step || 0;
+    if (!data) {
+      scheduleSeriesRetry(run, () => loadRun(run, pendingVersion));
+      return;
+    }
+    seriesRetryMs = 500;
+    try {
+    lastTrainStep = seriesTip(data.train, -1);
+    lastEvalStep = seriesTip(data.eval, -1);
+    lastGeneration = Number(data.generation || 0);
+    lastStep = Math.max(lastTrainStep, lastEvalStep, 0);
+    lastVersion = version || pendingVersion;
+    showNewestEvalSample(run, data.eval);
     const note = document.getElementById("decim-note");
     if (note) note.style.display = data.decimated ? "" : "none";
     const events = (tl && tl.events) || [];
@@ -1181,30 +1371,68 @@
     const cmpSel = document.getElementById("compare-run");
     if (cmp && cmp !== run) { if (cmpSel) cmpSel.value = cmp; setCompareRun(cmp); }
     else { if (cmpSel) cmpSel.value = ""; for (const id in charts) charts[id].setCompare(null); }
+    runLoaded = true;
+    } catch (e) {
+      console.warn("[trainboard] loadRun render failed; retrying full load:", e);
+      scheduleSeriesRetry(run, () => loadRun(run, pendingVersion));
+      return;
+    }
+    if (pendingVersion > lastVersion) {
+      scheduleSeriesRetry(run, () => appendRun(run, pendingVersion), true);
+    }
   }
 
   async function appendRun(run, version) {
-    if (version <= lastStep || loading) return;
+    pendingVersion = Math.max(pendingVersion, version || 0);
+    if (version <= lastVersion || loading || run !== curRun || !runLoaded) return;
+    clearTimeout(seriesRetryTimer); seriesRetryTimer = null;
     loading = true;
+    const gen = loadGen;
+    let succeeded = false;
+    let rewound = false;
     // Crash-isolate the whole live-append tick: a throw here (or a hung fetch)
     // must never leave `loading` stuck true, or EVERY later tick returns early
     // and the chart freezes until a manual reload (observed on a NaN/diverged
     // run). finally always clears the flag; catch keeps one bad point from
     // killing the live loop and logs it so the real trigger is visible.
     try {
-      const url = `/api/series/${encodeURIComponent(run)}?train=${TRAIN_FIELDS.join(",")}&eval=${EVAL_FIELDS.join(",")}&since=${lastStep}`;
+      // Overlap each cursor by one integer step. A trainer can append a
+      // corrected row at the current tip; the chart's upsert path replaces it.
+      const url = `/api/series/${encodeURIComponent(run)}?train=${TRAIN_FIELDS.join(",")}&eval=${EVAL_FIELDS.join(",")}&train_since=${lastTrainStep - 1}&eval_since=${lastEvalStep - 1}`;
       // Bound the request: a wedged/deadlocked query must not hang the await
       // forever (which would strand `loading` true and freeze all live ticks).
-      const ac = new AbortController();
-      const to = setTimeout(() => ac.abort(), 8000);
-      const data = await fetch(url, { signal: ac.signal }).then(r => r.json()).catch(() => null);
-      clearTimeout(to);
+      const data = await fetchJSON(url).catch(() => null);
       if (!data) return;
-      lastStep = Math.max(lastStep, data.max_step || 0);
+      // A run switch/full reload can begin while this request is in flight.  Do
+      // not let the obsolete append alter cursors, charts, or the eval card;
+      // its finally block must not release the newer load's global lock either.
+      if (run !== curRun || gen !== loadGen) return;
+      succeeded = true;
+      seriesRetryMs = 500;
+      const generation = Number(data.generation || 0);
+      if ((lastGeneration >= 0 && generation !== lastGeneration) ||
+          Number(data.max_train_step || 0) < lastTrainStep ||
+          Number(data.max_eval_step || 0) < lastEvalStep) {
+        // The ingester reset after checkpoint recovery. Append-only charts
+        // cannot delete abandoned future points, so replace them with one
+        // authoritative full load instead of requiring a manual run switch.
+        rewound = true;
+        return;
+      }
+      lastTrainStep = seriesTip(data.train, lastTrainStep);
+      lastEvalStep = seriesTip(data.eval, lastEvalStep);
+      lastGeneration = generation;
+      showNewestEvalSample(run, data.eval);
+      lastStep = Math.max(lastTrainStep, lastEvalStep, 0);
+      lastVersion = version;
       for (const spec of CHARTS) {
         const ch = charts[spec.id];
         if (ch) ch.append(data);
       }
+      appendCustom(run).catch((e) => {
+        console.warn("[trainboard] custom append failed; rebuilding:", e);
+        if (run === curRun && customRun === run) applyCustom();
+      });
       // pinned tail slides with the live tip (appended rows are full resolution)
       if (tailN && charts["chart-loss"]) {
         const c = charts["chart-loss"];
@@ -1213,15 +1441,30 @@
         if (hi <= lo) hi = lo + 1;
         syncView({ min: lo, max: hi });
       }
-      fetch(`/api/timeline/${encodeURIComponent(run)}`).then(r => r.json()).then(tl => {
+      const timelineRequest = ++timelineGen;
+      fetchJSON(`/api/timeline/${encodeURIComponent(run)}`).then(tl => {
+        if (run !== curRun || gen !== loadGen || timelineRequest !== timelineGen) return;
         const events = (tl && tl.events) || [];
         for (const id in charts) charts[id].setTimeline(events);
         renderEventList(events);
       }).catch(() => {});
     } catch (e) {
       console.warn("[trainboard] appendRun failed (live tick skipped):", e);
+      // Cursors/charts may already have been mutated before a Pixi render
+      // throws. Treat the tick like a rewind and rebuild every chart from one
+      // authoritative full payload; merely clearing `loading` would commit a
+      // partial client transaction and skip this version forever.
+      rewound = true;
     } finally {
+      if (run !== curRun || gen !== loadGen) return;
       loading = false;
+      if (run === curRun && rewound) {
+        runLoaded = false;
+        scheduleSeriesRetry(run, () => loadRun(run, pendingVersion), true);
+      } else if (run === curRun && pendingVersion > lastVersion) {
+        scheduleSeriesRetry(
+          run, () => appendRun(run, pendingVersion), succeeded);
+      }
     }
   }
 
@@ -1273,7 +1516,8 @@
     if (window.trainboard && window.trainboard.watchActiveRun) {
       window.trainboard.watchActiveRun((run, version) => {
         if (!run) return;
-        if (run !== curRun) loadRun(run);
+        if (run !== curRun) loadRun(run, version);
+        else if (version < lastVersion) loadRun(run, version);
         else appendRun(run, version);
       });
     }

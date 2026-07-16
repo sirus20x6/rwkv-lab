@@ -32,7 +32,9 @@ jobs:
           # pure-Python reference (RWKV8_FORCE_PYREF, set by tests/conftest.py), so `fla`
           # is not required.
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -e .        # pulls transformers/safetensors/einops/numpy from pyproject
+          # Vision extras cover the embedded-image corpus and deduplication
+          # utilities exercised by the multimodal CPU tests below.
+          pip install -e '.[vision]'
           pip install pytest
 
       - name: Run CPU test suite
@@ -61,4 +63,17 @@ jobs:
             tests/test_loop_deq.py \
             tests/test_loop_fprm.py \
             tests/test_loop_new_features.py \
-            tests/test_synthetic_tasks.py
+            tests/test_synthetic_tasks.py \
+            tests/test_engram_lmb.py \
+            tests/test_i1_acquisition.py \
+            tests/test_kimi_teacher.py \
+            tests/test_midjourney_alignment.py \
+            tests/test_moonvit_vlm.py \
+            tests/test_unlabeled_image_manifest.py \
+            tests/test_doclingmatix_fetch.py \
+            tests/test_vision_finish_mix.py \
+            tests/test_vision_fusion.py \
+            tests/test_vision_loop.py \
+            tests/test_vision_next_levers.py \
+            tests/test_vision_watchdog.py \
+            tests/test_world_vocab.py

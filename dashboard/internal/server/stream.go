@@ -76,8 +76,22 @@ func (s *Server) pushTick(sse *datastar.ServerSentEventGenerator, tabID string) 
 		"runVersions": snap.versions,
 	}
 
+	// Open the newest run on a tab's first visit.  Previously the stream filled
+	// the sidebar but left the entire detail pane hidden until an explicit click,
+	// which made a healthy dashboard look empty.  Also send the authoritative
+	// selection on every tick so a browser refresh restores that tab's view.
 	sel := s.selectedFor(tabID)
+	if _, ok := findSummary(snap.summaries, sel); !ok {
+		if len(snap.summaries) > 0 {
+			sel = snap.summaries[0].Name
+			s.setSelected(tabID, sel)
+		} else {
+			sel = ""
+		}
+	}
 	if sel != "" {
+		signals["selectedRun"] = sel
+		signals["hasSel"] = true
 		// Live header for the selected run (incl. authoritative best/ checkpoint).
 		runDir := filepath.Join(s.cfg.RunsDir, sel)
 		if sum, ok := findSummary(snap.summaries, sel); ok {
@@ -85,7 +99,7 @@ func (s *Server) pushTick(sse *datastar.ServerSentEventGenerator, tabID string) 
 			if p, has := snap.procByRun[sel]; has {
 				proc = &p
 			}
-			_ = sse.PatchElements(renderRunHeader(sum, proc, readBest(runDir), snap.ts))
+			_ = sse.PatchElements(renderRunHeader(sum, proc, snap.bestByRun[sel], snap.ts))
 		}
 		// LoopedRWKV residual-weight panel (live loop_rw.json).
 		if lr, ok := readLoopRW(runDir); ok {
@@ -95,6 +109,7 @@ func (s *Server) pushTick(sse *datastar.ServerSentEventGenerator, tabID string) 
 		}
 		// KPI strip values.
 		if k, ok, _ := s.db.RunKPIsByName(sel); ok {
+			applyEvalContractKPIs(&k, snap.bestByRun[sel])
 			signals["kpi"] = k
 		}
 		// Live-tuning overrides (desired vs applied) for the tuning panel.
@@ -139,9 +154,10 @@ func (s *Server) handleRunSelect(w http.ResponseWriter, r *http.Request) {
 	if p, has := procIndex(s.sampler.Latest().Procs)[name]; has {
 		proc = &p
 	}
-	_ = sse.PatchElements(renderRunHeader(sum, proc, readBest(filepath.Join(s.cfg.RunsDir, name)), now))
+	best := snap.bestByRun[name]
+	_ = sse.PatchElements(renderRunHeader(sum, proc, best, now))
 	_ = sse.PatchElementf(`<div id="active-run" data-run="%s" data-v="%d" hidden></div>`,
-		esc(name), latestStep(sum))
+		esc(name), runVersion(sum))
 	notes, tagsJSON := s.db.RunMeta(name)
 	// Reset staged live-tune overrides on run switch (values staged for one run
 	// must not silently carry to another) and surface the run's current config
@@ -187,9 +203,6 @@ func findSummary(summaries []db.RunSummary, name string) (db.RunSummary, bool) {
 	return db.RunSummary{}, false
 }
 
-func latestStep(s db.RunSummary) int64 {
-	if s.LatestStep != nil {
-		return *s.LatestStep
-	}
-	return 0
+func runVersion(s db.RunSummary) int64 {
+	return int64(s.LastUpdateTs * 1000)
 }

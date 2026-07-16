@@ -51,6 +51,7 @@ type Proc struct {
 	Script     string   `json:"script"`
 	RunName    string   `json:"run_name"`
 	RuntimeS   float64  `json:"runtime_s"`
+	StartedTS  float64  `json:"started_ts,omitempty"`
 	CPUPct     float64  `json:"cpu_pct"`
 	RSSGB      float64  `json:"rss_gb"`
 	NumThreads int32    `json:"num_threads"`

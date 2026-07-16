@@ -53,3 +53,20 @@ legacy/
 .DS_Store
 experiments.db
 models/cache/
+
+# --- Local multimodal corpora, generated manifests, and model trees ---
+# These directories contain multi-GB/TB downloads, extracted images, local
+# absolute paths, generated review packs, and third-party dataset metadata.
+/datasets/
+/models/
+/curated_vision/
+/NSFW_Manga/
+/i1-captions/
+/joy-captioning-*/
+/nsfw-video-still-caption-grid-only/
+/nsfw_scene_animes_*/
+/quality_review_pack/
+/quality_review_updated/
+
+# Local dashboard process state.
+/dashboard/trainboard.pid

@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS runs (
   max_steps      INTEGER,
   config_json    TEXT,
   notes          TEXT DEFAULT '',
-  tags_json      TEXT DEFAULT '[]'
+  tags_json      TEXT DEFAULT '[]',
+  event_generation INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS run_rollups (
   run_id            INTEGER PRIMARY KEY,
@@ -85,10 +86,12 @@ CREATE TABLE IF NOT EXISTS system_samples (
   loadavg  REAL
 );
 CREATE TABLE IF NOT EXISTS ingest_cursors (
-  path   TEXT PRIMARY KEY,
-  offset INTEGER,
-  size   INTEGER,
-  mtime  REAL
+  path      TEXT PRIMARY KEY,
+  offset    INTEGER,
+  size      INTEGER,
+  mtime     REAL,
+  tail_hash TEXT DEFAULT '',
+  file_id   TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS annotations (
   run_id INTEGER, step INTEGER, ts REAL, text TEXT
@@ -145,6 +148,8 @@ CREATE TABLE IF NOT EXISTS launch_queue (
 -- GROUP BY scans to a few MB regardless of how big extra_json payloads grow.
 CREATE INDEX IF NOT EXISTS idx_train_run_step ON train_events(run_id, step);
 CREATE INDEX IF NOT EXISTS idx_eval_run_step_ppl ON eval_events(run_id, step, ppl, top1);
+CREATE INDEX IF NOT EXISTS idx_train_codec_rel ON train_events(run_id, step DESC)
+  WHERE json_extract(extra_json,'$.codec_rel') IS NOT NULL;
 
 -- Layer library provenance: which run/checkpoint produced each accepted L*.pt.
 CREATE TABLE IF NOT EXISTS layer_lib (
@@ -223,6 +228,77 @@ func Open(path string) (*DB, error) {
 func (d *DB) migrate() error {
 	if _, err := d.Exec(schemaDDL); err != nil {
 		return fmt.Errorf("migrate: %w", err)
+	}
+	// CREATE TABLE IF NOT EXISTS cannot add columns to an existing dashboard.
+	// A cursor tail fingerprint detects rewrite-and-regrow between 1 Hz polls.
+	columns, err := d.Query(`PRAGMA table_info(ingest_cursors)`)
+	if err != nil {
+		return fmt.Errorf("cursor columns: %w", err)
+	}
+	hasTailHash, hasFileID := false, false
+	for columns.Next() {
+		var cid, notnull, pk int
+		var name, kind string
+		var defaultValue any
+		if err := columns.Scan(&cid, &name, &kind, &notnull, &defaultValue, &pk); err != nil {
+			columns.Close()
+			return fmt.Errorf("cursor column: %w", err)
+		}
+		if name == "tail_hash" {
+			hasTailHash = true
+		} else if name == "file_id" {
+			hasFileID = true
+		}
+	}
+	if err := columns.Close(); err != nil {
+		return fmt.Errorf("cursor columns close: %w", err)
+	}
+	// A mid-iteration error would end the loop early and misread a column as
+	// missing, turning the guarded ALTER into a duplicate-column failure.
+	if err := columns.Err(); err != nil {
+		return fmt.Errorf("cursor columns iterate: %w", err)
+	}
+	if !hasTailHash {
+		if _, err := d.Exec(`ALTER TABLE ingest_cursors ADD COLUMN tail_hash TEXT DEFAULT ''`); err != nil {
+			return fmt.Errorf("add cursor tail hash: %w", err)
+		}
+	}
+	if !hasFileID {
+		if _, err := d.Exec(`ALTER TABLE ingest_cursors ADD COLUMN file_id TEXT DEFAULT ''`); err != nil {
+			return fmt.Errorf("add cursor file id: %w", err)
+		}
+	}
+	// A maximum step cannot identify every rewrite: a recovered trainer may
+	// regrow to the old tip between browser polls. Persist an explicit event
+	// generation so clients can replace same-tip rewritten history.
+	runColumns, err := d.Query(`PRAGMA table_info(runs)`)
+	if err != nil {
+		return fmt.Errorf("run columns: %w", err)
+	}
+	hasEventGeneration := false
+	for runColumns.Next() {
+		var cid, notnull, pk int
+		var name, kind string
+		var defaultValue any
+		if err := runColumns.Scan(
+			&cid, &name, &kind, &notnull, &defaultValue, &pk); err != nil {
+			runColumns.Close()
+			return fmt.Errorf("run column: %w", err)
+		}
+		if name == "event_generation" {
+			hasEventGeneration = true
+		}
+	}
+	if err := runColumns.Close(); err != nil {
+		return fmt.Errorf("run columns close: %w", err)
+	}
+	if err := runColumns.Err(); err != nil {
+		return fmt.Errorf("run columns iterate: %w", err)
+	}
+	if !hasEventGeneration {
+		if _, err := d.Exec(`ALTER TABLE runs ADD COLUMN event_generation INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("add run event generation: %w", err)
+		}
 	}
 	// Existing databases get one backfill. Thereafter the transactional triggers
 	// keep this O(runs) summary current without per-second event-history scans.

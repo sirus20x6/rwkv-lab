@@ -29,6 +29,10 @@ type Config struct {
 	Detector *alerts.Detector // divergence/health detector
 	LibDir   string           // converted_layers_lib path (conversion board)
 	NLayers  int              // base-model layer count (0 = autodetect/default)
+	// ImageRoots confines eval-sample image serving: an artifact-listed image
+	// path must resolve (symlinks included) inside one of these directories.
+	// Empty falls back to {RunsDir, RepoRoot}.
+	ImageRoots []string
 }
 
 // Server owns the HTTP handler, the datastore, the live telemetry sampler, and
@@ -154,6 +158,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/timeline/{run}", s.handleTimeline)
 	// Metric catalog (known cols + extra_json keys) for the dynamic metric picker.
 	s.mux.HandleFunc("GET /api/metrics/{run}", s.handleMetrics)
+	// Qualitative image/reference/generated-caption snapshot for an eval point.
+	s.mux.HandleFunc("GET /api/runs/{name}/eval-samples/{step}", s.handleEvalSamples)
+	s.mux.HandleFunc("GET /api/runs/{name}/eval-samples/{step}/image/{index}", s.handleEvalSampleImage)
 
 	// Control actions (confirm-gated client-side, validated + audited here).
 	s.mux.HandleFunc("POST /api/runs/{name}/stop", s.handleStop)
