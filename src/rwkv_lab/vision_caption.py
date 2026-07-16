@@ -14,7 +14,7 @@ from rwkv_lab.engram_lmb import LexicalMemoryBank, attach_engram, float_growth_p
 from rwkv_lab.deep_vision import DeepVisionInjector, LayerMatchedVisionInjector
 from rwkv_lab.generate import SEP, WorldVocab
 from rwkv_lab.moonvit import (MoonViT, MoonViTPrefixProjector,
-                              checkpoint_fingerprint,
+                              checkpoint_fingerprint, pool_features,
                               valid_torch_archive_storages)
 from rwkv_lab.rwkv_finetune import load_g1g_fla
 from rwkv_lab.vision_fusion import (
@@ -195,7 +195,11 @@ def caption(checkpoint: str | Path, image_path: str | Path, *, max_new: int = 19
     prompt_ids = vocab.encode(prompt)
     sandwich = bool(args.get("sandwich_prompt", False))
     with torch.autocast("cuda", dtype=torch.bfloat16):
-        features = vision([image])
+        raw_features = vision([image])
+        # Training always feeds pooled prefix-width features (the cacheable
+        # contract) to both the projector and the layer-matched injector.
+        features = [pool_features(item, projector.prefix_tokens).squeeze(0)
+                    for item in raw_features]
         prefix = projector(features)
         if fusion_tower is not None and vision_fusion is not None:
             fusion_features = fusion_tower(

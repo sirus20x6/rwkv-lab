@@ -181,7 +181,9 @@ class LayerMatchedVisionInjector(nn.Module):
                 if features is None:
                     return args, kwargs
                 hidden = args[0] if args else kwargs.get("hidden_states")
-                if hidden is None or hidden.shape[0] != features.shape[0]:
+                if hidden is None:
+                    raise RuntimeError("layer-matched vision hook received no hidden states")
+                if hidden.shape[0] != features.shape[0]:
                     raise ValueError("layer-matched vision features do not match decoder input")
                 injection = self.adapters[adapter_key](features[:, stage]).to(hidden.dtype)
                 self._last_rms[adapter_key] = injection.detach().float().square().mean().sqrt()

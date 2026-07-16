@@ -35,8 +35,13 @@ EVAL_MANIFEST = ROOT / "curated_vision/vision_next_i1_civitai_eval.jsonl"
 TARGET_STEPS = int(os.environ.get("VISION_TARGET_STEPS", "1000000000"))
 TRAIN_STALE_SECONDS = 30 * 60
 DOWNLOAD_STALE_SECONDS = 30 * 60
+DOWNLOAD_MAX_RESTART_ATTEMPTS = 6
 SMOKE_STALE_SECONDS = 30 * 60
 SMOKE_KILL_GRACE_SECONDS = 2 * 60
+SMOKE_FAILURE_BACKOFF_SECONDS = (60, 5 * 60, 15 * 60)
+SMOKE_FAILURE_BACKOFF_CAP_SECONDS = 60 * 60
+SMOKE_MAX_CONSECUTIVE_FAILURES = 5
+SMOKE_FAILED_RECEIPTS_KEPT = 5
 HF_SOURCES = {
     "pexels", "midjourneyv6", "fluxreason", "imagenet22k",
     "megalith10m", "gptedit", "textatlas", "rendered_text",
@@ -157,6 +162,27 @@ def _is_expected_invocation(
     return True
 
 
+def _needle_matches(needle: str, token: str) -> bool:
+    """Match script needles by repo-relative path, other needles by substring.
+
+    Operators launch the same script as ``bash ./scripts/run_X.sh``,
+    ``bash scripts/run_X.sh``, or ``./scripts/run_X.sh``. All spellings must be
+    recognized, or the watchdog spawns a competing launcher whose flock only
+    prevents corruption, not misreported bookkeeping.
+    """
+    if Path(needle).suffix not in {".py", ".sh"}:
+        return needle in token
+    expected = Path(needle)
+    if expected.is_absolute():
+        try:
+            expected = expected.relative_to(ROOT)
+        except ValueError:
+            pass
+    relative = str(expected)
+    normalized = str(Path(token)) if token else token
+    return normalized == relative or normalized.endswith("/" + relative)
+
+
 def processes(*needles: str) -> list[int]:
     """Return PIDs whose argv tokens contain every requested identifier.
 
@@ -180,7 +206,7 @@ def processes(*needles: str) -> list[int]:
             continue
         searchable = [token for token in argv if not any(char.isspace() for char in token)]
         if (searchable and _is_expected_invocation(argv, cwd, needles)
-                and all(any(needle in token for token in searchable)
+                and all(any(_needle_matches(needle, token) for token in searchable)
                         for needle in needles)):
             result.append(pid)
     return sorted(result)
@@ -250,7 +276,15 @@ def launcher_contract(train_script: str) -> tuple[Path, Path] | None:
             return None
     except OSError:
         return None
-    return ROOT / contract[0], ROOT / contract[1]
+    run_path, eval_path = contract
+    if name == "run_vision_finish_grounded.sh":
+        # The finish launcher honors these overrides and the watchdog passes
+        # its environment through. Adopt them into the contract the same way
+        # resolve_target_steps adopts VISION_FINISH_TARGET_STEPS, so the
+        # supervised paths always agree with what the launcher will write.
+        run_path = os.environ.get("VISION_FINISH_RUN", run_path)
+        eval_path = os.environ.get("VISION_FINISH_EVAL", eval_path)
+    return ROOT / run_path, ROOT / eval_path
 
 
 def training_is_done(status: dict[str, Any], step: int, target_steps: int) -> bool:
@@ -491,11 +525,39 @@ def best_checkpoint(run: Path | None = None) -> Path | None:
     return resolve_best_checkpoint(run).checkpoint
 
 
+smoke_failures = 0
+smoke_retry_at = 0.0
+smoke_failure_key: tuple[str, int | None] | None = None
+
+
+def smoke_backoff_seconds(failures: int) -> int:
+    """Space deterministic smoke failures out instead of respawning per poll."""
+    if failures <= 0:
+        return 0
+    if failures <= len(SMOKE_FAILURE_BACKOFF_SECONDS):
+        return SMOKE_FAILURE_BACKOFF_SECONDS[failures - 1]
+    return SMOKE_FAILURE_BACKOFF_CAP_SECONDS
+
+
+def prune_failed_smoke_receipts(keep: int = SMOKE_FAILED_RECEIPTS_KEPT) -> None:
+    """Keep only the newest failure receipts; one bad night must not spam RUN."""
+    def mtime(path: Path) -> int:
+        try:
+            return path.stat().st_mtime_ns
+        except OSError:
+            return 0
+    receipts = sorted(
+        RUN.glob("overnight_caption_smoke.failed-*.txt"), key=mtime)
+    for stale in receipts[:-keep] if keep else receipts:
+        stale.unlink(missing_ok=True)
+
+
 def finish_or_start_smoke(
     training_done: bool,
     trainer_pids: list[int],
     launcher_pids: list[int] | None = None,
 ) -> str:
+    global smoke_failures, smoke_retry_at, smoke_failure_key
     final = RUN / "overnight_caption_smoke.json"
     temporary = RUN / "overnight_caption_smoke.json.tmp"
     launcher_pids = launcher_pids or []
@@ -531,9 +593,19 @@ def finish_or_start_smoke(
         except (TypeError, ValueError):
             pass
 
+    failure_key = (str(checkpoint), expected_step)
+    if failure_key != smoke_failure_key:
+        # A new checkpoint/step is a different deterministic input; give it a
+        # fresh failure budget instead of inheriting a stale blocked state.
+        smoke_failure_key = failure_key
+        smoke_failures = 0
+        smoke_retry_at = 0.0
+
     if not checkpoint.is_file():
         return "waiting_for_inputs"
     if valid_smoke(final, checkpoint=checkpoint, expected_step=expected_step):
+        smoke_failures = 0
+        smoke_retry_at = 0.0
         return "complete"
     if inference_pids:
         stale = [
@@ -569,10 +641,28 @@ def finish_or_start_smoke(
                 image=result.get("image"),
                 caption=result.get("caption"),
             )
+            smoke_failures = 0
+            smoke_retry_at = 0.0
             return "complete"
         failed = RUN / f"overnight_caption_smoke.failed-{int(time.time())}.txt"
         temporary.replace(failed)
-        event("caption_smoke_failed", output=str(failed))
+        smoke_failures += 1
+        prune_failed_smoke_receipts()
+        if smoke_failures >= SMOKE_MAX_CONSECUTIVE_FAILURES:
+            # Deterministic failure: stop paying a checkpoint-loading GPU
+            # process every poll and surface a terminal state instead.
+            event("caption_smoke_blocked", output=str(failed),
+                  consecutive_failures=smoke_failures)
+            return "smoke_blocked"
+        delay = smoke_backoff_seconds(smoke_failures)
+        smoke_retry_at = time.monotonic() + delay
+        event("caption_smoke_failed", output=str(failed),
+              consecutive_failures=smoke_failures, retry_in_seconds=delay)
+        return "smoke_retry_backoff"
+    if smoke_failures >= SMOKE_MAX_CONSECUTIVE_FAILURES:
+        return "smoke_blocked"
+    if time.monotonic() < smoke_retry_at:
+        return "smoke_retry_backoff"
     image = held_out_image()
     if image is None:
         return "waiting_for_inputs"
@@ -802,9 +892,17 @@ def main() -> int:
         archive_stall_signaled_at: float | None = None
         archive_signal_stage = 0
         completion_seen_at: float | None = None
+        completion_sigterm_at: float | None = None
+        completion_sigkill_sent = False
         training_restart_attempts = 0
         training_restart_step: int | None = None
         next_training_start_at = 0.0
+        hf_restart_attempts = 0
+        next_hf_start_at = 0.0
+        hf_blocked_reported = False
+        archive_restart_attempts = 0
+        next_archive_start_at = 0.0
+        archive_blocked_reported = False
 
         while True:
             status, step = training_state()
@@ -824,7 +922,12 @@ def main() -> int:
 
             trainer_pids = processes("rwkv_lab.vision_train", RUN.name)
             launcher_pids = processes(TRAIN_SCRIPT)
-            if launcher_pids:
+            if launcher_pids and not trainer_pids:
+                # The launcher-tree I/O signature exists for the pre-trainer
+                # cache-fill phase only. Once a trainer process exists, judge
+                # staleness by trainer progress alone: preload/prefetch threads
+                # and the launcher's own log keep producing I/O even while the
+                # trainer is GPU-deadlocked, which would suppress recovery.
                 current_launcher_signature = launcher_progress_signature(launcher_pids)
                 if (last_launcher_signature is None
                         or current_launcher_signature != last_launcher_signature):
@@ -854,6 +957,8 @@ def main() -> int:
                 completion_seen_at = completion_seen_at or time.monotonic()
             else:
                 completion_seen_at = None
+                completion_sigterm_at = None
+                completion_sigkill_sent = False
 
             if not args.downloads_only:
                 if (not training_done and not resume_missing
@@ -945,14 +1050,30 @@ def main() -> int:
                       and time.monotonic() - completion_seen_at >= 300):
                     # The final checkpoint and complete status are already atomic.
                     # Do not let Python's background cache threads hold the GPU and
-                    # prevent the promised post-training caption smoke test.
-                    for pid in trainer_pids:
-                        try:
-                            os.kill(pid, signal.SIGTERM)
-                        except ProcessLookupError:
-                            pass
-                    event("completed_trainer_sigterm", pids=trainer_pids, step=step)
-                    completion_seen_at = time.monotonic()
+                    # prevent the promised post-training caption smoke test. One
+                    # SIGTERM, then SIGKILL after a second timeout; never re-arm
+                    # the completion timer, or escalation would loop forever.
+                    if completion_sigterm_at is None:
+                        for pid in trainer_pids:
+                            try:
+                                os.kill(pid, signal.SIGTERM)
+                            except ProcessLookupError:
+                                pass
+                        event("completed_trainer_sigterm", pids=trainer_pids, step=step)
+                        completion_sigterm_at = time.monotonic()
+                    elif (not completion_sigkill_sent
+                          and time.monotonic() - completion_sigterm_at >= 120):
+                        # Re-resolve the allowlisted argv matches to guard
+                        # against PID reuse before the final signal.
+                        survivors = sorted(set(trainer_pids) & set(
+                            processes("rwkv_lab.vision_train", RUN.name)))
+                        for pid in survivors:
+                            try:
+                                os.kill(pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                        event("completed_trainer_sigkill", pids=survivors, step=step)
+                        completion_sigkill_sent = True
 
             hf_pids = processes("scripts/fetch_i1_sources.py")
             current_hf_signature = acquisition_progress_signature(
@@ -962,16 +1083,33 @@ def main() -> int:
                 hf_last_progress = time.monotonic()
                 hf_stall_signaled_at = None
                 hf_signal_stage = 0
+                # Visible acquisition progress starts a fresh restart budget;
+                # only a deterministically failing fetcher accumulates debt.
+                hf_restart_attempts = 0
+                next_hf_start_at = 0.0
+                hf_blocked_reported = False
             hf_stale_for = time.monotonic() - hf_last_progress
             if not hf_pids and not acquisition_complete(
                     DATA / "acquisition_state.json", HF_SOURCES):
-                start_hf_download()
-                # The old child may have reached TERM/KILL. A replacement must
-                # not inherit that stale age or escalation stage and be killed
-                # before it has had a chance to open and grow its next shard.
-                hf_last_progress, hf_stall_signaled_at, hf_signal_stage = \
-                    fresh_stall_supervision()
-                hf_stale_for = 0.0
+                if hf_restart_attempts >= DOWNLOAD_MAX_RESTART_ATTEMPTS:
+                    if not hf_blocked_reported:
+                        hf_blocked_reported = True
+                        event("hf_download_blocked",
+                              attempts=hf_restart_attempts)
+                elif time.monotonic() >= next_hf_start_at:
+                    start_hf_download()
+                    hf_restart_attempts += 1
+                    delay = restart_backoff_seconds(
+                        hf_restart_attempts, args.poll)
+                    next_hf_start_at = time.monotonic() + delay
+                    event("hf_download_restart_backoff",
+                          attempt=hf_restart_attempts, retry_in_seconds=delay)
+                    # The old child may have reached TERM/KILL. A replacement must
+                    # not inherit that stale age or escalation stage and be killed
+                    # before it has had a chance to open and grow its next shard.
+                    hf_last_progress, hf_stall_signaled_at, hf_signal_stage = \
+                        fresh_stall_supervision()
+                    hf_stale_for = 0.0
             elif (hf_pids and hf_stale_for >= DOWNLOAD_STALE_SECONDS
                   and not acquisition_waiting_for_space(DATA / "acquisition_state.json")):
                 hf_signal_stage, hf_stall_signaled_at, sent = \
@@ -995,13 +1133,29 @@ def main() -> int:
                 archive_last_progress = time.monotonic()
                 archive_stall_signaled_at = None
                 archive_signal_stage = 0
+                archive_restart_attempts = 0
+                next_archive_start_at = 0.0
+                archive_blocked_reported = False
             archive_stale_for = time.monotonic() - archive_last_progress
             if not archive_pids and not acquisition_complete(
                     DATA / "archive_acquisition_state.json", ARCHIVE_SOURCES):
-                start_archive_download()
-                archive_last_progress, archive_stall_signaled_at, \
-                    archive_signal_stage = fresh_stall_supervision()
-                archive_stale_for = 0.0
+                if archive_restart_attempts >= DOWNLOAD_MAX_RESTART_ATTEMPTS:
+                    if not archive_blocked_reported:
+                        archive_blocked_reported = True
+                        event("archive_download_blocked",
+                              attempts=archive_restart_attempts)
+                elif time.monotonic() >= next_archive_start_at:
+                    start_archive_download()
+                    archive_restart_attempts += 1
+                    delay = restart_backoff_seconds(
+                        archive_restart_attempts, args.poll)
+                    next_archive_start_at = time.monotonic() + delay
+                    event("archive_download_restart_backoff",
+                          attempt=archive_restart_attempts,
+                          retry_in_seconds=delay)
+                    archive_last_progress, archive_stall_signaled_at, \
+                        archive_signal_stage = fresh_stall_supervision()
+                    archive_stale_for = 0.0
             elif (archive_pids and archive_stale_for >= DOWNLOAD_STALE_SECONDS
                   and not acquisition_waiting_for_space(
                       DATA / "archive_acquisition_state.json")):
@@ -1056,8 +1210,16 @@ def main() -> int:
                 "downloads": {
                     "hf_pids": hf_pids,
                     "hf_seconds_since_progress": round(hf_stale_for, 1),
+                    "hf_restart_attempts": hf_restart_attempts,
+                    "hf_supervision": (
+                        "blocked_repeated_failures" if hf_blocked_reported
+                        else "enabled"),
                     "archive_pids": archive_pids,
                     "archive_seconds_since_progress": round(archive_stale_for, 1),
+                    "archive_restart_attempts": archive_restart_attempts,
+                    "archive_supervision": (
+                        "blocked_repeated_failures" if archive_blocked_reported
+                        else "enabled"),
                     "hf": acquisition_summary(DATA / "acquisition_state.json"),
                     "archives": acquisition_summary(DATA / "archive_acquisition_state.json"),
                 },

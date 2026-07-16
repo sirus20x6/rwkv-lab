@@ -32,24 +32,31 @@ TAPS = (8, 17, 26)
 VIEW_MODE = "full-quadrants"
 
 
-def cache_count(path: Path) -> int:
+def cache_count(path: Path, exclude: set[str] = frozenset()) -> int:
     try:
-        return sum(entry.name.endswith(".pt") for entry in os.scandir(path))
+        return sum(entry.name.endswith(".pt") and entry.name not in exclude
+                   for entry in os.scandir(path))
     except FileNotFoundError:
         return 0
 
 
 def active_cache_pids() -> list[int]:
     result = []
-    needle = str(ACTIVE_MOON).encode()
+    target = os.path.normpath(str(ACTIVE_MOON))
     for candidate in Path("/proc").iterdir():
         if not candidate.name.isdigit():
             continue
         try:
-            command = (candidate / "cmdline").read_bytes()
+            tokens = [token.decode("utf-8", errors="replace")
+                      for token in (candidate / "cmdline").read_bytes().split(b"\0")
+                      if token]
         except (OSError, PermissionError):
             continue
-        if b"rwkv_lab.vision_cache" in command and needle in command:
+        # Require the exact cache-directory argument: str(ACTIVE_MOON) is a
+        # prefix of the frozen shard directories, so a substring match could
+        # interrupt or count the wrong producer.
+        if ("rwkv_lab.vision_cache" in tokens
+                and any(os.path.normpath(token) == target for token in tokens)):
             result.append(int(candidate.name))
     return result
 
@@ -83,7 +90,21 @@ def moon_key(image_value: str, fingerprint: str) -> str:
         vision_fingerprint=fingerprint, tap_layers=TAPS, view_mode=VIEW_MODE)
 
 
-def select_cached_rows() -> tuple[list[str], set[str]]:
+def eval_cache_keys(fingerprint: str) -> set[str]:
+    """Eval entries in the active cache must not count toward TARGET_TRAIN."""
+    keys: set[str] = set()
+    with EVAL.open() as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                keys.add(moon_key(json.loads(line)["image"], fingerprint))
+            except OSError:
+                continue  # an absent eval image cannot be cached yet
+    return keys
+
+
+def select_cached_rows(cache_dir: Path) -> tuple[list[str], set[str]]:
     fingerprint = checkpoint_fingerprint(MOON_CHECKPOINT)
     rows: list[str] = []
     keys: set[str] = set()
@@ -93,7 +114,7 @@ def select_cached_rows() -> tuple[list[str], set[str]]:
                 continue
             row = json.loads(line)
             key = moon_key(row["image"], fingerprint)
-            if (ACTIVE_MOON / key).is_file():
+            if (cache_dir / key).is_file():
                 rows.append(line if line.endswith("\n") else line + "\n")
                 keys.add(key)
                 if len(rows) == TARGET_TRAIN:
@@ -112,9 +133,10 @@ def atomic_text(path: Path, value: str) -> None:
 
 
 def freeze_moon_shard(rows: list[str], selected: set[str]) -> None:
-    if SHARD_MOON.exists():
-        raise RuntimeError(f"refusing to replace existing shard cache {SHARD_MOON}")
-    os.replace(ACTIVE_MOON, SHARD_MOON)
+    if ACTIVE_MOON.exists():
+        if SHARD_MOON.exists():
+            raise RuntimeError(f"refusing to replace existing shard cache {SHARD_MOON}")
+        os.replace(ACTIVE_MOON, SHARD_MOON)
     OVERFLOW_MOON.mkdir(parents=True, exist_ok=True)
     overflow = 0
     for entry in list(SHARD_MOON.iterdir()):
@@ -175,19 +197,32 @@ def write_receipt() -> None:
 
 
 def main() -> None:
-    if SHARD_MOON.exists() or SHARD_FUSION.exists():
+    frozen = SHARD_MOON.exists() and not ACTIVE_MOON.exists()
+    if not frozen and (SHARD_MOON.exists() or SHARD_FUSION.exists()):
         raise SystemExit("shard 000 cache already exists; refusing an ambiguous handoff")
-    while True:
-        completed = cache_count(ACTIVE_MOON)
-        print({"kind": "handoff_wait", "completed": completed,
-               "target": TARGET_TRAIN}, flush=True)
-        if completed >= TARGET_TRAIN:
-            break
-        time.sleep(15)
+    if frozen:
+        # A previous run crashed after the atomic freeze rename. Every step
+        # from here on is idempotent, so resume instead of aborting forever.
+        print({"kind": "handoff", "action": "resume_after_freeze",
+               "manifest_published": SHARD_TRAIN.exists()}, flush=True)
+        if not SHARD_TRAIN.exists():
+            # The crash preceded the eval cache fill, so the frozen shard
+            # still holds only train entries; re-derive the same selection.
+            rows, selected = select_cached_rows(SHARD_MOON)
+            freeze_moon_shard(rows, selected)
+    else:
+        excluded = eval_cache_keys(checkpoint_fingerprint(MOON_CHECKPOINT))
+        while True:
+            completed = cache_count(ACTIVE_MOON, exclude=excluded)
+            print({"kind": "handoff_wait", "completed": completed,
+                   "target": TARGET_TRAIN}, flush=True)
+            if completed >= TARGET_TRAIN:
+                break
+            time.sleep(15)
 
-    stop_active_cache()
-    rows, selected = select_cached_rows()
-    freeze_moon_shard(rows, selected)
+        stop_active_cache()
+        rows, selected = select_cached_rows(ACTIVE_MOON)
+        freeze_moon_shard(rows, selected)
 
     # Ensure the stable, non-adult eval set is represented in this first shard.
     run([sys.executable, "-m", "rwkv_lab.vision_cache",

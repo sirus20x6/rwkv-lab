@@ -28,9 +28,14 @@ from torch.nn import functional as F
 CACHE_SCHEMA = "moonvit-pooled-v3"
 
 
-def valid_pooled_feature(item: object, prefix_tokens: int, stages: int = 1) -> bool:
-    """Return whether a cache payload matches the pooled MoonViT contract."""
-    expected = ((int(prefix_tokens), 4, 1152) if int(stages) == 1 else
+def valid_pooled_feature(item: object, prefix_tokens: int, stages: int = 0) -> bool:
+    """Return whether a cache payload matches the pooled MoonViT contract.
+
+    ``stages == 0`` means the unstaged (no-tap) 3-dim layout.  Any positive
+    ``stages`` — including a single tap — means the staged 4-dim layout with a
+    leading stage dimension of that size.
+    """
+    expected = ((int(prefix_tokens), 4, 1152) if int(stages) == 0 else
                 (int(stages), int(prefix_tokens), 4, 1152))
     return (torch.is_tensor(item)
             and tuple(item.shape) == expected
@@ -38,14 +43,14 @@ def valid_pooled_feature(item: object, prefix_tokens: int, stages: int = 1) -> b
 
 
 def valid_pooled_feature_payload(item: object, prefix_tokens: int,
-                                 stages: int = 1) -> bool:
+                                 stages: int = 0) -> bool:
     """Validate structure plus numeric payload when admitting an entry from disk."""
     return (valid_pooled_feature(item, prefix_tokens, stages)
             and bool(torch.isfinite(item).all()))
 
 
 def valid_pooled_feature_archive(path: str | Path, item: object,
-                                 prefix_tokens: int, stages: int = 1) -> bool:
+                                 prefix_tokens: int, stages: int = 0) -> bool:
     """Validate a cached tensor and its serialized storage checksum.
 
     ``torch.load`` intentionally does not verify the CRC stored in a PyTorch ZIP
@@ -244,7 +249,9 @@ class MoonViT(nn.Module):
             raise ValueError(f"unsupported MoonViT view mode: {view_mode}")
         self.tap_layers = taps
         self.view_mode = view_mode
-        self.feature_stages = len(taps) if taps else 1
+        # Zero means "unstaged" (no taps, 3-dim pooled features). Any positive
+        # count — including a single tap — produces the staged 4-dim layout.
+        self.feature_stages = len(taps)
         self.patch_embed = nn.Module()
         self.patch_embed.proj = nn.Conv2d(3, self.width, kernel_size=14, stride=14)
         self.patch_embed.pos_emb = nn.Module()

@@ -98,12 +98,25 @@ def main() -> None:
     tower = AlignedFrozenVisionFeatures(config).load_pretrained(
         device="cuda", dtype=torch.bfloat16)
     done = 0
+    skipped = 0
     for start in range(0, len(pending), args.batch):
-        batch = pending[start:start + args.batch]
+        candidates = pending[start:start + args.batch]
+        batch = []
         images = []
-        for image_path, _ in batch:
-            with Image.open(image_path) as image:
-                images.append(image.convert("RGB"))
+        for image_path, target in candidates:
+            # One corrupt/truncated file must not kill an hours-long prefill;
+            # skip it and let the remaining batch members proceed.
+            try:
+                with Image.open(image_path) as image:
+                    images.append(image.convert("RGB"))
+            except (OSError, ValueError, Image.DecompressionBombError) as error:
+                skipped += 1
+                print({"kind": "fusion_cache", "skipped_image": str(image_path),
+                       "error": repr(error), "shard": args.shard_index}, flush=True)
+                continue
+            batch.append((image_path, target))
+        if not batch:
+            continue
         features = tower(images, tokens=args.prefix_tokens, device="cuda")
         for (_, target), item in zip(batch, features.unbind(0)):
             item = item.detach().to(device="cpu", dtype=torch.bfloat16)
@@ -117,6 +130,9 @@ def main() -> None:
                 temporary.unlink(missing_ok=True)
         done += len(batch)
         print({"kind": "fusion_cache", "done": done,
+               "total": len(pending), "shard": args.shard_index}, flush=True)
+    if skipped:
+        print({"kind": "fusion_cache", "skipped_total": skipped,
                "total": len(pending), "shard": args.shard_index}, flush=True)
 
 

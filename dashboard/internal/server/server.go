@@ -29,6 +29,10 @@ type Config struct {
 	Detector *alerts.Detector // divergence/health detector
 	LibDir   string           // converted_layers_lib path (conversion board)
 	NLayers  int              // base-model layer count (0 = autodetect/default)
+	// ImageRoots confines eval-sample image serving: an artifact-listed image
+	// path must resolve (symlinks included) inside one of these directories.
+	// Empty falls back to {RunsDir, RepoRoot}.
+	ImageRoots []string
 }
 
 // Server owns the HTTP handler, the datastore, the live telemetry sampler, and

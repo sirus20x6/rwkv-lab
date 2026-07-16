@@ -805,20 +805,21 @@ class LexicalMemoryBank(nn.Module):
 
     def _update_recall_stats(self, rr: RecallResult) -> None:
         """Materialize Python telemetry only when a consumer asks for it."""
+        # Stack every scalar and materialize with one .tolist(): per-field
+        # float() calls each forced a separate device synchronization.
         v = rr.valid
-        stats = {"valid_rate": float(v.float().mean())}
+        names = ["valid_rate"]
+        values = [v.float().mean()]
         if bool(v.any()):
             d = rr.dist[v].float()
             m = rr.mlen[v].float()
-            stats.update({
-                "dist_p50": float(d.median()),
-                "dist_p90": float(d.quantile(0.9)),
-                # the decision metric vs ROSA-soft: recalls beyond its window
-                "frac_beyond_32": float((d > 32).float().mean()),
-                "mlen_p50": float(m.median()),
-                "mlen_max": float(m.max()),
-            })
-        self.recall_stats = stats
+            names += ["dist_p50", "dist_p90",
+                      # the decision metric vs ROSA-soft: recalls beyond its window
+                      "frac_beyond_32", "mlen_p50", "mlen_max"]
+            values += [d.median(), d.quantile(0.9),
+                       (d > 32).float().mean(), m.median(), m.max()]
+        rendered = torch.stack([value.float() for value in values]).tolist()
+        self.recall_stats = dict(zip(names, rendered))
 
     def telemetry(self) -> Dict[str, Dict[str, float]]:
         if self.last_recall is not None:

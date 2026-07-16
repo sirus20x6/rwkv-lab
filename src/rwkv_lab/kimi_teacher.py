@@ -69,6 +69,16 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def fsync_directory(path: Path) -> None:
+    """Commit directory-entry changes needed to recover after host power loss."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def atomic_json(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -76,6 +86,7 @@ def atomic_json(path: Path, value: dict) -> None:
     with temporary.open("rb") as handle:
         os.fsync(handle.fileno())
     os.replace(temporary, path)
+    fsync_directory(path.parent)
 
 
 def resolve_image(path: str, root: Path = ROOT) -> Path:
@@ -166,6 +177,22 @@ def build_queue(
     rank = lambda item: (-item["selection_score"], -item["old_caption_words"], item["id"])
     evaluation.sort(key=rank)
     training.sort(key=rank)
+
+    def deduplicate(rows: list[dict]) -> tuple[list[dict], int]:
+        # Multi-caption images share one queue identity; scheduling both rows
+        # would bill the same image twice and overwrite one receipt with the
+        # other. Rows are already ranked, so the first per id is the best.
+        unique: dict[str, dict] = {}
+        for item in rows:
+            unique.setdefault(item["id"], item)
+        return list(unique.values()), len(rows) - len(unique)
+
+    evaluation, eval_duplicates = deduplicate(evaluation)
+    training, train_duplicates = deduplicate(training)
+    dropped_duplicates = eval_duplicates + train_duplicates
+    if dropped_duplicates:
+        print(f"dropped {dropped_duplicates} duplicate queue rows "
+              f"(eval={eval_duplicates}, train={train_duplicates})", flush=True)
     if eval_limit:
         evaluation = evaluation[:eval_limit]
     if train_limit:
@@ -180,11 +207,13 @@ def build_queue(
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary, output)
+    fsync_directory(output.parent)
     return {
         "output": str(output),
         "eval": len(evaluation),
         "train": len(training),
         "total": len(evaluation) + len(training),
+        "dropped_duplicates": dropped_duplicates,
         "top_train_words": training[0]["old_caption_words"] if training else 0,
         "bottom_train_words": training[-1]["old_caption_words"] if training else 0,
     }
@@ -282,8 +311,22 @@ def post_completion(payload: dict, api_key: str, *, timeout: int) -> dict:
         raise ApiFailure(f"OpenRouter transport failure: {error}", retryable=True) from error
     if not isinstance(result, dict):
         raise ApiFailure("OpenRouter returned a non-object response", retryable=True)
-    if result.get("error"):
-        raise ApiFailure(f"OpenRouter error: {result['error']}", retryable=False)
+    error_body = result.get("error")
+    if error_body:
+        # OpenRouter embeds provider errors (including 429s) inside 200
+        # bodies. Classify them with the same rules as the HTTPError path.
+        code = None
+        message = f"OpenRouter error: {error_body}"
+        if isinstance(error_body, dict):
+            try:
+                code = int(error_body.get("code"))
+            except (TypeError, ValueError):
+                code = None
+            metadata = error_body.get("metadata")
+            if metadata:
+                message = f"OpenRouter error {code}: {error_body.get('message')} metadata={metadata}"
+        retryable = code is not None and (code == 429 or 500 <= code < 600)
+        raise ApiFailure(message, retryable=retryable)
     return result
 
 
@@ -484,6 +527,7 @@ def write_derived_manifests(output: Path, receipts: Iterable[dict]) -> dict:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, target)
+        fsync_directory(target.parent)
         counts[split] = len(selected)
     summary = {"updated_at": utc_now(), "spent_usd": spent, **counts}
     atomic_json(output / "summary.json", summary)
@@ -533,14 +577,19 @@ def execute_queue(args: argparse.Namespace) -> dict:
     accepted_this_run = 0
     consecutive_failures = 0
     stop_scheduling = False
+    requeued: list[dict] = []
+    retried: set[str] = set()
     with ThreadPoolExecutor(max_workers=args.workers, thread_name_prefix="kimi-teacher") as pool:
         while True:
             while not stop_scheduling and len(futures) < args.workers \
                     and spent + (len(futures) + 1) * per_request_reserve <= args.budget_usd:
-                try:
-                    item = next(iterator)
-                except StopIteration:
-                    break
+                if requeued:
+                    item = requeued.pop(0)
+                else:
+                    try:
+                        item = next(iterator)
+                    except StopIteration:
+                        break
                 future = pool.submit(caption_one, item, config=config, api_key=api_key)
                 futures[future] = item
                 attempted += 1
@@ -552,7 +601,16 @@ def execute_queue(args: argparse.Namespace) -> dict:
                 try:
                     receipt = future.result()
                 except Exception as error:
-                    print(f"failed {item['id']}: {error}", flush=True)
+                    # A local exception means no receipt was written; the item
+                    # would otherwise silently vanish from this run. Re-queue
+                    # it exactly once before giving up with the old message.
+                    if item["id"] not in retried:
+                        retried.add(item["id"])
+                        requeued.append(item)
+                        print(f"re-queueing {item['id']} after local failure: {error}",
+                              flush=True)
+                    else:
+                        print(f"failed {item['id']}: {error}", flush=True)
                     consecutive_failures += 1
                     stop_scheduling = consecutive_failures >= args.max_consecutive_failures
                     continue

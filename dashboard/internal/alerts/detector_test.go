@@ -82,8 +82,8 @@ func TestEvalContractResetScopesDetectorToCurrentRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	proc := sysmon.Proc{RunName: "vision"}
-	if stats, reset, ready := detector.currentTrainStats(proc, runID, fallback); ready || reset == nil || stats.N != 0 {
-		t.Fatalf("stale reset startup failed open: stats=%+v reset=%+v ready=%v", stats, reset, ready)
+	if stats, reset, ready, cause := detector.currentTrainStats(proc, runID, fallback); ready || reset == nil || stats.N != 0 || cause != "" {
+		t.Fatalf("stale reset startup failed open: stats=%+v reset=%+v ready=%v cause=%q", stats, reset, ready, cause)
 	}
 
 	current := make([]db.TrainRow, 0, 10)
@@ -97,7 +97,7 @@ func TestEvalContractResetScopesDetectorToCurrentRows(t *testing.T) {
 		{Step: 102, PPL: alertMetric(8), TS: 250},
 		{Step: 103, PPL: alertMetric(7), TS: 250},
 	})
-	stats, reset, ready := detector.currentTrainStats(proc, runID, fallback)
+	stats, reset, ready, _ := detector.currentTrainStats(proc, runID, fallback)
 	if !ready || reset == nil || stats.N != 10 || stats.LastStep != 110 || stats.MaxGnorm != 5 {
 		t.Fatalf("current contract train window = %+v reset=%+v ready=%v", stats, reset, ready)
 	}
@@ -113,13 +113,13 @@ func TestEvalContractResetScopesDetectorToCurrentRows(t *testing.T) {
 	// previous PID remain valid history for eval, but cannot trigger live health
 	// actions until this PID has produced a train record.
 	proc.StartedTS = 300
-	if stats, _, ready := detector.currentTrainStats(proc, runID, fallback); ready || stats.N != 0 {
-		t.Fatalf("previous PID train rows were treated as live: %+v ready=%v", stats, ready)
+	if stats, _, ready, cause := detector.currentTrainStats(proc, runID, fallback); ready || stats.N != 0 || cause != "" {
+		t.Fatalf("previous PID train rows were treated as live: %+v ready=%v cause=%q", stats, ready, cause)
 	}
 	writeAlertRows(t, database, runID, []db.TrainRow{
 		{Step: 111, Gnorm: alertMetric(4), Loss: alertMetric(0.8), TS: 310},
 	}, nil)
-	if stats, _, ready := detector.currentTrainStats(proc, runID, fallback); !ready || stats.N != 1 || stats.LastStep != 111 {
+	if stats, _, ready, _ := detector.currentTrainStats(proc, runID, fallback); !ready || stats.N != 1 || stats.LastStep != 111 {
 		t.Fatalf("current PID evidence did not release detector: %+v ready=%v", stats, ready)
 	}
 }
@@ -145,8 +145,71 @@ func TestMalformedEvalContractReceiptFailsDetectorClosed(t *testing.T) {
 	}
 	fallback := db.TrainStats{N: 50, MaxGnorm: 2000, LastStep: 900, LastTS: 900}
 	detector := &Detector{db: database, runsDir: runs}
-	if stats, reset, ready := detector.currentTrainStats(
-		sysmon.Proc{RunName: "vision"}, runID, fallback); ready || reset != nil || stats.N != 0 {
+	stats, reset, ready, cause := detector.currentTrainStats(
+		sysmon.Proc{RunName: "vision"}, runID, fallback)
+	if ready || reset != nil || stats.N != 0 {
 		t.Fatalf("malformed receipt failed open: stats=%+v reset=%+v ready=%v", stats, reset, ready)
+	}
+	if cause == "" {
+		t.Fatalf("malformed receipt produced no suspend cause")
+	}
+}
+
+func alertKinds(t *testing.T, database *db.DB) map[string]int {
+	t.Helper()
+	alerts, err := database.ActiveAlerts(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kinds := map[string]int{}
+	for _, a := range alerts {
+		kinds[a.Kind]++
+	}
+	return kinds
+}
+
+func TestStallAlertFiresWithoutIngestedEvidence(t *testing.T) {
+	database, err := db.Open(filepath.Join(t.TempDir(), "trainboard.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	// Process running, zero rows ingested since StartedTS (hang before the
+	// first log append), log stale beyond the stall threshold.
+	logAge := stallSeconds + 60
+	proc := sysmon.Proc{RunName: "vision", StartedTS: 100, LogAgeS: &logAge}
+	detector := &Detector{db: database, runsDir: t.TempDir(), lastRaised: map[string]float64{}}
+	detector.checkStall(proc, 0)
+	if kinds := alertKinds(t, database); kinds["stall"] != 1 {
+		t.Fatalf("stall alert missing for evidence-less hung process: %v", kinds)
+	}
+}
+
+func TestMonitoringSuspendedAlertIsOneShotAndClears(t *testing.T) {
+	database, err := db.Open(filepath.Join(t.TempDir(), "trainboard.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	proc := sysmon.Proc{RunName: "vision"}
+	detector := &Detector{db: database, runsDir: t.TempDir(), lastRaised: map[string]float64{}}
+
+	// Entering the fail-closed state raises exactly one alert per cause.
+	detector.noteMonitoringGate(proc, "eval_contract_reset.json present but malformed/unreadable")
+	detector.noteMonitoringGate(proc, "eval_contract_reset.json present but malformed/unreadable")
+	if kinds := alertKinds(t, database); kinds["monitoring_suspended"] != 1 {
+		t.Fatalf("suspend alert not one-shot: %v", kinds)
+	}
+	// The ordinary evidence gate (cause "") clears the state silently…
+	detector.noteMonitoringGate(proc, "")
+	if kinds := alertKinds(t, database); kinds["monitoring_suspended"] != 1 {
+		t.Fatalf("clearing raised a spurious alert: %v", kinds)
+	}
+	// …and a later re-entry alerts again (cooldown key was reset on clear).
+	detector.noteMonitoringGate(proc, "train stats query failed: disk I/O error")
+	if kinds := alertKinds(t, database); kinds["monitoring_suspended"] != 2 {
+		t.Fatalf("re-entry after recovery did not re-alert: %v", kinds)
 	}
 }

@@ -26,6 +26,9 @@ class ImageTextContrastiveHead(nn.Module):
 
     def forward(self, prefix: torch.Tensor, target_embeddings: torch.Tensor,
                 batch_positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # Enforce the documented invariant even if a caller forgets to detach:
+        # the auxiliary must not improve by rewriting the language model.
+        target_embeddings = target_embeddings.detach()
         batch = prefix.shape[0]
         if batch < 2:
             zero = prefix.new_zeros((), dtype=torch.float32)

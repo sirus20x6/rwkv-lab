@@ -55,8 +55,8 @@
     const meta = document.getElementById("eval-inline-meta");
     const body = document.getElementById("eval-inline-body");
     if (!panel || !body) return;
-    title.textContent = "eval captions · step " + Number(step).toLocaleString();
-    meta.textContent = run + (Number.isFinite(ppl) ? " · ppl " + Number(ppl).toFixed(3) : "");
+    if (title) title.textContent = "eval captions · step " + Number(step).toLocaleString();
+    if (meta) meta.textContent = run + (Number.isFinite(ppl) ? " · ppl " + Number(ppl).toFixed(3) : "");
     body.innerHTML = '<div class="empty">loading qualitative snapshot…</div>';
     const url = `/api/runs/${encodeURIComponent(run)}/eval-samples/${encodeURIComponent(step)}`;
     const controller = new AbortController();
@@ -83,17 +83,21 @@
       const expectedStep = Number(step), expectedPPL = Number(ppl);
       const pplMismatch = Number.isFinite(expectedPPL) && Number.isFinite(artifactPPL) &&
         Math.abs(artifactPPL - expectedPPL) > 1e-9 * Math.max(1, Math.abs(expectedPPL));
-      if (artifactStep !== expectedStep || pplMismatch) {
-        meta.textContent = `${run} · ppl ${expectedPPL.toFixed(3)} · replacing stale same-step snapshot`;
+      const stale = artifactStep !== expectedStep || pplMismatch;
+      if (stale && attempt < 5) {
+        if (meta) meta.textContent = `${run} · ppl ${expectedPPL.toFixed(3)} · replacing stale same-step snapshot`;
         body.innerHTML = '<div class="empty">waiting for this eval generation’s captions…</div>';
         setTimeout(() => {
-          if (request === evalSampleRequest) openEvalSamples(run, step, ppl);
+          if (request === evalSampleRequest) openEvalSamples(run, step, ppl, attempt + 1);
         }, 2000);
         return;
       }
-      const pending = data.complete === false;
-      meta.textContent = `${run} · ppl ${Number(data.ppl).toFixed(3)} · ${data.decoding || "greedy"} decoding` +
-        (pending ? ` · generating ${Number(data.generation_steps || 0)}/${Number(data.max_new || 0)}` : "");
+      // Retries exhausted on a permanently stale artifact (e.g. dead run whose
+      // recovery never republished): show what exists, flagged, and stop polling.
+      const pending = data.complete === false && !stale;
+      if (meta) meta.textContent = `${run} · ppl ${Number(data.ppl).toFixed(3)} · ${data.decoding || "greedy"} decoding` +
+        (pending ? ` · generating ${Number(data.generation_steps || 0)}/${Number(data.max_new || 0)}` : "") +
+        (stale ? " · stale snapshot from an earlier generation of this step" : "");
       body.innerHTML = "";
       for (const item of (data.items || [])) {
         const card = document.createElement("article"); card.className = "eval-sample";

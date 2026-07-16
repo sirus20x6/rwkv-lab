@@ -60,6 +60,7 @@ type Detector struct {
 
 	mu         sync.Mutex
 	lastRaised map[string]float64
+	suspended  map[string]string // run -> cause while stats-driven monitoring is suspended
 }
 
 // evalContractReset is the trainer's durable statement that rows at or before
@@ -78,6 +79,7 @@ func New(database *db.DB, sampler *sysmon.Sampler, runsDir string, interval time
 	d := &Detector{
 		db: database, sampler: sampler, runsDir: runsDir, interval: interval,
 		lastRaised: map[string]float64{},
+		suspended:  map[string]string{},
 	}
 	d.baselinePPL = loadBaselinePPL(runsDir)
 	return d
@@ -122,10 +124,20 @@ func (d *Detector) scan() {
 			continue
 		}
 		row, ok := statsByRun[p.RunName]
+		// Stall detection is driven purely by filesystem evidence (p.LogAgeS), so
+		// it must run before the ingested-row evidence gate: a trainer that hangs
+		// before its first log append (CUDA init deadlock etc.) is exactly the
+		// failure the stall alert exists for, yet it produces zero rows.
+		lastStep := int64(0)
+		if ok {
+			lastStep = row.Stats.LastStep
+		}
+		d.checkStall(p, lastStep)
 		if !ok {
 			continue
 		}
-		stats, reset, ready := d.currentTrainStats(p, row.RunID, row.Stats)
+		stats, reset, ready, cause := d.currentTrainStats(p, row.RunID, row.Stats)
+		d.noteMonitoringGate(p, cause)
 		if !ready {
 			// A newly started process can be visible before its first log append,
 			// while SQLite still describes the prior process/branch. Health actions
@@ -136,56 +148,96 @@ func (d *Detector) scan() {
 	}
 }
 
+// checkStall raises the stall alert for a live process whose log has gone
+// quiet. Runs independently of the ingested-evidence gate (see scan).
+func (d *Detector) checkStall(p sysmon.Proc, step int64) {
+	if p.LogAgeS != nil && *p.LogAgeS > stallSeconds {
+		d.raise(p, "stall", "warn", step,
+			fmt.Sprintf("no log update for %.0fs while process alive (possible hang)", *p.LogAgeS))
+	}
+}
+
+// noteMonitoringGate makes fail-closed monitoring failures visible. A malformed
+// receipt or a stats query error suppresses all stats-driven alerts for the run
+// (fail closed), which would otherwise be silent and indefinite — so entering
+// that state raises a one-shot "monitoring_suspended" alert (once per run per
+// cause) and recovering clears it so a later re-entry alerts again. The normal
+// no-evidence-yet gate passes cause "" and never alerts.
+func (d *Detector) noteMonitoringGate(p sysmon.Proc, cause string) {
+	d.mu.Lock()
+	if d.suspended == nil {
+		d.suspended = map[string]string{}
+	}
+	prev := d.suspended[p.RunName]
+	if cause == "" {
+		delete(d.suspended, p.RunName)
+		if prev != "" {
+			delete(d.lastRaised, p.RunName+"|monitoring_suspended")
+		}
+	} else {
+		d.suspended[p.RunName] = cause
+	}
+	d.mu.Unlock()
+	if cause != "" && cause != prev {
+		d.raise(p, "monitoring_suspended", "warn", 0,
+			"health alerts suspended (fail closed): "+cause)
+	}
+}
+
 // currentTrainStats returns only rows known to belong to the live process and,
 // when present, the active eval contract. A malformed present receipt is
 // authoritative but unusable, so it suppresses alerts rather than failing open
-// onto retained history.
-func (d *Detector) currentTrainStats(p sysmon.Proc, runID int64, fallback db.TrainStats) (db.TrainStats, *evalContractReset, bool) {
+// onto retained history. suspendCause is non-empty for the abnormal fail-closed
+// paths (malformed receipt, stats query error) that should be surfaced to the
+// user; the ordinary no-current-evidence gate leaves it empty.
+func (d *Detector) currentTrainStats(p sysmon.Proc, runID int64, fallback db.TrainStats) (stats db.TrainStats, reset *evalContractReset, ready bool, suspendCause string) {
 	receipt, present, valid := readEvalContractReset(filepath.Join(d.runsDir, p.RunName))
 	if present && !valid {
-		return db.TrainStats{}, nil, false
+		return db.TrainStats{}, nil, false, "eval_contract_reset.json present but malformed/unreadable"
 	}
 
 	afterStep, afterTS := int64(-1), -1.0
-	var reset *evalContractReset
 	if valid {
 		afterStep, afterTS = receipt.Step, receipt.PublishedTS
 		reset = &receipt
 	}
 	// A receipt persists across ordinary process restarts. Independently fence
 	// stale rows from a previous PID until the current PID appends to the log.
+	// Known limitation: ingested rows carry their source log's batch-wide mtime,
+	// so a watcher-backlog flush can stamp rows with a later ts than the append
+	// that produced them — the ts fence here is only as precise as ingestion.
 	if p.StartedTS > afterTS {
 		afterTS = p.StartedTS
 	}
 
-	stats := fallback
+	stats = fallback
 	var err error
 	if afterStep >= 0 || afterTS >= 0 {
 		stats, err = d.db.RecentTrainStatsSince(runID, afterStep, afterTS, 50)
 		if err != nil {
-			return db.TrainStats{}, reset, false
+			return db.TrainStats{}, reset, false, "train stats query failed: " + err.Error()
 		}
 	}
 	if stats.N == 0 || stats.LastStep <= afterStep || stats.LastTS <= afterTS {
-		return db.TrainStats{}, reset, false
+		return db.TrainStats{}, reset, false, ""
 	}
-	return stats, reset, true
+	return stats, reset, true, ""
 }
 
 func readEvalContractReset(runDir string) (receipt evalContractReset, present, valid bool) {
 	path := filepath.Join(runDir, "eval_contract_reset.json")
-	info, err := os.Lstat(path)
+	// Read first, then stat, so PublishedTS describes the content actually read
+	// (a stat-then-read window lets the trainer's atomic replace pair an old
+	// mtime with new content).
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return evalContractReset{}, false, false
 		}
 		return evalContractReset{}, true, false
 	}
-	if !info.Mode().IsRegular() {
-		return evalContractReset{}, true, false
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
 		return evalContractReset{}, true, false
 	}
 	var raw struct {
@@ -217,12 +269,8 @@ func (d *Detector) evalStats(runID int64, reset *evalContractReset) (db.EvalStat
 }
 
 func (d *Detector) scanRun(p sysmon.Proc, runID int64, stats db.TrainStats, latestPPL *float64, reset *evalContractReset) {
-
-	// stall: process alive but log gone quiet
-	if p.LogAgeS != nil && *p.LogAgeS > stallSeconds {
-		d.raise(p, "stall", "warn", stats.LastStep,
-			fmt.Sprintf("no log update for %.0fs while process alive (possible hang)", *p.LogAgeS))
-	}
+	// stall is checked in scan(), before the evidence gate — it must fire even
+	// for a process that has never appended a row.
 	if stats.N < minRows {
 		return // not enough data for the rate-based checks yet
 	}

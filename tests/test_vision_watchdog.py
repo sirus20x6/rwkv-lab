@@ -7,6 +7,8 @@ import signal
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def load_watchdog():
     path = Path(__file__).resolve().parents[1] / "scripts/overnight_vision_watchdog.py"
@@ -129,6 +131,315 @@ def test_known_launcher_contracts_bind_run_and_eval_paths(tmp_path, monkeypatch)
     assert watchdog.launcher_contract(
         "/somewhere/run_vision_finish_grounded.sh") is None
     assert watchdog.launcher_contract("custom_launcher.sh") is None
+
+
+def test_finish_contract_adopts_environment_overrides(tmp_path, monkeypatch):
+    watchdog = load_watchdog()
+    monkeypatch.setattr(watchdog, "ROOT", tmp_path)
+    launcher = tmp_path / "scripts/run_vision_finish_grounded.sh"
+    launcher.parent.mkdir()
+    launcher.write_text("#!/bin/sh\n")
+    monkeypatch.setenv("VISION_FINISH_RUN", "runs/custom_finish")
+    monkeypatch.setenv(
+        "VISION_FINISH_EVAL", str(tmp_path / "eval/custom_eval.jsonl"))
+    run, evaluation = watchdog.launcher_contract(str(launcher))
+    assert run == tmp_path / "runs/custom_finish"
+    assert evaluation == tmp_path / "eval/custom_eval.jsonl"
+
+    monkeypatch.delenv("VISION_FINISH_RUN")
+    monkeypatch.delenv("VISION_FINISH_EVAL")
+    run, evaluation = watchdog.launcher_contract(str(launcher))
+    assert run == tmp_path / "runs/moonvit_rwkv_finish_grounded"
+    assert evaluation == tmp_path / "curated_vision/vision_finish_grounded_eval.jsonl"
+
+    # Other launchers have no environment contract to adopt.
+    other = tmp_path / "scripts/run_vision_i1_next.sh"
+    other.write_text("#!/bin/sh\n")
+    monkeypatch.setenv("VISION_FINISH_RUN", "runs/custom_finish")
+    run, _ = watchdog.launcher_contract(str(other))
+    assert run == tmp_path / "runs/moonvit_rwkv_i1_civitai_phase2"
+
+
+def test_launcher_needle_matches_all_operator_spellings(tmp_path, monkeypatch):
+    watchdog = load_watchdog()
+    monkeypatch.setattr(watchdog, "ROOT", tmp_path)
+    needle = "./scripts/run_vision_i1_next.sh"
+    assert watchdog._needle_matches(needle, "./scripts/run_vision_i1_next.sh")
+    assert watchdog._needle_matches(needle, "scripts/run_vision_i1_next.sh")
+    assert watchdog._needle_matches(
+        needle, str(tmp_path / "scripts/run_vision_i1_next.sh"))
+    assert not watchdog._needle_matches(
+        needle, "otherscripts/run_vision_i1_next.sh")
+    assert not watchdog._needle_matches(needle, "run_vision_i1_next.sh")
+    absolute = str(tmp_path / "scripts/run_vision_i1_next.sh")
+    assert watchdog._needle_matches(absolute, "scripts/run_vision_i1_next.sh")
+    assert watchdog._needle_matches(absolute, "./scripts/run_vision_i1_next.sh")
+    # Non-script needles keep substring semantics.
+    assert watchdog._needle_matches("rwkv_lab.vision_train", "rwkv_lab.vision_train")
+    assert not watchdog._needle_matches("rwkv_lab.vision_train", "--out")
+
+    launcher = tmp_path / "scripts/run_vision_i1_next.sh"
+    launcher.parent.mkdir()
+    launcher.write_text("#!/bin/sh\n")
+    assert watchdog._is_expected_invocation(
+        ["bash", "scripts/run_vision_i1_next.sh"], tmp_path, (needle,))
+    assert watchdog._is_expected_invocation(
+        ["bash", "./scripts/run_vision_i1_next.sh"], tmp_path, (needle,))
+
+
+def _loop_harness(watchdog, tmp_path, monkeypatch, *, max_sleeps,
+                  trainer_pids, launcher_pids, status, step):
+    """Drive main() through several polls on a fake monotonic clock."""
+    run = tmp_path / "run"
+    data = tmp_path / "data"
+    run.mkdir()
+    data.mkdir()
+    (run / "last.pt").write_bytes(b"exact")
+    monkeypatch.setattr(watchdog, "ROOT", tmp_path)
+    monkeypatch.setattr(watchdog, "RUN", run)
+    monkeypatch.setattr(watchdog, "DATA", data)
+    monkeypatch.setattr(watchdog, "training_state", lambda: (status, step))
+
+    def fake_processes(*needles):
+        if "rwkv_lab.vision_train" in needles:
+            return list(trainer_pids)
+        if watchdog.TRAIN_SCRIPT in needles:
+            return list(launcher_pids)
+        return []
+
+    monkeypatch.setattr(watchdog, "processes", fake_processes)
+    monkeypatch.setattr(watchdog, "acquisition_complete", lambda *args: True)
+    monkeypatch.setattr(watchdog, "acquisition_summary", lambda *args: {})
+    monkeypatch.setattr(
+        watchdog, "acquisition_progress_signature", lambda *args, **kwargs: ((), ()))
+    monkeypatch.setattr(
+        watchdog, "finish_or_start_smoke", lambda *args, **kwargs: "waiting")
+    monkeypatch.setattr(
+        watchdog, "start_training",
+        lambda: (_ for _ in ()).throw(AssertionError("unexpected restart")))
+    io_ticks = iter(range(1_000_000))
+    monkeypatch.setattr(
+        watchdog, "launcher_progress_signature",
+        lambda pids=None: (next(io_ticks),))
+    clock = {"now": 0.0}
+    monkeypatch.setattr(watchdog.time, "monotonic", lambda: clock["now"])
+
+    class LoopDone(Exception):
+        pass
+
+    sleeps = {"count": 0}
+
+    def fake_sleep(seconds):
+        clock["now"] += seconds
+        sleeps["count"] += 1
+        if sleeps["count"] >= max_sleeps:
+            raise LoopDone
+
+    monkeypatch.setattr(watchdog.time, "sleep", fake_sleep)
+    return run, LoopDone
+
+
+def test_trainer_hang_is_detected_despite_launcher_tree_io(tmp_path, monkeypatch):
+    watchdog = load_watchdog()
+    run, LoopDone = _loop_harness(
+        watchdog, tmp_path, monkeypatch, max_sleeps=6,
+        trainer_pids=[111], launcher_pids=[222],
+        status={"state": "training", "step": 5, "updated": "t"}, step=5)
+    signals = []
+
+    class Signaled(Exception):
+        pass
+
+    def fake_kill(pid, sig):
+        signals.append((pid, sig))
+        raise Signaled
+
+    monkeypatch.setattr(watchdog.os, "kill", fake_kill)
+    monkeypatch.setattr(
+        sys, "argv", ["overnight_vision_watchdog.py", "--poll", "1800"])
+    with pytest.raises(Signaled):
+        watchdog.main()
+    # Launcher-tree I/O ticked every poll, yet the deadlocked trainer with no
+    # step/status/log progress still accumulated staleness and was signaled.
+    assert signals == [(111, signal.SIGINT)]
+
+
+def test_cache_phase_launcher_io_still_counts_as_progress(tmp_path, monkeypatch):
+    watchdog = load_watchdog()
+    run, LoopDone = _loop_harness(
+        watchdog, tmp_path, monkeypatch, max_sleeps=6,
+        trainer_pids=[], launcher_pids=[222],
+        status={"state": "loading_data"}, step=0)
+    signals = []
+    monkeypatch.setattr(
+        watchdog.os, "kill", lambda pid, sig: signals.append((pid, sig)))
+    monkeypatch.setattr(
+        watchdog.os, "killpg", lambda pgid, sig: signals.append((pgid, sig)))
+    monkeypatch.setattr(
+        sys, "argv", ["overnight_vision_watchdog.py", "--poll", "1800"])
+    with pytest.raises(LoopDone):
+        watchdog.main()
+    assert signals == []
+
+
+def test_completed_trainer_shutdown_escalates_once_without_rearming(
+        tmp_path, monkeypatch):
+    watchdog = load_watchdog()
+    run, LoopDone = _loop_harness(
+        watchdog, tmp_path, monkeypatch, max_sleeps=6,
+        trainer_pids=[111], launcher_pids=[],
+        status={"state": "complete", "step": 100}, step=100)
+    signals = []
+    monkeypatch.setattr(
+        watchdog.os, "kill", lambda pid, sig: signals.append((pid, sig)))
+    monkeypatch.setattr(
+        sys, "argv",
+        ["overnight_vision_watchdog.py", "--poll", "300",
+         "--target-steps", "100"])
+    with pytest.raises(LoopDone):
+        watchdog.main()
+    # One SIGTERM after the 300s completion grace, one SIGKILL escalation
+    # after a further timeout, and nothing else: no 300s SIGTERM loop.
+    assert signals == [(111, signal.SIGTERM), (111, signal.SIGKILL)]
+
+
+def test_download_restart_uses_backoff_and_terminal_blocked_state(
+        tmp_path, monkeypatch):
+    watchdog = load_watchdog()
+    run = tmp_path / "run"
+    data = tmp_path / "data"
+    run.mkdir()
+    data.mkdir()
+    monkeypatch.setattr(watchdog, "ROOT", tmp_path)
+    monkeypatch.setattr(watchdog, "RUN", run)
+    monkeypatch.setattr(watchdog, "DATA", data)
+    monkeypatch.setattr(
+        watchdog, "training_state", lambda: ({"state": "failed"}, 0))
+    monkeypatch.setattr(watchdog, "processes", lambda *needles: [])
+    monkeypatch.setattr(
+        watchdog, "acquisition_complete",
+        lambda path, expected: expected == watchdog.ARCHIVE_SOURCES)
+    monkeypatch.setattr(watchdog, "acquisition_summary", lambda *args: {})
+    monkeypatch.setattr(
+        watchdog, "acquisition_progress_signature", lambda *args, **kwargs: ((), ()))
+    monkeypatch.setattr(
+        watchdog, "start_archive_download",
+        lambda: (_ for _ in ()).throw(AssertionError("archive restart")))
+    clock = {"now": 0.0}
+    monkeypatch.setattr(watchdog.time, "monotonic", lambda: clock["now"])
+    starts = []
+    monkeypatch.setattr(
+        watchdog, "start_hf_download",
+        lambda: starts.append(clock["now"]) or 999)
+
+    class LoopDone(Exception):
+        pass
+
+    sleeps = {"count": 0}
+
+    def fake_sleep(seconds):
+        clock["now"] += seconds
+        sleeps["count"] += 1
+        if sleeps["count"] >= 130:
+            raise LoopDone
+
+    monkeypatch.setattr(watchdog.time, "sleep", fake_sleep)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["overnight_vision_watchdog.py", "--downloads-only", "--poll", "30"])
+    with pytest.raises(LoopDone):
+        watchdog.main()
+    # Exponentially spaced launches, then a terminal blocked state instead of
+    # relaunching a deterministically failing fetcher every poll forever.
+    assert starts == [0, 30, 90, 210, 450, 930]
+    heartbeat = json.loads((run / "overnight_status.json").read_text())
+    assert heartbeat["downloads"]["hf_restart_attempts"] == 6
+    assert heartbeat["downloads"]["hf_supervision"] == "blocked_repeated_failures"
+    assert heartbeat["downloads"]["archive_supervision"] == "enabled"
+    events = [json.loads(line)["event"]
+              for line in (run / "overnight_watchdog.jsonl").read_text().splitlines()]
+    assert events.count("hf_download_blocked") == 1
+
+
+def test_caption_smoke_failures_back_off_then_block_and_prune(
+        tmp_path, monkeypatch):
+    watchdog = load_watchdog()
+    run = tmp_path / "run"
+    best = run / "best"
+    best.mkdir(parents=True)
+    checkpoint = best / "ckpt_step_00000200.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    (best / "best.json").write_text(json.dumps({
+        "step": 200, "loss": 1.0, "checkpoint": checkpoint.name,
+    }))
+    monkeypatch.setattr(watchdog, "RUN", run)
+    monkeypatch.setattr(watchdog, "processes", lambda *needles: [])
+    events = []
+    monkeypatch.setattr(
+        watchdog, "event", lambda kind, **fields: events.append(kind))
+    image = tmp_path / "held_out.jpg"
+    image.write_bytes(b"image")
+    monkeypatch.setattr(watchdog, "held_out_image", lambda: image)
+    spawned = []
+
+    class FakeProcess:
+        pid = 999
+
+    monkeypatch.setattr(
+        watchdog.subprocess, "Popen",
+        lambda *args, **kwargs: spawned.append(args) or FakeProcess())
+    clock = {"now": 0.0}
+    monkeypatch.setattr(watchdog.time, "monotonic", lambda: clock["now"])
+    ticks = iter(range(1_000_000, 2_000_000))
+    monkeypatch.setattr(watchdog.time, "time", lambda: next(ticks))
+
+    # Two pre-existing failure receipts from an earlier night.
+    for stamp in (100, 101):
+        old = run / f"overnight_caption_smoke.failed-{stamp}.txt"
+        old.write_text("old failure")
+        os.utime(old, ns=(stamp * 10**9, stamp * 10**9))
+
+    temporary = run / "overnight_caption_smoke.json.tmp"
+    temporary.write_text("not json")
+
+    # Failure 1: backoff instead of an immediate GPU respawn.
+    assert watchdog.finish_or_start_smoke(True, []) == "smoke_retry_backoff"
+    assert spawned == []
+    clock["now"] = 59.0
+    assert watchdog.finish_or_start_smoke(True, []) == "smoke_retry_backoff"
+    assert spawned == []
+
+    # Deterministic failure: every respawn leaves an invalid temporary.
+    expected_backoffs = [300.0, 900.0, 3600.0]
+    for expected_delay in expected_backoffs:
+        clock["now"] += 3601.0
+        assert watchdog.finish_or_start_smoke(True, []) == "running"
+        assert temporary.exists()
+        assert watchdog.finish_or_start_smoke(True, []) == "smoke_retry_backoff"
+    clock["now"] += 3601.0
+    assert watchdog.finish_or_start_smoke(True, []) == "running"
+    assert watchdog.finish_or_start_smoke(True, []) == "smoke_blocked"
+    assert len(spawned) == 4
+    assert "caption_smoke_blocked" in events
+
+    # Blocked is terminal for this checkpoint: no further respawns.
+    clock["now"] += 10 * 3600.0
+    assert watchdog.finish_or_start_smoke(True, []) == "smoke_blocked"
+    assert len(spawned) == 4
+
+    # Receipts are capped: five failures kept, the pre-existing ones pruned.
+    receipts = sorted(run.glob("overnight_caption_smoke.failed-*.txt"))
+    assert len(receipts) == 5
+    assert run / "overnight_caption_smoke.failed-100.txt" not in receipts
+
+    # A new best checkpoint is a fresh deterministic input: budget resets.
+    replacement = best / "ckpt_step_00000300.pt"
+    replacement.write_bytes(b"new checkpoint")
+    (best / "best.json").write_text(json.dumps({
+        "step": 300, "loss": 0.9, "checkpoint": replacement.name,
+    }))
+    assert watchdog.finish_or_start_smoke(True, []) == "running"
+    assert len(spawned) == 5
 
 
 def test_stall_escalation_reaches_sigkill_only_after_grace_periods():

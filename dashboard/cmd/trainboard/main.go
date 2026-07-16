@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -31,6 +32,8 @@ func main() {
 	repo := flag.String("repo", "/thearray/git/moe-mla", "moe-mla repo root")
 	runs := flag.String("runs", "", "runs dir (default <repo>/runs)")
 	dbPath := flag.String("db", "", "sqlite path (default <repo>/dashboard/trainboard.db)")
+	imageRoots := flag.String("image-roots", "/thearray",
+		"comma-separated roots eval-sample images may be served from")
 	scanOnce := flag.Bool("scan-once", false, "ingest one full pass, print counts, exit (verification)")
 	sysmonOnce := flag.Bool("sysmon-once", false, "print one telemetry snapshot as JSON, exit (verification)")
 	flag.Parse()
@@ -90,6 +93,15 @@ func main() {
 		DB:       database,
 		Sampler:  sampler,
 		Detector: detector,
+		ImageRoots: func() []string {
+			var roots []string
+			for _, root := range strings.Split(*imageRoots, ",") {
+				if root = strings.TrimSpace(root); root != "" {
+					roots = append(roots, root)
+				}
+			}
+			return roots
+		}(),
 	})
 
 	if err := srv.Run(ctx); err != nil {

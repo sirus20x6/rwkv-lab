@@ -222,7 +222,12 @@ def main() -> None:
     encoded = {path: data_url(path) for path in all_images}
 
     # This warmup image is excluded from every measured benchmark set.
-    warmup_image = next(path for path in candidates[needed:] if path not in all_images)
+    warmup_image = next(
+        (path for path in candidates[needed:] if path not in all_images), None)
+    if warmup_image is None:
+        raise SystemExit(
+            f"need one spare warmup image beyond the {needed} benchmark images; "
+            f"found only {len(candidates)} candidates")
     encoded[warmup_image] = data_url(warmup_image)
     print("Running one unmeasured end-to-end warmup caption", flush=True)
     warmup = caption_job(Job(warmup_image, "image_only"), encoded,

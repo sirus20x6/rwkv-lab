@@ -253,6 +253,11 @@ func (d *DB) migrate() error {
 	if err := columns.Close(); err != nil {
 		return fmt.Errorf("cursor columns close: %w", err)
 	}
+	// A mid-iteration error would end the loop early and misread a column as
+	// missing, turning the guarded ALTER into a duplicate-column failure.
+	if err := columns.Err(); err != nil {
+		return fmt.Errorf("cursor columns iterate: %w", err)
+	}
 	if !hasTailHash {
 		if _, err := d.Exec(`ALTER TABLE ingest_cursors ADD COLUMN tail_hash TEXT DEFAULT ''`); err != nil {
 			return fmt.Errorf("add cursor tail hash: %w", err)
@@ -286,6 +291,9 @@ func (d *DB) migrate() error {
 	}
 	if err := runColumns.Close(); err != nil {
 		return fmt.Errorf("run columns close: %w", err)
+	}
+	if err := runColumns.Err(); err != nil {
+		return fmt.Errorf("run columns iterate: %w", err)
 	}
 	if !hasEventGeneration {
 		if _, err := d.Exec(`ALTER TABLE runs ADD COLUMN event_generation INTEGER NOT NULL DEFAULT 0`); err != nil {

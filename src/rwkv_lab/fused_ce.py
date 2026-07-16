@@ -18,6 +18,24 @@ except Exception:  # pragma: no cover - depends on the local CUDA stack
     HAS_FUSED_CE = False
 
 
+def masked_token_mean(
+    losses: torch.Tensor,
+    labels: torch.Tensor,
+    ignore_index: int = -100,
+) -> torch.Tensor:
+    """Mean of per-token losses over the non-ignored positions only.
+
+    This mirrors ``F.cross_entropy`` mean-reduction semantics exactly: ignored
+    rows contribute to neither the numerator nor the denominator, and a batch
+    where every position is ignored yields NaN (0/0), the same value the
+    fallback produces for an empty mean. The flash-CE fast path previously
+    divided by ``numel()``, silently deflating the loss whenever masked labels
+    were present.
+    """
+    mask = (labels != ignore_index).to(losses.dtype)
+    return (losses * mask).sum() / mask.sum()
+
+
 def logits_cross_entropy(
     logits: torch.Tensor,
     labels: torch.Tensor,
@@ -29,7 +47,7 @@ def logits_cross_entropy(
     flat_labels = labels.reshape(-1)
     if fused and HAS_FUSED_CE and flat_logits.is_cuda:
         losses, _ = _flash_ce(flat_logits, flat_labels, inplace_backward=True)
-        return losses.float().mean()
+        return masked_token_mean(losses.float(), flat_labels)
     return F.cross_entropy(flat_logits.float(), flat_labels)
 
 
@@ -53,12 +71,15 @@ def weighted_logits_cross_entropy(
     else:
         losses = F.cross_entropy(
             flat_logits.float(), flat_labels, reduction="none")
-    raw = losses.mean().detach()
+    # Both paths produce zero loss at ignore_index positions; excluding them
+    # from every denominator keeps fused and fallback reductions identical.
+    raw = masked_token_mean(losses, flat_labels).detach()
     if weights is None:
-        return losses.mean(), raw
+        return masked_token_mean(losses, flat_labels), raw
     flat_weights = weights.reshape(-1).to(device=losses.device, dtype=losses.dtype)
     if flat_weights.shape != losses.shape:
         raise ValueError("cross-entropy weights do not match labels")
+    flat_weights = flat_weights * (flat_labels != -100).to(losses.dtype)
     return ((losses * flat_weights).sum() / flat_weights.sum().clamp_min(1), raw)
 
 
