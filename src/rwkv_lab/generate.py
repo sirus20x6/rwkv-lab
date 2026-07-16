@@ -42,14 +42,35 @@ class WorldVocab:
             sp1, sp2 = line.index(" "), line.rindex(" ")
             v = ast.literal_eval(line[sp1 + 1:sp2])
             self.tok[int(line[:sp1])] = v.encode("utf-8") if isinstance(v, str) else v
+        # RWKV World uses greedy longest-byte matching.  Keeping the trie in
+        # process avoids spawning ztok once for every caption during VLM SFT.
+        self._trie: dict[int | None, dict] = {}
+        for token_id, value in self.tok.items():
+            if not value:
+                continue
+            node = self._trie
+            for byte in value:
+                node = node.setdefault(byte, {})
+            node[None] = token_id
 
     def decode(self, ids) -> str:
         return b"".join(self.tok.get(int(i), b"") for i in ids).decode("utf-8", errors="replace")
 
     def encode(self, text: str) -> list[int]:
-        out = subprocess.run([ZTOK, "encode", "--model", self.path, text],
-                             capture_output=True, text=True, check=True)
-        return [int(t) for t in out.stdout.split()]
+        raw, out, pos = text.encode("utf-8"), [], 0
+        while pos < len(raw):
+            node, best_id, best_end = self._trie, None, pos
+            cursor = pos
+            while cursor < len(raw) and raw[cursor] in node:
+                node = node[raw[cursor]]
+                cursor += 1
+                if None in node:
+                    best_id, best_end = node[None], cursor
+            if best_id is None:
+                raise ValueError(f"no World-vocab token begins with byte {raw[pos]:#x} at offset {pos}")
+            out.append(best_id)
+            pos = best_end
+        return out
 
 
 def build_from_ckpt(ckpt_path: str, device: str = "cuda", use_ema: bool = False,

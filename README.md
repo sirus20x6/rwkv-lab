@@ -1,5 +1,63 @@
 # RWKV-Lab
 
+## MoonViT → RWKV vision captioning
+
+`rwkv_lab.vision_train` freezes the downloaded 416.9M-parameter Kimi K2.6
+MoonViT tower, learns a 64-token bridge into the G1H 2.9B RWKV embedding
+space, and masks loss on both image-prefix and prompt tokens.  Its JSONL input
+uses `{"image": "relative/or/absolute/path.jpg", "text": "caption"}` rows;
+the curated grid, anime, and matched Joy manifests already follow that format.
+
+```bash
+PYTHONPATH=src python -m rwkv_lab.vision_train \
+  --data curated_vision/vision_stage1_mix.jsonl \
+  --steps 16000 --batch 8 --out runs/moonvit_rwkv_stage1_v3
+```
+
+### Kimi K2.6 teacher captions
+
+The clean Kimi teacher queue ranks i1 Pexels images primarily by the amount of
+useful information in their existing captions. It applies only small penalties
+to concatenated descriptions and image-generation boilerplate. The old caption
+is used for selection only and is never included in the Kimi request. Clean i1
+Pexels and Midjourney evaluation rows are queued first; adult, Civitai, and Joy
+rows are excluded.
+
+```bash
+PYTHONPATH=src python -m rwkv_lab.kimi_teacher select
+
+# This second command is intentionally inert without both the environment key
+# and --execute. It resumes from atomic per-image response receipts.
+OPENROUTER_API_KEY=... PYTHONPATH=src python -m rwkv_lab.kimi_teacher caption \
+  --budget-usd 3.80 --execute
+```
+
+The request asks for an exhaustive natural caption and lets the model stop at
+EOS; it does not target a fixed caption length. The default 2048-token value is
+only a runaway-spend guard. Any completion that actually reaches that guard is
+retained for diagnosis but excluded from the training manifest. Set
+`--max-completion-tokens 0` to omit even that guard. Original full-frame pixels
+are sent by default, with no crop or resize. Each raw receipt preserves the
+complete OpenRouter response, including chosen-token log probabilities, the top
+20 alternatives at every position, token bytes when returned, usage, provider,
+and cost. Accepted EOS-complete rows are materialized as
+`datasets/kimi_k26_teacher/{train,eval}.jsonl`.
+
+The default routing allowlist uses Kimi endpoints that advertise both logprobs
+and top-logprobs, with provider fallback enabled. Decart is temporarily excluded:
+its July 2026 OpenRouter endpoint advertises Kimi K2.6 as multimodal but returns
+an upstream `does not support image input` error for actual image requests.
+
+Only the bridge, per-TimeMix 2-pass factored-loop adapters, zero-init loop-index
+embeddings, the training-only NextLat head, and an optional `--engram` lexical
+memory bank are optimized; both pretrained models stay frozen. The loop starts
+after a 250-step bridge warmup and is an
+exact zero-impact adapter when enabled. Captions end in EOD, are length-bucketed
+without replacement, and use a stable held-out split. Atomic checkpoints include
+optimizer, sampler, and RNG state; rerunning the same command resumes `last.pt`
+automatically instead of overwriting the run. Use `--loop-count 1
+--nextlat-weight 0` for the plain bridge baseline.
+
 [![tests](https://github.com/sirus20x6/rwkv-lab/actions/workflows/tests.yml/badge.svg)](https://github.com/sirus20x6/rwkv-lab/actions/workflows/tests.yml)
 
 **An experimental toolbox for state-of-the-art LLM techniques on RWKV linear-attention cores.**
