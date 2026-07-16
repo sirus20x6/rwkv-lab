@@ -234,6 +234,15 @@ def fetch_range(url: str, output: Path, start: int, end: int, *,
                     handle.flush()
                     os.fsync(handle.fileno())
         except transient as error:
+            # HTTPError subclasses URLError: split permanent HTTP rejections
+            # (4xx other than timeout/rate-limit) out of the retry loop, or a
+            # gone/forbidden object would be re-requested forever.
+            if (isinstance(error, urllib.error.HTTPError)
+                    and 400 <= error.code < 500
+                    and error.code not in (408, 429)):
+                raise RuntimeError(
+                    f"permanent HTTP failure for {url}: "
+                    f"HTTP {error.code} {error.reason}") from error
             # Closing the append handle flushes Python's buffer, but it does not
             # make the newly observed file length power-loss durable. Commit the
             # partial before using its size as the next resume boundary.
@@ -243,7 +252,18 @@ def fetch_range(url: str, output: Path, start: int, end: int, *,
             resumed = output.stat().st_size if output.exists() else original_start
             if not original_start <= resumed <= end + 1:
                 raise RuntimeError(f"invalid partial size after network failure: {resumed}") from error
+            if resumed > start:
+                # The failed response still appended bytes; that is progress,
+                # so the consecutive-failure budget starts over.
+                failures = 0
             failures += 1
+            if failures >= 6:
+                # Mirror fetch_i1_sources.py's six-attempt cap instead of
+                # retrying a persistently failing range forever.
+                raise RuntimeError(
+                    f"giving up after {failures} consecutive transient "
+                    f"failures for {url}; last error: "
+                    f"{type(error).__name__}: {error}") from error
             print(
                 f"RETRY {failures}: {type(error).__name__}; resuming byte {resumed}",
                 flush=True,

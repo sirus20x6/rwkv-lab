@@ -70,10 +70,13 @@ resume_args=(--resume auto)
 if [[ ! -f "$RUN/last.pt" ]]; then
   if [[ -n "${VISION_NEXT_SOURCE_CHECKPOINT:-}" ]]; then
     SOURCE_CHECKPOINT="$VISION_NEXT_SOURCE_CHECKPOINT"
-  elif SOURCE_CHECKPOINT="$($PYTHON_BIN scripts/vision_run_evidence.py "$SOURCE_RUN" --resolve-best)"; then
+  elif SOURCE_CHECKPOINT="$("$PYTHON_BIN" scripts/vision_run_evidence.py "$SOURCE_RUN" --resolve-best)"; then
     :
-  else
+  elif [[ $? == 2 ]]; then
     SOURCE_CHECKPOINT="$SOURCE_RUN/last.pt"
+  else
+    echo "source best checkpoint publication is invalid: $SOURCE_RUN" >&2
+    exit 1
   fi
   if [[ ! -f "$SOURCE_CHECKPOINT" || -L "$SOURCE_CHECKPOINT" ]]; then
     echo "missing source checkpoint: $SOURCE_CHECKPOINT" >&2

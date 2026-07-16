@@ -77,6 +77,61 @@ func TestEvalSampleJSONAndImageEndpoints(t *testing.T) {
 	}
 }
 
+func TestEvalSampleImageRejectsPathsOutsideAllowedRoots(t *testing.T) {
+	runs := t.TempDir()
+	runDir := filepath.Join(runs, "vision", "eval_samples")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir() // not under RunsDir/RepoRoot/ImageRoots
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("top-secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{cfg: Config{RunsDir: runs}}
+	for _, image := range []string{"/etc/passwd", secret, "relative/path.jpg",
+		filepath.Join(runs, "..", filepath.Base(outside), "secret.txt")} {
+		artifact := evalSampleArtifact{Step: 100, PPL: 7.5,
+			Items: []evalSampleItem{{Image: image}}}
+		data, _ := json.Marshal(artifact)
+		if err := os.WriteFile(filepath.Join(runDir, "step_00000100.json"), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		token := evalSampleImageToken(artifact, 0)
+		req := httptest.NewRequest("GET", "/api/runs/vision/eval-samples/100/image/0?v="+token, nil)
+		req.SetPathValue("name", "vision")
+		req.SetPathValue("step", "100")
+		req.SetPathValue("index", "0")
+		w := httptest.NewRecorder()
+		s.handleEvalSampleImage(w, req)
+		if w.Code != 403 {
+			t.Fatalf("artifact image %q served with status %d: %q", image, w.Code, w.Body.String())
+		}
+	}
+
+	// A symlink inside the allowed root pointing outside must also be rejected.
+	link := filepath.Join(runs, "escape.jpg")
+	if err := os.Symlink(secret, link); err != nil {
+		t.Fatal(err)
+	}
+	artifact := evalSampleArtifact{Step: 100, PPL: 7.5,
+		Items: []evalSampleItem{{Image: link}}}
+	data, _ := json.Marshal(artifact)
+	if err := os.WriteFile(filepath.Join(runDir, "step_00000100.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("GET", "/api/runs/vision/eval-samples/100/image/0?v="+
+		evalSampleImageToken(artifact, 0), nil)
+	req.SetPathValue("name", "vision")
+	req.SetPathValue("step", "100")
+	req.SetPathValue("index", "0")
+	w := httptest.NewRecorder()
+	s.handleEvalSampleImage(w, req)
+	if w.Code != 403 {
+		t.Fatalf("symlink escape served with status %d: %q", w.Code, w.Body.String())
+	}
+}
+
 func TestEvalSamplesRejectParentDirectoryRunName(t *testing.T) {
 	s := &Server{cfg: Config{RunsDir: t.TempDir()}}
 	req := httptest.NewRequest("GET", "/api/runs/../eval-samples/100", nil)

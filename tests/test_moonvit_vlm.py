@@ -16,7 +16,8 @@ from rwkv_lab.moonvit import (MoonViT, MoonViTPrefixProjector, _Block, _resize,
                               valid_pooled_feature,
                               valid_torch_archive_storages)
 from rwkv_lab.vision_cache import cache_entry_valid
-from rwkv_lab.vision_train import (EpochBatchSampler, _FEATURE_MEMORY_CACHE,
+from rwkv_lab.vision_train import (EpochBatchSampler, _BoundedFeatureCache,
+                                   _FEATURE_MEMORY_CACHE,
                                    _acquire_run_lock,
                                    _archive_fresh_run_artifacts,
                                    _durable_replace,
@@ -51,7 +52,8 @@ from rwkv_lab.vision_train import (EpochBatchSampler, _FEATURE_MEMORY_CACHE,
                                    write_eval_samples)
 from rwkv_lab.generate import SEP, WorldVocab
 from rwkv_lab.deep_vision import DeepVisionInjector
-from rwkv_lab.fused_ce import logits_cross_entropy, weighted_logits_cross_entropy
+from rwkv_lab.fused_ce import (logits_cross_entropy, masked_token_mean,
+                               weighted_logits_cross_entropy)
 from rwkv_lab.vision_grounding import ImageTextContrastiveHead, early_token_weights
 from rwkv_lab.vision_caption import checkpoint_runtime_scales
 
@@ -150,6 +152,70 @@ def test_weighted_selected_logit_ce_matches_manual_reduction():
         logits.float(), labels, reduction="none")
     torch.testing.assert_close(actual, (losses * weights).sum() / weights.sum())
     torch.testing.assert_close(raw, losses.mean())
+
+
+def test_masked_token_mean_matches_cross_entropy_ignore_semantics():
+    torch.manual_seed(0)
+    logits = torch.randn(6, 11)
+    labels = torch.tensor([1, -100, 3, -100, 5, 6])
+    # reduction="none" zeroes ignored rows, exactly like the flash CE kernel,
+    # so this exercises the fused path's denominator math on CPU.
+    losses = torch.nn.functional.cross_entropy(logits, labels, reduction="none")
+    expected = torch.nn.functional.cross_entropy(logits, labels)
+    torch.testing.assert_close(masked_token_mean(losses, labels), expected)
+    all_ignored = torch.full((6,), -100)
+    assert torch.isnan(masked_token_mean(torch.zeros(6), all_ignored))
+    assert torch.isnan(torch.nn.functional.cross_entropy(logits, all_ignored))
+
+
+def test_weighted_ce_denominators_exclude_ignored_positions():
+    torch.manual_seed(1)
+    logits = torch.randn(5, 7)
+    labels = torch.tensor([1, 2, -100, 4, 5])
+    weights = torch.tensor([3., 1., 100., 1., 1.])
+    actual, raw = weighted_logits_cross_entropy(
+        logits, labels, weights, fused=False)
+    losses = torch.nn.functional.cross_entropy(logits, labels, reduction="none")
+    keep = labels != -100
+    torch.testing.assert_close(
+        actual, (losses[keep] * weights[keep]).sum() / weights[keep].sum())
+    torch.testing.assert_close(raw, losses[keep].mean())
+    unweighted, unweighted_raw = weighted_logits_cross_entropy(
+        logits, labels, None, fused=False)
+    torch.testing.assert_close(
+        unweighted, torch.nn.functional.cross_entropy(logits, labels))
+    torch.testing.assert_close(unweighted_raw, losses[keep].mean())
+
+
+def test_feature_memory_cache_evicts_oldest_and_refreshes_on_hit():
+    entry = lambda: torch.zeros(4, dtype=torch.float32)  # 16 bytes each
+    cache = _BoundedFeatureCache(max_bytes=48)
+    a, b, c, d = (Path(f"/cache/{name}.pt") for name in "abcd")
+    cache[a], cache[b], cache[c] = entry(), entry(), entry()
+    assert len(cache) == 3 and cache.total_bytes == 48
+    assert cache.get(a) is not None  # hit refreshes recency: b is now oldest
+    cache[d] = entry()
+    assert b not in cache
+    assert a in cache and c in cache and d in cache
+    assert cache.total_bytes == 48
+
+    tuples = _BoundedFeatureCache(max_bytes=32)
+    tuples[a] = (entry(), entry())  # fusion-style tuple entry: 32 bytes
+    tuples[b] = entry()
+    assert a not in tuples and b in tuples
+    assert tuples.total_bytes == 16
+
+    unbounded = _BoundedFeatureCache(max_bytes=0)
+    for key in (a, b, c, d):
+        unbounded[key] = entry()
+    assert len(unbounded) == 4
+
+    existing = entry()
+    lru = _BoundedFeatureCache(max_bytes=48)
+    lru[a], lru[b], lru[c] = existing, entry(), entry()
+    assert lru.setdefault(a, entry()) is existing  # setdefault is also a hit
+    lru[d] = entry()
+    assert a in lru and b not in lru
 
 
 def test_loop_runtime_scale_starts_small_and_saturates():
@@ -270,15 +336,21 @@ def test_legacy_complete_eval_artifact_does_not_regenerate(tmp_path: Path):
     assert _pending_eval_work(log, 100) == ("captions", scalar)
 
 
-def test_log_trim_discards_malformed_step_without_blocking_recovery(tmp_path: Path):
+def test_log_trim_preserves_malformed_lines_byte_for_byte(tmp_path: Path):
     log = tmp_path / "train.jsonl"
+    malformed = "{not json"
+    unstepped = json.dumps({"kind": "train", "step": None})
+    kept_record = json.dumps({"kind": "train", "step": 10})
     log.write_text("\n".join((
-        json.dumps({"kind": "train", "step": 10}),
-        json.dumps({"kind": "train", "step": None}),
+        kept_record,
+        malformed,
+        unstepped,
         json.dumps({"kind": "train", "step": 12}),
     )) + "\n")
     _trim_log(log, 10)
-    assert [json.loads(line)["step"] for line in log.read_text().splitlines()] == [10]
+    # Matches _invalidate_step_evaluation: only records provably newer than
+    # the checkpoint are dropped; everything else survives byte-identically.
+    assert log.read_text().splitlines() == [kept_record, malformed, unstepped]
 
 
 def test_nonterminal_exit_guard_preserves_terminal_states(tmp_path: Path):
@@ -1275,3 +1347,113 @@ def test_header_only_resize_geometry_matches_decoded_resize():
     new_w, new_h, pad_w, pad_h = _resize_geometry(*image.size, max_input_patches=256)
     assert len(patches) == ((new_w + pad_w) // 14) * ((new_h + pad_h) // 14)
     assert tuple(grid[0, 1:].tolist()) == ((new_h + pad_h) // 14, (new_w + pad_w) // 14)
+
+
+def test_single_tap_staged_features_pass_validation_end_to_end(tmp_path: Path):
+    from rwkv_lab.moonvit import pool_features
+
+    class Vision:
+        max_input_patches = 1024
+        cache_fingerprint = "single-tap-test"
+        tap_layers = (8,)
+        feature_stages = 1
+        view_mode = "full"
+        patch_embed = type(
+            "Patch", (), {"proj": type("Proj", (), {"weight": torch.empty(1)})()})()
+
+        def __init__(self):
+            self.calls = 0
+
+        def encode_many(self, images):
+            self.calls += 1
+            # One tap always yields the staged [stages, groups, 4, 1152] shape.
+            return [torch.ones(1, 70, 4, 1152) for _ in images]
+
+    image = tmp_path / "x.jpg"
+    Image.new("RGB", (4, 4)).save(image)
+    projector, vision = MoonViTPrefixProjector(32, 5), Vision()
+    rows = [{"image": image}]
+    cache = tmp_path / "cache"
+    first = cached_features(rows, vision, projector, cache)
+    second = cached_features(rows, vision, projector, cache)
+    assert vision.calls == 1
+    assert first[0].shape == (1, 5, 4, 1152)
+    assert torch.equal(first[0], second[0])
+    key = cache / feature_cache_key(
+        image, max_input_patches=1024, prefix_tokens=5,
+        vision_fingerprint="single-tap-test", tap_layers=(8,))
+    assert key.is_file()
+    assert cache_entry_valid(key, 5, 1)
+    # Zero stages is the unstaged 3-dim contract; positive counts are staged.
+    pooled = pool_features(torch.ones(1, 70, 4, 1152), 5).squeeze(0)
+    assert valid_pooled_feature(pooled, 5, 1)
+    assert not valid_pooled_feature(pooled, 5)
+    assert valid_pooled_feature(torch.ones(5, 4, 1152), 5)
+    assert not valid_pooled_feature(torch.ones(5, 4, 1152), 5, 1)
+
+
+def test_moonvit_feature_stages_zero_means_unstaged():
+    assert MoonViT(max_input_patches=64).feature_stages == 0
+    assert MoonViT(max_input_patches=64, tap_layers=(8,)).feature_stages == 1
+    assert MoonViT(max_input_patches=64, tap_layers=(3, 9)).feature_stages == 2
+
+
+def test_caption_layer_vision_path_injects_prefix_width_features():
+    from rwkv_lab.deep_vision import LayerMatchedVisionInjector
+    from rwkv_lab.moonvit import pool_features
+
+    class Vision:
+        def __call__(self, images):
+            # Raw staged MoonViT output: [stages, groups, 4, 1152] per image
+            # with a group count wider than the trained prefix width.
+            return [torch.randn(2, 11, 4, 1152) for _ in images]
+
+    class Layer(torch.nn.Module):
+        def forward(self, hidden_states, **_kwargs):
+            return hidden_states
+
+    prefix_tokens = 5
+    projector = MoonViTPrefixProjector(16, prefix_tokens)
+    vision = Vision()
+    raw_features = vision([object()])
+    # Mirror rwkv_lab.vision_caption.caption: pool to the cacheable training
+    # contract before the projector and the layer-matched injector.
+    features = [pool_features(item, projector.prefix_tokens).squeeze(0)
+                for item in raw_features]
+    prefix = projector(features)
+    assert prefix.shape == (1, prefix_tokens, 16)
+
+    layers = torch.nn.ModuleList([Layer(), Layer()])
+    injector = LayerMatchedVisionInjector(16, (0, 1), rank=4)
+    for adapter in injector.adapters.values():
+        torch.nn.init.ones_(adapter.up.weight)
+    injector.install(layers)
+    start = 2
+    hidden = torch.zeros(1, 9, 16)
+    with injector.use_features(torch.stack(features), (start,)):
+        output = hidden
+        for layer in layers:
+            output = layer(output)
+    changed = (output != hidden).any(-1)[0]
+    # Exactly prefix_tokens positions, beginning at the visual span start,
+    # receive the injected residual.
+    assert int(changed.sum()) == prefix_tokens
+    assert changed[start:start + prefix_tokens].all()
+    # The raw unpooled stack violates the trained width contract and must not
+    # silently inject a wider span.
+    injection_width = torch.stack(raw_features).shape[2]
+    assert injection_width != prefix_tokens
+    injector.close()
+
+
+def test_contrastive_head_detaches_caption_targets_itself():
+    head = ImageTextContrastiveHead(hidden_size=8, width=4)
+    prefix = torch.randn(2, 3, 8, requires_grad=True)
+    targets = torch.randn(4, 8, requires_grad=True)
+    positions = torch.tensor([0, 0, 1, 1])
+    loss, _ = head(prefix, targets, positions)
+    loss.backward()
+    # The documented invariant: the auxiliary can never improve by rewriting
+    # the language model's embeddings, even if a caller forgets to detach.
+    assert targets.grad is None
+    assert prefix.grad is not None

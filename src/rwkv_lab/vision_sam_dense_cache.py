@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def manifest_images(paths: list[str]) -> list[tuple[Path, int, int]]:
     unique: dict[str, tuple[Path, int, int]] = {}
+    skipped = 0
     for source in paths:
         with Path(source).open() as handle:
             for line in handle:
@@ -36,7 +37,15 @@ def manifest_images(paths: list[str]) -> list[tuple[Path, int, int]]:
                     stat = image.stat()
                 except OSError:
                     continue
+                # A directory or FIFO satisfies stat() but would crash the
+                # whole prefill later inside pool.map. Regular files only.
+                if not image.is_file():
+                    skipped += 1
+                    continue
                 unique[str(image)] = (image, stat.st_size, stat.st_mtime_ns)
+    if skipped:
+        print({"kind": "sam_dense_cache", "skipped_non_files": skipped},
+              flush=True)
     return list(unique.values())
 
 

@@ -275,7 +275,10 @@ def repair_row(row: dict, mapping: dict[str, dict], captions: dict[str, list[str
         raise RuntimeError(f"no alignment mapping for {source_key} in {row.get('image')}")
     canonical_key = item["canonical_key"]
     if str(row.get("stage1_source", "")).startswith("eight_hour_"):
-        selected = eight_hour_selection[source_key]
+        selected = eight_hour_selection.get(source_key)
+        if selected is None:
+            raise RuntimeError(
+                f"no repaired selection row for {source_key} in {row.get('image')}")
         text, variant = selected["text"], int(selected["caption_variant"])
         caption_provenance = selected["caption_provenance"]
     elif item["alignment_low_confidence"]:
@@ -368,7 +371,12 @@ def main() -> None:
     if len(selection_by_physical) != len(selection):
         raise RuntimeError("repaired selection contains duplicate physical keys")
 
-    manifests = sorted((ROOT / "curated_vision").glob("*.jsonl"))
+    # Per-shard part receipts feed later build_vision_eight_hour_mix.py reruns;
+    # leaving them stale would silently revert every repaired caption on the
+    # next rebuild. Repair them with the same key and pattern as the manifests.
+    part_files = sorted(
+        (args.selection.parent / "parts" / "midjourneyv6").glob("*.jsonl"))
+    manifests = [*sorted((ROOT / "curated_vision").glob("*.jsonl")), *part_files]
     plans = []
     for manifest in manifests:
         rows = read_jsonl(manifest)
@@ -386,6 +394,12 @@ def main() -> None:
         print(f"repair plan {manifest.name}: affected={affected:,} changed={changed:,}",
               flush=True)
 
+    def relative_path(path: Path) -> str:
+        try:
+            return str(path.relative_to(ROOT))
+        except ValueError:
+            return str(path)
+
     receipt = {
         "schema": 1,
         "alignment_schema": ALIGNMENT_SCHEMA,
@@ -393,7 +407,7 @@ def main() -> None:
         "mapping": stats,
         "selection_rows": len(repaired_selection),
         "manifests": [{
-            "path": str(path.relative_to(ROOT)),
+            "path": relative_path(path),
             "affected_rows": affected,
             "changed_rows": changed,
             "before_sha256": before,

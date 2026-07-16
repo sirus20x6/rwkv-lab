@@ -22,7 +22,7 @@ import sys
 import threading
 import time
 import zipfile
-from collections import Counter
+from collections import Counter, OrderedDict
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Callable, Sequence
@@ -78,7 +78,97 @@ _CACHE_LOAD_POOL = ThreadPoolExecutor(max_workers=16, thread_name_prefix="vision
 # stall on a cold cache.
 _FEATURE_PRELOAD_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="vision-preload")
 _NEXT_BATCH_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vision-next-batch")
-_FEATURE_MEMORY_CACHE: dict[Path, torch.Tensor] = {}
+
+
+class _BoundedFeatureCache:
+    """Thread-safe byte-bounded LRU for resident cached feature tensors.
+
+    Without a bound, every feature ever loaded stayed resident for the whole
+    process (~590KB/image MoonViT + ~560KB/image fusion), growing RSS on large
+    corpora until the OOM killer ended the run. ``max_bytes == 0`` disables
+    eviction; ``--preload-feature-cache`` opts into that unbounded mode because
+    the operator asserts the corpus fits in system RAM. Prefetch/preload run on
+    background threads, so every access holds the lock.
+    """
+
+    def __init__(self, max_bytes: int = 16 * 2**30) -> None:
+        self.max_bytes = int(max_bytes)
+        self._lock = threading.Lock()
+        self._items: OrderedDict[Path, object] = OrderedDict()
+        self._sizes: dict[Path, int] = {}
+        self._total_bytes = 0
+
+    @staticmethod
+    def _entry_bytes(item) -> int:
+        if isinstance(item, (tuple, list)):
+            return sum(_BoundedFeatureCache._entry_bytes(part) for part in item)
+        if torch.is_tensor(item):
+            return item.numel() * item.element_size()
+        return 0
+
+    @property
+    def total_bytes(self) -> int:
+        with self._lock:
+            return self._total_bytes
+
+    def __contains__(self, key) -> bool:
+        with self._lock:
+            return key in self._items
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._items)
+
+    def get(self, key, default=None):
+        with self._lock:
+            if key not in self._items:
+                return default
+            self._items.move_to_end(key)
+            return self._items[key]
+
+    def pop(self, key, default=None):
+        with self._lock:
+            if key not in self._items:
+                return default
+            self._total_bytes -= self._sizes.pop(key, 0)
+            return self._items.pop(key)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._items.clear()
+            self._sizes.clear()
+            self._total_bytes = 0
+
+    def setdefault(self, key, item):
+        with self._lock:
+            if key in self._items:
+                self._items.move_to_end(key)
+                return self._items[key]
+            self._store_locked(key, item)
+            return item
+
+    def __setitem__(self, key, item) -> None:
+        with self._lock:
+            self._store_locked(key, item)
+
+    def _store_locked(self, key, item) -> None:
+        if key in self._items:
+            self._total_bytes -= self._sizes.pop(key, 0)
+            del self._items[key]
+        self._items[key] = item
+        size = self._entry_bytes(item)
+        self._sizes[key] = size
+        self._total_bytes += size
+        if self.max_bytes <= 0:
+            return
+        # Keep at least the newest entry: callers already hold a reference to
+        # it, and a single oversized item must not thrash the whole cache.
+        while self._total_bytes > self.max_bytes and len(self._items) > 1:
+            old_key, _ = self._items.popitem(last=False)
+            self._total_bytes -= self._sizes.pop(old_key, 0)
+
+
+_FEATURE_MEMORY_CACHE = _BoundedFeatureCache()
 
 
 def _acquire_run_lock(out: Path):
@@ -95,8 +185,15 @@ def _acquire_run_lock(out: Path):
 
 def _load_raw_tensor_archive(path: Path, *, shape: tuple[int, ...],
                              stride: tuple[int, ...], storage_offset: int,
-                             dtype: torch.dtype, storage_bytes: int) -> torch.Tensor:
-    """Load a one-storage ``torch.save`` tensor without unpickling each file."""
+                             dtype: torch.dtype, storage_bytes: int,
+                             on_fallback: Callable[[], None] | None = None
+                             ) -> torch.Tensor:
+    """Load a one-storage ``torch.save`` tensor without unpickling each file.
+
+    ``on_fallback`` is invoked whenever the raw fast path cannot be used and
+    the safe (slow) ``torch.load`` compatibility loader runs instead, so
+    callers can surface how much of a corpus silently lost the speedup.
+    """
     try:
         with zipfile.ZipFile(path) as archive:
             members = [info for info in archive.infolist()
@@ -132,10 +229,14 @@ def _load_raw_tensor_archive(path: Path, *, shape: tuple[int, ...],
             raise
         if is_zip_archive:
             raise
+        if on_fallback is not None:
+            on_fallback()
         return torch.load(path, map_location="cpu", weights_only=True)
     except (FileNotFoundError, OSError, ValueError):
         # Preserve layout/dtype compatibility through the safe general loader.
         # Callers additionally verify the loaded storage against the ZIP CRC.
+        if on_fallback is not None:
+            on_fallback()
         return torch.load(path, map_location="cpu", weights_only=True)
 
 
@@ -432,15 +533,25 @@ def make_batch(rows: Sequence[dict], vocab: WorldVocab | None = None, *,
             raise ValueError("unprepared rows require a vocab")
         rows, _ = prepare_examples(rows, vocab, prompt=prompt, max_text_tokens=max_text_tokens)
     width = max(len(row["tokens"]) for row in rows)
-    ids = torch.zeros(len(rows), width, dtype=torch.long, device=device)
+    # Assemble the padded batch on the host: per-row torch.tensor(...,
+    # device="cuda") issued one synchronous transfer per caption. Three pinned
+    # bulk copies replace them without changing any produced value.
+    ids = torch.zeros(len(rows), width, dtype=torch.long)
     labels = torch.full_like(ids, -100)
     mask = torch.zeros_like(ids, dtype=torch.bool)
     for i, row in enumerate(rows):
-        tokens = torch.tensor(row["tokens"], dtype=torch.long, device=device)
+        tokens = torch.as_tensor(row["tokens"], dtype=torch.long)
         length, prompt_len = len(tokens), int(row["prompt_len"])
         ids[i, :length] = tokens
         labels[i, prompt_len:length] = tokens[prompt_len:]
         mask[i, :length] = True
+    target = torch.device(device)
+    if target.type == "cuda":
+        ids = ids.pin_memory().to(target, non_blocking=True)
+        labels = labels.pin_memory().to(target, non_blocking=True)
+        mask = mask.pin_memory().to(target, non_blocking=True)
+    else:
+        ids, labels, mask = ids.to(target), labels.to(target), mask.to(target)
     return ids, labels, mask
 
 
@@ -458,10 +569,15 @@ def insert_visual_span(text: torch.Tensor, visual: torch.Tensor,
     """Insert a fixed-width visual span into every padded text row."""
     if text.shape[0] != visual.shape[0] or len(starts) != text.shape[0]:
         raise ValueError("visual span batch does not match text batch")
+    if any(start < 0 or start > text.shape[1] for start in starts):
+        raise ValueError("visual insertion falls outside text sequence")
+    if len(set(starts)) == 1:
+        # Uniform insertion point (every non-sandwich batch): one batched cat
+        # instead of a per-row cat plus a stack.
+        start = starts[0]
+        return torch.cat((text[:, :start], visual, text[:, start:]), dim=1)
     rows = []
     for batch, start in enumerate(starts):
-        if start < 0 or start > text.shape[1]:
-            raise ValueError("visual insertion falls outside text sequence")
         rows.append(torch.cat((text[batch, :start], visual[batch],
                                text[batch, start:]), dim=0))
     return torch.stack(rows)
@@ -510,7 +626,7 @@ def cached_features(rows: Sequence[dict], vision: MoonViT,
     missing: list[tuple[int, Path | None, Image.Image]] = []
     device = vision.patch_embed.proj.weight.device
     fingerprint = getattr(vision, "cache_fingerprint", "unknown")
-    stages = int(getattr(vision, "feature_stages", 1))
+    stages = int(getattr(vision, "feature_stages", 0))
     tap_layers = tuple(getattr(vision, "tap_layers", ()))
     view_mode = str(getattr(vision, "view_mode", "full"))
 
@@ -665,7 +781,7 @@ def preload_feature_cache(rows: Sequence[dict], vision: MoonViT,
     Missing entries remain on the ordinary encode-and-fill fallback path.
     """
     fingerprint = getattr(vision, "cache_fingerprint", "unknown")
-    stages = int(getattr(vision, "feature_stages", 1))
+    stages = int(getattr(vision, "feature_stages", 0))
     tap_layers = tuple(getattr(vision, "tap_layers", ()))
     view_mode = str(getattr(vision, "view_mode", "full"))
     paths = list(dict.fromkeys(
@@ -706,24 +822,32 @@ def preload_feature_cache(rows: Sequence[dict], vision: MoonViT,
             "storage_bytes": int(template_item.untyped_storage().nbytes()),
         }
 
-    def load_one(path: Path) -> tuple[Path, torch.Tensor | None]:
+    def load_one(path: Path) -> tuple[Path, torch.Tensor | None, bool]:
+        fallback = [False]
+
+        def note_fallback() -> None:
+            fallback[0] = True
+
         try:
             if path == template_path:
-                return path, template_item
+                return path, template_item, False
             if layout is not None:
-                item = _load_raw_tensor_archive(path, **layout)
+                item = _load_raw_tensor_archive(
+                    path, **layout, on_fallback=note_fallback)
             else:
+                fallback[0] = True
                 item = torch.load(path, map_location="cpu", weights_only=True)
             if not _valid_pooled_feature_archive(
                     path, item, projector.prefix_tokens, stages):
-                return path, None
-            return path, item
+                return path, None, fallback[0]
+            return path, item, fallback[0]
         except (OSError, EOFError, RuntimeError, pickle.UnpicklingError,
                 zipfile.BadZipFile):
-            return path, None
+            return path, None, fallback[0]
 
     loaded = 0
     resident_bytes = 0
+    fallback_loads = 0
     # Executor.map eagerly queued the entire corpus. Global ThreadPoolExecutor
     # workers are joined by Python at process exit, so SIGINT could save the
     # checkpoint and then appear hung while thousands of "background" reads
@@ -749,11 +873,12 @@ def preload_feature_cache(rows: Sequence[dict], vision: MoonViT,
                 future.cancel()
             break
         for future in done:
-            path, item = future.result()
+            path, item, used_fallback = future.result()
             if item is None:
                 continue
             _FEATURE_MEMORY_CACHE[path] = item
             loaded += 1
+            fallback_loads += int(used_fallback)
             resident_bytes += item.numel() * item.element_size()
             if loaded % 4096 == 0:
                 print({"kind": "feature_preload", "loaded": loaded,
@@ -763,6 +888,13 @@ def preload_feature_cache(rows: Sequence[dict], vision: MoonViT,
                 future.cancel()
             break
         fill()
+    if pending:
+        # A half-migrated cache silently loses the raw fast path per file;
+        # make the split visible so operators notice the regression.
+        print({"kind": "feature_preload_paths",
+               "raw_fast_path": loaded - fallback_loads,
+               "torch_load_fallback": fallback_loads,
+               "total": len(pending)}, flush=True)
     return loaded, resident_bytes
 
 
@@ -773,7 +905,7 @@ def prefetch_cached_feature_rows(rows: Sequence[dict], vision: MoonViT,
     if cache_dir is None:
         return 0
     fingerprint = getattr(vision, "cache_fingerprint", "unknown")
-    stages = int(getattr(vision, "feature_stages", 1))
+    stages = int(getattr(vision, "feature_stages", 0))
     tap_layers = tuple(getattr(vision, "tap_layers", ()))
     view_mode = str(getattr(vision, "view_mode", "full"))
     paths = [cache_dir / _row_feature_cache_key(
@@ -1139,10 +1271,14 @@ def _trim_log(path: Path, checkpoint_step: int) -> None:
         try:
             record = json.loads(line)
             record_step = int(record.get("step", 0))
-        except (json.JSONDecodeError, TypeError, ValueError):
+        except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
+            # Keep malformed/unstepped lines byte-for-byte, matching
+            # _invalidate_step_evaluation. Only records provably newer than
+            # the recovered checkpoint may be discarded.
+            kept.append(line)
             continue
         if record_step <= checkpoint_step:
-            kept.append(json.dumps(record))
+            kept.append(line)
     temporary = path.with_suffix(".tmp")
     temporary.write_text("\n".join(kept) + ("\n" if kept else ""))
     _durable_replace(temporary, path)
@@ -2070,42 +2206,50 @@ def write_eval_samples(rows: Sequence[dict], indices: Sequence[int], *, step: in
                     sample_rows, fusion_tower, projector.prefix_tokens,
                     fusion_cache_dir)
                 prefix = prefix + fusion_adapter(fusion_features).to(prefix.dtype)
+        # Finished rows are dropped from the forward batch as they stop; each
+        # row's greedy decode is independent of its batchmates, so this leaves
+        # every produced caption identical while shrinking late-step batches.
+        active = list(range(len(sample_rows)))
         for generation_step in range(max_new):
-            sequences = [((row_prompt * (2 if sandwich_prompt else 1)) + item)
-                         for row_prompt, item in zip(prompt_ids, generated)]
-            starts = tuple(len(row_prompt) if sandwich_prompt else 0
-                           for row_prompt in prompt_ids)
+            sequences = [((prompt_ids[i] * (2 if sandwich_prompt else 1))
+                          + generated[i]) for i in active]
+            starts = tuple(len(prompt_ids[i]) if sandwich_prompt else 0
+                           for i in active)
             lengths = [len(item) for item in sequences]
             width = max(lengths)
-            ids = torch.zeros(len(sequences), width, dtype=torch.long, device="cuda")
-            text_mask = torch.zeros_like(ids, dtype=torch.bool)
-            for i, sequence in enumerate(sequences):
-                ids[i, :len(sequence)] = torch.tensor(sequence, dtype=torch.long, device="cuda")
-                text_mask[i, :len(sequence)] = True
+            ids_host = torch.zeros(len(sequences), width, dtype=torch.long)
+            mask_host = torch.zeros_like(ids_host, dtype=torch.bool)
+            for local, sequence in enumerate(sequences):
+                ids_host[local, :len(sequence)] = torch.as_tensor(
+                    sequence, dtype=torch.long)
+                mask_host[local, :len(sequence)] = True
+            ids = ids_host.pin_memory().to("cuda", non_blocking=True)
+            text_mask = mask_host.pin_memory().to("cuda", non_blocking=True)
+            active_prefix = prefix[active]
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 text = rwkv.model.embeddings(ids)
-                typed_prefix = prefix.to(text.dtype)
+                typed_prefix = active_prefix.to(text.dtype)
                 embeds = insert_visual_span(text, typed_prefix, starts)
                 attention_mask = insert_visual_span(
                     text_mask, torch.ones(
-                        len(sequences), prefix.shape[1], dtype=torch.bool,
+                        len(sequences), active_prefix.shape[1], dtype=torch.bool,
                         device="cuda"), starts)
                 if engram is not None:
                     boundary = 0 if engram.boundary_id is None else int(engram.boundary_id)
                     engram.set_input_ids(insert_boundary_ids(
-                        ids, starts, prefix.shape[1], boundary))
+                        ids, starts, active_prefix.shape[1], boundary))
                 with contextlib.ExitStack() as stack:
                     if deep_vision is not None:
                         stack.enter_context(deep_vision.use_prefix(typed_prefix, starts))
                     if layer_vision is not None:
                         stack.enter_context(layer_vision.use_features(
-                            torch.stack(features), starts))
+                            torch.stack([features[i] for i in active]), starts))
                     hidden = rwkv.model(
                         inputs_embeds=embeds, attention_mask=attention_mask,
                         output_hidden_states=False, use_cache=False,
                         return_dict=True).last_hidden_state
                 positions = torch.tensor(
-                    [prefix.shape[1] + length - 1 for length in lengths],
+                    [active_prefix.shape[1] + length - 1 for length in lengths],
                     dtype=torch.long, device="cuda")
                 logits = rwkv.lm_head(
                     hidden[torch.arange(len(sequences), device="cuda"), positions]).float()
@@ -2115,19 +2259,19 @@ def write_eval_samples(rows: Sequence[dict], indices: Sequence[int], *, step: in
                         inplace=True)
                 logits[:, 0] = -torch.inf
                 next_tokens = logits.argmax(-1).tolist()
-            for i, token in enumerate(next_tokens):
-                if stopped[i]:
-                    continue
+            for local, token in enumerate(next_tokens):
+                i = active[local]
                 if token == SEP:
                     stopped[i] = True
                 else:
                     generated[i].append(int(token))
+            active = [i for i in active if not stopped[i]]
             generation_steps = generation_step + 1
-            if generation_steps % 8 == 0 or all(stopped):
+            if generation_steps % 8 == 0 or not active:
                 persist(complete=False, generation_steps=generation_steps)
                 if progress is not None:
                     progress(generation_steps, max_new)
-            if all(stopped):
+            if not active:
                 break
     except BaseException:
         persist(complete=False, generation_steps=generation_steps)
@@ -2204,6 +2348,9 @@ def main() -> None:
     ap.add_argument("--feature-cache", default="caches/moonvit_features_stage1_v3")
     ap.add_argument("--preload-feature-cache", action="store_true",
                     help="keep deserialized cached MoonViT features in system RAM")
+    ap.add_argument("--feature-cache-max-bytes", type=int, default=16 * 2**30,
+                    help="approximate RAM budget for the in-process feature LRU; "
+                         "0 = unbounded; --preload-feature-cache implies unbounded")
     ap.add_argument("--background-feature-preload", action="store_true",
                     help="warm the RAM cache asynchronously while training starts")
     ap.add_argument("--manifest-stat-workers", type=int, default=1,
@@ -2258,6 +2405,23 @@ def main() -> None:
     ap.add_argument("--fresh", action="store_true",
                     help="explicitly archive an existing run and start over; incompatible with resume")
     args = ap.parse_args()
+
+    # A supervisor's default SIGTERM must reuse the KeyboardInterrupt
+    # checkpoint-and-pause path instead of dying mid-step and stranding
+    # status.json at "training". Background work here is thread-based (no
+    # forked dataloader workers), and CPython only delivers signal handlers in
+    # the main thread of the process that installed them.
+    def _sigterm_to_interrupt(signum, frame) -> None:
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _sigterm_to_interrupt)
+
+    if args.feature_cache_max_bytes < 0:
+        raise SystemExit("--feature-cache-max-bytes must be non-negative")
+    # Preload mode is the operator's assertion that the corpus fits in RAM;
+    # everything else gets a bounded LRU so long runs cannot grow until OOM.
+    _FEATURE_MEMORY_CACHE.max_bytes = (
+        0 if args.preload_feature_cache else int(args.feature_cache_max_bytes))
 
     if args.init_adapters_from and args.resume != "none":
         raise SystemExit("--init-adapters-from requires --resume none")

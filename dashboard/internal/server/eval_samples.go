@@ -143,10 +143,47 @@ func (s *Server) handleEvalSampleImage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "eval snapshot changed; refresh the card", http.StatusConflict)
 		return
 	}
-	image := artifact.Items[index].Image
+	// The artifact JSON is trainer-written but lives on disk; never let a
+	// tampered/garbage path turn this endpoint into an arbitrary file read.
+	image, ok := s.resolveEvalImage(artifact.Items[index].Image)
+	if !ok {
+		http.Error(w, "image path is outside the allowed data roots", http.StatusForbidden)
+		return
+	}
 	if info, statErr := os.Stat(image); statErr != nil || !info.Mode().IsRegular() {
 		http.Error(w, "image is no longer available", http.StatusNotFound)
 		return
 	}
 	http.ServeFile(w, r, image)
+}
+
+// resolveEvalImage resolves an artifact-listed image path (following symlinks)
+// and requires the result to live inside one of the allowed roots
+// (cfg.ImageRoots, defaulting to the runs dir and repo root). Returns the
+// resolved path to serve, so a post-check symlink swap cannot redirect it.
+func (s *Server) resolveEvalImage(image string) (string, bool) {
+	if image == "" || !filepath.IsAbs(image) {
+		return "", false
+	}
+	resolved, err := filepath.EvalSymlinks(filepath.Clean(image))
+	if err != nil {
+		return "", false
+	}
+	roots := s.cfg.ImageRoots
+	if len(roots) == 0 {
+		roots = []string{s.cfg.RunsDir, s.cfg.RepoRoot}
+	}
+	for _, root := range roots {
+		if root == "" {
+			continue
+		}
+		if resolvedRoot, err := filepath.EvalSymlinks(filepath.Clean(root)); err == nil {
+			root = resolvedRoot
+		}
+		if rel, err := filepath.Rel(root, resolved); err == nil && rel != ".." &&
+			!strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return resolved, true
+		}
+	}
+	return "", false
 }

@@ -226,6 +226,76 @@ def test_archive_short_eof_reissues_remaining_range_with_if_range(
     assert requests[1].get_header("Range") == "bytes=2-3"
 
 
+@pytest.mark.parametrize("code, reason", [
+    (404, "Not Found"), (403, "Forbidden"), (410, "Gone"),
+])
+def test_archive_permanent_http_failures_are_not_retried(
+        tmp_path, monkeypatch, code, reason):
+    fetch = load_script("fetch_i1_archives.py")
+    calls = {"count": 0}
+
+    def open_error(request, **unused):
+        calls["count"] += 1
+        raise fetch.urllib.error.HTTPError(
+            request.full_url, code, reason, None, None)
+
+    monkeypatch.setattr(fetch.urllib.request, "urlopen", open_error)
+    with pytest.raises(RuntimeError, match="permanent HTTP failure"):
+        fetch.fetch_range(
+            "https://example.test/archive", tmp_path / "archive.part",
+            0, 3, expected_total=4)
+    assert calls["count"] == 1
+
+
+@pytest.mark.parametrize("code", [503, 429, 408])
+def test_archive_transient_failures_are_capped_at_six(
+        tmp_path, monkeypatch, code):
+    fetch = load_script("fetch_i1_archives.py")
+    calls = {"count": 0}
+
+    def open_error(request, **unused):
+        calls["count"] += 1
+        raise fetch.urllib.error.HTTPError(
+            request.full_url, code, "unavailable", None, None)
+
+    monkeypatch.setattr(fetch.urllib.request, "urlopen", open_error)
+    monkeypatch.setattr(fetch.time, "sleep", lambda unused: None)
+    with pytest.raises(RuntimeError, match="consecutive transient failures"):
+        fetch.fetch_range(
+            "https://example.test/archive", tmp_path / "archive.part",
+            0, 3, expected_total=4)
+    assert calls["count"] == 6
+
+
+def test_archive_transient_cap_resets_when_bytes_advance(tmp_path, monkeypatch):
+    fetch = load_script("fetch_i1_archives.py")
+    output = tmp_path / "archive.part"
+
+    class _ShortRead(_RangeResponse):
+        """Yield one byte, then die: progress, so retries must not be capped."""
+
+        def __init__(self, start):
+            payload = bytes([65 + start])
+            super().__init__(payload, start=start, end=7, total=8,
+                             etag='"generation"')
+            self.calls = 0
+
+        def read(self, unused_size):
+            self.calls += 1
+            if self.calls == 1:
+                return self._payload
+            raise http.client.IncompleteRead(b"")
+
+    responses = iter(_ShortRead(start) for start in range(8))
+    monkeypatch.setattr(
+        fetch.urllib.request, "urlopen", lambda *args, **kwargs: next(responses))
+    monkeypatch.setattr(fetch.time, "sleep", lambda unused: None)
+    received, _ = fetch.fetch_range(
+        "https://example.test/archive", output, 0, 7, expected_total=8)
+    assert received == 8
+    assert output.read_bytes() == b"ABCDEFGH"
+
+
 class _InterruptedRangeResponse(_RangeResponse):
     def __init__(self):
         super().__init__(b"", start=0, end=3, total=4, etag='"generation"')

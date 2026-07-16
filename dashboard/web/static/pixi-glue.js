@@ -746,6 +746,7 @@
       const cv = this.canvas;
       let dragging = false, dragX = 0, dragDom = null;
       let boxing = false, boxX0 = 0;
+      let evalCand = null, downX = 0, downY = 0;
       cv.addEventListener("wheel", (e) => {
         e.preventDefault();
         const [xmin, xmax] = this._xDomain();
@@ -767,15 +768,23 @@
             saveHidden(this.id, this.hidden); this.drawStatic(); return;
           }
         }
-        const evalPoint = this._evalPointAt(px, py);
-        if (evalPoint && window.trainboard && window.trainboard.openEvalSamples) {
-          window.trainboard.openEvalSamples(curRun, evalPoint.step, evalPoint.ppl);
-          return;
-        }
+        // A press near an eval marker is only a *candidate* click: opening on
+        // pointerdown would steal drags/box-zooms that start within the 12px
+        // hit radius. Decide on pointerup, when movement is known.
+        evalCand = e.shiftKey ? null : this._evalPointAt(px, py);
+        downX = e.clientX; downY = e.clientY;
         if (e.shiftKey) { boxing = true; boxX0 = px; return; }   // shift+drag = box zoom (x)
         dragging = true; dragX = e.clientX; dragDom = this._xDomain();
       });
       window.addEventListener("pointerup", (e) => {
+        const cand = evalCand; evalCand = null;
+        if (cand && !boxing &&
+            Math.hypot(e.clientX - downX, e.clientY - downY) < 4 &&
+            window.trainboard && window.trainboard.openEvalSamples) {
+          dragging = false;
+          window.trainboard.openEvalSamples(curRun, cand.step, cand.ppl);
+          return;
+        }
         if (boxing) {
           boxing = false;
           const r = cv.getBoundingClientRect();

@@ -48,7 +48,7 @@ def decode(path: Path) -> Image.Image:
         return image.convert("RGB")
 
 
-def cache_entry_valid(path: Path, prefix_tokens: int, stages: int = 1) -> bool:
+def cache_entry_valid(path: Path, prefix_tokens: int, stages: int = 0) -> bool:
     """Verify the payload, not merely its filename, before skipping an image."""
     try:
         item = torch.load(path, map_location="cpu", weights_only=True)
@@ -84,7 +84,9 @@ def main() -> None:
         ap.error(f"invalid --tap-layers: {exc}")
     if any(index < 0 or index >= 27 for index in tap_layers):
         ap.error("--tap-layers must contain block indices from 0 to 26")
-    stages = len(tap_layers) if tap_layers else 1
+    # Zero stages means the unstaged 3-dim pooled layout; any tap count,
+    # including one, produces the staged 4-dim layout.
+    stages = len(tap_layers)
     if args.num_shards < 1 or not 0 <= args.shard_index < args.num_shards:
         ap.error("--shard-index must be in [0, --num-shards)")
     if args.batch < 1 or args.workers < 1 or args.sort_window < 1:
