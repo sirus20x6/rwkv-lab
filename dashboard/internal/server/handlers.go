@@ -42,12 +42,22 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 	if v := q.Get("since"); v != "" {
 		since, _ = strconv.ParseInt(v, 10, 64)
 	}
+	trainSince, evalSince := since, since
+	separateCursors := false
+	if v := q.Get("train_since"); v != "" {
+		trainSince, _ = strconv.ParseInt(v, 10, 64)
+		separateCursors = true
+	}
+	if v := q.Get("eval_since"); v != "" {
+		evalSince, _ = strconv.ParseInt(v, 10, 64)
+		separateCursors = true
+	}
 	// from/to = a step window (zoom): refetch that span at full resolution.
 	var to int64
 	ranged := false
 	if v := q.Get("from"); v != "" {
 		if f, e := strconv.ParseInt(v, 10, 64); e == nil {
-			since = f - 1
+			trainSince, evalSince = f-1, f-1
 			ranged = true
 		}
 	}
@@ -57,20 +67,25 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 	}
 
 	maxPoints := seriesMaxPoints
-	if since > 0 && !ranged {
+	if (separateCursors || since > 0) && !ranged {
 		maxPoints = 0 // pure incremental append; never decimate
 	}
 
-	res, err := series.Fetch(s.db, runID, trainFields, evalFields, since, to, maxPoints)
+	res, err := series.FetchCursors(s.db, runID, trainFields, evalFields,
+		trainSince, evalSince, to, maxPoints)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if since <= 0 && !ranged {
+	// Reset runs deliberately retain pre-contract eval points as history. The
+	// client must not crown their numeric minimum as the active contract winner.
+	res.SuppressBest = readBest(filepath.Join(s.cfg.RunsDir, name)).ContractReset
+	if !separateCursors && since <= 0 && !ranged {
 		res.Baseline = s.loadBaseline()
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(res)
 }
 
@@ -95,6 +110,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(cat)
 }
 
@@ -110,6 +126,7 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(tl)
 }
 

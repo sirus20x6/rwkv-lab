@@ -4,37 +4,164 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
 // BestInfo is the authoritative best checkpoint a run restarts from
-// (runs/<run>/best/best.json, written atomically by convert_train on improve).
+// (runs/<run>/best/best.json, atomically published by the trainers on improve).
 type BestInfo struct {
-	Step   int64
-	PPL    float64
-	Exists bool
+	Step          int64
+	PPL           float64
+	Exists        bool
+	ContractReset bool
 }
 
 func readBest(runDir string) BestInfo {
-	data, err := os.ReadFile(filepath.Join(runDir, "best", "best.json"))
+	// These directories are durable outcome markers created by the trainer when
+	// it removes a winner from the active branch.  The old eval records remain in
+	// train.jsonl, so their SQLite minimum is no longer an authoritative winner.
+	// Keep the marker active after a new winner appears: otherwise an even lower
+	// abandoned-branch metric would displace that new active checkpoint again.
+	result := BestInfo{ContractReset: hasEvalContractReset(runDir)}
+	bestDir := filepath.Join(runDir, "best")
+	if info, err := os.Lstat(bestDir); err != nil || !info.Mode().IsDir() {
+		return result
+	}
+	data, err := os.ReadFile(filepath.Join(bestDir, "best.json"))
 	if err != nil {
-		return BestInfo{}
+		return result
 	}
-	var b struct {
-		Step int64   `json:"step"`
-		PPL  float64 `json:"ppl"`
+	var manifest map[string]json.RawMessage
+	if json.Unmarshal(data, &manifest) != nil || manifest == nil {
+		return result
 	}
-	if json.Unmarshal(data, &b) != nil {
-		return BestInfo{}
+	stepRaw, ok := manifest["step"]
+	if !ok {
+		return result
 	}
-	// require the actual checkpoint too, so we only claim "restartable" when it is
-	if _, err := os.Stat(filepath.Join(runDir, "best", "ckpt.pt")); err != nil {
-		return BestInfo{}
+	step, err := strconv.ParseInt(strings.TrimSpace(string(stepRaw)), 10, 64)
+	if err != nil || step < 0 {
+		return result
 	}
-	return BestInfo{Step: b.Step, PPL: b.PPL, Exists: true}
+
+	// Match the trainer's manifest contract: every metric that is present must
+	// be finite and in range, and at least loss or PPL must identify the eval.
+	// PPL-only legacy manifests remain valid; a loss-only manifest can be
+	// rendered without silently treating a missing JSON field as zero.
+	lossRaw, hasLoss := manifest["loss"]
+	pplRaw, hasPPL := manifest["ppl"]
+	if !hasLoss && !hasPPL {
+		return result
+	}
+	ppl := 0.0
+	if hasLoss {
+		loss, err := strconv.ParseFloat(strings.TrimSpace(string(lossRaw)), 64)
+		if err != nil || math.IsNaN(loss) || math.IsInf(loss, 0) || loss < 0 {
+			return result
+		}
+		ppl = math.Exp(math.Min(loss, 20))
+	}
+	if hasPPL {
+		ppl, err = strconv.ParseFloat(strings.TrimSpace(string(pplRaw)), 64)
+		if err != nil || math.IsNaN(ppl) || math.IsInf(ppl, 0) || ppl <= 0 {
+			return result
+		}
+	}
+	// New vision runs atomically publish a manifest pointing at an immutable
+	// checkpoint. Validate that exact target; falling back to ckpt.pt when the
+	// field exists but is missing/invalid could label old bytes with new metrics.
+	checkpoint := filepath.Join(bestDir, "ckpt.pt")
+	if checkpointRaw, present := manifest["checkpoint"]; present {
+		var name string
+		if json.Unmarshal(checkpointRaw, &name) != nil || name == "" ||
+			filepath.Base(name) != name || filepath.Ext(name) != ".pt" {
+			return result
+		}
+		checkpoint = filepath.Join(bestDir, name)
+	}
+	// Trainer publications are regular files (hardlinks for vision winners).
+	// Lstat deliberately rejects symlinks, including a same-basename link that
+	// escapes best/ after the containment check above.
+	if info, err := os.Lstat(checkpoint); err != nil || !info.Mode().IsRegular() {
+		return result
+	}
+	result.Step, result.PPL, result.Exists = step, ppl, true
+	return result
+}
+
+func hasEvalContractReset(runDir string) bool {
+	if reset, authoritative := readEvalContractResetReceipt(runDir); authoritative {
+		return reset
+	}
+	// Pre-receipt runs still have the trainer's atomic quarantine rename as a
+	// durable signal. This fallback also covers a crash after the rename but
+	// before the separate receipt publication.
+	entries, err := os.ReadDir(runDir)
+	if err != nil {
+		return false
+	}
+	prefixes := [...]string{
+		"best.before-explicit-resume-step-",
+		"best.before-loop-reset-step-",
+		"best.before-text-limit-",
+		// Recognize the descriptive spelling as well as the current trainer's
+		// text-limit label so older/alternate migration runs remain fail-closed.
+		"best.before-text-migration-",
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(entry.Name(), prefix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func readEvalContractResetReceipt(runDir string) (reset, authoritative bool) {
+	path := filepath.Join(runDir, "eval_contract_reset.json")
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, false
+		}
+		return true, true
+	}
+	// A present but untrustworthy receipt fails closed: it must not restore a
+	// potentially abandoned DB minimum. Atomic trainer writes make malformed
+	// regular files impossible during ordinary publication.
+	if !info.Mode().IsRegular() {
+		return true, true
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return true, true
+	}
+	var receipt struct {
+		Schema  int      `json:"schema"`
+		Reset   *bool    `json:"reset"`
+		Step    *int64   `json:"step"`
+		Reasons []string `json:"reasons"`
+	}
+	if json.Unmarshal(data, &receipt) != nil || receipt.Schema != 1 ||
+		receipt.Reset == nil || receipt.Step == nil || *receipt.Step < 0 ||
+		len(receipt.Reasons) == 0 || !*receipt.Reset {
+		return true, true
+	}
+	for _, reason := range receipt.Reasons {
+		if strings.TrimSpace(reason) == "" {
+			return true, true
+		}
+	}
+	return true, true
 }
 
 // LoopRW mirrors runs/<run>/loop_rw.json (LoopedRWKV residual weights).
@@ -55,6 +182,7 @@ type LoopRWLayer struct {
 }
 
 type LoopRW struct {
+	Step      int64         `json:"step"`
 	LoopCount int           `json:"loop_count"`
 	NLayers   int           `json:"n_layers"`
 	NPinned   int           `json:"n_pinned"`
@@ -84,9 +212,9 @@ func renderLoopRW(lr LoopRW) string {
 	if mode == "" {
 		mode = "scalar"
 	}
-	b.WriteString(`<div id="looprw-panel" class="panel"><div class="panel-title">loop usage · residual_weight per layer ` +
-		fmt.Sprintf(`<span class="sub">mean %.3f · %d/%d pinned ~0.25 · %d passes · %s</span></div>`,
-			lr.MeanMaxRW, lr.NPinned, lr.NLayers, lr.LoopCount, html.EscapeString(mode)))
+	b.WriteString(`<div id="looprw-panel" class="panel"><div class="panel-title">loop usage · effective gate per layer ` +
+		fmt.Sprintf(`<span class="sub">step %d · mean layer max %.3f · %d/%d pinned · %d passes · %s</span></div>`,
+			lr.Step, lr.MeanMaxRW, lr.NPinned, lr.NLayers, lr.LoopCount, html.EscapeString(mode)))
 	rows := append([]LoopRWLayer{}, lr.Layers...)
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Layer < rows[j].Layer })
 	b.WriteString(`<div class="looprw-bars">`)

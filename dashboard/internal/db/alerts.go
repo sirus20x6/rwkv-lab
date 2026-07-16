@@ -66,6 +66,7 @@ type TrainStats struct {
 	LastTokPerSec float64
 	MedTokPerSec  float64
 	LastStep      int64
+	LastTS        float64
 	LastLoss      float64 // newest row in the window
 	OldestLoss    float64 // oldest row in the window (coarse train-trend check)
 	CodecRel      *float64
@@ -92,13 +93,13 @@ func (d *DB) RecentTrainStatsByName(names []string, n int) (map[string]RunTrainS
 	args = append(args, n)
 	// Keep the SQL straightforward rather than depending on generated column aliases.
 	query := fmt.Sprintf(`WITH ranked AS (
-		SELECT r.id, r.name, e.step, e.gnorm, e.skipped, e.tok_per_sec, e.loss,
+		SELECT r.id, r.name, e.step, e.ts, e.gnorm, e.skipped, e.tok_per_sec, e.loss,
 		       json_extract(e.extra_json,'$.codec_rel') AS codec,
 		       json_extract(e.extra_json,'$.rosa_inj_rms') AS rosa,
 		       json_extract(e.extra_json,'$.engram_inj_rms') AS engram,
 		       ROW_NUMBER() OVER (PARTITION BY r.id ORDER BY e.step DESC) AS rn
 		FROM runs r JOIN train_events e ON e.run_id=r.id WHERE r.name IN (%s))
-		SELECT id,name,step,gnorm,skipped,tok_per_sec,loss,codec,rosa,engram
+		SELECT id,name,step,ts,gnorm,skipped,tok_per_sec,loss,codec,rosa,engram
 		FROM ranked WHERE rn<=? ORDER BY name,step DESC`, marks)
 	rows, err := d.Query(query, args...)
 	if err != nil {
@@ -115,9 +116,9 @@ func (d *DB) RecentTrainStatsByName(names []string, n int) (map[string]RunTrainS
 	for rows.Next() {
 		var id, step int64
 		var name string
-		var gnorm, tokPerSec, loss, codec, rosa, engram sql.NullFloat64
+		var rowTS, gnorm, tokPerSec, loss, codec, rosa, engram sql.NullFloat64
 		var skipped sql.NullInt64
-		if err := rows.Scan(&id, &name, &step, &gnorm, &skipped, &tokPerSec, &loss,
+		if err := rows.Scan(&id, &name, &step, &rowTS, &gnorm, &skipped, &tokPerSec, &loss,
 			&codec, &rosa, &engram); err != nil {
 			return nil, err
 		}
@@ -125,7 +126,8 @@ func (d *DB) RecentTrainStatsByName(names []string, n int) (map[string]RunTrainS
 		if a == nil {
 			a = &accumulator{id: id}
 			acc[name] = a
-			a.ts.LastStep, a.ts.LastTokPerSec, a.ts.LastLoss = step, nzf(tokPerSec), nzf(loss)
+			a.ts.LastStep, a.ts.LastTS = step, nzf(rowTS)
+			a.ts.LastTokPerSec, a.ts.LastLoss = nzf(tokPerSec), nzf(loss)
 			if codec.Valid {
 				v := codec.Float64
 				a.ts.CodecRel = &v
@@ -171,12 +173,31 @@ func (d *DB) RecentTrainStatsByName(names []string, n int) (map[string]RunTrainS
 
 // RecentTrainStats aggregates the last n train rows for a run.
 func (d *DB) RecentTrainStats(runID int64, n int) (TrainStats, error) {
+	return d.recentTrainStatsSince(runID, -1, -1, n)
+}
+
+// RecentTrainStatsAfter scopes a health window to optimizer steps committed
+// after an eval-contract reset, excluding pre-mutation rows retained as history.
+func (d *DB) RecentTrainStatsAfter(runID, afterStep int64, n int) (TrainStats, error) {
+	return d.recentTrainStatsSince(runID, afterStep, -1, n)
+}
+
+// RecentTrainStatsSince scopes a health window to records produced after both
+// a logical optimizer boundary and a durable publication time.  The timestamp
+// predicate matters while the watcher is catching up: an abandoned branch can
+// still have higher-step rows in SQLite until its rewritten log is observed.
+func (d *DB) RecentTrainStatsSince(runID, afterStep int64, afterTS float64, n int) (TrainStats, error) {
+	return d.recentTrainStatsSince(runID, afterStep, afterTS, n)
+}
+
+func (d *DB) recentTrainStatsSince(runID, afterStep int64, afterTS float64, n int) (TrainStats, error) {
 	rows, err := d.Query(
-		`SELECT step, gnorm, skipped, tok_per_sec, loss,
+		`SELECT step, ts, gnorm, skipped, tok_per_sec, loss,
 		        json_extract(extra_json,'$.codec_rel'),
 		        json_extract(extra_json,'$.rosa_inj_rms'),
 		        json_extract(extra_json,'$.engram_inj_rms')
-		 FROM train_events WHERE run_id=? ORDER BY step DESC LIMIT ?`, runID, n)
+		 FROM train_events WHERE run_id=? AND step>? AND ts>? ORDER BY step DESC LIMIT ?`,
+		runID, afterStep, afterTS, n)
 	if err != nil {
 		return TrainStats{}, err
 	}
@@ -187,14 +208,14 @@ func (d *DB) RecentTrainStats(runID int64, n int) (TrainStats, error) {
 	first := true
 	for rows.Next() {
 		var step int64
-		var gnorm, tokPerSec, loss sql.NullFloat64
+		var rowTS, gnorm, tokPerSec, loss sql.NullFloat64
 		var skipped sql.NullInt64
 		var codec, rosa, engram sql.NullFloat64
-		if err := rows.Scan(&step, &gnorm, &skipped, &tokPerSec, &loss, &codec, &rosa, &engram); err != nil {
+		if err := rows.Scan(&step, &rowTS, &gnorm, &skipped, &tokPerSec, &loss, &codec, &rosa, &engram); err != nil {
 			return ts, err
 		}
 		if first {
-			ts.LastStep = step
+			ts.LastStep, ts.LastTS = step, nzf(rowTS)
 			ts.LastTokPerSec = nzf(tokPerSec)
 			ts.LastLoss = nzf(loss)
 			if codec.Valid {
@@ -240,6 +261,8 @@ func (d *DB) RecentTrainStats(runID int64, n int) (TrainStats, error) {
 // regression) check: a held-out metric rising above its own best.
 type EvalStats struct {
 	N            int
+	LastStep     int64
+	LastTS       float64
 	LastPPL      float64
 	MinPPL       float64
 	LastBlockVal *float64
@@ -254,11 +277,27 @@ type EvalStats struct {
 // RecentEvalStats aggregates the last n eval rows for a run (ppl + held-out
 // block_val and the loop-gate state from extra_json).
 func (d *DB) RecentEvalStats(runID int64, n int) (EvalStats, error) {
+	return d.recentEvalStatsSince(runID, -1, -1, n)
+}
+
+// RecentEvalStatsAfter excludes retained metrics from an abandoned contract.
+func (d *DB) RecentEvalStatsAfter(runID, afterStep int64, n int) (EvalStats, error) {
+	return d.recentEvalStatsSince(runID, afterStep, -1, n)
+}
+
+// RecentEvalStatsSince excludes both earlier steps and retained future-branch
+// rows whose ingest timestamp predates an eval-contract reset.
+func (d *DB) RecentEvalStatsSince(runID, afterStep int64, afterTS float64, n int) (EvalStats, error) {
+	return d.recentEvalStatsSince(runID, afterStep, afterTS, n)
+}
+
+func (d *DB) recentEvalStatsSince(runID, afterStep int64, afterTS float64, n int) (EvalStats, error) {
 	rows, err := d.Query(
-		`SELECT ppl, json_extract(extra_json,'$.block_val'), json_extract(extra_json,'$.loop_max_rw'),
+		`SELECT step, ts, ppl, json_extract(extra_json,'$.block_val'), json_extract(extra_json,'$.loop_max_rw'),
 		        json_extract(extra_json,'$.loop_lr_mult'), json_extract(extra_json,'$.loop_pin_thr'),
 		        json_extract(extra_json,'$.loop_live'), json_extract(extra_json,'$.loop_anneal')
-		 FROM eval_events WHERE run_id=? ORDER BY step DESC LIMIT ?`, runID, n)
+		 FROM eval_events WHERE run_id=? AND step>? AND ts>? ORDER BY step DESC LIMIT ?`,
+		runID, afterStep, afterTS, n)
 	if err != nil {
 		return EvalStats{}, err
 	}
@@ -266,11 +305,13 @@ func (d *DB) RecentEvalStats(runID int64, n int) (EvalStats, error) {
 	var es EvalStats
 	first := true
 	for rows.Next() {
-		var ppl, block, maxRW, loopMult, pinThr, loopLive, loopAnn sql.NullFloat64
-		if err := rows.Scan(&ppl, &block, &maxRW, &loopMult, &pinThr, &loopLive, &loopAnn); err != nil {
+		var step int64
+		var rowTS, ppl, block, maxRW, loopMult, pinThr, loopLive, loopAnn sql.NullFloat64
+		if err := rows.Scan(&step, &rowTS, &ppl, &block, &maxRW, &loopMult, &pinThr, &loopLive, &loopAnn); err != nil {
 			return es, err
 		}
 		if first {
+			es.LastStep, es.LastTS = step, nzf(rowTS)
 			es.LastPPL = nzf(ppl)
 			if block.Valid {
 				v := block.Float64

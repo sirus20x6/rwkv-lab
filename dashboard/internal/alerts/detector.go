@@ -62,6 +62,15 @@ type Detector struct {
 	lastRaised map[string]float64
 }
 
+// evalContractReset is the trainer's durable statement that rows at or before
+// Step (and any older abandoned-branch rows still in SQLite) cannot be used to
+// judge the active model contract. PublishedTS is the receipt's filesystem
+// publication time; ingested train/eval rows carry their source log mtime.
+type evalContractReset struct {
+	Step        int64
+	PublishedTS float64
+}
+
 func New(database *db.DB, sampler *sysmon.Sampler, runsDir string, interval time.Duration) *Detector {
 	if interval <= 0 {
 		interval = 10 * time.Second
@@ -116,11 +125,98 @@ func (d *Detector) scan() {
 		if !ok {
 			continue
 		}
-		d.scanRun(p, row.RunID, row.Stats, pplByRun[p.RunName])
+		stats, reset, ready := d.currentTrainStats(p, row.RunID, row.Stats)
+		if !ready {
+			// A newly started process can be visible before its first log append,
+			// while SQLite still describes the prior process/branch. Health actions
+			// must fail closed until this process has published current evidence.
+			continue
+		}
+		d.scanRun(p, row.RunID, stats, pplByRun[p.RunName], reset)
 	}
 }
 
-func (d *Detector) scanRun(p sysmon.Proc, runID int64, stats db.TrainStats, latestPPL *float64) {
+// currentTrainStats returns only rows known to belong to the live process and,
+// when present, the active eval contract. A malformed present receipt is
+// authoritative but unusable, so it suppresses alerts rather than failing open
+// onto retained history.
+func (d *Detector) currentTrainStats(p sysmon.Proc, runID int64, fallback db.TrainStats) (db.TrainStats, *evalContractReset, bool) {
+	receipt, present, valid := readEvalContractReset(filepath.Join(d.runsDir, p.RunName))
+	if present && !valid {
+		return db.TrainStats{}, nil, false
+	}
+
+	afterStep, afterTS := int64(-1), -1.0
+	var reset *evalContractReset
+	if valid {
+		afterStep, afterTS = receipt.Step, receipt.PublishedTS
+		reset = &receipt
+	}
+	// A receipt persists across ordinary process restarts. Independently fence
+	// stale rows from a previous PID until the current PID appends to the log.
+	if p.StartedTS > afterTS {
+		afterTS = p.StartedTS
+	}
+
+	stats := fallback
+	var err error
+	if afterStep >= 0 || afterTS >= 0 {
+		stats, err = d.db.RecentTrainStatsSince(runID, afterStep, afterTS, 50)
+		if err != nil {
+			return db.TrainStats{}, reset, false
+		}
+	}
+	if stats.N == 0 || stats.LastStep <= afterStep || stats.LastTS <= afterTS {
+		return db.TrainStats{}, reset, false
+	}
+	return stats, reset, true
+}
+
+func readEvalContractReset(runDir string) (receipt evalContractReset, present, valid bool) {
+	path := filepath.Join(runDir, "eval_contract_reset.json")
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return evalContractReset{}, false, false
+		}
+		return evalContractReset{}, true, false
+	}
+	if !info.Mode().IsRegular() {
+		return evalContractReset{}, true, false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return evalContractReset{}, true, false
+	}
+	var raw struct {
+		Schema  int      `json:"schema"`
+		Reset   *bool    `json:"reset"`
+		Step    *int64   `json:"step"`
+		Reasons []string `json:"reasons"`
+	}
+	if json.Unmarshal(data, &raw) != nil || raw.Schema != 1 || raw.Reset == nil ||
+		raw.Step == nil || *raw.Step < 0 || !*raw.Reset || len(raw.Reasons) == 0 {
+		return evalContractReset{}, true, false
+	}
+	for _, reason := range raw.Reasons {
+		if strings.TrimSpace(reason) == "" {
+			return evalContractReset{}, true, false
+		}
+	}
+	return evalContractReset{
+		Step:        *raw.Step,
+		PublishedTS: float64(info.ModTime().UnixNano()) / 1e9,
+	}, true, true
+}
+
+func (d *Detector) evalStats(runID int64, reset *evalContractReset) (db.EvalStats, error) {
+	if reset == nil {
+		return d.db.RecentEvalStats(runID, 30)
+	}
+	return d.db.RecentEvalStatsSince(runID, reset.Step, reset.PublishedTS, 30)
+}
+
+func (d *Detector) scanRun(p sysmon.Proc, runID int64, stats db.TrainStats, latestPPL *float64, reset *evalContractReset) {
 
 	// stall: process alive but log gone quiet
 	if p.LogAgeS != nil && *p.LogAgeS > stallSeconds {
@@ -148,13 +244,6 @@ func (d *Detector) scanRun(p sysmon.Proc, runID int64, stats db.TrainStats, late
 		d.raise(p, "codec_collapse", "critical", stats.LastStep,
 			fmt.Sprintf("codec rel_rmse %.3f > %.2f — SMT/DMT targets likely garbage", *stats.CodecRel, codecRelWarn))
 	}
-	if d.baselinePPL > 0 {
-		if latestPPL != nil && *latestPPL > pplRegressRatio*d.baselinePPL {
-			d.raise(p, "ppl_regress", "warn", stats.LastStep,
-				fmt.Sprintf("eval ppl %.1f is %.1fx the original baseline %.1f", *latestPPL, *latestPPL/d.baselinePPL, d.baselinePPL))
-		}
-	}
-
 	// memory_path_dead: a ROSA/Engram recall path that never activated (injection
 	// RMS still ~0 well past warmup). Only fires when the run actually emits the
 	// field — runs without ROSA/Engram leave it nil and are skipped.
@@ -173,7 +262,20 @@ func (d *Detector) scanRun(p sysmon.Proc, runID int64, stats db.TrainStats, late
 		}
 	}
 
-	es, eerr := d.db.RecentEvalStats(runID, 30)
+	es, eerr := d.evalStats(runID, reset)
+	// RunSummaries intentionally retains historical minima. After a contract
+	// reset its latest PPL can still be from the abandoned branch until watcher
+	// ingestion catches up, so only a scoped eval row may drive regression.
+	if reset != nil {
+		latestPPL = nil
+		if eerr == nil && es.N > 0 && es.LastPPL > 0 {
+			latestPPL = &es.LastPPL
+		}
+	}
+	if d.baselinePPL > 0 && latestPPL != nil && *latestPPL > pplRegressRatio*d.baselinePPL {
+		d.raise(p, "ppl_regress", "warn", stats.LastStep,
+			fmt.Sprintf("eval ppl %.1f is %.1fx the original baseline %.1f", *latestPPL, *latestPPL/d.baselinePPL, d.baselinePPL))
+	}
 
 	// loop-gate steering (LoopedRWKV residual_weight, surfaced as loop_max_rw on eval
 	// records). Full lifecycle: stalled ~0 well past warmup -> boost the live

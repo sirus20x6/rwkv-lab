@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"log"
+	"path/filepath"
 	"time"
 
 	"trainboard/internal/db"
@@ -18,6 +19,7 @@ type tickSnap struct {
 	ts        float64
 	summaries []db.RunSummary
 	procByRun map[string]sysmon.Proc
+	bestByRun map[string]BestInfo
 
 	sysGPUs, sysHost, sysProc string
 	runList, alerts, conv     string
@@ -50,11 +52,18 @@ func (s *Server) refreshTick() {
 		return // keep serving the previous snapshot
 	}
 	procByRun := procIndex(snap.Procs)
+	bestByRun := make(map[string]BestInfo, len(summaries))
+	for index := range summaries {
+		best := readBest(filepath.Join(s.cfg.RunsDir, summaries[index].Name))
+		bestByRun[summaries[index].Name] = best
+		applyEvalContractSummary(&summaries[index], best)
+	}
 
 	ts := &tickSnap{
 		ts:         now,
 		summaries:  summaries,
 		procByRun:  procByRun,
+		bestByRun:  bestByRun,
 		sysGPUs:    renderSysGPUs(snap.GPUs),
 		sysHost:    renderSysHost(snap.Host),
 		sysProc:    renderSysProc(snap.Procs),
@@ -70,9 +79,10 @@ func (s *Server) refreshTick() {
 		ts.queue = renderQueue(q, s.queueAuto.Load(), len(snap.Procs) == 0)
 	}
 	for _, su := range summaries {
-		if su.LatestStep != nil {
-			ts.versions[su.Name] = *su.LatestStep
-		}
+		// A step number is not a data revision: eval/checkpoint records are often
+		// appended after the train row at the same step. File mtime in milliseconds
+		// is monotonic across appends and remains JS-number safe, including rewrites.
+		ts.versions[su.Name] = runVersion(su)
 	}
 	s.tick.Store(ts)
 }

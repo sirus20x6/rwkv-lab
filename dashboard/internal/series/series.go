@@ -25,11 +25,15 @@ type Series struct {
 
 // Result is the full payload for one run.
 type Result struct {
-	Train     Series             `json:"train"`
-	Eval      Series             `json:"eval"`
-	Baseline  map[string]float64 `json:"baseline,omitempty"`
-	MaxStep   int64              `json:"max_step"`
-	Decimated bool               `json:"decimated"`
+	Train        Series             `json:"train"`
+	Eval         Series             `json:"eval"`
+	Baseline     map[string]float64 `json:"baseline,omitempty"`
+	MaxStep      int64              `json:"max_step"`
+	MaxTrainStep int64              `json:"max_train_step"`
+	MaxEvalStep  int64              `json:"max_eval_step"`
+	Generation   int64              `json:"generation"`
+	Decimated    bool               `json:"decimated"`
+	SuppressBest bool               `json:"suppress_best"`
 }
 
 // Known typed columns per table; anything else → json_extract(extra_json,...).
@@ -45,32 +49,60 @@ func colExpr(field string, known map[string]bool) (string, bool) {
 	if known[field] {
 		return field, true
 	}
-	return fmt.Sprintf("json_extract(extra_json, '$.%s')", field), true
+	// Extra payloads also contain metadata strings, objects, and arrays.  The
+	// custom chart is numeric, so return NULL for a row whose key changes type
+	// instead of asking database/sql to coerce JSON text into a float (which
+	// aborts the entire series response).
+	return fmt.Sprintf(
+		"CASE WHEN json_type(extra_json, '$.%[1]s') IN ('integer','real','true','false') "+
+			"THEN CAST(json_extract(extra_json, '$.%[1]s') AS REAL) END", field), true
 }
 
 // Fetch returns the requested train/eval metrics for a run. since>0 returns only
 // rows with step>since (incremental append). maxPoints>0 caps overview rows via
 // stride decimation (ignored when since>0 — increments are already small).
 func Fetch(d *db.DB, runID int64, trainFields, evalFields []string, since, to int64, maxPoints int) (Result, error) {
+	return FetchCursors(d, runID, trainFields, evalFields, since, since, to, maxPoints)
+}
+
+// FetchCursors advances dense training rows and sparse evaluation rows
+// independently. A shared cursor can permanently skip an eval written at step
+// N after the client has already fetched train step N.
+func FetchCursors(d *db.DB, runID int64, trainFields, evalFields []string,
+	trainSince, evalSince, to int64, maxPoints int) (Result, error) {
 	res := Result{Train: Series{Cols: map[string][]*float64{}}, Eval: Series{Cols: map[string][]*float64{}}}
 
-	tr, decT, err := fetchTable(d, "train_events", trainCols, runID, trainFields, since, to, maxPoints)
+	tr, decT, err := fetchTable(d, "train_events", trainCols, runID, trainFields, trainSince, to, maxPoints)
 	if err != nil {
 		return res, err
 	}
 	res.Train = tr
-	ev, _, err := fetchTable(d, "eval_events", evalCols, runID, evalFields, since, to, 0) // eval is small; never decimate
+	ev, _, err := fetchTable(d, "eval_events", evalCols, runID, evalFields, evalSince, to, 0) // eval is small; never decimate
 	if err != nil {
 		return res, err
 	}
 	res.Eval = ev
 	res.Decimated = decT
 
-	if len(tr.Step) > 0 {
-		res.MaxStep = tr.Step[len(tr.Step)-1]
+	// These are authoritative table tips, not merely the last rows returned by
+	// an incremental window. The browser compares them with its append cursors
+	// to detect a trainer log rewind and discard abandoned future points.
+	// Keep empty tables distinct from a legitimate step-0 row: returning zero
+	// for both makes deletion of the only step-0 event invisible to an open tab.
+	if err := d.QueryRow(`SELECT
+		COALESCE((SELECT max(step) FROM train_events WHERE run_id=?),-1),
+		COALESCE((SELECT max(step) FROM eval_events WHERE run_id=?),-1),
+		COALESCE((SELECT event_generation FROM runs WHERE id=?),0)`,
+		runID, runID, runID).Scan(
+		&res.MaxTrainStep, &res.MaxEvalStep, &res.Generation); err != nil {
+		return res, err
 	}
-	if len(ev.Step) > 0 && ev.Step[len(ev.Step)-1] > res.MaxStep {
-		res.MaxStep = ev.Step[len(ev.Step)-1]
+	res.MaxStep = res.MaxTrainStep
+	if res.MaxEvalStep > res.MaxStep {
+		res.MaxStep = res.MaxEvalStep
+	}
+	if res.MaxStep < 0 {
+		res.MaxStep = 0
 	}
 	return res, nil
 }
@@ -94,7 +126,8 @@ func tableCatalog(d *db.DB, table string, known map[string]bool, runID int64) []
 	q := fmt.Sprintf(
 		`SELECT DISTINCT je.key FROM
 		   (SELECT extra_json FROM %s WHERE run_id=? AND extra_json IS NOT NULL ORDER BY step DESC LIMIT 300) t,
-		   json_each(t.extra_json) je`, table)
+		   json_each(t.extra_json) je
+		 WHERE je.type IN ('integer','real','true','false')`, table)
 	if rows, err := d.Query(q, runID); err == nil {
 		defer rows.Close()
 		for rows.Next() {
@@ -119,11 +152,16 @@ func fetchTable(d *db.DB, table string, known map[string]bool, runID int64, fiel
 	}
 	exprs := []string{"step", "ts"}
 	var valid []string
+	seen := map[string]bool{}
 	for _, f := range fields {
+		if seen[f] {
+			continue
+		}
 		expr, ok := colExpr(f, known)
 		if !ok {
 			continue
 		}
+		seen[f] = true
 		exprs = append(exprs, expr)
 		valid = append(valid, f)
 	}

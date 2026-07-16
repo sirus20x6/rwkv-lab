@@ -194,6 +194,7 @@
             <button class="jump" data-jump="#arch-panel">arch</button>
             <button class="jump" data-jump="#loss-panel">charts</button>
             <button class="jump" data-jump="#conv-panel">conversion</button>
+            <button class="jump" data-jump="#grounding-panel">grounding</button>
             <button class="jump" data-jump="#custom-panel">custom</button>
             <button class="jump" data-jump="#tune-panel">tuning</button>
             <button class="jump" data-jump="#notes-panel">notes</button>
@@ -222,13 +223,20 @@
         </details>
 
         <div class="panel" id="loss-panel"><div class="panel-title">loss &amp; perplexity</div>
-          <div class="chart-box"><canvas id="chart-loss"></canvas></div></div>
+          <div class="chart-box"><canvas id="chart-loss"></canvas></div>
+          <section id="eval-sample-inline" class="eval-inline">
+            <header class="eval-inline-head"><div><h2 id="eval-inline-title">eval captions</h2><div id="eval-inline-meta" class="sub">The newest qualitative eval snapshot appears here automatically.</div></div></header>
+            <div id="eval-inline-body" class="eval-sample-grid"><div class="empty">waiting for a caption snapshot…</div></div>
+          </section>
+        </div>
         <div class="panel"><div class="panel-title">training signal <span class="sub">tok/s · gnorm · lr</span></div>
           <div class="chart-box"><canvas id="chart-training"></canvas></div></div>
         <div class="panel" id="conv-panel"><div class="panel-title">conversion signal <span class="sub">lm_ce · block · smt · dmt</span></div>
           <div class="chart-box"><canvas id="chart-conv"></canvas></div></div>
         <div class="panel" id="horizons-panel"><div class="panel-title">per-horizon accuracy <span class="sub">h=1…4 top-1 solid / top-5 dashed</span></div>
           <div class="chart-box"><canvas id="chart-horizons"></canvas></div></div>
+        <div class="panel" id="grounding-panel"><div class="panel-title">visual grounding <span class="sub">opening-weighted CE · image/text contrastive loss · retrieval accuracy</span></div>
+          <div class="chart-box"><canvas id="chart-grounding"></canvas></div></div>
         <div class="panel" id="memact-panel"><div class="panel-title">memory activation <span class="sub">ROSA / Engram injection RMS · recall path grokking-on</span></div>
           <div class="chart-box"><canvas id="chart-memact"></canvas></div></div>
         <div class="panel" id="memgen-panel"><div class="panel-title">memorization vs generalization <span class="sub">train block · held-out block · gen gap</span></div>
@@ -340,7 +348,7 @@
           <div class="ctl-row">
             <input class="ctl-input" style="max-width:110px" title="max new tokens" data-bind="sampleMaxNew" />
             <input class="ctl-input" style="max-width:90px" title="temperature (0 = greedy)" data-bind="sampleTemp" />
-            <button class="btn" data-attr-disabled="$sampleBusy"
+            <button class="btn" data-attr:disabled="$sampleBusy"
                     data-on:click="@post('/api/runs/'+$selectedRun+'/sample')">▶ sample</button>
             <span data-show="$sampleBusy">sampling…</span>
           </div>
