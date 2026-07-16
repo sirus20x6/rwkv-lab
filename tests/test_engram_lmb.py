@@ -81,8 +81,13 @@ class MiniModel(nn.Module):
         self.model = inner
         self.emb = nn.Embedding(V, dim)
 
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-        h = self.emb(input_ids)
+    def forward(self, input_ids: torch.Tensor | None = None, *,
+                inputs_embeds: torch.Tensor | None = None) -> torch.Tensor:
+        if inputs_embeds is None:
+            assert input_ids is not None
+            h = self.emb(input_ids)
+        else:
+            h = inputs_embeds
         for layer in self.model.layers:
             h = layer(h)[0]
         return h
@@ -293,6 +298,115 @@ def test_attach_noop_byte_exact():
     assert torch.equal(ref, out2)
 
 
+def test_eval_hooks_keep_gate_telemetry_device_resident():
+    model = MiniModel(C)
+    lmb = _make_lmb(layer_sites=[0])
+    handles = attach_engram(model, lmb)
+    ids_handle = install_input_ids_hook(model, lmb)
+    lmb.eval()
+    with torch.no_grad():
+        model(_repeat_ids())
+    site = lmb.sites["0"]
+    assert torch.is_tensor(site.stats["gate_vc_mean"])
+    assert torch.is_tensor(site.stats["gate_hc_mean"])
+    telemetry = lmb.telemetry()
+    assert isinstance(telemetry["0"]["gate_vc_mean"], float)
+    detach_engram(handles)
+    ids_handle.remove()
+
+
+def test_attach_fla_v_proj_seam():
+    class FLATimeMix(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.v_proj = nn.Linear(C, C, bias=False)
+            self.o_proj = nn.Linear(C, C, bias=False)
+
+        def forward(self, x):
+            return self.o_proj(torch.tanh(self.v_proj(x)))
+
+    class FLALayer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.att = FLATimeMix()
+
+        def forward(self, hidden_states):
+            return hidden_states + self.att(hidden_states)
+
+    model = nn.Module()
+    model.model = nn.Module()
+    model.model.layers = nn.ModuleList([FLALayer()])
+    ids = _repeat_ids()
+    hidden = torch.randn(B, T, C)
+    lmb = _make_lmb(layer_sites=[0])
+    attach_engram(model, lmb)
+    lmb.set_input_ids(ids)
+    with torch.no_grad():
+        ref = model.model.layers[0](hidden)
+        for table in lmb.table.tables:
+            table.fill_(0.25)
+        lmb.sites["0"].v_c.weight.fill_(0.1)
+        lmb.set_input_ids(ids)
+        out = model.model.layers[0](hidden)
+    assert not torch.equal(ref, out), "FLA v_proj must receive Engram injection"
+
+
+def test_attach_real_fla_attn_attribute_v_proj_seam():
+    """FLA RWKV7DecoderLayer exposes time-mix as `.attn`, not `.linear_attn`."""
+    C, V, T = 16, 64, 12
+
+    class AutocastProjection(nn.Module):
+        def forward(self, x):
+            return x.to(torch.bfloat16)
+
+    class FLAAttention(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.v_proj = AutocastProjection()
+            self.seen_v_dtype = None
+
+        def forward(self, x):
+            v = self.v_proj(x)
+            self.seen_v_dtype = v.dtype
+            return v.float()
+
+    class FLALayer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.attn = FLAAttention()
+
+        def forward(self, x):
+            return x + self.attn(x)
+
+    class Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = nn.Module()
+            self.model.layers = nn.ModuleList([FLALayer()])
+
+        def forward(self, x):
+            return self.model.layers[0](x)
+
+    model = Model()
+    lmb = LexicalMemoryBank(hidden_size=C, vocab_size=V, layer_sites=[0],
+                            d_row=8, table_rows=V, num_heads=4, max_loops=1)
+    attach_engram(model, lmb)
+    ids = torch.arange(T)[None] % 4
+    lmb.set_input_ids(ids)
+    x = torch.randn(1, T, C)
+    ref = model(x).detach().clone()
+    with torch.no_grad():
+        for table in lmb.table.tables:
+            table.fill_(0.25)
+        lmb.sites["0"].v_c.weight.fill_(0.01)
+    lmb.set_input_ids(ids)
+    out = model(x)
+    assert not torch.equal(ref, out), "real FLA `.attn.v_proj` must receive Engram injection"
+    assert model.model.layers[0].attn.seen_v_dtype == torch.bfloat16
+    assert lmb.sites["0"].loop_i == 1
+    assert lmb.sites["0"].last_inj_v_rms is not None
+
+
 def test_prefetched_recall_matches_inline_path():
     model = MiniModel(C)
     ids = _repeat_ids()
@@ -319,6 +433,18 @@ def test_noop_without_ids():
     with torch.no_grad():
         out = model(ids)
     assert torch.equal(ref, out)
+
+
+def test_inputs_embeds_forward_clears_prior_hook_ids():
+    model = MiniModel(C)
+    ids = _repeat_ids()
+    lmb = _make_lmb()
+    attach_engram(model, lmb)
+    install_input_ids_hook(model, lmb)
+    model(ids)
+    assert lmb.ctx.ids is not None and lmb.last_recall is not None
+    model(inputs_embeds=model.emb(ids))
+    assert lmb.ctx.ids is None and lmb.last_recall is None
 
 
 def test_injection_changes_output_and_grads_flow():
@@ -399,6 +525,45 @@ def test_logit_bias_copy_head():
     lmb.ctx.enabled = False
     assert torch.equal(lmb.logit_bias(logits), logits)
     lmb.ctx.enabled = True
+
+
+def test_sparse_logit_bias_matches_full_copy_head():
+    lmb = _make_lmb(layer_sites=[0])
+    ids = _repeat_ids(2, T)
+    lmb.set_input_ids(ids)
+    assert lmb.ensure_features()
+    with torch.no_grad():
+        lmb.logit_scale.fill_(1.25)
+        lmb.logit_feat.copy_(torch.tensor([0.2, 0.1, -0.05]))
+    logits = torch.randn(2, T, V)
+    batch = torch.tensor([0, 0, 1, 1])
+    positions = torch.tensor([3, T - 2, 7, T - 1])
+    sparse = lmb.logit_bias_at(logits[batch, positions], batch, positions)
+    full = lmb.logit_bias(logits)
+    torch.testing.assert_close(sparse, full[batch, positions])
+
+    selected_leaf = logits[batch, positions].clone().requires_grad_()
+    selected = selected_leaf * 1.0
+    storage = selected.data_ptr()
+    inplace = lmb.logit_bias_at(selected, batch, positions, inplace=True)
+    assert inplace.data_ptr() == storage
+    torch.testing.assert_close(inplace, sparse)
+    inplace.square().mean().backward()
+    assert selected_leaf.grad is not None
+
+
+def test_sparse_logit_bias_preserves_bfloat16_destination_dtype():
+    lmb = _make_lmb(layer_sites=[0])
+    ids = _repeat_ids(1, T)
+    lmb.set_input_ids(ids)
+    assert lmb.ensure_features()
+    with torch.no_grad():
+        lmb.logit_scale.fill_(1.0)
+    batch = torch.tensor([0, 0])
+    positions = torch.tensor([T - 2, T - 1])
+    logits = torch.randn(2, V, dtype=torch.bfloat16)
+    result = lmb.logit_bias_at(logits.clone(), batch, positions, inplace=True)
+    assert result.dtype == torch.bfloat16
 
 
 def test_recall_telemetry():

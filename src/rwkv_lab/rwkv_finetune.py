@@ -20,16 +20,45 @@ import torch.nn.functional as F
 
 
 # ---- faithful BlinkDL g070 -> fla RWKV7 loader (transpose-correct remap) ----
-def load_g1g_fla(path, n_layers=24, hidden=2048, n_heads=32, head_dim=64,
-                 decay_r=96, a_r=96, v_r=64, gate_r=256, vocab=65536, inter=8192,
+def infer_g1_layout(state_dict: dict[str, torch.Tensor], *, head_dim: int = 64) -> dict[str, int]:
+    """Infer a BlinkDL G1 checkpoint's architecture from its native tensors."""
+    hidden = state_dict["emb.weight"].shape[1]
+    layers = 1 + max(int(key.split(".")[1]) for key in state_dict if key.startswith("blocks."))
+    if hidden % head_dim:
+        raise ValueError(f"hidden size {hidden} is not divisible by RWKV head size {head_dim}")
+    return {
+        "n_layers": layers, "hidden": hidden, "n_heads": hidden // head_dim, "head_dim": head_dim,
+        "decay_r": state_dict["blocks.0.att.w1"].shape[1],
+        "a_r": state_dict["blocks.0.att.a1"].shape[1],
+        "v_r": state_dict["blocks.0.att.v1"].shape[1],
+        "gate_r": state_dict["blocks.0.att.g1"].shape[1],
+        "vocab": state_dict["emb.weight"].shape[0],
+        "inter": state_dict["blocks.0.ffn.key.weight"].shape[0],
+    }
+
+
+def load_g1g_fla(path, n_layers=None, hidden=None, n_heads=None, head_dim=64,
+                 decay_r=None, a_r=None, v_r=None, gate_r=None, vocab=None, inter=None,
                  device="cuda", dtype=torch.bfloat16):
     from fla.models.rwkv7 import RWKV7Config, RWKV7ForCausalLM
+    from transformers.modeling_utils import no_init_weights
     sd = torch.load(path, map_location="cpu", weights_only=True)
+    inferred = infer_g1_layout(sd, head_dim=head_dim)
+    n_layers = n_layers or inferred["n_layers"]; hidden = hidden or inferred["hidden"]
+    n_heads = n_heads or inferred["n_heads"]; decay_r = decay_r or inferred["decay_r"]
+    a_r = a_r or inferred["a_r"]; v_r = v_r or inferred["v_r"]; gate_r = gate_r or inferred["gate_r"]
+    vocab = vocab or inferred["vocab"]; inter = inter or inferred["inter"]
     cfg = RWKV7Config(hidden_size=hidden, num_hidden_layers=n_layers, num_heads=n_heads,
                       head_dim=head_dim, decay_low_rank_dim=decay_r, a_low_rank_dim=a_r,
                       v_low_rank_dim=v_r, gate_low_rank_dim=gate_r, vocab_size=vocab,
                       intermediate_size=inter, norm_bias=True, attn=None, fuse_norm=False)
-    m = RWKV7ForCausalLM(cfg); tgt = m.state_dict()
+    # Every parameter is replaced below. FLA's default construction performs
+    # costly orthogonal/random initialization of the entire multi-billion-
+    # parameter model; skipping it cuts recovery startup without changing a
+    # single loaded value.
+    with no_init_weights():
+        m = RWKV7ForCausalLM(cfg)
+    tgt = m.state_dict()
 
     def put(k, v):
         assert k in tgt and tgt[k].numel() == v.numel(), f"{k}: {tuple(tgt[k].shape)} vs {tuple(v.shape)}"
@@ -62,6 +91,7 @@ def load_g1g_fla(path, n_layers=24, hidden=2048, n_heads=32, head_dim=64,
         put(f"{l}.ffn.value.weight", sd[f"{b}.ffn.value.weight"])
     info = m.load_state_dict(tgt, strict=False)
     assert not info.missing_keys and not info.unexpected_keys, (info.missing_keys[:4], info.unexpected_keys[:4])
+    m.g1_layout = inferred
     return m.to(device, dtype)
 
 
@@ -129,7 +159,7 @@ def main():
     # Fixed, evenly-spaced val windows: deterministic evals that never touch the training RNG.
     val_offsets = np.linspace(0, len(val_toks) - (T + 1), args.val_windows).astype(np.int64)
     print(f"tokens: {len(toks)/1e6:.1f}M  (val {len(val_toks)}, train {len(train_toks)/1e6:.1f}M)", flush=True)
-    json.dump({"loop_count": 1, "n_layers": 24, "mode": f"g1g-ft-{args.optimizer}"},
+    json.dump({"loop_count": 1, "n_layers": model.config.num_hidden_layers, "mode": f"g1-ft-{args.optimizer}"},
               open(os.path.join(args.out, "loop_rw.json"), "w"))
 
     def batch(src, n):

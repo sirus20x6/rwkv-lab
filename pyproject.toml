@@ -34,6 +34,16 @@ full = [
     "schedulefree>=1.4.1",
     "pynvml>=11.5",
     "psutil>=6.0",
+    "pillow>=10",
+    "imagehash>=4.3",
+    "requests>=2.31",
+]
+vision = [
+    "datasets>=2.20",  # includes PyArrow for embedded-image Parquet corpora
+    "huggingface_hub>=0.25",
+    "pillow>=10",
+    "imagehash>=4.3",
+    "requests>=2.31",
 ]
 test = [
     "pytest>=8",

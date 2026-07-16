@@ -362,7 +362,9 @@ class LoopedRWKV(nn.Module):
                 g = g * (1.0 + self.gate_chan[i])
         if self.gate_cap > 0.0:
             g = self.gate_cap * torch.tanh(g / self.gate_cap)  # tanh(0)=0 keeps the init no-op
-        return g
+        # Trainers may ramp newly enabled recurrence from an exact no-op.  This
+        # is runtime state derived from the global step, not a learned tensor.
+        return g * float(getattr(self, "runtime_scale", 1.0))
 
     @torch.no_grad()
     def effective_rw(self):
