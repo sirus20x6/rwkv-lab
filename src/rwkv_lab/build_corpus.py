@@ -15,7 +15,8 @@ import argparse, glob, hashlib, json, os, random, subprocess, tempfile
 import numpy as np
 
 ZTOK = os.environ.get("ZTOK", "/thearray/git/ztok/zig-out/bin/ztok")
-VOCAB = os.environ.get("VOCAB", "/thearray/git/ztok/bench/vocabs/rwkv_vocab_v20230424.txt")
+_VENDORED_VOCAB = os.path.join(os.path.dirname(__file__), "assets", "rwkv_vocab_v20230424.txt")
+VOCAB = os.environ.get("VOCAB", _VENDORED_VOCAB)
 SEP_TOKEN = 1                                    # "\x00" tokenizes to World token 1
 
 

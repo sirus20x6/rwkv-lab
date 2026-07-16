@@ -28,7 +28,8 @@ import time
 import torch
 
 ZTOK = os.environ.get("ZTOK", "/thearray/git/ztok/zig-out/bin/ztok")
-VOCAB = os.environ.get("VOCAB", "/thearray/git/ztok/bench/vocabs/rwkv_vocab_v20230424.txt")
+_VENDORED_VOCAB = os.path.join(os.path.dirname(__file__), "assets", "rwkv_vocab_v20230424.txt")
+VOCAB = os.environ.get("VOCAB", _VENDORED_VOCAB)
 SEP = 1                                          # '\x00' — the corpus doc separator (EOD)
 
 
