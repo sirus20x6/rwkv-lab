@@ -2,6 +2,19 @@ package db
 
 import "database/sql"
 
+const runSummarySelect = `SELECT r.id, r.name, COALESCE(r.last_update_ts,0), COALESCE(r.tags_json,'[]'),
+	COALESCE(x.n_train,0), COALESCE(x.n_eval,0), COALESCE(x.n_ckpt,0),
+	x.latest_train_step, x.latest_train_loss, x.latest_eval_step,
+	x.latest_eval_ppl, x.latest_eval_top1, x.best_ppl, x.best_top1,
+	(SELECT e.step FROM eval_events e WHERE e.run_id=r.id AND e.ppl IS NOT NULL
+	 ORDER BY e.ppl ASC, e.step ASC LIMIT 1),
+	COALESCE(x.has_horizons,0)
+	FROM runs r LEFT JOIN run_rollups x ON x.run_id=r.id`
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
 // RunSummary is one row in the sidebar run list.
 type RunSummary struct {
 	ID           int64    `json:"-"`
@@ -26,14 +39,7 @@ type RunSummary struct {
 // query. Status here is purely log-age derived; the caller can promote a run to
 // "healthy" when a live process is attached.
 func (d *DB) RunSummaries(nowTs float64) ([]RunSummary, error) {
-	rows, err := d.Query(`SELECT r.id, r.name, COALESCE(r.last_update_ts,0), COALESCE(r.tags_json,'[]'),
-		COALESCE(x.n_train,0), COALESCE(x.n_eval,0), COALESCE(x.n_ckpt,0),
-		x.latest_train_step, x.latest_train_loss, x.latest_eval_step,
-		x.latest_eval_ppl, x.latest_eval_top1, x.best_ppl, x.best_top1,
-		(SELECT e.step FROM eval_events e WHERE e.run_id=r.id AND e.ppl IS NOT NULL
-		 ORDER BY e.ppl ASC, e.step ASC LIMIT 1),
-		COALESCE(x.has_horizons,0)
-		FROM runs r LEFT JOIN run_rollups x ON x.run_id=r.id`)
+	rows, err := d.Query(runSummarySelect)
 	if err != nil {
 		return nil, err
 	}
@@ -41,57 +47,11 @@ func (d *DB) RunSummaries(nowTs float64) ([]RunSummary, error) {
 
 	var order []*RunSummary
 	for rows.Next() {
-		s := &RunSummary{}
-		var trainStep, evalStep, bestPPLStep sql.NullInt64
-		var trainLoss, evalPPL, evalTop1, bestPPL, bestTop1 sql.NullFloat64
-		var hasHorizons int
-		if err := rows.Scan(&s.ID, &s.Name, &s.LastUpdateTs, &s.TagsJSON,
-			&s.NTrain, &s.NEval, &s.NCkpt, &trainStep, &trainLoss, &evalStep,
-			&evalPPL, &evalTop1, &bestPPL, &bestTop1, &bestPPLStep, &hasHorizons); err != nil {
+		s, err := scanRunSummary(rows, nowTs)
+		if err != nil {
 			return nil, err
 		}
-		if trainStep.Valid {
-			v := trainStep.Int64
-			s.LatestStep = &v
-		}
-		if trainLoss.Valid {
-			v := trainLoss.Float64
-			s.LatestLoss = &v
-		}
-		if evalStep.Valid && (s.LatestStep == nil || evalStep.Int64 > *s.LatestStep) {
-			v := evalStep.Int64
-			s.LatestStep = &v
-		}
-		if evalPPL.Valid {
-			v := evalPPL.Float64
-			s.LatestPPL = &v
-		}
-		if evalTop1.Valid {
-			v := evalTop1.Float64
-			s.LatestTop1 = &v
-		}
-		if bestPPL.Valid {
-			v := bestPPL.Float64
-			s.BestPPL = &v
-		}
-		if bestPPLStep.Valid {
-			v := bestPPLStep.Int64
-			s.BestPPLStep = &v
-		}
-		if bestTop1.Valid {
-			v := bestTop1.Float64
-			s.BestTop1 = &v
-		}
-		s.HasHorizons = hasHorizons != 0
-		switch age := nowTs - s.LastUpdateTs; {
-		case age < 300:
-			s.Status = "healthy"
-		case age < 900:
-			s.Status = "stalling"
-		default:
-			s.Status = "cold"
-		}
-		order = append(order, s)
+		order = append(order, &s)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -102,6 +62,74 @@ func (d *DB) RunSummaries(nowTs float64) ([]RunSummary, error) {
 		out = append(out, *s)
 	}
 	return out, nil
+}
+
+// RunSummaryByName returns one run's rollup through the unique runs.name index.
+// It is the per-browser live-refresh path, so it must not scan every run once
+// per browser per second like RunSummaries does for the shared tick cache.
+func (d *DB) RunSummaryByName(name string, nowTs float64) (RunSummary, bool, error) {
+	s, err := scanRunSummary(d.QueryRow(runSummarySelect+` WHERE r.name=?`, name), nowTs)
+	if err == sql.ErrNoRows {
+		return RunSummary{}, false, nil
+	}
+	if err != nil {
+		return RunSummary{}, false, err
+	}
+	return s, true, nil
+}
+
+func scanRunSummary(row rowScanner, nowTs float64) (RunSummary, error) {
+	s := RunSummary{}
+	var trainStep, evalStep, bestPPLStep sql.NullInt64
+	var trainLoss, evalPPL, evalTop1, bestPPL, bestTop1 sql.NullFloat64
+	var hasHorizons int
+	if err := row.Scan(&s.ID, &s.Name, &s.LastUpdateTs, &s.TagsJSON,
+		&s.NTrain, &s.NEval, &s.NCkpt, &trainStep, &trainLoss, &evalStep,
+		&evalPPL, &evalTop1, &bestPPL, &bestTop1, &bestPPLStep, &hasHorizons); err != nil {
+		return RunSummary{}, err
+	}
+	if trainStep.Valid {
+		v := trainStep.Int64
+		s.LatestStep = &v
+	}
+	if trainLoss.Valid {
+		v := trainLoss.Float64
+		s.LatestLoss = &v
+	}
+	if evalStep.Valid && (s.LatestStep == nil || evalStep.Int64 > *s.LatestStep) {
+		v := evalStep.Int64
+		s.LatestStep = &v
+	}
+	if evalPPL.Valid {
+		v := evalPPL.Float64
+		s.LatestPPL = &v
+	}
+	if evalTop1.Valid {
+		v := evalTop1.Float64
+		s.LatestTop1 = &v
+	}
+	if bestPPL.Valid {
+		v := bestPPL.Float64
+		s.BestPPL = &v
+	}
+	if bestPPLStep.Valid {
+		v := bestPPLStep.Int64
+		s.BestPPLStep = &v
+	}
+	if bestTop1.Valid {
+		v := bestTop1.Float64
+		s.BestTop1 = &v
+	}
+	s.HasHorizons = hasHorizons != 0
+	switch age := nowTs - s.LastUpdateTs; {
+	case age < 300:
+		s.Status = "healthy"
+	case age < 900:
+		s.Status = "stalling"
+	default:
+		s.Status = "cold"
+	}
+	return s, nil
 }
 
 // LatestCodecRelByRun returns the newest non-null codec metric for every run in
@@ -246,22 +274,27 @@ func (d *DB) scanBestEval(byID map[int64]*RunSummary) error {
 
 // RunKPIs is the selected-run KPI strip payload.
 type RunKPIs struct {
-	Step         *int64   `json:"step"`
-	Loss         *float64 `json:"loss"`
-	PPL          *float64 `json:"ppl"`
-	BestPPL      *float64 `json:"best_ppl"`
-	BestPPLStep  *int64   `json:"best_ppl_step"`
-	Top1         *float64 `json:"top1"`
-	BestTop1     *float64 `json:"best_top1"`
-	BestTop1Step *int64   `json:"best_top1_step"`
-	BestLoss     *float64 `json:"best_loss"`
-	BestLossStep *int64   `json:"best_loss_step"`
-	Toks         *float64 `json:"toks"`
-	LR           *float64 `json:"lr"`
-	Gnorm        *float64 `json:"gnorm"`
-	NTrain       int      `json:"n_train"`
-	NEval        int      `json:"n_eval"`
-	NCkpt        int      `json:"n_ckpt"`
+	Step               *int64   `json:"step"`
+	Loss               *float64 `json:"loss"`
+	PPL                *float64 `json:"ppl"`
+	CaptionPPL         *float64 `json:"caption_ppl"`
+	OCRPPL             *float64 `json:"ocr_ppl"`
+	StructuredPPL      *float64 `json:"structured_ppl"`
+	StructuredBoxIoU   *float64 `json:"structured_box_iou"`
+	StructuredMaskDice *float64 `json:"structured_mask_dice"`
+	BestPPL            *float64 `json:"best_ppl"`
+	BestPPLStep        *int64   `json:"best_ppl_step"`
+	Top1               *float64 `json:"top1"`
+	BestTop1           *float64 `json:"best_top1"`
+	BestTop1Step       *int64   `json:"best_top1_step"`
+	BestLoss           *float64 `json:"best_loss"`
+	BestLossStep       *int64   `json:"best_loss_step"`
+	Toks               *float64 `json:"toks"`
+	LR                 *float64 `json:"lr"`
+	Gnorm              *float64 `json:"gnorm"`
+	NTrain             int      `json:"n_train"`
+	NEval              int      `json:"n_eval"`
+	NCkpt              int      `json:"n_ckpt"`
 }
 
 // RunKPIsByName computes the KPI strip for one run (a few quick single-run queries).
@@ -299,9 +332,17 @@ func (d *DB) RunKPIsByName(name string) (RunKPIs, bool, error) {
 
 	// latest eval: ppl, top1 (and promote step)
 	var estep sql.NullInt64
-	var ppl, top1 sql.NullFloat64
-	_ = d.QueryRow(`SELECT step, ppl, top1 FROM eval_events WHERE run_id=? ORDER BY step DESC LIMIT 1`, rid).
-		Scan(&estep, &ppl, &top1)
+	var ppl, top1, captionPPL, ocrPPL, structuredPPL sql.NullFloat64
+	var structuredBoxIoU, structuredMaskDice sql.NullFloat64
+	_ = d.QueryRow(`SELECT step, ppl, top1,
+		json_extract(extra_json,'$.caption_ppl'),
+		json_extract(extra_json,'$.ocr_ppl'),
+		json_extract(extra_json,'$.structured_ppl'),
+		json_extract(extra_json,'$.structured_box_iou'),
+		json_extract(extra_json,'$.structured_mask_dice')
+		FROM eval_events WHERE run_id=? ORDER BY step DESC LIMIT 1`, rid).
+		Scan(&estep, &ppl, &top1, &captionPPL, &ocrPPL, &structuredPPL,
+			&structuredBoxIoU, &structuredMaskDice)
 	if estep.Valid && (k.Step == nil || estep.Int64 > *k.Step) {
 		k.Step = &estep.Int64
 	}
@@ -310,6 +351,21 @@ func (d *DB) RunKPIsByName(name string) (RunKPIs, bool, error) {
 	}
 	if top1.Valid {
 		k.Top1 = &top1.Float64
+	}
+	if captionPPL.Valid {
+		k.CaptionPPL = &captionPPL.Float64
+	}
+	if ocrPPL.Valid {
+		k.OCRPPL = &ocrPPL.Float64
+	}
+	if structuredPPL.Valid {
+		k.StructuredPPL = &structuredPPL.Float64
+	}
+	if structuredBoxIoU.Valid {
+		k.StructuredBoxIoU = &structuredBoxIoU.Float64
+	}
+	if structuredMaskDice.Valid {
+		k.StructuredMaskDice = &structuredMaskDice.Float64
 	}
 
 	// best ppl (min) + its step

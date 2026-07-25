@@ -109,6 +109,7 @@ func (d *Detector) scan() {
 			names = append(names, p.RunName)
 		}
 	}
+	_ = d.db.ResolveInactiveStalls(names)
 	statsByRun, err := d.db.RecentTrainStatsByName(names, 50)
 	if err != nil {
 		return
@@ -154,7 +155,12 @@ func (d *Detector) checkStall(p sysmon.Proc, step int64) {
 	if p.LogAgeS != nil && *p.LogAgeS > stallSeconds {
 		d.raise(p, "stall", "warn", step,
 			fmt.Sprintf("no log update for %.0fs while process alive (possible hang)", *p.LogAgeS))
+		return
 	}
+	// Stall alerts describe a live condition, not a permanent warning. Once the
+	// same trainer resumes appending, retire its banner entry automatically; the
+	// historical event remains available in the run timeline.
+	_ = d.db.ResolveAlerts(p.RunName, "stall")
 }
 
 // noteMonitoringGate makes fail-closed monitoring failures visible. A malformed

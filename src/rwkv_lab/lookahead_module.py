@@ -579,7 +579,7 @@ class LookaheadSystem(nn.Module):
                              chunk=self.top_chunk)
             total = total + self.top_weight * l_top
             out["top"] = float(l_top)
-        if self.lmtp is not None and lm_head is not None:
+        if self.lmtp is not None and lm_head is not None and self.lmtp_weight > 0.0:
             l_lmtp = lmtp_loss(self.lmtp, h_final, ids_full, lm_head, chunk=self.top_chunk)
             total = total + self.lmtp_weight * l_lmtp
             out["lmtp"] = float(l_lmtp)

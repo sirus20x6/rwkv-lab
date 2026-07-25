@@ -47,6 +47,7 @@ from rwkv_lab.vision_train import (EpochBatchSampler, _BoundedFeatureCache,
                                    cached_features, load_examples, preload_feature_cache,
                                    image_metadata_fingerprint,
                                    filter_eval_sample_indices, prepare_examples,
+                                   qualitative_eval_due,
                                    select_eval_sample_indices,
                                    split_examples, supervised_positions,
                                    write_eval_samples)
@@ -223,6 +224,13 @@ def test_loop_runtime_scale_starts_small_and_saturates():
     assert _loop_runtime_scale(250, start_step=250, ramp_steps=1000) == 0.001
     assert _loop_runtime_scale(1249, start_step=250, ramp_steps=1000) == 1.0
     assert _loop_runtime_scale(250, start_step=250, ramp_steps=0) == 1.0
+
+
+def test_qualitative_eval_can_run_less_often_than_scalar_eval():
+    assert qualitative_eval_due(100, eval_every=100, sample_every=0)
+    assert not qualitative_eval_due(100, eval_every=100, sample_every=500)
+    assert qualitative_eval_due(500, eval_every=100, sample_every=500)
+    assert not qualitative_eval_due(0, eval_every=100, sample_every=500)
 
 
 def test_nonfinite_metrics_are_rejected_before_logging_or_checkpointing():
@@ -526,6 +534,8 @@ def test_manifest_loader_requires_a_real_image_and_caption(tmp_path: Path):
     ]))
     rows = load_examples(path, root=tmp_path)
     assert len(rows) == 1 and rows[0]["image"] == image
+    with pytest.raises(ValueError, match="missing/unreadable images"):
+        load_examples(path, root=tmp_path, require_all=True)
 
 
 def test_image_metadata_fingerprint_detects_replaced_training_input(tmp_path: Path):

@@ -10,7 +10,7 @@ The intended deployment contract is:
 
 ```text
 input:   image pixels
-output:  [batch, 128 visual tokens, 2560 channels]
+output:  [batch, 64 visual tokens, 2560 channels]
 dtype:   bfloat16
 meaning: continuous visual pseudo-token embeddings, not text-token IDs
 ```
@@ -104,10 +104,12 @@ teacher streams into a fixed latent array. The initial conservative target is:
 canonical core: [batch, 128, 1024]
 ```
 
-This retains the current 128-token spatial budget while reducing channel
-width. A learned output expansion can produce `[batch, 128, 2560]` for the
-captioner. Ablations can later test 96 or 64 tokens, but the first version
-should prioritize retention over maximum compression.
+This retains a 128-token spatial supervision budget while reducing channel
+width. A learned output expansion and pairwise spatial reduction produces
+`[batch, 64, 2560]` for the existing frozen captioner, whose trained visual
+prefix contract is 64 tokens. The unreduced canonical target remains
+`[batch, 128, 1024]`, so a later 128-token caption contract does not require
+regenerating teacher targets.
 
 The compressor should be approximately 40–100M parameters, not another
 foundation-sized vision tower.
@@ -132,9 +134,10 @@ reasonable initial student is a bidirectional/multi-directional spatial
 Vision-RWKV with:
 
 - MoonViT-compatible aspect-preserving patchification;
-- internal width between 768 and 1,152;
+- internal width between 768 and 2,048, depending on the parameter target;
 - 12–27 spatial RWKV blocks, depending on the parameter target;
-- a native final output of 128 tokens by 2,560 channels.
+- a 128-token canonical prediction head and native final output of 64 tokens
+  by 2,560 channels for the current frozen caption RWKV.
 
 The final 2,560-channel layer is part of the vision model's native interface,
 not a separately deployed compatibility adapter. Making every internal layer
@@ -220,12 +223,20 @@ The reconstruction and caption losses should remain active after latent loss
 converges so the student does not merely reproduce easy low-frequency latent
 structure.
 
+The implemented first student is a 1.222B-parameter, 26-layer, 2,048-wide
+spatial RWKV. It letterboxes raw 512-pixel images without changing aspect
+ratio, forms a 16-by-16 patch grid, and alternates row-forward, row-backward,
+column-forward, and column-backward RWKV scans. The teachers and 54M compressor
+are frozen and training-only; deployment consumes raw pixels and requires only
+the student plus the frozen caption RWKV. The operational entry point is
+`scripts/run_vision_rwkv_student.sh`.
+
 ### Phase 4: Consolidate adapters into RWKV
 
 Use the completed multimodal model as a teacher while progressively removing
 the current internal vision adapters:
 
-1. Feed the student's native `[B, 128, 2560]` tokens directly to RWKV.
+1. Feed the student's native `[B, 64, 2560]` tokens directly to RWKV.
 2. Unfreeze RWKV at a low learning rate.
 3. Anneal deep-vision, layer-matching, and fusion-adapter contributions toward
    zero.

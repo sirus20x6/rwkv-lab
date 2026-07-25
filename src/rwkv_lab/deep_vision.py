@@ -120,6 +120,14 @@ class DeepVisionInjector(nn.Module):
             return torch.stack(list(self._last_rms.values())).square().mean().sqrt()
         return next(self.parameters()).new_zeros((), dtype=torch.float32)
 
+    def injection_rms_by_layer(self) -> dict[int, torch.Tensor]:
+        """Return per-site telemetry without synchronizing it to the host."""
+        zero = next(self.parameters()).new_zeros((), dtype=torch.float32)
+        return {
+            index: self._last_rms.get(str(index), zero)
+            for index in self.layer_indices
+        }
+
     def close(self) -> None:
         for handle in self._handles:
             handle.remove()

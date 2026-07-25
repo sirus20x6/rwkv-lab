@@ -13,7 +13,7 @@ Optimizer levers attach directly (model-agnostic). Loop/objective levers need ou
         --optimizer spectral_muon --sm-rsav 1 --minutes 10 --out runs/g1g_rsav
 """
 from __future__ import annotations
-import argparse, json, math, os, time
+import argparse, contextlib, json, math, os, sys, time
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -37,27 +37,59 @@ def infer_g1_layout(state_dict: dict[str, torch.Tensor], *, head_dim: int = 64) 
     }
 
 
+@contextlib.contextmanager
+def _flash_attn_2_reported_unavailable():
+    """Temporarily report flash-attn 2 as absent, everywhere it is already bound.
+
+    FLA uses Triton linear-attention kernels; Transformers may still eagerly
+    import the unrelated flash_attn_2_cuda extension, whose C++ ABI can be stale
+    after a host PyTorch upgrade. Patching only `transformers.utils` misses every
+    module that already did `from ... import is_flash_attn_2_available`, and
+    leaving the patch installed changes behavior for unrelated code later in the
+    process. Rebind each existing reference and restore all of them on exit.
+    """
+    import transformers  # noqa: F401 - ensure the package is imported
+
+    targets = []
+    for module in list(sys.modules.values()):
+        existing = getattr(module, "is_flash_attn_2_available", None)
+        if callable(existing) and getattr(
+                module, "__name__", "").startswith(("transformers", "fla")):
+            targets.append((module, existing))
+    for module, _ in targets:
+        module.is_flash_attn_2_available = lambda: False
+    try:
+        yield
+    finally:
+        for module, existing in targets:
+            module.is_flash_attn_2_available = existing
+
+
 def load_g1g_fla(path, n_layers=None, hidden=None, n_heads=None, head_dim=64,
                  decay_r=None, a_r=None, v_r=None, gate_r=None, vocab=None, inter=None,
                  device="cuda", dtype=torch.bfloat16):
-    from fla.models.rwkv7 import RWKV7Config, RWKV7ForCausalLM
-    from transformers.modeling_utils import no_init_weights
-    sd = torch.load(path, map_location="cpu", weights_only=True)
-    inferred = infer_g1_layout(sd, head_dim=head_dim)
-    n_layers = n_layers or inferred["n_layers"]; hidden = hidden or inferred["hidden"]
-    n_heads = n_heads or inferred["n_heads"]; decay_r = decay_r or inferred["decay_r"]
-    a_r = a_r or inferred["a_r"]; v_r = v_r or inferred["v_r"]; gate_r = gate_r or inferred["gate_r"]
-    vocab = vocab or inferred["vocab"]; inter = inter or inferred["inter"]
-    cfg = RWKV7Config(hidden_size=hidden, num_hidden_layers=n_layers, num_heads=n_heads,
-                      head_dim=head_dim, decay_low_rank_dim=decay_r, a_low_rank_dim=a_r,
-                      v_low_rank_dim=v_r, gate_low_rank_dim=gate_r, vocab_size=vocab,
-                      intermediate_size=inter, norm_bias=True, attn=None, fuse_norm=False)
-    # Every parameter is replaced below. FLA's default construction performs
-    # costly orthogonal/random initialization of the entire multi-billion-
-    # parameter model; skipping it cuts recovery startup without changing a
-    # single loaded value.
-    with no_init_weights():
-        m = RWKV7ForCausalLM(cfg)
+    # The guard must stay active through model construction, not just the
+    # imports: Transformers resolves its attention implementation inside
+    # PreTrainedModel.__init__.
+    with _flash_attn_2_reported_unavailable():
+        from fla.models.rwkv7 import RWKV7Config, RWKV7ForCausalLM
+        from transformers.modeling_utils import no_init_weights
+        sd = torch.load(path, map_location="cpu", weights_only=True)
+        inferred = infer_g1_layout(sd, head_dim=head_dim)
+        n_layers = n_layers or inferred["n_layers"]; hidden = hidden or inferred["hidden"]
+        n_heads = n_heads or inferred["n_heads"]; decay_r = decay_r or inferred["decay_r"]
+        a_r = a_r or inferred["a_r"]; v_r = v_r or inferred["v_r"]; gate_r = gate_r or inferred["gate_r"]
+        vocab = vocab or inferred["vocab"]; inter = inter or inferred["inter"]
+        cfg = RWKV7Config(hidden_size=hidden, num_hidden_layers=n_layers, num_heads=n_heads,
+                          head_dim=head_dim, decay_low_rank_dim=decay_r, a_low_rank_dim=a_r,
+                          v_low_rank_dim=v_r, gate_low_rank_dim=gate_r, vocab_size=vocab,
+                          intermediate_size=inter, norm_bias=True, attn=None, fuse_norm=False)
+        # Every parameter is replaced below. FLA's default construction performs
+        # costly orthogonal/random initialization of the entire multi-billion-
+        # parameter model; skipping it cuts recovery startup without changing a
+        # single loaded value.
+        with no_init_weights():
+            m = RWKV7ForCausalLM(cfg)
     tgt = m.state_dict()
 
     def put(k, v):

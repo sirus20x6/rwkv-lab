@@ -137,7 +137,13 @@ func (s *Server) gcTabsLocked() {
 func (s *Server) routes() {
 	// Static assets under /static/. http.FileServerFS serves the embedded FS.
 	fileServer := http.FileServerFS(s.cfg.Static)
-	s.mux.Handle("GET /static/", http.StripPrefix("/static/", fileServer))
+	staticHandler := http.StripPrefix("/static/", fileServer)
+	s.mux.Handle("GET /static/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The dashboard is a live control surface, not a versioned web app. Keep
+		// old tabs from mixing a cached JS client with a newly restarted server.
+		w.Header().Set("Cache-Control", "no-store")
+		staticHandler.ServeHTTP(w, r)
+	}))
 
 	// App shell.
 	s.mux.HandleFunc("GET /{$}", s.handleIndex)
@@ -152,6 +158,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/stream", s.handleStream)
 	// Select a run for the detail panel (one-shot SSE).
 	s.mux.HandleFunc("GET /api/run/{name}", s.handleRunSelect)
+	// Lightweight authoritative selected-run refresh. The browser polls this in
+	// addition to SSE so a suspended/reconnected stream cannot leave headline
+	// eval metrics stale while charts continue updating.
+	s.mux.HandleFunc("GET /api/runs/{name}/live", s.handleRunLive)
 	// Columnar metric series for the Pixi charts.
 	s.mux.HandleFunc("GET /api/series/{run}", s.handleSeries)
 	// Timeline markers (checkpoints/alerts/controls/actions) for chart overlays.
@@ -159,6 +169,7 @@ func (s *Server) routes() {
 	// Metric catalog (known cols + extra_json keys) for the dynamic metric picker.
 	s.mux.HandleFunc("GET /api/metrics/{run}", s.handleMetrics)
 	// Qualitative image/reference/generated-caption snapshot for an eval point.
+	s.mux.HandleFunc("GET /api/runs/{name}/eval-samples/latest", s.handleLatestEvalSamples)
 	s.mux.HandleFunc("GET /api/runs/{name}/eval-samples/{step}", s.handleEvalSamples)
 	s.mux.HandleFunc("GET /api/runs/{name}/eval-samples/{step}/image/{index}", s.handleEvalSampleImage)
 
@@ -208,6 +219,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(data)
 }
 

@@ -252,31 +252,36 @@ func renderLoopRWSplit(b *strings.Builder, sp *LoopRWSplit) {
 	fmt.Fprintf(b, `<div class="looprw-split"><div class="lrw-split-meta">heads %d x %d ch · channel buckets %d</div>`,
 		sp.Heads, sp.ChPerHead, sp.ChannelBuckets)
 	for i := range sp.HeadAbs {
-		renderLoopRWHeat(b, fmt.Sprintf("p%d H", i+1), sp.HeadAbs[i])
+		renderLoopRWSummary(b, fmt.Sprintf("p%d heads", i+1), sp.HeadAbs[i])
 		if i < len(sp.ChannelAbs) {
-			renderLoopRWHeat(b, fmt.Sprintf("p%d C", i+1), sp.ChannelAbs[i])
+			renderLoopRWSummary(b, fmt.Sprintf("p%d channels", i+1), sp.ChannelAbs[i])
 		}
 	}
 	b.WriteString(`</div>`)
 }
 
-func renderLoopRWHeat(b *strings.Builder, label string, vals []float64) {
+func renderLoopRWSummary(b *strings.Builder, label string, vals []float64) {
 	if len(vals) == 0 {
 		return
 	}
-	fmt.Fprintf(b, `<div class="lrw-heat-row"><span class="lrw-heat-label">%s</span><span class="lrw-heat">`,
-		html.EscapeString(label))
+	mean, maximum, active := 0.0, 0.0, 0
 	for _, v := range vals {
-		pct := v / 0.30
-		if pct > 1 {
-			pct = 1
+		if v < 0 {
+			v = -v
 		}
-		if pct < 0 {
-			pct = 0
+		mean += v
+		if v > maximum {
+			maximum = v
 		}
-		fmt.Fprintf(b, `<i style="opacity:%.3f" title="%.4f"></i>`, 0.18+0.82*pct, v)
+		if v >= 1e-4 {
+			active++
+		}
 	}
-	b.WriteString(`</span></div>`)
+	mean /= float64(len(vals))
+	fmt.Fprintf(b,
+		`<div class="lrw-split-meta">%s · mean %.4f · max %.4f · active %.0f%%</div>`,
+		html.EscapeString(label), mean, maximum,
+		100*float64(active)/float64(len(vals)))
 }
 
 // emptyLoopRW hides the panel when a run has no loop_rw.json.

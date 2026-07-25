@@ -14,6 +14,36 @@ import (
 
 const streamInterval = time.Second
 
+type streamPatchStamp struct {
+	html string
+	at   time.Time
+}
+
+// streamPatchState is connection-local. Datastar morphing an unchanged region
+// still parses all of its HTML and walks its DOM; the loop heatmap alone can be
+// thousands of nodes. Suppress identical patches and rate-limit large sidebar
+// churn while preserving the one-second scalar signal cadence.
+type streamPatchState struct {
+	patches map[string]streamPatchStamp
+}
+
+func newStreamPatchState() *streamPatchState {
+	return &streamPatchState{patches: make(map[string]streamPatchStamp)}
+}
+
+func (s *streamPatchState) shouldPatch(key, html string, now time.Time,
+	minimumInterval time.Duration) bool {
+	previous, exists := s.patches[key]
+	if exists && previous.html == html {
+		return false
+	}
+	if exists && minimumInterval > 0 && now.Sub(previous.at) < minimumInterval {
+		return false
+	}
+	s.patches[key] = streamPatchStamp{html: html, at: now}
+	return true
+}
+
 // handleStream is the long-lived Datastar SSE: it pushes the system header, the
 // sidebar run list, and the selected run's header + KPI signals every second.
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
@@ -26,7 +56,8 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	tabID := sig.TabID
 
 	sse := datastar.NewSSE(w, r)
-	s.pushTick(sse, tabID) // immediate first paint
+	patches := newStreamPatchState()
+	s.pushTick(sse, tabID, patches) // immediate first paint
 	t := time.NewTicker(streamInterval)
 	defer t.Stop()
 	for {
@@ -37,7 +68,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 			if sse.IsClosed() {
 				return
 			}
-			s.pushTick(sse, tabID)
+			s.pushTick(sse, tabID, patches)
 		}
 	}
 }
@@ -46,30 +77,38 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 // (system header, run list, alerts, conv map, queue) comes from the global
 // once-per-second snapshot — the only per-connection DB work is the small
 // selected-run queries, so N open tabs no longer multiply the heavy aggregates.
-func (s *Server) pushTick(sse *datastar.ServerSentEventGenerator, tabID string) {
+func (s *Server) pushTick(sse *datastar.ServerSentEventGenerator, tabID string,
+	patches *streamPatchState) {
 	snap := s.latestTick()
 	if snap == nil {
 		return // refreshLoop hasn't produced the first snapshot yet
 	}
 
-	// System header (morph each element by id).
-	_ = sse.PatchElements(snap.sysGPUs)
-	_ = sse.PatchElements(snap.sysHost)
-	_ = sse.PatchElements(snap.sysProc)
-	// Sidebar run list.
-	_ = sse.PatchElements(snap.runList)
+	now := time.Now()
+	patch := func(key, html string, minimumInterval time.Duration) {
+		if patches.shouldPatch(key, html, now, minimumInterval) {
+			_ = sse.PatchElements(html)
+		}
+	}
+
+	// Small telemetry regions may change every second. The full run list embeds
+	// status for every historical run and is intentionally capped at 5 seconds.
+	patch("sys-gpus", snap.sysGPUs, 0)
+	patch("sys-host", snap.sysHost, 0)
+	patch("sys-proc", snap.sysProc, 0)
+	patch("run-list", snap.runList, 15*time.Second)
 	// Global alerts banner (+ auto-stop toggle).
 	if snap.alerts != "" {
-		_ = sse.PatchElements(snap.alerts)
+		patch("alerts", snap.alerts, 0)
 	}
 	// Whole-model conversion map.
-	_ = sse.PatchElements(snap.conv)
+	patch("conv", snap.conv, 0)
 	// Launch queue.
 	if snap.queue != "" {
-		_ = sse.PatchElements(snap.queue)
+		patch("queue", snap.queue, 0)
 	}
 	// Launch-args history datalist (recent launches/enqueues).
-	_ = sse.PatchElements(snap.launchHist)
+	patch("launch-history", snap.launchHist, 0)
 
 	signals := map[string]any{
 		"now":         time.Now().Format("15:04:05"),
@@ -99,22 +138,24 @@ func (s *Server) pushTick(sse *datastar.ServerSentEventGenerator, tabID string) 
 			if p, has := snap.procByRun[sel]; has {
 				proc = &p
 			}
-			_ = sse.PatchElements(renderRunHeader(sum, proc, snap.bestByRun[sel], snap.ts))
+			patch("run-header:"+sel,
+				renderRunHeader(sum, proc, snap.bestByRun[sel], snap.ts), 0)
 		}
 		// LoopedRWKV residual-weight panel (live loop_rw.json).
 		if lr, ok := readLoopRW(runDir); ok {
-			_ = sse.PatchElements(renderLoopRW(lr))
+			patch("looprw:"+sel, renderLoopRW(lr), 0)
 		} else {
-			_ = sse.PatchElements(emptyLoopRW())
+			patch("looprw:"+sel, emptyLoopRW(), 0)
 		}
 		// KPI strip values.
 		if k, ok, _ := s.db.RunKPIsByName(sel); ok {
 			applyEvalContractKPIs(&k, snap.bestByRun[sel])
+			patch("kpis:"+sel, renderKPIs(k), 0)
 			signals["kpi"] = k
 		}
 		// Live-tuning overrides (desired vs applied) for the tuning panel.
 		if controls, err := s.db.GetControls(sel); err == nil {
-			_ = sse.PatchElements(renderControls(controls))
+			patch("controls:"+sel, renderControls(controls), 0)
 		}
 		// Hidden element the Pixi glue observes for (run, version) changes.
 		_ = sse.PatchElementf(`<div id="active-run" data-run="%s" data-v="%d" hidden></div>`,
@@ -159,6 +200,17 @@ func (s *Server) handleRunSelect(w http.ResponseWriter, r *http.Request) {
 	_ = sse.PatchElementf(`<div id="active-run" data-run="%s" data-v="%d" hidden></div>`,
 		esc(name), runVersion(sum))
 	notes, tagsJSON := s.db.RunMeta(name)
+	signals := map[string]any{
+		"selectedRun": name, "hasSel": true,
+		"notes": notes, "tags": tagsCSV(tagsJSON),
+	}
+	// A run click is also a refresh operation. Patch its KPIs in this response
+	// instead of leaving the old run's values visible until the next stream tick.
+	if k, found, _ := s.db.RunKPIsByName(name); found {
+		applyEvalContractKPIs(&k, best)
+		_ = sse.PatchElements(renderKPIs(k))
+		signals["kpi"] = k
+	}
 	// Reset staged live-tune overrides on run switch (values staged for one run
 	// must not silently carry to another) and surface the run's current config
 	// values so the tuning inputs show what an override would replace.
@@ -175,11 +227,9 @@ func (s *Server) handleRunSelect(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	_ = sse.MarshalAndPatchSignals(map[string]any{
-		"selectedRun": name, "hasSel": true,
-		"notes": notes, "tags": tagsCSV(tagsJSON),
-		"ctl": ctlReset, "ctlCur": ctlCur,
-	})
+	signals["ctl"] = ctlReset
+	signals["ctlCur"] = ctlCur
+	_ = sse.MarshalAndPatchSignals(signals)
 }
 
 // ---- helpers ----

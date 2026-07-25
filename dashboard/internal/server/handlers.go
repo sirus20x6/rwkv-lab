@@ -13,6 +13,20 @@ import (
 
 const seriesMaxPoints = 4000
 
+func retainAvailableFields(requested, available []string) []string {
+	set := make(map[string]struct{}, len(available))
+	for _, field := range available {
+		set[field] = struct{}{}
+	}
+	filtered := make([]string, 0, len(requested))
+	for _, field := range requested {
+		if _, ok := set[field]; ok {
+			filtered = append(filtered, field)
+		}
+	}
+	return filtered
+}
+
 // handleSeries returns columnar metric arrays for one run, for the Pixi charts.
 //
 //	GET /api/series/{run}?train=loss,lr,gnorm&eval=loss,ppl,top1&since=4000
@@ -69,6 +83,19 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 	maxPoints := seriesMaxPoints
 	if (separateCursors || since > 0) && !ranged {
 		maxPoints = 0 // pure incremental append; never decimate
+	}
+	// The shared client supports many experiment families and requests their
+	// union of metric names. Evaluating dozens of absent json_extract keys over
+	// an entire long run made initial chart loads exceed the browser's timeout,
+	// causing an endless cancel/retry loop that looked like a frozen dashboard.
+	// For overview loads, cheaply discover this run's numeric schema first and
+	// only evaluate fields it actually emits. Incremental/ranged windows are
+	// already small and retain their exact requested schema.
+	if maxPoints > 0 && !ranged {
+		if catalog, catalogErr := series.Catalog(s.db, runID); catalogErr == nil {
+			trainFields = retainAvailableFields(trainFields, catalog["train"])
+			evalFields = retainAvailableFields(evalFields, catalog["eval"])
+		}
 	}
 
 	res, err := series.FetchCursors(s.db, runID, trainFields, evalFields,

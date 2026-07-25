@@ -13,6 +13,15 @@ import (
 
 func metric(v float64) *float64 { return &v }
 
+func TestRetainAvailableFieldsDropsAbsentExperimentMetrics(t *testing.T) {
+	got := retainAvailableFields(
+		[]string{"loss", "recon_sam", "engram_inj_rms", "missing"},
+		[]string{"loss", "engram_inj_rms"})
+	if len(got) != 2 || got[0] != "loss" || got[1] != "engram_inj_rms" {
+		t.Fatalf("filtered fields = %v", got)
+	}
+}
+
 func TestSeriesTipOverlapReturnsCorrectedRowWithoutCaching(t *testing.T) {
 	database, err := db.Open(filepath.Join(t.TempDir(), "trainboard.db"))
 	if err != nil {

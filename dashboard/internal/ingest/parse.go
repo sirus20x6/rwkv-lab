@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"regexp"
+	"strings"
 
 	"trainboard/internal/db"
 )
@@ -95,6 +96,11 @@ func extraJSON(m map[string]any, known map[string]bool) string {
 		if known[k] {
 			continue
 		}
+		// Hierarchical trainer metrics are naturally emitted as e.g.
+		// recon/sam. SQLite JSON accepts that key, but the chart API deliberately
+		// permits only bare identifiers. Normalize the separator at the trust
+		// boundary so the dynamic catalog can safely expose every teacher.
+		k = strings.ReplaceAll(k, "/", "_")
 		leftover[k] = v
 	}
 	if len(leftover) == 0 {

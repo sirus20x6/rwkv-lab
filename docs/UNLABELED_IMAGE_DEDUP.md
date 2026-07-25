@@ -8,9 +8,11 @@ The pipeline has four resumable stages backed by one SQLite database:
 
 1. Inventory image paths and metadata without decoding images.
 2. Hash only byte-size collision groups to remove exact copies efficiently.
-3. Decode remaining images and calculate 256-bit perceptual and color hashes.
-4. Keep the highest-resolution representative from each conservative
-   near-duplicate group and atomically export a JSONL manifest.
+3. Decode remaining images, calculate 256-bit perceptual and color hashes, and
+   cluster every committed batch immediately.
+4. Publish atomic `*.partial.jsonl` snapshots during hashing, then keep the
+   highest-resolution representative from each conservative near-duplicate
+   group and atomically export the final JSONL manifest.
 
 Paths with uncertain-age indicators are excluded during inventory and are not
 opened by the hashing phases. Images whose shortest side is below 256 pixels,
@@ -24,6 +26,15 @@ complete resumable run can be started from the repository root with:
 ```bash
 .venv/bin/python scripts/build_unlabeled_image_manifest.py
 ```
+
+The default hash phase is incremental and crash-safe. It assigns exact and
+perceptual duplicates as each batch commits, resumes clustering hashes written
+by older interrupted runs, and refreshes
+`curated_vision/local_porn_unlabeled_dedup.partial.jsonl` every 100,000 newly
+clustered images. Change that cadence with `--publish-every`; use
+`--no-incremental` only when explicitly deferring all clustering. The partial
+filename is intentional: cache automation treats the canonical `.jsonl` as a
+completed, deterministically normalized manifest.
 
 Run individual phases so expensive work can be scheduled independently:
 

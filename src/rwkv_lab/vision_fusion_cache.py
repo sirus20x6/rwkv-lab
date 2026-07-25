@@ -13,7 +13,7 @@ from PIL import Image
 
 from rwkv_lab.moonvit import valid_torch_archive_storages
 from rwkv_lab.vision_fusion import (
-    AlignedFrozenVisionFeatures, VisionTowerConfig,
+    AlignedFrozenVisionFeatures, SamAlignedFrozenFeatures, VisionTowerConfig,
     aligned_feature_cache_key, valid_aligned_feature)
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -60,6 +60,11 @@ def main() -> None:
     ap.add_argument("--siglip2-width", type=int, default=1152)
     ap.add_argument("--dinov2", default="models/vision/dinov2-base")
     ap.add_argument("--sam", default="models/vision/sam-vit-base")
+    ap.add_argument("--sam-only", action="store_true",
+                    help="cache only the bounded global SAM residual features")
+    ap.add_argument("--sam-crop-padding", action="store_true",
+                    help="crop SAM's zero-padded canvas and pool on a 2D lattice "
+                         "(three-tower cache only; must match the trainer's flag)")
     ap.add_argument("--num-shards", type=int, default=1)
     ap.add_argument("--shard-index", type=int, default=0)
     args = ap.parse_args()
@@ -70,9 +75,16 @@ def main() -> None:
 
     config = VisionTowerConfig(
         siglip2=args.siglip2, dinov2=args.dinov2, sam=args.sam,
-        siglip_width=args.siglip2_width)
-    feature_width = args.siglip2_width + 768 + 256
-    fingerprint = config.fingerprint()
+        siglip_width=args.siglip2_width,
+        sam_crop_padding=args.sam_crop_padding)
+    if args.sam_only:
+        tower = SamAlignedFrozenFeatures(args.sam, tokens=args.prefix_tokens)
+        feature_width = tower.width
+        fingerprint = tower.cache_fingerprint
+    else:
+        tower = AlignedFrozenVisionFeatures(config)
+        feature_width = args.siglip2_width + 768 + 256
+        fingerprint = config.fingerprint()
     cache = Path(args.cache)
     cache.mkdir(parents=True, exist_ok=True)
     pending = []
@@ -95,8 +107,7 @@ def main() -> None:
     if not pending:
         return
 
-    tower = AlignedFrozenVisionFeatures(config).load_pretrained(
-        device="cuda", dtype=torch.bfloat16)
+    tower.load_pretrained(device="cuda", dtype=torch.bfloat16)
     done = 0
     skipped = 0
     for start in range(0, len(pending), args.batch):

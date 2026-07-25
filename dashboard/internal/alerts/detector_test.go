@@ -184,6 +184,16 @@ func TestStallAlertFiresWithoutIngestedEvidence(t *testing.T) {
 	if kinds := alertKinds(t, database); kinds["stall"] != 1 {
 		t.Fatalf("stall alert missing for evidence-less hung process: %v", kinds)
 	}
+	logAge = 1
+	detector.checkStall(proc, 1)
+	if kinds := alertKinds(t, database); kinds["stall"] != 0 {
+		t.Fatalf("recovered stall remained in live banner: %v", kinds)
+	}
+	var historical int
+	if err := database.QueryRow(`SELECT count(*) FROM alerts WHERE run_name='vision' AND kind='stall'`).
+		Scan(&historical); err != nil || historical != 1 {
+		t.Fatalf("resolved stall audit row missing: count=%d err=%v", historical, err)
+	}
 }
 
 func TestMonitoringSuspendedAlertIsOneShotAndClears(t *testing.T) {

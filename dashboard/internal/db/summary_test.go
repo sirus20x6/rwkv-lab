@@ -101,6 +101,63 @@ func TestPublishCursorDoesNotCommitWithoutRunRevision(t *testing.T) {
 	}
 }
 
+func TestReplacementBatchNeverExposesTransientEmptyRun(t *testing.T) {
+	d, err := Open(filepath.Join(t.TempDir(), "trainboard.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	rid, err := d.EnsureRun("vision", "/tmp/vision", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := d.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Train(rid, TrainRow{Step: 1, Loss: ptr(1), TS: 10}); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	replacement, err := d.BeginReplacement(rid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := replacement.Train(rid, TrainRow{Step: 9, Loss: ptr(9), TS: 11}); err != nil {
+		replacement.Rollback()
+		t.Fatal(err)
+	}
+	// WAL readers remain on the complete committed generation while the reset
+	// and replacement inserts are still in flight.
+	var count, step int
+	if err := d.QueryRow(`SELECT count(*),max(step) FROM train_events WHERE run_id=?`, rid).
+		Scan(&count, &step); err != nil {
+		replacement.Rollback()
+		t.Fatal(err)
+	}
+	if count != 1 || step != 1 {
+		replacement.Rollback()
+		t.Fatalf("reader observed partial replacement: count=%d step=%d", count, step)
+	}
+	if err := replacement.CommitAndPublish(rid, 11, "/tmp/vision/train.jsonl",
+		Cursor{Offset: 100, Size: 100, Mtime: 11, TailHash: "new", FileID: "1:2"}); err != nil {
+		t.Fatal(err)
+	}
+	var generation int
+	if err := d.QueryRow(`SELECT count(*),max(step),
+		(SELECT event_generation FROM runs WHERE id=?)
+		FROM train_events WHERE run_id=?`, rid, rid).Scan(&count, &step, &generation); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || step != 9 || generation != 1 {
+		t.Fatalf("replacement did not commit as one generation: count=%d step=%d generation=%d",
+			count, step, generation)
+	}
+}
+
 func TestRunSummaryRollups(t *testing.T) {
 	d, err := Open(filepath.Join(t.TempDir(), "trainboard.db"))
 	if err != nil {
@@ -156,6 +213,45 @@ func TestRunSummaryRollups(t *testing.T) {
 	}
 	if s.BestPPL == nil || *s.BestPPL != 3 || s.BestPPLStep == nil || *s.BestPPLStep != 2 || !s.HasHorizons {
 		t.Fatalf("bad best/horizon: %+v", s)
+	}
+	single, found, err := d.RunSummaryByName("r1", 13)
+	if err != nil || !found {
+		t.Fatalf("single-run summary missing: found=%v err=%v", found, err)
+	}
+	if single.Name != s.Name || single.NTrain != s.NTrain || single.NEval != s.NEval ||
+		single.LatestStep == nil || *single.LatestStep != *s.LatestStep ||
+		single.LatestPPL == nil || *single.LatestPPL != *s.LatestPPL ||
+		single.BestPPL == nil || *single.BestPPL != *s.BestPPL ||
+		single.BestPPLStep == nil || *single.BestPPLStep != *s.BestPPLStep ||
+		single.HasHorizons != s.HasHorizons || single.Status != s.Status {
+		t.Fatalf("single-run summary differs from shared rollup: all=%+v single=%+v", s, single)
+	}
+	if _, found, err := d.RunSummaryByName("missing", 13); err != nil || found {
+		t.Fatalf("missing single-run summary: found=%v err=%v", found, err)
+	}
+	// The browser calls this path every second. Guard against accidentally
+	// turning its name lookup back into an all-runs scan.
+	namePlan, err := d.Query(`EXPLAIN QUERY PLAN `+runSummarySelect+` WHERE r.name=?`, "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	usedNameIndex := false
+	for namePlan.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := namePlan.Scan(&id, &parent, &unused, &detail); err != nil {
+			namePlan.Close()
+			t.Fatal(err)
+		}
+		if strings.Contains(detail, "SEARCH r USING INDEX") && strings.Contains(detail, "name") {
+			usedNameIndex = true
+		}
+	}
+	if err := namePlan.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !usedNameIndex {
+		t.Fatal("single-run summary does not use the unique runs.name index")
 	}
 	codec, err := d.LatestCodecRelByRun()
 	if err != nil || codec["r1"] == nil || *codec["r1"] != .125 {

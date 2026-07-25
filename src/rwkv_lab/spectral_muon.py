@@ -116,6 +116,27 @@ def orthogonalize(G, steps=5, cubic=False, power=0.0, power_method="eigh"):
     return X
 
 
+def orthogonalize_batched(G, steps=5, cubic=False):
+    """Full-matrix Newton–Schulz for a same-shaped matrix batch.
+
+    This is mathematically the scalar ``orthogonalize`` path with independent
+    Frobenius normalization per matrix, but launches each NS matmul as one
+    batched GEMM.
+    """
+    if G.ndim != 3:
+        raise ValueError("batched Muon expects [batch, rows, cols]")
+    X = G.bfloat16()
+    transpose = X.size(-2) > X.size(-1)
+    if transpose:
+        X = X.mT
+    norms = X.flatten(1).norm(dim=1).clamp_min(1e-7).view(-1, 1, 1)
+    X = X / norms
+    X = _ns_cubic(X, steps) if cubic else _ns_quintic(X, steps)
+    if transpose:
+        X = X.mT
+    return X
+
+
 def _rms(x, dim):
     return x.pow(2).mean(dim=dim, keepdim=True).clamp_min(1e-12).sqrt()
 
@@ -199,7 +220,16 @@ class SpectralMuon(Optimizer):
                  rsav=False, rsav_c=1.0, rsav_cap=0.2, rsav_relax=0.0,
                  tile_size=0, da_muon=False, da_eta_max=0.01, da_r0=1e-3,
                  aro=False, aro_sink_iters=5, aro_compile=False,
+                 batched=False, compile_ns=False,
+                 row_update_floor=0.0, radial_brake=0.0, radius_pin=False,
+                 cautious_weight_decay=False, adam_update_interval=1,
                  weight_decay=0.0, adam_betas=(0.9, 0.95), adam_eps=1e-8):
+        if int(adam_update_interval) < 1:
+            raise ValueError("adam_update_interval must be >= 1")
+        if float(row_update_floor) < 0.0:
+            raise ValueError("row_update_floor must be non-negative")
+        if not 0.0 <= float(radial_brake) <= 1.0:
+            raise ValueError("radial_brake must be in [0, 1]")
         defaults = dict(momentum=momentum, nesterov=nesterov, ns_steps=ns_steps, cubic=cubic,
                         spectral_power=spectral_power, power_method=power_method, second_moment=second_moment,
                         sm_beta2=sm_beta2, sm_eps=sm_eps, equilibrate=equilibrate,
@@ -208,6 +238,9 @@ class SpectralMuon(Optimizer):
                         ddc_strength=ddc_strength, ddc_mode=ddc_mode,
                         tile_size=tile_size, da_muon=da_muon, da_eta_max=da_eta_max, da_r0=da_r0,
                         aro=aro, aro_sink_iters=aro_sink_iters,
+                        row_update_floor=row_update_floor, radial_brake=radial_brake,
+                        radius_pin=radius_pin, cautious_weight_decay=cautious_weight_decay,
+                        adam_update_interval=int(adam_update_interval),
                         weight_decay=weight_decay, adam_betas=adam_betas, adam_eps=adam_eps,
                         use_muon=False, lr=3e-4)
         super().__init__(param_groups, defaults)
@@ -222,6 +255,10 @@ class SpectralMuon(Optimizer):
         self._rsav_last_xi = 1.0     # diagnostics / tests
         self.aro_compile = bool(aro_compile)
         self._compiled_aro_core = None
+        self.batched = bool(batched)
+        self.compile_ns = bool(compile_ns)
+        self._compiled_ns: dict[tuple[int, bool], object] = {}
+        self._compile_ns_failed = False
 
     def load_state_dict(self, state_dict):
         # Optimizer.load_state_dict casts float state to each param's dtype (bf16 for a
@@ -253,6 +290,12 @@ class SpectralMuon(Optimizer):
     @torch.no_grad()
     def step(self, closure=None):
         loss = closure() if closure is not None else None
+        optimizer_step = max(
+            (int(group.get("_optimizer_step", 0)) for group in self.param_groups),
+            default=0,
+        ) + 1
+        for group in self.param_groups:
+            group["_optimizer_step"] = optimizer_step
         # --- RSAV pre-pass: global gradient energy E = Σ‖g‖² over Muon matrices ---
         xi, sqrt_Et = 1.0, None
         if self.rsav:
@@ -275,14 +318,32 @@ class SpectralMuon(Optimizer):
             self._rsav_last_xi = xi
         for grp in self.param_groups:
             adam_params = []
+            muon_params = []
             for p in grp["params"]:
                 if p.grad is None:
                     continue
                 if self._is_muon(grp, p):
-                    self._muon_step(p, p.grad, grp, self.state[p], xi)
+                    muon_params.append(p)
                 else:
                     adam_params.append(p)
-            self._adam_group_step(adam_params, grp)
+            if self.batched and self._can_batch_group(grp, xi):
+                buckets = {}
+                for p in muon_params:
+                    buckets.setdefault((p.device, p.dtype, tuple(p.shape)), []).append(p)
+                for bucket in buckets.values():
+                    if len(bucket) > 1:
+                        self._batched_muon_step(bucket, grp)
+                    else:
+                        p = bucket[0]
+                        self._muon_step(p, p.grad, grp, self.state[p], xi)
+            else:
+                for p in muon_params:
+                    self._muon_step(p, p.grad, grp, self.state[p], xi)
+            self._adam_group_step(
+                adam_params,
+                grp,
+                update=(optimizer_step % int(grp["adam_update_interval"]) == 0),
+            )
         # --- RSAV post-step: evolve r by the SAV chain rule, then relax toward √(E+C) ---
         if self.rsav and sqrt_Et is not None:
             r = self._rsav_r + self._rsav_dE / (2.0 * sqrt_Et)
@@ -290,6 +351,72 @@ class SpectralMuon(Optimizer):
                 r = (1.0 - self.rsav_relax) * r + self.rsav_relax * sqrt_Et
             self._rsav_r = r.clamp_min(1e-8)
         return loss
+
+    def _can_batch_group(self, grp, xi) -> bool:
+        """The fast path intentionally covers the common vanilla/Nesterov NS case."""
+        return (
+            not self.rsav
+            and not torch.is_tensor(xi)
+            and float(xi) == 1.0
+            and not grp["mona"]
+            and not grp["second_moment"]
+            and grp["equilibrate"] == "none"
+            and grp["plus_norm"] == "none"
+            and not grp["row_uniform"]
+            and not grp["ddc_strength"]
+            and not grp["spectral_power"]
+            and not grp["tile_size"]
+            and not grp["da_muon"]
+            and not grp["aro"]
+            and not grp["row_update_floor"]
+            and not grp["radial_brake"]
+            and not grp["radius_pin"]
+            and not grp["cautious_weight_decay"]
+        )
+
+    def _batched_orthogonalize(self, stacked, grp):
+        steps, cubic = int(grp["ns_steps"]), bool(grp["cubic"])
+        if self.compile_ns and stacked.is_cuda and not self._compile_ns_failed:
+            key = (steps, cubic)
+            if key not in self._compiled_ns:
+                try:
+                    def core(value):
+                        return orthogonalize_batched(value, steps=steps, cubic=cubic)
+                    self._compiled_ns[key] = torch.compile(
+                        core, dynamic=False, fullgraph=True)
+                except Exception:
+                    self._compile_ns_failed = True
+            if not self._compile_ns_failed:
+                try:
+                    return self._compiled_ns[key](stacked)
+                except Exception as exc:
+                    self._compile_ns_failed = True
+                    print("[spectral_muon] compiled batched NS failed "
+                          f"({type(exc).__name__}: {exc}); using eager batched NS", flush=True)
+        return orthogonalize_batched(stacked, steps=steps, cubic=cubic)
+
+    def _batched_muon_step(self, params, grp):
+        """Update same-shaped matrices with one batched Newton–Schulz graph."""
+        mu = float(grp["momentum"])
+        momenta = []
+        grads = []
+        for p in params:
+            st = self.state[p]
+            if "mom" not in st:
+                st["mom"] = torch.zeros_like(p.grad, dtype=torch.float32)
+            momenta.append(st["mom"])
+            grads.append(p.grad.float())
+        torch._foreach_mul_(momenta, mu)
+        torch._foreach_add_(momenta, grads)
+        updates = (torch._foreach_add(grads, momenta, alpha=mu)
+                   if grp["nesterov"] else momenta)
+        orthogonal = self._batched_orthogonalize(
+            torch.stack(updates), grp).to(params[0].dtype).unbind(0)
+        lr = float(grp["lr"])
+        if grp["weight_decay"]:
+            torch._foreach_mul_(params, 1.0 - lr * float(grp["weight_decay"]))
+        scale = float(grp["scale"]) * max(params[0].shape) ** 0.5
+        torch._foreach_add_(params, orthogonal, alpha=-lr * scale)
 
     def _muon_step(self, p, g, grp, st, xi=1.0):
         lr, mu = grp["lr"], grp["momentum"]
@@ -337,18 +464,57 @@ class SpectralMuon(Optimizer):
                 o = _ddc_project(o, p, grp["ddc_mode"], grp["ddc_strength"])
             base_scale = grp["scale"] * ((tile if tiling else max(p.shape)) ** 0.5)  # HiMuon: √tile
         eta = self._da_eta(p, st, grp) if grp["da_muon"] else 1.0   # Distance-Aware radius
-        if grp["weight_decay"]:
-            p.mul_(1.0 - lr * grp["weight_decay"])
         step_scale = xi * eta
         if torch.is_tensor(step_scale):
-            o.mul_(step_scale.to(device=o.device, dtype=o.dtype))
+            step_scale = step_scale.to(device=o.device, dtype=torch.float32)
         elif step_scale != 1.0:
-            o.mul_(step_scale)
-        alpha = -lr * base_scale                           # all defaults (1.0) ⇒ exactly vanilla
-        p.add_(o, alpha=alpha)
+            step_scale = float(step_scale)
+
+        # Shape-aware postconditioning from the Track-3 optimizer line. These
+        # operations are all opt-in; with defaults this reduces to vanilla Muon.
+        update = o.float().mul(float(base_scale))
+        if torch.is_tensor(step_scale):
+            update.mul_(step_scale)
+        elif step_scale != 1.0:
+            update.mul_(step_scale)
+        floor = float(grp["row_update_floor"])
+        if floor > 0.0:
+            p_rows = p.detach().float().norm(dim=1, keepdim=True)
+            u_rows = update.norm(dim=1, keepdim=True)
+            update.mul_((floor * p_rows / u_rows.clamp_min(1e-12)).clamp_min_(1.0))
+
+        needs_reference = bool(
+            grp["radial_brake"] or grp["radius_pin"] or grp["cautious_weight_decay"]
+        )
+        reference = p.detach().float().clone() if needs_reference else None
+        brake = float(grp["radial_brake"])
+        if brake > 0.0:
+            denom = reference.square().sum().clamp_min(1e-20)
+            coefficient = (update * reference).sum() / denom
+            radial = reference * coefficient
+            # p <- p - lr*u moves outward exactly when <p,u> is negative.
+            update = torch.where(
+                coefficient < 0,
+                update - radial + brake * radial,
+                update,
+            )
+
+        target_norm = None
+        if grp["radius_pin"]:
+            norm = reference.norm().clamp_min(1e-12)
+            target_norm = (norm - lr * (reference * update).sum() / norm).clamp_min(1e-12)
+
+        if grp["weight_decay"] and not grp["cautious_weight_decay"]:
+            p.mul_(1.0 - lr * grp["weight_decay"])
+        p.add_(update.to(p.dtype), alpha=-lr)
+        if target_norm is not None:
+            p.mul_((target_norm / p.detach().float().norm().clamp_min(1e-12)).to(p.dtype))
+        if grp["weight_decay"] and grp["cautious_weight_decay"]:
+            mask = ((update * reference) > 0).to(p.dtype)
+            p.mul_(1.0 - lr * grp["weight_decay"] * mask)
         if self.rsav and self._rsav_dE is not None:         # SAV chain rule: dE ≈ Σ ⟨g, Δx⟩
-            d = (g.float() * o.float()).sum().to(self._rsav_dE.device)  # multi-device safe; no-op single-device
-            self._rsav_dE.add_(d, alpha=alpha)
+            d = (g.float() * update).sum().to(self._rsav_dE.device)
+            self._rsav_dE.add_(d, alpha=-lr)
 
     def _da_eta(self, p, st, grp):
         """Distance-Aware Muon (2605.18999) adaptive radius: η = clamp(r̄/√(k+1), 0, η_max), with
@@ -385,20 +551,41 @@ class SpectralMuon(Optimizer):
         base_scale = 0.2 * float(M.shape[0] * M.shape[1]) ** 0.5   # ARO's AdamW-budget RMS match
         return dW.to(p.dtype), base_scale
 
-    def _adam_group_step(self, params, grp):
+    def _adam_group_step(self, params, grp, *, update=True):
         """Foreach AdamW fallback; DDC matrices retain their per-parameter projection."""
         if not params:
             return
+        cadence = int(grp["adam_update_interval"])
+        effective_grads = {}
+        if cadence > 1:
+            for p in params:
+                st = self.state[p]
+                accumulator = st.get("adam_grad_accum")
+                if accumulator is None:
+                    accumulator = st["adam_grad_accum"] = torch.zeros_like(
+                        p.grad, dtype=torch.float32
+                    )
+                    st["adam_grad_count"] = 0
+                accumulator.add_(p.grad.float())
+                st["adam_grad_count"] += 1
+                if update:
+                    effective_grads[p] = accumulator / max(
+                        int(st["adam_grad_count"]), 1
+                    )
+            if not update:
+                return
+        else:
+            effective_grads = {p: p.grad for p in params}
         ordinary = []
         for p in params:
             st = self.state[p]
             if "exp_avg" not in st:
-                st["exp_avg"] = torch.zeros_like(p.grad, dtype=torch.float32)
-                st["exp_sq"] = torch.zeros_like(p.grad, dtype=torch.float32)
+                st["exp_avg"] = torch.zeros_like(effective_grads[p], dtype=torch.float32)
+                st["exp_sq"] = torch.zeros_like(effective_grads[p], dtype=torch.float32)
                 st["t"] = 0
             st["t"] += 1
             if grp["ddc_strength"] > 0.0 and p.ndim == 2 and min(p.shape) > 1:
-                self._adam_step(p, p.grad, grp, st, increment=False)
+                self._adam_step(p, effective_grads[p], grp, st, increment=False)
             else:
                 ordinary.append(p)
         buckets = {}
@@ -407,7 +594,7 @@ class SpectralMuon(Optimizer):
             buckets.setdefault((p.device, st["t"]), []).append(p)
         b1, b2 = grp["adam_betas"]
         for (_, step), bucket in buckets.items():
-            grads = [p.grad.float() for p in bucket]
+            grads = [effective_grads[p].float() for p in bucket]
             exp_avg = [self.state[p]["exp_avg"] for p in bucket]
             exp_sq = [self.state[p]["exp_sq"] for p in bucket]
             torch._foreach_mul_(exp_avg, b1)
@@ -421,8 +608,14 @@ class SpectralMuon(Optimizer):
             torch._foreach_div_(updates, denom)
             if grp["weight_decay"]:
                 torch._foreach_mul_(bucket, 1.0 - grp["lr"] * grp["weight_decay"])
-            for p, update in zip(bucket, updates):
-                p.add_(update.to(p.dtype), alpha=-grp["lr"])
+            # Not named `update`: that is this method's keyword parameter, and
+            # shadowing it here would silently break any later use of the flag.
+            for p, delta in zip(bucket, updates):
+                p.add_(delta.to(p.dtype), alpha=-grp["lr"])
+        if cadence > 1:
+            for p in params:
+                self.state[p]["adam_grad_accum"].zero_()
+                self.state[p]["adam_grad_count"] = 0
 
     def _adam_step(self, p, g, grp, st, *, increment=True):
         b1, b2 = grp["adam_betas"]; eps = grp["adam_eps"]; lr = grp["lr"]

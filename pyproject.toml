@@ -17,6 +17,7 @@ dependencies = [
     "safetensors>=0.4",
     "einops>=0.8",
     "numpy>=1.26",
+    "PyYAML>=6",
 ]
 
 [project.optional-dependencies]
@@ -58,6 +59,9 @@ sm120 = [
 
 [project.urls]
 Repository = "https://github.com/sirus20x6/rwkv-lab"
+
+[project.scripts]
+ltx23-lora = "rwkv_lab.ltx23_lora:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }

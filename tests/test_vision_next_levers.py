@@ -11,9 +11,18 @@ from rwkv_lab.moonvit import (
     valid_pooled_feature)
 from rwkv_lab.vision_fusion import VisionFusionResidual
 from rwkv_lab.vision_train import (
-    _initialize_adapters, insert_boundary_ids, insert_visual_span,
+    EpochBatchSampler, _initialize_adapters, add_fusion_residual,
+    insert_boundary_ids, insert_visual_span,
     multimodal_loss, prepare_examples, remove_visual_span, supervised_positions,
     visual_insert_positions)
+
+
+def test_sam_global_residual_only_modifies_leading_radio_span():
+    prefix = torch.ones(2, 640, 8)
+    residual = torch.full((2, 256, 8), 3.0)
+    fused = add_fusion_residual(prefix, residual)
+    assert torch.equal(fused[:, :256], torch.full((2, 256, 8), 4.0))
+    assert torch.equal(fused[:, 256:], prefix[:, 256:])
 
 
 def test_sandwich_prompt_places_image_between_two_prompt_copies(tmp_path: Path):
@@ -27,6 +36,50 @@ def test_sandwich_prompt_places_image_between_two_prompt_copies(tmp_path: Path):
     assert row["vision_insert"] == len(prompt)
     assert row["prompt_len"] == len(prompt) * 2
     assert supervised_positions(rows, 5, device="cpu")[0, 1] == 5 + len(prompt) * 2 - 1
+
+
+def test_asymmetric_sandwich_uses_lead_then_image_then_task(tmp_path: Path):
+    vocab = WorldVocab()
+    rows, _ = prepare_examples(
+        [{"image": tmp_path / "x.jpg", "text": "a red kite"}], vocab,
+        prompt="Describe accurately:\n", max_text_tokens=64,
+        sandwich_prompt=True, sandwich_lead_prompt="An image follows:\n")
+    lead = vocab.encode("An image follows:\n")
+    task = vocab.encode("Describe accurately:\n")
+    assert rows[0]["tokens"][:len(lead) + len(task)] == lead + task
+    assert rows[0]["vision_insert"] == len(lead)
+    assert rows[0]["prompt_len"] == len(lead) + len(task)
+
+
+def test_sampler_never_crosses_exact_radio_tile_bucket():
+    keys = [1, 1, 3, 3, 3, 7, 7, 7]
+    sampler = EpochBatchSampler(
+        list(range(len(keys))), [10] * len(keys), batch_size=4, seed=7,
+        group_keys=keys)
+    seen = []
+    while len(seen) < len(keys):
+        batch = sampler.next_budget_batch(
+            [100] * len(keys), target_tokens=1000, min_items=1, max_items=4)
+        assert len({keys[index] for index in batch}) == 1
+        seen.extend(batch)
+    assert sorted(seen) == list(range(len(keys)))
+
+
+def test_sampler_interleaves_bounded_radio_tile_bucket_runs():
+    keys = [1] * 24 + [3] * 24 + [7] * 24
+    sampler = EpochBatchSampler(
+        list(range(len(keys))), [10] * len(keys), batch_size=2, seed=7,
+        bucket_batches=2, group_keys=keys)
+    run_keys = []
+    for index in sampler.order:
+        key = keys[index]
+        if not run_keys or run_keys[-1] != key:
+            run_keys.append(key)
+    # Whole-bucket concatenation produces only three runs.  Bounded
+    # round-robin chunks expose every exact shape throughout the epoch.
+    assert len(run_keys) > 3
+    assert set(run_keys[:3]) == {1, 3, 7}
+    assert sorted(sampler.order) == list(range(len(keys)))
 
 
 def test_arbitrary_visual_span_round_trip_and_boundaries():
@@ -176,3 +229,160 @@ def test_selected_levers_share_one_loss_sequence_contract():
     assert nextlat.net[0].weight.grad is not None
     deep.close()
     layered.close()
+
+
+def test_token_budget_no_longer_shrinks_as_images_grow():
+    """A 13-tile image once received 46% FEWER tokens than a 12-tile one.
+
+    tokens_per_tile halved at the threshold while tile count rose by one, so
+    total visual tokens fell off a cliff exactly on the large, detailed images
+    (97% of the OCR shard) where representation matters most.
+    """
+    from rwkv_lab.radio1d_rwkv import (
+        DEFAULT_MAX_DETAIL_TILES, token_budget_is_monotone,
+        tokens_per_tile_for_tile_count)
+
+    assert token_budget_is_monotone()
+    totals = [t * tokens_per_tile_for_tile_count(t)
+              for t in range(1, DEFAULT_MAX_DETAIL_TILES + 2)]
+    assert all(a <= b for a, b in zip(totals, totals[1:]))
+    assert totals[12] > totals[11]          # the old 12 -> 13 cliff
+    assert not token_budget_is_monotone(threshold=12)   # the previous default
+
+
+def test_letterbox_content_box_matches_the_real_letterbox():
+    """The derived content extent must equal what _letterbox actually produces."""
+    from PIL import Image
+    from rwkv_lab.radio1d_rwkv import (
+        RADIO_TILE_SIZE, _letterbox, letterbox_content_box)
+
+    for width, height in ((512, 512), (1920, 1080), (480, 640), (3790, 1000)):
+        canvas = _letterbox(Image.new("RGB", (width, height), (255, 255, 255)),
+                            RADIO_TILE_SIZE, fill=(0, 0, 0))
+        pixels = canvas.convert("L").point(lambda v: 255 if v > 0 else 0)
+        x0, y0, x1, y1 = pixels.getbbox()
+        derived = letterbox_content_box(width, height)
+        actual = (x0 / RADIO_TILE_SIZE, y0 / RADIO_TILE_SIZE,
+                  x1 / RADIO_TILE_SIZE, y1 / RADIO_TILE_SIZE)
+        assert all(abs(a - b) < 0.01 for a, b in zip(derived, actual)), (
+            f"{width}x{height}: derived {derived} vs actual {actual}")
+
+
+def test_content_boxes_recover_tile_geometry_from_source_boxes():
+    """Detail crops and full-image thumbnails must both letterbox correctly."""
+    import torch
+    from rwkv_lab.radio1d_rwkv import (
+        content_boxes_from_source, letterbox_content_box)
+
+    # 16:9 image; thumbnail covers all of it, one detail crop covers a square.
+    source = torch.tensor([[[0.0, 0.0, 1.0, 1.0], [0.0, 0.0, 0.5625, 1.0]]])
+    content = content_boxes_from_source(source, torch.tensor([16 / 9]))
+    expected_thumb = letterbox_content_box(1920, 1080)
+    expected_square = letterbox_content_box(1080, 1080)
+    assert torch.allclose(content[0, 0], torch.tensor(expected_thumb), atol=1e-4)
+    assert torch.allclose(content[0, 1], torch.tensor(expected_square), atol=1e-4)
+    # A square source needs no bars at all.
+    square = content_boxes_from_source(source[:, :1], torch.tensor([1.0]))
+    assert torch.allclose(square[0, 0], torch.tensor([0.0, 0.0, 1.0, 1.0]), atol=1e-6)
+
+
+def test_bridge_content_geometry_is_a_no_op_at_initialization():
+    """Supplying letterbox geometry must not perturb a resumed checkpoint."""
+    import torch
+    from rwkv_lab.radio1d_rwkv import RadioRWKVBridge
+
+    bridge = RadioRWKVBridge(hidden_size=32, rank=8, tokens_per_tile=4, max_tiles=3)
+    features = torch.randn(2, 2, 4, 32)
+    boxes = torch.tensor([[[0.0, 0.0, 1.0, 1.0], [0.0, 0.0, 0.5, 1.0]]]).repeat(2, 1, 1)
+    roles = torch.zeros(2, 2, dtype=torch.long)
+    without = bridge(features, boxes, roles).embeddings
+    with_geometry = bridge(features, boxes, roles,
+                           image_aspect=torch.tensor([1.5, 0.5])).embeddings
+    assert torch.allclose(without, with_geometry, atol=1e-6)
+
+
+def test_optimizer_moments_survive_a_grown_parameter_group():
+    """Adding a zero-init module must not discard 43k steps of Adam state."""
+    import torch
+    from rwkv_lab.vision_train import _load_optimizer_with_grown_groups
+
+    old_params = [torch.nn.Parameter(torch.randn(2, 2)) for _ in range(3)]
+    old = torch.optim.AdamW([{"params": old_params, "name": "bridge"},
+                             {"params": [torch.nn.Parameter(torch.randn(2))],
+                              "name": "head"}], lr=1e-3)
+    for parameter in old_params:
+        parameter.grad = torch.ones_like(parameter)
+    list(old.param_groups[1]["params"])[0].grad = torch.ones(2)
+    old.step()
+    saved = old.state_dict()
+
+    # Same topology, but the bridge group gained two appended parameters.
+    grown_params = [torch.nn.Parameter(p.detach().clone()) for p in old_params]
+    grown_params += [torch.nn.Parameter(torch.zeros(2, 2)) for _ in range(2)]
+    grown = torch.optim.AdamW([{"params": grown_params, "name": "bridge"},
+                               {"params": [torch.nn.Parameter(torch.randn(2))],
+                                "name": "head"}], lr=1e-3)
+    _load_optimizer_with_grown_groups(grown, saved, expected_growth=2)
+
+    restored = grown.state_dict()["state"]
+    assert len(restored) == len(saved["state"])          # every moment kept
+    for old_index, new_index in zip(sorted(saved["state"]), sorted(restored)):
+        assert torch.allclose(saved["state"][old_index]["exp_avg"],
+                              restored[new_index]["exp_avg"])
+    # The head group's index must have shifted by the growth, not been dropped.
+    assert grown.state_dict()["param_groups"][1]["params"] == [5]
+
+
+def test_grown_group_migration_refuses_unexpected_topology_changes():
+    import pytest
+    import torch
+    from rwkv_lab.vision_train import _load_optimizer_with_grown_groups
+
+    params = [torch.nn.Parameter(torch.randn(2))]
+    saved = torch.optim.AdamW([{"params": params, "name": "a"}], lr=1e-3).state_dict()
+    bigger = torch.optim.AdamW(
+        [{"params": params + [torch.nn.Parameter(torch.randn(2))], "name": "a"}],
+        lr=1e-3)
+    with pytest.raises(ValueError, match="expected"):
+        _load_optimizer_with_grown_groups(bigger, saved, expected_growth=7)
+    with pytest.raises(ValueError, match="group count"):
+        _load_optimizer_with_grown_groups(
+            bigger, {"param_groups": [], "state": {}}, expected_growth=1)
+
+
+def test_token_threshold_is_a_resumable_budget_change():
+    """Changing it must be accepted under --allow-batch-resize, not fatal."""
+    import argparse
+    from rwkv_lab.radio1d_rwkv import DEFAULT_ADAPTIVE_TOKEN_THRESHOLD
+    from rwkv_lab.vision_train import _budget_resume_differences
+
+    args = argparse.Namespace(
+        batch=1, max_batch=4, min_batch=0, target_batch_tokens=4096,
+        loop_token_budget_scale=1.0, radio_adaptive_complexity=True,
+        radio_complexity_budget_ratio=0.75, radio_complexity_token_quantum=16,
+        radio_adaptive_token_threshold=DEFAULT_ADAPTIVE_TOKEN_THRESHOLD)
+    saved = {"batch": 1, "max_batch": 4, "min_batch": 0,
+             "target_batch_tokens": 4096, "loop_token_budget_scale": 1.0,
+             "radio_adaptive_complexity": True,
+             "radio_complexity_budget_ratio": 0.75,
+             "radio_complexity_token_quantum": 16,
+             "radio_adaptive_token_threshold": 12}
+    assert _budget_resume_differences(saved, args) == [
+        "radio_adaptive_token_threshold"]
+
+
+def test_bridge_growth_stays_appended_for_moment_migration():
+    """_load_optimizer_with_grown_groups maps moments POSITIONALLY.
+
+    That is only valid while new parameters are appended. Registering a module
+    earlier in RadioRWKVBridge.__init__ would shift every later position and
+    silently reassign 43k steps of Adam state to the wrong tensors, so pin the
+    ordering here rather than discovering it in a run.
+    """
+    from rwkv_lab.radio1d_rwkv import RadioFeatureProjector
+
+    names = [name for name, _ in RadioFeatureProjector().named_parameters()]
+    new = [i for i, name in enumerate(names) if "content_embedding" in name]
+    assert new, "content_embedding disappeared from the bridge"
+    assert new == list(range(len(names) - len(new), len(names))), (
+        f"content_embedding must stay last; got positions {new} of {len(names)}")
