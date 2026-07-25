@@ -28,11 +28,30 @@
 set -uo pipefail
 cd /thearray/git/moe-mla
 
+# Match scripts/run_radio1d_captioning_first.sh: rwkv_lab is not installed, it
+# is imported from ./src, and the run is guarded by a lock so two launchers can
+# never own the same output directory.
+PYTHON_BIN="${VISION_PYTHON:-/usr/bin/python}"
+export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}src"
+
+RUN=runs/radio1d_rwkv_captioning_first
+for required in curated_vision/captioning_first_train.jsonl \
+                curated_vision/captioning_first_eval.jsonl \
+                "$RUN/best/ckpt.pt" \
+                models/vision/C-RADIOv4-1D-H \
+                models/rwkv7-g1h-2.9b-20260710-ctx10240.pth; do
+  [[ -e "$required" ]] || { echo "missing required input: $required" >&2; exit 1; }
+done
+
+mkdir -p "$RUN"
+exec 9>"$RUN/.launcher.lock"
+flock -n 9 || { echo "another launcher already owns $RUN" >&2; exit 75; }
+
 RESUME="runs/radio1d_rwkv_captioning_first/best/ckpt.pt"
 FAST_FAILURES=0
 while true; do
   START=$SECONDS
-  python -m rwkv_lab.vision_train \
+  "$PYTHON_BIN" -m rwkv_lab.vision_train \
       --activation-checkpoint-min-tokens 4096 \
       --batch 1 \
       --checkpoint-every 50 \

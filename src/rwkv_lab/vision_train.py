@@ -997,6 +997,21 @@ def runtime_cached_features(rows: Sequence[dict], vision: nn.Module,
     if isinstance(projector, RadioFeatureProjector):
         if cache_dir is None:
             raise ValueError("RADIO training requires a resumable feature cache")
+        if getattr(vision, "v4h_native", False):
+            from rwkv_lab.radio_v4h import load_native_features
+            return load_native_features(
+                rows, Path(getattr(vision, "v4h_cache_dir", cache_dir)),
+                revision=str(getattr(vision, "radio_revision")), root=ROOT,
+                max_edge=int(getattr(vision, "v4h_max_edge", 2048)))
+        if hasattr(vision, "v4h_lattice"):
+            from rwkv_lab.radio_v4h import load_v4h_features
+            # Read-only: a cache miss raises rather than encoding inline, so the
+            # prefetch worker can never touch CUDA from a foreign thread.
+            return load_v4h_features(
+                rows, Path(getattr(vision, "v4h_cache_dir", cache_dir)),
+                revision=str(getattr(vision, "radio_revision")),
+                lattice=int(getattr(vision, "v4h_lattice")), root=ROOT,
+                pair_axis=str(getattr(vision, "v4h_pair_axis", "columns")))
         return cached_radio_features(
             rows, vision, cache_dir,
             revision=str(getattr(vision, "radio_revision")),
@@ -1033,6 +1048,14 @@ def image_aspect_tensor(rows: Sequence[dict],
             return None
         values.append(float(width) / float(height))
     return torch.tensor(values, dtype=torch.float32, device=device)
+
+
+RADIO_BACKENDS = ("radio1d", "radio_v4h")
+
+
+def is_radio_backend(args: argparse.Namespace) -> bool:
+    """Both RADIO backends share tiling, sampler bucketing and token costing."""
+    return getattr(args, "vision_backend", "") in RADIO_BACKENDS
 
 
 def _vision_tower_config(args: argparse.Namespace) -> VisionTowerConfig:
@@ -1373,7 +1396,17 @@ def prefetch_training_batch(rows: Sequence[dict], vision: nn.Module,
     """Prepare exactly one future sampler batch without advancing its state."""
     started = time.perf_counter()
     stats: dict[str, int] = {}
-    if isinstance(projector, RadioFeatureProjector):
+    if isinstance(projector, RadioFeatureProjector) and getattr(vision, "v4h_native", False):
+        stats.update(resident_hits=0, disk_hits=len(rows), generated=0)
+        ready = len(rows)
+        visual_width = int({int(row["_visual_tokens"]) for row in rows}.pop())
+    elif isinstance(projector, RadioFeatureProjector) and hasattr(vision, "v4h_lattice"):
+        # v4h caches are pre-built and read-only; nothing to warm on the worker.
+        stats.update(resident_hits=0, disk_hits=len(rows), generated=0)
+        ready = len(rows)
+        visual_width = int(getattr(vision, "v4h_lattice")) ** 2 * int(
+            {int(row["_radio_tiles"]) for row in rows}.pop())
+    elif isinstance(projector, RadioFeatureProjector):
         if cache_dir is None:
             raise ValueError("RADIO prefetch requires a resumable feature cache")
         threshold = int(getattr(vision, "radio_adaptive_token_threshold"))
@@ -1536,7 +1569,9 @@ def multimodal_loss(rwkv: nn.Module, projector: nn.Module, vision: MoonViT,
         canonical = vision_compressor(features, fusion_features)
         prefix = projector(list(canonical.unbind(0)))
     elif isinstance(projector, RadioFeatureProjector):
-        prefix = projector(features, image_aspect=image_aspect)
+        prefix = (projector.forward_native(features)
+                  if getattr(projector, "native_mode", False)
+                  else projector(features, image_aspect=image_aspect))
     else:
         prefix = projector(features)
     fusion_residual = None
@@ -3276,7 +3311,7 @@ def main() -> None:
     ap.add_argument("--eval-data", nargs="+", default=None,
                     help="held-out image/text manifests; never sampled for training")
     ap.add_argument("--rwkv", default="models/rwkv7-g1h-2.9b-20260710-ctx10240.pth")
-    ap.add_argument("--vision-backend", choices=("moonvit", "radio1d"),
+    ap.add_argument("--vision-backend", choices=("moonvit", "radio1d", "radio_v4h"),
                     default="moonvit")
     ap.add_argument("--moonvit", default="models/kimi-k2.6-moonvit/model-00064-of-000064.safetensors")
     ap.add_argument("--radio-model", default="models/vision/C-RADIOv4-1D-H")
@@ -3288,6 +3323,23 @@ def main() -> None:
                     default=DEFAULT_ADAPTIVE_TOKEN_THRESHOLD,
                     help="use 256 native tokens/tile through this total tile count, then 128")
     ap.add_argument("--radio-tile-batch", type=int, default=8)
+    ap.add_argument("--radio-v4h-model", default="models/vision/C-RADIOv4-H")
+    ap.add_argument("--radio-v4h-revision", default="c-radiov4-h")
+    ap.add_argument("--radio-v4h-lattice", type=int, default=16,
+                    help="pooled tokens per tile axis for --vision-backend radio_v4h")
+    ap.add_argument("--radio-v4h-native", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="encode whole images at native resolution instead of "
+                         "tiling; tiling only existed because RADIO1D emitted a "
+                         "fixed token count per tile")
+    ap.add_argument("--radio-v4h-max-edge", type=int, default=2048)
+    ap.add_argument("--radio-v4h-pair-axis", choices=("columns", "rows"),
+                    default="columns",
+                    help="axis paired to reach the LM width; 'columns' retains "
+                         "more horizontal resolution, the scarce axis for text")
+    ap.add_argument("--radio-v4h-bridge-rank", type=int, default=256,
+                    help="bridge bottleneck; 256 matches the RADIO1D arm exactly "
+                         "because paired tokens need no input projection")
     ap.add_argument("--radio-adaptive-complexity",
                     action=argparse.BooleanOptionalAction, default=False,
                     help="content-route each tile's RADIO prefix under a fixed unpadded batch total")
@@ -3484,7 +3536,7 @@ def main() -> None:
     if ((args.init_adapters_from or args.init_text_adapters_from)
             and args.resume != "none"):
         raise SystemExit("adapter initialization requires --resume none")
-    if args.init_text_adapters_from and args.vision_backend != "radio1d":
+    if args.init_text_adapters_from and not is_radio_backend(args):
         raise SystemExit("--init-text-adapters-from is reserved for a replaced RADIO bridge")
 
     if args.steps < 0:
@@ -3512,7 +3564,12 @@ def main() -> None:
             or 256 % args.radio_complexity_token_quantum):
         raise SystemExit(
             "RADIO complexity ratio must be in (0,1] and its quantum must divide 128 and 256")
-    if args.vision_backend == "radio1d":
+    if args.vision_backend == "radio_v4h" and args.radio_adaptive_complexity:
+        raise SystemExit(
+            "--radio-adaptive-complexity truncates RADIO1D's nested prefix; "
+            "C-RADIOv4-H tokens are positional, so the budget is set by the "
+            "pooled lattice. Drop the flag for --vision-backend radio_v4h.")
+    if is_radio_backend(args):
         incompatible = []
         if args.vision_fusion:
             incompatible.append("--vision-fusion")
@@ -3548,13 +3605,13 @@ def main() -> None:
             or args.structured_heads < 1
             or args.structured_width % args.structured_heads):
         raise SystemExit("structured-head geometry/weight is invalid")
-    if args.structured_head and args.vision_backend != "radio1d":
-        raise SystemExit("--structured-head currently requires --vision-backend radio1d")
+    if args.structured_head and not is_radio_backend(args):
+        raise SystemExit("--structured-head requires a RADIO vision backend")
     if args.sam_fusion_tokens < 1:
         raise SystemExit("--sam-fusion-tokens must be positive")
     if args.sam_fusion and args.vision_fusion:
         raise SystemExit("--sam-fusion and --vision-fusion are mutually exclusive")
-    if args.sam_fusion and args.vision_backend != "radio1d":
+    if args.sam_fusion and not is_radio_backend(args):
         raise SystemExit("--sam-fusion is defined only for variable-prefix RADIO1D")
     if args.sam_fusion:
         # --vision-fusion is already rejected under RADIO1D on the grounds that
@@ -3770,7 +3827,7 @@ def main() -> None:
     else:
         rows, lengths = train_rows, train_lengths
         train_indices, val_indices = split_examples(rows, val_fraction=args.val_fraction)
-    if args.vision_backend == "radio1d":
+    if is_radio_backend(args):
         print("planning aspect-aware RADIO tile buckets", flush=True)
         for index, row in enumerate(rows):
             width, height = row.get("width"), row.get("height")
@@ -3786,12 +3843,27 @@ def main() -> None:
             # Retained so the bridge can reconstruct each tile's letterbox
             # transform without reopening the image every batch.
             row["_image_width"], row["_image_height"] = int(width), int(height)
-            maximum_tokens = tokens_per_tile_for_tile_count(
-                tiles, threshold=args.radio_adaptive_token_threshold)
-            routed_tokens = (adaptive_tokens_per_tile(
-                maximum_tokens, ratio=args.radio_complexity_budget_ratio,
-                quantum=args.radio_complexity_token_quantum)
-                if args.radio_adaptive_complexity else maximum_tokens)
+            if args.vision_backend == "radio_v4h" and args.radio_v4h_native:
+                from rwkv_lab.radio_v4h import native_grid_for
+                gh, gw = native_grid_for(row, root=ROOT,
+                                         max_edge=args.radio_v4h_max_edge)
+                # One whole-image "tile"; the bucket key is the grid itself,
+                # since token count now varies continuously with image size.
+                row["_radio_tiles"] = gh * 10000 + gw
+                row["_visual_tokens"] = gh * (gw // 2)
+                if (index + 1) % 50_000 == 0:
+                    print({"kind": "radio_tile_plan", "done": index + 1,
+                           "total": len(rows)}, flush=True)
+                continue
+            if args.vision_backend == "radio_v4h":
+                routed_tokens = args.radio_v4h_lattice ** 2
+            else:
+                maximum_tokens = tokens_per_tile_for_tile_count(
+                    tiles, threshold=args.radio_adaptive_token_threshold)
+                routed_tokens = (adaptive_tokens_per_tile(
+                    maximum_tokens, ratio=args.radio_complexity_budget_ratio,
+                    quantum=args.radio_complexity_token_quantum)
+                    if args.radio_adaptive_complexity else maximum_tokens)
             row["_visual_tokens"] = tiles * routed_tokens
             if (index + 1) % 50_000 == 0:
                 print({"kind": "radio_tile_plan", "done": index + 1,
@@ -3881,9 +3953,9 @@ def main() -> None:
     sampler = EpochBatchSampler(
         train_indices, lengths, batch_size=args.batch, seed=args.seed,
         group_keys=([int(row["_radio_tiles"]) for row in rows]
-                    if args.vision_backend == "radio1d" else None))
+                    if is_radio_backend(args) else None))
     token_costs = [
-        (int(row["_visual_tokens"]) if args.vision_backend == "radio1d"
+        (int(row["_visual_tokens"]) if is_radio_backend(args)
          else args.prefix_tokens) + length
         for row, length in zip(rows, lengths)
     ]
@@ -3927,7 +3999,48 @@ def main() -> None:
     moonvit_taps = tuple(int(value) for value in args.moonvit_tap_layers.split(",")
                          if value)
     vision_compressor = None
-    if args.vision_backend == "radio1d":
+    if args.vision_backend == "radio_v4h":
+        from rwkv_lab.radio_v4h import (V4H_HIDDEN_SIZE, V4H_TILE_SIZE,
+                                        load_radio_v4h)
+        from rwkv_lab.radio1d_rwkv import RadioRWKVBridge
+        _atomic_json(out / "status.json", {
+            "state": "loading_radio_v4h", "updated": time.time()})
+        print(f"loading frozen C-RADIOv4-H: {args.radio_v4h_model}", flush=True)
+        vision = load_radio_v4h(args.radio_v4h_model)
+        vision.radio_revision = args.radio_v4h_revision
+        vision.radio_max_detail_tiles = args.radio_max_detail_tiles
+        vision.radio_tile_batch = args.radio_tile_batch
+        vision.v4h_cache_dir = Path(args.feature_cache)
+        vision.v4h_lattice = args.radio_v4h_lattice
+        vision.v4h_pair_axis = args.radio_v4h_pair_axis
+        # Same bridge, built for 1280-wide positional tokens. Rank is exposed so
+        # capacity can be held comparable to the 2560-wide arm rather than
+        # halving as a side effect of the encoder swap.
+        # hidden_size is the LM width (the bridge output goes straight into the
+        # token stream); input_size is the encoder width. RADIO1D's 2560 happens
+        # to match RWKV-2.9B, C-RADIOv4-H's 1280 does not.
+        # Pairing two 1280-wide cells reaches the LM's 2560 with no parameters,
+        # so this bridge is identical to the RADIO1D arm's and the encoder is
+        # the only variable. A learned 1280->2560 projection would have added
+        # 3.28M and made the comparison uninterpretable.
+        projector = RadioFeatureProjector(
+            bridge=RadioRWKVBridge(
+                hidden_size=int(rwkv.config.hidden_size),
+                rank=args.radio_v4h_bridge_rank,
+                tokens_per_tile=(1 if args.radio_v4h_native
+                                 else args.radio_v4h_lattice ** 2),
+                max_tiles=(1 if args.radio_v4h_native
+                           else args.radio_max_detail_tiles + 1),
+                letterbox_geometry=not args.radio_v4h_native),
+        ).cuda().float()
+        projector.native_mode = bool(args.radio_v4h_native)
+        vision.v4h_native = bool(args.radio_v4h_native)
+        vision.v4h_max_edge = args.radio_v4h_max_edge
+        print(f"v4h bridge: rank={args.radio_v4h_bridge_rank} "
+              f"lattice={args.radio_v4h_lattice}x{args.radio_v4h_lattice} "
+              f"params={sum(p.numel() for p in projector.parameters())/1e6:.2f}M",
+              flush=True)
+    elif args.vision_backend == "radio1d":
         _atomic_json(out / "status.json", {
             "state": "loading_radio1d", "updated": time.time()})
         print(f"loading frozen RADIO1D-H: {args.radio_model}", flush=True)
@@ -3999,7 +4112,7 @@ def main() -> None:
             rank=args.deep_vision_rank,
             token_quantum=(args.radio_complexity_token_quantum
                            if args.radio_adaptive_complexity else 128)).cuda().float()
-            if args.vision_backend == "radio1d" else DeepVisionInjector(
+            if is_radio_backend(args) else DeepVisionInjector(
                 int(rwkv.config.hidden_size), deep_sites,
                 rank=args.deep_vision_rank).cuda().float())
         deep_vision.install(rwkv.model.layers)

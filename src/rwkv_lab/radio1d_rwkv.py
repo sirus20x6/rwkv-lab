@@ -307,6 +307,35 @@ def _letterbox(image: Image.Image, size: int,
     return canvas
 
 
+def native_aspect_size(width: int, height: int, *, budget: int = RADIO_TILE_SIZE,
+                       step: int = 16) -> tuple[int, int]:
+    """Nearest RADIO-supported non-square size preserving the crop's aspect.
+
+    RADIO accepts any multiple of ``min_resolution_step`` independently per axis
+    (verified: 512x288 -> 576 tokens, 288x512 -> 576), so letterboxing to a
+    square is pure waste — it spends tokens on grey bars and forces the model to
+    undo an offset that is never recorded. ``budget`` bounds the longer edge, so
+    a square crop still lands on the model's preferred 512x512.
+    """
+    if width < 1 or height < 1 or budget < step or step < 1:
+        raise ValueError("tile geometry must be positive and at least one step")
+    scale = budget / max(width, height)
+    sized = []
+    for value in (height, width):
+        snapped = int(round(value * scale / step)) * step
+        sized.append(max(step, min(budget, snapped)))
+    return sized[0], sized[1]
+
+
+def _resize_native(image: Image.Image, *, budget: int = RADIO_TILE_SIZE,
+                   step: int = 16) -> Image.Image:
+    """Resize a crop to its own supported resolution, with no padding."""
+    image = image.convert("RGB")
+    height, width = native_aspect_size(
+        image.width, image.height, budget=budget, step=step)
+    return image.resize((width, height), Image.Resampling.BICUBIC)
+
+
 def _detail_boxes(width: int, height: int, rows: int, columns: int,
                   overlap: float) -> Iterable[tuple[int, int, int, int]]:
     if not 0 <= overlap < 1:
@@ -324,33 +353,56 @@ def _detail_boxes(width: int, height: int, rows: int, columns: int,
 
 def build_radio_tiles(image: Image.Image, *, tile_size: int = RADIO_TILE_SIZE,
                       max_detail_tiles: int = DEFAULT_MAX_DETAIL_TILES,
-                      overlap: float = 0.125) -> list[RadioTile]:
+                      overlap: float = 0.125,
+                      letterbox: bool = True) -> list[RadioTile]:
     """Create a global thumbnail plus generous aspect-aware detail crops.
 
     A one-cell source is represented once rather than duplicated as identical
     thumbnail and detail tiles. EXIF orientation is applied before geometry is
     computed.
+
+    ``letterbox=False`` sizes every tile to its own supported non-square
+    resolution instead of padding it into a square. Detail cells differ by only
+    a few pixels of edge rounding, so they are snapped to one shared size and
+    stay batchable; the thumbnail keeps its own aspect. This removes the padding
+    entirely — 25-75% of the tokens on a non-square crop described grey bars.
     """
     source = ImageOps.exif_transpose(image).convert("RGB")
     width, height = source.size
     rows, columns = choose_detail_grid(
         width, height, tile_size=tile_size, max_detail_tiles=max_detail_tiles)
     detail_count = rows * columns
-    if detail_count == 1:
-        return [RadioTile(
-            _letterbox(source, tile_size), (0.0, 0.0, 1.0, 1.0),
-            "thumbnail", 0, 0, 0, 1, 1)]
 
-    tiles = [RadioTile(
-        _letterbox(source, tile_size), (0.0, 0.0, 1.0, 1.0),
-        "thumbnail", 0, -1, -1, rows, columns)]
-    for index, box in enumerate(
-            _detail_boxes(width, height, rows, columns, overlap), start=1):
+    def shape(crop: Image.Image) -> Image.Image:
+        return (_letterbox(crop, tile_size) if letterbox
+                else _resize_native(crop, budget=tile_size))
+
+    if detail_count == 1:
+        return [RadioTile(shape(source), (0.0, 0.0, 1.0, 1.0),
+                          "thumbnail", 0, 0, 0, 1, 1)]
+
+    boxes = list(_detail_boxes(width, height, rows, columns, overlap))
+    if letterbox:
+        detail_size = None
+    else:
+        # One shared size for every detail cell, from the mean cell geometry, so
+        # a single batched forward covers them all.
+        mean_w = sum(x1 - x0 for x0, _, x1, _ in boxes) / len(boxes)
+        mean_h = sum(y1 - y0 for _, y0, _, y1 in boxes) / len(boxes)
+        cell_h, cell_w = native_aspect_size(
+            max(1, round(mean_w)), max(1, round(mean_h)), budget=tile_size)
+        detail_size = (cell_w, cell_h)
+
+    tiles = [RadioTile(shape(source), (0.0, 0.0, 1.0, 1.0),
+                       "thumbnail", 0, -1, -1, rows, columns)]
+    for index, box in enumerate(boxes, start=1):
         x0, y0, x1, y1 = box
         row, column = divmod(index - 1, columns)
+        crop = source.crop(box)
+        sized = (shape(crop) if detail_size is None
+                 else crop.resize(detail_size, Image.Resampling.BICUBIC))
         tiles.append(RadioTile(
-            _letterbox(source.crop(box), tile_size),
-            (x0 / width, y0 / height, x1 / width, y1 / height),
+            sized, (x0 / width, y0 / height, x1 / width, y1 / height),
             "detail", index, row, column, rows, columns))
     return tiles
 
@@ -616,8 +668,21 @@ class RadioRWKVBridge(nn.Module):
 
     def __init__(self, hidden_size: int = RADIO_HIDDEN_SIZE, rank: int = 256,
                  tokens_per_tile: int = RADIO_TOKENS_PER_TILE,
-                 max_tiles: int = DEFAULT_MAX_DETAIL_TILES + 1):
+                 max_tiles: int = DEFAULT_MAX_DETAIL_TILES + 1,
+                 input_size: int | None = None,
+                 letterbox_geometry: bool = True):
         super().__init__()
+        # This module is width-PRESERVING: its output goes straight into the LM
+        # token stream, so hidden_size must equal the LM width. RADIO1D happens
+        # to emit 2560, matching RWKV-2.9B exactly. Encoders of other widths
+        # (C-RADIOv4-H is 1280) need an explicit input projection first.
+        self.input_size = int(input_size or hidden_size)
+        self.input_projection = (
+            nn.Linear(self.input_size, hidden_size, bias=False)
+            if self.input_size != hidden_size else None)
+        if self.input_projection is not None:
+            nn.init.normal_(self.input_projection.weight,
+                            std=hidden_size ** -0.5)
         self.hidden_size = hidden_size
         self.tokens_per_tile = tokens_per_tile
         self.max_tiles = max_tiles
@@ -631,8 +696,11 @@ class RadioRWKVBridge(nn.Module):
         self.box_embedding = FourierBoxEmbedding(hidden_size)
         # Where real pixels sit inside each letterboxed canvas. Zero-init like
         # every other metadata embedding, so supplying it is an exact no-op at
-        # step 0 and existing checkpoints load with strict=False-free semantics.
-        self.content_embedding = FourierBoxEmbedding(hidden_size)
+        # step 0. Skipped entirely when nothing letterboxes (native whole-image
+        # encoding), where it would sit in the checkpoint never receiving a
+        # gradient.
+        self.content_embedding = (
+            FourierBoxEmbedding(hidden_size) if letterbox_geometry else None)
         # The gated residual begins as an exact no-op, but its gate must still
         # receive a gradient. Zeroing both gate and Up would deadlock the branch.
         nn.init.normal_(self.up.weight, std=1e-3)
@@ -644,8 +712,11 @@ class RadioRWKVBridge(nn.Module):
                       tile_indices: Tensor, token_indices: Tensor,
                       content: Tensor | None = None) -> Tensor:
         """Align an already packed, unpadded RADIO sequence."""
-        if features.ndim != 3 or features.shape[-1] != self.hidden_size:
-            raise ValueError("packed features must be [batch,tokens,hidden]")
+        if features.ndim != 3 or features.shape[-1] != self.input_size:
+            raise ValueError(
+                f"packed features must be [batch,tokens,{self.input_size}]")
+        if self.input_projection is not None:
+            features = self.input_projection(features)
         batch, length = features.shape[:2]
         if (boxes.shape != (batch, length, 4)
                 or roles.shape != (batch, length)
@@ -664,6 +735,9 @@ class RadioRWKVBridge(nn.Module):
             + self.box_embedding(boxes).to(value.dtype)
         )
         if content is not None:
+            if self.content_embedding is None:
+                raise ValueError(
+                    "this bridge was built without letterbox geometry")
             # source box says WHICH image region a tile covers; content box says
             # where that region actually lives inside the padded canvas. Both are
             # needed to map a feature position back to an image coordinate.
@@ -691,7 +765,7 @@ class RadioRWKVBridge(nn.Module):
         packed_tiles, packed_tokens, all_counts = [], [], []
         lengths: set[int] = set()
         for tokens, boxes, roles in samples:
-            if (tokens.ndim != 3 or tokens.shape[-1] != self.hidden_size
+            if (tokens.ndim != 3 or tokens.shape[-1] != self.input_size
                     or boxes.shape != (tile_count, 4)
                     or roles.shape != (tile_count,)):
                 raise ValueError("malformed adaptive RADIO cache tuple")
@@ -742,16 +816,40 @@ class RadioRWKVBridge(nn.Module):
                                   device=device),
             token_counts=torch.stack(all_counts).to(device=device))
 
+    def forward_native(self, features: Tensor, boxes: Tensor) -> RadioVisualPrefix:
+        """Align whole-image native features carrying per-token geometry.
+
+        There is no tile axis and no per-index position table: every token
+        already knows where it sits via its own box, so tile/token embeddings
+        are held at index 0 (both are zero-init and contribute nothing).
+        """
+        if features.ndim != 3 or features.shape[-1] != self.input_size:
+            raise ValueError(
+                f"native features must be [batch,tokens,{self.input_size}]")
+        if boxes.shape != (*features.shape[:2], 4):
+            raise ValueError("native boxes must be [batch,tokens,4]")
+        batch, length = features.shape[:2]
+        zeros = torch.zeros((batch, length), dtype=torch.long,
+                            device=features.device)
+        value = self._align_packed(features, boxes, zeros, zeros, zeros)
+        return RadioVisualPrefix(
+            embeddings=value,
+            mask=torch.ones((batch, length), dtype=torch.bool,
+                            device=features.device),
+            tile_count=torch.ones(batch, dtype=torch.long, device=features.device),
+            token_counts=torch.full((batch, 1), length, dtype=torch.long,
+                                    device=features.device))
+
     def forward(self, features: Tensor, boxes: Tensor, roles: Tensor,
                 tile_mask: Tensor | None = None,
                 image_aspect: Tensor | None = None) -> RadioVisualPrefix:
         active_tokens = int(features.shape[-2]) if features.ndim == 4 else 0
-        if (features.ndim != 4 or features.shape[-1] != self.hidden_size
+        if (features.ndim != 4 or features.shape[-1] != self.input_size
                 or active_tokens not in (
                     RADIO_COMPACT_TOKENS_PER_TILE, self.tokens_per_tile)):
             raise ValueError(
                 f"features must be [batch,tiles,128|{self.tokens_per_tile},"
-                f"{self.hidden_size}]")
+                f"{self.input_size}]")
         batch, tiles = features.shape[:2]
         if tiles > self.max_tiles:
             raise ValueError(f"{tiles} tiles exceeds configured maximum {self.max_tiles}")
@@ -781,7 +879,7 @@ class RadioRWKVBridge(nn.Module):
                 boxes, image_aspect).unsqueeze(2).expand(
                     batch, tiles, active_tokens, 4).reshape(batch, -1, 4)
         value = self._align_packed(
-            features.reshape(batch, -1, self.hidden_size), packed_boxes,
+            features.reshape(batch, -1, self.input_size), packed_boxes,
             packed_roles, packed_tiles, packed_tokens, packed_content)
         value = value.masked_fill(~token_mask.unsqueeze(-1), 0)
         return RadioVisualPrefix(
@@ -808,6 +906,24 @@ class RadioFeatureProjector(nn.Module):
     @property
     def visual_width(self) -> int:
         return int(self.prefix_tokens)
+
+    def forward_native(self, features: Sequence[tuple[Tensor, Tensor, Tensor]]) -> Tensor:
+        """Whole-image native path: one variable-length prefix per row."""
+        if not features:
+            raise ValueError("RADIO projector needs cached features")
+        lengths = {int(item[0].shape[0]) for item in features}
+        if len(lengths) != 1:
+            raise ValueError(
+                f"native batches must share one token count, got {sorted(lengths)}")
+        device = self.bridge.gate.device
+        tokens = torch.stack([item[0] for item in features]).to(
+            device=device, non_blocking=True)
+        boxes = torch.stack([item[1] for item in features]).to(
+            device=device, non_blocking=True)
+        result = self.bridge.forward_native(tokens, boxes)
+        self.prefix_tokens = result.embeddings.shape[1]
+        self.last_token_counts = result.token_counts
+        return result.embeddings
 
     def forward(self, features: Sequence[tuple[Tensor, Tensor, Tensor]],
                 image_aspect: Tensor | None = None) -> Tensor:
