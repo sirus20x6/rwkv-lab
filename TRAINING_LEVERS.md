@@ -78,6 +78,11 @@ runs the Muon update on 2D matrices and a built-in AdamW on everything else. **W
 | `--sm-ddc-strength` / `--sm-ddc-mode` | `0.0` / `both` | **DDC** (abelian subset): remove the fraction [0,1] of the update along the **per-channel rescale gauge** (dead directions). Resists over-training collapse, cleaner minima. **Live** (`ddc_strength`). | 2606.29176 | When you see over-training/anti-grokking collapse; the optimizer-level analog of the autopilot. |
 | `--sm-rsav` / `--sm-rsav-c` / `--sm-rsav-cap` / `--sm-rsav-relax` | `0` / `1.0` / `0.2` / `0.0` | **SpecMuon RSAV**: a global scalar-auxiliary-variable `r` tracks gradient energy and gates the step size (ξ, capped) — energy-adaptive without per-param state. | 2602.16167 | Stability under noisy/nonstationary gradients; cheap. |
 | `--sm-tile-size T` | `0` | **Hierarchical/tiled Muon**: block-diagonal Newton–Schulz over T×T tiles (scale → c·√T); replaces the min(m,n) NS cost with `T`. 0 = full-matrix. | 2606.27216 | Very wide matrices where NS is the bottleneck. |
+| `--sm-batched 1` / `--sm-compile-ns 1` | `0` / `0` | Batch same-shaped full-matrix NS updates into one GEMM sequence; optionally compile the static CUDA subgraph. Advanced Muon variants fall back automatically. | modded-nanogpt | Vanilla/Nesterov Muon when several layers share matrix shapes. |
+| `--sm-row-update-floor` | `0.0` | Lift each output row's orthogonalized update to a minimum update/weight norm ratio. | modded-nanogpt Track 3 | Sweep around `0.2–0.4`; changes optimization geometry. |
+| `--sm-radial-brake` / `--sm-radius-pin` | `0.0` / `0` | Dampen only outward radial motion and remove finite tangential-step norm drift. | modded-nanogpt Track 3 | Normalized models where radial motion is mostly redundant. |
+| `--sm-cautious-wd` | `0` | Apply configured WD only where the update already shrinks the coordinate, after radius correction. | 2510.12402 | Pair with radius pin; sweep WD. |
+| `--muon-adam-interval` | `1` | Accumulate/average fallback Adam gradients and update them every N Muon steps. State and phase are checkpointed. | modded-nanogpt | Vocab-heavy runs; start with 2. |
 | `--sm-da-muon` / `--sm-da-eta-max` / `--sm-da-r0` | `0` / `0.01` / `1e-3` | **Distance-Aware Muon**: per-matrix adaptive radius `η = clamp(r̄/√k, η_max)`, `r̄` = running-max ‖W−W₀‖. Adds a W₀ snapshot per matrix. | 2605.18999 | When a fixed LR under-/over-shoots across layers. |
 | `--sm-aro` / `--sm-aro-iters` | `0` / `5` | **ARO-Sinkhorn**: replace NS orthogonalization with a learned rotation (orthogonal-Procrustes) + Sinkhorn base optimizer — a non-orthonormal update (a *mode*, not a knob; NS-on-NS is a no-op). Adds an m×m rotation state. | 2602.09006 | Experimental alternative to orthogonalization. |
 | `--sm-ns-steps-final` | `0` | **Spectral-Scaling** guard: route the readout/output projection to a separate Muon group with THIS many NS steps (e.g. 10) so its fast-shrinking momentum stays orthonormalizable. Frontier-scale concern. | 2606.04058 | Large-scale runs where the final layer's spectrum collapses. |
@@ -196,7 +201,8 @@ w_cos w_cka w_flow w_bridge agreement_gate
 
 **Sweep-first (regime/scale/weight-dependent):** `--sm-second-moment`, `--sm-row-uniform`,
 `--sm-mona`, `--sm-ddc-strength`, `--tail-weight-decay`, `--muon-to-adamw-frac`,
-`--hyperball`, and all the `--w-*` magnitudes.
+`--hyperball`, `--sm-row-update-floor`, `--sm-radial-brake`, `--sm-radius-pin`,
+`--sm-cautious-wd`, and all the `--w-*` magnitudes.
 
 ---
 

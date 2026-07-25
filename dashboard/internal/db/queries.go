@@ -234,11 +234,20 @@ type IngestBatch struct {
 	ckptStmt  *sql.Stmt
 }
 
-// Begin opens a batch. Call Commit or Rollback exactly once.
-func (d *DB) Begin() (*IngestBatch, error) {
+// begin opens a batch and, when resetRunID is nonzero, removes the previous
+// file generation inside the same transaction that will insert its
+// replacement. Readers therefore see either the complete old generation or
+// the complete new one, never the transient empty state between them.
+func (d *DB) begin(resetRunID int64) (*IngestBatch, error) {
 	tx, err := d.DB.Begin()
 	if err != nil {
 		return nil, err
+	}
+	if resetRunID != 0 {
+		if err := resetRunEventsTx(tx, resetRunID); err != nil {
+			_ = tx.Rollback()
+			return nil, fmt.Errorf("reset replacement generation: %w", err)
+		}
 	}
 	b := &IngestBatch{tx: tx}
 	for _, p := range []struct {
@@ -253,6 +262,18 @@ func (d *DB) Begin() (*IngestBatch, error) {
 		*p.dst = st
 	}
 	return b, nil
+}
+
+// Begin opens an append batch. Call Commit or Rollback exactly once.
+func (d *DB) Begin() (*IngestBatch, error) { return d.begin(0) }
+
+// BeginReplacement opens a batch that atomically replaces all derived events
+// for runID. It is used when train.jsonl was truncated or rewritten.
+func (d *DB) BeginReplacement(runID int64) (*IngestBatch, error) {
+	if runID <= 0 {
+		return nil, fmt.Errorf("begin replacement: invalid run id %d", runID)
+	}
+	return d.begin(runID)
 }
 
 func nullIfEmpty(s string) any {
@@ -283,6 +304,18 @@ func (b *IngestBatch) Checkpoint(runID int64, r CkptRow) error {
 
 // Commit finalizes the batch.
 func (b *IngestBatch) Commit() error { return b.tx.Commit() }
+
+// CommitAndPublish commits the events, browser revision, and ingest cursor as
+// one unit. For a replacement batch this also makes the reset and replay one
+// externally indivisible generation change.
+func (b *IngestBatch) CommitAndPublish(runID int64, lastUpdateTs float64,
+	path string, c Cursor) error {
+	if err := publishCursorTx(b.tx, runID, lastUpdateTs, path, c); err != nil {
+		_ = b.tx.Rollback()
+		return err
+	}
+	return b.tx.Commit()
+}
 
 // Rollback aborts the batch (safe to call after Commit — it just errors).
 func (b *IngestBatch) Rollback() { _ = b.tx.Rollback() }

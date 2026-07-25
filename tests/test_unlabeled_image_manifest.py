@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -79,3 +80,51 @@ def test_inventory_skips_non_utf8_filesystem_names(tmp_path: Path):
     assert module.inventory(root, db, commit_every=1) == 2
     assert db.execute("SELECT count(*) FROM files").fetchone()[0] == 1
     assert module.statistics(db)["invalid_utf8_paths"] == 1
+
+
+def test_incremental_resume_clusters_old_hashes_and_publishes(tmp_path: Path):
+    root = tmp_path / "images"
+    larger = root / "larger.jpg"
+    smaller = root / "smaller.jpg"
+    distinct = root / "distinct.jpg"
+    make_image(larger, (200, 40, 20), size=(640, 560))
+    make_image(smaller, (200, 40, 20), size=(320, 280))
+    make_image(distinct, (20, 40, 200), size=(320, 280))
+
+    db = module.connection(tmp_path / "dedup.sqlite")
+    module.inventory(root, db, commit_every=2)
+    # Simulate a checkpoint left by the old behavior: hashes are durable, but
+    # no perceptual clusters or manifest have been produced yet.
+    db.close()
+    subprocess.run([
+        sys.executable, str(SCRIPT), "--root", str(root),
+        "--db", str(tmp_path / "dedup.sqlite"),
+        "--manifest", str(tmp_path / "manifest.jsonl"),
+        "--phase", "hash", "--workers", "2", "--commit-every", "2",
+        "--no-incremental",
+    ], check=True, capture_output=True, text=True)
+    db = module.connection(tmp_path / "dedup.sqlite")
+    assert db.execute("SELECT count(*) FROM files WHERE phash IS NOT NULL").fetchone()[0] == 3
+    assert db.execute("SELECT count(*) FROM phash_bands").fetchone()[0] == 0
+
+    manifest = tmp_path / "manifest.jsonl"
+    assert module.perceptual_hashes(
+        db, workers=1, commit_every=2, incremental=True,
+        distance=4, min_side=256, manifest=manifest,
+        publish_every=1) == 0
+
+    assert db.execute("""SELECT count(*) FROM files
+                         WHERE duplicate_kind='perceptual'""").fetchone()[0] == 1
+    partial = module.partial_manifest_path(manifest)
+    assert partial.name == "manifest.partial.jsonl"
+    assert not manifest.exists()
+    records = [json.loads(line) for line in partial.read_text().splitlines()]
+    paths = {record["image"] for record in records}
+    assert paths == {str(larger.resolve()), str(distinct.resolve())}
+
+    # A second resume is idempotent: it neither decodes nor reclusters work.
+    assert module.perceptual_hashes(
+        db, workers=1, commit_every=2, incremental=True,
+        distance=4, min_side=256, manifest=manifest,
+        publish_every=1) == 0
+    assert db.execute("SELECT count(*) FROM phash_bands").fetchone()[0] == 16

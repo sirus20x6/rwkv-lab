@@ -6,6 +6,17 @@ import (
 	"testing"
 )
 
+func TestOpenKeepsReadCapacityDuringIngestTransactions(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "dashboard.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if got := database.Stats().MaxOpenConnections; got < 2 {
+		t.Fatalf("database pool has %d connection; ingest would block all dashboard reads", got)
+	}
+}
+
 func TestCursorFingerprintColumnsMigrateOnExistingDatabase(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "legacy.db")
 	raw, err := sql.Open("sqlite", path)

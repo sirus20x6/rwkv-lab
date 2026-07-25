@@ -77,6 +77,8 @@ __all__ = [
     "EngramSite",
     "LexicalMemoryBank",
     "RecallResult",
+    "BatchedStreamingEngramState",
+    "StreamingEngramState",
     "StreamingRecall",
     "attach_engram",
     "detach_engram",
@@ -355,6 +357,198 @@ class RecallResult(NamedTuple):
     dist: torch.Tensor      # long — t - tau (how far back the recall reached)
 
 
+class StreamingEngramState:
+    """Exact one-token Engram state for recurrent generation.
+
+    ``StreamingRecall`` avoids rebuilding the suffix automaton for the complete
+    lexical history after every generated token. The learned table's causal
+    ShortConv views need only their previous ``kernel - 1`` raw retrievals, so
+    retaining those small windows is exactly equivalent to evaluating each
+    view over the complete history and selecting its final position.
+
+    This state intentionally supports one sequence. Qualitative generation
+    decodes variable-tile images independently, and keeping this API scalar
+    makes its CPU suffix-automaton ownership unambiguous.
+    """
+
+    def __init__(self, lmb: "LexicalMemoryBank", ids: torch.Tensor,
+                 recall: RecallResult) -> None:
+        if ids.ndim != 2 or ids.shape[0] != 1:
+            raise ValueError("streaming Engram requires one [1, sequence] history")
+        if any(value.shape != ids.shape for value in recall):
+            raise ValueError("streaming Engram recall must match its token history")
+        self.lmb = lmb
+        self.recaller = StreamingRecall(lmb.boundary_id)
+        self.last_feature: Optional[torch.Tensor] = None
+        # This is the only device-to-host history transfer. Generation then
+        # feeds Python token IDs directly into the incremental automaton.
+        for token in ids.detach().cpu().reshape(-1).tolist():
+            self.recaller.extend(int(token))
+
+        table = lmb.table
+        self.histories: list[torch.Tensor] = []
+        for view, values, row_scale in zip(
+                table.views, table.tables, table.row_scale):
+            raw = table._retrieve(values, row_scale, recall.recalled)
+            raw = raw * recall.valid.unsqueeze(-1).to(raw.dtype)
+            keep = max(0, view.kernel - 1)
+            self.histories.append(raw[:, -keep:] if keep else raw[:, :0])
+
+    def step(self, token: int) -> RecallResult:
+        """Consume one lexical token and prepare exact one-position features."""
+        recalled, match_len, distance = self.recaller.extend(int(token))
+        device = self.lmb.table.tables[0].device
+        valid_value = recalled >= 0
+        rr = RecallResult(
+            recalled=torch.tensor([[max(0, recalled)]], dtype=torch.long,
+                                   device=device),
+            valid=torch.tensor([[valid_value]], dtype=torch.bool, device=device),
+            mlen=torch.tensor([[match_len]], dtype=torch.long, device=device),
+            dist=torch.tensor([[distance]], dtype=torch.long, device=device),
+        )
+
+        table = self.lmb.table
+        outputs = []
+        valid_mask = rr.valid.unsqueeze(-1)
+        for index, (view, values, row_scale) in enumerate(zip(
+                table.views, table.tables, table.row_scale)):
+            raw = table._retrieve(values, row_scale, rr.recalled)
+            raw = raw * valid_mask.to(raw.dtype)
+            window = torch.cat((self.histories[index], raw), dim=1)
+            current = view(window)[:, -1:]
+            outputs.append(table.view_weight[index].to(current.dtype) * current)
+            keep = max(0, view.kernel - 1)
+            self.histories[index] = window[:, -keep:] if keep else window[:, :0]
+        feature = torch.stack(outputs).sum(0) / math.sqrt(len(outputs))
+        feature = feature * valid_mask.to(feature.dtype)
+        self.last_feature = feature
+        self.lmb._set_precomputed_features(feature, rr)
+        return rr
+
+
+class BatchedStreamingEngramState:
+    """Stack independent scalar Engram streams for one-token batched decode.
+
+    Prefills remain independent and may have different lengths.  Each row owns
+    its own :class:`StreamingRecall` automaton, while the learned table reads
+    and causal ShortConv views run as one batch.  Inactive rows neither consume
+    their supplied token nor advance their ShortConv window; they expose an
+    invalid, zero feature so attached model hooks retain the full batch shape.
+
+    The scalar stream objects donate their recall automata to this state and
+    should not be advanced independently afterwards.
+    """
+
+    def __init__(self, streams: Sequence[StreamingEngramState]) -> None:
+        streams = tuple(streams)
+        if not streams:
+            raise ValueError("batched streaming Engram requires at least one row")
+        lmb = streams[0].lmb
+        if any(stream.lmb is not lmb for stream in streams):
+            raise ValueError("batched streaming Engram rows must share one memory bank")
+        view_count = len(lmb.table.views)
+        if any(len(stream.histories) != view_count for stream in streams):
+            raise ValueError("batched streaming Engram history/view mismatch")
+
+        self.lmb = lmb
+        self.recallers = [stream.recaller for stream in streams]
+        self.last_feature: Optional[torch.Tensor] = None
+        self.histories: list[torch.Tensor] = []
+        for index, view in enumerate(lmb.table.views):
+            keep = max(0, view.kernel - 1)
+            padded = []
+            for stream in streams:
+                history = stream.histories[index]
+                if history.ndim != 3 or history.shape[0] != 1 \
+                        or history.shape[-1] != lmb.table.d_row \
+                        or history.shape[1] > keep:
+                    raise ValueError(
+                        "batched streaming Engram row history has invalid shape")
+                # Unequal or very short prefills can retain fewer than K-1
+                # values. Left-zero-padding is exactly the causal convolution's
+                # ordinary pre-sequence padding and makes rows stackable.
+                if history.shape[1] < keep:
+                    history = F.pad(history, (0, 0, keep - history.shape[1], 0))
+                padded.append(history)
+            self.histories.append(torch.cat(padded, dim=0))
+
+    @property
+    def batch_size(self) -> int:
+        return len(self.recallers)
+
+    def step(self, tokens: Sequence[int] | torch.Tensor, *,
+             active: Sequence[bool] | torch.Tensor | None = None
+             ) -> RecallResult:
+        """Consume one token for each active row and prepare ``[B,1,D]`` features."""
+        if torch.is_tensor(tokens):
+            token_values = tokens.detach().cpu().reshape(-1).tolist()
+        else:
+            token_values = list(tokens)
+        if len(token_values) != self.batch_size:
+            raise ValueError("batched streaming Engram needs one token per row")
+        if active is None:
+            active_values = [True] * self.batch_size
+        elif torch.is_tensor(active):
+            active_values = active.detach().cpu().reshape(-1).bool().tolist()
+        else:
+            active_values = [bool(value) for value in active]
+        if len(active_values) != self.batch_size:
+            raise ValueError("batched streaming Engram needs one active flag per row")
+
+        recalled_values, valid_values = [], []
+        length_values, distance_values = [], []
+        for recaller, token, enabled in zip(
+                self.recallers, token_values, active_values):
+            if enabled:
+                recalled, match_len, distance = recaller.extend(int(token))
+            else:
+                recalled, match_len, distance = -1, 0, 0
+            recalled_values.append(max(0, recalled))
+            valid_values.append(enabled and recalled >= 0)
+            length_values.append(match_len)
+            distance_values.append(distance)
+
+        device = self.lmb.table.tables[0].device
+        active_mask = torch.tensor(active_values, dtype=torch.bool,
+                                   device=device).view(-1, 1, 1)
+        recalled_tensor = torch.tensor(recalled_values, dtype=torch.long,
+                                       device=device).view(-1, 1)
+        valid = torch.tensor(valid_values, dtype=torch.bool,
+                             device=device).view(-1, 1)
+        rr = RecallResult(
+            recalled=recalled_tensor,
+            valid=valid,
+            mlen=torch.tensor(length_values, dtype=torch.long,
+                              device=device).view(-1, 1),
+            dist=torch.tensor(distance_values, dtype=torch.long,
+                              device=device).view(-1, 1),
+        )
+
+        table = self.lmb.table
+        outputs = []
+        valid_mask = rr.valid.unsqueeze(-1)
+        for index, (view, values, row_scale) in enumerate(zip(
+                table.views, table.tables, table.row_scale)):
+            raw = table._retrieve(values, row_scale, rr.recalled)
+            raw = raw * valid_mask.to(raw.dtype)
+            previous = self.histories[index]
+            window = torch.cat((previous, raw), dim=1)
+            current = view(window)[:, -1:]
+            outputs.append(table.view_weight[index].to(current.dtype) * current)
+            keep = max(0, view.kernel - 1)
+            if keep:
+                candidate = window[:, -keep:]
+                self.histories[index] = torch.where(
+                    active_mask, candidate, previous)
+            else:
+                self.histories[index] = previous
+        feature = torch.stack(outputs).sum(0) / math.sqrt(len(outputs))
+        feature = feature * valid_mask.to(feature.dtype)
+        self.last_feature = feature
+        self.lmb._set_precomputed_features(feature, rr)
+        return rr
+
+
 def token_rosa_recall(ids: torch.Tensor, vocab_size: int,
                       boundary_id: Optional[int] = None) -> RecallResult:
     """Parameter-free ROSA recall over raw token ids.
@@ -401,19 +595,31 @@ class EngramContext:
     def __init__(self) -> None:
         self.ids: Optional[torch.Tensor] = None  # [B, T] long
         self.recall: Optional[RecallResult] = None
+        # Generation may feed a single token to the recurrent model while
+        # lexical recall still needs the complete token history.  In that
+        # case features are constructed over ``ids`` and only this slice is
+        # exposed to the model hooks.
+        self.active_slice: Optional[slice] = None
         self.version: int = 0
         self.enabled: bool = True
         self._warned: bool = False
 
     def set_input_ids(self, ids: torch.Tensor,
-                      recall: Optional[RecallResult] = None) -> None:
+                      recall: Optional[RecallResult] = None,
+                      active_slice: Optional[slice] = None) -> None:
+        if ids.ndim != 2:
+            raise ValueError("Engram input IDs must have shape [batch, sequence]")
+        if active_slice is not None and not isinstance(active_slice, slice):
+            raise TypeError("Engram active_slice must be a slice")
         self.ids = ids
         self.recall = recall
+        self.active_slice = active_slice
         self.version += 1
 
     def clear(self) -> None:
         self.ids = None
         self.recall = None
+        self.active_slice = None
         self.version += 1
 
 
@@ -692,12 +898,50 @@ class LexicalMemoryBank(nn.Module):
     # -- trainer API ----------------------------------------------------------
 
     def set_input_ids(self, ids: torch.Tensor,
-                      recall: Optional[RecallResult] = None) -> None:
-        """Stash ids and an optional CPU-prefetched recall result for this forward."""
-        self.ctx.set_input_ids(ids, recall)
+                      recall: Optional[RecallResult] = None,
+                      active_slice: Optional[slice] = None) -> None:
+        """Stash lexical context for the next model forward.
+
+        ``active_slice`` supports exact recurrent generation: ``ids`` remains
+        the complete lexical history used by suffix recall and the causal
+        ShortConv views, while the returned memory features are sliced to the
+        one-token sequence currently being passed through RWKV.
+        """
+        self.ctx.set_input_ids(ids, recall, active_slice)
 
     def set_warmup(self, w: float) -> None:
         self._warmup = float(min(max(w, 0.0), 1.0))
+
+    def begin_streaming(self, ids: torch.Tensor,
+                        recall: Optional[RecallResult] = None
+                        ) -> StreamingEngramState:
+        """Seed exact recurrent state from an already-scored lexical history.
+
+        ``recall`` may be a suffix of ``last_recall`` beginning at a document
+        boundary. Earlier positions are unreachable and need not remain in the
+        streaming state. If omitted, the current full-forward recall is used.
+        """
+        selected = self.last_recall if recall is None else recall
+        if selected is None:
+            raise RuntimeError("streaming Engram requires a completed prefill")
+        return StreamingEngramState(self, ids, selected)
+
+    def _set_precomputed_features(self, feature: torch.Tensor,
+                                  recall: RecallResult) -> None:
+        """Install one-position rolling features for the attached layer hooks."""
+        if feature.ndim != 3 or feature.shape[1] != 1:
+            raise ValueError("streaming Engram feature must have shape [batch,1,d_row]")
+        if feature.shape[-1] != self.table.d_row:
+            raise ValueError("streaming Engram feature width does not match its table")
+        if any(value.shape != feature.shape[:2] for value in recall):
+            raise ValueError("streaming Engram recall must match the feature batch")
+        self.ctx.set_input_ids(recall.recalled, recall=recall)
+        self.last_recall = recall
+        for site in self.sites.values():
+            site.prepare(feature, recall, self._warmup)
+        # Attached layer hooks call ensure_features(); mark this version ready
+        # so they consume the rolling feature without rebuilding full recall.
+        self._feat_version = self.ctx.version
 
     def read_recalled(self, recalled_ids: torch.Tensor,
                       valid: torch.Tensor) -> torch.Tensor:
@@ -732,8 +976,14 @@ class LexicalMemoryBank(nn.Module):
             rr = token_rosa_recall(ids, self.table.vocab_size, self.boundary_id)
         elif rr.recalled.device != ids.device:
             rr = RecallResult(*(x.to(ids.device, non_blocking=True) for x in rr))
-        self.last_recall = rr
         m_c = self.read_recalled(rr.recalled, rr.valid)
+        if self.ctx.active_slice is not None:
+            active = self.ctx.active_slice
+            m_c = m_c[:, active]
+            rr = RecallResult(*(value[:, active] for value in rr))
+            if m_c.shape[1] == 0:
+                raise ValueError("Engram active_slice selected no positions")
+        self.last_recall = rr
         for site in self.sites.values():
             site.prepare(m_c, rr, self._warmup)
         self._feat_version = self.ctx.version

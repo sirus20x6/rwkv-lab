@@ -11,6 +11,7 @@ import argparse
 import atexit
 import contextlib
 import fcntl
+import gc
 import hashlib
 import json
 import math
@@ -24,6 +25,7 @@ import time
 import zipfile
 from collections import Counter, OrderedDict
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -32,10 +34,12 @@ import torch.nn.functional as F
 from PIL import Image
 from torch import nn
 
+from rwkv_lab.activation_checkpointing import selective_activation_checkpointing
 from rwkv_lab.generate import SEP, WorldVocab
 from rwkv_lab.fused_ce import HAS_FUSED_CE, weighted_logits_cross_entropy
 from rwkv_lab.deep_vision import DeepVisionInjector, LayerMatchedVisionInjector
 from rwkv_lab.engram_lmb import (
+    BatchedStreamingEngramState,
     LexicalMemoryBank,
     RecallResult,
     attach_engram,
@@ -51,26 +55,64 @@ from rwkv_lab.moonvit import (MoonViT, MoonViTPrefixProjector, feature_cache_key
                               valid_torch_archive_storages)
 from rwkv_lab.rwkv_finetune import load_g1g_fla
 from rwkv_lab.vision_loop import (
+    capture_loop_refinement_caches,
     install_factored_timemix,
     load_loop_adapter_state,
     loop_adapter_state,
     loop_training_metrics,
     reset_loop_adapters,
+    reset_loop_inference_cache,
+    restore_loop_refinement_caches,
     set_loop_enabled,
     set_loop_scale,
+    stack_legacy_fla_caches,
+    stack_loop_refinement_cache_snapshots,
     write_loop_telemetry,
 )
 from rwkv_lab.vision_grounding import ImageTextContrastiveHead, early_token_weights
+from rwkv_lab.vision_structured import (
+    BOX_RE,
+    StructuredSpatialHead,
+    parse_structured_target,
+    structured_detection_loss,
+)
 from rwkv_lab.vision_fusion import (
     AlignedFrozenVisionFeatures,
+    SamAlignedFrozenFeatures,
     VisionFusionResidual,
     VisionTowerConfig,
     aligned_feature_cache_key,
     valid_aligned_feature,
 )
+from rwkv_lab.vision_compressor_features import (
+    CanonicalLatentPrefixProjector,
+    FrozenTeacherCompressor,
+)
+from rwkv_lab.radio1d_cache import (
+    cache_is_current as radio_cache_is_current,
+    cache_path as radio_cache_path,
+    load_cache as load_radio_cache,
+    make_metadata as make_radio_metadata,
+    save_cache as save_radio_cache,
+)
+from rwkv_lab.radio1d_rwkv import (
+    DEFAULT_ADAPTIVE_TOKEN_THRESHOLD,
+    DEFAULT_COMPLEXITY_BUDGET_RATIO,
+    DEFAULT_COMPLEXITY_TOKEN_QUANTUM,
+    DEFAULT_MAX_DETAIL_TILES,
+    RadioFeatureProjector,
+    RadioPrefixInjector,
+    build_radio_tiles,
+    choose_detail_grid,
+    encode_radio_tiles,
+    load_radio1d_h,
+    adaptive_tokens_per_tile,
+    tokens_per_tile_for_tile_count,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 CHECKPOINT_SCHEMA = 3
+EVAL_RESTART_EXIT_CODE = 42
 _CACHE_LOAD_POOL = ThreadPoolExecutor(max_workers=16, thread_name_prefix="vision-cache")
 # Background warming must leave I/O and CPU headroom for the exact next-batch
 # prefetch. Sixty-four concurrent torch ZIP readers previously flooded the same
@@ -78,6 +120,23 @@ _CACHE_LOAD_POOL = ThreadPoolExecutor(max_workers=16, thread_name_prefix="vision
 # stall on a cold cache.
 _FEATURE_PRELOAD_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="vision-preload")
 _NEXT_BATCH_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vision-next-batch")
+# RADIO is a frozen eval-only tower, but its remote implementation is not
+# documented as re-entrant.  Prefetch may overlap RWKV work; serialize RADIO
+# calls themselves so evaluation and a cache worker can never mutate/read the
+# same tower concurrently.
+_RADIO_ENCODE_LOCK = threading.Lock()
+
+
+@dataclass(frozen=True)
+class BatchPrefetchResult:
+    """Observable result of preparing exactly one sampler-peeked batch."""
+
+    ready: int
+    recall: RecallResult | None
+    resident_hits: int = 0
+    disk_hits: int = 0
+    generated: int = 0
+    elapsed_s: float = 0.0
 
 
 class _BoundedFeatureCache:
@@ -241,9 +300,11 @@ def _load_raw_tensor_archive(path: Path, *, shape: tuple[int, ...],
 
 
 def load_examples(path: str | Path, *, root: Path = ROOT,
-                  stat_workers: int = 1) -> list[dict]:
+                  stat_workers: int = 1,
+                  require_all: bool = False) -> list[dict]:
     """Read valid image-caption rows without silently accepting missing files."""
     candidates = []
+    invalid_fields: list[int] = []
     source = Path(path)
     # Iterate physical lines. str.splitlines() also splits valid JSON strings at
     # Unicode line-separator characters (U+2028/U+2029), corrupting such rows.
@@ -253,6 +314,7 @@ def load_examples(path: str | Path, *, root: Path = ROOT,
                 continue
             row = json.loads(line)
             if not row.get("image") or not row.get("text"):
+                invalid_fields.append(line_number)
                 continue
             image = Path(row["image"])
             image = image if image.is_absolute() else root / image
@@ -284,6 +346,13 @@ def load_examples(path: str | Path, *, root: Path = ROOT,
             rows = [item for item in inspected if item is not None]
     else:
         rows = [item for candidate in candidates if (item := inspect(candidate)) is not None]
+    if require_all and (invalid_fields or len(rows) != len(candidates)):
+        missing = len(candidates) - len(rows)
+        examples = invalid_fields[:5]
+        raise ValueError(
+            f"manifest {source} rejected {missing} missing/unreadable images and "
+            f"{len(invalid_fields)} rows without image/text"
+            + (f" (invalid field lines: {examples})" if examples else ""))
     return rows
 
 
@@ -313,7 +382,8 @@ def _row_feature_cache_key(row: dict, *, max_input_patches: int,
 
 def prepare_examples(rows: Sequence[dict], vocab: WorldVocab, *, prompt: str,
                      max_text_tokens: int,
-                     sandwich_prompt: bool = False) -> tuple[list[dict], list[int]]:
+                     sandwich_prompt: bool = False,
+                     sandwich_lead_prompt: str = "") -> tuple[list[dict], list[int]]:
     """Tokenize once, append EOD, and retain EOD when a caption is truncated."""
     prompt_cache: dict[str, list[int]] = {}
     prepared, lengths = [], []
@@ -323,24 +393,83 @@ def prepare_examples(rows: Sequence[dict], vocab: WorldVocab, *, prompt: str,
         if prompt_tokens is None:
             prompt_tokens = vocab.encode(row_prompt)
             prompt_cache[row_prompt] = prompt_tokens
-        prompt_copies = 2 if sandwich_prompt else 1
-        prompt_width = prompt_copies * len(prompt_tokens)
+        if sandwich_prompt:
+            lead_text = sandwich_lead_prompt or row_prompt
+            lead_tokens = prompt_cache.get(lead_text)
+            if lead_tokens is None:
+                lead_tokens = vocab.encode(lead_text)
+                prompt_cache[lead_text] = lead_tokens
+        else:
+            lead_tokens = []
+        prompt_width = len(lead_tokens) + len(prompt_tokens)
         if prompt_width + 2 > max_text_tokens:
             raise ValueError("max_text_tokens is too small for prompt + one caption token + EOD")
         room = max_text_tokens - prompt_width - 1
-        caption = vocab.encode(row["text"])
+        caption_text = str(row["text"])
+        caption = vocab.encode(caption_text)
         if not caption:
             continue
-        tokens = prompt_tokens * prompt_copies + caption[:room] + [SEP]
+        tokens = lead_tokens + prompt_tokens + caption[:room] + [SEP]
         item = dict(row)
         item["tokens"] = tokens
         item["prompt_len"] = prompt_width
-        item["vision_insert"] = len(prompt_tokens) if sandwich_prompt else 0
+        item["vision_insert"] = len(lead_tokens) if sandwich_prompt else 0
         item["prompt"] = row_prompt
         item["truncated"] = len(caption) > room
+        if str(row.get("task") or "") == "sam_mask":
+            coordinate_tokens, coordinate_starts = (
+                structured_coordinate_token_offsets(
+                    caption_text, caption[:room], vocab))
+            item["structured_coordinate_tokens"] = tuple(
+                prompt_width + offset for offset in coordinate_tokens)
+            item["structured_coordinate_starts"] = tuple(
+                prompt_width + offset for offset in coordinate_starts)
+            item["structured_boundary_lead_tokens"] = tuple(
+                vocab.encode(value)[0] for value in ("000", "999"))
         prepared.append(item)
         lengths.append(len(tokens))
     return prepared, lengths
+
+
+def structured_coordinate_token_offsets(
+        text: str, tokens: Sequence[int], vocab: WorldVocab,
+        ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Locate token offsets covering the four numeric fields of every box.
+
+    Offsets are computed in bytes because WorldVocab is byte-tokenized while
+    labels before ``box=`` may contain non-ASCII category names.  The returned
+    start offsets identify the first (normally two-digit) token of each
+    coordinate, which lets the LM objective explicitly suppress its common
+    ``00``/``99`` collapse without banning real edge-touching targets.
+    """
+    spans = []
+    for match in BOX_RE.finditer(text):
+        for group in range(1, 5):
+            char_start, char_end = match.span(group)
+            spans.append((len(text[:char_start].encode("utf-8")),
+                          len(text[:char_end].encode("utf-8"))))
+    if not spans or not tokens:
+        return (), ()
+    token_spans = []
+    cursor = 0
+    for token in tokens:
+        value = vocab.tok[int(token)]
+        token_spans.append((cursor, cursor + len(value)))
+        cursor += len(value)
+    covered, starts = set(), []
+    for span_start, span_end in spans:
+        first = None
+        for index, (token_start, token_end) in enumerate(token_spans):
+            if token_end <= span_start:
+                continue
+            if token_start >= span_end:
+                break
+            covered.add(index)
+            if first is None:
+                first = index
+        if first is not None:
+            starts.append(first)
+    return tuple(sorted(covered)), tuple(starts)
 
 
 def split_examples(rows: Sequence[dict], *, val_fraction: float) -> tuple[list[int], list[int]]:
@@ -416,13 +545,17 @@ class EpochBatchSampler:
     batches while avoiding the worst padding overhead from the caption tail.
     """
     def __init__(self, indices: Sequence[int], lengths: Sequence[int], *, batch_size: int,
-                 seed: int, bucket_batches: int = 32):
+                 seed: int, bucket_batches: int = 32,
+                 group_keys: Sequence[int] | None = None):
         if batch_size < 1:
             raise ValueError("batch_size must be positive")
         self.indices = list(indices)
         self.lengths = list(lengths)
         self.batch_size = int(batch_size)
         self.bucket_batches = max(1, int(bucket_batches))
+        self.group_keys = list(group_keys) if group_keys is not None else None
+        if self.group_keys is not None and len(self.group_keys) != len(self.lengths):
+            raise ValueError("sampler group keys must align with lengths")
         self.generator = torch.Generator().manual_seed(seed)
         self.epoch = 0
         self.position = 0
@@ -432,9 +565,39 @@ class EpochBatchSampler:
     def _new_epoch(self) -> None:
         shuffled = [self.indices[i] for i in torch.randperm(len(self.indices), generator=self.generator).tolist()]
         window = self.batch_size * self.bucket_batches
-        ordered = []
-        for start in range(0, len(shuffled), window):
-            ordered.extend(sorted(shuffled[start:start + window], key=self.lengths.__getitem__))
+        ordered: list[int] = []
+        if self.group_keys is None:
+            for start in range(0, len(shuffled), window):
+                ordered.extend(sorted(shuffled[start:start + window],
+                                      key=self.lengths.__getitem__))
+        else:
+            by_key: dict[int, list[int]] = {}
+            for index in shuffled:
+                by_key.setdefault(int(self.group_keys[index]), []).append(index)
+            # Each exact-shape bucket must remain contiguous inside a batch,
+            # but concatenating complete buckets can postpone a minority
+            # source for most (or all) of a finite run.  Build bounded,
+            # length-sorted runs and round-robin those runs instead.  The
+            # shuffled rows retain the requested source distribution within
+            # each shape while every shape appears throughout the epoch.
+            keys = list(by_key)
+            chunks: dict[int, list[list[int]]] = {}
+            for key in keys:
+                group = by_key[key]
+                chunks[key] = [
+                    sorted(group[start:start + window],
+                           key=self.lengths.__getitem__)
+                    for start in range(0, len(group), window)
+                ]
+            while chunks:
+                live = list(chunks)
+                permutation = torch.randperm(
+                    len(live), generator=self.generator).tolist()
+                for offset in permutation:
+                    key = live[offset]
+                    ordered.extend(chunks[key].pop(0))
+                    if not chunks[key]:
+                        del chunks[key]
         self.order = ordered
         self.position = 0
 
@@ -483,11 +646,27 @@ class EpochBatchSampler:
             return []
         if target_tokens <= 0:
             end = min(position + self.batch_size, len(self.order))
+            if self.group_keys is not None:
+                first_key = self.group_keys[self.order[position]]
+                while end > position + 1 and any(
+                        self.group_keys[index] != first_key
+                        for index in self.order[position:end]):
+                    end -= 1
             return self.order[position:end]
         if max_items == min_items:
             end = min(position + min_items, len(self.order))
+            if self.group_keys is not None:
+                first_key = self.group_keys[self.order[position]]
+                while end > position + 1 and self.group_keys[
+                        self.order[end - 1]] != first_key:
+                    end -= 1
             return self.order[position:end]
         available = min(max_items, len(self.order) - position)
+        if self.group_keys is not None:
+            first_key = self.group_keys[self.order[position]]
+            available = next((offset for offset in range(1, available)
+                              if self.group_keys[self.order[position + offset]]
+                              != first_key), available)
         take = min(min_items, available)
         max_cost = max(token_costs[index]
                        for index in self.order[position:position + take])
@@ -495,6 +674,10 @@ class EpochBatchSampler:
         # actual longest item, including when a batch crosses a bucket boundary.
         while take < available:
             candidate = self.order[position + take]
+            if (self.group_keys is not None
+                    and self.group_keys[candidate]
+                    != self.group_keys[self.order[position]]):
+                break
             candidate_max = max(max_cost, token_costs[candidate])
             padded = (take + 1) * candidate_max
             if padded > target_tokens:
@@ -617,6 +800,19 @@ def supervised_positions(rows: Sequence[dict], prefix_tokens: int, *,
     return torch.tensor(positions, dtype=torch.long, device=device)
 
 
+def visual_prefix_width(rows: Sequence[dict], projector: nn.Module) -> int:
+    widths = {int(row.get("_visual_tokens", 0)) for row in rows
+              if row.get("_visual_tokens") is not None}
+    if widths:
+        if len(widths) != 1:
+            raise ValueError("visual batch contains different RADIO token counts")
+        width = widths.pop()
+        if width < 1:
+            raise ValueError("RADIO visual token width must be positive")
+        return width
+    return int(projector.prefix_tokens)
+
+
 def cached_features(rows: Sequence[dict], vision: MoonViT,
                     projector: MoonViTPrefixProjector, cache_dir: Path | None) -> list[torch.Tensor]:
     """Load pooled frozen features, batch-encoding cache misses by image grid."""
@@ -699,12 +895,160 @@ def cached_features(rows: Sequence[dict], vision: MoonViT,
     return list(result)  # type: ignore[return-value]
 
 
+def cached_radio_features(
+        rows: Sequence[dict], vision: nn.Module, cache_dir: Path,
+        *, revision: str, max_detail_tiles: int, tile_batch: int,
+        adaptive_token_threshold: int,
+        telemetry: dict[str, int] | None = None,
+        ) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """Load or atomically create tiled RADIO globals in stable row order.
+
+    All cache misses in an exact-tile-count training batch are flattened into
+    one tile stream.  This fills ``tile_batch`` forwards across image
+    boundaries instead of issuing one under-filled RADIO call per image.
+    """
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    output: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None] = [
+        None] * len(rows)
+    misses: list[tuple[int, Path, object, list]] = []
+    resident_hits = disk_hits = 0
+    for index, row in enumerate(rows):
+        source = Path(row["image"])
+        target = radio_cache_path(cache_dir, source)
+        resident = _FEATURE_MEMORY_CACHE.get(target)
+        if resident is not None:
+            output[index] = resident
+            resident_hits += 1
+            continue
+        if radio_cache_is_current(
+                target, source, revision,
+                adaptive_token_threshold=adaptive_token_threshold,
+                source_sha256=row.get("image_sha256")):
+            metadata, tokens = load_radio_cache(target)
+            boxes = torch.tensor(
+                [tile.source_box for tile in metadata.tiles], dtype=torch.float32)
+            roles = torch.tensor(
+                [0 if tile.role == "thumbnail" else 1 for tile in metadata.tiles],
+                dtype=torch.long)
+            item = (tokens, boxes, roles)
+            _FEATURE_MEMORY_CACHE[target] = item
+            output[index] = item
+            disk_hits += 1
+        else:
+            with Image.open(source) as image:
+                tiles = build_radio_tiles(
+                    image, max_detail_tiles=max_detail_tiles)
+            metadata = make_radio_metadata(
+                source, revision, tiles,
+                adaptive_token_threshold=adaptive_token_threshold)
+            misses.append((index, target, metadata, tiles))
+
+    tile_counts = {
+        int(item[0].shape[0]) for item in output if item is not None}
+    tile_counts.update(len(tiles) for _, _, _, tiles in misses)
+    if len(tile_counts) > 1:
+        raise ValueError("RADIO batch crossed an exact tile-count bucket")
+    token_counts = {
+        int(item[0].shape[1]) for item in output if item is not None}
+    token_counts.update(tokens_per_tile_for_tile_count(
+        len(tiles), threshold=adaptive_token_threshold)
+        for _, _, _, tiles in misses)
+    if len(token_counts) > 1:
+        raise ValueError("RADIO batch crossed an adaptive token-policy bucket")
+
+    if misses:
+        flat_tiles = [tile for _, _, _, tiles in misses for tile in tiles]
+        tokens_per_tile = token_counts.pop()
+        # The shared default CUDA stream preserves ordering with the trainer's
+        # RWKV kernels.  The lock additionally protects the remote RADIO module
+        # from a simultaneous evaluation/cache forward in another host thread.
+        with _RADIO_ENCODE_LOCK:
+            packed = encode_radio_tiles(
+                vision, flat_tiles, batch_size=tile_batch,
+                num_tokens=tokens_per_tile)
+        offset = 0
+        for index, target, metadata, tiles in misses:
+            end = offset + len(tiles)
+            tokens = packed[offset:end].contiguous()
+            offset = end
+            save_radio_cache(target, metadata, tokens)
+            boxes = torch.tensor(
+                [tile.source_box for tile in metadata.tiles], dtype=torch.float32)
+            roles = torch.tensor(
+                [0 if tile.role == "thumbnail" else 1 for tile in metadata.tiles],
+                dtype=torch.long)
+            item = (tokens, boxes, roles)
+            _FEATURE_MEMORY_CACHE[target] = item
+            output[index] = item
+        if offset != packed.shape[0]:
+            raise RuntimeError("packed RADIO cache split did not consume every tile")
+
+    if telemetry is not None:
+        telemetry.update(resident_hits=resident_hits, disk_hits=disk_hits,
+                         generated=len(misses))
+    if any(item is None for item in output):
+        raise RuntimeError("RADIO cache loader left an unresolved row")
+    return list(output)  # type: ignore[return-value]
+
+
+def runtime_cached_features(rows: Sequence[dict], vision: nn.Module,
+                            projector: nn.Module,
+                            cache_dir: Path | None):
+    if isinstance(projector, RadioFeatureProjector):
+        if cache_dir is None:
+            raise ValueError("RADIO training requires a resumable feature cache")
+        return cached_radio_features(
+            rows, vision, cache_dir,
+            revision=str(getattr(vision, "radio_revision")),
+            max_detail_tiles=int(getattr(vision, "radio_max_detail_tiles")),
+            tile_batch=int(getattr(vision, "radio_tile_batch")),
+            adaptive_token_threshold=int(getattr(
+                vision, "radio_adaptive_token_threshold")))
+    return cached_features(rows, vision, projector, cache_dir)
+
+
 def _row_fusion_cache_path(row: dict, cache_dir: Path, *, tokens: int,
                            tower_fingerprint: str) -> Path:
     return cache_dir / aligned_feature_cache_key(
         row["image"], tokens=tokens, tower_fingerprint=tower_fingerprint,
         source_size=row.get("_source_size"),
         source_mtime_ns=row.get("_source_mtime_ns"))
+
+
+def image_aspect_tensor(rows: Sequence[dict],
+                        device: torch.device | str) -> torch.Tensor | None:
+    """Per-row width/height, the missing half of RADIO's tile geometry.
+
+    ``source_box`` says which image region a tile covers, but every tile is
+    letterboxed into a square canvas and that transform depends on the source
+    aspect ratio. Without it, a coordinate in feature space cannot be mapped to
+    a coordinate in the image frame that ``box=``/``mask16=`` targets use.
+    Returns ``None`` when any row lacks dimensions, so the bridge stays on its
+    previous behavior rather than silently inventing geometry.
+    """
+    values = []
+    for row in rows:
+        width, height = row.get("_image_width"), row.get("_image_height")
+        if not width or not height:
+            return None
+        values.append(float(width) / float(height))
+    return torch.tensor(values, dtype=torch.float32, device=device)
+
+
+def _vision_tower_config(args: argparse.Namespace) -> VisionTowerConfig:
+    """One construction site, so the cache fingerprint cannot drift from the tower."""
+    return VisionTowerConfig(
+        siglip2=args.siglip2_model, dinov2=args.dinov2_model,
+        sam=args.sam_model, siglip_width=args.siglip2_width,
+        sam_crop_padding=bool(getattr(args, "sam_crop_padding", False)))
+
+
+def fusion_feature_tokens(tower: nn.Module, projector: nn.Module) -> int:
+    tokens = int(getattr(tower, "fusion_tokens",
+                         getattr(projector, "prefix_tokens", 0)))
+    if tokens < 1:
+        raise ValueError("fusion tower has no positive fixed token span")
+    return tokens
 
 
 def cached_fusion_features(
@@ -740,8 +1084,7 @@ def cached_fusion_features(
     missing = [index for index, item in enumerate(result) if item is None]
     if missing:
         if not tower.loaded:
-            print("loading frozen SigLIP2 + DINOv2 + SAM for fusion cache misses",
-                  flush=True)
+            print("loading frozen vision tower for fusion cache misses", flush=True)
             tower.load_pretrained(device="cuda", dtype=torch.bfloat16)
         images = []
         for index in missing:
@@ -971,27 +1314,188 @@ def prefetch_fusion_feature_rows(
     return ready
 
 
-def prefetch_training_batch(rows: Sequence[dict], vision: MoonViT,
-                            projector: MoonViTPrefixProjector,
+def prefetch_cached_radio_rows(
+        rows: Sequence[dict], vision: nn.Module, cache_dir: Path, *,
+        adaptive_token_threshold: int) -> tuple[int, int, int]:
+    """Load existing RADIO archives into RAM without ever touching CUDA.
+
+    A next-batch worker used to call ``cached_radio_features`` directly. On a
+    miss that function encodes RADIO tiles on CUDA, but CUDA's current context
+    and default stream are thread-local. The resulting invalid-context errors
+    could poison the main training stream and surface later as an illegal
+    access during evaluation. Cache creation belongs exclusively to the main
+    trainer thread; a prefetch miss is simply left unresolved here.
+    """
+    revision = str(getattr(vision, "radio_revision"))
+
+    def load_one(row: dict) -> tuple[
+            Path, tuple[torch.Tensor, ...] | None, str]:
+        source = Path(row["image"])
+        target = radio_cache_path(cache_dir, source)
+        resident = _FEATURE_MEMORY_CACHE.get(target)
+        if resident is not None:
+            return target, resident, "resident"
+        try:
+            if not radio_cache_is_current(
+                    target, source, revision,
+                    adaptive_token_threshold=adaptive_token_threshold,
+                    source_sha256=row.get("image_sha256")):
+                return target, None, "miss"
+            metadata, tokens = load_radio_cache(target)
+            boxes = torch.tensor(
+                [tile.source_box for tile in metadata.tiles],
+                dtype=torch.float32)
+            roles = torch.tensor(
+                [0 if tile.role == "thumbnail" else 1
+                 for tile in metadata.tiles], dtype=torch.long)
+            return target, (tokens, boxes, roles), "disk"
+        except (OSError, EOFError, RuntimeError, pickle.UnpicklingError,
+                zipfile.BadZipFile):
+            return target, None, "miss"
+
+    ready = resident_hits = disk_hits = 0
+    for target, item, source in _CACHE_LOAD_POOL.map(load_one, rows):
+        if item is not None:
+            _FEATURE_MEMORY_CACHE.setdefault(target, item)
+            ready += 1
+            resident_hits += int(source == "resident")
+            disk_hits += int(source == "disk")
+    return ready, resident_hits, disk_hits
+
+
+def prefetch_training_batch(rows: Sequence[dict], vision: nn.Module,
+                            projector: nn.Module,
                             cache_dir: Path | None,
                             engram: LexicalMemoryBank | None,
                             fusion_tower: AlignedFrozenVisionFeatures | None = None,
                             fusion_cache_dir: Path | None = None,
-                            ) -> tuple[int, RecallResult | None]:
-    """Prepare disk features and CPU lexical recall while the GPU is busy."""
-    ready = prefetch_cached_feature_rows(rows, vision, projector, cache_dir)
+                            ) -> BatchPrefetchResult:
+    """Prepare exactly one future sampler batch without advancing its state."""
+    started = time.perf_counter()
+    stats: dict[str, int] = {}
+    if isinstance(projector, RadioFeatureProjector):
+        if cache_dir is None:
+            raise ValueError("RADIO prefetch requires a resumable feature cache")
+        threshold = int(getattr(vision, "radio_adaptive_token_threshold"))
+        ready, resident_hits, disk_hits = prefetch_cached_radio_rows(
+            rows, vision, cache_dir,
+            adaptive_token_threshold=threshold)
+        tile_counts = {int(row["_radio_tiles"]) for row in rows}
+        if len(tile_counts) != 1:
+            raise ValueError("prefetched RADIO rows do not share one tile count")
+        tile_count = tile_counts.pop()
+        maximum = tokens_per_tile_for_tile_count(
+            tile_count, threshold=threshold)
+        visual_width = tile_count * maximum
+        if projector.adaptive_complexity:
+            visual_width = tile_count * adaptive_tokens_per_tile(
+                maximum, ratio=projector.complexity_budget_ratio,
+                quantum=projector.complexity_token_quantum)
+        stats.update(resident_hits=resident_hits, disk_hits=disk_hits,
+                     generated=0)
+    else:
+        ready = prefetch_cached_feature_rows(
+            rows, vision, projector, cache_dir)  # type: ignore[arg-type]
+        visual_width = int(getattr(projector, "prefix_tokens"))
+        stats["disk_hits"] = ready
     ready += prefetch_fusion_feature_rows(
-        rows, fusion_tower, projector.prefix_tokens, fusion_cache_dir)
+        rows, fusion_tower,
+        (fusion_feature_tokens(fusion_tower, projector)
+         if fusion_tower is not None else 0), fusion_cache_dir)
     if engram is None:
-        return ready, None
+        return BatchPrefetchResult(
+            ready=ready, recall=None, elapsed_s=time.perf_counter() - started,
+            **stats)
     ids, _, _ = make_batch(rows, device="cpu")
     boundary = 0 if engram.boundary_id is None else int(engram.boundary_id)
     starts = visual_insert_positions(rows)
     recall = token_rosa_recall(
-        insert_boundary_ids(ids, starts, projector.prefix_tokens, boundary),
+        insert_boundary_ids(ids, starts, visual_width, boundary),
         engram.table.vocab_size,
         engram.boundary_id)
-    return ready, recall
+    return BatchPrefetchResult(
+        ready=ready, recall=recall, elapsed_s=time.perf_counter() - started,
+        **stats)
+
+
+def add_fusion_residual(prefix: torch.Tensor,
+                        residual: torch.Tensor) -> torch.Tensor:
+    if (prefix.ndim != 3 or residual.ndim != 3
+            or prefix.shape[0] != residual.shape[0]
+            or prefix.shape[2] != residual.shape[2]):
+        raise ValueError(
+            f"fusion residual {tuple(residual.shape)} is incompatible with "
+            f"prefix {tuple(prefix.shape)}")
+    if residual.shape[1] > prefix.shape[1]:
+        raise ValueError("fusion residual is longer than the visual prefix")
+    residual = residual.to(prefix.dtype)
+    if residual.shape[1] == prefix.shape[1]:
+        return prefix + residual
+    output = prefix.clone()
+    output[:, :residual.shape[1]] = (
+        output[:, :residual.shape[1]] + residual)
+    return output
+
+
+def structured_language_masks(
+        rows: Sequence[dict], full_labels: torch.Tensor,
+        *, visual_width: int, visual_starts: Sequence[int],
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Dense masks for structured coordinate targets after visual insertion."""
+    coordinate = torch.zeros_like(full_labels, dtype=torch.bool)
+    starts = torch.zeros_like(full_labels, dtype=torch.bool)
+    for batch, (row, visual_start) in enumerate(zip(rows, visual_starts)):
+        for key, destination in (
+                ("structured_coordinate_tokens", coordinate),
+                ("structured_coordinate_starts", starts)):
+            for target in row.get(key, ()):
+                target = int(target)
+                full_target = target + (visual_width
+                                        if target >= visual_start else 0)
+                if 0 <= full_target < full_labels.shape[1]:
+                    destination[batch, full_target] = True
+    return coordinate, starts
+
+
+def invalid_boundary_token_loss(
+        logits: torch.Tensor, targets: torch.Tensor, start_mask: torch.Tensor,
+        boundary_tokens: Sequence[int], *, margin: float = 1.0,
+        ) -> torch.Tensor:
+    """Rank false 00/99 coordinate starts below the correct target token.
+
+    A boundary lead is excluded when it is the teacher target, so real boxes
+    beginning with 00 or 99 are never penalized.  This acts directly on the
+    autoregressive coordinate stream whose greedy generations otherwise tend
+    to collapse to 000/999 despite a healthy continuous DETR auxiliary head.
+    """
+    if not boundary_tokens:
+        return logits.new_zeros(())
+    chosen_logits = logits[start_mask]
+    chosen_targets = targets[start_mask]
+    if chosen_logits.shape[0] == 0:
+        return logits.new_zeros(())
+    correct = chosen_logits.gather(1, chosen_targets[:, None]).squeeze(1)
+    bad_ids = torch.as_tensor(
+        tuple(dict.fromkeys(map(int, boundary_tokens))),
+        dtype=torch.long, device=logits.device)
+    bad = chosen_logits.index_select(1, bad_ids)
+    allowed = bad_ids.unsqueeze(0) != chosen_targets.unsqueeze(1)
+    terms = F.softplus(bad.float() - correct.float().unsqueeze(1) + margin)
+    return (terms * allowed).sum() / allowed.sum().clamp_min(1)
+
+
+def apply_coordinate_token_weights(
+        token_weights: torch.Tensor | None, coordinate_mask: torch.Tensor,
+        weight: float) -> torch.Tensor | None:
+    """Compose coordinate emphasis with optional pre-existing CE weights."""
+    if weight == 1:
+        return token_weights
+    if token_weights is None:
+        token_weights = torch.ones_like(coordinate_mask, dtype=torch.float32)
+    return token_weights * torch.where(
+        coordinate_mask,
+        token_weights.new_tensor(weight),
+        token_weights.new_tensor(1.0))
 
 
 def multimodal_loss(rwkv: nn.Module, projector: nn.Module, vision: MoonViT,
@@ -1008,21 +1512,39 @@ def multimodal_loss(rwkv: nn.Module, projector: nn.Module, vision: MoonViT,
                     visual_starts: Sequence[int] | None = None,
                     fusion_adapter: VisionFusionResidual | None = None,
                     fusion_features: Sequence[torch.Tensor] | None = None,
+                    vision_compressor: FrozenTeacherCompressor | None = None,
                     grounding: ImageTextContrastiveHead | None = None,
                     grounding_contrastive_weight: float = 0.0,
                     grounding_early_tokens: int = 0,
                     grounding_early_weight: float = 1.0,
+                    structured_head: StructuredSpatialHead | None = None,
+                    structured_rows: Sequence[dict] | None = None,
+                    structured_weight: float = 0.0,
+                    structured_coordinate_weight: float = 1.0,
+                    structured_invalid_box_weight: float = 0.0,
+                    structured_invalid_box_margin: float = 1.0,
+                    return_per_example_ce: bool = False,
+                    activation_checkpoint_min_tokens: int = 0,
+                    image_aspect: torch.Tensor | None = None,
                     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     if features is None:
         with torch.no_grad():
             features = vision(images)
-    prefix = projector(features)
+    if vision_compressor is not None:
+        if fusion_features is None:
+            raise ValueError("frozen compressor requires paired fusion features")
+        canonical = vision_compressor(features, fusion_features)
+        prefix = projector(list(canonical.unbind(0)))
+    elif isinstance(projector, RadioFeatureProjector):
+        prefix = projector(features, image_aspect=image_aspect)
+    else:
+        prefix = projector(features)
     fusion_residual = None
     if fusion_adapter is not None:
         if fusion_features is None:
             raise ValueError("fusion adapter requires cached three-tower features")
         fusion_residual = fusion_adapter(fusion_features)
-        prefix = prefix + fusion_residual.to(prefix.dtype)
+        prefix = add_fusion_residual(prefix, fusion_residual)
     text = rwkv.model.embeddings(ids)
     prefix = prefix.to(dtype=text.dtype)
     starts = tuple(int(value) for value in (
@@ -1041,7 +1563,18 @@ def multimodal_loss(rwkv: nn.Module, projector: nn.Module, vision: MoonViT,
         engram.set_input_ids(
             insert_boundary_ids(ids, starts, prefix.shape[1], boundary),
             recall=engram_recall)
-    with contextlib.ExitStack() as stack:
+    checkpoint_exclusions: set[int] = set()
+    if deep_vision is not None:
+        checkpoint_exclusions.update(deep_vision.layer_indices)
+    if layer_vision is not None:
+        checkpoint_exclusions.update(layer_vision.layer_indices)
+    if engram is not None:
+        checkpoint_exclusions.update(int(index) for index in engram.sites)
+    with selective_activation_checkpointing(
+            rwkv.model.layers, sequence_tokens=embeds.shape[1],
+            min_tokens=activation_checkpoint_min_tokens,
+            excluded_layers=checkpoint_exclusions) as checkpointed_layers, \
+            contextlib.ExitStack() as stack:
         if deep_vision is not None:
             stack.enter_context(deep_vision.use_prefix(prefix, starts))
         if layer_vision is not None:
@@ -1069,12 +1602,62 @@ def multimodal_loss(rwkv: nn.Module, projector: nn.Module, vision: MoonViT,
     token_weights = early_token_weights(
         full_labels, batch_positions, sequence_positions,
         token_count=grounding_early_tokens, weight=grounding_early_weight)
+    coordinate_mask = coordinate_start_mask = None
+    if (structured_rows is not None
+            and (structured_coordinate_weight != 1
+                 or structured_invalid_box_weight)):
+        coordinate_targets, coordinate_starts = structured_language_masks(
+            structured_rows, full_labels, visual_width=prefix.shape[1],
+            visual_starts=starts)
+        coordinate_mask = coordinate_targets[
+            batch_positions, sequence_positions + 1]
+        coordinate_start_mask = coordinate_starts[
+            batch_positions, sequence_positions + 1]
+        token_weights = apply_coordinate_token_weights(
+            token_weights, coordinate_mask, structured_coordinate_weight)
+    invalid_box_loss = selected_logits.new_zeros(())
+    if structured_invalid_box_weight and coordinate_start_mask is not None:
+        boundary_tokens = next((
+            tuple(map(int, row.get("structured_boundary_lead_tokens", ())))
+            for row in structured_rows
+            if row.get("structured_boundary_lead_tokens")), ())
+        invalid_box_loss = invalid_boundary_token_loss(
+            selected_logits, selected_targets, coordinate_start_mask,
+            boundary_tokens, margin=structured_invalid_box_margin)
     ce, raw_ce = weighted_logits_cross_entropy(
         selected_logits, selected_targets, token_weights)
-    loss = ce
+    loss = ce + structured_invalid_box_weight * invalid_box_loss
     # Leave scalar telemetry on-device until after backward/optimizer. Python
     # conversion here would force a forward-to-CPU barrier every training step.
     metrics = {"ce_loss": raw_ce, "grounded_ce_loss": ce.detach()}
+    if coordinate_mask is not None:
+        metrics.update(
+            structured_coordinate_tokens=coordinate_mask.sum().detach(),
+            structured_invalid_box_loss=invalid_box_loss.detach(),
+            structured_invalid_box_weighted_loss=(
+                structured_invalid_box_weight * invalid_box_loss.detach()),
+        )
+    if return_per_example_ce:
+        token_nll = F.cross_entropy(
+            selected_logits.float(), selected_targets, reduction="none")
+        per_example_sum = token_nll.new_zeros(ids.shape[0])
+        per_example_count = token_nll.new_zeros(ids.shape[0])
+        per_example_sum.scatter_add_(0, batch_positions, token_nll)
+        per_example_count.scatter_add_(
+            0, batch_positions, torch.ones_like(token_nll))
+        metrics["_eval_ce_sums"] = per_example_sum
+        metrics["_eval_ce_counts"] = per_example_count
+    if (isinstance(projector, RadioFeatureProjector)
+            and projector.last_token_counts is not None):
+        routed = projector.last_token_counts.float()
+        metrics.update(
+            radio_tokens_per_tile_mean=routed.mean().detach(),
+            radio_tokens_per_tile_min=routed.min().detach(),
+            radio_tokens_per_tile_max=routed.max().detach(),
+            radio_visual_tokens=loss.new_tensor(prefix.shape[1], dtype=torch.float32),
+        )
+    metrics["activation_checkpointed_layers"] = loss.new_tensor(
+        len(checkpointed_layers), dtype=torch.float32)
     if grounding is not None and grounding_contrastive_weight:
         target_embeddings = rwkv.model.embeddings(selected_targets).detach()
         contrastive, accuracy = grounding(
@@ -1082,6 +1665,33 @@ def multimodal_loss(rwkv: nn.Module, projector: nn.Module, vision: MoonViT,
         loss = loss + grounding_contrastive_weight * contrastive
         metrics.update(grounding_contrastive_loss=contrastive.detach(),
                        grounding_retrieval_accuracy=accuracy.detach())
+    if structured_head is not None and structured_weight:
+        if structured_rows is None or len(structured_rows) != ids.shape[0]:
+            raise ValueError("structured head requires every source row")
+        selected_rows = [index for index, row in enumerate(structured_rows)
+                         if str(row.get("task") or "") == "sam_mask"]
+        if selected_rows:
+            row_index = torch.tensor(
+                selected_rows, dtype=torch.long, device=prefix.device)
+            contexts = []
+            targets = []
+            for index in selected_rows:
+                row = structured_rows[index]
+                start = int(row.get("vision_insert", 0))
+                end = int(row["prompt_len"])
+                if not 0 <= start < end <= text.shape[1]:
+                    raise ValueError("structured task prompt span is invalid")
+                contexts.append(text[index, start:end].mean(dim=0))
+                targets.append(parse_structured_target(
+                    str(row.get("text") or ""), device=prefix.device))
+            prediction = structured_head(
+                prefix.index_select(0, row_index), torch.stack(contexts))
+            structured, structured_metrics = structured_detection_loss(
+                prediction, targets)
+            loss = loss + structured_weight * structured
+            metrics.update(structured_metrics)
+            metrics["structured_weighted_loss"] = (
+                structured_weight * structured.detach())
     if deep_vision is not None:
         metrics["deep_vision_inj_rms"] = deep_vision.injection_rms().detach()
     if layer_vision is not None:
@@ -1480,6 +2090,7 @@ def _save_checkpoint(path: Path, *, step: int, projector: nn.Module,
                      nextlat: nn.Module | None, engram: LexicalMemoryBank | None,
                      deep_vision: DeepVisionInjector | None,
                      grounding: ImageTextContrastiveHead | None,
+                     structured_head: StructuredSpatialHead | None,
                      wrappers: list[nn.Module], optimizer,
                      sampler: EpochBatchSampler, args: argparse.Namespace,
                      layer_vision: LayerMatchedVisionInjector | None = None,
@@ -1494,6 +2105,7 @@ def _save_checkpoint(path: Path, *, step: int, projector: nn.Module,
         "layer_vision": _cpu_state(layer_vision),
         "vision_fusion": _cpu_state(vision_fusion),
         "grounding": _cpu_state(grounding),
+        "structured_head": _cpu_state(structured_head),
         "loops": loop_adapter_state(wrappers),
         "optimizer": optimizer.state_dict(),
         "sampler": sampler.state_dict(),
@@ -1569,6 +2181,15 @@ def _budget_resume_differences(saved_args: dict,
         "min_batch": 0,
         "target_batch_tokens": 0,
         "loop_token_budget_scale": 1.0,
+        "radio_adaptive_complexity": False,
+        "radio_complexity_budget_ratio": DEFAULT_COMPLEXITY_BUDGET_RATIO,
+        "radio_complexity_token_quantum": DEFAULT_COMPLEXITY_TOKEN_QUANTUM,
+        # Sits with the other RADIO budget knobs rather than the hard contract
+        # list: like radio_adaptive_complexity it changes how much of each
+        # tile's prefix survives, and the same machinery already handles the
+        # consequences (stale feature-cache entries are re-encoded on demand,
+        # best/ is quarantined, and prior eval claims are reset).
+        "radio_adaptive_token_threshold": DEFAULT_ADAPTIVE_TOKEN_THRESHOLD,
     }
     return [name for name, default in defaults.items()
             if saved_args.get(name, default) != getattr(args, name, default)]
@@ -1593,16 +2214,19 @@ def _preserve_loop_reset_outcome(args: argparse.Namespace,
 
 
 def _resume_contract_changed(*, text_limit_migrated: bool,
-                             budget_differences: Sequence[str]) -> bool:
+                             budget_differences: Sequence[str],
+                             coco_prompt_migrated: bool = False) -> bool:
     """Whether accepted resume settings must be republished in the checkpoint."""
-    return bool(text_limit_migrated or budget_differences)
+    return bool(text_limit_migrated or budget_differences or coco_prompt_migrated)
 
 
 def _resume_invalidates_step_evaluation(*, text_limit_migrated: bool,
                                         unrelated_branch: bool,
-                                        loop_reset_pending: bool) -> bool:
+                                        loop_reset_pending: bool,
+                                        contract_changed: bool = False) -> bool:
     """Whether prior same-step evaluation belongs to a different model contract."""
-    return bool(text_limit_migrated or unrelated_branch or loop_reset_pending)
+    return bool(text_limit_migrated or unrelated_branch or loop_reset_pending
+                or contract_changed)
 
 
 def _promote_checkpoint(source: Path, best_dir: Path, *, step: int,
@@ -1647,6 +2271,7 @@ def _load_checkpoint(path: Path, *, projector: nn.Module, nextlat: nn.Module | N
                      layer_vision: LayerMatchedVisionInjector | None = None,
                      vision_fusion: VisionFusionResidual | None = None,
                      grounding: ImageTextContrastiveHead | None = None,
+                     structured_head: StructuredSpatialHead | None = None,
                      ) -> tuple[int, bool, bool, bool]:
     blob = torch.load(path, map_location="cpu", weights_only=False)
     if not valid_torch_archive_storages(path, blob):
@@ -1654,6 +2279,10 @@ def _load_checkpoint(path: Path, *, projector: nn.Module, nextlat: nn.Module | N
     if int(blob.get("schema", -1)) != CHECKPOINT_SCHEMA:
         raise ValueError(f"unsupported vision checkpoint schema {blob.get('schema')}")
     saved_args = blob.get("args", {})
+    adding_structured_head = bool(
+        structured_head is not None
+        and blob.get("structured_head") is None
+        and not saved_args.get("structured_head", False))
     saved_limit = int(saved_args.get("max_text_tokens", 0))
     migrating_text_limit = bool(
         args.allow_text_limit_increase_from
@@ -1662,8 +2291,17 @@ def _load_checkpoint(path: Path, *, projector: nn.Module, nextlat: nn.Module | N
         and saved_args.get("data_fingerprint")
         == getattr(args, "previous_data_fingerprint", None)
     )
-    migration_compatible = ({"data_fingerprint", "max_text_tokens"}
-                            if migrating_text_limit else set())
+    migrating_coco_prompt = bool(
+        getattr(args, "allow_coco_prompt_migration", False)
+        and saved_args.get("data_fingerprint")
+        == getattr(args, "previous_coco_prompt_data_fingerprint", None)
+        and saved_args.get("data_fingerprint") != args.data_fingerprint
+    )
+    migration_compatible = set()
+    if migrating_text_limit:
+        migration_compatible.update(("data_fingerprint", "max_text_tokens"))
+    if migrating_coco_prompt:
+        migration_compatible.add("data_fingerprint")
     compatibility = ("data_fingerprint", "rwkv_fingerprint", "moonvit_fingerprint",
                      "rwkv", "moonvit", "prefix_tokens",
                      "max_text_tokens", "max_input_patches", "loop_count",
@@ -1704,20 +2342,49 @@ def _load_checkpoint(path: Path, *, projector: nn.Module, nextlat: nn.Module | N
         "deep_vision_rank": 256, "moonvit_tap_layers": "",
         "layer_vision_layers": "", "layer_vision_rank": 256,
         "vision_view_mode": "full", "sandwich_prompt": False,
+        "sandwich_lead_prompt": "", "vision_backend": "moonvit",
+        "radio_model": "models/vision/C-RADIOv4-1D-H",
+        "radio_revision": "e18692120c7a3203496e1a99056a4149ede135fc",
+        "radio_max_detail_tiles": DEFAULT_MAX_DETAIL_TILES,
+        # radio_adaptive_token_threshold intentionally lives in
+        # _budget_resume_differences instead, so it is changeable under
+        # --allow-batch-resize rather than being an unresumable hard error.
+        "radio_tile_batch": 8, "radio_fingerprint": "",
         "vision_fusion": False, "vision_fusion_rank": 512,
         "vision_fusion_fingerprint": "",
+        "sam_fusion": False, "sam_fusion_tokens": 128,
+        "sam_crop_padding": False,
+        "vision_compressor_checkpoint": "",
+        "vision_compressor_fingerprint": "",
         "grounding_contrastive_weight": 0.0,
         "grounding_contrastive_dim": 512, "grounding_temperature": 0.07,
         "grounding_early_tokens": 0, "grounding_early_weight": 1.0,
+        "structured_head": False, "structured_weight": 1.0,
+        "structured_width": 256, "structured_object_queries": 16,
+        "structured_spatial_layers": 2, "structured_object_layers": 2,
+        "structured_heads": 8,
     }
     new_differences = [
         name for name, default in new_contract_defaults.items()
+        if not (adding_structured_head and name.startswith("structured_"))
         if saved_args.get(name, default) != getattr(args, name, default)
     ]
     if new_differences:
         raise ValueError(
             f"checkpoint grounding/vision configuration differs: {new_differences}")
-    projector.load_state_dict(blob["projector"])
+    # The letterbox content-geometry embedding is zero-initialized, so a
+    # checkpoint predating it resumes as an exact no-op and simply starts
+    # learning the term. Only that module may be absent; anything else missing
+    # still fails loudly.
+    projector_result = projector.load_state_dict(blob["projector"], strict=False)
+    unexpected = list(projector_result.unexpected_keys)
+    missing = [key for key in projector_result.missing_keys
+               if not key.startswith("bridge.content_embedding.")]
+    if missing or unexpected:
+        raise ValueError(
+            f"checkpoint projector does not match this run: missing={missing[:5]} "
+            f"unexpected={unexpected[:5]}")
+    content_geometry_growth = len(projector_result.missing_keys)
     if (nextlat is None) != (blob.get("nextlat") is None):
         raise ValueError("checkpoint NextLat configuration does not match this run")
     if nextlat is not None:
@@ -1742,15 +2409,37 @@ def _load_checkpoint(path: Path, *, projector: nn.Module, nextlat: nn.Module | N
         raise ValueError("checkpoint grounding-head configuration does not match this run")
     if grounding is not None:
         grounding.load_state_dict(blob["grounding"])
+    if not adding_structured_head:
+        if (structured_head is None) != (blob.get("structured_head") is None):
+            raise ValueError(
+                "checkpoint structured-head configuration does not match this run")
+        if structured_head is not None:
+            structured_head.load_state_dict(blob["structured_head"])
     load_loop_adapter_state(wrappers, blob["loops"])
-    optimizer.load_state_dict(blob["optimizer"])
+    if adding_structured_head and content_geometry_growth:
+        raise ValueError(
+            "cannot append a structured head and grow the visual bridge in one "
+            "resume; migrate them in separate runs")
+    if adding_structured_head:
+        _load_optimizer_with_appended_group(
+            optimizer, blob["optimizer"], group_name="structured_head")
+    elif content_geometry_growth:
+        _load_optimizer_with_grown_groups(
+            optimizer, blob["optimizer"], expected_growth=content_geometry_growth)
+    else:
+        optimizer.load_state_dict(blob["optimizer"])
     sampler.load_state_dict(blob["sampler"])
     random.setstate(blob["rng"]["python"])
     torch.set_rng_state(blob["rng"]["torch"])
     torch.cuda.set_rng_state_all(blob["rng"]["cuda"])
     contract_changed = _resume_contract_changed(
         text_limit_migrated=migrating_text_limit,
-        budget_differences=budget_differences)
+        budget_differences=budget_differences,
+        coco_prompt_migrated=migrating_coco_prompt)
+    contract_changed = (contract_changed or adding_structured_head
+                        or bool(content_geometry_growth))
+    if adding_structured_head:
+        args.structured_head_initialized_step = int(blob["step"])
     return (int(blob["step"]), migrating_text_limit,
             bool(saved_args.get("loop_reset_committed", False)),
             contract_changed)
@@ -1762,7 +2451,9 @@ def _initialize_adapters(path: Path, *, projector: nn.Module,
                          deep_vision: DeepVisionInjector | None = None,
                          layer_vision: LayerMatchedVisionInjector | None = None,
                          vision_fusion: VisionFusionResidual | None = None,
-                         grounding: ImageTextContrastiveHead | None = None) -> int:
+                         grounding: ImageTextContrastiveHead | None = None,
+                         structured_head: StructuredSpatialHead | None = None,
+                         replace_vision_bridge: bool = False) -> int:
     """Warm-start trainable vision adapters without inheriting run state.
 
     Unlike exact resume, this intentionally accepts a different dataset and
@@ -1777,9 +2468,11 @@ def _initialize_adapters(path: Path, *, projector: nn.Module,
     if int(blob.get("schema", -1)) != CHECKPOINT_SCHEMA:
         raise ValueError(f"unsupported vision checkpoint schema {blob.get('schema')}")
     saved = blob.get("args", {})
-    structural = ("rwkv_fingerprint", "moonvit_fingerprint",
-                  "max_input_patches", "nextlat_hidden", "loop_count",
-                  "loop_index", "loop_gate_cap")
+    structural = (("rwkv_fingerprint", "nextlat_hidden", "loop_count",
+                   "loop_index", "loop_gate_cap") if replace_vision_bridge else
+                  ("rwkv_fingerprint", "moonvit_fingerprint",
+                   "max_input_patches", "nextlat_hidden", "loop_count",
+                   "loop_index", "loop_gate_cap"))
     differences = [name for name in structural
                    if saved.get(name) != getattr(args, name, None)]
     if differences:
@@ -1807,12 +2500,13 @@ def _initialize_adapters(path: Path, *, projector: nn.Module,
             )
     source_resampler_layers = int(saved.get("vision_resampler_layers", 0))
     destination_resampler_layers = int(getattr(args, "vision_resampler_layers", 0))
-    if source_resampler_layers and source_resampler_layers != destination_resampler_layers:
+    if (not replace_vision_bridge and source_resampler_layers
+            and source_resampler_layers != destination_resampler_layers):
         raise ValueError("adapter initialization resampler geometry is incompatible")
     projector_state = dict(blob["projector"])
     source_prefix = int(saved.get("prefix_tokens", 0))
     destination_prefix = int(getattr(args, "prefix_tokens", 0))
-    if source_prefix != destination_prefix:
+    if not replace_vision_bridge and source_prefix != destination_prefix:
         if source_prefix < 1 or destination_prefix < 1:
             raise ValueError("adapter initialization has an invalid prefix geometry")
         for name in ("position", "resampler.queries"):
@@ -1825,12 +2519,19 @@ def _initialize_adapters(path: Path, *, projector: nn.Module,
                 value.float().transpose(1, 2), size=destination_prefix,
                 mode="linear", align_corners=False).transpose(1, 2)
             projector_state[name] = resized.to(value.dtype)
-    projector_info = projector.load_state_dict(
-        projector_state, strict=not (
-            source_resampler_layers == 0 and destination_resampler_layers > 0))
-    if not source_resampler_layers and destination_resampler_layers > 0:
-        invalid_missing = [key for key in projector_info.missing_keys
-                           if not key.startswith("resampler.")]
+    # Always non-strict, then validate: a checkpoint predating the letterbox
+    # content-geometry embedding is missing exactly those zero-init keys, and a
+    # strict load would reject it outright the way exact resume used to.
+    projector_info = (None if replace_vision_bridge
+                      else projector.load_state_dict(projector_state, strict=False))
+    if not replace_vision_bridge:
+        assert projector_info is not None
+        growing_resampler = (not source_resampler_layers
+                             and destination_resampler_layers > 0)
+        invalid_missing = [
+            key for key in projector_info.missing_keys
+            if not key.startswith("bridge.content_embedding.")
+            and not (growing_resampler and key.startswith("resampler."))]
         if invalid_missing or projector_info.unexpected_keys:
             raise ValueError(
                 "adapter initialization projector migration has unexpected keys: "
@@ -1864,6 +2565,11 @@ def _initialize_adapters(path: Path, *, projector: nn.Module,
         raise ValueError("adapter initialization would discard grounding head")
     if source_grounding is not None:
         grounding.load_state_dict(source_grounding)
+    source_structured = blob.get("structured_head")
+    if source_structured is not None and structured_head is None:
+        raise ValueError("adapter initialization would discard structured head")
+    if source_structured is not None:
+        structured_head.load_state_dict(source_structured)
     load_loop_adapter_state(wrappers, blob["loops"])
     return int(blob.get("step", 0))
 
@@ -1874,7 +2580,8 @@ def _optimizer(projector: nn.Module, nextlat: nn.Module | None,
                deep_vision: DeepVisionInjector | None = None,
                layer_vision: LayerMatchedVisionInjector | None = None,
                vision_fusion: VisionFusionResidual | None = None,
-               grounding: ImageTextContrastiveHead | None = None):
+               grounding: ImageTextContrastiveHead | None = None,
+               structured_head: StructuredSpatialHead | None = None):
     loop_gate, loop_norm = [], []
     for wrapper in wrappers:
         gate_names = wrapper.loop.loop_param_names()
@@ -1906,11 +2613,68 @@ def _optimizer(projector: nn.Module, nextlat: nn.Module | None,
     if grounding is not None:
         groups.append({"params": list(grounding.parameters()), "lr": args.lr,
                        "weight_decay": args.weight_decay, "name": "grounding"})
+    # Keep this last: exact-resume migration can append it to an existing
+    # optimizer without renumbering or losing any prior Adam moments.
+    if structured_head is not None:
+        groups.append({"params": list(structured_head.parameters()), "lr": args.lr,
+                       "weight_decay": args.weight_decay,
+                       "name": "structured_head"})
     groups = [group for group in groups if group["params"]]
     kwargs = dict(betas=(0.9, 0.95))
     if torch.cuda.is_available():
         kwargs["fused"] = True
     return torch.optim.AdamW(groups, **kwargs), [p for group in groups for p in group["params"]]
+
+
+def _load_optimizer_with_grown_groups(optimizer, saved: dict, *,
+                                      expected_growth: int) -> None:
+    """Restore moments when a group gained members from a new zero-init module.
+
+    ``Optimizer.load_state_dict`` matches groups by size, so adding parameters to
+    an existing group would otherwise discard every prior moment. New parameters
+    are appended by ``nn.Module`` registration order, so old positions map
+    one-to-one onto the first slots of each group and the newcomers simply start
+    without state — correct for a zero-initialized term.
+    """
+    current = optimizer.state_dict()
+    old_groups, new_groups = saved.get("param_groups", []), current.get("param_groups", [])
+    if len(old_groups) != len(new_groups):
+        raise ValueError("optimizer group count changed; cannot migrate moments")
+    mapping, growth = {}, 0
+    for old, new in zip(old_groups, new_groups):
+        if len(new["params"]) < len(old["params"]):
+            raise ValueError("an optimizer group shrank; refusing to guess a mapping")
+        growth += len(new["params"]) - len(old["params"])
+        mapping.update(zip(old["params"], new["params"]))
+    if growth != expected_growth:
+        raise ValueError(
+            f"optimizer grew by {growth} parameters, expected {expected_growth}")
+    optimizer.load_state_dict({
+        "state": {mapping[key]: value
+                  for key, value in saved.get("state", {}).items()
+                  if key in mapping},
+        "param_groups": [{**old, "params": new["params"]}
+                         for old, new in zip(old_groups, new_groups)],
+    })
+
+
+def _load_optimizer_with_appended_group(optimizer, saved: dict, *,
+                                        group_name: str) -> None:
+    """Restore old moments while retaining one newly appended parameter group."""
+    current = optimizer.state_dict()
+    old_groups = saved.get("param_groups", [])
+    new_groups = current.get("param_groups", [])
+    if len(new_groups) != len(old_groups) + 1:
+        raise ValueError("optimizer migration expected exactly one appended group")
+    for old, new in zip(old_groups, new_groups):
+        if old.get("name") != new.get("name") or len(old["params"]) != len(new["params"]):
+            raise ValueError("optimizer groups changed before structured-head append")
+    if new_groups[-1].get("name") != group_name:
+        raise ValueError(f"new optimizer group is not {group_name}")
+    optimizer.load_state_dict({
+        "state": saved.get("state", {}),
+        "param_groups": [*old_groups, new_groups[-1]],
+    })
 
 
 def _reset_loop_optimizer_state(optimizer, wrappers: Sequence[nn.Module], args) -> None:
@@ -2005,7 +2769,8 @@ def _engram_metrics(engram: LexicalMemoryBank | None) -> dict[str, float | bool]
 
 
 def assert_training_contract(rwkv: nn.Module, vision: nn.Module,
-                             wrappers: Sequence[nn.Module], trainable: Sequence[nn.Parameter]) -> None:
+                             wrappers: Sequence[nn.Module], trainable: Sequence[nn.Parameter],
+                             vision_compressor: nn.Module | None = None) -> None:
     """Fail at startup, not hundreds of steps later, on freeze/device mistakes."""
     trainable_ids = [id(parameter) for parameter in trainable]
     if len(trainable_ids) != len(set(trainable_ids)):
@@ -2029,12 +2794,47 @@ def assert_training_contract(rwkv: nn.Module, vision: nn.Module,
         raise RuntimeError(f"RWKV adapters missing from optimizer: {missing[:5]}")
     if any(parameter.requires_grad for parameter in vision.parameters()):
         raise RuntimeError("frozen MoonViT has trainable parameters")
+    if (vision_compressor is not None
+            and any(parameter.requires_grad for parameter in vision_compressor.parameters())):
+        raise RuntimeError("frozen teacher compressor has trainable parameters")
     off_device = [tuple(parameter.shape) for parameter in trainable if parameter.device.type != "cuda"]
     if off_device:
         raise RuntimeError(f"trainable parameters are not on CUDA: {off_device[:5]}")
     for layer, wrapper in enumerate(wrappers):
         if any(parameter.requires_grad for parameter in wrapper.inner.parameters()):
             raise RuntimeError(f"frozen RWKV TimeMix core is trainable at layer {layer}")
+
+
+def eval_task_name(row: dict) -> str:
+    task = str(row.get("task") or "caption").casefold()
+    if task == "ocr":
+        return "ocr"
+    if task == "sam_mask":
+        return "structured"
+    return "caption"
+
+
+def stratified_eval_indices(rows: Sequence[dict], indices: Sequence[int],
+                            max_examples: int) -> list[int]:
+    """Round-robin tasks, then exhaust small tasks before caption overflow."""
+    limit = min(len(indices), max_examples)
+    groups: dict[str, list[int]] = {}
+    for index in indices:
+        groups.setdefault(eval_task_name(rows[index]), []).append(index)
+    selected = []
+    positions = {name: 0 for name in groups}
+    names = sorted(groups)
+    while len(selected) < limit:
+        advanced = False
+        for name in names:
+            position = positions[name]
+            if position < len(groups[name]) and len(selected) < limit:
+                selected.append(groups[name][position])
+                positions[name] += 1
+                advanced = True
+        if not advanced:
+            break
+    return selected
 
 
 @torch.no_grad()
@@ -2047,38 +2847,113 @@ def evaluate(rows: Sequence[dict], indices: Sequence[int], *, rwkv: nn.Module,
              fusion_tower: AlignedFrozenVisionFeatures | None = None,
              fusion_adapter: VisionFusionResidual | None = None,
              fusion_cache_dir: Path | None = None,
-             progress: Callable[[int, int], None] | None = None) -> float:
+             vision_compressor: FrozenTeacherCompressor | None = None,
+             structured_head: StructuredSpatialHead | None = None,
+             structured_weight: float = 0.0,
+             structured_coordinate_weight: float = 1.0,
+             structured_invalid_box_weight: float = 0.0,
+             structured_invalid_box_margin: float = 1.0,
+             progress: Callable[[int, int], None] | None = None,
+             ) -> dict[str, float]:
     if not indices:
-        return float("nan")
-    losses, weights = [], []
-    total = min(len(indices), max_examples)
-    for start in range(0, total, batch_size):
-        chosen = indices[start:start + batch_size]
+        return {"loss": float("nan"), "ppl": float("nan")}
+    selected = stratified_eval_indices(rows, indices, max_examples)
+    if isinstance(projector, RadioFeatureProjector):
+        selected.sort(key=lambda index: int(rows[index]["_radio_tiles"]))
+    batches: list[list[int]] = []
+    for index in selected:
+        if (not batches or len(batches[-1]) >= batch_size
+                or (isinstance(projector, RadioFeatureProjector)
+                    and rows[batches[-1][0]]["_radio_tiles"]
+                    != rows[index]["_radio_tiles"])):
+            batches.append([])
+        batches[-1].append(index)
+    completed = 0
+    task_loss_sums: Counter[str] = Counter()
+    task_token_counts: Counter[str] = Counter()
+    structured_sums: Counter[str] = Counter()
+    structured_examples = structured_instances = 0.0
+    for chosen in batches:
         batch_rows = [rows[i] for i in chosen]
         ids, labels, mask = make_batch(batch_rows, device="cuda")
         positions = supervised_positions(
-            batch_rows, projector.prefix_tokens, device="cuda")
-        features = cached_features(batch_rows, vision, projector, cache_dir)
+            batch_rows, visual_prefix_width(batch_rows, projector), device="cuda")
+        features = runtime_cached_features(
+            batch_rows, vision, projector, cache_dir)
         fusion_features = (cached_fusion_features(
-            batch_rows, fusion_tower, projector.prefix_tokens, fusion_cache_dir)
-            if fusion_tower is not None and fusion_adapter is not None
+            batch_rows, fusion_tower,
+            fusion_feature_tokens(fusion_tower, projector), fusion_cache_dir)
+            if fusion_tower is not None and (fusion_adapter is not None
+                                             or vision_compressor is not None)
             and fusion_cache_dir is not None else None)
         starts = visual_insert_positions(batch_rows)
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            loss, _ = multimodal_loss(rwkv, projector, vision, (), ids, labels, mask,
+            _loss, batch_metrics = multimodal_loss(
+                                      rwkv, projector, vision, (), ids, labels, mask,
                                       engram=engram, features=features,
                                       selected_positions=positions,
                                       deep_vision=deep_vision,
                                       layer_vision=layer_vision,
                                       visual_starts=starts,
                                       fusion_adapter=fusion_adapter,
-                                      fusion_features=fusion_features)
-        weight = int((labels != -100).sum())
-        losses.append(float(loss) * weight)
-        weights.append(weight)
+                                      fusion_features=fusion_features,
+                                      vision_compressor=vision_compressor,
+                                      structured_head=structured_head,
+                                      structured_rows=batch_rows,
+                                      structured_weight=structured_weight,
+                                      structured_coordinate_weight=(
+                                          structured_coordinate_weight),
+                                      structured_invalid_box_weight=(
+                                          structured_invalid_box_weight),
+                                      structured_invalid_box_margin=(
+                                          structured_invalid_box_margin),
+                                      return_per_example_ce=True,
+                                      image_aspect=image_aspect_tensor(
+                                          batch_rows, "cuda"))
+        loss_sums = batch_metrics.pop("_eval_ce_sums").float().cpu().tolist()
+        token_counts = batch_metrics.pop("_eval_ce_counts").float().cpu().tolist()
+        for row, loss_sum, token_count in zip(
+                batch_rows, loss_sums, token_counts):
+            task = eval_task_name(row)
+            task_loss_sums[task] += float(loss_sum)
+            task_token_counts[task] += float(token_count)
+        examples = float(batch_metrics.get("structured_examples", 0))
+        instances = float(batch_metrics.get("structured_positive_instances", 0))
+        if examples:
+            for name in ("structured_loss", "structured_object_loss",
+                         "structured_box_l1", "structured_giou_loss",
+                         "structured_mask_bce", "structured_mask_dice_loss"):
+                structured_sums[name] += float(batch_metrics[name]) * examples
+            structured_examples += examples
+        if instances:
+            for name in ("structured_box_iou", "structured_mask_dice"):
+                structured_sums[name] += float(batch_metrics[name]) * instances
+            structured_instances += instances
+        completed += len(chosen)
         if progress is not None:
-            progress(min(start + len(chosen), total), total)
-    return sum(losses) / max(1, sum(weights))
+            progress(completed, len(selected))
+    total_loss = sum(task_loss_sums.values()) / max(
+        1.0, sum(task_token_counts.values()))
+    result = {"loss": total_loss, "ppl": math.exp(min(total_loss, 20.0))}
+    for task in ("caption", "ocr", "structured"):
+        if task_token_counts[task]:
+            task_loss = task_loss_sums[task] / task_token_counts[task]
+            result[f"{task}_loss"] = task_loss
+            result[f"{task}_ppl"] = math.exp(min(task_loss, 20.0))
+            result[f"{task}_eval_tokens"] = task_token_counts[task]
+    if structured_examples:
+        for name in ("structured_loss", "structured_object_loss",
+                     "structured_box_l1", "structured_giou_loss",
+                     "structured_mask_bce", "structured_mask_dice_loss"):
+            result[name] = structured_sums[name] / structured_examples
+        result["structured_eval_examples"] = structured_examples
+    if structured_instances:
+        result["structured_box_iou"] = (
+            structured_sums["structured_box_iou"] / structured_instances)
+        result["structured_mask_dice"] = (
+            structured_sums["structured_mask_dice"] / structured_instances)
+        result["structured_eval_instances"] = structured_instances
+    return result
 
 
 def select_eval_sample_indices(rows: Sequence[dict], indices: Sequence[int],
@@ -2152,6 +3027,18 @@ def filter_eval_sample_indices(rows: Sequence[dict], indices: Sequence[int],
     return output
 
 
+def qualitative_eval_due(step: int, *, eval_every: int,
+                         sample_every: int) -> bool:
+    """Return whether a scalar-eval step also owes free caption decoding.
+
+    A zero qualitative cadence preserves the historical behavior by following
+    ``eval_every``. This separates frequent teacher-forced PPL from the much
+    more expensive human-review gallery without changing either computation.
+    """
+    cadence = sample_every or eval_every
+    return bool(step > 0 and cadence > 0 and step % cadence == 0)
+
+
 @torch.no_grad()
 def write_eval_samples(rows: Sequence[dict], indices: Sequence[int], *, step: int,
                        ppl: float, rwkv: nn.Module, projector: nn.Module,
@@ -2161,9 +3048,12 @@ def write_eval_samples(rows: Sequence[dict], indices: Sequence[int], *, step: in
                        deep_vision: DeepVisionInjector | None = None,
                        layer_vision: LayerMatchedVisionInjector | None = None,
                        sandwich_prompt: bool = False,
+                       sandwich_lead_prompt: str = "",
                        fusion_tower: AlignedFrozenVisionFeatures | None = None,
                        fusion_adapter: VisionFusionResidual | None = None,
                        fusion_cache_dir: Path | None = None,
+                       vision_compressor: FrozenTeacherCompressor | None = None,
+                       wrappers: Sequence[nn.Module] = (),
                        progress: Callable[[int, int], None] | None = None) -> Path | None:
     """Greedily caption a fixed spread of held-out images for chart drill-down."""
     if count <= 0 or max_new <= 0 or not indices:
@@ -2171,21 +3061,32 @@ def write_eval_samples(rows: Sequence[dict], indices: Sequence[int], *, step: in
     chosen = select_eval_sample_indices(rows, indices, count)
     sample_rows = [rows[index] for index in chosen]
     prompt_ids = [vocab.encode(str(row.get("prompt") or prompt)) for row in sample_rows]
+    lead_ids = [vocab.encode(
+        sandwich_lead_prompt or str(row.get("prompt") or prompt))
+        for row in sample_rows]
     generated: list[list[int]] = [[] for _ in sample_rows]
     stopped = [False] * len(sample_rows)
+    item_complete = [False] * len(sample_rows)
+    item_steps = [0] * len(sample_rows)
     artifact = out / "eval_samples" / f"step_{step:08d}.json"
     artifact.parent.mkdir(parents=True, exist_ok=True)
+    total_work = len(sample_rows) * max_new
 
-    def persist(*, complete: bool, generation_steps: int) -> None:
+    def persist(*, complete: bool, generation_steps: int,
+                progress_completed: int) -> None:
         _atomic_json(artifact, {
-            "step": step, "ppl": ppl, "decoding": "greedy", "max_new": max_new,
+            "step": step, "ppl": ppl, "decoding": "greedy_recurrent_cache",
+            "max_new": max_new,
             "complete": complete, "generation_steps": generation_steps,
+            "progress_completed": progress_completed,
+            "progress_total": total_work,
             "items": [{
                 "image": str(row["image"].resolve()),
                 "prompt": str(row.get("prompt") or prompt),
                 "reference": row["text"],
                 "caption": vocab.decode(tokens).strip(),
                 "tokens": len(tokens), "stopped_at_eod": stopped[i],
+                "complete": item_complete[i], "generation_steps": item_steps[i],
                 "source": str(row.get("stage1_source") or row.get("source") or "unknown"),
             } for i, (row, tokens) in enumerate(zip(sample_rows, generated))],
         }, durable=complete)
@@ -2193,90 +3094,179 @@ def write_eval_samples(rows: Sequence[dict], indices: Sequence[int], *, step: in
     # Publish the image/reference skeleton before the expensive autoregressive
     # phase. The dashboard can render and poll it while captions are still being
     # produced, and a hard stop cannot erase the already-computed scalar eval.
-    persist(complete=False, generation_steps=0)
+    persist(complete=False, generation_steps=0, progress_completed=0)
     generation_steps = 0
+    completed_work = 0
     try:
-        features = cached_features(sample_rows, vision, projector, cache_dir)
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            prefix = projector(features)
-            if fusion_tower is not None and fusion_adapter is not None:
-                if fusion_cache_dir is None:
-                    raise ValueError("fusion eval requires its feature cache")
-                fusion_features = cached_fusion_features(
-                    sample_rows, fusion_tower, projector.prefix_tokens,
-                    fusion_cache_dir)
-                prefix = prefix + fusion_adapter(fusion_features).to(prefix.dtype)
-        # Finished rows are dropped from the forward batch as they stop; each
-        # row's greedy decode is independent of its batchmates, so this leaves
-        # every produced caption identical while shrinking late-step batches.
-        active = list(range(len(sample_rows)))
-        for generation_step in range(max_new):
-            sequences = [((prompt_ids[i] * (2 if sandwich_prompt else 1))
-                          + generated[i]) for i in active]
-            starts = tuple(len(prompt_ids[i]) if sandwich_prompt else 0
-                           for i in active)
-            lengths = [len(item) for item in sequences]
-            width = max(lengths)
-            ids_host = torch.zeros(len(sequences), width, dtype=torch.long)
-            mask_host = torch.zeros_like(ids_host, dtype=torch.bool)
-            for local, sequence in enumerate(sequences):
-                ids_host[local, :len(sequence)] = torch.as_tensor(
-                    sequence, dtype=torch.long)
-                mask_host[local, :len(sequence)] = True
-            ids = ids_host.pin_memory().to("cuda", non_blocking=True)
-            text_mask = mask_host.pin_memory().to("cuda", non_blocking=True)
-            active_prefix = prefix[active]
+        # RADIO images have variable visual-prefix widths. Prefill each row
+        # independently so no fake visual tokens enter recurrence, then stack
+        # the resulting positionless RWKV states and decode the gallery as one
+        # batch. This combines exact variable-tile prefills with one model call
+        # per token round instead of one call per image per token.
+        row_caches = []
+        refinement_snapshots = []
+        first_tokens: list[int] = []
+        engram_streams = []
+        for i, row in enumerate(sample_rows):
+            row_features = runtime_cached_features([row], vision, projector, cache_dir)
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                if vision_compressor is not None:
+                    if fusion_tower is None or fusion_cache_dir is None:
+                        raise ValueError("compressor eval requires paired feature caches")
+                    fusion_features = cached_fusion_features(
+                        [row], fusion_tower,
+                        fusion_feature_tokens(fusion_tower, projector),
+                        fusion_cache_dir)
+                    canonical = vision_compressor(row_features, fusion_features)
+                    prefix = projector(list(canonical.unbind(0)))
+                elif isinstance(projector, RadioFeatureProjector):
+                    prefix = projector(
+                        row_features,
+                        image_aspect=image_aspect_tensor([row], "cuda"))
+                else:
+                    prefix = projector(row_features)
+                if (vision_compressor is None and fusion_tower is not None
+                        and fusion_adapter is not None):
+                    if fusion_cache_dir is None:
+                        raise ValueError("fusion eval requires its feature cache")
+                    fusion_features = cached_fusion_features(
+                        [row], fusion_tower,
+                        fusion_feature_tokens(fusion_tower, projector),
+                        fusion_cache_dir)
+                    prefix = add_fusion_residual(
+                        prefix, fusion_adapter(fusion_features))
+
+            sequence = ((lead_ids[i] + prompt_ids[i]) if sandwich_prompt
+                        else prompt_ids[i])
+            start = len(lead_ids[i]) if sandwich_prompt else 0
+            ids = torch.tensor(sequence, dtype=torch.long).unsqueeze(0).pin_memory().to(
+                "cuda", non_blocking=True)
+            reset_loop_inference_cache(wrappers)
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 text = rwkv.model.embeddings(ids)
-                typed_prefix = active_prefix.to(text.dtype)
-                embeds = insert_visual_span(text, typed_prefix, starts)
-                attention_mask = insert_visual_span(
-                    text_mask, torch.ones(
-                        len(sequences), active_prefix.shape[1], dtype=torch.bool,
-                        device="cuda"), starts)
+                typed_prefix = prefix.to(text.dtype)
+                embeds = insert_visual_span(text, typed_prefix, (start,))
+                attention_mask = torch.ones(
+                    embeds.shape[:2], dtype=torch.bool, device=embeds.device)
                 if engram is not None:
                     boundary = 0 if engram.boundary_id is None else int(engram.boundary_id)
-                    engram.set_input_ids(insert_boundary_ids(
-                        ids, starts, active_prefix.shape[1], boundary))
+                    lexical_ids = insert_boundary_ids(
+                        ids, (start,), prefix.shape[1], boundary)
+                    engram.set_input_ids(lexical_ids)
                 with contextlib.ExitStack() as stack:
                     if deep_vision is not None:
-                        stack.enter_context(deep_vision.use_prefix(typed_prefix, starts))
+                        # Reinject RADIO only during the visual prefill. Its
+                        # effect is retained by RWKV's recurrent state.
+                        stack.enter_context(deep_vision.use_prefix(typed_prefix, (start,)))
                     if layer_vision is not None:
                         stack.enter_context(layer_vision.use_features(
-                            torch.stack([features[i] for i in active]), starts))
-                    hidden = rwkv.model(
+                            torch.stack(row_features), (start,)))
+                    output = rwkv.model(
                         inputs_embeds=embeds, attention_mask=attention_mask,
-                        output_hidden_states=False, use_cache=False,
-                        return_dict=True).last_hidden_state
-                positions = torch.tensor(
-                    [active_prefix.shape[1] + length - 1 for length in lengths],
-                    dtype=torch.long, device="cuda")
-                logits = rwkv.lm_head(
-                    hidden[torch.arange(len(sequences), device="cuda"), positions]).float()
+                        output_hidden_states=False, use_cache=True,
+                        return_dict=True)
+                position = prefix.shape[1] + len(sequence) - 1
+                logits = rwkv.lm_head(output.last_hidden_state[:, position]).float()
                 if engram is not None:
                     logits = engram.logit_bias_at(
-                        logits, torch.arange(len(sequences), device="cuda"), positions,
+                        logits, torch.zeros(1, dtype=torch.long, device="cuda"),
+                        torch.tensor([position], dtype=torch.long, device="cuda"),
                         inplace=True)
                 logits[:, 0] = -torch.inf
-                next_tokens = logits.argmax(-1).tolist()
-            for local, token in enumerate(next_tokens):
-                i = active[local]
+                token = int(logits.argmax(-1).item())
+            row_cache = output.past_key_values
+            row_caches.append(row_cache)
+            refinement_snapshots.append(capture_loop_refinement_caches(
+                wrappers, owner=row_cache))
+            first_tokens.append(token)
+            if engram is not None:
+                # Visual boundary tokens reset suffix recall. Everything
+                # before the final boundary is unreachable during decoding,
+                # so seed the exact streaming automaton and causal ShortConv
+                # windows from only that suffix.
+                last_boundary = start + prefix.shape[1] - 1
+                stream_ids = lexical_ids[:, last_boundary:]
+                assert engram.last_recall is not None
+                stream_recall = type(engram.last_recall)(*(
+                    value[:, last_boundary:] for value in engram.last_recall))
+                engram_streams.append(engram.begin_streaming(
+                    stream_ids, recall=stream_recall))
+
+        cache = stack_legacy_fla_caches(row_caches)
+        stacked_refinement = stack_loop_refinement_cache_snapshots(
+            refinement_snapshots)
+        restore_loop_refinement_caches(
+            wrappers, stacked_refinement, owner=cache)
+        batched_engram = (BatchedStreamingEngramState(engram_streams)
+                          if engram is not None else None)
+        tokens = torch.tensor(first_tokens, dtype=torch.long, device="cuda")
+        active = [True] * len(sample_rows)
+
+        for decode_round in range(1, max_new + 1):
+            token_values = tokens.tolist()  # one synchronization per batch round
+            completed_this_round = False
+            for i, token in enumerate(token_values):
+                if not active[i]:
+                    continue
+                generation_steps += 1
+                item_steps[i] += 1
                 if token == SEP:
                     stopped[i] = True
+                    active[i] = False
+                    item_complete[i] = True
+                    completed_this_round = True
                 else:
                     generated[i].append(int(token))
-            active = [i for i in active if not stopped[i]]
-            generation_steps = generation_step + 1
-            if generation_steps % 8 == 0 or not active:
-                persist(complete=False, generation_steps=generation_steps)
+                    if item_steps[i] >= max_new:
+                        active[i] = False
+                        item_complete[i] = True
+                        completed_this_round = True
+
+            completed_work = sum(
+                max_new if complete else steps
+                for complete, steps in zip(item_complete, item_steps))
+            if completed_this_round or decode_round % 64 == 0:
+                persist(complete=False, generation_steps=generation_steps,
+                        progress_completed=completed_work)
                 if progress is not None:
-                    progress(generation_steps, max_new)
-            if not active:
+                    progress(completed_work, total_work)
+            if not any(active):
                 break
+
+            active_tensor = torch.tensor(active, dtype=torch.bool, device="cuda")
+            # Finished rows stay in the fixed-size batch with a dummy token.
+            # Their states may mutate but can never become active again; active
+            # rows remain mathematically independent along the batch axis.
+            token_ids = torch.where(
+                active_tensor, tokens, torch.zeros_like(tokens)).unsqueeze(1)
+            if batched_engram is not None:
+                batched_engram.step(token_ids[:, 0], active=active_tensor)
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                output = rwkv.model(
+                    inputs_embeds=rwkv.model.embeddings(token_ids),
+                    attention_mask=torch.ones_like(token_ids, dtype=torch.bool),
+                    past_key_values=cache, use_cache=True,
+                    output_hidden_states=False, return_dict=True)
+                logits = rwkv.lm_head(output.last_hidden_state[:, -1]).float()
+                if engram is not None:
+                    rows_selector = torch.arange(
+                        len(sample_rows), dtype=torch.long, device="cuda")
+                    logits = engram.logit_bias_at(
+                        logits, rows_selector, torch.zeros_like(rows_selector),
+                        inplace=True)
+                logits[:, 0] = -torch.inf
+                tokens = logits.argmax(-1)
+            cache = output.past_key_values
+
+        completed_work = total_work
+        if progress is not None:
+            progress(completed_work, total_work)
     except BaseException:
-        persist(complete=False, generation_steps=generation_steps)
+        persist(complete=False, generation_steps=generation_steps,
+                progress_completed=completed_work)
         raise
-    persist(complete=True, generation_steps=generation_steps)
+    persist(complete=True, generation_steps=generation_steps,
+            progress_completed=total_work)
     return artifact
 
 
@@ -2286,7 +3276,25 @@ def main() -> None:
     ap.add_argument("--eval-data", nargs="+", default=None,
                     help="held-out image/text manifests; never sampled for training")
     ap.add_argument("--rwkv", default="models/rwkv7-g1h-2.9b-20260710-ctx10240.pth")
+    ap.add_argument("--vision-backend", choices=("moonvit", "radio1d"),
+                    default="moonvit")
     ap.add_argument("--moonvit", default="models/kimi-k2.6-moonvit/model-00064-of-000064.safetensors")
+    ap.add_argument("--radio-model", default="models/vision/C-RADIOv4-1D-H")
+    ap.add_argument("--radio-revision",
+                    default="e18692120c7a3203496e1a99056a4149ede135fc")
+    ap.add_argument("--radio-max-detail-tiles", type=int,
+                    default=DEFAULT_MAX_DETAIL_TILES)
+    ap.add_argument("--radio-adaptive-token-threshold", type=int,
+                    default=DEFAULT_ADAPTIVE_TOKEN_THRESHOLD,
+                    help="use 256 native tokens/tile through this total tile count, then 128")
+    ap.add_argument("--radio-tile-batch", type=int, default=8)
+    ap.add_argument("--radio-adaptive-complexity",
+                    action=argparse.BooleanOptionalAction, default=False,
+                    help="content-route each tile's RADIO prefix under a fixed unpadded batch total")
+    ap.add_argument("--radio-complexity-budget-ratio", type=float,
+                    default=DEFAULT_COMPLEXITY_BUDGET_RATIO)
+    ap.add_argument("--radio-complexity-token-quantum", type=int,
+                    default=DEFAULT_COMPLEXITY_TOKEN_QUANTUM)
     ap.add_argument("--out", default="runs/moonvit_rwkv_stage1_v3")
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--min-batch", type=int, default=0,
@@ -2295,6 +3303,8 @@ def main() -> None:
                     help="maximum captions when token-budget batching is enabled")
     ap.add_argument("--target-batch-tokens", type=int, default=0,
                     help="padded image-prefix + text tokens per step; 0 keeps fixed --batch")
+    ap.add_argument("--activation-checkpoint-min-tokens", type=int, default=0,
+                    help="checkpoint safe decoder layers at or above this full sequence length; 0 disables")
     ap.add_argument("--loop-token-budget-scale", type=float, default=1.0,
                     help="multiply token budget after factored loops become active")
     ap.add_argument("--allow-batch-resize", action="store_true",
@@ -2322,14 +3332,29 @@ def main() -> None:
     ap.add_argument("--vision-fusion", action=argparse.BooleanOptionalAction,
                     default=False,
                     help="add frozen SigLIP2+DINOv2+SAM aligned residual features")
+    ap.add_argument("--sam-fusion", action=argparse.BooleanOptionalAction,
+                    default=False,
+                    help="add a frozen global SAM ViT-B residual to RADIO. NOTE: "
+                         "C-RADIOv4-1D-H already distills SAM3 as a dense teacher, "
+                         "so this adds an older, smaller SAM on top of a stronger "
+                         "one the backbone has absorbed; measure before adopting")
+    ap.add_argument("--sam-fusion-tokens", type=int, default=128)
     ap.add_argument("--vision-fusion-rank", type=int, default=512)
     ap.add_argument("--siglip2-model",
                     default="models/vision/siglip2-so400m-patch16-512")
     ap.add_argument("--siglip2-width", type=int, default=1152)
     ap.add_argument("--dinov2-model", default="models/vision/dinov2-base")
     ap.add_argument("--sam-model", default="models/vision/sam-vit-base")
+    ap.add_argument("--sam-crop-padding", action=argparse.BooleanOptionalAction,
+                    default=False,
+                    help="crop SAM's zero-padded canvas and pool it on a 2D "
+                         "lattice; off by default because the shipped frozen "
+                         "compressor was trained on the uncropped features. "
+                         "Enabling it repartitions the fusion feature cache.")
     ap.add_argument("--fusion-feature-cache",
                     default="caches/siglip2_dinov2_sam_aligned_v1")
+    ap.add_argument("--vision-compressor-checkpoint", default="",
+                    help="frozen six-teacher 128x1024 compressor; replaces the Moon-only prefix bridge")
     ap.add_argument("--grounding-early-tokens", type=int, default=0,
                     help="caption-opening targets receiving extra CE weight")
     ap.add_argument("--grounding-early-weight", type=float, default=1.0)
@@ -2337,10 +3362,27 @@ def main() -> None:
                     help="in-batch image/text contrastive auxiliary weight")
     ap.add_argument("--grounding-contrastive-dim", type=int, default=512)
     ap.add_argument("--grounding-temperature", type=float, default=0.07)
+    ap.add_argument("--structured-head", action=argparse.BooleanOptionalAction,
+                    default=False,
+                    help="set-matched DETR-style box/mask auxiliary for sam_mask rows")
+    ap.add_argument("--structured-weight", type=float, default=1.0)
+    ap.add_argument("--structured-coordinate-weight", type=float, default=1.0,
+                    help="extra teacher-forced CE weight on box coordinate tokens")
+    ap.add_argument("--structured-invalid-box-weight", type=float, default=0.0,
+                    help="unlikelihood weight against false 000/999 coordinate starts")
+    ap.add_argument("--structured-invalid-box-margin", type=float, default=1.0,
+                    help="logit margin separating false boundary starts from the target")
+    ap.add_argument("--structured-width", type=int, default=256)
+    ap.add_argument("--structured-object-queries", type=int, default=16)
+    ap.add_argument("--structured-spatial-layers", type=int, default=2)
+    ap.add_argument("--structured-object-layers", type=int, default=2)
+    ap.add_argument("--structured-heads", type=int, default=8)
     ap.add_argument("--prompt", default="Describe this image:\n")
     ap.add_argument("--sandwich-prompt", action=argparse.BooleanOptionalAction,
                     default=False,
                     help="train prompt -> image -> repeated prompt -> caption")
+    ap.add_argument("--sandwich-lead-prompt", default="",
+                    help="asymmetric text before the image; empty repeats the task prompt")
     ap.add_argument("--max-text-tokens", type=int, default=384)
     ap.add_argument("--allow-text-limit-increase-from", type=int, default=0,
                     help="resume a checkpoint made at this smaller text limit; verifies its old fingerprint")
@@ -2385,9 +3427,17 @@ def main() -> None:
                     help="token ID separating the image prefix from caption recall")
     ap.add_argument("--val-fraction", type=float, default=0.02)
     ap.add_argument("--eval-every", type=int, default=100)
+    ap.add_argument("--restart-before-eval",
+                    action=argparse.BooleanOptionalAction, default=False,
+                    help="exit 42 after publishing eval_due so the launcher can "
+                         "recreate CUDA before evaluating the exact checkpoint")
     ap.add_argument("--eval-examples", type=int, default=64)
+    ap.add_argument("--eval-batch-size", type=int, default=0,
+                    help="teacher-forced eval batch cap; 0 uses --batch")
     ap.add_argument("--eval-samples", type=int, default=4,
                     help="held-out images greedily captioned at each eval marker")
+    ap.add_argument("--eval-sample-every", type=int, default=0,
+                    help="qualitative caption cadence; 0 follows --eval-every")
     ap.add_argument("--eval-sample-exclude-sources", default="",
                     help="comma-separated, case-insensitive source fragments excluded only from the qualitative gallery")
     ap.add_argument("--eval-sample-max-new", type=int, default=64)
@@ -2400,8 +3450,14 @@ def main() -> None:
                     help="fail before loading models if flash-attn Triton CE is unavailable")
     ap.add_argument("--seed", type=int, default=20260714)
     ap.add_argument("--resume", default="auto", help="auto, none, or a checkpoint path")
+    ap.add_argument("--allow-coco-prompt-migration", action="store_true",
+                    help="resume only when the prior data fingerprint exactly matches "
+                         "the legacy ambiguous COCO mask prompt; preserves optimizer "
+                         "and sampler state while resetting eval claims")
     ap.add_argument("--init-adapters-from", default=None,
                     help="warm-start adapters from another run; resets optimizer/sampler/step")
+    ap.add_argument("--init-text-adapters-from", default=None,
+                    help="warm-start non-vision adapters while replacing the vision bridge")
     ap.add_argument("--fresh", action="store_true",
                     help="explicitly archive an existing run and start over; incompatible with resume")
     args = ap.parse_args()
@@ -2423,8 +3479,13 @@ def main() -> None:
     _FEATURE_MEMORY_CACHE.max_bytes = (
         0 if args.preload_feature_cache else int(args.feature_cache_max_bytes))
 
-    if args.init_adapters_from and args.resume != "none":
-        raise SystemExit("--init-adapters-from requires --resume none")
+    if args.init_adapters_from and args.init_text_adapters_from:
+        raise SystemExit("choose only one adapter initialization source")
+    if ((args.init_adapters_from or args.init_text_adapters_from)
+            and args.resume != "none"):
+        raise SystemExit("adapter initialization requires --resume none")
+    if args.init_text_adapters_from and args.vision_backend != "radio1d":
+        raise SystemExit("--init-text-adapters-from is reserved for a replaced RADIO bridge")
 
     if args.steps < 0:
         raise SystemExit("--steps must be non-negative")
@@ -2442,6 +3503,29 @@ def main() -> None:
         raise SystemExit("--max-text-tokens and --prefix-tokens must be positive")
     if args.max_input_patches < 4:
         raise SystemExit("--max-input-patches must be at least 4")
+    if (args.radio_max_detail_tiles < 1 or args.radio_tile_batch < 1
+            or args.radio_adaptive_token_threshold < 1):
+        raise SystemExit("RADIO detail-tile and encoder-batch counts must be positive")
+    if (not 0 < args.radio_complexity_budget_ratio <= 1
+            or args.radio_complexity_token_quantum < 1
+            or 128 % args.radio_complexity_token_quantum
+            or 256 % args.radio_complexity_token_quantum):
+        raise SystemExit(
+            "RADIO complexity ratio must be in (0,1] and its quantum must divide 128 and 256")
+    if args.vision_backend == "radio1d":
+        incompatible = []
+        if args.vision_fusion:
+            incompatible.append("--vision-fusion")
+        if args.vision_compressor_checkpoint:
+            incompatible.append("--vision-compressor-checkpoint")
+        if args.moonvit_tap_layers.strip() or args.layer_vision_layers.strip():
+            incompatible.append("MoonViT layer taps")
+        if args.vision_resampler_layers:
+            incompatible.append("--vision-resampler-layers")
+        if incompatible:
+            raise SystemExit(
+                "RADIO1D already supplies the unpooled teacher representation; "
+                f"remove incompatible options: {incompatible}")
     if args.vision_resampler_layers < 0 or args.vision_resampler_width < 1:
         raise SystemExit("vision resampler layers must be non-negative and width positive")
     if (args.vision_resampler_heads < 1
@@ -2453,8 +3537,53 @@ def main() -> None:
         raise SystemExit("--layer-vision-rank must be positive")
     if args.vision_fusion_rank < 1:
         raise SystemExit("--vision-fusion-rank must be positive")
+    if (args.structured_weight < 0
+            or args.structured_coordinate_weight < 1
+            or args.structured_invalid_box_weight < 0
+            or args.structured_invalid_box_margin < 0
+            or args.structured_width < 1
+            or args.structured_object_queries < 1
+            or args.structured_spatial_layers < 1
+            or args.structured_object_layers < 1
+            or args.structured_heads < 1
+            or args.structured_width % args.structured_heads):
+        raise SystemExit("structured-head geometry/weight is invalid")
+    if args.structured_head and args.vision_backend != "radio1d":
+        raise SystemExit("--structured-head currently requires --vision-backend radio1d")
+    if args.sam_fusion_tokens < 1:
+        raise SystemExit("--sam-fusion-tokens must be positive")
+    if args.sam_fusion and args.vision_fusion:
+        raise SystemExit("--sam-fusion and --vision-fusion are mutually exclusive")
+    if args.sam_fusion and args.vision_backend != "radio1d":
+        raise SystemExit("--sam-fusion is defined only for variable-prefix RADIO1D")
+    if args.sam_fusion:
+        # --vision-fusion is already rejected under RADIO1D on the grounds that
+        # the backbone supplies the teacher representation. That argument applies
+        # at least as strongly here: C-RADIOv4-1D-H is distilled from SigLIP2-g,
+        # DINOv3-7B and SAM3, with SAM3 contributing dense (use_summary=false)
+        # structure specifically. Warn rather than refuse, so the redundancy can
+        # still be measured against the ocr_/structured_ eval splits.
+        print("warn: --sam-fusion adds SAM ViT-B to a backbone already distilled "
+              "from SAM3; treat it as an ablation, not a default", flush=True)
+    minimum_radio_tokens = (adaptive_tokens_per_tile(
+        256, ratio=args.radio_complexity_budget_ratio,
+        quantum=args.radio_complexity_token_quantum)
+        if args.radio_adaptive_complexity else 256)
+    if args.sam_fusion and args.sam_fusion_tokens > minimum_radio_tokens:
+        raise SystemExit(
+            "--sam-fusion-tokens exceeds the smallest possible RADIO prefix "
+            f"({minimum_radio_tokens})")
     if args.siglip2_width < 1:
         raise SystemExit("--siglip2-width must be positive")
+    if args.vision_compressor_checkpoint:
+        if args.prefix_tokens != 128:
+            raise SystemExit("the frozen compressor requires --prefix-tokens 128")
+        if args.vision_fusion:
+            raise SystemExit("compressor input and --vision-fusion residual are mutually exclusive")
+        if args.layer_vision_layers.strip():
+            raise SystemExit("compressor input cannot use raw MoonViT layer injection")
+        if not Path(args.vision_compressor_checkpoint).is_file():
+            raise SystemExit("frozen compressor checkpoint does not exist")
     try:
         moonvit_taps = tuple(sorted({int(value.strip()) for value in
                                     args.moonvit_tap_layers.split(",")
@@ -2464,9 +3593,12 @@ def main() -> None:
                                           if value.strip()}))
     except ValueError as exc:
         raise SystemExit("invalid MoonViT/RWKV layer-match specification") from exc
-    if bool(moonvit_taps) != bool(layer_vision_sites):
-        raise SystemExit("MoonViT taps and layer-vision sites must be enabled together")
-    if len(moonvit_taps) != len(layer_vision_sites):
+    # Staged caches are also useful without raw layer injection: the ordinary
+    # bridge consumes their deepest tap. Injection, however, still requires a
+    # one-to-one set of source taps.
+    if layer_vision_sites and not moonvit_taps:
+        raise SystemExit("layer-vision sites require MoonViT taps")
+    if layer_vision_sites and len(moonvit_taps) != len(layer_vision_sites):
         raise SystemExit("MoonViT taps and layer-vision sites need the same count")
     if any(index < 0 or index >= 27 for index in moonvit_taps):
         raise SystemExit("MoonViT tap layers must be between 0 and 26")
@@ -2489,6 +3621,8 @@ def main() -> None:
         raise SystemExit("--loop-start-step must be non-negative")
     if args.target_batch_tokens < 0:
         raise SystemExit("--target-batch-tokens must be non-negative")
+    if args.activation_checkpoint_min_tokens < 0:
+        raise SystemExit("--activation-checkpoint-min-tokens must be non-negative")
     if args.lr <= 0 or args.loop_lr < 0 or args.engram_lr < 0:
         raise SystemExit("--lr must be positive; adapter-specific learning rates non-negative")
     if args.grad_clip <= 0:
@@ -2501,7 +3635,8 @@ def main() -> None:
         raise SystemExit("--manifest-stat-workers must be positive")
     if args.engram_warmup_steps < 0:
         raise SystemExit("--engram-warmup-steps must be non-negative")
-    if args.eval_every < 0 or args.checkpoint_every < 0:
+    if (args.eval_every < 0 or args.eval_sample_every < 0
+            or args.eval_batch_size < 0 or args.checkpoint_every < 0):
         raise SystemExit("eval/checkpoint intervals must be non-negative")
     if args.log_every < 1:
         raise SystemExit("--log-every must be positive")
@@ -2580,7 +3715,9 @@ def main() -> None:
         raise SystemExit(message)
 
     raw_train = [row for source in args.data
-                 for row in load_examples(source, stat_workers=args.manifest_stat_workers)]
+                 for row in load_examples(
+                     source, stat_workers=args.manifest_stat_workers,
+                     require_all=True)]
     if not raw_train:
         raise SystemExit("No usable image/text rows found")
     # Deduplicate exact image-caption pairs before sampling.
@@ -2598,11 +3735,14 @@ def main() -> None:
     train_rows, train_lengths = prepare_examples(unique_train_rows, vocab,
                                                   prompt=args.prompt,
                                                   max_text_tokens=args.max_text_tokens,
-                                                  sandwich_prompt=args.sandwich_prompt)
+                                                  sandwich_prompt=args.sandwich_prompt,
+                                                  sandwich_lead_prompt=args.sandwich_lead_prompt)
     unique_eval_rows: list[dict] = []
     if args.eval_data:
         raw_eval = [row for source in args.eval_data
-                    for row in load_examples(source, stat_workers=args.manifest_stat_workers)]
+                    for row in load_examples(
+                        source, stat_workers=args.manifest_stat_workers,
+                        require_all=True)]
         train_images = {_image_file_identity(row) for row in unique_train.values()}
         eval_images = {_image_file_identity(row) for row in raw_eval}
         image_overlap = train_images & eval_images
@@ -2619,7 +3759,8 @@ def main() -> None:
         eval_rows, eval_lengths = prepare_examples(unique_eval_rows, vocab,
                                                     prompt=args.prompt,
                                                     max_text_tokens=args.max_text_tokens,
-                                                    sandwich_prompt=args.sandwich_prompt)
+                                                    sandwich_prompt=args.sandwich_prompt,
+                                                    sandwich_lead_prompt=args.sandwich_lead_prompt)
         if not eval_rows:
             raise SystemExit("No usable held-out image/text rows found")
         rows = train_rows + eval_rows
@@ -2629,6 +3770,32 @@ def main() -> None:
     else:
         rows, lengths = train_rows, train_lengths
         train_indices, val_indices = split_examples(rows, val_fraction=args.val_fraction)
+    if args.vision_backend == "radio1d":
+        print("planning aspect-aware RADIO tile buckets", flush=True)
+        for index, row in enumerate(rows):
+            width, height = row.get("width"), row.get("height")
+            if not width or not height:
+                with Image.open(row["image"]) as image:
+                    width, height = image.size
+            grid_rows, grid_columns = choose_detail_grid(
+                int(width), int(height),
+                max_detail_tiles=args.radio_max_detail_tiles)
+            details = grid_rows * grid_columns
+            tiles = 1 if details == 1 else details + 1
+            row["_radio_tiles"] = tiles
+            # Retained so the bridge can reconstruct each tile's letterbox
+            # transform without reopening the image every batch.
+            row["_image_width"], row["_image_height"] = int(width), int(height)
+            maximum_tokens = tokens_per_tile_for_tile_count(
+                tiles, threshold=args.radio_adaptive_token_threshold)
+            routed_tokens = (adaptive_tokens_per_tile(
+                maximum_tokens, ratio=args.radio_complexity_budget_ratio,
+                quantum=args.radio_complexity_token_quantum)
+                if args.radio_adaptive_complexity else maximum_tokens)
+            row["_visual_tokens"] = tiles * routed_tokens
+            if (index + 1) % 50_000 == 0:
+                print({"kind": "radio_tile_plan", "done": index + 1,
+                       "total": len(rows)}, flush=True)
     qualitative_val_indices = filter_eval_sample_indices(
         rows, val_indices, args.eval_sample_exclude_sources.split(","))
     if args.eval_samples and not qualitative_val_indices:
@@ -2637,16 +3804,51 @@ def main() -> None:
     args.data_fingerprint = dataset_fingerprint(
         rows, train_indices, val_indices, explicit_eval=bool(args.eval_data))
     args.image_metadata_fingerprint = image_metadata_fingerprint(rows)
+    if args.allow_coco_prompt_migration:
+        legacy_prompt = (
+            "Segment the annotated objects. For each instance, give its category, "
+            "normalized box [x1,y1,x2,y2], and 16x16 mask row spans:\n")
+
+        def legacy_coco_rows(source_rows: Sequence[dict]) -> list[dict]:
+            migrated = []
+            for row in source_rows:
+                item = dict(row)
+                if item.get("caption_variant") == "coco_instance_polygon_mask16":
+                    item["prompt"] = legacy_prompt
+                migrated.append(item)
+            return migrated
+
+        previous_train, _ = prepare_examples(
+            legacy_coco_rows(unique_train_rows), vocab, prompt=args.prompt,
+            max_text_tokens=args.max_text_tokens,
+            sandwich_prompt=args.sandwich_prompt,
+            sandwich_lead_prompt=args.sandwich_lead_prompt)
+        if args.eval_data:
+            previous_eval, _ = prepare_examples(
+                legacy_coco_rows(unique_eval_rows), vocab, prompt=args.prompt,
+                max_text_tokens=args.max_text_tokens,
+                sandwich_prompt=args.sandwich_prompt,
+                sandwich_lead_prompt=args.sandwich_lead_prompt)
+            previous_rows = previous_train + previous_eval
+        else:
+            previous_rows = previous_train
+        if len(previous_rows) != len(rows):
+            raise SystemExit("COCO prompt migration changed the usable row set")
+        args.previous_coco_prompt_data_fingerprint = dataset_fingerprint(
+            previous_rows, train_indices, val_indices,
+            explicit_eval=bool(args.eval_data))
     if args.allow_text_limit_increase_from:
         previous_train, _ = prepare_examples(
             unique_train_rows, vocab, prompt=args.prompt,
             max_text_tokens=args.allow_text_limit_increase_from,
-            sandwich_prompt=args.sandwich_prompt)
+            sandwich_prompt=args.sandwich_prompt,
+            sandwich_lead_prompt=args.sandwich_lead_prompt)
         if args.eval_data:
             previous_eval, _ = prepare_examples(
                 unique_eval_rows, vocab, prompt=args.prompt,
                 max_text_tokens=args.allow_text_limit_increase_from,
-                sandwich_prompt=args.sandwich_prompt)
+                sandwich_prompt=args.sandwich_prompt,
+                sandwich_lead_prompt=args.sandwich_lead_prompt)
             previous_rows = previous_train + previous_eval
         else:
             previous_rows = previous_train
@@ -2661,14 +3863,30 @@ def main() -> None:
         return hashlib.sha256(
             f"{resolved}|{stat.st_size}|{stat.st_mtime_ns}".encode()).hexdigest()
     args.rwkv_fingerprint = checkpoint_fingerprint(args.rwkv)
-    args.moonvit_fingerprint = checkpoint_fingerprint(args.moonvit)
-    args.vision_fusion_fingerprint = (VisionTowerConfig(
-        siglip2=args.siglip2_model, dinov2=args.dinov2_model,
-        sam=args.sam_model, siglip_width=args.siglip2_width).fingerprint()
-        if args.vision_fusion else "")
+    args.moonvit_fingerprint = (checkpoint_fingerprint(args.moonvit)
+                                if args.vision_backend == "moonvit" else "")
+    args.radio_fingerprint = (checkpoint_fingerprint(args.radio_model)
+                              if args.vision_backend == "radio1d" else "")
+    if args.sam_fusion:
+        args.vision_fusion_fingerprint = SamAlignedFrozenFeatures(
+            args.sam_model, tokens=args.sam_fusion_tokens).cache_fingerprint
+    elif args.vision_fusion or args.vision_compressor_checkpoint:
+        args.vision_fusion_fingerprint = _vision_tower_config(args).fingerprint()
+    else:
+        args.vision_fusion_fingerprint = ""
+    args.vision_compressor_fingerprint = (
+        checkpoint_fingerprint(args.vision_compressor_checkpoint)
+        if args.vision_compressor_checkpoint else "")
     _atomic_json(out / "config.json", {"schema": CHECKPOINT_SCHEMA, **vars(args)})
-    sampler = EpochBatchSampler(train_indices, lengths, batch_size=args.batch, seed=args.seed)
-    token_costs = [args.prefix_tokens + length for length in lengths]
+    sampler = EpochBatchSampler(
+        train_indices, lengths, batch_size=args.batch, seed=args.seed,
+        group_keys=([int(row["_radio_tiles"]) for row in rows]
+                    if args.vision_backend == "radio1d" else None))
+    token_costs = [
+        (int(row["_visual_tokens"]) if args.vision_backend == "radio1d"
+         else args.prefix_tokens) + length
+        for row, length in zip(rows, lengths)
+    ]
     train_truncated = sum(rows[index]["truncated"] for index in train_indices)
     val_truncated = sum(rows[index]["truncated"] for index in val_indices)
     print(f"data: {len(train_indices)} train / {len(val_indices)} val; "
@@ -2706,45 +3924,84 @@ def main() -> None:
         rwkv, n_loops=args.loop_count, gate_cap=args.loop_gate_cap,
         loop_index=args.loop_index)
 
-    _atomic_json(out / "status.json", {"state": "loading_moonvit", "updated": time.time()})
-    print(f"loading frozen MoonViT: {args.moonvit}", flush=True)
     moonvit_taps = tuple(int(value) for value in args.moonvit_tap_layers.split(",")
                          if value)
-    vision = MoonViT.from_checkpoint(args.moonvit, device="cuda",
-                                     max_input_patches=args.max_input_patches,
-                                     tap_layers=moonvit_taps,
-                                     view_mode=args.vision_view_mode)
-    vision.requires_grad_(False)
-    vision.eval()
+    vision_compressor = None
+    if args.vision_backend == "radio1d":
+        _atomic_json(out / "status.json", {
+            "state": "loading_radio1d", "updated": time.time()})
+        print(f"loading frozen RADIO1D-H: {args.radio_model}", flush=True)
+        vision = load_radio1d_h(args.radio_model)
+        vision.radio_revision = args.radio_revision
+        vision.radio_max_detail_tiles = args.radio_max_detail_tiles
+        vision.radio_tile_batch = args.radio_tile_batch
+        vision.radio_adaptive_token_threshold = args.radio_adaptive_token_threshold
+        projector = RadioFeatureProjector(
+            adaptive_complexity=args.radio_adaptive_complexity,
+            complexity_budget_ratio=args.radio_complexity_budget_ratio,
+            complexity_token_quantum=args.radio_complexity_token_quantum,
+        ).cuda().float()
+    else:
+        _atomic_json(out / "status.json", {
+            "state": "loading_moonvit", "updated": time.time()})
+        print(f"loading frozen MoonViT: {args.moonvit}", flush=True)
+        vision = MoonViT.from_checkpoint(
+            args.moonvit, device="cuda",
+            max_input_patches=args.max_input_patches,
+            tap_layers=moonvit_taps, view_mode=args.vision_view_mode)
+        vision.requires_grad_(False)
+        vision.eval()
     # Trainable modules intentionally remain fp32; autocast supplies bf16 matmuls
     # while AdamW retains real fp32 master parameters and moments.
-    projector = MoonViTPrefixProjector(
-        rwkv.config.hidden_size, args.prefix_tokens,
-        resampler_layers=args.vision_resampler_layers,
-        resampler_width=args.vision_resampler_width,
-        resampler_heads=args.vision_resampler_heads).cuda().float()
+    if args.vision_compressor_checkpoint:
+        vision_compressor = FrozenTeacherCompressor.from_checkpoint(
+            args.vision_compressor_checkpoint, device="cuda",
+            dtype=torch.bfloat16)
+        projector = CanonicalLatentPrefixProjector(
+            int(rwkv.config.hidden_size), args.prefix_tokens).cuda().float()
+        print(f"frozen teacher compressor: {args.vision_compressor_checkpoint} "
+              f"params={sum(p.numel() for p in vision_compressor.parameters())/1e6:.1f}M",
+              flush=True)
+    elif args.vision_backend == "moonvit":
+        projector = MoonViTPrefixProjector(
+            rwkv.config.hidden_size, args.prefix_tokens,
+            resampler_layers=args.vision_resampler_layers,
+            resampler_width=args.vision_resampler_width,
+            resampler_heads=args.vision_resampler_heads).cuda().float()
     fusion_tower = None
     vision_fusion = None
     fusion_cache_dir = None
-    if args.vision_fusion:
-        fusion_tower = AlignedFrozenVisionFeatures(VisionTowerConfig(
-            siglip2=args.siglip2_model, dinov2=args.dinov2_model,
-            sam=args.sam_model, siglip_width=args.siglip2_width))
+    if args.vision_fusion or args.sam_fusion or vision_compressor is not None:
+        fusion_tower = (SamAlignedFrozenFeatures(
+            args.sam_model, tokens=args.sam_fusion_tokens)
+            if args.sam_fusion
+            else AlignedFrozenVisionFeatures(_vision_tower_config(args)))
         fusion_tower.requires_grad_(False).eval()
-        vision_fusion = VisionFusionResidual(
-            int(rwkv.config.hidden_size), rank=args.vision_fusion_rank,
-            source_width=fusion_tower.width).cuda().float()
+        if args.vision_fusion or args.sam_fusion:
+            vision_fusion = VisionFusionResidual(
+                int(rwkv.config.hidden_size), rank=args.vision_fusion_rank,
+                source_width=fusion_tower.width).cuda().float()
         fusion_cache_dir = Path(args.fusion_feature_cache)
-        print(f"three-tower fusion: SigLIP2+DINOv2+SAM rank={args.vision_fusion_rank} "
+        mode = (f"SAM global residual rank={args.vision_fusion_rank}"
+                if args.sam_fusion else
+                f"residual rank={args.vision_fusion_rank}" if args.vision_fusion
+                else "frozen-compressor input")
+        towers = "SAM" if args.sam_fusion else "SigLIP2+DINOv2+SAM"
+        print(f"frozen fusion features: {towers} {mode} "
               f"cache={fusion_cache_dir} fingerprint={fusion_tower.cache_fingerprint[:12]}",
               flush=True)
     deep_vision = None
     if args.deep_vision_layers.strip():
         deep_sites = _parse_engram_sites(
             args.deep_vision_layers, int(rwkv.config.num_hidden_layers))
-        deep_vision = DeepVisionInjector(
+        deep_vision = (RadioPrefixInjector(
             int(rwkv.config.hidden_size), deep_sites,
-            rank=args.deep_vision_rank).cuda().float()
+            rank=args.deep_vision_rank,
+            token_quantum=(args.radio_complexity_token_quantum
+                           if args.radio_adaptive_complexity else 128)).cuda().float()
+            if args.vision_backend == "radio1d" else DeepVisionInjector(
+                int(rwkv.config.hidden_size), deep_sites,
+                rank=args.deep_vision_rank).cuda().float())
         deep_vision.install(rwkv.model.layers)
         print(f"deep vision: sites={deep_sites} rank={args.deep_vision_rank} "
               f"params={sum(p.numel() for p in deep_vision.parameters())/1e6:.1f}M",
@@ -2765,14 +4022,22 @@ def main() -> None:
         int(rwkv.config.hidden_size), width=args.grounding_contrastive_dim,
         temperature=args.grounding_temperature).cuda().float()
         if args.grounding_contrastive_weight else None)
+    structured_head = (StructuredSpatialHead(
+        input_width=int(rwkv.config.hidden_size), width=args.structured_width,
+        object_queries=args.structured_object_queries,
+        spatial_layers=args.structured_spatial_layers,
+        object_layers=args.structured_object_layers,
+        heads=args.structured_heads).cuda().float()
+        if args.structured_head else None)
     nextlat = (NextLatPredictor(rwkv.config.hidden_size, hidden=args.nextlat_hidden).cuda().float()
                if args.nextlat_weight else None)
     optimizer, trainable = _optimizer(
         projector, nextlat, engram, wrappers, args,
         deep_vision=deep_vision, layer_vision=layer_vision,
         vision_fusion=vision_fusion,
-        grounding=grounding)
-    assert_training_contract(rwkv, vision, wrappers, trainable)
+        grounding=grounding, structured_head=structured_head)
+    assert_training_contract(rwkv, vision, wrappers, trainable,
+                             vision_compressor=vision_compressor)
     last_checkpoint_step: int | None = None
 
     def save_last_checkpoint(checkpoint_step: int) -> None:
@@ -2781,7 +4046,8 @@ def main() -> None:
         _save_checkpoint(
             checkpoint_path, step=checkpoint_step, projector=projector,
             nextlat=nextlat, engram=engram, deep_vision=deep_vision,
-            layer_vision=layer_vision, grounding=grounding, wrappers=wrappers,
+            layer_vision=layer_vision, grounding=grounding,
+            structured_head=structured_head, wrappers=wrappers,
             optimizer=optimizer, sampler=sampler, args=args,
             vision_fusion=vision_fusion)
         # Update only after the atomic durable save succeeds.
@@ -2819,7 +4085,8 @@ def main() -> None:
              resume_path, projector=projector, nextlat=nextlat, engram=engram,
              wrappers=wrappers, optimizer=optimizer, sampler=sampler, args=args,
              deep_vision=deep_vision, layer_vision=layer_vision,
-             vision_fusion=vision_fusion, grounding=grounding)
+             vision_fusion=vision_fusion, grounding=grounding,
+             structured_head=structured_head)
         _preserve_loop_reset_outcome(args, loop_reset_already_applied)
         last_checkpoint_step = _resumed_last_checkpoint_step(
             resume_path, checkpoint_path, step,
@@ -2838,6 +4105,15 @@ def main() -> None:
             print(f"preserved {reason} at {quarantined_best}; "
                   f"it is no longer advertised by resumed step {step}",
                   flush=True)
+        if resume_contract_changed and not text_limit_migrated:
+            migrated_best = _quarantine_best(
+                best_dir, f"before-resume-contract-step-{step}")
+            if migrated_best is not None:
+                print(
+                    f"preserved pre-migration best checkpoint at {migrated_best}; "
+                    "the adaptive visual contract starts with no claimed winner",
+                    flush=True,
+                )
         if text_limit_migrated:
             migrated_best = _quarantine_best(
                 best_dir,
@@ -2868,7 +4144,8 @@ def main() -> None:
         invalidates_eval_contract = _resume_invalidates_step_evaluation(
                 text_limit_migrated=text_limit_migrated,
                 unrelated_branch=unrelated_resume_branch,
-                loop_reset_pending=loop_reset_pending)
+                loop_reset_pending=loop_reset_pending,
+                contract_changed=resume_contract_changed)
         if invalidates_eval_contract:
             reset_reasons = []
             if unrelated_resume_branch:
@@ -2877,6 +4154,8 @@ def main() -> None:
                 reset_reasons.append("text_limit_migration")
             if loop_reset_pending:
                 reset_reasons.append("loop_reset")
+            if resume_contract_changed:
+                reset_reasons.append("resume_contract_migration")
             # Publish independently of best/ existence. A missing or corrupt
             # active best must not let abandoned log minima masquerade as the
             # winner of the accepted contract.
@@ -2898,15 +4177,16 @@ def main() -> None:
         elif args.reset_loop_on_resume:
             print(f"loop reset was already committed at recovered step {step}; "
                   "not applying the one-time recovery twice", flush=True)
-    elif args.init_adapters_from:
-        init_path = Path(args.init_adapters_from)
+    elif args.init_adapters_from or args.init_text_adapters_from:
+        init_path = Path(args.init_adapters_from or args.init_text_adapters_from)
         if not init_path.is_file():
             raise SystemExit(f"adapter initialization checkpoint does not exist: {init_path}")
         source_step = _initialize_adapters(
             init_path, projector=projector, nextlat=nextlat, engram=engram,
             wrappers=wrappers, args=args, deep_vision=deep_vision,
             layer_vision=layer_vision, vision_fusion=vision_fusion,
-            grounding=grounding)
+            grounding=grounding, structured_head=structured_head,
+            replace_vision_bridge=bool(args.init_text_adapters_from))
         print(f"initialized adapters from {init_path} at source step {source_step}; "
               "optimizer, sampler, and step reset for new phase", flush=True)
     elif log_path.exists() and not args.fresh:
@@ -2926,7 +4206,8 @@ def main() -> None:
 
     best_eval_loss = float("inf")
     best_info_path = best_dir / "best.json"
-    if (not text_limit_migrated and best_info_path.is_file()
+    if (not resume_contract_changed and not text_limit_migrated
+            and best_info_path.is_file()
             and _best_checkpoint_path(best_dir) is not None):
         try:
             best_info = json.loads(best_info_path.read_text())
@@ -2996,23 +4277,38 @@ def main() -> None:
                                      rows[index].get("source") or "unknown")
                                  for index in val_indices)
     startup = {"kind": "startup", "step": step, "resumed": resume_path is not None,
-               "initialized_from": args.init_adapters_from,
+               "initialized_from": (
+                   args.init_adapters_from or args.init_text_adapters_from),
+               "vision_backend": args.vision_backend,
                "loop_reset_performed": loop_reset_performed,
                "text_limit_migrated": text_limit_migrated,
                "max_text_tokens": args.max_text_tokens,
+               "activation_checkpoint_min_tokens": args.activation_checkpoint_min_tokens,
                "train_examples": len(train_indices), "val_examples": len(val_indices),
                "source_counts": dict(sorted(source_counts.items())),
                "eval_source_counts": dict(sorted(eval_source_counts.items())),
                "trainable_parameters": sum(p.numel() for p in trainable),
+               "radio_bridge_parameters": (
+                   sum(p.numel() for p in projector.parameters())
+                   if isinstance(projector, RadioFeatureProjector) else 0),
+               "radio_adaptive_complexity": (
+                   projector.adaptive_complexity
+                   if isinstance(projector, RadioFeatureProjector) else False),
+               "radio_complexity_budget_ratio": (
+                   projector.complexity_budget_ratio
+                   if isinstance(projector, RadioFeatureProjector) else None),
                "vision_resampler_parameters": (
                    sum(p.numel() for p in projector.resampler.parameters())
-                   if projector.resampler is not None else 0),
+                   if getattr(projector, "resampler", None) is not None else 0),
                "deep_vision_parameters": (
                    sum(p.numel() for p in deep_vision.parameters())
                    if deep_vision is not None else 0),
                "grounding_parameters": (
                    sum(p.numel() for p in grounding.parameters())
                    if grounding is not None else 0),
+               "structured_head_parameters": (
+                   sum(p.numel() for p in structured_head.parameters())
+                   if structured_head is not None else 0),
                "engram_parameters": (sum(p.numel() for p in engram.parameters())
                                      if engram is not None else 0),
                "fused_ce": HAS_FUSED_CE,
@@ -3026,6 +4322,12 @@ def main() -> None:
                               "loop_lr": args.loop_lr,
                               "loop_ramp_steps": args.loop_ramp_steps}) + "\n")
     print(startup, flush=True)
+
+    # ``--profile-steps`` is a count of live steps to inspect, including after
+    # a resume.  Treating it as an absolute step number made restart profiling
+    # silently disappear on long-running jobs, exactly when a new hot-path
+    # optimization needs before/after timing evidence.
+    profile_until_step = step + args.profile_steps
 
     def schedule_next_batch_prefetch(step_number: int, *, position_offset: int = 0):
         if not args.prefetch_next_batch:
@@ -3050,6 +4352,17 @@ def main() -> None:
         """Run one scalar+qualitative eval; return whether it saved ``last.pt``."""
         nonlocal best_eval_loss
 
+        cadence_due = qualitative_eval_due(
+            eval_step, eval_every=args.eval_every,
+            sample_every=args.eval_sample_every)
+        # Resume an interrupted gallery only when that step is still part of
+        # the current qualitative cadence.  This lets an operator safely widen
+        # the cadence after a costly gallery was interrupted without forcing
+        # the obsolete work to finish on restart.
+        caption_due = cadence_due and (
+            prior_eval is None or prior_eval.get("sample_artifact") is not None
+        )
+
         def eval_progress(phase: str):
             def update(done: int, total: int) -> None:
                 _atomic_json(out / "status.json", {
@@ -3060,15 +4373,29 @@ def main() -> None:
 
         if prior_eval is None:
             eval_progress("loss")(0, min(len(val_indices), args.eval_examples))
-            val_loss = evaluate(
+            eval_metrics = evaluate(
                 rows, val_indices, rwkv=rwkv, projector=projector,
                 vision=vision, engram=engram, cache_dir=cache_dir,
-                batch_size=args.batch, max_examples=args.eval_examples,
+                batch_size=(args.eval_batch_size or args.batch),
+                max_examples=args.eval_examples,
                 deep_vision=deep_vision, layer_vision=layer_vision,
                 fusion_tower=fusion_tower, fusion_adapter=vision_fusion,
                 fusion_cache_dir=fusion_cache_dir,
+                vision_compressor=vision_compressor,
+                structured_head=structured_head,
+                structured_weight=args.structured_weight,
+                structured_coordinate_weight=args.structured_coordinate_weight,
+                structured_invalid_box_weight=args.structured_invalid_box_weight,
+                structured_invalid_box_margin=args.structured_invalid_box_margin,
                 progress=eval_progress("loss"))
-            val_loss = _require_finite_metric("validation loss", val_loss)
+            val_loss = _require_finite_metric(
+                "validation loss", eval_metrics["loss"])
+            ppl = _require_finite_metric(
+                "validation ppl", eval_metrics["ppl"])
+            eval_details = {
+                name: value for name, value in eval_metrics.items()
+                if name not in {"loss", "ppl"}
+            }
             improved = val_loss < best_eval_loss
             if improved:
                 # Persist the winner before qualitative decoding. Caption
@@ -3091,10 +4418,10 @@ def main() -> None:
                     "reason": "best_eval_promoted",
                     "path": str(_best_checkpoint_path(best_dir)),
                 }) + "\n")
-            ppl = math.exp(min(val_loss, 20.0))
             expected_artifact = (
                 out / "eval_samples" / f"step_{eval_step:08d}.json"
-                if (args.eval_samples > 0 and args.eval_sample_max_new > 0
+                if (caption_due and args.eval_samples > 0
+                    and args.eval_sample_max_new > 0
                     and qualitative_val_indices)
                 else None
             )
@@ -3104,6 +4431,7 @@ def main() -> None:
             log.write(json.dumps({
                 "kind": "eval", "step": eval_step, "loss": val_loss,
                 "val_loss": val_loss, "ppl": ppl,
+                **eval_details,
                 "sample_artifact": (str(expected_artifact)
                                     if expected_artifact else None),
                 "best": improved,
@@ -3121,7 +4449,29 @@ def main() -> None:
                 "resumed validation ppl",
                 prior_eval.get("ppl", math.exp(min(val_loss, 20.0))))
             improved = bool(prior_eval.get("best", False))
-        eval_progress("captions")(0, args.eval_sample_max_new)
+            eval_details = {
+                name: value for name, value in prior_eval.items()
+                if (name.startswith(("caption_", "ocr_", "structured_"))
+                    and isinstance(value, (int, float)))
+            }
+        if not caption_due:
+            evaluation = {
+                "kind": "eval_artifact", "step": eval_step,
+                "loss": val_loss, "val_loss": val_loss, "ppl": ppl,
+                **eval_details,
+                "sample_artifact": None, "best": improved,
+                "qualitative_complete": True,
+            }
+            log.write(json.dumps(evaluation) + "\n")
+            print(evaluation, flush=True)
+            _atomic_json(out / "status.json", {
+                "state": "training", "step": eval_step,
+                "updated": time.time(),
+            })
+            return checkpoint_saved
+        caption_work = min(args.eval_samples, len(qualitative_val_indices)) \
+            * args.eval_sample_max_new
+        eval_progress("captions")(0, caption_work)
         sample_artifact = write_eval_samples(
             rows, qualitative_val_indices, step=eval_step, ppl=ppl, rwkv=rwkv,
             projector=projector, vision=vision, engram=engram,
@@ -3129,12 +4479,16 @@ def main() -> None:
             count=args.eval_samples, max_new=args.eval_sample_max_new,
             deep_vision=deep_vision, layer_vision=layer_vision,
             sandwich_prompt=args.sandwich_prompt,
+            sandwich_lead_prompt=args.sandwich_lead_prompt,
+            wrappers=wrappers,
             fusion_tower=fusion_tower, fusion_adapter=vision_fusion,
             fusion_cache_dir=fusion_cache_dir,
+            vision_compressor=vision_compressor,
             progress=eval_progress("captions"))
         evaluation = {
             "kind": "eval_artifact", "step": eval_step, "loss": val_loss,
             "val_loss": val_loss, "ppl": ppl,
+            **eval_details,
             "sample_artifact": (str(sample_artifact) if sample_artifact else None),
             "best": improved, "qualitative_complete": True,
         }
@@ -3177,6 +4531,7 @@ def main() -> None:
                                  nextlat=nextlat, engram=engram,
                                  deep_vision=deep_vision, layer_vision=layer_vision,
                                  grounding=grounding,
+                                 structured_head=structured_head,
                                  wrappers=wrappers,
                                  optimizer=optimizer,
                                  sampler=sampler, args=args,
@@ -3196,7 +4551,7 @@ def main() -> None:
             if engram is not None:
                 engram_scale = min(1.0, next_step / max(args.engram_warmup_steps, 1))
                 engram.set_warmup(engram_scale)
-            profile = next_step <= args.profile_steps
+            profile = next_step <= profile_until_step
             if profile:
                 torch.cuda.synchronize()
             t0 = time.perf_counter()
@@ -3209,11 +4564,21 @@ def main() -> None:
                 min_items=(args.min_batch or args.batch), max_items=args.max_batch)
             prefetch_wait_s = 0.0
             prefetch_ready = 0
+            prefetch_resident_hits = 0
+            prefetch_disk_hits = 0
+            prefetch_generated = 0
+            prefetch_elapsed_s = 0.0
             prefetched_recall = None
             if prefetch_future is not None and prefetched_indices == indices:
                 wait_started = time.perf_counter()
                 try:
-                    prefetch_ready, prefetched_recall = prefetch_future.result()
+                    prefetch_result = prefetch_future.result()
+                    prefetch_ready = prefetch_result.ready
+                    prefetched_recall = prefetch_result.recall
+                    prefetch_resident_hits = prefetch_result.resident_hits
+                    prefetch_disk_hits = prefetch_result.disk_hits
+                    prefetch_generated = prefetch_result.generated
+                    prefetch_elapsed_s = prefetch_result.elapsed_s
                 except Exception as error:
                     print({"kind": "next_batch_prefetch_failed",
                            "error": repr(error)}, flush=True)
@@ -3225,14 +4590,18 @@ def main() -> None:
             batch_rows = [rows[i] for i in indices]
             ids, labels, text_mask = make_batch(batch_rows, device="cuda")
             positions = supervised_positions(
-                batch_rows, args.prefix_tokens, device="cuda")
+                batch_rows, visual_prefix_width(batch_rows, projector),
+                device="cuda")
             if profile:
                 torch.cuda.synchronize()
             t_data = time.perf_counter()
-            features = cached_features(batch_rows, vision, projector, cache_dir)
+            features = runtime_cached_features(
+                batch_rows, vision, projector, cache_dir)
             fusion_features = (cached_fusion_features(
-                batch_rows, fusion_tower, args.prefix_tokens, fusion_cache_dir)
-                if fusion_tower is not None and vision_fusion is not None
+                batch_rows, fusion_tower,
+                fusion_feature_tokens(fusion_tower, projector), fusion_cache_dir)
+                if fusion_tower is not None and (vision_fusion is not None
+                                                 or vision_compressor is not None)
                 and fusion_cache_dir is not None else None)
             if profile:
                 torch.cuda.synchronize()
@@ -3256,10 +4625,20 @@ def main() -> None:
                     visual_starts=visual_insert_positions(batch_rows),
                     fusion_adapter=vision_fusion,
                     fusion_features=fusion_features,
+                    vision_compressor=vision_compressor,
                     grounding=grounding,
                     grounding_contrastive_weight=args.grounding_contrastive_weight,
                     grounding_early_tokens=args.grounding_early_tokens,
-                    grounding_early_weight=args.grounding_early_weight)
+                    grounding_early_weight=args.grounding_early_weight,
+                    structured_head=structured_head,
+                    structured_rows=batch_rows,
+                    structured_weight=args.structured_weight,
+                    structured_coordinate_weight=args.structured_coordinate_weight,
+                    structured_invalid_box_weight=args.structured_invalid_box_weight,
+                    structured_invalid_box_margin=args.structured_invalid_box_margin,
+                    activation_checkpoint_min_tokens=(
+                        args.activation_checkpoint_min_tokens),
+                    image_aspect=image_aspect_tensor(batch_rows, "cuda"))
             if profile:
                 torch.cuda.synchronize()
             t_forward = time.perf_counter()
@@ -3325,6 +4704,10 @@ def main() -> None:
                     "engram_scale": engram_scale, **metrics,
                     "batch_prefetch_ready": prefetch_ready,
                     "batch_prefetch_wait_s": round(prefetch_wait_s, 4),
+                    "batch_prefetch_resident_hits": prefetch_resident_hits,
+                    "batch_prefetch_disk_hits": prefetch_disk_hits,
+                    "batch_prefetch_generated": prefetch_generated,
+                    "batch_prefetch_elapsed_s": round(prefetch_elapsed_s, 4),
                 }
                 record.update(loop_training_metrics(wrappers))
                 record.update(_engram_metrics(engram))
@@ -3373,11 +4756,38 @@ def main() -> None:
                 write_loop_telemetry(out / "loop_rw.json", wrappers, step=step)
                 _atomic_json(out / "status.json", {"state": "training", "step": step,
                                                    "updated": time.time()})
-            if step <= args.profile_steps or step % 10 == 0:
+            if step <= profile_until_step or step % 10 == 0:
                 print(record, flush=True)
 
             checkpoint_saved = eval_checkpoint_saved
             if args.eval_every and step % args.eval_every == 0:
+                # Release the completed training step before changing to eval
+                # sequence geometry. Retained gradients plus allocator
+                # fragmentation pushed the largest RADIO buckets into an OOM
+                # fallback, after which the asynchronous CUDA failure surfaced
+                # misleadingly in the structured matcher.
+                optimizer.zero_grad(set_to_none=True)
+                del (loss, grad_norm, loop_grad_norm, engram_grad_norm,
+                     features, fusion_features, ids, labels, text_mask,
+                     positions, prefetched_recall)
+                gc.collect()
+                torch.cuda.empty_cache()
+                if args.restart_before_eval:
+                    # FLA's recurrent inference path can retain invalid CUDA
+                    # state after hundreds of training forwards. The exact
+                    # checkpoint and eval obligation are already durable here.
+                    # A launcher-recognized process exit tears down the CUDA
+                    # context; resume drains the pending eval before step+1.
+                    if prefetch_future is not None:
+                        prefetch_future.cancel()
+                    _sync_log(log)
+                    _atomic_json(out / "status.json", {
+                        "state": "restarting_for_eval", "step": step,
+                        "updated": time.time(),
+                    }, durable=True)
+                    print({"kind": "eval_process_restart", "step": step,
+                           "exit_code": EVAL_RESTART_EXIT_CODE}, flush=True)
+                    os._exit(EVAL_RESTART_EXIT_CODE)
                 checkpoint_saved = run_evaluation(
                     step, checkpoint_saved=checkpoint_saved)
 

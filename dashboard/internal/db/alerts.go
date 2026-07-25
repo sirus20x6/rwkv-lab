@@ -58,6 +58,32 @@ func (d *DB) AckAlert(id int64) error {
 	return err
 }
 
+// ResolveAlerts removes recovered health conditions from the live banner while
+// retaining their rows for the run timeline and audit history.
+func (d *DB) ResolveAlerts(runName, kind string) error {
+	_, err := d.Exec(`UPDATE alerts SET acknowledged=1
+		WHERE acknowledged=0 AND run_name=? AND kind=?`, runName, kind)
+	return err
+}
+
+// ResolveInactiveStalls retires live-condition banners for trainers that no
+// longer have a process. Their alert rows remain as acknowledged history.
+func (d *DB) ResolveInactiveStalls(activeRunNames []string) error {
+	if len(activeRunNames) == 0 {
+		_, err := d.Exec(`UPDATE alerts SET acknowledged=1
+			WHERE acknowledged=0 AND kind='stall'`)
+		return err
+	}
+	marks := strings.TrimSuffix(strings.Repeat("?,", len(activeRunNames)), ",")
+	args := make([]any, len(activeRunNames))
+	for i, name := range activeRunNames {
+		args[i] = name
+	}
+	_, err := d.Exec(`UPDATE alerts SET acknowledged=1
+		WHERE acknowledged=0 AND kind='stall' AND run_name NOT IN (`+marks+`)`, args...)
+	return err
+}
+
 // TrainStats summarizes the most recent train rows for divergence detection.
 type TrainStats struct {
 	N             int

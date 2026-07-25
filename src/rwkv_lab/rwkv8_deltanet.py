@@ -72,6 +72,9 @@ class RWKV8ChannelMixDeltaNet(nn.Module):
         self.x_k = nn.Parameter(torch.zeros(hidden_size))
         self.key = nn.Linear(hidden_size, self.ffn_hidden_size, bias=False)
         self.value = nn.Linear(self.ffn_hidden_size, hidden_size, bias=False)
+        self._fused_training = False
+        self._cached_fp8_up = False
+        self._triton_fused_training = False
 
         nn.init.normal_(self.key.weight, mean=0.0, std=initializer_range)
         nn.init.normal_(
@@ -79,6 +82,47 @@ class RWKV8ChannelMixDeltaNet(nn.Module):
             mean=0.0,
             std=initializer_range * init_output_scale,
         )
+
+    def enable_fused_training(
+        self, *, cached_fp8_up: bool = False, triton_fused: bool = False
+    ) -> None:
+        """Enable the custom-autograd ReLU² block and optional cached FP8 W1."""
+        self._fused_training = True
+        self._cached_fp8_up = bool(cached_fp8_up)
+        self._triton_fused_training = bool(triton_fused)
+        if self._cached_fp8_up and not hasattr(self, "_key_weight_fp8"):
+            self.register_buffer(
+                "_key_weight_fp8",
+                torch.empty(
+                    0, device=self.key.weight.device, dtype=torch.float8_e4m3fn
+                ),
+                persistent=False,
+            )
+            self.register_buffer(
+                "_key_weight_fp8_scale",
+                torch.ones(
+                    1, device=self.key.weight.device, dtype=torch.float32
+                ),
+                persistent=False,
+            )
+        self.refresh_fp8_cache()
+
+    @torch.no_grad()
+    def refresh_fp8_cache(self) -> None:
+        """Refresh W1's FP8 copy after an optimizer update."""
+        if not self._cached_fp8_up:
+            return
+        from rwkv_lab.fused_channelmix import can_scaled_mm, quantize_weight_fp8
+
+        if not can_scaled_mm(self.key.weight):
+            self._key_weight_fp8 = torch.empty(
+                0, device=self.key.weight.device, dtype=torch.float8_e4m3fn
+            )
+            self._key_weight_fp8_scale.fill_(1.0)
+            return
+        quantized, scale = quantize_weight_fp8(self.key.weight)
+        self._key_weight_fp8 = quantized
+        self._key_weight_fp8_scale.copy_(scale)
 
     def forward(
         self,
@@ -129,6 +173,19 @@ class RWKV8ChannelMixDeltaNet(nn.Module):
             from rwkv_lab.megakernel_linear import ffn_squared_relu_value
             out = ffn_squared_relu_value(
                 mixed, self.key.weight, self.value.weight, use_candidate=True)
+        elif self._fused_training and self.training and hidden_gate is None:
+            from rwkv_lab.fused_channelmix import fused_channel_mix
+
+            cached = getattr(self, "_key_weight_fp8", None)
+            scale = getattr(self, "_key_weight_fp8_scale", None)
+            out = fused_channel_mix(
+                mixed,
+                self.key.weight,
+                self.value.weight,
+                key_fp8=(cached if cached is not None and cached.numel() else None),
+                key_scale=scale,
+                use_triton=self._triton_fused_training,
+            )
         else:
             k = torch.square(F.relu(self.key(mixed)))
             if hidden_gate is not None:          # DeepEmbed: per-token multiplicative gate on the

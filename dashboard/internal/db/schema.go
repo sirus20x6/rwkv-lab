@@ -205,18 +205,22 @@ CREATE TRIGGER IF NOT EXISTS rollup_ckpt_insert AFTER INSERT ON checkpoints BEGI
 END;
 `
 
-// Open opens (creating if needed) the SQLite database, applies WAL pragmas, and
-// runs migrations. A single open connection serializes all writes — simplest
-// correct model for one ingester + one sampler + quick handler reads.
+// Open opens (creating if needed) the SQLite database and applies WAL pragmas.
+// The application has only one ingester, so writes are naturally serialized;
+// extra connections let WAL readers continue serving the dashboard while a
+// large initial scan or rewritten-log replay holds a write transaction.
 func Open(path string) (*DB, error) {
 	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)", path)
 	sdb, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	// One connection = fully serialized access, no SQLITE_BUSY churn. Handler
-	// reads are fast (indexed by run_id, step), so this is fine for localhost.
-	sdb.SetMaxOpenConns(1)
+	// Do not collapse this to one connection: database/sql would then queue every
+	// handler behind the ingester's transaction even though WAL permits those
+	// reads. Four is enough for the writer plus concurrent live/series/SSE reads
+	// without creating an unbounded localhost connection pool.
+	sdb.SetMaxOpenConns(4)
+	sdb.SetMaxIdleConns(4)
 	d := &DB{sdb}
 	if err := d.migrate(); err != nil {
 		_ = sdb.Close()

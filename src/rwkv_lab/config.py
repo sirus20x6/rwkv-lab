@@ -176,7 +176,11 @@ def _run_synthetic(task_spec, cfg):
                              gen_block=int(tr.get("gen_block", 1)),
                              eval_factors=tuple(cfg.get("eval", {}).get("length_factors", (0.5,1,2,4,8))),
                              eval_noise=tuple(cfg.get("eval", {}).get("noise", (0.05,0.10))),
-                             data_seed=500_000+s, profile=bool(tr.get("profile", True))) for s in range(seeds)]
+                             data_seed=500_000+s, profile=bool(tr.get("profile", True)),
+                             lr_schedule=str(tr.get("lr_schedule", "cosine")),
+                             powercool_cooldown_fraction=float(tr.get("powercool_cooldown_fraction", 0.20)),
+                             powercool_power=float(tr.get("powercool_power", 2.0)),
+                             powercool_min_lr=float(tr.get("powercool_min_lr", 0.0))) for s in range(seeds)]
         for s, run in enumerate(runs):
             series, prof, rng_state = run.pop("_series"), run.pop("_profile"), run.pop("_rng")
             registry.record_trial(cid, arm_ids[name], s, 0, minutes*60 or steps, run,
@@ -216,19 +220,48 @@ def _lm_command(data_args, off_path, out_dir, model, train, lever, seed, save_pa
     if train.get("init_g1g"): cmd += ["--init-g1g", str(train["init_g1g"])]
     elif train.get("resume"): cmd += ["--resume", str(train["resume"])]
     if train.get("warmup"): cmd += ["--warmup", str(train["warmup"])]
+    if train.get("ctx_curriculum"):
+        cmd += ["--ctx-curriculum", str(train["ctx_curriculum"])]
+    if train.get("cpu_prefetch") is False:
+        cmd += ["--no-cpu-prefetch"]
     if train.get("fp8"): cmd += ["--fp8"]
+    for key, flag in (
+        ("fp8_head", "--fp8-head"),
+        ("fused_channelmix", "--fused-channelmix"),
+        ("cached_fp8_up", "--cached-fp8-up"),
+        ("compile_fullgraph", "--compile-fullgraph"),
+        ("fsdp_sparse_embeddings", "--fsdp-sparse-embeddings"),
+    ):
+        if train.get(key): cmd += [flag]
     if train.get("compile"): cmd += ["--compile"]
+    if train.get("compile_prewarm") is False: cmd += ["--no-compile-prewarm"]
     if distributed != "none": cmd += ["--distributed", distributed]
+    if distributed == "fsdp2":
+        cmd += ["--fsdp-prefetch-depth", str(train.get("fsdp_prefetch_depth", 1))]
     if train.get("activation_checkpointing"): cmd += ["--activation-checkpointing"]
     if train.get("cpu_offload"): cmd += ["--cpu-offload"]
     if train.get("lr_schedule"): cmd += ["--lr-schedule", str(train["lr_schedule"])]
+    if train.get("lr_schedule") == "powercool":
+        cmd += ["--powercool-cooldown-fraction", str(train.get("powercool_cooldown_fraction", 0.20)),
+                "--powercool-power", str(train.get("powercool_power", 2.0)),
+                "--powercool-min-lr", str(train.get("powercool_min_lr", 0.0))]
     if int(train.get("decay_steps", 0) or 0) > 0: cmd += ["--decay-steps", str(train["decay_steps"])]
     if int(train.get("grad_accum", 1) or 1) > 1: cmd += ["--grad-accum", str(train["grad_accum"])]
     if float(train.get("ema", 0.0) or 0.0) > 0: cmd += ["--ema", str(train["ema"])]
+    for key in ("tail_ema_start", "tail_ema_horizon", "tail_ema_blend",
+                "tie_head_until", "lmtp_cooldown_fraction"):
+        if key in train and train[key] not in (None, 0, 0.0):
+            cmd += [f"--{key.replace('_', '-')}", str(train[key])]
     muon = train.get("muon")
     if muon and train.get("optimizer") == "muon":
+        special = {
+            "adam_update_interval": "--muon-adam-interval",
+            "cautious_weight_decay": "--sm-cautious-wd",
+            "radius_pin": "--sm-radius-pin",
+        }
         for key, value in muon.items():
-            cmd += [f"--sm-{key.replace('_', '-')}", str(int(value) if isinstance(value, bool) else value)]
+            flag = special.get(key, f"--sm-{key.replace('_', '-')}")
+            cmd += [flag, str(int(value) if isinstance(value, bool) else value)]
     for key, value in lever.items():
         if key not in _LM_FLAG:
             raise ValueError(f"unknown lever key {key!r}: no rwkv_pretrain CLI flag in _LM_FLAG")
@@ -432,16 +465,36 @@ def main():
     rl.add_argument("--optimizer", default="adamw")
     rl.add_argument("--weight-decay", type=float, default=0.1)
     rl.add_argument("--warmup", type=int, default=0)
+    rl.add_argument("--ctx-curriculum", default="")
+    rl.add_argument("--cpu-prefetch", action=argparse.BooleanOptionalAction, default=True)
     rl.add_argument("--fp8", action="store_true")
+    rl.add_argument("--fp8-head", action="store_true")
+    rl.add_argument("--fused-channelmix", action="store_true")
+    rl.add_argument("--cached-fp8-up", action="store_true")
     rl.add_argument("--compile", action="store_true")
+    rl.add_argument("--compile-fullgraph", action="store_true")
+    rl.add_argument("--compile-prewarm", action=argparse.BooleanOptionalAction, default=True)
     rl.add_argument("--distributed", default="none", choices=("none", "fsdp2"))
     rl.add_argument("--world-size", type=int, default=2)
     rl.add_argument("--activation-checkpointing", action="store_true")
     rl.add_argument("--cpu-offload", action="store_true")
-    rl.add_argument("--lr-schedule", default="cosine", choices=("constant", "cosine"))
+    rl.add_argument("--fsdp-prefetch-depth", type=int, default=1)
+    rl.add_argument("--fsdp-sparse-embeddings", action="store_true")
+    rl.add_argument("--lr-schedule", default="cosine", choices=("constant", "cosine", "powercool"))
+    rl.add_argument("--powercool-cooldown-fraction", type=float, default=0.20,
+                    help="PowerCool fraction of training reserved for the power-law cooldown")
+    rl.add_argument("--powercool-power", type=float, default=2.0,
+                    help="PowerCool exponent; larger values delay the cooldown")
+    rl.add_argument("--powercool-min-lr", type=float, default=0.0,
+                    help="PowerCool terminal learning-rate floor")
     rl.add_argument("--decay-steps", type=int, default=0)
     rl.add_argument("--grad-accum", type=int, default=1)
     rl.add_argument("--ema", type=float, default=0.0)
+    rl.add_argument("--tail-ema-start", type=float, default=0.0)
+    rl.add_argument("--tail-ema-horizon", type=int, default=150)
+    rl.add_argument("--tail-ema-blend", type=float, default=0.6)
+    rl.add_argument("--tie-head-until", type=float, default=0.0)
+    rl.add_argument("--lmtp-cooldown-fraction", type=float, default=0.0)
     rl.add_argument("--corpus", default="local", choices=sorted(CORPORA))
     from rwkv_lab.rwkv_pretrain import add_muon_args, muon_opts_from
     add_muon_args(rl)                                        # --sm-* Muon variants
@@ -452,12 +505,25 @@ def main():
                {"steps": args.steps, "minutes": args.minutes, "seq_len": args.seq_len,
                 "batch": args.batch, "lr": args.lr, "init_g1g": args.init_g1g, "resume": args.resume,
                 "optimizer": args.optimizer, "weight_decay": args.weight_decay, "warmup": args.warmup,
-                "fp8": args.fp8, "compile": args.compile, "grad_accum": args.grad_accum,
+                "ctx_curriculum": args.ctx_curriculum, "cpu_prefetch": args.cpu_prefetch,
+                "fp8": args.fp8, "fp8_head": args.fp8_head,
+                "fused_channelmix": args.fused_channelmix,
+                "cached_fp8_up": args.cached_fp8_up,
+                "compile": args.compile, "compile_fullgraph": args.compile_fullgraph,
+                "compile_prewarm": args.compile_prewarm, "grad_accum": args.grad_accum,
                 "distributed": args.distributed, "world_size": args.world_size,
                 "activation_checkpointing": args.activation_checkpointing,
-                "cpu_offload": args.cpu_offload, "lr_schedule": args.lr_schedule,
-                "decay_steps": args.decay_steps,
-                "ema": args.ema, "muon": muon_opts_from(args)}, corpus=args.corpus,
+                "cpu_offload": args.cpu_offload, "fsdp_prefetch_depth": args.fsdp_prefetch_depth,
+                "fsdp_sparse_embeddings": args.fsdp_sparse_embeddings,
+                "lr_schedule": args.lr_schedule,
+                "decay_steps": args.decay_steps, "powercool_cooldown_fraction": args.powercool_cooldown_fraction,
+                "powercool_power": args.powercool_power, "powercool_min_lr": args.powercool_min_lr,
+                "ema": args.ema, "tail_ema_start": args.tail_ema_start,
+                "tail_ema_horizon": args.tail_ema_horizon,
+                "tail_ema_blend": args.tail_ema_blend,
+                "tie_head_until": args.tie_head_until,
+                "lmtp_cooldown_fraction": args.lmtp_cooldown_fraction,
+                "muon": muon_opts_from(args)}, corpus=args.corpus,
                seeds=args.seeds, db=args.db, campaign_name=args.campaign_name)
     else:
         run(args.config)

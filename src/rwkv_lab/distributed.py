@@ -62,19 +62,136 @@ def barrier() -> None:
 
 
 def fully_shard_rwkv(model: nn.Module, *, cpu_offload: bool = False,
-                     reshard_after_forward: bool = True) -> nn.Module:
+                     reshard_after_forward: bool = True,
+                     prefetch_depth: int = 0,
+                     ignored_params: set[nn.Parameter] | None = None) -> nn.Module:
     """Apply FSDP2 bottom-up to RWKV blocks and then the root model in place."""
     if not torch.distributed.is_initialized():
         raise RuntimeError("FSDP2 requires a torchrun process group")
     from torch.distributed.fsdp import CPUOffloadPolicy, OffloadPolicy, fully_shard
 
     offload = CPUOffloadPolicy() if cpu_offload else OffloadPolicy()
+    ignored_params = set(ignored_params or ())
     blocks = getattr(model, "blocks", ())
     for block in blocks:
+        block_params = set(block.parameters())
         fully_shard(block, reshard_after_forward=reshard_after_forward,
-                    offload_policy=offload)
-    fully_shard(model, reshard_after_forward=reshard_after_forward, offload_policy=offload)
+                    offload_policy=offload,
+                    ignored_params=ignored_params & block_params)
+    fully_shard(model, reshard_after_forward=reshard_after_forward,
+                offload_policy=offload, ignored_params=ignored_params)
+    configure_fsdp_prefetch(model, depth=prefetch_depth)
     return model
+
+
+def configure_fsdp_prefetch(model: nn.Module, *, depth: int = 1) -> None:
+    """Explicitly overlap adjacent RWKV block all-gathers with computation.
+
+    Forward executes blocks in increasing order and backward in reverse order,
+    so each block prefetches its next consumers in the corresponding direction.
+    FSDP2 keeps this opt-in because explicit ordering assumes a static traversal.
+    """
+    if depth < 0:
+        raise ValueError("FSDP2 prefetch depth must be non-negative")
+    if depth == 0:
+        return
+    blocks = list(getattr(model, "blocks", ()))
+    for index, block in enumerate(blocks):
+        forward = blocks[index + 1:index + 1 + depth]
+        backward = list(reversed(blocks[max(0, index - depth):index]))
+        set_forward = getattr(block, "set_modules_to_forward_prefetch", None)
+        set_backward = getattr(block, "set_modules_to_backward_prefetch", None)
+        if forward and callable(set_forward):
+            set_forward(forward)
+        if backward and callable(set_backward):
+            set_backward(backward)
+    root_forward = getattr(model, "set_modules_to_forward_prefetch", None)
+    if blocks and callable(root_forward):
+        root_forward(blocks[:depth])
+
+
+def set_requires_gradient_sync(model: nn.Module, required: bool) -> None:
+    """Toggle FSDP2 reduction, used to avoid collectives on accumulation microsteps."""
+    method = getattr(model, "set_requires_gradient_sync", None)
+    if callable(method):
+        method(bool(required), recurse=True)
+
+
+@torch.no_grad()
+def sparse_sync_parameter_rows(param: nn.Parameter, rows: torch.Tensor) -> int:
+    """Average only touched rows of a replicated embedding-style parameter.
+
+    ``param`` must be excluded from FSDP sharding. Every rank gathers compact
+    ``(row_index, row_gradient)`` payloads, reconstructs the same averaged
+    sparse gradient locally, and can then run an ordinary replicated optimizer.
+
+    ``rows`` is a *hint*, not a contract: the transmitted set is the union of it
+    and the rows the gradient actually reaches, so an incomplete or approximate
+    index mapping costs bandwidth rather than silently dropping gradient. Rows
+    are reduced in fp32 regardless of the parameter dtype.
+
+    Returns the maximum transmitted row count (useful for diagnostics).
+    """
+    if param.grad is None:
+        return 0
+    if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+        return int(_touched_rows(param, rows).numel())
+    world = torch.distributed.get_world_size()
+    if world == 1:
+        return int(_touched_rows(param, rows).numel())
+    rows = _touched_rows(param, rows)
+    count = torch.tensor([rows.numel()], dtype=torch.int64, device=param.grad.device)
+    counts = [torch.empty_like(count) for _ in range(world)]
+    torch.distributed.all_gather(counts, count)
+    max_rows = max(int(value.item()) for value in counts)
+    if max_rows == 0:
+        param.grad.zero_()
+        return 0
+
+    index_payload = torch.full(
+        (max_rows,), -1, dtype=torch.int64, device=param.grad.device
+    )
+    # Reduce in fp32 regardless of the parameter dtype. Summing `world` bf16 row
+    # gradients in bf16 loses roughly log2(world) mantissa bits before the mean
+    # is taken, which is exactly the accumulation error DDP avoids.
+    value_payload = torch.zeros(
+        (max_rows, *param.grad.shape[1:]),
+        dtype=torch.float32,
+        device=param.grad.device,
+    )
+    if rows.numel():
+        index_payload[: rows.numel()] = rows
+        value_payload[: rows.numel()] = param.grad.index_select(0, rows).float()
+    gathered_indices = [torch.empty_like(index_payload) for _ in range(world)]
+    gathered_values = [torch.empty_like(value_payload) for _ in range(world)]
+    torch.distributed.all_gather(gathered_indices, index_payload)
+    torch.distributed.all_gather(gathered_values, value_payload)
+
+    reduced = torch.zeros_like(param.grad, dtype=torch.float32)
+    for indices, values in zip(gathered_indices, gathered_values):
+        valid = indices >= 0
+        if valid.any():
+            reduced.index_add_(0, indices[valid], values[valid])
+    reduced.div_(world)
+    param.grad.copy_(reduced)
+    return max_rows
+
+
+def _touched_rows(param: nn.Parameter, hint: torch.Tensor) -> torch.Tensor:
+    """Every row this rank must transmit: the caller's hint plus real nonzeros.
+
+    Deriving the nonzero set from the gradient itself is what makes this safe.
+    An earlier version trusted ``hint`` alone and then zeroed ``param.grad``, so
+    any gradient reaching a row the caller did not know about — a tied parameter,
+    a second lookup path, a table whose index mapping the caller approximated —
+    was discarded with no error at all. The scan is one reduction over a
+    gradient that is about to be gathered anyway.
+    """
+    grad = param.grad
+    hint = hint.to(device=grad.device, dtype=torch.int64).reshape(-1)
+    hint = hint[(hint >= 0) & (hint < param.shape[0])]
+    nonzero = grad.reshape(grad.shape[0], -1).ne(0).any(dim=1).nonzero().reshape(-1)
+    return torch.unique(torch.cat((hint, nonzero)))
 
 
 def checkpoint_rwkv_blocks(model: nn.Module) -> nn.Module:

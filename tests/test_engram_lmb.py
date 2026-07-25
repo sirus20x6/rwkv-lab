@@ -7,10 +7,13 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import pytest
 
 from rwkv_lab.engram_lmb import (
+    BatchedStreamingEngramState,
     LearnedTable,
     LexicalMemoryBank,
+    RecallResult,
     StreamingRecall,
     attach_engram,
     detach_engram,
@@ -421,6 +424,202 @@ def test_prefetched_recall_matches_inline_path():
         rr = token_rosa_recall(ids.cpu(), V)
         prefetched = model(ids, precomputed_recall=rr)
     torch.testing.assert_close(prefetched, inline, rtol=0, atol=0)
+
+
+def test_full_context_active_slice_matches_last_full_engram_features():
+    """One-token decode keeps exact recall and causal ShortConv context."""
+    lmb = _make_lmb(layer_sites=[0])
+    ids = _repeat_ids()
+    lmb.set_input_ids(ids)
+    assert lmb.ensure_features()
+    full_recall = RecallResult(*(value.clone() for value in lmb.last_recall))
+    full_site = lmb.sites["0"]
+    full_k = full_site._k_r[:, -1:].clone()
+    full_v = full_site._v_r[:, -1:].clone()
+    full_h = full_site._h_r[:, -1:].clone()
+
+    lmb.set_input_ids(ids, active_slice=slice(-1, None))
+    assert lmb.ensure_features()
+    assert lmb.last_recall.valid.shape == (ids.shape[0], 1)
+    for actual, expected in zip(lmb.last_recall, full_recall):
+        torch.testing.assert_close(actual, expected[:, -1:], rtol=0, atol=0)
+    # CPU grouped-convolution/linear kernels may differ by a few ULP between
+    # repeated calls; the sliced and full paths use the same learned features.
+    torch.testing.assert_close(full_site._k_r, full_k, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(full_site._v_r, full_v, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(full_site._h_r, full_h, rtol=1e-5, atol=1e-6)
+
+
+def test_streaming_engram_matches_full_recall_and_shortconv_features():
+    """Rolling recall/table windows equal full-history evaluation at every step."""
+    boundary = 7
+    lmb = _make_lmb(layer_sites=[0], boundary_id=boundary)
+    with torch.no_grad():
+        for parameter in lmb.parameters():
+            parameter.normal_(std=0.05)
+    ids = torch.tensor([[
+        9, 4, 9, 4, boundary, 3, 8, 3, 8, 6, 3, 8, 6, 5, 3, 8, 6, 5,
+    ]])
+    split = 10
+    full_recall = token_rosa_recall(ids, V, boundary)
+    with torch.no_grad():
+        full_features = lmb.read_recalled(full_recall.recalled, full_recall.valid)
+
+        prefill_ids = ids[:, 4:split]  # begin at the last document boundary
+        prefill_recall = RecallResult(*(
+            value[:, 4:split] for value in full_recall))
+        lmb.set_input_ids(prefill_ids, recall=prefill_recall)
+        assert lmb.ensure_features()
+        stream = lmb.begin_streaming(prefill_ids, recall=prefill_recall)
+
+        for position in range(split, ids.shape[1]):
+            actual_recall = stream.step(int(ids[0, position]))
+            for actual, expected in zip(actual_recall, full_recall):
+                torch.testing.assert_close(
+                    actual, expected[:, position:position + 1], rtol=0, atol=0)
+            assert stream.last_feature is not None
+            torch.testing.assert_close(
+                stream.last_feature, full_features[:, position:position + 1],
+                rtol=1e-5, atol=1e-6)
+            # Layer hooks must consume the prepared rolling feature rather than
+            # falling back to a full-history token_rosa_recall call.
+            assert lmb.ensure_features()
+            assert lmb.last_recall is actual_recall
+
+
+def test_streaming_engram_requires_single_matching_history():
+    lmb = _make_lmb(layer_sites=[0])
+    ids = _repeat_ids()[:1]
+    recall = token_rosa_recall(ids, V)
+    with pytest.raises(ValueError, match="one.*history"):
+        lmb.begin_streaming(ids.expand(2, -1), recall=RecallResult(*(
+            value.expand(2, -1) for value in recall)))
+    with pytest.raises(ValueError, match="must match"):
+        lmb.begin_streaming(ids[:, :-1], recall=recall)
+
+
+def test_batched_streaming_engram_matches_unequal_scalar_streams():
+    """Batched rows preserve scalar recall/features, boundaries, and pauses."""
+    boundary = 7
+    scalar_lmb = _make_lmb(layer_sites=[0], boundary_id=boundary)
+    batched_lmb = _make_lmb(layer_sites=[0], boundary_id=boundary)
+    with torch.no_grad():
+        for parameter in scalar_lmb.parameters():
+            parameter.normal_(std=0.05)
+    batched_lmb.load_state_dict(scalar_lmb.state_dict())
+
+    # Row 2 is intentionally shorter than the largest ShortConv history. The
+    # batched state must left-pad it without changing causal semantics.
+    prefills = [
+        torch.tensor([[boundary, 1, 2, 1]]),
+        torch.tensor([[boundary, 4, 5, 4, 5, 6, 4]]),
+        torch.tensor([[boundary, 8]]),
+    ]
+    scalar_streams, batch_rows = [], []
+    for ids in prefills:
+        recall = token_rosa_recall(ids, V, boundary)
+        scalar_streams.append(scalar_lmb.begin_streaming(ids, recall=recall))
+        batch_rows.append(batched_lmb.begin_streaming(
+            ids, recall=RecallResult(*(value.clone() for value in recall))))
+    stream = BatchedStreamingEngramState(batch_rows)
+    assert stream.batch_size == 3
+    assert [history.shape[:2] for history in stream.histories] == [(3, 2), (3, 4)]
+
+    tokens = [
+        [2, 5, 9],
+        [3, 6, 999],       # row 2 is paused; its token must be ignored
+        [1, boundary, 8],  # an active boundary resets only row 1 recall
+        [2, 4, 9],
+        [3, 5, 0],
+        [boundary, 4, 8],  # independently reset row 0 later
+        [1, 5, 9],
+    ]
+    active = [
+        [True, True, True],
+        [True, True, False],
+        [True, True, True],
+        [True, True, True],
+        [True, True, True],
+        [True, True, True],
+        [True, True, True],
+    ]
+    saw_valid = False
+    with torch.no_grad():
+        for iteration, (step_tokens, step_active) in enumerate(zip(tokens, active)):
+            paused_histories = ([history[2].clone() for history in stream.histories]
+                                if not step_active[2] else None)
+            paused_time = (stream.recallers[2]._t if not step_active[2] else None)
+
+            expected_recall, expected_features = [], []
+            for row, (scalar, token, enabled) in enumerate(zip(
+                    scalar_streams, step_tokens, step_active)):
+                if enabled:
+                    rr = scalar.step(token)
+                    expected_recall.append(rr)
+                    expected_features.append(scalar.last_feature.clone())
+                    saw_valid = saw_valid or bool(rr.valid.any())
+                else:
+                    expected_recall.append(RecallResult(
+                        recalled=torch.zeros((1, 1), dtype=torch.long),
+                        valid=torch.zeros((1, 1), dtype=torch.bool),
+                        mlen=torch.zeros((1, 1), dtype=torch.long),
+                        dist=torch.zeros((1, 1), dtype=torch.long)))
+                    expected_features.append(torch.zeros(
+                        (1, 1, scalar_lmb.table.d_row),
+                        dtype=scalar_lmb.table.tables[0].dtype))
+
+            actual = stream.step(
+                torch.tensor(step_tokens), active=torch.tensor(step_active))
+            expected_batched = RecallResult(*(
+                torch.cat([rr[field] for rr in expected_recall], dim=0)
+                for field in range(4)))
+            for got, want in zip(actual, expected_batched):
+                torch.testing.assert_close(got.cpu(), want.cpu(), rtol=0, atol=0)
+            torch.testing.assert_close(
+                stream.last_feature.cpu(), torch.cat(expected_features).cpu(),
+                rtol=1e-5, atol=1e-6)
+
+            if paused_histories is not None:
+                assert stream.recallers[2]._t == paused_time
+                for history, previous in zip(stream.histories, paused_histories):
+                    torch.testing.assert_close(history[2], previous, rtol=0, atol=0)
+                assert not bool(actual.valid[2, 0])
+                assert torch.count_nonzero(stream.last_feature[2]) == 0
+
+            # Shared model hooks see one feature per row and must not rebuild
+            # recall from the clamped recalled-token IDs.
+            assert batched_lmb.last_recall is actual
+            assert batched_lmb.sites["0"]._shape == (3, 1)
+            assert batched_lmb.ensure_features()
+            assert batched_lmb.last_recall is actual
+    assert saw_valid, "parity exercise must include nonzero recalled features"
+
+
+def test_batched_streaming_engram_validates_rows_and_step_width():
+    lmb = _make_lmb(layer_sites=[0])
+    ids = torch.tensor([[1, 2, 1]])
+    recall = token_rosa_recall(ids, V)
+    row = lmb.begin_streaming(ids, recall=recall)
+    with pytest.raises(ValueError, match="at least one"):
+        BatchedStreamingEngramState([])
+    other_lmb = _make_lmb(layer_sites=[0])
+    other = other_lmb.begin_streaming(ids, recall=recall)
+    with pytest.raises(ValueError, match="share one"):
+        BatchedStreamingEngramState([row, other])
+
+    stream = BatchedStreamingEngramState([row])
+    with pytest.raises(ValueError, match="one token per row"):
+        stream.step([1, 2])
+    with pytest.raises(ValueError, match="one active flag per row"):
+        stream.step([1], active=[True, False])
+
+
+def test_engram_active_slice_rejects_empty_selection():
+    lmb = _make_lmb(layer_sites=[0])
+    ids = _repeat_ids()
+    lmb.set_input_ids(ids, active_slice=slice(0, 0))
+    with pytest.raises(ValueError, match="selected no positions"):
+        lmb.ensure_features()
 
 
 def test_noop_without_ids():

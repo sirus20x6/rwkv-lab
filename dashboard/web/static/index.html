@@ -45,7 +45,7 @@
                       showLB:false, diffA:'', diffB:'' }"
       data-on:keydown__window="evt.key==='Escape' && ($showLB=false)">
   <!-- Open the live SSE stream on load (system header + run list + selected KPIs). -->
-  <div data-effect="@get('/api/stream')" hidden></div>
+  <div data-effect="@get('/api/stream', {retry:'always', retryInterval:1000, retryScaler:1.5, retryMaxWait:10000, retryMaxCount:1000000})" hidden></div>
   <!-- Refresh the architecture panel on run change, but only when it is open —
        collapsed (the default), no fetch and no analyzer shell-out happens at all. -->
   <div data-effect="$selectedRun !== '' && document.getElementById('arch-panel') && document.getElementById('arch-panel').open && @get('/api/runs/'+$selectedRun+'/architecture')" hidden></div>
@@ -161,7 +161,7 @@
             data-on:click="confirm('Request a checkpoint for '+$selectedRun+'? (instrumented trainer only — refused otherwise.)') && @post('/api/runs/'+$selectedRun+'/checkpoint')"><svg class="bi" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5h8v11l-4-3-4 3z"/></svg><span>checkpoint now</span></button>
         </div>
 
-        <div class="kpis">
+        <div class="kpis" id="run-kpis">
           <div class="kpi"><div class="kpi-label">step</div>
             <div class="kpi-val" data-text="typeof $kpi.step==='number' ? $kpi.step.toLocaleString() : '—'">—</div></div>
           <div class="kpi"><div class="kpi-label">train loss</div>
@@ -171,6 +171,13 @@
             <div class="kpi-val" data-text="typeof $kpi.ppl==='number' ? $kpi.ppl.toFixed(3) : '—'">—</div>
             <div class="kpi-sub" data-class="{good: typeof $kpi.ppl==='number' && typeof $kpi.best_ppl==='number' && $kpi.ppl<=$kpi.best_ppl, warn: typeof $kpi.ppl==='number' && typeof $kpi.best_ppl==='number' && ($kpi.ppl-$kpi.best_ppl)/$kpi.best_ppl>0.005}"
               data-text="(typeof $kpi.ppl==='number' && typeof $kpi.best_ppl==='number') ? ($kpi.ppl<=$kpi.best_ppl ? '★ best' : ((($kpi.ppl-$kpi.best_ppl)/$kpi.best_ppl>0.005 ? '▲ ' : '')+'+'+($kpi.ppl-$kpi.best_ppl).toFixed(3)+' vs best')) : ''"></div></div>
+          <div class="kpi"><div class="kpi-label">caption ppl</div>
+            <div class="kpi-val" data-text="typeof $kpi.caption_ppl==='number' ? $kpi.caption_ppl.toFixed(3) : '—'">—</div></div>
+          <div class="kpi"><div class="kpi-label">OCR ppl</div>
+            <div class="kpi-val" data-text="typeof $kpi.ocr_ppl==='number' ? $kpi.ocr_ppl.toFixed(3) : '—'">—</div></div>
+          <div class="kpi"><div class="kpi-label">box/mask ppl</div>
+            <div class="kpi-val" data-text="typeof $kpi.structured_ppl==='number' ? $kpi.structured_ppl.toFixed(3) : '—'">—</div>
+            <div class="kpi-sub" data-text="'IoU '+(typeof $kpi.structured_box_iou==='number'?$kpi.structured_box_iou.toFixed(3):'—')+' · Dice '+(typeof $kpi.structured_mask_dice==='number'?$kpi.structured_mask_dice.toFixed(3):'—')"></div></div>
           <div class="kpi"><div class="kpi-label">best ppl</div>
             <div class="kpi-val good" data-text="typeof $kpi.best_ppl==='number' ? $kpi.best_ppl.toFixed(3) : '—'">—</div>
             <div class="kpi-sub good" data-text="typeof $kpi.best_ppl_step==='number' ? '@ step '+$kpi.best_ppl_step.toLocaleString() : ''"></div></div>
@@ -231,6 +238,10 @@
         </div>
         <div class="panel"><div class="panel-title">training signal <span class="sub">tok/s · gnorm · lr</span></div>
           <div class="chart-box"><canvas id="chart-training"></canvas></div></div>
+        <div class="panel" id="teacher-compressor-panel"><div class="panel-title">teacher reconstruction <span class="sub">MoonViT taps · SigLIP2 · DINOv2 · SAM</span></div>
+          <div class="chart-box"><canvas id="chart-teacher-reconstruction"></canvas></div></div>
+        <div class="panel" id="canonical-health-panel"><div class="panel-title">canonical latent health <span class="sub">variance · covariance · token diversity · latent standard deviation</span></div>
+          <div class="chart-box"><canvas id="chart-canonical-health"></canvas></div></div>
         <div class="panel" id="conv-panel"><div class="panel-title">conversion signal <span class="sub">lm_ce · block · smt · dmt</span></div>
           <div class="chart-box"><canvas id="chart-conv"></canvas></div></div>
         <div class="panel" id="horizons-panel"><div class="panel-title">per-horizon accuracy <span class="sub">h=1…4 top-1 solid / top-5 dashed</span></div>

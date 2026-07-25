@@ -28,6 +28,7 @@ from rwkv_lab.synthetic_tasks import make_task, Task
 from rwkv_lab.looped_rwkv import LoopedRWKV
 from rwkv_lab import registry
 from rwkv_lab.experiment_analysis import paired_stats, holm_adjust, pareto_front, sequential_holm
+from rwkv_lab.powercool import powercool_lr
 
 # Lever configs. A lever mixes LoopedRWKV kwargs (recurrent depth) with LookaheadSystem aux weights
 # (latent-prediction training objectives, keys ending in _weight). {} = bare core baseline.
@@ -316,7 +317,8 @@ def train_eval(task, d_model, n_layers, head_size, lever, seed, device, steps, b
                optimizer="adamw", weight_decay=0.01, warmup=0, muon_opts=None, fp8=False, do_compile=False,
                gen_block=1, eval_factors=(0.5, 1, 2, 4, 8), eval_noise=(0.05, 0.10),
                data_seed=None, profile=True, resume_path=None, checkpoint_path=None,
-               schedule_steps=None, schedule_minutes=None):
+               schedule_steps=None, schedule_minutes=None, lr_schedule="cosine",
+               powercool_cooldown_fraction=0.20, powercool_power=2.0, powercool_min_lr=0.0):
     """Train one model on the task; return metrics incl. length-generalization accuracy. Budget is
     either a fixed step count (minutes=0) or wall-clock minutes (Karpathy-style fixed-time rounds)."""
     torch.manual_seed(seed)
@@ -334,7 +336,14 @@ def train_eval(task, d_model, n_layers, head_size, lever, seed, device, steps, b
     opt = build_optimizer(named, optimizer, lr, weight_decay, muon_opts=muon_opts)
     schedule_steps = int(schedule_steps or steps)
     schedule_minutes = float(schedule_minutes or minutes)
+    if lr_schedule not in ("constant", "cosine", "powercool"):
+        raise ValueError(f"unknown lr_schedule: {lr_schedule!r}")
     warm = warmup if warmup > 0 else max(1, (schedule_steps or 2000) // 20)
+    if lr_schedule == "powercool":
+        # powercool_lr rejects warmup_steps > total_steps outright. A warmup
+        # longer than the whole budget is degenerate anyway, so clamp instead of
+        # failing after the model and optimizer are already built.
+        warm = max(1, min(warm, max(schedule_steps, 1)))
     step, elapsed_before, prior_series, last_loss = 0, 0.0, [], None
     resumed_from = None
     if resume_path:
@@ -364,12 +373,25 @@ def train_eval(task, d_model, n_layers, head_size, lever, seed, device, steps, b
     while ((elapsed_before + time.perf_counter() - t0 < minutes * 60)
            if minutes > 0 else (step < steps)):
         elapsed_total = elapsed_before + time.perf_counter() - t0
-        frac = (min(1.0, elapsed_total / (schedule_minutes * 60)) if minutes > 0
-                else step / max(schedule_steps, 1))
-        w = min(1.0, (step + 1) / warm)                      # warmup
-        cos = 0.5 * (1 + math.cos(math.pi * frac))           # 1 -> 0 over the budget
         for g in opt.param_groups:
-            g["lr"] = lr * w * (0.1 + 0.9 * cos)             # warmup then cosine decay to 0.1x
+            if lr_schedule == "powercool":
+                # PowerCool is defined over optimizer steps. For wall-clock
+                # rounds, schedule_steps is the declared target step budget,
+                # so continuing a run preserves the same LR curve.
+                g["lr"] = powercool_lr(
+                    step, peak_lr=lr, min_lr=powercool_min_lr,
+                    total_steps=max(schedule_steps, 1), warmup_steps=warm,
+                    cooldown_fraction=powercool_cooldown_fraction,
+                    power=powercool_power)
+            else:
+                frac = (min(1.0, elapsed_total / (schedule_minutes * 60)) if minutes > 0
+                        else step / max(schedule_steps, 1))
+                w = min(1.0, (step + 1) / warm)
+                if lr_schedule == "constant":
+                    g["lr"] = lr * w
+                else:
+                    cos = 0.5 * (1 + math.cos(math.pi * frac))
+                    g["lr"] = lr * w * (0.1 + 0.9 * cos)
         step += 1
         measured = profile and "cuda" in str(device) and step % sample_every == 0
         ev = [torch.cuda.Event(enable_timing=True) for _ in range(5)] if measured else None
@@ -519,6 +541,10 @@ def main():
                     choices=["adamw", "adamw8bit", "paged-adamw8bit", "muon"])
     ap.add_argument("--weight-decay", type=float, default=0.01)
     ap.add_argument("--warmup", type=int, default=0, help="warmup steps (0 = auto, about 5 percent)")
+    ap.add_argument("--lr-schedule", default="cosine", choices=["constant", "cosine", "powercool"])
+    ap.add_argument("--powercool-cooldown-fraction", type=float, default=0.20)
+    ap.add_argument("--powercool-power", type=float, default=2.0)
+    ap.add_argument("--powercool-min-lr", type=float, default=0.0)
     ap.add_argument("--fp8", action="store_true",
                     help="run eligible Linear GEMMs in fp8 (torchao Float8Linear; Blackwell/Hopper)")
     ap.add_argument("--compile", action="store_true",
@@ -613,7 +639,10 @@ def main():
                                          data_seed=500_000 + s, profile=args.profile,
                                          resume_path=prior_checkpoints.get((cfg, s)),
                                          checkpoint_path=ckpt_path, schedule_steps=args.steps,
-                                         schedule_minutes=args.minutes)
+                                         schedule_minutes=args.minutes, lr_schedule=args.lr_schedule,
+                                         powercool_cooldown_fraction=args.powercool_cooldown_fraction,
+                                         powercool_power=args.powercool_power,
+                                         powercool_min_lr=args.powercool_min_lr)
                         series, prof, rng_state = run.pop("_series"), run.pop("_profile"), run.pop("_rng")
                         saved_ckpt = run.pop("_checkpoint", None)
                         tid = registry.record_trial(cid, arm_ids[cfg], s, rung,
@@ -694,7 +723,11 @@ def main():
                                      args.weight_decay, args.warmup, muon_opts_from(args), fp8=args.fp8,
                                      do_compile=args.compile, gen_block=args.gen_block,
                                      eval_factors=eval_factors, eval_noise=eval_noise,
-                                     data_seed=600_000 + j, profile=args.profile)
+                                     data_seed=600_000 + j, profile=args.profile,
+                                     lr_schedule=args.lr_schedule,
+                                     powercool_cooldown_fraction=args.powercool_cooldown_fraction,
+                                     powercool_power=args.powercool_power,
+                                     powercool_min_lr=args.powercool_min_lr)
                     series, prof, rng_state = run.pop("_series"), run.pop("_profile"), run.pop("_rng")
                     registry.record_trial(ccid, c_arm[name], s, 0, args.minutes*60 or args.steps, run,
                                           series=series, profile=prof, rng=rng_state, phase="confirm",

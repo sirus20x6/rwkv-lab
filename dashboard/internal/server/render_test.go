@@ -20,6 +20,16 @@ func TestRunHeaderShowsLiveDatabaseBestWithoutArtifact(t *testing.T) {
 	}
 }
 
+func TestRunHeaderShowsLatestStepSeparatelyFromEventCount(t *testing.T) {
+	step := int64(500)
+	html := renderRunHeader(db.RunSummary{
+		Name: "vision", LatestStep: &step, NTrain: 493,
+	}, nil, BestInfo{}, 0)
+	if !strings.Contains(html, "step 500 · 493 train rows") {
+		t.Fatalf("header conflates latest step with event count: %s", html)
+	}
+}
+
 func TestRunHeaderShowsDurableCheckpointThatPrecedesItsEvalLog(t *testing.T) {
 	oldPPL, oldStep := 7.642, int64(3500)
 	html := renderRunHeader(db.RunSummary{
