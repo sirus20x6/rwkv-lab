@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
+.venv-mage-flow/
+.external/
 .ipynb_checkpoints/
 
 # --- Caches / local tool metadata ---
