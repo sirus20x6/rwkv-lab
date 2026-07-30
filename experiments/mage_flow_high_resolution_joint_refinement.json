@@ -1,0 +1,87 @@
+{
+  "schema": "rwkv-lab.mage-flow-high-resolution-design.v1",
+  "status": "design_only_not_launchable",
+  "parent": {
+    "checkpoint": "runs/mage_flow_expert/checkpoint-00016000",
+    "require_complete": true,
+    "fresh_optimizer": true
+  },
+  "data": {
+    "train_manifest": "/workspace/git/datasets/mageflow-expert-manifests/train.jsonl",
+    "train_manifest_sha256": "bd0012f28469506896c5a7e8e999bbfb7d799d1ee0919ddded9cb77c1890c2c5",
+    "eval_manifest": "/workspace/git/datasets/mageflow-expert-manifests/eval.jsonl",
+    "eval_manifest_sha256": "eb54598a15fee202f27714bb4a4373a7a5563314edc4a64229c8ce73158f03d0",
+    "no_upscale": true,
+    "max_side": 2048,
+    "max_aspect_ratio": 4.0
+  },
+  "trainable": {
+    "experts": ["photo", "animation"],
+    "shared_image_ffn_blocks": [10, 11],
+    "output_projection": true,
+    "shared_parameter_count_approx": 151419008,
+    "domain_dropout": 0.125
+  },
+  "batching": {
+    "microbatch_size": 1,
+    "gradient_accumulation_steps": 2,
+    "paired_domains_per_update": ["photo", "animation"]
+  },
+  "memory_gate": {
+    "device_total_mib": 97887,
+    "peak_allocated_gib_max": 80,
+    "peak_reserved_gib_max": 86,
+    "qualification_updates": 10,
+    "fail_closed": true
+  },
+  "rungs": [
+    {
+      "name": "1024_fp8",
+      "updates": 1500,
+      "pixel_budget": 1048576,
+      "minimum_source_pixels": 0,
+      "precision": "hybrid_fp8_bf16",
+      "expert_learning_rate": 0.00003,
+      "shared_learning_rate": 0.000003
+    },
+    {
+      "name": "1536_fp8",
+      "updates": 750,
+      "pixel_budget": 2359296,
+      "minimum_source_pixels": 2359296,
+      "precision": "hybrid_fp8_bf16",
+      "expert_learning_rate": 0.00002,
+      "shared_learning_rate": 0.000002
+    },
+    {
+      "name": "2048_fp8",
+      "updates": 250,
+      "pixel_budget": 4194304,
+      "minimum_source_pixels": 4194304,
+      "precision": "hybrid_fp8_bf16",
+      "expert_learning_rate": 0.00001,
+      "shared_learning_rate": 0.000001
+    },
+    {
+      "name": "bf16_polish",
+      "updates": 500,
+      "resolution_mix": {
+        "1024": 0.6,
+        "1536": 0.3,
+        "2048": 0.1
+      },
+      "precision": "bf16",
+      "expert_learning_rate": 0.000005,
+      "shared_learning_rate": 5e-7
+    }
+  ],
+  "evaluation": {
+    "at_parent_and_rung_end": true,
+    "all_photo_rows": 128,
+    "all_animation_rows": 128,
+    "routes": ["general", "photo", "animation"],
+    "gallery_per_domain": 4,
+    "gallery_side_by_side_target": true,
+    "gallery_pixel_budget": 1048576
+  }
+}
