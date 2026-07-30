@@ -793,3 +793,14 @@ def test_plan_writes_pinned_single_gpu_launcher(tmp_path):
     planned = json.loads((tmp_path / "plan" / "train_config.json").read_text())
     assert planned["expert_parameter_fraction"] == 0.15
     assert planned["expert_width_fraction"] is None
+
+    fa4_config = MageFlowExpertTrainConfig(
+        train_manifest=str(manifest),
+        output_dir=str(tmp_path / "fa4-output"),
+        max_steps=2,
+        microbatch_size=1,
+        attention_backend="flash4",
+    )
+    prepare_run(fa4_config, tmp_path / "fa4-plan")
+    fa4_launcher = (tmp_path / "fa4-plan" / "launch.sh").read_text()
+    assert ".venv-mage-flow-fa4" in fa4_launcher
