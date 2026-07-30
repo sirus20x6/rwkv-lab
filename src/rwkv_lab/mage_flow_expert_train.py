@@ -42,6 +42,16 @@ from rwkv_lab.mage_flow_adaptation import (
     load_domain_manifest,
     save_appearance_expert,
 )
+from rwkv_lab.mage_flow_optimizations import (
+    ACTIVATION_CHECKPOINT_MODES,
+    ENCODER_CACHE_MODES,
+    FLOAT8_RECIPES,
+    FrozenEncoderCache,
+    cache_coverage,
+    compile_transformer_blocks,
+    configure_activation_checkpointing,
+    convert_trainable_image_ffns_to_float8,
+)
 from rwkv_lab.mage_flow_pretrain import (
     _cosine_multiplier,
     _lens_to_cu,
@@ -133,8 +143,18 @@ class MageFlowExpertTrainConfig:
     auto_resume_latest: bool = False
     mixed_precision: str = "bf16"
     gradient_checkpointing: bool = True
+    activation_checkpointing_mode: str = "full"
     vae_sample_posterior: bool = True
     compile_vae_encoder: bool = True
+    attention_backend: str = "flash2"
+    compile_transformer_blocks: bool = False
+    compile_transformer_mode: str = "default"
+    compile_transformer_dynamic: bool = True
+    float8_training: bool = False
+    float8_recipe: str = "tensorwise"
+    encoder_cache_dir: str | None = None
+    encoder_cache_mode: str = "off"
+    offload_cached_encoders: bool = False
     max_uncaptioned_fraction: float = 0.15
 
     @classmethod
@@ -235,6 +255,25 @@ class MageFlowExpertTrainConfig:
             raise ValueError("invalid checkpoint retention or prefetch depth")
         if self.mixed_precision != "bf16":
             raise ValueError("Mage-Flow expert training is qualified only for bf16")
+        if self.activation_checkpointing_mode not in ACTIVATION_CHECKPOINT_MODES:
+            raise ValueError("unsupported activation_checkpointing_mode")
+        if self.attention_backend not in {"flash2", "flash4"}:
+            raise ValueError("attention_backend must be flash2 or flash4")
+        if self.float8_recipe not in FLOAT8_RECIPES:
+            raise ValueError("unsupported float8_recipe")
+        if self.float8_training and not self.compile_transformer_blocks:
+            raise ValueError(
+                "float8_training requires compile_transformer_blocks for a "
+                "qualified performant kernel path"
+            )
+        if self.encoder_cache_mode not in ENCODER_CACHE_MODES:
+            raise ValueError("unsupported encoder_cache_mode")
+        if self.encoder_cache_mode != "off" and not self.encoder_cache_dir:
+            raise ValueError("encoder_cache_mode requires encoder_cache_dir")
+        if self.offload_cached_encoders and self.encoder_cache_mode != "read_only":
+            raise ValueError(
+                "offload_cached_encoders requires a complete read_only cache"
+            )
         if not 0 <= self.max_uncaptioned_fraction <= 1:
             raise ValueError("max_uncaptioned_fraction must be in [0, 1]")
         if inspect_manifests:
@@ -420,7 +459,7 @@ def epoch_training_batches(
 def encode_domain_batch(
     model,
     rows: Sequence[Mapping[str, Any]],
-    images: Sequence[torch.Tensor],
+    images: Sequence[torch.Tensor | None],
     config: MageFlowExpertTrainConfig,
     device: torch.device,
     *,
@@ -435,30 +474,132 @@ def encode_domain_batch(
     prompts, conditioning_kinds = effective_conditioning_prompts(
         rows, caption_dropout=dropout
     )
-    # Pinned host tensors make these copies asynchronous. A dedicated stream
-    # lets PCIe transfer overlap the frozen Qwen forward on the default stream.
-    transfer_stream = getattr(model, "_training_transfer_stream", None)
-    if transfer_stream is None:
-        transfer_stream = torch.cuda.Stream(device=device)
-        model._training_transfer_stream = transfer_stream
-    with torch.cuda.stream(transfer_stream):
-        gpu_images = [image.to(device=device, non_blocking=True) for image in images]
     info = PROMPT_TEMPLATE["mage-flow"]
-    txt_flat, _vec, text_lens = _encode_texts_packed(
-        model,
-        prompts,
-        info["template"],
-        int(info["start_idx"]),
-        device,
+    template, drop_idx = info["template"], int(info["start_idx"])
+    encoder_cache: FrozenEncoderCache | None = getattr(
+        model, "_training_encoder_cache", None
     )
+    if encoder_cache is None:
+        txt_flat, _vec, text_lens = _encode_texts_packed(
+            model,
+            prompts,
+            template,
+            drop_idx,
+            device,
+        )
+    else:
+        cached_text: dict[str, torch.Tensor] = {}
+        missing_prompts = []
+        for prompt in prompts:
+            if prompt in cached_text:
+                continue
+            value = encoder_cache.load_text(prompt, template, drop_idx)
+            if value is None:
+                missing_prompts.append(prompt)
+            else:
+                cached_text[prompt] = value
+        if missing_prompts:
+            if encoder_cache.mode == "read_only":
+                raise RuntimeError(
+                    f"read-only encoder cache is missing {len(missing_prompts)} "
+                    "Qwen conditioning entries"
+                )
+            missing_flat, _missing_vec, missing_lens = _encode_texts_packed(
+                model,
+                missing_prompts,
+                template,
+                drop_idx,
+                device,
+            )
+            offset = 0
+            for prompt, length in zip(
+                missing_prompts, missing_lens, strict=True
+            ):
+                value = missing_flat[offset : offset + length]
+                encoder_cache.save_text(prompt, template, drop_idx, value)
+                cached_text[prompt] = value.detach().cpu()
+                offset += length
+        ordered_text = [cached_text[prompt] for prompt in prompts]
+        text_lens = [int(value.shape[0]) for value in ordered_text]
+        txt_flat = torch.cat(ordered_text, dim=0).to(
+            device=device, dtype=torch.bfloat16
+        )
     txt = txt_flat.reshape(1, -1, txt_flat.shape[-1]).to(
         device=device, dtype=torch.bfloat16
     )
     txt_cu = _lens_to_cu(text_lens, device)
 
-    torch.cuda.current_stream(device).wait_stream(transfer_stream)
-    clean, image_shapes = model.compute_vae_encodings(gpu_images, with_ids=False)
-    clean = clean.to(device=device, dtype=torch.bfloat16)
+    if encoder_cache is None:
+        if any(image is None for image in images):
+            raise RuntimeError("uncached VAE batch contains a missing image tensor")
+        # Pinned host tensors make these copies asynchronous. A dedicated stream
+        # lets PCIe transfer overlap the frozen Qwen forward on the default stream.
+        transfer_stream = getattr(model, "_training_transfer_stream", None)
+        if transfer_stream is None:
+            transfer_stream = torch.cuda.Stream(device=device)
+            model._training_transfer_stream = transfer_stream
+        with torch.cuda.stream(transfer_stream):
+            gpu_images = [
+                image.to(device=device, non_blocking=True)
+                for image in images
+                if image is not None
+            ]
+        torch.cuda.current_stream(device).wait_stream(transfer_stream)
+        clean, image_shapes = model.compute_vae_encodings(
+            gpu_images, with_ids=False
+        )
+        clean = clean.to(device=device, dtype=torch.bfloat16)
+    else:
+        moments: list[tuple[torch.Tensor, torch.Tensor] | None] = [
+            encoder_cache.load_moments(row) for row in rows
+        ]
+        missing_indices = [
+            index for index, value in enumerate(moments) if value is None
+        ]
+        if missing_indices:
+            if encoder_cache.mode == "read_only":
+                raise RuntimeError(
+                    f"read-only encoder cache is missing {len(missing_indices)} "
+                    "VAE posterior-moment entries"
+                )
+            if not hasattr(model.vae, "_encode_moments"):
+                raise RuntimeError(
+                    "posterior-moment caching requires MageVAE._encode_moments"
+                )
+            for index in missing_indices:
+                image = images[index]
+                if image is None:
+                    raise RuntimeError("VAE cache miss has no decoded image tensor")
+                batch = image.unsqueeze(0).to(
+                    device=device,
+                    dtype=model.vae.dtype,
+                    non_blocking=True,
+                )
+                mean, logvar = model.vae._encode_moments(batch)
+                encoder_cache.save_moments(rows[index], mean, logvar)
+                moments[index] = (mean, logvar)
+        packed_latents = []
+        image_shapes = []
+        for value in moments:
+            if value is None:
+                raise RuntimeError("internal VAE cache population failure")
+            mean, logvar = (
+                tensor.to(device=device, dtype=torch.bfloat16)
+                for tensor in value
+            )
+            latent = encoder_cache.sample_moments(
+                mean,
+                logvar,
+                sample_posterior=config.vae_sample_posterior,
+            )
+            _, _, latent_height, latent_width = latent.shape
+            image_shapes.append([(1, latent_height, latent_width)])
+            packed_latents.append(
+                latent.permute(0, 2, 3, 1).reshape(
+                    -1, latent.shape[1]
+                )
+            )
+        clean = torch.cat(packed_latents, dim=0).unsqueeze(0)
     image_lens = [int(row["latent_tokens"]) for row in rows]
     if clean.shape[1] != sum(image_lens):
         raise RuntimeError(
@@ -1089,7 +1230,16 @@ def evaluate_routes(
                 total_examples += domain_examples
             for indices in batches:
                 batch_rows = [rows[index] for index in indices]
-                images = [_load_image_tensor(row) for row in batch_rows]
+                encoder_cache = getattr(model, "_training_encoder_cache", None)
+                images = [
+                    (
+                        None
+                        if encoder_cache is not None
+                        and encoder_cache.has_moments(row)
+                        else _load_image_tensor(row)
+                    )
+                    for row in batch_rows
+                ]
                 flow = encode_domain_batch(
                     model,
                     batch_rows,
@@ -1133,10 +1283,13 @@ def _eval_gallery_rows(
     rows: Sequence[dict[str, Any]],
     *,
     count_per_domain: int = EVAL_GALLERY_SAMPLES_PER_DOMAIN,
+    domains: Sequence[str] = EXPERT_DOMAINS,
 ) -> list[dict[str, Any]]:
     """Select a deterministic balanced photo/animation qualitative gallery."""
     selected: list[dict[str, Any]] = []
-    for domain in EXPERT_DOMAINS:
+    for domain in domains:
+        if domain not in EXPERT_DOMAINS:
+            raise ValueError(f"unsupported evaluation gallery domain {domain!r}")
         domain_rows = [row for row in rows if row["domain"] == domain]
         if len(domain_rows) < count_per_domain:
             raise ValueError(
@@ -1157,9 +1310,10 @@ def generate_eval_gallery(
     output_dir: Path,
     *,
     step: int,
+    domains: Sequence[str] = EXPERT_DOMAINS,
 ) -> Path:
     """Generate a balanced expert-routed gallery consumable by trainboard."""
-    selected = _eval_gallery_rows(rows)
+    selected = _eval_gallery_rows(rows, domains=domains)
     selection_payload = [
         {
             "image_id": str(row["image_id"]),
@@ -1189,6 +1343,11 @@ def generate_eval_gallery(
     image_dir = output_dir / "eval_generations" / f"step_{step:08d}"
     image_dir.mkdir(parents=True, exist_ok=True)
     text_encoder = pipeline.model.txt_enc
+    text_encoder_was_offloaded = bool(
+        getattr(pipeline.model, "_training_text_encoder_offloaded", False)
+    )
+    if text_encoder_was_offloaded:
+        text_encoder.to(device)
     had_instance_screen = "screen_text" in vars(text_encoder)
     previous_instance_screen = vars(text_encoder).get("screen_text")
     was_training = bool(transformer.training)
@@ -1208,7 +1367,7 @@ def generate_eval_gallery(
         text_encoder.screen_text = lambda _prompt: AllowedVerdict()
         transformer.eval()
         with torch.random.fork_rng(devices=cuda_devices):
-            for domain_index, domain in enumerate(EXPERT_DOMAINS):
+            for domain_index, domain in enumerate(domains):
                 domain_rows = [row for row in selected if row["domain"] == domain]
                 prompts = [str(row["caption"]) for row in domain_rows]
                 seeds = [
@@ -1240,6 +1399,8 @@ def generate_eval_gallery(
             text_encoder.screen_text = previous_instance_screen
         else:
             del text_encoder.screen_text
+        if text_encoder_was_offloaded:
+            text_encoder.to("cpu")
         transformer.train(was_training)
 
     items = []
@@ -1280,6 +1441,7 @@ def generate_eval_gallery(
             "generation_steps": EVAL_GALLERY_STEPS,
             "cfg": EVAL_GALLERY_CFG,
             "samples_per_domain": EVAL_GALLERY_SAMPLES_PER_DOMAIN,
+            "domains": list(domains),
             "selection_sha256": selection_sha256,
             "selection": selection_payload,
             "items": items,
@@ -1376,6 +1538,135 @@ def _drop_vae_decoder(model) -> None:
         vae.decoder = None
 
 
+def cache_frozen_encoders(config: MageFlowExpertTrainConfig) -> dict[str, Any]:
+    """Materialize reusable Qwen states and VAE posterior moments."""
+    config.validate()
+    if config.encoder_cache_mode != "read_write" or not config.encoder_cache_dir:
+        raise ValueError(
+            "cache-encoders requires encoder_cache_mode='read_write' and "
+            "encoder_cache_dir"
+        )
+    try:
+        from huggingface_hub import snapshot_download
+        from mage_flow import MageFlowPipeline
+        from mage_flow.models.utils import PROMPT_TEMPLATE
+        from mage_flow.pipeline import _encode_texts_packed
+    except ImportError as error:
+        raise RuntimeError(
+            "Mage-Flow dependencies are missing; use the isolated Mage environment"
+        ) from error
+    if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():
+        raise RuntimeError("Mage-Flow encoder caching requires a BF16 CUDA GPU")
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    torch.manual_seed(config.seed)
+    torch.cuda.manual_seed_all(config.seed)
+    random.seed(config.seed)
+    model_dir = snapshot_download(
+        repo_id=config.model_id,
+        revision=config.model_revision,
+        local_files_only=True,
+    )
+    pipeline = MageFlowPipeline.from_pretrained(
+        model_dir,
+        device=str(device),
+        attn_type=config.attention_backend,
+    )
+    model = pipeline.model
+    model.vae.sample_posterior = config.vae_sample_posterior
+    model.vae.eval().requires_grad_(False)
+    model.txt_enc.eval().requires_grad_(False)
+    cache = FrozenEncoderCache(
+        config.encoder_cache_dir,
+        mode="read_write",
+        model_id=config.model_id,
+        model_revision=config.model_revision,
+    )
+    model._training_encoder_cache = cache
+    train_rows = load_domain_manifest(Path(config.train_manifest))
+    eval_rows = (
+        load_domain_manifest(Path(config.eval_manifest)) if config.eval_manifest else []
+    )
+    rows = [*train_rows, *eval_rows]
+    info = PROMPT_TEMPLATE["mage-flow"]
+    template, drop_idx = info["template"], int(info["start_idx"])
+    prompts, _kinds = effective_conditioning_prompts(
+        rows,
+        caption_dropout=0.0,
+        rng=random.Random(config.seed),
+    )
+    status_path = cache.root / "cache_build_status.json"
+    started = time.perf_counter()
+    encoded_rows = 0
+    reused_rows = 0
+    with torch.inference_mode():
+        if config.caption_dropout > 0 and not cache.has_text(
+            " ", template, drop_idx
+        ):
+            txt_flat, _vec, lens = _encode_texts_packed(
+                model, [" "], template, drop_idx, device
+            )
+            cache.save_text(" ", template, drop_idx, txt_flat[: lens[0]])
+        for index, (row, prompt) in enumerate(zip(rows, prompts, strict=True), 1):
+            has_text = cache.has_text(prompt, template, drop_idx)
+            has_moments = cache.has_moments(row)
+            if has_text and has_moments:
+                reused_rows += 1
+            else:
+                image = (
+                    None
+                    if has_moments
+                    else _load_image_tensor(row).pin_memory()
+                )
+                encode_domain_batch(
+                    model,
+                    [row],
+                    [image],
+                    config,
+                    device,
+                    caption_dropout=0.0,
+                )
+                encoded_rows += 1
+            if index % 100 == 0 or index == len(rows):
+                _atomic_json(
+                    status_path,
+                    {
+                        "schema": FrozenEncoderCache.schema,
+                        "state": "building",
+                        "processed": index,
+                        "total": len(rows),
+                        "encoded_rows": encoded_rows,
+                        "reused_rows": reused_rows,
+                        "elapsed_seconds": time.perf_counter() - started,
+                        "updated_at": _utc_now(),
+                    },
+                )
+    coverage = cache_coverage(
+        cache,
+        rows,
+        prompts=prompts,
+        template=template,
+        drop_idx=drop_idx,
+        require_null_prompt=config.caption_dropout > 0,
+    )
+    if not coverage["complete"]:
+        raise RuntimeError(f"encoder cache build is incomplete: {coverage}")
+    receipt = {
+        "schema": FrozenEncoderCache.schema,
+        "state": "complete",
+        "completed_at": _utc_now(),
+        "elapsed_seconds": time.perf_counter() - started,
+        "train_rows": len(train_rows),
+        "eval_rows": len(eval_rows),
+        "encoded_rows": encoded_rows,
+        "reused_rows": reused_rows,
+        "coverage": coverage,
+    }
+    _atomic_json(cache.root / "cache_build_receipt.json", receipt)
+    _atomic_json(status_path, receipt)
+    return receipt
+
+
 def train(config: MageFlowExpertTrainConfig) -> None:
     """Run single-GPU routed expert/shared-backbone optimization."""
     config.validate()
@@ -1412,7 +1703,11 @@ def train(config: MageFlowExpertTrainConfig) -> None:
         revision=config.model_revision,
         local_files_only=True,
     )
-    pipeline = MageFlowPipeline.from_pretrained(model_dir, device=str(device))
+    pipeline = MageFlowPipeline.from_pretrained(
+        model_dir,
+        device=str(device),
+        attn_type=config.attention_backend,
+    )
     model = pipeline.model
     model.vae.sample_posterior = config.vae_sample_posterior
     model.config.compile_vae_encoder = config.compile_vae_encoder
@@ -1421,7 +1716,6 @@ def train(config: MageFlowExpertTrainConfig) -> None:
     model.vae.eval().requires_grad_(False)
     model.txt_enc.eval().requires_grad_(False)
     transformer = model.transformer
-    transformer.checkpoint = config.gradient_checkpointing
     transformer.train()
 
     controller = inject_appearance_experts(
@@ -1442,6 +1736,29 @@ def train(config: MageFlowExpertTrainConfig) -> None:
         controller,
         train_experts=config.train_experts,
         shared_final_fraction=config.train_shared_final_fraction,
+    )
+    float8_report = convert_trainable_image_ffns_to_float8(
+        transformer,
+        enabled=config.float8_training,
+        recipe=config.float8_recipe,
+    )
+    if config.float8_training:
+        # TorchAO swaps eligible Linear modules in-place. Reassert the exact
+        # trainable boundary after conversion before optimizer construction.
+        scope = configure_training_scope(
+            transformer,
+            controller,
+            train_experts=config.train_experts,
+            shared_final_fraction=config.train_shared_final_fraction,
+        )
+    checkpoint_mode = (
+        config.activation_checkpointing_mode
+        if config.gradient_checkpointing
+        else "none"
+    )
+    activation_checkpoint_report = configure_activation_checkpointing(
+        transformer,
+        checkpoint_mode,
     )
     trainable = _all_trainable_parameters(transformer)
     preflight = training_scope_preflight_report(transformer, controller, scope)
@@ -1482,6 +1799,57 @@ def train(config: MageFlowExpertTrainConfig) -> None:
     annotate_domain_token_lengths(model, train_rows)
     if eval_rows:
         annotate_domain_token_lengths(model, eval_rows)
+    encoder_cache = None
+    encoder_cache_report: dict[str, Any] = {
+        "mode": "off",
+        "complete": False,
+    }
+    if config.encoder_cache_mode != "off":
+        encoder_cache = FrozenEncoderCache(
+            config.encoder_cache_dir,
+            mode=config.encoder_cache_mode,
+            model_id=config.model_id,
+            model_revision=config.model_revision,
+        )
+        model._training_encoder_cache = encoder_cache
+        from mage_flow.models.utils import PROMPT_TEMPLATE
+
+        info = PROMPT_TEMPLATE["mage-flow"]
+        cache_rows = [*train_rows, *eval_rows]
+        cache_prompts, _cache_kinds = effective_conditioning_prompts(
+            cache_rows,
+            caption_dropout=0.0,
+            rng=random.Random(config.seed),
+        )
+        encoder_cache_report = {
+            "mode": config.encoder_cache_mode,
+            "root": str(encoder_cache.root),
+            **cache_coverage(
+                encoder_cache,
+                cache_rows,
+                prompts=cache_prompts,
+                template=info["template"],
+                drop_idx=int(info["start_idx"]),
+                require_null_prompt=config.caption_dropout > 0,
+            ),
+        }
+        if (
+            config.encoder_cache_mode == "read_only"
+            and not encoder_cache_report["complete"]
+        ):
+            raise RuntimeError(
+                f"read-only encoder cache is incomplete: {encoder_cache_report}"
+            )
+        if config.offload_cached_encoders:
+            model.txt_enc.to("cpu")
+            if hasattr(model.vae, "dconv_encoder"):
+                model.vae.dconv_encoder.to("cpu")
+            else:
+                raise RuntimeError(
+                    "offload_cached_encoders requires MageVAE.dconv_encoder"
+                )
+            model._training_text_encoder_offloaded = True
+            model._training_vae_encoder_offloaded = True
     if not eval_rows:
         _drop_vae_decoder(model)
     contract_fingerprint = training_contract_fingerprint(config)
@@ -1571,6 +1939,12 @@ def train(config: MageFlowExpertTrainConfig) -> None:
         raise ValueError(
             f"checkpoint step {global_step} is not below max_steps {config.max_steps}"
         )
+    compile_report = compile_transformer_blocks(
+        transformer,
+        enabled=config.compile_transformer_blocks,
+        mode=config.compile_transformer_mode,
+        dynamic=config.compile_transformer_dynamic,
+    )
 
     _atomic_json(
         output_dir / "run_contract.json",
@@ -1584,6 +1958,14 @@ def train(config: MageFlowExpertTrainConfig) -> None:
             "base_revision": config.model_revision,
             "torch": torch.__version__,
             "gpu": torch.cuda.get_device_name(device),
+            "runtime_optimizations": {
+                "attention_backend": config.attention_backend,
+                "activation_checkpointing": activation_checkpoint_report,
+                "regional_compile": compile_report,
+                "float8": float8_report,
+                "frozen_encoder_cache": encoder_cache_report,
+                "cached_encoder_offload": config.offload_cached_encoders,
+            },
             "train_examples": len(train_rows),
             "eval_examples": len(eval_rows),
             "eval_domain_counts": dict(
@@ -1725,8 +2107,11 @@ def train(config: MageFlowExpertTrainConfig) -> None:
             batch_index, batch_rows = item
             image_tensors = []
             for row in batch_rows:
-                image = _load_image_tensor(row)
-                image_tensors.append(image.pin_memory())
+                if encoder_cache is not None and encoder_cache.has_moments(row):
+                    image_tensors.append(None)
+                else:
+                    image = _load_image_tensor(row)
+                    image_tensors.append(image.pin_memory())
             return (
                 batch_index,
                 batch_rows,
@@ -1968,13 +2353,18 @@ def prepare_run(config: MageFlowExpertTrainConfig, run_dir: Path) -> dict[str, A
     _atomic_json(config_path, asdict(config))
     repo_root = Path(__file__).resolve().parents[2]
     launcher = run_dir / "launch.sh"
+    default_venv = (
+        ".venv-mage-flow-fa4"
+        if config.attention_backend == "flash4" or config.float8_training
+        else ".venv-mage-flow"
+    )
     launcher.write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         'RUN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
         f"REPO_ROOT={shlex.quote(str(repo_root))}\n"
         'export HF_HOME="${MAGE_FLOW_HF_HOME:-$REPO_ROOT/.hf_cache}"\n'
-        'VENV="${MAGE_FLOW_VENV:-$REPO_ROOT/.venv-mage-flow}"\n'
+        f'VENV="${{MAGE_FLOW_VENV:-$REPO_ROOT/{default_venv}}}"\n'
         'exec "$VENV/bin/python" -m rwkv_lab.mage_flow_expert_train '
         'train --config "$RUN_DIR/train_config.json"\n',
         encoding="utf-8",
@@ -2082,14 +2472,45 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--train-shared-final-fraction", type=float, default=0.0)
     plan.add_argument("--mandatory-expert-routing", action="store_true")
     plan.add_argument("--auto-resume-latest", action="store_true")
+    plan.add_argument(
+        "--attention-backend",
+        choices=("flash2", "flash4"),
+        default="flash2",
+    )
+    plan.add_argument(
+        "--activation-checkpointing-mode",
+        choices=sorted(ACTIVATION_CHECKPOINT_MODES),
+        default="full",
+    )
+    plan.add_argument("--compile-transformer-blocks", action="store_true")
+    plan.add_argument("--compile-transformer-mode", default="default")
+    plan.add_argument("--float8-training", action="store_true")
+    plan.add_argument(
+        "--float8-recipe",
+        choices=sorted(FLOAT8_RECIPES),
+        default="tensorwise",
+    )
+    plan.add_argument("--encoder-cache-dir", type=Path)
+    plan.add_argument(
+        "--encoder-cache-mode",
+        choices=sorted(ENCODER_CACHE_MODES),
+        default="off",
+    )
+    plan.add_argument("--offload-cached-encoders", action="store_true")
 
     run = subparsers.add_parser("train")
     run.add_argument("--config", type=Path, required=True)
+    cache = subparsers.add_parser("cache-encoders")
+    cache.add_argument("--config", type=Path, required=True)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
+    if args.command == "cache-encoders":
+        config = MageFlowExpertTrainConfig.from_path(args.config)
+        print(json.dumps(cache_frozen_encoders(config), indent=2, sort_keys=True))
+        return
     if args.command == "plan":
         config = MageFlowExpertTrainConfig(
             train_manifest=str(args.train_manifest.expanduser().resolve()),
@@ -2129,6 +2550,19 @@ def main(argv: Sequence[str] | None = None) -> None:
             train_shared_final_fraction=args.train_shared_final_fraction,
             mandatory_expert_routing=args.mandatory_expert_routing,
             auto_resume_latest=args.auto_resume_latest,
+            attention_backend=args.attention_backend,
+            activation_checkpointing_mode=args.activation_checkpointing_mode,
+            compile_transformer_blocks=args.compile_transformer_blocks,
+            compile_transformer_mode=args.compile_transformer_mode,
+            float8_training=args.float8_training,
+            float8_recipe=args.float8_recipe,
+            encoder_cache_dir=(
+                str(args.encoder_cache_dir.expanduser().resolve())
+                if args.encoder_cache_dir
+                else None
+            ),
+            encoder_cache_mode=args.encoder_cache_mode,
+            offload_cached_encoders=args.offload_cached_encoders,
         )
         print(
             json.dumps(
