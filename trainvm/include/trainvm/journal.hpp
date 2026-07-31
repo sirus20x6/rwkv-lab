@@ -9,6 +9,8 @@
 #include <nlohmann/json.hpp>
 #include <sqlite3.h>
 
+#include "trainvm/lease.hpp"
+
 namespace trainvm {
 
 struct Event {
@@ -59,6 +61,18 @@ class Journal {
   [[nodiscard]] std::optional<Event> event(const std::string& event_id) const;
   [[nodiscard]] std::vector<Event> events_for_run(const std::string& run_id) const;
   [[nodiscard]] std::optional<RunProjection> projection(const std::string& run_id) const;
+  LeaseAcquireResult acquire_lease(const std::string& concurrency_key,
+                                   const std::string& owner_run_id,
+                                   const std::string& lease_id, std::int64_t now_ns,
+                                   std::int64_t timeout_ns);
+  bool renew_lease(const std::string& concurrency_key, const std::string& owner_run_id,
+                   const std::string& lease_id, std::uint64_t fencing_token,
+                   std::int64_t now_ns, std::int64_t timeout_ns);
+  bool release_lease(const std::string& concurrency_key, const std::string& owner_run_id,
+                     const std::string& lease_id, std::uint64_t fencing_token,
+                     std::int64_t now_ns);
+  [[nodiscard]] std::optional<ResourceLease> active_lease(
+      const std::string& concurrency_key, std::int64_t now_ns) const;
   [[nodiscard]] std::uint64_t event_count() const;
   [[nodiscard]] bool verify_chain(std::string* reason = nullptr) const;
   std::uint64_t rebuild_projections();

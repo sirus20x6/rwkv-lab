@@ -21,6 +21,8 @@ Implemented now:
   or terminal observation, then reconstructs and verifies execution state after restart;
 - a scripted fake worker adapter used for restart/resume, retry-idempotency, plan-mismatch, and
   transaction-rollback tests;
+- durable exclusive resource leases with explicit expiry, owner-checked renewal/release, and
+  monotonic fencing tokens that invalidate stale controllers after takeover;
 - `validate`, `plan`, `simulate`, and journal inspection/replay CLI commands.
 
 This code does not yet launch or control a trainer. The next implementation boundary is the FSM

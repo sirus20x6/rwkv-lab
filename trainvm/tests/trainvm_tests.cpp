@@ -683,6 +683,72 @@ void test_controller_and_fake_worker() {
   std::filesystem::remove_all(directory);
 }
 
+void test_resource_leases() {
+  const std::filesystem::path directory = std::filesystem::temp_directory_path() /
+      ("trainvm-lease-test-" + std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  const std::filesystem::path database_path = directory / "journal.db";
+
+  {
+    trainvm::Journal first(database_path);
+    trainvm::Journal second(database_path);
+    const auto acquired = first.acquire_lease("local-gpu", "run-a", "lease-a", 100, 50);
+    check(acquired.status == trainvm::LeaseAcquireStatus::acquired &&
+              acquired.lease.fencing_token == 1U && acquired.lease.expires_at_ns == 150,
+          "first resource lease acquisition receives fencing token one");
+
+    const auto repeated = second.acquire_lease("local-gpu", "run-a", "lease-a", 110, 500);
+    check(repeated.status == trainvm::LeaseAcquireStatus::already_owned &&
+              repeated.lease == acquired.lease,
+          "same live lease acquisition is idempotent and does not silently extend expiry");
+    const auto busy = second.acquire_lease("local-gpu", "run-b", "lease-b", 120, 50);
+    check(busy.status == trainvm::LeaseAcquireStatus::busy &&
+              busy.lease.owner_run_id == "run-a" && busy.lease.fencing_token == 1U,
+          "exclusive lease reports its current owner instead of overlapping");
+
+    check(!second.renew_lease("local-gpu", "run-b", "lease-b", 1, 125, 50),
+          "non-owner cannot renew a resource lease");
+    check(first.renew_lease("local-gpu", "run-a", "lease-a", 1, 130, 100),
+          "exact owner can renew a live resource lease");
+    const auto renewed = second.active_lease("local-gpu", 200);
+    check(renewed && renewed->owner_run_id == "run-a" && renewed->expires_at_ns == 230,
+          "renewed lease is visible across independent journal connections");
+  }
+
+  {
+    trainvm::Journal restarted(database_path);
+    const auto recovered = restarted.active_lease("local-gpu", 220);
+    check(recovered && recovered->lease_id == "lease-a" && recovered->fencing_token == 1U,
+          "resource lease survives controller and database connection restart");
+
+    const auto successor = restarted.acquire_lease("local-gpu", "run-b", "lease-b", 230, 100);
+    check(successor.status == trainvm::LeaseAcquireStatus::acquired &&
+              successor.lease.fencing_token == 2U && successor.lease.expires_at_ns == 330,
+          "expired lease transfers ownership with a larger fencing token");
+    check(!restarted.renew_lease("local-gpu", "run-a", "lease-a", 1, 240, 100) &&
+              !restarted.release_lease("local-gpu", "run-a", "lease-a", 1, 240),
+          "stale owner cannot renew or release a successor lease");
+    check(restarted.release_lease("local-gpu", "run-b", "lease-b", 2, 240) &&
+              !restarted.release_lease("local-gpu", "run-b", "lease-b", 2, 241) &&
+              !restarted.active_lease("local-gpu", 241),
+          "release is owner-fenced, idempotent, and immediately removes active ownership");
+    const auto reacquired = restarted.acquire_lease("local-gpu", "run-b", "lease-b", 242, 10);
+    check(reacquired.status == trainvm::LeaseAcquireStatus::acquired &&
+              reacquired.lease.fencing_token == 3U,
+          "reacquiring a released key advances its fencing token");
+
+    bool invalid_timeout_rejected = false;
+    try {
+      (void)restarted.acquire_lease("another-gpu", "run-c", "lease-c", 1, 0);
+    } catch (const std::invalid_argument&) {
+      invalid_timeout_rejected = true;
+    }
+    check(invalid_timeout_rejected, "nonpositive resource lease timeout is rejected");
+  }
+  std::filesystem::remove_all(directory);
+}
+
 }  // namespace
 
 int main() {
@@ -692,6 +758,7 @@ int main() {
     test_fsm();
     test_journal();
     test_controller_and_fake_worker();
+    test_resource_leases();
   } catch (const std::exception& exception) {
     std::cerr << "UNCAUGHT: " << exception.what() << '\n';
     return 1;

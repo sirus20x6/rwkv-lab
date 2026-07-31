@@ -77,6 +77,16 @@ CREATE TABLE IF NOT EXISTS run_projection (
   last_event_sequence INTEGER NOT NULL,
   failure_summary TEXT NOT NULL
 ) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS resource_leases (
+  concurrency_key TEXT PRIMARY KEY,
+  owner_run_id TEXT NOT NULL,
+  lease_id TEXT NOT NULL,
+  fencing_token INTEGER NOT NULL,
+  acquired_at_ns INTEGER NOT NULL,
+  expires_at_ns INTEGER NOT NULL,
+  released_at_ns INTEGER
+) WITHOUT ROWID;
 )sql";
 
 class Statement {
@@ -303,6 +313,34 @@ Event event_from_row(sqlite3_stmt* statement) {
   }
   event.payload = nlohmann::json::parse(column_text(statement, 13));
   return event;
+}
+
+std::int64_t lease_expiration(std::int64_t now_ns, std::int64_t timeout_ns) {
+  if (timeout_ns <= 0) {
+    throw std::invalid_argument("lease timeout must be positive");
+  }
+  if (now_ns > std::numeric_limits<std::int64_t>::max() - timeout_ns) {
+    throw std::invalid_argument("lease expiration exceeds the signed nanosecond range");
+  }
+  return now_ns + timeout_ns;
+}
+
+void require_lease_identity(const std::string& concurrency_key, const std::string& owner_run_id,
+                            const std::string& lease_id) {
+  if (concurrency_key.empty() || owner_run_id.empty() || lease_id.empty()) {
+    throw std::invalid_argument("lease concurrency_key, owner_run_id, and lease_id must not be empty");
+  }
+}
+
+ResourceLease lease_from_row(sqlite3_stmt* statement) {
+  return ResourceLease{
+      .concurrency_key = column_text(statement, 0),
+      .owner_run_id = column_text(statement, 1),
+      .lease_id = column_text(statement, 2),
+      .fencing_token = static_cast<std::uint64_t>(sqlite3_column_int64(statement, 3)),
+      .acquired_at_ns = sqlite3_column_int64(statement, 4),
+      .expires_at_ns = sqlite3_column_int64(statement, 5),
+  };
 }
 
 }  // namespace
@@ -545,6 +583,156 @@ std::optional<RunProjection> Journal::projection(const std::string& run_id) cons
       .last_event_sequence = static_cast<std::uint64_t>(sqlite3_column_int64(query.get(), 10)),
       .failure_summary = column_text(query.get(), 11),
   };
+}
+
+LeaseAcquireResult Journal::acquire_lease(const std::string& concurrency_key,
+                                          const std::string& owner_run_id,
+                                          const std::string& lease_id, std::int64_t now_ns,
+                                          std::int64_t timeout_ns) {
+  require_lease_identity(concurrency_key, owner_run_id, lease_id);
+  const std::int64_t expires_at_ns = lease_expiration(now_ns, timeout_ns);
+  Transaction transaction(database_);
+  Statement query(database_, R"sql(
+    SELECT concurrency_key, owner_run_id, lease_id, fencing_token,
+           acquired_at_ns, expires_at_ns, released_at_ns
+    FROM resource_leases WHERE concurrency_key=?
+  )sql");
+  bind_text(query.get(), 1, concurrency_key);
+  const int status = sqlite3_step(query.get());
+  if (status != SQLITE_ROW && status != SQLITE_DONE) {
+    throw std::runtime_error("could not read resource lease: " + std::string(sqlite3_errmsg(database_)));
+  }
+
+  ResourceLease lease;
+  if (status == SQLITE_DONE) {
+    lease = ResourceLease{.concurrency_key = concurrency_key,
+                          .owner_run_id = owner_run_id,
+                          .lease_id = lease_id,
+                          .fencing_token = 1,
+                          .acquired_at_ns = now_ns,
+                          .expires_at_ns = expires_at_ns};
+    Statement insert(database_, R"sql(
+      INSERT INTO resource_leases(
+        concurrency_key, owner_run_id, lease_id, fencing_token,
+        acquired_at_ns, expires_at_ns, released_at_ns
+      ) VALUES(?, ?, ?, ?, ?, ?, NULL)
+    )sql");
+    bind_text(insert.get(), 1, lease.concurrency_key);
+    bind_text(insert.get(), 2, lease.owner_run_id);
+    bind_text(insert.get(), 3, lease.lease_id);
+    bind_integer(insert.get(), 4, checked_integer(lease.fencing_token, "fencing_token"));
+    bind_integer(insert.get(), 5, lease.acquired_at_ns);
+    bind_integer(insert.get(), 6, lease.expires_at_ns);
+    require_done(database_, insert.get(), "insert resource lease");
+    transaction.commit();
+    return {.status = LeaseAcquireStatus::acquired, .lease = std::move(lease)};
+  }
+
+  lease = lease_from_row(query.get());
+  const bool released = sqlite3_column_type(query.get(), 6) != SQLITE_NULL;
+  const bool active = !released && lease.expires_at_ns > now_ns;
+  if (active) {
+    const LeaseAcquireStatus disposition =
+        lease.owner_run_id == owner_run_id && lease.lease_id == lease_id
+            ? LeaseAcquireStatus::already_owned
+            : LeaseAcquireStatus::busy;
+    transaction.commit();
+    return {.status = disposition, .lease = std::move(lease)};
+  }
+  if (lease.fencing_token == static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+    throw std::overflow_error("resource lease fencing token is exhausted");
+  }
+  ++lease.fencing_token;
+  lease.owner_run_id = owner_run_id;
+  lease.lease_id = lease_id;
+  lease.acquired_at_ns = now_ns;
+  lease.expires_at_ns = expires_at_ns;
+  Statement replace(database_, R"sql(
+    UPDATE resource_leases
+    SET owner_run_id=?, lease_id=?, fencing_token=?, acquired_at_ns=?,
+        expires_at_ns=?, released_at_ns=NULL
+    WHERE concurrency_key=?
+  )sql");
+  bind_text(replace.get(), 1, lease.owner_run_id);
+  bind_text(replace.get(), 2, lease.lease_id);
+  bind_integer(replace.get(), 3, checked_integer(lease.fencing_token, "fencing_token"));
+  bind_integer(replace.get(), 4, lease.acquired_at_ns);
+  bind_integer(replace.get(), 5, lease.expires_at_ns);
+  bind_text(replace.get(), 6, concurrency_key);
+  require_done(database_, replace.get(), "replace resource lease");
+  if (sqlite3_changes(database_) != 1) {
+    throw std::runtime_error("resource lease replacement affected an unexpected number of rows");
+  }
+  transaction.commit();
+  return {.status = LeaseAcquireStatus::acquired, .lease = std::move(lease)};
+}
+
+bool Journal::renew_lease(const std::string& concurrency_key, const std::string& owner_run_id,
+                          const std::string& lease_id, std::uint64_t fencing_token,
+                          std::int64_t now_ns, std::int64_t timeout_ns) {
+  require_lease_identity(concurrency_key, owner_run_id, lease_id);
+  const std::int64_t expires_at_ns = lease_expiration(now_ns, timeout_ns);
+  Transaction transaction(database_);
+  Statement update(database_, R"sql(
+    UPDATE resource_leases SET expires_at_ns=?
+    WHERE concurrency_key=? AND owner_run_id=? AND lease_id=? AND fencing_token=?
+      AND released_at_ns IS NULL AND expires_at_ns>?
+  )sql");
+  bind_integer(update.get(), 1, expires_at_ns);
+  bind_text(update.get(), 2, concurrency_key);
+  bind_text(update.get(), 3, owner_run_id);
+  bind_text(update.get(), 4, lease_id);
+  bind_integer(update.get(), 5, checked_integer(fencing_token, "fencing_token"));
+  bind_integer(update.get(), 6, now_ns);
+  require_done(database_, update.get(), "renew resource lease");
+  const bool renewed = sqlite3_changes(database_) == 1;
+  transaction.commit();
+  return renewed;
+}
+
+bool Journal::release_lease(const std::string& concurrency_key, const std::string& owner_run_id,
+                            const std::string& lease_id, std::uint64_t fencing_token,
+                            std::int64_t now_ns) {
+  require_lease_identity(concurrency_key, owner_run_id, lease_id);
+  Transaction transaction(database_);
+  Statement update(database_, R"sql(
+    UPDATE resource_leases SET released_at_ns=?
+    WHERE concurrency_key=? AND owner_run_id=? AND lease_id=? AND fencing_token=?
+      AND released_at_ns IS NULL
+  )sql");
+  bind_integer(update.get(), 1, now_ns);
+  bind_text(update.get(), 2, concurrency_key);
+  bind_text(update.get(), 3, owner_run_id);
+  bind_text(update.get(), 4, lease_id);
+  bind_integer(update.get(), 5, checked_integer(fencing_token, "fencing_token"));
+  require_done(database_, update.get(), "release resource lease");
+  const bool released = sqlite3_changes(database_) == 1;
+  transaction.commit();
+  return released;
+}
+
+std::optional<ResourceLease> Journal::active_lease(const std::string& concurrency_key,
+                                                   std::int64_t now_ns) const {
+  if (concurrency_key.empty()) {
+    throw std::invalid_argument("lease concurrency_key must not be empty");
+  }
+  Statement query(database_, R"sql(
+    SELECT concurrency_key, owner_run_id, lease_id, fencing_token,
+           acquired_at_ns, expires_at_ns
+    FROM resource_leases
+    WHERE concurrency_key=? AND released_at_ns IS NULL AND expires_at_ns>?
+  )sql");
+  bind_text(query.get(), 1, concurrency_key);
+  bind_integer(query.get(), 2, now_ns);
+  const int status = sqlite3_step(query.get());
+  if (status == SQLITE_DONE) {
+    return std::nullopt;
+  }
+  if (status != SQLITE_ROW) {
+    throw std::runtime_error("could not read active resource lease: " +
+                             std::string(sqlite3_errmsg(database_)));
+  }
+  return lease_from_row(query.get());
 }
 
 std::uint64_t Journal::event_count() const {
