@@ -106,7 +106,23 @@
         "value": true,
         "description": {"type": "string"},
         "secret_reference": {"type": "boolean", "default": false}
-      }
+      },
+      "allOf": [{
+        "if": {
+          "required": ["secret_reference"],
+          "properties": {"secret_reference": {"const": true}}
+        },
+        "then": {
+          "properties": {
+            "type": {"const": "string"},
+            "value": {
+              "type": "string",
+              "maxLength": 512,
+              "pattern": "^secret://[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}/[a-zA-Z0-9][a-zA-Z0-9._/-]{0,255}#[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$"
+            }
+          }
+        }
+      }]
     },
     "artifact": {
       "type": "object",

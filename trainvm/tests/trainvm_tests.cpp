@@ -225,6 +225,25 @@ void test_reflection_and_compiler() {
   check(!bad_parameter_result.valid() && has_diagnostic(bad_parameter_result, "parameter.value_type"),
         "semantic compiler enforces parameter value types");
 
+  auto raw_secret = fixture;
+  raw_secret["spec"]["parameters"]["credential"] = {
+      {"type", "string"}, {"value", "plaintext-token"},
+      {"secret_reference", true}};
+  const auto raw_secret_result = trainvm::compile_document(raw_secret);
+  check(!raw_secret_result.valid() &&
+            has_diagnostic(raw_secret_result,
+                           "parameter.secret_reference"),
+        "semantic compiler refuses raw values marked as secrets");
+
+  auto opaque_secret = fixture;
+  opaque_secret["spec"]["parameters"]["credential"] = {
+      {"type", "string"},
+      {"value", "secret://local/mageflow-api#v1"},
+      {"secret_reference", true}};
+  const auto opaque_secret_result = trainvm::compile_document(opaque_secret);
+  check(opaque_secret_result.valid(),
+        "semantic compiler accepts only versioned opaque secret references");
+
   auto bad_enum = fixture;
   bad_enum["spec"]["resources"]["accelerators"]["vendor"] = "cuda-ish";
   auto bad_enum_result = trainvm::compile_document(bad_enum);

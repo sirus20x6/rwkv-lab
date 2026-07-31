@@ -37,6 +37,10 @@ constexpr std::string_view kKind = "Experiment";
 const std::set<std::string> kTerminals{"$completed", "$failed", "$cancelled"};
 const std::regex kIdentifier("^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$");
 const std::regex kEventField("^[a-zA-Z][a-zA-Z0-9_.]*$");
+const std::regex kSecretReference(
+    "^secret://[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}/"
+    "[a-zA-Z0-9][a-zA-Z0-9._/-]{0,255}#"
+    "[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$");
 
 void error(std::vector<Diagnostic>& diagnostics, std::string code, std::string path,
            std::string message) {
@@ -361,6 +365,16 @@ void validate_experiment(const Experiment& experiment, std::vector<Diagnostic>& 
     if (!value_matches_parameter(parameter.type, parameter.value)) {
       error(diagnostics, "parameter.value_type", "/spec/parameters/" + name + "/value",
             "value does not match declared parameter type");
+    }
+    if (parameter.secret_reference.value_or(false) &&
+        (parameter.type != ParameterType::string || !parameter.value.is_string() ||
+         parameter.value.get_ref<const std::string&>().size() > 512U ||
+         !std::regex_match(parameter.value.get_ref<const std::string&>(),
+                           kSecretReference))) {
+      error(diagnostics, "parameter.secret_reference",
+            "/spec/parameters/" + name + "/value",
+            "secret parameters must be opaque string references of the form "
+            "secret://provider/name#version");
     }
   }
 
