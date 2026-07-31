@@ -67,6 +67,8 @@ ControlPatchValidation validate_control_patch(const CompiledPlan& plan,
     error(result, "control.patch_empty", "/assignments", "control patch must contain an assignment");
     return result;
   }
+  bool contains_next_eval = false;
+  bool contains_next_checkpoint = false;
   for (auto iterator = assignments.begin(); iterator != assignments.end(); ++iterator) {
     const std::string path = "/assignments/" + iterator.key();
     const auto declared = plan.experiment.spec.controls.catalog.find(iterator.key());
@@ -110,7 +112,15 @@ ControlPatchValidation validate_control_patch(const CompiledPlan& plan,
     if (apply_rank(control.apply) > apply_rank(result.apply_point)) {
       result.apply_point = control.apply;
     }
+    contains_next_eval = contains_next_eval || control.apply == ApplyPoint::next_eval;
+    contains_next_checkpoint =
+        contains_next_checkpoint || control.apply == ApplyPoint::next_checkpoint;
     result.assignments[iterator.key()] = iterator.value();
+  }
+  if (contains_next_eval && contains_next_checkpoint &&
+      result.apply_point != ApplyPoint::restart) {
+    error(result, "control.apply_incompatible", "/assignments",
+          "next-eval and next-checkpoint controls have no declared common application barrier");
   }
   if (!result.valid()) {
     result.assignments = nlohmann::json::object();

@@ -9,11 +9,14 @@
 #include <nlohmann/json.hpp>
 #include <sqlite3.h>
 
+#include "trainvm/document.hpp"
 #include "trainvm/dispatch.hpp"
 #include "trainvm/command.hpp"
 #include "trainvm/lease.hpp"
 
 namespace trainvm {
+
+class Controller;
 
 struct Event {
   std::string event_id;
@@ -63,19 +66,16 @@ class Journal {
   [[nodiscard]] std::optional<Event> event(const std::string& event_id) const;
   [[nodiscard]] std::vector<Event> events_for_run(const std::string& run_id) const;
   [[nodiscard]] std::optional<RunProjection> projection(const std::string& run_id) const;
+  [[nodiscard]] std::optional<CompiledPlan> compiled_plan(const std::string& plan_hash) const;
   Dispatch prepare_dispatch(const Dispatch& dispatch, const Event& prepared_event);
   void complete_dispatch(const std::string& dispatch_id, const std::string& result_event_id,
                          const std::vector<Event>& events);
   [[nodiscard]] std::optional<Dispatch> dispatch(const std::string& dispatch_id) const;
-  ControlCommand submit_control_command(ControlCommand command);
-  ControlCommand acknowledge_control_command(const std::string& command_id,
-                                             ControlCommandStatus status,
-                                             std::optional<std::uint64_t> effective_step,
-                                             nlohmann::json effective_values,
-                                             nlohmann::json diagnostics);
   [[nodiscard]] std::optional<ControlCommand> control_command(
       const std::string& command_id) const;
   [[nodiscard]] std::uint64_t latest_control_revision(const std::string& run_id) const;
+  [[nodiscard]] std::uint64_t latest_effective_control_revision(
+      const std::string& run_id) const;
   LeaseAcquireResult acquire_lease(const std::string& concurrency_key,
                                    const std::string& owner_run_id,
                                    const std::string& lease_id, std::int64_t now_ns,
@@ -89,14 +89,26 @@ class Journal {
   [[nodiscard]] std::optional<ResourceLease> active_lease(
       const std::string& concurrency_key, std::int64_t now_ns) const;
   [[nodiscard]] std::uint64_t event_count() const;
+  [[nodiscard]] std::string journal_id() const;
   [[nodiscard]] bool verify_chain(std::string* reason = nullptr) const;
   std::uint64_t rebuild_projections();
 
  private:
+  friend class Controller;
+
   sqlite3* database_{};
 
   void initialize();
   std::uint64_t append_uncommitted(const Event& event);
+  void create_run(const CompiledPlan& plan, const std::vector<Event>& events);
+  ControlSubmission submit_control_command(ControlCommand command);
+  ControlCommand acknowledge_control_command(const std::string& run_id,
+                                              const std::string& command_id,
+                                              const ControlAcknowledgementIdentity& identity,
+                                              ControlCommandStatus status,
+                                              std::optional<std::uint64_t> effective_step,
+                                              nlohmann::json effective_values,
+                                              nlohmann::json diagnostics);
 };
 
 nlohmann::json event_json(const Event& event);

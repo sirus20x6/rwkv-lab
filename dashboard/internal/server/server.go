@@ -30,6 +30,7 @@ type Config struct {
 	Detector  *alerts.Detector        // divergence/health detector
 	TrainVM   *trainvmstore.Reader    // read-only native control-plane projection
 	Authoring *trainvmstore.Authoring // schema/example/native semantic preview
+	Commander trainvmstore.Commander  // mutations through native gRPC authority only
 	LibDir    string                  // converted_layers_lib path (conversion board)
 	NLayers   int                     // base-model layer count (0 = autodetect/default)
 	// ImageRoots confines eval-sample image serving: an artifact-listed image
@@ -48,6 +49,7 @@ type Server struct {
 	detector  *alerts.Detector
 	trainvm   *trainvmstore.Reader
 	authoring *trainvmstore.Authoring
+	commander trainvmstore.Commander
 
 	mu sync.RWMutex
 	// Per-viewer selection: each browser tab sends a stable tabId signal, so one
@@ -82,6 +84,7 @@ func New(cfg Config) *Server {
 		cfg: cfg, mux: http.NewServeMux(), db: cfg.DB, sampler: cfg.Sampler, detector: cfg.Detector,
 		trainvm:   cfg.TrainVM,
 		authoring: cfg.Authoring,
+		commander: cfg.Commander,
 		selected:  map[string]string{},
 		seen:      map[string]time.Time{},
 		discovery: map[string]discoveryEntry{},
@@ -186,6 +189,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/trainvm/schema", s.handleTrainVMSchema)
 	s.mux.HandleFunc("GET /api/trainvm/example", s.handleTrainVMExample)
 	s.mux.HandleFunc("POST /api/trainvm/compile", s.handleTrainVMCompile)
+	s.mux.HandleFunc("POST /api/trainvm/runs/{run}/controls", s.handleTrainVMControls)
+	s.mux.HandleFunc("GET /api/trainvm/runs/{run}/controls", s.handleTrainVMControlView)
 	// Metric catalog (known cols + extra_json keys) for the dynamic metric picker.
 	s.mux.HandleFunc("GET /api/metrics/{run}", s.handleMetrics)
 	// Qualitative image/reference/generated-caption snapshot for an eval point.

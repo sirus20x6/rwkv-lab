@@ -119,6 +119,17 @@
           </nav>
           <section class="vm-detail" aria-live="polite">
             <div id="trainvm-summary" class="vm-summary"><div class="empty">select a native run</div></div>
+            <section class="vm-live-controls" aria-labelledby="vm-live-controls-title">
+              <div class="vm-timeline-head"><span id="vm-live-controls-title">live controls</span><span id="vm-control-revision">revision —</span></div>
+              <div id="vm-control-catalog" class="vm-control-catalog"><div class="empty">select a native run</div></div>
+              <div class="vm-control-submit">
+                <input id="vm-control-reason" type="text" maxlength="500" placeholder="reason for this change" aria-label="Reason for control change" />
+                <button class="btn sm" id="vm-control-apply" type="button" disabled>request atomic patch</button>
+                <span id="vm-control-state" class="sub">no pending changes</span>
+              </div>
+              <div class="vm-control-history-head">recent command revisions</div>
+              <div id="vm-control-history" class="vm-control-history"><div class="empty">no command history loaded</div></div>
+            </section>
             <div class="vm-timeline-head"><span>event timeline</span><span id="trainvm-cursor">sequence —</span></div>
             <div id="trainvm-timeline" class="vm-timeline"><div class="empty">no events loaded</div></div>
           </section>

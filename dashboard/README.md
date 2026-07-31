@@ -22,6 +22,13 @@ When `<repo>/trainvm.db` exists, the server attaches to it in SQLite read-only/q
 exposes native run projections at `/api/trainvm/runs`, `/api/trainvm/runs/{run}`, and the incremental
 `/api/trainvm/runs/{run}/timeline?after=SEQUENCE&limit=COUNT` endpoint. Use `-trainvm-db PATH` to
 select another journal. The Go process cannot mutate TrainVM lifecycle state.
+The dashboard configures a lazy gRPC client for `<repo>/trainvm.sock` (or `-trainvm-socket PATH`) even
+when the independently supervised native authority starts later. Live controls are generated
+from the selected run's persisted compiled plan and submitted as typed, revision-checked,
+idempotent patches. A short readiness probe disables mutations while the authority is unavailable;
+Go still never writes the TrainVM journal, and read-only run/timeline views remain usable.
+Mutation requests are intentionally restricted to loopback HTTP hosts to prevent DNS-rebinding
+access to the local command authority.
 The dashboard also serves the checked-in schema and example through `/api/trainvm/schema` and
 `/api/trainvm/example`. Drafts posted to `/api/trainvm/compile` are capped at 2 MiB and passed on
 stdin to the fixed native `trainvm compile` command for reflected decoding, semantic validation,

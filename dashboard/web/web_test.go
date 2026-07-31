@@ -148,6 +148,16 @@ func TestTrainVMPanelUsesIncrementalReadOnlyTimeline(t *testing.T) {
 		!strings.Contains(string(app), `setInterval(refreshTrainVM, 1000)`) {
 		t.Fatal("TrainVM panel does not incrementally follow the native journal")
 	}
+	for _, required := range []string{
+		`id="vm-control-catalog"`, `id="vm-control-apply"`,
+		`expected_control_revision`, `vmPendingControls`, `randomUUID`,
+		`request atomic patch`, `id="vm-control-history"`, `vmSelectionGeneration`,
+		`vmControlLoadAbort`, `vmControlRetries`, `outcome unknown · retry exact request`,
+	} {
+		if !strings.Contains(string(index)+string(app), required) {
+			t.Fatalf("TrainVM live-control surface is missing %q", required)
+		}
+	}
 }
 
 func TestTrainVMEditorIsSchemaDrivenAndNativeCompiled(t *testing.T) {

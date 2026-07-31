@@ -1,6 +1,7 @@
 #include "trainvm/document.hpp"
 #include "trainvm/fsm.hpp"
 #include "trainvm/journal.hpp"
+#include "trainvm/service.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -21,6 +22,7 @@ void usage() {
       << "  trainvm validate <experiment.json>\n"
       << "  trainvm plan <experiment.json> [--canonical]\n"
       << "  trainvm compile  # read JSON from stdin; emit canonical preview JSON\n"
+      << "  trainvm serve --journal <journal.db> --socket <trainvm.sock>\n"
       << "  trainvm simulate <experiment.json> <events.jsonl> [run-id]\n"
       << "  trainvm journal init <journal.db>\n"
       << "  trainvm journal append <journal.db> <event.json>\n"
@@ -154,6 +156,17 @@ int journal_command(int argc, char** argv) {
     return 64;
   }
   const std::string_view operation(argv[2]);
+  const bool valid_operation =
+      (operation == "init" && argc == 4) ||
+      (operation == "append" && argc == 5) ||
+      (operation == "verify" && argc == 4) ||
+      (operation == "replay" && argc == 4) ||
+      (operation == "show" && argc == 5);
+  if (!valid_operation) {
+    usage();
+    return 64;
+  }
+  trainvm::AuthorityLock authority_lock(argv[3]);
   trainvm::Journal journal(argv[3]);
   if (operation == "init" && argc == 4) {
     std::cout << nlohmann::json({{"initialized", true}, {"events", journal.event_count()}}).dump(2)
@@ -188,8 +201,16 @@ int journal_command(int argc, char** argv) {
     std::cout << trainvm::projection_json(*projection).dump(2) << '\n';
     return 0;
   }
-  usage();
-  return 64;
+  throw std::logic_error("validated journal operation was not dispatched");
+}
+
+int serve_command(int argc, char** argv) {
+  if (argc != 6 || std::string_view(argv[2]) != "--journal" ||
+      std::string_view(argv[4]) != "--socket") {
+    usage();
+    return 64;
+  }
+  return trainvm::serve(argv[3], argv[5]);
 }
 
 }  // namespace
@@ -204,6 +225,9 @@ int main(int argc, char** argv) {
     }
     if (argc == 2 && std::string_view(argv[1]) == "compile") {
       return compile_command();
+    }
+    if (argc >= 2 && std::string_view(argv[1]) == "serve") {
+      return serve_command(argc, argv);
     }
     if (argc >= 2 && std::string_view(argv[1]) == "simulate") {
       return simulate_command(argc, argv);

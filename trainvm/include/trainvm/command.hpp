@@ -12,6 +12,17 @@ namespace trainvm {
 
 enum class ControlCommandStatus { requested, applied, rejected, restart_required };
 
+struct ControlAcknowledgementIdentity {
+  std::string concurrency_key;
+  std::string lease_id;
+  std::uint64_t fencing_token{};
+  std::string node_id;
+  std::string attempt_id;
+  std::uint64_t worker_sequence{};
+
+  bool operator==(const ControlAcknowledgementIdentity&) const = default;
+};
+
 struct ControlCommand {
   std::string command_id;
   std::string run_id;
@@ -29,8 +40,15 @@ struct ControlCommand {
   std::optional<std::uint64_t> effective_step;
   nlohmann::json effective_values = nlohmann::json::object();
   nlohmann::json diagnostics = nlohmann::json::array();
+  std::optional<ControlAcknowledgementIdentity> acknowledgement;
+  std::optional<std::int64_t> acknowledged_at_ns;
 
   bool operator==(const ControlCommand&) const = default;
+};
+
+struct ControlSubmission {
+  ControlCommand command;
+  bool inserted{};
 };
 
 }  // namespace trainvm

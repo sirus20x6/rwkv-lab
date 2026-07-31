@@ -15,6 +15,7 @@ struct ControlPatchValidation {
   nlohmann::json assignments = nlohmann::json::object();
   ApplyPoint apply_point{ApplyPoint::immediate};
   bool requires_pause{};
+  bool replayed{};
   std::vector<Diagnostic> diagnostics;
   std::optional<ControlCommand> command;
 

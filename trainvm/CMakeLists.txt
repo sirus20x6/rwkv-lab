@@ -64,9 +64,14 @@ target_link_libraries(trainvm_core
   PRIVATE OpenSSL::Crypto SQLite3::SQLite3 yaml-cpp::yaml-cpp
 )
 
+add_library(trainvm_service src/service.cpp)
+target_include_directories(trainvm_service PUBLIC include)
+target_compile_options(trainvm_service PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror)
+target_link_libraries(trainvm_service PUBLIC trainvm_core trainvm_protocol)
+
 add_executable(trainvm src/main.cpp)
 target_compile_options(trainvm PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror)
-target_link_libraries(trainvm PRIVATE trainvm_core trainvm_protocol)
+target_link_libraries(trainvm PRIVATE trainvm_service)
 
 enable_testing()
 add_executable(trainvm_tests tests/trainvm_tests.cpp)
@@ -74,7 +79,7 @@ target_compile_options(trainvm_tests PRIVATE -Wall -Wextra -Wpedantic -Wconversi
 target_compile_definitions(trainvm_tests PRIVATE
   TRAINVM_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/.."
 )
-target_link_libraries(trainvm_tests PRIVATE trainvm_core trainvm_protocol)
+target_link_libraries(trainvm_tests PRIVATE trainvm_service)
 add_test(NAME trainvm_tests COMMAND trainvm_tests)
 add_test(
   NAME trainvm_cli_validate

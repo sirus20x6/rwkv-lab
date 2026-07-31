@@ -28,6 +28,10 @@ Implemented now:
 - reflected live-control validation with atomic multi-value patches, declared safe-point selection,
   pause requirements, optimistic run/control revisions, idempotent command keys, and durable
   applied/rejected/restart-required acknowledgements;
+- content-addressed compiled-plan persistence, verified plan recovery, and fail-closed schema
+  migration policy;
+- a native gRPC command authority over a permission-restricted Unix socket, with an exclusive
+  journal-owner lock, typed control results, serialized optimistic updates, and fenced worker acks;
 - `validate`, `plan`, `simulate`, and journal inspection/replay CLI commands.
 
 This code does not yet launch or control a trainer. The next implementation boundary is the FSM
@@ -67,6 +71,7 @@ trainvm/build/trainvm plan \
   docs/experiment-vm/examples/mageflow-cache-resume.json
 trainvm/build/trainvm compile < \
   docs/experiment-vm/examples/mageflow-cache-resume.json
+trainvm/build/trainvm serve --journal /tmp/trainvm.db --socket /tmp/trainvm.sock
 trainvm/build/trainvm simulate \
   docs/experiment-vm/examples/mageflow-cache-resume.json \
   docs/experiment-vm/examples/mageflow-cache-resume.events.jsonl
@@ -77,6 +82,9 @@ The reference plan currently has the golden identity
 format change must update the golden test and supply a plan-schema migration rationale.
 `compile` is the bounded dashboard authoring boundary: it reads one JSON document from stdin and
 returns either structured diagnostics or the native compiler's canonical plan and content hash.
+`serve` is the stateful mutation boundary. The dashboard connects to its Unix socket through gRPC;
+it never opens the journal writable. Only the live-control `CommandRun` variant is implemented in
+this slice. Worker launch, pause/resume, and lifecycle reconciliation remain subsequent milestones.
 
 ## Journal CLI
 

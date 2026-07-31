@@ -103,7 +103,9 @@ message RunSummary {
   google.protobuf.Timestamp last_heartbeat_at = 10;
   string wait_reason = 11;
   string failure_summary = 12;
-  uint64 effective_control_revision = 13;
+  uint64 effective_control_revision = 13 [deprecated = true];
+  uint64 latest_requested_control_revision = 14;
+  uint64 latest_effective_control_revision = 15;
 }
 
 message SubmitExperimentRequest {
@@ -173,6 +175,8 @@ message RunCommandRequest {
   string idempotency_key = 3;
   string author = 4;
   string reason = 5;
+  string expected_journal_id = 6;
+  string expected_plan_hash = 7;
   oneof command {
     PauseCommand pause = 10;
     ResumeCommand resume = 11;
@@ -181,6 +185,23 @@ message RunCommandRequest {
     ControlPatchCommand controls = 14;
     AdoptPlanRevisionCommand adopt_plan = 15;
   }
+}
+
+message ControlCommandResult {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    STATUS_REQUESTED = 1;
+    STATUS_APPLIED = 2;
+    STATUS_REJECTED = 3;
+    STATUS_RESTART_REQUIRED = 4;
+  }
+
+  string command_id = 1;
+  uint64 control_revision = 2;
+  ApplyPoint apply_point = 3;
+  bool requires_pause = 4;
+  Status status = 5;
+  repeated ControlAssignment assignments = 6;
 }
 
 message RunCommandResponse {
@@ -196,6 +217,7 @@ message RunCommandResponse {
   RunSummary run = 2;
   uint64 command_sequence = 3;
   repeated Diagnostic diagnostics = 4;
+  ControlCommandResult control = 5;
 }
 
 message ArtifactManifest {
@@ -251,6 +273,9 @@ message WorkerHello {
   string code_fingerprint = 7;
   repeated string capabilities = 8;
   uint64 last_acked_controller_sequence = 9;
+  string concurrency_key = 10;
+  string lease_id = 11;
+  uint64 fencing_token = 12;
 }
 
 message WorkerHeartbeat {
@@ -274,6 +299,12 @@ message ControlPatchAcknowledgement {
   uint64 effective_step = 4;
   repeated ControlAssignment effective_values = 5;
   repeated Diagnostic diagnostics = 6;
+  string command_id = 7;
+  string concurrency_key = 8;
+  string lease_id = 9;
+  uint64 fencing_token = 10;
+  uint64 worker_sequence = 11;
+  google.protobuf.Timestamp acknowledged_at = 12;
 }
 
 message WorkerToController {

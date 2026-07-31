@@ -1,0 +1,649 @@
+#include "trainvm/service.hpp"
+
+#include "trainvm/controller.hpp"
+#include "trainvm/reflection_json.hpp"
+
+#include <fcntl.h>
+#include <pthread.h>
+#include <signal.h>
+#include <sys/file.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
+#include <unistd.h>
+
+#include <cerrno>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <filesystem>
+#include <memory>
+#include <limits>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+
+#include <grpcpp/server.h>
+#include <grpcpp/server_builder.h>
+#include <grpcpp/security/server_credentials.h>
+
+namespace trainvm {
+
+AuthorityLock::AuthorityLock(const std::filesystem::path& journal_path) {
+  const auto absolute_journal = std::filesystem::absolute(journal_path);
+  if (!absolute_journal.parent_path().empty()) {
+    std::filesystem::create_directories(absolute_journal.parent_path());
+  }
+  // Lock the journal inode so symlink and hardlink aliases cannot create
+  // independent writer authorities. flock and SQLite's POSIX record locks are
+  // separate lock domains on Linux, so this does not interfere with SQLite.
+  journal_descriptor_ =
+      ::open(absolute_journal.c_str(), O_CREAT | O_CLOEXEC | O_RDWR, S_IRUSR | S_IWUSR);
+  if (journal_descriptor_ < 0) {
+    throw std::runtime_error("could not open authority journal " + absolute_journal.string() +
+                             ": " + std::strerror(errno));
+  }
+  if (::flock(journal_descriptor_, LOCK_EX | LOCK_NB) != 0) {
+    const std::string message = std::strerror(errno);
+    ::close(journal_descriptor_);
+    journal_descriptor_ = -1;
+    throw std::runtime_error("another TrainVM authority owns " + absolute_journal.string() +
+                             ": " + message);
+  }
+
+  const std::filesystem::path path =
+      std::filesystem::weakly_canonical(absolute_journal).string() + ".authority.lock";
+  descriptor_ = ::open(path.c_str(), O_CREAT | O_CLOEXEC | O_RDWR, S_IRUSR | S_IWUSR);
+  if (descriptor_ < 0) {
+    const std::string message = std::strerror(errno);
+    ::close(journal_descriptor_);
+    journal_descriptor_ = -1;
+    throw std::runtime_error("could not open authority lock " + path.string() + ": " + message);
+  }
+  if (::flock(descriptor_, LOCK_EX | LOCK_NB) != 0) {
+    const std::string message = std::strerror(errno);
+    ::close(descriptor_);
+    descriptor_ = -1;
+    ::close(journal_descriptor_);
+    journal_descriptor_ = -1;
+    throw std::runtime_error("another TrainVM authority owns " + path.string() + ": " +
+                               message);
+  }
+  if (::fchmod(descriptor_, S_IRUSR | S_IWUSR) != 0) {
+    const std::string message = std::strerror(errno);
+    ::close(descriptor_);
+    descriptor_ = -1;
+    ::close(journal_descriptor_);
+    journal_descriptor_ = -1;
+    throw std::runtime_error("could not restrict authority lock " + path.string() + ": " +
+                             message);
+  }
+}
+
+AuthorityLock::~AuthorityLock() {
+  if (descriptor_ >= 0) {
+    ::close(descriptor_);
+  }
+  if (journal_descriptor_ >= 0) {
+    ::close(journal_descriptor_);
+  }
+}
+
+namespace {
+
+constexpr std::size_t kMaximumCommandBytes = 64U * 1024U;
+
+class SignalMaskGuard {
+ public:
+  SignalMaskGuard() {
+    ::sigemptyset(&signals_);
+    ::sigaddset(&signals_, SIGINT);
+    ::sigaddset(&signals_, SIGTERM);
+    const int result = ::pthread_sigmask(SIG_BLOCK, &signals_, &previous_);
+    if (result != 0) {
+      throw std::runtime_error("could not block authority shutdown signals: " +
+                               std::string(std::strerror(result)));
+    }
+    active_ = true;
+  }
+
+  ~SignalMaskGuard() {
+    if (active_) {
+      (void)::pthread_sigmask(SIG_SETMASK, &previous_, nullptr);
+    }
+  }
+
+  SignalMaskGuard(const SignalMaskGuard&) = delete;
+  SignalMaskGuard& operator=(const SignalMaskGuard&) = delete;
+
+  [[nodiscard]] const sigset_t* signals() const { return &signals_; }
+
+ private:
+  sigset_t signals_{};
+  sigset_t previous_{};
+  bool active_{};
+};
+
+class UmaskGuard {
+ public:
+  explicit UmaskGuard(mode_t mask) : previous_(::umask(mask)) {}
+  ~UmaskGuard() { (void)::umask(previous_); }
+
+  UmaskGuard(const UmaskGuard&) = delete;
+  UmaskGuard& operator=(const UmaskGuard&) = delete;
+
+ private:
+  mode_t previous_{};
+};
+
+class SocketCleanupGuard {
+ public:
+  explicit SocketCleanupGuard(std::filesystem::path path) : path_(std::move(path)) {}
+  ~SocketCleanupGuard() {
+    if (!preserved_path_.empty()) {
+      struct stat current {};
+      if (::lstat(path_.c_str(), &current) != 0 && errno == ENOENT) {
+        (void)::rename(preserved_path_.c_str(), path_.c_str());
+      }
+    }
+    if (!claimed_) return;
+    struct stat status {};
+    if (::lstat(path_.c_str(), &status) == 0 && S_ISSOCK(status.st_mode) &&
+        status.st_dev == device_ && status.st_ino == inode_) {
+      (void)::unlink(path_.c_str());
+    }
+  }
+
+  void claim() {
+    struct stat status {};
+    if (::lstat(path_.c_str(), &status) != 0 || !S_ISSOCK(status.st_mode)) {
+      throw std::runtime_error("authority did not create its Unix socket " + path_.string());
+    }
+    device_ = status.st_dev;
+    inode_ = status.st_ino;
+    claimed_ = true;
+  }
+
+  void preserve_replacement() {
+    struct stat status {};
+    if (::lstat(path_.c_str(), &status) != 0) {
+      if (errno == ENOENT) return;
+      throw std::runtime_error("could not inspect authority socket before shutdown: " +
+                               std::string(std::strerror(errno)));
+    }
+    if (claimed_ && status.st_dev == device_ && status.st_ino == inode_) {
+      return;
+    }
+    preserved_path_ = path_.string() + ".preserved." +
+                      std::to_string(static_cast<long long>(::getpid())) + "." +
+                      std::to_string(static_cast<unsigned long long>(status.st_ino));
+    struct stat existing {};
+    if (::lstat(preserved_path_.c_str(), &existing) == 0 || errno != ENOENT) {
+      throw std::runtime_error("could not reserve replacement-socket preservation path");
+    }
+    if (::rename(path_.c_str(), preserved_path_.c_str()) != 0) {
+      preserved_path_.clear();
+      throw std::runtime_error("could not preserve replacement socket before shutdown: " +
+                               std::string(std::strerror(errno)));
+    }
+  }
+
+  void restore_replacement() {
+    if (preserved_path_.empty()) return;
+    struct stat current {};
+    if (::lstat(path_.c_str(), &current) == 0 || errno != ENOENT) {
+      throw std::runtime_error("authority socket path was unexpectedly occupied during shutdown");
+    }
+    if (::rename(preserved_path_.c_str(), path_.c_str()) != 0) {
+      throw std::runtime_error("could not restore replacement socket after shutdown: " +
+                               std::string(std::strerror(errno)));
+    }
+    preserved_path_.clear();
+  }
+
+  SocketCleanupGuard(const SocketCleanupGuard&) = delete;
+  SocketCleanupGuard& operator=(const SocketCleanupGuard&) = delete;
+
+ private:
+  std::filesystem::path path_;
+  dev_t device_{};
+  ino_t inode_{};
+  bool claimed_{};
+  std::filesystem::path preserved_path_;
+};
+
+class SocketAuthorityLock {
+ public:
+  explicit SocketAuthorityLock(const std::filesystem::path& socket_path) {
+    const auto parent = std::filesystem::weakly_canonical(socket_path.parent_path());
+    const auto path = parent / (socket_path.filename().string() + ".authority.lock");
+    descriptor_ = ::open(path.c_str(), O_CREAT | O_CLOEXEC | O_RDWR, S_IRUSR | S_IWUSR);
+    if (descriptor_ < 0) {
+      throw std::runtime_error("could not open socket authority lock " + path.string() + ": " +
+                               std::strerror(errno));
+    }
+    if (::flock(descriptor_, LOCK_EX | LOCK_NB) != 0) {
+      const std::string message = std::strerror(errno);
+      ::close(descriptor_);
+      descriptor_ = -1;
+      throw std::runtime_error("another TrainVM authority owns socket " +
+                               socket_path.string() + ": " + message);
+    }
+    if (::fchmod(descriptor_, S_IRUSR | S_IWUSR) != 0) {
+      const std::string message = std::strerror(errno);
+      ::close(descriptor_);
+      descriptor_ = -1;
+      throw std::runtime_error("could not restrict socket authority lock " + path.string() +
+                               ": " + message);
+    }
+  }
+
+  ~SocketAuthorityLock() {
+    if (descriptor_ >= 0) {
+      ::close(descriptor_);
+    }
+  }
+
+  SocketAuthorityLock(const SocketAuthorityLock&) = delete;
+  SocketAuthorityLock& operator=(const SocketAuthorityLock&) = delete;
+
+ private:
+  int descriptor_{-1};
+};
+
+bool cancelled(const grpc::ServerContext* context) {
+  return context != nullptr && context->IsCancelled();
+}
+
+grpc::Status cancellation_status() {
+  return {grpc::StatusCode::CANCELLED, "command was cancelled before persistence"};
+}
+
+v1::Diagnostic::Severity wire_severity(Diagnostic::Severity severity) {
+  switch (severity) {
+    case Diagnostic::Severity::info:
+      return v1::Diagnostic::SEVERITY_INFO;
+    case Diagnostic::Severity::warning:
+      return v1::Diagnostic::SEVERITY_WARNING;
+    case Diagnostic::Severity::error:
+      return v1::Diagnostic::SEVERITY_ERROR;
+  }
+  return v1::Diagnostic::SEVERITY_UNSPECIFIED;
+}
+
+void add_diagnostic(v1::RunCommandResponse& response, const Diagnostic& diagnostic) {
+  auto* output = response.add_diagnostics();
+  output->set_severity(wire_severity(diagnostic.severity));
+  output->set_code(diagnostic.code);
+  output->set_document_path(diagnostic.path);
+  output->set_message(diagnostic.message);
+}
+
+void add_stored_diagnostics(v1::RunCommandResponse& response,
+                            const nlohmann::json& diagnostics) {
+  if (!diagnostics.is_array()) return;
+  for (const auto& diagnostic : diagnostics) {
+    if (!diagnostic.is_object()) continue;
+    auto* output = response.add_diagnostics();
+    const auto severity = diagnostic.find("severity");
+    if (severity != diagnostic.end() && severity->is_string()) {
+      const auto value = severity->get<std::string>();
+      if (value == "info") output->set_severity(v1::Diagnostic::SEVERITY_INFO);
+      if (value == "warning") output->set_severity(v1::Diagnostic::SEVERITY_WARNING);
+      if (value == "error") output->set_severity(v1::Diagnostic::SEVERITY_ERROR);
+    }
+    const auto string_value = [&](std::string_view key) -> std::string {
+      const auto value = diagnostic.find(std::string(key));
+      if (value != diagnostic.end() && value->is_string()) {
+        return value->get<std::string>();
+      }
+      return {};
+    };
+    output->set_code(string_value("code"));
+    output->set_document_path(string_value("document_path"));
+    if (output->document_path().empty()) {
+      output->set_document_path(string_value("path"));
+    }
+    output->set_message(string_value("message"));
+    output->set_help(string_value("help"));
+  }
+}
+
+v1::ApplyPoint wire_apply_point(ApplyPoint point) {
+  switch (point) {
+    case ApplyPoint::immediate:
+      return v1::APPLY_POINT_IMMEDIATE;
+    case ApplyPoint::next_microbatch:
+      return v1::APPLY_POINT_NEXT_MICROBATCH;
+    case ApplyPoint::next_optimizer_step:
+      return v1::APPLY_POINT_NEXT_OPTIMIZER_STEP;
+    case ApplyPoint::next_eval:
+      return v1::APPLY_POINT_NEXT_EVAL;
+    case ApplyPoint::next_checkpoint:
+      return v1::APPLY_POINT_NEXT_CHECKPOINT;
+    case ApplyPoint::restart:
+      return v1::APPLY_POINT_RESTART;
+  }
+  return v1::APPLY_POINT_UNSPECIFIED;
+}
+
+v1::ControlCommandResult::Status wire_command_status(ControlCommandStatus status) {
+  switch (status) {
+    case ControlCommandStatus::requested:
+      return v1::ControlCommandResult::STATUS_REQUESTED;
+    case ControlCommandStatus::applied:
+      return v1::ControlCommandResult::STATUS_APPLIED;
+    case ControlCommandStatus::rejected:
+      return v1::ControlCommandResult::STATUS_REJECTED;
+    case ControlCommandStatus::restart_required:
+      return v1::ControlCommandResult::STATUS_RESTART_REQUIRED;
+  }
+  return v1::ControlCommandResult::STATUS_UNSPECIFIED;
+}
+
+nlohmann::json assignment_value(const v1::ScalarValue& input) {
+  switch (input.value_case()) {
+    case v1::ScalarValue::kNumberValue:
+      return input.number_value();
+    case v1::ScalarValue::kIntegerValue:
+      return input.integer_value();
+    case v1::ScalarValue::kBooleanValue:
+      return input.boolean_value();
+    case v1::ScalarValue::kStringValue:
+      return input.string_value();
+    case v1::ScalarValue::VALUE_NOT_SET:
+      throw std::invalid_argument("control assignment has no scalar value");
+  }
+  throw std::invalid_argument("control assignment has an unsupported scalar value");
+}
+
+nlohmann::json assignments_json(const v1::ControlPatchCommand& input) {
+  nlohmann::json output = nlohmann::json::object();
+  for (const auto& assignment : input.assignments()) {
+    if (assignment.key().empty()) {
+      throw std::invalid_argument("control assignment key must not be empty");
+    }
+    if (output.contains(assignment.key())) {
+      throw std::invalid_argument("control patch contains a duplicate assignment key");
+    }
+    output[assignment.key()] = assignment_value(assignment.value());
+  }
+  return output;
+}
+
+void set_wire_scalar(const nlohmann::json& value, v1::ScalarValue& output) {
+  if (value.is_number_float()) {
+    output.set_number_value(value.get<double>());
+  } else if (value.is_number_integer()) {
+    output.set_integer_value(value.get<std::int64_t>());
+  } else if (value.is_number_unsigned()) {
+    const auto unsigned_value = value.get<std::uint64_t>();
+    if (unsigned_value > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+      throw std::overflow_error("control integer exceeds the wire signed integer range");
+    }
+    output.set_integer_value(static_cast<std::int64_t>(unsigned_value));
+  } else if (value.is_boolean()) {
+    output.set_boolean_value(value.get<bool>());
+  } else if (value.is_string()) {
+    output.set_string_value(value.get<std::string>());
+  } else {
+    throw std::runtime_error("validated control command contains a non-scalar value");
+  }
+}
+
+void fill_control_result(const ControlCommand& command, v1::RunCommandResponse& response) {
+  response.set_command_sequence(command.control_revision);
+  auto* output = response.mutable_control();
+  output->set_command_id(command.command_id);
+  output->set_control_revision(command.control_revision);
+  output->set_apply_point(wire_apply_point(command.apply_point));
+  output->set_requires_pause(command.requires_pause);
+  output->set_status(wire_command_status(command.status));
+  for (auto iterator = command.assignments.begin(); iterator != command.assignments.end(); ++iterator) {
+    auto* assignment = output->add_assignments();
+    assignment->set_key(iterator.key());
+    set_wire_scalar(iterator.value(), *assignment->mutable_value());
+  }
+  add_stored_diagnostics(response, command.diagnostics);
+}
+
+v1::RunCommandResponse::Disposition replay_disposition(const ControlCommand& command) {
+  switch (command.status) {
+    case ControlCommandStatus::requested:
+      return v1::RunCommandResponse::DISPOSITION_ACCEPTED;
+    case ControlCommandStatus::applied:
+      return v1::RunCommandResponse::DISPOSITION_ALREADY_APPLIED;
+    case ControlCommandStatus::rejected:
+    case ControlCommandStatus::restart_required:
+      return v1::RunCommandResponse::DISPOSITION_REJECTED;
+  }
+  return v1::RunCommandResponse::DISPOSITION_UNSPECIFIED;
+}
+
+v1::DesiredState desired_state(std::string_view state) {
+  if (state == "queued") return v1::DESIRED_STATE_QUEUED;
+  if (state == "running") return v1::DESIRED_STATE_RUNNING;
+  if (state == "paused") return v1::DESIRED_STATE_PAUSED;
+  if (state == "cancelled") return v1::DESIRED_STATE_CANCELLED;
+  if (state == "completed") return v1::DESIRED_STATE_COMPLETED;
+  return v1::DESIRED_STATE_UNSPECIFIED;
+}
+
+v1::ObservedState observed_state(std::string_view state) {
+  if (state == "running") return v1::OBSERVED_STATE_RUNNING;
+  if (state == "paused") return v1::OBSERVED_STATE_PAUSED;
+  if (state == "completed") return v1::OBSERVED_STATE_COMPLETED;
+  if (state == "cancelled") return v1::OBSERVED_STATE_CANCELLED;
+  if (state == "failed") return v1::OBSERVED_STATE_FAILED;
+  if (state == "blocked") return v1::OBSERVED_STATE_BLOCKED;
+  return v1::OBSERVED_STATE_UNSPECIFIED;
+}
+
+void fill_run_summary(const RunProjection& projection, const Journal& journal,
+                      v1::RunCommandResponse& response) {
+  auto* output = response.mutable_run();
+  output->mutable_identity()->set_run_id(projection.run_id);
+  output->mutable_identity()->set_revision(projection.run_revision);
+  output->mutable_identity()->set_plan_hash(projection.plan_hash);
+  output->set_experiment_name(projection.experiment_name);
+  output->set_desired_state(desired_state(projection.desired_state));
+  output->set_observed_state(observed_state(projection.observed_state));
+  output->set_current_node_id(projection.current_node_id);
+  output->set_current_attempt_id(projection.current_attempt_id);
+  output->set_optimizer_step(projection.optimizer_step);
+  output->set_failure_summary(projection.failure_summary);
+  const auto requested = journal.latest_control_revision(projection.run_id);
+  const auto effective = journal.latest_effective_control_revision(projection.run_id);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+  output->set_effective_control_revision(effective);
+#pragma GCC diagnostic pop
+  output->set_latest_requested_control_revision(requested);
+  output->set_latest_effective_control_revision(effective);
+}
+
+void remove_stale_socket(const std::filesystem::path& path) {
+  struct stat status {};
+  if (::lstat(path.c_str(), &status) != 0) {
+    if (errno == ENOENT) return;
+    throw std::runtime_error("could not inspect authority socket " + path.string() + ": " +
+                             std::strerror(errno));
+  }
+  if (!S_ISSOCK(status.st_mode)) {
+    throw std::runtime_error("refusing to replace non-socket path " + path.string());
+  }
+  const std::string encoded = path.string();
+  sockaddr_un address{};
+  if (encoded.size() >= sizeof(address.sun_path)) {
+    throw std::runtime_error("authority socket path exceeds the Unix socket limit");
+  }
+  const int probe = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+  if (probe < 0) {
+    throw std::runtime_error("could not probe authority socket " + path.string() + ": " +
+                             std::strerror(errno));
+  }
+  address.sun_family = AF_UNIX;
+  std::memcpy(address.sun_path, encoded.c_str(), encoded.size() + 1U);
+  const auto address_size = static_cast<socklen_t>(
+      offsetof(sockaddr_un, sun_path) + encoded.size() + 1U);
+  const int connection = ::connect(probe, reinterpret_cast<sockaddr*>(&address), address_size);
+  const int connection_error = errno;
+  ::close(probe);
+  if (connection == 0 || connection_error == EINPROGRESS || connection_error == EAGAIN) {
+    throw std::runtime_error("refusing to replace active authority socket " + path.string());
+  }
+  if (connection_error != ECONNREFUSED && connection_error != ENOENT) {
+    throw std::runtime_error("could not determine whether authority socket is stale: " +
+                             std::string(std::strerror(connection_error)));
+  }
+  if (::unlink(path.c_str()) != 0) {
+    throw std::runtime_error("could not remove stale authority socket " + path.string() + ": " +
+                             std::strerror(errno));
+  }
+}
+
+}  // namespace
+
+TrainVMService::TrainVMService(const std::filesystem::path& journal_path)
+    : authority_lock_(std::make_unique<AuthorityLock>(journal_path)), journal_(journal_path) {}
+
+TrainVMService::~TrainVMService() = default;
+
+grpc::Status TrainVMService::CommandRun(grpc::ServerContext* context,
+                                        const v1::RunCommandRequest* request,
+                                        v1::RunCommandResponse* response) {
+  if (request == nullptr || response == nullptr) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, "request and response are required"};
+  }
+  if (request->ByteSizeLong() > kMaximumCommandBytes) {
+    return {grpc::StatusCode::RESOURCE_EXHAUSTED, "command exceeds 64 KiB"};
+  }
+  if (!request->has_controls()) {
+    return {grpc::StatusCode::UNIMPLEMENTED, "only live-control commands are implemented"};
+  }
+  if (request->run_id().empty() || request->idempotency_key().empty() ||
+      request->author().empty() || request->reason().empty() ||
+      request->expected_journal_id().empty() || request->expected_plan_hash().empty()) {
+    return {grpc::StatusCode::INVALID_ARGUMENT,
+            "run ID, journal ID, plan hash, idempotency key, author, and reason are required"};
+  }
+  if (cancelled(context)) return cancellation_status();
+
+  std::scoped_lock lock(command_mutex_);
+  if (cancelled(context)) return cancellation_status();
+  try {
+    const auto projection = journal_.projection(request->run_id());
+    if (!projection) {
+      return {grpc::StatusCode::NOT_FOUND, "run does not exist"};
+    }
+    if (request->expected_journal_id() != journal_.journal_id() ||
+        request->expected_plan_hash() != projection->plan_hash) {
+      response->set_disposition(v1::RunCommandResponse::DISPOSITION_CONFLICT);
+      auto* diagnostic = response->add_diagnostics();
+      diagnostic->set_severity(v1::Diagnostic::SEVERITY_ERROR);
+      diagnostic->set_code("control.authority_identity_conflict");
+      diagnostic->set_message("dashboard journal or plan identity differs from the authority");
+      fill_run_summary(*projection, journal_, *response);
+      return grpc::Status::OK;
+    }
+    const auto plan = journal_.compiled_plan(projection->plan_hash);
+    if (!plan) {
+      return {grpc::StatusCode::DATA_LOSS, "run has no persisted compiled plan"};
+    }
+    if (cancelled(context)) return cancellation_status();
+    Controller controller(*plan, journal_, request->run_id());
+    controller.recover();
+    if (cancelled(context)) return cancellation_status();
+    const auto assignments = assignments_json(request->controls());
+    if (cancelled(context)) return cancellation_status();
+    const auto validation = controller.request_controls(
+        request->idempotency_key(), request->expected_run_revision(),
+        request->controls().expected_control_revision(), assignments, request->author(),
+        request->reason());
+    if (!validation.valid()) {
+      response->set_disposition(v1::RunCommandResponse::DISPOSITION_REJECTED);
+      for (const auto& diagnostic : validation.diagnostics) {
+        add_diagnostic(*response, diagnostic);
+      }
+      fill_run_summary(*journal_.projection(request->run_id()), journal_, *response);
+      return grpc::Status::OK;
+    }
+    if (!validation.command) {
+      return {grpc::StatusCode::INTERNAL, "validated command was not persisted"};
+    }
+    response->set_disposition(validation.replayed
+                                  ? replay_disposition(*validation.command)
+                                  : v1::RunCommandResponse::DISPOSITION_ACCEPTED);
+    fill_control_result(*validation.command, *response);
+    fill_run_summary(*journal_.projection(request->run_id()), journal_, *response);
+    return grpc::Status::OK;
+  } catch (const std::invalid_argument& exception) {
+    response->set_disposition(v1::RunCommandResponse::DISPOSITION_CONFLICT);
+    auto* diagnostic = response->add_diagnostics();
+    diagnostic->set_severity(v1::Diagnostic::SEVERITY_ERROR);
+    diagnostic->set_code("control.conflict");
+    diagnostic->set_message(exception.what());
+    if (const auto projection = journal_.projection(request->run_id())) {
+      fill_run_summary(*projection, journal_, *response);
+    }
+    return grpc::Status::OK;
+  } catch (const std::exception& exception) {
+    return {grpc::StatusCode::DATA_LOSS, exception.what()};
+  }
+}
+
+int serve(const std::filesystem::path& journal_path, const std::filesystem::path& socket_path) {
+  if (journal_path.empty() || socket_path.empty()) {
+    throw std::invalid_argument("serve requires journal and socket paths");
+  }
+  const auto absolute_socket = std::filesystem::absolute(socket_path);
+  const auto parent = absolute_socket.parent_path();
+  if (!parent.empty()) {
+    std::filesystem::create_directories(parent);
+  }
+
+  SignalMaskGuard signal_mask;
+  // Acquire journal authority before touching the socket. Otherwise a second
+  // daemon pointed at the same paths could unlink the live authority's socket
+  // and only then discover that it cannot acquire the journal lock.
+  TrainVMService service(journal_path);
+  SocketAuthorityLock socket_authority(absolute_socket);
+  remove_stale_socket(absolute_socket);
+  SocketCleanupGuard socket_cleanup(absolute_socket);
+  grpc::ServerBuilder builder;
+  builder.SetMaxReceiveMessageSize(static_cast<int>(kMaximumCommandBytes));
+  builder.AddListeningPort("unix:" + absolute_socket.string(), grpc::InsecureServerCredentials());
+  builder.RegisterService(&service);
+  std::unique_ptr<grpc::Server> server;
+  {
+    // The Unix socket must be born owner-only. chmod after binding is retained as
+    // defense in depth, but is too late to close the bind-to-chmod access window.
+    UmaskGuard owner_only(S_IRWXG | S_IRWXO);
+    server = builder.BuildAndStart();
+  }
+  if (!server) {
+    throw std::runtime_error("could not start TrainVM authority on " + absolute_socket.string());
+  }
+  socket_cleanup.claim();
+  const auto shutdown_server = [&] {
+    socket_cleanup.preserve_replacement();
+    server->Shutdown();
+    server->Wait();
+    socket_cleanup.restore_replacement();
+  };
+  if (::chmod(absolute_socket.c_str(), S_IRUSR | S_IWUSR) != 0) {
+    shutdown_server();
+    throw std::runtime_error("could not restrict TrainVM authority socket permissions: " +
+                             std::string(std::strerror(errno)));
+  }
+  int received_signal = 0;
+  if (::sigwait(signal_mask.signals(), &received_signal) != 0) {
+    shutdown_server();
+    throw std::runtime_error("TrainVM authority signal wait failed");
+  }
+  shutdown_server();
+  return 0;
+}
+
+}  // namespace trainvm

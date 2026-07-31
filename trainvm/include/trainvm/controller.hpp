@@ -23,9 +23,9 @@ class Controller {
                                           std::uint64_t expected_control_revision,
                                           const nlohmann::json& assignments,
                                           const std::string& author,
-                                          const std::string& reason,
-                                          bool run_paused);
+                                          const std::string& reason);
   ControlCommand acknowledge_controls(const std::string& command_id,
+                                      const ControlAcknowledgementIdentity& identity,
                                       ControlCommandStatus status,
                                       std::optional<std::uint64_t> effective_step,
                                       nlohmann::json effective_values,
@@ -41,6 +41,7 @@ class Controller {
   std::string run_id_;
   ExecutionState state_;
   bool initialized_{};
+  bool paused_{};
 };
 
 }  // namespace trainvm

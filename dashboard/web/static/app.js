@@ -577,6 +577,18 @@
   let vmSelected = "";
   let vmAfter = 0;
   let vmBusy = false;
+  let vmSelectedRun = null;
+  let vmControlView = null;
+  let vmControlRun = "";
+  let vmPendingControls = {};
+  let vmControlIntent = "";
+  let vmCommandsEnabled = false;
+  let vmSelectionGeneration = 0;
+  let vmControlLoadGeneration = 0;
+  let vmControlLoadAbort = null;
+  let vmSubmitBusy = false;
+  const vmInvalidControls = new Set();
+  const vmControlRetries = new Map();
 
   function vmEscape(value) {
     return String(value ?? "").replace(/[&<>"']/g, (char) => ({
@@ -608,6 +620,296 @@
       fact("revision", String(run.run_revision || 0)) +
       fact("experiment", run.experiment_name, run.experiment_name) +
       fact("plan", String(run.plan_hash || "").slice(0, 12), run.plan_hash);
+  }
+
+  function sameVMValue(left, right) {
+    return JSON.stringify(left) === JSON.stringify(right);
+  }
+
+  function cloneVMValues(values) {
+    return JSON.parse(JSON.stringify(values || {}));
+  }
+
+  function selectVMRun(runID) {
+    if (vmSelected === runID) return false;
+    vmSelected = runID;
+    vmSelectionGeneration += 1;
+    vmSelectedRun = null;
+    vmControlRun = "";
+    vmControlView = null;
+    vmPendingControls = {};
+    vmControlIntent = "";
+    vmInvalidControls.clear();
+    if (vmControlLoadAbort) vmControlLoadAbort.abort();
+    vmControlLoadAbort = null;
+    vmControlLoadGeneration += 1;
+    const target = document.getElementById("vm-control-catalog");
+    if (target) target.innerHTML = runID ? '<div class="empty">loading declared controls…</div>' : '<div class="empty">select a native run</div>';
+    const history = document.getElementById("vm-control-history");
+    if (history) history.innerHTML = '<div class="empty">no command history loaded</div>';
+    const apply = document.getElementById("vm-control-apply");
+    if (apply) apply.disabled = true;
+    const reason = document.getElementById("vm-control-reason");
+    if (reason) {
+      reason.value = "";
+      reason.disabled = true;
+    }
+    const state = document.getElementById("vm-control-state");
+    if (state) {
+      state.textContent = runID ? "loading selected run…" : "no run selected";
+      state.className = "sub";
+    }
+    return true;
+  }
+
+  function vmCompactJSON(value, limit = 260) {
+    const encoded = JSON.stringify(value ?? {});
+    return encoded.length > limit ? `${encoded.slice(0, limit - 1)}…` : encoded;
+  }
+
+  function vmControlViewSignature(view) {
+    if (!view) return "";
+    return JSON.stringify({
+      catalog: view.catalog || {},
+      effective_values: view.effective_values || {},
+      latest_requested_revision: view.latest_requested_revision || 0,
+      latest_effective_revision: view.latest_effective_revision || 0,
+      commands: view.commands || [],
+    });
+  }
+
+  function renderVMCommandHistory() {
+    const target = document.getElementById("vm-control-history");
+    if (!target || !vmControlView) return;
+    const commands = Array.isArray(vmControlView.commands) ? vmControlView.commands.slice(0, 12) : [];
+    target.innerHTML = commands.map((command) => {
+      const status = String(command.status || "unknown").toLowerCase();
+      const diagnostics = Array.isArray(command.diagnostics) ? command.diagnostics : [];
+      const detail = [
+        command.apply_point || "unknown boundary",
+        command.effective_step == null ? "" : `step ${Number(command.effective_step).toLocaleString()}`,
+        command.reason || "",
+      ].filter(Boolean).join(" · ");
+      const diagnostic = diagnostics.map((item) => item.message || item.code || String(item)).join(" · ");
+      return `<article class="vm-command ${vmEscape(status)}">` +
+        `<div class="vm-command-head"><strong>r${Number(command.control_revision || 0)}</strong><span>${vmEscape(status)}</span></div>` +
+        `<div class="vm-command-values" title="${vmEscape(vmCompactJSON(command.assignments))}">${vmEscape(vmCompactJSON(command.assignments))}</div>` +
+        `<div class="vm-command-meta">${vmEscape(detail || "—")}</div>` +
+        (diagnostic ? `<div class="vm-command-diagnostic">${vmEscape(diagnostic)}</div>` : "") +
+        `</article>`;
+    }).join("") || '<div class="empty">no control commands requested</div>';
+  }
+
+  function vmControlInput(name, descriptor, value, disabled) {
+    const identity = ` data-vm-control="${vmEscape(name)}"`;
+    const blocked = disabled ? " disabled" : "";
+    if (Array.isArray(descriptor.values)) {
+      return `<select${identity}${blocked}>${descriptor.values.map((option) =>
+        `<option value="${vmEscape(option)}"${sameVMValue(option, value) ? " selected" : ""}>${vmEscape(option)}</option>`).join("")}</select>`;
+    }
+    if (descriptor.type === "boolean") {
+      return `<input type="checkbox"${identity}${value ? " checked" : ""}${blocked} />`;
+    }
+    if (descriptor.type === "number" || descriptor.type === "integer") {
+      const step = descriptor.type === "integer" ? "1" : "any";
+      const minimum = descriptor.minimum == null ? "" : ` min="${vmEscape(descriptor.minimum)}"`;
+      const maximum = descriptor.maximum == null ? "" : ` max="${vmEscape(descriptor.maximum)}"`;
+      return `<input type="number" step="${step}"${minimum}${maximum} value="${vmEscape(value)}"${identity}${blocked} />`;
+    }
+    return `<input type="text" value="${vmEscape(value)}"${identity}${blocked} />`;
+  }
+
+  function renderVMControls() {
+    const target = document.getElementById("vm-control-catalog");
+    const revision = document.getElementById("vm-control-revision");
+    const apply = document.getElementById("vm-control-apply");
+    if (!target || !vmControlView || !vmSelectedRun) return;
+    const catalog = vmControlView.catalog || {};
+    const effective = vmControlView.effective_values || {};
+    const active = ["running", "paused"].includes(vmSelectedRun.observed_state);
+    const retryLocked = vmControlRetries.has(vmSelectedRun.run_id);
+    const requested = {};
+    for (const command of Array.isArray(vmControlView.commands) ? vmControlView.commands : []) {
+      if (command.status !== "requested" || !command.assignments) continue;
+      for (const [name, value] of Object.entries(command.assignments)) {
+        if (!(name in requested)) requested[name] = value;
+      }
+    }
+    target.innerHTML = Object.keys(catalog).sort().map((name) => {
+      const descriptor = catalog[name] || {};
+      const invalid = vmInvalidControls.has(name);
+      const value = invalid ? "" : (name in vmPendingControls ? vmPendingControls[name] : effective[name]);
+      const pending = name in vmPendingControls;
+      const pauseBlocked = descriptor.requires_pause && vmSelectedRun.observed_state !== "paused";
+      const disabled = !vmCommandsEnabled || vmSubmitBusy || retryLocked || !active ||
+        !descriptor.mutable_after_start || pauseBlocked;
+      const meta = [
+        descriptor.apply || "unknown boundary",
+        descriptor.unit || "",
+        descriptor.requires_pause ? (pauseBlocked ? "pause required" : "paused") : "",
+        name in requested ? `requested ${String(requested[name])}` : "",
+        `effective ${String(effective[name] ?? "—")}`,
+      ].filter(Boolean).join(" · ");
+      return `<label class="vm-control-row${pending ? " pending" : ""}${invalid ? " invalid" : ""}" title="${vmEscape(descriptor.description || "")}">` +
+        `<span class="vm-control-copy"><span class="vm-control-name">${vmEscape(name)}</span><span class="vm-control-meta">${vmEscape(meta)}</span></span>` +
+        vmControlInput(name, descriptor, value, disabled) + `</label>`;
+    }).join("") || '<div class="empty">this plan declares no live controls</div>';
+    if (revision) revision.textContent =
+      `requested r${Number(vmControlView.latest_requested_revision || 0)} · effective r${Number(vmControlView.latest_effective_revision || 0)}`;
+    if (apply) apply.disabled = !vmCommandsEnabled || vmSubmitBusy ||
+      !Object.keys(vmPendingControls).length || vmInvalidControls.size > 0;
+    const reason = document.getElementById("vm-control-reason");
+    if (reason) reason.disabled = vmSubmitBusy || retryLocked;
+    renderVMCommandHistory();
+  }
+
+  async function refreshVMControlView(run, force = false) {
+    if (!run) return;
+    if (vmControlRun !== run.run_id) {
+      vmControlRun = run.run_id;
+      const retry = vmControlRetries.get(run.run_id);
+      vmPendingControls = retry ? cloneVMValues(retry.assignments) : {};
+      vmControlIntent = retry?.intent || "";
+      vmInvalidControls.clear();
+      vmControlView = null;
+      const reason = document.getElementById("vm-control-reason");
+      if (reason) reason.value = retry?.reason || "";
+      const state = document.getElementById("vm-control-state");
+      if (state) {
+        state.textContent = retry ? "outcome unknown · retry exact request" : "no pending changes";
+        state.className = retry ? "sub error" : "sub";
+      }
+      const target = document.getElementById("vm-control-catalog");
+      if (target) target.innerHTML = '<div class="empty">loading declared controls…</div>';
+    }
+    if (!force && vmControlView &&
+        Number(vmControlView.source_event_sequence || 0) === Number(run.last_event_sequence || 0)) {
+      return;
+    }
+    if (vmControlLoadAbort) vmControlLoadAbort.abort();
+    const controller = new AbortController();
+    vmControlLoadAbort = controller;
+    const selectionGeneration = vmSelectionGeneration;
+    const loadGeneration = ++vmControlLoadGeneration;
+    try {
+      const response = await fetch(`/api/trainvm/runs/${encodeURIComponent(run.run_id)}/controls`,
+        { cache: "no-store", signal: controller.signal });
+      if (selectionGeneration !== vmSelectionGeneration || loadGeneration !== vmControlLoadGeneration ||
+          vmSelected !== run.run_id || controller.signal.aborted) return;
+      if (!response.ok) {
+        const target = document.getElementById("vm-control-catalog");
+        if (target) target.innerHTML = '<div class="empty">persisted control catalog unavailable</div>';
+        return;
+      }
+      const view = await response.json();
+      if (selectionGeneration !== vmSelectionGeneration || loadGeneration !== vmControlLoadGeneration ||
+          vmSelected !== run.run_id || controller.signal.aborted) return;
+      const viewChanged = vmControlViewSignature(view) !== vmControlViewSignature(vmControlView);
+      vmControlView = view;
+      vmControlView.source_event_sequence = run.last_event_sequence;
+      if (viewChanged) renderVMControls();
+    } catch (error) {
+      if (error.name === "AbortError" || selectionGeneration !== vmSelectionGeneration ||
+          loadGeneration !== vmControlLoadGeneration || vmSelected !== run.run_id) return;
+      const target = document.getElementById("vm-control-catalog");
+      if (target) target.innerHTML = '<div class="empty">persisted control catalog unavailable</div>';
+    } finally {
+      if (loadGeneration === vmControlLoadGeneration) vmControlLoadAbort = null;
+    }
+  }
+
+  function vmInputValue(input, descriptor) {
+    if (descriptor.type === "boolean") return input.tagName === "SELECT" ? input.value === "true" : input.checked;
+    if (descriptor.type === "integer") return Number(input.value);
+    if (descriptor.type === "number") return Number(input.value);
+    return input.value;
+  }
+
+  async function requestVMControls() {
+    const state = document.getElementById("vm-control-state");
+    if (vmSubmitBusy || !vmSelectedRun || !vmControlView ||
+        !Object.keys(vmPendingControls).length || vmInvalidControls.size) return;
+    const runID = vmSelectedRun.run_id;
+    const retry = vmControlRetries.get(runID);
+    const reason = retry?.reason || document.getElementById("vm-control-reason")?.value.trim() || "";
+    if (!retry && !reason) {
+      state.textContent = "reason is required";
+      state.className = "sub error";
+      document.getElementById("vm-control-reason")?.focus();
+      return;
+    }
+    const intent = retry?.intent || vmControlIntent ||
+      (globalThis.crypto?.randomUUID?.() ||
+        `browser-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    vmControlIntent = intent;
+    const assignments = retry ? cloneVMValues(retry.assignments) : cloneVMValues(vmPendingControls);
+    const payload = retry?.payload || {
+      expected_run_revision: Number(vmSelectedRun.run_revision || 0),
+      expected_control_revision: Number(vmControlView.latest_requested_revision || 0),
+      idempotency_key: intent,
+      reason,
+      assignments,
+    };
+    const submission = {
+      runID,
+      selectionGeneration: vmSelectionGeneration,
+      intent,
+      reason,
+      assignments,
+      payload,
+      body: retry?.body || JSON.stringify(payload),
+    };
+    vmSubmitBusy = true;
+    renderVMControls();
+    state.textContent = "requesting native revision…";
+    state.className = "sub";
+    try {
+      const response = await fetch(
+        `/api/trainvm/runs/${encodeURIComponent(submission.runID)}/controls`, {
+          method: "POST", cache: "no-store", headers: { "Content-Type": "application/json" },
+          body: submission.body,
+        });
+      const text = await response.text();
+      let result = {};
+      try { result = JSON.parse(text); } catch (_) { /* HTTP error text is shown below. */ }
+      if (!response.ok) {
+        const ambiguous = response.status >= 500 || response.status === 408;
+        if (ambiguous) vmControlRetries.set(submission.runID, submission);
+        else vmControlRetries.delete(submission.runID);
+        if (submission.selectionGeneration === vmSelectionGeneration && vmSelected === submission.runID) {
+          vmControlIntent = ambiguous ? submission.intent : "";
+          vmPendingControls = cloneVMValues(submission.assignments);
+          state.textContent = ambiguous ?
+            `outcome unknown · retry exact request · ${text.trim() || `HTTP ${response.status}`}` :
+            result.diagnostics?.[0]?.message || text.trim() || `HTTP ${response.status}`;
+          state.className = "sub error";
+          if (!ambiguous && vmSelectedRun) await refreshVMControlView(vmSelectedRun, true);
+        }
+        return;
+      }
+      vmControlRetries.delete(submission.runID);
+      if (submission.selectionGeneration === vmSelectionGeneration && vmSelected === submission.runID) {
+        vmPendingControls = {};
+        vmControlIntent = "";
+        const reasonInput = document.getElementById("vm-control-reason");
+        if (reasonInput) reasonInput.value = "";
+        state.textContent = `${String(result.status || "requested").toLowerCase()} · control r${Number(result.control_revision || 0)}`;
+        state.className = "sub ok";
+        if (vmSelectedRun) await refreshVMControlView(vmSelectedRun, true);
+        await appendVMTimeline();
+      }
+    } catch (error) {
+      vmControlRetries.set(submission.runID, submission);
+      if (submission.selectionGeneration === vmSelectionGeneration && vmSelected === submission.runID) {
+        vmControlIntent = submission.intent;
+        vmPendingControls = cloneVMValues(submission.assignments);
+        state.textContent = `outcome unknown · retry exact request · ${error.message}`;
+        state.className = "sub error";
+      }
+    } finally {
+      vmSubmitBusy = false;
+      if (vmSelectedRun && vmControlView) renderVMControls();
+    }
   }
 
   async function appendVMTimeline() {
@@ -648,14 +950,21 @@
       const response = await fetch("/api/trainvm/runs", { cache: "no-store" });
       if (!response.ok) return;
       const payload = await response.json();
+      const commandsEnabled = Boolean(payload.commands_enabled);
+      const commandAvailabilityChanged = commandsEnabled !== vmCommandsEnabled;
+      vmCommandsEnabled = commandsEnabled;
       const runs = Array.isArray(payload.runs) ? payload.runs : [];
       if (!payload.enabled) {
         document.getElementById("trainvm-runs").innerHTML =
           '<div class="empty">native journal not attached · start with -trainvm-db PATH</div>';
         return;
       }
+      if (!vmCommandsEnabled) {
+        const state = document.getElementById("vm-control-state");
+        if (state) state.textContent = "native command socket not attached";
+      }
       if (!runs.some((run) => run.run_id === vmSelected)) {
-        vmSelected = runs[0]?.run_id || "";
+        selectVMRun(runs[0]?.run_id || "");
         vmAfter = 0;
         const timeline = document.getElementById("trainvm-timeline");
         if (timeline) timeline.innerHTML = '<div class="empty">no events loaded</div>';
@@ -667,7 +976,15 @@
         if (timeline) timeline.textContent = "";
       }
       renderVMRunList(runs);
-      if (selected) renderVMSummary(selected);
+      const previousObservedState = vmSelectedRun?.run_id === selected?.run_id ?
+        vmSelectedRun?.observed_state : "";
+      vmSelectedRun = selected || null;
+      if (selected) {
+        renderVMSummary(selected);
+        await refreshVMControlView(selected);
+        if ((commandAvailabilityChanged || previousObservedState !== selected.observed_state) &&
+            vmSelectedRun && vmControlView) renderVMControls();
+      }
       await appendVMTimeline();
     } catch (_) {
       // A WAL checkpoint or daemon restart is transient; the next tick retries.
@@ -678,10 +995,43 @@
 
   const vmPanel = document.getElementById("trainvm-panel");
   if (vmPanel) vmPanel.addEventListener("toggle", () => refreshTrainVM(true));
+  document.getElementById("vm-control-catalog")?.addEventListener("change", (event) => {
+    const input = event.target.closest("[data-vm-control]");
+    if (!input || !vmControlView) return;
+    const name = input.dataset.vmControl;
+    const descriptor = vmControlView.catalog?.[name] || {};
+    const value = vmInputValue(input, descriptor);
+    const numeric = descriptor.type === "number" || descriptor.type === "integer";
+    if (numeric && (!input.value.trim() || !Number.isFinite(value) ||
+        (descriptor.type === "integer" && !Number.isInteger(value)) || !input.checkValidity())) {
+      delete vmPendingControls[name];
+      vmInvalidControls.add(name);
+      vmControlIntent = "";
+      const state = document.getElementById("vm-control-state");
+      if (state) {
+        state.textContent = `${name} has an invalid numeric value`;
+        state.className = "sub error";
+      }
+      renderVMControls();
+      return;
+    }
+    vmInvalidControls.delete(name);
+    if (sameVMValue(value, vmControlView.effective_values?.[name])) delete vmPendingControls[name];
+    else vmPendingControls[name] = value;
+    vmControlIntent = "";
+    const state = document.getElementById("vm-control-state");
+    if (state) {
+      const count = Object.keys(vmPendingControls).length;
+      state.textContent = count ? `${count} pending · atomic patch` : "no pending changes";
+      state.className = "sub";
+    }
+    renderVMControls();
+  });
+  document.getElementById("vm-control-apply")?.addEventListener("click", requestVMControls);
   document.addEventListener("click", (event) => {
     const button = event.target.closest("[data-vm-run]");
     if (!button) return;
-    vmSelected = button.dataset.vmRun || "";
+    selectVMRun(button.dataset.vmRun || "");
     vmAfter = 0;
     const timeline = document.getElementById("trainvm-timeline");
     if (timeline) timeline.innerHTML = '<div class="empty">loading timeline…</div>';

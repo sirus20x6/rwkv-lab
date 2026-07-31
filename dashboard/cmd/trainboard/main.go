@@ -36,6 +36,7 @@ func main() {
 	trainVMPath := flag.String("trainvm-db", "", "TrainVM journal path (default <repo>/trainvm.db when present)")
 	trainVMBinary := flag.String("trainvm-bin", "", "TrainVM compiler binary (default <repo>/trainvm/build/trainvm)")
 	trainVMSchema := flag.String("trainvm-schema", "", "TrainVM experiment schema (default <repo>/docs/experiment-vm/experiment-v1.schema.json)")
+	trainVMSocket := flag.String("trainvm-socket", "", "TrainVM authority Unix socket (default <repo>/trainvm.sock)")
 	imageRoots := flag.String("image-roots", "/thearray",
 		"comma-separated roots eval-sample images may be served from")
 	scanOnce := flag.Bool("scan-once", false, "ingest one full pass, print counts, exit (verification)")
@@ -86,6 +87,19 @@ func main() {
 		SchemaPath:  vmSchema,
 		ExamplePath: filepath.Join(*repo, "docs", "experiment-vm", "examples", "mageflow-cache-resume.json"),
 	}
+	vmSocket := *trainVMSocket
+	if vmSocket == "" {
+		vmSocket = filepath.Join(*repo, "trainvm.sock")
+	}
+	var vmCommander *trainvmstore.GRPCCommander
+	if vmSocket != "" {
+		vmCommander, err = trainvmstore.DialCommander(vmSocket)
+		if err != nil {
+			log.Fatalf("TrainVM authority client: %v", err)
+		}
+		defer vmCommander.Close()
+		log.Printf("TrainVM command authority configured for %s", vmSocket)
+	}
 
 	ig := ingest.New(database, runsDir, time.Second)
 
@@ -129,6 +143,7 @@ func main() {
 		Detector:  detector,
 		TrainVM:   vmReader,
 		Authoring: vmAuthoring,
+		Commander: vmCommander,
 		ImageRoots: func() []string {
 			var roots []string
 			for _, root := range strings.Split(*imageRoots, ",") {

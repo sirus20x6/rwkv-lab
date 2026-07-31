@@ -6,14 +6,18 @@
 #include "trainvm/journal.hpp"
 #include "trainvm/model.hpp"
 #include "trainvm/reflection_json.hpp"
+#include "trainvm/service.hpp"
 #include "trainvm/v1/trainvm.pb.h"
 
 #include <sqlite3.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <future>
 #include <fstream>
 #include <iostream>
 #include <optional>
@@ -151,12 +155,38 @@ void test_wire_contract() {
   summary.mutable_identity()->set_plan_hash("abc123");
   summary.set_desired_state(trainvm::v1::DESIRED_STATE_PAUSED);
   summary.set_observed_state(trainvm::v1::OBSERVED_STATE_PAUSED);
+  summary.set_latest_requested_control_revision(7);
+  summary.set_latest_effective_control_revision(6);
   std::string wire;
   check(summary.SerializeToString(&wire), "Protobuf RunSummary serializes");
   trainvm::v1::RunSummary decoded;
   check(decoded.ParseFromString(wire), "Protobuf RunSummary parses");
-  check(decoded.identity().run_id() == "run-1" && decoded.identity().revision() == 4U,
+  check(decoded.identity().run_id() == "run-1" && decoded.identity().revision() == 4U &&
+            decoded.latest_requested_control_revision() == 7U &&
+            decoded.latest_effective_control_revision() == 6U,
         "generated C++ protocol types preserve the run identity");
+
+  trainvm::v1::RunCommandResponse response;
+  response.set_disposition(trainvm::v1::RunCommandResponse::DISPOSITION_ACCEPTED);
+  auto* control = response.mutable_control();
+  control->set_command_id("control-1");
+  control->set_control_revision(7);
+  control->set_apply_point(trainvm::v1::APPLY_POINT_NEXT_OPTIMIZER_STEP);
+  control->set_requires_pause(false);
+  control->set_status(trainvm::v1::ControlCommandResult::STATUS_REQUESTED);
+  auto* assignment = control->add_assignments();
+  assignment->set_key("learning_rate");
+  assignment->mutable_value()->set_number_value(0.00001);
+  wire.clear();
+  check(response.SerializeToString(&wire), "Protobuf control command result serializes");
+  trainvm::v1::RunCommandResponse decoded_response;
+  check(decoded_response.ParseFromString(wire) && decoded_response.has_control() &&
+            decoded_response.control().command_id() == "control-1" &&
+            decoded_response.control().control_revision() == 7U &&
+            decoded_response.control().status() ==
+                trainvm::v1::ControlCommandResult::STATUS_REQUESTED &&
+            decoded_response.control().assignments_size() == 1,
+        "generated C++ protocol types preserve typed control command results");
 }
 
 trainvm::Event event_for(const trainvm::ExecutionState& state, std::string id,
@@ -342,6 +372,17 @@ void test_control_validation() {
       trainvm::validate_control_patch(immutable_plan, {{"learning_rate", 0.00001}}, true, false);
   check(!immutable.valid() && immutable.diagnostics.front().code == "control.immutable",
         "started runs reject controls declared immutable after start");
+
+  auto incomparable_plan = *compiled.plan;
+  incomparable_plan.experiment.spec.controls.catalog.at("learning_rate").apply =
+      trainvm::ApplyPoint::next_eval;
+  incomparable_plan.experiment.spec.controls.catalog.at("eval_every").apply =
+      trainvm::ApplyPoint::next_checkpoint;
+  const auto incomparable = trainvm::validate_control_patch(
+      incomparable_plan, {{"learning_rate", 0.00001}, {"eval_every", 100}}, true, false);
+  check(!incomparable.valid() && incomparable.assignments.empty() &&
+            incomparable.diagnostics.back().code == "control.apply_incompatible",
+        "atomic patch rejects incomparable eval and checkpoint application barriers");
 }
 
 trainvm::Event created_event(const std::string& plan_hash) {
@@ -624,7 +665,17 @@ void test_controller_and_fake_worker() {
     } catch (const std::invalid_argument&) {
       reserved_worker_rejected = true;
     }
-    check(stale_worker_rejected && reserved_worker_rejected && journal.event_count() == 3U,
+    auto desired_event = first_event;
+    desired_event.event_id = "worker-forged-desire";
+    desired_event.event_type = "run.desired_state_changed";
+    bool desired_worker_rejected = false;
+    try {
+      controller.handle_event(desired_event);
+    } catch (const std::invalid_argument&) {
+      desired_worker_rejected = true;
+    }
+    check(stale_worker_rejected && reserved_worker_rejected && desired_worker_rejected &&
+              journal.event_count() == 3U,
           "controller rejects stale revisions and worker use of reserved event types");
 
     const trainvm::ExecutionState before_receipt_crash = controller.state();
@@ -771,6 +822,101 @@ void test_controller_and_fake_worker() {
   std::filesystem::remove_all(directory);
 }
 
+void test_compiled_plan_persistence() {
+  const auto compiled = trainvm::compile_document(load_fixture());
+  check(compiled.valid(), "fixture required by compiled-plan persistence test compiles");
+  if (!compiled.valid() || !compiled.plan) {
+    return;
+  }
+  const std::filesystem::path directory = std::filesystem::temp_directory_path() /
+      ("trainvm-plan-test-" + std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  const std::filesystem::path database_path = directory / "journal.db";
+
+  {
+    trainvm::Journal journal(database_path);
+    trainvm::Controller controller(*compiled.plan, journal, "persisted-plan-run");
+    controller.create();
+    const auto stored = journal.compiled_plan(compiled.plan->plan_hash);
+    check(stored && stored->plan_hash == compiled.plan->plan_hash &&
+              stored->canonical_plan == compiled.plan->canonical_plan,
+          "run creation atomically stores its content-addressed canonical plan");
+  }
+  {
+    trainvm::Journal journal(database_path);
+    const auto reloaded = journal.compiled_plan(compiled.plan->plan_hash);
+    trainvm::Controller restarted(*compiled.plan, journal, "persisted-plan-run");
+    check(reloaded && restarted.recover().current_node_id == "acquire_gpu",
+          "journal restart recompiles the persisted plan and recovers its controller");
+  }
+
+  sqlite3* tamper_database = nullptr;
+  check(sqlite3_open(database_path.c_str(), &tamper_database) == SQLITE_OK,
+        "test can open compiled-plan store for tamper simulation");
+  if (tamper_database) {
+    auto tampered = compiled.plan->canonical_plan;
+    tampered["metadata"]["description"] = "tampered canonical plan";
+    sqlite3_stmt* update = nullptr;
+    const char* sql = "UPDATE compiled_plans SET canonical_plan_json=? WHERE plan_hash=?";
+    bool tampered_row = sqlite3_prepare_v2(tamper_database, sql, -1, &update, nullptr) == SQLITE_OK;
+    const std::string tampered_text = tampered.dump();
+    if (tampered_row) {
+      tampered_row = sqlite3_bind_text(update, 1, tampered_text.c_str(),
+                                       static_cast<int>(tampered_text.size()), SQLITE_TRANSIENT) ==
+                         SQLITE_OK &&
+                     sqlite3_bind_text(update, 2, compiled.plan->plan_hash.c_str(),
+                                       static_cast<int>(compiled.plan->plan_hash.size()),
+                                       SQLITE_TRANSIENT) == SQLITE_OK &&
+                     sqlite3_step(update) == SQLITE_DONE;
+    }
+    check(tampered_row, "tamper simulation changes the stored canonical plan");
+    sqlite3_finalize(update);
+    sqlite3_close(tamper_database);
+  }
+  {
+    trainvm::Journal journal(database_path);
+    bool load_rejected = false;
+    try {
+      (void)journal.compiled_plan(compiled.plan->plan_hash);
+    } catch (const std::runtime_error&) {
+      load_rejected = true;
+    }
+    bool recovery_rejected = false;
+    try {
+      trainvm::Controller controller(*compiled.plan, journal, "persisted-plan-run");
+      (void)controller.recover();
+    } catch (const std::runtime_error&) {
+      recovery_rejected = true;
+    }
+    check(load_rejected && recovery_rejected,
+          "content-address verification rejects a tampered plan during load and recovery");
+  }
+
+  const std::filesystem::path rollback_path = directory / "rollback.db";
+  auto unique_source = load_fixture();
+  unique_source["metadata"]["name"] = "atomic-plan-rollback";
+  const auto unique = trainvm::compile_document(unique_source);
+  check(unique.valid(), "atomic rollback fixture compiles");
+  if (unique.valid() && unique.plan) {
+    trainvm::Journal journal(rollback_path);
+    auto collision = created_event(compiled.plan->plan_hash);
+    collision.event_id = "atomic-run:created";
+    collision.run_id = "collision-holder";
+    journal.append(collision);
+    bool creation_rejected = false;
+    try {
+      trainvm::Controller controller(*unique.plan, journal, "atomic-run");
+      (void)controller.create();
+    } catch (const std::invalid_argument&) {
+      creation_rejected = true;
+    }
+    check(creation_rejected && !journal.compiled_plan(unique.plan->plan_hash),
+          "failed initial event batch rolls back its newly inserted compiled plan");
+  }
+  std::filesystem::remove_all(directory);
+}
+
 void test_resource_leases() {
   const std::filesystem::path directory = std::filesystem::temp_directory_path() /
       ("trainvm-lease-test-" + std::to_string(static_cast<long long>(getpid())));
@@ -851,72 +997,81 @@ void test_control_command_journal() {
     trainvm::Journal journal(directory / "journal.db");
     trainvm::Controller controller(*compiled.plan, journal, "control-run");
     controller.create();
-    const auto validated = trainvm::validate_control_patch(
-        *compiled.plan, {{"learning_rate", 0.00001}, {"eval_every", 250}}, true, false);
-    check(validated.valid(), "control command test patch validates");
-    trainvm::ControlCommand request{
-        .command_id = "control-command-1",
-        .run_id = "control-run",
-        .idempotency_key = "browser-request-1",
-        .expected_run_revision = 1,
-        .expected_control_revision = 0,
-        .control_revision = 0,
-        .plan_revision = 1,
-        .apply_point = validated.apply_point,
-        .requires_pause = validated.requires_pause,
-        .assignments = validated.assignments,
-        .author = "operator",
-        .reason = "test live tuning",
-        .status = trainvm::ControlCommandStatus::requested,
-        .effective_step = std::nullopt,
-        .effective_values = nlohmann::json::object(),
-        .diagnostics = nlohmann::json::array(),
+    const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count();
+    const auto lease = journal.acquire_lease("local-gpu-training", "control-run", "lease-1",
+                                             now_ns - 1000, 3'600'000'000'000LL);
+    const auto acknowledgement = [&](std::uint64_t worker_sequence) {
+      return trainvm::ControlAcknowledgementIdentity{
+          .concurrency_key = "local-gpu-training",
+          .lease_id = "lease-1",
+          .fencing_token = lease.lease.fencing_token,
+          .node_id = controller.state().current_node_id,
+          .attempt_id = controller.state().current_attempt_id,
+          .worker_sequence = worker_sequence,
+      };
     };
-    const auto submitted = journal.submit_control_command(request);
+    const auto request = controller.request_controls(
+        "browser-request-1", 1, 0,
+        {{"learning_rate", 0.00001}, {"eval_every", 250}}, "operator",
+        "test live tuning");
+    check(request.valid() && request.command, "control command test patch validates");
+    if (!request.command) {
+      return;
+    }
+    const auto submitted = *request.command;
     check(submitted.control_revision == 1U &&
               submitted.status == trainvm::ControlCommandStatus::requested &&
               journal.latest_control_revision("control-run") == 1U && journal.event_count() == 3U,
           "control request atomically receives revision and journal event");
-    check(journal.submit_control_command(request) == submitted && journal.event_count() == 3U,
+    const auto retry = controller.request_controls(
+        "browser-request-1", 1, 0,
+        {{"learning_rate", 0.00001}, {"eval_every", 250}}, "operator",
+        "test live tuning");
+    check(retry.command == submitted && journal.event_count() == 3U,
           "identical control request is idempotent");
 
-    auto conflicting_identity = request;
-    conflicting_identity.assignments["eval_every"] = 500;
     bool identity_conflict = false;
     try {
-      (void)journal.submit_control_command(conflicting_identity);
+      (void)controller.request_controls(
+          "browser-request-1", 1, 0,
+          {{"learning_rate", 0.00001}, {"eval_every", 500}}, "operator",
+          "test live tuning");
     } catch (const std::invalid_argument&) {
       identity_conflict = true;
     }
     check(identity_conflict, "idempotency key rejects different control command content");
 
-    auto stale = request;
-    stale.command_id = "control-command-stale";
-    stale.idempotency_key = "browser-request-stale";
     bool stale_rejected = false;
     try {
-      (void)journal.submit_control_command(stale);
+      (void)controller.request_controls(
+          "browser-request-stale", 1, 0, {{"learning_rate", 0.00002}}, "operator",
+          "stale browser test");
     } catch (const std::invalid_argument&) {
       stale_rejected = true;
     }
     check(stale_rejected, "stale expected control revision loses an optimistic race");
 
-    const auto applied = journal.acknowledge_control_command(
-        submitted.command_id, trainvm::ControlCommandStatus::applied, 300,
+    const auto applied = controller.acknowledge_controls(
+        submitted.command_id, acknowledgement(1),
+        trainvm::ControlCommandStatus::applied, 300,
         submitted.assignments, nlohmann::json::array());
     check(applied.status == trainvm::ControlCommandStatus::applied &&
               applied.effective_step == std::optional<std::uint64_t>{300} &&
               journal.event_count() == 4U && journal.control_command(submitted.command_id) == applied,
           "worker acknowledgement atomically records exact effective values and step");
-    check(journal.acknowledge_control_command(
-              submitted.command_id, trainvm::ControlCommandStatus::applied, 300,
+    check(controller.acknowledge_controls(
+              submitted.command_id, acknowledgement(1),
+              trainvm::ControlCommandStatus::applied, 300,
               submitted.assignments, nlohmann::json::array()) == applied &&
               journal.event_count() == 4U,
           "identical worker control acknowledgement is idempotent");
     bool changed_ack_rejected = false;
     try {
-      (void)journal.acknowledge_control_command(
-          submitted.command_id, trainvm::ControlCommandStatus::applied, 301,
+      (void)controller.acknowledge_controls(
+          submitted.command_id, acknowledgement(1),
+          trainvm::ControlCommandStatus::applied, 301,
           submitted.assignments, nlohmann::json::array());
     } catch (const std::invalid_argument&) {
       changed_ack_rejected = true;
@@ -925,23 +1080,462 @@ void test_control_command_journal() {
 
     const auto invalid_controller_request = controller.request_controls(
         "browser-request-invalid", 1, 1, {{"caption_dropout", 4.0}},
-        "operator", "invalid range test", false);
+        "operator", "invalid range test");
     check(!invalid_controller_request.valid() && !invalid_controller_request.command &&
               journal.event_count() == 4U,
           "controller returns native control diagnostics without journaling an invalid patch");
     const auto controller_request = controller.request_controls(
         "browser-request-2", 1, 1, {{"caption_dropout", 0.2}},
-        "operator", "adjust dropout", false);
+        "operator", "adjust dropout");
     check(controller_request.valid() && controller_request.command &&
               controller_request.command->control_revision == 2U && journal.event_count() == 5U,
           "controller validates and durably submits a revision-checked control patch");
+    const auto later_request = controller.request_controls(
+        "browser-request-3", 1, 2, {{"caption_dropout", 0.3}},
+        "operator", "later dropout adjustment");
+    check(later_request.command && later_request.command->control_revision == 3U &&
+              journal.event_count() == 6U,
+          "successive control requests receive monotonic revisions");
+    bool out_of_order_rejected = false;
+    try {
+      (void)controller.acknowledge_controls(
+          later_request.command->command_id, acknowledgement(3),
+          trainvm::ControlCommandStatus::applied, 400,
+          later_request.command->assignments, nlohmann::json::array());
+    } catch (const std::invalid_argument&) {
+      out_of_order_rejected = true;
+    }
+    check(out_of_order_rejected && journal.event_count() == 6U,
+          "worker cannot apply control revisions out of order");
+    const auto second_applied = controller.acknowledge_controls(
+        controller_request.command->command_id, acknowledgement(2),
+        trainvm::ControlCommandStatus::applied, 350,
+        controller_request.command->assignments, nlohmann::json::array());
+    const auto third_rejected = controller.acknowledge_controls(
+        later_request.command->command_id, acknowledgement(3),
+        trainvm::ControlCommandStatus::rejected,
+        std::nullopt, nlohmann::json::object(),
+        nlohmann::json::array({{{"code", "worker.rejected"}}}));
+    check(second_applied.status == trainvm::ControlCommandStatus::applied &&
+              third_rejected.status == trainvm::ControlCommandStatus::rejected &&
+              journal.event_count() == 8U,
+          "ordered acknowledgements advance the durable command stream");
+    const auto fenced_request = controller.request_controls(
+        "browser-request-4", 1, 3, {{"caption_dropout", 0.4}},
+        "operator", "fencing test");
+    check(journal.release_lease("local-gpu-training", "control-run", "lease-1",
+                                lease.lease.fencing_token, now_ns),
+          "fencing test releases the first worker lease");
+    const auto successor = journal.acquire_lease("local-gpu-training", "control-run", "lease-2",
+                                                 now_ns, 3'600'000'000'000LL);
+    bool stale_lease_rejected = false;
+    try {
+      (void)controller.acknowledge_controls(
+          fenced_request.command->command_id, acknowledgement(4),
+          trainvm::ControlCommandStatus::applied, 450,
+          fenced_request.command->assignments, nlohmann::json::array());
+    } catch (const std::invalid_argument&) {
+      stale_lease_rejected = true;
+    }
+    const trainvm::ControlAcknowledgementIdentity successor_identity{
+        .concurrency_key = "local-gpu-training",
+        .lease_id = "lease-2",
+        .fencing_token = successor.lease.fencing_token,
+        .node_id = controller.state().current_node_id,
+        .attempt_id = controller.state().current_attempt_id,
+        .worker_sequence = 4,
+    };
+    const auto fenced_applied = controller.acknowledge_controls(
+        fenced_request.command->command_id, successor_identity,
+        trainvm::ControlCommandStatus::applied, 450,
+        fenced_request.command->assignments, nlohmann::json::array());
+    check(stale_lease_rejected && successor.lease.fencing_token == 2U &&
+              fenced_applied.acknowledgement == successor_identity && journal.event_count() == 10U,
+          "stale worker fencing tokens cannot acknowledge controls after lease takeover");
 
     trainvm::Controller restarted(*compiled.plan, journal, "control-run");
     check(restarted.recover() == controller.state(),
           "controller recovery tolerates and verifies interleaved control command events");
+    trainvm::Controller other(*compiled.plan, journal, "other-control-run");
+    other.create();
+    bool cross_run_ack_rejected = false;
+    try {
+      (void)other.acknowledge_controls(
+          submitted.command_id, acknowledgement(1),
+          trainvm::ControlCommandStatus::applied, 300,
+          submitted.assignments, nlohmann::json::array());
+    } catch (const std::invalid_argument&) {
+      cross_run_ack_rejected = true;
+    }
+    check(cross_run_ack_rejected,
+          "a controller cannot acknowledge another run's control command");
     std::string reason;
-    check(journal.verify_chain(&reason) && journal.rebuild_projections() == 5U,
-          "control request and acknowledgement remain replayable journal history");
+    check(journal.verify_chain(&reason) && journal.rebuild_projections() == 12U &&
+              journal.control_command(fenced_applied.command_id) == fenced_applied &&
+              journal.latest_control_revision("control-run") == 4U &&
+              journal.latest_effective_control_revision("control-run") == 4U,
+          "control request, acknowledgement, and effective revisions rebuild from journal history");
+  }
+  std::filesystem::remove_all(directory);
+}
+
+void test_command_service() {
+  const auto compiled = trainvm::compile_document(load_fixture());
+  check(compiled.valid(), "fixture required by command service compiles");
+  if (!compiled.valid()) {
+    return;
+  }
+  const std::filesystem::path directory = std::filesystem::temp_directory_path() /
+      ("trainvm-service-test-" + std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  const auto database_path = directory / "journal.db";
+  std::string journal_id;
+  {
+    trainvm::Journal journal(database_path);
+    trainvm::Controller controller(*compiled.plan, journal, "service-run");
+    controller.create();
+    (void)controller.prepare_dispatch();
+    journal_id = journal.journal_id();
+  }
+
+  trainvm::TrainVMService service(database_path);
+  auto request = [&] (std::string idempotency_key, std::uint64_t expected_control_revision,
+                     double value) {
+    trainvm::v1::RunCommandRequest output;
+    output.set_run_id("service-run");
+    output.set_expected_run_revision(1);
+    output.set_idempotency_key(std::move(idempotency_key));
+    output.set_author("dashboard");
+    output.set_reason("service test");
+    output.set_expected_journal_id(journal_id);
+    output.set_expected_plan_hash(compiled.plan->plan_hash);
+    auto* controls = output.mutable_controls();
+    controls->set_expected_control_revision(expected_control_revision);
+    auto* assignment = controls->add_assignments();
+    assignment->set_key("learning_rate");
+    assignment->mutable_value()->set_number_value(value);
+    return output;
+  };
+
+  auto first_request = request("intent-1", 0, 0.00001);
+  trainvm::v1::RunCommandResponse first_response;
+  const auto first_status = service.CommandRun(nullptr, &first_request, &first_response);
+  check(first_status.ok() &&
+            first_response.disposition() ==
+                trainvm::v1::RunCommandResponse::DISPOSITION_ACCEPTED &&
+            first_response.control().control_revision() == 1U &&
+            first_response.run().latest_requested_control_revision() == 1U,
+        "native command service validates, persists, and returns a typed control result");
+
+  trainvm::v1::RunCommandResponse retry_response;
+  const auto retry_status = service.CommandRun(nullptr, &first_request, &retry_response);
+  check(retry_status.ok() &&
+            retry_response.disposition() ==
+                trainvm::v1::RunCommandResponse::DISPOSITION_ACCEPTED &&
+            retry_response.control().status() ==
+                trainvm::v1::ControlCommandResult::STATUS_REQUESTED &&
+            retry_response.control().command_id() == first_response.control().command_id(),
+        "native command service reports a pending idempotent retry as accepted, not applied");
+
+  {
+    trainvm::Journal worker_journal(database_path);
+    trainvm::Controller worker(*compiled.plan, worker_journal, "service-run");
+    worker.recover();
+    const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count();
+    const auto lease = worker_journal.acquire_lease(
+        "local-gpu-training", "service-run", "service-worker-lease", now_ns - 1000,
+        3'600'000'000'000LL);
+    (void)worker.acknowledge_controls(
+        first_response.control().command_id(),
+        trainvm::ControlAcknowledgementIdentity{
+            .concurrency_key = "local-gpu-training",
+            .lease_id = "service-worker-lease",
+            .fencing_token = lease.lease.fencing_token,
+            .node_id = worker.state().current_node_id,
+            .attempt_id = worker.state().current_attempt_id,
+            .worker_sequence = 1,
+        },
+        trainvm::ControlCommandStatus::rejected, std::nullopt, nlohmann::json::object(),
+        nlohmann::json::array(
+            {{{"severity", "error"}, {"code", "worker.control_rejected"},
+              {"message", "worker rejected the requested value"}}}));
+  }
+  trainvm::v1::RunCommandResponse terminal_retry_response;
+  const auto terminal_retry_status =
+      service.CommandRun(nullptr, &first_request, &terminal_retry_response);
+  check(terminal_retry_status.ok() &&
+            terminal_retry_response.disposition() ==
+                trainvm::v1::RunCommandResponse::DISPOSITION_REJECTED &&
+            terminal_retry_response.control().status() ==
+                trainvm::v1::ControlCommandResult::STATUS_REJECTED &&
+            terminal_retry_response.diagnostics_size() == 1 &&
+            terminal_retry_response.diagnostics(0).code() == "worker.control_rejected",
+        "terminal command retries return their durable status and worker diagnostics");
+
+  {
+    trainvm::Journal runtime_journal(database_path);
+    const auto projection = runtime_journal.projection("service-run");
+    check(projection.has_value(), "pause test has a durable run projection");
+    const auto lifecycle_event = [&](std::string id, std::uint64_t revision,
+                                     std::string type, std::string state) {
+      return trainvm::Event{
+          .event_id = std::move(id),
+          .run_id = "service-run",
+          .run_revision = revision,
+          .plan_revision = 1,
+          .node_id = projection ? projection->current_node_id : std::string{},
+          .attempt_id = projection ? projection->current_attempt_id : std::string{},
+          .worker_sequence = 0,
+          .event_type = std::move(type),
+          .event_version = 1,
+          .wall_time_ns = static_cast<std::int64_t>(revision),
+          .monotonic_time_ns = revision,
+          .optimizer_step = std::nullopt,
+          .payload = {{"state", std::move(state)}},
+      };
+    };
+    runtime_journal.append_batch({
+        lifecycle_event("service-run:pause-desired", 2, "run.desired_state_changed", "paused"),
+        lifecycle_event("service-run:pausing", 3, "run.observed_state_changed", "pausing"),
+        lifecycle_event("service-run:paused", 4, "run.observed_state_changed", "paused"),
+    });
+  }
+  auto paused_request = request("paused-intent", 1, 0.0);
+  paused_request.set_expected_run_revision(4);
+  paused_request.mutable_controls()->clear_assignments();
+  auto* paused_assignment = paused_request.mutable_controls()->add_assignments();
+  paused_assignment->set_key("mixed_precision");
+  paused_assignment->mutable_value()->set_string_value("fp16");
+  trainvm::v1::RunCommandResponse paused_response;
+  const auto paused_status = service.CommandRun(nullptr, &paused_request, &paused_response);
+  check(paused_status.ok() &&
+            paused_response.disposition() ==
+                trainvm::v1::RunCommandResponse::DISPOSITION_ACCEPTED &&
+            paused_response.control().requires_pause() &&
+            paused_response.control().apply_point() == trainvm::v1::APPLY_POINT_RESTART,
+        "paused runs accept controls that declare a durable pause requirement");
+
+  {
+    trainvm::Journal runtime_journal(database_path);
+    const auto projection = runtime_journal.projection("service-run");
+    const auto lifecycle_event = [&](std::string id, std::uint64_t revision,
+                                     std::string type, std::string state) {
+      return trainvm::Event{
+          .event_id = std::move(id),
+          .run_id = "service-run",
+          .run_revision = revision,
+          .plan_revision = 1,
+          .node_id = projection ? projection->current_node_id : std::string{},
+          .attempt_id = projection ? projection->current_attempt_id : std::string{},
+          .worker_sequence = 0,
+          .event_type = std::move(type),
+          .event_version = 1,
+          .wall_time_ns = static_cast<std::int64_t>(revision),
+          .monotonic_time_ns = revision,
+          .optimizer_step = std::nullopt,
+          .payload = {{"state", std::move(state)}},
+      };
+    };
+    runtime_journal.append_batch({
+        lifecycle_event("service-run:resume-desired", 5, "run.desired_state_changed", "running"),
+        lifecycle_event("service-run:resuming", 6, "run.observed_state_changed", "resuming"),
+        lifecycle_event("service-run:resumed", 7, "run.observed_state_changed", "running"),
+    });
+  }
+  trainvm::v1::RunCommandResponse resumed_retry_response;
+  const auto resumed_retry_status =
+      service.CommandRun(nullptr, &paused_request, &resumed_retry_response);
+  check(resumed_retry_status.ok() &&
+            resumed_retry_response.disposition() ==
+                trainvm::v1::RunCommandResponse::DISPOSITION_ACCEPTED &&
+            resumed_retry_response.control().command_id() == paused_response.control().command_id(),
+        "an exact paused command retry keeps its identity after the run resumes");
+  {
+    trainvm::Journal runtime_journal(database_path);
+    trainvm::Controller resumed(*compiled.plan, runtime_journal, "service-run");
+    resumed.recover();
+    const auto redispatch = resumed.prepare_dispatch();
+    check(redispatch.run_revision == 7U &&
+              redispatch.dispatch_id == "service-run:dispatch:acquire_gpu:acquire_gpu@1" &&
+              redispatch.status == trainvm::DispatchStatus::prepared,
+          "resume reissues the prepared node attempt at the current run revision");
+  }
+
+  auto changed_request = request("intent-1", 0, 0.00002);
+  trainvm::v1::RunCommandResponse changed_response;
+  const auto changed_status = service.CommandRun(nullptr, &changed_request, &changed_response);
+  check(changed_status.ok() &&
+            changed_response.disposition() ==
+                trainvm::v1::RunCommandResponse::DISPOSITION_CONFLICT,
+        "native command service reports changed idempotent content as a conflict");
+
+  auto invalid_request = request("invalid-intent", 1, 2.0);
+  trainvm::v1::RunCommandResponse invalid_response;
+  const auto invalid_status = service.CommandRun(nullptr, &invalid_request, &invalid_response);
+  check(invalid_status.ok() &&
+            invalid_response.disposition() ==
+                trainvm::v1::RunCommandResponse::DISPOSITION_REJECTED &&
+            invalid_response.diagnostics_size() > 0,
+        "native command service returns semantic diagnostics without mutating the journal");
+
+  auto race = [&](std::string key, double value) {
+    auto race_request = request(std::move(key), 2, value);
+    race_request.set_expected_run_revision(7);
+    trainvm::v1::RunCommandResponse response;
+    const auto status = service.CommandRun(nullptr, &race_request, &response);
+    return std::pair{status.ok(), response.disposition()};
+  };
+  auto left = std::async(std::launch::async, race, "race-left", 0.00003);
+  auto right = std::async(std::launch::async, race, "race-right", 0.00004);
+  const auto left_result = left.get();
+  const auto right_result = right.get();
+  const int accepted =
+      (left_result.second == trainvm::v1::RunCommandResponse::DISPOSITION_ACCEPTED ? 1 : 0) +
+      (right_result.second == trainvm::v1::RunCommandResponse::DISPOSITION_ACCEPTED ? 1 : 0);
+  const int conflicts =
+      (left_result.second == trainvm::v1::RunCommandResponse::DISPOSITION_CONFLICT ? 1 : 0) +
+      (right_result.second == trainvm::v1::RunCommandResponse::DISPOSITION_CONFLICT ? 1 : 0);
+  check(left_result.first && right_result.first && accepted == 1 && conflicts == 1,
+        "concurrent dashboard edits at one control revision have exactly one winner");
+  {
+    trainvm::Journal verify(database_path);
+    check(verify.event_count() == 13U && verify.latest_control_revision("service-run") == 3U,
+          "service retries, rejections, and losing races leave no duplicate command events");
+  }
+  std::filesystem::remove_all(directory);
+}
+
+void test_legacy_journal_migration_policy() {
+  const std::filesystem::path directory = std::filesystem::temp_directory_path() /
+      ("trainvm-legacy-journal-test-" +
+       std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  const auto database_path = directory / "legacy.db";
+
+  sqlite3* database = nullptr;
+  check(sqlite3_open(database_path.c_str(), &database) == SQLITE_OK,
+        "legacy migration test opens its fixture database");
+  if (database != nullptr) {
+    const char* fixture = R"sql(
+      CREATE TABLE journal_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
+      INSERT INTO journal_meta(key, value) VALUES('schema_version', '3');
+      CREATE TABLE events(marker INTEGER NOT NULL);
+      CREATE TABLE resource_leases(marker INTEGER NOT NULL);
+      INSERT INTO resource_leases(marker) VALUES(1);
+    )sql";
+    check(sqlite3_exec(database, fixture, nullptr, nullptr, nullptr) == SQLITE_OK,
+          "legacy migration test creates non-event pre-v4 durable state");
+    sqlite3_close(database);
+    database = nullptr;
+  }
+
+  bool refused = false;
+  try {
+    trainvm::Journal journal(database_path);
+  } catch (const std::runtime_error& exception) {
+    refused = std::string(exception.what()).find("nonempty pre-v4 journal") != std::string::npos;
+  }
+  check(refused, "nonempty pre-v4 journals are preserved rather than silently blessed as v4");
+
+  check(sqlite3_open(database_path.c_str(), &database) == SQLITE_OK,
+        "refused legacy journal remains readable");
+  if (database != nullptr) {
+    sqlite3_stmt* statement = nullptr;
+    std::string version;
+    if (sqlite3_prepare_v2(database,
+                           "SELECT value FROM journal_meta WHERE key='schema_version'", -1,
+                           &statement, nullptr) == SQLITE_OK &&
+        sqlite3_step(statement) == SQLITE_ROW) {
+      version = reinterpret_cast<const char*>(sqlite3_column_text(statement, 0));
+    }
+    sqlite3_finalize(statement);
+    sqlite3_close(database);
+    check(version == "3", "refused legacy journal schema version is not mutated");
+  }
+
+  const auto future_path = directory / "future.db";
+  check(sqlite3_open(future_path.c_str(), &database) == SQLITE_OK,
+        "future schema test opens its fixture database");
+  if (database != nullptr) {
+    const char* fixture = R"sql(
+      CREATE TABLE journal_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
+      INSERT INTO journal_meta(key, value) VALUES('schema_version', '999');
+    )sql";
+    check(sqlite3_exec(database, fixture, nullptr, nullptr, nullptr) == SQLITE_OK,
+          "future schema test creates its metadata");
+    sqlite3_close(database);
+    database = nullptr;
+  }
+  bool future_refused = false;
+  try {
+    trainvm::Journal journal(future_path);
+  } catch (const std::runtime_error& exception) {
+    future_refused = std::string(exception.what()).find("unsupported journal schema version") !=
+                     std::string::npos;
+  }
+  check(future_refused, "future journal schemas are rejected before initialization writes");
+  check(sqlite3_open(future_path.c_str(), &database) == SQLITE_OK,
+        "refused future journal remains readable");
+  if (database != nullptr) {
+    sqlite3_stmt* statement = nullptr;
+    std::string version;
+    if (sqlite3_prepare_v2(database,
+                           "SELECT value FROM journal_meta WHERE key='schema_version'", -1,
+                           &statement, nullptr) == SQLITE_OK &&
+        sqlite3_step(statement) == SQLITE_ROW) {
+      version = reinterpret_cast<const char*>(sqlite3_column_text(statement, 0));
+    }
+    sqlite3_finalize(statement);
+    sqlite3_close(database);
+    check(version == "999", "future journal schema version is not mutated");
+  }
+
+  for (const auto& [name, identity] :
+       std::array<std::pair<std::string_view, std::optional<std::string_view>>, 2>{
+           std::pair<std::string_view, std::optional<std::string_view>>{"missing", std::nullopt},
+           std::pair<std::string_view, std::optional<std::string_view>>{
+               "malformed", "not-a-valid-journal-identity!!"}}) {
+    const auto identity_path = directory / (std::string(name) + "-identity.db");
+    check(sqlite3_open(identity_path.c_str(), &database) == SQLITE_OK,
+          "v4 identity test opens its fixture database");
+    if (database != nullptr) {
+      check(sqlite3_exec(database,
+                         "CREATE TABLE journal_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) "
+                         "WITHOUT ROWID; INSERT INTO journal_meta(key, value) "
+                         "VALUES('schema_version', '4');",
+                         nullptr, nullptr, nullptr) == SQLITE_OK,
+            "v4 identity test creates schema metadata");
+      if (identity) {
+        sqlite3_stmt* statement = nullptr;
+        check(sqlite3_prepare_v2(database,
+                                 "INSERT INTO journal_meta(key, value) VALUES('journal_id', ?)",
+                                 -1, &statement, nullptr) == SQLITE_OK,
+              "v4 identity test prepares malformed identity");
+        if (statement != nullptr) {
+          sqlite3_bind_text(statement, 1, identity->data(),
+                            static_cast<int>(identity->size()), SQLITE_TRANSIENT);
+          check(sqlite3_step(statement) == SQLITE_DONE,
+                "v4 identity test stores malformed identity");
+        }
+        sqlite3_finalize(statement);
+      }
+      sqlite3_close(database);
+      database = nullptr;
+    }
+    bool identity_refused = false;
+    try {
+      trainvm::Journal journal(identity_path);
+    } catch (const std::runtime_error& exception) {
+      identity_refused =
+          std::string(exception.what()).find("identity is missing or malformed") !=
+          std::string::npos;
+    }
+    check(identity_refused, "established v4 journal rejects " + std::string(name) +
+                                " identity without repairing it");
   }
   std::filesystem::remove_all(directory);
 }
@@ -956,8 +1550,11 @@ int main() {
     test_control_validation();
     test_journal();
     test_controller_and_fake_worker();
+    test_compiled_plan_persistence();
     test_resource_leases();
     test_control_command_journal();
+    test_command_service();
+    test_legacy_journal_migration_policy();
   } catch (const std::exception& exception) {
     std::cerr << "UNCAUGHT: " << exception.what() << '\n';
     return 1;

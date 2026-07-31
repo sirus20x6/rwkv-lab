@@ -5,6 +5,7 @@ package trainvm
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -50,6 +51,40 @@ type Event struct {
 	Payload         json.RawMessage `json:"payload"`
 }
 
+type ControlDescriptor struct {
+	Type              string   `json:"type"`
+	Default           any      `json:"default"`
+	Minimum           *float64 `json:"minimum,omitempty"`
+	Maximum           *float64 `json:"maximum,omitempty"`
+	Values            []any    `json:"values,omitempty"`
+	Apply             string   `json:"apply"`
+	MutableAfterStart bool     `json:"mutable_after_start"`
+	RequiresPause     bool     `json:"requires_pause,omitempty"`
+	Description       string   `json:"description,omitempty"`
+	Unit              string   `json:"unit,omitempty"`
+}
+
+type ControlCommandView struct {
+	CommandID       string          `json:"command_id"`
+	ControlRevision uint64          `json:"control_revision"`
+	ApplyPoint      string          `json:"apply_point"`
+	Assignments     json.RawMessage `json:"assignments"`
+	Author          string          `json:"author"`
+	Reason          string          `json:"reason"`
+	Status          string          `json:"status"`
+	EffectiveStep   *uint64         `json:"effective_step,omitempty"`
+	EffectiveValues json.RawMessage `json:"effective_values"`
+	Diagnostics     json.RawMessage `json:"diagnostics"`
+}
+
+type ControlView struct {
+	Catalog                 map[string]ControlDescriptor `json:"catalog"`
+	EffectiveValues         map[string]any               `json:"effective_values"`
+	LatestRequestedRevision uint64                       `json:"latest_requested_revision"`
+	LatestEffectiveRevision uint64                       `json:"latest_effective_revision"`
+	Commands                []ControlCommandView         `json:"commands"`
+}
+
 func Open(path string) (*Reader, error) {
 	absolute, err := filepath.Abs(path)
 	if err != nil {
@@ -69,6 +104,18 @@ func Open(path string) (*Reader, error) {
 }
 
 func (r *Reader) Close() error { return r.db.Close() }
+
+func (r *Reader) JournalID(ctx context.Context) (string, error) {
+	var identity string
+	if err := r.db.QueryRowContext(ctx,
+		"SELECT value FROM journal_meta WHERE key='journal_id'").Scan(&identity); err != nil {
+		return "", fmt.Errorf("read TrainVM journal identity: %w", err)
+	}
+	if len(identity) != 32 {
+		return "", fmt.Errorf("TrainVM journal identity is malformed")
+	}
+	return identity, nil
+}
 
 func (r *Reader) Runs(ctx context.Context) ([]Run, error) {
 	rows, err := r.db.QueryContext(ctx, `
@@ -160,4 +207,123 @@ func (r *Reader) Timeline(ctx context.Context, runID string, after uint64, limit
 		return nil, fmt.Errorf("read TrainVM timeline: %w", err)
 	}
 	return result, nil
+}
+
+func (r *Reader) Controls(ctx context.Context, runID string) (ControlView, bool, error) {
+	transaction, err := r.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return ControlView{}, false, fmt.Errorf("begin TrainVM control snapshot: %w", err)
+	}
+	defer transaction.Rollback()
+	var planHash, canonical string
+	err = transaction.QueryRowContext(ctx, `
+		SELECT compiled_plans.plan_hash, compiled_plans.canonical_plan_json
+		FROM run_projection
+		JOIN compiled_plans ON compiled_plans.plan_hash=run_projection.plan_hash
+		WHERE run_projection.run_id=?`, runID).Scan(&planHash, &canonical)
+	if err == sql.ErrNoRows {
+		return ControlView{}, false, nil
+	}
+	if err != nil {
+		return ControlView{}, false, fmt.Errorf("read TrainVM control catalog: %w", err)
+	}
+	actualHash := fmt.Sprintf("%x", sha256.Sum256([]byte(canonical)))
+	if actualHash != planHash {
+		return ControlView{}, false, fmt.Errorf(
+			"TrainVM persisted plan failed integrity verification: expected %s, got %s",
+			planHash, actualHash)
+	}
+	var document struct {
+		Spec struct {
+			Controls struct {
+				Catalog map[string]ControlDescriptor `json:"catalog"`
+			} `json:"controls"`
+		} `json:"spec"`
+	}
+	if err := json.Unmarshal([]byte(canonical), &document); err != nil {
+		return ControlView{}, false, fmt.Errorf("decode TrainVM control catalog: %w", err)
+	}
+	view := ControlView{
+		Catalog:         document.Spec.Controls.Catalog,
+		EffectiveValues: make(map[string]any, len(document.Spec.Controls.Catalog)),
+		Commands:        []ControlCommandView{},
+	}
+	for key, descriptor := range view.Catalog {
+		view.EffectiveValues[key] = descriptor.Default
+	}
+	if err := transaction.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(control_revision),0),
+		       COALESCE(MAX(CASE WHEN status='applied' THEN control_revision ELSE 0 END),0)
+		FROM control_commands WHERE run_id=?`, runID).
+		Scan(&view.LatestRequestedRevision, &view.LatestEffectiveRevision); err != nil {
+		return ControlView{}, false, fmt.Errorf("read TrainVM control revisions: %w", err)
+	}
+	applied, err := transaction.QueryContext(ctx, `
+		SELECT effective_values_json FROM control_commands
+		WHERE run_id=? AND status='applied' ORDER BY control_revision`, runID)
+	if err != nil {
+		return ControlView{}, false, fmt.Errorf("read TrainVM effective controls: %w", err)
+	}
+	for applied.Next() {
+		var encoded string
+		if err := applied.Scan(&encoded); err != nil {
+			applied.Close()
+			return ControlView{}, false, fmt.Errorf("scan TrainVM effective controls: %w", err)
+		}
+		var values map[string]any
+		if err := json.Unmarshal([]byte(encoded), &values); err != nil {
+			applied.Close()
+			return ControlView{}, false, fmt.Errorf("decode TrainVM effective controls: %w", err)
+		}
+		for key, value := range values {
+			view.EffectiveValues[key] = value
+		}
+	}
+	if err := applied.Err(); err != nil {
+		applied.Close()
+		return ControlView{}, false, fmt.Errorf("read TrainVM effective controls: %w", err)
+	}
+	if err := applied.Close(); err != nil {
+		return ControlView{}, false, fmt.Errorf("close TrainVM effective controls: %w", err)
+	}
+	rows, err := transaction.QueryContext(ctx, `
+		SELECT command_id, control_revision, apply_point, assignments_json, author,
+		       reason, status, effective_step, effective_values_json, diagnostics_json
+		FROM control_commands WHERE run_id=? ORDER BY control_revision DESC LIMIT 50`, runID)
+	if err != nil {
+		return ControlView{}, false, fmt.Errorf("read TrainVM control commands: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var command ControlCommandView
+		var step sql.NullInt64
+		var assignments, effective, diagnostics string
+		if err := rows.Scan(&command.CommandID, &command.ControlRevision, &command.ApplyPoint,
+			&assignments, &command.Author, &command.Reason, &command.Status, &step,
+			&effective, &diagnostics); err != nil {
+			return ControlView{}, false, fmt.Errorf("scan TrainVM control command: %w", err)
+		}
+		if !json.Valid([]byte(assignments)) || !json.Valid([]byte(effective)) ||
+			!json.Valid([]byte(diagnostics)) {
+			return ControlView{}, false, fmt.Errorf("TrainVM control command contains invalid JSON")
+		}
+		if step.Valid {
+			value := uint64(step.Int64)
+			command.EffectiveStep = &value
+		}
+		command.Assignments = json.RawMessage(assignments)
+		command.EffectiveValues = json.RawMessage(effective)
+		command.Diagnostics = json.RawMessage(diagnostics)
+		view.Commands = append(view.Commands, command)
+	}
+	if err := rows.Err(); err != nil {
+		return ControlView{}, false, fmt.Errorf("read TrainVM control commands: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return ControlView{}, false, fmt.Errorf("close TrainVM control commands: %w", err)
+	}
+	if err := transaction.Commit(); err != nil {
+		return ControlView{}, false, fmt.Errorf("commit TrainVM control snapshot: %w", err)
+	}
+	return view, true, nil
 }
