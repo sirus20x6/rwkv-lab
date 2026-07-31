@@ -7,6 +7,7 @@
 #include "trainvm/host_launch.hpp"
 #include "trainvm/host_launch_registry.hpp"
 #include "trainvm/journal.hpp"
+#include "trainvm/lease_renewal.hpp"
 #include "trainvm/model.hpp"
 #include "trainvm/reflection_json.hpp"
 #include "trainvm/reconciler.hpp"
@@ -146,7 +147,19 @@ std::vector<trainvm::AdapterProfile> fixture_adapter_profiles(
        .effect = trainvm::Effect::process,
        .idempotency = trainvm::Idempotency::receipt_required,
        .code_fingerprint = worker_fingerprint,
-       .required_capabilities = {"worker.metrics", "worker.controls"}},
+       .required_capabilities = {"worker.metrics", "worker.controls"},
+       .lifecycle = {
+           .stateful = true,
+           .graceful_stop = true,
+           .checkpoint_now = true,
+           .pause_keep_resources = true,
+           .pause_release_resources = true,
+           .compile = true,
+           .warmup = true,
+           .qualify = true,
+           .profile = true,
+           .resume_grade = trainvm::ResumeGrade::exact,
+       }},
       {.key = key("rwkv-lab.mageflow", "1.0.0",
                   trainvm::ComponentRuntime::python_worker,
                   "prepare_cache_span",
@@ -161,7 +174,19 @@ std::vector<trainvm::AdapterProfile> fixture_adapter_profiles(
        .effect = trainvm::Effect::process,
        .idempotency = trainvm::Idempotency::receipt_required,
        .code_fingerprint = worker_fingerprint,
-       .required_capabilities = {"worker.metrics", "worker.controls"}},
+       .required_capabilities = {"worker.metrics", "worker.controls"},
+       .lifecycle = {
+           .stateful = false,
+           .graceful_stop = true,
+           .checkpoint_now = false,
+           .pause_keep_resources = false,
+           .pause_release_resources = false,
+           .compile = false,
+           .warmup = false,
+           .qualify = false,
+           .profile = false,
+           .resume_grade = trainvm::ResumeGrade::none,
+       }},
   };
 }
 
@@ -390,7 +415,19 @@ void test_reflection_and_compiler() {
                 std::vector<std::string>({
                     "enabled", "backend", "warmup_steps", "skip_steps",
                     "capture_steps", "output_artifact", "activities",
-                    "record_shapes", "profile_memory", "with_stack"}),
+                    "record_shapes", "profile_memory", "with_stack"}) &&
+            trainvm::reflected_field_names<
+                trainvm::OperationLifecycleCapabilities>() ==
+                std::vector<std::string>({
+                    "stateful", "graceful_stop", "checkpoint_now",
+                    "pause_keep_resources", "pause_release_resources",
+                    "compile", "warmup", "qualify", "profile",
+                    "resume_grade"}) &&
+            trainvm::enum_from_string<trainvm::ResumeGrade>("exact") ==
+                trainvm::ResumeGrade::exact &&
+            trainvm::enum_to_string(
+                trainvm::ResumeGrade::terminal_checkpoint) ==
+                "terminal_checkpoint",
         "reflection exposes the closed lifecycle, profiler, and CPU/I/O policy schema");
 
   auto fixture = load_fixture();
@@ -1533,6 +1570,623 @@ void test_resource_leases() {
               after_reboot.lease.boot_id == other_boot.boot_id,
           "a new boot supersedes an old-boot lease with a larger fence");
   }
+  std::filesystem::remove_all(directory);
+}
+
+void test_lease_renewal_authority() {
+  const std::filesystem::path directory =
+      std::filesystem::temp_directory_path() /
+      ("trainvm-lease-renewal-test-" +
+       std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  const auto scalar = [](sqlite3* connection, const char* sql) {
+    sqlite3_stmt* statement = nullptr;
+    if (sqlite3_prepare_v2(connection, sql, -1, &statement, nullptr) !=
+        SQLITE_OK) {
+      throw std::runtime_error("could not prepare renewal fixture query");
+    }
+    std::string value;
+    if (sqlite3_step(statement) == SQLITE_ROW &&
+        sqlite3_column_type(statement, 0) != SQLITE_NULL) {
+      value = reinterpret_cast<const char*>(sqlite3_column_text(statement, 0));
+    }
+    sqlite3_finalize(statement);
+    return value;
+  };
+
+  const auto exact_path = directory / "exact.db";
+  {
+    trainvm::Journal journal(exact_path);
+    const auto acquired = journal.acquire_lease(
+        "exact-gpu", "exact-run", "exact-lease", test_time(100, 1'000),
+        100);
+    const auto renewed = journal.renew_lease_exact(
+        acquired.lease, test_time(180, 1'080), 100);
+    check(renewed.status == trainvm::LeaseRenewalStatus::renewed &&
+              renewed.receipt &&
+              renewed.receipt->concurrency_key == "exact-gpu" &&
+              renewed.receipt->owner_run_id == "exact-run" &&
+              renewed.receipt->lease_id == "exact-lease" &&
+              renewed.receipt->fencing_token == 1U &&
+              renewed.receipt->clock_domain ==
+                  trainvm::ResourceLease::kBootTimeDomain &&
+              renewed.receipt->boot_id == kTestBootId &&
+              renewed.receipt->acquired_boottime_ns == 100 &&
+              renewed.receipt->acquired_wall_time_ns == 1'000 &&
+              renewed.receipt->prior_expires_boottime_ns == 200 &&
+              renewed.receipt->new_expires_boottime_ns == 280 &&
+              renewed.receipt->prior_expires_wall_time_ns == 1'100 &&
+              renewed.receipt->new_expires_wall_time_ns == 1'180 &&
+              renewed.receipt->renewed_boottime_ns == 180 &&
+              renewed.receipt->renewed_wall_time_ns == 1'080,
+          "exact renewal atomically returns its complete durable authority receipt");
+
+    const auto replayed = journal.renew_lease_exact(
+        acquired.lease, test_time(180, 1'080), 100);
+    check(replayed.status == trainvm::LeaseRenewalStatus::replayed &&
+              replayed.receipt == renewed.receipt,
+          "an exact same-sample and same-timeout renewal retry replays one receipt");
+
+    auto wrong_acquisition = acquired.lease;
+    --wrong_acquisition.acquired_boottime_ns;
+    bool acquisition_identity_conflicted = false;
+    try {
+      (void)journal.renew_lease_exact(
+          wrong_acquisition, test_time(180, 1'080), 100);
+    } catch (const std::runtime_error& exception) {
+      acquisition_identity_conflicted =
+          std::string(exception.what()).find("replay conflicts") !=
+          std::string::npos;
+    }
+    check(acquisition_identity_conflicted,
+          "exact renewal replay binds the acquisition timestamps as well as expiry and fence");
+
+    bool later_sample_conflicted = false;
+    try {
+      (void)journal.renew_lease_exact(acquired.lease,
+                                      test_time(181, 1'081), 100);
+    } catch (const std::runtime_error& exception) {
+      later_sample_conflicted =
+          std::string(exception.what()).find("replay conflicts") !=
+          std::string::npos;
+    }
+    const auto current = journal.active_lease("exact-gpu", test_time(182));
+    check(later_sample_conflicted && current &&
+              current->expires_boottime_ns == 280 &&
+              current->expires_wall_time_ns == 1'180,
+          "a later clock sample against stale expected expiry conflicts without mutation");
+
+    sqlite3* database = nullptr;
+    check(sqlite3_open(exact_path.c_str(), &database) == SQLITE_OK,
+          "renewal receipt fixture is directly inspectable");
+    if (database != nullptr) {
+      check(scalar(database,
+                   "SELECT COUNT(*) FROM resource_lease_renewals") == "1",
+            "exact replay never duplicates a renewal receipt");
+      check(sqlite3_exec(database, R"sql(
+              UPDATE resource_lease_renewals
+              SET renewed_wall_time_ns=renewed_wall_time_ns+1
+            )sql", nullptr, nullptr, nullptr) != SQLITE_OK &&
+                sqlite3_exec(database,
+                             "DELETE FROM resource_lease_renewals", nullptr,
+                             nullptr, nullptr) != SQLITE_OK &&
+                sqlite3_exec(database, R"sql(
+                  INSERT OR REPLACE INTO resource_lease_renewals
+                  SELECT concurrency_key, owner_run_id, lease_id,
+                         fencing_token, clock_domain, boot_id,
+                         acquired_boottime_ns, acquired_wall_time_ns,
+                         prior_expires_boottime_ns,
+                         new_expires_boottime_ns,
+                         prior_expires_wall_time_ns,
+                         new_expires_wall_time_ns,
+                         renewed_boottime_ns, renewed_wall_time_ns+1
+                  FROM resource_lease_renewals
+                )sql", nullptr, nullptr, nullptr) != SQLITE_OK,
+            "renewal receipts reject update, delete, and INSERT OR REPLACE mutations");
+      check(sqlite3_exec(database, R"sql(
+              INSERT INTO resource_lease_renewals VALUES(
+                'exact-gpu', 'exact-run', 'exact-lease', 1,
+                'boottime/v1',
+                'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+                100, 1000, 280, 400, 1180, 1300, 260, 1200
+              )
+            )sql", nullptr, nullptr, nullptr) != SQLITE_OK,
+            "renewal receipt schema rejects unequal boot and wall timeout deltas");
+      sqlite3_close(database);
+    }
+
+    std::size_t restart_clock_calls = 0U;
+    auto restart_clock = std::make_shared<trainvm::AuthorityClock>([&] {
+      ++restart_clock_calls;
+      return test_time(183, 1'083);
+    });
+    trainvm::LeaseRenewalCoordinator restarted(journal, restart_clock);
+    restarted.track({.lease = *current,
+                     .timeout_ns = 100,
+                     .renewal_margin_ns = 25});
+    const auto restart_tick = restarted.tick();
+    check(restart_tick.size() == 1U &&
+              restart_tick.front().status ==
+                  trainvm::LeaseRenewalTickStatus::not_due &&
+              restart_clock_calls == 1U && restarted.tracked_count() == 1U,
+          "a restarted coordinator tracks the journal's current renewed lease, not stale expected state");
+
+    bool reboot_refused = false;
+    try {
+      (void)journal.renew_lease_exact(
+          *current,
+          test_time_on_boot(
+              5, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", 2'000),
+          100);
+    } catch (const std::invalid_argument&) {
+      reboot_refused = true;
+    }
+    check(reboot_refused,
+          "exact renewal never adopts a lease from a different boot identity");
+
+    const auto before_second =
+        journal.active_lease("exact-gpu", test_time(260, 1'160));
+    const auto second = journal.renew_lease_exact(
+        *before_second, test_time(260, 1'160), 100);
+    check(second.status == trainvm::LeaseRenewalStatus::renewed &&
+              second.receipt &&
+              second.receipt->prior_expires_boottime_ns == 280 &&
+              second.receipt->prior_expires_wall_time_ns == 1'180 &&
+              second.receipt->new_expires_boottime_ns == 360 &&
+              second.receipt->new_expires_wall_time_ns == 1'260,
+          "successive renewal receipts preserve boot and wall expiry continuity");
+  }
+  {
+    trainvm::Journal reopened(exact_path);
+    const auto current = reopened.active_lease("exact-gpu", test_time(261));
+    check(current && current->expires_boottime_ns == 360 &&
+              current->expires_wall_time_ns == 1'260,
+          "a multi-receipt renewal chain passes full reopen attestation");
+  }
+
+  const auto identity_mismatch_path = directory / "identity-mismatch.db";
+  {
+    trainvm::Journal journal(identity_mismatch_path);
+    const auto acquired = journal.acquire_lease(
+        "identity-gpu", "identity-run", "identity-lease", test_time(10),
+        100);
+    (void)journal.renew_lease_exact(acquired.lease, test_time(90), 100);
+  }
+  sqlite3* mismatch_database = nullptr;
+  check(sqlite3_open(identity_mismatch_path.c_str(), &mismatch_database) ==
+            SQLITE_OK,
+        "current identity mismatch fixture opens for mutation");
+  if (mismatch_database != nullptr) {
+    check(sqlite3_exec(mismatch_database,
+                       "UPDATE resource_leases SET owner_run_id='other-run'",
+                       nullptr, nullptr, nullptr) == SQLITE_OK,
+          "current identity mismatch fixture changes only the lease owner");
+    sqlite3_close(mismatch_database);
+  }
+  bool current_identity_rejected = false;
+  try {
+    trainvm::Journal rejected(identity_mismatch_path);
+  } catch (const std::runtime_error& exception) {
+    current_identity_rejected =
+        std::string(exception.what()).find("disagrees with renewal receipts") !=
+        std::string::npos;
+  }
+  check(current_identity_rejected,
+        "reopen attestation rejects a same-fence current lease identity that diverges from its receipts");
+
+  const auto wall_chain_path = directory / "wall-chain-mismatch.db";
+  {
+    trainvm::Journal journal(wall_chain_path);
+    const auto acquired = journal.acquire_lease(
+        "wall-gpu", "wall-run", "wall-lease", test_time(10, 1'000), 100);
+    const auto first =
+        journal.renew_lease_exact(acquired.lease, test_time(90, 1'080), 100);
+    const auto current = journal.active_lease("wall-gpu", test_time(91));
+    (void)journal.renew_lease_exact(*current, test_time(170, 1'160), 100);
+    check(first.status == trainvm::LeaseRenewalStatus::renewed,
+          "wall continuity fixture creates its receipt chain");
+  }
+  check(sqlite3_open(wall_chain_path.c_str(), &mismatch_database) == SQLITE_OK,
+        "wall continuity fixture opens for mutation");
+  if (mismatch_database != nullptr) {
+    check(sqlite3_exec(mismatch_database, R"sql(
+            DROP TRIGGER resource_lease_renewals_no_conflicting_insert;
+            INSERT OR REPLACE INTO resource_lease_renewals
+            SELECT concurrency_key, owner_run_id, lease_id, fencing_token,
+                   clock_domain, boot_id, acquired_boottime_ns,
+                   acquired_wall_time_ns, prior_expires_boottime_ns,
+                   new_expires_boottime_ns, prior_expires_wall_time_ns+1,
+                   new_expires_wall_time_ns, renewed_boottime_ns,
+                   renewed_wall_time_ns
+            FROM resource_lease_renewals
+            WHERE prior_expires_boottime_ns=190;
+            CREATE TRIGGER resource_lease_renewals_no_conflicting_insert
+            BEFORE INSERT ON resource_lease_renewals
+            WHEN EXISTS(
+              SELECT 1 FROM resource_lease_renewals
+              WHERE (concurrency_key=NEW.concurrency_key AND
+                     lease_id=NEW.lease_id AND
+                     fencing_token=NEW.fencing_token AND
+                     prior_expires_boottime_ns=
+                         NEW.prior_expires_boottime_ns)
+                 OR (concurrency_key=NEW.concurrency_key AND
+                     lease_id=NEW.lease_id AND
+                     fencing_token=NEW.fencing_token AND
+                     new_expires_boottime_ns=NEW.new_expires_boottime_ns)
+            )
+            BEGIN
+              SELECT RAISE(ABORT,
+                           'resource lease renewal receipt already exists');
+            END;
+          )sql", nullptr, nullptr, nullptr) == SQLITE_OK,
+          "wall continuity fixture preserves exact schema while breaking the second receipt link");
+    sqlite3_close(mismatch_database);
+  }
+  bool wall_chain_rejected = false;
+  try {
+    trainvm::Journal rejected(wall_chain_path);
+  } catch (const std::runtime_error& exception) {
+    wall_chain_rejected =
+        std::string(exception.what()).find("discontinuous") !=
+        std::string::npos;
+  }
+  check(wall_chain_rejected,
+        "reopen attestation rejects discontinuous wall-expiry receipt state");
+
+  {
+    trainvm::Journal journal(directory / "coordinator.db");
+    const auto acquired = journal.acquire_lease(
+        "coordinator-gpu", "coordinator-run", "coordinator-lease",
+        test_time(100, 10'000), 100);
+    std::vector<trainvm::AuthorityTimeSample> samples{
+        test_time(170, 10'070), test_time(180, 10'080),
+        test_time(180, 10'080)};
+    std::size_t sample_index = 0U;
+    auto clock = std::make_shared<trainvm::AuthorityClock>([&] {
+      return samples.at(sample_index++);
+    });
+    trainvm::LeaseRenewalCoordinator coordinator(journal, clock);
+    coordinator.track({.lease = acquired.lease,
+                       .timeout_ns = 100,
+                       .renewal_margin_ns = 25});
+    const auto early = coordinator.tick();
+    const auto due = coordinator.tick();
+    const auto duplicate = coordinator.tick();
+    check(early.size() == 1U &&
+              early.front().status ==
+                  trainvm::LeaseRenewalTickStatus::not_due &&
+              due.size() == 1U &&
+              due.front().status ==
+                  trainvm::LeaseRenewalTickStatus::renewed &&
+              due.front().receipt &&
+              due.front().receipt->prior_expires_boottime_ns == 200 &&
+              due.front().receipt->new_expires_boottime_ns == 280 &&
+              duplicate.size() == 1U &&
+              duplicate.front().status ==
+                  trainvm::LeaseRenewalTickStatus::not_due &&
+              coordinator.tracked_count() == 1U,
+          "manual coordinator renews only inside its margin and duplicate ticks do not extend twice");
+  }
+
+  {
+    trainvm::Journal journal(directory / "stale.db");
+    const auto old = journal.acquire_lease(
+        "stale-gpu", "old-run", "old-lease", test_time(0), 100);
+    const auto successor = journal.acquire_lease(
+        "stale-gpu", "new-run", "new-lease", test_time(100), 100);
+    std::size_t clock_calls = 0U;
+    auto clock = std::make_shared<trainvm::AuthorityClock>([&] {
+      ++clock_calls;
+      return test_time(101);
+    });
+    trainvm::LeaseRenewalCoordinator coordinator(journal, clock);
+    coordinator.track({.lease = old.lease,
+                       .timeout_ns = 100,
+                       .renewal_margin_ns = 25});
+    const auto tick = coordinator.tick();
+    check(successor.status == trainvm::LeaseAcquireStatus::acquired &&
+              successor.lease.fencing_token ==
+                  old.lease.fencing_token + 1U &&
+              tick.size() == 1U &&
+              tick.front().status == trainvm::LeaseRenewalTickStatus::lost &&
+              coordinator.tracked_count() == 0U && !coordinator.poisoned() &&
+              clock_calls == 1U,
+          "a stale fencing token is dropped without renewing or poisoning authority");
+  }
+
+  {
+    trainvm::Journal journal(directory / "fresh-samples.db");
+    const auto left = journal.acquire_lease(
+        "fresh-a", "fresh-run-a", "fresh-lease-a", test_time(100), 100);
+    const auto right = journal.acquire_lease(
+        "fresh-b", "fresh-run-b", "fresh-lease-b", test_time(100), 100);
+    std::vector<trainvm::AuthorityTimeSample> samples{
+        test_time(180), test_time(200)};
+    std::size_t sample_index = 0U;
+    auto clock = std::make_shared<trainvm::AuthorityClock>([&] {
+      return samples.at(sample_index++);
+    });
+    trainvm::LeaseRenewalCoordinator coordinator(journal, clock);
+    coordinator.track({.lease = left.lease,
+                       .timeout_ns = 100,
+                       .renewal_margin_ns = 25});
+    coordinator.track({.lease = right.lease,
+                       .timeout_ns = 100,
+                       .renewal_margin_ns = 25});
+    const auto tick = coordinator.tick();
+    check(tick.size() == 2U && sample_index == 2U &&
+              tick[0].status == trainvm::LeaseRenewalTickStatus::renewed &&
+              tick[1].status == trainvm::LeaseRenewalTickStatus::lost &&
+              coordinator.tracked_count() == 1U,
+          "each tracked target receives a fresh authority sample before renewal");
+  }
+
+  {
+    trainvm::Journal journal(directory / "target-cap.db");
+    const auto acquired = journal.acquire_lease(
+        "cap-source", "cap-run", "cap-lease", test_time(10), 100);
+    auto clock = std::make_shared<trainvm::AuthorityClock>(
+        [] { return test_time(20); });
+    trainvm::LeaseRenewalCoordinator coordinator(journal, clock);
+    for (std::size_t index = 0U;
+         index < trainvm::LeaseRenewalCoordinator::kMaximumTrackedTargets;
+         ++index) {
+      auto lease = acquired.lease;
+      lease.concurrency_key = "cap-" + std::to_string(index);
+      lease.owner_run_id = "cap-run-" + std::to_string(index);
+      lease.lease_id = "cap-lease-" + std::to_string(index);
+      coordinator.track({.lease = std::move(lease),
+                         .timeout_ns = 100,
+                         .renewal_margin_ns = 25});
+    }
+    auto overflow = acquired.lease;
+    overflow.concurrency_key = "cap-overflow";
+    bool cap_rejected = false;
+    try {
+      coordinator.track({.lease = std::move(overflow),
+                         .timeout_ns = 100,
+                         .renewal_margin_ns = 25});
+    } catch (const std::invalid_argument&) {
+      cap_rejected = true;
+    }
+    check(cap_rejected &&
+              coordinator.tracked_count() ==
+                  trainvm::LeaseRenewalCoordinator::kMaximumTrackedTargets,
+          "lease renewal coordinator enforces a hard tracked-target bound");
+  }
+
+  {
+    trainvm::Journal journal(directory / "expired.db");
+    const auto acquired = journal.acquire_lease(
+        "expired-gpu", "expired-run", "expired-lease", test_time(0), 100);
+    auto clock = std::make_shared<trainvm::AuthorityClock>(
+        [] { return test_time(100); });
+    trainvm::LeaseRenewalCoordinator coordinator(journal, clock);
+    coordinator.track({.lease = acquired.lease,
+                       .timeout_ns = 100,
+                       .renewal_margin_ns = 25});
+    const auto tick = coordinator.tick();
+    check(tick.size() == 1U &&
+              tick.front().status == trainvm::LeaseRenewalTickStatus::lost &&
+              coordinator.tracked_count() == 0U,
+          "a lease at exact expiry is lost and never renewed");
+  }
+
+  const auto tuple_path = directory / "tuple-chain.db";
+  {
+    trainvm::Journal journal(tuple_path);
+    const auto left = journal.acquire_lease(
+        "tuple-a", "tuple-run-a", "tuple-b\nc", test_time(10), 100);
+    const auto right = journal.acquire_lease(
+        "tuple-a\ntuple-b", "tuple-run-b", "c", test_time(10), 100);
+    const auto left_renewed =
+        journal.renew_lease_exact(left.lease, test_time(90), 100);
+    const auto right_renewed =
+        journal.renew_lease_exact(right.lease, test_time(90), 100);
+    check(left_renewed.status == trainvm::LeaseRenewalStatus::renewed &&
+              right_renewed.status == trainvm::LeaseRenewalStatus::renewed,
+          "distinct renewal identities containing delimiters remain independent");
+  }
+  {
+    trainvm::Journal reopened(tuple_path);
+    check(reopened.active_lease("tuple-a", test_time(91)).has_value() &&
+              reopened.active_lease("tuple-a\ntuple-b", test_time(91))
+                  .has_value(),
+          "tuple-keyed renewal chains reopen without delimiter collisions");
+  }
+
+  {
+    trainvm::Journal journal(directory / "clock-regression.db");
+    const auto acquired = journal.acquire_lease(
+        "clock-gpu", "clock-run", "clock-lease", test_time(0), 100);
+    std::size_t source_calls = 0U;
+    auto clock = std::make_shared<trainvm::AuthorityClock>([&] {
+      ++source_calls;
+      return source_calls == 1U ? test_time(10) : test_time(9);
+    });
+    trainvm::LeaseRenewalCoordinator coordinator(journal, clock);
+    coordinator.track({.lease = acquired.lease,
+                       .timeout_ns = 100,
+                       .renewal_margin_ns = 25});
+    const auto first = coordinator.tick();
+    bool regression_poisoned = false;
+    bool poison_sticky = false;
+    try {
+      (void)coordinator.tick();
+    } catch (const trainvm::LeaseRenewalCoordinatorError&) {
+      regression_poisoned = true;
+    }
+    try {
+      (void)coordinator.tick();
+    } catch (const trainvm::LeaseRenewalCoordinatorError&) {
+      poison_sticky = true;
+    }
+    check(first.size() == 1U &&
+              first.front().status ==
+                  trainvm::LeaseRenewalTickStatus::not_due &&
+              regression_poisoned && poison_sticky && coordinator.poisoned() &&
+              coordinator.tracked_count() == 0U && source_calls == 2U,
+          "clock regression permanently poisons and stops the manual coordinator");
+  }
+
+  const auto failure_path = directory / "receipt-failure.db";
+  {
+    trainvm::Journal journal(failure_path);
+    const auto acquired = journal.acquire_lease(
+        "failure-gpu", "failure-run", "failure-lease",
+        test_time(100, 1'000), 100);
+    sqlite3* database = nullptr;
+    check(sqlite3_open(failure_path.c_str(), &database) == SQLITE_OK,
+          "receipt failure fixture opens a fault-injection connection");
+    if (database != nullptr) {
+      check(sqlite3_exec(database, R"sql(
+              CREATE TRIGGER reject_test_renewal_receipt
+              BEFORE INSERT ON resource_lease_renewals
+              BEGIN
+                SELECT RAISE(ABORT, 'injected renewal receipt failure');
+              END
+            )sql", nullptr, nullptr, nullptr) == SQLITE_OK,
+            "receipt failure fixture installs an insert fault");
+    }
+
+    std::size_t source_calls = 0U;
+    auto clock = std::make_shared<trainvm::AuthorityClock>([&] {
+      ++source_calls;
+      return test_time(180, 1'080);
+    });
+    trainvm::LeaseRenewalCoordinator coordinator(journal, clock);
+    coordinator.track({.lease = acquired.lease,
+                       .timeout_ns = 100,
+                       .renewal_margin_ns = 25});
+    bool receipt_failure_poisoned = false;
+    bool poison_sticky = false;
+    try {
+      (void)coordinator.tick();
+    } catch (const trainvm::LeaseRenewalCoordinatorError&) {
+      receipt_failure_poisoned = true;
+    }
+    try {
+      (void)coordinator.tick();
+    } catch (const trainvm::LeaseRenewalCoordinatorError&) {
+      poison_sticky = true;
+    }
+    const auto current = journal.active_lease("failure-gpu", test_time(181));
+    check(receipt_failure_poisoned && poison_sticky && coordinator.poisoned() &&
+              coordinator.tracked_count() == 0U && source_calls == 1U &&
+              current && current->expires_boottime_ns == 200 &&
+              database != nullptr &&
+              scalar(database,
+                     "SELECT COUNT(*) FROM resource_lease_renewals") == "0",
+          "receipt insertion failure rolls back mutable expiry and permanently stops renewal");
+    if (database != nullptr) {
+      check(sqlite3_exec(database,
+                         "DROP TRIGGER reject_test_renewal_receipt", nullptr,
+                         nullptr, nullptr) == SQLITE_OK,
+            "receipt failure fixture removes its fault trigger");
+      sqlite3_close(database);
+    }
+  }
+
+  const auto migration_path = directory / "migration-v5.db";
+  {
+    trainvm::Journal fresh(migration_path);
+    const auto acquired = fresh.acquire_lease(
+        "migration-gpu", "migration-run", "migration-lease",
+        test_time(10, 1'000), 100);
+    check(acquired.status == trainvm::LeaseAcquireStatus::acquired,
+          "v5 migration fixture starts with an active lease");
+  }
+  sqlite3* database = nullptr;
+  check(sqlite3_open(migration_path.c_str(), &database) == SQLITE_OK,
+        "v5 migration fixture opens for exact downgrade");
+  if (database != nullptr) {
+    check(sqlite3_exec(database, R"sql(
+            BEGIN IMMEDIATE;
+            DROP TRIGGER resource_lease_renewals_no_update;
+            DROP TRIGGER resource_lease_renewals_no_delete;
+            DROP TABLE resource_lease_renewals;
+            UPDATE journal_meta SET value='5' WHERE key='schema_version';
+            COMMIT;
+          )sql", nullptr, nullptr, nullptr) == SQLITE_OK,
+          "v5 migration fixture exactly removes only v6 objects");
+    sqlite3_close(database);
+    database = nullptr;
+  }
+  {
+    trainvm::Journal migrated(migration_path);
+    const auto active = migrated.active_lease("migration-gpu", test_time(20));
+    check(active && active->lease_id == "migration-lease" &&
+              active->expires_boottime_ns == 110,
+          "transactional v5-to-v6 migration preserves mutable lease authority");
+  }
+  check(sqlite3_open(migration_path.c_str(), &database) == SQLITE_OK,
+        "migrated v6 journal remains inspectable");
+  if (database != nullptr) {
+    check(scalar(database,
+                 "SELECT value FROM journal_meta WHERE key='schema_version'") ==
+                  "6" &&
+              scalar(database,
+                     "SELECT COUNT(*) FROM resource_lease_renewals") == "0" &&
+              scalar(database, R"sql(
+                SELECT COUNT(*) FROM sqlite_master
+                WHERE type='trigger' AND name IN(
+                  'resource_lease_renewals_no_conflicting_insert',
+                  'resource_lease_renewals_no_update',
+                  'resource_lease_renewals_no_delete')
+              )sql") == "3",
+          "v5-to-v6 migration atomically installs the empty receipt journal and immutable triggers");
+    sqlite3_close(database);
+    database = nullptr;
+  }
+
+  const auto adversarial_path = directory / "adversarial-v5.db";
+  {
+    trainvm::Journal fresh(adversarial_path);
+  }
+  check(sqlite3_open(adversarial_path.c_str(), &database) == SQLITE_OK,
+        "adversarial v5 fixture opens for downgrade");
+  std::string adversarial_sql;
+  if (database != nullptr) {
+    check(sqlite3_exec(database, R"sql(
+            BEGIN IMMEDIATE;
+            DROP TRIGGER resource_lease_renewals_no_update;
+            DROP TRIGGER resource_lease_renewals_no_delete;
+            DROP TABLE resource_lease_renewals;
+            CREATE TABLE resource_lease_renewals(marker TEXT NOT NULL);
+            UPDATE journal_meta SET value='5' WHERE key='schema_version';
+            COMMIT;
+          )sql", nullptr, nullptr, nullptr) == SQLITE_OK,
+          "adversarial v5 fixture installs a conflicting future receipt table");
+    adversarial_sql = scalar(
+        database,
+        "SELECT sql FROM sqlite_master WHERE name='resource_lease_renewals'");
+    sqlite3_close(database);
+    database = nullptr;
+  }
+  bool adversarial_refused = false;
+  try {
+    trainvm::Journal journal(adversarial_path);
+  } catch (const std::runtime_error& exception) {
+    adversarial_refused =
+        std::string(exception.what()).find("authoritative schema") !=
+        std::string::npos;
+  }
+  check(adversarial_refused,
+        "v5 migration refuses conflicting receipt objects before mutation");
+  check(sqlite3_open(adversarial_path.c_str(), &database) == SQLITE_OK,
+        "refused adversarial v5 journal remains inspectable");
+  if (database != nullptr) {
+    check(scalar(database,
+                 "SELECT value FROM journal_meta WHERE key='schema_version'") ==
+                  "5" &&
+              scalar(database,
+                     "SELECT sql FROM sqlite_master WHERE name='resource_lease_renewals'") ==
+                  adversarial_sql,
+          "failed v5 migration preserves version and conflicting evidence byte-for-byte");
+    sqlite3_close(database);
+  }
+
   std::filesystem::remove_all(directory);
 }
 
@@ -5660,7 +6314,7 @@ void test_adapter_registry_file_contract() {
   const auto original_profiles = fixture_external_adapter_profiles();
   const nlohmann::json original_document = trainvm::encode_json(
       trainvm::AdapterRegistryDocument{
-          .api_version = "trainvm.adapters/v1",
+          .api_version = "trainvm.adapters/v2",
           .profiles = original_profiles,
       });
   const auto original_path = directory / "registry.json";
@@ -5676,7 +6330,7 @@ void test_adapter_registry_file_contract() {
   const auto reordered_path = directory / "registry-reordered.json";
   write_json(reordered_path,
              trainvm::encode_json(trainvm::AdapterRegistryDocument{
-                 .api_version = "trainvm.adapters/v1",
+                 .api_version = "trainvm.adapters/v2",
                  .profiles = std::move(reversed_profiles),
              }));
   const trainvm::AdapterRegistry reordered =
@@ -5692,6 +6346,12 @@ void test_adapter_registry_file_contract() {
               resolved.required_capabilities ==
                   std::vector<std::string>({"worker.controls",
                                             "worker.metrics"}) &&
+              resolved.lifecycle.stateful &&
+              resolved.lifecycle.resume_grade ==
+                  trainvm::ResumeGrade::exact &&
+              original_document["profiles"].at(0).contains("lifecycle") &&
+              original_document["profiles"].at(0)["lifecycle"]
+                               ["resume_grade"] == "exact" &&
               loaded.registry_digest().starts_with("sha256:") &&
               loaded.registry_digest().size() == 71U &&
               loaded.registry_digest() == reordered.registry_digest() &&
@@ -5722,7 +6382,7 @@ void test_adapter_registry_file_contract() {
   }
 
   auto future_document = original_document;
-  future_document["api_version"] = "trainvm.adapters/v2";
+  future_document["api_version"] = "trainvm.adapters/v3";
   const auto future_path = directory / "registry-future.json";
   write_json(future_path, future_document);
   bool version_rejected = false;
@@ -5730,6 +6390,68 @@ void test_adapter_registry_file_contract() {
     (void)trainvm::AdapterRegistry::load_file(future_path);
   } catch (const std::invalid_argument&) {
     version_rejected = true;
+  }
+
+  auto legacy_document = original_document;
+  legacy_document["api_version"] = "trainvm.adapters/v1";
+  const auto legacy_path = directory / "registry-legacy.json";
+  write_json(legacy_path, legacy_document);
+  bool legacy_rejected = false;
+  try {
+    (void)trainvm::AdapterRegistry::load_file(legacy_path);
+  } catch (const std::invalid_argument&) {
+    legacy_rejected = true;
+  }
+
+  auto missing_lifecycle_document = original_document;
+  missing_lifecycle_document["profiles"].at(0).erase("lifecycle");
+  const auto missing_lifecycle_path =
+      directory / "registry-missing-lifecycle.json";
+  write_json(missing_lifecycle_path, missing_lifecycle_document);
+  bool missing_lifecycle_rejected = false;
+  try {
+    (void)trainvm::AdapterRegistry::load_file(missing_lifecycle_path);
+  } catch (const std::invalid_argument&) {
+    missing_lifecycle_rejected = true;
+  }
+
+  auto missing_lifecycle_field_document = original_document;
+  missing_lifecycle_field_document["profiles"].at(0)["lifecycle"].erase(
+      "graceful_stop");
+  const auto missing_lifecycle_field_path =
+      directory / "registry-missing-lifecycle-field.json";
+  write_json(missing_lifecycle_field_path, missing_lifecycle_field_document);
+  bool missing_lifecycle_field_rejected = false;
+  try {
+    (void)trainvm::AdapterRegistry::load_file(missing_lifecycle_field_path);
+  } catch (const std::invalid_argument&) {
+    missing_lifecycle_field_rejected = true;
+  }
+
+  auto unknown_lifecycle_field_document = original_document;
+  unknown_lifecycle_field_document["profiles"].at(0)["lifecycle"]
+                                  ["checkpoint_magic"] = true;
+  const auto unknown_lifecycle_field_path =
+      directory / "registry-unknown-lifecycle-field.json";
+  write_json(unknown_lifecycle_field_path, unknown_lifecycle_field_document);
+  bool unknown_lifecycle_field_rejected = false;
+  try {
+    (void)trainvm::AdapterRegistry::load_file(unknown_lifecycle_field_path);
+  } catch (const std::invalid_argument&) {
+    unknown_lifecycle_field_rejected = true;
+  }
+
+  auto unknown_resume_grade_document = original_document;
+  unknown_resume_grade_document["profiles"].at(0)["lifecycle"]
+                               ["resume_grade"] = "best_effort";
+  const auto unknown_resume_grade_path =
+      directory / "registry-unknown-resume-grade.json";
+  write_json(unknown_resume_grade_path, unknown_resume_grade_document);
+  bool unknown_resume_grade_rejected = false;
+  try {
+    (void)trainvm::AdapterRegistry::load_file(unknown_resume_grade_path);
+  } catch (const std::invalid_argument&) {
+    unknown_resume_grade_rejected = true;
   }
 
   auto reserved_namespace_document = original_document;
@@ -5748,7 +6470,7 @@ void test_adapter_registry_file_contract() {
   const auto duplicate_key_path = directory / "registry-duplicate-key.json";
   {
     std::ofstream duplicate_key(duplicate_key_path);
-    duplicate_key << R"({"api_version":"trainvm.adapters/v1","api_version":"trainvm.adapters/v1","profiles":[]})";
+    duplicate_key << R"({"api_version":"trainvm.adapters/v2","api_version":"trainvm.adapters/v2","profiles":[]})";
   }
   set_owner_only(duplicate_key_path);
   bool duplicate_key_rejected = false;
@@ -5783,9 +6505,13 @@ void test_adapter_registry_file_contract() {
     oversized_rejected = true;
   }
   check(symlink_rejected && unknown_rejected && version_rejected &&
+            legacy_rejected && missing_lifecycle_rejected &&
+            missing_lifecycle_field_rejected &&
+            unknown_lifecycle_field_rejected &&
+            unknown_resume_grade_rejected &&
             reserved_namespace_rejected && duplicate_key_rejected &&
             empty_rejected && oversized_rejected,
-        "registry file loading rejects symlinks, unknown fields, unsupported versions, reserved trainvm.core names, duplicate keys, and unbounded files");
+        "registry file loading rejects symlinks, missing or unknown lifecycle fields, unknown grades, incompatible versions, reserved trainvm.core names, duplicate keys, and unbounded files");
   std::filesystem::remove_all(directory);
 }
 
@@ -5969,6 +6695,20 @@ void test_adapter_registry_and_reconciler() {
   const trainvm::AdapterRegistry registry(fixture_adapter_profiles());
   const nlohmann::json submission_identity =
       adapter_locked_submission(*compiled.plan, registry);
+  const nlohmann::json adapter_lock =
+      nlohmann::json::parse(registry.plan_lock_manifest(*compiled.plan));
+  auto legacy_lock_submission = submission_identity;
+  legacy_lock_submission["adapter_lock"]["api_version"] =
+      "trainvm.adapter-lock/v1";
+  bool legacy_lock_rejected = false;
+  try {
+    registry.validate_submission_lock(*compiled.plan, legacy_lock_submission);
+  } catch (const trainvm::AdapterResolutionError&) {
+    legacy_lock_rejected = true;
+  }
+  check(adapter_lock.at("api_version") == "trainvm.adapter-lock/v2" &&
+            legacy_lock_rejected,
+        "adapter lock v2 binds lifecycle schema and rejects legacy v1 manifests");
   bool plan_validated = true;
   try {
     registry.validate_plan(*compiled.plan);
@@ -5994,8 +6734,213 @@ void test_adapter_registry_and_reconciler() {
             train_profile.code_fingerprint == expected_fingerprint &&
             train_profile.required_capabilities ==
                 std::vector<std::string>({"worker.controls",
-                                          "worker.metrics"}),
-        "adapter registry resolves the exact authority-owned operation profile");
+                                          "worker.metrics"}) &&
+            train_profile.lifecycle.stateful &&
+            train_profile.lifecycle.checkpoint_now &&
+            train_profile.lifecycle.pause_release_resources &&
+            train_profile.lifecycle.resume_grade ==
+                trainvm::ResumeGrade::exact,
+        "adapter registry resolves exact authority-owned operation and lifecycle profiles while allowing a stateless process node in an exact-recovery plan");
+
+  auto compatible_train_profiles = fixture_adapter_profiles();
+  const auto compatible_train = std::ranges::find_if(
+      compatible_train_profiles, [](const trainvm::AdapterProfile& profile) {
+        return profile.key.operation == "train";
+      });
+  if (compatible_train != compatible_train_profiles.end()) {
+    compatible_train->lifecycle.resume_grade =
+        trainvm::ResumeGrade::compatible;
+  }
+  bool stateful_downgrade_rejected = false;
+  try {
+    const trainvm::AdapterRegistry compatible_registry(
+        compatible_train_profiles);
+    compatible_registry.validate_plan(*compiled.plan);
+  } catch (const trainvm::AdapterResolutionError&) {
+    stateful_downgrade_rejected = true;
+  }
+  auto restart_plan_source = load_fixture();
+  restart_plan_source["spec"]["recovery"]["exact_resume"] = false;
+  const auto restart_plan = trainvm::compile_document(restart_plan_source);
+  bool compatible_nonexact_accepted = restart_plan.valid();
+  if (restart_plan.valid()) {
+    try {
+      trainvm::AdapterRegistry(std::move(compatible_train_profiles))
+          .validate_plan(*restart_plan.plan);
+    } catch (const std::exception&) {
+      compatible_nonexact_accepted = false;
+    }
+  }
+  check(stateful_downgrade_rejected && compatible_nonexact_accepted,
+        "exact recovery rejects a compatible-only stateful trainer while the same mixed stateful/stateless graph remains valid without an exact request");
+
+  const auto rejects_lifecycle = [](trainvm::OperationLifecycleCapabilities lifecycle) {
+    auto profiles = fixture_adapter_profiles();
+    const auto train = std::ranges::find_if(
+        profiles, [](const trainvm::AdapterProfile& profile) {
+          return profile.key.operation == "train";
+        });
+    if (train != profiles.end()) train->lifecycle = lifecycle;
+    try {
+      (void)trainvm::AdapterRegistry(std::move(profiles));
+    } catch (const std::invalid_argument&) {
+      return true;
+    }
+    return false;
+  };
+  auto stateless_checkpoint = train_profile.lifecycle;
+  stateless_checkpoint.stateful = false;
+  auto exact_without_checkpoint = train_profile.lifecycle;
+  exact_without_checkpoint.checkpoint_now = false;
+  exact_without_checkpoint.pause_release_resources = false;
+  auto release_without_resume = train_profile.lifecycle;
+  release_without_resume.resume_grade = trainvm::ResumeGrade::restart_only;
+  auto terminal_checkpoint_now = train_profile.lifecycle;
+  terminal_checkpoint_now.resume_grade =
+      trainvm::ResumeGrade::terminal_checkpoint;
+  auto terminal_release_pause = train_profile.lifecycle;
+  terminal_release_pause.resume_grade =
+      trainvm::ResumeGrade::terminal_checkpoint;
+  terminal_release_pause.checkpoint_now = false;
+  check(rejects_lifecycle(stateless_checkpoint) &&
+            rejects_lifecycle(exact_without_checkpoint) &&
+            rejects_lifecycle(release_without_resume) &&
+            rejects_lifecycle(terminal_checkpoint_now) &&
+            rejects_lifecycle(terminal_release_pause),
+        "adapter lifecycle validation rejects stateless checkpoint state, exact resume without checkpoint-now, terminal checkpoint-now, and resource-releasing pause without compatible continuation state");
+
+  const auto rejects_plan_profiles = [&](std::vector<trainvm::AdapterProfile> profiles,
+                                         const trainvm::CompiledPlan& plan) {
+    try {
+      trainvm::AdapterRegistry(std::move(profiles)).validate_plan(plan);
+    } catch (const trainvm::AdapterResolutionError&) {
+      return true;
+    }
+    return false;
+  };
+  auto no_graceful_stop = fixture_adapter_profiles();
+  auto no_release_pause = fixture_adapter_profiles();
+  for (auto& profile : no_graceful_stop) {
+    if (profile.key.operation == "train") {
+      profile.lifecycle.graceful_stop = false;
+    }
+  }
+  for (auto& profile : no_release_pause) {
+    if (profile.key.operation == "train") {
+      profile.lifecycle.pause_release_resources = false;
+    }
+  }
+  auto retained_pause_source = load_fixture();
+  retained_pause_source["spec"]["recovery"]
+                       ["release_accelerators_when_paused"] = false;
+  const auto retained_pause_plan =
+      trainvm::compile_document(retained_pause_source);
+  auto no_retained_pause = fixture_adapter_profiles();
+  for (auto& profile : no_retained_pause) {
+    if (profile.key.operation == "train") {
+      profile.lifecycle.pause_keep_resources = false;
+    }
+  }
+  auto unspecified_pause_source = load_fixture();
+  unspecified_pause_source["spec"]["recovery"].erase(
+      "release_accelerators_when_paused");
+  const auto unspecified_pause_plan =
+      trainvm::compile_document(unspecified_pause_source);
+  auto no_pause_protocol = fixture_adapter_profiles();
+  for (auto& profile : no_pause_protocol) {
+    if (profile.key.operation == "train") {
+      profile.lifecycle.pause_keep_resources = false;
+      profile.lifecycle.pause_release_resources = false;
+    }
+  }
+  check(rejects_plan_profiles(std::move(no_graceful_stop), *compiled.plan) &&
+            rejects_plan_profiles(std::move(no_release_pause), *compiled.plan) &&
+            retained_pause_plan.valid() &&
+            rejects_plan_profiles(std::move(no_retained_pause),
+                                  *retained_pause_plan.plan) &&
+            unspecified_pause_plan.valid() &&
+            rejects_plan_profiles(std::move(no_pause_protocol),
+                                  *unspecified_pause_plan.plan),
+        "reachable stateful operations must support graceful stop and the plan's release, retain, or pause-required control policy");
+
+  auto stateful_at_most_once_source = load_fixture();
+  stateful_at_most_once_source["spec"]["workflow"]["nodes"]
+                               ["train_to_boundary"]["idempotency"] =
+      "at_most_once";
+  stateful_at_most_once_source["spec"]["workflow"]["nodes"]
+                               ["resume_training"]["idempotency"] =
+      "at_most_once";
+  const auto stateful_at_most_once_plan =
+      trainvm::compile_document(stateful_at_most_once_source);
+  auto stateful_at_most_once_profiles = fixture_adapter_profiles();
+  for (auto& profile : stateful_at_most_once_profiles) {
+    if (profile.key.operation == "train") {
+      profile.idempotency = trainvm::Idempotency::at_most_once;
+    }
+  }
+  auto stateless_at_most_once_source = load_fixture();
+  stateless_at_most_once_source["spec"]["workflow"]["nodes"]
+                               ["build_cache"]["idempotency"] =
+      "at_most_once";
+  const auto stateless_at_most_once_plan =
+      trainvm::compile_document(stateless_at_most_once_source);
+  auto stateless_at_most_once_profiles = fixture_adapter_profiles();
+  for (auto& profile : stateless_at_most_once_profiles) {
+    if (profile.key.operation == "cache_encoders") {
+      profile.idempotency = trainvm::Idempotency::at_most_once;
+    }
+  }
+  check(stateful_at_most_once_plan.valid() &&
+            rejects_plan_profiles(std::move(stateful_at_most_once_profiles),
+                                  *stateful_at_most_once_plan.plan) &&
+            stateless_at_most_once_plan.valid() &&
+            rejects_plan_profiles(std::move(stateless_at_most_once_profiles),
+                                  *stateless_at_most_once_plan.plan),
+        "exact recovery rejects reachable stateful and stateless at-most-once process operations");
+
+  auto mismatched_execution_source = load_fixture();
+  mismatched_execution_source["spec"]["components"]["mageflow"]
+                             ["operations"]["unused_phase"] = {
+      {"contract", "rwkv_lab.mageflow.v1.UnusedPhase"}};
+  mismatched_execution_source["spec"]["execution"]["operation"] =
+      "unused_phase";
+  const auto mismatched_execution =
+      trainvm::compile_document(mismatched_execution_source);
+  auto forged_execution_plan = *compiled.plan;
+  forged_execution_plan.experiment.spec.components.at("mageflow")
+      .operations.emplace(
+          "unused_phase",
+          trainvm::Operation{.contract =
+                                 "rwkv_lab.mageflow.v1.UnusedPhase",
+                             .description = std::nullopt});
+  forged_execution_plan.experiment.spec.execution->operation = "unused_phase";
+  auto forged_execution_profiles = fixture_adapter_profiles();
+  auto unused_profile = train_profile;
+  unused_profile.key.operation = "unused_phase";
+  unused_profile.key.contract = "rwkv_lab.mageflow.v1.UnusedPhase";
+  forged_execution_profiles.push_back(std::move(unused_profile));
+  check(!mismatched_execution.valid() &&
+            rejects_plan_profiles(std::move(forged_execution_profiles),
+                                  forged_execution_plan),
+        "document and registry validation reject execution phases targeting an operation absent from reachable workflow nodes");
+
+  auto no_profile_support = fixture_adapter_profiles();
+  const auto unprofiled_train = std::ranges::find_if(
+      no_profile_support, [](const trainvm::AdapterProfile& profile) {
+        return profile.key.operation == "train";
+      });
+  if (unprofiled_train != no_profile_support.end()) {
+    unprofiled_train->lifecycle.profile = false;
+  }
+  bool unsupported_profile_rejected = false;
+  try {
+    trainvm::AdapterRegistry(std::move(no_profile_support))
+        .validate_plan(*compiled.plan);
+  } catch (const trainvm::AdapterResolutionError&) {
+    unsupported_profile_rejected = true;
+  }
+  check(unsupported_profile_rejected,
+        "typed execution phases are rejected when the exact operation lacks the authority-owned lifecycle capability");
 
   auto duplicate_profiles = fixture_adapter_profiles();
   duplicate_profiles.push_back(duplicate_profiles.back());
@@ -6018,11 +6963,26 @@ void test_adapter_registry_and_reconciler() {
     const trainvm::AdapterRegistry mismatch(
         std::move(semantic_mismatch_profiles));
     mismatch.validate_plan(*compiled.plan);
-  } catch (const trainvm::AdapterResolutionError&) {
+  } catch (const std::exception&) {
     semantic_mismatch_rejected = true;
   }
-  check(duplicate_rejected && semantic_mismatch_rejected,
-        "adapter registry rejects duplicate keys and under-declared operation semantics");
+  auto builtin_lifecycle_profiles = fixture_adapter_profiles();
+  for (auto& profile : builtin_lifecycle_profiles) {
+    if (profile.key.runtime == trainvm::ComponentRuntime::builtin) {
+      profile.lifecycle.profile = true;
+      break;
+    }
+  }
+  bool builtin_lifecycle_rejected = false;
+  try {
+    trainvm::AdapterRegistry invalid_builtin(
+        std::move(builtin_lifecycle_profiles));
+  } catch (const std::invalid_argument&) {
+    builtin_lifecycle_rejected = true;
+  }
+  check(duplicate_rejected && semantic_mismatch_rejected &&
+            builtin_lifecycle_rejected,
+        "adapter registry rejects duplicate keys, stateful non-process effects, and noncanonical builtin lifecycle authority");
 
   const auto launch_bytes = [](const trainvm::WorkerLaunchTicket& launch) {
     return nlohmann::json{
@@ -6325,6 +7285,15 @@ void test_adapter_registry_and_reconciler() {
   drift_rejected_without_mutation(
       std::move(capability_drift),
       "adapter capability drift after launch intent fails closed without mutation");
+  auto lifecycle_drift = fixture_adapter_profiles();
+  for (auto& profile : lifecycle_drift) {
+    if (profile.key.operation == "train") {
+      profile.lifecycle.pause_keep_resources = false;
+    }
+  }
+  drift_rejected_without_mutation(
+      std::move(lifecycle_drift),
+      "adapter lifecycle authority drift after launch intent fails closed without mutation");
 
   {
     const auto busy_path = directory / "busy.db";
@@ -6590,6 +7559,9 @@ void test_legacy_journal_migration_policy() {
     if (database != nullptr) {
       check(sqlite3_exec(database, R"sql(
         BEGIN IMMEDIATE;
+        DROP TRIGGER resource_lease_renewals_no_update;
+        DROP TRIGGER resource_lease_renewals_no_delete;
+        DROP TABLE resource_lease_renewals;
         ALTER TABLE resource_leases RENAME TO resource_leases_v5;
         CREATE TABLE resource_leases (
           concurrency_key TEXT PRIMARY KEY,
@@ -6681,6 +7653,9 @@ void test_legacy_journal_migration_policy() {
     if (database != nullptr) {
       const char* downgrade = R"sql(
         BEGIN IMMEDIATE;
+        DROP TRIGGER resource_lease_renewals_no_update;
+        DROP TRIGGER resource_lease_renewals_no_delete;
+        DROP TABLE resource_lease_renewals;
         ALTER TABLE resource_leases RENAME TO resource_leases_v5;
         CREATE TABLE resource_leases (
           concurrency_key TEXT PRIMARY KEY,
@@ -6833,6 +7808,9 @@ void test_legacy_journal_migration_policy() {
       const char* downgrade = R"sql(
         PRAGMA journal_mode=DELETE;
         BEGIN IMMEDIATE;
+        DROP TRIGGER resource_lease_renewals_no_update;
+        DROP TRIGGER resource_lease_renewals_no_delete;
+        DROP TABLE resource_lease_renewals;
         ALTER TABLE resource_leases RENAME TO resource_leases_v5;
         CREATE TABLE resource_leases (
           concurrency_key TEXT PRIMARY KEY,
@@ -6913,6 +7891,9 @@ void test_legacy_journal_migration_policy() {
   if (database != nullptr) {
     check(sqlite3_exec(database, R"sql(
       BEGIN IMMEDIATE;
+      DROP TRIGGER resource_lease_renewals_no_update;
+      DROP TRIGGER resource_lease_renewals_no_delete;
+      DROP TABLE resource_lease_renewals;
       ALTER TABLE resource_leases RENAME TO resource_leases_v5;
       CREATE TABLE resource_leases (
         concurrency_key TEXT PRIMARY KEY,
@@ -6971,44 +7952,44 @@ void test_legacy_journal_migration_policy() {
     database = nullptr;
   }
 
-  const auto v5_missing_head_path = directory / "v5-missing-head.db";
+  const auto v6_missing_head_path = directory / "v6-missing-head.db";
   {
-    trainvm::Journal fresh(v5_missing_head_path);
+    trainvm::Journal fresh(v6_missing_head_path);
     check(trainvm::JournalTestAccess::append(
               fresh, created_event(std::string(64U, 'c'))) == 1U,
-          "missing-head v5 fixture creates a valid event chain");
+          "missing-head v6 fixture creates a valid event chain");
   }
-  check(sqlite3_open(v5_missing_head_path.c_str(), &database) == SQLITE_OK,
-        "missing-head v5 fixture opens for corruption");
+  check(sqlite3_open(v6_missing_head_path.c_str(), &database) == SQLITE_OK,
+        "missing-head v6 fixture opens for corruption");
   if (database != nullptr) {
     check(sqlite3_exec(database,
                        "DELETE FROM journal_meta WHERE key='chain_head'", nullptr,
                        nullptr, nullptr) == SQLITE_OK,
-          "missing-head v5 fixture removes required authority metadata");
+          "missing-head v6 fixture removes required authority metadata");
     sqlite3_close(database);
     database = nullptr;
   }
-  bool v5_missing_head_refused = false;
+  bool v6_missing_head_refused = false;
   try {
-    trainvm::Journal journal(v5_missing_head_path);
+    trainvm::Journal journal(v6_missing_head_path);
   } catch (const std::runtime_error& exception) {
-    v5_missing_head_refused =
+    v6_missing_head_refused =
         std::string(exception.what()).find("authority metadata") !=
         std::string::npos;
   }
-  check(v5_missing_head_refused,
-        "established v5 journal never synthesizes a missing chain head");
-  check(sqlite3_open(v5_missing_head_path.c_str(), &database) == SQLITE_OK,
-        "refused missing-head v5 journal remains inspectable");
+  check(v6_missing_head_refused,
+        "established v6 journal never synthesizes a missing chain head");
+  check(sqlite3_open(v6_missing_head_path.c_str(), &database) == SQLITE_OK,
+        "refused missing-head v6 journal remains inspectable");
   if (database != nullptr) {
     check(scalar(database,
                  "SELECT value FROM journal_meta WHERE key='schema_version'") ==
-                  "5" &&
+                  "6" &&
               scalar(database,
                      "SELECT COUNT(*) FROM journal_meta WHERE key='chain_head'") ==
                   "0" &&
               scalar(database, "SELECT COUNT(*) FROM events") == "1",
-          "missing-head v5 refusal preserves history without metadata repair");
+          "missing-head v6 refusal preserves history without metadata repair");
     sqlite3_close(database);
     database = nullptr;
   }
@@ -7027,6 +8008,9 @@ void test_legacy_journal_migration_policy() {
   if (database != nullptr) {
     const char* downgrade = R"sql(
       BEGIN IMMEDIATE;
+      DROP TRIGGER resource_lease_renewals_no_update;
+      DROP TRIGGER resource_lease_renewals_no_delete;
+      DROP TABLE resource_lease_renewals;
       ALTER TABLE resource_leases RENAME TO resource_leases_v5;
       CREATE TABLE resource_leases (
         concurrency_key TEXT PRIMARY KEY,
@@ -7125,7 +8109,7 @@ void test_legacy_journal_migration_policy() {
     )sql");
     const std::string head_after = scalar(
         database, "SELECT value FROM journal_meta WHERE key='chain_head'");
-    check(version == "5" && released_history == "legacy-wall/v1|NULL|NULL|NULL|10|20|30" &&
+    check(version == "6" && released_history == "legacy-wall/v1|NULL|NULL|NULL|10|20|30" &&
               release_receipt == "legacy-wall/v1|NULL|30",
           "v4 lease and release history migrates into explicit legacy-wall quarantine");
     check(event_after == event_before && head_after == head_before,
@@ -7143,6 +8127,9 @@ void test_legacy_journal_migration_policy() {
   if (database != nullptr) {
     const char* downgrade = R"sql(
       BEGIN IMMEDIATE;
+      DROP TRIGGER resource_lease_renewals_no_update;
+      DROP TRIGGER resource_lease_renewals_no_delete;
+      DROP TABLE resource_lease_renewals;
       ALTER TABLE resource_leases RENAME TO resource_leases_v5;
       CREATE TABLE resource_leases (
         concurrency_key TEXT PRIMARY KEY, owner_run_id TEXT NOT NULL,
@@ -7239,6 +8226,7 @@ int main() {
     test_controller_and_fake_worker();
     test_compiled_plan_persistence();
     test_resource_leases();
+    test_lease_renewal_authority();
     test_authority_clock_integration();
     test_authority_lock_file_identity();
     test_control_command_journal();

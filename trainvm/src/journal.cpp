@@ -23,6 +23,7 @@
 #include <string>
 #include <string_view>
 #include <sys/stat.h>
+#include <tuple>
 #include <unistd.h>
 #include <utility>
 
@@ -44,7 +45,7 @@ CREATE TABLE IF NOT EXISTS journal_meta (
   value TEXT NOT NULL
 ) WITHOUT ROWID;
 
-INSERT INTO journal_meta(key, value) VALUES('schema_version', '5')
+INSERT INTO journal_meta(key, value) VALUES('schema_version', '6')
 ON CONFLICT(key) DO NOTHING;
 
 INSERT INTO journal_meta(key, value) VALUES(
@@ -133,6 +134,64 @@ CREATE TABLE IF NOT EXISTS resource_lease_releases (
   PRIMARY KEY(concurrency_key, lease_id, fencing_token)
 ) WITHOUT ROWID;
 
+CREATE TABLE IF NOT EXISTS resource_lease_renewals (
+  concurrency_key TEXT NOT NULL,
+  owner_run_id TEXT NOT NULL,
+  lease_id TEXT NOT NULL,
+  fencing_token INTEGER NOT NULL,
+  clock_domain TEXT NOT NULL CHECK(clock_domain='boottime/v1'),
+  boot_id TEXT NOT NULL,
+  acquired_boottime_ns INTEGER NOT NULL,
+  acquired_wall_time_ns INTEGER NOT NULL,
+  prior_expires_boottime_ns INTEGER NOT NULL,
+  new_expires_boottime_ns INTEGER NOT NULL,
+  prior_expires_wall_time_ns INTEGER NOT NULL,
+  new_expires_wall_time_ns INTEGER NOT NULL,
+  renewed_boottime_ns INTEGER NOT NULL,
+  renewed_wall_time_ns INTEGER NOT NULL,
+  CHECK(acquired_boottime_ns >= 0 AND acquired_wall_time_ns >= 0),
+  CHECK(prior_expires_boottime_ns > acquired_boottime_ns),
+  CHECK(new_expires_boottime_ns > prior_expires_boottime_ns),
+  CHECK(renewed_boottime_ns >= acquired_boottime_ns AND
+        renewed_boottime_ns < prior_expires_boottime_ns),
+  CHECK(prior_expires_wall_time_ns >= 0 AND
+        new_expires_wall_time_ns >= renewed_wall_time_ns AND
+        renewed_wall_time_ns >= 0),
+  CHECK(new_expires_boottime_ns - renewed_boottime_ns =
+        new_expires_wall_time_ns - renewed_wall_time_ns),
+  PRIMARY KEY(concurrency_key, lease_id, fencing_token,
+              prior_expires_boottime_ns),
+  UNIQUE(concurrency_key, lease_id, fencing_token,
+         new_expires_boottime_ns)
+) WITHOUT ROWID;
+
+CREATE TRIGGER resource_lease_renewals_no_conflicting_insert
+BEFORE INSERT ON resource_lease_renewals
+WHEN EXISTS(
+  SELECT 1 FROM resource_lease_renewals
+  WHERE (concurrency_key=NEW.concurrency_key AND lease_id=NEW.lease_id AND
+         fencing_token=NEW.fencing_token AND
+         prior_expires_boottime_ns=NEW.prior_expires_boottime_ns)
+     OR (concurrency_key=NEW.concurrency_key AND lease_id=NEW.lease_id AND
+         fencing_token=NEW.fencing_token AND
+         new_expires_boottime_ns=NEW.new_expires_boottime_ns)
+)
+BEGIN
+  SELECT RAISE(ABORT, 'resource lease renewal receipt already exists');
+END;
+
+CREATE TRIGGER resource_lease_renewals_no_update
+BEFORE UPDATE ON resource_lease_renewals
+BEGIN
+  SELECT RAISE(ABORT, 'resource lease renewal receipts are immutable');
+END;
+
+CREATE TRIGGER resource_lease_renewals_no_delete
+BEFORE DELETE ON resource_lease_renewals
+BEGIN
+  SELECT RAISE(ABORT, 'resource lease renewal receipts are immutable');
+END;
+
 CREATE TABLE IF NOT EXISTS node_dispatches (
   dispatch_id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL,
@@ -174,6 +233,68 @@ CREATE TABLE IF NOT EXISTS control_commands (
   UNIQUE(run_id, idempotency_key),
   UNIQUE(run_id, control_revision)
 ) WITHOUT ROWID;
+)sql";
+
+constexpr std::string_view kSchemaV6Migration = R"sql(
+CREATE TABLE resource_lease_renewals (
+  concurrency_key TEXT NOT NULL,
+  owner_run_id TEXT NOT NULL,
+  lease_id TEXT NOT NULL,
+  fencing_token INTEGER NOT NULL,
+  clock_domain TEXT NOT NULL CHECK(clock_domain='boottime/v1'),
+  boot_id TEXT NOT NULL,
+  acquired_boottime_ns INTEGER NOT NULL,
+  acquired_wall_time_ns INTEGER NOT NULL,
+  prior_expires_boottime_ns INTEGER NOT NULL,
+  new_expires_boottime_ns INTEGER NOT NULL,
+  prior_expires_wall_time_ns INTEGER NOT NULL,
+  new_expires_wall_time_ns INTEGER NOT NULL,
+  renewed_boottime_ns INTEGER NOT NULL,
+  renewed_wall_time_ns INTEGER NOT NULL,
+  CHECK(acquired_boottime_ns >= 0 AND acquired_wall_time_ns >= 0),
+  CHECK(prior_expires_boottime_ns > acquired_boottime_ns),
+  CHECK(new_expires_boottime_ns > prior_expires_boottime_ns),
+  CHECK(renewed_boottime_ns >= acquired_boottime_ns AND
+        renewed_boottime_ns < prior_expires_boottime_ns),
+  CHECK(prior_expires_wall_time_ns >= 0 AND
+        new_expires_wall_time_ns >= renewed_wall_time_ns AND
+        renewed_wall_time_ns >= 0),
+  CHECK(new_expires_boottime_ns - renewed_boottime_ns =
+        new_expires_wall_time_ns - renewed_wall_time_ns),
+  PRIMARY KEY(concurrency_key, lease_id, fencing_token,
+              prior_expires_boottime_ns),
+  UNIQUE(concurrency_key, lease_id, fencing_token,
+         new_expires_boottime_ns)
+) WITHOUT ROWID;
+
+CREATE TRIGGER resource_lease_renewals_no_conflicting_insert
+BEFORE INSERT ON resource_lease_renewals
+WHEN EXISTS(
+  SELECT 1 FROM resource_lease_renewals
+  WHERE (concurrency_key=NEW.concurrency_key AND lease_id=NEW.lease_id AND
+         fencing_token=NEW.fencing_token AND
+         prior_expires_boottime_ns=NEW.prior_expires_boottime_ns)
+     OR (concurrency_key=NEW.concurrency_key AND lease_id=NEW.lease_id AND
+         fencing_token=NEW.fencing_token AND
+         new_expires_boottime_ns=NEW.new_expires_boottime_ns)
+)
+BEGIN
+  SELECT RAISE(ABORT, 'resource lease renewal receipt already exists');
+END;
+
+CREATE TRIGGER resource_lease_renewals_no_update
+BEFORE UPDATE ON resource_lease_renewals
+BEGIN
+  SELECT RAISE(ABORT, 'resource lease renewal receipts are immutable');
+END;
+
+CREATE TRIGGER resource_lease_renewals_no_delete
+BEFORE DELETE ON resource_lease_renewals
+BEGIN
+  SELECT RAISE(ABORT, 'resource lease renewal receipts are immutable');
+END;
+
+UPDATE journal_meta SET value='6' WHERE key='schema_version' AND value='5';
 )sql";
 
 constexpr std::string_view kSchemaV4 = R"sql(
@@ -451,6 +572,18 @@ const SchemaSnapshot& canonical_schema_v4() {
 }
 
 const SchemaSnapshot& canonical_schema_v5() {
+  static const SchemaSnapshot schema = [] {
+    SchemaSnapshot result = canonical_schema(kSchema);
+    result.erase("table\nresource_lease_renewals");
+    result.erase("trigger\nresource_lease_renewals_no_conflicting_insert");
+    result.erase("trigger\nresource_lease_renewals_no_update");
+    result.erase("trigger\nresource_lease_renewals_no_delete");
+    return result;
+  }();
+  return schema;
+}
+
+const SchemaSnapshot& canonical_schema_v6() {
   static const SchemaSnapshot schema = canonical_schema(kSchema);
   return schema;
 }
@@ -856,6 +989,26 @@ ResourceLease lease_from_row(sqlite3_stmt* statement) {
   };
 }
 
+LeaseRenewalReceipt renewal_receipt_from_row(sqlite3_stmt* statement) {
+  return {
+      .concurrency_key = column_text(statement, 0),
+      .owner_run_id = column_text(statement, 1),
+      .lease_id = column_text(statement, 2),
+      .fencing_token =
+          static_cast<std::uint64_t>(sqlite3_column_int64(statement, 3)),
+      .clock_domain = column_text(statement, 4),
+      .boot_id = column_text(statement, 5),
+      .acquired_boottime_ns = sqlite3_column_int64(statement, 6),
+      .acquired_wall_time_ns = sqlite3_column_int64(statement, 7),
+      .prior_expires_boottime_ns = sqlite3_column_int64(statement, 8),
+      .new_expires_boottime_ns = sqlite3_column_int64(statement, 9),
+      .prior_expires_wall_time_ns = sqlite3_column_int64(statement, 10),
+      .new_expires_wall_time_ns = sqlite3_column_int64(statement, 11),
+      .renewed_boottime_ns = sqlite3_column_int64(statement, 12),
+      .renewed_wall_time_ns = sqlite3_column_int64(statement, 13),
+  };
+}
+
 Dispatch dispatch_from_row(sqlite3_stmt* statement) {
   Dispatch dispatch{
       .dispatch_id = column_text(statement, 0),
@@ -1213,7 +1366,8 @@ void Journal::initialize() {
     }
     stored_version = column_text(version.get(), 0);
     if (stored_version != "1" && stored_version != "2" && stored_version != "3" &&
-        stored_version != "4" && stored_version != "5") {
+        stored_version != "4" && stored_version != "5" &&
+        stored_version != "6") {
       throw std::runtime_error("unsupported journal schema version");
     }
   }
@@ -1236,8 +1390,8 @@ void Journal::initialize() {
       throw std::runtime_error(
           "refusing to initialize a SQLite database claimed by another application");
     }
-    execute_sql(kSchema, "could not create journal schema v5");
-    require_exact_schema(database_, canonical_schema_v5(), "v5");
+    execute_sql(kSchema, "could not create journal schema v6");
+    require_exact_schema(database_, canonical_schema_v6(), "v6");
     Statement insert(database_, R"sql(
       INSERT INTO journal_meta(key, value) VALUES('journal_id', ?)
     )sql");
@@ -1509,31 +1663,44 @@ void Journal::initialize() {
     }
     stored_version = "5";
   }
-  if (stored_version == "5") {
+  if (stored_version == "5" && !migration_transaction) {
+    migration_transaction = std::make_unique<Transaction>(database_);
+  }
+  std::map<std::string, ResourceLease> attested_leases;
+  if (stored_version == "5" || stored_version == "6") {
+    const std::string authority_version = stored_version;
     for (const std::string_view table :
          std::array<std::string_view, 8>{
              "journal_meta", "events", "run_projection", "compiled_plans",
              "resource_leases", "resource_lease_releases", "node_dispatches",
              "control_commands"}) {
       if (!table_exists(table)) {
-        throw std::runtime_error("journal schema v5 is partial: missing " +
+        throw std::runtime_error("journal schema v" + authority_version +
+                                 " is partial: missing " +
                                  std::string(table));
       }
     }
-    require_exact_schema(database_, canonical_schema_v5(), "v5");
-    require_authority_metadata("5");
+    if (stored_version == "6" && !table_exists("resource_lease_renewals")) {
+      throw std::runtime_error(
+          "journal schema v6 is partial: missing resource_lease_renewals");
+    }
+    require_exact_schema(database_,
+                         stored_version == "5" ? canonical_schema_v5()
+                                               : canonical_schema_v6(),
+                         "v" + authority_version);
+    require_authority_metadata(authority_version);
     require_columns(
         "resource_leases",
         {"concurrency_key", "owner_run_id", "lease_id", "fencing_token",
          "clock_domain", "boot_id", "acquired_boottime_ns",
          "expires_boottime_ns", "acquired_wall_time_ns",
          "expires_wall_time_ns", "released_wall_time_ns"},
-        "v5");
+        "v" + authority_version);
     require_columns(
         "resource_lease_releases",
         {"concurrency_key", "owner_run_id", "lease_id", "fencing_token",
          "clock_domain", "boot_id", "released_wall_time_ns"},
-        "v5");
+        "v" + authority_version);
     require_definition(
         "resource_leases",
         {"concurrency_key|TEXT|1|1", "owner_run_id|TEXT|1|0",
@@ -1544,28 +1711,28 @@ void Journal::initialize() {
          "acquired_wall_time_ns|INTEGER|1|0",
          "expires_wall_time_ns|INTEGER|1|0",
          "released_wall_time_ns|INTEGER|0|0"},
-        "v5");
+        "v" + authority_version);
     require_definition(
         "resource_lease_releases",
         {"concurrency_key|TEXT|1|1", "owner_run_id|TEXT|1|0",
          "lease_id|TEXT|1|2", "fencing_token|INTEGER|1|3",
          "clock_domain|TEXT|1|0", "boot_id|TEXT|0|0",
          "released_wall_time_ns|INTEGER|1|0"},
-        "v5");
+        "v" + authority_version);
     require_schema_fragments(
         "resource_leases",
         {"CHECK(clock_domain IN ('boottime/v1','legacy-wall/v1'))",
          "(clock_domain='boottime/v1' AND boot_id IS NOT NULL AND",
          "(clock_domain='legacy-wall/v1' AND boot_id IS NULL AND",
          "WITHOUT ROWID"},
-        "v5");
+        "v" + authority_version);
     require_schema_fragments(
         "resource_lease_releases",
         {"CHECK(clock_domain IN ('boottime/v1','legacy-wall/v1'))",
          "(clock_domain='boottime/v1' AND boot_id IS NOT NULL)",
          "(clock_domain='legacy-wall/v1' AND boot_id IS NULL)",
          "WITHOUT ROWID"},
-        "v5");
+        "v" + authority_version);
 
     Statement leases(database_, R"sql(
       SELECT concurrency_key, owner_run_id, lease_id, fencing_token,
@@ -1603,6 +1770,12 @@ void Journal::initialize() {
           (!valid_boot_scope && !valid_legacy_scope) || !valid_release) {
         throw std::runtime_error("journal schema v5 has malformed lease authority data");
       }
+      ResourceLease attested = lease_from_row(leases.get());
+      if (!attested_leases.emplace(attested.concurrency_key,
+                                   std::move(attested)).second) {
+        throw std::runtime_error(
+            "journal lease authority contains a duplicate concurrency key");
+      }
     }
     if (lease_status != SQLITE_DONE) {
       throw std::runtime_error("journal schema v5 lease authority data is unreadable");
@@ -1633,11 +1806,159 @@ void Journal::initialize() {
     if (release_status != SQLITE_DONE) {
       throw std::runtime_error("journal schema v5 lease release data is unreadable");
     }
+    if (stored_version == "5") {
+      execute_sql(kSchemaV6Migration,
+                  "journal schema migration to version 6 failed");
+      stored_version = "6";
+      require_exact_schema(database_, canonical_schema_v6(), "v6");
+      require_authority_metadata("6");
+    }
+  }
+  if (stored_version == "6") {
+    require_columns(
+        "resource_lease_renewals",
+        {"concurrency_key", "owner_run_id", "lease_id", "fencing_token",
+         "clock_domain", "boot_id", "acquired_boottime_ns",
+         "acquired_wall_time_ns", "prior_expires_boottime_ns",
+         "new_expires_boottime_ns", "prior_expires_wall_time_ns",
+         "new_expires_wall_time_ns", "renewed_boottime_ns",
+         "renewed_wall_time_ns"},
+        "v6");
+    require_definition(
+        "resource_lease_renewals",
+        {"concurrency_key|TEXT|1|1", "owner_run_id|TEXT|1|0",
+         "lease_id|TEXT|1|2", "fencing_token|INTEGER|1|3",
+         "clock_domain|TEXT|1|0", "boot_id|TEXT|1|0",
+         "acquired_boottime_ns|INTEGER|1|0",
+         "acquired_wall_time_ns|INTEGER|1|0",
+         "prior_expires_boottime_ns|INTEGER|1|4",
+         "new_expires_boottime_ns|INTEGER|1|0",
+         "prior_expires_wall_time_ns|INTEGER|1|0",
+         "new_expires_wall_time_ns|INTEGER|1|0",
+         "renewed_boottime_ns|INTEGER|1|0",
+         "renewed_wall_time_ns|INTEGER|1|0"},
+        "v6");
+
+    struct RenewalChainState final {
+      std::string owner_run_id;
+      std::string clock_domain;
+      std::string boot_id;
+      std::int64_t acquired_boottime_ns{};
+      std::int64_t acquired_wall_time_ns{};
+      std::int64_t new_expires_boottime_ns{};
+      std::int64_t new_expires_wall_time_ns{};
+      std::int64_t renewed_boottime_ns{};
+    };
+    using RenewalChainKey =
+        std::tuple<std::string, std::string, std::int64_t>;
+    std::map<RenewalChainKey, RenewalChainState> chains;
+    Statement renewals(database_, R"sql(
+      SELECT concurrency_key, owner_run_id, lease_id, fencing_token,
+             clock_domain, boot_id, acquired_boottime_ns,
+             acquired_wall_time_ns, prior_expires_boottime_ns,
+             new_expires_boottime_ns, prior_expires_wall_time_ns,
+             new_expires_wall_time_ns, renewed_boottime_ns,
+             renewed_wall_time_ns
+      FROM resource_lease_renewals
+      ORDER BY concurrency_key, lease_id, fencing_token,
+               prior_expires_boottime_ns
+    )sql");
+    int renewal_status = SQLITE_ROW;
+    while ((renewal_status = sqlite3_step(renewals.get())) == SQLITE_ROW) {
+      const std::string concurrency_key = column_text(renewals.get(), 0);
+      const std::string owner_run_id = column_text(renewals.get(), 1);
+      const std::string lease_id = column_text(renewals.get(), 2);
+      const std::string clock_domain = column_text(renewals.get(), 4);
+      const std::string boot_id = column_text(renewals.get(), 5);
+      const std::int64_t fencing_token = sqlite3_column_int64(renewals.get(), 3);
+      const std::int64_t acquired_boot = sqlite3_column_int64(renewals.get(), 6);
+      const std::int64_t acquired_wall = sqlite3_column_int64(renewals.get(), 7);
+      const std::int64_t prior_boot = sqlite3_column_int64(renewals.get(), 8);
+      const std::int64_t new_boot = sqlite3_column_int64(renewals.get(), 9);
+      const std::int64_t prior_wall = sqlite3_column_int64(renewals.get(), 10);
+      const std::int64_t new_wall = sqlite3_column_int64(renewals.get(), 11);
+      const std::int64_t renewed_boot = sqlite3_column_int64(renewals.get(), 12);
+      const std::int64_t renewed_wall = sqlite3_column_int64(renewals.get(), 13);
+      const bool integer_fields =
+          sqlite3_column_type(renewals.get(), 3) == SQLITE_INTEGER &&
+          std::ranges::all_of(std::array{6, 7, 8, 9, 10, 11, 12, 13},
+                              [&](int column) {
+                                return sqlite3_column_type(renewals.get(), column) ==
+                                       SQLITE_INTEGER;
+                              });
+      if (concurrency_key.empty() || owner_run_id.empty() || lease_id.empty() ||
+          !integer_fields || fencing_token <= 0 ||
+          clock_domain != ResourceLease::kBootTimeDomain ||
+          !canonical_boot_id(boot_id) || acquired_boot < 0 ||
+          acquired_wall < 0 || prior_boot <= acquired_boot ||
+          new_boot <= prior_boot || renewed_boot < acquired_boot ||
+          renewed_boot >= prior_boot || prior_wall < 0 || new_wall < 0 ||
+          renewed_wall < 0 || new_wall < renewed_wall ||
+          new_boot - renewed_boot != new_wall - renewed_wall) {
+        throw std::runtime_error(
+            "journal schema v6 has malformed lease renewal receipt data");
+      }
+      const RenewalChainKey chain_key{concurrency_key, lease_id,
+                                      fencing_token};
+      const auto found = chains.find(chain_key);
+      if (found != chains.end() &&
+          (found->second.owner_run_id != owner_run_id ||
+           found->second.clock_domain != clock_domain ||
+           found->second.boot_id != boot_id ||
+           found->second.acquired_boottime_ns != acquired_boot ||
+           found->second.acquired_wall_time_ns != acquired_wall ||
+           found->second.new_expires_boottime_ns != prior_boot ||
+           found->second.new_expires_wall_time_ns != prior_wall ||
+           renewed_boot < found->second.renewed_boottime_ns)) {
+        throw std::runtime_error(
+            "journal schema v6 has a discontinuous lease renewal receipt chain");
+      }
+      chains[chain_key] = {.owner_run_id = owner_run_id,
+                           .clock_domain = clock_domain,
+                           .boot_id = boot_id,
+                           .acquired_boottime_ns = acquired_boot,
+                           .acquired_wall_time_ns = acquired_wall,
+                           .new_expires_boottime_ns = new_boot,
+                           .new_expires_wall_time_ns = new_wall,
+                           .renewed_boottime_ns = renewed_boot};
+    }
+    if (renewal_status != SQLITE_DONE) {
+      throw std::runtime_error(
+          "journal schema v6 lease renewal receipt data is unreadable");
+    }
+
+    for (const auto& [key, chain] : chains) {
+      const auto& [concurrency_key, lease_id, fencing_token] = key;
+      const auto current = attested_leases.find(concurrency_key);
+      if (current == attested_leases.end() ||
+          current->second.fencing_token <
+              static_cast<std::uint64_t>(fencing_token)) {
+        throw std::runtime_error(
+            "journal schema v6 renewal receipt has no possible current lease");
+      }
+      if (current->second.fencing_token ==
+              static_cast<std::uint64_t>(fencing_token) &&
+          (current->second.owner_run_id != chain.owner_run_id ||
+           current->second.lease_id != lease_id ||
+           current->second.clock_domain != chain.clock_domain ||
+           current->second.boot_id != chain.boot_id ||
+           current->second.acquired_boottime_ns !=
+               chain.acquired_boottime_ns ||
+           current->second.acquired_wall_time_ns !=
+               chain.acquired_wall_time_ns ||
+           current->second.expires_boottime_ns !=
+               chain.new_expires_boottime_ns ||
+           current->second.expires_wall_time_ns !=
+               chain.new_expires_wall_time_ns)) {
+        throw std::runtime_error(
+            "journal schema v6 current lease disagrees with renewal receipts");
+      }
+    }
   }
   if (migration_transaction) {
     migration_transaction->commit();
   }
-  execute_sql(kWalPragma, "could not enable WAL for journal schema v5");
+  execute_sql(kWalPragma, "could not enable WAL for journal schema v6");
 }
 
 std::uint64_t Journal::append(const Event& event) {
@@ -3675,16 +3996,95 @@ bool Journal::renew_lease(const std::string& concurrency_key, const std::string&
                           std::int64_t timeout_ns) {
   require_lease_identity(concurrency_key, owner_run_id, lease_id);
   require_authority_time(now);
-  const std::int64_t expires_boottime_ns =
+  const auto active = active_lease(concurrency_key, now);
+  if (!active || active->owner_run_id != owner_run_id ||
+      active->lease_id != lease_id || active->fencing_token != fencing_token) {
+    return false;
+  }
+  const LeaseRenewalResult result = renew_lease_exact(*active, now, timeout_ns);
+  return result.status != LeaseRenewalStatus::not_owned;
+}
+
+LeaseRenewalResult Journal::renew_lease_exact(
+    const ResourceLease& expected, const AuthorityTimeSample& now,
+    std::int64_t timeout_ns) {
+  require_lease_identity(expected.concurrency_key, expected.owner_run_id,
+                         expected.lease_id);
+  require_authority_time(now);
+  if (expected.fencing_token == 0U ||
+      expected.clock_domain != ResourceLease::kBootTimeDomain ||
+      !canonical_boot_id(expected.boot_id) ||
+      expected.boot_id != now.boot_id || expected.acquired_boottime_ns < 0 ||
+      expected.expires_boottime_ns <= expected.acquired_boottime_ns ||
+      expected.acquired_wall_time_ns < 0 ||
+      expected.expires_wall_time_ns < 0) {
+    throw std::invalid_argument(
+        "exact lease renewal requires a canonical boot-scoped lease");
+  }
+  const std::int64_t new_expires_boottime_ns =
       lease_expiration(now.boot.nanoseconds, timeout_ns);
-  const std::int64_t expires_wall_time_ns =
+  const std::int64_t new_expires_wall_time_ns =
       lease_expiration(now.wall.nanoseconds, timeout_ns);
+  if (expected.expires_boottime_ns <= now.boot.nanoseconds ||
+      new_expires_boottime_ns <= expected.expires_boottime_ns) {
+    return {.status = LeaseRenewalStatus::not_owned, .receipt = std::nullopt};
+  }
+  const LeaseRenewalReceipt requested{
+      .concurrency_key = expected.concurrency_key,
+      .owner_run_id = expected.owner_run_id,
+      .lease_id = expected.lease_id,
+      .fencing_token = expected.fencing_token,
+      .clock_domain = expected.clock_domain,
+      .boot_id = expected.boot_id,
+      .acquired_boottime_ns = expected.acquired_boottime_ns,
+      .acquired_wall_time_ns = expected.acquired_wall_time_ns,
+      .prior_expires_boottime_ns = expected.expires_boottime_ns,
+      .new_expires_boottime_ns = new_expires_boottime_ns,
+      .prior_expires_wall_time_ns = expected.expires_wall_time_ns,
+      .new_expires_wall_time_ns = new_expires_wall_time_ns,
+      .renewed_boottime_ns = now.boot.nanoseconds,
+      .renewed_wall_time_ns = now.wall.nanoseconds,
+  };
+
   Transaction transaction(database_);
+  Statement replay(database_, R"sql(
+    SELECT concurrency_key, owner_run_id, lease_id, fencing_token,
+           clock_domain, boot_id, acquired_boottime_ns,
+           acquired_wall_time_ns, prior_expires_boottime_ns,
+           new_expires_boottime_ns, prior_expires_wall_time_ns,
+           new_expires_wall_time_ns, renewed_boottime_ns,
+           renewed_wall_time_ns
+    FROM resource_lease_renewals
+    WHERE concurrency_key=? AND lease_id=? AND fencing_token=?
+      AND prior_expires_boottime_ns=?
+  )sql");
+  bind_text(replay.get(), 1, expected.concurrency_key);
+  bind_text(replay.get(), 2, expected.lease_id);
+  bind_integer(replay.get(), 3,
+               checked_integer(expected.fencing_token, "fencing_token"));
+  bind_integer(replay.get(), 4, expected.expires_boottime_ns);
+  const int replay_status = sqlite3_step(replay.get());
+  if (replay_status == SQLITE_ROW) {
+    const LeaseRenewalReceipt stored = renewal_receipt_from_row(replay.get());
+    if (stored != requested) {
+      throw std::runtime_error(
+          "lease renewal replay conflicts with its durable receipt");
+    }
+    transaction.commit();
+    return {.status = LeaseRenewalStatus::replayed, .receipt = stored};
+  }
+  if (replay_status != SQLITE_DONE) {
+    throw std::runtime_error("could not inspect lease renewal replay receipt: " +
+                             std::string(sqlite3_errmsg(database_)));
+  }
+
   Statement update(database_, R"sql(
     UPDATE resource_leases
     SET expires_boottime_ns=?, expires_wall_time_ns=?
     WHERE concurrency_key=? AND owner_run_id=? AND lease_id=? AND fencing_token=?
       AND clock_domain='boottime/v1' AND boot_id=?
+      AND acquired_boottime_ns=? AND acquired_wall_time_ns=?
+      AND expires_boottime_ns=? AND expires_wall_time_ns=?
       AND released_wall_time_ns IS NULL AND expires_boottime_ns>?
       AND NOT EXISTS(
         SELECT 1 FROM resource_lease_releases AS release
@@ -3694,18 +4094,53 @@ bool Journal::renew_lease(const std::string& concurrency_key, const std::string&
           AND release.fencing_token=resource_leases.fencing_token
       )
   )sql");
-  bind_integer(update.get(), 1, expires_boottime_ns);
-  bind_integer(update.get(), 2, expires_wall_time_ns);
-  bind_text(update.get(), 3, concurrency_key);
-  bind_text(update.get(), 4, owner_run_id);
-  bind_text(update.get(), 5, lease_id);
-  bind_integer(update.get(), 6, checked_integer(fencing_token, "fencing_token"));
-  bind_text(update.get(), 7, now.boot_id);
-  bind_integer(update.get(), 8, now.boot.nanoseconds);
+  bind_integer(update.get(), 1, new_expires_boottime_ns);
+  bind_integer(update.get(), 2, new_expires_wall_time_ns);
+  bind_text(update.get(), 3, expected.concurrency_key);
+  bind_text(update.get(), 4, expected.owner_run_id);
+  bind_text(update.get(), 5, expected.lease_id);
+  bind_integer(update.get(), 6,
+               checked_integer(expected.fencing_token, "fencing_token"));
+  bind_text(update.get(), 7, expected.boot_id);
+  bind_integer(update.get(), 8, expected.acquired_boottime_ns);
+  bind_integer(update.get(), 9, expected.acquired_wall_time_ns);
+  bind_integer(update.get(), 10, expected.expires_boottime_ns);
+  bind_integer(update.get(), 11, expected.expires_wall_time_ns);
+  bind_integer(update.get(), 12, now.boot.nanoseconds);
   require_done(database_, update.get(), "renew resource lease");
   const bool renewed = sqlite3_changes(database_) == 1;
+  if (!renewed) {
+    transaction.commit();
+    return {.status = LeaseRenewalStatus::not_owned, .receipt = std::nullopt};
+  }
+
+  Statement receipt(database_, R"sql(
+    INSERT INTO resource_lease_renewals(
+      concurrency_key, owner_run_id, lease_id, fencing_token, clock_domain,
+      boot_id, acquired_boottime_ns, acquired_wall_time_ns,
+      prior_expires_boottime_ns, new_expires_boottime_ns,
+      prior_expires_wall_time_ns, new_expires_wall_time_ns,
+      renewed_boottime_ns, renewed_wall_time_ns
+    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  )sql");
+  bind_text(receipt.get(), 1, requested.concurrency_key);
+  bind_text(receipt.get(), 2, requested.owner_run_id);
+  bind_text(receipt.get(), 3, requested.lease_id);
+  bind_integer(receipt.get(), 4,
+               checked_integer(requested.fencing_token, "fencing_token"));
+  bind_text(receipt.get(), 5, requested.clock_domain);
+  bind_text(receipt.get(), 6, requested.boot_id);
+  bind_integer(receipt.get(), 7, requested.acquired_boottime_ns);
+  bind_integer(receipt.get(), 8, requested.acquired_wall_time_ns);
+  bind_integer(receipt.get(), 9, requested.prior_expires_boottime_ns);
+  bind_integer(receipt.get(), 10, requested.new_expires_boottime_ns);
+  bind_integer(receipt.get(), 11, requested.prior_expires_wall_time_ns);
+  bind_integer(receipt.get(), 12, requested.new_expires_wall_time_ns);
+  bind_integer(receipt.get(), 13, requested.renewed_boottime_ns);
+  bind_integer(receipt.get(), 14, requested.renewed_wall_time_ns);
+  require_done(database_, receipt.get(), "record resource lease renewal");
   transaction.commit();
-  return renewed;
+  return {.status = LeaseRenewalStatus::renewed, .receipt = requested};
 }
 
 bool Journal::release_lease(const std::string& concurrency_key, const std::string& owner_run_id,

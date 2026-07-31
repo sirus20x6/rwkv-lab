@@ -125,6 +125,14 @@ public:
   bool renew_lease(const std::string& concurrency_key, const std::string& owner_run_id,
                    const std::string& lease_id, std::uint64_t fencing_token,
                    const AuthorityTimeSample& now, std::int64_t timeout_ns);
+  // Replay identity includes the exact acquisition and expected expiry,
+  // authority-time sample, and timeout because those values define the
+  // immutable receipt bytes. A later sample against stale expected state is a
+  // conflict. After restart, resume from active_lease() rather than retrying
+  // stale expected state.
+  LeaseRenewalResult renew_lease_exact(const ResourceLease& expected,
+                                       const AuthorityTimeSample& now,
+                                       std::int64_t timeout_ns);
   bool release_lease(const std::string& concurrency_key, const std::string& owner_run_id,
                      const std::string& lease_id, std::uint64_t fencing_token,
                      const AuthorityTimeSample& now);

@@ -86,17 +86,57 @@ std::vector<std::string> canonical_capabilities(
   return capabilities;
 }
 
+bool resume_from_checkpoint(ResumeGrade grade) {
+  return grade == ResumeGrade::compatible || grade == ResumeGrade::exact;
+}
+
+void validate_lifecycle(const OperationLifecycleCapabilities& lifecycle) {
+  if (!lifecycle.stateful) {
+    if (lifecycle.checkpoint_now || lifecycle.pause_keep_resources ||
+        lifecycle.pause_release_resources ||
+        lifecycle.resume_grade != ResumeGrade::none) {
+      throw std::invalid_argument(
+          "stateless adapter operations cannot declare checkpoint, pause, or "
+          "resume capabilities");
+    }
+    return;
+  }
+  if (lifecycle.resume_grade == ResumeGrade::exact &&
+      !lifecycle.checkpoint_now) {
+    throw std::invalid_argument(
+        "exact-resume adapter operations must support checkpoint_now");
+  }
+  if (lifecycle.resume_grade == ResumeGrade::terminal_checkpoint &&
+      lifecycle.checkpoint_now) {
+    throw std::invalid_argument(
+        "terminal-checkpoint adapter operations cannot support checkpoint_now");
+  }
+  if (lifecycle.pause_release_resources &&
+      (!lifecycle.checkpoint_now ||
+       !resume_from_checkpoint(lifecycle.resume_grade))) {
+    throw std::invalid_argument(
+        "pause_release_resources requires checkpoint_now and a resumable "
+        "checkpoint grade");
+  }
+}
+
 void validate_profile(AdapterProfile& profile) {
   if (profile.key.adapter.empty() || profile.key.version.empty() ||
       profile.key.operation.empty() || profile.key.contract.empty()) {
     throw std::invalid_argument("adapter profile key fields must not be empty");
   }
   const bool builtin = profile.key.runtime == ComponentRuntime::builtin;
+  validate_lifecycle(profile.lifecycle);
+  if (profile.lifecycle.stateful && profile.effect != Effect::process) {
+    throw std::invalid_argument(
+        "stateful adapter operations must have process effect");
+  }
   if (builtin) {
     if (!profile.code_fingerprint.empty() ||
-        !profile.required_capabilities.empty()) {
+        !profile.required_capabilities.empty() ||
+        profile.lifecycle != OperationLifecycleCapabilities{}) {
       throw std::invalid_argument(
-          "builtin adapter profiles cannot carry worker launch authority");
+          "builtin adapter profiles cannot carry worker launch or lifecycle authority");
     }
     const bool acquire =
         profile.key.adapter == "trainvm.core" &&
@@ -159,7 +199,7 @@ AdapterRegistry::AdapterRegistry(std::vector<AdapterProfile> profiles) {
   }
   registry_digest_ = "sha256:" +
                      sha256_hex(nlohmann::json{
-                                    {"api_version", "trainvm.adapters/v1"},
+                                    {"api_version", "trainvm.adapters/v2"},
                                     {"profiles", std::move(canonical_profiles)}}
                                     .dump());
 }
@@ -254,9 +294,9 @@ AdapterRegistry AdapterRegistry::load_file(
         "adapter registry schema validation failed: " +
         diagnostics_json(diagnostics).dump());
   }
-  if (document.api_version != "trainvm.adapters/v1") {
+  if (document.api_version != "trainvm.adapters/v2") {
     throw std::invalid_argument(
-        "adapter registry api_version must be trainvm.adapters/v1");
+        "adapter registry api_version must be trainvm.adapters/v2");
   }
   if (std::ranges::any_of(
           document.profiles, [](const AdapterProfile& profile) {
@@ -296,6 +336,30 @@ const AdapterProfile& AdapterRegistry::resolve(
 }
 
 void AdapterRegistry::validate_plan(const CompiledPlan& plan) const {
+  const Workflow& workflow = plan.experiment.spec.workflow;
+  std::set<std::string> reachable;
+  if (workflow.nodes.contains(workflow.entrypoint)) {
+    reachable.insert(workflow.entrypoint);
+    bool changed = true;
+    while (changed) {
+      changed = false;
+      const std::vector<std::string> snapshot(reachable.begin(),
+                                               reachable.end());
+      for (const std::string& name : snapshot) {
+        for (const Transition& transition : workflow.nodes.at(name).transitions) {
+          if (!transition.target.starts_with('$') &&
+              workflow.nodes.contains(transition.target)) {
+            changed = reachable.insert(transition.target).second || changed;
+          }
+        }
+      }
+    }
+  }
+  const bool pause_required = std::ranges::any_of(
+      plan.experiment.spec.controls.catalog,
+      [](const auto& entry) {
+        return entry.second.requires_pause.value_or(false);
+      });
   for (const auto& [name, component] : plan.experiment.spec.components) {
     (void)name;
     for (const auto& [operation, declaration] : component.operations) {
@@ -315,6 +379,82 @@ void AdapterRegistry::validate_plan(const CompiledPlan& plan) const {
           "workflow node " + name +
           " disagrees with its authority-owned effect or idempotency class");
     }
+    if (reachable.contains(name)) {
+      if (node.effect == Effect::process &&
+          plan.experiment.spec.recovery.exact_resume &&
+          node.idempotency == Idempotency::at_most_once) {
+        throw AdapterResolutionError(
+            "workflow node " + name +
+            " requests exact resume but is an at-most-once process operation");
+      }
+      if (profile.lifecycle.stateful) {
+        if (!profile.lifecycle.graceful_stop) {
+          throw AdapterResolutionError(
+              "workflow node " + name +
+              " has a graceful-stop timeout but its stateful operation cannot stop gracefully");
+        }
+        if (plan.experiment.spec.recovery.exact_resume &&
+            profile.lifecycle.resume_grade != ResumeGrade::exact) {
+          throw AdapterResolutionError(
+              "workflow node " + name +
+              " requests exact resume but its stateful process operation is not "
+              "exact-resumable");
+        }
+        if (plan.experiment.spec.recovery.release_accelerators_when_paused) {
+          const bool release = *plan.experiment.spec.recovery
+                                    .release_accelerators_when_paused;
+          const bool supported =
+              release ? profile.lifecycle.pause_release_resources
+                      : profile.lifecycle.pause_keep_resources;
+          if (!supported) {
+            throw AdapterResolutionError(
+                "workflow node " + name +
+                (release
+                     ? " cannot pause while releasing resources as requested"
+                     : " cannot pause while retaining resources as requested"));
+          }
+        } else if (pause_required &&
+                   !profile.lifecycle.pause_keep_resources &&
+                   !profile.lifecycle.pause_release_resources) {
+          throw AdapterResolutionError(
+              "workflow node " + name +
+              " is targeted by a pause-required plan without a supported pause protocol");
+        }
+      }
+    }
+  }
+  if (plan.experiment.spec.execution) {
+    const ExecutionPhases& execution = *plan.experiment.spec.execution;
+    const Component& component =
+        plan.experiment.spec.components.at(execution.component);
+    const AdapterProfile& profile =
+        resolve(component, execution.operation);
+    const bool reachable_target = std::ranges::any_of(
+        reachable, [&](const std::string& name) {
+          const Invocation& invocation = workflow.nodes.at(name).invoke;
+          return invocation.component == execution.component &&
+                 invocation.operation == execution.operation;
+        });
+    if (!reachable_target) {
+      throw AdapterResolutionError(
+          "execution phases must target an operation invoked by a reachable workflow node");
+    }
+    const auto reject_unsupported = [&](bool requested, bool supported,
+                                        std::string_view capability) {
+      if (requested && !supported) {
+        throw AdapterResolutionError(
+            "execution requests " + std::string(capability) +
+            " but the authority-owned operation does not support it");
+      }
+    };
+    reject_unsupported(execution.compile && execution.compile->enabled,
+                       profile.lifecycle.compile, "compile");
+    reject_unsupported(execution.warmup && execution.warmup->enabled,
+                       profile.lifecycle.warmup, "warmup");
+    reject_unsupported(execution.qualify && execution.qualify->enabled,
+                       profile.lifecycle.qualify, "qualify");
+    reject_unsupported(execution.gpu_trace && execution.gpu_trace->enabled,
+                       profile.lifecycle.profile, "profile");
   }
 }
 
@@ -354,7 +494,7 @@ std::string AdapterRegistry::plan_lock_manifest(
   for (const std::string& profile : canonical_profiles) {
     locked.push_back(nlohmann::json::parse(profile));
   }
-  return nlohmann::json{{"api_version", "trainvm.adapter-lock/v1"},
+  return nlohmann::json{{"api_version", "trainvm.adapter-lock/v2"},
                         {"profiles", std::move(locked)}}
       .dump();
 }

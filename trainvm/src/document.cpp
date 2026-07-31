@@ -784,6 +784,18 @@ void validate_experiment(const Experiment& experiment, std::vector<Diagnostic>& 
               "node is unreachable from the entrypoint");
       }
     }
+    if (spec.execution) {
+      const bool targets_reachable_operation = std::ranges::any_of(
+          reachable, [&](const std::string& name) {
+            const Invocation& invocation = workflow.nodes.at(name).invoke;
+            return invocation.component == spec.execution->component &&
+                   invocation.operation == spec.execution->operation;
+          });
+      if (!targets_reachable_operation) {
+        error(diagnostics, "execution.target", "/spec/execution",
+              "execution phases must target an operation invoked by a reachable workflow node");
+      }
+    }
   }
   validate_cycles(workflow, graph, diagnostics);
 

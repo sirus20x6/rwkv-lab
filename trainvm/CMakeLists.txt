@@ -60,6 +60,7 @@ add_library(trainvm_core
   src/host_launch.cpp
   src/host_launch_registry.cpp
   src/journal.cpp
+  src/lease_renewal.cpp
   src/reconciler.cpp
 )
 target_include_directories(trainvm_core PUBLIC include)

@@ -12,6 +12,43 @@ script-only. Executability is therefore an explicit registry property with a sea
 effect contract, not something inferred from packaging, importability, filenames, or the old
 dashboard process list.
 
+## Lifecycle authority and current resume grades
+
+The authority registry uses a required, reflected `lifecycle` object on every
+operation profile. Its fixed fields are `stateful`, `graceful_stop`,
+`checkpoint_now`, `pause_keep_resources`, `pause_release_resources`, `compile`,
+`warmup`, `qualify`, `profile`, and `resume_grade`. The closed grades mean:
+
+| Grade | Authority meaning |
+|---|---|
+| `none` | no operation-state restart or checkpoint-resume claim; mandatory for stateless operations |
+| `restart_only` | interruption restarts the operation from its immutable inputs or parent |
+| `terminal_checkpoint` | a successful terminal invocation publishes reusable state, but there is no mid-run safe-point claim |
+| `compatible` | a checkpoint can seed continuation, but omitted state or identity prevents trajectory-equivalence claims |
+| `exact` | the operation implements the complete, identity-bound checkpoint and resume contract and supports checkpoint-now |
+
+The following classifications document the audited original implementation;
+they are test data and migration requirements, not registration or launch
+authority for the legacy entrypoints:
+
+| Original operation family | Current grade | Reason |
+|---|---|---|
+| `rwkv_pretrain` | `terminal_checkpoint` | terminal model/optimizer/RNG state exists, but no periodic/signal checkpoint or sealed config/data identity |
+| `rwkv_finetune`, standalone Engram stages, consolidation and current post-training arms | `restart_only` | interruption restarts a bounded operation from immutable inputs |
+| canonical `train_mla` / `train_mla_engram` | `compatible` | checkpoints omit RNG and data cursor state |
+| `qwen_ao3_cpt` | `compatible` | atomic cursor/config/RNG checkpoint and signal safe point exist, but the packed-token bytes and frozen base-model bytes are not content-bound |
+| MageFlow full-backbone pretrain and routed expert trainer | `compatible` | useful state restoration exists, but the complete input/source identity closure is not exact |
+| MageFlow terminal/TREAD trainer | `compatible` | strong contract/cursor/RNG/expert-bank state exists, but manifest-referenced image/caption bytes and source checkpoints are not fully content-bound |
+| canonical `vision_train` and vision teacher compressor | `exact` candidates | atomic sampler/RNG and manifest-bound state; require the same golden gate |
+| vision native head and raw-pixel student | `compatible` | missing cursor or external-input identity prevents exactness |
+| direct RLVR and external LTX wrapper | `compatible` | resume state or upstream resume exists, but verifier/config/revision/input closure is incomplete |
+| deterministic data/cache builders, validation, generation, evaluation, and diagnostics | `none` | stateless/replay semantics are represented by effect and idempotency, not a fictitious training-resume grade |
+
+An exact-recovery plan may mix an exact stateful trainer with stateless process
+nodes such as cache builders. It fails registry validation if any reachable
+stateful process operation is graded `compatible`, `terminal_checkpoint`,
+`restart_only`, or `none`.
+
 | Existing workflow | Current mechanism | Declarative representation | Required adapter capability |
 |---|---|---|---|
 | Synthetic and architecture/objective A/B campaigns | `rwkv_lab.experiment`, `rwkv_lab.config`, experiment registry, paired/factorial arms and confirmation seeds | parameterized arm graph with successive-halving rungs, paired tapes, confirm nodes, and statistical decision artifact | deterministic arm, rung checkpoint, paired evaluation, campaign aggregation |

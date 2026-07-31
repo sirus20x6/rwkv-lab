@@ -155,6 +155,10 @@ eval suites replace sequence-length and perplexity gates.
 
 ### P0 — safe execution foundation
 
+The implementation contract and adversarial gates for host-wide allocation, guarded launch, and
+startup orphan recovery are defined in
+[`HOST_RESOURCE_AUTHORITY.md`](HOST_RESOURCE_AUTHORITY.md).
+
 - Boot-scoped authority time and journal migration with legacy lease quarantine.
 - Centralized active-lease validation, renewal receipts, fencing-token checks, and host-wide resource
   locks.

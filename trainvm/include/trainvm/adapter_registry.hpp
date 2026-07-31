@@ -24,12 +24,40 @@ struct AdapterKey {
   auto operator<=>(const AdapterKey&) const = default;
 };
 
+enum class ResumeGrade {
+  none,
+  restart_only,
+  terminal_checkpoint,
+  compatible,
+  exact,
+};
+
+// A closed, authority-owned declaration of the lifecycle protocol implemented
+// by one exact adapter operation. These booleans are intentionally bounded:
+// experiment documents can select capabilities, but cannot add arbitrary
+// lifecycle verbs or infer them from signals, files, or worker output.
+struct OperationLifecycleCapabilities {
+  bool stateful{};
+  bool graceful_stop{};
+  bool checkpoint_now{};
+  bool pause_keep_resources{};
+  bool pause_release_resources{};
+  bool compile{};
+  bool warmup{};
+  bool qualify{};
+  bool profile{};
+  ResumeGrade resume_grade{};
+
+  bool operator==(const OperationLifecycleCapabilities&) const = default;
+};
+
 struct AdapterProfile {
   AdapterKey key;
   Effect effect{};
   Idempotency idempotency{};
   std::string code_fingerprint;
   std::vector<std::string> required_capabilities;
+  OperationLifecycleCapabilities lifecycle{};
 };
 
 struct AdapterRegistryDocument {

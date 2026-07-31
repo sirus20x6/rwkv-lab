@@ -9,6 +9,11 @@ The cross-family performance, profiling, and optimization plan is maintained in
 workers, RWKV, transformers, vision/multimodal training, fine-tuning, distillation, post-training,
 and qualification; TrainVM itself remains model-family-neutral.
 
+The P0 physical-resource, guarded-launch, and orphan-recovery boundary is specified in
+[`HOST_RESOURCE_AUTHORITY.md`](HOST_RESOURCE_AUTHORITY.md). Journal-local leases remain logical run
+authority; host-wide accelerator and process authority belongs to the shared host daemon described
+there.
+
 ## Decision
 
 Build a compiled C++ control-plane daemon, **TrainVM**, that owns the lifecycle of every
@@ -94,7 +99,8 @@ The Go dashboard becomes a client for mutations. Python workers never open the d
 | experiment definition and revisions | TrainVM | content-addressed after validation |
 | desired run state | TrainVM | revisioned commands with idempotency keys |
 | observed worker state | worker, recorded by TrainVM | heartbeat and structured events |
-| GPU/process lease | TrainVM | one durable lease per concurrency key |
+| logical run/workspace lease | TrainVM | one durable boot-scoped lease per concurrency key |
+| physical GPU/process grant | host resource daemon | host-wide across every journal and service |
 | model and tensor operations | Python worker | PyTorch remains where it is valuable |
 | event and command journal | TrainVM | append-only SQLite/WAL initially |
 | query projections | TrainVM | rebuildable from journal |
@@ -158,6 +164,32 @@ module and a hand-built set of arguments. An adapter descriptor declares:
 - emitted event types, safe points, checkpoint protocol, and capabilities;
 - side-effect and path policy;
 - compatibility and migration rules.
+
+Lifecycle authority is attached to an exact operation profile rather than to a
+component, executable name, or experiment. `trainvm.adapters/v2` uses the
+reflected `OperationLifecycleCapabilities` object: a closed `stateful` bit,
+booleans for graceful stop, checkpoint-now, retained-resource pause,
+resource-releasing pause, compile, warmup, qualification, and profiling, plus
+the reflected resume grade `none | restart_only | terminal_checkpoint |
+compatible | exact`. Stateless operations always use grade `none` and cannot
+claim checkpoint or pause state. A stateful declaration is legal only for a
+`process` effect. Resource-releasing pause requires an on-demand checkpoint and
+a compatible or exact grade; `terminal_checkpoint` has no mid-run safe point
+and cannot declare checkpoint-now or resource-releasing pause. Exact resume
+additionally requires checkpoint-now.
+
+When `spec.recovery.exact_resume` is true, registry validation walks the
+reachable workflow and rejects every stateful process operation whose
+authority-owned grade is not `exact`. Stateless process nodes such as
+idempotent cache builders do not have to pretend to serialize training state,
+but reachable `at_most_once` process operations are incompatible with exact
+recovery. Every reachable stateful operation must support graceful stop and the
+plan's retained-resource or resource-releasing pause policy; a pause-required
+control without an explicit resource policy requires at least one safe pause
+protocol. The same registry check gates requested compile, warmup, qualify, and
+profile phases against an operation actually invoked by a reachable workflow
+node. These declarations describe protocol support only; they do not
+themselves authorize a legacy launcher.
 
 Adding a trainer family requires one adapter and its tests. Creating another experiment from
 registered operations requires no new Go handler, HTML form, subprocess code, or Python supervisor.

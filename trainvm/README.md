@@ -51,7 +51,8 @@ Implemented now:
   generic worker/simulation hooks, with atomic builtin result, transition, dispatch receipt, and
   immutable lease-release evidence;
 - an authority-owned exact adapter registry that binds adapter/version/runtime/operation/contract,
-  effect, idempotency, trusted code fingerprint, and required worker capabilities before mutation;
+  effect, idempotency, trusted code fingerprint, required worker capabilities, and a reflected
+  operation lifecycle/resume grade before mutation;
 - a restart-safe launch-authorization reconciler that resumes partial resource admission, converges
   concurrent/repeated steps on one fenced launch intent, and fails closed on registry drift;
 - a separate immutable host-launch registry and deterministic `worker.launch_bound` receipt that
@@ -60,8 +61,9 @@ Implemented now:
   process-free and structurally excludes dynamic credentials;
 - a strongly typed authority-time sampler that separates display-only wall time from Linux
   `CLOCK_BOOTTIME`, latches one boot UUID, and fails closed on boot-time regression;
-- journal schema v5 boot-scoped lease authority across acquisition, renewal, release, readiness,
-  dispatch, control acknowledgement, and host binding; v4 wall-clock rows migrate as quarantined
+- journal schema v6 boot-scoped lease authority across acquisition, renewal, release, readiness,
+  dispatch, control acknowledgement, and host binding; renewal atomically advances mutable expiry
+  and appends an immutable exact-input receipt, while v4 wall-clock rows migrate as quarantined
   `legacy-wall/v1` evidence and can never satisfy active authority;
 - exact journal-schema and metadata attestation with transactional v4 migration, plus a
   descriptor-resolved authority namespace that rejects unsafe SQLite aliases and permanently
@@ -91,9 +93,15 @@ adapter operations. The coverage and optimization inventories live in
 [`WORKFLOW_COVERAGE.md`](../docs/experiment-vm/WORKFLOW_COVERAGE.md) and
 [`PERFORMANCE_ROADMAP.md`](../docs/experiment-vm/PERFORMANCE_ROADMAP.md).
 
-The v5 clock migration closes scalar wall time as a lease-authority path. It does not yet enable
-spawning: renewal scheduling, host-wide resource/orphan checks, cgroup cleanup, process-instance
-credentials, and durable spawn/exit receipts remain mandatory startup gates.
+The v6 renewal authority includes a manually tickable coordinator bounded to 256 exact targets that
+samples authority time separately for each target and permanently stops on clock or receipt
+failure. Renewal receipts bind acquisition identity, prior and new expiry, the equal boot/wall
+timeout delta, and a continuous per-fence history; conflicting inserts, replacements, updates, and
+deletes are rejected. It deliberately owns no thread or timer: service scheduling,
+host-wide resource/orphan checks, cgroup cleanup, process-instance credentials, and durable
+spawn/exit receipts remain mandatory startup gates before spawning is enabled. Exact renewal replay
+requires the same expected expiry, authority-time sample, and timeout; after restart a coordinator
+tracks the journal's current active lease instead of retrying stale pre-renewal state.
 
 The journal namespace guard closes cooperating-process split authority and rejects unsafe SQLite
 side-file aliases at every SQL boundary, but stock SQLite still opens WAL/SHM/rollback files by
@@ -160,7 +168,7 @@ format change must update the golden test and supply a plan-schema migration rat
 `compile` is the bounded dashboard authoring boundary: it reads one JSON document from stdin and
 returns either structured diagnostics or the native compiler's canonical plan and content hash.
 `serve` is the stateful mutation boundary. The dashboard connects to its Unix socket through gRPC;
-it never opens the journal writable. Startup requires bounded `trainvm.adapters/v1` and
+it never opens the journal writable. Startup requires bounded `trainvm.adapters/v2` and
 `trainvm.host-launches/v1` registry documents, decoded strictly and retained immutably for the
 daemon lifetime. An explicitly supplied host registry with no profiles is the launch-disabled
 configuration; missing or invalid host authority fails startup. `SubmitExperiment`
@@ -178,6 +186,43 @@ Secret-marked parameters are restricted to versioned opaque references of the fo
 The host-launch registry contains only fixed `public_arguments`. Future resolved credentials will
 travel over sealed descriptors and will not enter argv, the adapter lock, launch binding, journal,
 or diagnostics.
+
+Every external profile in `trainvm.adapters/v2` contains the following closed
+authority-owned shape (values shown are illustrative, not a registered legacy
+launcher):
+
+```json
+{
+  "lifecycle": {
+    "stateful": true,
+    "graceful_stop": true,
+    "checkpoint_now": true,
+    "pause_keep_resources": true,
+    "pause_release_resources": true,
+    "compile": true,
+    "warmup": true,
+    "qualify": true,
+    "profile": true,
+    "resume_grade": "exact"
+  }
+}
+```
+
+`resume_grade` is one of `none`, `restart_only`, `terminal_checkpoint`,
+`compatible`, or `exact`. Stateless profiles must use `none` and cannot declare
+checkpoint or pause controls. Stateful profiles must have `process` effect.
+`terminal_checkpoint` cannot claim a mid-run checkpoint or resource-releasing
+pause; resource-releasing pause requires checkpoint-now and a `compatible` or
+`exact` grade. A plan requesting exact recovery is rejected unless every
+reachable stateful process operation is graded `exact`, and no reachable
+process operation may be `at_most_once`. Reachable stateful operations must
+also implement graceful stop and the declared pause resource policy. Typed
+compile, warmup, qualification, and profiling phases must target an operation
+actually invoked by a reachable workflow node.
+
+The canonical plan adapter lock is `trainvm.adapter-lock/v2`. Lifecycle fields
+are part of its digest; legacy v1 locks are rejected rather than silently
+upgraded.
 
 ## Journal CLI
 
