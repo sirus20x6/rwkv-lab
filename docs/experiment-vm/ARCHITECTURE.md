@@ -12,19 +12,22 @@ typed execution plan. Python remains the worker language for PyTorch, model cons
 other tensor-heavy code. The existing Go dashboard remains the web/UI layer during the migration
 and talks to TrainVM through a generated protocol instead of spawning or signalling trainers.
 
-The durable system boundary is schema-first, not compiler-reflection-first:
+The durable system boundary is schema-first, while the TrainVM implementation is intentionally
+GCC-reflection-first:
 
 - Protobuf defines commands, events, worker messages, and dashboard queries.
 - JSON Schema defines the human-authored experiment document.
 - Generated C++/Go/Python types provide the cross-language contract.
-- C++26 reflection may remove registration and serialization boilerplate inside the C++ process,
-  but persisted data never depends on a compiler-specific reflection representation.
+- C++26 reflection drives struct decoding, strict unknown-field checks, enum conversion, descriptor
+  generation, and internal operation registration inside the C++ process.
+- Persisted data never depends on a compiler-specific reflection representation.
 
 GCC 16 in this workspace compiles the P2996 reflection syntax with
 `-std=c++26 -freflection`, consistent with the [GCC C++ status table](https://gcc.gnu.org/projects/cxx-status.html).
-[Clang's C++ status table](https://clang.llvm.org/cxx_status) still marks P2996 unsupported. The
-portable baseline is therefore C++23 plus generated types; reflection is an optional GCC build
-profile until both the toolchain and libraries are dependable.
+[Clang's C++ status table](https://clang.llvm.org/cxx_status) still marks P2996 unsupported. TrainVM
+therefore standardizes on GCC 16+, `-std=c++26`, and `-freflection`; supporting Clang is not a goal.
+JSON Schema and Protobuf remain explicit so compiler upgrades cannot silently change stored plans or
+wire messages.
 
 ## Why the current boundary needs to change
 
@@ -367,13 +370,14 @@ Exit: a new composition of registered operations needs only a document and no da
 
 Exit: no active run depends on PID discovery, status-file polling, or a shell supervisor for recovery.
 
-### Phase 5 — hardening and optional reflection profile
+### Phase 5 — hardening and reflection stabilization
 
 - fault injection at every external-effect boundary;
 - property tests for transitions and control revisions;
 - compatibility/migration tests across adapter and document versions;
 - benchmark event ingestion and metric compaction;
-- enable reflection-backed internal registration only where it removes code without changing storage.
+- extend reflection-backed registration where it removes code without changing storage, and retain
+  compile-time assertions that detect compiler/library behavior changes.
 
 ## Required test strategy
 
@@ -394,5 +398,6 @@ Exit: no active run depends on PID discovery, status-file polling, or a shell su
 - a general-purpose bytecode VM or arbitrary user scripting engine;
 - Kubernetes or multi-host scheduling;
 - dynamic mutation of already executed graph history;
+- supporting a non-GCC TrainVM toolchain;
 - making C++26 reflection a persisted-format dependency;
 - rewriting the working Go/Datastar/Pixi frontend before the control plane is proven.

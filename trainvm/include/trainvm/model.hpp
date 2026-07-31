@@ -1,0 +1,218 @@
+#pragma once
+
+#include <cstdint>
+#include <map>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include <nlohmann/json.hpp>
+
+namespace trainvm {
+
+using Json = nlohmann::json;
+
+enum class AcceleratorVendor { nvidia, amd, intel, none };
+enum class ParameterType { string, integer, number, boolean, path, duration };
+enum class ArtifactType { path, checkpoint, dataset, image_gallery, metrics, report, opaque };
+enum class Immutability { immutable, append_only, mutable_until_publish };
+enum class Fingerprint { sha256, manifest_sha256, adapter, none };
+enum class ComponentRuntime { builtin, python_worker, native_worker, external_worker };
+enum class Idempotency { replay_safe, receipt_required, at_most_once };
+enum class Effect { read_only, workspace_write, process, resource, external };
+enum class Backoff { none, fixed, exponential };
+enum class ProgressDirection { increasing, decreasing };
+enum class ControlType { number, integer, boolean, string, enumeration };
+enum class ApplyPoint {
+  immediate,
+  next_microbatch,
+  next_optimizer_step,
+  next_eval,
+  next_checkpoint,
+  restart,
+};
+enum class MetricType { counter, gauge, histogram };
+enum class StepDomain { microbatch, optimizer_step, sample, token, epoch, wall_time };
+enum class Aggregation { last, sum, mean, weighted_mean, min, max, histogram };
+enum class ReconcilePolicy { fail_closed, adopt_if_fingerprint_matches, restart_from_checkpoint };
+enum class OrphanPolicy { leave_and_block, adopt_if_identity_matches, terminate_and_recover };
+
+struct Metadata {
+  std::string name;
+  std::optional<std::string> description;
+  std::optional<std::map<std::string, std::string>> labels;
+};
+
+struct Workspace {
+  std::string root;
+  std::string run_directory;
+  std::string concurrency_key;
+  std::optional<std::vector<std::string>> allowed_read_roots;
+  std::optional<std::vector<std::string>> allowed_write_roots;
+};
+
+struct Accelerators {
+  AcceleratorVendor vendor{};
+  std::int64_t count{};
+  std::optional<double> minimum_memory_gib;
+  bool exclusive{};
+  std::optional<std::map<std::string, std::string>> selector;
+};
+
+struct Resources {
+  Accelerators accelerators;
+  std::optional<double> minimum_host_memory_gib;
+  std::optional<std::int64_t> cpu_threads;
+  std::optional<std::int64_t> lease_timeout_seconds;
+};
+
+struct Parameter {
+  ParameterType type{};
+  Json value;
+  std::optional<std::string> description;
+  std::optional<bool> secret_reference;
+};
+
+struct Artifact {
+  ArtifactType type{};
+  std::optional<std::string> schema;
+  Immutability immutability{};
+  Fingerprint fingerprint{};
+  std::optional<bool> required;
+  std::optional<std::string> description;
+};
+
+struct Operation {
+  std::string contract;
+  std::optional<std::string> description;
+};
+
+struct Component {
+  std::string adapter;
+  std::string version;
+  ComponentRuntime runtime{};
+  std::map<std::string, Operation> operations;
+};
+
+struct NodeOutputReference {
+  std::string node;
+  std::string name;
+};
+
+struct Binding {
+  std::optional<Json> literal;
+  std::optional<std::string> parameter;
+  std::optional<std::string> artifact;
+  std::optional<std::string> control;
+  std::optional<std::string> context;
+  std::optional<NodeOutputReference> node_output;
+};
+
+struct Invocation {
+  std::string component;
+  std::string operation;
+  std::map<std::string, Binding> inputs;
+};
+
+struct Transition {
+  std::string on;
+  std::optional<Json> where;
+  std::string target;
+  std::optional<std::string> description;
+};
+
+struct Retry {
+  std::int64_t maximum_attempts{};
+  Backoff backoff{};
+  std::optional<double> initial_delay_seconds;
+  std::optional<double> maximum_delay_seconds;
+  std::optional<std::vector<std::string>> retryable_events;
+};
+
+struct LoopGuard {
+  std::int64_t max_visits{};
+  std::string progress_field;
+  ProgressDirection direction{};
+};
+
+struct Node {
+  std::optional<std::string> description;
+  Invocation invoke;
+  std::optional<std::map<std::string, std::string>> publishes;
+  Idempotency idempotency{};
+  Effect effect{};
+  std::optional<std::int64_t> timeout_seconds;
+  std::optional<Retry> retry;
+  std::optional<LoopGuard> loop_guard;
+  std::vector<Transition> transitions;
+};
+
+struct Workflow {
+  std::string entrypoint;
+  std::map<std::string, Node> nodes;
+};
+
+struct Control {
+  ControlType type{};
+  Json default_value;
+  std::optional<double> minimum;
+  std::optional<double> maximum;
+  std::optional<std::vector<Json>> values;
+  ApplyPoint apply{};
+  bool mutable_after_start{};
+  std::optional<bool> requires_pause;
+  std::vector<std::string> targets;
+  std::optional<std::string> description;
+  std::optional<std::string> unit;
+};
+
+struct Controls {
+  std::map<std::string, Control> catalog;
+};
+
+struct Metric {
+  std::string name;
+  MetricType type{};
+  std::string unit;
+  StepDomain step_domain{};
+  Aggregation aggregation{};
+  std::optional<std::string> description;
+};
+
+struct Observability {
+  std::int64_t heartbeat_seconds{};
+  std::vector<Metric> metrics;
+  std::int64_t retain_raw_metrics_days{};
+  std::optional<std::string> eval_gallery_artifact;
+  std::optional<std::string> log_artifact;
+};
+
+struct Recovery {
+  bool exact_resume{};
+  std::optional<std::string> checkpoint_artifact;
+  ReconcilePolicy reconcile{};
+  OrphanPolicy orphan_policy{};
+  std::int64_t graceful_stop_seconds{};
+  std::optional<bool> release_accelerators_when_paused;
+};
+
+struct Spec {
+  Workspace workspace;
+  Resources resources;
+  std::map<std::string, Parameter> parameters;
+  std::map<std::string, Artifact> artifacts;
+  std::map<std::string, Component> components;
+  Workflow workflow;
+  Controls controls;
+  Observability observability;
+  Recovery recovery;
+};
+
+struct Experiment {
+  std::string api_version;
+  std::string kind;
+  Metadata metadata;
+  Spec spec;
+};
+
+}  // namespace trainvm

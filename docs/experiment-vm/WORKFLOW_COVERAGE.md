@@ -40,7 +40,7 @@ The first runtime is not ready to own training until these scenarios pass withou
 - SQLite event throughput and metric compaction thresholds.
 - gRPC Python safe-point polling overhead at the current images/second rate.
 - process adoption reliability using pidfd plus worker launch identity on Linux.
-- cost and diagnostic quality of GCC reflection compared with generated registration code.
+- GCC reflection/compiler upgrade compatibility against the golden plan and descriptor corpus.
 - whether artifact payloads need a local content-addressed store or only content-addressed manifests
   referencing existing run directories.
 

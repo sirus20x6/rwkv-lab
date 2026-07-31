@@ -42,6 +42,7 @@ research/
 dashboard/trainboard
 dashboard/trainboard-candidate*
 dashboard/trainboard.before-*
+trainvm/build/
 dashboard/launches/
 
 # --- Logs and local process metadata ---

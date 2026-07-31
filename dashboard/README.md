@@ -6,7 +6,8 @@ GPU-accelerated, real-time training dashboard for the RWKV-Lab conversion projec
 The proposed next control-plane architecture is documented in
 [`docs/experiment-vm/ARCHITECTURE.md`](../docs/experiment-vm/ARCHITECTURE.md). It keeps this Go UI
 while moving declarative plan validation, process ownership, recovery, live controls, and the event
-journal into a typed compiled TrainVM runtime.
+journal into a typed compiled TrainVM runtime. The native implementation and build instructions live
+in [`trainvm/`](../trainvm/README.md).
 
 ## Run
 
