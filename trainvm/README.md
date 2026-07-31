@@ -14,7 +14,9 @@ Implemented now:
 - monotonic run, plan, and worker sequence checks;
 - a SHA-256 journal hash chain;
 - deterministic run-projection replay that refuses a corrupted journal;
-- `validate`, `plan`, and journal inspection/replay CLI commands.
+- a deterministic process-free FSM reducer with structured predicates, terminal states, bounded
+  visits, monotonic loop progress, and stale-attempt rejection;
+- `validate`, `plan`, `simulate`, and journal inspection/replay CLI commands.
 
 This code does not yet launch or control a trainer. The next implementation boundary is the FSM
 reconciler and a fake worker adapter; real MageFlow ownership follows only after fault-injection tests
@@ -51,6 +53,9 @@ trainvm/build/trainvm validate \
   docs/experiment-vm/examples/mageflow-cache-resume.json
 trainvm/build/trainvm plan \
   docs/experiment-vm/examples/mageflow-cache-resume.json
+trainvm/build/trainvm simulate \
+  docs/experiment-vm/examples/mageflow-cache-resume.json \
+  docs/experiment-vm/examples/mageflow-cache-resume.events.jsonl
 ```
 
 The reference plan currently has the golden identity

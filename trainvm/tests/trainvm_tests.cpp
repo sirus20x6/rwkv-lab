@@ -1,4 +1,5 @@
 #include "trainvm/document.hpp"
+#include "trainvm/fsm.hpp"
 #include "trainvm/journal.hpp"
 #include "trainvm/model.hpp"
 #include "trainvm/reflection_json.hpp"
@@ -12,9 +13,11 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -151,6 +154,150 @@ void test_wire_contract() {
   check(decoded.ParseFromString(wire), "Protobuf RunSummary parses");
   check(decoded.identity().run_id() == "run-1" && decoded.identity().revision() == 4U,
         "generated C++ protocol types preserve the run identity");
+}
+
+trainvm::Event event_for(const trainvm::ExecutionState& state, std::string id,
+                         std::string type, nlohmann::json payload = nlohmann::json::object(),
+                         std::optional<std::uint64_t> step = std::nullopt) {
+  return trainvm::Event{
+      .event_id = std::move(id),
+      .run_id = state.run_id,
+      .run_revision = state.revision,
+      .plan_revision = 1,
+      .node_id = state.current_node_id,
+      .attempt_id = state.current_attempt_id,
+      .worker_sequence = 0,
+      .event_type = std::move(type),
+      .event_version = 1,
+      .wall_time_ns = 0,
+      .monotonic_time_ns = 0,
+      .optimizer_step = step,
+      .payload = std::move(payload),
+  };
+}
+
+void test_fsm() {
+  auto compiled = trainvm::compile_document(load_fixture());
+  check(compiled.valid(), "fixture required by FSM test compiles");
+  if (!compiled.valid()) {
+    return;
+  }
+  auto state = trainvm::start_execution(*compiled.plan, "fsm-run");
+  check(state.current_node_id == "acquire_gpu" && state.current_attempt_id == "acquire_gpu@1",
+        "execution starts at a deterministic first attempt");
+  std::vector<trainvm::Event> events;
+  const auto advance = [&](std::string id, std::string type,
+                           nlohmann::json payload = nlohmann::json::object(),
+                           std::optional<std::uint64_t> step = std::nullopt) {
+    events.push_back(event_for(state, std::move(id), std::move(type), std::move(payload), step));
+    state = trainvm::advance_execution(*compiled.plan, state, events.back()).state;
+  };
+
+  advance("fsm-1", "resource.acquired");
+  check(state.current_node_id == "train_to_boundary", "resource acquisition enters training");
+
+  auto wrong_reason = event_for(state, "wrong-reason", "worker.completed", {{"reason", "unknown"}});
+  bool missing_transition_rejected = false;
+  try {
+    (void)trainvm::advance_execution(*compiled.plan, state, wrong_reason);
+  } catch (const std::logic_error&) {
+    missing_transition_rejected = true;
+  }
+  check(missing_transition_rejected, "an event with no matching conditional transition is rejected");
+
+  auto ambiguous_plan = *compiled.plan;
+  auto& ambiguous_transitions =
+      ambiguous_plan.experiment.spec.workflow.nodes.at("train_to_boundary").transitions;
+  ambiguous_transitions.push_back(ambiguous_transitions.front());
+  auto ambiguous_event = event_for(state, "ambiguous", "worker.completed",
+                                   {{"reason", "cache_span_complete"}}, 5500);
+  bool ambiguity_rejected = false;
+  try {
+    (void)trainvm::advance_execution(ambiguous_plan, state, ambiguous_event);
+  } catch (const std::logic_error&) {
+    ambiguity_rejected = true;
+  }
+  check(ambiguity_rejected, "multiple matching conditional transitions are rejected");
+
+  auto wrong_attempt = event_for(state, "wrong-attempt", "worker.completed",
+                                 {{"reason", "cache_span_complete"}}, 5500);
+  wrong_attempt.attempt_id = "train_to_boundary@stale";
+  bool stale_attempt_rejected = false;
+  try {
+    (void)trainvm::advance_execution(*compiled.plan, state, wrong_attempt);
+  } catch (const std::invalid_argument&) {
+    stale_attempt_rejected = true;
+  }
+  check(stale_attempt_rejected, "events from stale node attempts are rejected");
+
+  advance("fsm-2", "worker.completed", {{"reason", "cache_span_complete"}}, 5500);
+  advance("fsm-3", "operation.completed");
+  advance("fsm-4", "operation.completed");
+  advance("fsm-5", "artifact.validated");
+  check(state.current_node_id == "resume_training" && state.visits.at("resume_training") == 1U,
+        "validated cache enters the resume node");
+
+  advance("fsm-6", "worker.restart_requested", nlohmann::json::object(), 6000);
+  check(state.current_attempt_id == "resume_training@2" &&
+            state.loop_progress.at("resume_training") == 6000.0,
+        "clean-process restart increments the attempt and records progress");
+  auto stalled = event_for(state, "fsm-stalled", "worker.restart_requested",
+                           nlohmann::json::object(), 6000);
+  bool stalled_rejected = false;
+  try {
+    (void)trainvm::advance_execution(*compiled.plan, state, stalled);
+  } catch (const std::logic_error&) {
+    stalled_rejected = true;
+  }
+  check(stalled_rejected, "loop re-entry without monotonic progress is rejected");
+  advance("fsm-7", "worker.restart_requested", nlohmann::json::object(), 6500);
+  advance("fsm-8", "worker.completed", {{"reason", "training_complete"}}, 12228);
+  advance("fsm-9", "resource.released");
+  check(state.status == trainvm::ExecutionStatus::completed && state.current_node_id.empty(),
+        "release transition reaches the completed terminal state");
+  check(state.transition_count == 9U && state.revision == 10U,
+        "FSM revisions count committed transitions");
+
+  const auto replayed = trainvm::replay_execution(*compiled.plan, "fsm-run", events);
+  check(replayed == state, "event replay deterministically reconstructs execution state");
+  bool terminal_rejected = false;
+  try {
+    (void)trainvm::advance_execution(*compiled.plan, state, events.back());
+  } catch (const std::logic_error&) {
+    terminal_rejected = true;
+  }
+  check(terminal_rejected, "terminal execution cannot advance");
+
+  trainvm::Event predicate_event = event_for(trainvm::start_execution(*compiled.plan, "predicate-run"),
+                                              "predicate", "test", {{"domain", "animation"}, {"quality", 7}});
+  const nlohmann::json predicate = {{"all", {{{"field", "domain"}, {"operator", "in"},
+                                                {"value", {"animation", "photo"}}},
+                                               {{"field", "quality"}, {"operator", "ge"}, {"value", 5}}}}};
+  check(trainvm::predicate_matches(predicate, predicate_event),
+        "compound predicates resolve payload fields without string evaluation");
+
+  auto limited_plan = *compiled.plan;
+  limited_plan.experiment.spec.workflow.nodes.at("resume_training").loop_guard->max_visits = 2;
+  auto limited_state = trainvm::start_execution(limited_plan, "limited-run");
+  const auto limited_advance = [&](std::string type, nlohmann::json payload = nlohmann::json::object(),
+                                   std::optional<std::uint64_t> step = std::nullopt) {
+    auto event = event_for(limited_state, "limited-" + std::to_string(limited_state.revision),
+                           std::move(type), std::move(payload), step);
+    limited_state = trainvm::advance_execution(limited_plan, limited_state, event).state;
+  };
+  limited_advance("resource.acquired");
+  limited_advance("worker.completed", {{"reason", "cache_span_complete"}}, 5500);
+  limited_advance("operation.completed");
+  limited_advance("operation.completed");
+  limited_advance("artifact.validated");
+  limited_advance("worker.restart_requested", nlohmann::json::object(), 6000);
+  bool visit_limit_rejected = false;
+  try {
+    limited_advance("worker.restart_requested", nlohmann::json::object(), 6500);
+  } catch (const std::logic_error&) {
+    visit_limit_rejected = true;
+  }
+  check(visit_limit_rejected, "loop visit limit is enforced before state advances");
 }
 
 trainvm::Event created_event(const std::string& plan_hash) {
@@ -315,6 +462,7 @@ int main() {
   try {
     test_reflection_and_compiler();
     test_wire_contract();
+    test_fsm();
     test_journal();
   } catch (const std::exception& exception) {
     std::cerr << "UNCAUGHT: " << exception.what() << '\n';

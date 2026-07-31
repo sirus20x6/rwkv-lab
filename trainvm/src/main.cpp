@@ -1,12 +1,15 @@
 #include "trainvm/document.hpp"
+#include "trainvm/fsm.hpp"
 #include "trainvm/journal.hpp"
 
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -17,6 +20,7 @@ void usage() {
       << "usage:\n"
       << "  trainvm validate <experiment.json>\n"
       << "  trainvm plan <experiment.json> [--canonical]\n"
+      << "  trainvm simulate <experiment.json> <events.jsonl> [run-id]\n"
       << "  trainvm journal init <journal.db>\n"
       << "  trainvm journal append <journal.db> <event.json>\n"
       << "  trainvm journal verify <journal.db>\n"
@@ -74,6 +78,50 @@ int plan_command(int argc, char** argv) {
   return 0;
 }
 
+int simulate_command(int argc, char** argv) {
+  if (argc != 4 && argc != 5) {
+    usage();
+    return 64;
+  }
+  auto compiled = trainvm::compile_document_file(argv[2]);
+  if (!compiled.valid()) {
+    print_diagnostics(compiled);
+    return 2;
+  }
+  std::ifstream input(argv[3]);
+  if (!input) {
+    throw std::runtime_error("could not open " + std::string(argv[3]));
+  }
+  std::string run_id = argc == 5 ? argv[4] : "simulation";
+  auto state = trainvm::start_execution(*compiled.plan, run_id);
+  nlohmann::json trace = nlohmann::json::array();
+  std::string line;
+  std::size_t line_number = 0;
+  while (std::getline(input, line)) {
+    ++line_number;
+    if (line.find_first_not_of(" \t\r") == std::string::npos) {
+      continue;
+    }
+    try {
+      auto event = trainvm::event_from_json(nlohmann::json::parse(line));
+      const auto result = trainvm::advance_execution(*compiled.plan, state, event);
+      trace.push_back({{"event_id", event.event_id},
+                       {"event_type", event.event_type},
+                       {"source", result.source_node_id},
+                       {"target", result.target},
+                       {"transition_index", result.transition_index}});
+      state = result.state;
+    } catch (const std::exception& exception) {
+      throw std::runtime_error("simulation line " + std::to_string(line_number) + ": " + exception.what());
+    }
+  }
+  std::cout << nlohmann::json({{"plan_hash", compiled.plan->plan_hash},
+                               {"state", trainvm::execution_state_json(state)},
+                               {"trace", std::move(trace)}}).dump(2)
+            << '\n';
+  return 0;
+}
+
 int journal_command(int argc, char** argv) {
   if (argc < 4) {
     usage();
@@ -127,6 +175,9 @@ int main(int argc, char** argv) {
     }
     if (argc >= 3 && std::string_view(argv[1]) == "plan") {
       return plan_command(argc, argv);
+    }
+    if (argc >= 2 && std::string_view(argv[1]) == "simulate") {
+      return simulate_command(argc, argv);
     }
     if (argc >= 2 && std::string_view(argv[1]) == "journal") {
       return journal_command(argc, argv);

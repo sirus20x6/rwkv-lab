@@ -50,6 +50,7 @@ target_link_libraries(trainvm_protocol PUBLIC protobuf::libprotobuf gRPC::grpc++
 
 add_library(trainvm_core
   src/document.cpp
+  src/fsm.cpp
   src/journal.cpp
 )
 target_include_directories(trainvm_core PUBLIC include)
@@ -72,3 +73,17 @@ target_compile_definitions(trainvm_tests PRIVATE
 )
 target_link_libraries(trainvm_tests PRIVATE trainvm_core trainvm_protocol)
 add_test(NAME trainvm_tests COMMAND trainvm_tests)
+add_test(
+  NAME trainvm_cli_validate
+  COMMAND trainvm validate
+    "${CMAKE_CURRENT_SOURCE_DIR}/../docs/experiment-vm/examples/mageflow-cache-resume.json"
+)
+add_test(
+  NAME trainvm_cli_simulate
+  COMMAND trainvm simulate
+    "${CMAKE_CURRENT_SOURCE_DIR}/../docs/experiment-vm/examples/mageflow-cache-resume.json"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../docs/experiment-vm/examples/mageflow-cache-resume.events.jsonl"
+)
+set_tests_properties(trainvm_cli_simulate PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"status\": \"completed\""
+)
