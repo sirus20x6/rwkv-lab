@@ -1,6 +1,10 @@
 package db
 
-import "database/sql"
+import (
+	"database/sql"
+	"fmt"
+	"log"
+)
 
 const runSummarySelect = `SELECT r.id, r.name, COALESCE(r.last_update_ts,0), COALESCE(r.tags_json,'[]'),
 	COALESCE(x.n_train,0), COALESCE(x.n_eval,0), COALESCE(x.n_ckpt,0),
@@ -274,27 +278,54 @@ func (d *DB) scanBestEval(byID map[int64]*RunSummary) error {
 
 // RunKPIs is the selected-run KPI strip payload.
 type RunKPIs struct {
-	Step               *int64   `json:"step"`
-	Loss               *float64 `json:"loss"`
-	PPL                *float64 `json:"ppl"`
-	CaptionPPL         *float64 `json:"caption_ppl"`
-	OCRPPL             *float64 `json:"ocr_ppl"`
-	StructuredPPL      *float64 `json:"structured_ppl"`
-	StructuredBoxIoU   *float64 `json:"structured_box_iou"`
-	StructuredMaskDice *float64 `json:"structured_mask_dice"`
-	BestPPL            *float64 `json:"best_ppl"`
-	BestPPLStep        *int64   `json:"best_ppl_step"`
-	Top1               *float64 `json:"top1"`
-	BestTop1           *float64 `json:"best_top1"`
-	BestTop1Step       *int64   `json:"best_top1_step"`
-	BestLoss           *float64 `json:"best_loss"`
-	BestLossStep       *int64   `json:"best_loss_step"`
-	Toks               *float64 `json:"toks"`
-	LR                 *float64 `json:"lr"`
-	Gnorm              *float64 `json:"gnorm"`
-	NTrain             int      `json:"n_train"`
-	NEval              int      `json:"n_eval"`
-	NCkpt              int      `json:"n_ckpt"`
+	Step                           *int64   `json:"step"`
+	Loss                           *float64 `json:"loss"`
+	PPL                            *float64 `json:"ppl"`
+	CaptionPPL                     *float64 `json:"caption_ppl"`
+	OCRPPL                         *float64 `json:"ocr_ppl"`
+	OCRShuffledPPL                 *float64 `json:"ocr_shuffled_ppl"`
+	OCRConditioningNLL             *float64 `json:"ocr_image_conditioning_nll_delta"`
+	OCRConditioningExampleCoverage *float64 `json:"ocr_image_conditioning_example_coverage"`
+	OCRConditioningTokenCoverage   *float64 `json:"ocr_image_conditioning_token_coverage"`
+	StructuredPPL                  *float64 `json:"structured_ppl"`
+	StructuredCoordPPL             *float64 `json:"structured_coordinate_ppl"`
+	// StructuredBoxIoU is the instance-weighted true IoU, emitted under the
+	// current key structured_box_iou_instance.
+	StructuredBoxIoU *float64 `json:"structured_box_iou_instance"`
+	// StructuredBoxIoULegacy carries the RETIRED structured_box_iou key, which
+	// held a differently-weighted quantity. Rows written before the rename still
+	// have only that key; they are surfaced as an explicitly-labelled legacy
+	// series rather than silently rendered as if they were the new metric, and
+	// never as the new field (mixing the two would make a run's history lie).
+	StructuredBoxIoULegacy *float64 `json:"structured_box_iou_legacy"`
+	StructuredBoxGIoU      *float64 `json:"structured_box_giou"`
+	StructuredMaskDice     *float64 `json:"structured_mask_dice"`
+	BestPPL                        *float64 `json:"best_ppl"`
+	BestPPLStep                    *int64   `json:"best_ppl_step"`
+	Top1                           *float64 `json:"top1"`
+	BestTop1                       *float64 `json:"best_top1"`
+	BestTop1Step                   *int64   `json:"best_top1_step"`
+	BestLoss                       *float64 `json:"best_loss"`
+	BestLossStep                   *int64   `json:"best_loss_step"`
+	Toks                           *float64 `json:"toks"`
+	LR                             *float64 `json:"lr"`
+	Gnorm                          *float64 `json:"gnorm"`
+	NTrain                         int      `json:"n_train"`
+	NEval                          int      `json:"n_eval"`
+	NCkpt                          int      `json:"n_ckpt"`
+}
+
+// kpiScan normalizes one KPI QueryRow result. A run with no rows of that kind
+// yet is ordinary (the KPI renders "—"), but every other error is real: these
+// SELECTs carry a dozen-plus json_extract columns whose count must match their
+// Scan list exactly, and a silently discarded error there makes EVERY KPI in
+// the strip render "—" with nothing in the log to explain it.
+func kpiScan(what, run string, err error) error {
+	if err == nil || err == sql.ErrNoRows {
+		return nil
+	}
+	log.Printf("[kpi] run %q %s: %v", run, what, err)
+	return fmt.Errorf("run %q %s KPI: %w", run, what, err)
 }
 
 // RunKPIsByName computes the KPI strip for one run (a few quick single-run queries).
@@ -312,8 +343,11 @@ func (d *DB) RunKPIsByName(name string) (RunKPIs, bool, error) {
 	// latest train: step, loss, tok_per_sec, lr, gnorm
 	var step sql.NullInt64
 	var loss, toks, lr, gnorm sql.NullFloat64
-	_ = d.QueryRow(`SELECT step, loss, tok_per_sec, lr, gnorm FROM train_events WHERE run_id=? ORDER BY step DESC LIMIT 1`, rid).
-		Scan(&step, &loss, &toks, &lr, &gnorm)
+	if err := kpiScan("latest train", name, d.QueryRow(
+		`SELECT step, loss, tok_per_sec, lr, gnorm FROM train_events WHERE run_id=? ORDER BY step DESC LIMIT 1`, rid).
+		Scan(&step, &loss, &toks, &lr, &gnorm)); err != nil {
+		return RunKPIs{}, true, err
+	}
 	if step.Valid {
 		k.Step = &step.Int64
 	}
@@ -332,17 +366,33 @@ func (d *DB) RunKPIsByName(name string) (RunKPIs, bool, error) {
 
 	// latest eval: ppl, top1 (and promote step)
 	var estep sql.NullInt64
-	var ppl, top1, captionPPL, ocrPPL, structuredPPL sql.NullFloat64
-	var structuredBoxIoU, structuredMaskDice sql.NullFloat64
-	_ = d.QueryRow(`SELECT step, ppl, top1,
+	var ppl, top1, captionPPL, ocrPPL, ocrShuffledPPL, ocrConditioningNLL sql.NullFloat64
+	var ocrConditioningExampleCoverage, ocrConditioningTokenCoverage sql.NullFloat64
+	var structuredPPL, structuredCoordPPL sql.NullFloat64
+	var structuredBoxIoU, structuredBoxIoULegacy sql.NullFloat64
+	var structuredBoxGIoU, structuredMaskDice sql.NullFloat64
+	if err := kpiScan("latest eval", name, d.QueryRow(`SELECT step, ppl, top1,
 		json_extract(extra_json,'$.caption_ppl'),
 		json_extract(extra_json,'$.ocr_ppl'),
+		json_extract(extra_json,'$.ocr_shuffled_ppl'),
+		json_extract(extra_json,'$.ocr_image_conditioning_nll_delta'),
+		json_extract(extra_json,'$.ocr_image_conditioning_example_coverage'),
+		json_extract(extra_json,'$.ocr_image_conditioning_token_coverage'),
 		json_extract(extra_json,'$.structured_ppl'),
+		json_extract(extra_json,'$.structured_coordinate_ppl'),
+		json_extract(extra_json,'$.structured_box_iou_instance'),
 		json_extract(extra_json,'$.structured_box_iou'),
+		json_extract(extra_json,'$.structured_box_giou'),
 		json_extract(extra_json,'$.structured_mask_dice')
 		FROM eval_events WHERE run_id=? ORDER BY step DESC LIMIT 1`, rid).
-		Scan(&estep, &ppl, &top1, &captionPPL, &ocrPPL, &structuredPPL,
-			&structuredBoxIoU, &structuredMaskDice)
+		Scan(&estep, &ppl, &top1, &captionPPL, &ocrPPL,
+			&ocrShuffledPPL, &ocrConditioningNLL,
+			&ocrConditioningExampleCoverage, &ocrConditioningTokenCoverage,
+			&structuredPPL,
+			&structuredCoordPPL, &structuredBoxIoU, &structuredBoxIoULegacy,
+			&structuredBoxGIoU, &structuredMaskDice)); err != nil {
+		return RunKPIs{}, true, err
+	}
 	if estep.Valid && (k.Step == nil || estep.Int64 > *k.Step) {
 		k.Step = &estep.Int64
 	}
@@ -358,11 +408,32 @@ func (d *DB) RunKPIsByName(name string) (RunKPIs, bool, error) {
 	if ocrPPL.Valid {
 		k.OCRPPL = &ocrPPL.Float64
 	}
+	if ocrShuffledPPL.Valid {
+		k.OCRShuffledPPL = &ocrShuffledPPL.Float64
+	}
+	if ocrConditioningNLL.Valid {
+		k.OCRConditioningNLL = &ocrConditioningNLL.Float64
+	}
+	if ocrConditioningExampleCoverage.Valid {
+		k.OCRConditioningExampleCoverage = &ocrConditioningExampleCoverage.Float64
+	}
+	if ocrConditioningTokenCoverage.Valid {
+		k.OCRConditioningTokenCoverage = &ocrConditioningTokenCoverage.Float64
+	}
 	if structuredPPL.Valid {
 		k.StructuredPPL = &structuredPPL.Float64
 	}
+	if structuredCoordPPL.Valid {
+		k.StructuredCoordPPL = &structuredCoordPPL.Float64
+	}
 	if structuredBoxIoU.Valid {
 		k.StructuredBoxIoU = &structuredBoxIoU.Float64
+	} else if structuredBoxIoULegacy.Valid {
+		// Pre-rename row: the only value it has is the retired metric.
+		k.StructuredBoxIoULegacy = &structuredBoxIoULegacy.Float64
+	}
+	if structuredBoxGIoU.Valid {
+		k.StructuredBoxGIoU = &structuredBoxGIoU.Float64
 	}
 	if structuredMaskDice.Valid {
 		k.StructuredMaskDice = &structuredMaskDice.Float64
@@ -371,8 +442,11 @@ func (d *DB) RunKPIsByName(name string) (RunKPIs, bool, error) {
 	// best ppl (min) + its step
 	var bppl sql.NullFloat64
 	var bpstep sql.NullInt64
-	_ = d.QueryRow(`SELECT ppl, step FROM eval_events WHERE run_id=? AND ppl IS NOT NULL ORDER BY ppl ASC LIMIT 1`, rid).
-		Scan(&bppl, &bpstep)
+	if err := kpiScan("best eval ppl", name, d.QueryRow(
+		`SELECT ppl, step FROM eval_events WHERE run_id=? AND ppl IS NOT NULL ORDER BY ppl ASC LIMIT 1`, rid).
+		Scan(&bppl, &bpstep)); err != nil {
+		return RunKPIs{}, true, err
+	}
 	if bppl.Valid {
 		k.BestPPL = &bppl.Float64
 	}
@@ -383,7 +457,11 @@ func (d *DB) RunKPIsByName(name string) (RunKPIs, bool, error) {
 	// best top1 (max) + its step
 	var btop1 sql.NullFloat64
 	var bt1step sql.NullInt64
-	_ = d.QueryRow(`SELECT top1, step FROM eval_events WHERE run_id=? AND top1 IS NOT NULL ORDER BY top1 DESC LIMIT 1`, rid).Scan(&btop1, &bt1step)
+	if err := kpiScan("best eval top1", name, d.QueryRow(
+		`SELECT top1, step FROM eval_events WHERE run_id=? AND top1 IS NOT NULL ORDER BY top1 DESC LIMIT 1`, rid).
+		Scan(&btop1, &bt1step)); err != nil {
+		return RunKPIs{}, true, err
+	}
 	if btop1.Valid {
 		k.BestTop1 = &btop1.Float64
 	}
@@ -393,7 +471,11 @@ func (d *DB) RunKPIsByName(name string) (RunKPIs, bool, error) {
 	// best (min) train loss + its step
 	var bloss sql.NullFloat64
 	var blstep sql.NullInt64
-	_ = d.QueryRow(`SELECT loss, step FROM train_events WHERE run_id=? AND loss IS NOT NULL ORDER BY loss ASC LIMIT 1`, rid).Scan(&bloss, &blstep)
+	if err := kpiScan("best train loss", name, d.QueryRow(
+		`SELECT loss, step FROM train_events WHERE run_id=? AND loss IS NOT NULL ORDER BY loss ASC LIMIT 1`, rid).
+		Scan(&bloss, &blstep)); err != nil {
+		return RunKPIs{}, true, err
+	}
 	if bloss.Valid {
 		k.BestLoss = &bloss.Float64
 	}

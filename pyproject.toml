@@ -38,6 +38,8 @@ full = [
     "pillow>=10",
     "imagehash>=4.3",
     "requests>=2.31",
+    "zstandard>=0.23",
+    "peft>=0.18.1",
 ]
 vision = [
     "datasets>=2.20",  # includes PyArrow for embedded-image Parquet corpora
@@ -62,6 +64,11 @@ Repository = "https://github.com/sirus20x6/rwkv-lab"
 
 [project.scripts]
 ltx23-lora = "rwkv_lab.ltx23_lora:main"
+mage-flow-pretrain = "rwkv_lab.mage_flow_pretrain:main"
+mage-flow-expert-train = "rwkv_lab.mage_flow_expert_train:main"
+ao3-cpt-prepare = "rwkv_lab.ao3_cpt_data:main"
+ao3-cpt-tokens = "rwkv_lab.ao3_cpt_tokens:main"
+qwen-ao3-cpt = "rwkv_lab.qwen_ao3_cpt:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }

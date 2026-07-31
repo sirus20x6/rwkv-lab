@@ -37,6 +37,24 @@ def test_checkpoint_selection_preserves_excluded_hook_sites():
         grad_enabled=False) == ()
 
 
+def test_checkpoint_selection_can_spread_a_bounded_subset():
+    assert checkpointed_layer_indices(
+        10, sequence_tokens=4096, min_tokens=4096,
+        excluded_layers=(3, 7), max_layers=4) == (0, 2, 6, 9)
+    assert checkpointed_layer_indices(
+        10, sequence_tokens=4096, min_tokens=4096,
+        excluded_layers=(3, 7), max_layers=1) == (5,)
+    assert checkpointed_layer_indices(
+        4, sequence_tokens=8704, min_tokens=4096,
+        max_layers=99) == (0, 1, 2, 3)
+    assert checkpointed_layer_indices(
+        10, sequence_tokens=6144, min_tokens=4096,
+        excluded_layers=(3, 7), max_layers=4) == (0, 1, 4, 5, 8, 9)
+    assert checkpointed_layer_indices(
+        10, sequence_tokens=8192, min_tokens=4096,
+        excluded_layers=(3, 7), max_layers=4) == (0, 1, 2, 4, 5, 6, 8, 9)
+
+
 def test_selected_layers_recompute_and_restore_state():
     layers = nn.ModuleList([CheckpointAwareLayer() for _ in range(3)])
     layers.eval()

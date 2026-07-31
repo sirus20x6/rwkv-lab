@@ -58,6 +58,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--repo", default=DEFAULT_REPO)
     parser.add_argument("--revision", default=DEFAULT_REVISION)
+    parser.add_argument(
+        "--local-shard-dir",
+        type=Path,
+        default=None,
+        help=(
+            "optional directory containing pinned source parquet shards; "
+            "matching local files are read directly instead of downloaded"
+        ),
+    )
     parser.add_argument("--fraction", type=float, default=0.30)
     parser.add_argument(
         "--resolutions",
@@ -264,6 +273,7 @@ def materialize_candidates(
     repo: str,
     revision: str,
     workers: int,
+    local_shard_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     selected_set = set(selected_shards)
     routes_by_shard: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -300,8 +310,13 @@ def materialize_candidates(
             cached = load_jsonl(metadata_path)
             if {source_key(row) for row in cached} == expected:
                 return shard, cached
-        local_shard = download_root / shard
-        download_shard(local_shard, repo=repo, revision=revision, shard=shard)
+        pinned_local_shard = (
+            local_shard_dir / shard if local_shard_dir is not None else None
+        )
+        downloaded = pinned_local_shard is None or not pinned_local_shard.is_file()
+        local_shard = download_root / shard if downloaded else pinned_local_shard
+        if downloaded:
+            download_shard(local_shard, repo=repo, revision=revision, shard=shard)
         try:
             extracted = extract_selected_rows(
                 local_shard,
@@ -310,7 +325,8 @@ def materialize_candidates(
                 metadata_path=metadata_path,
             )
         finally:
-            local_shard.unlink(missing_ok=True)
+            if downloaded:
+                local_shard.unlink(missing_ok=True)
         return shard, extracted
 
     work = [shard for shard in selected_shards if missing_by_shard[shard]]
@@ -512,6 +528,13 @@ def main() -> None:
     current_stage = args.current_stage.expanduser().resolve()
     excluded_stages = [stage.expanduser().resolve() for stage in args.exclude_stage]
     output_dir = args.output_dir.expanduser().resolve()
+    local_shard_dir = (
+        args.local_shard_dir.expanduser().resolve()
+        if args.local_shard_dir is not None
+        else None
+    )
+    if local_shard_dir is not None and not local_shard_dir.is_dir():
+        raise ValueError(f"local shard directory does not exist: {local_shard_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / "report.json"
     if report_path.is_file():
@@ -547,6 +570,9 @@ def main() -> None:
             "schema": "rwkv-lab.midjourney-v6-continuation-selection.v1",
             "repo": args.repo,
             "revision": args.revision,
+            "local_shard_dir": (
+                str(local_shard_dir) if local_shard_dir is not None else None
+            ),
             "fraction_of_remaining": args.fraction,
             "remaining_family_safe_counts": remaining_counts,
             "targets": targets,
@@ -568,6 +594,7 @@ def main() -> None:
         repo=args.repo,
         revision=args.revision,
         workers=args.workers,
+        local_shard_dir=local_shard_dir,
     )
     unique_pool, dedup_counts = deduplicate_against_prior(pool, prior_hashes)
     selected = select_training_records(unique_pool, targets)
@@ -619,6 +646,9 @@ def main() -> None:
         "schema": "rwkv-lab.midjourney-v6-continuation-stage.v1",
         "repo": args.repo,
         "revision": args.revision,
+        "local_shard_dir": (
+            str(local_shard_dir) if local_shard_dir is not None else None
+        ),
         "current_stage": str(current_stage),
         "excluded_stages": [str(stage) for stage in excluded_stages],
         "fraction_of_remaining": args.fraction,

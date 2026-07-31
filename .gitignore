@@ -4,6 +4,7 @@ __pycache__/
 *.egg-info/
 .venv/
 .venv-mage-flow/
+.venv-mage-flow-fa4/
 .external/
 .ipynb_checkpoints/
 
@@ -40,6 +41,7 @@ research/
 # compiled Go binaries (built from ./cmd/trainboard); source stays tracked
 dashboard/trainboard
 dashboard/trainboard-candidate*
+dashboard/trainboard.before-*
 dashboard/launches/
 
 # --- Logs and local process metadata ---

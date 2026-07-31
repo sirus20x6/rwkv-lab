@@ -73,10 +73,15 @@ def test_coco_polygon_becomes_compact_mask_rows_and_normalized_box():
     }
     spans = _mask_row_spans(annotation, 100, 100)
     assert "4:4-12" in spans
-    target, annotation_ids = _coco_sam_target(
+    target, annotation_ids, instances = _coco_sam_target(
         [annotation], {3: "object"}, 100, 100)
     assert "object; box=[250,250,749,749]; mask16=" in target
     assert annotation_ids == [7]
+    assert instances == [{
+        "box_xyxy": [0.25, 0.25, 0.75, 0.75],
+        "polygons": [[0.25, 0.25, 0.75, 0.25,
+                      0.75, 0.75, 0.25, 0.75]],
+    }]
 
 
 def test_coco_prompt_names_requested_categories_and_instance_counts():
@@ -97,6 +102,9 @@ def test_concept_mask_target_serializes_instances_without_repeating_prompt_label
         "id": 9, "area": 2500, "bbox": [25, 25, 50, 50],
         "segmentation": [[25, 25, 75, 25, 75, 75, 25, 75]],
     }
-    target, annotation_ids = _concept_sam_target([annotation], 100, 100)
+    target, annotation_ids, instances = _concept_sam_target(
+        [annotation], 100, 100)
     assert target.startswith("instance 1; box=[250,250,749,749]; mask16=")
     assert annotation_ids == [9]
+    assert instances[0]["box_xyxy"] == [0.25, 0.25, 0.75, 0.75]
+    assert len(instances[0]["polygons"]) == 1

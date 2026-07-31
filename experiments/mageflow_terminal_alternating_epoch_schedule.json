@@ -1,0 +1,153 @@
+{
+  "domain_counts": {
+    "animation": 56527,
+    "photo": 41292
+  },
+  "domain_weights": {
+    "animation": 0.5778734192743741,
+    "photo": 0.4221265807256259
+  },
+  "fresh_data_epoch": true,
+  "max_steps": 12228,
+  "scheduled_step_weights": {
+    "animation": 0.5779358848544325,
+    "photo": 0.4220641151455676
+  },
+  "scheduled_steps": {
+    "animation": 7067,
+    "photo": 5161
+  },
+  "schema": "rwkv-lab.mage-flow-domain-window-schedule.v1",
+  "seed": 42,
+  "train_manifest": "/thearray/git/datasets/midjourney-v6-recap-continuation-30pct-b-512-1024/train.jsonl",
+  "window_maximum_steps": 1000,
+  "window_minimum_steps": 500,
+  "windows": [
+    {
+      "domain": "animation",
+      "end_step": 751,
+      "index": 0,
+      "start_step": 0,
+      "steps": 751
+    },
+    {
+      "domain": "photo",
+      "end_step": 1299,
+      "index": 1,
+      "start_step": 751,
+      "steps": 548
+    },
+    {
+      "domain": "animation",
+      "end_step": 1998,
+      "index": 2,
+      "start_step": 1299,
+      "steps": 699
+    },
+    {
+      "domain": "photo",
+      "end_step": 2509,
+      "index": 3,
+      "start_step": 1998,
+      "steps": 511
+    },
+    {
+      "domain": "animation",
+      "end_step": 3356,
+      "index": 4,
+      "start_step": 2509,
+      "steps": 847
+    },
+    {
+      "domain": "photo",
+      "end_step": 3975,
+      "index": 5,
+      "start_step": 3356,
+      "steps": 619
+    },
+    {
+      "domain": "animation",
+      "end_step": 4804,
+      "index": 6,
+      "start_step": 3975,
+      "steps": 829
+    },
+    {
+      "domain": "photo",
+      "end_step": 5410,
+      "index": 7,
+      "start_step": 4804,
+      "steps": 606
+    },
+    {
+      "domain": "animation",
+      "end_step": 6227,
+      "index": 8,
+      "start_step": 5410,
+      "steps": 817
+    },
+    {
+      "domain": "photo",
+      "end_step": 6823,
+      "index": 9,
+      "start_step": 6227,
+      "steps": 596
+    },
+    {
+      "domain": "animation",
+      "end_step": 7590,
+      "index": 10,
+      "start_step": 6823,
+      "steps": 767
+    },
+    {
+      "domain": "photo",
+      "end_step": 8150,
+      "index": 11,
+      "start_step": 7590,
+      "steps": 560
+    },
+    {
+      "domain": "animation",
+      "end_step": 8895,
+      "index": 12,
+      "start_step": 8150,
+      "steps": 745
+    },
+    {
+      "domain": "photo",
+      "end_step": 9439,
+      "index": 13,
+      "start_step": 8895,
+      "steps": 544
+    },
+    {
+      "domain": "animation",
+      "end_step": 10324,
+      "index": 14,
+      "start_step": 9439,
+      "steps": 885
+    },
+    {
+      "domain": "photo",
+      "end_step": 10970,
+      "index": 15,
+      "start_step": 10324,
+      "steps": 646
+    },
+    {
+      "domain": "animation",
+      "end_step": 11697,
+      "index": 16,
+      "start_step": 10970,
+      "steps": 727
+    },
+    {
+      "domain": "photo",
+      "end_step": 12228,
+      "index": 17,
+      "start_step": 11697,
+      "steps": 531
+    }
+  ]
+}

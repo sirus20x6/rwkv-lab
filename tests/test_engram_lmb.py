@@ -614,6 +614,88 @@ def test_batched_streaming_engram_validates_rows_and_step_width():
         stream.step([1], active=[True, False])
 
 
+def _make_stream(lmb, prompts):
+    rows = []
+    for ids in prompts:
+        recall = token_rosa_recall(ids, V)
+        rows.append(lmb.begin_streaming(ids, recall=recall))
+    return BatchedStreamingEngramState(rows)
+
+
+def test_compacting_a_decode_batch_equals_decoding_those_rows_alone():
+    """Dropping a finished row must not disturb the rows that remain."""
+    lmb = _make_lmb(layer_sites=[0])
+    prompts = [
+        torch.tensor([[1, 2, 1]]),
+        torch.tensor([[3, 4, 3, 4]]),
+        torch.tensor([[5, 6, 5, 6, 5]]),
+    ]
+    warm = [2, 4, 6]
+    tail = [[5, 1], [6, 2], [5, 1]]
+
+    with torch.no_grad():
+        stream = _make_stream(lmb, prompts)
+        stream.step(warm)
+        stream.select_rows([2, 0])
+        compacted = []
+        for step_tokens in tail:
+            recall = stream.step(step_tokens)
+            compacted.append((
+                RecallResult(*(value.clone() for value in recall)),
+                stream.last_feature.clone()))
+
+        # The same two rows, in the same order, never batched with the dropped
+        # row. Identical output here covers history layout, per-row automaton
+        # donation and the shared bank's rolling features in one shot.
+        reference_stream = _make_stream(lmb, [prompts[2], prompts[0]])
+        reference_stream.step([warm[2], warm[0]])
+        reference = []
+        for step_tokens in tail:
+            recall = reference_stream.step(step_tokens)
+            reference.append((
+                RecallResult(*(value.clone() for value in recall)),
+                reference_stream.last_feature.clone()))
+
+    assert stream.batch_size == 2
+    for (got_recall, got_feature), (want_recall, want_feature) in zip(
+            compacted, reference):
+        for got, want in zip(got_recall, want_recall):
+            torch.testing.assert_close(got.cpu(), want.cpu(), rtol=0, atol=0)
+        torch.testing.assert_close(
+            got_feature.cpu(), want_feature.cpu(), rtol=0, atol=0)
+
+    with pytest.raises(ValueError, match="zero rows"):
+        stream.select_rows([])
+    with pytest.raises(ValueError, match="unique"):
+        stream.select_rows([0, 0])
+    with pytest.raises(IndexError, match="out of range"):
+        stream.select_rows([0, 2])
+
+
+def test_compaction_invalidates_the_shared_banks_stale_batch_state():
+    lmb = _make_lmb(layer_sites=[0])
+    stream = _make_stream(lmb, [
+        torch.tensor([[1, 2, 1]]),
+        torch.tensor([[3, 4, 3]]),
+        torch.tensor([[5, 6, 5]]),
+    ])
+    with torch.no_grad():
+        stream.step([2, 4, 6])
+        assert lmb.sites["0"]._shape == (3, 1)
+
+        stream.select_rows([2, 0])
+
+        # Nothing may still describe the pre-compaction batch: a forward here
+        # would otherwise inject a [3,1,D] feature into a two-row stream.
+        assert lmb.ctx.ids is None
+        assert lmb.last_recall is None
+        assert lmb.sites["0"]._shape is None
+        assert not lmb.ensure_features()
+
+        stream.step([5, 1])
+        assert lmb.sites["0"]._shape == (2, 1)
+
+
 def test_engram_active_slice_rejects_empty_selection():
     lmb = _make_lmb(layer_sites=[0])
     ids = _repeat_ids()

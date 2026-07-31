@@ -35,6 +35,11 @@ RADIO_TILE_SIZE = 512
 RADIO_TOKENS_PER_TILE = 256
 RADIO_COMPACT_TOKENS_PER_TILE = 128
 RADIO_HIDDEN_SIZE = 2560
+# Largest prefix a native C-RADIOv4-H image can produce: the 2048-pixel cap over
+# a 16-pixel patch is 128 cells per axis, and column pairing halves that once.
+# Not a tile quantum -- a native prefix has no tile structure -- but it is a real
+# invariant: any longer prefix is a shape error, not an image.
+RADIO_NATIVE_MAX_TOKENS = (2048 // 16) ** 2
 RWKV_REFERENCE_CONTEXT = 10_240
 DEFAULT_MAX_DETAIL_TILES = 48
 DEFAULT_COMPLEXITY_BUDGET_RATIO = 0.75
@@ -641,6 +646,18 @@ def pad_radio_features(samples: Sequence[Tensor]) -> tuple[Tensor, Tensor]:
     return result, mask
 
 
+def fourier_box_features(
+        boxes: Tensor, frequency_count: int = 4) -> Tensor:
+    """Parameter-free Fourier basis for normalized source boxes."""
+    center = (boxes[..., :2] + boxes[..., 2:]) / 2
+    size = boxes[..., 2:] - boxes[..., :2]
+    geometry = torch.cat((boxes, center, size), dim=-1).float()
+    frequencies = 2.0 ** torch.arange(
+        frequency_count, device=boxes.device, dtype=torch.float32)
+    phase = geometry.unsqueeze(-1) * frequencies * math.pi
+    return torch.cat((phase.sin(), phase.cos()), dim=-1).flatten(-2)
+
+
 class FourierBoxEmbedding(nn.Module):
     """Embed normalized source boxes without discretizing image geometry."""
 
@@ -652,15 +669,19 @@ class FourierBoxEmbedding(nn.Module):
         nn.init.zeros_(self.projection.weight)
         nn.init.zeros_(self.projection.bias)
 
-    def forward(self, boxes: Tensor) -> Tensor:
-        center = (boxes[..., :2] + boxes[..., 2:]) / 2
-        size = boxes[..., 2:] - boxes[..., :2]
-        geometry = torch.cat((boxes, center, size), dim=-1).float()
-        frequencies = 2.0 ** torch.arange(
-            self.frequency_count, device=boxes.device, dtype=torch.float32)
-        phase = geometry.unsqueeze(-1) * frequencies * math.pi
-        features = torch.cat((phase.sin(), phase.cos()), dim=-1).flatten(-2)
+    def encode(self, boxes: Tensor) -> Tensor:
+        return fourier_box_features(boxes, self.frequency_count)
+
+    def project(self, features: Tensor) -> Tensor:
+        expected = 8 * self.frequency_count * 2
+        if features.shape[-1] != expected:
+            raise ValueError(
+                f"box Fourier features need width {expected}, got "
+                f"{features.shape[-1]}")
         return self.projection(features.to(self.projection.weight.dtype))
+
+    def forward(self, boxes: Tensor) -> Tensor:
+        return self.project(self.encode(boxes))
 
 
 class RadioRWKVBridge(nn.Module):
@@ -710,7 +731,8 @@ class RadioRWKVBridge(nn.Module):
 
     def _align_packed(self, features: Tensor, boxes: Tensor, roles: Tensor,
                       tile_indices: Tensor, token_indices: Tensor,
-                      content: Tensor | None = None) -> Tensor:
+                      content: Tensor | None = None,
+                      box_fourier: Tensor | None = None) -> Tensor:
         """Align an already packed, unpadded RADIO sequence."""
         if features.ndim != 3 or features.shape[-1] != self.input_size:
             raise ValueError(
@@ -732,7 +754,8 @@ class RadioRWKVBridge(nn.Module):
             self.role_embedding(roles)
             + self.tile_embedding(tile_indices)
             + self.token_embedding(token_indices)
-            + self.box_embedding(boxes).to(value.dtype)
+            + (self.box_embedding(boxes) if box_fourier is None
+               else self.box_embedding.project(box_fourier)).to(value.dtype)
         )
         if content is not None:
             if self.content_embedding is None:
@@ -816,7 +839,9 @@ class RadioRWKVBridge(nn.Module):
                                   device=device),
             token_counts=torch.stack(all_counts).to(device=device))
 
-    def forward_native(self, features: Tensor, boxes: Tensor) -> RadioVisualPrefix:
+    def forward_native(
+            self, features: Tensor, boxes: Tensor,
+            box_fourier: Tensor | None = None) -> RadioVisualPrefix:
         """Align whole-image native features carrying per-token geometry.
 
         There is no tile axis and no per-index position table: every token
@@ -828,10 +853,15 @@ class RadioRWKVBridge(nn.Module):
                 f"native features must be [batch,tokens,{self.input_size}]")
         if boxes.shape != (*features.shape[:2], 4):
             raise ValueError("native boxes must be [batch,tokens,4]")
+        if (box_fourier is not None
+                and box_fourier.shape[:2] != features.shape[:2]):
+            raise ValueError("native box Fourier features do not match tokens")
         batch, length = features.shape[:2]
         zeros = torch.zeros((batch, length), dtype=torch.long,
                             device=features.device)
-        value = self._align_packed(features, boxes, zeros, zeros, zeros)
+        value = self._align_packed(
+            features, boxes, zeros, zeros, zeros,
+            box_fourier=box_fourier)
         return RadioVisualPrefix(
             embeddings=value,
             mask=torch.ones((batch, length), dtype=torch.bool,
@@ -907,20 +937,37 @@ class RadioFeatureProjector(nn.Module):
     def visual_width(self) -> int:
         return int(self.prefix_tokens)
 
-    def forward_native(self, features: Sequence[tuple[Tensor, Tensor, Tensor]]) -> Tensor:
+    def forward_native(
+            self, features: Sequence[tuple[Tensor, Tensor, Tensor]]
+            | tuple[Tensor, Tensor, Tensor]
+            | tuple[Tensor, Tensor, Tensor, Tensor]) -> Tensor:
         """Whole-image native path: one variable-length prefix per row."""
         if not features:
             raise ValueError("RADIO projector needs cached features")
-        lengths = {int(item[0].shape[0]) for item in features}
-        if len(lengths) != 1:
-            raise ValueError(
-                f"native batches must share one token count, got {sorted(lengths)}")
         device = self.bridge.gate.device
-        tokens = torch.stack([item[0] for item in features]).to(
-            device=device, non_blocking=True)
-        boxes = torch.stack([item[1] for item in features]).to(
-            device=device, non_blocking=True)
-        result = self.bridge.forward_native(tokens, boxes)
+        box_fourier = None
+        if (isinstance(features, tuple) and len(features) in (3, 4)
+                and all(torch.is_tensor(value) for value in features)
+                and features[0].ndim == 3):
+            tokens, boxes, _roles = features[:3]
+            if len(features) == 4:
+                box_fourier = features[3].to(
+                    device=device, non_blocking=True)
+            if boxes.shape != (*tokens.shape[:2], 4):
+                raise ValueError("batched native boxes do not match tokens")
+            tokens = tokens.to(device=device, non_blocking=True)
+            boxes = boxes.to(device=device, non_blocking=True)
+        else:
+            lengths = {int(item[0].shape[0]) for item in features}
+            if len(lengths) != 1:
+                raise ValueError(
+                    f"native batches must share one token count, got {sorted(lengths)}")
+            tokens = torch.stack([item[0] for item in features]).to(
+                device=device, non_blocking=True)
+            boxes = torch.stack([item[1] for item in features]).to(
+                device=device, non_blocking=True)
+        result = self.bridge.forward_native(
+            tokens, boxes, box_fourier=box_fourier)
         self.prefix_tokens = result.embeddings.shape[1]
         self.last_token_counts = result.token_counts
         return result.embeddings
@@ -976,17 +1023,36 @@ class RadioPrefixInjector(DeepVisionInjector):
     def __init__(self, hidden_size: int = RADIO_HIDDEN_SIZE,
                  layer_indices: Sequence[int] = (8, 16, 24), *, rank: int = 256,
                  tokens_per_tile: int = RADIO_TOKENS_PER_TILE,
-                 token_quantum: int = RADIO_COMPACT_TOKENS_PER_TILE):
-        super().__init__(hidden_size, layer_indices, rank=rank)
+                 token_quantum: int | None = RADIO_COMPACT_TOKENS_PER_TILE,
+                 max_native_tokens: int = RADIO_NATIVE_MAX_TOKENS,
+                 grouped_precompute: bool = False):
+        """``token_quantum=None`` accepts native-resolution prefixes.
+
+        A tiled RADIO prefix is always a whole number of tiles, so its length
+        is necessarily a multiple of the smallest tile budget. A native
+        C-RADIOv4-H prefix is ``grid_h * (grid_w // 2)`` for one image and
+        carries no tile structure at all, so that multiple is not a property
+        it can satisfy; ``max_native_tokens`` bounds it instead. The padding and
+        finiteness checks still apply.
+        """
+        super().__init__(
+            hidden_size, layer_indices, rank=rank,
+            grouped_precompute=grouped_precompute)
         self.hidden_size = hidden_size
         self.tokens_per_tile = tokens_per_tile
-        self.token_quantum = token_quantum
+        self.token_quantum = None if token_quantum is None else int(token_quantum)
+        self.max_native_tokens = int(max_native_tokens)
+        if self.max_native_tokens < 1:
+            raise ValueError("max_native_tokens must be positive")
 
     @contextmanager
     def use_aligned_prefix(
             self, prefix: RadioVisualPrefix | Tensor,
             starts: int | Sequence[int] = 0):
         if isinstance(prefix, RadioVisualPrefix):
+            if self.token_quantum is None:
+                raise ValueError(
+                    "native-resolution injector received a tiled RADIO prefix")
             if not bool(prefix.mask.all()):
                 raise ValueError(
                     "RADIO reinjection requires exact tile-count buckets without padding")
@@ -1004,11 +1070,24 @@ class RadioPrefixInjector(DeepVisionInjector):
         if embeddings.ndim != 3 or embeddings.shape[-1] != self.hidden_size:
             raise ValueError(
                 f"aligned RADIO prefix must be [B,T,{self.hidden_size}]")
-        token_quantum = min(self.token_quantum, self.tokens_per_tile)
-        if (embeddings.shape[1] < token_quantum or
-                embeddings.shape[1] % token_quantum):
-            raise ValueError(
-                f"RADIO prefix length must be a positive multiple of {token_quantum}")
+        if self.token_quantum is None:
+            # A native prefix satisfies no tile multiple, but it is still one
+            # image's grid_h * (grid_w // 2) cells, so it is bounded above by
+            # the encoder's own resolution cap. Without this the native path
+            # had no length invariant at all, and a mis-shaped batch (a flat
+            # [B*T, C] view, or tokens and channels transposed) reached the
+            # injector as a plausible-looking prefix.
+            if not 1 <= embeddings.shape[1] <= self.max_native_tokens:
+                raise ValueError(
+                    f"native RADIO prefix length {embeddings.shape[1]} is "
+                    f"outside 1..{self.max_native_tokens}, the cell count of "
+                    f"the largest image C-RADIOv4-H can encode")
+        else:
+            token_quantum = min(self.token_quantum, self.tokens_per_tile)
+            if (embeddings.shape[1] < token_quantum or
+                    embeddings.shape[1] % token_quantum):
+                raise ValueError(
+                    f"RADIO prefix length must be a positive multiple of {token_quantum}")
         if not bool(torch.isfinite(embeddings).all()):
             raise ValueError("aligned RADIO prefix contains non-finite values")
         with super().use_prefix(embeddings, starts):

@@ -14,6 +14,7 @@ from rwkv_lab.radio1d_rwkv import (
     choose_detail_grid,
     estimate_context,
     extract_radio_global_tokens,
+    fourier_box_features,
     pad_radio_features,
     pad_tile_metadata,
     tile_metadata,
@@ -109,6 +110,27 @@ def test_adaptive_projector_packs_variable_tiles_without_padding():
     assert projector.last_token_counts.sum(dim=1).tolist() == [24, 24]
     assert projector.last_token_counts.min() >= 4
     assert projector.last_token_counts.max() <= 16
+
+
+def test_native_projector_accepts_prebatched_features_without_changing_output():
+    torch.manual_seed(41)
+    bridge = RadioRWKVBridge(
+        hidden_size=16, input_size=16, rank=4,
+        tokens_per_tile=16, max_tiles=3, letterbox_geometry=False)
+    projector = RadioFeatureProjector(bridge)
+    tokens = torch.randn(2, 12, 16)
+    boxes = torch.rand(2, 12, 4)
+    boxes[..., 2:] = torch.maximum(boxes[..., :2], boxes[..., 2:])
+    roles = torch.zeros(2, 12, dtype=torch.long)
+    rows = [(tokens[index], boxes[index], roles[index])
+            for index in range(tokens.shape[0])]
+
+    expected = projector.forward_native(rows)
+    actual = projector.forward_native((tokens, boxes, roles))
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    precomputed = projector.forward_native(
+        (tokens, boxes, roles, fourier_box_features(boxes)))
+    torch.testing.assert_close(precomputed, expected, rtol=0, atol=0)
 
 
 def test_variable_tile_batch_padding_has_explicit_mask():
@@ -261,4 +283,75 @@ def test_radio_reinjection_refuses_padded_interior_visual_steps():
         tile_count=torch.tensor([1]))
     with pytest.raises(ValueError, match="without padding"):
         with injector.use_aligned_prefix(padded):
+            pass
+
+
+def test_native_prefix_injector_accepts_a_non_tile_multiple_length():
+    """Native C-RADIOv4-H prefixes are grid_h*(grid_w//2), not tile multiples.
+
+    879 is the measured mean paired-token count and is not a multiple of any
+    tile budget; under the tiled quantum it raised and killed the run.
+    """
+    import pytest
+
+    class Layer(torch.nn.Module):
+        def forward(self, hidden_states, **_kwargs):
+            return hidden_states
+
+    layers = torch.nn.ModuleList([Layer() for _ in range(3)])
+    injector = RadioPrefixInjector(
+        hidden_size=16, layer_indices=(1,), rank=4, token_quantum=None)
+    injector.install(layers)
+    prefix = torch.randn(2, 879, 16, requires_grad=True)
+    hidden = torch.randn(2, 890, 16, requires_grad=True)
+    with injector.use_aligned_prefix(prefix, starts=(0, 0)):
+        output = hidden
+        for layer in layers:
+            output = layer(output)
+    torch.testing.assert_close(output, hidden, rtol=0, atol=0)
+    output.sum().backward()
+    assert injector.adapters["1"].up.weight.grad is not None
+    injector.close()
+
+    # The tiled injector must still reject that same length.
+    tiled = RadioPrefixInjector(
+        hidden_size=16, layer_indices=(1,), rank=4, token_quantum=128)
+    with pytest.raises(ValueError, match="positive multiple of"):
+        with tiled.use_aligned_prefix(torch.randn(2, 879, 16)):
+            pass
+
+
+def test_native_prefix_injector_bounds_the_prefix_length():
+    """token_quantum=None drops the tile multiple, not every length invariant.
+
+    A native prefix is one image's cells, so it cannot exceed the cell count of
+    the largest image the encoder accepts. Without the bound, a flattened or
+    axis-swapped batch arrives as a plausible prefix and trains on garbage.
+    """
+    import pytest
+    from rwkv_lab.radio1d_rwkv import RADIO_NATIVE_MAX_TOKENS
+
+    assert RADIO_NATIVE_MAX_TOKENS == (2048 // 16) ** 2
+    injector = RadioPrefixInjector(
+        hidden_size=8, layer_indices=(0,), rank=2, token_quantum=None,
+        max_native_tokens=64)
+    with pytest.raises(ValueError, match="outside 1..64"):
+        with injector.use_aligned_prefix(torch.randn(1, 65, 8)):
+            pass
+    with pytest.raises(ValueError, match="outside 1..64"):
+        with injector.use_aligned_prefix(torch.randn(1, 0, 8)):
+            pass
+
+
+def test_native_prefix_injector_rejects_a_tiled_prefix():
+    """Handing tiles to a native injector is a wiring error, not a shape to coerce."""
+    import pytest
+    injector = RadioPrefixInjector(
+        hidden_size=8, layer_indices=(0,), rank=2, token_quantum=None)
+    tiled = RadioVisualPrefix(
+        embeddings=torch.randn(1, 8, 8),
+        mask=torch.ones(1, 8, dtype=torch.bool),
+        tile_count=torch.tensor([1]))
+    with pytest.raises(ValueError, match="received a tiled RADIO prefix"):
+        with injector.use_aligned_prefix(tiled):
             pass

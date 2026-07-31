@@ -84,20 +84,60 @@ func (d *DB) ResolveInactiveStalls(activeRunNames []string) error {
 	return err
 }
 
+// engramRecallMinValidRate is the smallest engram_recall_valid_rate that makes
+// a row's injection RMS evidence about the recall path.  The field is a
+// FRACTION of positions that recalled anything (count / valid.numel() in
+// src/rwkv_lab/vision_train.py), so a bare >0 test admits a batch where a
+// single position out of thousands hit the memory — whose injection RMS is
+// legitimately ~0 and would bias the window toward a false memory_path_dead.
+const engramRecallMinValidRate = 0.01
+
+// engramRowIsEvidence decides whether one train row's engram_inj_rms belongs in
+// the dead-path window.
+//
+// Two producers emit engram_inj_rms and they do NOT share a key set:
+//   - src/rwkv_lab/vision_train.py `_engram_metrics` emits engram_inj_rms plus
+//     engram_recall_valid_rate (and friends) — but only while the bank has a
+//     recall record; the recall keys vanish otherwise.
+//   - src/rwkv_lab/grokking_metrics.py `injection_stats()` — used by
+//     looped_rwkv_rosa_engram_v3.py and the convert_train recipe, i.e. the
+//     Engram-LMB / GDN-conversion runs this alert exists for — emits
+//     engram_inj_rms with NO recall-rate key at all.
+//
+// So an absent recall rate must NOT be read as "no lookup was possible"; it
+// means the producer does not report one, and the row is the only evidence
+// available. A present rate is still honoured as a filter.
+func engramRowIsEvidence(engram, engramValid sql.NullFloat64) bool {
+	if !engram.Valid {
+		return false
+	}
+	if !engramValid.Valid {
+		return true
+	}
+	return engramValid.Float64 >= engramRecallMinValidRate
+}
+
 // TrainStats summarizes the most recent train rows for divergence detection.
 type TrainStats struct {
-	N             int
-	MaxGnorm      float64
-	SkipFrac      float64
-	LastTokPerSec float64
-	MedTokPerSec  float64
-	LastStep      int64
-	LastTS        float64
-	LastLoss      float64 // newest row in the window
-	OldestLoss    float64 // oldest row in the window (coarse train-trend check)
-	CodecRel      *float64
-	RosaInjRMS    *float64 // latest ROSA injection RMS (nil if the run has no ROSA)
-	EngramInjRMS  *float64 // latest Engram injection RMS (nil if the run has no Engram)
+	N              int
+	MaxGnorm       float64
+	SkipFrac       float64
+	LastTokPerSec  float64
+	MedTokPerSec   float64
+	LastStep       int64
+	LastTS         float64
+	LastLoss       float64 // newest row in the window
+	OldestLoss     float64 // oldest row in the window (coarse train-trend check)
+	CodecRel       *float64  // newest non-null codec_rel in the window
+	CodecRelWindow []float64 // every codec_rel in the window (newest first)
+	RosaInjRMS     *float64  // latest ROSA injection RMS (nil if the run has no ROSA)
+	EngramInjRMS   *float64  // latest usable Engram injection RMS
+	RosaInjWindow  []float64
+	// EngramInjWindow holds every row whose Engram injection RMS is usable
+	// evidence: rows reporting a recall rate below engramRecallMinValidRate are
+	// dropped, rows reporting no recall rate at all are kept (see
+	// engramRowIsEvidence).
+	EngramInjWindow []float64
 }
 
 type RunTrainStats struct {
@@ -123,9 +163,10 @@ func (d *DB) RecentTrainStatsByName(names []string, n int) (map[string]RunTrainS
 		       json_extract(e.extra_json,'$.codec_rel') AS codec,
 		       json_extract(e.extra_json,'$.rosa_inj_rms') AS rosa,
 		       json_extract(e.extra_json,'$.engram_inj_rms') AS engram,
+		       json_extract(e.extra_json,'$.engram_recall_valid_rate') AS engram_valid,
 		       ROW_NUMBER() OVER (PARTITION BY r.id ORDER BY e.step DESC) AS rn
 		FROM runs r JOIN train_events e ON e.run_id=r.id WHERE r.name IN (%s))
-		SELECT id,name,step,ts,gnorm,skipped,tok_per_sec,loss,codec,rosa,engram
+		SELECT id,name,step,ts,gnorm,skipped,tok_per_sec,loss,codec,rosa,engram,engram_valid
 		FROM ranked WHERE rn<=? ORDER BY name,step DESC`, marks)
 	rows, err := d.Query(query, args...)
 	if err != nil {
@@ -142,10 +183,10 @@ func (d *DB) RecentTrainStatsByName(names []string, n int) (map[string]RunTrainS
 	for rows.Next() {
 		var id, step int64
 		var name string
-		var rowTS, gnorm, tokPerSec, loss, codec, rosa, engram sql.NullFloat64
+		var rowTS, gnorm, tokPerSec, loss, codec, rosa, engram, engramValid sql.NullFloat64
 		var skipped sql.NullInt64
 		if err := rows.Scan(&id, &name, &step, &rowTS, &gnorm, &skipped, &tokPerSec, &loss,
-			&codec, &rosa, &engram); err != nil {
+			&codec, &rosa, &engram, &engramValid); err != nil {
 			return nil, err
 		}
 		a := acc[name]
@@ -154,15 +195,25 @@ func (d *DB) RecentTrainStatsByName(names []string, n int) (map[string]RunTrainS
 			acc[name] = a
 			a.ts.LastStep, a.ts.LastTS = step, nzf(rowTS)
 			a.ts.LastTokPerSec, a.ts.LastLoss = nzf(tokPerSec), nzf(loss)
-			if codec.Valid {
+		}
+		if codec.Valid {
+			a.ts.CodecRelWindow = append(a.ts.CodecRelWindow, codec.Float64)
+			if a.ts.CodecRel == nil {
 				v := codec.Float64
 				a.ts.CodecRel = &v
 			}
-			if rosa.Valid {
+		}
+		if rosa.Valid {
+			a.ts.RosaInjWindow = append(a.ts.RosaInjWindow, rosa.Float64)
+			if a.ts.RosaInjRMS == nil {
 				v := rosa.Float64
 				a.ts.RosaInjRMS = &v
 			}
-			if engram.Valid {
+		}
+		if engramRowIsEvidence(engram, engramValid) {
+			a.ts.EngramInjWindow = append(
+				a.ts.EngramInjWindow, engram.Float64)
+			if a.ts.EngramInjRMS == nil {
 				v := engram.Float64
 				a.ts.EngramInjRMS = &v
 			}
@@ -221,7 +272,8 @@ func (d *DB) recentTrainStatsSince(runID, afterStep int64, afterTS float64, n in
 		`SELECT step, ts, gnorm, skipped, tok_per_sec, loss,
 		        json_extract(extra_json,'$.codec_rel'),
 		        json_extract(extra_json,'$.rosa_inj_rms'),
-		        json_extract(extra_json,'$.engram_inj_rms')
+		        json_extract(extra_json,'$.engram_inj_rms'),
+		        json_extract(extra_json,'$.engram_recall_valid_rate')
 		 FROM train_events WHERE run_id=? AND step>? AND ts>? ORDER BY step DESC LIMIT ?`,
 		runID, afterStep, afterTS, n)
 	if err != nil {
@@ -236,27 +288,39 @@ func (d *DB) recentTrainStatsSince(runID, afterStep int64, afterTS float64, n in
 		var step int64
 		var rowTS, gnorm, tokPerSec, loss sql.NullFloat64
 		var skipped sql.NullInt64
-		var codec, rosa, engram sql.NullFloat64
-		if err := rows.Scan(&step, &rowTS, &gnorm, &skipped, &tokPerSec, &loss, &codec, &rosa, &engram); err != nil {
+		var codec, rosa, engram, engramValid sql.NullFloat64
+		if err := rows.Scan(
+			&step, &rowTS, &gnorm, &skipped, &tokPerSec, &loss,
+			&codec, &rosa, &engram, &engramValid); err != nil {
 			return ts, err
 		}
 		if first {
 			ts.LastStep, ts.LastTS = step, nzf(rowTS)
 			ts.LastTokPerSec = nzf(tokPerSec)
 			ts.LastLoss = nzf(loss)
-			if codec.Valid {
+			first = false
+		}
+		if codec.Valid {
+			ts.CodecRelWindow = append(ts.CodecRelWindow, codec.Float64)
+			if ts.CodecRel == nil {
 				v := codec.Float64
 				ts.CodecRel = &v
 			}
-			if rosa.Valid {
+		}
+		if rosa.Valid {
+			ts.RosaInjWindow = append(ts.RosaInjWindow, rosa.Float64)
+			if ts.RosaInjRMS == nil {
 				v := rosa.Float64
 				ts.RosaInjRMS = &v
 			}
-			if engram.Valid {
+		}
+		if engramRowIsEvidence(engram, engramValid) {
+			ts.EngramInjWindow = append(
+				ts.EngramInjWindow, engram.Float64)
+			if ts.EngramInjRMS == nil {
 				v := engram.Float64
 				ts.EngramInjRMS = &v
 			}
-			first = false
 		}
 		if loss.Valid {
 			ts.OldestLoss = loss.Float64 // overwritten each row; rows are DESC, so ends on oldest

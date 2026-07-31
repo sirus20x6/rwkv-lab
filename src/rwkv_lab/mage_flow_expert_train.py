@@ -46,6 +46,7 @@ from rwkv_lab.mage_flow_optimizations import (
     ACTIVATION_CHECKPOINT_MODES,
     ENCODER_CACHE_MODES,
     FLOAT8_RECIPES,
+    FP32MasterAdamW,
     FrozenEncoderCache,
     cache_coverage,
     compile_transformer_blocks,
@@ -149,7 +150,7 @@ class MageFlowExpertTrainConfig:
     attention_backend: str = "flash2"
     compile_transformer_blocks: bool = False
     compile_transformer_mode: str = "default"
-    compile_transformer_dynamic: bool = True
+    compile_transformer_dynamic: bool = False
     float8_training: bool = False
     float8_recipe: str = "tensorwise"
     encoder_cache_dir: str | None = None
@@ -409,6 +410,88 @@ def effective_conditioning_prompts(
     return prompts, kinds
 
 
+@dataclass(frozen=True)
+class PrefetchedFrozenEncoderBatch:
+    """CPU-resident frozen-encoder tensors loaded ahead of GPU execution."""
+
+    row_digests: tuple[str, ...]
+    text_by_prompt: dict[str, torch.Tensor]
+    moments: tuple[tuple[torch.Tensor, torch.Tensor] | None, ...]
+    load_seconds: float
+    pinned: bool
+
+
+def prefetch_frozen_encoder_batch(
+    model,
+    rows: Sequence[Mapping[str, Any]],
+    config: MageFlowExpertTrainConfig,
+) -> PrefetchedFrozenEncoderBatch | None:
+    """Read one cached Qwen/VAE batch without touching CUDA or global RNG state."""
+    from mage_flow.models.utils import PROMPT_TEMPLATE
+
+    encoder_cache: FrozenEncoderCache | None = getattr(
+        model, "_training_encoder_cache", None
+    )
+    if encoder_cache is None:
+        return None
+    started_at = time.perf_counter()
+    info = PROMPT_TEMPLATE["mage-flow"]
+    template, drop_idx = info["template"], int(info["start_idx"])
+    # Resolve the non-dropped alternatives with a private RNG. The actual
+    # dropout choice remains on the training thread so async I/O cannot perturb
+    # the checkpointed Python RNG stream.
+    prompts, _kinds = effective_conditioning_prompts(
+        rows,
+        caption_dropout=0.0,
+        rng=random.Random(0),
+    )
+    candidates = set(prompts)
+    if config.caption_dropout > 0:
+        candidates.add(" ")
+    text_by_prompt = {
+        prompt: encoder_cache.load_text(prompt, template, drop_idx)
+        for prompt in candidates
+    }
+    missing_prompts = [
+        prompt for prompt, value in text_by_prompt.items() if value is None
+    ]
+    if missing_prompts and encoder_cache.mode == "read_only":
+        raise RuntimeError(
+            f"read-only encoder cache is missing {len(missing_prompts)} "
+            "prefetched Qwen conditioning entries"
+        )
+    moments = tuple(encoder_cache.load_moments(row) for row in rows)
+    if encoder_cache.mode == "read_only" and any(value is None for value in moments):
+        raise RuntimeError("read-only encoder cache is missing prefetched VAE moments")
+
+    pinned = torch.cuda.is_available()
+    if pinned:
+        text_by_prompt = {
+            prompt: value.pin_memory() if value is not None else value
+            for prompt, value in text_by_prompt.items()
+        }
+        moments = tuple(
+            (
+                value[0].pin_memory(),
+                value[1].pin_memory(),
+            )
+            if value is not None
+            else None
+            for value in moments
+        )
+    return PrefetchedFrozenEncoderBatch(
+        row_digests=tuple(encoder_cache.moments_digest(row) for row in rows),
+        text_by_prompt={
+            prompt: value
+            for prompt, value in text_by_prompt.items()
+            if value is not None
+        },
+        moments=moments,
+        load_seconds=time.perf_counter() - started_at,
+        pinned=pinned,
+    )
+
+
 def annotate_domain_token_lengths(model, rows: Sequence[dict[str, Any]]) -> None:
     """Measure packed Qwen lengths using the non-dropped conditioning."""
     from mage_flow.models.utils import PROMPT_TEMPLATE
@@ -464,6 +547,7 @@ def encode_domain_batch(
     device: torch.device,
     *,
     caption_dropout: float | None = None,
+    prefetched_cache: PrefetchedFrozenEncoderBatch | None = None,
 ) -> dict[str, Any]:
     """Build official packed Qwen/VAE conditioning and flow targets."""
     from mage_flow.models.utils import PROMPT_TEMPLATE
@@ -479,6 +563,12 @@ def encode_domain_batch(
     encoder_cache: FrozenEncoderCache | None = getattr(
         model, "_training_encoder_cache", None
     )
+    if prefetched_cache is not None:
+        if encoder_cache is None:
+            raise ValueError("prefetched encoder tensors require an active cache")
+        expected = tuple(encoder_cache.moments_digest(row) for row in rows)
+        if prefetched_cache.row_digests != expected:
+            raise ValueError("prefetched encoder batch does not match its rows")
     if encoder_cache is None:
         txt_flat, _vec, text_lens = _encode_texts_packed(
             model,
@@ -488,7 +578,11 @@ def encode_domain_batch(
             device,
         )
     else:
-        cached_text: dict[str, torch.Tensor] = {}
+        cached_text: dict[str, torch.Tensor] = (
+            dict(prefetched_cache.text_by_prompt)
+            if prefetched_cache is not None
+            else {}
+        )
         missing_prompts = []
         for prompt in prompts:
             if prompt in cached_text:
@@ -522,12 +616,19 @@ def encode_domain_batch(
         ordered_text = [cached_text[prompt] for prompt in prompts]
         text_lens = [int(value.shape[0]) for value in ordered_text]
         txt_flat = torch.cat(ordered_text, dim=0).to(
-            device=device, dtype=torch.bfloat16
+            device=device,
+            dtype=torch.bfloat16,
+            non_blocking=bool(prefetched_cache and prefetched_cache.pinned),
         )
     txt = txt_flat.reshape(1, -1, txt_flat.shape[-1]).to(
         device=device, dtype=torch.bfloat16
     )
     txt_cu = _lens_to_cu(text_lens, device)
+    repa_enabled = bool(getattr(config, "repa_enabled", False))
+    use_repa_posterior_mean = bool(
+        getattr(config, "repa_use_posterior_mean", True)
+    )
+    repa_target: torch.Tensor | None = None
 
     if encoder_cache is None:
         if any(image is None for image in images):
@@ -545,14 +646,66 @@ def encode_domain_batch(
                 if image is not None
             ]
         torch.cuda.current_stream(device).wait_stream(transfer_stream)
-        clean, image_shapes = model.compute_vae_encodings(
-            gpu_images, with_ids=False
-        )
+        if repa_enabled:
+            if not hasattr(model.vae, "_encode_moments"):
+                raise RuntimeError(
+                    "deterministic REPA targets require MageVAE._encode_moments"
+                )
+            groups: dict[tuple[int, int], list[int]] = {}
+            for index, image in enumerate(gpu_images):
+                shape = (int(image.shape[-2]), int(image.shape[-1]))
+                groups.setdefault(shape, []).append(index)
+            moments_by_index: list[
+                tuple[torch.Tensor, torch.Tensor] | None
+            ] = [None] * len(gpu_images)
+            for indices in groups.values():
+                batch = torch.stack(
+                    [gpu_images[index] for index in indices], dim=0
+                )
+                batch = batch.to(memory_format=torch.contiguous_format).float()
+                batch = batch.to(model.vae.device, dtype=model.vae.dtype)
+                mean_batch, logvar_batch = model.vae._encode_moments(batch)
+                for local_index, image_index in enumerate(indices):
+                    moments_by_index[image_index] = (
+                        mean_batch[local_index : local_index + 1],
+                        logvar_batch[local_index : local_index + 1],
+                    )
+            packed_latents = []
+            packed_means = []
+            image_shapes = []
+            for value in moments_by_index:
+                if value is None:
+                    raise RuntimeError("internal VAE moment encoding failure")
+                mean, logvar = value
+                latent = FrozenEncoderCache.sample_moments(
+                    mean,
+                    logvar,
+                    sample_posterior=config.vae_sample_posterior,
+                )
+                _, _, latent_height, latent_width = latent.shape
+                image_shapes.append([(1, latent_height, latent_width)])
+                packed_latents.append(
+                    latent.permute(0, 2, 3, 1).reshape(-1, latent.shape[1])
+                )
+                packed_means.append(
+                    mean.permute(0, 2, 3, 1).reshape(-1, mean.shape[1])
+                )
+            clean = torch.cat(packed_latents, dim=0).unsqueeze(0)
+            posterior_mean = torch.cat(packed_means, dim=0).unsqueeze(0)
+            repa_target = posterior_mean if use_repa_posterior_mean else clean
+        else:
+            clean, image_shapes = model.compute_vae_encodings(
+                gpu_images, with_ids=False
+            )
         clean = clean.to(device=device, dtype=torch.bfloat16)
+        if repa_target is not None:
+            repa_target = repa_target.to(device=device, dtype=torch.bfloat16)
     else:
-        moments: list[tuple[torch.Tensor, torch.Tensor] | None] = [
-            encoder_cache.load_moments(row) for row in rows
-        ]
+        moments: list[tuple[torch.Tensor, torch.Tensor] | None] = (
+            list(prefetched_cache.moments)
+            if prefetched_cache is not None
+            else [encoder_cache.load_moments(row) for row in rows]
+        )
         missing_indices = [
             index for index, value in enumerate(moments) if value is None
         ]
@@ -579,12 +732,17 @@ def encode_domain_batch(
                 encoder_cache.save_moments(rows[index], mean, logvar)
                 moments[index] = (mean, logvar)
         packed_latents = []
+        packed_means = []
         image_shapes = []
         for value in moments:
             if value is None:
                 raise RuntimeError("internal VAE cache population failure")
             mean, logvar = (
-                tensor.to(device=device, dtype=torch.bfloat16)
+                tensor.to(
+                    device=device,
+                    dtype=torch.bfloat16,
+                    non_blocking=bool(prefetched_cache and prefetched_cache.pinned),
+                )
                 for tensor in value
             )
             latent = encoder_cache.sample_moments(
@@ -599,7 +757,18 @@ def encode_domain_batch(
                     -1, latent.shape[1]
                 )
             )
+            if repa_enabled:
+                packed_means.append(
+                    mean.permute(0, 2, 3, 1).reshape(
+                        -1, mean.shape[1]
+                    )
+                )
         clean = torch.cat(packed_latents, dim=0).unsqueeze(0)
+        if repa_enabled:
+            posterior_mean = torch.cat(packed_means, dim=0).unsqueeze(0)
+            repa_target = (
+                posterior_mean if use_repa_posterior_mean else clean
+            )
     image_lens = [int(row["latent_tokens"]) for row in rows]
     if clean.shape[1] != sum(image_lens):
         raise RuntimeError(
@@ -614,6 +783,14 @@ def encode_domain_batch(
     return {
         "domain": domain,
         "conditioning_kinds": conditioning_kinds,
+        # Training-only objectives may reuse the frozen VAE representation and
+        # may permute the sampled Gaussian across an accumulation window. Keep
+        # both exact tensors instead of reconstructing either from the path.
+        "clean": clean.detach(),
+        "repa_target": (
+            repa_target.detach() if repa_target is not None else None
+        ),
+        "noise": noise,
         "img": noised.to(dtype=clean.dtype),
         "txt": txt,
         "timesteps": timesteps,
@@ -626,7 +803,17 @@ def encode_domain_batch(
     }
 
 
-def _forward_transformer(transformer, flow: Mapping[str, Any]):
+def _forward_transformer(
+    transformer,
+    flow: Mapping[str, Any],
+    *,
+    return_hidden_layer: int | None = None,
+):
+    extra = (
+        {}
+        if return_hidden_layer is None
+        else {"return_hidden_layer": return_hidden_layer}
+    )
     return transformer(
         img=flow["img"],
         txt=flow["txt"],
@@ -634,6 +821,7 @@ def _forward_transformer(transformer, flow: Mapping[str, Any]):
         img_shapes=flow["img_shapes"],
         img_cu_seqlens=flow["img_cu_seqlens"],
         txt_cu_seqlens=flow["txt_cu_seqlens"],
+        **extra,
     )
 
 
@@ -1332,13 +1520,6 @@ def generate_eval_gallery(
         ).encode("utf-8")
     ).hexdigest()
     artifact = output_dir / "eval_samples" / f"step_{step:08d}.json"
-    if artifact.is_file():
-        existing = json.loads(artifact.read_text(encoding="utf-8"))
-        if (
-            existing.get("selection_sha256") == selection_sha256
-            and existing.get("complete") is True
-        ):
-            return artifact
 
     image_dir = output_dir / "eval_generations" / f"step_{step:08d}"
     image_dir.mkdir(parents=True, exist_ok=True)
@@ -1562,10 +1743,15 @@ def cache_frozen_encoders(config: MageFlowExpertTrainConfig) -> dict[str, Any]:
     torch.manual_seed(config.seed)
     torch.cuda.manual_seed_all(config.seed)
     random.seed(config.seed)
-    model_dir = snapshot_download(
-        repo_id=config.model_id,
-        revision=config.model_revision,
-        local_files_only=True,
+    model_path = getattr(config, "model_path", None)
+    model_dir = (
+        str(Path(model_path).expanduser().resolve())
+        if model_path
+        else snapshot_download(
+            repo_id=config.model_id,
+            revision=config.model_revision,
+            local_files_only=True,
+        )
     )
     pipeline = MageFlowPipeline.from_pretrained(
         model_dir,
@@ -1770,7 +1956,7 @@ def train(config: MageFlowExpertTrainConfig) -> None:
         learning_rate=config.learning_rate,
         shared_learning_rate_multiplier=config.shared_learning_rate_multiplier,
     )
-    optimizer = torch.optim.AdamW(
+    optimizer = FP32MasterAdamW(
         optimizer_groups,
         lr=config.learning_rate,
         betas=(config.adam_beta1, config.adam_beta2),
@@ -1963,6 +2149,7 @@ def train(config: MageFlowExpertTrainConfig) -> None:
                 "activation_checkpointing": activation_checkpoint_report,
                 "regional_compile": compile_report,
                 "float8": float8_report,
+                "optimizer_precision": optimizer.precision_report(),
                 "frozen_encoder_cache": encoder_cache_report,
                 "cached_encoder_offload": config.offload_cached_encoders,
             },

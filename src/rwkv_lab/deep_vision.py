@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from typing import Iterator, Sequence
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 
@@ -30,7 +31,8 @@ class _DeepVisionAdapter(nn.Module):
 class DeepVisionInjector(nn.Module):
     """Inject a projected visual prefix at selected frozen decoder layers."""
 
-    def __init__(self, hidden_size: int, layer_indices: Sequence[int], *, rank: int = 256):
+    def __init__(self, hidden_size: int, layer_indices: Sequence[int], *,
+                 rank: int = 256, grouped_precompute: bool = False):
         super().__init__()
         if rank < 1:
             raise ValueError("deep vision rank must be positive")
@@ -45,6 +47,28 @@ class DeepVisionInjector(nn.Module):
         self._starts: tuple[int, ...] = ()
         self._handles: list[torch.utils.hooks.RemovableHandle] = []
         self._last_rms: dict[str, torch.Tensor] = {}
+        self.grouped_precompute = bool(grouped_precompute)
+        self._prepared: dict[str, torch.Tensor] = {}
+
+    def _grouped_injections(self, prefix: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Evaluate every independent low-rank adapter as grouped GEMMs."""
+        keys = list(self.adapters)
+        adapters = [self.adapters[key] for key in keys]
+        first = adapters[0]
+        normalized = F.layer_norm(
+            prefix, (prefix.shape[-1],), eps=first.norm.eps)
+        norm_weight = torch.stack([adapter.norm.weight for adapter in adapters])
+        norm_bias = torch.stack([adapter.norm.bias for adapter in adapters])
+        affine = (
+            normalized.unsqueeze(0) * norm_weight[:, None, None, :]
+            + norm_bias[:, None, None, :]
+        )
+        down_weight = torch.stack([adapter.down.weight for adapter in adapters])
+        reduced = torch.einsum("sbtd,srd->sbtr", affine, down_weight)
+        reduced = F.gelu(reduced)
+        up_weight = torch.stack([adapter.up.weight for adapter in adapters])
+        injections = torch.einsum("sbtr,sdr->sbtd", reduced, up_weight)
+        return {key: injections[index] for index, key in enumerate(keys)}
 
     def install(self, layers: Sequence[nn.Module]) -> None:
         if self._handles:
@@ -69,7 +93,11 @@ class DeepVisionInjector(nn.Module):
                     raise RuntimeError("deep vision hook received no hidden states")
                 if hidden.shape[0] != prefix.shape[0] or hidden.shape[1] < prefix.shape[1]:
                     raise ValueError("deep vision prefix does not match decoder input")
-                injection = self.adapters[adapter_key](prefix).to(hidden.dtype)
+                injection = (
+                    self._prepared[adapter_key]
+                    if adapter_key in self._prepared else
+                    self.adapters[adapter_key](prefix)
+                ).to(hidden.dtype)
                 self._last_rms[adapter_key] = injection.detach().float().square().mean().sqrt()
                 starts = self._starts or (0,) * hidden.shape[0]
                 if len(set(starts)) == 1:
@@ -109,9 +137,12 @@ class DeepVisionInjector(nn.Module):
             raise ValueError("deep vision starts must have one entry per batch row")
         self._prefix = prefix
         self._starts = normalized
+        if self.grouped_precompute:
+            self._prepared = self._grouped_injections(prefix)
         try:
             yield
         finally:
+            self._prepared = {}
             self._prefix = None
             self._starts = ()
 

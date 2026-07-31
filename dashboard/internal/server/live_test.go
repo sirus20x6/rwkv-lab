@@ -94,12 +94,16 @@ func TestRunLiveRefreshesLatestAndBestEvalWithoutRunSwitch(t *testing.T) {
 }
 
 func TestRenderKPIsUsesStablePatchTarget(t *testing.T) {
-	ppl, best := 9.1, 7.2
+	ppl, best, shuffled, delta := 9.1, 7.2, 11.47, 0.03
 	step, bestStep := int64(300), int64(200)
 	html := renderKPIs(db.RunKPIs{
 		Step: &step, PPL: &ppl, BestPPL: &best, BestPPLStep: &bestStep,
+		OCRShuffledPPL: &shuffled, OCRConditioningNLL: &delta,
 	})
-	for _, want := range []string{`id="run-kpis"`, ">9.100<", ">7.200<", "@ step 200"} {
+	for _, want := range []string{
+		`id="run-kpis"`, ">9.100<", ">7.200<", "@ step 200",
+		"shuffle 11.470 · ΔNLL 0.030",
+	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("KPI patch missing %q: %s", want, html)
 		}

@@ -217,6 +217,23 @@ func renderKPIs(k db.RunKPIs) string {
 		}
 		return fmt.Sprintf("%.*f", decimals, *v)
 	}
+	// Fractions the trainer reports in 0..1 read better as whole percents, and
+	// index.html's Datastar expressions render them the same way. This strip is
+	// replaced wholesale by every live/SSE patch, so anything the initial
+	// Datastar paint shows must be reproduced here or it vanishes seconds later.
+	percentValue := func(v *float64) string {
+		if v == nil {
+			return "—"
+		}
+		return fmt.Sprintf("%.0f%%", *v*100)
+	}
+	// structured_box_iou was RETIRED in favour of structured_box_iou_instance;
+	// pre-rename rows held a differently-weighted quantity, so they render
+	// explicitly labelled instead of masquerading as the current metric.
+	boxIoU := floatValue(k.StructuredBoxIoU, 3)
+	if k.StructuredBoxIoU == nil && k.StructuredBoxIoULegacy != nil {
+		boxIoU = fmt.Sprintf("%.3f (legacy)", *k.StructuredBoxIoULegacy)
+	}
 	bestLoss := ""
 	if k.BestLoss != nil {
 		bestLoss = fmt.Sprintf("best %.3f", *k.BestLoss)
@@ -281,8 +298,8 @@ func renderKPIs(k db.RunKPIs) string {
 		`<div class="kpi"><div class="kpi-label">train loss</div><div class="kpi-val">%s</div><div class="kpi-sub">%s</div></div>`+
 		`<div class="kpi"><div class="kpi-label">eval ppl</div><div class="kpi-val">%s</div><div class="kpi-sub %s">%s</div></div>`+
 		`<div class="kpi"><div class="kpi-label">caption ppl</div><div class="kpi-val">%s</div></div>`+
-		`<div class="kpi"><div class="kpi-label">OCR ppl</div><div class="kpi-val">%s</div></div>`+
-		`<div class="kpi"><div class="kpi-label">box/mask ppl</div><div class="kpi-val">%s</div><div class="kpi-sub">IoU %s · Dice %s</div></div>`+
+		`<div class="kpi"><div class="kpi-label">OCR ppl</div><div class="kpi-val">%s</div><div class="kpi-sub">shuffle %s · ΔNLL %s · coverage ex %s · tok %s</div></div>`+
+		`<div class="kpi"><div class="kpi-label">structured text ppl</div><div class="kpi-val">%s</div><div class="kpi-sub">coord TF %s · IoU %s · GIoU %s · Dice %s</div></div>`+
 		`<div class="kpi"><div class="kpi-label">best ppl</div><div class="kpi-val good">%s</div><div class="kpi-sub good">%s</div></div>`+
 		`<div class="kpi"><div class="kpi-label">top-1</div><div class="kpi-val">%s</div><div class="kpi-sub %s">%s</div></div>`+
 		`<div class="kpi"><div class="kpi-label">best top-1</div><div class="kpi-val good">%s</div><div class="kpi-sub good">%s</div></div>`+
@@ -291,7 +308,11 @@ func renderKPIs(k db.RunKPIs) string {
 		intValue(k.Step), floatValue(k.Loss, 3), esc(bestLoss),
 		floatValue(k.PPL, 3), evalClass, esc(evalDelta),
 		floatValue(k.CaptionPPL, 3), floatValue(k.OCRPPL, 3),
-		floatValue(k.StructuredPPL, 3), floatValue(k.StructuredBoxIoU, 3),
+		floatValue(k.OCRShuffledPPL, 3), floatValue(k.OCRConditioningNLL, 3),
+		percentValue(k.OCRConditioningExampleCoverage),
+		percentValue(k.OCRConditioningTokenCoverage),
+		floatValue(k.StructuredPPL, 3), floatValue(k.StructuredCoordPPL, 3),
+		esc(boxIoU), floatValue(k.StructuredBoxGIoU, 3),
 		floatValue(k.StructuredMaskDice, 3),
 		floatValue(k.BestPPL, 3), esc(bestPPLStep),
 		top1, top1Class, esc(top1Delta), bestTop1, esc(bestTop1Step),

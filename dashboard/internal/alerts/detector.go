@@ -11,6 +11,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,6 +37,10 @@ const (
 	// grokking diagnostics
 	memDeadRMS         = 1e-4 // ROSA/Engram injection RMS below this = path never activated
 	memDeadMinStep     = 400  // only flag a dead path once it's had time to grok on
+	memDeadMinSamples  = 10   // require persistent evidence, not one atypical batch
+	memDeadFrac        = 0.90 // fraction of usable rows that must be near zero
+	memDeadMinFinite   = 0.50 // ≥half the reported rows must be finite to judge at all
+	codecRelMinSamples = 3    // codec_collapse is critical: never fire off one batch
 	pplCollapseRatio   = 1.15 // held-out ppl risen >15% over its own best = collapse
 	blockCollapseRatio = 1.15 // held-out block-MSE risen >15% over its own best
 	antiGrokLRCool     = 0.5  // lr_scale written on collapse (cool in place, don't kill)
@@ -48,6 +53,81 @@ const (
 	loopPinRW        = 0.245 // legacy default; trainer now reports loop_pin_thr per run (scales with --loop-gate-cap)
 	loopMultCap      = 30.0  // --loop-lr-mult help's fresh-conversion ceiling
 )
+
+// memoryPathVerdict is the tri-state health of one recall path's injection
+// window. The middle state matters: injection stats are flag-gated
+// (--log-grokking-metrics) on a deliberately coarse cadence, so a run can carry
+// too few injection rows in its 50-TRAIN-ROW window to judge — a state that
+// used to be indistinguishable from "healthy" because both produced silence.
+type memoryPathVerdict int
+
+const (
+	memoryPathAbsent  memoryPathVerdict = iota // no injection rows at all: run has no such path
+	memoryPathUnknown                          // rows exist but are too few / too non-finite to judge
+	memoryPathAlive
+	memoryPathDead
+)
+
+// memoryPathEvidence carries the verdict plus the counts behind it, so an
+// insufficient-evidence alert can state exactly what it was missing.
+type memoryPathEvidence struct {
+	verdict memoryPathVerdict
+	rows    int // rows in the window that reported an injection RMS
+	finite  int // of those, rows whose value is a real number
+	dead    int // of the finite rows, rows below memDeadRMS
+}
+
+// classifyMemoryPath judges a ROSA/Engram injection window.
+//
+// Non-finite values are dropped rather than counted as dead (injection_rms
+// returns a/b, so NaN is reachable). Dropping alone is not enough: a window of
+// 45 NaNs and 10 zeros would otherwise raise "persistently ~0" on 10/50 rows.
+// So the finite rows must also be a majority of what was reported; below that
+// the window is unknown, not dead.
+func classifyMemoryPath(samples []float64) memoryPathEvidence {
+	e := memoryPathEvidence{rows: len(samples)}
+	if e.rows == 0 {
+		return e // memoryPathAbsent
+	}
+	for _, value := range samples {
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			continue
+		}
+		e.finite++
+		if value < memDeadRMS {
+			e.dead++
+		}
+	}
+	if e.finite < memDeadMinSamples ||
+		float64(e.finite) < memDeadMinFinite*float64(e.rows) {
+		e.verdict = memoryPathUnknown
+		return e
+	}
+	e.verdict = memoryPathAlive
+	if float64(e.dead)/float64(e.finite) >= memDeadFrac {
+		e.verdict = memoryPathDead
+	}
+	return e
+}
+
+// robustCodecRel reduces the codec_rel window to its median. codec_collapse is
+// the only CRITICAL stats-driven alert (it can SIGINT the run under auto-stop),
+// so it must not fire off one atypical batch — the same failure the memory-path
+// checks were hardened against. Reports ok=false when the window is too thin to
+// be robust; the alert then stays silent rather than trusting a single row.
+func robustCodecRel(window []float64) (float64, bool) {
+	finite := make([]float64, 0, len(window))
+	for _, value := range window {
+		if !math.IsNaN(value) && !math.IsInf(value, 0) {
+			finite = append(finite, value)
+		}
+	}
+	if len(finite) < codecRelMinSamples {
+		return 0, false
+	}
+	sort.Float64s(finite)
+	return finite[len(finite)/2], true
+}
 
 type Detector struct {
 	db       *db.DB
@@ -294,25 +374,44 @@ func (d *Detector) scanRun(p sysmon.Proc, runID int64, stats db.TrainStats, late
 		d.raise(p, "throughput_drop", "warn", stats.LastStep,
 			fmt.Sprintf("throughput fell to %.0f tok/s (median %.0f)", stats.LastTokPerSec, stats.MedTokPerSec))
 	}
-	if stats.CodecRel != nil && *stats.CodecRel > codecRelWarn {
+	if median, ok := robustCodecRel(stats.CodecRelWindow); ok && median > codecRelWarn {
 		d.raise(p, "codec_collapse", "critical", stats.LastStep,
-			fmt.Sprintf("codec rel_rmse %.3f > %.2f — SMT/DMT targets likely garbage", *stats.CodecRel, codecRelWarn))
+			fmt.Sprintf("codec rel_rmse median %.3f over %d rows > %.2f — SMT/DMT targets likely garbage",
+				median, len(stats.CodecRelWindow), codecRelWarn))
 	}
 	// memory_path_dead: a ROSA/Engram recall path that never activated (injection
 	// RMS still ~0 well past warmup). Only fires when the run actually emits the
-	// field — runs without ROSA/Engram leave it nil and are skipped.
+	// field — runs without ROSA/Engram report zero rows and are skipped.
+	// memory_path_unmeasured is its explicit counterpart: rows exist, but too few
+	// to judge, which must be visible rather than silently absent.
 	if stats.LastStep > memDeadMinStep {
-		var dead []string
-		if stats.RosaInjRMS != nil && *stats.RosaInjRMS < memDeadRMS {
-			dead = append(dead, "ROSA")
-		}
-		if stats.EngramInjRMS != nil && *stats.EngramInjRMS < memDeadRMS {
-			dead = append(dead, "Engram")
+		var dead, unknown []string
+		for _, path := range []struct {
+			name   string
+			window []float64
+		}{{"ROSA", stats.RosaInjWindow}, {"Engram", stats.EngramInjWindow}} {
+			evidence := classifyMemoryPath(path.window)
+			switch evidence.verdict {
+			case memoryPathDead:
+				dead = append(dead, path.name)
+			case memoryPathUnknown:
+				unknown = append(unknown, fmt.Sprintf("%s (%d finite of %d rows)",
+					path.name, evidence.finite, evidence.rows))
+			}
 		}
 		if len(dead) > 0 {
 			d.raise(p, "memory_path_dead", "warn", stats.LastStep,
-				fmt.Sprintf("%s injection still ~0 (RMS < %.0e) at step %d — recall path hasn't grokked on",
-					strings.Join(dead, " & "), memDeadRMS, stats.LastStep))
+				fmt.Sprintf("%s injection persistently ~0 on usable rows (≥%.0f%% RMS < %.0e) at step %d — recall path hasn't grokked on",
+					strings.Join(dead, " & "), 100*memDeadFrac, memDeadRMS, stats.LastStep))
+		}
+		if len(unknown) > 0 {
+			d.raise(p, "memory_path_unmeasured", "info", stats.LastStep,
+				fmt.Sprintf("%s injection health is UNKNOWN, not healthy: need ≥%d finite rows (and ≥%.0f%% finite) in the last %d train rows — raise the --log-grokking-metrics cadence",
+					strings.Join(unknown, " & "), memDeadMinSamples, 100*memDeadMinFinite, stats.N))
+		} else {
+			// Insufficient evidence describes a live condition, like stall:
+			// once the window carries enough rows to judge, retire the banner.
+			_ = d.db.ResolveAlerts(p.RunName, "memory_path_unmeasured")
 		}
 	}
 

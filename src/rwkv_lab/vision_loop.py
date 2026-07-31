@@ -151,6 +151,128 @@ def stack_legacy_fla_caches(caches: Sequence[Any]) -> Any:
     return result
 
 
+def _cache_row_count(value: Any, *, location: str) -> int | None:
+    """Batch size implied by a cache value; every tensor in it must agree.
+
+    ``_stack_cache_values`` cross-checks ``shape[1:]``, dtype and device across
+    the rows it concatenates.  Selection has no second row to compare against,
+    so the batch axis is pinned here instead: a slot that is not batched along
+    dimension zero (``cu_seqlens``, an offset vector, a per-layer counter) would
+    otherwise be silently ``index_select``-ed into garbage.
+    """
+    if value is None:
+        return None
+    if torch.is_tensor(value):
+        if value.ndim < 1:
+            raise ValueError(f"cache tensor has no batch dimension at {location}")
+        return int(value.shape[0])
+    if isinstance(value, dict):
+        children = [(f"{location}.{key}", child) for key, child in value.items()]
+    elif isinstance(value, (tuple, list)):
+        children = [(f"{location}[{index}]", child)
+                    for index, child in enumerate(value)]
+    else:
+        return None
+    rows: int | None = None
+    for child_location, child in children:
+        count = _cache_row_count(child, location=child_location)
+        if count is None:
+            continue
+        if rows is None:
+            rows = count
+        elif count != rows:
+            raise ValueError(
+                f"cache tensors disagree on batch size at {child_location}: "
+                f"{count} vs {rows}")
+    return rows
+
+
+def _select_cache_rows(value: Any, indices: torch.Tensor, *,
+                       location: str, batch: int) -> Any:
+    """Recursively select cache tensors along their batch dimension."""
+    if value is None:
+        return None
+    if torch.is_tensor(value):
+        if value.ndim < 1:
+            raise ValueError(f"cache tensor has no batch dimension at {location}")
+        if value.shape[0] != batch:
+            raise ValueError(
+                f"cache tensor is not batched along dimension zero at "
+                f"{location}: {tuple(value.shape)} against batch {batch}")
+        return value.index_select(0, indices.to(value.device))
+    if isinstance(value, dict):
+        return {
+            key: _select_cache_rows(
+                child, indices, location=f"{location}.{key}", batch=batch)
+            for key, child in value.items()
+        }
+    if isinstance(value, (tuple, list)):
+        selected = [
+            _select_cache_rows(
+                child, indices, location=f"{location}[{index}]", batch=batch)
+            for index, child in enumerate(value)
+        ]
+        return tuple(selected) if isinstance(value, tuple) else selected
+    return value
+
+
+def _validated_row_indices(indices: Sequence[int] | torch.Tensor, *,
+                           batch: int | None, what: str) -> torch.Tensor:
+    """Validate row indices before they reach ``index_select``.
+
+    An out-of-range index is a device-side assert on CUDA: it poisons the
+    context and kills the process rather than raising something catchable. A
+    duplicated index silently aliases two decode rows onto one recurrent state
+    and yields plausible-but-wrong text.  Both are checked on the host here,
+    matching ``BatchedStreamingEngramState.select_rows``.
+    """
+    selected = torch.as_tensor(indices, dtype=torch.long).detach().cpu()
+    if selected.ndim != 1 or not selected.numel():
+        raise ValueError(f"{what} requires a non-empty 1D index")
+    if int(torch.unique(selected).numel()) != int(selected.numel()):
+        raise ValueError(f"{what} indices must be unique")
+    if batch is not None and (int(selected.min()) < 0
+                              or int(selected.max()) >= batch):
+        raise IndexError(f"{what} index is out of range for batch {batch}")
+    return selected
+
+
+def select_legacy_fla_cache_rows(cache: Any,
+                                 indices: Sequence[int] | torch.Tensor) -> Any:
+    """Return an FLA cache containing only the requested batch rows."""
+    layer_count = len(cache)
+    batch: int | None = None
+    for layer in range(layer_count):
+        count = _cache_row_count(cache[layer], location=f"layer[{layer}]")
+        if count is None:
+            continue
+        if batch is None:
+            batch = count
+        elif count != batch:
+            raise ValueError(
+                f"cache layers disagree on batch size at layer[{layer}]: "
+                f"{count} vs {batch}")
+    selected = _validated_row_indices(
+        indices, batch=batch, what="cache row selection")
+    states = [
+        _select_cache_rows(
+            cache[layer], selected, location=f"layer[{layer}]", batch=batch)
+        for layer in range(layer_count)
+    ]
+    factory = getattr(type(cache), "from_legacy_cache", None)
+    if factory is None:
+        raise TypeError("FLA cache type does not provide from_legacy_cache")
+    seen = int(getattr(cache, "_seen_tokens", 0))
+    try:
+        result = factory(list(states), seen_tokens=seen)
+    except TypeError as error:
+        raise TypeError("FLA cache type cannot restore selected legacy states") from error
+    if len(result) != layer_count:
+        raise RuntimeError(
+            "FLA cache factory discarded selected layer states during restore")
+    return result
+
+
 @dataclass(frozen=True)
 class RefinementCacheEntry:
     """Captured attention-only state for one layer and refinement pass."""
@@ -218,6 +340,38 @@ def stack_loop_refinement_cache_snapshots(
                 state=state,
             ))
         wrappers.append(tuple(passes))
+    return LoopRefinementCacheSnapshot(tuple(wrappers))
+
+
+def select_loop_refinement_cache_rows(
+        snapshot: LoopRefinementCacheSnapshot,
+        indices: Sequence[int] | torch.Tensor) -> LoopRefinementCacheSnapshot:
+    """Select batch rows from every factored refinement-cache stream."""
+    batch: int | None = None
+    for wrapper_index, entries in enumerate(snapshot.wrappers):
+        for pass_index, entry in enumerate(entries):
+            location = f"refinement[{wrapper_index}][{pass_index}]"
+            count = _cache_row_count(entry.state, location=location)
+            if count is None:
+                continue
+            if batch is None:
+                batch = count
+            elif count != batch:
+                raise ValueError(
+                    f"refinement streams disagree on batch size at {location}: "
+                    f"{count} vs {batch}")
+    selected = _validated_row_indices(
+        indices, batch=batch, what="refinement cache row selection")
+    wrappers = []
+    for wrapper_index, entries in enumerate(snapshot.wrappers):
+        wrappers.append(tuple(RefinementCacheEntry(
+            layer_idx=entry.layer_idx,
+            seen_tokens=entry.seen_tokens,
+            state=_select_cache_rows(
+                entry.state, selected,
+                location=f"refinement[{wrapper_index}][{pass_index}]",
+                batch=batch),
+        ) for pass_index, entry in enumerate(entries)))
     return LoopRefinementCacheSnapshot(tuple(wrappers))
 
 
@@ -439,7 +593,23 @@ def loop_adapter_state(wrappers: list[FLAFactoredTimeMix]) -> list[dict[str, tor
              if not name.startswith("core.")} for wrapper in wrappers]
 
 
-def load_loop_adapter_state(wrappers: list[FLAFactoredTimeMix], states: list[dict[str, torch.Tensor]]) -> None:
+def load_loop_adapter_state(
+        wrappers: list[FLAFactoredTimeMix],
+        states: list[dict[str, torch.Tensor]], *,
+        allow_loop_count_increase_from: int = 0) -> None:
+    """Restore loop adapters, optionally adding zero-init refinement passes.
+
+    ``allow_loop_count_increase_from`` declares the checkpoint's pass count and
+    permits growing it: any pass count may grow to any larger one, not only
+    1 -> N.  Appended rows are zeroed, and a zero ``residual_weight`` row makes
+    ``_gate(i)`` exactly zero for that pass, so every appended pass is an exact
+    no-op regardless of how many trained passes precede it.  The declaration is
+    required only so that a silent geometry change cannot pass as a restore.
+
+    Growth is limited to the pass-indexed gate tensors.  ``hyper_lanes`` and
+    ``lora_rank`` configurations carry additional per-pass state whose no-op
+    initialization is not a zero row; those are rejected by name below.
+    """
     if len(wrappers) != len(states):
         raise ValueError(f"loop checkpoint has {len(states)} layers, model has {len(wrappers)}")
     for layer, (wrapper, saved) in enumerate(zip(wrappers, states)):
@@ -449,19 +619,51 @@ def load_loop_adapter_state(wrappers: list[FLAFactoredTimeMix], states: list[dic
         if actual != expected:
             missing = sorted(expected - actual)
             unexpected = sorted(actual - expected)
+            if all(name.startswith(("loop_lora_A.", "loop_lora_B."))
+                   for name in (*missing, *unexpected)):
+                raise ValueError(
+                    f"loop checkpoint layer {layer} has a different per-pass "
+                    f"LoRA pass count; loop_lora_A/B keys are named by pass so "
+                    f"a loop-count change cannot be migrated"
+                )
             raise ValueError(
                 f"loop checkpoint layer {layer} key mismatch; "
                 f"missing={missing[:3]}, unexpected={unexpected[:3]}"
             )
-        for name, value in saved.items():
-            if current[name].shape != value.shape:
-                raise ValueError(f"incompatible loop tensor layer {layer} {name}")
-            current[name].copy_(value.to(device=current[name].device, dtype=current[name].dtype))
+        with torch.no_grad():
+            for name, value in saved.items():
+                target = current[name]
+                if target.shape == value.shape:
+                    target.copy_(value.to(device=target.device, dtype=target.dtype))
+                    continue
+                pass_indexed = name in {
+                    "residual_weight", "gate_chan", "loop_index_embed",
+                }
+                can_grow = bool(
+                    pass_indexed
+                    and allow_loop_count_increase_from > 0
+                    and value.ndim > 0 and target.ndim == value.ndim
+                    and value.shape[0] == allow_loop_count_increase_from
+                    and target.shape[0] > value.shape[0]
+                    and target.shape[1:] == value.shape[1:])
+                if not can_grow:
+                    if name.startswith("hyper_"):
+                        raise ValueError(
+                            f"loop checkpoint layer {layer} {name}: "
+                            f"hyper-connection tensors are pass-indexed but "
+                            f"their no-op init is not a zero row, so the loop "
+                            f"count cannot be grown")
+                    raise ValueError(
+                        f"incompatible loop tensor layer {layer} {name}")
+                target.zero_()
+                target[:value.shape[0]].copy_(
+                    value.to(device=target.device, dtype=target.dtype))
 
 
 @torch.no_grad()
-def loop_training_metrics(wrappers: list[FLAFactoredTimeMix]) -> dict[str, float]:
-    """Small scalar telemetry for JSONL charts; refinement pass zero is unused."""
+def loop_training_metric_tensors(
+        wrappers: list[FLAFactoredTimeMix]) -> dict[str, torch.Tensor]:
+    """Unmaterialized loop telemetry for a shared device-to-host transfer."""
     if not wrappers or wrappers[0].loop.n_loops <= 1:
         return {}
     effective = torch.cat([wrapper.loop.effective_rw()[1:].reshape(-1)
@@ -480,22 +682,29 @@ def loop_training_metrics(wrappers: list[FLAFactoredTimeMix]) -> dict[str, float
     channel_rms = channel.square().mean().sqrt()
     index_rms = (index.square().mean().sqrt()
                  if index is not None and index.numel() else gate_rms.new_zeros(()))
-    # One device-to-host transfer for the whole telemetry bundle. Calling
-    # float(cuda_scalar) for each field serializes a train step behind a string
-    # of tiny reductions and was visible as an avoidable GPU launch gap.
-    mean, rms, maximum, active, channel_value, index_value = torch.stack((
-        gate_mean, gate_rms, gate_max, active_frac, channel_rms, index_rms,
-    )).float().tolist()
     return {
-        "loop_gate_abs_mean": mean,
-        "loop_gate_rms": rms,
-        "loop_gate_max": maximum,
-        "loop_gate_active_frac": active,
-        "loop_gate_cap_utilization": (rms / cap if cap > 0 else 0.0),
-        "loop_gate_max_cap_utilization": (maximum / cap if cap > 0 else 0.0),
-        "loop_channel_delta_rms": channel_value,
-        "loop_index_rms": index_value,
+        "loop_gate_abs_mean": gate_mean,
+        "loop_gate_rms": gate_rms,
+        "loop_gate_max": gate_max,
+        "loop_gate_active_frac": active_frac,
+        "loop_gate_cap_utilization": (
+            gate_rms / cap if cap > 0 else gate_rms.new_zeros(())),
+        "loop_gate_max_cap_utilization": (
+            gate_max / cap if cap > 0 else gate_max.new_zeros(())),
+        "loop_channel_delta_rms": channel_rms,
+        "loop_index_rms": index_rms,
     }
+
+
+@torch.no_grad()
+def loop_training_metrics(wrappers: list[FLAFactoredTimeMix]) -> dict[str, float]:
+    """Compatibility renderer for callers that need ordinary JSON scalars."""
+    metrics = loop_training_metric_tensors(wrappers)
+    if not metrics:
+        return {}
+    rendered = torch.stack([
+        value.float() for value in metrics.values()]).tolist()
+    return dict(zip(metrics, rendered))
 
 
 def loop_telemetry_from_states(states: list[dict[str, torch.Tensor]], *,
@@ -556,15 +765,33 @@ def loop_telemetry_from_states(states: list[dict[str, torch.Tensor]], *,
 
 
 @torch.no_grad()
-def write_loop_telemetry(path: str | Path, wrappers: list[FLAFactoredTimeMix],
-                         *, step: int) -> None:
-    states = [{name: value.detach().cpu() for name, value in wrapper.loop.state_dict().items()
-               if not name.startswith("core.")} for wrapper in wrappers]
+def loop_telemetry_payload(
+        wrappers: list[FLAFactoredTimeMix], *, step: int) -> dict:
+    # The dashboard artifact consumes only these gates. Avoid synchronously
+    # copying the large factored hypernetwork matrices every ten steps.
+    states = []
+    for wrapper in wrappers:
+        state = wrapper.loop.state_dict()
+        states.append({
+            name: state[name].detach().cpu()
+            for name in ("residual_weight", "gate_chan")
+            if name in state
+        })
     first = wrappers[0].loop
-    payload = loop_telemetry_from_states(states, loop_count=first.n_loops,
-                                         gate_cap=first.gate_cap, step=step,
-                                         runtime_scale=first.runtime_scale)
+    return loop_telemetry_from_states(
+        states, loop_count=first.n_loops, gate_cap=first.gate_cap, step=step,
+        runtime_scale=first.runtime_scale)
+
+
+def write_loop_telemetry_payload(path: str | Path, payload: dict) -> None:
     target = Path(path)
     temporary = target.with_suffix(".tmp")
     temporary.write_text(json.dumps(payload) + "\n")
     os.replace(temporary, target)
+
+
+@torch.no_grad()
+def write_loop_telemetry(path: str | Path, wrappers: list[FLAFactoredTimeMix],
+                         *, step: int) -> None:
+    write_loop_telemetry_payload(
+        path, loop_telemetry_payload(wrappers, step=step))
