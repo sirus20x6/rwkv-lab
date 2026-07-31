@@ -149,3 +149,31 @@ func TestTrainVMPanelUsesIncrementalReadOnlyTimeline(t *testing.T) {
 		t.Fatal("TrainVM panel does not incrementally follow the native journal")
 	}
 }
+
+func TestTrainVMEditorIsSchemaDrivenAndNativeCompiled(t *testing.T) {
+	assets := Static()
+	index, err := fs.ReadFile(assets, "index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	editor, err := fs.ReadFile(assets, "trainvm-editor.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(index), `id="trainvm-authoring"`) ||
+		!strings.Contains(string(index), `id="vm-schema-form"`) ||
+		!strings.Contains(string(index), `/static/trainvm-editor.js`) {
+		t.Fatal("TrainVM authoring panel or editor script is missing")
+	}
+	for _, required := range []string{
+		`/api/trainvm/schema`, `resolveSchema`, `node.oneOf`, `resolved.enum`,
+		`resolved.additionalProperties`, `/api/trainvm/compile`, `canonical_plan`,
+	} {
+		if !strings.Contains(string(editor), required) {
+			t.Fatalf("TrainVM schema editor is missing %q", required)
+		}
+	}
+	if strings.Contains(string(index), "launch TrainVM") {
+		t.Fatal("preview-only TrainVM editor unexpectedly exposes a launch action")
+	}
+}
