@@ -20,6 +20,8 @@ constexpr std::uint64_t kInitialPlanRevision = 1;
 
 bool same_worker_event(const Event& stored, const Event& input) {
   return stored.event_id == input.event_id && stored.run_id == input.run_id &&
+         stored.run_revision == input.run_revision &&
+         stored.plan_revision == input.plan_revision &&
          stored.node_id == input.node_id && stored.attempt_id == input.attempt_id &&
          stored.worker_sequence == input.worker_sequence && stored.event_type == input.event_type &&
          stored.event_version == input.event_version && stored.wall_time_ns == input.wall_time_ns &&
@@ -878,6 +880,58 @@ const ExecutionState& Controller::recover() {
       replayed_control_status[command->command_id] = suffix;
       continue;
     }
+    if (phase == ReplayPhase::ready && managed_run &&
+        recovered.status == ExecutionStatus::running &&
+        runtime_observed_state == "running" && event.worker_sequence == 0) {
+      const Node& node =
+          plan_.experiment.spec.workflow.nodes.at(recovered.current_node_id);
+      const Component& component =
+          plan_.experiment.spec.components.at(node.invoke.component);
+      const bool validation = node.invoke.operation == "validate_artifact";
+      const bool releasing = node.invoke.operation == "release_resources";
+      const auto dispatch = journal_.dispatch(dispatch_id_for(recovered));
+      const auto acquisition = journal_.event(run_id_ + ":lease-acquired");
+      nlohmann::json expected_payload = nlohmann::json::object();
+      if (releasing && acquisition) {
+        expected_payload = {
+            {"concurrency_key",
+             plan_.experiment.spec.workspace.concurrency_key},
+            {"lease_id",
+             acquisition->payload.value("lease_id", std::string{})},
+            {"fencing_token", acquisition->payload.value(
+                                  "fencing_token", std::uint64_t{})},
+        };
+      }
+      if (component.runtime != ComponentRuntime::builtin ||
+          component.adapter != "trainvm.core" || (!validation && !releasing) ||
+          !dispatch || dispatch->status != DispatchStatus::completed ||
+          dispatch->result_event_id !=
+              std::optional<std::string>{event.event_id} ||
+          event.event_id != dispatch->dispatch_id + ":builtin-result" ||
+          event.run_id != run_id_ || event.run_revision != recovered.revision ||
+          event.node_id != recovered.current_node_id ||
+          event.attempt_id != recovered.current_attempt_id ||
+          event.monotonic_time_ns != 0 ||
+          (validation && event.event_type != "artifact.validated" &&
+           event.event_type != "artifact.invalid") ||
+          (releasing && event.event_type != "resource.released") ||
+          event.payload != expected_payload || !acquisition) {
+        throw std::runtime_error(
+            "journal contains a noncanonical managed builtin result");
+      }
+      if (releasing &&
+          !journal_.has_lease_release_receipt(
+              plan_.experiment.spec.workspace.concurrency_key, run_id_,
+              acquisition->payload.value("lease_id", std::string{}),
+              acquisition->payload.value("fencing_token", std::uint64_t{}),
+              event.wall_time_ns)) {
+        throw std::runtime_error(
+            "managed resource release has no durable lease receipt");
+      }
+      pending_cause = event;
+      phase = ReplayPhase::awaiting_transition;
+      continue;
+    }
     if (is_controller_event(event.event_type)) {
       throw std::runtime_error("journal recovery encountered an unsupported controller event");
     }
@@ -1140,7 +1194,8 @@ WorkerLaunchTicket Controller::prepare_worker_launch(WorkerLaunchRequest request
           acquisition->payload.value("fencing_token", std::uint64_t{}) ||
       active->acquired_at_ns !=
           acquisition->payload.value("acquired_at_ns", std::int64_t{})) {
-    throw std::runtime_error("worker launch no longer owns its acquired lease fence");
+    throw OperationPreconditionError(
+        "worker launch no longer owns its acquired lease fence");
   }
   WorkerLaunchTicket launch{
       .run_id = run_id_,
@@ -1263,12 +1318,10 @@ Dispatch Controller::prepare_dispatch() {
   }
   const Node& node =
       plan_.experiment.spec.workflow.nodes.at(state_.current_node_id);
-  const Component& component =
-      plan_.experiment.spec.components.at(node.invoke.component);
   const bool managed_run = journal_.event(run_id_ + ":lease-acquired").has_value();
-  if (managed_run && component.runtime != ComponentRuntime::builtin) {
+  if (managed_run) {
     throw std::logic_error(
-        "worker-backed dispatch requires a fenced dispatch clock");
+        "managed dispatch requires a typed builtin or fenced worker operation");
   }
   Dispatch dispatch{
       .dispatch_id = dispatch_id_for(state_),
@@ -1329,6 +1382,152 @@ const ExecutionState& Controller::handle_event(
   return handle_event_impl(input, identity, now_ns);
 }
 
+const ExecutionState& Controller::complete_artifact_validation(
+    ArtifactValidationOutcome outcome, std::int64_t now_ns) {
+  return complete_managed_builtin(
+      "validate_artifact",
+      outcome == ArtifactValidationOutcome::valid ? "artifact.validated"
+                                                   : "artifact.invalid",
+      false, now_ns);
+}
+
+const ExecutionState& Controller::release_managed_resources(
+    std::int64_t now_ns) {
+  return complete_managed_builtin("release_resources", "resource.released",
+                                  true, now_ns);
+}
+
+const ExecutionState& Controller::complete_managed_builtin(
+    std::string_view expected_operation, std::string event_type,
+    bool release_lease, std::int64_t now_ns) {
+  if (now_ns < 0) {
+    throw std::invalid_argument("managed builtin clock must be nonnegative");
+  }
+  recover();
+  if (state_.status != ExecutionStatus::running || paused_) {
+    throw std::logic_error("managed builtin requires an active running node");
+  }
+  const Node& node =
+      plan_.experiment.spec.workflow.nodes.at(state_.current_node_id);
+  const Component& component =
+      plan_.experiment.spec.components.at(node.invoke.component);
+  if (component.runtime != ComponentRuntime::builtin ||
+      component.adapter != "trainvm.core" ||
+      node.invoke.operation != expected_operation ||
+      (expected_operation == "validate_artifact" &&
+       event_type != "artifact.validated" && event_type != "artifact.invalid") ||
+      (expected_operation == "release_resources" &&
+       (event_type != "resource.released" || !release_lease)) ||
+      (expected_operation != "validate_artifact" &&
+       expected_operation != "release_resources")) {
+    throw std::logic_error(
+        "managed builtin call does not match the active trainvm.core operation");
+  }
+  const auto acquisition = journal_.event(run_id_ + ":lease-acquired");
+  if (!acquisition || acquisition->event_type != "resource.lease_acquired") {
+    throw std::logic_error("managed builtin requires durable acquisition evidence");
+  }
+  const std::string& concurrency_key =
+      plan_.experiment.spec.workspace.concurrency_key;
+  const auto active = journal_.active_lease(concurrency_key, now_ns);
+  if (!active || active->owner_run_id != run_id_ ||
+      active->lease_id !=
+          acquisition->payload.value("lease_id", std::string{}) ||
+      active->fencing_token !=
+          acquisition->payload.value("fencing_token", std::uint64_t{}) ||
+      active->acquired_at_ns !=
+          acquisition->payload.value("acquired_at_ns", std::int64_t{})) {
+    throw OperationPreconditionError(
+        "managed builtin no longer owns its acquired lease fence");
+  }
+
+  const Dispatch dispatch{
+      .dispatch_id = dispatch_id_for(state_),
+      .run_id = run_id_,
+      .run_revision = state_.revision,
+      .plan_revision = kInitialPlanRevision,
+      .node_id = state_.current_node_id,
+      .attempt_id = state_.current_attempt_id,
+      .component = node.invoke.component,
+      .operation = node.invoke.operation,
+      .status = DispatchStatus::prepared,
+      .result_event_id = std::nullopt,
+  };
+  const Dispatch prepared =
+      journal_.prepare_dispatch(dispatch, dispatch_prepared_event(dispatch));
+  const auto projection = journal_.projection(run_id_);
+  if (!projection || projection->observed_state != "running" ||
+      projection->current_node_id != state_.current_node_id ||
+      projection->current_attempt_id != state_.current_attempt_id) {
+    throw std::runtime_error(
+        "managed builtin dispatch has no matching active projection");
+  }
+  nlohmann::json payload = nlohmann::json::object();
+  if (release_lease) {
+    payload = {{"concurrency_key", active->concurrency_key},
+               {"lease_id", active->lease_id},
+               {"fencing_token", active->fencing_token}};
+  }
+  const Event cause{
+      .event_id = prepared.dispatch_id + ":builtin-result",
+      .run_id = run_id_,
+      .run_revision = state_.revision,
+      .plan_revision = kInitialPlanRevision,
+      .node_id = state_.current_node_id,
+      .attempt_id = state_.current_attempt_id,
+      .worker_sequence = 0,
+      .event_type = std::move(event_type),
+      .event_version = 1,
+      .wall_time_ns = now_ns,
+      .monotonic_time_ns = 0,
+      .optimizer_step = projection->optimizer_step == 0U
+                            ? std::nullopt
+                            : std::optional<std::uint64_t>{
+                                  projection->optimizer_step},
+      .payload = std::move(payload),
+  };
+  const TransitionResult result = advance_execution(plan_, state_, cause);
+  std::vector<Event> batch{cause, transitioned_event(cause, result)};
+  if (result.state.status == ExecutionStatus::running) {
+    const Node& target_node =
+        plan_.experiment.spec.workflow.nodes.at(result.state.current_node_id);
+    const Component& target_component =
+        plan_.experiment.spec.components.at(target_node.invoke.component);
+    if (target_component.runtime != ComponentRuntime::builtin) {
+      batch.push_back(
+          dispatch_completed_event(dispatch, cause, result.state.revision));
+      batch.push_back(Event{
+          .event_id = cause.event_id + ":acquiring",
+          .run_id = run_id_,
+          .run_revision = result.state.revision + 1U,
+          .plan_revision = kInitialPlanRevision,
+          .node_id = result.state.current_node_id,
+          .attempt_id = result.state.current_attempt_id,
+          .worker_sequence = 0,
+          .event_type = "run.observed_state_changed",
+          .event_version = 1,
+          .wall_time_ns = now_ns,
+          .monotonic_time_ns = 0,
+          .optimizer_step = cause.optimizer_step,
+          .payload = {{"state", "acquiring"},
+                      {"cause_event_id", cause.event_id}},
+      });
+    } else {
+      batch.push_back(
+          entered_event(plan_, result.state, cause.event_id + ":node-entered", &cause));
+      batch.push_back(
+          dispatch_completed_event(dispatch, cause, result.state.revision));
+    }
+  } else {
+    batch.push_back(terminal_event(cause, result.state));
+    batch.push_back(
+        dispatch_completed_event(dispatch, cause, result.state.revision));
+  }
+  journal_.complete_managed_builtin_dispatch(prepared, *active, now_ns,
+                                             release_lease, batch);
+  return recover();
+}
+
 const ExecutionState& Controller::handle_event_impl(
     const Event& input,
     const std::optional<WorkerSessionIdentity>& identity,
@@ -1357,6 +1556,11 @@ const ExecutionState& Controller::handle_event_impl(
       journal_.event(run_id_ + ":lease-acquired").has_value();
   const bool worker_authority =
       managed_run && active_component.runtime != ComponentRuntime::builtin;
+  if (managed_run && active_component.runtime == ComponentRuntime::builtin &&
+      !identity) {
+    throw std::logic_error(
+        "managed builtin results require an operation-specific controller API");
+  }
   const std::string launch_id = input.run_id + ":worker-launch:" + input.node_id +
                                 ":" + input.attempt_id;
   const auto ready = journal_.event(launch_id + ":ready");
@@ -1381,7 +1585,8 @@ const ExecutionState& Controller::handle_event_impl(
     if (!active || active->owner_run_id != identity->run_id ||
         active->lease_id != identity->lease_id ||
         active->fencing_token != identity->fencing_token) {
-      throw std::runtime_error("worker event session no longer owns its active lease");
+      throw OperationPreconditionError(
+          "worker event session no longer owns its active lease");
     }
   } else if (identity) {
     throw std::invalid_argument(
@@ -1400,7 +1605,12 @@ const ExecutionState& Controller::handle_event_impl(
     throw std::invalid_argument("worker event uses a controller-reserved event type");
   }
   if (input.run_revision != state_.revision || input.plan_revision != kInitialPlanRevision) {
-    throw std::invalid_argument("worker event carries a stale run or plan revision");
+    if (worker_authority) {
+      throw OperationPreconditionError(
+          "worker event carries a stale run or plan revision");
+    }
+    throw std::invalid_argument(
+        "worker event carries a stale run or plan revision");
   }
   if (input.worker_sequence == 0) {
     throw std::invalid_argument("worker event sequence must be nonzero");

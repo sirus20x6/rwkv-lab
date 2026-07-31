@@ -21,6 +21,7 @@
 #include <future>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -2208,14 +2209,26 @@ void test_worker_launch_and_readiness_boundary() {
               builtin.current_node_id == "validate_cache" &&
               journal.projection(run_id)->observed_state == "running",
           "external result may enter a managed builtin node immediately");
-    const auto validation_dispatch = controller.prepare_dispatch();
-    const trainvm::Event cache_validated{
-        .event_id = validation_dispatch.dispatch_id + ":result",
+    const auto before_wrong_builtin = journal.event_count();
+    bool wrong_builtin_rejected = false;
+    try {
+      (void)controller.release_managed_resources(6'300);
+    } catch (const std::logic_error&) {
+      wrong_builtin_rejected = true;
+    }
+    bool simulation_dispatch_rejected = false;
+    try {
+      (void)controller.prepare_dispatch();
+    } catch (const std::logic_error&) {
+      simulation_dispatch_rejected = true;
+    }
+    const trainvm::Event simulated_validation{
+        .event_id = run_id + ":simulated-validation",
         .run_id = run_id,
-        .run_revision = 12,
+        .run_revision = builtin.revision,
         .plan_revision = 1,
-        .node_id = "validate_cache",
-        .attempt_id = "validate_cache@1",
+        .node_id = builtin.current_node_id,
+        .attempt_id = builtin.current_attempt_id,
         .worker_sequence = 1,
         .event_type = "artifact.validated",
         .event_version = 1,
@@ -2224,19 +2237,40 @@ void test_worker_launch_and_readiness_boundary() {
         .optimizer_step = 5'500,
         .payload = nlohmann::json::object(),
     };
-    const auto& builtin_advanced = controller.handle_event(cache_validated);
+    bool simulation_result_rejected = false;
+    try {
+      (void)controller.handle_event(simulated_validation);
+    } catch (const std::logic_error&) {
+      simulation_result_rejected = true;
+    }
+    check(simulation_dispatch_rejected && simulation_result_rejected &&
+              journal.event_count() == before_wrong_builtin,
+          "managed artifact validation rejects generic simulation hooks without mutation");
+    const auto& builtin_advanced = controller.complete_artifact_validation(
+        trainvm::ArtifactValidationOutcome::valid, 6'300);
     const auto builtin_reacquiring = journal.projection(run_id);
+    const auto validation_events = journal.events_for_run(run_id);
+    const auto validation_result = std::ranges::find_if(
+        validation_events, [](const trainvm::Event& event) {
+          return event.event_type == "artifact.validated";
+        });
     trainvm::Controller builtin_restart(*compiled.plan, journal, run_id);
     const auto& builtin_recovered = builtin_restart.recover();
-    check(builtin_advanced.revision == 14U &&
+    check(wrong_builtin_rejected && simulation_dispatch_rejected &&
+              simulation_result_rejected &&
+              journal.event_count() == before_wrong_builtin + 5U &&
+              validation_result != validation_events.end() &&
+              validation_result->worker_sequence == 0U &&
+              validation_result->payload.empty() &&
+              builtin_advanced.revision == 14U &&
               builtin_advanced.current_node_id == "resume_training" &&
               builtin_reacquiring &&
               builtin_reacquiring->observed_state == "acquiring" &&
               builtin_reacquiring->current_node_id.empty() &&
               builtin_reacquiring->current_attempt_id.empty() &&
               builtin_recovered == builtin_advanced,
-          "managed builtin-to-external transition is durably unassigned and "
-          "recoverable");
+          "typed artifact validation authors a canonical result and durably "
+          "returns to worker acquisition");
     const auto resume_launch =
         builtin_restart.prepare_worker_launch(launch_request, 6'400);
     (void)builtin_restart.accept_worker_hello(
@@ -2247,6 +2281,793 @@ void test_worker_launch_and_readiness_boundary() {
           "builtin-to-external progress also requires a fresh WorkerHello");
   }
 
+  std::filesystem::remove_all(directory);
+}
+
+void test_worker_control_service_boundary() {
+  const auto compiled = trainvm::compile_document(load_fixture());
+  check(compiled.valid(), "fixture required by WorkerControl service compiles");
+  if (!compiled.valid()) return;
+
+  const auto wire_hello = [](const trainvm::WorkerLaunchTicket& launch) {
+    trainvm::v1::WorkerHello hello;
+    hello.set_run_id(launch.run_id);
+    hello.set_node_id(launch.node_id);
+    hello.set_attempt_id(launch.attempt_id);
+    hello.set_launch_nonce(launch.launch_nonce);
+    hello.set_adapter(launch.adapter);
+    hello.set_adapter_version(launch.adapter_version);
+    hello.set_code_fingerprint(launch.code_fingerprint);
+    for (const auto& capability : launch.required_capabilities) {
+      hello.add_capabilities(capability);
+    }
+    hello.set_last_acked_controller_sequence(0);
+    hello.set_concurrency_key(launch.concurrency_key);
+    hello.set_lease_id(launch.lease_id);
+    hello.set_fencing_token(launch.fencing_token);
+    return hello;
+  };
+  const auto wire_result = [](const trainvm::TrainVMService::WorkerConnection& connection) {
+    trainvm::v1::EventEnvelope event;
+    event.set_event_id(connection.dispatch.dispatch_id + ":result");
+    event.set_run_id(connection.identity.run_id);
+    event.set_run_revision(connection.dispatch.run_revision);
+    event.set_plan_revision(connection.dispatch.plan_revision);
+    event.set_node_id(connection.identity.node_id);
+    event.set_attempt_id(connection.identity.attempt_id);
+    event.set_worker_sequence(1);
+    event.set_event_type("worker.completed");
+    event.set_event_version(1);
+    event.mutable_wall_time()->set_seconds(1);
+    event.set_monotonic_time_ns(1);
+    event.set_optimizer_step(5'500);
+    event.set_canonical_json_payload(R"({"reason":"cache_span_complete"})");
+    return event;
+  };
+  const trainvm::WorkerLaunchRequest launch_request{
+      .code_fingerprint = "sha256:worker-control-service-v1",
+      .required_capabilities = {"worker.controls", "worker.metrics"},
+  };
+
+  // WorkerToController is deliberately a closed oneof. Connect additionally
+  // requires kHello first and currently rejects every subsequent case except
+  // kEvent; the helper boundary below covers the accepted event path.
+  trainvm::v1::WorkerToController first_message;
+  check(first_message.message_case() ==
+            trainvm::v1::WorkerToController::MESSAGE_NOT_SET,
+        "WorkerControl stream has no implicit first-message variant");
+  first_message.mutable_heartbeat()->set_worker_sequence(1);
+  check(!first_message.has_hello() &&
+            first_message.message_case() ==
+                trainvm::v1::WorkerToController::kHeartbeat,
+        "a heartbeat is distinguishable from the required first WorkerHello");
+  first_message.mutable_metric()->set_name("loss");
+  check(first_message.message_case() == trainvm::v1::WorkerToController::kMetric &&
+            !first_message.has_heartbeat() && !first_message.has_event(),
+        "unsupported WorkerControl variants cannot alias the result event case");
+
+  const std::filesystem::path directory =
+      std::filesystem::temp_directory_path() /
+      ("trainvm-worker-control-service-test-" +
+       std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+
+  {
+    const auto database_path = directory / "accepted.db";
+    const std::string run_id = "worker-control-service-run";
+    trainvm::WorkerLaunchTicket launch;
+    {
+      trainvm::Journal journal(database_path);
+      trainvm::Controller controller(*compiled.plan, journal, run_id);
+      controller.create_queued();
+      (void)controller.begin_acquisition(1'000);
+      launch = controller.prepare_worker_launch(launch_request, 1'100);
+      check(journal.event_count() == 7U,
+            "WorkerControl fixture stops at a durable launch request");
+    }
+
+    std::int64_t authority_now_ns = 1'200;
+    trainvm::TrainVMService service(
+        database_path, [&authority_now_ns] { return authority_now_ns; });
+    trainvm::TrainVMService::WorkerConnection connection;
+    const auto hello = wire_hello(launch);
+    const grpc::Status open =
+        service.open_worker_connection(hello, connection);
+    {
+      trainvm::Journal observer(database_path);
+      const auto projection = observer.projection(run_id);
+      const auto dispatch = observer.dispatch(connection.dispatch.dispatch_id);
+      check(open.ok() &&
+                connection.welcome.disposition() ==
+                    trainvm::v1::WorkerWelcome::DISPOSITION_ACCEPTED &&
+                connection.welcome.run_revision() == 5U &&
+                connection.welcome.dispatch_id() ==
+                    connection.dispatch.dispatch_id &&
+                projection && projection->observed_state == "running" &&
+                projection->run_revision == 5U &&
+                projection->current_node_id == launch.node_id && dispatch &&
+                dispatch->status == trainvm::DispatchStatus::prepared &&
+                observer.event_count() == 11U,
+            "WorkerControl returns Welcome only after readiness and dispatch are durable");
+    }
+    if (!open.ok()) {
+      std::filesystem::remove_all(directory);
+      return;
+    }
+
+    auto canonical = wire_result(connection);
+    const auto reject_without_mutation =
+        [&](trainvm::v1::EventEnvelope candidate, grpc::StatusCode expected,
+            std::string_view message) {
+          trainvm::Journal before(database_path);
+          const auto count = before.event_count();
+          trainvm::v1::WorkerReceipt ignored;
+          const grpc::Status status = service.complete_worker_connection(
+              candidate, connection, ignored);
+          trainvm::Journal after(database_path);
+          check(status.error_code() == expected && after.event_count() == count,
+                message);
+        };
+
+    auto malformed = canonical;
+    malformed.set_canonical_json_payload("{not-json");
+    reject_without_mutation(malformed, grpc::StatusCode::INVALID_ARGUMENT,
+                            "WorkerControl rejects malformed JSON without mutation");
+    auto noncanonical = canonical;
+    noncanonical.set_canonical_json_payload(
+        R"({"reason": "cache_span_complete"})");
+    reject_without_mutation(
+        noncanonical, grpc::StatusCode::INVALID_ARGUMENT,
+        "WorkerControl rejects noncanonical JSON without mutation");
+    auto wrong_revision = canonical;
+    wrong_revision.set_run_revision(canonical.run_revision() + 1U);
+    reject_without_mutation(
+        wrong_revision, grpc::StatusCode::INVALID_ARGUMENT,
+        "WorkerControl rejects a mismatched run revision without mutation");
+    auto wrong_plan_revision = canonical;
+    wrong_plan_revision.set_plan_revision(canonical.plan_revision() + 1U);
+    reject_without_mutation(
+        wrong_plan_revision, grpc::StatusCode::INVALID_ARGUMENT,
+        "WorkerControl rejects a mismatched plan revision without mutation");
+    auto wrong_sequence = canonical;
+    wrong_sequence.set_worker_sequence(2);
+    reject_without_mutation(
+        wrong_sequence, grpc::StatusCode::INVALID_ARGUMENT,
+        "WorkerControl rejects a noncanonical worker sequence without mutation");
+    auto any_payload = canonical;
+    any_payload.mutable_payload()->set_type_url("type.googleapis.com/test.Unsupported");
+    any_payload.mutable_payload()->set_value("opaque");
+    reject_without_mutation(
+        any_payload, grpc::StatusCode::INVALID_ARGUMENT,
+        "WorkerControl rejects Any payload ingress without mutation");
+    constexpr std::int64_t maximum_timestamp_seconds =
+        std::numeric_limits<std::int64_t>::max() / 1'000'000'000LL;
+    constexpr std::int32_t maximum_timestamp_remainder =
+        static_cast<std::int32_t>(
+            std::numeric_limits<std::int64_t>::max() % 1'000'000'000LL);
+    auto overflowing_timestamp = canonical;
+    overflowing_timestamp.mutable_wall_time()->set_seconds(
+        maximum_timestamp_seconds);
+    overflowing_timestamp.mutable_wall_time()->set_nanos(
+        maximum_timestamp_remainder + 1);
+    reject_without_mutation(
+        overflowing_timestamp, grpc::StatusCode::INVALID_ARGUMENT,
+        "WorkerControl rejects a timestamp one nanosecond beyond int64 range");
+
+    authority_now_ns = 1'400;
+    canonical.mutable_wall_time()->set_seconds(maximum_timestamp_seconds);
+    canonical.mutable_wall_time()->set_nanos(maximum_timestamp_remainder);
+    trainvm::v1::WorkerReceipt receipt;
+    const grpc::Status complete = service.complete_worker_connection(
+        canonical, connection, receipt);
+    const std::string first_receipt = receipt.SerializeAsString();
+    {
+      trainvm::Journal observer(database_path);
+      const auto projection = observer.projection(run_id);
+      const auto dispatch = observer.dispatch(connection.dispatch.dispatch_id);
+      check(complete.ok() && receipt.event_id() == canonical.event_id() &&
+                receipt.acknowledged_worker_sequence() == 1U &&
+                receipt.committed_run_revision() == 7U &&
+                receipt.observed_state() ==
+                    trainvm::v1::OBSERVED_STATE_ACQUIRING &&
+                projection && projection->run_revision == 7U &&
+                projection->observed_state == "acquiring" && dispatch &&
+                dispatch->status == trainvm::DispatchStatus::completed &&
+                dispatch->result_event_id ==
+                    std::optional<std::string>{canonical.event_id()} &&
+                observer.event_count() == 15U,
+            "WorkerControl accepts the maximum int64 timestamp, commits the canonical result, "
+            "and returns its durable Receipt");
+    }
+
+    trainvm::v1::WorkerReceipt retry_receipt;
+    const grpc::Status retry = service.complete_worker_connection(
+        canonical, connection, retry_receipt);
+    trainvm::TrainVMService::WorkerConnection reconnected;
+    const grpc::Status reconnect =
+        service.open_worker_connection(hello, reconnected);
+    {
+      trainvm::Journal observer(database_path);
+      check(retry.ok() && retry_receipt.SerializeAsString() == first_receipt &&
+                reconnect.ok() &&
+                reconnected.welcome.disposition() ==
+                    trainvm::v1::WorkerWelcome::DISPOSITION_ALREADY_COMPLETED &&
+                reconnected.completed_receipt &&
+                reconnected.completed_receipt->SerializeAsString() ==
+                    first_receipt &&
+                observer.event_count() == 15U,
+            "lost WorkerControl receipts replay exactly without duplicate commits");
+    }
+  }
+
+  {
+    const auto database_path = directory / "expired-between-phases.db";
+    const std::string run_id = "worker-control-expired-between-phases-run";
+    trainvm::WorkerLaunchTicket launch;
+    trainvm::ResourceLease lease;
+    {
+      trainvm::Journal journal(database_path);
+      trainvm::Controller controller(*compiled.plan, journal, run_id);
+      controller.create_queued();
+      lease = controller.begin_acquisition(3'000).lease;
+      launch = controller.prepare_worker_launch(launch_request, 3'100);
+    }
+    std::size_t clock_sample = 0;
+    trainvm::TrainVMService service(database_path, [&] {
+      ++clock_sample;
+      return clock_sample == 1U ? lease.expires_at_ns - 1
+                                : lease.expires_at_ns;
+    });
+    trainvm::TrainVMService::WorkerConnection connection;
+    const grpc::Status expired =
+        service.open_worker_connection(wire_hello(launch), connection);
+    trainvm::Journal observer(database_path);
+    const auto projection = observer.projection(run_id);
+    if (!(expired.error_code() == grpc::StatusCode::FAILED_PRECONDITION &&
+          clock_sample == 2U && projection &&
+          projection->observed_state == "running" &&
+          projection->run_revision == 5U &&
+          !observer.dispatch(run_id + ":dispatch:" + launch.node_id +
+                             ":" + launch.attempt_id) &&
+          observer.event_count() == 10U)) {
+      std::cerr << "expired-between-phases: status=" << expired.error_code()
+                << " message='" << expired.error_message()
+                << "' samples=" << clock_sample
+                << " observed="
+                << (projection ? projection->observed_state : "<missing>")
+                << " revision=" << (projection ? projection->run_revision : 0U)
+                << " events=" << observer.event_count() << '\n';
+    }
+    check(expired.error_code() == grpc::StatusCode::FAILED_PRECONDITION &&
+              clock_sample == 2U && projection &&
+              projection->observed_state == "running" &&
+              projection->run_revision == 5U &&
+              !observer.dispatch(run_id + ":dispatch:" + launch.node_id +
+                                 ":" + launch.attempt_id) &&
+              observer.event_count() == 10U,
+          "WorkerControl resamples time and refuses dispatch when the lease expires "
+          "after hello readiness");
+  }
+
+  {
+    const auto database_path = directory / "stale-fence.db";
+    const std::string run_id = "worker-control-stale-fence-run";
+    trainvm::WorkerLaunchTicket launch;
+    {
+      trainvm::Journal journal(database_path);
+      trainvm::Controller controller(*compiled.plan, journal, run_id);
+      controller.create_queued();
+      (void)controller.begin_acquisition(2'000);
+      launch = controller.prepare_worker_launch(launch_request, 2'100);
+    }
+    std::int64_t authority_now_ns = 2'200;
+    trainvm::TrainVMService service(
+        database_path, [&authority_now_ns] { return authority_now_ns; });
+    trainvm::TrainVMService::WorkerConnection connection;
+    const grpc::Status open =
+        service.open_worker_connection(wire_hello(launch), connection);
+    check(open.ok(), "stale-fence WorkerControl fixture opens a worker session");
+    if (open.ok()) {
+      trainvm::Journal authority_observer(database_path);
+      const auto count = authority_observer.event_count();
+      check(authority_observer.release_lease(
+                launch.concurrency_key, launch.run_id, launch.lease_id,
+                launch.fencing_token, 2'300),
+            "stale-fence WorkerControl fixture releases the accepted lease");
+      const auto successor = authority_observer.acquire_lease(
+          launch.concurrency_key, "successor-run", "successor-lease", 2'301,
+          60'000'000'000LL);
+      authority_now_ns = 2'400;
+      trainvm::v1::WorkerReceipt receipt;
+      const grpc::Status stale = service.complete_worker_connection(
+          wire_result(connection), connection, receipt);
+      check(successor.status == trainvm::LeaseAcquireStatus::acquired &&
+                stale.error_code() == grpc::StatusCode::FAILED_PRECONDITION &&
+                authority_observer.event_count() == count,
+            "WorkerControl rejects a result after lease fence takeover without mutation");
+    }
+  }
+
+  {
+    const auto database_path = directory / "authority-corruption.db";
+    const std::string run_id = "worker-control-authority-corruption-run";
+    trainvm::WorkerLaunchTicket launch;
+    {
+      trainvm::Journal journal(database_path);
+      trainvm::Controller controller(*compiled.plan, journal, run_id);
+      controller.create_queued();
+      (void)controller.begin_acquisition(4'000);
+      launch = controller.prepare_worker_launch(launch_request, 4'100);
+    }
+    trainvm::TrainVMService service(database_path, [] { return 4'200; });
+    trainvm::TrainVMService::WorkerConnection connection;
+    const grpc::Status open =
+        service.open_worker_connection(wire_hello(launch), connection);
+    check(open.ok(),
+          "authority-corruption WorkerControl fixture opens a worker session");
+    sqlite3* tamper = nullptr;
+    check(sqlite3_open(database_path.c_str(), &tamper) == SQLITE_OK,
+          "authority-corruption test opens the journal database");
+    if (open.ok() && tamper != nullptr) {
+      trainvm::Journal before(database_path);
+      const auto count = before.event_count();
+      check(sqlite3_exec(
+                tamper,
+                "UPDATE compiled_plans SET canonical_plan_json='{broken'",
+                nullptr, nullptr, nullptr) == SQLITE_OK,
+            "authority-corruption test damages persisted plan JSON");
+      trainvm::v1::WorkerReceipt ignored;
+      const grpc::Status corrupt = service.complete_worker_connection(
+          wire_result(connection), connection, ignored);
+      check(corrupt.error_code() == grpc::StatusCode::DATA_LOSS &&
+                before.event_count() == count,
+            "post-ingress authority JSON corruption maps to DATA_LOSS without mutation");
+    }
+    if (tamper != nullptr) sqlite3_close(tamper);
+  }
+
+  std::filesystem::remove_all(directory);
+}
+
+void test_worker_control_grpc_stream() {
+  const auto compiled = trainvm::compile_document(load_fixture());
+  auto eof_fixture = load_fixture();
+  eof_fixture["metadata"]["name"] = "worker-control-clean-eof";
+  eof_fixture["spec"]["workspace"]["concurrency_key"] =
+      "local-gpu-training-clean-eof";
+  const auto eof_compiled = trainvm::compile_document(eof_fixture);
+  check(compiled.valid() && eof_compiled.valid(),
+        "fixtures required by WorkerControl gRPC stream compile");
+  if (!compiled.valid() || !eof_compiled.valid()) return;
+
+  const std::filesystem::path directory =
+      std::filesystem::temp_directory_path() /
+      ("trainvm-worker-control-grpc-test-" +
+       std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  const auto database_path = directory / "journal.db";
+  const std::string run_id = "worker-control-grpc-run";
+  const std::string eof_run_id = "worker-control-grpc-clean-eof-run";
+  trainvm::WorkerLaunchTicket launch;
+  trainvm::WorkerLaunchTicket eof_launch;
+  {
+    trainvm::Journal journal(database_path);
+    trainvm::Controller controller(*compiled.plan, journal, run_id);
+    controller.create_queued();
+    (void)controller.begin_acquisition(1'000);
+    launch = controller.prepare_worker_launch(
+        {.code_fingerprint = "sha256:worker-control-grpc-v1",
+         .required_capabilities = {"worker.controls", "worker.metrics"}},
+        1'100);
+    trainvm::Controller eof_controller(
+        *eof_compiled.plan, journal, eof_run_id);
+    eof_controller.create_queued();
+    (void)eof_controller.begin_acquisition(1'000);
+    eof_launch = eof_controller.prepare_worker_launch(
+        {.code_fingerprint = "sha256:worker-control-grpc-eof-v1",
+         .required_capabilities = {"worker.controls", "worker.metrics"}},
+        1'100);
+  }
+
+  const auto hello_for = [](const trainvm::WorkerLaunchTicket& ticket) {
+    trainvm::v1::WorkerToController message;
+    auto* hello = message.mutable_hello();
+    hello->set_run_id(ticket.run_id);
+    hello->set_node_id(ticket.node_id);
+    hello->set_attempt_id(ticket.attempt_id);
+    hello->set_launch_nonce(ticket.launch_nonce);
+    hello->set_adapter(ticket.adapter);
+    hello->set_adapter_version(ticket.adapter_version);
+    hello->set_code_fingerprint(ticket.code_fingerprint);
+    for (const auto& capability : ticket.required_capabilities) {
+      hello->add_capabilities(capability);
+    }
+    hello->set_last_acked_controller_sequence(0);
+    hello->set_concurrency_key(ticket.concurrency_key);
+    hello->set_lease_id(ticket.lease_id);
+    hello->set_fencing_token(ticket.fencing_token);
+    return message;
+  };
+  const auto result_for = [](const trainvm::v1::WorkerWelcome& welcome) {
+    trainvm::v1::WorkerToController message;
+    auto* event = message.mutable_event();
+    event->set_event_id(welcome.dispatch_id() + ":result");
+    event->set_run_id(welcome.run_id());
+    event->set_run_revision(welcome.run_revision());
+    event->set_plan_revision(welcome.plan_revision());
+    event->set_node_id(welcome.node_id());
+    event->set_attempt_id(welcome.attempt_id());
+    event->set_worker_sequence(1);
+    event->set_event_type("worker.completed");
+    event->set_event_version(1);
+    event->mutable_wall_time()->set_seconds(1);
+    event->set_monotonic_time_ns(1);
+    event->set_optimizer_step(5'500);
+    event->set_canonical_json_payload(
+        R"({"reason":"cache_span_complete"})");
+    return message;
+  };
+
+  trainvm::TrainVMService service(database_path, [] { return 1'200; });
+  grpc::ServerBuilder builder;
+  int port = 0;
+  builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(),
+                           &port);
+  builder.RegisterService(
+      static_cast<trainvm::v1::WorkerControl::Service*>(&service));
+  std::unique_ptr<grpc::Server> server = builder.BuildAndStart();
+  check(server != nullptr && port > 0,
+        "WorkerControl integration fixture starts an in-process gRPC server");
+  if (!server || port <= 0) {
+    std::filesystem::remove_all(directory);
+    return;
+  }
+
+  const auto channel = grpc::CreateChannel(
+      "127.0.0.1:" + std::to_string(port),
+      grpc::InsecureChannelCredentials());
+  const auto stub = trainvm::v1::WorkerControl::NewStub(channel);
+
+  {
+    grpc::ClientContext context;
+    auto stream = stub->Connect(&context);
+    trainvm::v1::WorkerToController heartbeat;
+    heartbeat.mutable_heartbeat()->set_worker_sequence(1);
+    const bool wrote = stream->Write(heartbeat);
+    stream->WritesDone();
+    trainvm::v1::ControllerToWorker unexpected;
+    const bool received = stream->Read(&unexpected);
+    const grpc::Status status = stream->Finish();
+    trainvm::Journal observer(database_path);
+    check(wrote && !received &&
+              status.error_code() == grpc::StatusCode::INVALID_ARGUMENT &&
+              observer.events_for_run(run_id).size() == 7U &&
+              observer.events_for_run(eof_run_id).size() == 7U,
+          "WorkerControl gRPC rejects a non-Hello first message without mutation");
+  }
+
+  {
+    grpc::ClientContext context;
+    auto stream = stub->Connect(&context);
+    const bool hello_written = stream->Write(hello_for(eof_launch));
+    trainvm::v1::ControllerToWorker welcome;
+    const bool welcome_received = stream->Read(&welcome);
+    stream->WritesDone();
+    trainvm::v1::ControllerToWorker unexpected_receipt;
+    const bool receipt_received = stream->Read(&unexpected_receipt);
+    const grpc::Status status = stream->Finish();
+    trainvm::Journal observer(database_path);
+    const auto dispatch = welcome.has_welcome()
+                              ? observer.dispatch(welcome.welcome().dispatch_id())
+                              : std::nullopt;
+    const auto projection = observer.projection(eof_run_id);
+    check(hello_written && welcome_received && welcome.has_welcome() &&
+              !receipt_received &&
+              status.error_code() ==
+                  grpc::StatusCode::FAILED_PRECONDITION &&
+              dispatch &&
+              dispatch->status == trainvm::DispatchStatus::prepared &&
+              !dispatch->result_event_id && projection &&
+              projection->observed_state == "running" &&
+              projection->run_revision == 5U &&
+              observer.events_for_run(eof_run_id).size() == 11U,
+          "WorkerControl gRPC treats clean EOF after Welcome as incomplete and "
+          "leaves its dispatch prepared without a Receipt");
+  }
+
+  {
+    grpc::ClientContext context;
+    auto stream = stub->Connect(&context);
+    const bool hello_written = stream->Write(hello_for(eof_launch));
+    trainvm::v1::ControllerToWorker welcome;
+    const bool welcome_received = stream->Read(&welcome);
+    const bool result_written =
+        welcome.has_welcome() &&
+        stream->Write(result_for(welcome.welcome()));
+    stream->WritesDone();
+    trainvm::v1::ControllerToWorker receipt;
+    const bool receipt_received = stream->Read(&receipt);
+    trainvm::v1::ControllerToWorker trailing;
+    const bool trailing_received = stream->Read(&trailing);
+    const grpc::Status status = stream->Finish();
+    trainvm::Journal observer(database_path);
+    const auto dispatch = welcome.has_welcome()
+                              ? observer.dispatch(welcome.welcome().dispatch_id())
+                              : std::nullopt;
+    const auto projection = observer.projection(eof_run_id);
+    check(hello_written && welcome_received && welcome.has_welcome() &&
+              welcome.welcome().disposition() ==
+                  trainvm::v1::WorkerWelcome::DISPOSITION_REPLAYED &&
+              result_written && receipt_received && receipt.has_receipt() &&
+              !trailing_received && status.ok() && dispatch &&
+              dispatch->status == trainvm::DispatchStatus::completed &&
+              projection && projection->observed_state == "acquiring" &&
+              projection->run_revision == 7U &&
+              observer.events_for_run(eof_run_id).size() == 15U,
+          "WorkerControl gRPC releases the EOF stream claim and completes the "
+          "same durable dispatch after reconnect");
+  }
+
+  grpc::ClientContext primary_context;
+  auto primary = stub->Connect(&primary_context);
+  const auto hello = hello_for(launch);
+  const bool hello_written = primary->Write(hello);
+  trainvm::v1::ControllerToWorker welcome_message;
+  const bool welcome_received = primary->Read(&welcome_message);
+  check(hello_written && welcome_received && welcome_message.has_welcome() &&
+            welcome_message.message_case() ==
+                trainvm::v1::ControllerToWorker::kWelcome &&
+            welcome_message.welcome().disposition() ==
+                trainvm::v1::WorkerWelcome::DISPOSITION_ACCEPTED,
+        "WorkerControl gRPC emits Welcome first for an accepted Hello");
+
+  {
+    grpc::ClientContext duplicate_context;
+    auto duplicate = stub->Connect(&duplicate_context);
+    const bool duplicate_written = duplicate->Write(hello);
+    duplicate->WritesDone();
+    trainvm::v1::ControllerToWorker unexpected;
+    const bool duplicate_received = duplicate->Read(&unexpected);
+    const grpc::Status duplicate_status = duplicate->Finish();
+    check(duplicate_written && !duplicate_received &&
+              duplicate_status.error_code() ==
+                  grpc::StatusCode::ALREADY_EXISTS,
+          "WorkerControl gRPC rejects a duplicate active attempt while its first stream is open");
+  }
+
+  bool result_written = false;
+  trainvm::v1::ControllerToWorker receipt_message;
+  bool receipt_received = false;
+  grpc::Status primary_status;
+  if (welcome_received && welcome_message.has_welcome()) {
+    result_written = primary->Write(result_for(welcome_message.welcome()));
+    primary->WritesDone();
+    receipt_received = primary->Read(&receipt_message);
+    trainvm::v1::ControllerToWorker trailing;
+    check(!primary->Read(&trailing),
+          "WorkerControl gRPC closes after its single result Receipt");
+    primary_status = primary->Finish();
+  } else {
+    primary_context.TryCancel();
+    primary_status = primary->Finish();
+  }
+
+  {
+    trainvm::Journal observer(database_path);
+    const auto dispatch = welcome_message.has_welcome()
+                              ? observer.dispatch(
+                                    welcome_message.welcome().dispatch_id())
+                              : std::nullopt;
+    const auto projection = observer.projection(run_id);
+    check(result_written && receipt_received && receipt_message.has_receipt() &&
+              receipt_message.message_case() ==
+                  trainvm::v1::ControllerToWorker::kReceipt &&
+              primary_status.ok() &&
+              receipt_message.receipt().event_id() ==
+                  welcome_message.welcome().dispatch_id() + ":result" &&
+              receipt_message.receipt().acknowledged_worker_sequence() == 1U &&
+              receipt_message.receipt().committed_run_revision() == 7U &&
+              dispatch &&
+              dispatch->status == trainvm::DispatchStatus::completed &&
+              dispatch->result_event_id ==
+                  std::optional<std::string>{
+                      receipt_message.receipt().event_id()} &&
+              projection && projection->observed_state == "acquiring" &&
+              projection->run_revision == 7U &&
+              observer.events_for_run(run_id).size() == 15U,
+          "WorkerControl gRPC orders Hello, durable Welcome, Event, and durable Receipt");
+  }
+
+  server->Shutdown();
+  server->Wait();
+  std::filesystem::remove_all(directory);
+}
+
+void test_typed_managed_resource_release() {
+  const auto compiled = trainvm::compile_document(load_fixture());
+  check(compiled.valid(), "typed resource release fixture compiles");
+  if (!compiled.valid()) return;
+
+  const std::filesystem::path directory = std::filesystem::temp_directory_path() /
+      ("trainvm-managed-release-test-" +
+       std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  const auto database_path = directory / "journal.db";
+  const std::string run_id = "managed-release-run";
+  trainvm::Journal journal(database_path);
+  trainvm::Controller controller(*compiled.plan, journal, run_id);
+  controller.create_queued();
+  const auto acquired = controller.begin_acquisition(1'000);
+  const trainvm::WorkerLaunchRequest request{
+      .code_fingerprint = "sha256:managed-release-worker-v1",
+      .required_capabilities = {"worker.controls"},
+  };
+  const auto launch = controller.prepare_worker_launch(request, 1'100);
+  (void)controller.accept_worker_hello(
+      {.run_id = launch.run_id,
+       .node_id = launch.node_id,
+       .attempt_id = launch.attempt_id,
+       .launch_nonce = launch.launch_nonce,
+       .adapter = launch.adapter,
+       .adapter_version = launch.adapter_version,
+       .code_fingerprint = launch.code_fingerprint,
+       .capabilities = launch.required_capabilities,
+       .last_acked_controller_sequence = 0,
+       .concurrency_key = launch.concurrency_key,
+       .lease_id = launch.lease_id,
+       .fencing_token = launch.fencing_token},
+      1'200);
+  const auto worker_dispatch = controller.prepare_dispatch(1'300);
+  const trainvm::WorkerSessionIdentity session{
+      .run_id = launch.run_id,
+      .node_id = launch.node_id,
+      .attempt_id = launch.attempt_id,
+      .launch_nonce = launch.launch_nonce,
+      .concurrency_key = launch.concurrency_key,
+      .lease_id = launch.lease_id,
+      .fencing_token = launch.fencing_token,
+  };
+  const trainvm::Event worker_result{
+      .event_id = worker_dispatch.dispatch_id + ":result",
+      .run_id = run_id,
+      .run_revision = 5,
+      .plan_revision = 1,
+      .node_id = launch.node_id,
+      .attempt_id = launch.attempt_id,
+      .worker_sequence = 1,
+      .event_type = "worker.completed",
+      .event_version = 1,
+      .wall_time_ns = 1'400,
+      .monotonic_time_ns = 1,
+      .optimizer_step = 5'500,
+      .payload = {{"reason", "training_complete"}},
+  };
+  const auto& builtin =
+      controller.handle_event(worker_result, session, 1'400);
+  check(builtin.revision == 6U && builtin.current_node_id == "release_gpu" &&
+            journal.projection(run_id)->observed_state == "running",
+        "managed worker result enters the resource release builtin");
+
+  const auto before_wrong_builtin = journal.event_count();
+  bool wrong_builtin_rejected = false;
+  try {
+    (void)controller.complete_artifact_validation(
+        trainvm::ArtifactValidationOutcome::valid, 1'500);
+  } catch (const std::logic_error&) {
+    wrong_builtin_rejected = true;
+  }
+  bool simulation_dispatch_rejected = false;
+  try {
+    (void)controller.prepare_dispatch();
+  } catch (const std::logic_error&) {
+    simulation_dispatch_rejected = true;
+  }
+  const trainvm::Event simulated_release{
+      .event_id = run_id + ":simulated-release",
+      .run_id = run_id,
+      .run_revision = builtin.revision,
+      .plan_revision = 1,
+      .node_id = builtin.current_node_id,
+      .attempt_id = builtin.current_attempt_id,
+      .worker_sequence = 1,
+      .event_type = "resource.released",
+      .event_version = 1,
+      .wall_time_ns = 1'500,
+      .monotonic_time_ns = 2,
+      .optimizer_step = 5'500,
+      .payload = nlohmann::json::object(),
+  };
+  bool simulation_result_rejected = false;
+  try {
+    (void)controller.handle_event(simulated_release);
+  } catch (const std::logic_error&) {
+    simulation_result_rejected = true;
+  }
+  check(simulation_dispatch_rejected && simulation_result_rejected &&
+            journal.event_count() == before_wrong_builtin,
+        "managed resource release rejects generic simulation hooks without mutation");
+  const auto& completed = controller.release_managed_resources(1'500);
+  const auto projection = journal.projection(run_id);
+  const auto release_events = journal.events_for_run(run_id);
+  const auto release_result = std::ranges::find_if(
+      release_events, [](const trainvm::Event& event) {
+        return event.event_type == "resource.released";
+      });
+  const auto release_receipts = std::ranges::count_if(
+      release_events, [](const trainvm::Event& event) {
+        return event.event_type == "node.dispatch_completed" &&
+               event.node_id == "release_gpu";
+      });
+  trainvm::Controller restarted(*compiled.plan, journal, run_id);
+  const auto& recovered = restarted.recover();
+  std::string chain_reason;
+  check(wrong_builtin_rejected && simulation_dispatch_rejected &&
+            simulation_result_rejected &&
+            journal.event_count() == before_wrong_builtin + 5U &&
+            completed.status == trainvm::ExecutionStatus::completed &&
+            completed.revision == 7U && recovered == completed && projection &&
+            projection->observed_state == "completed" &&
+            projection->current_node_id.empty() &&
+            projection->current_attempt_id.empty() && release_receipts == 1 &&
+            release_result != release_events.end() &&
+            release_result->worker_sequence == 0U &&
+            release_result->payload ==
+                nlohmann::json{{"concurrency_key", acquired.lease.concurrency_key},
+                               {"lease_id", acquired.lease.lease_id},
+                               {"fencing_token", acquired.lease.fencing_token}} &&
+            !journal.active_lease(acquired.lease.concurrency_key, 1'500) &&
+            journal.verify_chain(&chain_reason),
+        "typed resource release atomically releases its fence and commits one terminal receipt");
+  sqlite3* tamper = nullptr;
+  check(sqlite3_open(database_path.c_str(), &tamper) == SQLITE_OK,
+        "release receipt tamper test opens the journal database");
+  if (tamper != nullptr) {
+    check(sqlite3_exec(
+              tamper,
+              "UPDATE resource_leases SET released_at_ns=NULL",
+              nullptr, nullptr, nullptr) == SQLITE_OK,
+          "release receipt tamper test resurrects the mutable lease row");
+    check(!journal.active_lease(acquired.lease.concurrency_key, 1'500) &&
+              !journal.renew_lease(
+                  acquired.lease.concurrency_key, run_id,
+                  acquired.lease.lease_id, acquired.lease.fencing_token,
+                  1'500, 60'000'000'000LL) &&
+              !journal.release_lease(
+                  acquired.lease.concurrency_key, run_id,
+                  acquired.lease.lease_id, acquired.lease.fencing_token,
+                  1'501),
+          "immutable release receipt prevents a mutable lease resurrection");
+    bool resurrected_release_recovered = false;
+    try {
+      trainvm::Controller durable_release(*compiled.plan, journal, run_id);
+      resurrected_release_recovered = durable_release.recover() == completed;
+    } catch (const std::exception&) {
+      resurrected_release_recovered = false;
+    }
+    check(resurrected_release_recovered,
+          "terminal recovery trusts the immutable release receipt over a stale mutable row");
+    check(sqlite3_exec(
+              tamper,
+              "UPDATE resource_leases SET released_at_ns=1500",
+              nullptr, nullptr, nullptr) == SQLITE_OK,
+          "release receipt tamper test restores the mutable release marker");
+    check(sqlite3_exec(tamper, "DELETE FROM resource_lease_releases", nullptr,
+                       nullptr, nullptr) == SQLITE_OK,
+          "release receipt tamper test removes the unchained lease receipt");
+    sqlite3_close(tamper);
+  }
+  bool missing_release_receipt_rejected = false;
+  try {
+    trainvm::Controller corrupted(*compiled.plan, journal, run_id);
+    (void)corrupted.recover();
+  } catch (const std::runtime_error&) {
+    missing_release_receipt_rejected = true;
+  }
+  check(missing_release_receipt_rejected,
+        "terminal recovery rejects a resource release without its durable lease receipt");
   std::filesystem::remove_all(directory);
 }
 
@@ -2895,6 +3716,9 @@ int main() {
     test_submission_and_queue_boundary();
     test_atomic_queue_acquisition_boundary();
     test_worker_launch_and_readiness_boundary();
+    test_worker_control_service_boundary();
+    test_worker_control_grpc_stream();
+    test_typed_managed_resource_release();
     test_concurrent_worker_launch_and_readiness_replay();
     test_concurrent_fenced_result_content_conflict();
     test_concurrent_queue_acquisition_replay();

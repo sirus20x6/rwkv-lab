@@ -44,13 +44,18 @@ Implemented now:
   external node returns to unassigned observed-acquiring and requires a distinct launch/hello;
 - live-fence validation in the same transaction as worker-backed dispatch preparation and result
   completion, so an expired, released, or superseded worker cannot mutate the FSM;
+- a bounded `WorkerControl.Connect` stream that requires `WorkerHello` first, persists readiness
+  and dispatch before `WorkerWelcome`, admits one exact fenced result, persists its transition and
+  receipt before acknowledging it, rejects duplicate live streams, and replays lost receipts;
+- typed `trainvm.core` artifact-validation and resource-release execution that cannot enter through
+  generic worker/simulation hooks, with atomic builtin result, transition, dispatch receipt, and
+  immutable lease-release evidence;
 - `validate`, `plan`, `simulate`, and journal inspection/replay CLI commands.
 
 This code does not yet launch or control a trainer. The next implementation boundary is the
-WorkerControl stream and reconciler: map the existing Protobuf WorkerHello into the verified native
-readiness transaction, issue an explicit welcome receipt, and then own an adapter process. Real
-MageFlow process ownership follows only after that service boundary and its fault-injection tests
-pass.
+reconciler and process supervisor: converge queued/acquiring runs, execute typed builtins, launch an
+allowlisted adapter process, and reconcile its identity after controller restart. Real MageFlow
+process ownership follows only after that lifecycle boundary and its fault-injection tests pass.
 
 ## Toolchain
 
@@ -100,8 +105,8 @@ returns either structured diagnostics or the native compiler's canonical plan an
 it never opens the journal writable. `SubmitExperiment` supports validation and idempotent queued
 creation; the live-control `CommandRun` variant is also implemented. The dashboard freezes ambiguous
 submissions and retries their exact body and key. The process-free worker launch/readiness core is
-implemented; WorkerControl streaming, pause/resume, and lifecycle reconciliation remain subsequent
-milestones.
+implemented, as is the initial single-result WorkerControl stream. Process launch/reconciliation,
+heartbeats and metrics, and pause/resume remain subsequent milestones.
 
 ## Journal CLI
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 
 #include "trainvm/document.hpp"
 #include "trainvm/dispatch.hpp"
@@ -10,6 +11,8 @@
 #include "trainvm/worker.hpp"
 
 namespace trainvm {
+
+enum class ArtifactValidationOutcome { valid, invalid };
 
 class Controller {
  public:
@@ -26,6 +29,9 @@ class Controller {
   const ExecutionState& handle_event(const Event& event,
                                      const WorkerSessionIdentity& identity,
                                      std::int64_t now_ns);
+  const ExecutionState& complete_artifact_validation(
+      ArtifactValidationOutcome outcome, std::int64_t now_ns);
+  const ExecutionState& release_managed_resources(std::int64_t now_ns);
   ControlPatchValidation request_controls(const std::string& idempotency_key,
                                           std::uint64_t expected_run_revision,
                                           std::uint64_t expected_control_revision,
@@ -61,6 +67,9 @@ class Controller {
   const ExecutionState& handle_event_impl(
       const Event& event, const std::optional<WorkerSessionIdentity>& identity,
       std::optional<std::int64_t> now_ns);
+  const ExecutionState& complete_managed_builtin(
+      std::string_view expected_operation, std::string event_type,
+      bool release_lease, std::int64_t now_ns);
 };
 
 }  // namespace trainvm

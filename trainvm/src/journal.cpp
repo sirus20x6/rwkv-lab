@@ -98,6 +98,15 @@ CREATE TABLE IF NOT EXISTS resource_leases (
   released_at_ns INTEGER
 ) WITHOUT ROWID;
 
+CREATE TABLE IF NOT EXISTS resource_lease_releases (
+  concurrency_key TEXT NOT NULL,
+  owner_run_id TEXT NOT NULL,
+  lease_id TEXT NOT NULL,
+  fencing_token INTEGER NOT NULL,
+  released_at_ns INTEGER NOT NULL,
+  PRIMARY KEY(concurrency_key, lease_id, fencing_token)
+) WITHOUT ROWID;
+
 CREATE TABLE IF NOT EXISTS node_dispatches (
   dispatch_id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL,
@@ -1216,6 +1225,13 @@ Dispatch Journal::prepare_dispatch_impl(
     Statement lease(database_, R"sql(
       SELECT owner_run_id, lease_id, fencing_token, expires_at_ns, released_at_ns
       FROM resource_leases WHERE concurrency_key=?
+        AND NOT EXISTS(
+          SELECT 1 FROM resource_lease_releases AS release
+          WHERE release.concurrency_key=resource_leases.concurrency_key
+            AND release.owner_run_id=resource_leases.owner_run_id
+            AND release.lease_id=resource_leases.lease_id
+            AND release.fencing_token=resource_leases.fencing_token
+        )
     )sql");
     bind_text(lease.get(), 1, launch->concurrency_key);
     if (sqlite3_step(lease.get()) != SQLITE_ROW ||
@@ -1225,7 +1241,8 @@ Dispatch Journal::prepare_dispatch_impl(
             launch->fencing_token ||
         sqlite3_column_int64(lease.get(), 3) <= *now_ns ||
         sqlite3_column_type(lease.get(), 4) != SQLITE_NULL) {
-      throw std::runtime_error("dispatch no longer owns its active worker lease");
+      throw OperationPreconditionError(
+          "dispatch no longer owns its active worker lease");
     }
     const auto ready = event(dispatch.run_id + ":worker-launch:" +
                              dispatch.node_id + ":" + dispatch.attempt_id +
@@ -1250,7 +1267,8 @@ Dispatch Journal::prepare_dispatch_impl(
           dispatch.run_revision ||
       column_text(projection.get(), 2) != dispatch.node_id ||
       column_text(projection.get(), 3) != dispatch.attempt_id) {
-    throw std::runtime_error("dispatch preparation is stale for the active run projection");
+    throw OperationPreconditionError(
+        "dispatch preparation is stale for the active run projection");
   }
   Statement existing(database_, R"sql(
     SELECT dispatch_id, run_id, run_revision, plan_revision, node_id, attempt_id,
@@ -1381,7 +1399,8 @@ void Journal::complete_dispatch_impl(
           stored.run_revision ||
       column_text(projection.get(), 2) != stored.node_id ||
       column_text(projection.get(), 3) != stored.attempt_id) {
-    throw std::runtime_error("dispatch completion is stale for the active run projection");
+    throw OperationPreconditionError(
+        "dispatch completion is stale for the active run projection");
   }
   if (identity) {
     if (!now_ns || *now_ns < 0 || identity->run_id != stored.run_id ||
@@ -1392,6 +1411,13 @@ void Journal::complete_dispatch_impl(
     Statement lease(database_, R"sql(
       SELECT owner_run_id, lease_id, fencing_token, expires_at_ns, released_at_ns
       FROM resource_leases WHERE concurrency_key=?
+        AND NOT EXISTS(
+          SELECT 1 FROM resource_lease_releases AS release
+          WHERE release.concurrency_key=resource_leases.concurrency_key
+            AND release.owner_run_id=resource_leases.owner_run_id
+            AND release.lease_id=resource_leases.lease_id
+            AND release.fencing_token=resource_leases.fencing_token
+        )
     )sql");
     bind_text(lease.get(), 1, identity->concurrency_key);
     if (sqlite3_step(lease.get()) != SQLITE_ROW ||
@@ -1401,7 +1427,8 @@ void Journal::complete_dispatch_impl(
             identity->fencing_token ||
         sqlite3_column_int64(lease.get(), 3) <= *now_ns ||
         sqlite3_column_type(lease.get(), 4) != SQLITE_NULL) {
-      throw std::runtime_error("dispatch completion lost its active lease fence");
+      throw OperationPreconditionError(
+          "dispatch completion lost its active lease fence");
     }
     const auto ready = event(identity->run_id + ":worker-launch:" +
                              identity->node_id + ":" + identity->attempt_id +
@@ -1438,6 +1465,198 @@ void Journal::complete_dispatch_impl(
   require_done(database_, update.get(), "complete node dispatch");
   if (sqlite3_changes(database_) != 1) {
     throw std::runtime_error("dispatch completion affected an unexpected number of rows");
+  }
+  transaction.commit();
+}
+
+void Journal::complete_managed_builtin_dispatch(
+    const Dispatch& dispatch, const ResourceLease& lease,
+    std::int64_t now_ns, bool release_lease,
+    const std::vector<Event>& events) {
+  require_lease_identity(lease.concurrency_key, lease.owner_run_id,
+                         lease.lease_id);
+  if (now_ns < 0 || lease.fencing_token == 0 || events.size() != 4U ||
+      dispatch.status != DispatchStatus::prepared || dispatch.result_event_id) {
+    throw std::invalid_argument(
+        "managed builtin completion requires a prepared dispatch, lease, and four events");
+  }
+  const Event& result = events[0];
+  const Event& transition = events[1];
+  const auto receipt = std::ranges::find_if(events, [](const Event& event) {
+    return event.event_type == "node.dispatch_completed";
+  });
+  const bool validation = dispatch.operation == "validate_artifact";
+  const bool releasing = dispatch.operation == "release_resources";
+  const nlohmann::json expected_result_payload =
+      releasing
+          ? nlohmann::json{{"concurrency_key", lease.concurrency_key},
+                           {"lease_id", lease.lease_id},
+                           {"fencing_token", lease.fencing_token}}
+          : nlohmann::json::object();
+  if ((!validation && !releasing) || release_lease != releasing ||
+      dispatch.run_id != lease.owner_run_id || result.run_id != dispatch.run_id ||
+      result.node_id != dispatch.node_id ||
+      result.attempt_id != dispatch.attempt_id ||
+      result.run_revision != dispatch.run_revision ||
+      result.plan_revision != dispatch.plan_revision || result.worker_sequence != 0 ||
+      result.event_id != dispatch.dispatch_id + ":builtin-result" ||
+      (validation && result.event_type != "artifact.validated" &&
+       result.event_type != "artifact.invalid") ||
+      (releasing && result.event_type != "resource.released") ||
+      result.wall_time_ns != now_ns || result.monotonic_time_ns != 0 ||
+      result.payload != expected_result_payload ||
+      transition.event_id != result.event_id + ":transition" ||
+      transition.event_type != "fsm.transitioned" ||
+      transition.run_id != dispatch.run_id ||
+      transition.node_id != dispatch.node_id ||
+      transition.attempt_id != dispatch.attempt_id ||
+      transition.worker_sequence != 0 ||
+      transition.payload.value("cause_event_id", std::string{}) != result.event_id ||
+      receipt == events.end() ||
+      receipt->event_id != dispatch.dispatch_id + ":completed" ||
+      receipt->run_id != dispatch.run_id || receipt->node_id != dispatch.node_id ||
+      receipt->attempt_id != dispatch.attempt_id || receipt->worker_sequence != 0 ||
+      receipt->payload != nlohmann::json{{"dispatch_id", dispatch.dispatch_id},
+                                        {"result_event_id", result.event_id}} ||
+      std::ranges::count_if(events, [](const Event& event) {
+        return event.event_type == "node.dispatch_completed";
+      }) != 1) {
+    throw std::invalid_argument(
+        "managed builtin completion batch is not canonical for its operation");
+  }
+  if (std::ranges::any_of(events, [&](const Event& event) {
+        return event.run_id != dispatch.run_id ||
+               event.plan_revision != dispatch.plan_revision;
+      })) {
+    throw std::invalid_argument("managed builtin completion crosses run identity");
+  }
+
+  Transaction transaction(database_);
+  Statement query(database_, R"sql(
+    SELECT dispatch_id, run_id, run_revision, plan_revision, node_id, attempt_id,
+           component, operation, status, result_event_id
+    FROM node_dispatches WHERE dispatch_id=?
+  )sql");
+  bind_text(query.get(), 1, dispatch.dispatch_id);
+  if (sqlite3_step(query.get()) != SQLITE_ROW) {
+    throw std::invalid_argument("managed builtin completion has no prepared dispatch");
+  }
+  const Dispatch stored = dispatch_from_row(query.get());
+  if (!same_dispatch_attempt(stored, dispatch)) {
+    throw std::invalid_argument("managed builtin dispatch identity changed");
+  }
+  if (stored.status == DispatchStatus::completed) {
+    if (stored.result_event_id != std::optional<std::string>{result.event_id}) {
+      throw std::invalid_argument(
+          "managed builtin dispatch completed with another result");
+    }
+    for (const Event& requested : events) {
+      const auto durable = event(requested.event_id);
+      if (!durable || event_json(*durable) != event_json(requested)) {
+        throw std::invalid_argument(
+            "managed builtin retry differs from its durable event batch");
+      }
+    }
+    if (release_lease &&
+        !has_lease_release_receipt(
+            lease.concurrency_key, lease.owner_run_id, lease.lease_id,
+            lease.fencing_token, result.wall_time_ns)) {
+      throw std::runtime_error(
+          "managed builtin release retry has no durable lease receipt");
+    }
+    transaction.commit();
+    return;
+  }
+  Statement projection(database_, R"sql(
+    SELECT observed_state, run_revision, current_node_id, current_attempt_id
+    FROM run_projection WHERE run_id=?
+  )sql");
+  bind_text(projection.get(), 1, dispatch.run_id);
+  if (sqlite3_step(projection.get()) != SQLITE_ROW ||
+      column_text(projection.get(), 0) != "running" ||
+      static_cast<std::uint64_t>(sqlite3_column_int64(projection.get(), 1)) !=
+          dispatch.run_revision ||
+      column_text(projection.get(), 2) != dispatch.node_id ||
+      column_text(projection.get(), 3) != dispatch.attempt_id) {
+    throw std::runtime_error(
+        "managed builtin completion is stale for the active projection");
+  }
+  Statement current_lease(database_, R"sql(
+    SELECT owner_run_id, lease_id, fencing_token, acquired_at_ns, expires_at_ns,
+           released_at_ns
+    FROM resource_leases WHERE concurrency_key=?
+      AND NOT EXISTS(
+        SELECT 1 FROM resource_lease_releases AS release
+        WHERE release.concurrency_key=resource_leases.concurrency_key
+          AND release.owner_run_id=resource_leases.owner_run_id
+          AND release.lease_id=resource_leases.lease_id
+          AND release.fencing_token=resource_leases.fencing_token
+      )
+  )sql");
+  bind_text(current_lease.get(), 1, lease.concurrency_key);
+  if (sqlite3_step(current_lease.get()) != SQLITE_ROW ||
+      column_text(current_lease.get(), 0) != lease.owner_run_id ||
+      column_text(current_lease.get(), 1) != lease.lease_id ||
+      static_cast<std::uint64_t>(sqlite3_column_int64(current_lease.get(), 2)) !=
+          lease.fencing_token ||
+      sqlite3_column_int64(current_lease.get(), 3) != lease.acquired_at_ns ||
+      sqlite3_column_int64(current_lease.get(), 4) <= now_ns ||
+      sqlite3_column_type(current_lease.get(), 5) != SQLITE_NULL) {
+    throw OperationPreconditionError(
+        "managed builtin completion lost its active lease fence");
+  }
+  if (release_lease) {
+    Statement release(database_, R"sql(
+      UPDATE resource_leases SET released_at_ns=?
+      WHERE concurrency_key=? AND owner_run_id=? AND lease_id=? AND fencing_token=?
+        AND released_at_ns IS NULL AND expires_at_ns>?
+        AND NOT EXISTS(
+          SELECT 1 FROM resource_lease_releases AS release
+          WHERE release.concurrency_key=resource_leases.concurrency_key
+            AND release.owner_run_id=resource_leases.owner_run_id
+            AND release.lease_id=resource_leases.lease_id
+            AND release.fencing_token=resource_leases.fencing_token
+        )
+    )sql");
+    bind_integer(release.get(), 1, now_ns);
+    bind_text(release.get(), 2, lease.concurrency_key);
+    bind_text(release.get(), 3, lease.owner_run_id);
+    bind_text(release.get(), 4, lease.lease_id);
+    bind_integer(release.get(), 5,
+                 checked_integer(lease.fencing_token, "fencing_token"));
+    bind_integer(release.get(), 6, now_ns);
+    require_done(database_, release.get(), "release managed builtin lease");
+    if (sqlite3_changes(database_) != 1) {
+      throw std::runtime_error(
+          "managed builtin lease release affected an unexpected row count");
+    }
+    Statement release_receipt(database_, R"sql(
+      INSERT INTO resource_lease_releases(
+        concurrency_key, owner_run_id, lease_id, fencing_token, released_at_ns
+      ) VALUES(?, ?, ?, ?, ?)
+    )sql");
+    bind_text(release_receipt.get(), 1, lease.concurrency_key);
+    bind_text(release_receipt.get(), 2, lease.owner_run_id);
+    bind_text(release_receipt.get(), 3, lease.lease_id);
+    bind_integer(release_receipt.get(), 4,
+                 checked_integer(lease.fencing_token, "fencing_token"));
+    bind_integer(release_receipt.get(), 5, now_ns);
+    require_done(database_, release_receipt.get(),
+                 "record managed builtin lease release");
+  }
+  for (const Event& event : events) {
+    append_uncommitted(event);
+  }
+  Statement update(database_, R"sql(
+    UPDATE node_dispatches SET status='completed', result_event_id=?
+    WHERE dispatch_id=? AND status='prepared'
+  )sql");
+  bind_text(update.get(), 1, result.event_id);
+  bind_text(update.get(), 2, dispatch.dispatch_id);
+  require_done(database_, update.get(), "complete managed builtin dispatch");
+  if (sqlite3_changes(database_) != 1) {
+    throw std::runtime_error(
+        "managed builtin completion affected an unexpected dispatch count");
   }
   transaction.commit();
 }
@@ -1677,6 +1896,13 @@ ControlCommand Journal::acknowledge_control_command(
     SELECT 1 FROM resource_leases
     WHERE concurrency_key=? AND owner_run_id=? AND lease_id=? AND fencing_token=?
       AND released_at_ns IS NULL AND acquired_at_ns<=? AND expires_at_ns>?
+      AND NOT EXISTS(
+        SELECT 1 FROM resource_lease_releases AS release
+        WHERE release.concurrency_key=resource_leases.concurrency_key
+          AND release.owner_run_id=resource_leases.owner_run_id
+          AND release.lease_id=resource_leases.lease_id
+          AND release.fencing_token=resource_leases.fencing_token
+      )
   )sql");
   bind_text(lease.get(), 1, identity.concurrency_key);
   bind_text(lease.get(), 2, command.run_id);
@@ -1931,7 +2157,14 @@ LeaseAcquireResult Journal::acquire_lease_with_events(
   };
   Statement query(database_, R"sql(
     SELECT concurrency_key, owner_run_id, lease_id, fencing_token,
-           acquired_at_ns, expires_at_ns, released_at_ns
+           acquired_at_ns, expires_at_ns, released_at_ns,
+           EXISTS(
+             SELECT 1 FROM resource_lease_releases AS release
+             WHERE release.concurrency_key=resource_leases.concurrency_key
+               AND release.owner_run_id=resource_leases.owner_run_id
+               AND release.lease_id=resource_leases.lease_id
+               AND release.fencing_token=resource_leases.fencing_token
+           )
     FROM resource_leases WHERE concurrency_key=?
   )sql");
   bind_text(query.get(), 1, concurrency_key);
@@ -1946,7 +2179,8 @@ LeaseAcquireResult Journal::acquire_lease_with_events(
       throw std::runtime_error("acquiring run has no durable lease row");
     }
     lease = lease_from_row(query.get());
-    const bool released = sqlite3_column_type(query.get(), 6) != SQLITE_NULL;
+    const bool released = sqlite3_column_type(query.get(), 6) != SQLITE_NULL ||
+                          sqlite3_column_int(query.get(), 7) != 0;
     if (released || lease.owner_run_id != owner_run_id || lease.lease_id != lease_id ||
         lease.fencing_token !=
             replayed_resource_event->payload.value("fencing_token", std::uint64_t{}) ||
@@ -1983,7 +2217,8 @@ LeaseAcquireResult Journal::acquire_lease_with_events(
   }
 
   lease = lease_from_row(query.get());
-  const bool released = sqlite3_column_type(query.get(), 6) != SQLITE_NULL;
+  const bool released = sqlite3_column_type(query.get(), 6) != SQLITE_NULL ||
+                        sqlite3_column_int(query.get(), 7) != 0;
   const bool active = !released && lease.expires_at_ns > now_ns;
   if (active) {
     const LeaseAcquireStatus disposition =
@@ -2081,6 +2316,13 @@ bool Journal::complete_builtin_admission(const ResourceLease& lease,
     SELECT owner_run_id, lease_id, fencing_token, acquired_at_ns, expires_at_ns,
            released_at_ns
     FROM resource_leases WHERE concurrency_key=?
+      AND NOT EXISTS(
+        SELECT 1 FROM resource_lease_releases AS release
+        WHERE release.concurrency_key=resource_leases.concurrency_key
+          AND release.owner_run_id=resource_leases.owner_run_id
+          AND release.lease_id=resource_leases.lease_id
+          AND release.fencing_token=resource_leases.fencing_token
+      )
   )sql");
   bind_text(current_lease.get(), 1, lease.concurrency_key);
   if (sqlite3_step(current_lease.get()) != SQLITE_ROW ||
@@ -2091,7 +2333,8 @@ bool Journal::complete_builtin_admission(const ResourceLease& lease,
       sqlite3_column_int64(current_lease.get(), 3) != lease.acquired_at_ns ||
       sqlite3_column_int64(current_lease.get(), 4) <= now_ns ||
       sqlite3_column_type(current_lease.get(), 5) != SQLITE_NULL) {
-    throw std::runtime_error("builtin admission no longer owns its active fenced lease");
+    throw OperationPreconditionError(
+        "builtin admission no longer owns its active fenced lease");
   }
 
   const auto stored_result = event(result.event_id);
@@ -2176,6 +2419,13 @@ bool Journal::prepare_worker_launch(const WorkerLaunchTicket& launch,
   Statement lease(database_, R"sql(
     SELECT owner_run_id, lease_id, fencing_token, expires_at_ns, released_at_ns
     FROM resource_leases WHERE concurrency_key=?
+      AND NOT EXISTS(
+        SELECT 1 FROM resource_lease_releases AS release
+        WHERE release.concurrency_key=resource_leases.concurrency_key
+          AND release.owner_run_id=resource_leases.owner_run_id
+          AND release.lease_id=resource_leases.lease_id
+          AND release.fencing_token=resource_leases.fencing_token
+      )
   )sql");
   bind_text(lease.get(), 1, launch.concurrency_key);
   if (sqlite3_step(lease.get()) != SQLITE_ROW ||
@@ -2185,7 +2435,8 @@ bool Journal::prepare_worker_launch(const WorkerLaunchTicket& launch,
           launch.fencing_token ||
       sqlite3_column_int64(lease.get(), 3) <= now_ns ||
       sqlite3_column_type(lease.get(), 4) != SQLITE_NULL) {
-    throw std::runtime_error("worker launch no longer owns its active lease");
+    throw OperationPreconditionError(
+        "worker launch no longer owns its active lease");
   }
   const auto stored = this->event(event.event_id);
   if (stored) {
@@ -2317,6 +2568,13 @@ WorkerReadinessDisposition Journal::accept_worker_ready(
   Statement lease(database_, R"sql(
     SELECT owner_run_id, lease_id, fencing_token, expires_at_ns, released_at_ns
     FROM resource_leases WHERE concurrency_key=?
+      AND NOT EXISTS(
+        SELECT 1 FROM resource_lease_releases AS release
+        WHERE release.concurrency_key=resource_leases.concurrency_key
+          AND release.owner_run_id=resource_leases.owner_run_id
+          AND release.lease_id=resource_leases.lease_id
+          AND release.fencing_token=resource_leases.fencing_token
+      )
   )sql");
   bind_text(lease.get(), 1, launch.concurrency_key);
   if (sqlite3_step(lease.get()) != SQLITE_ROW ||
@@ -2326,7 +2584,8 @@ WorkerReadinessDisposition Journal::accept_worker_ready(
           launch.fencing_token ||
       sqlite3_column_int64(lease.get(), 3) <= now_ns ||
       sqlite3_column_type(lease.get(), 4) != SQLITE_NULL) {
-    throw std::runtime_error("worker readiness no longer owns its active lease");
+    throw OperationPreconditionError(
+        "worker readiness no longer owns its active lease");
   }
 
   if (observed_state == "running") {
@@ -2376,6 +2635,13 @@ bool Journal::renew_lease(const std::string& concurrency_key, const std::string&
     UPDATE resource_leases SET expires_at_ns=?
     WHERE concurrency_key=? AND owner_run_id=? AND lease_id=? AND fencing_token=?
       AND released_at_ns IS NULL AND expires_at_ns>?
+      AND NOT EXISTS(
+        SELECT 1 FROM resource_lease_releases AS release
+        WHERE release.concurrency_key=resource_leases.concurrency_key
+          AND release.owner_run_id=resource_leases.owner_run_id
+          AND release.lease_id=resource_leases.lease_id
+          AND release.fencing_token=resource_leases.fencing_token
+      )
   )sql");
   bind_integer(update.get(), 1, expires_at_ns);
   bind_text(update.get(), 2, concurrency_key);
@@ -2398,6 +2664,13 @@ bool Journal::release_lease(const std::string& concurrency_key, const std::strin
     UPDATE resource_leases SET released_at_ns=?
     WHERE concurrency_key=? AND owner_run_id=? AND lease_id=? AND fencing_token=?
       AND released_at_ns IS NULL
+      AND NOT EXISTS(
+        SELECT 1 FROM resource_lease_releases AS release
+        WHERE release.concurrency_key=resource_leases.concurrency_key
+          AND release.owner_run_id=resource_leases.owner_run_id
+          AND release.lease_id=resource_leases.lease_id
+          AND release.fencing_token=resource_leases.fencing_token
+      )
   )sql");
   bind_integer(update.get(), 1, now_ns);
   bind_text(update.get(), 2, concurrency_key);
@@ -2420,6 +2693,13 @@ std::optional<ResourceLease> Journal::active_lease(const std::string& concurrenc
            acquired_at_ns, expires_at_ns
     FROM resource_leases
     WHERE concurrency_key=? AND released_at_ns IS NULL AND expires_at_ns>?
+      AND NOT EXISTS(
+        SELECT 1 FROM resource_lease_releases AS release
+        WHERE release.concurrency_key=resource_leases.concurrency_key
+          AND release.owner_run_id=resource_leases.owner_run_id
+          AND release.lease_id=resource_leases.lease_id
+          AND release.fencing_token=resource_leases.fencing_token
+      )
   )sql");
   bind_text(query.get(), 1, concurrency_key);
   bind_integer(query.get(), 2, now_ns);
@@ -2432,6 +2712,33 @@ std::optional<ResourceLease> Journal::active_lease(const std::string& concurrenc
                              std::string(sqlite3_errmsg(database_)));
   }
   return lease_from_row(query.get());
+}
+
+bool Journal::has_lease_release_receipt(
+    const std::string& concurrency_key, const std::string& owner_run_id,
+    const std::string& lease_id, std::uint64_t fencing_token,
+    std::int64_t released_at_ns) const {
+  require_lease_identity(concurrency_key, owner_run_id, lease_id);
+  if (fencing_token == 0 || released_at_ns < 0) {
+    throw std::invalid_argument("lease release receipt identity is invalid");
+  }
+  Statement query(database_, R"sql(
+    SELECT 1 FROM resource_lease_releases
+    WHERE concurrency_key=? AND owner_run_id=? AND lease_id=?
+      AND fencing_token=? AND released_at_ns=?
+  )sql");
+  bind_text(query.get(), 1, concurrency_key);
+  bind_text(query.get(), 2, owner_run_id);
+  bind_text(query.get(), 3, lease_id);
+  bind_integer(query.get(), 4,
+               checked_integer(fencing_token, "fencing_token"));
+  bind_integer(query.get(), 5, released_at_ns);
+  const int status = sqlite3_step(query.get());
+  if (status == SQLITE_ROW) return true;
+  if (status != SQLITE_DONE) {
+    throw std::runtime_error("could not read lease release receipt");
+  }
+  return false;
 }
 
 std::uint64_t Journal::event_count() const {

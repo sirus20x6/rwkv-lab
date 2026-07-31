@@ -13,16 +13,19 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <memory>
 #include <limits>
+#include <ranges>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include <grpcpp/server.h>
 #include <grpcpp/server_builder.h>
@@ -94,6 +97,7 @@ namespace {
 
 constexpr std::size_t kMaximumCommandBytes = 64U * 1024U;
 constexpr std::size_t kMaximumSubmissionBytes = 2U * 1024U * 1024U;
+constexpr std::size_t kMaximumWorkerMessageBytes = 64U * 1024U;
 
 class SignalMaskGuard {
  public:
@@ -521,12 +525,432 @@ void remove_stale_socket(const std::filesystem::path& path) {
   }
 }
 
+std::vector<std::string> canonical_worker_capabilities(
+    const google::protobuf::RepeatedPtrField<std::string>& input) {
+  std::vector<std::string> capabilities(input.begin(), input.end());
+  if (capabilities.size() > 256U ||
+      std::ranges::any_of(capabilities, [](const std::string& capability) {
+        return capability.empty() || capability.size() > 256U;
+      })) {
+    throw std::invalid_argument("worker hello contains invalid capabilities");
+  }
+  std::ranges::sort(capabilities);
+  if (std::ranges::adjacent_find(capabilities) != capabilities.end()) {
+    throw std::invalid_argument("worker hello capabilities must be unique");
+  }
+  return capabilities;
+}
+
+WorkerHelloEvidence worker_hello_evidence(const v1::WorkerHello& hello) {
+  if (hello.run_id().empty() || hello.node_id().empty() ||
+      hello.attempt_id().empty() || hello.launch_nonce().empty() ||
+      hello.adapter().empty() || hello.adapter_version().empty() ||
+      hello.code_fingerprint().empty() || hello.concurrency_key().empty() ||
+      hello.lease_id().empty() || hello.fencing_token() == 0U) {
+    throw std::invalid_argument("worker hello identity fields must not be empty");
+  }
+  return WorkerHelloEvidence{
+      .run_id = hello.run_id(),
+      .node_id = hello.node_id(),
+      .attempt_id = hello.attempt_id(),
+      .launch_nonce = hello.launch_nonce(),
+      .adapter = hello.adapter(),
+      .adapter_version = hello.adapter_version(),
+      .code_fingerprint = hello.code_fingerprint(),
+      .capabilities = canonical_worker_capabilities(hello.capabilities()),
+      .last_acked_controller_sequence =
+          hello.last_acked_controller_sequence(),
+      .concurrency_key = hello.concurrency_key(),
+      .lease_id = hello.lease_id(),
+      .fencing_token = hello.fencing_token(),
+  };
+}
+
+WorkerSessionIdentity worker_session(const WorkerHelloEvidence& hello) {
+  return WorkerSessionIdentity{
+      .run_id = hello.run_id,
+      .node_id = hello.node_id,
+      .attempt_id = hello.attempt_id,
+      .launch_nonce = hello.launch_nonce,
+      .concurrency_key = hello.concurrency_key,
+      .lease_id = hello.lease_id,
+      .fencing_token = hello.fencing_token,
+  };
+}
+
+std::int64_t timestamp_ns(const google::protobuf::Timestamp& timestamp) {
+  constexpr std::int64_t kNanosecondsPerSecond = 1'000'000'000LL;
+  constexpr std::int64_t kMaximumSeconds =
+      std::numeric_limits<std::int64_t>::max() / kNanosecondsPerSecond;
+  constexpr std::int32_t kMaximumRemainder = static_cast<std::int32_t>(
+      std::numeric_limits<std::int64_t>::max() % kNanosecondsPerSecond);
+  if (timestamp.seconds() < 0 || timestamp.nanos() < 0 ||
+      timestamp.nanos() >= kNanosecondsPerSecond ||
+      timestamp.seconds() > kMaximumSeconds ||
+      (timestamp.seconds() == kMaximumSeconds &&
+       timestamp.nanos() > kMaximumRemainder)) {
+    throw std::invalid_argument("worker event wall timestamp is out of range");
+  }
+  return timestamp.seconds() * kNanosecondsPerSecond + timestamp.nanos();
+}
+
+grpc::Status worker_failure(const std::exception& exception) {
+  if (dynamic_cast<const std::invalid_argument*>(&exception) != nullptr) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, exception.what()};
+  }
+  if (dynamic_cast<const OperationPreconditionError*>(&exception) != nullptr) {
+    return {grpc::StatusCode::FAILED_PRECONDITION, exception.what()};
+  }
+  if (dynamic_cast<const std::logic_error*>(&exception) != nullptr) {
+    return {grpc::StatusCode::FAILED_PRECONDITION, exception.what()};
+  }
+  return {grpc::StatusCode::DATA_LOSS, exception.what()};
+}
+
 }  // namespace
 
-TrainVMService::TrainVMService(const std::filesystem::path& journal_path)
-    : authority_lock_(std::make_unique<AuthorityLock>(journal_path)), journal_(journal_path) {}
+TrainVMService::TrainVMService(
+    const std::filesystem::path& journal_path,
+    std::function<std::int64_t()> authority_clock)
+    : authority_lock_(std::make_unique<AuthorityLock>(journal_path)),
+      journal_(journal_path),
+      authority_clock_(std::move(authority_clock)) {
+  if (!authority_clock_) {
+    authority_clock_ = [] {
+      return std::chrono::duration_cast<std::chrono::nanoseconds>(
+                 std::chrono::system_clock::now().time_since_epoch())
+          .count();
+    };
+  }
+}
 
 TrainVMService::~TrainVMService() = default;
+
+std::int64_t TrainVMService::authority_now_ns() const {
+  const std::int64_t now_ns = authority_clock_();
+  if (now_ns < 0) {
+    throw std::runtime_error("authority clock returned a negative timestamp");
+  }
+  return now_ns;
+}
+
+bool TrainVMService::claim_worker_attempt(const std::string& key) {
+  std::scoped_lock lock(worker_sessions_mutex_);
+  return active_worker_attempts_.insert(key).second;
+}
+
+void TrainVMService::release_worker_attempt(const std::string& key) {
+  std::scoped_lock lock(worker_sessions_mutex_);
+  active_worker_attempts_.erase(key);
+}
+
+grpc::Status TrainVMService::open_worker_connection(
+    const v1::WorkerHello& wire_hello, WorkerConnection& connection) {
+  if (wire_hello.ByteSizeLong() > kMaximumWorkerMessageBytes) {
+    return {grpc::StatusCode::RESOURCE_EXHAUSTED,
+            "worker hello exceeds 64 KiB"};
+  }
+  try {
+    WorkerHelloEvidence hello = worker_hello_evidence(wire_hello);
+    std::scoped_lock lock(command_mutex_);
+    const auto projection = journal_.projection(hello.run_id);
+    if (!projection) {
+      return {grpc::StatusCode::NOT_FOUND, "worker run does not exist"};
+    }
+    const auto plan = journal_.compiled_plan(projection->plan_hash);
+    if (!plan) {
+      return {grpc::StatusCode::DATA_LOSS,
+              "worker run has no persisted compiled plan"};
+    }
+    Controller controller(*plan, journal_, hello.run_id);
+    controller.recover();
+
+    const std::string dispatch_id =
+        hello.run_id + ":dispatch:" + hello.node_id + ":" + hello.attempt_id;
+    const auto historical_dispatch = journal_.dispatch(dispatch_id);
+    if (historical_dispatch &&
+        historical_dispatch->status == DispatchStatus::completed) {
+      const std::string launch_id = hello.run_id + ":worker-launch:" +
+                                    hello.node_id + ":" + hello.attempt_id;
+      const auto launch = journal_.event(launch_id);
+      const auto ready = journal_.event(launch_id + ":ready");
+      const auto result = historical_dispatch->result_event_id
+                              ? journal_.event(*historical_dispatch->result_event_id)
+                              : std::nullopt;
+      std::vector<std::string> ready_capabilities;
+      if (ready && ready->payload.contains("capabilities")) {
+        ready_capabilities = ready->payload.at("capabilities")
+                                 .get<std::vector<std::string>>();
+      }
+      if (!launch || launch->event_type != "worker.launch_requested" ||
+          !ready || ready->event_type != "worker.ready" || !result ||
+          launch->node_id != hello.node_id ||
+          launch->attempt_id != hello.attempt_id ||
+          ready->payload.value("cause_event_id", std::string{}) != launch_id ||
+          ready->payload.value("launch_nonce", std::string{}) !=
+              hello.launch_nonce ||
+          ready->payload.value("adapter", std::string{}) != hello.adapter ||
+          ready->payload.value("adapter_version", std::string{}) !=
+              hello.adapter_version ||
+          ready->payload.value("code_fingerprint", std::string{}) !=
+              hello.code_fingerprint ||
+          ready_capabilities != hello.capabilities ||
+          ready->payload.value("last_acked_controller_sequence",
+                               std::uint64_t{}) !=
+              hello.last_acked_controller_sequence ||
+          ready->payload.value("concurrency_key", std::string{}) !=
+              hello.concurrency_key ||
+          ready->payload.value("lease_id", std::string{}) != hello.lease_id ||
+          ready->payload.value("fencing_token", std::uint64_t{}) !=
+              hello.fencing_token ||
+          result->run_id != hello.run_id || result->node_id != hello.node_id ||
+          result->attempt_id != hello.attempt_id ||
+          result->worker_sequence == 0U) {
+        return {grpc::StatusCode::FAILED_PRECONDITION,
+                "completed worker attempt disagrees with its durable session"};
+      }
+      connection.identity = worker_session(hello);
+      connection.dispatch = *historical_dispatch;
+      auto& welcome = connection.welcome;
+      welcome.set_disposition(
+          v1::WorkerWelcome::DISPOSITION_ALREADY_COMPLETED);
+      welcome.set_journal_id(journal_.journal_id());
+      welcome.set_plan_hash(projection->plan_hash);
+      welcome.set_plan_revision(historical_dispatch->plan_revision);
+      welcome.set_run_id(hello.run_id);
+      welcome.set_run_revision(historical_dispatch->run_revision);
+      welcome.set_node_id(hello.node_id);
+      welcome.set_attempt_id(hello.attempt_id);
+      welcome.set_launch_nonce(hello.launch_nonce);
+      welcome.set_concurrency_key(hello.concurrency_key);
+      welcome.set_lease_id(hello.lease_id);
+      welcome.set_fencing_token(hello.fencing_token);
+      welcome.set_dispatch_id(historical_dispatch->dispatch_id);
+      welcome.set_component(historical_dispatch->component);
+      welcome.set_operation(historical_dispatch->operation);
+      welcome.set_acknowledged_worker_sequence(result->worker_sequence);
+      v1::WorkerReceipt receipt;
+      receipt.set_event_id(result->event_id);
+      receipt.set_acknowledged_worker_sequence(result->worker_sequence);
+      receipt.set_run_id(hello.run_id);
+      receipt.set_committed_run_revision(projection->run_revision);
+      receipt.set_observed_state(observed_state(projection->observed_state));
+      receipt.set_next_node_id(projection->current_node_id);
+      receipt.set_next_attempt_id(projection->current_attempt_id);
+      connection.completed_receipt = std::move(receipt);
+      return grpc::Status::OK;
+    }
+
+    const WorkerReadinessResult readiness =
+        controller.accept_worker_hello(hello, authority_now_ns());
+    const Dispatch dispatch = controller.prepare_dispatch(authority_now_ns());
+    const auto ready_projection = journal_.projection(hello.run_id);
+    if (!ready_projection || ready_projection->observed_state != "running" ||
+        ready_projection->current_node_id != hello.node_id ||
+        ready_projection->current_attempt_id != hello.attempt_id ||
+        ready_projection->run_revision != dispatch.run_revision) {
+      return {grpc::StatusCode::DATA_LOSS,
+              "worker readiness projection disagrees with durable dispatch"};
+    }
+    connection.identity = worker_session(hello);
+    connection.dispatch = dispatch;
+    auto& welcome = connection.welcome;
+    welcome.set_disposition(
+        readiness.disposition == WorkerReadinessDisposition::accepted
+            ? v1::WorkerWelcome::DISPOSITION_ACCEPTED
+            : v1::WorkerWelcome::DISPOSITION_REPLAYED);
+    welcome.set_journal_id(journal_.journal_id());
+    welcome.set_plan_hash(ready_projection->plan_hash);
+    welcome.set_plan_revision(dispatch.plan_revision);
+    welcome.set_run_id(hello.run_id);
+    welcome.set_run_revision(dispatch.run_revision);
+    welcome.set_node_id(hello.node_id);
+    welcome.set_attempt_id(hello.attempt_id);
+    welcome.set_launch_nonce(hello.launch_nonce);
+    welcome.set_concurrency_key(hello.concurrency_key);
+    welcome.set_lease_id(hello.lease_id);
+    welcome.set_fencing_token(hello.fencing_token);
+    welcome.set_dispatch_id(dispatch.dispatch_id);
+    welcome.set_component(dispatch.component);
+    welcome.set_operation(dispatch.operation);
+    welcome.set_acknowledged_worker_sequence(0);
+    return grpc::Status::OK;
+  } catch (const nlohmann::json::exception& exception) {
+    return {grpc::StatusCode::DATA_LOSS, exception.what()};
+  } catch (const std::exception& exception) {
+    return worker_failure(exception);
+  }
+}
+
+grpc::Status TrainVMService::complete_worker_connection(
+    const v1::EventEnvelope& envelope, const WorkerConnection& connection,
+    v1::WorkerReceipt& receipt) {
+  if (envelope.ByteSizeLong() > kMaximumWorkerMessageBytes) {
+    return {grpc::StatusCode::RESOURCE_EXHAUSTED,
+            "worker result exceeds 64 KiB"};
+  }
+  if (envelope.journal_sequence() != 0U ||
+      envelope.event_id() != connection.dispatch.dispatch_id + ":result" ||
+      envelope.run_id() != connection.identity.run_id ||
+      envelope.run_revision() != connection.dispatch.run_revision ||
+      envelope.plan_revision() != connection.dispatch.plan_revision ||
+      envelope.node_id() != connection.identity.node_id ||
+      envelope.attempt_id() != connection.identity.attempt_id ||
+      envelope.worker_sequence() != 1U || envelope.event_type().empty() ||
+      envelope.event_type().size() > 256U || envelope.event_version() != 1U ||
+      !envelope.has_wall_time() || envelope.has_payload() ||
+      envelope.canonical_json_payload().empty() ||
+      envelope.canonical_json_payload().size() > kMaximumWorkerMessageBytes) {
+    return {grpc::StatusCode::INVALID_ARGUMENT,
+            "worker result envelope is not the canonical dispatched result"};
+  }
+  nlohmann::json payload;
+  try {
+    payload = nlohmann::json::parse(envelope.canonical_json_payload());
+    if (!payload.is_object() || payload.dump() != envelope.canonical_json_payload()) {
+      return {grpc::StatusCode::INVALID_ARGUMENT,
+              "worker result payload must be a canonical JSON object"};
+    }
+  } catch (const nlohmann::json::exception& exception) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, exception.what()};
+  }
+  try {
+    std::scoped_lock lock(command_mutex_);
+    const auto projection = journal_.projection(connection.identity.run_id);
+    if (!projection) {
+      return {grpc::StatusCode::NOT_FOUND, "worker run does not exist"};
+    }
+    const auto plan = journal_.compiled_plan(projection->plan_hash);
+    if (!plan) {
+      return {grpc::StatusCode::DATA_LOSS,
+              "worker run has no persisted compiled plan"};
+    }
+    Controller controller(*plan, journal_, connection.identity.run_id);
+    controller.recover();
+    Event event{
+        .event_id = envelope.event_id(),
+        .run_id = envelope.run_id(),
+        .run_revision = envelope.run_revision(),
+        .plan_revision = envelope.plan_revision(),
+        .node_id = envelope.node_id(),
+        .attempt_id = envelope.attempt_id(),
+        .worker_sequence = envelope.worker_sequence(),
+        .event_type = envelope.event_type(),
+        .event_version = envelope.event_version(),
+        .wall_time_ns = timestamp_ns(envelope.wall_time()),
+        .monotonic_time_ns = envelope.monotonic_time_ns(),
+        .optimizer_step = envelope.has_optimizer_step()
+                              ? std::optional<std::uint64_t>{
+                                    envelope.optimizer_step()}
+                              : std::nullopt,
+        .payload = payload,
+    };
+    const ExecutionState& committed =
+        controller.handle_event(event, connection.identity, authority_now_ns());
+    const auto committed_projection =
+        journal_.projection(connection.identity.run_id);
+    if (!committed_projection ||
+        committed_projection->run_revision != committed.revision) {
+      return {grpc::StatusCode::DATA_LOSS,
+              "worker result projection disagrees with committed FSM state"};
+    }
+    receipt.set_event_id(event.event_id);
+    receipt.set_acknowledged_worker_sequence(event.worker_sequence);
+    receipt.set_run_id(event.run_id);
+    receipt.set_committed_run_revision(committed.revision);
+    receipt.set_observed_state(
+        observed_state(committed_projection->observed_state));
+    receipt.set_next_node_id(committed_projection->current_node_id);
+    receipt.set_next_attempt_id(committed_projection->current_attempt_id);
+    return grpc::Status::OK;
+  } catch (const std::exception& exception) {
+    return worker_failure(exception);
+  }
+}
+
+grpc::Status TrainVMService::Connect(
+    grpc::ServerContext* context,
+    grpc::ServerReaderWriter<v1::ControllerToWorker,
+                             v1::WorkerToController>* stream) {
+  if (stream == nullptr) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, "worker stream is required"};
+  }
+  v1::WorkerToController first;
+  if (!stream->Read(&first)) {
+    return cancelled(context)
+               ? grpc::Status(grpc::StatusCode::CANCELLED,
+                              "worker stream cancelled before hello")
+               : grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                              "worker hello must be the first stream message");
+  }
+  if (first.ByteSizeLong() > kMaximumWorkerMessageBytes || !first.has_hello()) {
+    return {first.ByteSizeLong() > kMaximumWorkerMessageBytes
+                ? grpc::StatusCode::RESOURCE_EXHAUSTED
+                : grpc::StatusCode::INVALID_ARGUMENT,
+            "worker hello must be the first bounded stream message"};
+  }
+  const auto& hello = first.hello();
+  if (hello.run_id().empty() || hello.node_id().empty() ||
+      hello.attempt_id().empty()) {
+    return {grpc::StatusCode::INVALID_ARGUMENT,
+            "worker hello attempt identity is required"};
+  }
+  const std::string attempt_key = hello.run_id() + "\n" + hello.node_id() +
+                                  "\n" + hello.attempt_id();
+  if (!claim_worker_attempt(attempt_key)) {
+    return {grpc::StatusCode::ALREADY_EXISTS,
+            "worker attempt already has an active stream"};
+  }
+  const auto finish = [&](grpc::Status status) {
+    release_worker_attempt(attempt_key);
+    return status;
+  };
+  WorkerConnection connection;
+  grpc::Status status = open_worker_connection(hello, connection);
+  if (!status.ok()) return finish(std::move(status));
+  v1::ControllerToWorker welcome;
+  *welcome.mutable_welcome() = connection.welcome;
+  if (!stream->Write(welcome)) {
+    return finish({grpc::StatusCode::CANCELLED,
+                   "worker disconnected before durable welcome"});
+  }
+  if (connection.completed_receipt) {
+    v1::ControllerToWorker receipt;
+    *receipt.mutable_receipt() = *connection.completed_receipt;
+    if (!stream->Write(receipt)) {
+      return finish({grpc::StatusCode::CANCELLED,
+                     "worker disconnected before replayed receipt"});
+    }
+    return finish(grpc::Status::OK);
+  }
+  v1::WorkerToController result;
+  if (!stream->Read(&result)) {
+    return finish(cancelled(context)
+                      ? grpc::Status(grpc::StatusCode::CANCELLED,
+                                     "worker stream cancelled before result")
+                      : grpc::Status(
+                            grpc::StatusCode::FAILED_PRECONDITION,
+                            "worker stream closed before its required result"));
+  }
+  if (result.ByteSizeLong() > kMaximumWorkerMessageBytes) {
+    return finish({grpc::StatusCode::RESOURCE_EXHAUSTED,
+                   "worker result exceeds 64 KiB"});
+  }
+  if (!result.has_event()) {
+    return finish({grpc::StatusCode::UNIMPLEMENTED,
+                   "this WorkerControl revision accepts one result event only"});
+  }
+  v1::WorkerReceipt committed;
+  status = complete_worker_connection(result.event(), connection, committed);
+  if (!status.ok()) return finish(std::move(status));
+  v1::ControllerToWorker response;
+  *response.mutable_receipt() = std::move(committed);
+  if (!stream->Write(response)) {
+    return finish({grpc::StatusCode::CANCELLED,
+                   "worker disconnected after durable result commit"});
+  }
+  return finish(grpc::Status::OK);
+}
 
 grpc::Status TrainVMService::SubmitExperiment(grpc::ServerContext* context,
                                               const v1::SubmitExperimentRequest* request,
@@ -719,7 +1143,8 @@ int serve(const std::filesystem::path& journal_path, const std::filesystem::path
   grpc::ServerBuilder builder;
   builder.SetMaxReceiveMessageSize(static_cast<int>(kMaximumSubmissionBytes));
   builder.AddListeningPort("unix:" + absolute_socket.string(), grpc::InsecureServerCredentials());
-  builder.RegisterService(&service);
+  builder.RegisterService(static_cast<v1::TrainVM::Service*>(&service));
+  builder.RegisterService(static_cast<v1::WorkerControl::Service*>(&service));
   std::unique_ptr<grpc::Server> server;
   {
     // The Unix socket must be born owner-only. chmod after binding is retained as

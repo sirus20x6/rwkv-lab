@@ -20,6 +20,14 @@ namespace trainvm {
 
 class Controller;
 
+// A durable command was valid when issued but has lost the active run/resource
+// fence required to apply it. Boundary services map this typed condition to
+// FAILED_PRECONDITION; untyped runtime failures remain authority corruption.
+class OperationPreconditionError : public std::runtime_error {
+ public:
+  using std::runtime_error::runtime_error;
+};
+
 struct Event {
   std::string event_id;
   std::string run_id;
@@ -164,6 +172,14 @@ public:
       const std::vector<Event>& events,
       const std::optional<WorkerSessionIdentity>& identity,
       std::optional<std::int64_t> now_ns);
+  void complete_managed_builtin_dispatch(
+      const Dispatch& dispatch, const ResourceLease& lease,
+      std::int64_t now_ns, bool release_lease,
+      const std::vector<Event>& events);
+  [[nodiscard]] bool has_lease_release_receipt(
+      const std::string& concurrency_key, const std::string& owner_run_id,
+      const std::string& lease_id, std::uint64_t fencing_token,
+      std::int64_t released_at_ns) const;
   ControlSubmission submit_control_command(ControlCommand command);
   ControlCommand acknowledge_control_command(const std::string& run_id,
                                               const std::string& command_id,

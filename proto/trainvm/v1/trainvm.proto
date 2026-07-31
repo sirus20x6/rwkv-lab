@@ -254,6 +254,11 @@ message EventEnvelope {
   uint64 monotonic_time_ns = 11;
   optional uint64 optimizer_step = 12;
   google.protobuf.Any payload = 13;
+  uint64 run_revision = 14;
+  // Worker ingress uses this bounded canonical JSON object until every adapter
+  // event has a registered protobuf payload type. Inbound Any payloads are
+  // rejected by the authority in this protocol revision.
+  bytes canonical_json_payload = 15;
 }
 
 message MetricSample {
@@ -334,10 +339,48 @@ message WorkerCommand {
   }
 }
 
+message WorkerWelcome {
+  enum Disposition {
+    DISPOSITION_UNSPECIFIED = 0;
+    DISPOSITION_ACCEPTED = 1;
+    DISPOSITION_REPLAYED = 2;
+    DISPOSITION_ALREADY_COMPLETED = 3;
+  }
+
+  Disposition disposition = 1;
+  string journal_id = 2;
+  string plan_hash = 3;
+  uint64 plan_revision = 4;
+  string run_id = 5;
+  uint64 run_revision = 6;
+  string node_id = 7;
+  string attempt_id = 8;
+  string launch_nonce = 9;
+  string concurrency_key = 10;
+  string lease_id = 11;
+  uint64 fencing_token = 12;
+  string dispatch_id = 13;
+  string component = 14;
+  string operation = 15;
+  uint64 acknowledged_worker_sequence = 16;
+}
+
+message WorkerReceipt {
+  string event_id = 1;
+  uint64 acknowledged_worker_sequence = 2;
+  string run_id = 3;
+  uint64 committed_run_revision = 4;
+  ObservedState observed_state = 5;
+  string next_node_id = 6;
+  string next_attempt_id = 7;
+}
+
 message ControllerToWorker {
   oneof message {
     WorkerCommand command = 1;
     uint64 acknowledge_worker_sequence = 2;
+    WorkerWelcome welcome = 3;
+    WorkerReceipt receipt = 4;
   }
 }
 
