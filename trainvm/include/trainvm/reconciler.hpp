@@ -2,11 +2,13 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 
 #include "trainvm/adapter_registry.hpp"
+#include "trainvm/authority_time.hpp"
 #include "trainvm/journal.hpp"
 #include "trainvm/worker.hpp"
 
@@ -48,12 +50,12 @@ class Reconciler {
 
   Reconciler(Journal& journal, const AdapterRegistry& registry,
              std::mutex& authority_mutex,
-             std::function<std::int64_t()> authority_clock);
+             std::function<AuthorityTimeSample()> authority_clock);
 
   Journal& journal_;
   const AdapterRegistry& registry_;
   std::mutex& authority_mutex_;
-  std::function<std::int64_t()> authority_clock_;
+  std::shared_ptr<AuthorityClock> authority_clock_;
 };
 
 }  // namespace trainvm

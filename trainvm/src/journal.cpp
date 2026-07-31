@@ -9,38 +9,178 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cerrno>
 #include <cstdint>
+#include <cstring>
+#include <fcntl.h>
 #include <filesystem>
 #include <limits>
+#include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <utility>
 
 namespace trainvm {
 namespace {
 
-constexpr std::string_view kSchema = R"sql(
-PRAGMA journal_mode=WAL;
+constexpr std::string_view kConnectionPragmas = R"sql(
 PRAGMA synchronous=FULL;
 PRAGMA foreign_keys=ON;
 PRAGMA busy_timeout=5000;
 PRAGMA trusted_schema=OFF;
+)sql";
 
+constexpr std::string_view kWalPragma = "PRAGMA journal_mode=WAL;";
+
+constexpr std::string_view kSchema = R"sql(
 CREATE TABLE IF NOT EXISTS journal_meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 ) WITHOUT ROWID;
 
-INSERT INTO journal_meta(key, value) VALUES('schema_version', '4')
+INSERT INTO journal_meta(key, value) VALUES('schema_version', '5')
 ON CONFLICT(key) DO NOTHING;
 
 INSERT INTO journal_meta(key, value) VALUES(
   'chain_head',
   '0000000000000000000000000000000000000000000000000000000000000000'
 ) ON CONFLICT(key) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS events (
+  journal_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id TEXT NOT NULL UNIQUE,
+  run_id TEXT NOT NULL,
+  run_revision INTEGER NOT NULL,
+  plan_revision INTEGER NOT NULL,
+  node_id TEXT NOT NULL,
+  attempt_id TEXT NOT NULL,
+  worker_sequence INTEGER NOT NULL,
+  event_type TEXT NOT NULL,
+  event_version INTEGER NOT NULL,
+  wall_time_ns INTEGER NOT NULL,
+  monotonic_time_ns INTEGER NOT NULL,
+  optimizer_step INTEGER,
+  payload_json TEXT NOT NULL,
+  previous_hash TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  chain_hash TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_run_sequence ON events(run_id, journal_sequence);
+CREATE INDEX IF NOT EXISTS idx_events_attempt_worker_sequence
+  ON events(run_id, node_id, attempt_id, worker_sequence)
+  WHERE worker_sequence > 0;
+
+CREATE TABLE IF NOT EXISTS run_projection (
+  run_id TEXT PRIMARY KEY,
+  experiment_name TEXT NOT NULL,
+  plan_hash TEXT NOT NULL,
+  desired_state TEXT NOT NULL,
+  observed_state TEXT NOT NULL,
+  current_node_id TEXT NOT NULL,
+  current_attempt_id TEXT NOT NULL,
+  run_revision INTEGER NOT NULL,
+  optimizer_step INTEGER NOT NULL,
+  last_heartbeat_ns INTEGER NOT NULL,
+  last_event_sequence INTEGER NOT NULL,
+  failure_summary TEXT NOT NULL
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS compiled_plans (
+  plan_hash TEXT PRIMARY KEY,
+  experiment_name TEXT NOT NULL,
+  canonical_plan_json TEXT NOT NULL
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS resource_leases (
+  concurrency_key TEXT PRIMARY KEY,
+  owner_run_id TEXT NOT NULL,
+  lease_id TEXT NOT NULL,
+  fencing_token INTEGER NOT NULL,
+  clock_domain TEXT NOT NULL CHECK(clock_domain IN ('boottime/v1','legacy-wall/v1')),
+  boot_id TEXT,
+  acquired_boottime_ns INTEGER,
+  expires_boottime_ns INTEGER,
+  acquired_wall_time_ns INTEGER NOT NULL,
+  expires_wall_time_ns INTEGER NOT NULL,
+  released_wall_time_ns INTEGER,
+  CHECK(
+    (clock_domain='boottime/v1' AND boot_id IS NOT NULL AND
+     acquired_boottime_ns IS NOT NULL AND expires_boottime_ns IS NOT NULL) OR
+    (clock_domain='legacy-wall/v1' AND boot_id IS NULL AND
+     acquired_boottime_ns IS NULL AND expires_boottime_ns IS NULL)
+  )
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS resource_lease_releases (
+  concurrency_key TEXT NOT NULL,
+  owner_run_id TEXT NOT NULL,
+  lease_id TEXT NOT NULL,
+  fencing_token INTEGER NOT NULL,
+  clock_domain TEXT NOT NULL CHECK(clock_domain IN ('boottime/v1','legacy-wall/v1')),
+  boot_id TEXT,
+  released_wall_time_ns INTEGER NOT NULL,
+  CHECK(
+    (clock_domain='boottime/v1' AND boot_id IS NOT NULL) OR
+    (clock_domain='legacy-wall/v1' AND boot_id IS NULL)
+  ),
+  PRIMARY KEY(concurrency_key, lease_id, fencing_token)
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS node_dispatches (
+  dispatch_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  run_revision INTEGER NOT NULL,
+  plan_revision INTEGER NOT NULL,
+  node_id TEXT NOT NULL,
+  attempt_id TEXT NOT NULL,
+  component TEXT NOT NULL,
+  operation TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('prepared', 'completed')),
+  result_event_id TEXT,
+  UNIQUE(run_id, node_id, attempt_id)
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS control_commands (
+  command_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  expected_run_revision INTEGER NOT NULL,
+  expected_control_revision INTEGER NOT NULL,
+  control_revision INTEGER NOT NULL,
+  plan_revision INTEGER NOT NULL,
+  apply_point TEXT NOT NULL,
+  requires_pause INTEGER NOT NULL,
+  assignments_json TEXT NOT NULL,
+  author TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('requested','applied','rejected','restart_required')),
+  effective_step INTEGER,
+  effective_values_json TEXT NOT NULL,
+  diagnostics_json TEXT NOT NULL,
+  ack_concurrency_key TEXT,
+  ack_lease_id TEXT,
+  ack_fencing_token INTEGER,
+  ack_node_id TEXT,
+  ack_attempt_id TEXT,
+  ack_worker_sequence INTEGER,
+  acknowledged_at_ns INTEGER,
+  UNIQUE(run_id, idempotency_key),
+  UNIQUE(run_id, control_revision)
+) WITHOUT ROWID;
+)sql";
+
+constexpr std::string_view kSchemaV4 = R"sql(
+CREATE TABLE IF NOT EXISTS journal_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS events (
   journal_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -169,6 +309,159 @@ class Statement {
   sqlite3* database_{};
   sqlite3_stmt* statement_{};
 };
+
+using SchemaSnapshot = std::map<std::string, std::string>;
+
+std::string normalized_schema_sql(std::string_view sql) {
+  enum class LexicalState {
+    normal_sql,
+    single_quoted_literal,
+    double_quoted_identifier,
+    backtick_quoted_identifier,
+    bracket_quoted_identifier,
+    line_comment,
+    block_comment,
+  };
+
+  std::string normalized;
+  normalized.reserve(sql.size());
+  LexicalState state = LexicalState::normal_sql;
+  for (std::size_t index = 0; index < sql.size(); ++index) {
+    const char character = sql[index];
+    const char next = index + 1U < sql.size() ? sql[index + 1U] : '\0';
+    if (state == LexicalState::normal_sql) {
+      if (character == '\'') {
+        state = LexicalState::single_quoted_literal;
+      } else if (character == '"') {
+        state = LexicalState::double_quoted_identifier;
+      } else if (character == '`') {
+        state = LexicalState::backtick_quoted_identifier;
+      } else if (character == '[') {
+        state = LexicalState::bracket_quoted_identifier;
+      } else if (character == '-' && next == '-') {
+        state = LexicalState::line_comment;
+      } else if (character == '/' && next == '*') {
+        state = LexicalState::block_comment;
+      } else if (character == ' ' || character == '\t' || character == '\r' ||
+                 character == '\n' || character == '\f' || character == '\v') {
+        continue;
+      }
+      normalized.push_back(character);
+      continue;
+    }
+
+    normalized.push_back(character);
+    if (state == LexicalState::single_quoted_literal && character == '\'') {
+      if (next == '\'') {
+        normalized.push_back(next);
+        ++index;
+      } else {
+        state = LexicalState::normal_sql;
+      }
+    } else if (state == LexicalState::double_quoted_identifier && character == '"') {
+      if (next == '"') {
+        normalized.push_back(next);
+        ++index;
+      } else {
+        state = LexicalState::normal_sql;
+      }
+    } else if (state == LexicalState::backtick_quoted_identifier && character == '`') {
+      if (next == '`') {
+        normalized.push_back(next);
+        ++index;
+      } else {
+        state = LexicalState::normal_sql;
+      }
+    } else if (state == LexicalState::bracket_quoted_identifier && character == ']') {
+      state = LexicalState::normal_sql;
+    } else if (state == LexicalState::line_comment &&
+               (character == '\n' || character == '\r')) {
+      state = LexicalState::normal_sql;
+    } else if (state == LexicalState::block_comment && character == '*' && next == '/') {
+      normalized.push_back(next);
+      ++index;
+      state = LexicalState::normal_sql;
+    }
+  }
+  return normalized;
+}
+
+SchemaSnapshot schema_snapshot(sqlite3* database) {
+  SchemaSnapshot snapshot;
+  const auto text_at = [](sqlite3_stmt* statement, int index) {
+    const auto* value = sqlite3_column_text(statement, index);
+    return value ? std::string(reinterpret_cast<const char*>(value))
+                 : std::string{};
+  };
+  Statement query(database, R"sql(
+    SELECT type, name, sql FROM sqlite_master
+    WHERE name NOT LIKE 'sqlite_%' AND sql IS NOT NULL
+    ORDER BY type, name
+  )sql");
+  int status = SQLITE_ROW;
+  while ((status = sqlite3_step(query.get())) == SQLITE_ROW) {
+    const std::string type = text_at(query.get(), 0);
+    const std::string name = text_at(query.get(), 1);
+    const auto [position, inserted] = snapshot.emplace(
+        type + "\n" + name,
+        normalized_schema_sql(text_at(query.get(), 2)));
+    (void)position;
+    if (!inserted) {
+      throw std::runtime_error("journal schema contains a duplicate object identity");
+    }
+  }
+  if (status != SQLITE_DONE) {
+    throw std::runtime_error("could not inspect complete journal schema: " +
+                             std::string(sqlite3_errmsg(database)));
+  }
+  return snapshot;
+}
+
+SchemaSnapshot canonical_schema(std::string_view schema) {
+  sqlite3* database = nullptr;
+  if (sqlite3_open_v2(":memory:", &database,
+                      SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr) !=
+      SQLITE_OK) {
+    const std::string message =
+        database ? sqlite3_errmsg(database) : "unknown error";
+    if (database != nullptr) sqlite3_close(database);
+    throw std::runtime_error("could not create canonical schema database: " +
+                             message);
+  }
+  struct CloseDatabase final {
+    sqlite3* database;
+    ~CloseDatabase() { sqlite3_close(database); }
+  } close{database};
+  char* error_message = nullptr;
+  const std::string owned(schema);
+  if (sqlite3_exec(database, owned.c_str(), nullptr, nullptr, &error_message) !=
+      SQLITE_OK) {
+    const std::string message =
+        error_message ? error_message : sqlite3_errmsg(database);
+    sqlite3_free(error_message);
+    throw std::runtime_error("could not create canonical journal schema: " +
+                             message);
+  }
+  return schema_snapshot(database);
+}
+
+const SchemaSnapshot& canonical_schema_v4() {
+  static const SchemaSnapshot schema = canonical_schema(kSchemaV4);
+  return schema;
+}
+
+const SchemaSnapshot& canonical_schema_v5() {
+  static const SchemaSnapshot schema = canonical_schema(kSchema);
+  return schema;
+}
+
+void require_exact_schema(sqlite3* database, const SchemaSnapshot& expected,
+                          std::string_view version) {
+  if (schema_snapshot(database) != expected) {
+    throw std::runtime_error("journal schema " + std::string(version) +
+                             " does not exactly match its authoritative schema");
+  }
+}
 
 class Transaction {
  public:
@@ -502,10 +795,30 @@ Event event_from_row(sqlite3_stmt* statement) {
   return event;
 }
 
-std::int64_t lease_expiration(std::int64_t now_ns, std::int64_t timeout_ns) {
-  if (now_ns < 0) {
-    throw std::invalid_argument("lease clock must be nonnegative");
+bool canonical_boot_id(std::string_view value) {
+  if (value.size() != 36U || value[8U] != '-' || value[13U] != '-' ||
+      value[18U] != '-' || value[23U] != '-') {
+    return false;
   }
+  for (std::size_t index = 0; index < value.size(); ++index) {
+    if (index == 8U || index == 13U || index == 18U || index == 23U) continue;
+    const char character = value[index];
+    if (!((character >= '0' && character <= '9') ||
+          (character >= 'a' && character <= 'f'))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void require_authority_time(const AuthorityTimeSample& now) {
+  if (now.wall.nanoseconds < 0 || now.boot.nanoseconds < 0 ||
+      !canonical_boot_id(now.boot_id)) {
+    throw std::invalid_argument("lease authority time is malformed");
+  }
+}
+
+std::int64_t lease_expiration(std::int64_t now_ns, std::int64_t timeout_ns) {
   if (timeout_ns <= 0) {
     throw std::invalid_argument("lease timeout must be positive");
   }
@@ -528,8 +841,18 @@ ResourceLease lease_from_row(sqlite3_stmt* statement) {
       .owner_run_id = column_text(statement, 1),
       .lease_id = column_text(statement, 2),
       .fencing_token = static_cast<std::uint64_t>(sqlite3_column_int64(statement, 3)),
-      .acquired_at_ns = sqlite3_column_int64(statement, 4),
-      .expires_at_ns = sqlite3_column_int64(statement, 5),
+      .clock_domain = column_text(statement, 4),
+      .boot_id = sqlite3_column_type(statement, 5) == SQLITE_NULL
+                     ? std::string{}
+                     : column_text(statement, 5),
+      .acquired_boottime_ns = sqlite3_column_type(statement, 6) == SQLITE_NULL
+                            ? std::int64_t{}
+                            : sqlite3_column_int64(statement, 6),
+      .expires_boottime_ns = sqlite3_column_type(statement, 7) == SQLITE_NULL
+                           ? std::int64_t{}
+                           : sqlite3_column_int64(statement, 7),
+      .acquired_wall_time_ns = sqlite3_column_int64(statement, 8),
+      .expires_wall_time_ns = sqlite3_column_int64(statement, 9),
   };
 }
 
@@ -641,14 +964,57 @@ bool same_command_request(const ControlCommand& left, const ControlCommand& righ
          left.author == right.author && left.reason == right.reason;
 }
 
+int open_existing_directory_by_components(
+    const std::filesystem::path& absolute_path) {
+  if (!absolute_path.is_absolute()) {
+    throw std::runtime_error("authority namespace directory is not absolute");
+  }
+  int current = ::open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (current < 0) {
+    throw std::runtime_error("could not open filesystem root for authority validation");
+  }
+  for (const auto& part : absolute_path.relative_path()) {
+    const std::string component = part.string();
+    if (component.empty() || component == "." || component == ".." ||
+        component.find('/') != std::string::npos) {
+      (void)::close(current);
+      throw std::runtime_error("authority namespace has a noncanonical component");
+    }
+    const int next = ::openat(
+        current, component.c_str(),
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (next < 0) {
+      const std::string message = std::strerror(errno);
+      (void)::close(current);
+      throw std::runtime_error("could not securely re-resolve authority namespace: " +
+                               message);
+    }
+    (void)::close(current);
+    current = next;
+  }
+  return current;
+}
+
+bool safe_authority_file(const struct stat& status, std::uint64_t owner_uid) {
+  return S_ISREG(status.st_mode) &&
+         static_cast<std::uint64_t>(status.st_uid) == owner_uid &&
+         status.st_nlink == 1 &&
+         (status.st_mode & (S_IWGRP | S_IWOTH)) == 0;
+}
+
 }  // namespace
 
-Journal::Journal(const std::filesystem::path& path) {
+Journal::Journal(const std::filesystem::path& path,
+                 std::optional<JournalFileIdentity> expected_file)
+    : expected_file_(std::move(expected_file)) {
   const auto parent = path.parent_path();
-  if (!parent.empty()) {
+  if (!expected_file_ && !parent.empty()) {
     std::filesystem::create_directories(parent);
   }
-  if (sqlite3_open_v2(path.c_str(), &database_, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr) !=
+  const int open_flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE |
+                         (expected_file_ ? 0 : SQLITE_OPEN_NOFOLLOW);
+  if (sqlite3_open_v2(path.c_str(), &database_, open_flags,
+                      nullptr) !=
       SQLITE_OK) {
     const std::string message = database_ ? sqlite3_errmsg(database_) : "unknown error";
     if (database_) {
@@ -658,12 +1024,133 @@ Journal::Journal(const std::filesystem::path& path) {
     throw std::runtime_error("sqlite open failed: " + message);
   }
   try {
+    if (expected_file_) {
+      require_file_identity(*expected_file_);
+      if (sqlite3_set_authorizer(database_, &Journal::authorize_database_operation,
+                                 this) != SQLITE_OK) {
+        throw std::runtime_error("could not install journal authority boundary");
+      }
+      (void)sqlite3_commit_hook(database_, &Journal::authorize_commit, this);
+    }
     initialize();
   } catch (...) {
     sqlite3_close(database_);
     database_ = nullptr;
     throw;
   }
+}
+
+void Journal::require_file_identity(const JournalFileIdentity& expected) const {
+  require_namespace_identity(expected);
+  int moved = 0;
+  const int control = sqlite3_file_control(
+      database_, "main", SQLITE_FCNTL_HAS_MOVED, &moved);
+  const char* filename = sqlite3_db_filename(database_, "main");
+  struct stat status {};
+  if (control != SQLITE_OK || moved != 0 || filename == nullptr ||
+      ::stat(filename, &status) != 0 || !S_ISREG(status.st_mode) ||
+      static_cast<std::uint64_t>(status.st_dev) != expected.device ||
+      static_cast<std::uint64_t>(status.st_ino) != expected.inode) {
+    throw std::runtime_error(
+        "SQLite journal file does not match the authority-locked inode");
+  }
+}
+
+void Journal::require_namespace_identity(
+    const JournalFileIdentity& expected) const {
+  if (expected.directory_path.empty() || expected.journal_name.empty() ||
+      expected.authority_name.empty()) {
+    throw std::runtime_error("journal authority namespace identity is incomplete");
+  }
+  const int directory = open_existing_directory_by_components(
+      std::filesystem::path(expected.directory_path));
+  struct CloseDirectory final {
+    int descriptor;
+    ~CloseDirectory() { (void)::close(descriptor); }
+  } close{directory};
+
+  struct stat directory_status {};
+  if (::fstat(directory, &directory_status) != 0 ||
+      !S_ISDIR(directory_status.st_mode) ||
+      static_cast<std::uint64_t>(directory_status.st_dev) !=
+          expected.directory_device ||
+      static_cast<std::uint64_t>(directory_status.st_ino) !=
+          expected.directory_inode ||
+      static_cast<std::uint64_t>(directory_status.st_uid) != expected.owner_uid ||
+      (directory_status.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+    throw std::runtime_error("journal authority directory identity has moved");
+  }
+
+  const auto require_entry = [&](const std::string& name, std::uint64_t device,
+                                 std::uint64_t inode,
+                                 std::string_view description) {
+    struct stat status {};
+    if (::fstatat(directory, name.c_str(), &status, AT_SYMLINK_NOFOLLOW) != 0 ||
+        !safe_authority_file(status, expected.owner_uid) ||
+        static_cast<std::uint64_t>(status.st_dev) != device ||
+        static_cast<std::uint64_t>(status.st_ino) != inode) {
+      if (description == "database") {
+        throw std::runtime_error(
+            "SQLite journal file does not match the authority-locked inode");
+      }
+      throw std::runtime_error("journal " + std::string(description) +
+                               " identity has moved");
+    }
+  };
+  require_entry(expected.journal_name, expected.device, expected.inode,
+                "database");
+  require_entry(expected.authority_name, expected.authority_device,
+                expected.authority_inode, "authority sidecar");
+
+  // WAL and rollback auxiliaries are legitimately deleted and recreated by
+  // SQLite, so their inode cannot be latched across an observed absence. Every
+  // authoritative SQL boundary instead requires any present generation to be
+  // an unaliased, non-symlink, owner-controlled regular file.
+  for (const std::string_view suffix :
+       {std::string_view{"-journal"}, std::string_view{"-wal"},
+        std::string_view{"-shm"}}) {
+    const std::string name = expected.journal_name + std::string(suffix);
+    struct stat status {};
+    if (::fstatat(directory, name.c_str(), &status, AT_SYMLINK_NOFOLLOW) != 0) {
+      if (errno == ENOENT) continue;
+      throw std::runtime_error("could not inspect SQLite authority auxiliary");
+    }
+    if (!safe_authority_file(status, expected.owner_uid)) {
+      throw std::runtime_error("SQLite authority auxiliary is unsafe: " + name);
+    }
+  }
+}
+
+bool Journal::validate_authority_boundary() const noexcept {
+  if (!expected_file_) return true;
+  if (authority_poisoned_.load(std::memory_order_acquire)) return false;
+  try {
+    require_namespace_identity(*expected_file_);
+    return true;
+  } catch (...) {
+    authority_poisoned_.store(true, std::memory_order_release);
+    return false;
+  }
+}
+
+int Journal::authorize_database_operation(void* context, int action,
+                                          const char*, const char*,
+                                          const char*, const char*) noexcept {
+  // SQLITE_READ and SQLITE_FUNCTION are subordinate callbacks of a statement
+  // whose top-level SELECT/INSERT/UPDATE/etc. callback was already checked.
+  if (action == SQLITE_READ || action == SQLITE_FUNCTION ||
+      action == SQLITE_RECURSIVE) {
+    return SQLITE_OK;
+  }
+  const auto* journal = static_cast<const Journal*>(context);
+  return journal != nullptr && journal->validate_authority_boundary()
+             ? SQLITE_OK
+             : SQLITE_DENY;
+}
+
+int Journal::authorize_commit(void* context) noexcept {
+  const auto* journal = static_cast<const Journal*>(context);
+  return journal != nullptr && journal->validate_authority_boundary() ? 0 : 1;
 }
 
 Journal::~Journal() {
@@ -700,6 +1187,17 @@ Journal::ReadSnapshot Journal::read_snapshot() const {
 
 void Journal::initialize() {
   char* error_message = nullptr;
+  const auto execute_sql = [&](std::string_view sql, std::string_view action) {
+    const std::string owned(sql);
+    char* message = nullptr;
+    if (sqlite3_exec(database_, owned.c_str(), nullptr, nullptr, &message) !=
+        SQLITE_OK) {
+      const std::string detail = message ? message : sqlite3_errmsg(database_);
+      sqlite3_free(message);
+      throw std::runtime_error(std::string(action) + ": " + detail);
+    }
+  };
+  execute_sql(kConnectionPragmas, "could not configure journal connection");
   bool has_metadata = false;
   {
     Statement metadata(database_, R"sql(
@@ -715,106 +1213,431 @@ void Journal::initialize() {
     }
     stored_version = column_text(version.get(), 0);
     if (stored_version != "1" && stored_version != "2" && stored_version != "3" &&
-        stored_version != "4") {
+        stored_version != "4" && stored_version != "5") {
       throw std::runtime_error("unsupported journal schema version");
     }
-    if (stored_version == "4") {
-      Statement identity(database_, "SELECT value FROM journal_meta WHERE key='journal_id'");
-      if (sqlite3_step(identity.get()) != SQLITE_ROW ||
-          !valid_journal_id(column_text(identity.get(), 0))) {
-        throw std::runtime_error("established v4 journal identity is missing or malformed");
-      }
-    }
-  }
-  if (stored_version == "1" || stored_version == "2" || stored_version == "3") {
-    // These versions predate the complete authority and acknowledgement invariants.
-    // Rewriting a journal that already contains history would silently bless data
-    // that cannot satisfy the v4 trust model. Empty legacy databases may be upgraded,
-    // but nonempty ones must be preserved and explicitly exported by a future,
-    // version-aware migration tool.
-    const auto table_has_rows = [&](std::string_view table) {
-      Statement exists(database_, R"sql(
-        SELECT EXISTS(
-          SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1
-        )
-      )sql");
-      bind_text(exists.get(), 1, std::string(table));
-      if (sqlite3_step(exists.get()) != SQLITE_ROW) {
-        throw std::runtime_error("could not inspect legacy journal tables");
-      }
-      if (sqlite3_column_int(exists.get(), 0) == 0) {
-        return false;
-      }
-      Statement rows(database_, "SELECT EXISTS(SELECT 1 FROM \"" + std::string(table) +
-                                    "\" LIMIT 1)");
-      if (sqlite3_step(rows.get()) != SQLITE_ROW) {
-        throw std::runtime_error("could not inspect legacy journal contents");
-      }
-      return sqlite3_column_int(rows.get(), 0) != 0;
-    };
-    bool has_durable_state = false;
-    for (const std::string_view table :
-         std::array<std::string_view, 6>{"events", "run_projection", "compiled_plans",
-                                         "resource_leases", "node_dispatches",
-                                         "control_commands"}) {
-      has_durable_state = has_durable_state || table_has_rows(table);
-    }
-    if (has_durable_state) {
-      throw std::runtime_error(
-          "refusing to migrate a nonempty pre-v4 journal; preserve it read-only and create a "
-          "new v4 authority journal");
-    }
-  }
-  const std::string schema(kSchema);
-  error_message = nullptr;
-  if (sqlite3_exec(database_, schema.c_str(), nullptr, nullptr, &error_message) != SQLITE_OK) {
-    const std::string message = error_message ? error_message : sqlite3_errmsg(database_);
-    sqlite3_free(error_message);
-    throw std::runtime_error("journal initialization failed: " + message);
   }
   if (!has_metadata) {
-    stored_version = "4";
-  }
-  if (stored_version == "1" || stored_version == "2" || stored_version == "3") {
     Transaction transaction(database_);
-    const auto column_exists = [&](std::string_view wanted) {
-      Statement columns(database_, "PRAGMA table_info(control_commands)");
-      while (sqlite3_step(columns.get()) == SQLITE_ROW) {
-        if (column_text(columns.get(), 1) == wanted) {
-          return true;
-        }
-      }
-      return false;
-    };
-    for (const auto& [name, declaration] :
-         std::vector<std::pair<std::string_view, std::string_view>>{
-             {"ack_concurrency_key", "TEXT"}, {"ack_lease_id", "TEXT"},
-             {"ack_fencing_token", "INTEGER"}, {"ack_node_id", "TEXT"},
-             {"ack_attempt_id", "TEXT"}, {"ack_worker_sequence", "INTEGER"},
-             {"acknowledged_at_ns", "INTEGER"}}) {
-      if (!column_exists(name)) {
-        const std::string sql = "ALTER TABLE control_commands ADD COLUMN " +
-                                std::string(name) + " " + std::string(declaration);
-        if (sqlite3_exec(database_, sql.c_str(), nullptr, nullptr, nullptr) != SQLITE_OK) {
-          throw std::runtime_error("journal schema migration to version 4 failed: " +
-                                   std::string(sqlite3_errmsg(database_)));
-        }
-      }
+    if (!schema_snapshot(database_).empty()) {
+      throw std::runtime_error(
+          "refusing to initialize an unversioned nonempty journal database");
     }
-    Statement migrate(database_, "UPDATE journal_meta SET value='4' WHERE key='schema_version'");
-    require_done(database_, migrate.get(), "migrate journal schema to version 4");
-    transaction.commit();
-  }
-  if (!has_metadata || stored_version != "4") {
-    Transaction transaction(database_);
+    const auto pragma_integer = [&](std::string_view pragma) {
+      Statement query(database_, std::string(pragma));
+      if (sqlite3_step(query.get()) != SQLITE_ROW ||
+          sqlite3_column_type(query.get(), 0) != SQLITE_INTEGER) {
+        throw std::runtime_error("could not inspect unversioned SQLite database headers");
+      }
+      return sqlite3_column_int64(query.get(), 0);
+    };
+    if (pragma_integer("PRAGMA application_id") != 0 ||
+        pragma_integer("PRAGMA user_version") != 0) {
+      throw std::runtime_error(
+          "refusing to initialize a SQLite database claimed by another application");
+    }
+    execute_sql(kSchema, "could not create journal schema v5");
+    require_exact_schema(database_, canonical_schema_v5(), "v5");
     Statement insert(database_, R"sql(
       INSERT INTO journal_meta(key, value) VALUES('journal_id', ?)
-      ON CONFLICT(key) DO UPDATE SET value=excluded.value
     )sql");
     bind_text(insert.get(), 1, random_journal_id());
     require_done(database_, insert.get(), "initialize journal identity");
     transaction.commit();
+    execute_sql(kWalPragma, "could not enable WAL for a new journal database");
+    return;
   }
+  const auto table_exists = [&](std::string_view table) {
+    Statement exists(database_, R"sql(
+      SELECT EXISTS(
+        SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1
+      )
+    )sql");
+    bind_text(exists.get(), 1, std::string(table));
+    if (sqlite3_step(exists.get()) != SQLITE_ROW) {
+      throw std::runtime_error("could not inspect journal tables");
+    }
+    return sqlite3_column_int(exists.get(), 0) != 0;
+  };
+  const auto table_columns = [&](std::string_view table) {
+    std::vector<std::string> columns;
+    Statement query(database_, "PRAGMA table_info(\"" + std::string(table) + "\")");
+    while (sqlite3_step(query.get()) == SQLITE_ROW) {
+      columns.push_back(column_text(query.get(), 1));
+    }
+    return columns;
+  };
+  const auto table_definition = [&](std::string_view table) {
+    std::vector<std::string> definition;
+    Statement query(database_, "PRAGMA table_info(\"" + std::string(table) + "\")");
+    while (sqlite3_step(query.get()) == SQLITE_ROW) {
+      definition.push_back(column_text(query.get(), 1) + "|" +
+                           column_text(query.get(), 2) + "|" +
+                           std::to_string(sqlite3_column_int(query.get(), 3)) + "|" +
+                           std::to_string(sqlite3_column_int(query.get(), 5)));
+    }
+    return definition;
+  };
+  const auto require_columns = [&](std::string_view table,
+                                   const std::vector<std::string>& expected,
+                                   std::string_view version) {
+    if (!table_exists(table) || table_columns(table) != expected) {
+      throw std::runtime_error("journal schema " + std::string(version) +
+                               " has a malformed " + std::string(table) +
+                               " table");
+    }
+  };
+  const auto require_definition = [&](std::string_view table,
+                                      const std::vector<std::string>& expected,
+                                      std::string_view version) {
+    if (table_definition(table) != expected) {
+      throw std::runtime_error("journal schema " + std::string(version) +
+                               " has a malformed " + std::string(table) +
+                               " definition");
+    }
+  };
+  const auto require_schema_fragments = [&](
+      std::string_view table, const std::vector<std::string_view>& fragments,
+      std::string_view version) {
+    Statement query(database_,
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name=?");
+    bind_text(query.get(), 1, std::string(table));
+    if (sqlite3_step(query.get()) != SQLITE_ROW) {
+      throw std::runtime_error("journal schema " + std::string(version) +
+                               " is missing " + std::string(table));
+    }
+    const std::string sql = column_text(query.get(), 0);
+    if (std::ranges::any_of(fragments, [&](std::string_view fragment) {
+          return sql.find(fragment) == std::string::npos;
+        })) {
+      throw std::runtime_error("journal schema " + std::string(version) +
+                               " has malformed constraints for " +
+                               std::string(table));
+    }
+  };
+  const auto require_authority_metadata = [&](std::string_view version) {
+    std::map<std::string, std::string> metadata;
+    Statement query(database_, "SELECT key, value FROM journal_meta ORDER BY key");
+    int status = SQLITE_ROW;
+    while ((status = sqlite3_step(query.get())) == SQLITE_ROW) {
+      metadata.emplace(column_text(query.get(), 0), column_text(query.get(), 1));
+    }
+    if (status != SQLITE_DONE) {
+      throw std::runtime_error("journal authority metadata is unreadable");
+    }
+    const auto chain = metadata.find("chain_head");
+    const auto identity = metadata.find("journal_id");
+    const auto schema_version = metadata.find("schema_version");
+    const auto valid_hash = [](std::string_view value) {
+      return value.size() == 64U &&
+             std::ranges::all_of(value, [](char character) {
+               return (character >= '0' && character <= '9') ||
+                      (character >= 'a' && character <= 'f');
+             });
+    };
+    if (metadata.size() != 3U || chain == metadata.end() ||
+        identity == metadata.end() || schema_version == metadata.end() ||
+        schema_version->second != version || !valid_hash(chain->second) ||
+        !valid_journal_id(identity->second)) {
+      throw std::runtime_error(
+          "established journal authority metadata is missing, malformed, or unexpected");
+    }
+  };
+  if (stored_version == "1" || stored_version == "2" || stored_version == "3") {
+    // These schemas predate the complete authority and acknowledgement
+    // invariants. Even an apparently empty journal may carry an old table
+    // definition that CREATE TABLE IF NOT EXISTS cannot safely replace. Never
+    // stamp it as a newer authority schema; preserve it read-only and create a
+    // fresh journal or use a future exact-version export tool.
+    throw std::runtime_error(
+        "refusing to migrate a pre-v4 journal; preserve it read-only and create a new v5 authority journal");
+  }
+  std::unique_ptr<Transaction> migration_transaction;
+  if (stored_version == "4") {
+    migration_transaction = std::make_unique<Transaction>(database_);
+    require_exact_schema(database_, canonical_schema_v4(), "v4");
+    require_authority_metadata("4");
+    std::string chain_reason;
+    if (!verify_chain(&chain_reason)) {
+      throw std::runtime_error(
+          "refusing to migrate journal schema v4 with an invalid event chain: " +
+          chain_reason);
+    }
+    for (const std::string_view table :
+         std::array<std::string_view, 8>{
+             "journal_meta", "events", "run_projection", "compiled_plans",
+             "resource_leases", "resource_lease_releases", "node_dispatches",
+             "control_commands"}) {
+      if (!table_exists(table)) {
+        throw std::runtime_error("journal schema v4 is partial: missing " +
+                                 std::string(table));
+      }
+    }
+    require_columns(
+        "resource_leases",
+        {"concurrency_key", "owner_run_id", "lease_id", "fencing_token",
+         "acquired_at_ns", "expires_at_ns", "released_at_ns"},
+        "v4");
+    require_columns(
+        "resource_lease_releases",
+        {"concurrency_key", "owner_run_id", "lease_id", "fencing_token",
+         "released_at_ns"},
+        "v4");
+    require_definition(
+        "resource_leases",
+        {"concurrency_key|TEXT|1|1", "owner_run_id|TEXT|1|0",
+         "lease_id|TEXT|1|0", "fencing_token|INTEGER|1|0",
+         "acquired_at_ns|INTEGER|1|0", "expires_at_ns|INTEGER|1|0",
+         "released_at_ns|INTEGER|0|0"},
+        "v4");
+    require_definition(
+        "resource_lease_releases",
+        {"concurrency_key|TEXT|1|1", "owner_run_id|TEXT|1|0",
+         "lease_id|TEXT|1|2", "fencing_token|INTEGER|1|3",
+         "released_at_ns|INTEGER|1|0"},
+        "v4");
+    Statement legacy_leases(database_, R"sql(
+      SELECT concurrency_key, owner_run_id, lease_id, fencing_token,
+             acquired_at_ns, expires_at_ns, released_at_ns
+      FROM resource_leases
+    )sql");
+    int legacy_lease_status = SQLITE_ROW;
+    while ((legacy_lease_status = sqlite3_step(legacy_leases.get())) == SQLITE_ROW) {
+      const bool valid_release =
+          sqlite3_column_type(legacy_leases.get(), 6) == SQLITE_NULL ||
+          (sqlite3_column_type(legacy_leases.get(), 6) == SQLITE_INTEGER &&
+           sqlite3_column_int64(legacy_leases.get(), 6) >= 0);
+      if (column_text(legacy_leases.get(), 0).empty() ||
+          column_text(legacy_leases.get(), 1).empty() ||
+          column_text(legacy_leases.get(), 2).empty() ||
+          sqlite3_column_type(legacy_leases.get(), 3) != SQLITE_INTEGER ||
+          sqlite3_column_int64(legacy_leases.get(), 3) <= 0 ||
+          sqlite3_column_type(legacy_leases.get(), 4) != SQLITE_INTEGER ||
+          sqlite3_column_int64(legacy_leases.get(), 4) < 0 ||
+          sqlite3_column_type(legacy_leases.get(), 5) != SQLITE_INTEGER ||
+          sqlite3_column_int64(legacy_leases.get(), 5) < 0 || !valid_release) {
+        throw std::runtime_error("journal schema v4 has malformed lease history");
+      }
+    }
+    if (legacy_lease_status != SQLITE_DONE) {
+      throw std::runtime_error("journal schema v4 lease history is unreadable");
+    }
+    Statement legacy_releases(database_, R"sql(
+      SELECT concurrency_key, owner_run_id, lease_id, fencing_token,
+             released_at_ns
+      FROM resource_lease_releases
+    )sql");
+    int legacy_release_status = SQLITE_ROW;
+    while ((legacy_release_status = sqlite3_step(legacy_releases.get())) == SQLITE_ROW) {
+      if (column_text(legacy_releases.get(), 0).empty() ||
+          column_text(legacy_releases.get(), 1).empty() ||
+          column_text(legacy_releases.get(), 2).empty() ||
+          sqlite3_column_type(legacy_releases.get(), 3) != SQLITE_INTEGER ||
+          sqlite3_column_int64(legacy_releases.get(), 3) <= 0 ||
+          sqlite3_column_type(legacy_releases.get(), 4) != SQLITE_INTEGER ||
+          sqlite3_column_int64(legacy_releases.get(), 4) < 0) {
+        throw std::runtime_error("journal schema v4 has malformed release history");
+      }
+    }
+    if (legacy_release_status != SQLITE_DONE) {
+      throw std::runtime_error("journal schema v4 release history is unreadable");
+    }
+    constexpr std::string_view migration = R"sql(
+      ALTER TABLE resource_leases RENAME TO resource_leases_v4;
+      CREATE TABLE resource_leases (
+        concurrency_key TEXT PRIMARY KEY,
+        owner_run_id TEXT NOT NULL,
+        lease_id TEXT NOT NULL,
+        fencing_token INTEGER NOT NULL,
+        clock_domain TEXT NOT NULL CHECK(clock_domain IN ('boottime/v1','legacy-wall/v1')),
+        boot_id TEXT,
+        acquired_boottime_ns INTEGER,
+        expires_boottime_ns INTEGER,
+        acquired_wall_time_ns INTEGER NOT NULL,
+        expires_wall_time_ns INTEGER NOT NULL,
+        released_wall_time_ns INTEGER,
+        CHECK(
+          (clock_domain='boottime/v1' AND boot_id IS NOT NULL AND
+           acquired_boottime_ns IS NOT NULL AND expires_boottime_ns IS NOT NULL) OR
+          (clock_domain='legacy-wall/v1' AND boot_id IS NULL AND
+           acquired_boottime_ns IS NULL AND expires_boottime_ns IS NULL)
+        )
+      ) WITHOUT ROWID;
+      INSERT INTO resource_leases(
+        concurrency_key, owner_run_id, lease_id, fencing_token, clock_domain,
+        boot_id, acquired_boottime_ns, expires_boottime_ns,
+        acquired_wall_time_ns, expires_wall_time_ns, released_wall_time_ns
+      )
+      SELECT concurrency_key, owner_run_id, lease_id, fencing_token,
+             'legacy-wall/v1', NULL, NULL, NULL,
+             acquired_at_ns, expires_at_ns, released_at_ns
+      FROM resource_leases_v4;
+      DROP TABLE resource_leases_v4;
+
+      ALTER TABLE resource_lease_releases RENAME TO resource_lease_releases_v4;
+      CREATE TABLE resource_lease_releases (
+        concurrency_key TEXT NOT NULL,
+        owner_run_id TEXT NOT NULL,
+        lease_id TEXT NOT NULL,
+        fencing_token INTEGER NOT NULL,
+        clock_domain TEXT NOT NULL CHECK(clock_domain IN ('boottime/v1','legacy-wall/v1')),
+        boot_id TEXT,
+        released_wall_time_ns INTEGER NOT NULL,
+        CHECK(
+          (clock_domain='boottime/v1' AND boot_id IS NOT NULL) OR
+          (clock_domain='legacy-wall/v1' AND boot_id IS NULL)
+        ),
+        PRIMARY KEY(concurrency_key, lease_id, fencing_token)
+      ) WITHOUT ROWID;
+      INSERT INTO resource_lease_releases(
+        concurrency_key, owner_run_id, lease_id, fencing_token, clock_domain,
+        boot_id, released_wall_time_ns
+      )
+      SELECT concurrency_key, owner_run_id, lease_id, fencing_token,
+             'legacy-wall/v1', NULL, released_at_ns
+      FROM resource_lease_releases_v4;
+      DROP TABLE resource_lease_releases_v4;
+      UPDATE journal_meta SET value='5' WHERE key='schema_version';
+    )sql";
+    if (sqlite3_exec(database_, std::string(migration).c_str(), nullptr, nullptr,
+                     &error_message) != SQLITE_OK) {
+      const std::string message =
+          error_message ? error_message : sqlite3_errmsg(database_);
+      sqlite3_free(error_message);
+      throw std::runtime_error("journal schema migration to version 5 failed: " +
+                               message);
+    }
+    stored_version = "5";
+  }
+  if (stored_version == "5") {
+    for (const std::string_view table :
+         std::array<std::string_view, 8>{
+             "journal_meta", "events", "run_projection", "compiled_plans",
+             "resource_leases", "resource_lease_releases", "node_dispatches",
+             "control_commands"}) {
+      if (!table_exists(table)) {
+        throw std::runtime_error("journal schema v5 is partial: missing " +
+                                 std::string(table));
+      }
+    }
+    require_exact_schema(database_, canonical_schema_v5(), "v5");
+    require_authority_metadata("5");
+    require_columns(
+        "resource_leases",
+        {"concurrency_key", "owner_run_id", "lease_id", "fencing_token",
+         "clock_domain", "boot_id", "acquired_boottime_ns",
+         "expires_boottime_ns", "acquired_wall_time_ns",
+         "expires_wall_time_ns", "released_wall_time_ns"},
+        "v5");
+    require_columns(
+        "resource_lease_releases",
+        {"concurrency_key", "owner_run_id", "lease_id", "fencing_token",
+         "clock_domain", "boot_id", "released_wall_time_ns"},
+        "v5");
+    require_definition(
+        "resource_leases",
+        {"concurrency_key|TEXT|1|1", "owner_run_id|TEXT|1|0",
+         "lease_id|TEXT|1|0", "fencing_token|INTEGER|1|0",
+         "clock_domain|TEXT|1|0", "boot_id|TEXT|0|0",
+         "acquired_boottime_ns|INTEGER|0|0",
+         "expires_boottime_ns|INTEGER|0|0",
+         "acquired_wall_time_ns|INTEGER|1|0",
+         "expires_wall_time_ns|INTEGER|1|0",
+         "released_wall_time_ns|INTEGER|0|0"},
+        "v5");
+    require_definition(
+        "resource_lease_releases",
+        {"concurrency_key|TEXT|1|1", "owner_run_id|TEXT|1|0",
+         "lease_id|TEXT|1|2", "fencing_token|INTEGER|1|3",
+         "clock_domain|TEXT|1|0", "boot_id|TEXT|0|0",
+         "released_wall_time_ns|INTEGER|1|0"},
+        "v5");
+    require_schema_fragments(
+        "resource_leases",
+        {"CHECK(clock_domain IN ('boottime/v1','legacy-wall/v1'))",
+         "(clock_domain='boottime/v1' AND boot_id IS NOT NULL AND",
+         "(clock_domain='legacy-wall/v1' AND boot_id IS NULL AND",
+         "WITHOUT ROWID"},
+        "v5");
+    require_schema_fragments(
+        "resource_lease_releases",
+        {"CHECK(clock_domain IN ('boottime/v1','legacy-wall/v1'))",
+         "(clock_domain='boottime/v1' AND boot_id IS NOT NULL)",
+         "(clock_domain='legacy-wall/v1' AND boot_id IS NULL)",
+         "WITHOUT ROWID"},
+        "v5");
+
+    Statement leases(database_, R"sql(
+      SELECT concurrency_key, owner_run_id, lease_id, fencing_token,
+             clock_domain, boot_id, acquired_boottime_ns,
+             expires_boottime_ns, acquired_wall_time_ns,
+             expires_wall_time_ns, released_wall_time_ns
+      FROM resource_leases
+    )sql");
+    int lease_status = SQLITE_ROW;
+    while ((lease_status = sqlite3_step(leases.get())) == SQLITE_ROW) {
+      const std::string domain = column_text(leases.get(), 4);
+      const bool boot_scoped = domain == ResourceLease::kBootTimeDomain;
+      const bool legacy = domain == ResourceLease::kLegacyWallDomain;
+      const bool has_boot_id = sqlite3_column_type(leases.get(), 5) != SQLITE_NULL;
+      const bool has_acquired_boot = sqlite3_column_type(leases.get(), 6) != SQLITE_NULL;
+      const bool has_expires_boot = sqlite3_column_type(leases.get(), 7) != SQLITE_NULL;
+      const bool valid_boot_scope =
+          boot_scoped && has_boot_id && has_acquired_boot && has_expires_boot &&
+          canonical_boot_id(column_text(leases.get(), 5)) &&
+          sqlite3_column_int64(leases.get(), 6) >= 0 &&
+          sqlite3_column_int64(leases.get(), 7) > sqlite3_column_int64(leases.get(), 6);
+      const bool valid_legacy_scope =
+          legacy && !has_boot_id && !has_acquired_boot && !has_expires_boot;
+      const bool valid_release =
+          sqlite3_column_type(leases.get(), 10) == SQLITE_NULL ||
+          sqlite3_column_int64(leases.get(), 10) >= 0;
+      if (column_text(leases.get(), 0).empty() ||
+          column_text(leases.get(), 1).empty() ||
+          column_text(leases.get(), 2).empty() ||
+          sqlite3_column_int64(leases.get(), 3) <= 0 ||
+          sqlite3_column_type(leases.get(), 8) != SQLITE_INTEGER ||
+          sqlite3_column_type(leases.get(), 9) != SQLITE_INTEGER ||
+          sqlite3_column_int64(leases.get(), 8) < 0 ||
+          sqlite3_column_int64(leases.get(), 9) < 0 ||
+          (!valid_boot_scope && !valid_legacy_scope) || !valid_release) {
+        throw std::runtime_error("journal schema v5 has malformed lease authority data");
+      }
+    }
+    if (lease_status != SQLITE_DONE) {
+      throw std::runtime_error("journal schema v5 lease authority data is unreadable");
+    }
+
+    Statement releases(database_, R"sql(
+      SELECT concurrency_key, owner_run_id, lease_id, fencing_token,
+             clock_domain, boot_id, released_wall_time_ns
+      FROM resource_lease_releases
+    )sql");
+    int release_status = SQLITE_ROW;
+    while ((release_status = sqlite3_step(releases.get())) == SQLITE_ROW) {
+      const std::string domain = column_text(releases.get(), 4);
+      const bool has_boot_id = sqlite3_column_type(releases.get(), 5) != SQLITE_NULL;
+      const bool valid_scope =
+          (domain == ResourceLease::kBootTimeDomain && has_boot_id &&
+           canonical_boot_id(column_text(releases.get(), 5))) ||
+          (domain == ResourceLease::kLegacyWallDomain && !has_boot_id);
+      if (column_text(releases.get(), 0).empty() ||
+          column_text(releases.get(), 1).empty() ||
+          column_text(releases.get(), 2).empty() ||
+          sqlite3_column_int64(releases.get(), 3) <= 0 || !valid_scope ||
+          sqlite3_column_type(releases.get(), 6) != SQLITE_INTEGER ||
+          sqlite3_column_int64(releases.get(), 6) < 0) {
+        throw std::runtime_error("journal schema v5 has malformed lease release data");
+      }
+    }
+    if (release_status != SQLITE_DONE) {
+      throw std::runtime_error("journal schema v5 lease release data is unreadable");
+    }
+  }
+  if (migration_transaction) {
+    migration_transaction->commit();
+  }
+  execute_sql(kWalPragma, "could not enable WAL for journal schema v5");
 }
 
 std::uint64_t Journal::append(const Event& event) {
@@ -1187,14 +2010,14 @@ Dispatch Journal::prepare_dispatch(const Dispatch& dispatch, const Event& prepar
 Dispatch Journal::prepare_fenced_dispatch(const Dispatch& dispatch,
                                           const Event& prepared_event,
                                           const WorkerLaunchTicket& launch,
-                                          std::int64_t now_ns) {
-  return prepare_dispatch_impl(dispatch, prepared_event, launch, now_ns);
+                                          const AuthorityTimeSample& now) {
+  return prepare_dispatch_impl(dispatch, prepared_event, launch, now);
 }
 
 Dispatch Journal::prepare_dispatch_impl(
     const Dispatch& dispatch, const Event& prepared_event,
     const std::optional<WorkerLaunchTicket>& launch,
-    std::optional<std::int64_t> now_ns) {
+    std::optional<AuthorityTimeSample> now) {
   if (dispatch.dispatch_id.empty() || dispatch.run_id.empty() || dispatch.node_id.empty() ||
       dispatch.attempt_id.empty() || dispatch.component.empty() || dispatch.operation.empty()) {
     throw std::invalid_argument("dispatch identity and operation fields must not be empty");
@@ -1214,16 +2037,20 @@ Dispatch Journal::prepare_dispatch_impl(
       prepared_dispatch_id->get<std::string>() != dispatch.dispatch_id) {
     throw std::invalid_argument("dispatch preparation event has the wrong dispatch_id payload");
   }
+  if (now) {
+    require_authority_time(*now);
+  }
 
   Transaction transaction(database_);
   if (launch) {
-    if (!now_ns || *now_ns < 0 || launch->run_id != dispatch.run_id ||
+    if (!now || launch->run_id != dispatch.run_id ||
         launch->node_id != dispatch.node_id ||
         launch->attempt_id != dispatch.attempt_id || launch->fencing_token == 0) {
       throw std::invalid_argument("fenced dispatch has an invalid launch identity");
     }
     Statement lease(database_, R"sql(
-      SELECT owner_run_id, lease_id, fencing_token, expires_at_ns, released_at_ns
+      SELECT owner_run_id, lease_id, fencing_token, clock_domain, boot_id,
+             expires_boottime_ns, released_wall_time_ns
       FROM resource_leases WHERE concurrency_key=?
         AND NOT EXISTS(
           SELECT 1 FROM resource_lease_releases AS release
@@ -1239,8 +2066,10 @@ Dispatch Journal::prepare_dispatch_impl(
         column_text(lease.get(), 1) != launch->lease_id ||
         static_cast<std::uint64_t>(sqlite3_column_int64(lease.get(), 2)) !=
             launch->fencing_token ||
-        sqlite3_column_int64(lease.get(), 3) <= *now_ns ||
-        sqlite3_column_type(lease.get(), 4) != SQLITE_NULL) {
+        column_text(lease.get(), 3) != ResourceLease::kBootTimeDomain ||
+        column_text(lease.get(), 4) != now->boot_id ||
+        sqlite3_column_int64(lease.get(), 5) <= now->boot.nanoseconds ||
+        sqlite3_column_type(lease.get(), 6) != SQLITE_NULL) {
       throw OperationPreconditionError(
           "dispatch no longer owns its active worker lease");
     }
@@ -1346,15 +2175,15 @@ void Journal::complete_dispatch(const std::string& dispatch_id, const std::strin
 void Journal::complete_fenced_dispatch(
     const std::string& dispatch_id, const std::string& result_event_id,
     const std::vector<Event>& events, const WorkerSessionIdentity& identity,
-    std::int64_t now_ns) {
-  complete_dispatch_impl(dispatch_id, result_event_id, events, identity, now_ns);
+    const AuthorityTimeSample& now) {
+  complete_dispatch_impl(dispatch_id, result_event_id, events, identity, now);
 }
 
 void Journal::complete_dispatch_impl(
     const std::string& dispatch_id, const std::string& result_event_id,
     const std::vector<Event>& events,
     const std::optional<WorkerSessionIdentity>& identity,
-    std::optional<std::int64_t> now_ns) {
+    std::optional<AuthorityTimeSample> now) {
   if (dispatch_id.empty() || result_event_id.empty() || events.empty()) {
     throw std::invalid_argument("dispatch completion requires IDs and journal events");
   }
@@ -1362,6 +2191,9 @@ void Journal::complete_dispatch_impl(
         return event.event_id == result_event_id;
       })) {
     throw std::invalid_argument("dispatch completion batch does not contain its result event");
+  }
+  if (now) {
+    require_authority_time(*now);
   }
   Transaction transaction(database_);
   Statement query(database_, R"sql(
@@ -1403,13 +2235,14 @@ void Journal::complete_dispatch_impl(
         "dispatch completion is stale for the active run projection");
   }
   if (identity) {
-    if (!now_ns || *now_ns < 0 || identity->run_id != stored.run_id ||
+    if (!now || identity->run_id != stored.run_id ||
         identity->node_id != stored.node_id ||
         identity->attempt_id != stored.attempt_id || identity->fencing_token == 0) {
       throw std::invalid_argument("dispatch completion has an invalid worker session");
     }
     Statement lease(database_, R"sql(
-      SELECT owner_run_id, lease_id, fencing_token, expires_at_ns, released_at_ns
+      SELECT owner_run_id, lease_id, fencing_token, clock_domain, boot_id,
+             expires_boottime_ns, released_wall_time_ns
       FROM resource_leases WHERE concurrency_key=?
         AND NOT EXISTS(
           SELECT 1 FROM resource_lease_releases AS release
@@ -1425,8 +2258,10 @@ void Journal::complete_dispatch_impl(
         column_text(lease.get(), 1) != identity->lease_id ||
         static_cast<std::uint64_t>(sqlite3_column_int64(lease.get(), 2)) !=
             identity->fencing_token ||
-        sqlite3_column_int64(lease.get(), 3) <= *now_ns ||
-        sqlite3_column_type(lease.get(), 4) != SQLITE_NULL) {
+        column_text(lease.get(), 3) != ResourceLease::kBootTimeDomain ||
+        column_text(lease.get(), 4) != now->boot_id ||
+        sqlite3_column_int64(lease.get(), 5) <= now->boot.nanoseconds ||
+        sqlite3_column_type(lease.get(), 6) != SQLITE_NULL) {
       throw OperationPreconditionError(
           "dispatch completion lost its active lease fence");
     }
@@ -1471,11 +2306,12 @@ void Journal::complete_dispatch_impl(
 
 void Journal::complete_managed_builtin_dispatch(
     const Dispatch& dispatch, const ResourceLease& lease,
-    std::int64_t now_ns, bool release_lease,
+    const AuthorityTimeSample& now, bool release_lease,
     const std::vector<Event>& events) {
   require_lease_identity(lease.concurrency_key, lease.owner_run_id,
                          lease.lease_id);
-  if (now_ns < 0 || lease.fencing_token == 0 || events.size() != 4U ||
+  require_authority_time(now);
+  if (lease.fencing_token == 0 || events.size() != 4U ||
       dispatch.status != DispatchStatus::prepared || dispatch.result_event_id) {
     throw std::invalid_argument(
         "managed builtin completion requires a prepared dispatch, lease, and four events");
@@ -1503,7 +2339,7 @@ void Journal::complete_managed_builtin_dispatch(
       (validation && result.event_type != "artifact.validated" &&
        result.event_type != "artifact.invalid") ||
       (releasing && result.event_type != "resource.released") ||
-      result.wall_time_ns != now_ns || result.monotonic_time_ns != 0 ||
+      result.wall_time_ns != now.wall.nanoseconds || result.monotonic_time_ns != 0 ||
       result.payload != expected_result_payload ||
       transition.event_id != result.event_id + ":transition" ||
       transition.event_type != "fsm.transitioned" ||
@@ -1560,7 +2396,8 @@ void Journal::complete_managed_builtin_dispatch(
     if (release_lease &&
         !has_lease_release_receipt(
             lease.concurrency_key, lease.owner_run_id, lease.lease_id,
-            lease.fencing_token, result.wall_time_ns)) {
+            lease.fencing_token, lease.clock_domain, lease.boot_id,
+            result.wall_time_ns)) {
       throw std::runtime_error(
           "managed builtin release retry has no durable lease receipt");
     }
@@ -1582,8 +2419,8 @@ void Journal::complete_managed_builtin_dispatch(
         "managed builtin completion is stale for the active projection");
   }
   Statement current_lease(database_, R"sql(
-    SELECT owner_run_id, lease_id, fencing_token, acquired_at_ns, expires_at_ns,
-           released_at_ns
+    SELECT owner_run_id, lease_id, fencing_token, clock_domain, boot_id,
+           acquired_boottime_ns, expires_boottime_ns, released_wall_time_ns
     FROM resource_leases WHERE concurrency_key=?
       AND NOT EXISTS(
         SELECT 1 FROM resource_lease_releases AS release
@@ -1599,17 +2436,22 @@ void Journal::complete_managed_builtin_dispatch(
       column_text(current_lease.get(), 1) != lease.lease_id ||
       static_cast<std::uint64_t>(sqlite3_column_int64(current_lease.get(), 2)) !=
           lease.fencing_token ||
-      sqlite3_column_int64(current_lease.get(), 3) != lease.acquired_at_ns ||
-      sqlite3_column_int64(current_lease.get(), 4) <= now_ns ||
-      sqlite3_column_type(current_lease.get(), 5) != SQLITE_NULL) {
+      column_text(current_lease.get(), 3) != ResourceLease::kBootTimeDomain ||
+      lease.clock_domain != ResourceLease::kBootTimeDomain ||
+      column_text(current_lease.get(), 4) != now.boot_id ||
+      lease.boot_id != now.boot_id ||
+      sqlite3_column_int64(current_lease.get(), 5) != lease.acquired_boottime_ns ||
+      sqlite3_column_int64(current_lease.get(), 6) <= now.boot.nanoseconds ||
+      sqlite3_column_type(current_lease.get(), 7) != SQLITE_NULL) {
     throw OperationPreconditionError(
         "managed builtin completion lost its active lease fence");
   }
   if (release_lease) {
     Statement release(database_, R"sql(
-      UPDATE resource_leases SET released_at_ns=?
+      UPDATE resource_leases SET released_wall_time_ns=?
       WHERE concurrency_key=? AND owner_run_id=? AND lease_id=? AND fencing_token=?
-        AND released_at_ns IS NULL AND expires_at_ns>?
+        AND clock_domain='boottime/v1' AND boot_id=?
+        AND released_wall_time_ns IS NULL AND expires_boottime_ns>?
         AND NOT EXISTS(
           SELECT 1 FROM resource_lease_releases AS release
           WHERE release.concurrency_key=resource_leases.concurrency_key
@@ -1618,13 +2460,14 @@ void Journal::complete_managed_builtin_dispatch(
             AND release.fencing_token=resource_leases.fencing_token
         )
     )sql");
-    bind_integer(release.get(), 1, now_ns);
+    bind_integer(release.get(), 1, now.wall.nanoseconds);
     bind_text(release.get(), 2, lease.concurrency_key);
     bind_text(release.get(), 3, lease.owner_run_id);
     bind_text(release.get(), 4, lease.lease_id);
     bind_integer(release.get(), 5,
                  checked_integer(lease.fencing_token, "fencing_token"));
-    bind_integer(release.get(), 6, now_ns);
+    bind_text(release.get(), 6, now.boot_id);
+    bind_integer(release.get(), 7, now.boot.nanoseconds);
     require_done(database_, release.get(), "release managed builtin lease");
     if (sqlite3_changes(database_) != 1) {
       throw std::runtime_error(
@@ -1632,15 +2475,18 @@ void Journal::complete_managed_builtin_dispatch(
     }
     Statement release_receipt(database_, R"sql(
       INSERT INTO resource_lease_releases(
-        concurrency_key, owner_run_id, lease_id, fencing_token, released_at_ns
-      ) VALUES(?, ?, ?, ?, ?)
+        concurrency_key, owner_run_id, lease_id, fencing_token, clock_domain,
+        boot_id, released_wall_time_ns
+      ) VALUES(?, ?, ?, ?, ?, ?, ?)
     )sql");
     bind_text(release_receipt.get(), 1, lease.concurrency_key);
     bind_text(release_receipt.get(), 2, lease.owner_run_id);
     bind_text(release_receipt.get(), 3, lease.lease_id);
     bind_integer(release_receipt.get(), 4,
                  checked_integer(lease.fencing_token, "fencing_token"));
-    bind_integer(release_receipt.get(), 5, now_ns);
+    bind_text(release_receipt.get(), 5, ResourceLease::kBootTimeDomain);
+    bind_text(release_receipt.get(), 6, now.boot_id);
+    bind_integer(release_receipt.get(), 7, now.wall.nanoseconds);
     require_done(database_, release_receipt.get(),
                  "record managed builtin lease release");
   }
@@ -1812,7 +2658,7 @@ ControlCommand Journal::acknowledge_control_command(
     const std::string& run_id, const std::string& command_id,
     const ControlAcknowledgementIdentity& identity, ControlCommandStatus status,
     std::optional<std::uint64_t> effective_step, nlohmann::json effective_values,
-    nlohmann::json diagnostics) {
+    nlohmann::json diagnostics, const AuthorityTimeSample& now) {
   if (run_id.empty() || command_id.empty() || identity.concurrency_key.empty() ||
       identity.lease_id.empty() || identity.fencing_token == 0 || identity.node_id.empty() ||
       identity.attempt_id.empty() || identity.worker_sequence == 0 ||
@@ -1820,10 +2666,9 @@ ControlCommand Journal::acknowledge_control_command(
       !effective_values.is_object() || !diagnostics.is_array()) {
     throw std::invalid_argument("invalid control command acknowledgement");
   }
+  require_authority_time(now);
   Transaction transaction(database_);
-  const auto received_at_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                  std::chrono::system_clock::now().time_since_epoch())
-                                  .count();
+  const std::int64_t received_at_ns = now.wall.nanoseconds;
   Statement query(database_, R"sql(
     SELECT command_id, run_id, idempotency_key, expected_run_revision,
            expected_control_revision, control_revision, plan_revision, apply_point,
@@ -1895,7 +2740,9 @@ ControlCommand Journal::acknowledge_control_command(
   Statement lease(database_, R"sql(
     SELECT 1 FROM resource_leases
     WHERE concurrency_key=? AND owner_run_id=? AND lease_id=? AND fencing_token=?
-      AND released_at_ns IS NULL AND acquired_at_ns<=? AND expires_at_ns>?
+      AND clock_domain='boottime/v1' AND boot_id=?
+      AND released_wall_time_ns IS NULL
+      AND acquired_boottime_ns<=? AND expires_boottime_ns>?
       AND NOT EXISTS(
         SELECT 1 FROM resource_lease_releases AS release
         WHERE release.concurrency_key=resource_leases.concurrency_key
@@ -1908,8 +2755,9 @@ ControlCommand Journal::acknowledge_control_command(
   bind_text(lease.get(), 2, command.run_id);
   bind_text(lease.get(), 3, identity.lease_id);
   bind_integer(lease.get(), 4, checked_integer(identity.fencing_token, "fencing_token"));
-  bind_integer(lease.get(), 5, received_at_ns);
-  bind_integer(lease.get(), 6, received_at_ns);
+  bind_text(lease.get(), 5, now.boot_id);
+  bind_integer(lease.get(), 6, now.boot.nanoseconds);
+  bind_integer(lease.get(), 7, now.boot.nanoseconds);
   if (sqlite3_step(lease.get()) != SQLITE_ROW) {
     throw std::invalid_argument("control acknowledgement has no matching active fenced lease");
   }
@@ -2025,18 +2873,24 @@ std::uint64_t Journal::latest_effective_control_revision(const std::string& run_
 
 LeaseAcquireResult Journal::acquire_lease(const std::string& concurrency_key,
                                           const std::string& owner_run_id,
-                                          const std::string& lease_id, std::int64_t now_ns,
+                                          const std::string& lease_id,
+                                          const AuthorityTimeSample& now,
                                           std::int64_t timeout_ns) {
-  return acquire_lease_with_events(concurrency_key, owner_run_id, lease_id, now_ns,
+  return acquire_lease_with_events(concurrency_key, owner_run_id, lease_id, now,
                                    timeout_ns, {});
 }
 
 LeaseAcquireResult Journal::acquire_lease_with_events(
     const std::string& concurrency_key, const std::string& owner_run_id,
-    const std::string& lease_id, std::int64_t now_ns, std::int64_t timeout_ns,
+    const std::string& lease_id, const AuthorityTimeSample& now,
+    std::int64_t timeout_ns,
     const std::vector<Event>& events) {
   require_lease_identity(concurrency_key, owner_run_id, lease_id);
-  const std::int64_t expires_at_ns = lease_expiration(now_ns, timeout_ns);
+  require_authority_time(now);
+  const std::int64_t expires_boottime_ns =
+      lease_expiration(now.boot.nanoseconds, timeout_ns);
+  const std::int64_t expires_wall_time_ns =
+      lease_expiration(now.wall.nanoseconds, timeout_ns);
   Transaction transaction(database_);
   bool replaying_acquisition = false;
   std::optional<Event> replayed_resource_event;
@@ -2121,10 +2975,12 @@ LeaseAcquireResult Journal::acquire_lease_with_events(
       nlohmann::json expected_resource = events[1].payload;
       expected_resource["fencing_token"] =
           stored_resource->payload.value("fencing_token", std::uint64_t{});
-      expected_resource["acquired_at_ns"] =
-          stored_resource->payload.value("acquired_at_ns", std::int64_t{});
-      expected_resource["expires_at_ns"] =
-          stored_resource->payload.value("expires_at_ns", std::int64_t{});
+      expected_resource["clock_domain"] = ResourceLease::kBootTimeDomain;
+      expected_resource["boot_id"] = now.boot_id;
+      expected_resource["acquired_boottime_ns"] =
+          stored_resource->payload.value("acquired_boottime_ns", std::int64_t{});
+      expected_resource["expires_boottime_ns"] =
+          stored_resource->payload.value("expires_boottime_ns", std::int64_t{});
       nlohmann::json expected_observed = events[2].payload;
       expected_observed["fencing_token"] =
           stored_resource->payload.value("fencing_token", std::uint64_t{});
@@ -2145,9 +3001,11 @@ LeaseAcquireResult Journal::acquire_lease_with_events(
     for (std::size_t index = 0; index < events.size(); ++index) {
       Event event = events[index];
       if (index == 1U) {
-        event.wall_time_ns = acquired_lease.acquired_at_ns;
-        event.payload["acquired_at_ns"] = acquired_lease.acquired_at_ns;
-        event.payload["expires_at_ns"] = acquired_lease.expires_at_ns;
+        event.wall_time_ns = acquired_lease.acquired_wall_time_ns;
+        event.payload["clock_domain"] = acquired_lease.clock_domain;
+        event.payload["boot_id"] = acquired_lease.boot_id;
+        event.payload["acquired_boottime_ns"] = acquired_lease.acquired_boottime_ns;
+        event.payload["expires_boottime_ns"] = acquired_lease.expires_boottime_ns;
         event.payload["fencing_token"] = acquired_lease.fencing_token;
       } else if (index == 2U) {
         event.payload["fencing_token"] = acquired_lease.fencing_token;
@@ -2157,7 +3015,8 @@ LeaseAcquireResult Journal::acquire_lease_with_events(
   };
   Statement query(database_, R"sql(
     SELECT concurrency_key, owner_run_id, lease_id, fencing_token,
-           acquired_at_ns, expires_at_ns, released_at_ns,
+           clock_domain, boot_id, acquired_boottime_ns, expires_boottime_ns,
+           acquired_wall_time_ns, expires_wall_time_ns, released_wall_time_ns,
            EXISTS(
              SELECT 1 FROM resource_lease_releases AS release
              WHERE release.concurrency_key=resource_leases.concurrency_key
@@ -2179,13 +3038,15 @@ LeaseAcquireResult Journal::acquire_lease_with_events(
       throw std::runtime_error("acquiring run has no durable lease row");
     }
     lease = lease_from_row(query.get());
-    const bool released = sqlite3_column_type(query.get(), 6) != SQLITE_NULL ||
-                          sqlite3_column_int(query.get(), 7) != 0;
+    const bool released = sqlite3_column_type(query.get(), 10) != SQLITE_NULL ||
+                          sqlite3_column_int(query.get(), 11) != 0;
     if (released || lease.owner_run_id != owner_run_id || lease.lease_id != lease_id ||
+        lease.clock_domain != ResourceLease::kBootTimeDomain ||
+        lease.boot_id != now.boot_id ||
         lease.fencing_token !=
             replayed_resource_event->payload.value("fencing_token", std::uint64_t{}) ||
-        lease.acquired_at_ns !=
-            replayed_resource_event->payload.value("acquired_at_ns", std::int64_t{})) {
+        lease.acquired_boottime_ns !=
+            replayed_resource_event->payload.value("acquired_boottime_ns", std::int64_t{})) {
       throw std::runtime_error("acquiring run no longer has its durable fenced lease");
     }
     transaction.commit();
@@ -2196,20 +3057,29 @@ LeaseAcquireResult Journal::acquire_lease_with_events(
                           .owner_run_id = owner_run_id,
                           .lease_id = lease_id,
                           .fencing_token = 1,
-                          .acquired_at_ns = now_ns,
-                          .expires_at_ns = expires_at_ns};
+                          .clock_domain = ResourceLease::kBootTimeDomain,
+                          .boot_id = now.boot_id,
+                          .acquired_boottime_ns = now.boot.nanoseconds,
+                          .expires_boottime_ns = expires_boottime_ns,
+                          .acquired_wall_time_ns = now.wall.nanoseconds,
+                          .expires_wall_time_ns = expires_wall_time_ns};
     Statement insert(database_, R"sql(
       INSERT INTO resource_leases(
         concurrency_key, owner_run_id, lease_id, fencing_token,
-        acquired_at_ns, expires_at_ns, released_at_ns
-      ) VALUES(?, ?, ?, ?, ?, ?, NULL)
+        clock_domain, boot_id, acquired_boottime_ns, expires_boottime_ns,
+        acquired_wall_time_ns, expires_wall_time_ns, released_wall_time_ns
+      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
     )sql");
     bind_text(insert.get(), 1, lease.concurrency_key);
     bind_text(insert.get(), 2, lease.owner_run_id);
     bind_text(insert.get(), 3, lease.lease_id);
     bind_integer(insert.get(), 4, checked_integer(lease.fencing_token, "fencing_token"));
-    bind_integer(insert.get(), 5, lease.acquired_at_ns);
-    bind_integer(insert.get(), 6, lease.expires_at_ns);
+    bind_text(insert.get(), 5, lease.clock_domain);
+    bind_text(insert.get(), 6, lease.boot_id);
+    bind_integer(insert.get(), 7, lease.acquired_boottime_ns);
+    bind_integer(insert.get(), 8, lease.expires_boottime_ns);
+    bind_integer(insert.get(), 9, lease.acquired_wall_time_ns);
+    bind_integer(insert.get(), 10, lease.expires_wall_time_ns);
     require_done(database_, insert.get(), "insert resource lease");
     append_events(lease);
     transaction.commit();
@@ -2217,9 +3087,12 @@ LeaseAcquireResult Journal::acquire_lease_with_events(
   }
 
   lease = lease_from_row(query.get());
-  const bool released = sqlite3_column_type(query.get(), 6) != SQLITE_NULL ||
-                        sqlite3_column_int(query.get(), 7) != 0;
-  const bool active = !released && lease.expires_at_ns > now_ns;
+  const bool released = sqlite3_column_type(query.get(), 10) != SQLITE_NULL ||
+                        sqlite3_column_int(query.get(), 11) != 0;
+  const bool active = !released &&
+                      lease.clock_domain == ResourceLease::kBootTimeDomain &&
+                      lease.boot_id == now.boot_id &&
+                      lease.expires_boottime_ns > now.boot.nanoseconds;
   if (active) {
     const LeaseAcquireStatus disposition =
         lease.owner_run_id == owner_run_id && lease.lease_id == lease_id
@@ -2237,20 +3110,29 @@ LeaseAcquireResult Journal::acquire_lease_with_events(
   ++lease.fencing_token;
   lease.owner_run_id = owner_run_id;
   lease.lease_id = lease_id;
-  lease.acquired_at_ns = now_ns;
-  lease.expires_at_ns = expires_at_ns;
+  lease.clock_domain = ResourceLease::kBootTimeDomain;
+  lease.boot_id = now.boot_id;
+  lease.acquired_boottime_ns = now.boot.nanoseconds;
+  lease.expires_boottime_ns = expires_boottime_ns;
+  lease.acquired_wall_time_ns = now.wall.nanoseconds;
+  lease.expires_wall_time_ns = expires_wall_time_ns;
   Statement replace(database_, R"sql(
     UPDATE resource_leases
-    SET owner_run_id=?, lease_id=?, fencing_token=?, acquired_at_ns=?,
-        expires_at_ns=?, released_at_ns=NULL
+    SET owner_run_id=?, lease_id=?, fencing_token=?, clock_domain=?, boot_id=?,
+        acquired_boottime_ns=?, expires_boottime_ns=?, acquired_wall_time_ns=?,
+        expires_wall_time_ns=?, released_wall_time_ns=NULL
     WHERE concurrency_key=?
   )sql");
   bind_text(replace.get(), 1, lease.owner_run_id);
   bind_text(replace.get(), 2, lease.lease_id);
   bind_integer(replace.get(), 3, checked_integer(lease.fencing_token, "fencing_token"));
-  bind_integer(replace.get(), 4, lease.acquired_at_ns);
-  bind_integer(replace.get(), 5, lease.expires_at_ns);
-  bind_text(replace.get(), 6, concurrency_key);
+  bind_text(replace.get(), 4, lease.clock_domain);
+  bind_text(replace.get(), 5, lease.boot_id);
+  bind_integer(replace.get(), 6, lease.acquired_boottime_ns);
+  bind_integer(replace.get(), 7, lease.expires_boottime_ns);
+  bind_integer(replace.get(), 8, lease.acquired_wall_time_ns);
+  bind_integer(replace.get(), 9, lease.expires_wall_time_ns);
+  bind_text(replace.get(), 10, concurrency_key);
   require_done(database_, replace.get(), "replace resource lease");
   if (sqlite3_changes(database_) != 1) {
     throw std::runtime_error("resource lease replacement affected an unexpected number of rows");
@@ -2261,11 +3143,12 @@ LeaseAcquireResult Journal::acquire_lease_with_events(
 }
 
 bool Journal::complete_builtin_admission(const ResourceLease& lease,
-                                         std::int64_t now_ns,
+                                         const AuthorityTimeSample& now,
                                          const std::vector<Event>& events) {
   require_lease_identity(lease.concurrency_key, lease.owner_run_id,
                          lease.lease_id);
-  if (now_ns < 0 || lease.fencing_token == 0 || events.size() != 2U) {
+  require_authority_time(now);
+  if (lease.fencing_token == 0 || events.size() != 2U) {
     throw std::invalid_argument("builtin admission requires a valid lease and event pair");
   }
   const Event& result = events[0];
@@ -2313,8 +3196,8 @@ bool Journal::complete_builtin_admission(const ResourceLease& lease,
       static_cast<std::uint64_t>(sqlite3_column_int64(projection.get(), 2));
 
   Statement current_lease(database_, R"sql(
-    SELECT owner_run_id, lease_id, fencing_token, acquired_at_ns, expires_at_ns,
-           released_at_ns
+    SELECT owner_run_id, lease_id, fencing_token, clock_domain, boot_id,
+           acquired_boottime_ns, expires_boottime_ns, released_wall_time_ns
     FROM resource_leases WHERE concurrency_key=?
       AND NOT EXISTS(
         SELECT 1 FROM resource_lease_releases AS release
@@ -2330,9 +3213,13 @@ bool Journal::complete_builtin_admission(const ResourceLease& lease,
       column_text(current_lease.get(), 1) != lease.lease_id ||
       static_cast<std::uint64_t>(sqlite3_column_int64(current_lease.get(), 2)) !=
           lease.fencing_token ||
-      sqlite3_column_int64(current_lease.get(), 3) != lease.acquired_at_ns ||
-      sqlite3_column_int64(current_lease.get(), 4) <= now_ns ||
-      sqlite3_column_type(current_lease.get(), 5) != SQLITE_NULL) {
+      column_text(current_lease.get(), 3) != ResourceLease::kBootTimeDomain ||
+      lease.clock_domain != ResourceLease::kBootTimeDomain ||
+      column_text(current_lease.get(), 4) != now.boot_id ||
+      lease.boot_id != now.boot_id ||
+      sqlite3_column_int64(current_lease.get(), 5) != lease.acquired_boottime_ns ||
+      sqlite3_column_int64(current_lease.get(), 6) <= now.boot.nanoseconds ||
+      sqlite3_column_type(current_lease.get(), 7) != SQLITE_NULL) {
     throw OperationPreconditionError(
         "builtin admission no longer owns its active fenced lease");
   }
@@ -2372,7 +3259,7 @@ bool Journal::complete_builtin_admission(const ResourceLease& lease,
 }
 
 bool Journal::prepare_worker_launch(const WorkerLaunchTicket& launch,
-                                    std::int64_t now_ns,
+                                    const AuthorityTimeSample& now,
                                     const Event& event) {
   require_lease_identity(launch.concurrency_key, launch.run_id,
                          launch.lease_id);
@@ -2386,7 +3273,8 @@ bool Journal::prepare_worker_launch(const WorkerLaunchTicket& launch,
       {"lease_id", launch.lease_id},
       {"fencing_token", launch.fencing_token},
   };
-  if (now_ns < 0 || launch.fencing_token == 0 || launch.node_id.empty() ||
+  require_authority_time(now);
+  if (launch.fencing_token == 0 || launch.node_id.empty() ||
       launch.attempt_id.empty() || launch.launch_nonce.empty() ||
       launch.adapter.empty() || launch.adapter_version.empty() ||
       launch.code_fingerprint.empty() || event.run_id != launch.run_id ||
@@ -2417,7 +3305,8 @@ bool Journal::prepare_worker_launch(const WorkerLaunchTicket& launch,
     throw std::invalid_argument("worker launch requires an unassigned acquiring run");
   }
   Statement lease(database_, R"sql(
-    SELECT owner_run_id, lease_id, fencing_token, expires_at_ns, released_at_ns
+    SELECT owner_run_id, lease_id, fencing_token, clock_domain, boot_id,
+           expires_boottime_ns, released_wall_time_ns
     FROM resource_leases WHERE concurrency_key=?
       AND NOT EXISTS(
         SELECT 1 FROM resource_lease_releases AS release
@@ -2433,8 +3322,10 @@ bool Journal::prepare_worker_launch(const WorkerLaunchTicket& launch,
       column_text(lease.get(), 1) != launch.lease_id ||
       static_cast<std::uint64_t>(sqlite3_column_int64(lease.get(), 2)) !=
           launch.fencing_token ||
-      sqlite3_column_int64(lease.get(), 3) <= now_ns ||
-      sqlite3_column_type(lease.get(), 4) != SQLITE_NULL) {
+      column_text(lease.get(), 3) != ResourceLease::kBootTimeDomain ||
+      column_text(lease.get(), 4) != now.boot_id ||
+      sqlite3_column_int64(lease.get(), 5) <= now.boot.nanoseconds ||
+      sqlite3_column_type(lease.get(), 6) != SQLITE_NULL) {
     throw OperationPreconditionError(
         "worker launch no longer owns its active lease");
   }
@@ -2466,7 +3357,7 @@ bool Journal::prepare_worker_launch(const WorkerLaunchTicket& launch,
 }
 
 bool Journal::bind_worker_launch(const ResolvedLaunchSpec& binding,
-                                 std::int64_t now_ns,
+                                 const AuthorityTimeSample& now,
                                  const Event& event) {
   const ResolvedLaunchSpec canonical = resolved_launch_spec_from_json(
       resolved_launch_spec_json(binding));
@@ -2477,7 +3368,8 @@ bool Journal::bind_worker_launch(const ResolvedLaunchSpec& binding,
       {"cause_event_id", identity.launch_event_id},
       {"spec", resolved_launch_spec_json(canonical)},
   };
-  if (now_ns < 0 || identity.fencing_token == 0U ||
+  require_authority_time(now);
+  if (identity.fencing_token == 0U ||
       identity.launch_event_id.empty() || identity.run_id.empty() ||
       identity.node_id.empty() || identity.attempt_id.empty() ||
       identity.launch_nonce.empty() || identity.adapter_key.adapter.empty() ||
@@ -2548,7 +3440,8 @@ bool Journal::bind_worker_launch(const ResolvedLaunchSpec& binding,
   Statement lease(database_, R"sql(
     SELECT 1 FROM resource_leases
     WHERE concurrency_key=? AND owner_run_id=? AND lease_id=?
-      AND fencing_token=? AND expires_at_ns>? AND released_at_ns IS NULL
+      AND fencing_token=? AND clock_domain='boottime/v1' AND boot_id=?
+      AND expires_boottime_ns>? AND released_wall_time_ns IS NULL
       AND NOT EXISTS(
         SELECT 1 FROM resource_lease_releases AS release
         WHERE release.concurrency_key=resource_leases.concurrency_key
@@ -2562,7 +3455,8 @@ bool Journal::bind_worker_launch(const ResolvedLaunchSpec& binding,
   bind_text(lease.get(), 3, identity.lease_id);
   bind_integer(lease.get(), 4,
                checked_integer(identity.fencing_token, "fencing_token"));
-  bind_integer(lease.get(), 5, now_ns);
+  bind_text(lease.get(), 5, now.boot_id);
+  bind_integer(lease.get(), 6, now.boot.nanoseconds);
   if (sqlite3_step(lease.get()) != SQLITE_ROW) {
     throw OperationPreconditionError(
         "host launch binding no longer owns its active lease");
@@ -2613,10 +3507,11 @@ std::optional<ResolvedLaunchSpec> Journal::launch_binding(
 
 WorkerReadinessDisposition Journal::accept_worker_ready(
     const WorkerLaunchTicket& launch, const WorkerHelloEvidence& hello,
-    std::int64_t now_ns, const std::vector<Event>& events) {
+    const AuthorityTimeSample& now, const std::vector<Event>& events) {
   require_lease_identity(launch.concurrency_key, launch.run_id,
                          launch.lease_id);
-  if (now_ns < 0 || events.size() != 3U || hello.run_id != launch.run_id ||
+  require_authority_time(now);
+  if (events.size() != 3U || hello.run_id != launch.run_id ||
       hello.node_id != launch.node_id || hello.attempt_id != launch.attempt_id ||
       hello.launch_nonce != launch.launch_nonce || hello.adapter != launch.adapter ||
       hello.adapter_version != launch.adapter_version ||
@@ -2712,7 +3607,8 @@ WorkerReadinessDisposition Journal::accept_worker_ready(
     throw std::invalid_argument("worker readiness payload differs from verified hello");
   }
   Statement lease(database_, R"sql(
-    SELECT owner_run_id, lease_id, fencing_token, expires_at_ns, released_at_ns
+    SELECT owner_run_id, lease_id, fencing_token, clock_domain, boot_id,
+           expires_boottime_ns, released_wall_time_ns
     FROM resource_leases WHERE concurrency_key=?
       AND NOT EXISTS(
         SELECT 1 FROM resource_lease_releases AS release
@@ -2728,8 +3624,10 @@ WorkerReadinessDisposition Journal::accept_worker_ready(
       column_text(lease.get(), 1) != launch.lease_id ||
       static_cast<std::uint64_t>(sqlite3_column_int64(lease.get(), 2)) !=
           launch.fencing_token ||
-      sqlite3_column_int64(lease.get(), 3) <= now_ns ||
-      sqlite3_column_type(lease.get(), 4) != SQLITE_NULL) {
+      column_text(lease.get(), 3) != ResourceLease::kBootTimeDomain ||
+      column_text(lease.get(), 4) != now.boot_id ||
+      sqlite3_column_int64(lease.get(), 5) <= now.boot.nanoseconds ||
+      sqlite3_column_type(lease.get(), 6) != SQLITE_NULL) {
     throw OperationPreconditionError(
         "worker readiness no longer owns its active lease");
   }
@@ -2773,14 +3671,21 @@ WorkerReadinessDisposition Journal::accept_worker_ready(
 
 bool Journal::renew_lease(const std::string& concurrency_key, const std::string& owner_run_id,
                           const std::string& lease_id, std::uint64_t fencing_token,
-                          std::int64_t now_ns, std::int64_t timeout_ns) {
+                          const AuthorityTimeSample& now,
+                          std::int64_t timeout_ns) {
   require_lease_identity(concurrency_key, owner_run_id, lease_id);
-  const std::int64_t expires_at_ns = lease_expiration(now_ns, timeout_ns);
+  require_authority_time(now);
+  const std::int64_t expires_boottime_ns =
+      lease_expiration(now.boot.nanoseconds, timeout_ns);
+  const std::int64_t expires_wall_time_ns =
+      lease_expiration(now.wall.nanoseconds, timeout_ns);
   Transaction transaction(database_);
   Statement update(database_, R"sql(
-    UPDATE resource_leases SET expires_at_ns=?
+    UPDATE resource_leases
+    SET expires_boottime_ns=?, expires_wall_time_ns=?
     WHERE concurrency_key=? AND owner_run_id=? AND lease_id=? AND fencing_token=?
-      AND released_at_ns IS NULL AND expires_at_ns>?
+      AND clock_domain='boottime/v1' AND boot_id=?
+      AND released_wall_time_ns IS NULL AND expires_boottime_ns>?
       AND NOT EXISTS(
         SELECT 1 FROM resource_lease_releases AS release
         WHERE release.concurrency_key=resource_leases.concurrency_key
@@ -2789,12 +3694,14 @@ bool Journal::renew_lease(const std::string& concurrency_key, const std::string&
           AND release.fencing_token=resource_leases.fencing_token
       )
   )sql");
-  bind_integer(update.get(), 1, expires_at_ns);
-  bind_text(update.get(), 2, concurrency_key);
-  bind_text(update.get(), 3, owner_run_id);
-  bind_text(update.get(), 4, lease_id);
-  bind_integer(update.get(), 5, checked_integer(fencing_token, "fencing_token"));
-  bind_integer(update.get(), 6, now_ns);
+  bind_integer(update.get(), 1, expires_boottime_ns);
+  bind_integer(update.get(), 2, expires_wall_time_ns);
+  bind_text(update.get(), 3, concurrency_key);
+  bind_text(update.get(), 4, owner_run_id);
+  bind_text(update.get(), 5, lease_id);
+  bind_integer(update.get(), 6, checked_integer(fencing_token, "fencing_token"));
+  bind_text(update.get(), 7, now.boot_id);
+  bind_integer(update.get(), 8, now.boot.nanoseconds);
   require_done(database_, update.get(), "renew resource lease");
   const bool renewed = sqlite3_changes(database_) == 1;
   transaction.commit();
@@ -2803,13 +3710,15 @@ bool Journal::renew_lease(const std::string& concurrency_key, const std::string&
 
 bool Journal::release_lease(const std::string& concurrency_key, const std::string& owner_run_id,
                             const std::string& lease_id, std::uint64_t fencing_token,
-                            std::int64_t now_ns) {
+                            const AuthorityTimeSample& now) {
   require_lease_identity(concurrency_key, owner_run_id, lease_id);
+  require_authority_time(now);
   Transaction transaction(database_);
   Statement update(database_, R"sql(
-    UPDATE resource_leases SET released_at_ns=?
+    UPDATE resource_leases SET released_wall_time_ns=?
     WHERE concurrency_key=? AND owner_run_id=? AND lease_id=? AND fencing_token=?
-      AND released_at_ns IS NULL
+      AND clock_domain='boottime/v1' AND boot_id=?
+      AND released_wall_time_ns IS NULL
       AND NOT EXISTS(
         SELECT 1 FROM resource_lease_releases AS release
         WHERE release.concurrency_key=resource_leases.concurrency_key
@@ -2818,27 +3727,47 @@ bool Journal::release_lease(const std::string& concurrency_key, const std::strin
           AND release.fencing_token=resource_leases.fencing_token
       )
   )sql");
-  bind_integer(update.get(), 1, now_ns);
+  bind_integer(update.get(), 1, now.wall.nanoseconds);
   bind_text(update.get(), 2, concurrency_key);
   bind_text(update.get(), 3, owner_run_id);
   bind_text(update.get(), 4, lease_id);
   bind_integer(update.get(), 5, checked_integer(fencing_token, "fencing_token"));
+  bind_text(update.get(), 6, now.boot_id);
   require_done(database_, update.get(), "release resource lease");
   const bool released = sqlite3_changes(database_) == 1;
+  if (released) {
+    Statement receipt(database_, R"sql(
+      INSERT INTO resource_lease_releases(
+        concurrency_key, owner_run_id, lease_id, fencing_token, clock_domain,
+        boot_id, released_wall_time_ns
+      ) VALUES(?, ?, ?, ?, 'boottime/v1', ?, ?)
+    )sql");
+    bind_text(receipt.get(), 1, concurrency_key);
+    bind_text(receipt.get(), 2, owner_run_id);
+    bind_text(receipt.get(), 3, lease_id);
+    bind_integer(receipt.get(), 4,
+                 checked_integer(fencing_token, "fencing_token"));
+    bind_text(receipt.get(), 5, now.boot_id);
+    bind_integer(receipt.get(), 6, now.wall.nanoseconds);
+    require_done(database_, receipt.get(), "record resource lease release");
+  }
   transaction.commit();
   return released;
 }
 
 std::optional<ResourceLease> Journal::active_lease(const std::string& concurrency_key,
-                                                   std::int64_t now_ns) const {
+                                                   const AuthorityTimeSample& now) const {
   if (concurrency_key.empty()) {
     throw std::invalid_argument("lease concurrency_key must not be empty");
   }
+  require_authority_time(now);
   Statement query(database_, R"sql(
     SELECT concurrency_key, owner_run_id, lease_id, fencing_token,
-           acquired_at_ns, expires_at_ns
+           clock_domain, boot_id, acquired_boottime_ns, expires_boottime_ns,
+           acquired_wall_time_ns, expires_wall_time_ns
     FROM resource_leases
-    WHERE concurrency_key=? AND released_at_ns IS NULL AND expires_at_ns>?
+    WHERE concurrency_key=? AND clock_domain='boottime/v1' AND boot_id=?
+      AND released_wall_time_ns IS NULL AND expires_boottime_ns>?
       AND NOT EXISTS(
         SELECT 1 FROM resource_lease_releases AS release
         WHERE release.concurrency_key=resource_leases.concurrency_key
@@ -2848,7 +3777,8 @@ std::optional<ResourceLease> Journal::active_lease(const std::string& concurrenc
       )
   )sql");
   bind_text(query.get(), 1, concurrency_key);
-  bind_integer(query.get(), 2, now_ns);
+  bind_text(query.get(), 2, now.boot_id);
+  bind_integer(query.get(), 3, now.boot.nanoseconds);
   const int status = sqlite3_step(query.get());
   if (status == SQLITE_DONE) {
     return std::nullopt;
@@ -2863,22 +3793,28 @@ std::optional<ResourceLease> Journal::active_lease(const std::string& concurrenc
 bool Journal::has_lease_release_receipt(
     const std::string& concurrency_key, const std::string& owner_run_id,
     const std::string& lease_id, std::uint64_t fencing_token,
-    std::int64_t released_at_ns) const {
+    std::string_view clock_domain, std::string_view boot_id,
+    std::int64_t released_wall_time_ns) const {
   require_lease_identity(concurrency_key, owner_run_id, lease_id);
-  if (fencing_token == 0 || released_at_ns < 0) {
+  if (fencing_token == 0 ||
+      clock_domain != ResourceLease::kBootTimeDomain ||
+      !canonical_boot_id(boot_id) || released_wall_time_ns < 0) {
     throw std::invalid_argument("lease release receipt identity is invalid");
   }
   Statement query(database_, R"sql(
     SELECT 1 FROM resource_lease_releases
     WHERE concurrency_key=? AND owner_run_id=? AND lease_id=?
-      AND fencing_token=? AND released_at_ns=?
+      AND fencing_token=? AND clock_domain=? AND boot_id=?
+      AND released_wall_time_ns=?
   )sql");
   bind_text(query.get(), 1, concurrency_key);
   bind_text(query.get(), 2, owner_run_id);
   bind_text(query.get(), 3, lease_id);
   bind_integer(query.get(), 4,
                checked_integer(fencing_token, "fencing_token"));
-  bind_integer(query.get(), 5, released_at_ns);
+  bind_text(query.get(), 5, std::string(clock_domain));
+  bind_text(query.get(), 6, std::string(boot_id));
+  bind_integer(query.get(), 7, released_wall_time_ns);
   const int status = sqlite3_step(query.get());
   if (status == SQLITE_ROW) return true;
   if (status != SQLITE_DONE) {

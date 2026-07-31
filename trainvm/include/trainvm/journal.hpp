@@ -1,10 +1,12 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -76,9 +78,26 @@ struct RunCreationResult {
   bool operator==(const RunCreationResult&) const = default;
 };
 
+// Expected Linux identity for the already-authority-locked main database.
+// Service construction supplies this before Journal performs schema writes.
+struct JournalFileIdentity final {
+  std::string directory_path;
+  std::string journal_name;
+  std::string authority_name;
+  std::uint64_t directory_device{};
+  std::uint64_t directory_inode{};
+  std::uint64_t device{};
+  std::uint64_t inode{};
+  std::uint64_t authority_device{};
+  std::uint64_t authority_inode{};
+  std::uint64_t owner_uid{};
+};
+
 class Journal {
 public:
-  explicit Journal(const std::filesystem::path& path);
+  explicit Journal(
+      const std::filesystem::path& path,
+      std::optional<JournalFileIdentity> expected_file = std::nullopt);
   ~Journal();
 
   Journal(const Journal&) = delete;
@@ -100,16 +119,18 @@ public:
       const std::string& run_id) const;
   LeaseAcquireResult acquire_lease(const std::string& concurrency_key,
                                    const std::string& owner_run_id,
-                                   const std::string& lease_id, std::int64_t now_ns,
+                                   const std::string& lease_id,
+                                   const AuthorityTimeSample& now,
                                    std::int64_t timeout_ns);
   bool renew_lease(const std::string& concurrency_key, const std::string& owner_run_id,
                    const std::string& lease_id, std::uint64_t fencing_token,
-                   std::int64_t now_ns, std::int64_t timeout_ns);
+                   const AuthorityTimeSample& now, std::int64_t timeout_ns);
   bool release_lease(const std::string& concurrency_key, const std::string& owner_run_id,
                      const std::string& lease_id, std::uint64_t fencing_token,
-                     std::int64_t now_ns);
+                     const AuthorityTimeSample& now);
   [[nodiscard]] std::optional<ResourceLease> active_lease(
-      const std::string& concurrency_key, std::int64_t now_ns) const;
+      const std::string& concurrency_key,
+      const AuthorityTimeSample& now) const;
   [[nodiscard]] std::uint64_t event_count() const;
   [[nodiscard]] std::string journal_id() const;
   [[nodiscard]] bool verify_chain(std::string* reason = nullptr) const;
@@ -134,6 +155,8 @@ public:
   };
 
   sqlite3* database_{};
+  std::optional<JournalFileIdentity> expected_file_;
+  mutable std::atomic<bool> authority_poisoned_{false};
 
   [[nodiscard]] ReadSnapshot read_snapshot() const;
   std::uint64_t append(const Event& event);
@@ -144,47 +167,58 @@ public:
                          const std::string& result_event_id,
                          const std::vector<Event>& events);
   void initialize();
+  void require_file_identity(const JournalFileIdentity& expected) const;
+  void require_namespace_identity(const JournalFileIdentity& expected) const;
+  [[nodiscard]] bool validate_authority_boundary() const noexcept;
+  static int authorize_database_operation(void* context, int action,
+                                          const char*, const char*,
+                                          const char*, const char*) noexcept;
+  static int authorize_commit(void* context) noexcept;
   std::uint64_t append_uncommitted(const Event& event);
   RunCreationResult create_run(const CompiledPlan& plan, const std::vector<Event>& events);
   LeaseAcquireResult acquire_lease_with_events(
       const std::string& concurrency_key, const std::string& owner_run_id,
-      const std::string& lease_id, std::int64_t now_ns, std::int64_t timeout_ns,
+      const std::string& lease_id, const AuthorityTimeSample& now,
+      std::int64_t timeout_ns,
       const std::vector<Event>& events);
-  bool complete_builtin_admission(const ResourceLease& lease, std::int64_t now_ns,
+  bool complete_builtin_admission(const ResourceLease& lease,
+                                  const AuthorityTimeSample& now,
                                   const std::vector<Event>& events);
-  bool prepare_worker_launch(const WorkerLaunchTicket& launch, std::int64_t now_ns,
+  bool prepare_worker_launch(const WorkerLaunchTicket& launch,
+                             const AuthorityTimeSample& now,
                              const Event& event);
   bool bind_worker_launch(const ResolvedLaunchSpec& binding,
-                          std::int64_t now_ns, const Event& event);
+                          const AuthorityTimeSample& now, const Event& event);
   WorkerReadinessDisposition accept_worker_ready(
       const WorkerLaunchTicket& launch, const WorkerHelloEvidence& hello,
-      std::int64_t now_ns, const std::vector<Event>& events);
+      const AuthorityTimeSample& now, const std::vector<Event>& events);
   Dispatch prepare_fenced_dispatch(const Dispatch& dispatch,
                                    const Event& prepared_event,
                                    const WorkerLaunchTicket& launch,
-                                   std::int64_t now_ns);
+                                   const AuthorityTimeSample& now);
   Dispatch prepare_dispatch_impl(
       const Dispatch& dispatch, const Event& prepared_event,
       const std::optional<WorkerLaunchTicket>& launch,
-      std::optional<std::int64_t> now_ns);
+      std::optional<AuthorityTimeSample> now);
   void complete_fenced_dispatch(const std::string& dispatch_id,
                                 const std::string& result_event_id,
                                 const std::vector<Event>& events,
                                 const WorkerSessionIdentity& identity,
-                                std::int64_t now_ns);
+                                const AuthorityTimeSample& now);
   void complete_dispatch_impl(
       const std::string& dispatch_id, const std::string& result_event_id,
       const std::vector<Event>& events,
       const std::optional<WorkerSessionIdentity>& identity,
-      std::optional<std::int64_t> now_ns);
+      std::optional<AuthorityTimeSample> now);
   void complete_managed_builtin_dispatch(
       const Dispatch& dispatch, const ResourceLease& lease,
-      std::int64_t now_ns, bool release_lease,
+      const AuthorityTimeSample& now, bool release_lease,
       const std::vector<Event>& events);
   [[nodiscard]] bool has_lease_release_receipt(
       const std::string& concurrency_key, const std::string& owner_run_id,
       const std::string& lease_id, std::uint64_t fencing_token,
-      std::int64_t released_at_ns) const;
+      std::string_view clock_domain, std::string_view boot_id,
+      std::int64_t released_wall_time_ns) const;
   ControlSubmission submit_control_command(ControlCommand command);
   ControlCommand acknowledge_control_command(const std::string& run_id,
                                               const std::string& command_id,
@@ -192,7 +226,8 @@ public:
                                               ControlCommandStatus status,
                                               std::optional<std::uint64_t> effective_step,
                                               nlohmann::json effective_values,
-                                              nlohmann::json diagnostics);
+                                              nlohmann::json diagnostics,
+                                              const AuthorityTimeSample& now);
 };
 
 nlohmann::json event_json(const Event& event);

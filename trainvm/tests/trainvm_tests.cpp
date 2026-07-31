@@ -17,6 +17,7 @@
 #include <fcntl.h>
 #include <linux/memfd.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -58,6 +59,30 @@ class JournalTestAccess {
 namespace {
 
 int failures = 0;
+
+constexpr const char* kTestBootId =
+    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+
+trainvm::AuthorityTimeSample test_time(std::int64_t nanoseconds,
+                                       std::int64_t wall_nanoseconds = -1) {
+  return {
+      .wall = {.nanoseconds = wall_nanoseconds < 0 ? nanoseconds
+                                                   : wall_nanoseconds},
+      .boot = {.nanoseconds = nanoseconds},
+      .boot_id = kTestBootId,
+  };
+}
+
+trainvm::AuthorityTimeSample test_time_on_boot(
+    std::int64_t nanoseconds, std::string boot_id,
+    std::int64_t wall_nanoseconds = -1) {
+  return {
+      .wall = {.nanoseconds = wall_nanoseconds < 0 ? nanoseconds
+                                                   : wall_nanoseconds},
+      .boot = {.nanoseconds = nanoseconds},
+      .boot_id = std::move(boot_id),
+  };
+}
 
 void check(bool condition, std::string_view message) {
   if (!condition) {
@@ -337,7 +362,8 @@ trainvm::ResolvedLaunchSpec bind_test_worker_launch(
                                         .dump());
   trainvm::ResolvedLaunch resolved(
       spec, -1, code ? std::optional<int>{-1} : std::nullopt, -1);
-  return controller.bind_worker_launch(resolved, registry, host, now_ns);
+  return controller.bind_worker_launch(resolved, registry, host,
+                                       test_time(now_ns));
 }
 
 bool has_diagnostic(const trainvm::CompileResult& result, std::string_view code) {
@@ -352,6 +378,20 @@ void test_reflection_and_compiler() {
   const auto control_fields = trainvm::reflected_field_names<trainvm::Control>();
   check(std::find(control_fields.begin(), control_fields.end(), "default") != control_fields.end(),
         "reflection maps the C++ default_value member to the JSON default field");
+  check(trainvm::reflected_field_names<trainvm::CpuIoPolicy>() ==
+            std::vector<std::string>({"cpuset", "cpus", "cpu_weight",
+                                      "io_weight", "omp_threads",
+                                      "preprocessing_workers", "nice"}) &&
+            trainvm::reflected_field_names<trainvm::ExecutionPhases>() ==
+                std::vector<std::string>({"component", "operation",
+                                          "compile", "warmup", "qualify",
+                                          "gpu_trace"}) &&
+            trainvm::reflected_field_names<trainvm::GpuTraceCapture>() ==
+                std::vector<std::string>({
+                    "enabled", "backend", "warmup_steps", "skip_steps",
+                    "capture_steps", "output_artifact", "activities",
+                    "record_shapes", "profile_memory", "with_stack"}),
+        "reflection exposes the closed lifecycle, profiler, and CPU/I/O policy schema");
 
   auto fixture = load_fixture();
   auto result = trainvm::compile_document(fixture);
@@ -362,7 +402,15 @@ void test_reflection_and_compiler() {
   }
   check(result.plan->experiment.spec.workflow.nodes.size() == 7U, "compiled plan has seven nodes");
   check(result.plan->experiment.spec.controls.catalog.size() == 4U, "compiled plan has four controls");
-  check(result.plan->plan_hash == "783d2860b51374138e7352d39607cb07254c3b774f9d776946a6f2b5e6ad468c",
+  check(result.plan->experiment.spec.execution &&
+            result.plan->experiment.spec.execution->gpu_trace &&
+            result.plan->experiment.spec.execution->gpu_trace->backend ==
+                trainvm::ProfilerBackend::torch &&
+            result.plan->experiment.spec.resources.cpu_io_policy &&
+            result.plan->experiment.spec.resources.cpu_io_policy->cpuset ==
+                std::optional<std::string>{"0-15"},
+        "compiler retains model-family-neutral lifecycle and host resource declarations");
+  check(result.plan->plan_hash == "d9874d50706cb8b13f3803258bde08f2175bfb4869eae860aa47994d151e901e",
         "MageFlow canonical plan matches its golden SHA-256 identity");
   check(result.plan->canonical_plan["spec"]["controls"]["catalog"]["learning_rate"].contains("default"),
         "canonical plan uses schema field aliases");
@@ -428,6 +476,153 @@ void test_reflection_and_compiler() {
   auto bad_enum_result = trainvm::compile_document(bad_enum);
   check(!bad_enum_result.valid() && has_diagnostic(bad_enum_result, "enum.unknown"),
         "reflected enum decoder rejects unknown values");
+
+  auto arbitrary_launch = fixture;
+  arbitrary_launch["spec"]["execution"]["compile"]["command"] =
+      "python train.py";
+  arbitrary_launch["spec"]["execution"]["compile"]["env"] =
+      {{"TOKEN", "plaintext"}};
+  const auto arbitrary_launch_result =
+      trainvm::compile_document(arbitrary_launch);
+  check(!arbitrary_launch_result.valid() &&
+            has_diagnostic(arbitrary_launch_result, "field.unknown"),
+        "execution declarations reject arbitrary commands and environment maps");
+
+  auto builtin_execution = fixture;
+  builtin_execution["spec"]["execution"]["component"] = "core";
+  builtin_execution["spec"]["execution"]["operation"] =
+      "acquire_resources";
+  const auto builtin_execution_result =
+      trainvm::compile_document(builtin_execution);
+  check(!builtin_execution_result.valid() &&
+            has_diagnostic(builtin_execution_result, "execution.target"),
+        "lifecycle policy is scoped to an exact external adapter operation");
+
+  auto unknown_profiler = fixture;
+  unknown_profiler["spec"]["execution"]["gpu_trace"]["backend"] =
+      "shell-profiler";
+  const auto unknown_profiler_result =
+      trainvm::compile_document(unknown_profiler);
+  check(!unknown_profiler_result.valid() &&
+            has_diagnostic(unknown_profiler_result, "enum.unknown"),
+        "profiler backend is a closed reflected enum");
+
+  auto disabled_phase = fixture;
+  disabled_phase["spec"]["execution"]["warmup"]["enabled"] = false;
+  const auto disabled_phase_result =
+      trainvm::compile_document(disabled_phase);
+  check(!disabled_phase_result.valid() &&
+            has_diagnostic(disabled_phase_result,
+                           "execution.disabled_configuration"),
+        "disabled lifecycle phases cannot retain active settings");
+
+  auto oversized_trace = fixture;
+  oversized_trace["spec"]["execution"]["gpu_trace"]["capture_steps"] =
+      129;
+  const auto oversized_trace_result =
+      trainvm::compile_document(oversized_trace);
+  check(!oversized_trace_result.valid() &&
+            has_diagnostic(oversized_trace_result,
+                           "execution.trace_steps"),
+        "GPU trace capture enforces a strict small step window");
+
+  auto incompatible_profiler = fixture;
+  incompatible_profiler["spec"]["execution"]["gpu_trace"]["backend"] =
+      "nsys";
+  const auto incompatible_profiler_result =
+      trainvm::compile_document(incompatible_profiler);
+  check(!incompatible_profiler_result.valid() &&
+            has_diagnostic(incompatible_profiler_result,
+                           "execution.trace_backend_options"),
+        "backend-specific profiler flags cannot be silently ignored");
+
+  auto missing_trace_artifact = fixture;
+  missing_trace_artifact["spec"]["execution"]["gpu_trace"]
+                        ["output_artifact"] = "not_declared";
+  const auto missing_trace_artifact_result =
+      trainvm::compile_document(missing_trace_artifact);
+  check(!missing_trace_artifact_result.valid() &&
+            has_diagnostic(missing_trace_artifact_result,
+                           "reference.artifact"),
+        "GPU trace output must name a declared artifact contract");
+
+  auto wrong_trace_artifact = fixture;
+  wrong_trace_artifact["spec"]["execution"]["gpu_trace"]
+                      ["output_artifact"] = "eval_gallery";
+  const auto wrong_trace_artifact_result =
+      trainvm::compile_document(wrong_trace_artifact);
+  check(!wrong_trace_artifact_result.valid() &&
+            has_diagnostic(wrong_trace_artifact_result,
+                           "execution.trace_artifact"),
+        "GPU trace output rejects an incompatible artifact type");
+
+  auto cpuset_conflict = fixture;
+  cpuset_conflict["spec"]["resources"]["cpu_io_policy"]["cpus"] =
+      {0, 1, 2, 3};
+  const auto cpuset_conflict_result =
+      trainvm::compile_document(cpuset_conflict);
+  check(!cpuset_conflict_result.valid() &&
+            has_diagnostic(cpuset_conflict_result,
+                           "resources.cpuset_conflict"),
+        "CPU policy rejects simultaneous textual and structured CPU sets");
+
+  auto structured_cpus = fixture;
+  structured_cpus["spec"]["resources"]["cpu_io_policy"].erase("cpuset");
+  structured_cpus["spec"]["resources"]["cpu_io_policy"]["cpus"] =
+      {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+  const auto structured_cpus_result =
+      trainvm::compile_document(structured_cpus);
+  check(structured_cpus_result.valid(),
+        "CPU policy accepts the typed structured CPU-list alternative");
+
+  auto malformed_cpuset = fixture;
+  malformed_cpuset["spec"]["resources"]["cpu_io_policy"]["cpuset"] =
+      "0-8,8-15";
+  const auto malformed_cpuset_result =
+      trainvm::compile_document(malformed_cpuset);
+  check(!malformed_cpuset_result.valid() &&
+            has_diagnostic(malformed_cpuset_result, "resources.cpuset"),
+        "textual CPU sets reject overlapping or ambiguous ranges");
+
+  auto duplicate_cpus = fixture;
+  duplicate_cpus["spec"]["resources"]["cpu_io_policy"].erase("cpuset");
+  duplicate_cpus["spec"]["resources"]["cpu_io_policy"]["cpus"] =
+      {0, 1, 1};
+  const auto duplicate_cpus_result =
+      trainvm::compile_document(duplicate_cpus);
+  check(!duplicate_cpus_result.valid() &&
+            has_diagnostic(duplicate_cpus_result, "resources.cpus"),
+        "structured CPU sets require unique bounded indices");
+
+  auto oversubscribed_cpu = fixture;
+  oversubscribed_cpu["spec"]["resources"]["cpu_io_policy"]
+                    ["omp_threads"] = 12;
+  const auto oversubscribed_cpu_result =
+      trainvm::compile_document(oversubscribed_cpu);
+  check(!oversubscribed_cpu_result.valid() &&
+            has_diagnostic(oversubscribed_cpu_result,
+                           "resources.thread_conflict"),
+        "CPU policy rejects declared preprocessing and OMP oversubscription");
+
+  auto invalid_cpu_weight = fixture;
+  invalid_cpu_weight["spec"]["resources"]["cpu_io_policy"]
+                    ["cpu_weight"] = 0;
+  const auto invalid_cpu_weight_result =
+      trainvm::compile_document(invalid_cpu_weight);
+  check(!invalid_cpu_weight_result.valid() &&
+            has_diagnostic(invalid_cpu_weight_result, "number.range"),
+        "CPU and I/O policy weights use bounded cgroup-v2 ranges");
+
+  auto valid_ncu = fixture;
+  auto& ncu_trace = valid_ncu["spec"]["execution"]["gpu_trace"];
+  ncu_trace["backend"] = "ncu";
+  ncu_trace["activities"] = {"accelerator"};
+  ncu_trace.erase("record_shapes");
+  ncu_trace.erase("profile_memory");
+  ncu_trace.erase("with_stack");
+  const auto valid_ncu_result = trainvm::compile_document(valid_ncu);
+  check(valid_ncu_result.valid(),
+        "ncu is a typed backend with its bounded accelerator-only option surface");
 
   auto bad_binding = fixture;
   bad_binding["spec"]["workflow"]["nodes"]["prepare_cache"]["invoke"]["inputs"]["final_step"] =
@@ -1238,59 +1433,560 @@ void test_resource_leases() {
   {
     trainvm::Journal first(database_path);
     trainvm::Journal second(database_path);
-    const auto acquired = first.acquire_lease("local-gpu", "run-a", "lease-a", 100, 50);
+    const auto acquired = first.acquire_lease("local-gpu", "run-a", "lease-a", test_time(100), 50);
     check(acquired.status == trainvm::LeaseAcquireStatus::acquired &&
-              acquired.lease.fencing_token == 1U && acquired.lease.expires_at_ns == 150,
+              acquired.lease.fencing_token == 1U && acquired.lease.expires_boottime_ns == 150,
           "first resource lease acquisition receives fencing token one");
 
-    const auto repeated = second.acquire_lease("local-gpu", "run-a", "lease-a", 110, 500);
+    const auto repeated = second.acquire_lease("local-gpu", "run-a", "lease-a", test_time(110), 500);
     check(repeated.status == trainvm::LeaseAcquireStatus::already_owned &&
               repeated.lease == acquired.lease,
           "same live lease acquisition is idempotent and does not silently extend expiry");
-    const auto busy = second.acquire_lease("local-gpu", "run-b", "lease-b", 120, 50);
+    const auto busy = second.acquire_lease("local-gpu", "run-b", "lease-b", test_time(120), 50);
     check(busy.status == trainvm::LeaseAcquireStatus::busy &&
               busy.lease.owner_run_id == "run-a" && busy.lease.fencing_token == 1U,
           "exclusive lease reports its current owner instead of overlapping");
 
-    check(!second.renew_lease("local-gpu", "run-b", "lease-b", 1, 125, 50),
+    check(!second.renew_lease("local-gpu", "run-b", "lease-b", 1, test_time(125), 50),
           "non-owner cannot renew a resource lease");
-    check(first.renew_lease("local-gpu", "run-a", "lease-a", 1, 130, 100),
+    check(first.renew_lease("local-gpu", "run-a", "lease-a", 1, test_time(130), 100),
           "exact owner can renew a live resource lease");
-    const auto renewed = second.active_lease("local-gpu", 200);
-    check(renewed && renewed->owner_run_id == "run-a" && renewed->expires_at_ns == 230,
+    const auto renewed = second.active_lease("local-gpu", test_time(200));
+    check(renewed && renewed->owner_run_id == "run-a" && renewed->expires_boottime_ns == 230,
           "renewed lease is visible across independent journal connections");
   }
 
   {
     trainvm::Journal restarted(database_path);
-    const auto recovered = restarted.active_lease("local-gpu", 220);
+    const auto recovered = restarted.active_lease("local-gpu", test_time(220));
     check(recovered && recovered->lease_id == "lease-a" && recovered->fencing_token == 1U,
           "resource lease survives controller and database connection restart");
 
-    const auto successor = restarted.acquire_lease("local-gpu", "run-b", "lease-b", 230, 100);
+    const auto successor = restarted.acquire_lease("local-gpu", "run-b", "lease-b", test_time(230), 100);
     check(successor.status == trainvm::LeaseAcquireStatus::acquired &&
-              successor.lease.fencing_token == 2U && successor.lease.expires_at_ns == 330,
+              successor.lease.fencing_token == 2U && successor.lease.expires_boottime_ns == 330,
           "expired lease transfers ownership with a larger fencing token");
-    check(!restarted.renew_lease("local-gpu", "run-a", "lease-a", 1, 240, 100) &&
-              !restarted.release_lease("local-gpu", "run-a", "lease-a", 1, 240),
+    check(!restarted.renew_lease("local-gpu", "run-a", "lease-a", 1, test_time(240), 100) &&
+              !restarted.release_lease("local-gpu", "run-a", "lease-a", 1, test_time(240)),
           "stale owner cannot renew or release a successor lease");
-    check(restarted.release_lease("local-gpu", "run-b", "lease-b", 2, 240) &&
-              !restarted.release_lease("local-gpu", "run-b", "lease-b", 2, 241) &&
-              !restarted.active_lease("local-gpu", 241),
+    check(restarted.release_lease("local-gpu", "run-b", "lease-b", 2, test_time(240)) &&
+              !restarted.release_lease("local-gpu", "run-b", "lease-b", 2, test_time(241)) &&
+              !restarted.active_lease("local-gpu", test_time(241)),
           "release is owner-fenced, idempotent, and immediately removes active ownership");
-    const auto reacquired = restarted.acquire_lease("local-gpu", "run-b", "lease-b", 242, 10);
+    sqlite3* receipt_database = nullptr;
+    check(sqlite3_open(database_path.c_str(), &receipt_database) == SQLITE_OK,
+          "direct lease release receipt is independently readable");
+    if (receipt_database != nullptr) {
+      sqlite3_stmt* statement = nullptr;
+      std::string receipt;
+      constexpr const char* query = R"sql(
+        SELECT clock_domain || '|' || boot_id || '|' || released_wall_time_ns
+        FROM resource_lease_releases
+        WHERE concurrency_key='local-gpu' AND owner_run_id='run-b'
+          AND lease_id='lease-b' AND fencing_token=2
+      )sql";
+      if (sqlite3_prepare_v2(receipt_database, query, -1, &statement, nullptr) ==
+              SQLITE_OK &&
+          sqlite3_step(statement) == SQLITE_ROW) {
+        receipt = reinterpret_cast<const char*>(sqlite3_column_text(statement, 0));
+      }
+      sqlite3_finalize(statement);
+      sqlite3_close(receipt_database);
+      check(receipt ==
+                "boottime/v1|aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa|240",
+            "direct lease release records an immutable boot-scoped receipt");
+    }
+    const auto reacquired = restarted.acquire_lease("local-gpu", "run-b", "lease-b", test_time(242), 10);
     check(reacquired.status == trainvm::LeaseAcquireStatus::acquired &&
               reacquired.lease.fencing_token == 3U,
           "reacquiring a released key advances its fencing token");
 
     bool invalid_timeout_rejected = false;
     try {
-      (void)restarted.acquire_lease("another-gpu", "run-c", "lease-c", 1, 0);
+      (void)restarted.acquire_lease("another-gpu", "run-c", "lease-c", test_time(1), 0);
     } catch (const std::invalid_argument&) {
       invalid_timeout_rejected = true;
     }
     check(invalid_timeout_rejected, "nonpositive resource lease timeout is rejected");
+
+    const auto before_reboot = restarted.acquire_lease(
+        "reboot-gpu", "old-boot-run", "old-boot-lease",
+        test_time(1'000, 50'000), 1'000'000);
+    const auto other_boot = test_time_on_boot(
+        5, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", 60'000);
+    check(before_reboot.status == trainvm::LeaseAcquireStatus::acquired &&
+              !restarted.active_lease("reboot-gpu", other_boot) &&
+              !restarted.renew_lease("reboot-gpu", "old-boot-run",
+                                     "old-boot-lease",
+                                     before_reboot.lease.fencing_token,
+                                     other_boot, 1'000) &&
+              !restarted.release_lease("reboot-gpu", "old-boot-run",
+                                       "old-boot-lease",
+                                       before_reboot.lease.fencing_token,
+                                       other_boot),
+          "a lease from another boot identity cannot remain active or authorize mutation");
+    const auto after_reboot = restarted.acquire_lease(
+        "reboot-gpu", "new-boot-run", "new-boot-lease", other_boot, 100);
+    check(after_reboot.status == trainvm::LeaseAcquireStatus::acquired &&
+              after_reboot.lease.fencing_token ==
+                  before_reboot.lease.fencing_token + 1U &&
+              after_reboot.lease.boot_id == other_boot.boot_id,
+          "a new boot supersedes an old-boot lease with a larger fence");
   }
+  std::filesystem::remove_all(directory);
+}
+
+void test_authority_clock_integration() {
+  const std::filesystem::path directory =
+      std::filesystem::temp_directory_path() /
+      ("trainvm-authority-integration-test-" +
+       std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+
+  {
+    trainvm::Journal journal(directory / "reconciler.db");
+    trainvm::AdapterRegistry registry(fixture_adapter_profiles());
+    std::mutex authority_mutex;
+    std::size_t source_calls = 0U;
+    trainvm::Reconciler reconciler(
+        journal, registry, authority_mutex,
+        [&] {
+          ++source_calls;
+          return source_calls == 1U ? test_time(100, 10'000)
+                                    : test_time(99, 10'001);
+        });
+    bool first_reached_journal = false;
+    try {
+      (void)reconciler.step("missing-run");
+    } catch (const std::invalid_argument&) {
+      first_reached_journal = true;
+    }
+    bool regression_refused = false;
+    bool poison_sticky = false;
+    try {
+      (void)reconciler.step("missing-run");
+    } catch (const trainvm::AuthorityClockError&) {
+      regression_refused = true;
+    }
+    try {
+      (void)reconciler.step("missing-run");
+    } catch (const trainvm::AuthorityClockError&) {
+      poison_sticky = true;
+    }
+    check(first_reached_journal && regression_refused && poison_sticky &&
+              source_calls == 2U,
+          "reconciler rejects same-boot BOOTTIME regression and keeps its injected clock poisoned");
+  }
+
+  {
+    std::size_t source_calls = 0U;
+    trainvm::TrainVMService service(
+        directory / "service-boot-flip.db",
+        trainvm::AdapterRegistry(fixture_adapter_profiles()),
+        fixture_disabled_host_launch_registry(),
+        [&] {
+          ++source_calls;
+          return source_calls == 1U
+                     ? test_time_on_boot(
+                           100, "11111111-1111-1111-1111-111111111111",
+                           20'000)
+                     : test_time_on_boot(
+                           101, "22222222-2222-2222-2222-222222222222",
+                           20'001);
+        });
+    const auto first = service.authority_now();
+    bool boot_flip_refused = false;
+    bool poison_sticky = false;
+    try {
+      (void)service.authority_now();
+    } catch (const trainvm::AuthorityClockError&) {
+      boot_flip_refused = true;
+    }
+    try {
+      (void)service.authority_now();
+    } catch (const trainvm::AuthorityClockError&) {
+      poison_sticky = true;
+    }
+    check(first.boot.nanoseconds == 100 && boot_flip_refused && poison_sticky &&
+              source_calls == 2U,
+          "service rejects an injected boot identity flip and keeps the authority poisoned");
+  }
+
+  {
+    std::size_t source_calls = 0U;
+    trainvm::TrainVMService service(
+        directory / "service-malformed.db",
+        trainvm::AdapterRegistry(fixture_adapter_profiles()),
+        fixture_disabled_host_launch_registry(),
+        [&] {
+          ++source_calls;
+          return trainvm::AuthorityTimeSample{
+              .wall = {.nanoseconds = 30'000},
+              .boot = {.nanoseconds = 100},
+              .boot_id = "malformed-boot-id",
+          };
+        });
+    bool malformed_refused = false;
+    bool poison_sticky = false;
+    try {
+      (void)service.authority_now();
+    } catch (const trainvm::AuthorityClockError&) {
+      malformed_refused = true;
+    }
+    try {
+      (void)service.authority_now();
+    } catch (const trainvm::AuthorityClockError&) {
+      poison_sticky = true;
+    }
+    check(malformed_refused && poison_sticky && source_calls == 1U,
+          "service rejects malformed injected authority time and never resamples after poison");
+  }
+
+  std::filesystem::remove_all(directory);
+}
+
+void test_authority_lock_file_identity() {
+  const std::filesystem::path directory =
+      std::filesystem::temp_directory_path() /
+      ("trainvm-authority-file-test-" +
+       std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  std::filesystem::permissions(
+      directory, std::filesystem::perms::owner_all,
+      std::filesystem::perm_options::replace);
+
+  const auto target = directory / "target.db";
+  {
+    trainvm::Journal journal(target);
+  }
+  const auto symlink = directory / "symlink.db";
+  std::filesystem::create_symlink(target.filename(), symlink);
+  bool symlink_refused = false;
+  try {
+    trainvm::TrainVMService service(
+        symlink, trainvm::AdapterRegistry(fixture_adapter_profiles()),
+        fixture_disabled_host_launch_registry(),
+        [] { return test_time(1); });
+  } catch (const std::runtime_error&) {
+    symlink_refused = true;
+  }
+  check(symlink_refused,
+        "service authority rejects a symlink journal before SQLite initialization");
+
+  const auto hardlink = directory / "hardlink.db";
+  std::filesystem::create_hard_link(target, hardlink);
+  bool hardlink_refused = false;
+  try {
+    trainvm::TrainVMService service(
+        hardlink, trainvm::AdapterRegistry(fixture_adapter_profiles()),
+        fixture_disabled_host_launch_registry(),
+        [] { return test_time(1); });
+  } catch (const std::runtime_error&) {
+    hardlink_refused = true;
+  }
+  check(hardlink_refused,
+        "service authority rejects hardlink aliases instead of creating independent locks");
+  std::filesystem::remove(hardlink);
+
+  const auto raced = directory / "raced.db";
+  const auto displaced = directory / "displaced.db";
+  bool retarget_refused = false;
+  std::uintmax_t replacement_size = std::numeric_limits<std::uintmax_t>::max();
+  {
+    trainvm::AuthorityLock authority(raced);
+    std::filesystem::rename(raced, displaced);
+    const int replacement = ::open(
+        raced.c_str(), O_CREAT | O_EXCL | O_CLOEXEC | O_RDWR,
+        S_IRUSR | S_IWUSR);
+    check(replacement >= 0,
+          "authority file race fixture creates a replacement journal inode");
+    if (replacement >= 0) {
+      (void)::close(replacement);
+    }
+    try {
+      trainvm::Journal journal(authority.journal_path(),
+                               authority.journal_identity());
+    } catch (const std::runtime_error& exception) {
+      retarget_refused =
+          std::string(exception.what()).find("authority-locked inode") !=
+          std::string::npos;
+    }
+    replacement_size = std::filesystem::file_size(raced);
+  }
+  check(retarget_refused && replacement_size == 0U,
+        "SQLite rejects a retargeted journal inode before performing schema writes");
+
+  const auto simultaneous = directory / "simultaneous.db";
+  bool simultaneous_refused = false;
+  {
+    trainvm::AuthorityLock first(simultaneous);
+    try {
+      trainvm::AuthorityLock second(simultaneous);
+    } catch (const std::runtime_error&) {
+      simultaneous_refused = true;
+    }
+  }
+  check(simultaneous_refused,
+        "the authority sidecar serializes simultaneous owners of one journal namespace");
+
+  const auto split_path = directory / "split-namespace.db";
+  bool split_authority_refused = false;
+  {
+    trainvm::AuthorityLock first(split_path);
+    trainvm::Journal journal(first.journal_path(), first.journal_identity());
+    const auto displaced_main = directory / "split-namespace.main-old";
+    const auto lock =
+        std::filesystem::path(split_path.string() + ".authority.lock");
+    const auto displaced_lock = directory / "split-namespace.lock-old";
+    std::filesystem::rename(split_path, displaced_main);
+    std::filesystem::rename(lock, displaced_lock);
+    std::vector<std::pair<std::filesystem::path, std::filesystem::path>>
+        displaced_auxiliaries;
+    for (const std::string_view suffix :
+         {std::string_view{"-journal"}, std::string_view{"-wal"},
+          std::string_view{"-shm"}}) {
+      const auto source =
+          std::filesystem::path(split_path.string() + std::string(suffix));
+      if (std::filesystem::exists(source)) {
+        const auto displaced_auxiliary = directory /
+            ("split-namespace" + std::string(suffix) + "-old");
+        std::filesystem::rename(source, displaced_auxiliary);
+        displaced_auxiliaries.emplace_back(source, displaced_auxiliary);
+      }
+    }
+    try {
+      trainvm::AuthorityLock second(split_path);
+    } catch (const std::runtime_error&) {
+      split_authority_refused = true;
+    }
+    for (auto iterator = displaced_auxiliaries.rbegin();
+         iterator != displaced_auxiliaries.rend(); ++iterator) {
+      std::filesystem::rename(iterator->second, iterator->first);
+    }
+    std::filesystem::rename(displaced_lock, lock);
+    std::filesystem::rename(displaced_main, split_path);
+  }
+  check(split_authority_refused,
+        "kernel namespace locking prevents split authority after the database, sidecar, and SQLite auxiliaries are renamed together");
+
+  bool auxiliary_aliases_refused = true;
+  for (const std::string_view suffix :
+       {std::string_view{"-journal"}, std::string_view{"-wal"},
+        std::string_view{"-shm"}}) {
+    for (const bool symbolic : {false, true}) {
+      const auto case_directory =
+          directory / ("aux-" + std::string(suffix.substr(1)) +
+                       (symbolic ? "-symlink" : "-hardlink"));
+      std::filesystem::create_directories(case_directory);
+      std::filesystem::permissions(
+          case_directory, std::filesystem::perms::owner_all,
+          std::filesystem::perm_options::replace);
+      const auto victim = case_directory / "victim";
+      {
+        std::ofstream output(victim, std::ios::binary);
+        output << "preserve-this-file";
+      }
+      const auto journal_path = case_directory / "journal.db";
+      const auto auxiliary =
+          std::filesystem::path(journal_path.string() + std::string(suffix));
+      if (symbolic) {
+        std::filesystem::create_symlink(victim.filename(), auxiliary);
+      } else {
+        std::filesystem::create_hard_link(victim, auxiliary);
+      }
+      bool refused = false;
+      try {
+        trainvm::AuthorityLock authority(journal_path);
+      } catch (const std::runtime_error&) {
+        refused = true;
+      }
+      std::ifstream input(victim, std::ios::binary);
+      const std::string contents((std::istreambuf_iterator<char>(input)),
+                                 std::istreambuf_iterator<char>());
+      auxiliary_aliases_refused = auxiliary_aliases_refused && refused &&
+                                  contents == "preserve-this-file";
+    }
+  }
+  check(auxiliary_aliases_refused,
+        "authority acquisition rejects SQLite journal, WAL, and SHM aliases without touching their victims");
+
+  const auto real_parent = directory / "real-parent";
+  const auto linked_parent = directory / "linked-parent";
+  std::filesystem::create_directories(real_parent);
+  std::filesystem::permissions(real_parent,
+                               std::filesystem::perms::owner_all,
+                               std::filesystem::perm_options::replace);
+  std::filesystem::create_directory_symlink(real_parent.filename(),
+                                            linked_parent);
+  bool parent_symlink_refused = false;
+  try {
+    trainvm::AuthorityLock authority(linked_parent / "journal.db");
+  } catch (const std::runtime_error&) {
+    parent_symlink_refused = true;
+  }
+  check(parent_symlink_refused,
+        "component-wise authority resolution refuses an intermediate directory symlink");
+
+  const auto lifetime_path = directory / "lifetime-main.db";
+  const auto lifetime_displaced = directory / "lifetime-main.displaced";
+  bool lifetime_move_refused = false;
+  bool lifetime_poison_sticky = false;
+  {
+    trainvm::AuthorityLock authority(lifetime_path);
+    trainvm::Journal journal(authority.journal_path(),
+                             authority.journal_identity());
+    std::filesystem::rename(lifetime_path, lifetime_displaced);
+    const int replacement = ::open(
+        lifetime_path.c_str(), O_CREAT | O_EXCL | O_CLOEXEC | O_RDWR,
+        S_IRUSR | S_IWUSR);
+    check(replacement >= 0,
+          "lifetime identity test creates a replacement database inode");
+    if (replacement >= 0) (void)::close(replacement);
+    try {
+      (void)journal.event_count();
+    } catch (const std::runtime_error&) {
+      lifetime_move_refused = true;
+    }
+    std::filesystem::remove(lifetime_path);
+    std::filesystem::rename(lifetime_displaced, lifetime_path);
+    try {
+      (void)journal.event_count();
+    } catch (const std::runtime_error&) {
+      lifetime_poison_sticky = true;
+    }
+  }
+  check(lifetime_move_refused && lifetime_poison_sticky,
+        "a post-construction main-file move poisons every later journal operation even after restoration");
+
+  const auto sidecar_lifetime_path = directory / "lifetime-sidecar.db";
+  bool sidecar_move_refused = false;
+  {
+    trainvm::AuthorityLock authority(sidecar_lifetime_path);
+    trainvm::Journal journal(authority.journal_path(),
+                             authority.journal_identity());
+    const auto sidecar = std::filesystem::path(
+        sidecar_lifetime_path.string() + ".authority.lock");
+    const auto displaced_sidecar = directory / "lifetime-sidecar.displaced";
+    std::filesystem::rename(sidecar, displaced_sidecar);
+    const int replacement = ::open(
+        sidecar.c_str(), O_CREAT | O_EXCL | O_CLOEXEC | O_RDWR,
+        S_IRUSR | S_IWUSR);
+    if (replacement >= 0) (void)::close(replacement);
+    try {
+      (void)journal.event_count();
+    } catch (const std::runtime_error&) {
+      sidecar_move_refused = true;
+    }
+    if (replacement >= 0) std::filesystem::remove(sidecar);
+    std::filesystem::rename(displaced_sidecar, sidecar);
+  }
+  check(sidecar_move_refused,
+        "a post-construction authority-sidecar replacement poisons the old journal before another operation");
+
+  const auto auxiliary_lifetime_path = directory / "lifetime-aux.db";
+  bool auxiliary_lifetime_refused = false;
+  {
+    trainvm::AuthorityLock authority(auxiliary_lifetime_path);
+    trainvm::Journal journal(authority.journal_path(),
+                             authority.journal_identity());
+    const auto wal =
+        std::filesystem::path(auxiliary_lifetime_path.string() + "-wal");
+    const auto wal_victim = directory / "lifetime-wal-victim";
+    const auto wal_alias = directory / "lifetime-wal-alias";
+    if (std::filesystem::exists(wal)) {
+      std::filesystem::create_hard_link(wal, wal_alias);
+    } else {
+      {
+        std::ofstream output(wal_victim, std::ios::binary);
+        output << "preserve-lifetime-victim";
+      }
+      std::filesystem::create_hard_link(wal_victim, wal);
+    }
+    try {
+      (void)journal.event_count();
+    } catch (const std::runtime_error&) {
+      auxiliary_lifetime_refused = true;
+    }
+    if (std::filesystem::exists(wal_alias)) {
+      std::filesystem::remove(wal_alias);
+    } else {
+      std::filesystem::remove(wal);
+      std::filesystem::remove(wal_victim);
+    }
+  }
+  check(auxiliary_lifetime_refused,
+        "lifetime boundaries poison a journal when a live SQLite auxiliary gains a hardlink alias");
+
+  const auto namespace_path = directory / "lifetime-namespace";
+  const auto namespace_displaced = directory / "lifetime-namespace.displaced";
+  std::filesystem::create_directories(namespace_path);
+  std::filesystem::permissions(namespace_path,
+                               std::filesystem::perms::owner_all,
+                               std::filesystem::perm_options::replace);
+  bool namespace_move_refused = false;
+  {
+    const auto path = namespace_path / "journal.db";
+    trainvm::AuthorityLock authority(path);
+    trainvm::Journal journal(authority.journal_path(),
+                             authority.journal_identity());
+    std::filesystem::rename(namespace_path, namespace_displaced);
+    std::filesystem::create_directories(namespace_path);
+    std::filesystem::permissions(namespace_path,
+                                 std::filesystem::perms::owner_all,
+                                 std::filesystem::perm_options::replace);
+    try {
+      (void)journal.event_count();
+    } catch (const std::runtime_error&) {
+      namespace_move_refused = true;
+    }
+    std::filesystem::remove(namespace_path);
+    std::filesystem::rename(namespace_displaced, namespace_path);
+  }
+  check(namespace_move_refused,
+        "lifetime validation re-walks and rejects replacement of the configured parent directory");
+
+  const auto cli_directory = directory / "cli-adversarial";
+  std::filesystem::create_directories(cli_directory);
+  std::filesystem::permissions(cli_directory,
+                               std::filesystem::perms::owner_all,
+                               std::filesystem::perm_options::replace);
+  const auto cli_victim = cli_directory / "victim";
+  {
+    std::ofstream output(cli_victim, std::ios::binary);
+    output << "cli-victim";
+  }
+  const auto cli_journal = cli_directory / "journal.db";
+  std::filesystem::create_hard_link(
+      cli_victim, std::filesystem::path(cli_journal.string() + "-wal"));
+  std::array<char, 4096> executable_buffer{};
+  const ssize_t executable_size = ::readlink(
+      "/proc/self/exe", executable_buffer.data(), executable_buffer.size() - 1U);
+  bool cli_refused = false;
+  if (executable_size > 0) {
+    executable_buffer[static_cast<std::size_t>(executable_size)] = '\0';
+    const auto cli_binary =
+        std::filesystem::path(executable_buffer.data()).parent_path() / "trainvm";
+    const pid_t child = ::fork();
+    if (child == 0) {
+      ::execl(cli_binary.c_str(), cli_binary.c_str(), "journal", "init",
+              cli_journal.c_str(), static_cast<char*>(nullptr));
+      ::_exit(127);
+    }
+    if (child > 0) {
+      int status = 0;
+      if (::waitpid(child, &status, 0) == child) {
+        cli_refused = WIFEXITED(status) && WEXITSTATUS(status) != 0;
+      }
+    }
+  }
+  std::ifstream cli_input(cli_victim, std::ios::binary);
+  const std::string cli_contents((std::istreambuf_iterator<char>(cli_input)),
+                                 std::istreambuf_iterator<char>());
+  check(cli_refused && cli_contents == "cli-victim",
+        "journal CLI uses AuthorityLock auxiliary validation and cannot overwrite an aliased WAL victim");
+
   std::filesystem::remove_all(directory);
 }
 
@@ -1312,7 +2008,7 @@ void test_control_command_journal() {
                             std::chrono::system_clock::now().time_since_epoch())
                             .count();
     const auto lease = journal.acquire_lease("local-gpu-training", "control-run", "lease-1",
-                                             now_ns - 1000, 3'600'000'000'000LL);
+                                             test_time(now_ns - 1000), 3'600'000'000'000LL);
     const auto acknowledgement = [&](std::uint64_t worker_sequence) {
       return trainvm::ControlAcknowledgementIdentity{
           .concurrency_key = "local-gpu-training",
@@ -1367,7 +2063,7 @@ void test_control_command_journal() {
     const auto applied = controller.acknowledge_controls(
         submitted.command_id, acknowledgement(1),
         trainvm::ControlCommandStatus::applied, 300,
-        submitted.assignments, nlohmann::json::array());
+        submitted.assignments, nlohmann::json::array(), test_time(now_ns));
     check(applied.status == trainvm::ControlCommandStatus::applied &&
               applied.effective_step == std::optional<std::uint64_t>{300} &&
               journal.event_count() == 4U && journal.control_command(submitted.command_id) == applied,
@@ -1375,7 +2071,8 @@ void test_control_command_journal() {
     check(controller.acknowledge_controls(
               submitted.command_id, acknowledgement(1),
               trainvm::ControlCommandStatus::applied, 300,
-              submitted.assignments, nlohmann::json::array()) == applied &&
+              submitted.assignments, nlohmann::json::array(),
+              test_time(now_ns)) == applied &&
               journal.event_count() == 4U,
           "identical worker control acknowledgement is idempotent");
     bool changed_ack_rejected = false;
@@ -1383,7 +2080,7 @@ void test_control_command_journal() {
       (void)controller.acknowledge_controls(
           submitted.command_id, acknowledgement(1),
           trainvm::ControlCommandStatus::applied, 301,
-          submitted.assignments, nlohmann::json::array());
+          submitted.assignments, nlohmann::json::array(), test_time(now_ns));
     } catch (const std::invalid_argument&) {
       changed_ack_rejected = true;
     }
@@ -1412,7 +2109,8 @@ void test_control_command_journal() {
       (void)controller.acknowledge_controls(
           later_request.command->command_id, acknowledgement(3),
           trainvm::ControlCommandStatus::applied, 400,
-          later_request.command->assignments, nlohmann::json::array());
+          later_request.command->assignments, nlohmann::json::array(),
+          test_time(now_ns));
     } catch (const std::invalid_argument&) {
       out_of_order_rejected = true;
     }
@@ -1421,12 +2119,14 @@ void test_control_command_journal() {
     const auto second_applied = controller.acknowledge_controls(
         controller_request.command->command_id, acknowledgement(2),
         trainvm::ControlCommandStatus::applied, 350,
-        controller_request.command->assignments, nlohmann::json::array());
+        controller_request.command->assignments, nlohmann::json::array(),
+        test_time(now_ns));
     const auto third_rejected = controller.acknowledge_controls(
         later_request.command->command_id, acknowledgement(3),
         trainvm::ControlCommandStatus::rejected,
         std::nullopt, nlohmann::json::object(),
-        nlohmann::json::array({{{"code", "worker.rejected"}}}));
+        nlohmann::json::array({{{"code", "worker.rejected"}}}),
+        test_time(now_ns));
     check(second_applied.status == trainvm::ControlCommandStatus::applied &&
               third_rejected.status == trainvm::ControlCommandStatus::rejected &&
               journal.event_count() == 8U,
@@ -1435,16 +2135,17 @@ void test_control_command_journal() {
         "browser-request-4", 1, 3, {{"caption_dropout", 0.4}},
         "operator", "fencing test");
     check(journal.release_lease("local-gpu-training", "control-run", "lease-1",
-                                lease.lease.fencing_token, now_ns),
+                                lease.lease.fencing_token, test_time(now_ns)),
           "fencing test releases the first worker lease");
     const auto successor = journal.acquire_lease("local-gpu-training", "control-run", "lease-2",
-                                                 now_ns, 3'600'000'000'000LL);
+                                                 test_time(now_ns), 3'600'000'000'000LL);
     bool stale_lease_rejected = false;
     try {
       (void)controller.acknowledge_controls(
           fenced_request.command->command_id, acknowledgement(4),
           trainvm::ControlCommandStatus::applied, 450,
-          fenced_request.command->assignments, nlohmann::json::array());
+          fenced_request.command->assignments, nlohmann::json::array(),
+          test_time(now_ns));
     } catch (const std::invalid_argument&) {
       stale_lease_rejected = true;
     }
@@ -1459,7 +2160,8 @@ void test_control_command_journal() {
     const auto fenced_applied = controller.acknowledge_controls(
         fenced_request.command->command_id, successor_identity,
         trainvm::ControlCommandStatus::applied, 450,
-        fenced_request.command->assignments, nlohmann::json::array());
+        fenced_request.command->assignments, nlohmann::json::array(),
+        test_time(now_ns));
     check(stale_lease_rejected && successor.lease.fencing_token == 2U &&
               fenced_applied.acknowledgement == successor_identity && journal.event_count() == 10U,
           "stale worker fencing tokens cannot acknowledge controls after lease takeover");
@@ -1474,7 +2176,7 @@ void test_control_command_journal() {
       (void)other.acknowledge_controls(
           submitted.command_id, acknowledgement(1),
           trainvm::ControlCommandStatus::applied, 300,
-          submitted.assignments, nlohmann::json::array());
+          submitted.assignments, nlohmann::json::array(), test_time(now_ns));
     } catch (const std::invalid_argument&) {
       cross_run_ack_rejected = true;
     }
@@ -1559,7 +2261,7 @@ void test_command_service() {
                             std::chrono::system_clock::now().time_since_epoch())
                             .count();
     const auto lease = worker_journal.acquire_lease(
-        "local-gpu-training", "service-run", "service-worker-lease", now_ns - 1000,
+        "local-gpu-training", "service-run", "service-worker-lease", test_time(now_ns - 1000),
         3'600'000'000'000LL);
     (void)worker.acknowledge_controls(
         first_response.control().command_id(),
@@ -1574,7 +2276,8 @@ void test_command_service() {
         trainvm::ControlCommandStatus::rejected, std::nullopt, nlohmann::json::object(),
         nlohmann::json::array(
             {{{"severity", "error"}, {"code", "worker.control_rejected"},
-              {"message", "worker rejected the requested value"}}}));
+              {"message", "worker rejected the requested value"}}}),
+        test_time(now_ns));
   }
   trainvm::v1::RunCommandResponse terminal_retry_response;
   const auto terminal_retry_status =
@@ -1991,10 +2694,11 @@ void test_atomic_queue_acquisition_boundary() {
 
   const auto blocker =
       journal.acquire_lease(compiled.plan->experiment.spec.workspace.concurrency_key,
-                            "blocking-run", "blocking-lease", 100, 1'000);
+                            "blocking-run", "blocking-lease",
+                            test_time(100, 10'000), 1'000);
   check(blocker.status == trainvm::LeaseAcquireStatus::acquired,
         "queue acquisition test establishes a competing lease");
-  const auto busy = controller.begin_acquisition(200);
+  const auto busy = controller.begin_acquisition(test_time(200, 20'000));
   const auto queued = journal.projection("queued-acquisition-run");
   check(busy.status == trainvm::LeaseAcquireStatus::busy && queued &&
             queued->desired_state == "queued" && queued->observed_state == "queued" &&
@@ -2002,9 +2706,9 @@ void test_atomic_queue_acquisition_boundary() {
         "busy resource lease leaves the queued run and journal unchanged");
 
   check(journal.release_lease(blocker.lease.concurrency_key, blocker.lease.owner_run_id,
-                              blocker.lease.lease_id, blocker.lease.fencing_token, 250),
+                              blocker.lease.lease_id, blocker.lease.fencing_token, test_time(250)),
         "queue acquisition test releases its competing lease");
-  const auto acquired = controller.begin_acquisition(300);
+  const auto acquired = controller.begin_acquisition(test_time(300, 30'000));
   const auto acquiring = journal.projection("queued-acquisition-run");
   check(acquired.status == trainvm::LeaseAcquireStatus::acquired && acquiring &&
             acquiring->desired_state == "running" && acquiring->observed_state == "acquiring" &&
@@ -2016,6 +2720,11 @@ void test_atomic_queue_acquisition_boundary() {
   const auto lease_event = journal.event("queued-acquisition-run:lease-acquired");
   const auto acquisition_events = journal.events_for_run("queued-acquisition-run");
   check(lease_event &&
+            lease_event->wall_time_ns == 30'000 &&
+            lease_event->payload.value("clock_domain", std::string{}) ==
+                trainvm::ResourceLease::kBootTimeDomain &&
+            lease_event->payload.value("boot_id", std::string{}) == kTestBootId &&
+            lease_event->payload.value("acquired_boottime_ns", std::int64_t{}) == 300 &&
             lease_event->payload.value("fencing_token", std::uint64_t{}) ==
                 acquired.lease.fencing_token &&
             lease_event->payload.value("owner_run_id", std::string{}) == "queued-acquisition-run" &&
@@ -2036,16 +2745,16 @@ void test_atomic_queue_acquisition_boundary() {
                                               "boundary:train_to_boundary@1"),
         "acquiring state cannot dispatch before verified worker readiness");
 
-  const auto expires_at = acquired.lease.expires_at_ns;
-  const auto replayed = controller.begin_acquisition(400);
+  const auto expires_at = acquired.lease.expires_boottime_ns;
+  const auto replayed = controller.begin_acquisition(test_time(400, 40'000));
   check(replayed.status == trainvm::LeaseAcquireStatus::already_owned &&
             replayed.lease.fencing_token == acquired.lease.fencing_token &&
-            replayed.lease.expires_at_ns == expires_at && journal.event_count() == 6U,
+            replayed.lease.expires_boottime_ns == expires_at && journal.event_count() == 6U,
         "acquisition retry neither renews the lease nor duplicates admission "
         "events");
   bool negative_retry_rejected = false;
   try {
-    (void)controller.begin_acquisition(-1);
+    (void)controller.begin_acquisition(test_time(-1));
   } catch (const std::invalid_argument&) {
     negative_retry_rejected = true;
   }
@@ -2057,7 +2766,7 @@ void test_atomic_queue_acquisition_boundary() {
         "boundary");
   bool expired_reconcile_refused = false;
   try {
-    (void)restarted.begin_acquisition(expires_at + 1);
+    (void)restarted.begin_acquisition(test_time(expires_at + 1));
   } catch (const std::runtime_error&) {
     expired_reconcile_refused = true;
   }
@@ -2082,7 +2791,7 @@ void test_atomic_queue_acquisition_boundary() {
     invalid_controller.create_queued();
     bool rejected_before_lease = false;
     try {
-      (void)invalid_controller.begin_acquisition(500);
+      (void)invalid_controller.begin_acquisition(test_time(500));
     } catch (const std::exception&) {
       rejected_before_lease = true;
     }
@@ -2093,7 +2802,7 @@ void test_atomic_queue_acquisition_boundary() {
               invalid_journal.event_count() == 1U &&
               !invalid_journal.active_lease(
                   invalid_admission.plan->experiment.spec.workspace.concurrency_key,
-                  500),
+                  test_time(500)),
           "unsupported builtin admission is rejected before acquiring its lease");
   }
 
@@ -2132,7 +2841,7 @@ void test_atomic_queue_acquisition_boundary() {
     bool rejected_before_mutation = false;
     std::string rejection_message;
     try {
-      (void)conditional_controller.begin_acquisition(600);
+      (void)conditional_controller.begin_acquisition(test_time(600));
     } catch (const std::exception& exception) {
       rejected_before_mutation = true;
       rejection_message = exception.what();
@@ -2145,7 +2854,7 @@ void test_atomic_queue_acquisition_boundary() {
               events_before == 1U && projection_after == projection_before &&
               projection_after && projection_after->desired_state == "queued" &&
               projection_after->observed_state == "queued" &&
-              !conditional_journal.active_lease(concurrency_key, 600),
+              !conditional_journal.active_lease(concurrency_key, test_time(600)),
           "payload-dependent builtin admission is rejected before lease or "
           "lifecycle mutation");
   }
@@ -2166,7 +2875,7 @@ void test_atomic_queue_acquisition_boundary() {
     const auto projection_before = external_journal.projection(external_run_id);
     bool rejected_before_mutation = false;
     try {
-      (void)external_controller.begin_acquisition(700);
+      (void)external_controller.begin_acquisition(test_time(700));
     } catch (const std::logic_error&) {
       rejected_before_mutation = true;
     }
@@ -2174,7 +2883,7 @@ void test_atomic_queue_acquisition_boundary() {
               external_journal.projection(external_run_id) == projection_before &&
               !external_journal.active_lease(
                   external_admission.plan->experiment.spec.workspace.concurrency_key,
-                  700),
+                  test_time(700)),
           "non-builtin queued entrypoint is rejected before lease or lifecycle "
           "mutation");
   }
@@ -2221,7 +2930,7 @@ void test_worker_launch_and_readiness_boundary() {
     trainvm::Journal journal(database_path);
     trainvm::Controller controller(*compiled.plan, journal, run_id);
     controller.create_queued();
-    const auto acquired = controller.begin_acquisition(1'000);
+    const auto acquired = controller.begin_acquisition(test_time(1'000));
     const auto acquiring = journal.projection(run_id);
     check(acquired.status == trainvm::LeaseAcquireStatus::acquired &&
               controller.state().revision == 4U &&
@@ -2232,8 +2941,8 @@ void test_worker_launch_and_readiness_boundary() {
           "queued acquisition advances builtin admission to an unassigned "
           "revision-four node");
 
-    const auto launch = controller.prepare_worker_launch(launch_request, 1'100);
-    const auto launch_retry = controller.prepare_worker_launch(launch_request, 1'100);
+    const auto launch = controller.prepare_worker_launch(launch_request, test_time(1'100));
+    const auto launch_retry = controller.prepare_worker_launch(launch_request, test_time(1'100));
     check(launch == launch_retry && launch.run_id == run_id &&
               launch.node_id == "train_to_boundary" && launch.attempt_id == "train_to_boundary@1" &&
               launch.code_fingerprint == launch_request.code_fingerprint &&
@@ -2249,7 +2958,7 @@ void test_worker_launch_and_readiness_boundary() {
     wrong_nonce.launch_nonce += "-wrong";
     bool wrong_nonce_rejected = false;
     try {
-      (void)controller.accept_worker_hello(std::move(wrong_nonce), 1'200);
+      (void)controller.accept_worker_hello(std::move(wrong_nonce), test_time(1'200));
     } catch (const std::invalid_argument&) {
       wrong_nonce_rejected = true;
     }
@@ -2257,7 +2966,7 @@ void test_worker_launch_and_readiness_boundary() {
     missing_capability.capabilities = {"worker.controls"};
     bool missing_capability_rejected = false;
     try {
-      (void)controller.accept_worker_hello(std::move(missing_capability), 1'200);
+      (void)controller.accept_worker_hello(std::move(missing_capability), test_time(1'200));
     } catch (const std::invalid_argument&) {
       missing_capability_rejected = true;
     }
@@ -2268,7 +2977,7 @@ void test_worker_launch_and_readiness_boundary() {
           "worker hello rejects wrong nonce and missing required capability "
           "without mutation");
 
-    const auto ready = controller.accept_worker_hello(hello, 1'200);
+    const auto ready = controller.accept_worker_hello(hello, test_time(1'200));
     const auto running = journal.projection(run_id);
     const auto readiness_events = journal.events_for_run(run_id);
     check(ready.disposition == trainvm::WorkerReadinessDisposition::accepted && running &&
@@ -2282,7 +2991,7 @@ void test_worker_launch_and_readiness_boundary() {
               readiness_events[10].event_type == "node.entered",
           "matching worker hello atomically publishes readiness, running, and "
           "node assignment");
-    const auto ready_retry = controller.accept_worker_hello(hello, 1'250);
+    const auto ready_retry = controller.accept_worker_hello(hello, test_time(1'250));
     check(ready_retry.disposition == trainvm::WorkerReadinessDisposition::replayed &&
               ready_retry.launch == launch && journal.event_count() == 11U,
           "exact worker hello retry replays without duplicate readiness events");
@@ -2293,7 +3002,7 @@ void test_worker_launch_and_readiness_boundary() {
     } catch (const std::logic_error&) {
       unfenced_dispatch_rejected = true;
     }
-    const auto dispatch = controller.prepare_dispatch(1'300);
+    const auto dispatch = controller.prepare_dispatch(test_time(1'300));
     check(unfenced_dispatch_rejected && dispatch.run_id == run_id && dispatch.run_revision == 5U &&
               dispatch.node_id == "train_to_boundary" &&
               dispatch.attempt_id == "train_to_boundary@1" &&
@@ -2344,14 +3053,14 @@ void test_worker_launch_and_readiness_boundary() {
     check(journal.release_lease(acquired.lease.concurrency_key,
                                 acquired.lease.owner_run_id,
                                 acquired.lease.lease_id,
-                                acquired.lease.fencing_token, 1'400),
+                                acquired.lease.fencing_token, test_time(1'400)),
           "stale worker fixture releases the accepted fence");
     const auto successor = journal.acquire_lease(
         acquired.lease.concurrency_key, "successor-run", "successor-lease",
-        1'401, 60'000'000'000LL);
+        test_time(1'401), 60'000'000'000LL);
     bool stale_result_rejected = false;
     try {
-      (void)controller.handle_event(result_event, session, 1'500);
+      (void)controller.handle_event(result_event, session, test_time(1'500));
     } catch (const std::runtime_error&) {
       stale_result_rejected = true;
     }
@@ -2366,7 +3075,7 @@ void test_worker_launch_and_readiness_boundary() {
     trainvm::Journal journal(database_path);
     trainvm::Controller controller(*compiled.plan, journal, run_id);
     controller.create_queued();
-    const auto acquired = controller.begin_acquisition(2'000);
+    const auto acquired = controller.begin_acquisition(test_time(2'000));
     trainvm::WorkerHelloEvidence hello{
         .run_id = run_id,
         .node_id = controller.state().current_node_id,
@@ -2383,7 +3092,7 @@ void test_worker_launch_and_readiness_boundary() {
     };
     bool rejected = false;
     try {
-      (void)controller.accept_worker_hello(std::move(hello), 2'100);
+      (void)controller.accept_worker_hello(std::move(hello), test_time(2'100));
     } catch (const std::logic_error&) {
       rejected = true;
     }
@@ -2398,13 +3107,13 @@ void test_worker_launch_and_readiness_boundary() {
     trainvm::Journal journal(database_path);
     trainvm::Controller controller(*compiled.plan, journal, run_id);
     controller.create_queued();
-    const auto acquired = controller.begin_acquisition(3'000);
-    const auto launch = controller.prepare_worker_launch(launch_request, 3'100);
+    const auto acquired = controller.begin_acquisition(test_time(3'000));
+    const auto launch = controller.prepare_worker_launch(launch_request, test_time(3'100));
     (void)bind_test_worker_launch(controller, launch, 3'150);
     auto hello = hello_for(launch, launch_request.required_capabilities);
     bool rejected = false;
     try {
-      (void)controller.accept_worker_hello(std::move(hello), acquired.lease.expires_at_ns + 1);
+      (void)controller.accept_worker_hello(std::move(hello), test_time(acquired.lease.expires_boottime_ns + 1));
     } catch (const std::runtime_error&) {
       rejected = true;
     }
@@ -2421,16 +3130,16 @@ void test_worker_launch_and_readiness_boundary() {
     trainvm::Journal journal(database_path);
     trainvm::Controller controller(*compiled.plan, journal, run_id);
     controller.create_queued();
-    const auto acquired = controller.begin_acquisition(4'000);
-    const auto launch = controller.prepare_worker_launch(launch_request, 4'100);
+    const auto acquired = controller.begin_acquisition(test_time(4'000));
+    const auto launch = controller.prepare_worker_launch(launch_request, test_time(4'100));
     (void)bind_test_worker_launch(controller, launch, 4'150);
     check(journal.release_lease(acquired.lease.concurrency_key, acquired.lease.owner_run_id,
-                                acquired.lease.lease_id, acquired.lease.fencing_token, 4'200),
+                                acquired.lease.lease_id, acquired.lease.fencing_token, test_time(4'200)),
           "released-lease readiness fixture releases its acquired fence");
     auto hello = hello_for(launch, launch_request.required_capabilities);
     bool rejected = false;
     try {
-      (void)controller.accept_worker_hello(std::move(hello), 4'300);
+      (void)controller.accept_worker_hello(std::move(hello), test_time(4'300));
     } catch (const std::runtime_error&) {
       rejected = true;
     }
@@ -2447,12 +3156,12 @@ void test_worker_launch_and_readiness_boundary() {
     trainvm::Journal journal(database_path);
     trainvm::Controller controller(*compiled.plan, journal, run_id);
     controller.create_queued();
-    (void)controller.begin_acquisition(5'000);
-    const auto launch = controller.prepare_worker_launch(launch_request, 5'100);
+    (void)controller.begin_acquisition(test_time(5'000));
+    const auto launch = controller.prepare_worker_launch(launch_request, test_time(5'100));
     (void)bind_test_worker_launch(controller, launch, 5'150);
     (void)controller.accept_worker_hello(
-        hello_for(launch, launch_request.required_capabilities), 5'200);
-    const auto dispatch = controller.prepare_dispatch(5'300);
+        hello_for(launch, launch_request.required_capabilities), test_time(5'200));
+    const auto dispatch = controller.prepare_dispatch(test_time(5'300));
     const trainvm::WorkerSessionIdentity session{
         .run_id = launch.run_id,
         .node_id = launch.node_id,
@@ -2477,7 +3186,8 @@ void test_worker_launch_and_readiness_boundary() {
         .optimizer_step = 5'500,
         .payload = {{"reason", "cache_span_complete"}},
     };
-    const auto& advanced = controller.handle_event(result, session, 5'400);
+    const auto& advanced =
+        controller.handle_event(result, session, test_time(5'400));
     const auto receipt = journal.dispatch(dispatch.dispatch_id);
     const auto reacquiring = journal.projection(run_id);
     bool unfenced_next_dispatch_rejected = false;
@@ -2488,7 +3198,7 @@ void test_worker_launch_and_readiness_boundary() {
       unfenced_next_dispatch_rejected = true;
     }
     try {
-      (void)controller.prepare_dispatch(5'450);
+      (void)controller.prepare_dispatch(test_time(5'450));
     } catch (const std::logic_error&) {
       unready_next_dispatch_rejected = true;
     }
@@ -2503,12 +3213,13 @@ void test_worker_launch_and_readiness_boundary() {
           "active fenced result returns the next external node to an unassigned "
           "readiness boundary");
     const auto next_launch =
-        controller.prepare_worker_launch(launch_request, 5'500);
+        controller.prepare_worker_launch(launch_request, test_time(5'500));
     (void)bind_test_worker_launch(controller, next_launch, 5'550);
     const auto next_ready = controller.accept_worker_hello(
-        hello_for(next_launch, launch_request.required_capabilities), 5'600);
+        hello_for(next_launch, launch_request.required_capabilities),
+        test_time(5'600));
     const auto next_running = journal.projection(run_id);
-    const auto next_dispatch = controller.prepare_dispatch(5'700);
+    const auto next_dispatch = controller.prepare_dispatch(test_time(5'700));
     check(next_launch.node_id == "prepare_cache" &&
               next_launch.attempt_id == "prepare_cache@1" &&
               next_launch.launch_nonce != launch.launch_nonce &&
@@ -2549,13 +3260,14 @@ void test_worker_launch_and_readiness_boundary() {
         .payload = nlohmann::json::object(),
     };
     (void)controller.handle_event(cache_prepared, session_for(next_launch),
-                                  5'800);
+                                  test_time(5'800));
     const auto build_launch =
-        controller.prepare_worker_launch(launch_request, 5'900);
+        controller.prepare_worker_launch(launch_request, test_time(5'900));
     (void)bind_test_worker_launch(controller, build_launch, 5'950);
     (void)controller.accept_worker_hello(
-        hello_for(build_launch, launch_request.required_capabilities), 6'000);
-    const auto build_dispatch = controller.prepare_dispatch(6'100);
+        hello_for(build_launch, launch_request.required_capabilities),
+        test_time(6'000));
+    const auto build_dispatch = controller.prepare_dispatch(test_time(6'100));
     const trainvm::Event cache_built{
         .event_id = build_dispatch.dispatch_id + ":result",
         .run_id = run_id,
@@ -2572,7 +3284,7 @@ void test_worker_launch_and_readiness_boundary() {
         .payload = nlohmann::json::object(),
     };
     const auto& builtin = controller.handle_event(
-        cache_built, session_for(build_launch), 6'200);
+        cache_built, session_for(build_launch), test_time(6'200));
     check(builtin.revision == 12U &&
               builtin.current_node_id == "validate_cache" &&
               journal.projection(run_id)->observed_state == "running",
@@ -2580,7 +3292,7 @@ void test_worker_launch_and_readiness_boundary() {
     const auto before_wrong_builtin = journal.event_count();
     bool wrong_builtin_rejected = false;
     try {
-      (void)controller.release_managed_resources(6'300);
+      (void)controller.release_managed_resources(test_time(6'300));
     } catch (const std::logic_error&) {
       wrong_builtin_rejected = true;
     }
@@ -2615,7 +3327,7 @@ void test_worker_launch_and_readiness_boundary() {
               journal.event_count() == before_wrong_builtin,
           "managed artifact validation rejects generic simulation hooks without mutation");
     const auto& builtin_advanced = controller.complete_artifact_validation(
-        trainvm::ArtifactValidationOutcome::valid, 6'300);
+        trainvm::ArtifactValidationOutcome::valid, test_time(6'300));
     const auto builtin_reacquiring = journal.projection(run_id);
     const auto validation_events = journal.events_for_run(run_id);
     const auto validation_result = std::ranges::find_if(
@@ -2640,10 +3352,11 @@ void test_worker_launch_and_readiness_boundary() {
           "typed artifact validation authors a canonical result and durably "
           "returns to worker acquisition");
     const auto resume_launch =
-        builtin_restart.prepare_worker_launch(launch_request, 6'400);
+        builtin_restart.prepare_worker_launch(launch_request, test_time(6'400));
     (void)bind_test_worker_launch(builtin_restart, resume_launch, 6'450);
     (void)builtin_restart.accept_worker_hello(
-        hello_for(resume_launch, launch_request.required_capabilities), 6'500);
+        hello_for(resume_launch, launch_request.required_capabilities),
+        test_time(6'500));
     check(resume_launch.node_id == "resume_training" &&
               builtin_restart.state().revision == 15U &&
               journal.projection(run_id)->current_node_id == "resume_training",
@@ -2732,8 +3445,8 @@ void test_worker_control_service_boundary() {
       trainvm::Journal journal(database_path);
       trainvm::Controller controller(*compiled.plan, journal, run_id);
       controller.create_queued(submission_identity);
-      (void)controller.begin_acquisition(1'000);
-      launch = controller.prepare_worker_launch(launch_request, 1'100);
+      (void)controller.begin_acquisition(test_time(1'000));
+      launch = controller.prepare_worker_launch(launch_request, test_time(1'100));
       (void)bind_test_worker_launch(controller, launch, 1'150);
       check(journal.event_count() == 8U,
             "WorkerControl fixture stops at a durable host launch binding");
@@ -2744,7 +3457,7 @@ void test_worker_control_service_boundary() {
         database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
         fixture_test_host_launch_registry(*compiled.plan, launch),
         fixture_test_host_identity(),
-        [&authority_now_ns] { return authority_now_ns; });
+        [&authority_now_ns] { return test_time(authority_now_ns); });
     const auto hello = wire_hello(launch);
     trainvm::TrainVMService::WorkerConnection unbound_connection;
     const std::size_t before_unbound =
@@ -2895,8 +3608,8 @@ void test_worker_control_service_boundary() {
       trainvm::Journal journal(database_path);
       trainvm::Controller controller(*compiled.plan, journal, run_id);
       controller.create_queued(submission_identity);
-      lease = controller.begin_acquisition(3'000).lease;
-      launch = controller.prepare_worker_launch(launch_request, 3'100);
+      lease = controller.begin_acquisition(test_time(3'000)).lease;
+      launch = controller.prepare_worker_launch(launch_request, test_time(3'100));
       (void)bind_test_worker_launch(controller, launch, 3'150);
     }
     std::size_t clock_sample = 0;
@@ -2906,8 +3619,9 @@ void test_worker_control_service_boundary() {
         fixture_test_host_identity(),
         [&] {
           ++clock_sample;
-          return clock_sample == 1U ? lease.expires_at_ns - 1
-                                    : lease.expires_at_ns;
+          return test_time(clock_sample == 1U
+                               ? lease.expires_boottime_ns - 1
+                               : lease.expires_boottime_ns);
         });
     prime_test_service_launch(service, launch);
     trainvm::TrainVMService::WorkerConnection connection;
@@ -2939,7 +3653,7 @@ void test_worker_control_service_boundary() {
               observer.event_count() == 11U,
           "WorkerControl resamples time and refuses dispatch when the lease expires "
           "after hello readiness");
-    service.prune_retained_launches(lease.expires_at_ns);
+    service.prune_retained_launches(test_time(lease.expires_boottime_ns));
     check(service.resolved_launches_.empty(),
           "expired same-attempt leases release their retained launch bundles");
   }
@@ -2952,8 +3666,8 @@ void test_worker_control_service_boundary() {
       trainvm::Journal journal(database_path);
       trainvm::Controller controller(*compiled.plan, journal, run_id);
       controller.create_queued(submission_identity);
-      (void)controller.begin_acquisition(2'000);
-      launch = controller.prepare_worker_launch(launch_request, 2'100);
+      (void)controller.begin_acquisition(test_time(2'000));
+      launch = controller.prepare_worker_launch(launch_request, test_time(2'100));
       (void)bind_test_worker_launch(controller, launch, 2'150);
     }
     std::int64_t authority_now_ns = 2'200;
@@ -2961,7 +3675,7 @@ void test_worker_control_service_boundary() {
         database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
         fixture_test_host_launch_registry(*compiled.plan, launch),
         fixture_test_host_identity(),
-        [&authority_now_ns] { return authority_now_ns; });
+        [&authority_now_ns] { return test_time(authority_now_ns); });
     prime_test_service_launch(service, launch);
     trainvm::TrainVMService::WorkerConnection connection;
     const grpc::Status open =
@@ -2972,10 +3686,10 @@ void test_worker_control_service_boundary() {
       const auto count = authority_observer.event_count();
       check(authority_observer.release_lease(
                 launch.concurrency_key, launch.run_id, launch.lease_id,
-                launch.fencing_token, 2'300),
+                launch.fencing_token, test_time(2'300)),
             "stale-fence WorkerControl fixture releases the accepted lease");
       const auto successor = authority_observer.acquire_lease(
-          launch.concurrency_key, "successor-run", "successor-lease", 2'301,
+          launch.concurrency_key, "successor-run", "successor-lease", test_time(2'301),
           60'000'000'000LL);
       authority_now_ns = 2'400;
       trainvm::v1::WorkerReceipt receipt;
@@ -2985,7 +3699,7 @@ void test_worker_control_service_boundary() {
                 stale.error_code() == grpc::StatusCode::FAILED_PRECONDITION &&
                 authority_observer.event_count() == count,
             "WorkerControl rejects a result after lease fence takeover without mutation");
-      service.prune_retained_launches(authority_now_ns);
+      service.prune_retained_launches(test_time(authority_now_ns));
       check(service.resolved_launches_.empty(),
             "released and superseded same-attempt leases release their retained launch bundles");
     }
@@ -2999,15 +3713,15 @@ void test_worker_control_service_boundary() {
       trainvm::Journal journal(database_path);
       trainvm::Controller controller(*compiled.plan, journal, run_id);
       controller.create_queued(submission_identity);
-      (void)controller.begin_acquisition(4'000);
-      launch = controller.prepare_worker_launch(launch_request, 4'100);
+      (void)controller.begin_acquisition(test_time(4'000));
+      launch = controller.prepare_worker_launch(launch_request, test_time(4'100));
       (void)bind_test_worker_launch(controller, launch, 4'150);
     }
     trainvm::TrainVMService service(
         database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
         fixture_test_host_launch_registry(*compiled.plan, launch),
         fixture_test_host_identity(),
-        [] { return 4'200; });
+        [] { return test_time(4'200); });
     prime_test_service_launch(service, launch);
     trainvm::TrainVMService::WorkerConnection connection;
     const grpc::Status open =
@@ -3068,20 +3782,20 @@ void test_worker_control_grpc_stream() {
     trainvm::Journal journal(database_path);
     trainvm::Controller controller(*compiled.plan, journal, run_id);
     controller.create_queued(submission_identity);
-    (void)controller.begin_acquisition(1'000);
+    (void)controller.begin_acquisition(test_time(1'000));
     launch = controller.prepare_worker_launch(
         {.code_fingerprint = "sha256:" + std::string(64U, '3'),
          .required_capabilities = {"worker.controls", "worker.metrics"}},
-        1'100);
+        test_time(1'100));
     (void)bind_test_worker_launch(controller, launch, 1'150);
     trainvm::Controller eof_controller(
         *eof_compiled.plan, journal, eof_run_id);
     eof_controller.create_queued(eof_submission_identity);
-    (void)eof_controller.begin_acquisition(1'000);
+    (void)eof_controller.begin_acquisition(test_time(1'000));
     eof_launch = eof_controller.prepare_worker_launch(
         {.code_fingerprint = "sha256:" + std::string(64U, '3'),
          .required_capabilities = {"worker.controls", "worker.metrics"}},
-        1'100);
+        test_time(1'100));
     (void)bind_test_worker_launch(eof_controller, eof_launch, 1'150);
   }
 
@@ -3128,7 +3842,7 @@ void test_worker_control_grpc_stream() {
       database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
       fixture_test_host_launch_registry(*compiled.plan, launch),
       fixture_test_host_identity(),
-      [] { return 1'200; });
+      [] { return test_time(1'200); });
   prime_test_service_launch(service, launch);
   prime_test_service_launch(service, eof_launch);
   grpc::ServerBuilder builder;
@@ -3320,12 +4034,12 @@ void test_typed_managed_resource_release() {
   trainvm::Journal journal(database_path);
   trainvm::Controller controller(*compiled.plan, journal, run_id);
   controller.create_queued();
-  const auto acquired = controller.begin_acquisition(1'000);
+  const auto acquired = controller.begin_acquisition(test_time(1'000));
   const trainvm::WorkerLaunchRequest request{
       .code_fingerprint = "sha256:" + std::string(64U, '5'),
       .required_capabilities = {"worker.controls"},
   };
-  const auto launch = controller.prepare_worker_launch(request, 1'100);
+  const auto launch = controller.prepare_worker_launch(request, test_time(1'100));
   (void)bind_test_worker_launch(controller, launch, 1'150);
   (void)controller.accept_worker_hello(
       {.run_id = launch.run_id,
@@ -3340,8 +4054,8 @@ void test_typed_managed_resource_release() {
        .concurrency_key = launch.concurrency_key,
        .lease_id = launch.lease_id,
        .fencing_token = launch.fencing_token},
-      1'200);
-  const auto worker_dispatch = controller.prepare_dispatch(1'300);
+      test_time(1'200));
+  const auto worker_dispatch = controller.prepare_dispatch(test_time(1'300));
   const trainvm::WorkerSessionIdentity session{
       .run_id = launch.run_id,
       .node_id = launch.node_id,
@@ -3367,7 +4081,7 @@ void test_typed_managed_resource_release() {
       .payload = {{"reason", "training_complete"}},
   };
   const auto& builtin =
-      controller.handle_event(worker_result, session, 1'400);
+      controller.handle_event(worker_result, session, test_time(1'400));
   check(builtin.revision == 6U && builtin.current_node_id == "release_gpu" &&
             journal.projection(run_id)->observed_state == "running",
         "managed worker result enters the resource release builtin");
@@ -3376,7 +4090,7 @@ void test_typed_managed_resource_release() {
   bool wrong_builtin_rejected = false;
   try {
     (void)controller.complete_artifact_validation(
-        trainvm::ArtifactValidationOutcome::valid, 1'500);
+        trainvm::ArtifactValidationOutcome::valid, test_time(1'500));
   } catch (const std::logic_error&) {
     wrong_builtin_rejected = true;
   }
@@ -3410,7 +4124,7 @@ void test_typed_managed_resource_release() {
   check(simulation_dispatch_rejected && simulation_result_rejected &&
             journal.event_count() == before_wrong_builtin,
         "managed resource release rejects generic simulation hooks without mutation");
-  const auto& completed = controller.release_managed_resources(1'500);
+  const auto& completed = controller.release_managed_resources(test_time(1'500));
   const auto projection = journal.projection(run_id);
   const auto release_events = journal.events_for_run(run_id);
   const auto release_result = std::ranges::find_if(
@@ -3439,7 +4153,7 @@ void test_typed_managed_resource_release() {
                 nlohmann::json{{"concurrency_key", acquired.lease.concurrency_key},
                                {"lease_id", acquired.lease.lease_id},
                                {"fencing_token", acquired.lease.fencing_token}} &&
-            !journal.active_lease(acquired.lease.concurrency_key, 1'500) &&
+            !journal.active_lease(acquired.lease.concurrency_key, test_time(1'500)) &&
             journal.verify_chain(&chain_reason),
         "typed resource release atomically releases its fence and commits one terminal receipt");
   sqlite3* tamper = nullptr;
@@ -3448,18 +4162,18 @@ void test_typed_managed_resource_release() {
   if (tamper != nullptr) {
     check(sqlite3_exec(
               tamper,
-              "UPDATE resource_leases SET released_at_ns=NULL",
+              "UPDATE resource_leases SET released_wall_time_ns=NULL",
               nullptr, nullptr, nullptr) == SQLITE_OK,
           "release receipt tamper test resurrects the mutable lease row");
-    check(!journal.active_lease(acquired.lease.concurrency_key, 1'500) &&
+    check(!journal.active_lease(acquired.lease.concurrency_key, test_time(1'500)) &&
               !journal.renew_lease(
                   acquired.lease.concurrency_key, run_id,
                   acquired.lease.lease_id, acquired.lease.fencing_token,
-                  1'500, 60'000'000'000LL) &&
+                  test_time(1'500), 60'000'000'000LL) &&
               !journal.release_lease(
                   acquired.lease.concurrency_key, run_id,
                   acquired.lease.lease_id, acquired.lease.fencing_token,
-                  1'501),
+                  test_time(1'501)),
           "immutable release receipt prevents a mutable lease resurrection");
     bool resurrected_release_recovered = false;
     try {
@@ -3472,7 +4186,7 @@ void test_typed_managed_resource_release() {
           "terminal recovery trusts the immutable release receipt over a stale mutable row");
     check(sqlite3_exec(
               tamper,
-              "UPDATE resource_leases SET released_at_ns=1500",
+              "UPDATE resource_leases SET released_wall_time_ns=1500",
               nullptr, nullptr, nullptr) == SQLITE_OK,
           "release receipt tamper test restores the mutable release marker");
     check(sqlite3_exec(tamper, "DELETE FROM resource_lease_releases", nullptr,
@@ -3508,7 +4222,7 @@ void test_concurrent_worker_launch_and_readiness_replay() {
     trainvm::Journal journal(database_path);
     trainvm::Controller creator(*compiled.plan, journal, run_id);
     creator.create_queued();
-    check(creator.begin_acquisition(1'000).status ==
+    check(creator.begin_acquisition(test_time(1'000)).status ==
               trainvm::LeaseAcquireStatus::acquired &&
               creator.state().revision == 4U &&
               creator.state().current_node_id == "train_to_boundary",
@@ -3536,7 +4250,7 @@ void test_concurrent_worker_launch_and_readiness_replay() {
     start.wait();
     try {
       return LaunchOutcome{
-          .ticket = controller.prepare_worker_launch(launch_request, now_ns),
+          .ticket = controller.prepare_worker_launch(launch_request, test_time(now_ns)),
           .error = {}};
     } catch (const std::exception& exception) {
       return LaunchOutcome{.ticket = std::nullopt, .error = exception.what()};
@@ -3600,7 +4314,7 @@ void test_concurrent_worker_launch_and_readiness_replay() {
     start.wait();
     try {
       return HelloOutcome{
-          .result = controller.accept_worker_hello(std::move(hello), now_ns),
+          .result = controller.accept_worker_hello(std::move(hello), test_time(now_ns)),
           .error = {}};
     } catch (const std::exception& exception) {
       return HelloOutcome{.result = std::nullopt, .error = exception.what()};
@@ -3678,11 +4392,11 @@ void test_concurrent_fenced_result_content_conflict() {
     trainvm::Journal journal(database_path);
     trainvm::Controller creator(*compiled.plan, journal, run_id);
     creator.create_queued();
-    (void)creator.begin_acquisition(1'000);
+    (void)creator.begin_acquisition(test_time(1'000));
     launch = creator.prepare_worker_launch(
         {.code_fingerprint = "sha256:" + std::string(64U, '8'),
          .required_capabilities = {"worker.controls", "worker.metrics"}},
-        1'100);
+        test_time(1'100));
     (void)bind_test_worker_launch(creator, launch, 1'150);
     (void)creator.accept_worker_hello(
         {.run_id = launch.run_id,
@@ -3697,8 +4411,8 @@ void test_concurrent_fenced_result_content_conflict() {
          .concurrency_key = launch.concurrency_key,
          .lease_id = launch.lease_id,
          .fencing_token = launch.fencing_token},
-        1'200);
-    dispatch = creator.prepare_dispatch(1'300);
+        test_time(1'200));
+    dispatch = creator.prepare_dispatch(test_time(1'300));
     check(journal.event_count() == 12U &&
               dispatch.status == trainvm::DispatchStatus::prepared,
           "result race fixture prepares one fenced external dispatch");
@@ -3751,7 +4465,7 @@ void test_concurrent_fenced_result_content_conflict() {
                            std::shared_future<void> start) {
     start.wait();
     try {
-      (void)controller.handle_event(event, worker_session, 1'400);
+      (void)controller.handle_event(event, worker_session, test_time(1'400));
       return Outcome{.succeeded = true, .error = {}};
     } catch (const std::exception& exception) {
       return Outcome{.succeeded = false, .error = exception.what()};
@@ -3836,7 +4550,7 @@ void test_concurrent_queue_acquisition_replay() {
   };
   const auto acquire = [](trainvm::Controller& controller) {
     try {
-      const auto result = controller.begin_acquisition(1'000);
+      const auto result = controller.begin_acquisition(test_time(1'000));
       return Outcome{.succeeded = true,
                      .status = result.status,
                      .fencing_token = result.lease.fencing_token,
@@ -3879,12 +4593,12 @@ void test_acquiring_recovery_ignores_mutable_lease_lifecycle() {
   trainvm::Journal journal(database_path);
   trainvm::Controller controller(*compiled.plan, journal, "acquisition-lifecycle-run");
   controller.create_queued();
-  const auto acquired = controller.begin_acquisition(1'000);
+  const auto acquired = controller.begin_acquisition(test_time(1'000));
   check(acquired.status == trainvm::LeaseAcquireStatus::acquired,
         "lease lifecycle recovery test acquires its initial fence");
   check(journal.renew_lease(acquired.lease.concurrency_key, acquired.lease.owner_run_id,
                             acquired.lease.lease_id, acquired.lease.fencing_token,
-                            2'000, 60'000'000'000LL),
+                            test_time(2'000), 60'000'000'000LL),
         "lease lifecycle recovery test renews the mutable lease row");
   bool renewed_recovered = false;
   try {
@@ -3895,7 +4609,7 @@ void test_acquiring_recovery_ignores_mutable_lease_lifecycle() {
   check(renewed_recovered,
         "lease renewal does not invalidate immutable acquisition history");
   check(journal.release_lease(acquired.lease.concurrency_key, acquired.lease.owner_run_id,
-                              acquired.lease.lease_id, acquired.lease.fencing_token, 3'000),
+                              acquired.lease.lease_id, acquired.lease.fencing_token, test_time(3'000)),
         "lease lifecycle recovery test releases the mutable lease row");
   bool released_recovered = false;
   try {
@@ -3907,7 +4621,7 @@ void test_acquiring_recovery_ignores_mutable_lease_lifecycle() {
         "lease release does not invalidate immutable acquisition history");
   const auto reacquired = journal.acquire_lease(
       acquired.lease.concurrency_key, acquired.lease.owner_run_id,
-      acquired.lease.lease_id, 4'000, 60'000'000'000LL);
+      acquired.lease.lease_id, test_time(4'000), 60'000'000'000LL);
   check(reacquired.status == trainvm::LeaseAcquireStatus::acquired &&
             reacquired.lease.fencing_token > acquired.lease.fencing_token,
         "reacquiring a released textual identity advances its fence");
@@ -3915,7 +4629,7 @@ void test_acquiring_recovery_ignores_mutable_lease_lifecycle() {
   try {
     trainvm::Controller replacement(*compiled.plan, journal,
                                     "acquisition-lifecycle-run");
-    (void)replacement.begin_acquisition(5'000);
+    (void)replacement.begin_acquisition(test_time(5'000));
   } catch (const std::runtime_error&) {
     replacement_rejected = true;
   }
@@ -3938,7 +4652,7 @@ void test_acquiring_rejects_fabricated_running_transition() {
   const std::string run_id = "fabricated-readiness-run";
   trainvm::Controller controller(*compiled.plan, journal, run_id);
   controller.create_queued();
-  (void)controller.begin_acquisition(1'000);
+  (void)controller.begin_acquisition(test_time(1'000));
   const trainvm::ExecutionState initial = trainvm::start_execution(*compiled.plan, run_id);
   const trainvm::Node& node =
       compiled.plan->experiment.spec.workflow.nodes.at(initial.current_node_id);
@@ -4419,11 +5133,11 @@ void test_host_launch_resolution_and_binding() {
   trainvm::Journal journal(database);
   trainvm::Controller controller(*compiled.plan, journal, run_id);
   controller.create_queued();
-  const auto acquisition = controller.begin_acquisition(1'000);
+  const auto acquisition = controller.begin_acquisition(test_time(1'000));
   const auto ticket = controller.prepare_worker_launch(
       {.code_fingerprint = code_digest,
        .required_capabilities = {"worker.metrics", "worker.controls"}},
-      1'100);
+      test_time(1'100));
   trainvm::HostLaunchResolver resolver(registry, host);
   auto first = resolver.resolve(ticket, key);
   auto second = resolver.resolve(ticket, key);
@@ -4492,13 +5206,64 @@ void test_host_launch_resolution_and_binding() {
         "self-hashed malformed bindings fail semantics and move-only FD ownership remains valid");
   if (moved_fd >= 0) (void)::close(moved_fd);
 
+  sqlite3* raw_database = nullptr;
+  check(sqlite3_open(database.c_str(), &raw_database) == SQLITE_OK,
+        "legacy bind quarantine test opens the active journal");
+  if (raw_database != nullptr) {
+    check(sqlite3_exec(raw_database, R"sql(
+      UPDATE resource_leases
+      SET clock_domain='legacy-wall/v1', boot_id=NULL,
+          acquired_boottime_ns=NULL, expires_boottime_ns=NULL
+    )sql", nullptr, nullptr, nullptr) == SQLITE_OK,
+          "legacy bind quarantine test removes boot-scoped lease evidence");
+    sqlite3_close(raw_database);
+    raw_database = nullptr;
+  }
+  bool legacy_bind_rejected = false;
+  try {
+    (void)controller.bind_worker_launch(first, registry, host,
+                                        test_time(1'150));
+  } catch (const trainvm::OperationPreconditionError&) {
+    legacy_bind_rejected = true;
+  }
+  check(legacy_bind_rejected,
+        "legacy-wall lease rows cannot authorize a new host launch binding");
+  check(sqlite3_open(database.c_str(), &raw_database) == SQLITE_OK,
+        "legacy bind quarantine test reopens the active journal");
+  if (raw_database != nullptr) {
+    sqlite3_stmt* restore = nullptr;
+    check(sqlite3_prepare_v2(raw_database, R"sql(
+      UPDATE resource_leases
+      SET clock_domain='boottime/v1', boot_id=?,
+          acquired_boottime_ns=?, expires_boottime_ns=?
+      WHERE concurrency_key=?
+    )sql", -1, &restore, nullptr) == SQLITE_OK,
+          "legacy bind quarantine test prepares typed lease restoration");
+    if (restore != nullptr) {
+      sqlite3_bind_text(restore, 1, acquisition.lease.boot_id.c_str(), -1,
+                        SQLITE_TRANSIENT);
+      sqlite3_bind_int64(restore, 2,
+                         acquisition.lease.acquired_boottime_ns);
+      sqlite3_bind_int64(restore, 3,
+                         acquisition.lease.expires_boottime_ns);
+      sqlite3_bind_text(restore, 4,
+                        acquisition.lease.concurrency_key.c_str(), -1,
+                        SQLITE_TRANSIENT);
+      check(sqlite3_step(restore) == SQLITE_DONE,
+            "legacy bind quarantine test restores boot-scoped lease evidence");
+    }
+    sqlite3_finalize(restore);
+    sqlite3_close(raw_database);
+  }
+
   const auto before_binding = journal.event_count();
   const auto bound =
-      controller.bind_worker_launch(first, registry, host, 1'200);
+      controller.bind_worker_launch(first, registry, host, test_time(1'200));
   const auto replayed =
-      controller.bind_worker_launch(first, registry, host, 1'250);
+      controller.bind_worker_launch(first, registry, host, test_time(1'250));
   const auto historical_replay = controller.bind_worker_launch(
-      first, registry, host, acquisition.lease.expires_at_ns + 1);
+      first, registry, host,
+      test_time(acquisition.lease.expires_boottime_ns + 1));
   trainvm::Controller restarted(*compiled.plan, journal, run_id);
   const auto& recovered = restarted.recover();
   check(bound == first.spec() && replayed == bound &&
@@ -4514,7 +5279,8 @@ void test_host_launch_resolution_and_binding() {
   const auto before_rejections = journal.event_count();
   bool wrong_host_rejected = false;
   try {
-    (void)controller.bind_worker_launch(first, registry, wrong_host, 1'300);
+    (void)controller.bind_worker_launch(first, registry, wrong_host,
+                                        test_time(1'300));
   } catch (const std::invalid_argument&) {
     wrong_host_rejected = true;
   }
@@ -4527,7 +5293,8 @@ void test_host_launch_resolution_and_binding() {
   });
   bool changed_profile_rejected = false;
   try {
-    (void)controller.bind_worker_launch(first, changed_registry, host, 1'300);
+    (void)controller.bind_worker_launch(first, changed_registry, host,
+                                        test_time(1'300));
   } catch (const std::invalid_argument&) {
     changed_profile_rejected = true;
   }
@@ -4672,7 +5439,7 @@ void test_service_host_launch_binding() {
     trainvm::TrainVMService service(
         database, trainvm::AdapterRegistry(adapter_profiles),
         trainvm::HostLaunchRegistry(host_document), host,
-        [&now_ns] { return now_ns; });
+        [&now_ns] { return test_time(now_ns); });
     const auto acquired = service.reconcile_once(run_id);
     now_ns = 1'100;
     const auto prepared = service.reconcile_once(run_id);
@@ -4751,7 +5518,7 @@ void test_service_host_launch_binding() {
     trainvm::TrainVMService restarted(
         database, trainvm::AdapterRegistry(adapter_profiles),
         trainvm::HostLaunchRegistry(host_document), host,
-        [] { return 1'250; });
+        [] { return test_time(1'250); });
     trainvm::v1::WorkerHello hello;
     hello.set_run_id(ticket.run_id);
     hello.set_node_id(ticket.node_id);
@@ -4791,7 +5558,7 @@ void test_service_host_launch_binding() {
           trainvm::TrainVMService service(
               database, trainvm::AdapterRegistry(std::move(adapters)),
               std::move(registry), std::move(authority_host),
-              [] { return 1'300; });
+              [] { return test_time(1'300); });
           (void)service.bind_worker_launch(ticket);
         } catch (const std::exception&) {
           rejected = true;
@@ -4850,7 +5617,7 @@ void test_service_host_launch_binding() {
     trainvm::TrainVMService service(
         disabled_database, trainvm::AdapterRegistry(adapter_profiles),
         fixture_disabled_host_launch_registry(), host,
-        [] { return 2'000; });
+        [] { return test_time(2'000); });
     (void)service.reconcile_once(disabled_run);
     const auto prepared = service.reconcile_once(disabled_run);
     const std::size_t before = trainvm::Journal(disabled_database).event_count();
@@ -5105,7 +5872,7 @@ void test_service_registry_and_reconciliation() {
               !observer.compiled_plan(compiled.plan->plan_hash) &&
               !observer.active_lease(
                   compiled.plan->experiment.spec.workspace.concurrency_key,
-                  1'000),
+                  test_time(1'000)),
           "preview and creation retain canonical identity but reject registry mismatch without mutation");
   }
 
@@ -5120,7 +5887,7 @@ void test_service_registry_and_reconciliation() {
     trainvm::TrainVMService service(
         database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
         fixture_disabled_host_launch_registry(),
-        [&authority_now_ns] { return authority_now_ns; });
+        [&authority_now_ns] { return test_time(authority_now_ns); });
     auto preview_request = request_for(journal_id, false, "");
     trainvm::v1::SubmitExperimentResponse preview;
     const grpc::Status preview_status =
@@ -5298,7 +6065,7 @@ void test_adapter_registry_and_reconciler() {
         std::move(missing_profiles));
     std::mutex authority_mutex;
     trainvm::Reconciler reconciler(journal, missing_registry,
-                                   authority_mutex, [] { return 1'000; });
+                                   authority_mutex, [] { return test_time(1'000); });
     bool mismatch_rejected = false;
     try {
       (void)reconciler.step(run_id);
@@ -5309,7 +6076,7 @@ void test_adapter_registry_and_reconciler() {
               journal.projection(run_id) == before_projection &&
               !journal.active_lease(
                   compiled.plan->experiment.spec.workspace.concurrency_key,
-                  1'000),
+                  test_time(1'000)),
           "registry mismatch rejects reconciliation before any journal or lease mutation");
   }
 
@@ -5349,7 +6116,8 @@ void test_adapter_registry_and_reconciler() {
           };
       const std::string acquired_id = run_id + ":lease-acquired";
       const auto acquired = journal.acquire_lease_with_events(
-          concurrency_key, run_id, lease_id, 4'000, 30'000'000'000LL,
+          concurrency_key, run_id, lease_id, test_time(4'000),
+          30'000'000'000LL,
           {acquisition_event(
                run_id + ":lease-desired", 2,
                "run.desired_state_changed",
@@ -5380,7 +6148,7 @@ void test_adapter_registry_and_reconciler() {
     trainvm::Journal restarted_journal(database_path);
     std::mutex authority_mutex;
     trainvm::Reconciler restarted(restarted_journal, registry,
-                                  authority_mutex, [] { return 4'100; });
+                                  authority_mutex, [] { return test_time(4'100); });
     const auto resumed = restarted.step(run_id);
     const auto completed = restarted_journal.projection(run_id);
     trainvm::Controller recovered(*compiled.plan, restarted_journal, run_id);
@@ -5407,7 +6175,7 @@ void test_adapter_registry_and_reconciler() {
     controller.create_queued(submission_identity);
     std::mutex authority_mutex;
     trainvm::Reconciler reconciler(journal, registry, authority_mutex,
-                                   [] { return 2'000; });
+                                   [] { return test_time(2'000); });
     const auto acquired = reconciler.step(run_id);
     const auto projection = journal.projection(run_id);
     check(acquired.disposition ==
@@ -5432,9 +6200,9 @@ void test_adapter_registry_and_reconciler() {
     trainvm::Journal right_journal(database_path);
     std::mutex authority_mutex;
     trainvm::Reconciler left(left_journal, registry, authority_mutex,
-                             [] { return 2'100; });
+                             [] { return test_time(2'100); });
     trainvm::Reconciler right(right_journal, registry, authority_mutex,
-                              [] { return 2'100; });
+                              [] { return test_time(2'100); });
     std::promise<void> start;
     const auto gate = start.get_future().share();
     const auto reconcile = [&](trainvm::Reconciler& candidate) {
@@ -5496,7 +6264,7 @@ void test_adapter_registry_and_reconciler() {
     trainvm::Journal restarted_journal(database_path);
     std::mutex restarted_mutex;
     trainvm::Reconciler restarted(restarted_journal, registry,
-                                  restarted_mutex, [] { return 2'200; });
+                                  restarted_mutex, [] { return test_time(2'200); });
     const auto first = restarted.step(run_id);
     const auto second = restarted.step(run_id);
     const std::string launch_id =
@@ -5530,7 +6298,7 @@ void test_adapter_registry_and_reconciler() {
         const auto before_launch = journal.event(launch_id);
         std::mutex authority_mutex;
         trainvm::Reconciler reconciler(journal, drifted, authority_mutex,
-                                       [] { return 2'400; });
+                                       [] { return test_time(2'400); });
         bool rejected = false;
         try {
           (void)reconciler.step(run_id);
@@ -5571,13 +6339,13 @@ void test_adapter_registry_and_reconciler() {
     std::int64_t authority_now_ns = 3'000;
     trainvm::Reconciler reconciler(
         journal, registry, authority_mutex,
-        [&authority_now_ns] { return authority_now_ns; });
+        [&authority_now_ns] { return test_time(authority_now_ns); });
     const auto acquired = reconciler.step(owner_run);
     const auto before_waiter = journal.projection(waiting_run);
     authority_now_ns = 3'100;
     const auto busy = reconciler.step(waiting_run);
     const auto active = journal.active_lease(
-        compiled.plan->experiment.spec.workspace.concurrency_key, 3'100);
+        compiled.plan->experiment.spec.workspace.concurrency_key, test_time(3'100));
     check(acquired.disposition ==
               trainvm::ReconcileDisposition::lease_acquired &&
               busy.disposition == trainvm::ReconcileDisposition::lease_busy &&
@@ -5603,6 +6371,19 @@ void test_legacy_journal_migration_policy() {
   const auto database_path = directory / "legacy.db";
 
   sqlite3* database = nullptr;
+  const auto scalar = [](sqlite3* connection, const char* sql) {
+    sqlite3_stmt* statement = nullptr;
+    if (sqlite3_prepare_v2(connection, sql, -1, &statement, nullptr) != SQLITE_OK) {
+      throw std::runtime_error("could not prepare migration fixture query");
+    }
+    std::string value;
+    if (sqlite3_step(statement) == SQLITE_ROW &&
+        sqlite3_column_type(statement, 0) != SQLITE_NULL) {
+      value = reinterpret_cast<const char*>(sqlite3_column_text(statement, 0));
+    }
+    sqlite3_finalize(statement);
+    return value;
+  };
   check(sqlite3_open(database_path.c_str(), &database) == SQLITE_OK,
         "legacy migration test opens its fixture database");
   if (database != nullptr) {
@@ -5623,7 +6404,7 @@ void test_legacy_journal_migration_policy() {
   try {
     trainvm::Journal journal(database_path);
   } catch (const std::runtime_error& exception) {
-    refused = std::string(exception.what()).find("nonempty pre-v4 journal") != std::string::npos;
+    refused = std::string(exception.what()).find("pre-v4 journal") != std::string::npos;
   }
   check(refused, "nonempty pre-v4 journals are preserved rather than silently blessed as v4");
 
@@ -5641,6 +6422,121 @@ void test_legacy_journal_migration_policy() {
     sqlite3_finalize(statement);
     sqlite3_close(database);
     check(version == "3", "refused legacy journal schema version is not mutated");
+  }
+
+  const auto empty_legacy_path = directory / "empty-legacy.db";
+  check(sqlite3_open(empty_legacy_path.c_str(), &database) == SQLITE_OK,
+        "empty legacy migration test opens its fixture database");
+  if (database != nullptr) {
+    const char* fixture = R"sql(
+      CREATE TABLE journal_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
+      INSERT INTO journal_meta(key, value) VALUES('schema_version', '3');
+      CREATE TABLE events(marker INTEGER NOT NULL);
+      CREATE TABLE resource_leases(marker INTEGER NOT NULL);
+    )sql";
+    check(sqlite3_exec(database, fixture, nullptr, nullptr, nullptr) == SQLITE_OK,
+          "empty legacy migration test creates old table definitions");
+    sqlite3_close(database);
+    database = nullptr;
+  }
+  bool empty_refused = false;
+  try {
+    trainvm::Journal journal(empty_legacy_path);
+  } catch (const std::runtime_error& exception) {
+    empty_refused =
+        std::string(exception.what()).find("pre-v4 journal") != std::string::npos;
+  }
+  check(empty_refused,
+        "empty pre-v4 journals are refused because old table definitions are unsafe");
+  check(sqlite3_open(empty_legacy_path.c_str(), &database) == SQLITE_OK,
+        "refused empty legacy journal remains readable");
+  if (database != nullptr) {
+    check(scalar(database,
+                 "SELECT value FROM journal_meta WHERE key='schema_version'") == "3",
+          "refused empty legacy journal schema version is not mutated");
+    sqlite3_close(database);
+    database = nullptr;
+  }
+
+  const auto unversioned_path = directory / "unversioned-nonempty.db";
+  check(sqlite3_open(unversioned_path.c_str(), &database) == SQLITE_OK,
+        "unversioned journal test opens its fixture database");
+  std::string unversioned_schema_before;
+  if (database != nullptr) {
+    check(sqlite3_exec(database, R"sql(
+      CREATE TABLE resource_leases(marker TEXT NOT NULL);
+      INSERT INTO resource_leases VALUES('preserve-me');
+    )sql", nullptr, nullptr, nullptr) == SQLITE_OK,
+          "unversioned journal test creates a nonempty application schema");
+    unversioned_schema_before = scalar(
+        database,
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='resource_leases'");
+    sqlite3_close(database);
+    database = nullptr;
+  }
+  bool unversioned_refused = false;
+  try {
+    trainvm::Journal journal(unversioned_path);
+  } catch (const std::runtime_error& exception) {
+    unversioned_refused = std::string(exception.what()).find(
+                              "unversioned nonempty journal") !=
+                          std::string::npos;
+  }
+  check(unversioned_refused,
+        "unversioned nonempty databases are never adopted as fresh journals");
+  check(sqlite3_open(unversioned_path.c_str(), &database) == SQLITE_OK,
+        "refused unversioned journal remains inspectable");
+  if (database != nullptr) {
+    check(scalar(database, R"sql(
+            SELECT EXISTS(
+              SELECT 1 FROM sqlite_master
+              WHERE type='table' AND name='journal_meta'
+            )
+          )sql") == "0" &&
+              scalar(database,
+                     "SELECT sql FROM sqlite_master WHERE type='table' "
+                     "AND name='resource_leases'") ==
+                  unversioned_schema_before &&
+              scalar(database,
+                     "SELECT marker FROM resource_leases LIMIT 1") ==
+                  "preserve-me",
+          "unversioned refusal preserves schema and rows without metadata writes");
+    sqlite3_close(database);
+    database = nullptr;
+  }
+
+  const auto foreign_header_path = directory / "foreign-empty-sqlite.db";
+  check(sqlite3_open(foreign_header_path.c_str(), &database) == SQLITE_OK,
+        "foreign SQLite header test opens its fixture database");
+  if (database != nullptr) {
+    check(sqlite3_exec(database, R"sql(
+      PRAGMA application_id=1414677846;
+      PRAGMA user_version=77;
+    )sql", nullptr, nullptr, nullptr) == SQLITE_OK,
+          "foreign SQLite header test claims its empty database");
+    sqlite3_close(database);
+    database = nullptr;
+  }
+  bool foreign_header_refused = false;
+  try {
+    trainvm::Journal journal(foreign_header_path);
+  } catch (const std::runtime_error& exception) {
+    foreign_header_refused =
+        std::string(exception.what()).find("claimed by another application") !=
+        std::string::npos;
+  }
+  check(foreign_header_refused,
+        "metadata-free SQLite databases with foreign header ownership are refused");
+  check(sqlite3_open(foreign_header_path.c_str(), &database) == SQLITE_OK,
+        "refused foreign SQLite database remains inspectable");
+  if (database != nullptr) {
+    check(scalar(database, "PRAGMA application_id") == "1414677846" &&
+              scalar(database, "PRAGMA user_version") == "77" &&
+              scalar(database, "SELECT COUNT(*) FROM sqlite_master") == "0" &&
+              scalar(database, "PRAGMA journal_mode") == "delete",
+          "foreign SQLite refusal preserves header ownership and journal mode without adding schema");
+    sqlite3_close(database);
+    database = nullptr;
   }
 
   const auto future_path = directory / "future.db";
@@ -5686,19 +6582,43 @@ void test_legacy_journal_migration_policy() {
            std::pair<std::string_view, std::optional<std::string_view>>{
                "malformed", "not-a-valid-journal-identity!!"}}) {
     const auto identity_path = directory / (std::string(name) + "-identity.db");
+    {
+      trainvm::Journal fresh(identity_path);
+    }
     check(sqlite3_open(identity_path.c_str(), &database) == SQLITE_OK,
           "v4 identity test opens its fixture database");
     if (database != nullptr) {
-      check(sqlite3_exec(database,
-                         "CREATE TABLE journal_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) "
-                         "WITHOUT ROWID; INSERT INTO journal_meta(key, value) "
-                         "VALUES('schema_version', '4');",
-                         nullptr, nullptr, nullptr) == SQLITE_OK,
-            "v4 identity test creates schema metadata");
+      check(sqlite3_exec(database, R"sql(
+        BEGIN IMMEDIATE;
+        ALTER TABLE resource_leases RENAME TO resource_leases_v5;
+        CREATE TABLE resource_leases (
+          concurrency_key TEXT PRIMARY KEY,
+          owner_run_id TEXT NOT NULL,
+          lease_id TEXT NOT NULL,
+          fencing_token INTEGER NOT NULL,
+          acquired_at_ns INTEGER NOT NULL,
+          expires_at_ns INTEGER NOT NULL,
+          released_at_ns INTEGER
+        ) WITHOUT ROWID;
+        DROP TABLE resource_leases_v5;
+        ALTER TABLE resource_lease_releases RENAME TO resource_lease_releases_v5;
+        CREATE TABLE resource_lease_releases (
+          concurrency_key TEXT NOT NULL,
+          owner_run_id TEXT NOT NULL,
+          lease_id TEXT NOT NULL,
+          fencing_token INTEGER NOT NULL,
+          released_at_ns INTEGER NOT NULL,
+          PRIMARY KEY(concurrency_key, lease_id, fencing_token)
+        ) WITHOUT ROWID;
+        DROP TABLE resource_lease_releases_v5;
+        UPDATE journal_meta SET value='4' WHERE key='schema_version';
+        COMMIT;
+      )sql", nullptr, nullptr, nullptr) == SQLITE_OK,
+            "v4 identity test creates an exact established v4 schema");
       if (identity) {
         sqlite3_stmt* statement = nullptr;
         check(sqlite3_prepare_v2(database,
-                                 "INSERT INTO journal_meta(key, value) VALUES('journal_id', ?)",
+                                 "UPDATE journal_meta SET value=? WHERE key='journal_id'",
                                  -1, &statement, nullptr) == SQLITE_OK,
               "v4 identity test prepares malformed identity");
         if (statement != nullptr) {
@@ -5708,6 +6628,11 @@ void test_legacy_journal_migration_policy() {
                 "v4 identity test stores malformed identity");
         }
         sqlite3_finalize(statement);
+      } else {
+        check(sqlite3_exec(database,
+                           "DELETE FROM journal_meta WHERE key='journal_id'", nullptr,
+                           nullptr, nullptr) == SQLITE_OK,
+              "v4 identity test removes its established identity");
       }
       sqlite3_close(database);
       database = nullptr;
@@ -5717,12 +6642,588 @@ void test_legacy_journal_migration_policy() {
       trainvm::Journal journal(identity_path);
     } catch (const std::runtime_error& exception) {
       identity_refused =
-          std::string(exception.what()).find("identity is missing or malformed") !=
+          std::string(exception.what()).find("authority metadata") !=
           std::string::npos;
     }
     check(identity_refused, "established v4 journal rejects " + std::string(name) +
                                 " identity without repairing it");
+    check(sqlite3_open(identity_path.c_str(), &database) == SQLITE_OK,
+          "refused v4 identity fixture remains inspectable");
+    if (database != nullptr) {
+      const std::string stored_identity = scalar(
+          database,
+          "SELECT value FROM journal_meta WHERE key='journal_id'");
+      check(scalar(database,
+                   "SELECT value FROM journal_meta WHERE key='schema_version'") ==
+                    "4" &&
+                stored_identity == (identity ? std::string(*identity) : std::string{}) &&
+                scalar(database, R"sql(
+                  SELECT group_concat(name, ',')
+                  FROM pragma_table_info('resource_leases')
+                )sql") ==
+                    "concurrency_key,owner_run_id,lease_id,fencing_token,acquired_at_ns,expires_at_ns,released_at_ns",
+            "v4 identity refusal preserves metadata and lease schema without migration");
+      sqlite3_close(database);
+      database = nullptr;
+    }
   }
+
+  const auto corrupt_v4 = [&](std::string_view name,
+                              std::string_view object_name,
+                              std::string_view corruption) {
+    const auto path = directory / ("malformed-v4-" + std::string(name) + ".db");
+    {
+      trainvm::Journal fresh(path);
+    }
+    check(sqlite3_open(path.c_str(), &database) == SQLITE_OK,
+          "malformed v4 " + std::string(name) + " test opens its fixture");
+    std::string object_before;
+    if (database != nullptr) {
+      const char* downgrade = R"sql(
+        BEGIN IMMEDIATE;
+        ALTER TABLE resource_leases RENAME TO resource_leases_v5;
+        CREATE TABLE resource_leases (
+          concurrency_key TEXT PRIMARY KEY,
+          owner_run_id TEXT NOT NULL,
+          lease_id TEXT NOT NULL,
+          fencing_token INTEGER NOT NULL,
+          acquired_at_ns INTEGER NOT NULL,
+          expires_at_ns INTEGER NOT NULL,
+          released_at_ns INTEGER
+        ) WITHOUT ROWID;
+        DROP TABLE resource_leases_v5;
+        ALTER TABLE resource_lease_releases RENAME TO resource_lease_releases_v5;
+        CREATE TABLE resource_lease_releases (
+          concurrency_key TEXT NOT NULL,
+          owner_run_id TEXT NOT NULL,
+          lease_id TEXT NOT NULL,
+          fencing_token INTEGER NOT NULL,
+          released_at_ns INTEGER NOT NULL,
+          PRIMARY KEY(concurrency_key, lease_id, fencing_token)
+        ) WITHOUT ROWID;
+        DROP TABLE resource_lease_releases_v5;
+        UPDATE journal_meta SET value='4' WHERE key='schema_version';
+        COMMIT;
+      )sql";
+      check(sqlite3_exec(database, downgrade, nullptr, nullptr, nullptr) == SQLITE_OK,
+            "malformed v4 fixture starts from the exact established lease schema");
+      const std::string owned_corruption(corruption);
+      check(sqlite3_exec(database, owned_corruption.c_str(), nullptr, nullptr,
+                         nullptr) == SQLITE_OK,
+            "malformed v4 fixture corrupts its " + std::string(name));
+      sqlite3_stmt* object = nullptr;
+      check(sqlite3_prepare_v2(
+                database,
+                "SELECT sql FROM sqlite_master WHERE name=? AND sql IS NOT NULL",
+                -1, &object, nullptr) == SQLITE_OK,
+            "malformed v4 fixture prepares object inspection");
+      if (object != nullptr) {
+        sqlite3_bind_text(object, 1, object_name.data(),
+                          static_cast<int>(object_name.size()), SQLITE_TRANSIENT);
+        if (sqlite3_step(object) == SQLITE_ROW) {
+          object_before = reinterpret_cast<const char*>(sqlite3_column_text(object, 0));
+        }
+      }
+      sqlite3_finalize(object);
+      sqlite3_close(database);
+      database = nullptr;
+    }
+
+    bool rejected = false;
+    try {
+      trainvm::Journal journal(path);
+    } catch (const std::runtime_error& exception) {
+      rejected = std::string(exception.what()).find(
+                     "authoritative schema") != std::string::npos;
+    }
+    check(rejected, "malformed v4 " + std::string(name) +
+                        " is rejected before migration");
+    check(sqlite3_open(path.c_str(), &database) == SQLITE_OK,
+          "rejected malformed v4 " + std::string(name) + " remains inspectable");
+    if (database != nullptr) {
+      sqlite3_stmt* object = nullptr;
+      std::string object_after;
+      if (sqlite3_prepare_v2(
+              database,
+              "SELECT sql FROM sqlite_master WHERE name=? AND sql IS NOT NULL",
+              -1, &object, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(object, 1, object_name.data(),
+                          static_cast<int>(object_name.size()), SQLITE_TRANSIENT);
+        if (sqlite3_step(object) == SQLITE_ROW) {
+          object_after = reinterpret_cast<const char*>(sqlite3_column_text(object, 0));
+        }
+      }
+      sqlite3_finalize(object);
+      check(scalar(database,
+                   "SELECT value FROM journal_meta WHERE key='schema_version'") ==
+                    "4" &&
+                scalar(database, R"sql(
+                  SELECT group_concat(name, ',')
+                  FROM pragma_table_info('resource_leases')
+                )sql") ==
+                    "concurrency_key,owner_run_id,lease_id,fencing_token,acquired_at_ns,expires_at_ns,released_at_ns" &&
+                object_after == object_before,
+            "malformed v4 " + std::string(name) +
+                " refusal preserves version, lease schema, and corrupt object byte-for-byte");
+      sqlite3_close(database);
+      database = nullptr;
+    }
+  };
+
+  corrupt_v4(
+      "table", "events", R"sql(
+        DROP TABLE events;
+        CREATE TABLE events(marker INTEGER NOT NULL);
+      )sql");
+  corrupt_v4(
+      "index", "idx_events_run_sequence", R"sql(
+        DROP INDEX idx_events_run_sequence;
+        CREATE INDEX idx_events_run_sequence ON events(event_id);
+      )sql");
+  corrupt_v4(
+      "constraint", "node_dispatches", R"sql(
+        DROP TABLE node_dispatches;
+        CREATE TABLE node_dispatches (
+          dispatch_id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL,
+          run_revision INTEGER NOT NULL,
+          plan_revision INTEGER NOT NULL,
+          node_id TEXT NOT NULL,
+          attempt_id TEXT NOT NULL,
+          component TEXT NOT NULL,
+          operation TEXT NOT NULL,
+          status TEXT NOT NULL,
+          result_event_id TEXT,
+          UNIQUE(run_id, node_id, attempt_id)
+        ) WITHOUT ROWID;
+      )sql");
+  corrupt_v4(
+      "quoted-literal", "node_dispatches", R"sql(
+        DROP TABLE node_dispatches;
+        CREATE TABLE node_dispatches (
+          dispatch_id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL,
+          run_revision INTEGER NOT NULL,
+          plan_revision INTEGER NOT NULL,
+          node_id TEXT NOT NULL,
+          attempt_id TEXT NOT NULL,
+          component TEXT NOT NULL,
+          operation TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('prepared',' completed')),
+          result_event_id TEXT,
+          UNIQUE(run_id, node_id, attempt_id)
+        ) WITHOUT ROWID;
+      )sql");
+
+  for (const bool with_event : {false, true}) {
+    const std::string fixture_name = with_event ? "event" : "empty";
+    const auto path = directory / ("v4-missing-head-" + fixture_name + ".db");
+    {
+      trainvm::Journal fresh(path);
+      if (with_event) {
+        check(trainvm::JournalTestAccess::append(
+                  fresh, created_event(std::string(64U, 'b'))) == 1U,
+              "missing-head v4 fixture creates a valid event chain");
+      }
+    }
+    check(sqlite3_open(path.c_str(), &database) == SQLITE_OK,
+          "missing-head v4 fixture opens for exact downgrade");
+    std::string identity_before;
+    if (database != nullptr) {
+      const char* downgrade = R"sql(
+        PRAGMA journal_mode=DELETE;
+        BEGIN IMMEDIATE;
+        ALTER TABLE resource_leases RENAME TO resource_leases_v5;
+        CREATE TABLE resource_leases (
+          concurrency_key TEXT PRIMARY KEY,
+          owner_run_id TEXT NOT NULL,
+          lease_id TEXT NOT NULL,
+          fencing_token INTEGER NOT NULL,
+          acquired_at_ns INTEGER NOT NULL,
+          expires_at_ns INTEGER NOT NULL,
+          released_at_ns INTEGER
+        ) WITHOUT ROWID;
+        DROP TABLE resource_leases_v5;
+        ALTER TABLE resource_lease_releases RENAME TO resource_lease_releases_v5;
+        CREATE TABLE resource_lease_releases (
+          concurrency_key TEXT NOT NULL,
+          owner_run_id TEXT NOT NULL,
+          lease_id TEXT NOT NULL,
+          fencing_token INTEGER NOT NULL,
+          released_at_ns INTEGER NOT NULL,
+          PRIMARY KEY(concurrency_key, lease_id, fencing_token)
+        ) WITHOUT ROWID;
+        DROP TABLE resource_lease_releases_v5;
+        UPDATE journal_meta SET value='4' WHERE key='schema_version';
+        DELETE FROM journal_meta WHERE key='chain_head';
+        COMMIT;
+      )sql";
+      check(sqlite3_exec(database, downgrade, nullptr, nullptr, nullptr) == SQLITE_OK,
+            "missing-head fixture constructs an exact v4 schema without its head");
+      identity_before = scalar(
+          database, "SELECT value FROM journal_meta WHERE key='journal_id'");
+      sqlite3_close(database);
+      database = nullptr;
+    }
+
+    bool rejected = false;
+    try {
+      trainvm::Journal journal(path);
+    } catch (const std::runtime_error& exception) {
+      rejected = std::string(exception.what()).find("authority metadata") !=
+                 std::string::npos;
+    }
+    check(rejected, "v4 " + fixture_name +
+                        " journal with a missing chain head is refused");
+    check(sqlite3_open(path.c_str(), &database) == SQLITE_OK,
+          "refused missing-head v4 journal remains inspectable");
+    if (database != nullptr) {
+      check(scalar(database,
+                   "SELECT value FROM journal_meta WHERE key='schema_version'") ==
+                    "4" &&
+                scalar(database,
+                       "SELECT COUNT(*) FROM journal_meta WHERE key='chain_head'") ==
+                    "0" &&
+                scalar(database, "SELECT COUNT(*) FROM events") ==
+                    (with_event ? "1" : "0") &&
+                scalar(database, R"sql(
+                  SELECT group_concat(name, ',')
+                  FROM pragma_table_info('resource_leases')
+                )sql") ==
+                    "concurrency_key,owner_run_id,lease_id,fencing_token,acquired_at_ns,expires_at_ns,released_at_ns" &&
+                scalar(database,
+                       "SELECT value FROM journal_meta WHERE key='journal_id'") ==
+                    identity_before &&
+                scalar(database, "PRAGMA journal_mode") == "delete",
+            "missing-head v4 refusal preserves version, schema, events, identity, and journal mode without repair");
+      sqlite3_close(database);
+      database = nullptr;
+    }
+  }
+
+  const auto v4_invalid_chain_path = directory / "v4-invalid-chain.db";
+  {
+    trainvm::Journal fresh(v4_invalid_chain_path);
+    check(trainvm::JournalTestAccess::append(
+              fresh, created_event(std::string(64U, 'd'))) == 1U,
+          "invalid-chain v4 fixture starts with a valid event");
+  }
+  check(sqlite3_open(v4_invalid_chain_path.c_str(), &database) == SQLITE_OK,
+        "invalid-chain v4 fixture opens for exact downgrade");
+  if (database != nullptr) {
+    check(sqlite3_exec(database, R"sql(
+      BEGIN IMMEDIATE;
+      ALTER TABLE resource_leases RENAME TO resource_leases_v5;
+      CREATE TABLE resource_leases (
+        concurrency_key TEXT PRIMARY KEY,
+        owner_run_id TEXT NOT NULL,
+        lease_id TEXT NOT NULL,
+        fencing_token INTEGER NOT NULL,
+        acquired_at_ns INTEGER NOT NULL,
+        expires_at_ns INTEGER NOT NULL,
+        released_at_ns INTEGER
+      ) WITHOUT ROWID;
+      DROP TABLE resource_leases_v5;
+      ALTER TABLE resource_lease_releases RENAME TO resource_lease_releases_v5;
+      CREATE TABLE resource_lease_releases (
+        concurrency_key TEXT NOT NULL,
+        owner_run_id TEXT NOT NULL,
+        lease_id TEXT NOT NULL,
+        fencing_token INTEGER NOT NULL,
+        released_at_ns INTEGER NOT NULL,
+        PRIMARY KEY(concurrency_key, lease_id, fencing_token)
+      ) WITHOUT ROWID;
+      DROP TABLE resource_lease_releases_v5;
+      UPDATE journal_meta SET value='4' WHERE key='schema_version';
+      UPDATE events SET payload_json='{}' WHERE journal_sequence=1;
+      COMMIT;
+    )sql", nullptr, nullptr, nullptr) == SQLITE_OK,
+          "invalid-chain fixture corrupts history behind an exact v4 schema");
+    sqlite3_close(database);
+    database = nullptr;
+  }
+  bool invalid_chain_refused = false;
+  try {
+    trainvm::Journal journal(v4_invalid_chain_path);
+  } catch (const std::runtime_error& exception) {
+    invalid_chain_refused =
+        std::string(exception.what()).find("invalid event chain") !=
+        std::string::npos;
+  }
+  check(invalid_chain_refused,
+        "v4 migration refuses a corrupt event chain before changing schema version");
+  check(sqlite3_open(v4_invalid_chain_path.c_str(), &database) == SQLITE_OK,
+        "refused invalid-chain v4 journal remains inspectable");
+  if (database != nullptr) {
+    check(scalar(database,
+                 "SELECT value FROM journal_meta WHERE key='schema_version'") ==
+                  "4" &&
+              scalar(database,
+                     "SELECT payload_json FROM events WHERE journal_sequence=1") ==
+                  "{}" &&
+              scalar(database, R"sql(
+                SELECT group_concat(name, ',')
+                FROM pragma_table_info('resource_leases')
+              )sql") ==
+                  "concurrency_key,owner_run_id,lease_id,fencing_token,acquired_at_ns,expires_at_ns,released_at_ns",
+          "invalid-chain refusal preserves v4 schema and corrupted evidence for inspection");
+    sqlite3_close(database);
+    database = nullptr;
+  }
+
+  const auto v5_missing_head_path = directory / "v5-missing-head.db";
+  {
+    trainvm::Journal fresh(v5_missing_head_path);
+    check(trainvm::JournalTestAccess::append(
+              fresh, created_event(std::string(64U, 'c'))) == 1U,
+          "missing-head v5 fixture creates a valid event chain");
+  }
+  check(sqlite3_open(v5_missing_head_path.c_str(), &database) == SQLITE_OK,
+        "missing-head v5 fixture opens for corruption");
+  if (database != nullptr) {
+    check(sqlite3_exec(database,
+                       "DELETE FROM journal_meta WHERE key='chain_head'", nullptr,
+                       nullptr, nullptr) == SQLITE_OK,
+          "missing-head v5 fixture removes required authority metadata");
+    sqlite3_close(database);
+    database = nullptr;
+  }
+  bool v5_missing_head_refused = false;
+  try {
+    trainvm::Journal journal(v5_missing_head_path);
+  } catch (const std::runtime_error& exception) {
+    v5_missing_head_refused =
+        std::string(exception.what()).find("authority metadata") !=
+        std::string::npos;
+  }
+  check(v5_missing_head_refused,
+        "established v5 journal never synthesizes a missing chain head");
+  check(sqlite3_open(v5_missing_head_path.c_str(), &database) == SQLITE_OK,
+        "refused missing-head v5 journal remains inspectable");
+  if (database != nullptr) {
+    check(scalar(database,
+                 "SELECT value FROM journal_meta WHERE key='schema_version'") ==
+                  "5" &&
+              scalar(database,
+                     "SELECT COUNT(*) FROM journal_meta WHERE key='chain_head'") ==
+                  "0" &&
+              scalar(database, "SELECT COUNT(*) FROM events") == "1",
+          "missing-head v5 refusal preserves history without metadata repair");
+    sqlite3_close(database);
+    database = nullptr;
+  }
+
+  const auto v4_path = directory / "v4-quarantine.db";
+  {
+    trainvm::Journal fresh(v4_path);
+    check(trainvm::JournalTestAccess::append(
+              fresh, created_event(std::string(64U, 'a'))) == 1U,
+          "v4 quarantine fixture starts with a valid event chain");
+  }
+  check(sqlite3_open(v4_path.c_str(), &database) == SQLITE_OK,
+        "v4 quarantine test opens a fresh v5 fixture");
+  std::string event_before;
+  std::string head_before;
+  if (database != nullptr) {
+    const char* downgrade = R"sql(
+      BEGIN IMMEDIATE;
+      ALTER TABLE resource_leases RENAME TO resource_leases_v5;
+      CREATE TABLE resource_leases (
+        concurrency_key TEXT PRIMARY KEY,
+        owner_run_id TEXT NOT NULL,
+        lease_id TEXT NOT NULL,
+        fencing_token INTEGER NOT NULL,
+        acquired_at_ns INTEGER NOT NULL,
+        expires_at_ns INTEGER NOT NULL,
+        released_at_ns INTEGER
+      ) WITHOUT ROWID;
+      INSERT INTO resource_leases VALUES
+        ('legacy-released', 'old-run', 'old-released', 7, 10, 20, 30),
+        ('legacy-future', 'old-run', 'old-live', 9, 100,
+         9223372036854775807, NULL);
+      DROP TABLE resource_leases_v5;
+
+      ALTER TABLE resource_lease_releases RENAME TO resource_lease_releases_v5;
+      CREATE TABLE resource_lease_releases (
+        concurrency_key TEXT NOT NULL,
+        owner_run_id TEXT NOT NULL,
+        lease_id TEXT NOT NULL,
+        fencing_token INTEGER NOT NULL,
+        released_at_ns INTEGER NOT NULL,
+        PRIMARY KEY(concurrency_key, lease_id, fencing_token)
+      ) WITHOUT ROWID;
+      INSERT INTO resource_lease_releases VALUES
+        ('legacy-released', 'old-run', 'old-released', 7, 30);
+      DROP TABLE resource_lease_releases_v5;
+
+      UPDATE journal_meta SET value='4' WHERE key='schema_version';
+      COMMIT;
+    )sql";
+    check(sqlite3_exec(database, downgrade, nullptr, nullptr, nullptr) == SQLITE_OK,
+          "v4 quarantine test constructs a complete established v4 journal");
+    event_before = scalar(database, R"sql(
+      SELECT quote(journal_sequence)||'|'||quote(event_id)||'|'||quote(run_id)||'|'||
+             quote(run_revision)||'|'||quote(plan_revision)||'|'||quote(node_id)||'|'||
+             quote(attempt_id)||'|'||quote(worker_sequence)||'|'||quote(event_type)||'|'||
+             quote(event_version)||'|'||quote(wall_time_ns)||'|'||
+             quote(monotonic_time_ns)||'|'||quote(optimizer_step)||'|'||
+             quote(payload_json)||'|'||quote(previous_hash)||'|'||
+             quote(content_hash)||'|'||quote(chain_hash)
+      FROM events WHERE journal_sequence=1
+    )sql");
+    head_before = scalar(
+        database, "SELECT value FROM journal_meta WHERE key='chain_head'");
+    sqlite3_close(database);
+    database = nullptr;
+  }
+
+  {
+    trainvm::Journal migrated(v4_path);
+    check(!migrated.active_lease("legacy-future", test_time(1, 999'999)) &&
+              !migrated.renew_lease("legacy-future", "old-run", "old-live", 9,
+                                    test_time(2, 1'000'000), 100) &&
+              !migrated.release_lease("legacy-future", "old-run", "old-live", 9,
+                                      test_time(3, 1'000'001)),
+          "unreleased v4 leases are quarantined and never active, renewable, or releasable");
+    const auto replacement = migrated.acquire_lease(
+        "legacy-future", "new-run", "new-lease", test_time(50, 4'000), 25);
+    check(replacement.status == trainvm::LeaseAcquireStatus::acquired &&
+              replacement.lease.fencing_token == 10U &&
+              replacement.lease.clock_domain == trainvm::ResourceLease::kBootTimeDomain &&
+              replacement.lease.boot_id == kTestBootId &&
+              replacement.lease.acquired_boottime_ns == 50 &&
+              replacement.lease.expires_boottime_ns == 75 &&
+              replacement.lease.acquired_wall_time_ns == 4'000 &&
+              replacement.lease.expires_wall_time_ns == 4'025,
+          "a boot-scoped acquisition supersedes quarantined future-wall authority");
+  }
+  check(sqlite3_open(v4_path.c_str(), &database) == SQLITE_OK,
+        "migrated v5 journal remains directly inspectable");
+  if (database != nullptr) {
+    const std::string version = scalar(
+        database, "SELECT value FROM journal_meta WHERE key='schema_version'");
+    const std::string released_history = scalar(database, R"sql(
+      SELECT clock_domain||'|'||quote(boot_id)||'|'||
+             quote(acquired_boottime_ns)||'|'||quote(expires_boottime_ns)||'|'||
+             acquired_wall_time_ns||'|'||expires_wall_time_ns||'|'||
+             released_wall_time_ns
+      FROM resource_leases WHERE concurrency_key='legacy-released'
+    )sql");
+    const std::string release_receipt = scalar(database, R"sql(
+      SELECT clock_domain||'|'||quote(boot_id)||'|'||released_wall_time_ns
+      FROM resource_lease_releases WHERE concurrency_key='legacy-released'
+    )sql");
+    const std::string event_after = scalar(database, R"sql(
+      SELECT quote(journal_sequence)||'|'||quote(event_id)||'|'||quote(run_id)||'|'||
+             quote(run_revision)||'|'||quote(plan_revision)||'|'||quote(node_id)||'|'||
+             quote(attempt_id)||'|'||quote(worker_sequence)||'|'||quote(event_type)||'|'||
+             quote(event_version)||'|'||quote(wall_time_ns)||'|'||
+             quote(monotonic_time_ns)||'|'||quote(optimizer_step)||'|'||
+             quote(payload_json)||'|'||quote(previous_hash)||'|'||
+             quote(content_hash)||'|'||quote(chain_hash)
+      FROM events WHERE journal_sequence=1
+    )sql");
+    const std::string head_after = scalar(
+        database, "SELECT value FROM journal_meta WHERE key='chain_head'");
+    check(version == "5" && released_history == "legacy-wall/v1|NULL|NULL|NULL|10|20|30" &&
+              release_receipt == "legacy-wall/v1|NULL|30",
+          "v4 lease and release history migrates into explicit legacy-wall quarantine");
+    check(event_after == event_before && head_after == head_before,
+          "v4 migration preserves event records and chain head byte-for-byte");
+    sqlite3_close(database);
+    database = nullptr;
+  }
+
+  const auto empty_v4_path = directory / "empty-v4.db";
+  {
+    trainvm::Journal fresh(empty_v4_path);
+  }
+  check(sqlite3_open(empty_v4_path.c_str(), &database) == SQLITE_OK,
+        "empty v4 migration test opens its fixture");
+  if (database != nullptr) {
+    const char* downgrade = R"sql(
+      BEGIN IMMEDIATE;
+      ALTER TABLE resource_leases RENAME TO resource_leases_v5;
+      CREATE TABLE resource_leases (
+        concurrency_key TEXT PRIMARY KEY, owner_run_id TEXT NOT NULL,
+        lease_id TEXT NOT NULL, fencing_token INTEGER NOT NULL,
+        acquired_at_ns INTEGER NOT NULL, expires_at_ns INTEGER NOT NULL,
+        released_at_ns INTEGER
+      ) WITHOUT ROWID;
+      DROP TABLE resource_leases_v5;
+      ALTER TABLE resource_lease_releases RENAME TO resource_lease_releases_v5;
+      CREATE TABLE resource_lease_releases (
+        concurrency_key TEXT NOT NULL, owner_run_id TEXT NOT NULL,
+        lease_id TEXT NOT NULL, fencing_token INTEGER NOT NULL,
+        released_at_ns INTEGER NOT NULL,
+        PRIMARY KEY(concurrency_key, lease_id, fencing_token)
+      ) WITHOUT ROWID;
+      DROP TABLE resource_lease_releases_v5;
+      UPDATE journal_meta SET value='4' WHERE key='schema_version';
+      COMMIT;
+    )sql";
+    check(sqlite3_exec(database, downgrade, nullptr, nullptr, nullptr) == SQLITE_OK,
+          "empty v4 fixture uses the exact established lease schema");
+    sqlite3_close(database);
+    database = nullptr;
+  }
+  {
+    trainvm::Journal migrated(empty_v4_path);
+    const auto acquired = migrated.acquire_lease(
+        "empty-v4-gpu", "new-run", "new-lease", test_time(10, 500), 20);
+    check(acquired.status == trainvm::LeaseAcquireStatus::acquired &&
+              acquired.lease.clock_domain == trainvm::ResourceLease::kBootTimeDomain,
+          "empty established v4 journal safely migrates and accepts typed leases");
+  }
+
+  const auto partial_v5_path = directory / "partial-v5.db";
+  check(sqlite3_open(partial_v5_path.c_str(), &database) == SQLITE_OK,
+        "partial v5 test opens its fixture");
+  if (database != nullptr) {
+    check(sqlite3_exec(database, R"sql(
+      CREATE TABLE journal_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
+      INSERT INTO journal_meta VALUES('schema_version', '5');
+      INSERT INTO journal_meta VALUES('journal_id', '0123456789abcdef0123456789abcdef');
+    )sql", nullptr, nullptr, nullptr) == SQLITE_OK,
+          "partial v5 test creates trusted metadata without its required tables");
+    sqlite3_close(database);
+    database = nullptr;
+  }
+  bool partial_refused = false;
+  try {
+    trainvm::Journal journal(partial_v5_path);
+  } catch (const std::runtime_error& exception) {
+    partial_refused = std::string(exception.what()).find("v5 is partial") !=
+                      std::string::npos;
+  }
+  check(partial_refused, "partial v5 journals fail closed before schema repair");
+
+  const auto malformed_v5_path = directory / "malformed-v5.db";
+  {
+    trainvm::Journal fresh(malformed_v5_path);
+  }
+  check(sqlite3_open(malformed_v5_path.c_str(), &database) == SQLITE_OK,
+        "malformed v5 test opens its fixture");
+  if (database != nullptr) {
+    check(sqlite3_exec(database, R"sql(
+      PRAGMA ignore_check_constraints=ON;
+      INSERT INTO resource_leases VALUES(
+        'bad-gpu', 'bad-run', 'bad-lease', 1, 'boottime/v1', 'not-a-boot-id',
+        10, 20, 100, 110, NULL
+      );
+    )sql", nullptr, nullptr, nullptr) == SQLITE_OK,
+          "malformed v5 test injects invalid persisted authority data");
+    sqlite3_close(database);
+    database = nullptr;
+  }
+  bool malformed_refused = false;
+  try {
+    trainvm::Journal journal(malformed_v5_path);
+  } catch (const std::runtime_error& exception) {
+    malformed_refused = std::string(exception.what()).find(
+                            "malformed lease authority data") != std::string::npos;
+  }
+  check(malformed_refused, "malformed v5 lease authority fails closed on open");
   std::filesystem::remove_all(directory);
 }
 
@@ -5738,6 +7239,8 @@ int main() {
     test_controller_and_fake_worker();
     test_compiled_plan_persistence();
     test_resource_leases();
+    test_authority_clock_integration();
+    test_authority_lock_file_identity();
     test_control_command_journal();
     test_command_service();
     test_submission_and_queue_boundary();

@@ -157,7 +157,8 @@ int journal_command(int argc, char** argv) {
     return 64;
   }
   trainvm::AuthorityLock authority_lock(argv[3]);
-  trainvm::Journal journal(argv[3]);
+  trainvm::Journal journal(authority_lock.journal_path(),
+                           authority_lock.journal_identity());
   if (operation == "init" && argc == 4) {
     std::cout << nlohmann::json({{"initialized", true}, {"events", journal.event_count()}}).dump(2)
               << '\n';

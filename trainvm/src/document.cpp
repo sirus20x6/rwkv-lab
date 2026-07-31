@@ -42,6 +42,57 @@ const std::regex kSecretReference(
     "[a-zA-Z0-9][a-zA-Z0-9._/-]{0,255}#"
     "[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$");
 
+std::optional<std::size_t> cpuset_cpu_count(std::string_view value) {
+  if (value.empty() || value.size() > 4096U) return std::nullopt;
+  std::vector<std::pair<std::int64_t, std::int64_t>> ranges;
+  std::size_t offset = 0U;
+  while (offset < value.size()) {
+    const std::size_t comma = value.find(',', offset);
+    const std::string_view item = value.substr(
+        offset, comma == std::string_view::npos ? value.size() - offset
+                                                : comma - offset);
+    if (item.empty()) return std::nullopt;
+    const std::size_t dash = item.find('-');
+    if (dash != std::string_view::npos && item.find('-', dash + 1U) !=
+                                              std::string_view::npos) {
+      return std::nullopt;
+    }
+    const auto parse_cpu = [](std::string_view text,
+                              std::int64_t& output) {
+      if (text.empty()) return false;
+      const auto [end, error_code] = std::from_chars(
+          text.data(), text.data() + text.size(), output);
+      return error_code == std::errc{} && end == text.data() + text.size() &&
+             output >= 0 && output <= 1'048'575;
+    };
+    std::int64_t first = 0;
+    std::int64_t last = 0;
+    if (dash == std::string_view::npos) {
+      if (!parse_cpu(item, first)) return std::nullopt;
+      last = first;
+    } else if (!parse_cpu(item.substr(0U, dash), first) ||
+               !parse_cpu(item.substr(dash + 1U), last) || first > last) {
+      return std::nullopt;
+    }
+    ranges.emplace_back(first, last);
+    if (comma == std::string_view::npos) break;
+    if (comma + 1U == value.size()) return std::nullopt;
+    offset = comma + 1U;
+  }
+  if (!std::ranges::is_sorted(ranges) ||
+      std::ranges::adjacent_find(
+          ranges, [](const auto& left, const auto& right) {
+            return right.first <= left.second + 1;
+          }) != ranges.end()) {
+    return std::nullopt;
+  }
+  std::size_t count = 0U;
+  for (const auto& [first, last] : ranges) {
+    count += static_cast<std::size_t>(last - first + 1);
+  }
+  return count;
+}
+
 void error(std::vector<Diagnostic>& diagnostics, std::string code, std::string path,
            std::string message) {
   diagnostics.push_back(
@@ -359,6 +410,232 @@ void validate_experiment(const Experiment& experiment, std::vector<Diagnostic>& 
   if (spec.resources.lease_timeout_seconds && *spec.resources.lease_timeout_seconds < 5) {
     error(diagnostics, "number.minimum", "/spec/resources/lease_timeout_seconds",
           "must be at least 5 seconds");
+  }
+  if (spec.resources.cpu_io_policy) {
+    const CpuIoPolicy& policy = *spec.resources.cpu_io_policy;
+    constexpr std::string_view path = "/spec/resources/cpu_io_policy";
+    std::optional<std::size_t> selected_cpu_count;
+    if (!policy.cpuset && !policy.cpus && !policy.cpu_weight &&
+        !policy.io_weight && !policy.omp_threads &&
+        !policy.preprocessing_workers && !policy.nice) {
+      error(diagnostics, "resources.policy_empty", std::string(path),
+            "CPU/I/O policy must declare at least one bounded setting");
+    }
+    if (policy.cpuset && policy.cpus) {
+      error(diagnostics, "resources.cpuset_conflict", std::string(path),
+            "cpuset and cpus are mutually exclusive representations");
+    }
+    if (policy.cpuset) {
+      selected_cpu_count = cpuset_cpu_count(*policy.cpuset);
+      if (!selected_cpu_count) {
+        error(diagnostics, "resources.cpuset", child_path(std::string(path), "cpuset"),
+              "must be a bounded canonical Linux CPU-list expression");
+      }
+    }
+    if (policy.cpus) {
+      std::set<std::int64_t> unique;
+      if (policy.cpus->empty() || policy.cpus->size() > 1024U ||
+          !std::ranges::is_sorted(*policy.cpus) ||
+          std::ranges::any_of(*policy.cpus, [](std::int64_t cpu) {
+            return cpu < 0 || cpu > 1'048'575;
+          }) || !std::ranges::all_of(*policy.cpus, [&](std::int64_t cpu) {
+            return unique.insert(cpu).second;
+          })) {
+        error(diagnostics, "resources.cpus", child_path(std::string(path), "cpus"),
+              "must contain 1 to 1024 sorted unique nonnegative CPU indices");
+      } else {
+        selected_cpu_count = policy.cpus->size();
+      }
+    }
+    const auto bounded = [&](const std::optional<std::int64_t>& value,
+                             std::string_view name, std::int64_t minimum,
+                             std::int64_t maximum) {
+      if (value && (*value < minimum || *value > maximum)) {
+        error(diagnostics, "number.range",
+              child_path(std::string(path), name),
+              "must be between " + std::to_string(minimum) + " and " +
+                  std::to_string(maximum));
+      }
+    };
+    bounded(policy.cpu_weight, "cpu_weight", 1, 10'000);
+    bounded(policy.io_weight, "io_weight", 1, 10'000);
+    bounded(policy.omp_threads, "omp_threads", 1, 65'536);
+    bounded(policy.preprocessing_workers, "preprocessing_workers", 0,
+            65'536);
+    bounded(policy.nice, "nice", -20, 19);
+    if (spec.resources.cpu_threads && selected_cpu_count &&
+        *spec.resources.cpu_threads >
+            static_cast<std::int64_t>(*selected_cpu_count)) {
+      error(diagnostics, "resources.thread_conflict", std::string(path),
+            "resources.cpu_threads cannot exceed the selected CPU affinity set");
+    }
+    if (spec.resources.cpu_threads && policy.omp_threads &&
+        *policy.omp_threads > *spec.resources.cpu_threads) {
+      error(diagnostics, "resources.thread_conflict",
+            child_path(std::string(path), "omp_threads"),
+            "omp_threads cannot exceed resources.cpu_threads");
+    }
+    if (spec.resources.cpu_threads && policy.preprocessing_workers &&
+        *policy.preprocessing_workers > *spec.resources.cpu_threads) {
+      error(diagnostics, "resources.thread_conflict",
+            child_path(std::string(path), "preprocessing_workers"),
+            "preprocessing_workers cannot exceed resources.cpu_threads");
+    }
+    if (spec.resources.cpu_threads && policy.omp_threads &&
+        policy.preprocessing_workers &&
+        *policy.omp_threads >= 1 && *policy.omp_threads <= 65'536 &&
+        *policy.preprocessing_workers >= 0 &&
+        *policy.preprocessing_workers <= 65'536 &&
+        *policy.omp_threads + *policy.preprocessing_workers >
+            *spec.resources.cpu_threads) {
+      error(diagnostics, "resources.thread_conflict", std::string(path),
+            "omp_threads plus preprocessing_workers cannot exceed resources.cpu_threads");
+    }
+  }
+
+  if (spec.execution) {
+    const ExecutionPhases& execution = *spec.execution;
+    const auto execution_component =
+        spec.components.find(execution.component);
+    if (execution_component == spec.components.end()) {
+      error(diagnostics, "reference.component", "/spec/execution/component",
+            "unknown execution component: " + execution.component);
+    } else if (!execution_component->second.operations.contains(
+                   execution.operation)) {
+      error(diagnostics, "reference.operation", "/spec/execution/operation",
+            "execution component does not provide operation: " +
+                execution.operation);
+    } else if (execution_component->second.runtime ==
+               ComponentRuntime::builtin) {
+      error(diagnostics, "execution.target", "/spec/execution/component",
+            "lifecycle and profiler phases require an external worker operation");
+    }
+    if (!execution.compile && !execution.warmup && !execution.qualify &&
+        !execution.gpu_trace) {
+      error(diagnostics, "execution.empty", "/spec/execution",
+            "execution must declare at least one typed phase");
+    }
+    const auto validate_step_phase = [&](bool enabled,
+                                         const std::optional<std::int64_t>& steps,
+                                         const std::string& path) {
+      if (enabled && (!steps || *steps < 1 || *steps > 10'000)) {
+        error(diagnostics, "execution.steps", child_path(path, "steps"),
+              "an enabled phase requires between 1 and 10000 steps");
+      } else if (!enabled && steps) {
+        error(diagnostics, "execution.disabled_configuration", path,
+              "a disabled phase cannot declare steps");
+      }
+    };
+    if (execution.warmup) {
+      validate_step_phase(execution.warmup->enabled,
+                          execution.warmup->steps,
+                          "/spec/execution/warmup");
+    }
+    if (execution.qualify) {
+      validate_step_phase(execution.qualify->enabled,
+                          execution.qualify->steps,
+                          "/spec/execution/qualify");
+    }
+    if (execution.gpu_trace) {
+      const GpuTraceCapture& trace = *execution.gpu_trace;
+      constexpr std::string_view path = "/spec/execution/gpu_trace";
+      const bool has_configuration =
+          trace.backend || trace.warmup_steps || trace.skip_steps ||
+          trace.capture_steps || trace.output_artifact || trace.activities ||
+          trace.record_shapes || trace.profile_memory || trace.with_stack;
+      if (!trace.enabled && has_configuration) {
+        error(diagnostics, "execution.disabled_configuration", std::string(path),
+              "disabled GPU trace capture cannot retain profiler settings");
+      }
+      if (trace.enabled &&
+          (!trace.backend || !trace.warmup_steps || !trace.skip_steps ||
+           !trace.capture_steps || !trace.output_artifact ||
+           !trace.activities || trace.activities->empty())) {
+        error(diagnostics, "execution.trace_required", std::string(path),
+              "enabled GPU trace capture requires backend, bounded schedule, output artifact, and activities");
+      }
+      const auto bounded_trace_steps = [&](const std::optional<std::int64_t>& value,
+                                           std::string_view name,
+                                           std::int64_t minimum,
+                                           std::int64_t maximum) {
+        if (value && (*value < minimum || *value > maximum)) {
+          error(diagnostics, "execution.trace_steps",
+                child_path(std::string(path), name),
+                "must be between " + std::to_string(minimum) + " and " +
+                    std::to_string(maximum));
+        }
+      };
+      bounded_trace_steps(trace.warmup_steps, "warmup_steps", 0, 256);
+      bounded_trace_steps(trace.skip_steps, "skip_steps", 0, 256);
+      bounded_trace_steps(trace.capture_steps, "capture_steps", 1, 128);
+      if (trace.warmup_steps && trace.skip_steps && trace.capture_steps &&
+          *trace.warmup_steps >= 0 && *trace.warmup_steps <= 256 &&
+          *trace.skip_steps >= 0 && *trace.skip_steps <= 256 &&
+          *trace.capture_steps >= 1 && *trace.capture_steps <= 128 &&
+          *trace.warmup_steps + *trace.skip_steps + *trace.capture_steps >
+              512) {
+        error(diagnostics, "execution.trace_window", std::string(path),
+              "GPU trace schedule cannot exceed 512 total steps");
+      }
+      if (trace.activities &&
+          (trace.activities->size() > 2U ||
+           !std::ranges::is_sorted(*trace.activities) ||
+           std::set<ProfilerActivity>(trace.activities->begin(),
+                                      trace.activities->end()).size() !=
+               trace.activities->size())) {
+        error(diagnostics, "execution.trace_activities",
+              child_path(std::string(path), "activities"),
+              "profiler activities must be sorted, nonempty, and unique");
+      }
+      const bool uses_accelerator =
+          trace.activities && std::ranges::find(*trace.activities,
+                                                ProfilerActivity::accelerator) !=
+                                  trace.activities->end();
+      if (trace.enabled && !uses_accelerator) {
+        error(diagnostics, "execution.trace_activities",
+              child_path(std::string(path), "activities"),
+              "GPU trace capture requires the accelerator activity");
+      }
+      if (trace.enabled &&
+          (accelerators.vendor == AcceleratorVendor::none ||
+           accelerators.count == 0)) {
+        error(diagnostics, "execution.trace_accelerator", std::string(path),
+              "GPU trace capture requires an accelerator allocation");
+      }
+      if (trace.backend && *trace.backend != ProfilerBackend::torch &&
+          accelerators.vendor != AcceleratorVendor::nvidia) {
+        error(diagnostics, "execution.trace_accelerator", std::string(path),
+              "nsys and ncu profiling require an NVIDIA accelerator");
+      }
+      if (trace.backend && *trace.backend == ProfilerBackend::ncu &&
+          trace.activities &&
+          *trace.activities != std::vector<ProfilerActivity>{
+                                   ProfilerActivity::accelerator}) {
+        error(diagnostics, "execution.trace_activities",
+              child_path(std::string(path), "activities"),
+              "ncu capture supports only the accelerator activity");
+      }
+      if (trace.backend && *trace.backend != ProfilerBackend::torch &&
+          (trace.record_shapes || trace.profile_memory || trace.with_stack)) {
+        error(diagnostics, "execution.trace_backend_options", std::string(path),
+              "record_shapes, profile_memory, and with_stack are torch-profiler-only options");
+      }
+      if (trace.output_artifact) {
+        const auto artifact = spec.artifacts.find(*trace.output_artifact);
+        if (artifact == spec.artifacts.end()) {
+          error(diagnostics, "reference.artifact",
+                child_path(std::string(path), "output_artifact"),
+                "unknown GPU trace output artifact: " +
+                    *trace.output_artifact);
+        } else if (artifact->second.type != ArtifactType::path &&
+                   artifact->second.type != ArtifactType::report &&
+                   artifact->second.type != ArtifactType::opaque) {
+          error(diagnostics, "execution.trace_artifact",
+                child_path(std::string(path), "output_artifact"),
+                "GPU trace output must target a path, report, or opaque artifact");
+        }
+      }
+    }
   }
 
   for (const auto& [name, parameter] : spec.parameters) {

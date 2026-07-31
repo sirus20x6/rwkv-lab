@@ -20,22 +20,23 @@ class Controller {
 
   const ExecutionState& create_queued(nlohmann::json submission = nlohmann::json::object());
   const ExecutionState& recover();
-  LeaseAcquireResult begin_acquisition(std::int64_t now_ns);
+  LeaseAcquireResult begin_acquisition(const AuthorityTimeSample& now);
   WorkerLaunchTicket prepare_worker_launch(WorkerLaunchRequest request,
-                                           std::int64_t now_ns);
+                                           const AuthorityTimeSample& now);
   ResolvedLaunchSpec bind_worker_launch(
       const ResolvedLaunch& resolved,
       const HostLaunchRegistry& host_registry,
-      const HostIdentity& authority_host, std::int64_t now_ns);
+      const HostIdentity& authority_host, const AuthorityTimeSample& now);
   WorkerReadinessResult accept_worker_hello(WorkerHelloEvidence hello,
-                                             std::int64_t now_ns);
-  Dispatch prepare_dispatch(std::int64_t now_ns);
+                                             const AuthorityTimeSample& now);
+  Dispatch prepare_dispatch(const AuthorityTimeSample& now);
   const ExecutionState& handle_event(const Event& event,
                                      const WorkerSessionIdentity& identity,
-                                     std::int64_t now_ns);
+                                     const AuthorityTimeSample& now);
   const ExecutionState& complete_artifact_validation(
-      ArtifactValidationOutcome outcome, std::int64_t now_ns);
-  const ExecutionState& release_managed_resources(std::int64_t now_ns);
+      ArtifactValidationOutcome outcome, const AuthorityTimeSample& now);
+  const ExecutionState& release_managed_resources(
+      const AuthorityTimeSample& now);
   ControlPatchValidation request_controls(const std::string& idempotency_key,
                                           std::uint64_t expected_run_revision,
                                           std::uint64_t expected_control_revision,
@@ -47,7 +48,8 @@ class Controller {
                                       ControlCommandStatus status,
                                       std::optional<std::uint64_t> effective_step,
                                       nlohmann::json effective_values,
-                                      nlohmann::json diagnostics);
+                                      nlohmann::json diagnostics,
+                                      const AuthorityTimeSample& now);
 
   [[nodiscard]] const ExecutionState& state() const;
   [[nodiscard]] const CompiledPlan& plan() const;
@@ -67,13 +69,13 @@ class Controller {
   Dispatch prepare_dispatch();
   const ExecutionState& handle_event(const Event& event);
   void complete_builtin_admission(const ResourceLease& lease,
-                                  std::int64_t now_ns);
+                                  const AuthorityTimeSample& now);
   const ExecutionState& handle_event_impl(
       const Event& event, const std::optional<WorkerSessionIdentity>& identity,
-      std::optional<std::int64_t> now_ns);
+      std::optional<AuthorityTimeSample> now);
   const ExecutionState& complete_managed_builtin(
       std::string_view expected_operation, std::string event_type,
-      bool release_lease, std::int64_t now_ns);
+      bool release_lease, const AuthorityTimeSample& now);
 };
 
 }  // namespace trainvm

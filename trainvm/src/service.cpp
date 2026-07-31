@@ -32,65 +32,243 @@
 #include <grpcpp/security/server_credentials.h>
 
 namespace trainvm {
+namespace {
 
-AuthorityLock::AuthorityLock(const std::filesystem::path& journal_path) {
-  const auto absolute_journal = std::filesystem::absolute(journal_path);
-  if (!absolute_journal.parent_path().empty()) {
-    std::filesystem::create_directories(absolute_journal.parent_path());
+int open_directory_by_components(const std::filesystem::path& absolute_path,
+                                 bool create_missing) {
+  if (!absolute_path.is_absolute()) {
+    throw std::runtime_error("authority directory path must be absolute");
   }
-  // Lock the journal inode so symlink and hardlink aliases cannot create
-  // independent writer authorities. flock and SQLite's POSIX record locks are
-  // separate lock domains on Linux, so this does not interfere with SQLite.
-  journal_descriptor_ =
-      ::open(absolute_journal.c_str(), O_CREAT | O_CLOEXEC | O_RDWR, S_IRUSR | S_IWUSR);
-  if (journal_descriptor_ < 0) {
-    throw std::runtime_error("could not open authority journal " + absolute_journal.string() +
+  int current = ::open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (current < 0) {
+    throw std::runtime_error("could not open filesystem root: " +
+                             std::string(std::strerror(errno)));
+  }
+  for (const auto& part : absolute_path.relative_path()) {
+    const std::string component = part.string();
+    if (component.empty() || component == "." || component == ".." ||
+        component.find('/') != std::string::npos) {
+      (void)::close(current);
+      throw std::runtime_error("authority directory has a noncanonical component");
+    }
+    int next = ::openat(current, component.c_str(),
+                        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (next < 0 && errno == ENOENT && create_missing) {
+      if (::mkdirat(current, component.c_str(), S_IRWXU) != 0 &&
+          errno != EEXIST) {
+        const std::string message = std::strerror(errno);
+        (void)::close(current);
+        throw std::runtime_error("could not create authority directory component " +
+                                 component + ": " + message);
+      }
+      next = ::openat(current, component.c_str(),
+                      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    }
+    if (next < 0) {
+      const std::string message = std::strerror(errno);
+      (void)::close(current);
+      throw std::runtime_error("could not securely resolve authority directory component " +
+                               component + ": " + message);
+    }
+    (void)::close(current);
+    current = next;
+  }
+  return current;
+}
+
+bool safe_owned_regular(const struct stat& status, uid_t owner) {
+  return S_ISREG(status.st_mode) && status.st_uid == owner &&
+         status.st_nlink == 1 &&
+         (status.st_mode & (S_IWGRP | S_IWOTH)) == 0;
+}
+
+void require_safe_sqlite_auxiliary(int directory_descriptor,
+                                   std::string_view name, uid_t owner) {
+  struct stat status {};
+  const std::string owned_name(name);
+  if (::fstatat(directory_descriptor, owned_name.c_str(), &status,
+                AT_SYMLINK_NOFOLLOW) != 0) {
+    if (errno == ENOENT) return;
+    throw std::runtime_error("could not inspect SQLite auxiliary " + owned_name +
                              ": " + std::strerror(errno));
   }
-  if (::flock(journal_descriptor_, LOCK_EX | LOCK_NB) != 0) {
-    const std::string message = std::strerror(errno);
-    ::close(journal_descriptor_);
-    journal_descriptor_ = -1;
-    throw std::runtime_error("another TrainVM authority owns " + absolute_journal.string() +
-                             ": " + message);
-  }
-
-  const std::filesystem::path path =
-      std::filesystem::weakly_canonical(absolute_journal).string() + ".authority.lock";
-  descriptor_ = ::open(path.c_str(), O_CREAT | O_CLOEXEC | O_RDWR, S_IRUSR | S_IWUSR);
-  if (descriptor_ < 0) {
-    const std::string message = std::strerror(errno);
-    ::close(journal_descriptor_);
-    journal_descriptor_ = -1;
-    throw std::runtime_error("could not open authority lock " + path.string() + ": " + message);
-  }
-  if (::flock(descriptor_, LOCK_EX | LOCK_NB) != 0) {
-    const std::string message = std::strerror(errno);
-    ::close(descriptor_);
-    descriptor_ = -1;
-    ::close(journal_descriptor_);
-    journal_descriptor_ = -1;
-    throw std::runtime_error("another TrainVM authority owns " + path.string() + ": " +
-                               message);
-  }
-  if (::fchmod(descriptor_, S_IRUSR | S_IWUSR) != 0) {
-    const std::string message = std::strerror(errno);
-    ::close(descriptor_);
-    descriptor_ = -1;
-    ::close(journal_descriptor_);
-    journal_descriptor_ = -1;
-    throw std::runtime_error("could not restrict authority lock " + path.string() + ": " +
-                             message);
+  if (!safe_owned_regular(status, owner)) {
+    throw std::runtime_error(
+        "SQLite auxiliary is not a safe unique owned regular file " +
+        owned_name);
   }
 }
 
+}  // namespace
+
+AuthorityLock::AuthorityLock(const std::filesystem::path& journal_path) {
+  const auto absolute_journal =
+      std::filesystem::absolute(journal_path).lexically_normal();
+  const std::filesystem::path parent = absolute_journal.parent_path();
+  const std::string filename = absolute_journal.filename().string();
+  if (filename.empty() || filename == "." || filename == ".." ||
+      filename.find('/') != std::string::npos) {
+    throw std::runtime_error("authority journal requires a plain filename");
+  }
+  const auto close_all = [&] {
+    if (kernel_namespace_descriptor_ >= 0) {
+      (void)::close(kernel_namespace_descriptor_);
+      kernel_namespace_descriptor_ = -1;
+    }
+    if (descriptor_ >= 0) {
+      (void)::close(descriptor_);
+      descriptor_ = -1;
+    }
+    if (journal_descriptor_ >= 0) {
+      (void)::close(journal_descriptor_);
+      journal_descriptor_ = -1;
+    }
+    if (directory_descriptor_ >= 0) {
+      (void)::close(directory_descriptor_);
+      directory_descriptor_ = -1;
+    }
+  };
+  const auto fail = [&](std::string message) -> void {
+    close_all();
+    throw std::runtime_error(std::move(message));
+  };
+
+  // The abstract Unix-socket name is a kernel-resident lock for the configured
+  // absolute namespace. Unlike the co-located sidecar, it cannot be renamed
+  // together with a replaced journal and therefore prevents two cooperating
+  // authorities from splitting across old and replacement inodes.
+  kernel_namespace_descriptor_ =
+      ::socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+  if (kernel_namespace_descriptor_ < 0) {
+    fail("could not create journal namespace lock socket: " +
+         std::string(std::strerror(errno)));
+  }
+  const std::string kernel_name =
+      "trainvm-journal-" + sha256_hex(absolute_journal.string());
+  sockaddr_un kernel_address {};
+  if (kernel_name.size() + 1U > sizeof(kernel_address.sun_path)) {
+    fail("journal namespace lock identity exceeds the Linux abstract socket limit");
+  }
+  kernel_address.sun_family = AF_UNIX;
+  std::memcpy(kernel_address.sun_path + 1, kernel_name.data(), kernel_name.size());
+  const socklen_t kernel_address_size = static_cast<socklen_t>(
+      offsetof(sockaddr_un, sun_path) + 1U + kernel_name.size());
+  if (::bind(kernel_namespace_descriptor_,
+             reinterpret_cast<const sockaddr*>(&kernel_address),
+             kernel_address_size) != 0) {
+    fail("another TrainVM authority owns journal namespace " +
+         absolute_journal.string() + ": " + std::strerror(errno));
+  }
+
+  try {
+    directory_descriptor_ = open_directory_by_components(parent, true);
+  } catch (const std::exception& exception) {
+    fail(exception.what());
+  }
+  struct stat directory_status {};
+  if (directory_descriptor_ < 0 ||
+      ::fstat(directory_descriptor_, &directory_status) != 0 ||
+      !S_ISDIR(directory_status.st_mode) ||
+      directory_status.st_uid != ::geteuid() ||
+      (directory_status.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+    const std::string message = std::strerror(errno);
+    fail("authority journal directory is not a safe owned directory " +
+         parent.string() + ": " + message);
+  }
+
+  const std::string lock_name = filename + ".authority.lock";
+  descriptor_ = ::openat(directory_descriptor_, lock_name.c_str(),
+                         O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_RDWR,
+                         S_IRUSR | S_IWUSR);
+  struct stat lock_status {};
+  if (descriptor_ < 0 || ::fstat(descriptor_, &lock_status) != 0 ||
+      !S_ISREG(lock_status.st_mode) || lock_status.st_uid != ::geteuid() ||
+      lock_status.st_nlink != 1 ||
+      (lock_status.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+    const std::string message = std::strerror(errno);
+    fail("authority sidecar is not a safe unique regular file " + lock_name +
+         ": " + message);
+  }
+  if (::flock(descriptor_, LOCK_EX | LOCK_NB) != 0) {
+    const std::string message = std::strerror(errno);
+    fail("another TrainVM authority owns " + lock_name + ": " + message);
+  }
+  if (::fchmod(descriptor_, S_IRUSR | S_IWUSR) != 0) {
+    const std::string message = std::strerror(errno);
+    fail("could not restrict authority lock " + lock_name + ": " + message);
+  }
+
+  journal_descriptor_ = ::openat(
+      directory_descriptor_, filename.c_str(),
+      O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_RDWR, S_IRUSR | S_IWUSR);
+  struct stat journal_status {};
+  if (journal_descriptor_ < 0 ||
+      ::fstat(journal_descriptor_, &journal_status) != 0 ||
+      !S_ISREG(journal_status.st_mode) ||
+      journal_status.st_uid != ::geteuid() || journal_status.st_nlink != 1 ||
+      (journal_status.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+    const std::string message = std::strerror(errno);
+    fail("authority journal is not a safe unique regular file " + filename +
+         ": " + message);
+  }
+  if (::flock(journal_descriptor_, LOCK_EX | LOCK_NB) != 0) {
+    const std::string message = std::strerror(errno);
+    fail("another TrainVM authority owns " + filename + ": " + message);
+  }
+  if (::fchmod(journal_descriptor_, S_IRUSR | S_IWUSR) != 0) {
+    const std::string message = std::strerror(errno);
+    fail("could not restrict authority journal " + filename + ": " + message);
+  }
+
+  try {
+    for (const std::string_view suffix :
+         {std::string_view{"-journal"}, std::string_view{"-wal"},
+          std::string_view{"-shm"}}) {
+      require_safe_sqlite_auxiliary(directory_descriptor_, filename +
+                                        std::string(suffix),
+                                    ::geteuid());
+    }
+  } catch (const std::exception& exception) {
+    fail(exception.what());
+  }
+
+  journal_identity_ = {
+      .directory_path = parent.string(),
+      .journal_name = filename,
+      .authority_name = lock_name,
+      .directory_device = static_cast<std::uint64_t>(directory_status.st_dev),
+      .directory_inode = static_cast<std::uint64_t>(directory_status.st_ino),
+      .device = static_cast<std::uint64_t>(journal_status.st_dev),
+      .inode = static_cast<std::uint64_t>(journal_status.st_ino),
+      .authority_device = static_cast<std::uint64_t>(lock_status.st_dev),
+      .authority_inode = static_cast<std::uint64_t>(lock_status.st_ino),
+      .owner_uid = static_cast<std::uint64_t>(::geteuid()),
+  };
+  stable_journal_path_ = std::filesystem::path("/proc/self/fd") /
+                         std::to_string(directory_descriptor_) / filename;
+}
+
 AuthorityLock::~AuthorityLock() {
+  if (kernel_namespace_descriptor_ >= 0) {
+    ::close(kernel_namespace_descriptor_);
+  }
   if (descriptor_ >= 0) {
     ::close(descriptor_);
   }
   if (journal_descriptor_ >= 0) {
     ::close(journal_descriptor_);
   }
+  if (directory_descriptor_ >= 0) {
+    ::close(directory_descriptor_);
+  }
+}
+
+const std::filesystem::path& AuthorityLock::journal_path() const noexcept {
+  return stable_journal_path_;
+}
+
+const JournalFileIdentity& AuthorityLock::journal_identity() const noexcept {
+  return journal_identity_;
 }
 
 namespace {
@@ -616,7 +794,7 @@ TrainVMService::TrainVMService(
     const std::filesystem::path& journal_path,
     AdapterRegistry adapter_registry,
     HostLaunchRegistry host_launch_registry,
-    std::function<std::int64_t()> authority_clock)
+    std::function<AuthorityTimeSample()> authority_clock)
     : TrainVMService(journal_path, std::move(adapter_registry),
                      std::move(host_launch_registry),
                      HostLaunchResolver::local_host_identity(),
@@ -627,48 +805,38 @@ TrainVMService::TrainVMService(
     AdapterRegistry adapter_registry,
     HostLaunchRegistry host_launch_registry,
     HostIdentity authority_host,
-    std::function<std::int64_t()> authority_clock)
+    std::function<AuthorityTimeSample()> authority_clock)
     : authority_lock_(std::make_unique<AuthorityLock>(journal_path)),
-      journal_(journal_path),
-      authority_clock_(authority_clock ? std::move(authority_clock)
-                                       : std::function<std::int64_t()>{[] {
-                                           return std::chrono::duration_cast<
-                                                      std::chrono::nanoseconds>(
-                                                      std::chrono::system_clock::now()
-                                                          .time_since_epoch())
-                                               .count();
-                                         }}),
+      journal_(authority_lock_->journal_path(),
+               authority_lock_->journal_identity()),
+      authority_clock_(
+          authority_clock
+              ? std::make_shared<AuthorityClock>(std::move(authority_clock))
+              : std::make_shared<AuthorityClock>()),
       adapter_registry_(std::move(adapter_registry)),
       host_launch_registry_(std::move(host_launch_registry)),
       authority_host_(std::move(authority_host)),
       host_launch_resolver_(host_launch_registry_, authority_host_),
       reconciler_(journal_, adapter_registry_, command_mutex_,
-                  [this] { return authority_now_ns(); }) {}
+                  [this] { return authority_now(); }) {}
 
 TrainVMService::~TrainVMService() = default;
 
-std::int64_t TrainVMService::authority_now_ns() const {
-  const std::int64_t now_ns = authority_clock_();
-  if (now_ns < 0) {
-    throw std::runtime_error("authority clock returned a negative timestamp");
-  }
-  return now_ns;
+AuthorityTimeSample TrainVMService::authority_now() const {
+  return authority_clock_->sample();
 }
 
 ReconcileResult TrainVMService::reconcile_once(const std::string& run_id) {
   return reconciler_.step(run_id);
 }
 
-void TrainVMService::prune_retained_launches(std::int64_t now_ns) {
-  if (now_ns < 0) {
-    throw std::invalid_argument(
-        "retained host launch pruning clock must be nonnegative");
-  }
+void TrainVMService::prune_retained_launches(
+    const AuthorityTimeSample& now) {
   for (auto retained = resolved_launches_.begin();
        retained != resolved_launches_.end();) {
     const ResolvedLaunchIdentity& identity = retained->second.spec().identity;
     const auto projection = journal_.projection(identity.run_id);
-    const auto active = journal_.active_lease(identity.concurrency_key, now_ns);
+    const auto active = journal_.active_lease(identity.concurrency_key, now);
     const bool owns_active_lease =
         active && active->owner_run_id == identity.run_id &&
         active->lease_id == identity.lease_id &&
@@ -739,8 +907,8 @@ ResolvedLaunchSpec TrainVMService::bind_worker_launch(
         "host launch binding requires a run identity");
   }
   std::scoped_lock lock(command_mutex_);
-  const std::int64_t now_ns = authority_now_ns();
-  prune_retained_launches(now_ns);
+  const AuthorityTimeSample now = authority_now();
+  prune_retained_launches(now);
   const auto projection = journal_.projection(launch.run_id);
   if (!projection) {
     throw std::invalid_argument(
@@ -796,7 +964,7 @@ ResolvedLaunchSpec TrainVMService::bind_worker_launch(
       state.current_attempt_id;
   const auto durable_launch = journal_.event(launch_id);
   const auto active_lease =
-      journal_.active_lease(launch.concurrency_key, now_ns);
+      journal_.active_lease(launch.concurrency_key, now);
   const nlohmann::json expected_payload{
       {"launch_nonce", launch.launch_nonce},
       {"adapter", launch.adapter},
@@ -830,7 +998,7 @@ ResolvedLaunchSpec TrainVMService::bind_worker_launch(
       retained != resolved_launches_.end()) {
     const ResolvedLaunchSpec durable = controller.bind_worker_launch(
         retained->second, host_launch_registry_, authority_host_,
-        now_ns);
+        now);
     if (durable != retained->second.spec()) {
       throw std::runtime_error(
           "durable host launch binding disagrees with retained authority bundle");
@@ -841,7 +1009,7 @@ ResolvedLaunchSpec TrainVMService::bind_worker_launch(
   ResolvedLaunch resolved = host_launch_resolver_.resolve(launch, key);
   require_retained_launch_capacity(resolved.spec());
   const ResolvedLaunchSpec durable = controller.bind_worker_launch(
-      resolved, host_launch_registry_, authority_host_, authority_now_ns());
+      resolved, host_launch_registry_, authority_host_, authority_now());
   if (durable != resolved.spec()) {
     throw std::runtime_error(
         "durable host launch binding disagrees with resolved authority bundle");
@@ -997,8 +1165,8 @@ grpc::Status TrainVMService::open_worker_connection(
     }
 
     const WorkerReadinessResult readiness =
-        controller.accept_worker_hello(hello, authority_now_ns());
-    const Dispatch dispatch = controller.prepare_dispatch(authority_now_ns());
+        controller.accept_worker_hello(hello, authority_now());
+    const Dispatch dispatch = controller.prepare_dispatch(authority_now());
     const auto ready_projection = journal_.projection(hello.run_id);
     if (!ready_projection || ready_projection->observed_state != "running" ||
         ready_projection->current_node_id != hello.node_id ||
@@ -1101,7 +1269,7 @@ grpc::Status TrainVMService::complete_worker_connection(
         .payload = payload,
     };
     const ExecutionState& committed =
-        controller.handle_event(event, connection.identity, authority_now_ns());
+        controller.handle_event(event, connection.identity, authority_now());
     const auto committed_projection =
         journal_.projection(connection.identity.run_id);
     if (!committed_projection ||

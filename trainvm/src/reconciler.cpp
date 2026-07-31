@@ -9,10 +9,11 @@ namespace trainvm {
 
 Reconciler::Reconciler(Journal& journal, const AdapterRegistry& registry,
                        std::mutex& authority_mutex,
-                       std::function<std::int64_t()> authority_clock)
+                       std::function<AuthorityTimeSample()> authority_clock)
     : journal_(journal), registry_(registry),
       authority_mutex_(authority_mutex),
-      authority_clock_(std::move(authority_clock)) {
+      authority_clock_(
+          std::make_shared<AuthorityClock>(std::move(authority_clock))) {
   if (!authority_clock_) {
     throw std::invalid_argument(
         "reconciler requires an authority-owned clock");
@@ -24,11 +25,7 @@ ReconcileResult Reconciler::step(const std::string& run_id) {
     throw std::invalid_argument("reconciliation requires a run identity");
   }
   std::scoped_lock lock(authority_mutex_);
-  const std::int64_t now_ns = authority_clock_();
-  if (now_ns < 0) {
-    throw std::runtime_error(
-        "reconciler authority clock returned a negative timestamp");
-  }
+  const AuthorityTimeSample now = authority_clock_->sample();
   const auto projection = journal_.projection(run_id);
   if (!projection) {
     throw std::invalid_argument("cannot reconcile an unknown run");
@@ -62,7 +59,7 @@ ReconcileResult Reconciler::step(const std::string& run_id) {
 
   if (current->desired_state == "queued" &&
       current->observed_state == "queued") {
-    const LeaseAcquireResult acquisition = controller.begin_acquisition(now_ns);
+    const LeaseAcquireResult acquisition = controller.begin_acquisition(now);
     result.disposition =
         acquisition.status == LeaseAcquireStatus::busy
             ? ReconcileDisposition::lease_busy
@@ -86,7 +83,7 @@ ReconcileResult Reconciler::step(const std::string& run_id) {
       if (component.adapter == "trainvm.core" &&
           node.invoke.operation == "acquire_resources") {
         const LeaseAcquireResult acquisition =
-            controller.begin_acquisition(now_ns);
+            controller.begin_acquisition(now);
         if (acquisition.status == LeaseAcquireStatus::busy) {
           throw std::runtime_error(
               "durable acquiring run unexpectedly lost its admission lease");
@@ -103,7 +100,7 @@ ReconcileResult Reconciler::step(const std::string& run_id) {
     const bool replay = journal_.event(launch_id).has_value();
     const WorkerLaunchRequest request =
         registry_.worker_launch_request(component, node.invoke.operation);
-    result.launch = controller.prepare_worker_launch(request, now_ns);
+    result.launch = controller.prepare_worker_launch(request, now);
     result.disposition = replay ? ReconcileDisposition::launch_replayed
                                 : ReconcileDisposition::launch_prepared;
     return result;
@@ -125,7 +122,7 @@ ReconcileResult Reconciler::step(const std::string& run_id) {
     return result;
   }
   if (node.invoke.operation == "release_resources") {
-    (void)controller.release_managed_resources(now_ns);
+    (void)controller.release_managed_resources(now);
     result.disposition = ReconcileDisposition::builtin_completed;
     return result;
   }

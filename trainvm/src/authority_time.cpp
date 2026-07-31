@@ -124,6 +124,8 @@ AuthorityClock::AuthorityClock(Source source) : source_(std::move(source)) {
   }
 }
 
+AuthorityClock::~AuthorityClock() = default;
+
 AuthorityTimeSample AuthorityClock::sample() {
   std::scoped_lock lock(mutex_);
   if (poison_reason_) {
@@ -145,6 +147,11 @@ AuthorityTimeSample AuthorityClock::sample() {
   } catch (const std::exception& exception) {
     poison_reason_ = "authority clock is poisoned until restart: " +
                      std::string(exception.what());
+    throw AuthorityClockError(*poison_reason_);
+  } catch (...) {
+    poison_reason_ =
+        "authority clock is poisoned until restart: time source threw a "
+        "non-standard exception";
     throw AuthorityClockError(*poison_reason_);
   }
 }

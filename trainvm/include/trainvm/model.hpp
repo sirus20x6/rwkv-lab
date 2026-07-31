@@ -36,6 +36,8 @@ enum class StepDomain { microbatch, optimizer_step, sample, token, epoch, wall_t
 enum class Aggregation { last, sum, mean, weighted_mean, min, max, histogram };
 enum class ReconcilePolicy { fail_closed, adopt_if_fingerprint_matches, restart_from_checkpoint };
 enum class OrphanPolicy { leave_and_block, adopt_if_identity_matches, terminate_and_recover };
+enum class ProfilerBackend { torch, nsys, ncu };
+enum class ProfilerActivity { cpu, accelerator };
 
 struct Metadata {
   std::string name;
@@ -59,11 +61,58 @@ struct Accelerators {
   std::optional<std::map<std::string, std::string>> selector;
 };
 
+struct CpuIoPolicy {
+  std::optional<std::string> cpuset;
+  std::optional<std::vector<std::int64_t>> cpus;
+  std::optional<std::int64_t> cpu_weight;
+  std::optional<std::int64_t> io_weight;
+  std::optional<std::int64_t> omp_threads;
+  std::optional<std::int64_t> preprocessing_workers;
+  std::optional<std::int64_t> nice;
+};
+
 struct Resources {
   Accelerators accelerators;
   std::optional<double> minimum_host_memory_gib;
   std::optional<std::int64_t> cpu_threads;
   std::optional<std::int64_t> lease_timeout_seconds;
+  std::optional<CpuIoPolicy> cpu_io_policy;
+};
+
+struct CompilePhase {
+  bool enabled{};
+};
+
+struct WarmupPhase {
+  bool enabled{};
+  std::optional<std::int64_t> steps;
+};
+
+struct QualifyPhase {
+  bool enabled{};
+  std::optional<std::int64_t> steps;
+};
+
+struct GpuTraceCapture {
+  bool enabled{};
+  std::optional<ProfilerBackend> backend;
+  std::optional<std::int64_t> warmup_steps;
+  std::optional<std::int64_t> skip_steps;
+  std::optional<std::int64_t> capture_steps;
+  std::optional<std::string> output_artifact;
+  std::optional<std::vector<ProfilerActivity>> activities;
+  std::optional<bool> record_shapes;
+  std::optional<bool> profile_memory;
+  std::optional<bool> with_stack;
+};
+
+struct ExecutionPhases {
+  std::string component;
+  std::string operation;
+  std::optional<CompilePhase> compile;
+  std::optional<WarmupPhase> warmup;
+  std::optional<QualifyPhase> qualify;
+  std::optional<GpuTraceCapture> gpu_trace;
 };
 
 struct Parameter {
@@ -199,6 +248,7 @@ struct Recovery {
 struct Spec {
   Workspace workspace;
   Resources resources;
+  std::optional<ExecutionPhases> execution;
   std::map<std::string, Parameter> parameters;
   std::map<std::string, Artifact> artifacts;
   std::map<std::string, Component> components;

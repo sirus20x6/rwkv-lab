@@ -44,6 +44,7 @@ class AuthorityClock final {
 
   AuthorityClock();
   explicit AuthorityClock(Source source);
+  ~AuthorityClock();
 
   AuthorityClock(const AuthorityClock&) = delete;
   AuthorityClock& operator=(const AuthorityClock&) = delete;

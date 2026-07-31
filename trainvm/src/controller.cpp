@@ -465,14 +465,20 @@ const ExecutionState& Controller::recover() {
       require_payload_string(event, "owner_run_id", run_id_);
       const auto lease_id = event.payload.find("lease_id");
       const auto fencing_token = event.payload.find("fencing_token");
-      const auto acquired_at = event.payload.find("acquired_at_ns");
-      const auto expires_at = event.payload.find("expires_at_ns");
+      const auto clock_domain = event.payload.find("clock_domain");
+      const auto boot_id = event.payload.find("boot_id");
+      const auto acquired_at = event.payload.find("acquired_boottime_ns");
+      const auto expires_at = event.payload.find("expires_boottime_ns");
       if (lease_id == event.payload.end() || !lease_id->is_string() ||
           lease_id->get_ref<const std::string&>().empty() ||
           fencing_token == event.payload.end() || !fencing_token->is_number_unsigned() ||
+          clock_domain == event.payload.end() || !clock_domain->is_string() ||
+          clock_domain->get_ref<const std::string&>() != ResourceLease::kBootTimeDomain ||
+          boot_id == event.payload.end() || !boot_id->is_string() ||
+          boot_id->get_ref<const std::string&>().empty() ||
           acquired_at == event.payload.end() || !acquired_at->is_number_integer() ||
           expires_at == event.payload.end() || !expires_at->is_number_integer() ||
-          acquired_at->get<std::int64_t>() != event.wall_time_ns ||
+          acquired_at->get<std::int64_t>() < 0 ||
           expires_at->get<std::int64_t>() <= acquired_at->get<std::int64_t>()) {
         throw std::runtime_error("lease acquisition event has an invalid fenced identity");
       }
@@ -989,6 +995,8 @@ const ExecutionState& Controller::recover() {
               plan_.experiment.spec.workspace.concurrency_key, run_id_,
               acquisition->payload.value("lease_id", std::string{}),
               acquisition->payload.value("fencing_token", std::uint64_t{}),
+              acquisition->payload.value("clock_domain", std::string{}),
+              acquisition->payload.value("boot_id", std::string{}),
               event.wall_time_ns)) {
         throw std::runtime_error(
             "managed resource release has no durable lease receipt");
@@ -1060,10 +1068,8 @@ const ExecutionState& Controller::recover() {
   return state_;
 }
 
-LeaseAcquireResult Controller::begin_acquisition(std::int64_t now_ns) {
-  if (now_ns < 0) {
-    throw std::invalid_argument("lease clock must be nonnegative");
-  }
+LeaseAcquireResult Controller::begin_acquisition(
+    const AuthorityTimeSample& now) {
   const ExecutionState admission_state = start_execution(plan_, run_id_);
   const Node& admission_node = plan_.experiment.spec.workflow.nodes.at(
       admission_state.current_node_id);
@@ -1125,25 +1131,34 @@ LeaseAcquireResult Controller::begin_acquisition(std::int64_t now_ns) {
       throw std::runtime_error("acquiring run has no durable lease event");
     }
     const auto event_fence = acquired->payload.find("fencing_token");
-    const auto event_acquired_at = acquired->payload.find("acquired_at_ns");
+    const auto event_clock_domain = acquired->payload.find("clock_domain");
+    const auto event_boot_id = acquired->payload.find("boot_id");
+    const auto event_acquired_at = acquired->payload.find("acquired_boottime_ns");
     if (event_fence == acquired->payload.end() || !event_fence->is_number_unsigned() ||
+        event_clock_domain == acquired->payload.end() ||
+        !event_clock_domain->is_string() ||
+        event_clock_domain->get_ref<const std::string&>() !=
+            ResourceLease::kBootTimeDomain ||
+        event_boot_id == acquired->payload.end() || !event_boot_id->is_string() ||
         event_acquired_at == acquired->payload.end() || !event_acquired_at->is_number_integer()) {
       throw std::runtime_error("acquiring run has malformed durable lease evidence");
     }
-    const auto lease = journal_.active_lease(concurrency_key, acquired->wall_time_ns);
+    const auto lease = journal_.active_lease(concurrency_key, now);
     if (!lease || lease->owner_run_id != run_id_ || lease->lease_id != lease_id ||
+        lease->clock_domain != event_clock_domain->get<std::string>() ||
+        lease->boot_id != event_boot_id->get<std::string>() ||
         lease->fencing_token != event_fence->get<std::uint64_t>() ||
-        lease->acquired_at_ns != event_acquired_at->get<std::int64_t>()) {
+        lease->acquired_boottime_ns != event_acquired_at->get<std::int64_t>()) {
       throw std::runtime_error("acquiring run no longer owns its fenced lease identity");
     }
-    if (lease->expires_at_ns <= now_ns) {
+    if (lease->expires_boottime_ns <= now.boot.nanoseconds) {
       throw std::runtime_error(
           "acquiring run lease has expired and requires a fenced reconciliation decision");
     }
     LeaseAcquireResult result{.status = LeaseAcquireStatus::already_owned,
                               .lease = *lease};
     recover();
-    complete_builtin_admission(result.lease, now_ns);
+    complete_builtin_admission(result.lease, now);
     recover();
     return result;
   }
@@ -1162,33 +1177,33 @@ LeaseAcquireResult Controller::begin_acquisition(std::int64_t now_ns) {
                          {"cause", "scheduler.lease_acquisition"},
                          {"lease_id", lease_id},
                          {"plan_hash", plan_.plan_hash}},
-                        now_ns),
+                        now.wall.nanoseconds),
       acquisition_event(state_, acquired_event_id, desired_revision,
                         "resource.lease_acquired",
                         {{"concurrency_key", concurrency_key},
                          {"owner_run_id", run_id_},
                          {"lease_id", lease_id}},
-                        now_ns),
+                        now.wall.nanoseconds),
       acquisition_event(state_, run_id_ + ":acquiring", acquiring_revision,
                         "run.observed_state_changed",
                         {{"state", "acquiring"},
                          {"cause_event_id", acquired_event_id},
                          {"concurrency_key", concurrency_key},
                          {"lease_id", lease_id}},
-                        now_ns),
+                        now.wall.nanoseconds),
   };
   LeaseAcquireResult result = journal_.acquire_lease_with_events(
-      concurrency_key, run_id_, lease_id, now_ns, timeout_ns, events);
+      concurrency_key, run_id_, lease_id, now, timeout_ns, events);
   if (result.status != LeaseAcquireStatus::busy) {
     recover();
-    complete_builtin_admission(result.lease, now_ns);
+    complete_builtin_admission(result.lease, now);
     recover();
   }
   return result;
 }
 
 void Controller::complete_builtin_admission(const ResourceLease& lease,
-                                            std::int64_t now_ns) {
+                                            const AuthorityTimeSample& now) {
   const Node& node =
       plan_.experiment.spec.workflow.nodes.at(state_.current_node_id);
   const Component& component =
@@ -1208,7 +1223,7 @@ void Controller::complete_builtin_admission(const ResourceLease& lease,
       .worker_sequence = 0,
       .event_type = "resource.acquired",
       .event_version = 1,
-      .wall_time_ns = now_ns,
+      .wall_time_ns = now.wall.nanoseconds,
       .monotonic_time_ns = 0,
       .optimizer_step = std::nullopt,
       .payload = {{"concurrency_key", lease.concurrency_key},
@@ -1220,12 +1235,12 @@ void Controller::complete_builtin_admission(const ResourceLease& lease,
     throw std::runtime_error("builtin resource admission must advance to a running node");
   }
   journal_.complete_builtin_admission(
-      lease, now_ns, {acquired, transitioned_event(acquired, transition)});
+      lease, now, {acquired, transitioned_event(acquired, transition)});
 }
 
 WorkerLaunchTicket Controller::prepare_worker_launch(WorkerLaunchRequest request,
-                                                       std::int64_t now_ns) {
-  if (now_ns < 0 || request.code_fingerprint.empty() ||
+                                                       const AuthorityTimeSample& now) {
+  if (request.code_fingerprint.empty() ||
       request.code_fingerprint.size() > 512U) {
     throw std::invalid_argument("worker launch requires a bounded code fingerprint and clock");
   }
@@ -1252,14 +1267,17 @@ WorkerLaunchTicket Controller::prepare_worker_launch(WorkerLaunchRequest request
   }
   const std::string& concurrency_key =
       plan_.experiment.spec.workspace.concurrency_key;
-  const auto active = journal_.active_lease(concurrency_key, now_ns);
+  const auto active = journal_.active_lease(concurrency_key, now);
   if (!active || active->owner_run_id != run_id_ ||
       active->lease_id !=
           acquisition->payload.value("lease_id", std::string{}) ||
       active->fencing_token !=
           acquisition->payload.value("fencing_token", std::uint64_t{}) ||
-      active->acquired_at_ns !=
-          acquisition->payload.value("acquired_at_ns", std::int64_t{})) {
+      active->clock_domain !=
+          acquisition->payload.value("clock_domain", std::string{}) ||
+      active->boot_id != acquisition->payload.value("boot_id", std::string{}) ||
+      active->acquired_boottime_ns !=
+          acquisition->payload.value("acquired_boottime_ns", std::int64_t{})) {
     throw OperationPreconditionError(
         "worker launch no longer owns its acquired lease fence");
   }
@@ -1287,7 +1305,7 @@ WorkerLaunchTicket Controller::prepare_worker_launch(WorkerLaunchRequest request
       .worker_sequence = 0,
       .event_type = "worker.launch_requested",
       .event_version = 1,
-      .wall_time_ns = now_ns,
+      .wall_time_ns = now.wall.nanoseconds,
       .monotonic_time_ns = 0,
       .optimizer_step = std::nullopt,
       .payload = {{"launch_nonce", launch.launch_nonce},
@@ -1299,7 +1317,7 @@ WorkerLaunchTicket Controller::prepare_worker_launch(WorkerLaunchRequest request
                   {"lease_id", launch.lease_id},
                   {"fencing_token", launch.fencing_token}},
   };
-  journal_.prepare_worker_launch(launch, now_ns, event);
+  journal_.prepare_worker_launch(launch, now, event);
   recover();
   return launch;
 }
@@ -1307,11 +1325,7 @@ WorkerLaunchTicket Controller::prepare_worker_launch(WorkerLaunchRequest request
 ResolvedLaunchSpec Controller::bind_worker_launch(
     const ResolvedLaunch& resolved,
     const HostLaunchRegistry& host_registry,
-    const HostIdentity& authority_host, std::int64_t now_ns) {
-  if (now_ns < 0) {
-    throw std::invalid_argument(
-        "host launch binding clock must be nonnegative");
-  }
+    const HostIdentity& authority_host, const AuthorityTimeSample& now) {
   const ResolvedLaunchSpec& binding = resolved.spec();
   recover();
   const std::string launch_id = worker_launch_event_id(state_);
@@ -1362,13 +1376,13 @@ ResolvedLaunchSpec Controller::bind_worker_launch(
       .worker_sequence = 0,
       .event_type = "worker.launch_bound",
       .event_version = 1,
-      .wall_time_ns = now_ns,
+      .wall_time_ns = now.wall.nanoseconds,
       .monotonic_time_ns = 0,
       .optimizer_step = std::nullopt,
       .payload = {{"cause_event_id", launch_id},
                   {"spec", resolved_launch_spec_json(binding)}},
   };
-  (void)journal_.bind_worker_launch(binding, now_ns, event);
+  (void)journal_.bind_worker_launch(binding, now, event);
   recover();
   const auto durable = journal_.launch_binding(launch_id);
   if (!durable) {
@@ -1379,10 +1393,7 @@ ResolvedLaunchSpec Controller::bind_worker_launch(
 }
 
 WorkerReadinessResult Controller::accept_worker_hello(WorkerHelloEvidence hello,
-                                                       std::int64_t now_ns) {
-  if (now_ns < 0) {
-    throw std::invalid_argument("worker hello clock must be nonnegative");
-  }
+                                                       const AuthorityTimeSample& now) {
   hello.capabilities = canonical_capabilities(std::move(hello.capabilities));
   recover();
   const auto launch_event = journal_.event(worker_launch_event_id(state_));
@@ -1420,7 +1431,7 @@ WorkerReadinessResult Controller::accept_worker_hello(WorkerHelloEvidence hello,
       .worker_sequence = 0,
       .event_type = "worker.ready",
       .event_version = 1,
-      .wall_time_ns = now_ns,
+      .wall_time_ns = now.wall.nanoseconds,
       .monotonic_time_ns = 0,
       .optimizer_step = std::nullopt,
       .payload = {{"cause_event_id", launch_event->event_id},
@@ -1440,7 +1451,7 @@ WorkerReadinessResult Controller::accept_worker_hello(WorkerHelloEvidence hello,
       "run.observed_state_changed",
       {{"state", "running"}, {"cause_event_id", ready_id},
        {"launch_nonce", launch.launch_nonce}},
-      now_ns);
+      now.wall.nanoseconds);
   running.node_id = state_.current_node_id;
   running.attempt_id = state_.current_attempt_id;
   ExecutionState running_state = state_;
@@ -1448,7 +1459,7 @@ WorkerReadinessResult Controller::accept_worker_hello(WorkerHelloEvidence hello,
   const Event entered = entered_event(
       plan_, running_state, launch_event->event_id + ":entered", &running);
   const WorkerReadinessDisposition disposition = journal_.accept_worker_ready(
-      launch, hello, now_ns, {ready, running, entered});
+      launch, hello, now, {ready, running, entered});
   recover();
   return {.disposition = disposition, .launch = launch};
 }
@@ -1482,10 +1493,7 @@ Dispatch Controller::prepare_dispatch() {
   return journal_.prepare_dispatch(dispatch, dispatch_prepared_event(dispatch));
 }
 
-Dispatch Controller::prepare_dispatch(std::int64_t now_ns) {
-  if (now_ns < 0) {
-    throw std::invalid_argument("dispatch clock must be nonnegative");
-  }
+Dispatch Controller::prepare_dispatch(const AuthorityTimeSample& now) {
   recover();
   if (state_.status != ExecutionStatus::running || paused_) {
     throw std::logic_error("controller cannot dispatch work for an inactive run");
@@ -1510,7 +1518,7 @@ Dispatch Controller::prepare_dispatch(std::int64_t now_ns) {
       .result_event_id = std::nullopt,
   };
   return journal_.prepare_fenced_dispatch(
-      dispatch, dispatch_prepared_event(dispatch), launch, now_ns);
+      dispatch, dispatch_prepared_event(dispatch), launch, now);
 }
 
 const ExecutionState& Controller::handle_event(const Event& input) {
@@ -1519,34 +1527,28 @@ const ExecutionState& Controller::handle_event(const Event& input) {
 
 const ExecutionState& Controller::handle_event(
     const Event& input, const WorkerSessionIdentity& identity,
-    std::int64_t now_ns) {
-  if (now_ns < 0) {
-    throw std::invalid_argument("worker event clock must be nonnegative");
-  }
-  return handle_event_impl(input, identity, now_ns);
+    const AuthorityTimeSample& now) {
+  return handle_event_impl(input, identity, now);
 }
 
 const ExecutionState& Controller::complete_artifact_validation(
-    ArtifactValidationOutcome outcome, std::int64_t now_ns) {
+    ArtifactValidationOutcome outcome, const AuthorityTimeSample& now) {
   return complete_managed_builtin(
       "validate_artifact",
       outcome == ArtifactValidationOutcome::valid ? "artifact.validated"
                                                    : "artifact.invalid",
-      false, now_ns);
+      false, now);
 }
 
 const ExecutionState& Controller::release_managed_resources(
-    std::int64_t now_ns) {
+    const AuthorityTimeSample& now) {
   return complete_managed_builtin("release_resources", "resource.released",
-                                  true, now_ns);
+                                  true, now);
 }
 
 const ExecutionState& Controller::complete_managed_builtin(
     std::string_view expected_operation, std::string event_type,
-    bool release_lease, std::int64_t now_ns) {
-  if (now_ns < 0) {
-    throw std::invalid_argument("managed builtin clock must be nonnegative");
-  }
+    bool release_lease, const AuthorityTimeSample& now) {
   recover();
   if (state_.status != ExecutionStatus::running || paused_) {
     throw std::logic_error("managed builtin requires an active running node");
@@ -1573,14 +1575,17 @@ const ExecutionState& Controller::complete_managed_builtin(
   }
   const std::string& concurrency_key =
       plan_.experiment.spec.workspace.concurrency_key;
-  const auto active = journal_.active_lease(concurrency_key, now_ns);
+  const auto active = journal_.active_lease(concurrency_key, now);
   if (!active || active->owner_run_id != run_id_ ||
       active->lease_id !=
           acquisition->payload.value("lease_id", std::string{}) ||
       active->fencing_token !=
           acquisition->payload.value("fencing_token", std::uint64_t{}) ||
-      active->acquired_at_ns !=
-          acquisition->payload.value("acquired_at_ns", std::int64_t{})) {
+      active->clock_domain !=
+          acquisition->payload.value("clock_domain", std::string{}) ||
+      active->boot_id != acquisition->payload.value("boot_id", std::string{}) ||
+      active->acquired_boottime_ns !=
+          acquisition->payload.value("acquired_boottime_ns", std::int64_t{})) {
     throw OperationPreconditionError(
         "managed builtin no longer owns its acquired lease fence");
   }
@@ -1622,7 +1627,7 @@ const ExecutionState& Controller::complete_managed_builtin(
       .worker_sequence = 0,
       .event_type = std::move(event_type),
       .event_version = 1,
-      .wall_time_ns = now_ns,
+      .wall_time_ns = now.wall.nanoseconds,
       .monotonic_time_ns = 0,
       .optimizer_step = projection->optimizer_step == 0U
                             ? std::nullopt
@@ -1650,7 +1655,7 @@ const ExecutionState& Controller::complete_managed_builtin(
           .worker_sequence = 0,
           .event_type = "run.observed_state_changed",
           .event_version = 1,
-          .wall_time_ns = now_ns,
+          .wall_time_ns = now.wall.nanoseconds,
           .monotonic_time_ns = 0,
           .optimizer_step = cause.optimizer_step,
           .payload = {{"state", "acquiring"},
@@ -1667,7 +1672,7 @@ const ExecutionState& Controller::complete_managed_builtin(
     batch.push_back(
         dispatch_completed_event(dispatch, cause, result.state.revision));
   }
-  journal_.complete_managed_builtin_dispatch(prepared, *active, now_ns,
+  journal_.complete_managed_builtin_dispatch(prepared, *active, now,
                                              release_lease, batch);
   return recover();
 }
@@ -1675,7 +1680,7 @@ const ExecutionState& Controller::complete_managed_builtin(
 const ExecutionState& Controller::handle_event_impl(
     const Event& input,
     const std::optional<WorkerSessionIdentity>& identity,
-    std::optional<std::int64_t> now_ns) {
+    std::optional<AuthorityTimeSample> now) {
   if (!initialized_) {
     throw std::logic_error("controller must create or recover the run before handling events");
   }
@@ -1713,7 +1718,7 @@ const ExecutionState& Controller::handle_event_impl(
       throw std::invalid_argument(
           "worker event has no durable readiness for the active external node");
     }
-    if (!identity || !now_ns || identity->run_id != input.run_id ||
+    if (!identity || !now || identity->run_id != input.run_id ||
         identity->node_id != input.node_id ||
         identity->attempt_id != input.attempt_id ||
         identity->launch_nonce !=
@@ -1725,7 +1730,7 @@ const ExecutionState& Controller::handle_event_impl(
             ready->payload.value("fencing_token", std::uint64_t{})) {
       throw std::invalid_argument("worker event lacks its accepted session identity");
     }
-    const auto active = journal_.active_lease(identity->concurrency_key, *now_ns);
+    const auto active = journal_.active_lease(identity->concurrency_key, *now);
     if (!active || active->owner_run_id != identity->run_id ||
         active->lease_id != identity->lease_id ||
         active->fencing_token != identity->fencing_token) {
@@ -1805,9 +1810,9 @@ const ExecutionState& Controller::handle_event_impl(
     batch.push_back(
         dispatch_completed_event(*dispatch, cause, result.state.revision));
   }
-  if (identity && now_ns) {
+  if (identity && now) {
     journal_.complete_fenced_dispatch(dispatch->dispatch_id, cause.event_id,
-                                      batch, *identity, *now_ns);
+                                      batch, *identity, *now);
   } else {
     journal_.complete_dispatch(dispatch->dispatch_id, cause.event_id, batch);
   }
@@ -1884,7 +1889,7 @@ ControlCommand Controller::acknowledge_controls(
     const std::string& command_id, const ControlAcknowledgementIdentity& identity,
     ControlCommandStatus status,
     std::optional<std::uint64_t> effective_step, nlohmann::json effective_values,
-    nlohmann::json diagnostics) {
+    nlohmann::json diagnostics, const AuthorityTimeSample& now) {
   if (!initialized_) {
     throw std::logic_error("controller must create or recover before acknowledging controls");
   }
@@ -1894,7 +1899,7 @@ ControlCommand Controller::acknowledge_controls(
   }
   return journal_.acknowledge_control_command(run_id_, command_id, identity, status, effective_step,
                                               std::move(effective_values),
-                                              std::move(diagnostics));
+                                              std::move(diagnostics), now);
 }
 
 const ExecutionState& Controller::state() const {

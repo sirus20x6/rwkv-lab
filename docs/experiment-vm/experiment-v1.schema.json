@@ -41,6 +41,7 @@
       "properties": {
         "workspace": {"$ref": "#/$defs/workspace"},
         "resources": {"$ref": "#/$defs/resources"},
+        "execution": {"$ref": "#/$defs/execution_phases"},
         "parameters": {
           "type": "object",
           "propertyNames": {"$ref": "#/$defs/identifier"},
@@ -94,8 +95,160 @@
         },
         "minimum_host_memory_gib": {"type": "number", "minimum": 0},
         "cpu_threads": {"type": "integer", "minimum": 1},
-        "lease_timeout_seconds": {"type": "integer", "minimum": 5, "default": 30}
+        "lease_timeout_seconds": {"type": "integer", "minimum": 5, "default": 30},
+        "cpu_io_policy": {"$ref": "#/$defs/cpu_io_policy"}
       }
+    },
+    "cpu_io_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "cpuset": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^[0-9]+(?:-[0-9]+)?(?:,[0-9]+(?:-[0-9]+)?)*$"
+        },
+        "cpus": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1024,
+          "uniqueItems": true,
+          "items": {"type": "integer", "minimum": 0, "maximum": 1048575}
+        },
+        "cpu_weight": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "io_weight": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "omp_threads": {"type": "integer", "minimum": 1, "maximum": 65536},
+        "preprocessing_workers": {"type": "integer", "minimum": 0, "maximum": 65536},
+        "nice": {"type": "integer", "minimum": -20, "maximum": 19}
+      },
+      "not": {"required": ["cpuset", "cpus"]}
+    },
+    "execution_phases": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["component", "operation"],
+      "properties": {
+        "component": {"$ref": "#/$defs/identifier"},
+        "operation": {"$ref": "#/$defs/identifier"},
+        "compile": {"$ref": "#/$defs/compile_phase"},
+        "warmup": {"$ref": "#/$defs/step_phase"},
+        "qualify": {"$ref": "#/$defs/step_phase"},
+        "gpu_trace": {"$ref": "#/$defs/gpu_trace_capture"}
+      },
+      "anyOf": [
+        {"required": ["compile"]},
+        {"required": ["warmup"]},
+        {"required": ["qualify"]},
+        {"required": ["gpu_trace"]}
+      ]
+    },
+    "compile_phase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {"enabled": {"type": "boolean"}}
+    },
+    "step_phase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "steps": {"type": "integer", "minimum": 1, "maximum": 10000}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"enabled": {"const": true}}},
+          "then": {"required": ["steps"]}
+        },
+        {
+          "if": {"properties": {"enabled": {"const": false}}},
+          "then": {"not": {"required": ["steps"]}}
+        }
+      ]
+    },
+    "gpu_trace_capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "backend": {"enum": ["torch", "nsys", "ncu"]},
+        "warmup_steps": {"type": "integer", "minimum": 0, "maximum": 256},
+        "skip_steps": {"type": "integer", "minimum": 0, "maximum": 256},
+        "capture_steps": {"type": "integer", "minimum": 1, "maximum": 128},
+        "output_artifact": {"$ref": "#/$defs/identifier"},
+        "activities": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "contains": {"const": "accelerator"},
+          "items": {"enum": ["cpu", "accelerator"]}
+        },
+        "record_shapes": {"type": "boolean"},
+        "profile_memory": {"type": "boolean"},
+        "with_stack": {"type": "boolean"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"enabled": {"const": true}}},
+          "then": {
+            "required": [
+              "backend", "warmup_steps", "skip_steps", "capture_steps",
+              "output_artifact", "activities"
+            ]
+          }
+        },
+        {
+          "if": {"properties": {"enabled": {"const": false}}},
+          "then": {
+            "not": {
+              "anyOf": [
+                {"required": ["backend"]},
+                {"required": ["warmup_steps"]},
+                {"required": ["skip_steps"]},
+                {"required": ["capture_steps"]},
+                {"required": ["output_artifact"]},
+                {"required": ["activities"]},
+                {"required": ["record_shapes"]},
+                {"required": ["profile_memory"]},
+                {"required": ["with_stack"]}
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["backend"],
+            "properties": {"backend": {"enum": ["nsys", "ncu"]}}
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {"required": ["record_shapes"]},
+                {"required": ["profile_memory"]},
+                {"required": ["with_stack"]}
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["backend"],
+            "properties": {"backend": {"const": "ncu"}}
+          },
+          "then": {
+            "properties": {
+              "activities": {
+                "const": ["accelerator"]
+              }
+            }
+          }
+        }
+      ]
     },
     "parameter": {
       "type": "object",

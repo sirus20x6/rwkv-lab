@@ -33,7 +33,34 @@
       },
       "minimum_host_memory_gib": 64,
       "cpu_threads": 16,
-      "lease_timeout_seconds": 30
+      "lease_timeout_seconds": 30,
+      "cpu_io_policy": {
+        "cpuset": "0-15",
+        "cpu_weight": 100,
+        "io_weight": 100,
+        "omp_threads": 8,
+        "preprocessing_workers": 8,
+        "nice": 0
+      }
+    },
+    "execution": {
+      "component": "mageflow",
+      "operation": "train",
+      "compile": {"enabled": true},
+      "warmup": {"enabled": true, "steps": 8},
+      "qualify": {"enabled": true, "steps": 4},
+      "gpu_trace": {
+        "enabled": true,
+        "backend": "torch",
+        "warmup_steps": 2,
+        "skip_steps": 1,
+        "capture_steps": 4,
+        "output_artifact": "gpu_trace",
+        "activities": ["cpu", "accelerator"],
+        "record_shapes": true,
+        "profile_memory": true,
+        "with_stack": false
+      }
     },
     "parameters": {
       "source_config": {
@@ -77,6 +104,13 @@
         "type": "path",
         "immutability": "append_only",
         "fingerprint": "none",
+        "required": false
+      },
+      "gpu_trace": {
+        "type": "opaque",
+        "schema": "trainvm.gpu-trace.v1",
+        "immutability": "mutable_until_publish",
+        "fingerprint": "adapter",
         "required": false
       }
     },

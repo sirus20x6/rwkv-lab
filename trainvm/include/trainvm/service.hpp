@@ -13,6 +13,7 @@
 #include <grpcpp/grpcpp.h>
 
 #include "trainvm/journal.hpp"
+#include "trainvm/authority_time.hpp"
 #include "trainvm/host_launch.hpp"
 #include "trainvm/reconciler.hpp"
 #include "trainvm/v1/trainvm.grpc.pb.h"
@@ -27,9 +28,16 @@ class AuthorityLock {
   AuthorityLock(const AuthorityLock&) = delete;
   AuthorityLock& operator=(const AuthorityLock&) = delete;
 
+  [[nodiscard]] const std::filesystem::path& journal_path() const noexcept;
+  [[nodiscard]] const JournalFileIdentity& journal_identity() const noexcept;
+
  private:
+  int kernel_namespace_descriptor_{-1};
   int descriptor_{-1};
   int journal_descriptor_{-1};
+  int directory_descriptor_{-1};
+  std::filesystem::path stable_journal_path_;
+  JournalFileIdentity journal_identity_;
 };
 
 class TrainVMService final : public v1::TrainVM::Service,
@@ -39,7 +47,7 @@ class TrainVMService final : public v1::TrainVM::Service,
       const std::filesystem::path& journal_path,
       AdapterRegistry adapter_registry,
       HostLaunchRegistry host_launch_registry,
-      std::function<std::int64_t()> authority_clock = {});
+      std::function<AuthorityTimeSample()> authority_clock = {});
   ~TrainVMService() override;
 
   grpc::Status SubmitExperiment(grpc::ServerContext* context,
@@ -70,7 +78,7 @@ class TrainVMService final : public v1::TrainVM::Service,
       const WorkerConnection& connection, v1::WorkerReceipt& receipt);
   bool claim_worker_attempt(const std::string& key);
   void release_worker_attempt(const std::string& key);
-  [[nodiscard]] std::int64_t authority_now_ns() const;
+  [[nodiscard]] AuthorityTimeSample authority_now() const;
   ReconcileResult reconcile_once(const std::string& run_id);
   // Process-free supervisor boundary. The ticket must already be durable.
   // Successful bindings retain their sealed descriptor bundle for a later
@@ -83,17 +91,17 @@ class TrainVMService final : public v1::TrainVM::Service,
                  AdapterRegistry adapter_registry,
                  HostLaunchRegistry host_launch_registry,
                  HostIdentity authority_host,
-                 std::function<std::int64_t()> authority_clock);
+                 std::function<AuthorityTimeSample()> authority_clock);
 
   static constexpr std::size_t kMaximumRetainedLaunches = 32U;
   static constexpr std::uint64_t kMaximumRetainedLaunchBytes = 2ULL << 30U;
-  void prune_retained_launches(std::int64_t now_ns);
+  void prune_retained_launches(const AuthorityTimeSample& now);
   void require_retained_launch_capacity(const ResolvedLaunchSpec& candidate) const;
 
   std::unique_ptr<AuthorityLock> authority_lock_;
   Journal journal_;
   std::mutex command_mutex_;
-  std::function<std::int64_t()> authority_clock_;
+  std::shared_ptr<AuthorityClock> authority_clock_;
   const AdapterRegistry adapter_registry_;
   const HostLaunchRegistry host_launch_registry_;
   const HostIdentity authority_host_;

@@ -4,6 +4,11 @@ Status: proposed architecture for `dashboard/declarative-vm-fsm`
 
 Scope: training orchestration, live control, recovery, telemetry, and dashboard integration
 
+The cross-family performance, profiling, and optimization plan is maintained in
+[`PERFORMANCE_ROADMAP.md`](PERFORMANCE_ROADMAP.md). It covers MageFlow and other flow/diffusion
+workers, RWKV, transformers, vision/multimodal training, fine-tuning, distillation, post-training,
+and qualification; TrainVM itself remains model-family-neutral.
+
 ## Decision
 
 Build a compiled C++ control-plane daemon, **TrainVM**, that owns the lifecycle of every
@@ -111,10 +116,17 @@ The checked-in schema is `experiment-v1.schema.json`. A document contains:
 6. a live-control catalog including when each update may apply;
 7. observability and retention declarations;
 8. exact-resume, orphan, and reconciliation policy.
+9. optional model-family-neutral compile, warmup, qualification, and bounded GPU-trace phases;
+10. bounded CPU affinity, cgroup weight, thread, preprocessing-worker, and nice policies.
 
 Experiments do not contain shell, Python, Jinja, or an unrestricted expression language. Values are
 either literals or structured references to parameters, controls, artifacts, prior node outputs, or
 run context. Conditions are a small typed predicate tree over event fields.
+
+Lifecycle and profiling declarations select only typed VM features and registered profiler
+backends. They never carry commands or environment maps. Adapter capability resolution decides
+whether a MageFlow, RWKV, transformer, or future worker can implement a requested phase; the shared
+plan vocabulary does not encode model-family-specific launch behavior.
 
 Before a run exists, the plan compiler performs:
 
@@ -123,10 +135,12 @@ Before a run exists, the plan compiler performs:
 - input/output type checking against operation descriptors;
 - reference resolution and graph reachability checks;
 - resource feasibility and path-policy checks;
+- CPU/I/O policy conflict checks and bounded profiler schedule/artifact validation;
 - cycle analysis (every cycle needs a visit bound and monotonic progress value);
 - artifact producer/consumer and immutability checks;
 - live-control type, target, range, and application-point validation;
-- exact-resume capability checks for every stateful worker;
+- resume-capability checks against each stateful operation's declared grade; plans requesting exact
+  resume reject stop-only, restart-only, or incomplete-state workers;
 - construction of a canonical plan and SHA-256 plan identity.
 
 The CLI must expose `trainvm validate`, `trainvm plan`, and `trainvm diff`. `plan` shows resolved
@@ -322,6 +336,8 @@ TrainVM fails closed on these invariants:
 8. no arbitrary shell evaluation in experiment documents;
 9. no path write outside adapter-declared roots;
 10. no secret value persisted in a document or event—only a secret reference.
+11. lease authority uses boot-scoped monotonic time plus boot identity; display wall time never
+    authorizes work, and legacy wall-clock leases cannot be adopted as active.
 
 All command endpoints require an idempotency key and optimistic run revision. Destructive operations
 are explicit protocol variants, never stringly typed action names.
@@ -344,14 +360,15 @@ Exit: the compiler rejects invalid graphs and produces stable plan hashes for th
 
 Exit: shadow state agrees with representative current runs and survives forced daemon restarts.
 
-### Phase 2 — own one MageFlow workflow
+### Phase 2 — own representative adapter workflows
 
-- Implement the MageFlow adapter and Python worker SDK.
-- Move cache-span handoff, cache validation, resume, pause, and control delivery into TrainVM.
+- Implement the Python worker SDK and representative MageFlow, RWKV, and transformer adapters.
+- Move cache-span handoff, cache validation, resume protocol/evidence, pause, and control delivery
+  into TrainVM while preserving honest stop-only/non-resumable adapter grades.
 - Keep the existing Go UI, adding the VM timeline and desired/observed state.
 
-Exit: `mageflow_cache_rest_and_resume.sh` is represented by one document and can recover after a
-daemon or worker kill at every node boundary.
+Exit: representative MageFlow, RWKV, and transformer workflows are each represented by one document
+and can recover after a daemon or worker kill at every node boundary.
 
 ### Phase 3 — clean-process eval and experiment campaigns
 
@@ -387,7 +404,8 @@ Exit: no active run depends on PID discovery, status-file polling, or a shell su
 - replay tests: identical projections after any restart/event prefix;
 - fault injection: crash before dispatch, after dispatch, before receipt, and after receipt;
 - adapter contract tests with fake workers before real GPUs are involved;
-- exact-resume tests comparing data cursor, RNG, optimizer, and checkpoint hashes;
+- exact-resume tests for adapters declaring that capability, comparing data cursor, RNG, optimizer,
+  and checkpoint hashes; negative tests prove non-resumable adapters reject resume;
 - control race tests for concurrent edits and stale revisions;
 - end-to-end Go/C++/Python protocol compatibility tests;
 - dashboard tests driven from descriptors, not experiment names.

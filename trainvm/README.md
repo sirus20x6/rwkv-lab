@@ -60,6 +60,20 @@ Implemented now:
   process-free and structurally excludes dynamic credentials;
 - a strongly typed authority-time sampler that separates display-only wall time from Linux
   `CLOCK_BOOTTIME`, latches one boot UUID, and fails closed on boot-time regression;
+- journal schema v5 boot-scoped lease authority across acquisition, renewal, release, readiness,
+  dispatch, control acknowledgement, and host binding; v4 wall-clock rows migrate as quarantined
+  `legacy-wall/v1` evidence and can never satisfy active authority;
+- exact journal-schema and metadata attestation with transactional v4 migration, plus a
+  descriptor-resolved authority namespace that rejects unsafe SQLite aliases and permanently
+  poisons a live Journal if its directory, database, or lock identity moves;
+- model-family-neutral, operation-scoped declarations for compile, disposable warmup,
+  qualification, bounded accelerator tracing, and CPU/I/O placement, with no arbitrary command or
+  environment channel;
+- a canonical, explicitly untrusted compiler/JIT namespace-claim format covering
+  adapter/code/executable fingerprints, compute compatibility and optional placement, host ABI,
+  driver/runtime closure, compiler configuration, and compile inputs. Cache reuse remains disabled
+  until an authority builder verifies those receipts and an immutable cache-publication protocol
+  prevents poisoning;
 - `validate`, `plan`, `simulate`, and journal inspection/replay CLI commands.
 
 This code does not yet launch or control a trainer. The launch-authorization reconciler first
@@ -70,9 +84,23 @@ boot-time lease renewal, host-wide resource locks, cgroup cleanup, process-insta
 durable spawn/exit receipts. Real MageFlow process ownership follows only after those fault-injection
 tests pass.
 
-The typed clock is a migration foundation, not current lease authority: the v4 lease rows and APIs
-still use scalar wall timestamps. They must be migrated to boot-scoped v5 rows, with unreleased v4
-leases quarantined, before the startup gate may enable spawning or renewal.
+MageFlow is only the first recovery fixture. The runtime is not a MageFlow-specific launcher: RWKV,
+transformer, vision/multimodal, conversion, distillation, post-training, RLVR, external-trainer, and
+qualification workflows use the same lifecycle and evidence protocols through distinct registered
+adapter operations. The coverage and optimization inventories live in
+[`WORKFLOW_COVERAGE.md`](../docs/experiment-vm/WORKFLOW_COVERAGE.md) and
+[`PERFORMANCE_ROADMAP.md`](../docs/experiment-vm/PERFORMANCE_ROADMAP.md).
+
+The v5 clock migration closes scalar wall time as a lease-authority path. It does not yet enable
+spawning: renewal scheduling, host-wide resource/orphan checks, cgroup cleanup, process-instance
+credentials, and durable spawn/exit receipts remain mandatory startup gates.
+
+The journal namespace guard closes cooperating-process split authority and rejects unsafe SQLite
+side-file aliases at every SQL boundary, but stock SQLite still opens WAL/SHM/rollback files by
+pathname. A hostile same-UID process can race that open unless the authority directory is part of
+the trusted host boundary or a controlled VFS is used. The abstract-socket namespace fence is also
+network-namespace-local. These residuals are explicit host-isolation/lock-broker design inputs, not
+authorization to enable worker spawning.
 
 The sealed payload hashes cover only the copied executable/interpreter and adapter artifact. They do
 not yet claim a reproducible dynamic-library, Python standard-library, or import closure; real Python
@@ -125,7 +153,9 @@ trainvm/build/trainvm simulate \
 ```
 
 The reference plan currently has the golden identity
-`783d2860b51374138e7352d39607cb07254c3b774f9d776946a6f2b5e6ad468c`. A deliberate canonical
+`d9874d50706cb8b13f3803258bde08f2175bfb4869eae860aa47994d151e901e`. This deliberate canonical
+plan-schema migration adds typed cross-family lifecycle/profiling and CPU/I/O policy declarations
+to the reference fixture. Any further deliberate canonical
 format change must update the golden test and supply a plan-schema migration rationale.
 `compile` is the bounded dashboard authoring boundary: it reads one JSON document from stdin and
 returns either structured diagnostics or the native compiler's canonical plan and content hash.

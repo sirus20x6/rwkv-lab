@@ -99,6 +99,21 @@ int main() {
         },
         "empty authority clock source must be rejected");
 
+    std::size_t nonstandard_source_calls = 0;
+    trainvm::AuthorityClock nonstandard_exception_clock(
+        [&nonstandard_source_calls]() -> trainvm::AuthorityTimeSample {
+          ++nonstandard_source_calls;
+          throw 7;
+        });
+    require_throws<trainvm::AuthorityClockError>(
+        [&] { (void)nonstandard_exception_clock.sample(); },
+        "non-standard source exceptions must fail closed");
+    require_throws<trainvm::AuthorityClockError>(
+        [&] { (void)nonstandard_exception_clock.sample(); },
+        "non-standard source exceptions must permanently poison the authority");
+    require(nonstandard_source_calls == 1U,
+            "a poisoned authority clock must never invoke its source again");
+
     trainvm::AuthorityClock local;
     const auto local_sample = local.sample();
     require(local_sample.wall.nanoseconds > 0 &&
