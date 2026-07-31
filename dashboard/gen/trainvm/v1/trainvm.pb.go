@@ -918,13 +918,17 @@ func (x *RunSummary) GetLatestEffectiveControlRevision() uint64 {
 }
 
 type SubmitExperimentRequest struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	SourceDocument string                 `protobuf:"bytes,1,opt,name=source_document,json=sourceDocument,proto3" json:"source_document,omitempty"`
-	SourceFormat   string                 `protobuf:"bytes,2,opt,name=source_format,json=sourceFormat,proto3" json:"source_format,omitempty"` // json or yaml
-	CreateRun      bool                   `protobuf:"varint,3,opt,name=create_run,json=createRun,proto3" json:"create_run,omitempty"`
-	IdempotencyKey string                 `protobuf:"bytes,4,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	SourceDocument    string                 `protobuf:"bytes,1,opt,name=source_document,json=sourceDocument,proto3" json:"source_document,omitempty"`
+	SourceFormat      string                 `protobuf:"bytes,2,opt,name=source_format,json=sourceFormat,proto3" json:"source_format,omitempty"` // json or yaml
+	CreateRun         bool                   `protobuf:"varint,3,opt,name=create_run,json=createRun,proto3" json:"create_run,omitempty"`
+	IdempotencyKey    string                 `protobuf:"bytes,4,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
+	ExpectedJournalId string                 `protobuf:"bytes,5,opt,name=expected_journal_id,json=expectedJournalId,proto3" json:"expected_journal_id,omitempty"`
+	Author            string                 `protobuf:"bytes,6,opt,name=author,proto3" json:"author,omitempty"`
+	Reason            string                 `protobuf:"bytes,7,opt,name=reason,proto3" json:"reason,omitempty"`
+	ExpectedPlanHash  string                 `protobuf:"bytes,8,opt,name=expected_plan_hash,json=expectedPlanHash,proto3" json:"expected_plan_hash,omitempty"` // required for create_run; fences preview/compiler skew
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *SubmitExperimentRequest) Reset() {
@@ -981,6 +985,34 @@ func (x *SubmitExperimentRequest) GetCreateRun() bool {
 func (x *SubmitExperimentRequest) GetIdempotencyKey() string {
 	if x != nil {
 		return x.IdempotencyKey
+	}
+	return ""
+}
+
+func (x *SubmitExperimentRequest) GetExpectedJournalId() string {
+	if x != nil {
+		return x.ExpectedJournalId
+	}
+	return ""
+}
+
+func (x *SubmitExperimentRequest) GetAuthor() string {
+	if x != nil {
+		return x.Author
+	}
+	return ""
+}
+
+func (x *SubmitExperimentRequest) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *SubmitExperimentRequest) GetExpectedPlanHash() string {
+	if x != nil {
+		return x.ExpectedPlanHash
 	}
 	return ""
 }
@@ -3370,13 +3402,17 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\x0ffailure_summary\x18\f \x01(\tR\x0efailureSummary\x12@\n" +
 	"\x1aeffective_control_revision\x18\r \x01(\x04B\x02\x18\x01R\x18effectiveControlRevision\x12I\n" +
 	"!latest_requested_control_revision\x18\x0e \x01(\x04R\x1elatestRequestedControlRevision\x12I\n" +
-	"!latest_effective_control_revision\x18\x0f \x01(\x04R\x1elatestEffectiveControlRevision\"\xaf\x01\n" +
+	"!latest_effective_control_revision\x18\x0f \x01(\x04R\x1elatestEffectiveControlRevision\"\xbd\x02\n" +
 	"\x17SubmitExperimentRequest\x12'\n" +
 	"\x0fsource_document\x18\x01 \x01(\tR\x0esourceDocument\x12#\n" +
 	"\rsource_format\x18\x02 \x01(\tR\fsourceFormat\x12\x1d\n" +
 	"\n" +
 	"create_run\x18\x03 \x01(\bR\tcreateRun\x12'\n" +
-	"\x0fidempotency_key\x18\x04 \x01(\tR\x0eidempotencyKey\"\xf2\x01\n" +
+	"\x0fidempotency_key\x18\x04 \x01(\tR\x0eidempotencyKey\x12.\n" +
+	"\x13expected_journal_id\x18\x05 \x01(\tR\x11expectedJournalId\x12\x16\n" +
+	"\x06author\x18\x06 \x01(\tR\x06author\x12\x16\n" +
+	"\x06reason\x18\a \x01(\tR\x06reason\x12,\n" +
+	"\x12expected_plan_hash\x18\b \x01(\tR\x10expectedPlanHash\"\xf2\x01\n" +
 	"\x18SubmitExperimentResponse\x12-\n" +
 	"\x12canonical_document\x18\x01 \x01(\tR\x11canonicalDocument\x12%\n" +
 	"\x0ecanonical_plan\x18\x02 \x01(\tR\rcanonicalPlan\x12\x1b\n" +

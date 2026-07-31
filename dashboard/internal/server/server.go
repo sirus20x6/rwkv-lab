@@ -189,6 +189,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/trainvm/schema", s.handleTrainVMSchema)
 	s.mux.HandleFunc("GET /api/trainvm/example", s.handleTrainVMExample)
 	s.mux.HandleFunc("POST /api/trainvm/compile", s.handleTrainVMCompile)
+	s.mux.HandleFunc("POST /api/trainvm/experiments", s.handleTrainVMSubmit)
 	s.mux.HandleFunc("POST /api/trainvm/runs/{run}/controls", s.handleTrainVMControls)
 	s.mux.HandleFunc("GET /api/trainvm/runs/{run}/controls", s.handleTrainVMControlView)
 	// Metric catalog (known cols + extra_json keys) for the dynamic metric picker.

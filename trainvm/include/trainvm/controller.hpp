@@ -15,6 +15,7 @@ class Controller {
   Controller(const CompiledPlan& plan, Journal& journal, std::string run_id);
 
   const ExecutionState& create();
+  const ExecutionState& create_queued(nlohmann::json submission = nlohmann::json::object());
   const ExecutionState& recover();
   Dispatch prepare_dispatch();
   const ExecutionState& handle_event(const Event& event);

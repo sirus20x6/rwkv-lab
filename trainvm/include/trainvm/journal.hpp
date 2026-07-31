@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -51,8 +52,22 @@ struct RunProjection {
   bool operator==(const RunProjection&) const = default;
 };
 
+enum class RunCreationDisposition { inserted, replayed };
+
+class RunCreationConflict final : public std::invalid_argument {
+public:
+  using std::invalid_argument::invalid_argument;
+};
+
+struct RunCreationResult {
+  RunCreationDisposition disposition{};
+  Event created_event;
+
+  bool operator==(const RunCreationResult&) const = default;
+};
+
 class Journal {
- public:
+public:
   explicit Journal(const std::filesystem::path& path);
   ~Journal();
 
@@ -100,7 +115,7 @@ class Journal {
 
   void initialize();
   std::uint64_t append_uncommitted(const Event& event);
-  void create_run(const CompiledPlan& plan, const std::vector<Event>& events);
+  RunCreationResult create_run(const CompiledPlan& plan, const std::vector<Event>& events);
   ControlSubmission submit_control_command(ControlCommand command);
   ControlCommand acknowledge_control_command(const std::string& run_id,
                                               const std::string& command_id,

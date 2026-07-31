@@ -18,9 +18,17 @@ import (
 )
 
 type fakeTrainVMCommander struct {
-	request trainvmstore.ControlRequest
-	result  trainvmstore.ControlResult
-	err     error
+	request          trainvmstore.ControlRequest
+	result           trainvmstore.ControlResult
+	submission       trainvmstore.SubmissionRequest
+	submissionResult trainvmstore.SubmissionResult
+	err              error
+}
+
+func (f *fakeTrainVMCommander) SubmitExperiment(_ context.Context,
+	request trainvmstore.SubmissionRequest) (trainvmstore.SubmissionResult, error) {
+	f.submission = request
+	return f.submissionResult, f.err
 }
 
 type unreachableTrainVMCommander struct{ fakeTrainVMCommander }
@@ -119,10 +127,12 @@ func TestTrainVMReadModelEndpoints(t *testing.T) {
 		t.Fatalf("runs status=%d body=%s", response.Code, response.Body.String())
 	}
 	var listing struct {
-		Enabled bool               `json:"enabled"`
-		Runs    []trainvmstore.Run `json:"runs"`
+		Enabled   bool               `json:"enabled"`
+		JournalID string             `json:"journal_id"`
+		Runs      []trainvmstore.Run `json:"runs"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &listing); err != nil || !listing.Enabled ||
+		listing.JournalID != "0123456789abcdef0123456789abcdef" ||
 		len(listing.Runs) != 1 || listing.Runs[0].RunID != "vm-run" {
 		t.Fatalf("unexpected listing: %#v err=%v", listing, err)
 	}
@@ -228,6 +238,112 @@ func TestTrainVMControlEndpointUsesNativeCommander(t *testing.T) {
 	}
 	if _, ok := commander.request.Assignments["eval_every"].(json.Number); !ok {
 		t.Fatalf("JSON number type was lost: %#v", commander.request.Assignments)
+	}
+}
+
+func TestTrainVMSubmissionEndpointUsesNativeCommander(t *testing.T) {
+	commander := &fakeTrainVMCommander{submissionResult: trainvmstore.SubmissionResult{
+		PlanHash: "native-plan", Run: &trainvmstore.RunIdentity{
+			RunID: "run-new", Revision: 1, PlanHash: "native-plan",
+		},
+	}}
+	srv := New(Config{Commander: commander, TrainVM: trainVMFixture(t)})
+	request := httptest.NewRequest(http.MethodPost, "/api/trainvm/experiments",
+		strings.NewReader(`{"source_document":"{\"kind\":\"Experiment\"}","source_format":"json","create_run":true,"idempotency_key":"submit-1","expected_journal_id":"0123456789abcdef0123456789abcdef","expected_plan_hash":"native-plan","reason":"launch test"}`))
+	request.Host = "127.0.0.1:9124"
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted ||
+		commander.submission.SourceDocument != `{"kind":"Experiment"}` ||
+		commander.submission.SourceFormat != "json" || !commander.submission.CreateRun ||
+		commander.submission.IdempotencyKey != "submit-1" || commander.submission.Author != "dashboard" ||
+		commander.submission.ExpectedJournalID != "0123456789abcdef0123456789abcdef" ||
+		commander.submission.ExpectedPlanHash != "native-plan" ||
+		!strings.Contains(response.Body.String(), `"run_id":"run-new"`) {
+		t.Fatalf("unexpected submission forwarding: status=%d request=%#v body=%s",
+			response.Code, commander.submission, response.Body.String())
+	}
+}
+
+func TestTrainVMSubmissionRejectsStaleAuthorityIdentity(t *testing.T) {
+	commander := &fakeTrainVMCommander{}
+	srv := New(Config{Commander: commander, TrainVM: trainVMFixture(t)})
+	request := httptest.NewRequest(http.MethodPost, "/api/trainvm/experiments",
+		strings.NewReader(`{"source_document":"{}","source_format":"json","create_run":true,"idempotency_key":"submit-1","expected_journal_id":"stale-journal","expected_plan_hash":"native-plan","reason":"launch test"}`))
+	request.Host = "127.0.0.1:9124"
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusConflict || commander.submission.SourceDocument != "" {
+		t.Fatalf("stale submission reached authority: status=%d request=%#v body=%s",
+			response.Code, commander.submission, response.Body.String())
+	}
+}
+
+func TestTrainVMSubmissionWithoutCreatedRunIsUnprocessable(t *testing.T) {
+	commander := &fakeTrainVMCommander{submissionResult: trainvmstore.SubmissionResult{
+		PlanHash: "native-plan",
+		Diagnostics: []trainvmstore.ControlDiagnostic{{
+			Severity: "ERROR", Code: "experiment.invalid", Message: "draft rejected",
+		}},
+	}}
+	srv := New(Config{Commander: commander, TrainVM: trainVMFixture(t)})
+	request := httptest.NewRequest(http.MethodPost, "/api/trainvm/experiments",
+		strings.NewReader(`{"source_document":"{}","source_format":"json","create_run":true,"idempotency_key":"submit-1","expected_journal_id":"0123456789abcdef0123456789abcdef","expected_plan_hash":"native-plan","reason":"launch test"}`))
+	request.Host = "127.0.0.1:9124"
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusUnprocessableEntity ||
+		!strings.Contains(response.Body.String(), `"code":"experiment.invalid"`) {
+		t.Fatalf("invalid native result was not preserved: status=%d body=%s",
+			response.Code, response.Body.String())
+	}
+}
+
+func TestTrainVMSubmissionRejectsMismatchedPreviewResult(t *testing.T) {
+	commander := &fakeTrainVMCommander{submissionResult: trainvmstore.SubmissionResult{
+		PlanHash: "different-plan",
+		Run:      &trainvmstore.RunIdentity{RunID: "run-new", Revision: 1, PlanHash: "different-plan"},
+	}}
+	srv := New(Config{Commander: commander, TrainVM: trainVMFixture(t)})
+	request := httptest.NewRequest(http.MethodPost, "/api/trainvm/experiments",
+		strings.NewReader(`{"source_document":"{}","source_format":"json","create_run":true,"idempotency_key":"submit-1","expected_journal_id":"0123456789abcdef0123456789abcdef","expected_plan_hash":"native-plan","reason":"launch test"}`))
+	request.Host = "127.0.0.1:9124"
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("mismatched native identity accepted: status=%d body=%s",
+			response.Code, response.Body.String())
+	}
+}
+
+func TestTrainVMSubmissionEndpointSharesStrictMutationBoundary(t *testing.T) {
+	commander := &fakeTrainVMCommander{}
+	srv := New(Config{Commander: commander, TrainVM: trainVMFixture(t)})
+	for name, test := range map[string]struct {
+		body        string
+		contentType string
+		host        string
+		expected    int
+	}{
+		"unknown field": {body: `{"mystery":true}`, contentType: "application/json", host: "127.0.0.1", expected: http.StatusBadRequest},
+		"trailing JSON": {body: `{}` + ` {}`, contentType: "application/json", host: "127.0.0.1", expected: http.StatusBadRequest},
+		"wrong type":    {body: `{}`, contentType: "text/plain", host: "127.0.0.1", expected: http.StatusUnsupportedMediaType},
+		"rebound host":  {body: `{}`, contentType: "application/json", host: "attacker.invalid", expected: http.StatusForbidden},
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/api/trainvm/experiments", strings.NewReader(test.body))
+			request.Host = test.host
+			request.Header.Set("Content-Type", test.contentType)
+			response := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(response, request)
+			if response.Code != test.expected {
+				t.Fatalf("status=%d expected=%d body=%s", response.Code, test.expected, response.Body.String())
+			}
+		})
 	}
 }
 

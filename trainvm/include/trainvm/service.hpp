@@ -29,6 +29,10 @@ class TrainVMService final : public v1::TrainVM::Service {
   explicit TrainVMService(const std::filesystem::path& journal_path);
   ~TrainVMService() override;
 
+  grpc::Status SubmitExperiment(grpc::ServerContext* context,
+                                const v1::SubmitExperimentRequest* request,
+                                v1::SubmitExperimentResponse* response) override;
+
   grpc::Status CommandRun(grpc::ServerContext* context,
                           const v1::RunCommandRequest* request,
                           v1::RunCommandResponse* response) override;

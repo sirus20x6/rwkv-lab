@@ -995,6 +995,16 @@
 
   const vmPanel = document.getElementById("trainvm-panel");
   if (vmPanel) vmPanel.addEventListener("toggle", () => refreshTrainVM(true));
+  window.addEventListener("trainvm-refresh", (event) => {
+    const runID = String(event.detail?.runID || "");
+    if (runID) {
+      selectVMRun(runID);
+      vmAfter = 0;
+      const timeline = document.getElementById("trainvm-timeline");
+      if (timeline) timeline.innerHTML = '<div class="empty">loading timeline…</div>';
+    }
+    refreshTrainVM(true);
+  });
   document.getElementById("vm-control-catalog")?.addEventListener("change", (event) => {
     const input = event.target.closest("[data-vm-control]");
     if (!input || !vmControlView) return;

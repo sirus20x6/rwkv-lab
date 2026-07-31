@@ -187,3 +187,36 @@ func TestTrainVMEditorIsSchemaDrivenAndNativeCompiled(t *testing.T) {
 		t.Fatal("preview-only TrainVM editor unexpectedly exposes a launch action")
 	}
 }
+
+func TestTrainVMSubmissionFreezesPreviewAndRetriesExactIntent(t *testing.T) {
+	assets := Static()
+	editor, err := fs.ReadFile(assets, "trainvm-editor.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := fs.ReadFile(assets, "app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		`expected_journal_id: authorityJournalID`,
+		`expected_plan_hash: validatedDraft.planHash`,
+		`sessionStorage.setItem`,
+		`body: intent.body`,
+		`submissionBusy`,
+		`submittedDraftSource === validatedDraft.source`,
+		`compileGeneration += 1`,
+		`response.status === 408 || response.status >= 500`,
+	} {
+		if !strings.Contains(string(editor), required) {
+			t.Fatalf("TrainVM submission lifecycle is missing %q", required)
+		}
+	}
+	for _, required := range []string{
+		`event.detail?.runID`, `selectVMRun(runID)`, `refreshTrainVM(true)`,
+	} {
+		if !strings.Contains(string(app), required) {
+			t.Fatalf("created TrainVM run selection is missing %q", required)
+		}
+	}
+}

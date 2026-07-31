@@ -93,6 +93,7 @@ AuthorityLock::~AuthorityLock() {
 namespace {
 
 constexpr std::size_t kMaximumCommandBytes = 64U * 1024U;
+constexpr std::size_t kMaximumSubmissionBytes = 2U * 1024U * 1024U;
 
 class SignalMaskGuard {
  public:
@@ -280,6 +281,14 @@ void add_diagnostic(v1::RunCommandResponse& response, const Diagnostic& diagnost
   output->set_message(diagnostic.message);
 }
 
+void add_diagnostic(v1::SubmitExperimentResponse& response, const Diagnostic& diagnostic) {
+  auto* output = response.add_diagnostics();
+  output->set_severity(wire_severity(diagnostic.severity));
+  output->set_code(diagnostic.code);
+  output->set_document_path(diagnostic.path);
+  output->set_message(diagnostic.message);
+}
+
 void add_stored_diagnostics(v1::RunCommandResponse& response,
                             const nlohmann::json& diagnostics) {
   if (!diagnostics.is_array()) return;
@@ -431,10 +440,19 @@ v1::DesiredState desired_state(std::string_view state) {
 }
 
 v1::ObservedState observed_state(std::string_view state) {
+  if (state == "draft") return v1::OBSERVED_STATE_DRAFT;
+  if (state == "validated") return v1::OBSERVED_STATE_VALIDATED;
+  if (state == "queued") return v1::OBSERVED_STATE_QUEUED;
+  if (state == "acquiring") return v1::OBSERVED_STATE_ACQUIRING;
   if (state == "running") return v1::OBSERVED_STATE_RUNNING;
+  if (state == "pausing") return v1::OBSERVED_STATE_PAUSING;
   if (state == "paused") return v1::OBSERVED_STATE_PAUSED;
+  if (state == "recovering") return v1::OBSERVED_STATE_RECOVERING;
+  if (state == "completing") return v1::OBSERVED_STATE_COMPLETING;
   if (state == "completed") return v1::OBSERVED_STATE_COMPLETED;
+  if (state == "cancelling") return v1::OBSERVED_STATE_CANCELLING;
   if (state == "cancelled") return v1::OBSERVED_STATE_CANCELLED;
+  if (state == "failing") return v1::OBSERVED_STATE_FAILING;
   if (state == "failed") return v1::OBSERVED_STATE_FAILED;
   if (state == "blocked") return v1::OBSERVED_STATE_BLOCKED;
   return v1::OBSERVED_STATE_UNSPECIFIED;
@@ -509,6 +527,93 @@ TrainVMService::TrainVMService(const std::filesystem::path& journal_path)
     : authority_lock_(std::make_unique<AuthorityLock>(journal_path)), journal_(journal_path) {}
 
 TrainVMService::~TrainVMService() = default;
+
+grpc::Status TrainVMService::SubmitExperiment(grpc::ServerContext* context,
+                                              const v1::SubmitExperimentRequest* request,
+                                              v1::SubmitExperimentResponse* response) {
+  if (request == nullptr || response == nullptr) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, "request and response are required"};
+  }
+  if (request->ByteSizeLong() > kMaximumSubmissionBytes) {
+    return {grpc::StatusCode::RESOURCE_EXHAUSTED, "submission exceeds 2 MiB"};
+  }
+  try {
+    if (request->expected_journal_id().empty() ||
+        request->expected_journal_id() != journal_.journal_id()) {
+      return {grpc::StatusCode::FAILED_PRECONDITION,
+              "dashboard journal identity differs from the authority"};
+    }
+    if (request->source_document().empty() || request->source_format().empty()) {
+      return {grpc::StatusCode::INVALID_ARGUMENT, "source document and format are required"};
+    }
+    if (request->create_run() &&
+        (request->idempotency_key().empty() || request->author().empty() ||
+         request->reason().empty() || request->expected_plan_hash().empty())) {
+      return {grpc::StatusCode::INVALID_ARGUMENT,
+              "run creation requires an idempotency key, author, reason, and "
+              "expected plan hash"};
+    }
+    if (cancelled(context))
+      return cancellation_status();
+
+    const CompileResult compiled =
+        compile_document_source(request->source_document(), request->source_format());
+    for (const auto& diagnostic : compiled.diagnostics) {
+      add_diagnostic(*response, diagnostic);
+    }
+    if (!compiled.valid() || !compiled.plan) {
+      return grpc::Status::OK;
+    }
+    const std::string canonical = compiled.plan->canonical_plan.dump();
+    response->set_canonical_document(canonical);
+    // v1 has no separate lowered execution IR yet, so both canonical fields
+    // intentionally carry the same normalized, hashed experiment document.
+    response->set_canonical_plan(canonical);
+    response->set_plan_hash(compiled.plan->plan_hash);
+    if (!request->create_run()) {
+      return grpc::Status::OK;
+    }
+    if (request->expected_plan_hash() != compiled.plan->plan_hash) {
+      return {grpc::StatusCode::FAILED_PRECONDITION,
+              "authority compiler plan hash differs from the validated preview"};
+    }
+    if (cancelled(context))
+      return cancellation_status();
+
+    std::scoped_lock lock(command_mutex_);
+    if (cancelled(context))
+      return cancellation_status();
+    const std::string run_id =
+        "run-" + sha256_hex(nlohmann::json({{"journal_id", journal_.journal_id()},
+                                            {"idempotency_key", request->idempotency_key()}})
+                                .dump());
+    const nlohmann::json submission_identity{
+        {"idempotency_key", request->idempotency_key()},
+        {"source_format", request->source_format()},
+        {"create_run", request->create_run()},
+        {"author", request->author()},
+        {"reason", request->reason()},
+        {"plan_hash", compiled.plan->plan_hash},
+    };
+    Controller controller(*compiled.plan, journal_, run_id);
+    controller.create_queued(submission_identity);
+    const auto projection = journal_.projection(run_id);
+    if (!projection) {
+      return {grpc::StatusCode::INTERNAL, "created run has no durable projection"};
+    }
+    auto* identity = response->mutable_run();
+    identity->set_run_id(projection->run_id);
+    identity->set_revision(projection->run_revision);
+    identity->set_plan_hash(projection->plan_hash);
+    return grpc::Status::OK;
+  } catch (const RunCreationConflict& exception) {
+    return {grpc::StatusCode::ALREADY_EXISTS, exception.what()};
+  } catch (const std::invalid_argument& exception) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, exception.what()};
+  } catch (const std::exception& exception) {
+    return {grpc::StatusCode::DATA_LOSS, exception.what()};
+  }
+}
 
 grpc::Status TrainVMService::CommandRun(grpc::ServerContext* context,
                                         const v1::RunCommandRequest* request,
@@ -612,7 +717,7 @@ int serve(const std::filesystem::path& journal_path, const std::filesystem::path
   remove_stale_socket(absolute_socket);
   SocketCleanupGuard socket_cleanup(absolute_socket);
   grpc::ServerBuilder builder;
-  builder.SetMaxReceiveMessageSize(static_cast<int>(kMaximumCommandBytes));
+  builder.SetMaxReceiveMessageSize(static_cast<int>(kMaximumSubmissionBytes));
   builder.AddListeningPort("unix:" + absolute_socket.string(), grpc::InsecureServerCredentials());
   builder.RegisterService(&service);
   std::unique_ptr<grpc::Server> server;

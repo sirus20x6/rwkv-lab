@@ -32,7 +32,10 @@ access to the local command authority.
 The dashboard also serves the checked-in schema and example through `/api/trainvm/schema` and
 `/api/trainvm/example`. Drafts posted to `/api/trainvm/compile` are capped at 2 MiB and passed on
 stdin to the fixed native `trainvm compile` command for reflected decoding, semantic validation,
-canonicalization, and plan hashing; the endpoint cannot launch a run.
+canonicalization, and plan hashing; that preview endpoint cannot launch a run. Valid drafts may be
+frozen and posted to `/api/trainvm/experiments`, where the native authority independently recompiles
+them and creates an idempotent queued run. Ambiguous browser failures retain the exact serialized
+request and key in session storage for an exact retry; the dashboard never writes the journal.
 The one-second shared snapshot reads conversion quality from ingestion-time rollups plus one batched
 codec query; it does not fan out KPI/count queries per layer. Run-sidecar and campaign/dataset discovery
 are cached, so multiple panels and browser tabs do not repeatedly walk the 1TB-scale `runs/` tree.

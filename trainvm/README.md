@@ -32,11 +32,15 @@ Implemented now:
   migration policy;
 - a native gRPC command authority over a permission-restricted Unix socket, with an exclusive
   journal-owner lock, typed control results, serialized optimistic updates, and fenced worker acks;
+- strict in-memory JSON/YAML experiment submission, canonical recompilation by the authority,
+  journal-bound idempotency identities, atomic queued run creation, and deterministic queued-run
+  recovery without launching work;
 - `validate`, `plan`, `simulate`, and journal inspection/replay CLI commands.
 
 This code does not yet launch or control a trainer. The next implementation boundary is the FSM
-reconciler service loop, resource leases, and process-free fault injection around dispatch receipts;
-real MageFlow process ownership follows only after those boundaries pass.
+reconciler service loop that advances submitted runs through lease acquisition and worker startup,
+plus process-free fault injection around dispatch receipts. Real MageFlow process ownership follows
+only after those boundaries pass.
 
 ## Toolchain
 
@@ -83,8 +87,10 @@ format change must update the golden test and supply a plan-schema migration rat
 `compile` is the bounded dashboard authoring boundary: it reads one JSON document from stdin and
 returns either structured diagnostics or the native compiler's canonical plan and content hash.
 `serve` is the stateful mutation boundary. The dashboard connects to its Unix socket through gRPC;
-it never opens the journal writable. Only the live-control `CommandRun` variant is implemented in
-this slice. Worker launch, pause/resume, and lifecycle reconciliation remain subsequent milestones.
+it never opens the journal writable. `SubmitExperiment` supports validation and idempotent queued
+creation; the live-control `CommandRun` variant is also implemented. The dashboard freezes ambiguous
+submissions and retries their exact body and key. Worker launch, pause/resume, and lifecycle
+reconciliation remain subsequent milestones.
 
 ## Journal CLI
 

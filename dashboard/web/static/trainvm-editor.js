@@ -6,6 +6,13 @@
   let loaded = false;
   let compileTimer = 0;
   let compileGeneration = 0;
+  let validatedDraft = null;
+  let submissionIntent = null;
+  let submissionBusy = false;
+  let submissionStorageAvailable = true;
+  let submittedDraftSource = null;
+  let authorityJournalID = "";
+  const submissionStorageKey = "trainvm.submission.intent.v1";
 
   const byID = (id) => document.getElementById(id);
   const escapeHTML = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
@@ -115,10 +122,82 @@
   }
 
   function scheduleCompile() {
+    compileGeneration += 1;
+    validatedDraft = null;
+    submittedDraftSource = null;
+    updateSubmitState();
     clearTimeout(compileTimer);
     compileTimer = setTimeout(compileDraft, 450);
     const state = byID("vm-editor-state");
     if (state) state.textContent = "draft changed · preview pending";
+  }
+
+  function restoreSubmissionIntent() {
+    try {
+      const stored = sessionStorage.getItem(submissionStorageKey);
+      submissionIntent = stored ? JSON.parse(stored) : null;
+      if (!submissionIntent || typeof submissionIntent.body !== "string") {
+        submissionIntent = null;
+        return;
+      }
+      const payload = JSON.parse(submissionIntent.body);
+      if (!payload.expected_journal_id || !payload.expected_plan_hash ||
+          typeof payload.source_document !== "string") {
+        submissionIntent = null;
+        return;
+      }
+      submissionIntent.source ||= payload.source_document;
+      submissionIntent.journalID ||= payload.expected_journal_id;
+      submissionIntent.planHash ||= payload.expected_plan_hash;
+      const reason = byID("vm-submit-reason");
+      if (reason) reason.value = payload.reason || "";
+    } catch (_) {
+      submissionIntent = null;
+      submissionStorageAvailable = false;
+    }
+  }
+
+  function persistSubmissionIntent() {
+    try {
+      if (submissionIntent) sessionStorage.setItem(submissionStorageKey, JSON.stringify(submissionIntent));
+      else sessionStorage.removeItem(submissionStorageKey);
+      submissionStorageAvailable = true;
+      return true;
+    } catch (_) {
+      submissionStorageAvailable = false;
+      return false;
+    }
+  }
+
+  function lockEditor(locked) {
+    document.querySelectorAll("#vm-schema-form input, #vm-schema-form select, #vm-json-source, #vm-apply-json, #vm-load-example, #vm-compile")
+      .forEach((control) => {
+        if (locked && !control.disabled) {
+          control.dataset.vmIntentDisabled = "true";
+          control.disabled = true;
+        } else if (!locked && control.dataset.vmIntentDisabled === "true") {
+          delete control.dataset.vmIntentDisabled;
+          control.disabled = false;
+        }
+      });
+  }
+
+  function updateSubmitState(message = "") {
+    const button = byID("vm-submit");
+    const reason = byID("vm-submit-reason");
+    if (!button) return;
+    const retry = Boolean(submissionIntent);
+    const alreadySubmitted = Boolean(validatedDraft && submittedDraftSource === validatedDraft.source);
+    button.disabled = submissionBusy || (!retry &&
+      (!validatedDraft || !reason?.value.trim() || !authorityJournalID || alreadySubmitted));
+    button.textContent = submissionBusy ? "submitting…" :
+      (retry ? "retry exact submission" : "create queued run");
+    if (reason) reason.disabled = retry || submissionBusy;
+    lockEditor(retry || submissionBusy);
+    if (message) {
+      const state = byID("vm-editor-state");
+      if (state) state.textContent = message;
+    }
   }
 
   function renderDiagnostics(result) {
@@ -144,13 +223,17 @@
 
   async function compileDraft() {
     if (!draft) return;
+    clearTimeout(compileTimer);
+    validatedDraft = null;
+    updateSubmitState();
     const generation = ++compileGeneration;
+    const source = JSON.stringify(draft);
     const state = byID("vm-editor-state");
     if (state) state.textContent = "native compile…";
     try {
       const response = await fetch("/api/trainvm/compile", {
         method: "POST", cache: "no-store", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(draft),
+        body: source,
       });
       const text = await response.text();
       if (generation !== compileGeneration) return;
@@ -158,6 +241,10 @@
       const result = JSON.parse(text);
       renderDiagnostics(result);
       renderPlan(result);
+      validatedDraft = result.valid && result.plan_hash ? {
+        generation, source, planHash: String(result.plan_hash),
+      } : null;
+      updateSubmitState();
       if (state) state.textContent = result.valid ? `valid · ${String(result.plan_hash || "").slice(0, 12)}` : "native compiler rejected draft";
     } catch (error) {
       if (generation !== compileGeneration) return;
@@ -167,20 +254,107 @@
     }
   }
 
+  async function submitDraft() {
+    if (submissionBusy) return;
+    const reason = byID("vm-submit-reason");
+    if (!submissionIntent) {
+      if (!validatedDraft || !reason?.value.trim() || !authorityJournalID ||
+          submittedDraftSource === validatedDraft.source) return;
+      submissionIntent = {
+        body: JSON.stringify({
+          source_document: validatedDraft.source,
+          source_format: "json",
+          create_run: true,
+          idempotency_key: crypto.randomUUID(),
+          expected_journal_id: authorityJournalID,
+          expected_plan_hash: validatedDraft.planHash,
+          reason: reason.value.trim(),
+        }),
+        source: validatedDraft.source,
+        journalID: authorityJournalID,
+        planHash: validatedDraft.planHash,
+      };
+      persistSubmissionIntent();
+    }
+    const intent = submissionIntent;
+    submissionBusy = true;
+    updateSubmitState("submitting frozen draft to native authority…");
+    let finalMessage = "";
+    try {
+      const response = await fetch("/api/trainvm/experiments", {
+        method: "POST", cache: "no-store", headers: { "Content-Type": "application/json" },
+        body: intent.body,
+      });
+      const text = await response.text();
+      let result = null;
+      try { result = JSON.parse(text); } catch (_) { /* HTTP text is shown below. */ }
+      if (!response.ok) {
+        if (response.status === 408 || response.status >= 500) {
+          finalMessage = submissionStorageAvailable ?
+            "outcome unknown · retry exact submission" :
+            "outcome unknown · retry exact submission · keep this tab open";
+          return;
+        }
+        submissionIntent = null;
+        persistSubmissionIntent();
+        validatedDraft = null;
+        submittedDraftSource = null;
+        if (result?.diagnostics) {
+          renderDiagnostics({ valid: false, diagnostics: result.diagnostics });
+          renderPlan({ valid: false });
+        }
+        finalMessage = `submission rejected · ${result?.diagnostics?.[0]?.message ||
+          text.trim() || `HTTP ${response.status}`}`;
+        return;
+      }
+      const runID = result?.run?.run_id || "";
+      if (!runID || result.plan_hash !== intent.planHash ||
+          result.run?.plan_hash !== intent.planHash) {
+        finalMessage = "authority returned an inconsistent result · retry exact submission";
+        return;
+      }
+      submissionIntent = null;
+      persistSubmissionIntent();
+      submittedDraftSource = intent.source;
+      if (reason) reason.value = "";
+      finalMessage = `queued · ${runID}`;
+      window.dispatchEvent(new CustomEvent("trainvm-refresh", { detail: { runID } }));
+    } catch (_) {
+      finalMessage = submissionStorageAvailable ?
+        "outcome unknown · retry exact submission" :
+        "outcome unknown · retry exact submission · keep this tab open";
+    } finally {
+      submissionBusy = false;
+      updateSubmitState(finalMessage);
+    }
+  }
+
   async function loadAuthoring(force = false) {
     if (loaded && !force) return;
+    clearTimeout(compileTimer);
+    compileGeneration += 1;
+    validatedDraft = null;
+    submittedDraftSource = null;
+    updateSubmitState();
     const state = byID("vm-editor-state");
     if (state) state.textContent = "loading schema and reference…";
     try {
-      const [schemaResponse, exampleResponse] = await Promise.all([
+      const [schemaResponse, exampleResponse, runsResponse] = await Promise.all([
         fetch("/api/trainvm/schema", { cache: "no-store" }),
         fetch("/api/trainvm/example", { cache: "no-store" }),
+        fetch("/api/trainvm/runs", { cache: "no-store" }),
       ]);
-      if (!schemaResponse.ok || !exampleResponse.ok) throw new Error("TrainVM authoring endpoints unavailable");
+      if (!schemaResponse.ok || !exampleResponse.ok || !runsResponse.ok) {
+        throw new Error("TrainVM authoring endpoints unavailable");
+      }
       schema = await schemaResponse.json();
       draft = await exampleResponse.json();
+      const runs = await runsResponse.json();
+      authorityJournalID = String(runs.journal_id || "");
+      if (!authorityJournalID) throw new Error("TrainVM journal identity unavailable");
       loaded = true;
       renderForm();
+      updateSubmitState();
       await compileDraft();
     } catch (error) {
       if (state) state.textContent = error.message;
@@ -188,9 +362,20 @@
   }
 
   const authoring = byID("trainvm-authoring");
+  restoreSubmissionIntent();
+  updateSubmitState();
   if (authoring) authoring.addEventListener("toggle", () => { if (authoring.open) loadAuthoring(); });
   byID("vm-load-example")?.addEventListener("click", () => loadAuthoring(true));
   byID("vm-compile")?.addEventListener("click", compileDraft);
+  byID("vm-submit")?.addEventListener("click", submitDraft);
+  byID("vm-submit-reason")?.addEventListener("input", () => updateSubmitState());
+  byID("vm-json-source")?.addEventListener("input", () => {
+    clearTimeout(compileTimer);
+    compileGeneration += 1;
+    validatedDraft = null;
+    submittedDraftSource = null;
+    updateSubmitState("raw source changed · apply JSON before compiling");
+  });
   byID("vm-apply-json")?.addEventListener("click", () => {
     const source = byID("vm-json-source");
     try {
@@ -198,6 +383,11 @@
       renderForm();
       scheduleCompile();
     } catch (error) {
+      clearTimeout(compileTimer);
+      compileGeneration += 1;
+      validatedDraft = null;
+      submittedDraftSource = null;
+      updateSubmitState();
       byID("vm-editor-state").textContent = `invalid JSON · ${error.message}`;
     }
   });

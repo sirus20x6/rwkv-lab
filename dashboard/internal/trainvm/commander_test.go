@@ -39,6 +39,44 @@ func TestControlRPCRequestPreservesTypedScalarsAndSortsKeys(t *testing.T) {
 	}
 }
 
+func TestSubmissionRequiresConfiguredAuthority(t *testing.T) {
+	commander := &GRPCCommander{client: nil}
+	_, err := commander.SubmitExperiment(context.Background(), SubmissionRequest{})
+	if err == nil {
+		t.Fatal("incomplete submission unexpectedly accepted")
+	}
+}
+
+func TestSubmissionRPCRequestFencesAuthorityAndPreview(t *testing.T) {
+	request, err := submissionRPCRequest(SubmissionRequest{
+		SourceDocument: `{"kind":"Experiment"}`, SourceFormat: " JSON ", CreateRun: true,
+		IdempotencyKey: " submission-1 ", ExpectedJournalID: " journal-1 ",
+		ExpectedPlanHash: " plan-1 ", Author: " operator ", Reason: " launch ",
+	})
+	if err != nil {
+		t.Fatalf("map submission request: %v", err)
+	}
+	if request.GetSourceFormat() != "json" || !request.GetCreateRun() ||
+		request.GetIdempotencyKey() != "submission-1" ||
+		request.GetExpectedJournalId() != "journal-1" ||
+		request.GetExpectedPlanHash() != "plan-1" || request.GetAuthor() != "operator" ||
+		request.GetReason() != "launch" {
+		t.Fatalf("submission fence was not preserved: %#v", request)
+	}
+}
+
+func TestSubmissionRPCRequestRequiresPreviewFenceForCreate(t *testing.T) {
+	_, err := submissionRPCRequest(SubmissionRequest{
+		SourceDocument: "{}", SourceFormat: "json", CreateRun: true,
+		IdempotencyKey: "submission-1", ExpectedJournalID: "journal-1",
+		Author: "operator", Reason: "launch",
+	})
+	var validationError *ValidationError
+	if !errors.As(err, &validationError) {
+		t.Fatalf("expected ValidationError, got %T: %v", err, err)
+	}
+}
+
 func TestCommanderReachabilityFailsClosedWhenSocketIsAbsent(t *testing.T) {
 	commander, err := DialCommander(filepath.Join(t.TempDir(), "missing.sock"))
 	if err != nil {

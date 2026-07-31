@@ -26,6 +26,7 @@ struct CompileResult {
 };
 
 CompileResult compile_document(const nlohmann::json& source);
+CompileResult compile_document_source(std::string_view source, std::string_view source_format);
 CompileResult compile_document_file(const std::filesystem::path& path);
 std::string sha256_hex(std::string_view value);
 std::string severity_name(Diagnostic::Severity severity);

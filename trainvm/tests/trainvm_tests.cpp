@@ -1408,6 +1408,188 @@ void test_command_service() {
   std::filesystem::remove_all(directory);
 }
 
+void test_submission_and_queue_boundary() {
+  const auto fixture = load_fixture();
+  const auto json_source = fixture.dump();
+  const auto json_result = trainvm::compile_document_source(json_source, "json");
+  const auto yaml_result = trainvm::compile_document_source(json_source, "yaml");
+  check(json_result.valid() && yaml_result.valid() &&
+            json_result.plan->plan_hash == yaml_result.plan->plan_hash,
+        "in-memory JSON and YAML submission sources compile identically");
+  check(!trainvm::compile_document_source(json_source, "toml").valid(),
+        "submission compiler rejects unsupported source formats");
+
+  const std::filesystem::path directory = std::filesystem::temp_directory_path() /
+      ("trainvm-submission-test-" + std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  const auto database_path = directory / "journal.db";
+  std::string journal_id;
+  {
+    trainvm::Journal journal(database_path);
+    journal_id = journal.journal_id();
+  }
+  trainvm::TrainVMService service(database_path);
+  const auto request = [&](bool create_run, std::string key, std::string source = {}) {
+    trainvm::v1::SubmitExperimentRequest output;
+    output.set_source_document(source.empty() ? json_source : std::move(source));
+    output.set_source_format("json");
+    output.set_create_run(create_run);
+    output.set_idempotency_key(std::move(key));
+    output.set_expected_journal_id(journal_id);
+    output.set_expected_plan_hash(json_result.plan->plan_hash);
+    output.set_author("dashboard");
+    output.set_reason("submission test");
+    return output;
+  };
+
+  auto validate = request(false, "");
+  trainvm::v1::SubmitExperimentResponse validate_response;
+  const auto validate_status = service.SubmitExperiment(nullptr, &validate, &validate_response);
+  check(validate_status.ok() && !validate_response.has_run() &&
+            validate_response.plan_hash() == json_result.plan->plan_hash &&
+            validate_response.canonical_document() == validate_response.canonical_plan(),
+        "validation-only submission returns canonical content without a run");
+  {
+    trainvm::Journal journal(database_path);
+    check(journal.event_count() == 0U,
+          "validation-only submission leaves the authority journal unchanged");
+  }
+
+  auto create = request(true, "submission-1");
+  trainvm::v1::SubmitExperimentResponse created;
+  const auto create_status = service.SubmitExperiment(nullptr, &create, &created);
+  check(create_status.ok() && created.has_run() && created.run().revision() == 1U &&
+            created.run().plan_hash() == json_result.plan->plan_hash,
+        "run submission creates a deterministic revision-one run");
+  const std::string run_id = created.run().run_id();
+  {
+    trainvm::Journal journal(database_path);
+    const auto projection = journal.projection(run_id);
+    check(projection && projection->desired_state == "queued" &&
+              projection->observed_state == "queued" && projection->current_node_id.empty() &&
+              journal.event_count() == 1U,
+          "new submissions are durably queued without dispatching work");
+  }
+
+  trainvm::v1::SubmitExperimentResponse replayed;
+  const auto replay_status = service.SubmitExperiment(nullptr, &create, &replayed);
+  check(replay_status.ok() && replayed.has_run() && replayed.run().run_id() == run_id,
+        "exact submission retry returns the original run identity");
+  {
+    trainvm::Journal journal(database_path);
+    check(journal.event_count() == 1U,
+          "exact submission retry does not duplicate durable creation events");
+  }
+
+  auto concurrent_request = request(true, "concurrent-submission");
+  auto concurrent_submit = [&] {
+    trainvm::v1::SubmitExperimentResponse response;
+    const auto status = service.SubmitExperiment(nullptr, &concurrent_request, &response);
+    return std::pair{status, response.run().run_id()};
+  };
+  auto concurrent_left = std::async(std::launch::async, concurrent_submit);
+  auto concurrent_right = std::async(std::launch::async, concurrent_submit);
+  const auto left_submission = concurrent_left.get();
+  const auto right_submission = concurrent_right.get();
+  check(left_submission.first.ok() && right_submission.first.ok() &&
+            !left_submission.second.empty() && left_submission.second == right_submission.second,
+        "concurrent exact submissions converge on one deterministic run identity");
+
+  auto changed_fixture = fixture;
+  changed_fixture["metadata"]["name"] = "changed-submission";
+  auto changed = request(true, "submission-1", changed_fixture.dump());
+  const auto changed_compiled = trainvm::compile_document(changed_fixture);
+  check(changed_compiled.valid(), "changed submission conflict fixture compiles");
+  changed.set_expected_plan_hash(changed_compiled.plan->plan_hash);
+  trainvm::v1::SubmitExperimentResponse changed_response;
+  const auto changed_status = service.SubmitExperiment(nullptr, &changed, &changed_response);
+  check(changed_status.error_code() == grpc::StatusCode::ALREADY_EXISTS,
+        "same submission key with changed canonical content conflicts");
+  auto changed_reason = create;
+  changed_reason.set_reason("different retry content");
+  trainvm::v1::SubmitExperimentResponse changed_reason_response;
+  const auto changed_reason_status =
+      service.SubmitExperiment(nullptr, &changed_reason, &changed_reason_response);
+  check(changed_reason_status.error_code() == grpc::StatusCode::ALREADY_EXISTS,
+        "same submission key with changed audit content conflicts");
+
+  auto wrong_authority = request(false, "");
+  wrong_authority.set_expected_journal_id("00000000000000000000000000000000");
+  trainvm::v1::SubmitExperimentResponse wrong_authority_response;
+  const auto wrong_authority_status =
+      service.SubmitExperiment(nullptr, &wrong_authority, &wrong_authority_response);
+  check(wrong_authority_status.error_code() == grpc::StatusCode::FAILED_PRECONDITION,
+        "submission refuses a mismatched journal authority identity");
+
+  auto wrong_preview = request(true, "wrong-preview");
+  wrong_preview.set_expected_plan_hash(std::string(64, '0'));
+  trainvm::v1::SubmitExperimentResponse wrong_preview_response;
+  const auto wrong_preview_status =
+      service.SubmitExperiment(nullptr, &wrong_preview, &wrong_preview_response);
+  check(wrong_preview_status.error_code() == grpc::StatusCode::FAILED_PRECONDITION,
+        "submission refuses compiler skew from the validated preview plan");
+
+  sqlite3* raw_database = nullptr;
+  check(sqlite3_open(database_path.c_str(), &raw_database) == SQLITE_OK,
+        "submission recovery test opens journal for fault injection");
+  if (raw_database != nullptr) {
+    const std::string corrupt_projection =
+        "UPDATE run_projection SET desired_state='running' WHERE run_id='" + run_id + "'";
+    check(sqlite3_exec(raw_database, corrupt_projection.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK,
+          "submission recovery test corrupts its rebuildable projection");
+    sqlite3_close(raw_database);
+    raw_database = nullptr;
+  }
+  trainvm::v1::SubmitExperimentResponse inconsistent_replay;
+  const auto inconsistent_status =
+      service.SubmitExperiment(nullptr, &create, &inconsistent_replay);
+  check(inconsistent_status.error_code() == grpc::StatusCode::DATA_LOSS,
+        "idempotent replay refuses projection and journal disagreement");
+  check(sqlite3_open(database_path.c_str(), &raw_database) == SQLITE_OK,
+        "submission recovery test reopens journal projection");
+  if (raw_database != nullptr) {
+    const std::string restore_projection =
+        "UPDATE run_projection SET desired_state='queued' WHERE run_id='" + run_id + "'";
+    check(sqlite3_exec(raw_database, restore_projection.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK,
+          "submission recovery test restores its projection");
+    sqlite3_close(raw_database);
+    raw_database = nullptr;
+  }
+
+  {
+    trainvm::Journal journal(database_path);
+    trainvm::Controller queued(*json_result.plan, journal, run_id);
+    queued.recover();
+    bool dispatch_refused = false;
+    try {
+      (void)queued.prepare_dispatch();
+    } catch (const std::logic_error&) {
+      dispatch_refused = true;
+    }
+    check(dispatch_refused, "queued runs cannot dispatch work before they are started");
+    const auto projection = journal.projection(run_id);
+    check(projection && projection->observed_state == "queued",
+          "submission cannot fabricate running state without lease and worker evidence");
+  }
+
+  check(sqlite3_open(database_path.c_str(), &raw_database) == SQLITE_OK,
+        "submission chain test opens journal for fault injection");
+  if (raw_database != nullptr) {
+    const std::string corrupt_chain =
+        "UPDATE events SET chain_hash='" + std::string(64, '0') +
+        "' WHERE event_id='" + run_id + ":created'";
+    check(sqlite3_exec(raw_database, corrupt_chain.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK,
+          "submission chain test tampers with the event chain");
+    sqlite3_close(raw_database);
+  }
+  trainvm::v1::SubmitExperimentResponse corrupt_replay;
+  const auto corrupt_status = service.SubmitExperiment(nullptr, &create, &corrupt_replay);
+  check(corrupt_status.error_code() == grpc::StatusCode::DATA_LOSS,
+        "idempotent replay refuses a tampered global event chain");
+  std::filesystem::remove_all(directory);
+}
+
 void test_legacy_journal_migration_policy() {
   const std::filesystem::path directory = std::filesystem::temp_directory_path() /
       ("trainvm-legacy-journal-test-" +
@@ -1554,6 +1736,7 @@ int main() {
     test_resource_leases();
     test_control_command_journal();
     test_command_service();
+    test_submission_and_queue_boundary();
     test_legacy_journal_migration_policy();
   } catch (const std::exception& exception) {
     std::cerr << "UNCAUGHT: " << exception.what() << '\n';

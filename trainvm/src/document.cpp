@@ -762,6 +762,31 @@ CompileResult compile_document(const nlohmann::json& source) {
   return result;
 }
 
+CompileResult compile_document_source(std::string_view source, std::string_view source_format) {
+  CompileResult result;
+  if (source.empty()) {
+    error(result.diagnostics, "document.empty", "", "source document must not be empty");
+    return result;
+  }
+  try {
+    if (source_format == "json") {
+      return compile_document(nlohmann::json::parse(source));
+    }
+    if (source_format == "yaml") {
+      return compile_document(yaml_to_json(YAML::Load(std::string(source))));
+    }
+    error(result.diagnostics, "document.format", "/source_format",
+          "source format must be json or yaml");
+  } catch (const nlohmann::json::parse_error& exception) {
+    error(result.diagnostics, "document.json", "", exception.what());
+  } catch (const YAML::Exception& exception) {
+    error(result.diagnostics, "document.yaml", "", exception.what());
+  } catch (const std::invalid_argument& exception) {
+    error(result.diagnostics, "document.yaml", "", exception.what());
+  }
+  return result;
+}
+
 CompileResult compile_document_file(const std::filesystem::path& path) {
   CompileResult result;
   std::ifstream input(path);
@@ -772,11 +797,13 @@ CompileResult compile_document_file(const std::filesystem::path& path) {
   try {
     const std::string extension = path.extension().string();
     if (extension == ".yaml" || extension == ".yml") {
-      return compile_document(yaml_to_json(YAML::LoadFile(path.string())));
+      std::ostringstream contents;
+      contents << input.rdbuf();
+      return compile_document_source(contents.str(), "yaml");
     }
-    nlohmann::json source;
-    input >> source;
-    return compile_document(source);
+    std::ostringstream contents;
+    contents << input.rdbuf();
+    return compile_document_source(contents.str(), "json");
   } catch (const nlohmann::json::parse_error& exception) {
     error(result.diagnostics, "document.json", "", exception.what());
     return result;

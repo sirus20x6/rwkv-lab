@@ -113,6 +113,10 @@ message SubmitExperimentRequest {
   string source_format = 2; // json or yaml
   bool create_run = 3;
   string idempotency_key = 4;
+  string expected_journal_id = 5;
+  string author = 6;
+  string reason = 7;
+  string expected_plan_hash = 8; // required for create_run; fences preview/compiler skew
 }
 
 message SubmitExperimentResponse {

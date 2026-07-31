@@ -77,8 +77,11 @@ Event dispatch_completed_event(const Dispatch& dispatch, const Event& result,
   };
 }
 
-Event created_event(const CompiledPlan& plan, const ExecutionState& state) {
-  return Event{
+Event created_event(const CompiledPlan& plan, const ExecutionState& state,
+                    std::string_view desired_state = "running",
+                    std::string_view observed_state = "running",
+                    nlohmann::json submission = nlohmann::json::object()) {
+  Event event{
       .event_id = state.run_id + ":created",
       .run_id = state.run_id,
       .run_revision = state.revision,
@@ -93,9 +96,16 @@ Event created_event(const CompiledPlan& plan, const ExecutionState& state) {
       .optimizer_step = std::nullopt,
       .payload = {{"experiment_name", plan.experiment.metadata.name},
                   {"plan_hash", plan.plan_hash},
-                  {"desired_state", "running"},
-                  {"observed_state", "running"}},
+                  {"desired_state", desired_state},
+                  {"observed_state", observed_state}},
   };
+  if (!submission.empty()) {
+    if (!submission.is_object()) {
+      throw std::invalid_argument("run submission identity must be an object");
+    }
+    event.payload["submission"] = std::move(submission);
+  }
+  return event;
 }
 
 Event entered_event(const CompiledPlan& plan, const ExecutionState& state,
@@ -114,7 +124,8 @@ Event entered_event(const CompiledPlan& plan, const ExecutionState& state,
       .wall_time_ns = cause ? cause->wall_time_ns : 0,
       .monotonic_time_ns = cause ? cause->monotonic_time_ns : 0,
       .optimizer_step = cause ? cause->optimizer_step : std::nullopt,
-      .payload = {{"component", node.invoke.component}, {"operation", node.invoke.operation}},
+      .payload = {{"component", node.invoke.component},
+                  {"operation", node.invoke.operation}},
   };
 }
 
@@ -190,15 +201,29 @@ Controller::Controller(const CompiledPlan& plan, Journal& journal, std::string r
 }
 
 const ExecutionState& Controller::create() {
-  if (journal_.projection(run_id_)) {
+  ExecutionState initial = start_execution(plan_, run_id_);
+  const RunCreationResult creation =
+      journal_.create_run(plan_, {created_event(plan_, initial),
+                                  entered_event(plan_, initial, run_id_ + ":initial-node")});
+  if (creation.disposition == RunCreationDisposition::replayed) {
     return recover();
   }
-  ExecutionState initial = start_execution(plan_, run_id_);
-  journal_.create_run(plan_, {created_event(plan_, initial),
-                              entered_event(plan_, initial, run_id_ + ":initial-node")});
   state_ = std::move(initial);
   initialized_ = true;
   paused_ = false;
+  return state_;
+}
+
+const ExecutionState& Controller::create_queued(nlohmann::json submission) {
+  ExecutionState initial = start_execution(plan_, run_id_);
+  const RunCreationResult creation = journal_.create_run(
+      plan_, {created_event(plan_, initial, "queued", "queued", std::move(submission))});
+  if (creation.disposition == RunCreationDisposition::replayed) {
+    return recover();
+  }
+  state_ = std::move(initial);
+  initialized_ = true;
+  paused_ = true;
   return state_;
 }
 
@@ -228,13 +253,33 @@ const ExecutionState& Controller::recover() {
   }
 
   ExecutionState recovered = start_execution(plan_, run_id_);
-  enum class ReplayPhase { expecting_entry, ready, awaiting_transition, expecting_terminal, terminal };
-  ReplayPhase phase = ReplayPhase::expecting_entry;
+  enum class ReplayPhase {
+    queued,
+    acquiring,
+    expecting_entry,
+    ready,
+    awaiting_transition,
+    expecting_terminal,
+    terminal
+  };
+  const auto initial_desired = events.front().payload.find("desired_state");
+  const auto initial_observed = events.front().payload.find("observed_state");
+  if (initial_desired == events.front().payload.end() || !initial_desired->is_string() ||
+      initial_observed == events.front().payload.end() || !initial_observed->is_string()) {
+    throw std::runtime_error("run.created is missing its lifecycle state");
+  }
+  std::string runtime_desired_state = initial_desired->get<std::string>();
+  std::string runtime_observed_state = initial_observed->get<std::string>();
+  const bool initially_queued =
+      runtime_desired_state == "queued" && runtime_observed_state == "queued";
+  if (!initially_queued &&
+      (runtime_desired_state != "running" || runtime_observed_state != "running")) {
+    throw std::runtime_error("run.created carries an unsupported lifecycle state");
+  }
+  ReplayPhase phase = initially_queued ? ReplayPhase::queued : ReplayPhase::expecting_entry;
   std::optional<Event> pending_cause;
   std::optional<std::pair<std::string, std::string>> expected_completion;
   std::map<std::string, std::string> replayed_control_status;
-  std::string runtime_desired_state = "running";
-  std::string runtime_observed_state = "running";
   for (const Event& event : events) {
     if (event.plan_revision != kInitialPlanRevision) {
       throw std::runtime_error("journal recovery encountered an unsupported plan revision");
@@ -248,7 +293,8 @@ const ExecutionState& Controller::recover() {
     if (event.event_type == "node.entered") {
       if (phase != ReplayPhase::expecting_entry || recovered.status != ExecutionStatus::running ||
           event.node_id != recovered.current_node_id ||
-          event.attempt_id != recovered.current_attempt_id || event.run_revision != recovered.revision) {
+          event.attempt_id != recovered.current_attempt_id ||
+          event.run_revision != recovered.revision) {
         throw std::runtime_error("journal node.entered disagrees with deterministic FSM state");
       }
       const Node& node = plan_.experiment.spec.workflow.nodes.at(recovered.current_node_id);
@@ -268,7 +314,8 @@ const ExecutionState& Controller::recover() {
       const Node& node = plan_.experiment.spec.workflow.nodes.at(recovered.current_node_id);
       if (!stored || stored->run_id != run_id_ || stored->node_id != recovered.current_node_id ||
           stored->attempt_id != recovered.current_attempt_id ||
-          stored->component != node.invoke.component || stored->operation != node.invoke.operation) {
+          stored->component != node.invoke.component ||
+          stored->operation != node.invoke.operation) {
         throw std::runtime_error("persisted dispatch disagrees with its preparation event");
       }
       require_payload_string(event, "component", node.invoke.component);
@@ -281,12 +328,14 @@ const ExecutionState& Controller::recover() {
         throw std::runtime_error("run desire is missing its state");
       }
       const std::string desired_value = desired->get<std::string>();
-      const bool valid_desire =
-          (desired_value == "paused" && runtime_desired_state == "running" &&
-           runtime_observed_state == "running") ||
-          (desired_value == "running" && runtime_desired_state == "paused" &&
-           runtime_observed_state == "paused");
-      if (!valid_desire || phase != ReplayPhase::ready || expected_completion ||
+      const bool starting = desired_value == "running" && runtime_desired_state == "queued" &&
+                            runtime_observed_state == "queued" && phase == ReplayPhase::queued;
+      const bool valid_desire = starting ||
+                                (desired_value == "paused" && runtime_desired_state == "running" &&
+                                 runtime_observed_state == "running") ||
+                                (desired_value == "running" && runtime_desired_state == "paused" &&
+                                 runtime_observed_state == "paused");
+      if (!valid_desire || (!starting && phase != ReplayPhase::ready) || expected_completion ||
           recovered.status != ExecutionStatus::running ||
           event.run_revision != recovered.revision + 1U) {
         throw std::runtime_error("journal contains an invalid pause/resume desire");
@@ -301,9 +350,17 @@ const ExecutionState& Controller::recover() {
         throw std::runtime_error("run observation is missing its state");
       }
       const std::string observed_value = observed->get<std::string>();
-      if (observed_value == "pausing" || observed_value == "paused" ||
-          observed_value == "resuming" || observed_value == "running") {
+      if (observed_value == "acquiring" || observed_value == "pausing" ||
+          observed_value == "paused" || observed_value == "resuming" ||
+          observed_value == "running") {
+        const bool acquiring = observed_value == "acquiring" &&
+                               runtime_desired_state == "running" &&
+                               runtime_observed_state == "queued" && phase == ReplayPhase::queued;
+        const bool started = observed_value == "running" && runtime_desired_state == "running" &&
+                             runtime_observed_state == "acquiring" &&
+                             phase == ReplayPhase::acquiring;
         const bool valid_observation =
+            acquiring || started ||
             (observed_value == "pausing" && runtime_desired_state == "paused" &&
              runtime_observed_state == "running") ||
             (observed_value == "paused" && runtime_desired_state == "paused" &&
@@ -312,19 +369,31 @@ const ExecutionState& Controller::recover() {
              runtime_observed_state == "paused") ||
             (observed_value == "running" && runtime_desired_state == "running" &&
              runtime_observed_state == "resuming");
-        if (!valid_observation || phase != ReplayPhase::ready || expected_completion ||
+        if (!valid_observation ||
+            (!acquiring && !started && phase != ReplayPhase::ready) ||
+            expected_completion ||
             recovered.status != ExecutionStatus::running ||
             event.run_revision != recovered.revision + 1U ||
-            (!event.node_id.empty() && event.node_id != recovered.current_node_id) ||
-            (!event.attempt_id.empty() && event.attempt_id != recovered.current_attempt_id)) {
-          throw std::runtime_error("journal contains an invalid pause/resume observation");
+            (!event.node_id.empty() &&
+             event.node_id != recovered.current_node_id) ||
+            (!event.attempt_id.empty() &&
+             event.attempt_id != recovered.current_attempt_id)) {
+          throw std::runtime_error(
+              "journal contains an invalid pause/resume observation");
         }
         runtime_observed_state = observed_value;
         recovered.revision = event.run_revision;
+        if (acquiring) {
+          phase = ReplayPhase::acquiring;
+        } else if (started) {
+          phase = ReplayPhase::expecting_entry;
+        }
         continue;
       }
-      if (phase != ReplayPhase::expecting_terminal || event.run_revision != recovered.revision) {
-        throw std::runtime_error("journal contains an unexpected terminal state observation");
+      if (phase != ReplayPhase::expecting_terminal ||
+          event.run_revision != recovered.revision) {
+        throw std::runtime_error(
+            "journal contains an unexpected terminal state observation");
       }
       require_payload_string(event, "state", enum_to_string(recovered.status));
       phase = ReplayPhase::terminal;
@@ -422,7 +491,8 @@ const ExecutionState& Controller::recover() {
         throw std::runtime_error("control acknowledgement has no preceding request event");
       } else {
         if (!command->acknowledgement) {
-          throw std::runtime_error("terminal control command has no worker acknowledgement identity");
+          throw std::runtime_error(
+              "terminal control command has no worker acknowledgement identity");
         }
         const auto& identity = *command->acknowledgement;
         const nlohmann::json expected_payload{
@@ -439,8 +509,7 @@ const ExecutionState& Controller::recover() {
         if (suffix != control_status_name(command->status) || event.payload != expected_payload ||
             event.optimizer_step != command->effective_step || event.node_id != identity.node_id ||
             event.attempt_id != identity.attempt_id ||
-            event.worker_sequence != identity.worker_sequence ||
-            !command->acknowledged_at_ns ||
+            event.worker_sequence != identity.worker_sequence || !command->acknowledged_at_ns ||
             event.wall_time_ns != *command->acknowledged_at_ns) {
           throw std::runtime_error(
               "control acknowledgement event disagrees with its durable command");
@@ -457,23 +526,29 @@ const ExecutionState& Controller::recover() {
       throw std::runtime_error("journal contains a causing event outside an active node");
     }
     if (event.run_revision != recovered.revision || event.worker_sequence == 0) {
-      throw std::runtime_error("journal contains a causing event with an invalid revision or sequence");
+      throw std::runtime_error(
+          "journal contains a causing event with an invalid revision or sequence");
     }
     const auto receipt = journal_.dispatch(dispatch_id_for(recovered));
     if (!receipt || receipt->status != DispatchStatus::completed ||
         receipt->result_event_id != std::optional<std::string>{event.event_id}) {
-      throw std::runtime_error("causing event has no matching completed dispatch receipt");
+      throw std::runtime_error(
+          "causing event has no matching completed dispatch receipt");
     }
     pending_cause = event;
     phase = ReplayPhase::awaiting_transition;
   }
-  if ((phase != ReplayPhase::ready && phase != ReplayPhase::terminal) || expected_completion) {
-    throw std::runtime_error("run journal ends in an incomplete controller transaction");
+  if ((phase != ReplayPhase::queued && phase != ReplayPhase::ready &&
+       phase != ReplayPhase::terminal) ||
+      expected_completion) {
+    throw std::runtime_error(
+        "run journal ends in an incomplete controller transaction");
   }
-  for (const auto& [command_id, status] : replayed_control_status) {
+  for (const auto &[command_id, status] : replayed_control_status) {
     const auto command = journal_.control_command(command_id);
     if (!command || status != control_status_name(command->status)) {
-      throw std::runtime_error("control command projection disagrees with journal replay");
+      throw std::runtime_error(
+          "control command projection disagrees with journal replay");
     }
   }
   const auto projection = journal_.projection(run_id_);
@@ -481,10 +556,12 @@ const ExecutionState& Controller::recover() {
       recovered.status == ExecutionStatus::running
           ? runtime_observed_state
           : std::string(enum_to_string(recovered.status));
+  const bool active_node = recovered.status == ExecutionStatus::running &&
+                           runtime_observed_state != "queued";
   const std::string expected_node =
-      recovered.status == ExecutionStatus::running ? recovered.current_node_id : std::string{};
+      active_node ? recovered.current_node_id : std::string{};
   const std::string expected_attempt =
-      recovered.status == ExecutionStatus::running ? recovered.current_attempt_id : std::string{};
+      active_node ? recovered.current_attempt_id : std::string{};
   if (!projection || projection->plan_hash != plan_.plan_hash ||
       projection->experiment_name != plan_.experiment.metadata.name ||
       projection->run_revision != recovered.revision ||
@@ -492,7 +569,8 @@ const ExecutionState& Controller::recover() {
       projection->observed_state != expected_observed ||
       projection->current_node_id != expected_node ||
       projection->current_attempt_id != expected_attempt) {
-    throw std::runtime_error("run projection disagrees with deterministic journal replay");
+    throw std::runtime_error(
+        "run projection disagrees with deterministic journal replay");
   }
   state_ = std::move(recovered);
   initialized_ = true;

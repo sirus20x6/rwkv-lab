@@ -800,7 +800,8 @@ std::vector<std::uint64_t> Journal::append_batch(const std::vector<Event>& event
   return sequences;
 }
 
-void Journal::create_run(const CompiledPlan& plan, const std::vector<Event>& events) {
+RunCreationResult Journal::create_run(const CompiledPlan& plan,
+                                      const std::vector<Event>& events) {
   const CompileResult verified = compile_document(plan.canonical_plan);
   if (!verified.valid() || !verified.plan || verified.plan->plan_hash != plan.plan_hash ||
       verified.plan->canonical_plan != plan.canonical_plan ||
@@ -811,8 +812,46 @@ void Journal::create_run(const CompiledPlan& plan, const std::vector<Event>& eve
       events.front().payload.value("plan_hash", std::string{}) != plan.plan_hash) {
     throw std::invalid_argument("run creation batch does not identify its compiled plan");
   }
+  const Event& requested_creation = events.front();
+  for (const Event& event : events) {
+    if (event.run_id != requested_creation.run_id) {
+      throw std::invalid_argument("run creation batch crosses run identities");
+    }
+  }
 
   Transaction transaction(database_);
+  std::string chain_reason;
+  if (!verify_chain(&chain_reason)) {
+    throw std::runtime_error("refusing run creation: " + chain_reason);
+  }
+
+  std::optional<Event> stored_creation;
+  {
+    Statement existing_run(database_, R"sql(
+      SELECT journal_sequence, event_id, run_id, run_revision, plan_revision, node_id,
+             attempt_id, worker_sequence, event_type, event_version, wall_time_ns,
+             monotonic_time_ns, optimizer_step, payload_json
+      FROM events WHERE run_id=? AND event_type='run.created'
+      ORDER BY journal_sequence
+    )sql");
+    bind_text(existing_run.get(), 1, requested_creation.run_id);
+    const int status = sqlite3_step(existing_run.get());
+    if (status == SQLITE_ROW) {
+      stored_creation = event_from_row(existing_run.get());
+      if (sqlite3_step(existing_run.get()) != SQLITE_DONE) {
+        throw std::runtime_error("run has more than one durable creation event");
+      }
+    } else if (status != SQLITE_DONE) {
+      throw std::runtime_error("could not read existing run creation: " +
+                               std::string(sqlite3_errmsg(database_)));
+    }
+  }
+
+  if (stored_creation && event_json(*stored_creation) != event_json(requested_creation)) {
+    throw RunCreationConflict(
+        "run already exists with a different run.created event");
+  }
+
   Statement existing(database_, R"sql(
     SELECT experiment_name, canonical_plan_json FROM compiled_plans WHERE plan_hash=?
   )sql");
@@ -824,6 +863,9 @@ void Journal::create_run(const CompiledPlan& plan, const std::vector<Event>& eve
       throw std::invalid_argument("plan_hash already exists with different canonical content");
     }
   } else if (existing_status == SQLITE_DONE) {
+    if (stored_creation) {
+      throw std::runtime_error("durable run creation has no compiled plan");
+    }
     Statement insert(database_, R"sql(
       INSERT INTO compiled_plans(plan_hash, experiment_name, canonical_plan_json)
       VALUES(?, ?, ?)
@@ -837,10 +879,51 @@ void Journal::create_run(const CompiledPlan& plan, const std::vector<Event>& eve
                              std::string(sqlite3_errmsg(database_)));
   }
 
+  if (stored_creation) {
+    Statement projection(database_, "SELECT 1 FROM run_projection WHERE run_id=?");
+    bind_text(projection.get(), 1, requested_creation.run_id);
+    const int projection_status = sqlite3_step(projection.get());
+    if (projection_status == SQLITE_DONE) {
+      throw std::runtime_error("durable run creation has no projection");
+    }
+    if (projection_status != SQLITE_ROW) {
+      throw std::runtime_error("could not read durable run projection: " +
+                               std::string(sqlite3_errmsg(database_)));
+    }
+    transaction.commit();
+    return {.disposition = RunCreationDisposition::replayed,
+            .created_event = std::move(*stored_creation)};
+  }
+
+  {
+    Statement orphaned_events(database_, "SELECT 1 FROM events WHERE run_id=? LIMIT 1");
+    bind_text(orphaned_events.get(), 1, requested_creation.run_id);
+    const int event_status = sqlite3_step(orphaned_events.get());
+    if (event_status == SQLITE_ROW) {
+      throw std::runtime_error("run has durable history without run.created");
+    }
+    if (event_status != SQLITE_DONE) {
+      throw std::runtime_error("could not inspect existing run history: " +
+                               std::string(sqlite3_errmsg(database_)));
+    }
+    Statement orphaned_projection(database_, "SELECT 1 FROM run_projection WHERE run_id=?");
+    bind_text(orphaned_projection.get(), 1, requested_creation.run_id);
+    const int projection_status = sqlite3_step(orphaned_projection.get());
+    if (projection_status == SQLITE_ROW) {
+      throw std::runtime_error("run projection exists without run.created");
+    }
+    if (projection_status != SQLITE_DONE) {
+      throw std::runtime_error("could not inspect existing run projection: " +
+                               std::string(sqlite3_errmsg(database_)));
+    }
+  }
+
   for (const auto& event : events) {
     append_uncommitted(event);
   }
   transaction.commit();
+  return {.disposition = RunCreationDisposition::inserted,
+          .created_event = requested_creation};
 }
 
 std::uint64_t Journal::append_uncommitted(const Event& event) {

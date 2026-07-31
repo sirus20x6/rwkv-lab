@@ -37,8 +37,14 @@ func (s *Server) handleTrainVMRuns(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	journalID, err := s.trainvm.JournalID(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"enabled": true, "commands_enabled": commandsEnabled, "runs": runs,
+		"enabled": true, "commands_enabled": commandsEnabled,
+		"journal_id": journalID, "runs": runs,
 	})
 }
 
@@ -155,52 +161,87 @@ type trainVMControlRequest struct {
 	Assignments             map[string]any `json:"assignments"`
 }
 
+type trainVMSubmissionRequest struct {
+	SourceDocument    string `json:"source_document"`
+	SourceFormat      string `json:"source_format"`
+	CreateRun         bool   `json:"create_run"`
+	IdempotencyKey    string `json:"idempotency_key"`
+	ExpectedJournalID string `json:"expected_journal_id"`
+	ExpectedPlanHash  string `json:"expected_plan_hash"`
+	Reason            string `json:"reason"`
+}
+
+func (s *Server) handleTrainVMSubmit(w http.ResponseWriter, r *http.Request) {
+	if s.commander == nil || s.trainvm == nil {
+		http.Error(w, "TrainVM read model and command authority are both required", http.StatusServiceUnavailable)
+		return
+	}
+	if !validateTrainVMMutation(w, r, "submission") {
+		return
+	}
+	var input trainVMSubmissionRequest
+	if !decodeTrainVMMutation(w, r, "submission", trainVMDraftLimit, &input) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	journalID, err := s.trainvm.JournalID(ctx)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	input.ExpectedJournalID = strings.TrimSpace(input.ExpectedJournalID)
+	input.ExpectedPlanHash = strings.TrimSpace(input.ExpectedPlanHash)
+	if input.ExpectedJournalID == "" || (input.CreateRun && input.ExpectedPlanHash == "") {
+		http.Error(w, "submission requires expected journal and plan identities", http.StatusBadRequest)
+		return
+	}
+	if input.ExpectedJournalID != journalID {
+		http.Error(w, "submission journal identity is stale", http.StatusConflict)
+		return
+	}
+	result, err := s.commander.SubmitExperiment(ctx, trainvmstore.SubmissionRequest{
+		SourceDocument: input.SourceDocument, SourceFormat: input.SourceFormat,
+		CreateRun: input.CreateRun, IdempotencyKey: input.IdempotencyKey,
+		ExpectedJournalID: input.ExpectedJournalID, ExpectedPlanHash: input.ExpectedPlanHash,
+		Author: "dashboard", Reason: input.Reason,
+	})
+	if err != nil {
+		writeTrainVMAuthorityError(w, err)
+		return
+	}
+	statusCode := http.StatusOK
+	if input.CreateRun {
+		if result.Run == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "no-store")
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_ = json.NewEncoder(w).Encode(result)
+			return
+		}
+		if result.PlanHash != input.ExpectedPlanHash || result.Run.PlanHash != input.ExpectedPlanHash ||
+			strings.TrimSpace(result.Run.RunID) == "" {
+			http.Error(w, "native authority returned a mismatched submission identity", http.StatusBadGateway)
+			return
+		}
+		statusCode = http.StatusAccepted
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(statusCode)
+	_ = json.NewEncoder(w).Encode(result)
+}
+
 func (s *Server) handleTrainVMControls(w http.ResponseWriter, r *http.Request) {
 	if s.commander == nil || s.trainvm == nil {
 		http.Error(w, "TrainVM read model and command authority are both required", http.StatusServiceUnavailable)
 		return
 	}
-	if !trainVMControlHostAllowed(r.Host) {
-		http.Error(w, "TrainVM mutations are restricted to a loopback host", http.StatusForbidden)
+	if !validateTrainVMMutation(w, r, "control") {
 		return
 	}
-	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if err != nil || mediaType != "application/json" {
-		http.Error(w, "control requests require application/json", http.StatusUnsupportedMediaType)
-		return
-	}
-	if origin := r.Header.Get("Origin"); origin != "" {
-		parsed, parseErr := url.Parse(origin)
-		expectedScheme := "http"
-		if r.TLS != nil {
-			expectedScheme = "https"
-		}
-		if parseErr != nil || parsed.Host != r.Host || parsed.Scheme != expectedScheme {
-			http.Error(w, "cross-origin control request rejected", http.StatusForbidden)
-			return
-		}
-	}
-	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
-		http.Error(w, "cross-site control request rejected", http.StatusForbidden)
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, trainVMCommandLimit)
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	decoder.UseNumber()
 	var input trainVMControlRequest
-	if err := decoder.Decode(&input); err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			http.Error(w, "control request exceeds the 64 KiB limit", http.StatusRequestEntityTooLarge)
-			return
-		}
-		http.Error(w, "invalid control request: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		http.Error(w, "control request must contain one JSON object", http.StatusBadRequest)
+	if !decodeTrainVMMutation(w, r, "control", trainVMCommandLimit, &input) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
@@ -227,26 +268,7 @@ func (s *Server) handleTrainVMControls(w http.ResponseWriter, r *http.Request) {
 		Assignments: input.Assignments,
 	})
 	if err != nil {
-		var validationError *trainvmstore.ValidationError
-		if errors.As(err, &validationError) {
-			http.Error(w, validationError.Error(), http.StatusBadRequest)
-			return
-		}
-		code := status.Code(err)
-		httpStatus := http.StatusBadGateway
-		switch code {
-		case codes.Unavailable:
-			httpStatus = http.StatusServiceUnavailable
-		case codes.DeadlineExceeded, codes.Canceled:
-			httpStatus = http.StatusGatewayTimeout
-		case codes.InvalidArgument:
-			httpStatus = http.StatusBadRequest
-		case codes.NotFound:
-			httpStatus = http.StatusNotFound
-		case codes.ResourceExhausted:
-			httpStatus = http.StatusRequestEntityTooLarge
-		}
-		http.Error(w, err.Error(), httpStatus)
+		writeTrainVMAuthorityError(w, err)
 		return
 	}
 	httpStatus := http.StatusOK
@@ -267,6 +289,80 @@ func (s *Server) handleTrainVMControls(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(httpStatus)
 	_ = json.NewEncoder(w).Encode(result)
+}
+
+func validateTrainVMMutation(w http.ResponseWriter, r *http.Request, kind string) bool {
+	if !trainVMControlHostAllowed(r.Host) {
+		http.Error(w, "TrainVM mutations are restricted to a loopback host", http.StatusForbidden)
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		http.Error(w, kind+" requests require application/json", http.StatusUnsupportedMediaType)
+		return false
+	}
+	if origin := r.Header.Get("Origin"); origin != "" {
+		parsed, parseErr := url.Parse(origin)
+		expectedScheme := "http"
+		if r.TLS != nil {
+			expectedScheme = "https"
+		}
+		if parseErr != nil || parsed.Host != r.Host || parsed.Scheme != expectedScheme {
+			http.Error(w, "cross-origin "+kind+" request rejected", http.StatusForbidden)
+			return false
+		}
+	}
+	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
+		http.Error(w, "cross-site "+kind+" request rejected", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
+func decodeTrainVMMutation(w http.ResponseWriter, r *http.Request, kind string, limit int64, output any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	decoder.UseNumber()
+	if err := decoder.Decode(output); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			http.Error(w, kind+" request exceeds its size limit", http.StatusRequestEntityTooLarge)
+			return false
+		}
+		http.Error(w, "invalid "+kind+" request: "+err.Error(), http.StatusBadRequest)
+		return false
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		http.Error(w, kind+" request must contain one JSON object", http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+func writeTrainVMAuthorityError(w http.ResponseWriter, err error) {
+	var validationError *trainvmstore.ValidationError
+	if errors.As(err, &validationError) {
+		http.Error(w, validationError.Error(), http.StatusBadRequest)
+		return
+	}
+	httpStatus := http.StatusBadGateway
+	switch status.Code(err) {
+	case codes.Unavailable:
+		httpStatus = http.StatusServiceUnavailable
+	case codes.DeadlineExceeded, codes.Canceled:
+		httpStatus = http.StatusGatewayTimeout
+	case codes.InvalidArgument:
+		httpStatus = http.StatusBadRequest
+	case codes.NotFound:
+		httpStatus = http.StatusNotFound
+	case codes.AlreadyExists, codes.FailedPrecondition, codes.Aborted:
+		httpStatus = http.StatusConflict
+	case codes.ResourceExhausted:
+		httpStatus = http.StatusRequestEntityTooLarge
+	}
+	http.Error(w, err.Error(), httpStatus)
 }
 
 func trainVMControlHostAllowed(hostPort string) bool {

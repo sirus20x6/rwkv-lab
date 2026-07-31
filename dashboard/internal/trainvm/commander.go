@@ -20,7 +20,33 @@ import (
 // Commander is the dashboard's mutation boundary. Implementations send typed
 // commands to the native TrainVM authority and never receive a journal path.
 type Commander interface {
+	SubmitExperiment(context.Context, SubmissionRequest) (SubmissionResult, error)
 	RequestControls(context.Context, ControlRequest) (ControlResult, error)
+}
+
+type SubmissionRequest struct {
+	SourceDocument    string
+	SourceFormat      string
+	CreateRun         bool
+	IdempotencyKey    string
+	ExpectedJournalID string
+	ExpectedPlanHash  string
+	Author            string
+	Reason            string
+}
+
+type SubmissionResult struct {
+	CanonicalDocument string              `json:"canonical_document,omitempty"`
+	CanonicalPlan     string              `json:"canonical_plan,omitempty"`
+	PlanHash          string              `json:"plan_hash,omitempty"`
+	Run               *RunIdentity        `json:"run,omitempty"`
+	Diagnostics       []ControlDiagnostic `json:"diagnostics,omitempty"`
+}
+
+type RunIdentity struct {
+	RunID    string `json:"run_id"`
+	Revision uint64 `json:"revision"`
+	PlanHash string `json:"plan_hash"`
 }
 
 type ControlRequest struct {
@@ -133,6 +159,58 @@ func (c *GRPCCommander) RequestControls(ctx context.Context, request ControlRequ
 		return ControlResult{}, err
 	}
 	return controlResult(response), nil
+}
+
+func (c *GRPCCommander) SubmitExperiment(ctx context.Context, request SubmissionRequest) (SubmissionResult, error) {
+	if c == nil || c.client == nil {
+		return SubmissionResult{}, fmt.Errorf("TrainVM authority client is not configured")
+	}
+	rpcRequest, err := submissionRPCRequest(request)
+	if err != nil {
+		return SubmissionResult{}, err
+	}
+	response, err := c.client.SubmitExperiment(ctx, rpcRequest)
+	if err != nil {
+		return SubmissionResult{}, err
+	}
+	result := SubmissionResult{
+		CanonicalDocument: response.GetCanonicalDocument(), CanonicalPlan: response.GetCanonicalPlan(),
+		PlanHash: response.GetPlanHash(),
+	}
+	if run := response.GetRun(); run != nil {
+		result.Run = &RunIdentity{RunID: run.GetRunId(), Revision: run.GetRevision(), PlanHash: run.GetPlanHash()}
+	}
+	for _, diagnostic := range response.GetDiagnostics() {
+		result.Diagnostics = append(result.Diagnostics, ControlDiagnostic{
+			Severity: strings.TrimPrefix(diagnostic.GetSeverity().String(), "SEVERITY_"),
+			Code:     diagnostic.GetCode(), Path: diagnostic.GetDocumentPath(),
+			Message: diagnostic.GetMessage(), Help: diagnostic.GetHelp(),
+		})
+	}
+	return result, nil
+}
+
+func submissionRPCRequest(request SubmissionRequest) (*trainvmv1.SubmitExperimentRequest, error) {
+	request.SourceFormat = strings.TrimSpace(strings.ToLower(request.SourceFormat))
+	request.IdempotencyKey = strings.TrimSpace(request.IdempotencyKey)
+	request.ExpectedJournalID = strings.TrimSpace(request.ExpectedJournalID)
+	request.ExpectedPlanHash = strings.TrimSpace(request.ExpectedPlanHash)
+	request.Author = strings.TrimSpace(request.Author)
+	request.Reason = strings.TrimSpace(request.Reason)
+	if request.SourceDocument == "" || request.ExpectedJournalID == "" ||
+		(request.SourceFormat != "json" && request.SourceFormat != "yaml") {
+		return nil, &ValidationError{Message: "source document, json/yaml format, and journal ID are required"}
+	}
+	if request.CreateRun && (request.IdempotencyKey == "" || request.Author == "" ||
+		request.Reason == "" || request.ExpectedPlanHash == "") {
+		return nil, &ValidationError{Message: "run creation requires an idempotency key, author, reason, and expected plan hash"}
+	}
+	return &trainvmv1.SubmitExperimentRequest{
+		SourceDocument: request.SourceDocument, SourceFormat: request.SourceFormat,
+		CreateRun: request.CreateRun, IdempotencyKey: request.IdempotencyKey,
+		ExpectedJournalId: request.ExpectedJournalID, Author: request.Author, Reason: request.Reason,
+		ExpectedPlanHash: request.ExpectedPlanHash,
+	}, nil
 }
 
 func controlRPCRequest(request ControlRequest) (*trainvmv1.RunCommandRequest, error) {
