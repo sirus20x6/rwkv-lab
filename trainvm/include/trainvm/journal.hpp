@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 #include <sqlite3.h>
@@ -54,6 +55,7 @@ class Journal {
   Journal& operator=(Journal&&) = delete;
 
   std::uint64_t append(const Event& event);
+  std::vector<std::uint64_t> append_batch(const std::vector<Event>& events);
   [[nodiscard]] std::optional<RunProjection> projection(const std::string& run_id) const;
   [[nodiscard]] std::uint64_t event_count() const;
   [[nodiscard]] bool verify_chain(std::string* reason = nullptr) const;
@@ -63,6 +65,7 @@ class Journal {
   sqlite3* database_{};
 
   void initialize();
+  std::uint64_t append_uncommitted(const Event& event);
 };
 
 nlohmann::json event_json(const Event& event);

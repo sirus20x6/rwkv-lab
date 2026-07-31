@@ -411,6 +411,48 @@ void test_journal() {
   check(journal.rebuild_projections() == 4U, "replay consumes every event");
   check(journal.projection("run-1") == before, "replay deterministically rebuilds the same projection");
 
+  trainvm::Event batch_first{
+      .event_id = "batch-first",
+      .run_id = "run-1",
+      .run_revision = 5,
+      .plan_revision = 1,
+      .node_id = "",
+      .attempt_id = "",
+      .worker_sequence = 0,
+      .event_type = "run.observed_state_changed",
+      .event_version = 1,
+      .wall_time_ns = 450,
+      .monotonic_time_ns = 45,
+      .optimizer_step = std::nullopt,
+      .payload = {{"state", "pausing"}},
+  };
+  auto batch_invalid = batch_first;
+  batch_invalid.event_id = "batch-invalid";
+  batch_invalid.run_id = "run-does-not-exist";
+  bool batch_rejected = false;
+  try {
+    (void)journal.append_batch({batch_first, batch_invalid});
+  } catch (const std::invalid_argument&) {
+    batch_rejected = true;
+  }
+  check(batch_rejected, "invalid event rejects its entire journal batch");
+  check(journal.event_count() == 4U && journal.projection("run-1") == before,
+        "failed batch rolls back both events and projection changes");
+
+  auto batch_second = batch_first;
+  batch_second.event_id = "batch-second";
+  batch_second.run_revision = 6;
+  batch_second.event_type = "run.observed_state_changed";
+  batch_second.payload = {{"state", "paused"}};
+  const auto batch_sequences = journal.append_batch({batch_first, batch_second});
+  check(batch_sequences == std::vector<std::uint64_t>({5U, 6U}),
+        "valid batch receives contiguous journal sequences");
+  const auto after_batch = journal.projection("run-1");
+  check(after_batch && after_batch->observed_state == "paused" &&
+            after_batch->run_revision == 6U && after_batch->last_event_sequence == 6U,
+        "valid batch atomically advances the materialized projection");
+  check(journal.verify_chain(&reason), "hash chain includes every event in a committed batch");
+
   auto regressed = heartbeat;
   regressed.event_id = "event-regressed";
   regressed.worker_sequence = 1;

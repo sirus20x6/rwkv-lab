@@ -336,6 +336,27 @@ void Journal::initialize() {
 }
 
 std::uint64_t Journal::append(const Event& event) {
+  Transaction transaction(database_);
+  const std::uint64_t sequence = append_uncommitted(event);
+  transaction.commit();
+  return sequence;
+}
+
+std::vector<std::uint64_t> Journal::append_batch(const std::vector<Event>& events) {
+  if (events.empty()) {
+    return {};
+  }
+  Transaction transaction(database_);
+  std::vector<std::uint64_t> sequences;
+  sequences.reserve(events.size());
+  for (const auto& event : events) {
+    sequences.push_back(append_uncommitted(event));
+  }
+  transaction.commit();
+  return sequences;
+}
+
+std::uint64_t Journal::append_uncommitted(const Event& event) {
   if (event.event_id.empty() || event.run_id.empty() || event.event_type.empty()) {
     throw std::invalid_argument("event_id, run_id, and event_type must not be empty");
   }
@@ -349,8 +370,6 @@ std::uint64_t Journal::append(const Event& event) {
     throw std::invalid_argument("node.entered requires node_id and attempt_id");
   }
   const std::string event_content_hash = content_hash(event);
-  Transaction transaction(database_);
-
   {
     Statement duplicate(database_,
                         "SELECT journal_sequence, content_hash FROM events WHERE event_id=?");
@@ -360,7 +379,6 @@ std::uint64_t Journal::append(const Event& event) {
       if (column_text(duplicate.get(), 1) != event_content_hash) {
         throw std::invalid_argument("event_id already exists with different content");
       }
-      transaction.commit();
       return sequence;
     }
   }
@@ -453,7 +471,6 @@ std::uint64_t Journal::append(const Event& event) {
       throw std::runtime_error("journal chain head is missing");
     }
   }
-  transaction.commit();
   return journal_sequence;
 }
 

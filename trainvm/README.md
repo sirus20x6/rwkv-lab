@@ -11,6 +11,7 @@ Implemented now:
 - stable canonical plan hashing with SHA-256;
 - generated Protobuf/gRPC C++ protocol types;
 - an append-only SQLite/WAL event journal with idempotent event IDs;
+- atomic multi-event transactions for a causing event and its derived VM transition;
 - monotonic run, plan, and worker sequence checks;
 - a SHA-256 journal hash chain;
 - deterministic run-projection replay that refuses a corrupted journal;
