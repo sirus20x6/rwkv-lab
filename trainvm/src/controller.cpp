@@ -707,10 +707,7 @@ const ExecutionState& Controller::recover() {
       continue;
     }
     if (event.event_type == "worker.ready") {
-      // launch_requested remains temporarily accepted for process-free legacy
-      // fixtures. The production supervisor boundary will require launch_bound.
-      if ((phase != ReplayPhase::launch_requested &&
-           phase != ReplayPhase::launch_bound) ||
+      if (phase != ReplayPhase::launch_bound ||
           event.run_revision != recovered.revision ||
           event.node_id != recovered.current_node_id ||
           event.attempt_id != recovered.current_attempt_id ||
@@ -1391,6 +1388,10 @@ WorkerReadinessResult Controller::accept_worker_hello(WorkerHelloEvidence hello,
   const auto launch_event = journal_.event(worker_launch_event_id(state_));
   if (!launch_event || launch_event->event_type != "worker.launch_requested") {
     throw std::logic_error("worker hello has no durable launch request");
+  }
+  if (!journal_.launch_binding(launch_event->event_id)) {
+    throw std::logic_error(
+        "worker hello has no durable host launch binding");
   }
   const WorkerLaunchTicket launch = launch_from_event(*launch_event);
   if (hello.run_id != launch.run_id || hello.node_id != launch.node_id ||

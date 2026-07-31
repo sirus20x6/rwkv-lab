@@ -50,6 +50,7 @@ target_link_libraries(trainvm_protocol PUBLIC protobuf::libprotobuf gRPC::grpc++
 
 add_library(trainvm_core
   src/adapter_registry.cpp
+  src/authority_time.cpp
   src/control.cpp
   src/controller.cpp
   src/document.cpp
@@ -88,6 +89,12 @@ target_compile_definitions(trainvm_tests PRIVATE
 )
 target_link_libraries(trainvm_tests PRIVATE trainvm_service)
 add_test(NAME trainvm_tests COMMAND trainvm_tests)
+add_executable(authority_time_tests tests/authority_time_tests.cpp)
+target_compile_options(authority_time_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(authority_time_tests PRIVATE trainvm_core)
+add_test(NAME authority_time_tests COMMAND authority_time_tests)
 add_test(
   NAME trainvm_cli_validate
   COMMAND trainvm validate

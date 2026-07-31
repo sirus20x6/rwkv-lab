@@ -58,6 +58,8 @@ Implemented now:
   bind the exact active operation to a host/boot, versioned public argv, verified source evidence,
   and sealed executable/code bytes opened beneath trusted Linux `openat2` dirfds; this resolver is
   process-free and structurally excludes dynamic credentials;
+- a strongly typed authority-time sampler that separates display-only wall time from Linux
+  `CLOCK_BOOTTIME`, latches one boot UUID, and fails closed on boot-time regression;
 - `validate`, `plan`, `simulate`, and journal inspection/replay CLI commands.
 
 This code does not yet launch or control a trainer. The launch-authorization reconciler first
@@ -67,6 +69,10 @@ to spawn or signal an OS process. The next boundary is a single-threaded guarded
 boot-time lease renewal, host-wide resource locks, cgroup cleanup, process-instance credentials, and
 durable spawn/exit receipts. Real MageFlow process ownership follows only after those fault-injection
 tests pass.
+
+The typed clock is a migration foundation, not current lease authority: the v4 lease rows and APIs
+still use scalar wall timestamps. They must be migrated to boot-scoped v5 rows, with unreleased v4
+leases quarantined, before the startup gate may enable spawning or renewal.
 
 The sealed payload hashes cover only the copied executable/interpreter and adapter artifact. They do
 not yet claim a reproducible dynamic-library, Python standard-library, or import closure; real Python
@@ -111,7 +117,8 @@ trainvm/build/trainvm plan \
 trainvm/build/trainvm compile < \
   docs/experiment-vm/examples/mageflow-cache-resume.json
 trainvm/build/trainvm serve --journal /tmp/trainvm.db --socket /tmp/trainvm.sock \
-  --registry /etc/trainvm/adapters.json
+  --registry /etc/trainvm/adapters.json \
+  --host-launch-registry /etc/trainvm/host-launches.json
 trainvm/build/trainvm simulate \
   docs/experiment-vm/examples/mageflow-cache-resume.json \
   docs/experiment-vm/examples/mageflow-cache-resume.events.jsonl
@@ -123,8 +130,10 @@ format change must update the golden test and supply a plan-schema migration rat
 `compile` is the bounded dashboard authoring boundary: it reads one JSON document from stdin and
 returns either structured diagnostics or the native compiler's canonical plan and content hash.
 `serve` is the stateful mutation boundary. The dashboard connects to its Unix socket through gRPC;
-it never opens the journal writable. Startup requires one bounded `trainvm.adapters/v1` registry
-document, decoded strictly and retained immutably for the daemon lifetime. `SubmitExperiment`
+it never opens the journal writable. Startup requires bounded `trainvm.adapters/v1` and
+`trainvm.host-launches/v1` registry documents, decoded strictly and retained immutably for the
+daemon lifetime. An explicitly supplied host registry with no profiles is the launch-disabled
+configuration; missing or invalid host authority fails startup. `SubmitExperiment`
 validates every exact adapter profile before validation succeeds or a run is created, and supports
 idempotent queued
 creation; the live-control `CommandRun` variant is also implemented. The dashboard freezes ambiguous

@@ -153,6 +153,14 @@ std::vector<trainvm::AdapterProfile> fixture_external_adapter_profiles(
   return profiles;
 }
 
+trainvm::HostLaunchRegistry fixture_disabled_host_launch_registry() {
+  return trainvm::HostLaunchRegistry({
+      .api_version = "trainvm.host-launches/v1",
+      .trusted_roots = {},
+      .profiles = {},
+  });
+}
+
 nlohmann::json adapter_locked_submission(
     const trainvm::CompiledPlan& plan,
     const trainvm::AdapterRegistry& registry) {
@@ -165,6 +173,171 @@ nlohmann::json fixture_adapter_locked_submission(
     const trainvm::CompiledPlan& plan) {
   return adapter_locked_submission(
       plan, trainvm::AdapterRegistry(fixture_adapter_profiles()));
+}
+
+trainvm::HostIdentity fixture_test_host_identity() {
+  return {
+      .host_id = "sha256:" + std::string(64U, '7'),
+      .boot_id = "77777777-7777-7777-7777-777777777777",
+  };
+}
+
+trainvm::HostLaunchRegistry fixture_test_host_launch_registry(
+    const trainvm::CompiledPlan& plan,
+    const trainvm::WorkerLaunchTicket& launch) {
+  const auto& node = plan.experiment.spec.workflow.nodes.at(launch.node_id);
+  const auto& component =
+      plan.experiment.spec.components.at(node.invoke.component);
+  const auto& operation = component.operations.at(node.invoke.operation);
+  const trainvm::AdapterKey key{
+      .adapter = component.adapter,
+      .version = component.version,
+      .runtime = component.runtime,
+      .operation = node.invoke.operation,
+      .contract = operation.contract,
+  };
+  return trainvm::HostLaunchRegistry({
+      .api_version = "trainvm.host-launches/v1",
+      .trusted_roots = {"/test"},
+      .profiles = {{
+          .key = key,
+          .code_fingerprint = launch.code_fingerprint,
+          .executable_path = "/test/trainvm-worker",
+          .executable_fingerprint =
+              "sha256:" + std::string(64U, 'e'),
+          .code_path =
+              component.runtime == trainvm::ComponentRuntime::python_worker
+                  ? std::optional<std::string>{"/test/worker.pyz"}
+                  : std::nullopt,
+          .public_arguments = {"worker.pyz"},
+          .working_directory = "/test/work",
+      }},
+  });
+}
+
+void prime_test_service_launch(trainvm::TrainVMService& service,
+                               const trainvm::WorkerLaunchTicket& launch) {
+  const std::string launch_id = launch.run_id + ":worker-launch:" +
+                                launch.node_id + ":" + launch.attempt_id;
+  const auto binding = service.journal_.launch_binding(launch_id);
+  if (!binding || binding->identity.host != service.authority_host_ ||
+      binding->identity.host_registry_digest !=
+          service.host_launch_registry_.registry_digest()) {
+    throw std::runtime_error(
+        "test service launch authority disagrees with durable binding");
+  }
+  auto [retained, inserted] = service.resolved_launches_.emplace(
+      launch_id,
+      trainvm::ResolvedLaunch(
+          *binding, -1,
+          binding->identity.code ? std::optional<int>{-1} : std::nullopt,
+          -1));
+  if (!inserted || retained->second.spec() != *binding) {
+    throw std::runtime_error("could not prime exact test launch bundle");
+  }
+}
+
+// Controller-focused tests do not exercise secure host I/O. They still cross
+// the same durable launch-bound gate with a canonical, content-addressed host
+// identity before presenting WorkerHello evidence.
+trainvm::ResolvedLaunchSpec bind_test_worker_launch(
+    trainvm::Controller& controller,
+    const trainvm::WorkerLaunchTicket& launch, std::int64_t now_ns) {
+  controller.recover();
+  const auto& plan = controller.plan();
+  const auto& state = controller.state();
+  const auto& node =
+      plan.experiment.spec.workflow.nodes.at(state.current_node_id);
+  const auto& component =
+      plan.experiment.spec.components.at(node.invoke.component);
+  const auto& operation = component.operations.at(node.invoke.operation);
+  const trainvm::AdapterKey key{
+      .adapter = component.adapter,
+      .version = component.version,
+      .runtime = component.runtime,
+      .operation = node.invoke.operation,
+      .contract = operation.contract,
+  };
+  const std::string executable_digest =
+      "sha256:" + std::string(64U, 'e');
+  const trainvm::HostLaunchProfile profile{
+      .key = key,
+      .code_fingerprint = launch.code_fingerprint,
+      .executable_path = "/test/trainvm-worker",
+      .executable_fingerprint = executable_digest,
+      .code_path = component.runtime == trainvm::ComponentRuntime::python_worker
+                       ? std::optional<std::string>{"/test/worker.pyz"}
+                       : std::nullopt,
+      .public_arguments = {"worker.pyz"},
+      .working_directory = "/test/work",
+  };
+  const trainvm::HostLaunchRegistry registry =
+      fixture_test_host_launch_registry(plan, launch);
+  const trainvm::HostIdentity host = fixture_test_host_identity();
+  const trainvm::VerifiedLaunchArtifact executable{
+      .source_path = profile.executable_path,
+      .source_device = 1,
+      .source_inode = 1,
+      .source_size = 1,
+      .source_mode = static_cast<std::uint32_t>(S_IFREG | 0500),
+      .source_uid = 0,
+      .source_gid = 0,
+      .sealed_sha256 = executable_digest,
+  };
+  const auto code = profile.code_path
+                        ? std::optional<trainvm::VerifiedLaunchArtifact>{{
+                              .source_path = *profile.code_path,
+                              .source_device = 2,
+                              .source_inode = 2,
+                              .source_size = 1,
+                              .source_mode = static_cast<std::uint32_t>(
+                                  S_IFREG | 0400),
+                              .source_uid = 0,
+                              .source_gid = 0,
+                              .sealed_sha256 = launch.code_fingerprint,
+                          }}
+                        : std::nullopt;
+  trainvm::ResolvedLaunchIdentity identity{
+      .api_version = "trainvm.resolved-launch/v1",
+      .launch_event_id = launch.run_id + ":worker-launch:" + launch.node_id +
+                         ":" + launch.attempt_id,
+      .run_id = launch.run_id,
+      .node_id = launch.node_id,
+      .attempt_id = launch.attempt_id,
+      .launch_nonce = launch.launch_nonce,
+      .adapter_key = key,
+      .code_fingerprint = launch.code_fingerprint,
+      .required_capabilities = launch.required_capabilities,
+      .host_registry_digest = registry.registry_digest(),
+      .host_profile_digest =
+          registry.profile_digest(key, launch.code_fingerprint),
+      .concurrency_key = launch.concurrency_key,
+      .lease_id = launch.lease_id,
+      .fencing_token = launch.fencing_token,
+      .host = host,
+      .executable = executable,
+      .code = code,
+      .public_arguments = profile.public_arguments,
+      .working_directory = {
+          .source_path = profile.working_directory,
+          .device = 3,
+          .inode = 3,
+          .mode = static_cast<std::uint32_t>(S_IFDIR | 0700),
+          .uid = 0,
+          .gid = 0,
+      },
+  };
+  trainvm::ResolvedLaunchSpec spec{
+      .identity = std::move(identity),
+      .spec_digest = {},
+  };
+  spec.spec_digest = "sha256:" + trainvm::sha256_hex(
+                                    trainvm::resolved_launch_identity_json(
+                                        spec.identity)
+                                        .dump());
+  trainvm::ResolvedLaunch resolved(
+      spec, -1, code ? std::optional<int>{-1} : std::nullopt, -1);
+  return controller.bind_worker_launch(resolved, registry, host, now_ns);
 }
 
 bool has_diagnostic(const trainvm::CompileResult& result, std::string_view code) {
@@ -1338,7 +1511,8 @@ void test_command_service() {
   }
 
   trainvm::TrainVMService service(
-      database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()));
+      database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
+      fixture_disabled_host_launch_registry());
   auto request = [&] (std::string idempotency_key, std::uint64_t expected_control_revision,
                      double value) {
     trainvm::v1::RunCommandRequest output;
@@ -1569,7 +1743,8 @@ void test_submission_and_queue_boundary() {
     journal_id = journal.journal_id();
   }
   auto service = std::make_unique<trainvm::TrainVMService>(
-      database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()));
+      database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
+      fixture_disabled_host_launch_registry());
   std::string adapter_lock_digest;
   const auto request = [&](bool create_run, std::string key, std::string source = {}) {
     trainvm::v1::SubmitExperimentRequest output;
@@ -1650,7 +1825,8 @@ void test_submission_and_queue_boundary() {
         unresolved_profiles.end());
     trainvm::TrainVMService unresolved_registry_service(
         database_path,
-        trainvm::AdapterRegistry(std::move(unresolved_profiles)));
+        trainvm::AdapterRegistry(std::move(unresolved_profiles)),
+        fixture_disabled_host_launch_registry());
     trainvm::v1::SubmitExperimentResponse unresolved_registry_replay;
     const auto unresolved_registry_replay_status =
         unresolved_registry_service.SubmitExperiment(
@@ -1676,7 +1852,8 @@ void test_submission_and_queue_boundary() {
           "durable submission identity replays before current registry resolution and still rejects changed retries");
   }
   service = std::make_unique<trainvm::TrainVMService>(
-      database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()));
+      database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
+      fixture_disabled_host_launch_registry());
 
   auto concurrent_request = request(true, "concurrent-submission");
   auto concurrent_submit = [&] {
@@ -2028,7 +2205,7 @@ void test_worker_launch_and_readiness_boundary() {
     };
   };
   const trainvm::WorkerLaunchRequest launch_request{
-      .code_fingerprint = "sha256:mageflow-worker-v1",
+      .code_fingerprint = "sha256:" + std::string(64U, '1'),
       .required_capabilities = {"worker.metrics", "worker.controls"},
   };
 
@@ -2065,6 +2242,7 @@ void test_worker_launch_and_readiness_boundary() {
               !launch.launch_nonce.empty() && journal.event_count() == 7U,
           "worker launch preparation freezes fingerprint and capabilities "
           "idempotently");
+    (void)bind_test_worker_launch(controller, launch, 1'150);
 
     auto hello = hello_for(launch, {"worker.metrics", "worker.events", "worker.controls"});
     auto wrong_nonce = hello;
@@ -2086,7 +2264,7 @@ void test_worker_launch_and_readiness_boundary() {
     const auto still_acquiring = journal.projection(run_id);
     check(wrong_nonce_rejected && missing_capability_rejected && still_acquiring &&
               still_acquiring->observed_state == "acquiring" &&
-              still_acquiring->current_node_id.empty() && journal.event_count() == 7U,
+              still_acquiring->current_node_id.empty() && journal.event_count() == 8U,
           "worker hello rejects wrong nonce and missing required capability "
           "without mutation");
 
@@ -2097,16 +2275,16 @@ void test_worker_launch_and_readiness_boundary() {
               running->desired_state == "running" && running->observed_state == "running" &&
               running->run_revision == 5U && running->current_node_id == "train_to_boundary" &&
               running->current_attempt_id == "train_to_boundary@1" &&
-              controller.state().revision == 5U && readiness_events.size() == 10U &&
-              readiness_events[7].event_type == "worker.ready" &&
-              readiness_events[8].event_type == "run.observed_state_changed" &&
-              readiness_events[8].payload.value("state", std::string{}) == "running" &&
-              readiness_events[9].event_type == "node.entered",
+              controller.state().revision == 5U && readiness_events.size() == 11U &&
+              readiness_events[8].event_type == "worker.ready" &&
+              readiness_events[9].event_type == "run.observed_state_changed" &&
+              readiness_events[9].payload.value("state", std::string{}) == "running" &&
+              readiness_events[10].event_type == "node.entered",
           "matching worker hello atomically publishes readiness, running, and "
           "node assignment");
     const auto ready_retry = controller.accept_worker_hello(hello, 1'250);
     check(ready_retry.disposition == trainvm::WorkerReadinessDisposition::replayed &&
-              ready_retry.launch == launch && journal.event_count() == 10U,
+              ready_retry.launch == launch && journal.event_count() == 11U,
           "exact worker hello retry replays without duplicate readiness events");
 
     bool unfenced_dispatch_rejected = false;
@@ -2222,6 +2400,7 @@ void test_worker_launch_and_readiness_boundary() {
     controller.create_queued();
     const auto acquired = controller.begin_acquisition(3'000);
     const auto launch = controller.prepare_worker_launch(launch_request, 3'100);
+    (void)bind_test_worker_launch(controller, launch, 3'150);
     auto hello = hello_for(launch, launch_request.required_capabilities);
     bool rejected = false;
     try {
@@ -2231,7 +2410,7 @@ void test_worker_launch_and_readiness_boundary() {
     }
     const auto projection = journal.projection(run_id);
     check(rejected && projection && projection->observed_state == "acquiring" &&
-              projection->current_node_id.empty() && journal.event_count() == 7U,
+              projection->current_node_id.empty() && journal.event_count() == 8U,
           "worker hello with an expired lease is rejected without readiness "
           "evidence");
   }
@@ -2244,6 +2423,7 @@ void test_worker_launch_and_readiness_boundary() {
     controller.create_queued();
     const auto acquired = controller.begin_acquisition(4'000);
     const auto launch = controller.prepare_worker_launch(launch_request, 4'100);
+    (void)bind_test_worker_launch(controller, launch, 4'150);
     check(journal.release_lease(acquired.lease.concurrency_key, acquired.lease.owner_run_id,
                                 acquired.lease.lease_id, acquired.lease.fencing_token, 4'200),
           "released-lease readiness fixture releases its acquired fence");
@@ -2256,7 +2436,7 @@ void test_worker_launch_and_readiness_boundary() {
     }
     const auto projection = journal.projection(run_id);
     check(rejected && projection && projection->observed_state == "acquiring" &&
-              projection->current_node_id.empty() && journal.event_count() == 7U,
+              projection->current_node_id.empty() && journal.event_count() == 8U,
           "worker hello with a released lease is rejected without readiness "
           "evidence");
   }
@@ -2269,6 +2449,7 @@ void test_worker_launch_and_readiness_boundary() {
     controller.create_queued();
     (void)controller.begin_acquisition(5'000);
     const auto launch = controller.prepare_worker_launch(launch_request, 5'100);
+    (void)bind_test_worker_launch(controller, launch, 5'150);
     (void)controller.accept_worker_hello(
         hello_for(launch, launch_request.required_capabilities), 5'200);
     const auto dispatch = controller.prepare_dispatch(5'300);
@@ -2323,6 +2504,7 @@ void test_worker_launch_and_readiness_boundary() {
           "readiness boundary");
     const auto next_launch =
         controller.prepare_worker_launch(launch_request, 5'500);
+    (void)bind_test_worker_launch(controller, next_launch, 5'550);
     const auto next_ready = controller.accept_worker_hello(
         hello_for(next_launch, launch_request.required_capabilities), 5'600);
     const auto next_running = journal.projection(run_id);
@@ -2370,6 +2552,7 @@ void test_worker_launch_and_readiness_boundary() {
                                   5'800);
     const auto build_launch =
         controller.prepare_worker_launch(launch_request, 5'900);
+    (void)bind_test_worker_launch(controller, build_launch, 5'950);
     (void)controller.accept_worker_hello(
         hello_for(build_launch, launch_request.required_capabilities), 6'000);
     const auto build_dispatch = controller.prepare_dispatch(6'100);
@@ -2458,6 +2641,7 @@ void test_worker_launch_and_readiness_boundary() {
           "returns to worker acquisition");
     const auto resume_launch =
         builtin_restart.prepare_worker_launch(launch_request, 6'400);
+    (void)bind_test_worker_launch(builtin_restart, resume_launch, 6'450);
     (void)builtin_restart.accept_worker_hello(
         hello_for(resume_launch, launch_request.required_capabilities), 6'500);
     check(resume_launch.node_id == "resume_training" &&
@@ -2512,7 +2696,7 @@ void test_worker_control_service_boundary() {
     return event;
   };
   const trainvm::WorkerLaunchRequest launch_request{
-      .code_fingerprint = "sha256:worker-control-service-v1",
+      .code_fingerprint = "sha256:" + std::string(64U, '2'),
       .required_capabilities = {"worker.controls", "worker.metrics"},
   };
 
@@ -2550,16 +2734,28 @@ void test_worker_control_service_boundary() {
       controller.create_queued(submission_identity);
       (void)controller.begin_acquisition(1'000);
       launch = controller.prepare_worker_launch(launch_request, 1'100);
-      check(journal.event_count() == 7U,
-            "WorkerControl fixture stops at a durable launch request");
+      (void)bind_test_worker_launch(controller, launch, 1'150);
+      check(journal.event_count() == 8U,
+            "WorkerControl fixture stops at a durable host launch binding");
     }
 
     std::int64_t authority_now_ns = 1'200;
     trainvm::TrainVMService service(
         database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
+        fixture_test_host_launch_registry(*compiled.plan, launch),
+        fixture_test_host_identity(),
         [&authority_now_ns] { return authority_now_ns; });
-    trainvm::TrainVMService::WorkerConnection connection;
     const auto hello = wire_hello(launch);
+    trainvm::TrainVMService::WorkerConnection unbound_connection;
+    const std::size_t before_unbound =
+        trainvm::Journal(database_path).event_count();
+    const grpc::Status unbound =
+        service.open_worker_connection(hello, unbound_connection);
+    check(unbound.error_code() == grpc::StatusCode::FAILED_PRECONDITION &&
+              trainvm::Journal(database_path).event_count() == before_unbound,
+          "WorkerControl refuses historical binding evidence until the current authority retains its exact bundle");
+    prime_test_service_launch(service, launch);
+    trainvm::TrainVMService::WorkerConnection connection;
     const grpc::Status open =
         service.open_worker_connection(hello, connection);
     {
@@ -2576,7 +2772,7 @@ void test_worker_control_service_boundary() {
                 projection->run_revision == 5U &&
                 projection->current_node_id == launch.node_id && dispatch &&
                 dispatch->status == trainvm::DispatchStatus::prepared &&
-                observer.event_count() == 11U,
+                observer.event_count() == 12U,
             "WorkerControl returns Welcome only after readiness and dispatch are durable");
     }
     if (!open.ok()) {
@@ -2664,9 +2860,10 @@ void test_worker_control_service_boundary() {
                 dispatch->status == trainvm::DispatchStatus::completed &&
                 dispatch->result_event_id ==
                     std::optional<std::string>{canonical.event_id()} &&
-                observer.event_count() == 15U,
+                observer.event_count() == 16U &&
+                service.resolved_launches_.empty(),
             "WorkerControl accepts the maximum int64 timestamp, commits the canonical result, "
-            "and returns its durable Receipt");
+            "returns its durable Receipt, and releases the retained launch bundle");
     }
 
     trainvm::v1::WorkerReceipt retry_receipt;
@@ -2684,7 +2881,7 @@ void test_worker_control_service_boundary() {
                 reconnected.completed_receipt &&
                 reconnected.completed_receipt->SerializeAsString() ==
                     first_receipt &&
-                observer.event_count() == 15U,
+                observer.event_count() == 16U,
             "lost WorkerControl receipts replay exactly without duplicate commits");
     }
   }
@@ -2700,15 +2897,19 @@ void test_worker_control_service_boundary() {
       controller.create_queued(submission_identity);
       lease = controller.begin_acquisition(3'000).lease;
       launch = controller.prepare_worker_launch(launch_request, 3'100);
+      (void)bind_test_worker_launch(controller, launch, 3'150);
     }
     std::size_t clock_sample = 0;
     trainvm::TrainVMService service(
         database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
+        fixture_test_host_launch_registry(*compiled.plan, launch),
+        fixture_test_host_identity(),
         [&] {
           ++clock_sample;
           return clock_sample == 1U ? lease.expires_at_ns - 1
                                     : lease.expires_at_ns;
         });
+    prime_test_service_launch(service, launch);
     trainvm::TrainVMService::WorkerConnection connection;
     const grpc::Status expired =
         service.open_worker_connection(wire_hello(launch), connection);
@@ -2720,7 +2921,7 @@ void test_worker_control_service_boundary() {
           projection->run_revision == 5U &&
           !observer.dispatch(run_id + ":dispatch:" + launch.node_id +
                              ":" + launch.attempt_id) &&
-          observer.event_count() == 10U)) {
+          observer.event_count() == 11U)) {
       std::cerr << "expired-between-phases: status=" << expired.error_code()
                 << " message='" << expired.error_message()
                 << "' samples=" << clock_sample
@@ -2735,9 +2936,12 @@ void test_worker_control_service_boundary() {
               projection->run_revision == 5U &&
               !observer.dispatch(run_id + ":dispatch:" + launch.node_id +
                                  ":" + launch.attempt_id) &&
-              observer.event_count() == 10U,
+              observer.event_count() == 11U,
           "WorkerControl resamples time and refuses dispatch when the lease expires "
           "after hello readiness");
+    service.prune_retained_launches(lease.expires_at_ns);
+    check(service.resolved_launches_.empty(),
+          "expired same-attempt leases release their retained launch bundles");
   }
 
   {
@@ -2750,11 +2954,15 @@ void test_worker_control_service_boundary() {
       controller.create_queued(submission_identity);
       (void)controller.begin_acquisition(2'000);
       launch = controller.prepare_worker_launch(launch_request, 2'100);
+      (void)bind_test_worker_launch(controller, launch, 2'150);
     }
     std::int64_t authority_now_ns = 2'200;
     trainvm::TrainVMService service(
         database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
+        fixture_test_host_launch_registry(*compiled.plan, launch),
+        fixture_test_host_identity(),
         [&authority_now_ns] { return authority_now_ns; });
+    prime_test_service_launch(service, launch);
     trainvm::TrainVMService::WorkerConnection connection;
     const grpc::Status open =
         service.open_worker_connection(wire_hello(launch), connection);
@@ -2777,6 +2985,9 @@ void test_worker_control_service_boundary() {
                 stale.error_code() == grpc::StatusCode::FAILED_PRECONDITION &&
                 authority_observer.event_count() == count,
             "WorkerControl rejects a result after lease fence takeover without mutation");
+      service.prune_retained_launches(authority_now_ns);
+      check(service.resolved_launches_.empty(),
+            "released and superseded same-attempt leases release their retained launch bundles");
     }
   }
 
@@ -2790,10 +3001,14 @@ void test_worker_control_service_boundary() {
       controller.create_queued(submission_identity);
       (void)controller.begin_acquisition(4'000);
       launch = controller.prepare_worker_launch(launch_request, 4'100);
+      (void)bind_test_worker_launch(controller, launch, 4'150);
     }
     trainvm::TrainVMService service(
         database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
+        fixture_test_host_launch_registry(*compiled.plan, launch),
+        fixture_test_host_identity(),
         [] { return 4'200; });
+    prime_test_service_launch(service, launch);
     trainvm::TrainVMService::WorkerConnection connection;
     const grpc::Status open =
         service.open_worker_connection(wire_hello(launch), connection);
@@ -2855,17 +3070,19 @@ void test_worker_control_grpc_stream() {
     controller.create_queued(submission_identity);
     (void)controller.begin_acquisition(1'000);
     launch = controller.prepare_worker_launch(
-        {.code_fingerprint = "sha256:worker-control-grpc-v1",
+        {.code_fingerprint = "sha256:" + std::string(64U, '3'),
          .required_capabilities = {"worker.controls", "worker.metrics"}},
         1'100);
+    (void)bind_test_worker_launch(controller, launch, 1'150);
     trainvm::Controller eof_controller(
         *eof_compiled.plan, journal, eof_run_id);
     eof_controller.create_queued(eof_submission_identity);
     (void)eof_controller.begin_acquisition(1'000);
     eof_launch = eof_controller.prepare_worker_launch(
-        {.code_fingerprint = "sha256:worker-control-grpc-eof-v1",
+        {.code_fingerprint = "sha256:" + std::string(64U, '3'),
          .required_capabilities = {"worker.controls", "worker.metrics"}},
         1'100);
+    (void)bind_test_worker_launch(eof_controller, eof_launch, 1'150);
   }
 
   const auto hello_for = [](const trainvm::WorkerLaunchTicket& ticket) {
@@ -2909,7 +3126,11 @@ void test_worker_control_grpc_stream() {
 
   trainvm::TrainVMService service(
       database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
+      fixture_test_host_launch_registry(*compiled.plan, launch),
+      fixture_test_host_identity(),
       [] { return 1'200; });
+  prime_test_service_launch(service, launch);
+  prime_test_service_launch(service, eof_launch);
   grpc::ServerBuilder builder;
   int port = 0;
   builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(),
@@ -2942,8 +3163,8 @@ void test_worker_control_grpc_stream() {
     trainvm::Journal observer(database_path);
     check(wrote && !received &&
               status.error_code() == grpc::StatusCode::INVALID_ARGUMENT &&
-              observer.events_for_run(run_id).size() == 7U &&
-              observer.events_for_run(eof_run_id).size() == 7U,
+              observer.events_for_run(run_id).size() == 8U &&
+              observer.events_for_run(eof_run_id).size() == 8U,
           "WorkerControl gRPC rejects a non-Hello first message without mutation");
   }
 
@@ -2971,7 +3192,7 @@ void test_worker_control_grpc_stream() {
               !dispatch->result_event_id && projection &&
               projection->observed_state == "running" &&
               projection->run_revision == 5U &&
-              observer.events_for_run(eof_run_id).size() == 11U,
+              observer.events_for_run(eof_run_id).size() == 12U,
           "WorkerControl gRPC treats clean EOF after Welcome as incomplete and "
           "leaves its dispatch prepared without a Receipt");
   }
@@ -3004,7 +3225,7 @@ void test_worker_control_grpc_stream() {
               dispatch->status == trainvm::DispatchStatus::completed &&
               projection && projection->observed_state == "acquiring" &&
               projection->run_revision == 7U &&
-              observer.events_for_run(eof_run_id).size() == 15U,
+              observer.events_for_run(eof_run_id).size() == 16U,
           "WorkerControl gRPC releases the EOF stream claim and completes the "
           "same durable dispatch after reconnect");
   }
@@ -3075,7 +3296,7 @@ void test_worker_control_grpc_stream() {
                       receipt_message.receipt().event_id()} &&
               projection && projection->observed_state == "acquiring" &&
               projection->run_revision == 7U &&
-              observer.events_for_run(run_id).size() == 15U,
+              observer.events_for_run(run_id).size() == 16U,
           "WorkerControl gRPC orders Hello, durable Welcome, Event, and durable Receipt");
   }
 
@@ -3101,10 +3322,11 @@ void test_typed_managed_resource_release() {
   controller.create_queued();
   const auto acquired = controller.begin_acquisition(1'000);
   const trainvm::WorkerLaunchRequest request{
-      .code_fingerprint = "sha256:managed-release-worker-v1",
+      .code_fingerprint = "sha256:" + std::string(64U, '5'),
       .required_capabilities = {"worker.controls"},
   };
   const auto launch = controller.prepare_worker_launch(request, 1'100);
+  (void)bind_test_worker_launch(controller, launch, 1'150);
   (void)controller.accept_worker_hello(
       {.run_id = launch.run_id,
        .node_id = launch.node_id,
@@ -3301,7 +3523,7 @@ void test_concurrent_worker_launch_and_readiness_replay() {
         "both worker race controllers recover acquiring revision four");
 
   const trainvm::WorkerLaunchRequest request{
-      .code_fingerprint = "sha256:concurrent-mageflow-worker-v1",
+      .code_fingerprint = "sha256:" + std::string(64U, '6'),
       .required_capabilities = {"worker.metrics", "worker.controls"},
   };
   struct LaunchOutcome {
@@ -3350,6 +3572,7 @@ void test_concurrent_worker_launch_and_readiness_replay() {
     return;
   }
   const trainvm::WorkerLaunchTicket ticket = *left_launch.ticket;
+  (void)bind_test_worker_launch(left, ticket, 1'175);
   const auto hello_for = [](const trainvm::WorkerLaunchTicket& launch) {
     return trainvm::WorkerHelloEvidence{
         .run_id = launch.run_id,
@@ -3423,7 +3646,7 @@ void test_concurrent_worker_launch_and_readiness_replay() {
             count_type("worker.ready") == 1 &&
             count_type("run.observed_state_changed") == 2 &&
             count_type("node.entered") == 1 &&
-            readiness_events.size() == 10U && projection &&
+            readiness_events.size() == 11U && projection &&
             projection->desired_state == "running" &&
             projection->observed_state == "running" &&
             projection->run_revision == 5U &&
@@ -3457,9 +3680,10 @@ void test_concurrent_fenced_result_content_conflict() {
     creator.create_queued();
     (void)creator.begin_acquisition(1'000);
     launch = creator.prepare_worker_launch(
-        {.code_fingerprint = "sha256:fenced-result-race-worker-v1",
+        {.code_fingerprint = "sha256:" + std::string(64U, '8'),
          .required_capabilities = {"worker.controls", "worker.metrics"}},
         1'100);
+    (void)bind_test_worker_launch(creator, launch, 1'150);
     (void)creator.accept_worker_hello(
         {.run_id = launch.run_id,
          .node_id = launch.node_id,
@@ -3475,7 +3699,7 @@ void test_concurrent_fenced_result_content_conflict() {
          .fencing_token = launch.fencing_token},
         1'200);
     dispatch = creator.prepare_dispatch(1'300);
-    check(journal.event_count() == 11U &&
+    check(journal.event_count() == 12U &&
               dispatch.status == trainvm::DispatchStatus::prepared,
           "result race fixture prepares one fenced external dispatch");
   }
@@ -3569,7 +3793,7 @@ void test_concurrent_fenced_result_content_conflict() {
             receipt && receipt->status == trainvm::DispatchStatus::completed &&
             receipt->result_event_id ==
                 std::optional<std::string>{result_id} &&
-            events.size() == 15U && projection &&
+            events.size() == 16U && projection &&
             projection->observed_state == "acquiring" &&
             projection->run_revision == 7U &&
             projection->current_node_id.empty() &&
@@ -4357,6 +4581,292 @@ void test_host_launch_resolution_and_binding() {
   std::filesystem::remove_all(directory);
 }
 
+void test_service_host_launch_binding() {
+  const auto compiled = trainvm::compile_document(load_fixture());
+  check(compiled.valid(), "service host launch fixture compiles");
+  if (!compiled.valid()) return;
+
+  const std::filesystem::path directory =
+      std::filesystem::temp_directory_path() /
+      ("trainvm-service-host-launch-test-" +
+       std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory / "work");
+  std::filesystem::create_directories(directory / "unused-root");
+  std::filesystem::permissions(
+      directory, std::filesystem::perms::owner_all,
+      std::filesystem::perm_options::replace);
+  std::filesystem::permissions(
+      directory / "work", std::filesystem::perms::owner_all,
+      std::filesystem::perm_options::replace);
+  std::filesystem::permissions(
+      directory / "unused-root", std::filesystem::perms::owner_all,
+      std::filesystem::perm_options::replace);
+  const auto executable = directory / "python";
+  std::filesystem::copy_file("/proc/self/exe", executable);
+  std::filesystem::permissions(
+      executable,
+      std::filesystem::perms::owner_read |
+          std::filesystem::perms::owner_exec,
+      std::filesystem::perm_options::replace);
+  const auto code = directory / "worker.pyz";
+  {
+    std::ofstream output(code, std::ios::binary);
+    output << "PK\003\004service-owned-immutable-zipapp";
+  }
+  std::filesystem::permissions(
+      code, std::filesystem::perms::owner_read,
+      std::filesystem::perm_options::replace);
+  const auto file_digest = [](const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    const std::string bytes((std::istreambuf_iterator<char>(input)),
+                            std::istreambuf_iterator<char>());
+    return "sha256:" + trainvm::sha256_hex(bytes);
+  };
+  const std::string executable_digest = file_digest(executable);
+  const std::string code_digest = file_digest(code);
+
+  auto adapter_profiles = fixture_adapter_profiles();
+  for (auto& profile : adapter_profiles) {
+    if (profile.key.runtime != trainvm::ComponentRuntime::builtin) {
+      profile.code_fingerprint = code_digest;
+    }
+  }
+  std::vector<trainvm::HostLaunchProfile> launch_profiles;
+  for (const auto& profile : adapter_profiles) {
+    if (profile.key.runtime == trainvm::ComponentRuntime::builtin) continue;
+    launch_profiles.push_back({
+        .key = profile.key,
+        .code_fingerprint = code_digest,
+        .executable_path = executable.string(),
+        .executable_fingerprint = executable_digest,
+        .code_path = code.string(),
+        .public_arguments = {"-I", "worker.pyz"},
+        .working_directory = (directory / "work").string(),
+    });
+  }
+  const trainvm::HostLaunchRegistryDocument host_document{
+      .api_version = "trainvm.host-launches/v1",
+      .trusted_roots = {directory.string()},
+      .profiles = launch_profiles,
+  };
+  const trainvm::HostIdentity host{
+      .host_id = "sha256:" + std::string(64U, '3'),
+      .boot_id = "33333333-3333-3333-3333-333333333333",
+  };
+  const auto database = directory / "journal.db";
+  const std::string run_id = "service-host-binding-run";
+  {
+    trainvm::AdapterRegistry registry(adapter_profiles);
+    trainvm::Journal journal(database);
+    trainvm::Controller controller(*compiled.plan, journal, run_id);
+    controller.create_queued(adapter_locked_submission(*compiled.plan,
+                                                       registry));
+  }
+
+  trainvm::WorkerLaunchTicket ticket;
+  trainvm::ResolvedLaunchSpec binding;
+  std::size_t bound_event_count = 0U;
+  {
+    std::int64_t now_ns = 1'000;
+    trainvm::TrainVMService service(
+        database, trainvm::AdapterRegistry(adapter_profiles),
+        trainvm::HostLaunchRegistry(host_document), host,
+        [&now_ns] { return now_ns; });
+    const auto acquired = service.reconcile_once(run_id);
+    now_ns = 1'100;
+    const auto prepared = service.reconcile_once(run_id);
+    check(acquired.disposition ==
+              trainvm::ReconcileDisposition::lease_acquired &&
+              prepared.launch.has_value(),
+          "service prepares a portable ticket before host binding");
+    if (!prepared.launch) {
+      std::filesystem::remove_all(directory);
+      return;
+    }
+    ticket = *prepared.launch;
+    now_ns = 1'200;
+    binding = service.bind_worker_launch(ticket);
+    const auto hidden_executable = directory / "python.hidden";
+    const auto hidden_code = directory / "worker.pyz.hidden";
+    std::filesystem::rename(executable, hidden_executable);
+    std::filesystem::rename(code, hidden_code);
+    trainvm::ResolvedLaunchSpec replay;
+    try {
+      replay = service.bind_worker_launch(ticket);
+    } catch (...) {
+      std::filesystem::rename(hidden_executable, executable);
+      std::filesystem::rename(hidden_code, code);
+      throw;
+    }
+    std::filesystem::rename(hidden_executable, executable);
+    std::filesystem::rename(hidden_code, code);
+    trainvm::Journal observer(database);
+    bound_event_count = observer.event_count();
+    const int retained_fd =
+        service.resolved_launches_.at(binding.identity.launch_event_id)
+            .duplicate_executable_fd();
+    check(binding == replay && retained_fd >= 0 &&
+              service.resolved_launches_.size() == 1U &&
+              observer.launch_binding(binding.identity.launch_event_id) ==
+                  std::optional<trainvm::ResolvedLaunchSpec>{binding},
+          "service binds once and exact replay retains one sealed authority bundle");
+    if (retained_fd >= 0) (void)::close(retained_fd);
+
+    for (std::size_t index = service.resolved_launches_.size();
+         index < trainvm::TrainVMService::kMaximumRetainedLaunches; ++index) {
+      service.resolved_launches_.emplace(
+          "synthetic-count-" + std::to_string(index),
+          trainvm::ResolvedLaunch(
+              binding, -1,
+              binding.identity.code ? std::optional<int>{-1} : std::nullopt,
+              -1));
+    }
+    bool count_quota_rejected = false;
+    try {
+      service.require_retained_launch_capacity(binding);
+    } catch (const trainvm::HostLaunchResolutionError&) {
+      count_quota_rejected = true;
+    }
+    service.resolved_launches_.clear();
+    auto large = binding;
+    large.identity.executable.source_size = 256ULL << 20U;
+    large.identity.code.reset();
+    for (std::size_t index = 0; index < 8U; ++index) {
+      service.resolved_launches_.emplace(
+          "synthetic-bytes-" + std::to_string(index),
+          trainvm::ResolvedLaunch(large, -1, std::nullopt, -1));
+    }
+    bool byte_quota_rejected = false;
+    try {
+      service.require_retained_launch_capacity(binding);
+    } catch (const trainvm::HostLaunchResolutionError&) {
+      byte_quota_rejected = true;
+    }
+    check(count_quota_rejected && byte_quota_rejected,
+          "service fails closed at retained launch count and aggregate byte quotas");
+  }
+
+  {
+    trainvm::TrainVMService restarted(
+        database, trainvm::AdapterRegistry(adapter_profiles),
+        trainvm::HostLaunchRegistry(host_document), host,
+        [] { return 1'250; });
+    trainvm::v1::WorkerHello hello;
+    hello.set_run_id(ticket.run_id);
+    hello.set_node_id(ticket.node_id);
+    hello.set_attempt_id(ticket.attempt_id);
+    hello.set_launch_nonce(ticket.launch_nonce);
+    hello.set_adapter(ticket.adapter);
+    hello.set_adapter_version(ticket.adapter_version);
+    hello.set_code_fingerprint(ticket.code_fingerprint);
+    for (const auto& capability : ticket.required_capabilities) {
+      hello.add_capabilities(capability);
+    }
+    hello.set_last_acked_controller_sequence(0);
+    hello.set_concurrency_key(ticket.concurrency_key);
+    hello.set_lease_id(ticket.lease_id);
+    hello.set_fencing_token(ticket.fencing_token);
+    trainvm::TrainVMService::WorkerConnection unbound_connection;
+    const grpc::Status unbound =
+        restarted.open_worker_connection(hello, unbound_connection);
+    const auto replayed = restarted.bind_worker_launch(ticket);
+    const int rehydrated_fd =
+        restarted.resolved_launches_.at(binding.identity.launch_event_id)
+            .duplicate_executable_fd();
+    check(unbound.error_code() == grpc::StatusCode::FAILED_PRECONDITION &&
+              replayed == binding && rehydrated_fd >= 0 &&
+              restarted.resolved_launches_.size() == 1U &&
+              trainvm::Journal(database).event_count() == bound_event_count,
+          "service restart rejects readiness until exact durable binding re-resolution rehydrates one sealed bundle without mutation");
+    if (rehydrated_fd >= 0) (void)::close(rehydrated_fd);
+  }
+
+  const auto rejects_without_mutation =
+      [&](trainvm::HostLaunchRegistry registry,
+          trainvm::HostIdentity authority_host,
+          std::vector<trainvm::AdapterProfile> adapters) {
+        bool rejected = false;
+        try {
+          trainvm::TrainVMService service(
+              database, trainvm::AdapterRegistry(std::move(adapters)),
+              std::move(registry), std::move(authority_host),
+              [] { return 1'300; });
+          (void)service.bind_worker_launch(ticket);
+        } catch (const std::exception&) {
+          rejected = true;
+        }
+        trainvm::Journal observer(database);
+        return rejected && observer.event_count() == bound_event_count;
+      };
+
+  auto wrong_host = host;
+  wrong_host.boot_id = "44444444-4444-4444-4444-444444444444";
+  const bool host_drift_rejected = rejects_without_mutation(
+      trainvm::HostLaunchRegistry(host_document), wrong_host,
+      adapter_profiles);
+  auto changed_profiles = launch_profiles;
+  for (auto& profile : changed_profiles) {
+    profile.public_arguments.push_back("--profile-drift");
+  }
+  const bool profile_drift_rejected = rejects_without_mutation(
+      trainvm::HostLaunchRegistry({
+          .api_version = "trainvm.host-launches/v1",
+          .trusted_roots = {directory.string()},
+          .profiles = std::move(changed_profiles),
+      }),
+      host, adapter_profiles);
+  const bool registry_drift_rejected = rejects_without_mutation(
+      trainvm::HostLaunchRegistry({
+          .api_version = "trainvm.host-launches/v1",
+          .trusted_roots = {"/"},
+          .profiles = launch_profiles,
+      }),
+      host, adapter_profiles);
+  auto skewed_adapters = adapter_profiles;
+  for (auto& profile : skewed_adapters) {
+    if (profile.key.runtime != trainvm::ComponentRuntime::builtin) {
+      profile.code_fingerprint = "sha256:" + std::string(64U, 'f');
+    }
+  }
+  const bool adapter_skew_rejected = rejects_without_mutation(
+      trainvm::HostLaunchRegistry(host_document), host,
+      std::move(skewed_adapters));
+  check(host_drift_rejected && profile_drift_rejected &&
+            registry_drift_rejected && adapter_skew_rejected,
+        "service restart rejects current host, profile, registry, and portable adapter drift before mutation");
+
+  const auto disabled_database = directory / "disabled.db";
+  const std::string disabled_run = "service-host-disabled-run";
+  {
+    trainvm::AdapterRegistry registry(adapter_profiles);
+    trainvm::Journal journal(disabled_database);
+    trainvm::Controller controller(*compiled.plan, journal, disabled_run);
+    controller.create_queued(adapter_locked_submission(*compiled.plan,
+                                                       registry));
+  }
+  bool disabled_rejected = false;
+  {
+    trainvm::TrainVMService service(
+        disabled_database, trainvm::AdapterRegistry(adapter_profiles),
+        fixture_disabled_host_launch_registry(), host,
+        [] { return 2'000; });
+    (void)service.reconcile_once(disabled_run);
+    const auto prepared = service.reconcile_once(disabled_run);
+    const std::size_t before = trainvm::Journal(disabled_database).event_count();
+    try {
+      (void)service.bind_worker_launch(*prepared.launch);
+    } catch (const trainvm::HostLaunchResolutionError&) {
+      disabled_rejected = true;
+    }
+    check(disabled_rejected && service.resolved_launches_.empty() &&
+              trainvm::Journal(disabled_database).event_count() == before,
+          "explicit empty host registry disables binding without mutation");
+  }
+
+  std::filesystem::remove_all(directory);
+}
+
 void test_adapter_registry_file_contract() {
   const std::filesystem::path directory =
       std::filesystem::temp_directory_path() /
@@ -4569,7 +5079,8 @@ void test_service_registry_and_reconciliation() {
         incomplete_profiles.end());
     trainvm::TrainVMService service(
         database_path,
-        trainvm::AdapterRegistry(std::move(incomplete_profiles)));
+        trainvm::AdapterRegistry(std::move(incomplete_profiles)),
+        fixture_disabled_host_launch_registry());
 
     auto preview_request = request_for(journal_id, false, "");
     trainvm::v1::SubmitExperimentResponse preview;
@@ -4608,6 +5119,7 @@ void test_service_registry_and_reconciliation() {
     std::int64_t authority_now_ns = 5'000;
     trainvm::TrainVMService service(
         database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
+        fixture_disabled_host_launch_registry(),
         [&authority_now_ns] { return authority_now_ns; });
     auto preview_request = request_for(journal_id, false, "");
     trainvm::v1::SubmitExperimentResponse preview;
@@ -5241,6 +5753,7 @@ int main() {
     test_acquiring_rejects_fabricated_running_transition();
     test_host_launch_registry_contract();
     test_host_launch_resolution_and_binding();
+    test_service_host_launch_binding();
     test_adapter_registry_file_contract();
     test_service_registry_and_reconciliation();
     test_adapter_registry_and_reconciler();

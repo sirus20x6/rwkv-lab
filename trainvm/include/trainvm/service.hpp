@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -12,6 +13,7 @@
 #include <grpcpp/grpcpp.h>
 
 #include "trainvm/journal.hpp"
+#include "trainvm/host_launch.hpp"
 #include "trainvm/reconciler.hpp"
 #include "trainvm/v1/trainvm.grpc.pb.h"
 
@@ -36,6 +38,7 @@ class TrainVMService final : public v1::TrainVM::Service,
   explicit TrainVMService(
       const std::filesystem::path& journal_path,
       AdapterRegistry adapter_registry,
+      HostLaunchRegistry host_launch_registry,
       std::function<std::int64_t()> authority_clock = {});
   ~TrainVMService() override;
 
@@ -69,13 +72,34 @@ class TrainVMService final : public v1::TrainVM::Service,
   void release_worker_attempt(const std::string& key);
   [[nodiscard]] std::int64_t authority_now_ns() const;
   ReconcileResult reconcile_once(const std::string& run_id);
+  // Process-free supervisor boundary. The ticket must already be durable.
+  // Successful bindings retain their sealed descriptor bundle for a later
+  // launcher boundary; this method never forks or executes a process.
+  ResolvedLaunchSpec bind_worker_launch(const WorkerLaunchTicket& launch);
+
+  // Deterministic host-identity injection is restricted to focused authority
+  // tests. Production construction always captures the local Linux identity.
+  TrainVMService(const std::filesystem::path& journal_path,
+                 AdapterRegistry adapter_registry,
+                 HostLaunchRegistry host_launch_registry,
+                 HostIdentity authority_host,
+                 std::function<std::int64_t()> authority_clock);
+
+  static constexpr std::size_t kMaximumRetainedLaunches = 32U;
+  static constexpr std::uint64_t kMaximumRetainedLaunchBytes = 2ULL << 30U;
+  void prune_retained_launches(std::int64_t now_ns);
+  void require_retained_launch_capacity(const ResolvedLaunchSpec& candidate) const;
 
   std::unique_ptr<AuthorityLock> authority_lock_;
   Journal journal_;
   std::mutex command_mutex_;
   std::function<std::int64_t()> authority_clock_;
   const AdapterRegistry adapter_registry_;
+  const HostLaunchRegistry host_launch_registry_;
+  const HostIdentity authority_host_;
+  HostLaunchResolver host_launch_resolver_;
   Reconciler reconciler_;
+  std::map<std::string, ResolvedLaunch> resolved_launches_;
   std::mutex worker_sessions_mutex_;
   std::set<std::string> active_worker_attempts_;
 };
@@ -84,6 +108,7 @@ class TrainVMService final : public v1::TrainVM::Service,
 // socket. Throws if another authority owns the journal lock.
 int serve(const std::filesystem::path& journal_path,
           const std::filesystem::path& socket_path,
-          AdapterRegistry adapter_registry);
+          AdapterRegistry adapter_registry,
+          HostLaunchRegistry host_launch_registry);
 
 }  // namespace trainvm

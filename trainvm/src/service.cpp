@@ -615,6 +615,18 @@ grpc::Status worker_failure(const std::exception& exception) {
 TrainVMService::TrainVMService(
     const std::filesystem::path& journal_path,
     AdapterRegistry adapter_registry,
+    HostLaunchRegistry host_launch_registry,
+    std::function<std::int64_t()> authority_clock)
+    : TrainVMService(journal_path, std::move(adapter_registry),
+                     std::move(host_launch_registry),
+                     HostLaunchResolver::local_host_identity(),
+                     std::move(authority_clock)) {}
+
+TrainVMService::TrainVMService(
+    const std::filesystem::path& journal_path,
+    AdapterRegistry adapter_registry,
+    HostLaunchRegistry host_launch_registry,
+    HostIdentity authority_host,
     std::function<std::int64_t()> authority_clock)
     : authority_lock_(std::make_unique<AuthorityLock>(journal_path)),
       journal_(journal_path),
@@ -627,6 +639,9 @@ TrainVMService::TrainVMService(
                                                .count();
                                          }}),
       adapter_registry_(std::move(adapter_registry)),
+      host_launch_registry_(std::move(host_launch_registry)),
+      authority_host_(std::move(authority_host)),
+      host_launch_resolver_(host_launch_registry_, authority_host_),
       reconciler_(journal_, adapter_registry_, command_mutex_,
                   [this] { return authority_now_ns(); }) {}
 
@@ -642,6 +657,202 @@ std::int64_t TrainVMService::authority_now_ns() const {
 
 ReconcileResult TrainVMService::reconcile_once(const std::string& run_id) {
   return reconciler_.step(run_id);
+}
+
+void TrainVMService::prune_retained_launches(std::int64_t now_ns) {
+  if (now_ns < 0) {
+    throw std::invalid_argument(
+        "retained host launch pruning clock must be nonnegative");
+  }
+  for (auto retained = resolved_launches_.begin();
+       retained != resolved_launches_.end();) {
+    const ResolvedLaunchIdentity& identity = retained->second.spec().identity;
+    const auto projection = journal_.projection(identity.run_id);
+    const auto active = journal_.active_lease(identity.concurrency_key, now_ns);
+    const bool owns_active_lease =
+        active && active->owner_run_id == identity.run_id &&
+        active->lease_id == identity.lease_id &&
+        active->fencing_token == identity.fencing_token;
+    const bool terminal =
+        !projection || projection->observed_state == "completed" ||
+        projection->observed_state == "failed" ||
+        projection->observed_state == "cancelled";
+    const std::string dispatch_id = identity.run_id + ":dispatch:" +
+                                    identity.node_id + ":" +
+                                    identity.attempt_id;
+    const auto dispatch = journal_.dispatch(dispatch_id);
+    const bool completed_attempt =
+        dispatch && dispatch->status == DispatchStatus::completed;
+    const bool different_attempt =
+        projection && !projection->current_node_id.empty() &&
+        !projection->current_attempt_id.empty() &&
+        (projection->current_node_id != identity.node_id ||
+         projection->current_attempt_id != identity.attempt_id);
+    if (terminal || completed_attempt || different_attempt ||
+        !owns_active_lease) {
+      retained = resolved_launches_.erase(retained);
+    } else {
+      ++retained;
+    }
+  }
+}
+
+void TrainVMService::require_retained_launch_capacity(
+    const ResolvedLaunchSpec& candidate) const {
+  const auto bundle_bytes = [](const ResolvedLaunchSpec& launch) {
+    std::uint64_t bytes = launch.identity.executable.source_size;
+    if (launch.identity.code) {
+      if (launch.identity.code->source_size >
+          std::numeric_limits<std::uint64_t>::max() - bytes) {
+        throw HostLaunchResolutionError(
+            "retained host launch byte accounting overflowed");
+      }
+      bytes += launch.identity.code->source_size;
+    }
+    return bytes;
+  };
+  if (resolved_launches_.size() >= kMaximumRetainedLaunches) {
+    throw HostLaunchResolutionError(
+        "retained host launch count quota is exhausted");
+  }
+  std::uint64_t retained_bytes = 0U;
+  for (const auto& [launch_id, retained] : resolved_launches_) {
+    (void)launch_id;
+    const std::uint64_t bytes = bundle_bytes(retained.spec());
+    if (bytes > kMaximumRetainedLaunchBytes - retained_bytes) {
+      throw HostLaunchResolutionError(
+          "retained host launch byte quota is exhausted");
+    }
+    retained_bytes += bytes;
+  }
+  const std::uint64_t candidate_bytes = bundle_bytes(candidate);
+  if (candidate_bytes > kMaximumRetainedLaunchBytes - retained_bytes) {
+    throw HostLaunchResolutionError(
+        "retained host launch byte quota is exhausted");
+  }
+}
+
+ResolvedLaunchSpec TrainVMService::bind_worker_launch(
+    const WorkerLaunchTicket& launch) {
+  if (launch.run_id.empty()) {
+    throw std::invalid_argument(
+        "host launch binding requires a run identity");
+  }
+  std::scoped_lock lock(command_mutex_);
+  const std::int64_t now_ns = authority_now_ns();
+  prune_retained_launches(now_ns);
+  const auto projection = journal_.projection(launch.run_id);
+  if (!projection) {
+    throw std::invalid_argument(
+        "cannot bind a host launch for an unknown run");
+  }
+  const auto plan = journal_.compiled_plan(projection->plan_hash);
+  if (!plan) {
+    throw std::runtime_error(
+        "cannot bind a host launch without its persisted compiled plan");
+  }
+
+  // Portable adapter authority is revalidated before any host path is opened.
+  // Host launch profiles may narrow it, but can never repair or override skew.
+  adapter_registry_.validate_plan(*plan);
+  const auto created = journal_.event(launch.run_id + ":created");
+  if (!created || created->event_type != "run.created" ||
+      !created->payload.contains("submission")) {
+    throw std::runtime_error(
+        "run has no durable adapter lock identity");
+  }
+  adapter_registry_.validate_submission_lock(
+      *plan, created->payload.at("submission"));
+
+  Controller controller(*plan, journal_, launch.run_id);
+  controller.recover();
+  const ExecutionState& state = controller.state();
+  if (state.status != ExecutionStatus::running ||
+      state.current_node_id.empty() || state.current_attempt_id.empty()) {
+    throw std::logic_error(
+        "host launch binding requires an active external attempt");
+  }
+  const Node& node =
+      plan->experiment.spec.workflow.nodes.at(state.current_node_id);
+  const Component& component =
+      plan->experiment.spec.components.at(node.invoke.component);
+  if (component.runtime == ComponentRuntime::builtin) {
+    throw std::logic_error(
+        "builtin operations cannot receive a host launch binding");
+  }
+  const Operation& operation = component.operations.at(node.invoke.operation);
+  const AdapterKey key{
+      .adapter = component.adapter,
+      .version = component.version,
+      .runtime = component.runtime,
+      .operation = node.invoke.operation,
+      .contract = operation.contract,
+  };
+  const WorkerLaunchRequest request =
+      adapter_registry_.worker_launch_request(component,
+                                              node.invoke.operation);
+  const std::string launch_id =
+      launch.run_id + ":worker-launch:" + state.current_node_id + ":" +
+      state.current_attempt_id;
+  const auto durable_launch = journal_.event(launch_id);
+  const auto active_lease =
+      journal_.active_lease(launch.concurrency_key, now_ns);
+  const nlohmann::json expected_payload{
+      {"launch_nonce", launch.launch_nonce},
+      {"adapter", launch.adapter},
+      {"adapter_version", launch.adapter_version},
+      {"code_fingerprint", launch.code_fingerprint},
+      {"required_capabilities", launch.required_capabilities},
+      {"concurrency_key", launch.concurrency_key},
+      {"lease_id", launch.lease_id},
+      {"fencing_token", launch.fencing_token},
+  };
+  if (launch.node_id != state.current_node_id ||
+      launch.attempt_id != state.current_attempt_id ||
+      launch.adapter != key.adapter ||
+      launch.adapter_version != key.version ||
+      launch.code_fingerprint != request.code_fingerprint ||
+      launch.required_capabilities != request.required_capabilities ||
+      !active_lease || active_lease->owner_run_id != launch.run_id ||
+      active_lease->lease_id != launch.lease_id ||
+      active_lease->fencing_token != launch.fencing_token ||
+      !durable_launch || durable_launch->event_id != launch_id ||
+      durable_launch->event_type != "worker.launch_requested" ||
+      durable_launch->run_id != launch.run_id ||
+      durable_launch->node_id != launch.node_id ||
+      durable_launch->attempt_id != launch.attempt_id ||
+      durable_launch->payload != expected_payload) {
+    throw AdapterResolutionError(
+        "host launch ticket disagrees with portable adapter authority or durable request");
+  }
+
+  if (const auto retained = resolved_launches_.find(launch_id);
+      retained != resolved_launches_.end()) {
+    const ResolvedLaunchSpec durable = controller.bind_worker_launch(
+        retained->second, host_launch_registry_, authority_host_,
+        now_ns);
+    if (durable != retained->second.spec()) {
+      throw std::runtime_error(
+          "durable host launch binding disagrees with retained authority bundle");
+    }
+    return durable;
+  }
+
+  ResolvedLaunch resolved = host_launch_resolver_.resolve(launch, key);
+  require_retained_launch_capacity(resolved.spec());
+  const ResolvedLaunchSpec durable = controller.bind_worker_launch(
+      resolved, host_launch_registry_, authority_host_, authority_now_ns());
+  if (durable != resolved.spec()) {
+    throw std::runtime_error(
+        "durable host launch binding disagrees with resolved authority bundle");
+  }
+  const auto [retained, inserted] =
+      resolved_launches_.emplace(launch_id, std::move(resolved));
+  if (!inserted || retained->second.spec() != durable) {
+    throw std::runtime_error(
+        "host launch bundle cache rejected an exact committed binding");
+  }
+  return durable;
 }
 
 bool TrainVMService::claim_worker_attempt(const std::string& key) {
@@ -759,6 +970,31 @@ grpc::Status TrainVMService::open_worker_connection(
     }
     adapter_registry_.validate_submission_lock(
         *plan, created->payload.at("submission"));
+
+    const std::string launch_id =
+        hello.run_id + ":worker-launch:" + hello.node_id + ":" +
+        hello.attempt_id;
+    const auto binding = journal_.launch_binding(launch_id);
+    const auto retained = resolved_launches_.find(launch_id);
+    if (!binding || retained == resolved_launches_.end() ||
+        retained->second.spec() != *binding ||
+        binding->identity.host != authority_host_ ||
+        binding->identity.host_registry_digest !=
+            host_launch_registry_.registry_digest()) {
+      return {grpc::StatusCode::FAILED_PRECONDITION,
+              "worker readiness requires the current authority's exact retained host launch bundle"};
+    }
+    try {
+      if (binding->identity.host_profile_digest !=
+          host_launch_registry_.profile_digest(
+              binding->identity.adapter_key,
+              binding->identity.code_fingerprint)) {
+        return {grpc::StatusCode::FAILED_PRECONDITION,
+                "worker host launch profile has drifted from current authority"};
+      }
+    } catch (const HostLaunchResolutionError& exception) {
+      return {grpc::StatusCode::FAILED_PRECONDITION, exception.what()};
+    }
 
     const WorkerReadinessResult readiness =
         controller.accept_worker_hello(hello, authority_now_ns());
@@ -881,6 +1117,11 @@ grpc::Status TrainVMService::complete_worker_connection(
         observed_state(committed_projection->observed_state));
     receipt.set_next_node_id(committed_projection->current_node_id);
     receipt.set_next_attempt_id(committed_projection->current_attempt_id);
+    const std::string launch_id = connection.identity.run_id +
+                                  ":worker-launch:" +
+                                  connection.identity.node_id + ":" +
+                                  connection.identity.attempt_id;
+    resolved_launches_.erase(launch_id);
     return grpc::Status::OK;
   } catch (const std::exception& exception) {
     return worker_failure(exception);
@@ -1239,7 +1480,8 @@ grpc::Status TrainVMService::CommandRun(grpc::ServerContext* context,
 
 int serve(const std::filesystem::path& journal_path,
           const std::filesystem::path& socket_path,
-          AdapterRegistry adapter_registry) {
+          AdapterRegistry adapter_registry,
+          HostLaunchRegistry host_launch_registry) {
   if (journal_path.empty() || socket_path.empty()) {
     throw std::invalid_argument("serve requires journal and socket paths");
   }
@@ -1253,7 +1495,8 @@ int serve(const std::filesystem::path& journal_path,
   // Acquire journal authority before touching the socket. Otherwise a second
   // daemon pointed at the same paths could unlink the live authority's socket
   // and only then discover that it cannot acquire the journal lock.
-  TrainVMService service(journal_path, std::move(adapter_registry));
+  TrainVMService service(journal_path, std::move(adapter_registry),
+                         std::move(host_launch_registry));
   SocketAuthorityLock socket_authority(absolute_socket);
   remove_stale_socket(absolute_socket);
   SocketCleanupGuard socket_cleanup(absolute_socket);
