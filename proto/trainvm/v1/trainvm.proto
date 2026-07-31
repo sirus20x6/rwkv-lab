@@ -1,0 +1,354 @@
+syntax = "proto3";
+
+package trainvm.v1;
+
+import "google/protobuf/any.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "trainboard/gen/trainvm/v1;trainvmv1";
+
+// The protocol is deliberately independent of the human-authored experiment
+// document. TrainVM validates that document and returns a canonical plan hash.
+
+enum DesiredState {
+  DESIRED_STATE_UNSPECIFIED = 0;
+  DESIRED_STATE_QUEUED = 1;
+  DESIRED_STATE_RUNNING = 2;
+  DESIRED_STATE_PAUSED = 3;
+  DESIRED_STATE_CANCELLED = 4;
+  DESIRED_STATE_COMPLETED = 5;
+}
+
+enum ObservedState {
+  OBSERVED_STATE_UNSPECIFIED = 0;
+  OBSERVED_STATE_DRAFT = 1;
+  OBSERVED_STATE_VALIDATED = 2;
+  OBSERVED_STATE_QUEUED = 3;
+  OBSERVED_STATE_ACQUIRING = 4;
+  OBSERVED_STATE_RUNNING = 5;
+  OBSERVED_STATE_PAUSING = 6;
+  OBSERVED_STATE_PAUSED = 7;
+  OBSERVED_STATE_RECOVERING = 8;
+  OBSERVED_STATE_COMPLETING = 9;
+  OBSERVED_STATE_COMPLETED = 10;
+  OBSERVED_STATE_CANCELLING = 11;
+  OBSERVED_STATE_CANCELLED = 12;
+  OBSERVED_STATE_FAILING = 13;
+  OBSERVED_STATE_FAILED = 14;
+  OBSERVED_STATE_BLOCKED = 15;
+}
+
+enum ApplyPoint {
+  APPLY_POINT_UNSPECIFIED = 0;
+  APPLY_POINT_IMMEDIATE = 1;
+  APPLY_POINT_NEXT_MICROBATCH = 2;
+  APPLY_POINT_NEXT_OPTIMIZER_STEP = 3;
+  APPLY_POINT_NEXT_EVAL = 4;
+  APPLY_POINT_NEXT_CHECKPOINT = 5;
+  APPLY_POINT_RESTART = 6;
+}
+
+enum ArtifactKind {
+  ARTIFACT_KIND_UNSPECIFIED = 0;
+  ARTIFACT_KIND_PATH = 1;
+  ARTIFACT_KIND_CHECKPOINT = 2;
+  ARTIFACT_KIND_DATASET = 3;
+  ARTIFACT_KIND_IMAGE_GALLERY = 4;
+  ARTIFACT_KIND_METRICS = 5;
+  ARTIFACT_KIND_REPORT = 6;
+  ARTIFACT_KIND_OPAQUE = 7;
+}
+
+message Diagnostic {
+  enum Severity {
+    SEVERITY_UNSPECIFIED = 0;
+    SEVERITY_INFO = 1;
+    SEVERITY_WARNING = 2;
+    SEVERITY_ERROR = 3;
+  }
+
+  Severity severity = 1;
+  string code = 2;
+  string document_path = 3;
+  string message = 4;
+  string help = 5;
+}
+
+message ScalarValue {
+  oneof value {
+    double number_value = 1;
+    sint64 integer_value = 2;
+    bool boolean_value = 3;
+    string string_value = 4;
+  }
+}
+
+message RunIdentity {
+  string run_id = 1;
+  uint64 revision = 2;
+  string plan_hash = 3;
+}
+
+message RunSummary {
+  RunIdentity identity = 1;
+  string experiment_name = 2;
+  DesiredState desired_state = 3;
+  ObservedState observed_state = 4;
+  string current_node_id = 5;
+  string current_attempt_id = 6;
+  uint64 optimizer_step = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+  google.protobuf.Timestamp last_heartbeat_at = 10;
+  string wait_reason = 11;
+  string failure_summary = 12;
+  uint64 effective_control_revision = 13;
+}
+
+message SubmitExperimentRequest {
+  string source_document = 1;
+  string source_format = 2; // json or yaml
+  bool create_run = 3;
+  string idempotency_key = 4;
+}
+
+message SubmitExperimentResponse {
+  string canonical_document = 1;
+  string canonical_plan = 2;
+  string plan_hash = 3;
+  repeated Diagnostic diagnostics = 4;
+  RunIdentity run = 5; // absent when create_run is false or validation fails
+}
+
+message PlanDiffRequest {
+  string run_id = 1;
+  uint64 expected_revision = 2;
+  string proposed_source_document = 3;
+  string source_format = 4;
+}
+
+message PlanDiffResponse {
+  bool adoptable_in_place = 1;
+  string semantic_diff = 2;
+  string proposed_plan_hash = 3;
+  repeated Diagnostic diagnostics = 4;
+}
+
+message PauseCommand {
+  bool checkpoint_first = 1;
+  bool release_resources = 2;
+}
+
+message ResumeCommand {}
+
+message CheckpointCommand {
+  string reason = 1;
+}
+
+message CancelCommand {
+  string reason = 1;
+  google.protobuf.Duration graceful_timeout = 2;
+}
+
+message ControlAssignment {
+  string key = 1;
+  ScalarValue value = 2;
+}
+
+message ControlPatchCommand {
+  uint64 expected_control_revision = 1;
+  repeated ControlAssignment assignments = 2;
+}
+
+message AdoptPlanRevisionCommand {
+  string proposed_source_document = 1;
+  string source_format = 2;
+  string expected_plan_hash = 3;
+}
+
+message RunCommandRequest {
+  string run_id = 1;
+  uint64 expected_run_revision = 2;
+  string idempotency_key = 3;
+  string author = 4;
+  string reason = 5;
+  oneof command {
+    PauseCommand pause = 10;
+    ResumeCommand resume = 11;
+    CheckpointCommand checkpoint = 12;
+    CancelCommand cancel = 13;
+    ControlPatchCommand controls = 14;
+    AdoptPlanRevisionCommand adopt_plan = 15;
+  }
+}
+
+message RunCommandResponse {
+  enum Disposition {
+    DISPOSITION_UNSPECIFIED = 0;
+    DISPOSITION_ACCEPTED = 1;
+    DISPOSITION_ALREADY_APPLIED = 2;
+    DISPOSITION_REJECTED = 3;
+    DISPOSITION_CONFLICT = 4;
+  }
+
+  Disposition disposition = 1;
+  RunSummary run = 2;
+  uint64 command_sequence = 3;
+  repeated Diagnostic diagnostics = 4;
+}
+
+message ArtifactManifest {
+  string artifact_id = 1;
+  string logical_name = 2;
+  ArtifactKind kind = 3;
+  string schema = 4;
+  string uri = 5;
+  uint64 size_bytes = 6;
+  string fingerprint_algorithm = 7;
+  string fingerprint = 8;
+  bool complete = 9;
+  string producer_node_id = 10;
+  string producer_attempt_id = 11;
+  repeated string parent_artifact_ids = 12;
+  google.protobuf.Timestamp published_at = 13;
+}
+
+message EventEnvelope {
+  uint64 journal_sequence = 1;
+  string event_id = 2;
+  string run_id = 3;
+  uint64 plan_revision = 4;
+  string node_id = 5;
+  string attempt_id = 6;
+  uint64 worker_sequence = 7;
+  string event_type = 8;
+  uint32 event_version = 9;
+  google.protobuf.Timestamp wall_time = 10;
+  uint64 monotonic_time_ns = 11;
+  optional uint64 optimizer_step = 12;
+  google.protobuf.Any payload = 13;
+}
+
+message MetricSample {
+  string name = 1;
+  ScalarValue value = 2;
+  string unit = 3;
+  string step_domain = 4;
+  uint64 step = 5;
+  double sample_weight = 6;
+  map<string, string> labels = 7;
+  google.protobuf.Timestamp observed_at = 8;
+}
+
+message WorkerHello {
+  string run_id = 1;
+  string node_id = 2;
+  string attempt_id = 3;
+  string launch_nonce = 4;
+  string adapter = 5;
+  string adapter_version = 6;
+  string code_fingerprint = 7;
+  repeated string capabilities = 8;
+  uint64 last_acked_controller_sequence = 9;
+}
+
+message WorkerHeartbeat {
+  uint64 worker_sequence = 1;
+  uint64 optimizer_step = 2;
+  string phase = 3;
+  google.protobuf.Timestamp observed_at = 4;
+}
+
+message ControlPatchAcknowledgement {
+  enum Disposition {
+    DISPOSITION_UNSPECIFIED = 0;
+    DISPOSITION_APPLIED = 1;
+    DISPOSITION_REJECTED = 2;
+    DISPOSITION_RESTART_REQUIRED = 3;
+  }
+
+  uint64 control_revision = 1;
+  Disposition disposition = 2;
+  ApplyPoint apply_point = 3;
+  uint64 effective_step = 4;
+  repeated ControlAssignment effective_values = 5;
+  repeated Diagnostic diagnostics = 6;
+}
+
+message WorkerToController {
+  oneof message {
+    WorkerHello hello = 1;
+    WorkerHeartbeat heartbeat = 2;
+    EventEnvelope event = 3;
+    MetricSample metric = 4;
+    ArtifactManifest artifact = 5;
+    ControlPatchAcknowledgement control_ack = 6;
+  }
+}
+
+message WorkerCommand {
+  uint64 controller_sequence = 1;
+  string command_id = 2;
+  oneof command {
+    PauseCommand pause = 10;
+    ResumeCommand resume = 11;
+    CheckpointCommand checkpoint = 12;
+    CancelCommand cancel = 13;
+    ControlPatchCommand controls = 14;
+  }
+}
+
+message ControllerToWorker {
+  oneof message {
+    WorkerCommand command = 1;
+    uint64 acknowledge_worker_sequence = 2;
+  }
+}
+
+message GetRunRequest {
+  string run_id = 1;
+}
+
+message ListRunsRequest {
+  repeated ObservedState observed_states = 1;
+  map<string, string> labels = 2;
+  uint32 limit = 3;
+  string page_token = 4;
+}
+
+message ListRunsResponse {
+  repeated RunSummary runs = 1;
+  string next_page_token = 2;
+}
+
+message WatchEventsRequest {
+  repeated string run_ids = 1;
+  uint64 after_journal_sequence = 2;
+  repeated string event_types = 3;
+}
+
+message DescriptorRequest {
+  string adapter = 1;
+  string version = 2;
+}
+
+message DescriptorResponse {
+  // Versioned JSON Schema remains the canonical editor/operation descriptor.
+  string schema_json = 1;
+  string schema_hash = 2;
+}
+
+service TrainVM {
+  rpc SubmitExperiment(SubmitExperimentRequest) returns (SubmitExperimentResponse);
+  rpc DiffPlan(PlanDiffRequest) returns (PlanDiffResponse);
+  rpc CommandRun(RunCommandRequest) returns (RunCommandResponse);
+  rpc GetRun(GetRunRequest) returns (RunSummary);
+  rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
+  rpc WatchEvents(WatchEventsRequest) returns (stream EventEnvelope);
+  rpc GetDescriptor(DescriptorRequest) returns (DescriptorResponse);
+}
+
+service WorkerControl {
+  rpc Connect(stream WorkerToController) returns (stream ControllerToWorker);
+}

@@ -3,6 +3,11 @@
 GPU-accelerated, real-time training dashboard for the RWKV-Lab conversion project.
 **Stack:** Go + SQLite + Datastar + Pixi.js. Successor to `../dashboard/` (FastAPI + Chart.js).
 
+The proposed next control-plane architecture is documented in
+[`docs/experiment-vm/ARCHITECTURE.md`](../docs/experiment-vm/ARCHITECTURE.md). It keeps this Go UI
+while moving declarative plan validation, process ownership, recovery, live controls, and the event
+journal into a typed compiled TrainVM runtime.
+
 ## Run
 
 ```bash

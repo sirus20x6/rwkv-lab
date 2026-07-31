@@ -1,0 +1,349 @@
+{
+  "api_version": "trainvm.rwkv-lab/v1alpha1",
+  "kind": "Experiment",
+  "metadata": {
+    "name": "mageflow-cache-handoff-resume",
+    "description": "Train to a cache boundary, materialize and validate the remaining encoder cache, then resume exactly.",
+    "labels": {
+      "family": "mageflow",
+      "domain": "mixed-animation-photo"
+    }
+  },
+  "spec": {
+    "workspace": {
+      "root": "/thearray/git/moe-mla",
+      "run_directory": "/thearray/git/moe-mla/runs/mage_flow_terminal_tread_loop_repa_fixed_v2",
+      "concurrency_key": "local-gpu-training",
+      "allowed_read_roots": [
+        "/thearray/git/moe-mla",
+        "/thearray/git/datasets",
+        "/mnt/hypercard/mageflow-cache"
+      ],
+      "allowed_write_roots": [
+        "/thearray/git/moe-mla/runs/mage_flow_terminal_tread_loop_repa_fixed_v2",
+        "/mnt/hypercard/mageflow-cache"
+      ]
+    },
+    "resources": {
+      "accelerators": {
+        "vendor": "nvidia",
+        "count": 1,
+        "minimum_memory_gib": 48,
+        "exclusive": true
+      },
+      "minimum_host_memory_gib": 64,
+      "cpu_threads": 16,
+      "lease_timeout_seconds": 30
+    },
+    "parameters": {
+      "source_config": {
+        "type": "path",
+        "value": "/thearray/git/moe-mla/experiments/mageflow_terminal_repa_fixed_v2.json"
+      },
+      "cache_directory": {
+        "type": "path",
+        "value": "/mnt/hypercard/mageflow-cache/mageflow-steps-00005501-00012228"
+      },
+      "target_step": {"type": "integer", "value": 5500},
+      "final_step": {"type": "integer", "value": 12228}
+    },
+    "artifacts": {
+      "checkpoint": {
+        "type": "checkpoint",
+        "schema": "rwkv-lab.mageflow-checkpoint.v1",
+        "immutability": "immutable",
+        "fingerprint": "manifest_sha256"
+      },
+      "cache_plan": {
+        "type": "report",
+        "schema": "rwkv-lab.mageflow-cache-plan.v1",
+        "immutability": "immutable",
+        "fingerprint": "sha256"
+      },
+      "encoder_cache": {
+        "type": "dataset",
+        "schema": "rwkv-lab.encoder-cache.v1",
+        "immutability": "mutable_until_publish",
+        "fingerprint": "manifest_sha256"
+      },
+      "eval_gallery": {
+        "type": "image_gallery",
+        "schema": "rwkv-lab.eval-gallery.v2",
+        "immutability": "append_only",
+        "fingerprint": "manifest_sha256",
+        "required": false
+      },
+      "trainer_log": {
+        "type": "path",
+        "immutability": "append_only",
+        "fingerprint": "none",
+        "required": false
+      }
+    },
+    "components": {
+      "core": {
+        "adapter": "trainvm.core",
+        "version": "1.0.0",
+        "runtime": "builtin",
+        "operations": {
+          "acquire_resources": {"contract": "trainvm.v1.AcquireResources"},
+          "validate_artifact": {"contract": "trainvm.v1.ValidateArtifact"},
+          "release_resources": {"contract": "trainvm.v1.ReleaseResources"}
+        }
+      },
+      "mageflow": {
+        "adapter": "rwkv-lab.mageflow",
+        "version": "1.0.0",
+        "runtime": "python_worker",
+        "operations": {
+          "train": {"contract": "rwkv_lab.mageflow.v1.Train"},
+          "prepare_cache_span": {"contract": "rwkv_lab.mageflow.v1.PrepareCacheSpan"},
+          "cache_encoders": {"contract": "rwkv_lab.mageflow.v1.CacheEncoders"}
+        }
+      }
+    },
+    "workflow": {
+      "entrypoint": "acquire_gpu",
+      "nodes": {
+        "acquire_gpu": {
+          "description": "Acquire the durable exclusive training lease.",
+          "invoke": {
+            "component": "core",
+            "operation": "acquire_resources",
+            "inputs": {
+              "concurrency_key": {"literal": "local-gpu-training"}
+            }
+          },
+          "idempotency": "receipt_required",
+          "effect": "resource",
+          "transitions": [
+            {"on": "resource.acquired", "target": "train_to_boundary"},
+            {"on": "operation.failed", "target": "$failed"}
+          ]
+        },
+        "train_to_boundary": {
+          "description": "Continue the existing run until it reports either the planned cache boundary or completion.",
+          "invoke": {
+            "component": "mageflow",
+            "operation": "train",
+            "inputs": {
+              "config": {"parameter": "source_config"},
+              "stop_at_step": {"parameter": "target_step"},
+              "run_directory": {"context": "run_directory"}
+            }
+          },
+          "publishes": {
+            "checkpoint": "checkpoint",
+            "eval_gallery": "eval_gallery",
+            "log": "trainer_log"
+          },
+          "idempotency": "receipt_required",
+          "effect": "process",
+          "retry": {
+            "maximum_attempts": 3,
+            "backoff": "fixed",
+            "initial_delay_seconds": 5,
+            "retryable_events": ["worker.lost"]
+          },
+          "transitions": [
+            {
+              "on": "worker.completed",
+              "where": {"field": "reason", "operator": "eq", "value": "cache_span_complete"},
+              "target": "prepare_cache"
+            },
+            {
+              "on": "worker.completed",
+              "where": {"field": "reason", "operator": "eq", "value": "training_complete"},
+              "target": "release_gpu"
+            },
+            {"on": "operation.failed", "target": "$failed"}
+          ]
+        },
+        "prepare_cache": {
+          "invoke": {
+            "component": "mageflow",
+            "operation": "prepare_cache_span",
+            "inputs": {
+              "config": {"parameter": "source_config"},
+              "checkpoint": {"artifact": "checkpoint"},
+              "final_step": {"parameter": "final_step"},
+              "output_directory": {"parameter": "cache_directory"}
+            }
+          },
+          "publishes": {"plan": "cache_plan"},
+          "idempotency": "replay_safe",
+          "effect": "workspace_write",
+          "transitions": [
+            {"on": "operation.completed", "target": "build_cache"},
+            {"on": "operation.failed", "target": "$failed"}
+          ]
+        },
+        "build_cache": {
+          "invoke": {
+            "component": "mageflow",
+            "operation": "cache_encoders",
+            "inputs": {
+              "plan": {"artifact": "cache_plan"},
+              "output_directory": {"parameter": "cache_directory"}
+            }
+          },
+          "publishes": {"cache": "encoder_cache"},
+          "idempotency": "receipt_required",
+          "effect": "process",
+          "retry": {
+            "maximum_attempts": 3,
+            "backoff": "exponential",
+            "initial_delay_seconds": 5,
+            "maximum_delay_seconds": 60,
+            "retryable_events": ["worker.lost", "worker.out_of_memory"]
+          },
+          "transitions": [
+            {"on": "operation.completed", "target": "validate_cache"},
+            {"on": "operation.failed", "target": "$failed"}
+          ]
+        },
+        "validate_cache": {
+          "invoke": {
+            "component": "core",
+            "operation": "validate_artifact",
+            "inputs": {
+              "artifact": {"artifact": "encoder_cache"},
+              "required_schema": {"literal": "rwkv-lab.encoder-cache.v1"}
+            }
+          },
+          "idempotency": "replay_safe",
+          "effect": "read_only",
+          "transitions": [
+            {"on": "artifact.validated", "target": "resume_training"},
+            {"on": "artifact.invalid", "target": "$failed"}
+          ]
+        },
+        "resume_training": {
+          "description": "Resume exactly; a planned clean-process eval restart loops through this node with monotonic step progress.",
+          "invoke": {
+            "component": "mageflow",
+            "operation": "train",
+            "inputs": {
+              "config": {"parameter": "source_config"},
+              "checkpoint": {"artifact": "checkpoint"},
+              "encoder_cache": {"artifact": "encoder_cache"},
+              "run_directory": {"context": "run_directory"}
+            }
+          },
+          "publishes": {
+            "checkpoint": "checkpoint",
+            "eval_gallery": "eval_gallery",
+            "log": "trainer_log"
+          },
+          "idempotency": "receipt_required",
+          "effect": "process",
+          "loop_guard": {
+            "max_visits": 128,
+            "progress_field": "step",
+            "direction": "increasing"
+          },
+          "transitions": [
+            {"on": "worker.restart_requested", "target": "resume_training"},
+            {"on": "worker.completed", "target": "release_gpu"},
+            {"on": "operation.failed", "target": "$failed"}
+          ]
+        },
+        "release_gpu": {
+          "invoke": {
+            "component": "core",
+            "operation": "release_resources",
+            "inputs": {
+              "concurrency_key": {"literal": "local-gpu-training"}
+            }
+          },
+          "idempotency": "replay_safe",
+          "effect": "resource",
+          "transitions": [
+            {"on": "resource.released", "target": "$completed"},
+            {"on": "operation.failed", "target": "$failed"}
+          ]
+        }
+      }
+    },
+    "controls": {
+      "catalog": {
+        "learning_rate": {
+          "type": "number",
+          "default": 0.000001,
+          "minimum": 0,
+          "maximum": 0.001,
+          "apply": "next_optimizer_step",
+          "mutable_after_start": true,
+          "targets": ["mageflow.train.learning_rate"],
+          "unit": "ratio"
+        },
+        "eval_every": {
+          "type": "integer",
+          "default": 500,
+          "minimum": 1,
+          "maximum": 100000,
+          "apply": "next_optimizer_step",
+          "mutable_after_start": true,
+          "targets": ["mageflow.train.eval_every"],
+          "unit": "optimizer_step"
+        },
+        "caption_dropout": {
+          "type": "number",
+          "default": 0.1,
+          "minimum": 0,
+          "maximum": 1,
+          "apply": "next_microbatch",
+          "mutable_after_start": true,
+          "targets": ["mageflow.train.caption_dropout"],
+          "unit": "ratio"
+        },
+        "mixed_precision": {
+          "type": "enum",
+          "default": "bf16",
+          "values": ["bf16", "fp16"],
+          "apply": "restart",
+          "mutable_after_start": true,
+          "requires_pause": true,
+          "targets": ["mageflow.train.mixed_precision"]
+        }
+      }
+    },
+    "observability": {
+      "heartbeat_seconds": 5,
+      "metrics": [
+        {
+          "name": "train.loss",
+          "type": "gauge",
+          "unit": "dimensionless",
+          "step_domain": "optimizer_step",
+          "aggregation": "weighted_mean"
+        },
+        {
+          "name": "train.images_per_second",
+          "type": "gauge",
+          "unit": "image/second",
+          "step_domain": "wall_time",
+          "aggregation": "mean"
+        },
+        {
+          "name": "system.gpu_memory_used",
+          "type": "gauge",
+          "unit": "byte",
+          "step_domain": "wall_time",
+          "aggregation": "max"
+        }
+      ],
+      "retain_raw_metrics_days": 30,
+      "eval_gallery_artifact": "eval_gallery",
+      "log_artifact": "trainer_log"
+    },
+    "recovery": {
+      "exact_resume": true,
+      "checkpoint_artifact": "checkpoint",
+      "reconcile": "adopt_if_fingerprint_matches",
+      "orphan_policy": "adopt_if_identity_matches",
+      "graceful_stop_seconds": 300,
+      "release_accelerators_when_paused": true
+    }
+  }
+}
