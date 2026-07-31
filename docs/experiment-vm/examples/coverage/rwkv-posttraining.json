@@ -1,0 +1,135 @@
+{
+  "api_version": "trainvm.rwkv-lab/v1alpha1",
+  "kind": "Experiment",
+  "metadata": {
+    "name": "coverage-rwkv-posttraining",
+    "description": "Compiler coverage for validated RWKV SFT data and a bounded restart-only adapter-training arm.",
+    "labels": {"family": "rwkv-posttraining", "fixture": "compiler-coverage"}
+  },
+  "spec": {
+    "workspace": {
+      "root": "/thearray/git/moe-mla",
+      "run_directory": "/thearray/git/moe-mla/runs/trainvm-coverage/rwkv-posttraining",
+      "concurrency_key": "coverage-rwkv-posttraining",
+      "allowed_read_roots": ["/thearray/git/moe-mla"],
+      "allowed_write_roots": ["/thearray/git/moe-mla/runs/trainvm-coverage/rwkv-posttraining"]
+    },
+    "resources": {
+      "accelerators": {"vendor": "nvidia", "count": 1, "minimum_memory_gib": 24, "exclusive": true},
+      "minimum_host_memory_gib": 32,
+      "cpu_threads": 8,
+      "lease_timeout_seconds": 30,
+      "cpu_io_policy": {"cpu_weight": 100, "io_weight": 100, "omp_threads": 4, "preprocessing_workers": 4, "nice": 0}
+    },
+    "parameters": {
+      "base_checkpoint_path": {"type": "path", "value": "/thearray/git/moe-mla/fixtures/checkpoints/rwkv-posttrain-base.pt"},
+      "source_dataset_path": {"type": "path", "value": "/thearray/git/moe-mla/fixtures/posttrain/sft.jsonl"},
+      "scored_token_budget": {"type": "integer", "value": 524288}
+    },
+    "artifacts": {
+      "validated_dataset": {"type": "dataset", "schema": "coverage.posttrain-dataset.v1", "immutability": "immutable", "fingerprint": "manifest_sha256"},
+      "base_checkpoint": {"type": "checkpoint", "schema": "coverage.rwkv-base-checkpoint.v1", "immutability": "immutable", "fingerprint": "sha256"},
+      "adapter_bundle": {"type": "opaque", "schema": "coverage.rwkv-adapter.v1", "immutability": "immutable", "fingerprint": "manifest_sha256"},
+      "training_report": {"type": "report", "schema": "coverage.posttrain-report.v1", "immutability": "immutable", "fingerprint": "sha256"}
+    },
+    "components": {
+      "core": {
+        "adapter": "trainvm.core",
+        "version": "1.0.0",
+        "runtime": "builtin",
+        "operations": {
+          "acquire_resources": {"contract": "trainvm.v1.AcquireResources"},
+          "release_resources": {"contract": "trainvm.v1.ReleaseResources"}
+        }
+      },
+      "rwkv_posttrain": {
+        "adapter": "coverage.rwkv-posttrain",
+        "version": "1.0.0-coverage",
+        "runtime": "python_worker",
+        "operations": {
+          "validate_inputs": {"contract": "coverage.rwkv_posttrain.v1.ValidateSftInputs"},
+          "train_sft": {"contract": "coverage.rwkv_posttrain.v1.TrainRestartOnlySft"}
+        }
+      }
+    },
+    "workflow": {
+      "entrypoint": "acquire_resources",
+      "nodes": {
+        "acquire_resources": {
+          "invoke": {"component": "core", "operation": "acquire_resources", "inputs": {
+            "concurrency_key": {"literal": "coverage-rwkv-posttraining"}
+          }},
+          "idempotency": "receipt_required",
+          "effect": "resource",
+          "transitions": [
+            {"on": "resource.acquired", "target": "validate_inputs"},
+            {"on": "operation.failed", "target": "$failed"}
+          ]
+        },
+        "validate_inputs": {
+          "invoke": {"component": "rwkv_posttrain", "operation": "validate_inputs", "inputs": {
+            "base": {"parameter": "base_checkpoint_path"},
+            "dataset": {"parameter": "source_dataset_path"},
+            "run_directory": {"context": "run_directory"}
+          }},
+          "publishes": {"base": "base_checkpoint", "dataset": "validated_dataset"},
+          "idempotency": "replay_safe",
+          "effect": "workspace_write",
+          "timeout_seconds": 900,
+          "transitions": [
+            {"on": "artifact.validated", "target": "train_sft"},
+            {"on": "artifact.invalid", "target": "$failed"}
+          ]
+        },
+        "train_sft": {
+          "invoke": {"component": "rwkv_posttrain", "operation": "train_sft", "inputs": {
+            "base": {"artifact": "base_checkpoint"},
+            "dataset": {"artifact": "validated_dataset"},
+            "scored_tokens": {"parameter": "scored_token_budget"},
+            "run_directory": {"context": "run_directory"}
+          }},
+          "publishes": {"adapter": "adapter_bundle", "report": "training_report"},
+          "idempotency": "receipt_required",
+          "effect": "process",
+          "timeout_seconds": 43200,
+          "transitions": [
+            {"on": "worker.completed", "target": "release_resources"},
+            {"on": "operation.failed", "target": "$failed"}
+          ]
+        },
+        "release_resources": {
+          "invoke": {"component": "core", "operation": "release_resources", "inputs": {
+            "concurrency_key": {"literal": "coverage-rwkv-posttraining"}
+          }},
+          "idempotency": "replay_safe",
+          "effect": "resource",
+          "transitions": [
+            {"on": "resource.released", "target": "$completed"},
+            {"on": "operation.failed", "target": "$failed"}
+          ]
+        }
+      }
+    },
+    "controls": {"catalog": {
+      "learning_rate": {
+        "type": "number", "default": 0.0001, "minimum": 0, "maximum": 0.01,
+        "apply": "restart", "mutable_after_start": false,
+        "targets": ["rwkv_posttrain.train_sft.learning_rate"], "unit": "ratio"
+      }
+    }},
+    "observability": {
+      "heartbeat_seconds": 10,
+      "metrics": [
+        {"name": "train.scored_token_loss", "type": "gauge", "unit": "dimensionless", "step_domain": "token", "aggregation": "weighted_mean"},
+        {"name": "train.scored_tokens", "type": "counter", "unit": "token", "step_domain": "token", "aggregation": "sum"}
+      ],
+      "retain_raw_metrics_days": 30
+    },
+    "recovery": {
+      "exact_resume": false,
+      "reconcile": "fail_closed",
+      "orphan_policy": "leave_and_block",
+      "graceful_stop_seconds": 120
+    }
+  }
+}

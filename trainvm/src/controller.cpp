@@ -1075,11 +1075,20 @@ LeaseAcquireResult Controller::begin_acquisition(
       admission_state.current_node_id);
   const Component& admission_component =
       plan_.experiment.spec.components.at(admission_node.invoke.component);
+  const auto admission_operation =
+      admission_component.operations.find(admission_node.invoke.operation);
   if (admission_component.runtime != ComponentRuntime::builtin ||
       admission_component.adapter != "trainvm.core" ||
-      admission_node.invoke.operation != "acquire_resources") {
+      admission_component.version != "1.0.0" ||
+      admission_node.invoke.operation != "acquire_resources" ||
+      admission_operation == admission_component.operations.end() ||
+      admission_operation->second.contract !=
+          "trainvm.v1.AcquireResources" ||
+      admission_node.effect != Effect::resource ||
+      admission_node.idempotency != Idempotency::receipt_required) {
     throw std::logic_error(
-        "queued admission supports only builtin trainvm.core acquire_resources");
+        "queued admission supports only the exact builtin trainvm.core 1.0.0 "
+        "acquire_resources contract");
   }
   const Transition* admission_transition = nullptr;
   for (const Transition& transition : admission_node.transitions) {

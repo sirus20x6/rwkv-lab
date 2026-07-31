@@ -1,0 +1,831 @@
+{
+  "api_version": "trainvm.compatibility-workflows/v1",
+  "authority": "compatibility_evidence_only",
+  "source_tree_digest": "sha256:54b7d9290c18c8ddf63b7474bdb9085d4dd492110230a8cca44e0bec9fa8236c",
+  "entries": [
+    {
+      "stable_id": "rwkv.synthetic-campaign",
+      "family": "rwkv",
+      "source_paths": [
+        "src/rwkv_lab/experiment.py",
+        "src/rwkv_lab/config.py"
+      ],
+      "stateful": true,
+      "operation_role": "campaign",
+      "notes": "Synthetic paired, factorial, halving, and confirmation campaigns. This records a discovered Python module mechanism, not launch permission.",
+      "observed_invocation": "python_module",
+      "resume_evidence": "compatible",
+      "legacy_invocation_display": "python -m rwkv_lab.experiment; python -m rwkv_lab.config run <config>"
+    },
+    {
+      "stable_id": "rwkv.scratch-pretrain",
+      "family": "rwkv",
+      "source_paths": [
+        "src/rwkv_lab/rwkv_pretrain.py"
+      ],
+      "stateful": true,
+      "operation_role": "training",
+      "notes": "Scratch RWKV and G1G continuation trainer. The observed legacy contract publishes terminal state but does not seal exact mid-run recovery.",
+      "observed_invocation": "python_module",
+      "resume_evidence": "terminal_checkpoint",
+      "legacy_invocation_display": "python -m rwkv_lab.rwkv_pretrain <arguments>"
+    },
+    {
+      "stable_id": "rwkv.optimizer-finetune",
+      "family": "rwkv",
+      "source_paths": [
+        "src/rwkv_lab/rwkv_finetune.py"
+      ],
+      "stateful": true,
+      "operation_role": "training",
+      "notes": "Bounded recurrent optimizer comparison trainer; interruption restarts an arm.",
+      "observed_invocation": "python_module",
+      "resume_evidence": "restart_only",
+      "legacy_invocation_display": "python -m rwkv_lab.rwkv_finetune <arguments>"
+    },
+    {
+      "stable_id": "transformer.mla-train",
+      "family": "transformer_mla",
+      "source_paths": [
+        "src/rwkv_lab/train_mla.py"
+      ],
+      "stateful": true,
+      "operation_role": "training",
+      "notes": "Canonical MLA-family trainer including MTP, auxiliary heads, RWKV replacement, Engram integration, and full-unfreeze modes. Checkpoints omit exact RNG and data-cursor closure.",
+      "observed_invocation": "python_module",
+      "resume_evidence": "compatible",
+      "legacy_invocation_display": "python -m rwkv_lab.train_mla <arguments>"
+    },
+    {
+      "stable_id": "transformer.mla-engram-train",
+      "family": "transformer_mla",
+      "source_paths": [
+        "src/rwkv_lab/train_mla_engram.py"
+      ],
+      "stateful": true,
+      "operation_role": "training",
+      "notes": "Combined MLA and Engram training with weight and optimizer restoration but without exact sampler and RNG recovery.",
+      "observed_invocation": "python_module",
+      "resume_evidence": "compatible",
+      "legacy_invocation_display": "python -m rwkv_lab.train_mla_engram <arguments>"
+    },
+    {
+      "stable_id": "transformer.engram-prefill",
+      "family": "transformer_mla",
+      "source_paths": [
+        "src/rwkv_lab/gpu_engram_prefill.py"
+      ],
+      "stateful": true,
+      "operation_role": "training",
+      "notes": "GPU lexical-memory prefill can warm-start Engram weights, but restarts optimizer, RNG, corpus cursor, and global step.",
+      "observed_invocation": "python_module",
+      "resume_evidence": "compatible",
+      "legacy_invocation_display": "python -m rwkv_lab.gpu_engram_prefill --corpus PATH:TOKENS --out <directory>"
+    },
+    {
+      "stable_id": "transformer.qwen-ao3-cpt",
+      "family": "transformer_mla",
+      "source_paths": [
+        "src/rwkv_lab/qwen_ao3_cpt.py"
+      ],
+      "stateful": true,
+      "operation_role": "training",
+      "notes": "Hybrid QLoRA continued pretraining for the Qwen MoE transformer. Cursor and RNG state exist, while packed data and frozen base bytes are not fully content-bound.",
+      "observed_invocation": "console_script",
+      "resume_evidence": "compatible",
+      "legacy_invocation_display": "qwen-ao3-cpt train --config <config.json>"
+    },
+    {
+      "stable_id": "vision.frozen-adapter-train",
+      "family": "vision_multimodal",
+      "source_paths": [
+        "src/rwkv_lab/vision_train.py"
+      ],
+      "stateful": true,
+      "operation_role": "training",
+      "notes": "Canonical frozen-vision-to-RWKV adapter trainer for MoonViT, RADIO1D, and RADIO-V4H backends with manifest-bound sampler and RNG state.",
+      "observed_invocation": "python_module",
+      "resume_evidence": "exact_candidate",
+      "legacy_invocation_display": "python -m rwkv_lab.vision_train --data <manifest> --eval-data <manifest>"
+    },
+    {
+      "stable_id": "vision.teacher-compressor",
+      "family": "vision_multimodal",
+      "source_paths": [
+        "src/rwkv_lab/vision_teacher_compressor.py"
+      ],
+      "stateful": true,
+      "operation_role": "distillation",
+      "notes": "Manifest-bound multi-teacher representation compressor with atomic sampler and RNG recovery.",
+      "observed_invocation": "python_module",
+      "resume_evidence": "exact_candidate",
+      "legacy_invocation_display": "python -m rwkv_lab.vision_teacher_compressor --data <train.jsonl> --eval-data <eval.jsonl> --out <directory>"
+    },
+    {
+      "stable_id": "vision.native-head-train",
+      "family": "vision_multimodal",
+      "source_paths": [
+        "src/rwkv_lab/vision_native_train.py"
+      ],
+      "stateful": true,
+      "operation_role": "training",
+      "notes": "Native representation head trainer; legacy resume does not preserve a complete sampler cursor and input closure.",
+      "observed_invocation": "python_module",
+      "resume_evidence": "compatible",
+      "legacy_invocation_display": "python -m rwkv_lab.vision_native_train <arguments>"
+    },
+    {
+      "stable_id": "vision.raw-pixel-student",
+      "family": "vision_multimodal",
+      "source_paths": [
+        "src/rwkv_lab/vision_rwkv_student_train.py"
+      ],
+      "stateful": true,
+      "operation_role": "distillation",
+      "notes": "Raw-pixel RWKV student trainer restores sampler and RNG state but does not bind every manifest, cache, baseline, compressor, and native-head input.",
+      "observed_invocation": "python_module",
+      "resume_evidence": "compatible",
+      "legacy_invocation_display": "python -m rwkv_lab.vision_rwkv_student_train <arguments>"
+    },
+    {
+      "stable_id": "mageflow.full-backbone-pretrain",
+      "family": "mageflow_diffusion",
+      "source_paths": [
+        "src/rwkv_lab/mage_flow_pretrain.py"
+      ],
+      "stateful": true,
+      "operation_role": "training",
+      "notes": "Full Mage-Flow-Edit-Base continued pretraining. Accelerate and data position restore usefully, but the complete source identity is not exact.",
+      "observed_invocation": "console_script",
+      "resume_evidence": "compatible",
+      "legacy_invocation_display": "mage-flow-pretrain train --config <train_config.json>"
+    },
+    {
+      "stable_id": "mageflow.routed-expert-train",
+      "family": "mageflow_diffusion",
+      "source_paths": [
+        "src/rwkv_lab/mage_flow_expert_train.py"
+      ],
+      "stateful": true,
+      "operation_role": "training",
+      "notes": "Photo and animation routed expert training with configurable shared-backbone and expert freeze maps.",
+      "observed_invocation": "console_script",
+      "resume_evidence": "compatible",
+      "legacy_invocation_display": "mage-flow-expert-train train --config <train_config.json>"
+    },
+    {
+      "stable_id": "mageflow.terminal-tread-train",
+      "family": "mageflow_diffusion",
+      "source_paths": [
+        "src/rwkv_lab/mage_flow_terminal_train.py"
+      ],
+      "stateful": true,
+      "operation_role": "training",
+      "notes": "Mandatory terminal expert routing and TREAD factored-loop training with cache-span and domain-window handoffs; referenced image and source-checkpoint bytes are not fully content-bound.",
+      "observed_invocation": "python_module",
+      "resume_evidence": "compatible",
+      "legacy_invocation_display": "python -m rwkv_lab.mage_flow_terminal_train train --config <config.json>"
+    },
+    {
+      "stable_id": "mageflow.cache-resume-supervisor",
+      "family": "mageflow_diffusion",
+      "source_paths": [
+        "scripts/mageflow_cache_rest_and_resume.sh",
+        "src/rwkv_lab/mage_flow_terminal_train.py"
+      ],
+      "stateful": true,
+      "operation_role": "supervisor",
+      "notes": "Legacy shell supervisor for a cache-span boundary and terminal-trainer continuation. It polls process and status files; cataloging it does not authorize shell execution or process control.",
+      "observed_invocation": "host_script",
+      "resume_evidence": "compatible",
+      "legacy_invocation_display": "scripts/mageflow_cache_rest_and_resume.sh <arguments>"
+    },
+    {
+      "stable_id": "mageflow.high-resolution-design",
+      "family": "mageflow_diffusion",
+      "source_paths": [
+        "docs/mage_flow_high_resolution_joint_refinement.md"
+      ],
+      "stateful": false,
+      "operation_role": "design_spec",
+      "notes": "Design document only. It is not an implemented trainer and must not be inferred as launchable.",
+      "observed_invocation": "design_only",
+      "resume_evidence": "none"
+    },
+    {
+      "stable_id": "conversion.attention-l3-poc",
+      "family": "conversion_distillation",
+      "source_paths": [
+        "src/rwkv_lab/attn_L3_poc.py"
+      ],
+      "stateful": true,
+      "operation_role": "distillation",
+      "notes": "Standalone full-attention to RWKV block-alignment and optional top-k logit-KL trainer; it publishes only a terminal core checkpoint.",
+      "observed_invocation": "python_module",
+      "resume_evidence": "terminal_checkpoint",
+      "legacy_invocation_display": "python -m rwkv_lab.attn_L3_poc --layer <index> --out <directory>"
+    },
+    {
+      "stable_id": "conversion.per-layer-rwkv-train",
+      "family": "conversion_distillation",
+      "source_paths": [
+        "src/rwkv_lab/convert_train.py"
+      ],
+      "stateful": true,
+      "operation_role": "conversion",
+      "notes": "Main learned per-layer GDN or full-attention to RWKV conversion trainer. It can restore weights and optimizer momentum, but restarts loop step and sampling state.",
+      "observed_invocation": "python_module",
+      "resume_evidence": "compatible",
+      "legacy_invocation_display": "python -m rwkv_lab.convert_train --model-dir <model> --data <tokens> --layer <index> --out <directory>"
+    },
+    {
+      "stable_id": "conversion.stack-consolidation",
+      "family": "conversion_distillation",
+      "source_paths": [
+        "src/rwkv_lab/distill_consolidate.py"
+      ],
+      "stateful": true,
+      "operation_role": "distillation",
+      "notes": "Bounded joint converted-stack consolidation. Interrupted runs restart from immutable inputs.",
+      "observed_invocation": "python_module",
+      "resume_evidence": "restart_only",
+      "legacy_invocation_display": "python -m rwkv_lab.distill_consolidate --model-dir <model> --data <tokens> --rwkv-ckpt <checkpoint>"
+    },
+    {
+      "stable_id": "conversion.lossless-gdn-map",
+      "family": "conversion_distillation",
+      "source_paths": [
+        "src/rwkv_lab/convert_gdn_lossless.py"
+      ],
+      "stateful": false,
+      "operation_role": "conversion",
+      "notes": "Exact in-memory GDN mapping and self-test helper. The existing command does not itself publish an authority-trusted model artifact.",
+      "observed_invocation": "python_module",
+      "resume_evidence": "none",
+      "legacy_invocation_display": "python -m rwkv_lab.convert_gdn_lossless <arguments>"
+    },
+    {
+      "stable_id": "posttraining.rwkv-adapter",
+      "family": "rwkv_posttraining",
+      "source_paths": [
+        "src/rwkv_lab/posttrain_train.py"
+      ],
+      "stateful": true,
+      "operation_role": "training",
+      "notes": "RWKV-only SFT, DPO, KTO, ORPO, SimPO, reward-model, and process-reward adapter training. This is not a generic transformer post-training claim.",
+      "observed_invocation": "python_module",
+      "resume_evidence": "restart_only",
+      "legacy_invocation_display": "python -m rwkv_lab.posttrain_train --checkpoint <rwkv.pt> --data <dataset.jsonl> --output <directory>"
+    },
+    {
+      "stable_id": "posttraining.rwkv-campaign",
+      "family": "rwkv_posttraining",
+      "source_paths": [
+        "src/rwkv_lab/posttrain_campaign.py"
+      ],
+      "stateful": true,
+      "operation_role": "campaign",
+      "notes": "Paired RWKV post-training objective and confirmation campaign. Completed arms can be reused; incomplete arms restart.",
+      "observed_invocation": "python_module",
+      "resume_evidence": "compatible",
+      "legacy_invocation_display": "python -m rwkv_lab.posttrain_campaign <arguments>"
+    },
+    {
+      "stable_id": "rlvr.rwkv-train",
+      "family": "rwkv_rlvr",
+      "source_paths": [
+        "src/rwkv_lab/rlvr_train.py"
+      ],
+      "stateful": true,
+      "operation_role": "training",
+      "notes": "RWKV-checkpoint-only grouped RLVR using GSPO, Dr.GRPO, or DAPO. Legacy resume does not seal configuration, tasks, verifier, reference policy, or input content.",
+      "observed_invocation": "python_module",
+      "resume_evidence": "compatible",
+      "legacy_invocation_display": "python -m rwkv_lab.rlvr_train --ckpt <rwkv.pt> --out <directory>"
+    },
+    {
+      "stable_id": "rlvr.rwkv-campaign",
+      "family": "rwkv_rlvr",
+      "source_paths": [
+        "src/rwkv_lab/rlvr_campaign.py"
+      ],
+      "stateful": true,
+      "operation_role": "campaign",
+      "notes": "Algorithm-by-seed RWKV RLVR campaign that reuses completed arms and restarts incomplete arms.",
+      "observed_invocation": "python_module",
+      "resume_evidence": "compatible",
+      "legacy_invocation_display": "python -m rwkv_lab.rlvr_campaign <arguments>"
+    },
+    {
+      "stable_id": "external.ltx23-lora",
+      "family": "external_trainer",
+      "source_paths": [
+        "src/rwkv_lab/ltx23_lora.py"
+      ],
+      "stateful": true,
+      "operation_role": "supervisor",
+      "notes": "Wrapper around the external LTX-2.3 video and optional audio LoRA trainer. An observed console mechanism is not an approved external revision or host launch.",
+      "observed_invocation": "console_script",
+      "resume_evidence": "compatible",
+      "legacy_invocation_display": "ltx23-lora train --ltx-root <checkout> --model-path <model> --work-dir <directory>"
+    },
+    {
+      "stable_id": "data.engram-allocation",
+      "family": "data_cache",
+      "source_paths": [
+        "src/rwkv_lab/engram_lmb_build.py"
+      ],
+      "stateful": false,
+      "operation_role": "preprocess",
+      "notes": "Offline lexical frequency and allocation builder. It is preprocessing, not Engram model training.",
+      "observed_invocation": "python_module",
+      "resume_evidence": "none",
+      "legacy_invocation_display": "python -m rwkv_lab.engram_lmb_build freq|alloc <arguments>"
+    },
+    {
+      "stable_id": "cache.vision-features",
+      "family": "data_cache",
+      "source_paths": [
+        "src/rwkv_lab/vision_cache.py"
+      ],
+      "stateful": false,
+      "operation_role": "cache_build",
+      "notes": "Deterministic frozen vision feature-cache construction; this entry records an artifact-building workflow only.",
+      "observed_invocation": "python_module",
+      "resume_evidence": "none",
+      "legacy_invocation_display": "python -m rwkv_lab.vision_cache <arguments>"
+    },
+    {
+      "stable_id": "data.mageflow-manifest-preparation",
+      "family": "data_cache",
+      "source_paths": [
+        "src/rwkv_lab/mage_flow_pretrain.py"
+      ],
+      "stateful": false,
+      "operation_role": "preprocess",
+      "notes": "MageFlow image-caption canonicalization and frozen Reddit split preparation. This subcommand entry does not imply authority for the sibling training subcommand.",
+      "observed_invocation": "console_script",
+      "resume_evidence": "none",
+      "legacy_invocation_display": "mage-flow-pretrain prepare-data|prepare-reddit <arguments>"
+    },
+    {
+      "stable_id": "evaluation.vision-caption",
+      "family": "evaluation_profile_export",
+      "source_paths": [
+        "src/rwkv_lab/vision_caption.py"
+      ],
+      "stateful": false,
+      "operation_role": "evaluation",
+      "notes": "Read-only caption generation from a vision-adapter checkpoint; it is not a trainer.",
+      "observed_invocation": "python_module",
+      "resume_evidence": "none",
+      "legacy_invocation_display": "python -m rwkv_lab.vision_caption <arguments>"
+    },
+    {
+      "stable_id": "profiling.production-kernels",
+      "family": "evaluation_profile_export",
+      "source_paths": [
+        "src/rwkv_lab/production_kernels.py",
+        "src/rwkv_lab/posttrain_kernels.py"
+      ],
+      "stateful": false,
+      "operation_role": "profiling",
+      "notes": "Kernel parity, determinism, gradient, state, and performance qualification. Internal backward passes are tests, not model-training authority.",
+      "observed_invocation": "python_module",
+      "resume_evidence": "none",
+      "legacy_invocation_display": "python -m rwkv_lab.production_kernels <arguments>; python -m rwkv_lab.posttrain_kernels <arguments>"
+    },
+    {
+      "stable_id": "export.legacy-mutable-bundle",
+      "family": "evaluation_profile_export",
+      "source_paths": [
+        "src/rwkv_lab/export_bundle.py"
+      ],
+      "stateful": false,
+      "operation_role": "export_artifact",
+      "notes": "Legacy bundle exporter recursively removes and overwrites its destination before publication. Its verification is shallow and checks only listed files/tensor counts; this is mutable export evidence, not an immutable or serving-authorized bundle.",
+      "observed_invocation": "python_module",
+      "resume_evidence": "none",
+      "legacy_invocation_display": "python -m rwkv_lab.export_bundle <arguments>"
+    },
+    {
+      "stable_id": "qualification.native-g1g",
+      "family": "evaluation_profile_export",
+      "source_paths": [
+        "src/rwkv_lab/native_g1g.py"
+      ],
+      "stateful": false,
+      "operation_role": "qualification",
+      "notes": "Native RWKV checkpoint loading and perplexity parity qualification only; wrapping loop modules does not run training.",
+      "observed_invocation": "python_module",
+      "resume_evidence": "none",
+      "legacy_invocation_display": "python -m rwkv_lab.native_g1g --model <checkpoint>"
+    },
+    {
+      "stable_id": "oracle.diffusion-rwkv-head",
+      "family": "rwkv",
+      "source_paths": [
+        "src/rwkv_lab/diffusion_rwkv.py"
+      ],
+      "stateful": false,
+      "operation_role": "library_oracle",
+      "notes": "Isolated triplet-block discrete-diffusion auxiliary head. There is no model-training CLI, and adoption requires a future registered campaign.",
+      "observed_invocation": "library_only",
+      "resume_evidence": "none"
+    },
+    {
+      "stable_id": "oracle.looped-rwkv-integrated",
+      "family": "rwkv",
+      "source_paths": [
+        "src/rwkv_lab/looped_rwkv_rosa_engram_v3.py"
+      ],
+      "stateful": false,
+      "operation_role": "library_oracle",
+      "notes": "Integrated looped RWKV, ROSA, and Engram research scaffold. Its __main__ path is a synthetic backward smoke test, not a production trainer.",
+      "observed_invocation": "library_only",
+      "resume_evidence": "none"
+    },
+    {
+      "stable_id": "oracle.rosa-retrieval",
+      "family": "rwkv",
+      "source_paths": [
+        "src/rwkv_lab/rosa.py"
+      ],
+      "stateful": false,
+      "operation_role": "library_oracle",
+      "notes": "ROSA suffix-retrieval layer and gradient self-test. Importability and a backward smoke test do not imply a training workflow.",
+      "observed_invocation": "library_only",
+      "resume_evidence": "none"
+    },
+    {
+      "stable_id": "oracle.smt-dmt-losses",
+      "family": "conversion_distillation",
+      "source_paths": [
+        "src/rwkv_lab/smt_dmt.py"
+      ],
+      "stateful": false,
+      "operation_role": "library_oracle",
+      "notes": "Supervised and dynamical memory loss primitives plus synthetic self-test; training ownership belongs to an explicit consumer such as convert_train.",
+      "observed_invocation": "library_only",
+      "resume_evidence": "none"
+    },
+    {
+      "stable_id": "inventory.unlabeled-images",
+      "family": "data_cache",
+      "source_paths": [
+        "scripts/build_unlabeled_image_manifest.py"
+      ],
+      "stateful": true,
+      "operation_role": "inventory",
+      "notes": "Multi-phase image inventory, exact hashing, perceptual hashing, clustering, and manifest export. SQLite is a durable per-file checkpoint, but the legacy database and source tree are not sealed enough for exact recovery.",
+      "observed_invocation": "host_script",
+      "resume_evidence": "compatible",
+      "legacy_invocation_display": "python scripts/build_unlabeled_image_manifest.py --phase inventory|exact|hash|cluster|export|all <arguments>"
+    },
+    {
+      "stable_id": "acquisition.i1-direct-archives",
+      "family": "data_cache",
+      "source_paths": [
+        "scripts/fetch_i1_archives.py"
+      ],
+      "stateful": true,
+      "operation_role": "acquisition",
+      "notes": "Resumable byte-range acquisition with strong ETag pinning, fsynced partial files, atomic state, and exact-size publication. Remote availability and repository-level input closure prevent an exact-resume claim.",
+      "observed_invocation": "host_script",
+      "resume_evidence": "compatible",
+      "legacy_invocation_display": "python scripts/fetch_i1_archives.py --sources <names> --output <directory>"
+    },
+    {
+      "stable_id": "acquisition.civitai-anima",
+      "family": "data_cache",
+      "source_paths": [
+        "scripts/download_civitai_anima_dataset.py"
+      ],
+      "stateful": true,
+      "operation_role": "acquisition",
+      "notes": "Prompt-bearing Civitai Anima gallery inventory and download. SQLite durably checkpoints pagination and transfers, while the mutable external gallery and network service prevent exact replay.",
+      "observed_invocation": "host_script",
+      "resume_evidence": "compatible",
+      "legacy_invocation_display": "python scripts/download_civitai_anima_dataset.py inventory|download|validate|all --root <directory>"
+    },
+    {
+      "stable_id": "dedup.materialize-exact-links",
+      "family": "data_cache",
+      "source_paths": [
+        "scripts/materialize_exact_dedup.py"
+      ],
+      "stateful": false,
+      "operation_role": "deduplication",
+      "notes": "Idempotent exact-duplicate materialization replaces verified duplicates atomically with hard links while retaining every pathname. It owns no durable operation cursor and is classified as stateless mutation evidence.",
+      "observed_invocation": "host_script",
+      "resume_evidence": "none",
+      "legacy_invocation_display": "python scripts/materialize_exact_dedup.py --db <inventory.sqlite3>"
+    },
+    {
+      "stable_id": "review.i1-quality-viewer",
+      "family": "data_cache",
+      "source_paths": [
+        "scripts/i1_quality_viewer.py"
+      ],
+      "stateful": true,
+      "operation_role": "review",
+      "notes": "Interactive human quality review with recoverable image moves, an fsynced append-only deletion ledger, and background atomic manifest reconciliation. Restart can recover durable review decisions but is not trajectory-equivalent live-session resume.",
+      "observed_invocation": "host_script",
+      "resume_evidence": "compatible",
+      "legacy_invocation_display": "python scripts/i1_quality_viewer.py --root <dataset> --host <address> --port <port>"
+    },
+    {
+      "stable_id": "scoring.i1-anime-aesthetic",
+      "family": "data_cache",
+      "source_paths": [
+        "scripts/score_i1_anime_aesthetic.py"
+      ],
+      "stateful": true,
+      "operation_role": "scoring",
+      "notes": "DeepGHS anime-aesthetic scoring uses an append-only result cache with periodic fsync and atomic manifest replacement. Completed image scores resume compatibly; the full external/runtime identity is not exact.",
+      "observed_invocation": "host_script",
+      "resume_evidence": "compatible",
+      "legacy_invocation_display": "python scripts/score_i1_anime_aesthetic.py --root <dataset> <arguments>"
+    },
+    {
+      "stable_id": "review.dedupe-cutoff",
+      "family": "data_cache",
+      "source_paths": [
+        "scripts/dedupe_cutoff_review.py"
+      ],
+      "stateful": true,
+      "operation_role": "review",
+      "notes": "The human policy file persists through atomic replacement, but the review server has no durable item cursor or resumable session. Restarting recovers policy state only.",
+      "observed_invocation": "host_script",
+      "resume_evidence": "restart_only",
+      "legacy_invocation_display": "python scripts/dedupe_cutoff_review.py --db <inventory.sqlite3> --policy <policy.json>"
+    },
+    {
+      "stable_id": "cache.vision-overlay-assembly",
+      "family": "data_cache",
+      "source_paths": [
+        "scripts/assemble_vision_cache_overlay.py"
+      ],
+      "stateful": false,
+      "operation_role": "cache_build",
+      "notes": "Idempotent same-filesystem hard-link union of immutable teacher-cache shards with collision checks and an atomic receipt. It has no operation cursor.",
+      "observed_invocation": "host_script",
+      "resume_evidence": "none",
+      "legacy_invocation_display": "python scripts/assemble_vision_cache_overlay.py --train <manifest> --eval <manifest> --moon-source <cache> --fusion-source <cache> <arguments>"
+    },
+    {
+      "stable_id": "cache.vision-finalization",
+      "family": "data_cache",
+      "source_paths": [
+        "scripts/finalize_vision_cache.py"
+      ],
+      "stateful": false,
+      "operation_role": "qualification",
+      "notes": "Complete cache-key and payload validation followed by atomic fast-start receipt publication. It validates cache state but does not resume cache construction.",
+      "observed_invocation": "host_script",
+      "resume_evidence": "none",
+      "legacy_invocation_display": "python scripts/finalize_vision_cache.py --train <manifest> --eval <manifest> --cache <directory> --output <receipt.json>"
+    },
+    {
+      "stable_id": "cache.vision-ten-percent-handoff",
+      "family": "data_cache",
+      "source_paths": [
+        "scripts/handoff_vision_cache_at_10_percent.py"
+      ],
+      "stateful": true,
+      "operation_role": "cache_handoff",
+      "notes": "Legacy cache boundary supervisor stops one exact producer, atomically freezes a shard, builds the paired cache, and can resume idempotently after the freeze rename. Hard-coded paths and process discovery prevent exact recovery or host authority.",
+      "observed_invocation": "host_script",
+      "resume_evidence": "compatible",
+      "legacy_invocation_display": "python scripts/handoff_vision_cache_at_10_percent.py"
+    },
+    {
+      "stable_id": "export.frozen-vision-compressor",
+      "family": "evaluation_profile_export",
+      "source_paths": [
+        "scripts/export_frozen_vision_compressor.py"
+      ],
+      "stateful": false,
+      "operation_role": "export_artifact",
+      "notes": "Weights-only compressor export uses atomic replacement, but the destination is overwriteable and the artifact has no self-bound content hash. It is mutable export evidence, not a frozen immutable identity.",
+      "observed_invocation": "host_script",
+      "resume_evidence": "none",
+      "legacy_invocation_display": "python scripts/export_frozen_vision_compressor.py --input <checkpoint> --output <frozen.pt>"
+    },
+    {
+      "stable_id": "qualification.vision-run-evidence",
+      "family": "evaluation_profile_export",
+      "source_paths": [
+        "scripts/vision_run_evidence.py"
+      ],
+      "stateful": false,
+      "operation_role": "qualification",
+      "notes": "Read-only classifier for exact checkpoints, committed work, startup debris, and atomic best-checkpoint publication. It reports evidence and cannot control or resume a worker.",
+      "observed_invocation": "host_script",
+      "resume_evidence": "none",
+      "legacy_invocation_display": "python scripts/vision_run_evidence.py <run-directory> --json|--resolve-best"
+    },
+    {
+      "stable_id": "profiling.mageflow-runtime",
+      "family": "evaluation_profile_export",
+      "source_paths": [
+        "scripts/benchmark_mage_flow_runtime.py"
+      ],
+      "stateful": false,
+      "operation_role": "profiling",
+      "notes": "Isolated fixed-input MageFlow training-step runtime benchmark with atomic success/failure output. Its optimizer updates are disposable measurements, not a resumable model-training run.",
+      "observed_invocation": "host_script",
+      "resume_evidence": "none",
+      "legacy_invocation_display": "python scripts/benchmark_mage_flow_runtime.py --variant <name> --train-manifest <manifest> --expert-checkpoint <checkpoint> --output <report.json>"
+    },
+    {
+      "stable_id": "oracle.adapter-consolidation",
+      "family": "rwkv_posttraining",
+      "source_paths": [
+        "src/rwkv_lab/adapter_consolidation.py"
+      ],
+      "stateful": false,
+      "operation_role": "library_oracle",
+      "notes": "Guarded adapter-consolidation controller primitives with immutable snapshots and human promotion gates. There is no standalone registered operation or CLI.",
+      "observed_invocation": "library_only",
+      "resume_evidence": "none"
+    },
+    {
+      "stable_id": "oracle.distillation-merge",
+      "family": "conversion_distillation",
+      "source_paths": [
+        "src/rwkv_lab/distillation_merge.py"
+      ],
+      "stateful": false,
+      "operation_role": "library_oracle",
+      "notes": "Expert-state merge and tolerance-corrected evaluation functions only; callers must supply a separately registered artifact publication workflow.",
+      "observed_invocation": "library_only",
+      "resume_evidence": "none"
+    },
+    {
+      "stable_id": "oracle.reasoning-cache",
+      "family": "rwkv_rlvr",
+      "source_paths": [
+        "src/rwkv_lab/reasoning_cache.py"
+      ],
+      "stateful": false,
+      "operation_role": "library_oracle",
+      "notes": "Bounded summary-conditioned reasoning and accounting primitives. The module neither executes generated code nor promotes a checkpoint.",
+      "observed_invocation": "library_only",
+      "resume_evidence": "none"
+    },
+    {
+      "stable_id": "oracle.test-time-training",
+      "family": "rwkv_posttraining",
+      "source_paths": [
+        "src/rwkv_lab/test_time_training.py"
+      ],
+      "stateful": false,
+      "operation_role": "library_oracle",
+      "notes": "In-memory guarded test-time update transaction with rollback and held-out gating. It has no durable operation boundary or launchable trainer.",
+      "observed_invocation": "library_only",
+      "resume_evidence": "none"
+    },
+    {
+      "stable_id": "oracle.decoding-evaluation",
+      "family": "evaluation_profile_export",
+      "source_paths": [
+        "src/rwkv_lab/decoding_eval.py"
+      ],
+      "stateful": false,
+      "operation_role": "library_oracle",
+      "notes": "Deterministic decoder comparison and recurrent-state drift functions. Evaluation requires an explicit registered caller and checkpoint binding.",
+      "observed_invocation": "library_only",
+      "resume_evidence": "none"
+    },
+    {
+      "stable_id": "oracle.recurrent-serving",
+      "family": "evaluation_profile_export",
+      "source_paths": [
+        "src/rwkv_lab/recurrent_serving.py"
+      ],
+      "stateful": false,
+      "operation_role": "library_oracle",
+      "notes": "Scheduler-neutral paged recurrent-state storage and batching primitives. The source explicitly is not a network server and grants no serving or host authority.",
+      "observed_invocation": "library_only",
+      "resume_evidence": "none"
+    },
+    {
+      "stable_id": "conversion.drive-isolation",
+      "family": "conversion_distillation",
+      "source_paths": [
+        "src/rwkv_lab/drive_isolation.py"
+      ],
+      "observed_invocation": "python_module",
+      "stateful": true,
+      "resume_evidence": "restart_only",
+      "operation_role": "supervisor",
+      "notes": "Sequential isolation supervisor around per-layer conversion jobs. Child artifacts may survive, but the supervisor has no durable campaign cursor and restarts its scheduling pass.",
+      "legacy_invocation_display": "python -m rwkv_lab.drive_isolation <arguments>"
+    },
+    {
+      "stable_id": "conversion.gdn-sweep-supervisor",
+      "family": "conversion_distillation",
+      "source_paths": [
+        "scripts/gdn_sweep.sh"
+      ],
+      "observed_invocation": "host_script",
+      "stateful": true,
+      "resume_evidence": "restart_only",
+      "operation_role": "supervisor",
+      "notes": "Shell sweep that launches and early-stops GDN conversion trials. Outputs may remain, but the shell process records no durable sweep cursor.",
+      "legacy_invocation_display": "scripts/gdn_sweep.sh"
+    },
+    {
+      "stable_id": "conversion.rel-sweep-supervisor",
+      "family": "conversion_distillation",
+      "source_paths": [
+        "scripts/rel_sweep.sh"
+      ],
+      "observed_invocation": "host_script",
+      "stateful": true,
+      "resume_evidence": "restart_only",
+      "operation_role": "supervisor",
+      "notes": "Shell sweep that launches relative-position conversion trials. Outputs may remain, but the shell process records no durable sweep cursor.",
+      "legacy_invocation_display": "scripts/rel_sweep.sh"
+    },
+    {
+      "stable_id": "conversion.gate-ab-campaign",
+      "family": "conversion_distillation",
+      "source_paths": [
+        "scripts/gate_ab.sh"
+      ],
+      "observed_invocation": "host_script",
+      "stateful": true,
+      "resume_evidence": "restart_only",
+      "operation_role": "campaign",
+      "notes": "Sequential A/B gate campaign with independently materialized arms and no durable campaign cursor; interruption restarts campaign scheduling.",
+      "legacy_invocation_display": "scripts/gate_ab.sh"
+    },
+    {
+      "stable_id": "conversion.assemble-looped",
+      "family": "conversion_distillation",
+      "source_paths": [
+        "src/rwkv_lab/assemble_looped.py"
+      ],
+      "observed_invocation": "python_module",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "conversion",
+      "notes": "One-shot assembly of looped conversion components into an output artifact; it exposes no durable in-operation recovery boundary.",
+      "legacy_invocation_display": "python -m rwkv_lab.assemble_looped <arguments>"
+    },
+    {
+      "stable_id": "conversion.memory-target-cache",
+      "family": "conversion_distillation",
+      "source_paths": [
+        "src/rwkv_lab/build_memory_targets.py"
+      ],
+      "observed_invocation": "python_module",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "cache_build",
+      "notes": "One-shot memory-target memmap and manifest builder. Existing outputs are products, not a durable cursor for resuming the build.",
+      "legacy_invocation_display": "python -m rwkv_lab.build_memory_targets <arguments>"
+    },
+    {
+      "stable_id": "rlvr.recursive-improve",
+      "family": "rwkv_rlvr",
+      "source_paths": [
+        "src/rwkv_lab/recursive_improve.py"
+      ],
+      "observed_invocation": "python_module",
+      "stateful": true,
+      "resume_evidence": "compatible",
+      "operation_role": "campaign",
+      "notes": "Recursive-improvement campaign with atomic loop state, explicit resume, and checksummed immutable parent evidence. This remains compatibility evidence rather than scheduler authority.",
+      "legacy_invocation_display": "python -m rwkv_lab.recursive_improve <arguments>"
+    },
+    {
+      "stable_id": "posttraining.adapter-recursive",
+      "family": "rwkv_posttraining",
+      "source_paths": [
+        "src/rwkv_lab/adapter_recursive.py"
+      ],
+      "observed_invocation": "python_module",
+      "stateful": true,
+      "resume_evidence": "compatible",
+      "operation_role": "campaign",
+      "notes": "Recursive adapter campaign with atomic adapter-loop state, default resume behavior, and immutable parent bookkeeping.",
+      "legacy_invocation_display": "python -m rwkv_lab.adapter_recursive <arguments>"
+    },
+    {
+      "stable_id": "acquisition.kimi-teacher",
+      "family": "data_cache",
+      "source_paths": [
+        "src/rwkv_lab/kimi_teacher.py"
+      ],
+      "observed_invocation": "python_module",
+      "stateful": true,
+      "resume_evidence": "compatible",
+      "operation_role": "acquisition",
+      "notes": "External teacher acquisition queue with atomic per-request receipts and budget accounting, providing a durable compatible restart boundary.",
+      "legacy_invocation_display": "python -m rwkv_lab.kimi_teacher <arguments>"
+    }
+  ]
+}

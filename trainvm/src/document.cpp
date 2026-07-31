@@ -359,6 +359,141 @@ void validate_cycles(const Workflow& workflow, const std::map<std::string, std::
   }
 }
 
+bool is_exact_core_operation(const Spec& spec, const Node& node,
+                             std::string_view operation,
+                             std::string_view contract, Effect effect,
+                             Idempotency idempotency) {
+  const auto component = spec.components.find(node.invoke.component);
+  if (component == spec.components.end() ||
+      component->second.runtime != ComponentRuntime::builtin ||
+      component->second.adapter != "trainvm.core" ||
+      component->second.version != "1.0.0" ||
+      node.invoke.operation != operation || node.effect != effect ||
+      node.idempotency != idempotency) {
+    return false;
+  }
+  const auto declared_operation =
+      component->second.operations.find(node.invoke.operation);
+  return declared_operation != component->second.operations.end() &&
+         declared_operation->second.contract == contract;
+}
+
+bool is_exact_resource_acquisition(const Spec& spec, const Node& node) {
+  return is_exact_core_operation(
+      spec, node, "acquire_resources", "trainvm.v1.AcquireResources",
+      Effect::resource, Idempotency::receipt_required);
+}
+
+bool is_exact_resource_release(const Spec& spec, const Node& node) {
+  return is_exact_core_operation(
+      spec, node, "release_resources", "trainvm.v1.ReleaseResources",
+      Effect::resource, Idempotency::replay_safe);
+}
+
+void validate_resource_lifecycle(const Spec& spec,
+                                 std::vector<Diagnostic>& diagnostics) {
+  const Workflow& workflow = spec.workflow;
+  const auto entrypoint = workflow.nodes.find(workflow.entrypoint);
+  if (entrypoint == workflow.nodes.end()) {
+    return;
+  }
+
+  const std::string entrypoint_path =
+      "/spec/workflow/nodes/" + workflow.entrypoint;
+  if (!is_exact_resource_acquisition(spec, entrypoint->second)) {
+    error(diagnostics, "workflow.resource_admission", entrypoint_path,
+          "entrypoint must be builtin trainvm.core 1.0.0 acquire_resources "
+          "with contract trainvm.v1.AcquireResources, resource effect, and "
+          "receipt_required idempotency");
+  }
+
+  const Transition* acquired_transition = nullptr;
+  std::size_t acquired_transition_index = 0U;
+  std::size_t acquired_transition_count = 0U;
+  for (std::size_t index = 0; index < entrypoint->second.transitions.size();
+       ++index) {
+    const Transition& transition = entrypoint->second.transitions[index];
+    if (transition.on != "resource.acquired") {
+      continue;
+    }
+    if (acquired_transition == nullptr) {
+      acquired_transition = &transition;
+      acquired_transition_index = index;
+    }
+    ++acquired_transition_count;
+  }
+  const std::string transitions_path =
+      child_path(entrypoint_path, "transitions");
+  if (acquired_transition_count != 1U) {
+    error(diagnostics, "workflow.resource_admission_transition",
+          transitions_path,
+          "resource admission requires exactly one resource.acquired transition");
+  } else {
+    const std::string transition_path =
+        child_path(transitions_path, std::to_string(acquired_transition_index));
+    if (acquired_transition->where) {
+      error(diagnostics, "workflow.resource_admission_transition",
+            child_path(transition_path, "where"),
+            "resource.acquired transition must be unconditional");
+    }
+    if (acquired_transition->target.starts_with('$') ||
+        !workflow.nodes.contains(acquired_transition->target)) {
+      error(diagnostics, "workflow.resource_admission_target",
+            child_path(transition_path, "target"),
+            "resource.acquired transition must target an external worker node");
+    } else {
+      const Node& target = workflow.nodes.at(acquired_transition->target);
+      const auto target_component = spec.components.find(target.invoke.component);
+      if (target_component == spec.components.end() ||
+          target_component->second.runtime == ComponentRuntime::builtin) {
+        error(diagnostics, "workflow.resource_admission_target",
+              child_path(transition_path, "target"),
+              "resource.acquired transition must target a non-builtin external worker node");
+      }
+    }
+  }
+
+  // Explore the product of workflow node and release state. This detects a
+  // completion bypass even when the same node is also reachable through a
+  // correctly released branch, and remains finite in the presence of cycles.
+  std::queue<std::pair<std::string, bool>> pending;
+  std::set<std::pair<std::string, bool>> visited;
+  std::set<std::string> diagnosed_completion_paths;
+  pending.emplace(workflow.entrypoint, false);
+  while (!pending.empty()) {
+    auto [node_name, released_since_acquisition] = pending.front();
+    pending.pop();
+    if (!visited.emplace(node_name, released_since_acquisition).second) {
+      continue;
+    }
+    const Node& node = workflow.nodes.at(node_name);
+    if (is_exact_resource_acquisition(spec, node)) {
+      released_since_acquisition = false;
+    } else if (is_exact_resource_release(spec, node)) {
+      released_since_acquisition = true;
+    }
+    for (std::size_t index = 0; index < node.transitions.size(); ++index) {
+      const Transition& transition = node.transitions[index];
+      const std::string target_path = child_path(
+          child_path(child_path("/spec/workflow/nodes/" + node_name,
+                                "transitions"),
+                     std::to_string(index)),
+          "target");
+      if (transition.target == "$completed") {
+        if (!released_since_acquisition &&
+            diagnosed_completion_paths.insert(target_path).second) {
+          error(diagnostics, "workflow.resource_release", target_path,
+                "every reachable $completed path must pass through an exact "
+                "builtin trainvm.core 1.0.0 release_resources node");
+        }
+      } else if (!transition.target.starts_with('$') &&
+                 workflow.nodes.contains(transition.target)) {
+        pending.emplace(transition.target, released_since_acquisition);
+      }
+    }
+  }
+}
+
 void validate_experiment(const Experiment& experiment, std::vector<Diagnostic>& diagnostics) {
   if (experiment.api_version != kApiVersion) {
     error(diagnostics, "api_version.unsupported", "/api_version",
@@ -762,6 +897,7 @@ void validate_experiment(const Experiment& experiment, std::vector<Diagnostic>& 
       }
     }
   }
+  validate_resource_lifecycle(spec, diagnostics);
 
   if (workflow.nodes.contains(workflow.entrypoint)) {
     std::set<std::string> reachable;

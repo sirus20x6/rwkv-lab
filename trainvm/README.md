@@ -53,6 +53,10 @@ Implemented now:
 - an authority-owned exact adapter registry that binds adapter/version/runtime/operation/contract,
   effect, idempotency, trusted code fingerprint, required worker capabilities, and a reflected
   operation lifecycle/resume grade before mutation;
+- a reflected compatibility-workflow catalog and executable validation gate spanning RWKV,
+  transformer/MLA, vision, MageFlow/diffusion, conversion/distillation, post-training, RLVR,
+  external trainers, data/cache, and evaluation/profile/export, bound to the exact reviewed source
+  bytes while structurally granting no adapter or host execution authority;
 - a restart-safe launch-authorization reconciler that resumes partial resource admission, converges
   concurrent/repeated steps on one fenced launch intent, and fails closed on registry drift;
 - a separate immutable host-launch registry and deterministic `worker.launch_bound` receipt that
@@ -152,6 +156,8 @@ trainvm/build/trainvm plan \
   docs/experiment-vm/examples/mageflow-cache-resume.json
 trainvm/build/trainvm compile < \
   docs/experiment-vm/examples/mageflow-cache-resume.json
+trainvm/build/trainvm validate-catalog \
+  "$PWD/docs/experiment-vm/compatibility-workflows.v1.json" "$PWD"
 trainvm/build/trainvm serve --journal /tmp/trainvm.db --socket /tmp/trainvm.sock \
   --registry /etc/trainvm/adapters.json \
   --host-launch-registry /etc/trainvm/host-launches.json

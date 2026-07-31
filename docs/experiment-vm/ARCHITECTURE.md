@@ -14,6 +14,16 @@ The P0 physical-resource, guarded-launch, and orphan-recovery boundary is specif
 authority; host-wide accelerator and process authority belongs to the shared host daemon described
 there.
 
+The model-family-neutral authority contract for acquisition, inventories, dataset materialization,
+cache qualification, human review, eval galleries, export, promotion, and retention is specified in
+[`DATA_EVAL_ARTIFACT_AUTHORITY.md`](DATA_EVAL_ARTIFACT_AUTHORITY.md). Paths and worker-produced bytes
+remain staging evidence until that contract's immutable publication transaction succeeds.
+
+The original repository's reviewed workflow surface is pinned by the source-bound, explicitly
+non-authoritative catalog described in
+[`COMPATIBILITY_CATALOG.md`](COMPATIBILITY_CATALOG.md). It is a regression gate for model-family and
+operation coverage, never a substitute for adapter or host execution authority.
+
 ## Decision
 
 Build a compiled C++ control-plane daemon, **TrainVM**, that owns the lifecycle of every

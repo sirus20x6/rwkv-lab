@@ -454,6 +454,160 @@ void test_reflection_and_compiler() {
   check(!result.plan->canonical_plan["spec"]["controls"]["catalog"]["learning_rate"].contains("default_value"),
         "canonical plan does not leak C++ keyword workarounds");
 
+  check(result.plan->experiment.spec.workflow.nodes.at("resume_training")
+                .loop_guard.has_value(),
+        "resource lifecycle validation accepts branched and cyclic paths when "
+        "every completion route passes through the exact release node");
+
+  auto direct_external_entry = fixture;
+  direct_external_entry["spec"]["workflow"]["entrypoint"] =
+      "train_to_boundary";
+  const auto direct_external_entry_result =
+      trainvm::compile_document(direct_external_entry);
+  check(!direct_external_entry_result.valid() &&
+            has_diagnostic(direct_external_entry_result,
+                           "workflow.resource_admission"),
+        "semantic compiler rejects a direct external worker entrypoint");
+
+  auto wrong_admission_component = fixture;
+  wrong_admission_component["spec"]["components"]["alternate_core"] =
+      wrong_admission_component["spec"]["components"]["core"];
+  wrong_admission_component["spec"]["components"]["alternate_core"]
+                           ["adapter"] = "rwkv-lab.alternate-core";
+  wrong_admission_component["spec"]["workflow"]["nodes"]["acquire_gpu"]
+                           ["invoke"]["component"] = "alternate_core";
+  const auto wrong_admission_component_result =
+      trainvm::compile_document(wrong_admission_component);
+  check(!wrong_admission_component_result.valid() &&
+            has_diagnostic(wrong_admission_component_result,
+                           "workflow.resource_admission"),
+        "semantic compiler rejects an admission operation from another component");
+
+  auto wrong_admission_version = fixture;
+  wrong_admission_version["spec"]["components"]["core"]["version"] =
+      "1.0.1";
+  const auto wrong_admission_version_result =
+      trainvm::compile_document(wrong_admission_version);
+  check(!wrong_admission_version_result.valid() &&
+            has_diagnostic(wrong_admission_version_result,
+                           "workflow.resource_admission"),
+        "semantic compiler pins resource admission to trainvm.core 1.0.0");
+
+  auto wrong_admission_operation = fixture;
+  wrong_admission_operation["spec"]["workflow"]["nodes"]["acquire_gpu"]
+                           ["invoke"]["operation"] = "validate_artifact";
+  const auto wrong_admission_operation_result =
+      trainvm::compile_document(wrong_admission_operation);
+  check(!wrong_admission_operation_result.valid() &&
+            has_diagnostic(wrong_admission_operation_result,
+                           "workflow.resource_admission"),
+        "semantic compiler requires the exact acquire_resources operation");
+
+  auto wrong_admission_contract = fixture;
+  wrong_admission_contract["spec"]["components"]["core"]["operations"]
+                          ["acquire_resources"]["contract"] =
+      "trainvm.v1.NotAcquireResources";
+  const auto wrong_admission_contract_result =
+      trainvm::compile_document(wrong_admission_contract);
+  check(!wrong_admission_contract_result.valid() &&
+            has_diagnostic(wrong_admission_contract_result,
+                           "workflow.resource_admission"),
+        "semantic compiler pins the typed resource acquisition contract");
+
+  auto wrong_admission_effect = fixture;
+  wrong_admission_effect["spec"]["workflow"]["nodes"]["acquire_gpu"]
+                        ["effect"] = "process";
+  const auto wrong_admission_effect_result =
+      trainvm::compile_document(wrong_admission_effect);
+  check(!wrong_admission_effect_result.valid() &&
+            has_diagnostic(wrong_admission_effect_result,
+                           "workflow.resource_admission"),
+        "semantic compiler requires resource effect for admission");
+
+  auto wrong_admission_idempotency = fixture;
+  wrong_admission_idempotency["spec"]["workflow"]["nodes"]["acquire_gpu"]
+                             ["idempotency"] = "replay_safe";
+  const auto wrong_admission_idempotency_result =
+      trainvm::compile_document(wrong_admission_idempotency);
+  check(!wrong_admission_idempotency_result.valid() &&
+            has_diagnostic(wrong_admission_idempotency_result,
+                           "workflow.resource_admission"),
+        "semantic compiler requires receipt-backed resource admission");
+
+  auto missing_acquired_transition = fixture;
+  missing_acquired_transition["spec"]["workflow"]["nodes"]["acquire_gpu"]
+                             ["transitions"][0]["on"] =
+      "resource.unexpected";
+  const auto missing_acquired_transition_result =
+      trainvm::compile_document(missing_acquired_transition);
+  check(!missing_acquired_transition_result.valid() &&
+            has_diagnostic(missing_acquired_transition_result,
+                           "workflow.resource_admission_transition"),
+        "semantic compiler requires the resource.acquired admission event");
+
+  auto multiple_acquired_transitions = fixture;
+  multiple_acquired_transitions["spec"]["workflow"]["nodes"]["acquire_gpu"]
+                               ["transitions"].push_back(
+      {{"on", "resource.acquired"}, {"target", "train_to_boundary"}});
+  const auto multiple_acquired_transitions_result =
+      trainvm::compile_document(multiple_acquired_transitions);
+  check(!multiple_acquired_transitions_result.valid() &&
+            has_diagnostic(multiple_acquired_transitions_result,
+                           "workflow.resource_admission_transition"),
+        "semantic compiler rejects multiple resource.acquired routes");
+
+  auto conditional_acquired_transition = fixture;
+  conditional_acquired_transition["spec"]["workflow"]["nodes"]["acquire_gpu"]
+                                 ["transitions"][0]["where"] =
+      {{"field", "payload.ready"}, {"operator", "eq"}, {"value", true}};
+  const auto conditional_acquired_transition_result =
+      trainvm::compile_document(conditional_acquired_transition);
+  check(!conditional_acquired_transition_result.valid() &&
+            has_diagnostic(conditional_acquired_transition_result,
+                           "workflow.resource_admission_transition"),
+        "semantic compiler rejects conditional resource admission routing");
+
+  auto terminal_acquired_transition = fixture;
+  terminal_acquired_transition["spec"]["workflow"]["nodes"]["acquire_gpu"]
+                              ["transitions"][0]["target"] = "$failed";
+  const auto terminal_acquired_transition_result =
+      trainvm::compile_document(terminal_acquired_transition);
+  check(!terminal_acquired_transition_result.valid() &&
+            has_diagnostic(terminal_acquired_transition_result,
+                           "workflow.resource_admission_target"),
+        "semantic compiler rejects an alternate terminal admission route");
+
+  auto builtin_acquired_target = fixture;
+  builtin_acquired_target["spec"]["workflow"]["nodes"]["acquire_gpu"]
+                         ["transitions"][0]["target"] = "validate_cache";
+  const auto builtin_acquired_target_result =
+      trainvm::compile_document(builtin_acquired_target);
+  check(!builtin_acquired_target_result.valid() &&
+            has_diagnostic(builtin_acquired_target_result,
+                           "workflow.resource_admission_target"),
+        "semantic compiler requires admission to enter a non-builtin worker node");
+
+  auto completion_without_release = fixture;
+  completion_without_release["spec"]["workflow"]["nodes"]
+                            ["train_to_boundary"]["transitions"][1]["target"] =
+      "$completed";
+  const auto completion_without_release_result =
+      trainvm::compile_document(completion_without_release);
+  check(!completion_without_release_result.valid() &&
+            has_diagnostic(completion_without_release_result,
+                           "workflow.resource_release"),
+        "semantic compiler rejects any completion branch that bypasses release");
+
+  auto malformed_release = fixture;
+  malformed_release["spec"]["workflow"]["nodes"]["release_gpu"]["effect"] =
+      "read_only";
+  const auto malformed_release_result =
+      trainvm::compile_document(malformed_release);
+  check(!malformed_release_result.valid() &&
+            has_diagnostic(malformed_release_result,
+                           "workflow.resource_release"),
+        "semantic compiler counts only the exact builtin release operation");
+
   auto reordered = nlohmann::json::parse(fixture.dump());
   auto reordered_result = trainvm::compile_document(reordered);
   check(reordered_result.valid() && reordered_result.plan->plan_hash == result.plan->plan_hash,
@@ -3436,29 +3590,10 @@ void test_atomic_queue_acquisition_boundary() {
                             ["transitions"][0]["on"] = "resource.unexpected";
   const auto invalid_admission =
       trainvm::compile_document(invalid_admission_document);
-  check(invalid_admission.valid(),
-        "unsupported admission transition remains a structurally valid plan fixture");
-  if (invalid_admission.valid()) {
-    trainvm::Journal invalid_journal(directory / "invalid-admission.db");
-    trainvm::Controller invalid_controller(*invalid_admission.plan, invalid_journal,
-                                           "invalid-admission-run");
-    invalid_controller.create_queued();
-    bool rejected_before_lease = false;
-    try {
-      (void)invalid_controller.begin_acquisition(test_time(500));
-    } catch (const std::exception&) {
-      rejected_before_lease = true;
-    }
-    const auto invalid_projection = invalid_journal.projection("invalid-admission-run");
-    check(rejected_before_lease && invalid_projection &&
-              invalid_projection->desired_state == "queued" &&
-              invalid_projection->observed_state == "queued" &&
-              invalid_journal.event_count() == 1U &&
-              !invalid_journal.active_lease(
-                  invalid_admission.plan->experiment.spec.workspace.concurrency_key,
-                  test_time(500)),
-          "unsupported builtin admission is rejected before acquiring its lease");
-  }
+  check(!invalid_admission.valid() &&
+            has_diagnostic(invalid_admission,
+                           "workflow.resource_admission_transition"),
+        "unsupported builtin admission is rejected during compilation");
 
   auto conditional_admission_document = load_fixture();
   conditional_admission_document["spec"]["workflow"]["nodes"]["acquire_gpu"]
@@ -3472,75 +3607,20 @@ void test_atomic_queue_acquisition_boundary() {
        {{"on", "operation.failed"}, {"target", "$failed"}}});
   const auto conditional_admission =
       trainvm::compile_document(conditional_admission_document);
-  check(conditional_admission.valid(),
-        "conditional admission with an unconditional fallback is compile-valid");
-  if (conditional_admission.valid()) {
-    const std::string conditional_run_id = "conditional-admission-run";
-    const auto admission_state =
-        trainvm::start_execution(*conditional_admission.plan, conditional_run_id);
-    const auto real_payload_route = trainvm::advance_execution(
-        *conditional_admission.plan, admission_state,
-        event_for(admission_state, "conditional-real-payload",
-                  "resource.acquired", {{"fencing_token", 1U}}));
-    check(real_payload_route.transition_index == 0U &&
-              real_payload_route.target == "$failed" &&
-              real_payload_route.state.status == trainvm::ExecutionStatus::failed,
-          "real fenced admission payload selects the conditional branch instead of fallback");
-    trainvm::Journal conditional_journal(directory / "conditional-admission.db");
-    trainvm::Controller conditional_controller(
-        *conditional_admission.plan, conditional_journal, conditional_run_id);
-    conditional_controller.create_queued();
-    const auto projection_before = conditional_journal.projection(conditional_run_id);
-    const auto events_before = conditional_journal.event_count();
-    bool rejected_before_mutation = false;
-    std::string rejection_message;
-    try {
-      (void)conditional_controller.begin_acquisition(test_time(600));
-    } catch (const std::exception& exception) {
-      rejected_before_mutation = true;
-      rejection_message = exception.what();
-    }
-    const auto projection_after = conditional_journal.projection(conditional_run_id);
-    const std::string& concurrency_key =
-        conditional_admission.plan->experiment.spec.workspace.concurrency_key;
-    check(rejected_before_mutation && !rejection_message.empty() &&
-              conditional_journal.event_count() == events_before &&
-              events_before == 1U && projection_after == projection_before &&
-              projection_after && projection_after->desired_state == "queued" &&
-              projection_after->observed_state == "queued" &&
-              !conditional_journal.active_lease(concurrency_key, test_time(600)),
-          "payload-dependent builtin admission is rejected before lease or "
-          "lifecycle mutation");
-  }
+  check(!conditional_admission.valid() &&
+            has_diagnostic(conditional_admission,
+                           "workflow.resource_admission_transition"),
+        "payload-dependent builtin admission is rejected during compilation");
 
   auto external_admission_document = load_fixture();
   external_admission_document["spec"]["components"]["core"]["runtime"] =
       "python_worker";
   const auto external_admission =
       trainvm::compile_document(external_admission_document);
-  check(external_admission.valid(),
-        "externalized admission remains a compile-valid negative fixture");
-  if (external_admission.valid()) {
-    const std::string external_run_id = "external-admission-run";
-    trainvm::Journal external_journal(directory / "external-admission.db");
-    trainvm::Controller external_controller(
-        *external_admission.plan, external_journal, external_run_id);
-    external_controller.create_queued();
-    const auto projection_before = external_journal.projection(external_run_id);
-    bool rejected_before_mutation = false;
-    try {
-      (void)external_controller.begin_acquisition(test_time(700));
-    } catch (const std::logic_error&) {
-      rejected_before_mutation = true;
-    }
-    check(rejected_before_mutation && external_journal.event_count() == 1U &&
-              external_journal.projection(external_run_id) == projection_before &&
-              !external_journal.active_lease(
-                  external_admission.plan->experiment.spec.workspace.concurrency_key,
-                  test_time(700)),
-          "non-builtin queued entrypoint is rejected before lease or lifecycle "
-          "mutation");
-  }
+  check(!external_admission.valid() &&
+            has_diagnostic(external_admission,
+                           "workflow.resource_admission"),
+        "non-builtin queued entrypoint is rejected during compilation");
   std::filesystem::remove_all(directory);
 }
 

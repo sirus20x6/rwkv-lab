@@ -1,0 +1,136 @@
+{
+  "api_version": "trainvm.rwkv-lab/v1alpha1",
+  "kind": "Experiment",
+  "metadata": {
+    "name": "coverage-scratch-rwkv-pretrain",
+    "description": "Compiler coverage for corpus preparation followed by terminal-checkpoint RWKV pretraining.",
+    "labels": {"family": "rwkv", "fixture": "compiler-coverage"}
+  },
+  "spec": {
+    "workspace": {
+      "root": "/thearray/git/moe-mla",
+      "run_directory": "/thearray/git/moe-mla/runs/trainvm-coverage/scratch-rwkv-pretrain",
+      "concurrency_key": "coverage-rwkv-scratch",
+      "allowed_read_roots": ["/thearray/git/moe-mla"],
+      "allowed_write_roots": ["/thearray/git/moe-mla/runs/trainvm-coverage/scratch-rwkv-pretrain"]
+    },
+    "resources": {
+      "accelerators": {"vendor": "nvidia", "count": 1, "minimum_memory_gib": 24, "exclusive": true},
+      "minimum_host_memory_gib": 32,
+      "cpu_threads": 8,
+      "lease_timeout_seconds": 30,
+      "cpu_io_policy": {"cpu_weight": 100, "io_weight": 100, "omp_threads": 4, "preprocessing_workers": 4, "nice": 0}
+    },
+    "parameters": {
+      "source_corpus": {"type": "path", "value": "/thearray/git/moe-mla/fixtures/corpora/rwkv-source.jsonl"},
+      "token_budget": {"type": "integer", "value": 1048576},
+      "optimizer_steps": {"type": "integer", "value": 1000}
+    },
+    "artifacts": {
+      "token_corpus": {"type": "dataset", "schema": "coverage.rwkv-token-corpus.v1", "immutability": "immutable", "fingerprint": "manifest_sha256"},
+      "terminal_checkpoint": {"type": "checkpoint", "schema": "coverage.rwkv-terminal-checkpoint.v1", "immutability": "immutable", "fingerprint": "manifest_sha256"},
+      "training_metrics": {"type": "metrics", "schema": "coverage.rwkv-pretrain-metrics.v1", "immutability": "append_only", "fingerprint": "sha256"},
+      "trainer_log": {"type": "path", "immutability": "append_only", "fingerprint": "none", "required": false}
+    },
+    "components": {
+      "core": {
+        "adapter": "trainvm.core",
+        "version": "1.0.0",
+        "runtime": "builtin",
+        "operations": {
+          "acquire_resources": {"contract": "trainvm.v1.AcquireResources"},
+          "release_resources": {"contract": "trainvm.v1.ReleaseResources"}
+        }
+      },
+      "rwkv_scratch": {
+        "adapter": "coverage.rwkv-scratch",
+        "version": "1.0.0-coverage",
+        "runtime": "python_worker",
+        "operations": {
+          "prepare_corpus": {"contract": "coverage.rwkv_scratch.v1.PrepareCorpus"},
+          "train_terminal": {"contract": "coverage.rwkv_scratch.v1.TrainTerminalCheckpoint"}
+        }
+      }
+    },
+    "workflow": {
+      "entrypoint": "acquire_resources",
+      "nodes": {
+        "acquire_resources": {
+          "invoke": {"component": "core", "operation": "acquire_resources", "inputs": {
+            "concurrency_key": {"literal": "coverage-rwkv-scratch"}
+          }},
+          "idempotency": "receipt_required",
+          "effect": "resource",
+          "transitions": [
+            {"on": "resource.acquired", "target": "prepare_corpus"},
+            {"on": "operation.failed", "target": "$failed"}
+          ]
+        },
+        "prepare_corpus": {
+          "invoke": {"component": "rwkv_scratch", "operation": "prepare_corpus", "inputs": {
+            "source": {"parameter": "source_corpus"},
+            "token_budget": {"parameter": "token_budget"},
+            "run_directory": {"context": "run_directory"}
+          }},
+          "publishes": {"corpus": "token_corpus"},
+          "idempotency": "replay_safe",
+          "effect": "workspace_write",
+          "timeout_seconds": 1800,
+          "transitions": [
+            {"on": "operation.completed", "target": "train"},
+            {"on": "operation.failed", "target": "$failed"}
+          ]
+        },
+        "train": {
+          "invoke": {"component": "rwkv_scratch", "operation": "train_terminal", "inputs": {
+            "corpus": {"artifact": "token_corpus"},
+            "steps": {"parameter": "optimizer_steps"},
+            "run_directory": {"context": "run_directory"}
+          }},
+          "publishes": {"checkpoint": "terminal_checkpoint", "metrics": "training_metrics", "log": "trainer_log"},
+          "idempotency": "receipt_required",
+          "effect": "process",
+          "timeout_seconds": 86400,
+          "transitions": [
+            {"on": "worker.completed", "target": "release_resources"},
+            {"on": "operation.failed", "target": "$failed"}
+          ]
+        },
+        "release_resources": {
+          "invoke": {"component": "core", "operation": "release_resources", "inputs": {
+            "concurrency_key": {"literal": "coverage-rwkv-scratch"}
+          }},
+          "idempotency": "replay_safe",
+          "effect": "resource",
+          "transitions": [
+            {"on": "resource.released", "target": "$completed"},
+            {"on": "operation.failed", "target": "$failed"}
+          ]
+        }
+      }
+    },
+    "controls": {"catalog": {
+      "learning_rate": {
+        "type": "number", "default": 0.0003, "minimum": 0, "maximum": 0.01,
+        "apply": "restart", "mutable_after_start": false,
+        "targets": ["rwkv_scratch.train_terminal.learning_rate"], "unit": "ratio"
+      }
+    }},
+    "observability": {
+      "heartbeat_seconds": 10,
+      "metrics": [
+        {"name": "train.loss", "type": "gauge", "unit": "dimensionless", "step_domain": "token", "aggregation": "weighted_mean"},
+        {"name": "train.tokens_per_second", "type": "gauge", "unit": "token/second", "step_domain": "wall_time", "aggregation": "mean"}
+      ],
+      "retain_raw_metrics_days": 14,
+      "log_artifact": "trainer_log"
+    },
+    "recovery": {
+      "exact_resume": false,
+      "checkpoint_artifact": "terminal_checkpoint",
+      "reconcile": "fail_closed",
+      "orphan_policy": "leave_and_block",
+      "graceful_stop_seconds": 120
+    }
+  }
+}

@@ -1,6 +1,8 @@
+#include "trainvm/compatibility_catalog.hpp"
 #include "trainvm/document.hpp"
 #include "trainvm/fsm.hpp"
 #include "trainvm/journal.hpp"
+#include "trainvm/reflection_json.hpp"
 #include "trainvm/service.hpp"
 
 #include <filesystem>
@@ -22,6 +24,7 @@ void usage() {
       << "  trainvm validate <experiment.json>\n"
       << "  trainvm plan <experiment.json> [--canonical]\n"
       << "  trainvm compile  # read JSON from stdin; emit canonical preview JSON\n"
+      << "  trainvm validate-catalog <compatibility.json> <repository-root>\n"
       << "  trainvm serve --journal <journal.db> --socket <trainvm.sock> "
          "--registry <adapters.json> --host-launch-registry "
          "<host-launches.json>\n"
@@ -94,6 +97,25 @@ int compile_command() {
   output["canonical_plan"] = result.plan->canonical_plan;
   output["diagnostics"] = trainvm::diagnostics_json(result.diagnostics);
   std::cout << output.dump(2) << '\n';
+  return 0;
+}
+
+int validate_catalog_command(const std::filesystem::path& catalog_path,
+                             const std::filesystem::path& repository_root) {
+  const auto catalog = trainvm::CompatibilityCatalog::load_file(
+      std::filesystem::absolute(catalog_path).lexically_normal(),
+      std::filesystem::absolute(repository_root).lexically_normal());
+  std::cout << nlohmann::json{
+                   {"valid", true},
+                   {"authority", trainvm::enum_to_string(catalog.authority())},
+                   {"entries", catalog.entries().size()},
+                   {"catalog_digest", catalog.catalog_digest()},
+                   {"source_tree_digest", catalog.source_tree_digest()},
+                   {"repository_root_identity",
+                    catalog.repository_root_identity_display()},
+               }
+                   .dump(2)
+            << '\n';
   return 0;
 }
 
@@ -213,6 +235,9 @@ int main(int argc, char** argv) {
     }
     if (argc == 2 && std::string_view(argv[1]) == "compile") {
       return compile_command();
+    }
+    if (argc == 4 && std::string_view(argv[1]) == "validate-catalog") {
+      return validate_catalog_command(argv[2], argv[3]);
     }
     if (argc >= 2 && std::string_view(argv[1]) == "serve") {
       return serve_command(argc, argv);

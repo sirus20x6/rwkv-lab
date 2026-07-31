@@ -71,6 +71,17 @@ target_link_libraries(trainvm_core
   PRIVATE OpenSSL::Crypto SQLite3::SQLite3 yaml-cpp::yaml-cpp
 )
 
+add_library(trainvm_compatibility_catalog src/compatibility_catalog.cpp)
+target_include_directories(trainvm_compatibility_catalog PUBLIC include)
+target_compile_options(trainvm_compatibility_catalog PUBLIC -freflection)
+target_compile_options(trainvm_compatibility_catalog PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(trainvm_compatibility_catalog
+  PUBLIC nlohmann_json::nlohmann_json
+  PRIVATE OpenSSL::Crypto
+)
+
 add_library(trainvm_service src/service.cpp)
 target_include_directories(trainvm_service PUBLIC include)
 target_compile_options(trainvm_service PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror)
@@ -78,7 +89,7 @@ target_link_libraries(trainvm_service PUBLIC trainvm_core trainvm_protocol)
 
 add_executable(trainvm src/main.cpp)
 target_compile_options(trainvm PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror)
-target_link_libraries(trainvm PRIVATE trainvm_service)
+target_link_libraries(trainvm PRIVATE trainvm_service trainvm_compatibility_catalog)
 
 enable_testing()
 add_executable(trainvm_tests tests/trainvm_tests.cpp)
@@ -103,6 +114,30 @@ target_compile_options(cache_namespace_tests PRIVATE
 )
 target_link_libraries(cache_namespace_tests PRIVATE trainvm_core)
 add_test(NAME cache_namespace_tests COMMAND cache_namespace_tests)
+add_executable(compatibility_catalog_tests tests/compatibility_catalog_tests.cpp)
+target_compile_options(compatibility_catalog_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_compile_definitions(compatibility_catalog_tests PRIVATE
+  TRAINVM_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/.."
+)
+target_link_libraries(compatibility_catalog_tests PRIVATE trainvm_compatibility_catalog)
+add_test(NAME compatibility_catalog_tests COMMAND compatibility_catalog_tests)
+add_executable(coverage_fixture_tests tests/coverage_fixture_tests.cpp)
+target_compile_options(coverage_fixture_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_compile_definitions(coverage_fixture_tests PRIVATE
+  TRAINVM_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/.."
+)
+target_link_libraries(coverage_fixture_tests PRIVATE trainvm_core)
+add_test(NAME coverage_fixture_tests COMMAND coverage_fixture_tests)
+
+get_target_property(TRAINVM_SERVICE_LINKS trainvm_service LINK_LIBRARIES)
+if("trainvm_compatibility_catalog" IN_LIST TRAINVM_SERVICE_LINKS)
+  message(FATAL_ERROR
+    "trainvm_service must not link the compatibility evidence catalog")
+endif()
 add_test(
   NAME trainvm_cli_validate
   COMMAND trainvm validate
@@ -113,6 +148,15 @@ add_test(
   COMMAND trainvm simulate
     "${CMAKE_CURRENT_SOURCE_DIR}/../docs/experiment-vm/examples/mageflow-cache-resume.json"
     "${CMAKE_CURRENT_SOURCE_DIR}/../docs/experiment-vm/examples/mageflow-cache-resume.events.jsonl"
+)
+add_test(
+  NAME trainvm_cli_validate_compatibility_catalog
+  COMMAND trainvm validate-catalog
+    "${CMAKE_CURRENT_SOURCE_DIR}/../docs/experiment-vm/compatibility-workflows.v1.json"
+    "${CMAKE_CURRENT_SOURCE_DIR}/.."
+)
+set_tests_properties(trainvm_cli_validate_compatibility_catalog PROPERTIES
+  PASS_REGULAR_EXPRESSION "compatibility_evidence_only"
 )
 set_tests_properties(trainvm_cli_simulate PROPERTIES
   PASS_REGULAR_EXPRESSION "\"status\": \"completed\""

@@ -165,6 +165,10 @@ void validate_profile(AdapterProfile& profile) {
     }
     return;
   }
+  if (profile.key.adapter.starts_with("coverage.")) {
+    throw std::invalid_argument(
+        "coverage.* adapter names are reserved for compile-only fixtures");
+  }
   if (!valid_sha256_fingerprint(profile.code_fingerprint)) {
     throw std::invalid_argument(
         "worker adapter code fingerprint must be canonical sha256 hex");

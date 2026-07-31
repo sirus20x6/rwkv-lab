@@ -27,6 +27,12 @@ Performance work is split into three layers:
    attention-window curricula, multi-token prediction, architectural skips, loss fusion, or altered
    parameter schedules. They are never silently enabled as generic “speed” flags.
 
+Dataset, cache, evaluation, benchmark, gallery, export, promotion, and retention evidence follows
+the publication and qualification contract in
+[`DATA_EVAL_ARTIFACT_AUTHORITY.md`](DATA_EVAL_ARTIFACT_AUTHORITY.md). In particular, cache presence is
+not cache integrity, mutable gallery staging is not historical evidence, and optimization promotion
+requires an isolated benchmark map plus a machine-readable parity decision.
+
 An experiment declares capabilities, constraints, and expected evidence. It never embeds arbitrary
 commands, environment variables, Python, or compiler flags. Existing environment-selected paths,
 runtimes, and credentials migrate to typed host-profile, artifact, and secret references whose
