@@ -23,6 +23,8 @@ Implemented now:
   transaction-rollback tests;
 - durable exclusive resource leases with explicit expiry, owner-checked renewal/release, and
   monotonic fencing tokens that invalidate stale controllers after takeover;
+- durable per-attempt dispatch intents and completion receipts, with idempotent worker re-execution
+  and atomic receipt/cause/FSM commits closing the controller-crash ambiguity window;
 - `validate`, `plan`, `simulate`, and journal inspection/replay CLI commands.
 
 This code does not yet launch or control a trainer. The next implementation boundary is the FSM

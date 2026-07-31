@@ -9,6 +9,7 @@
 #include <nlohmann/json.hpp>
 #include <sqlite3.h>
 
+#include "trainvm/dispatch.hpp"
 #include "trainvm/lease.hpp"
 
 namespace trainvm {
@@ -61,6 +62,10 @@ class Journal {
   [[nodiscard]] std::optional<Event> event(const std::string& event_id) const;
   [[nodiscard]] std::vector<Event> events_for_run(const std::string& run_id) const;
   [[nodiscard]] std::optional<RunProjection> projection(const std::string& run_id) const;
+  Dispatch prepare_dispatch(const Dispatch& dispatch, const Event& prepared_event);
+  void complete_dispatch(const std::string& dispatch_id, const std::string& result_event_id,
+                         const std::vector<Event>& events);
+  [[nodiscard]] std::optional<Dispatch> dispatch(const std::string& dispatch_id) const;
   LeaseAcquireResult acquire_lease(const std::string& concurrency_key,
                                    const std::string& owner_run_id,
                                    const std::string& lease_id, std::int64_t now_ns,

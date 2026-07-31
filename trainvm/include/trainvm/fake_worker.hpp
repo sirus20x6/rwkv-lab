@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -8,6 +9,7 @@
 #include <nlohmann/json.hpp>
 
 #include "trainvm/document.hpp"
+#include "trainvm/dispatch.hpp"
 #include "trainvm/fsm.hpp"
 #include "trainvm/journal.hpp"
 
@@ -25,13 +27,13 @@ class FakeWorker {
  public:
   explicit FakeWorker(std::vector<FakeOutcome> outcomes);
 
-  Event next(const CompiledPlan& plan, const ExecutionState& state);
+  Event execute(const CompiledPlan& plan, const ExecutionState& state, const Dispatch& dispatch);
   [[nodiscard]] std::size_t remaining() const;
 
  private:
   std::vector<FakeOutcome> outcomes_;
   std::size_t cursor_{};
-  std::uint64_t event_number_{};
+  std::map<std::string, Event> receipts_;
 };
 
 }  // namespace trainvm

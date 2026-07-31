@@ -87,6 +87,20 @@ CREATE TABLE IF NOT EXISTS resource_leases (
   expires_at_ns INTEGER NOT NULL,
   released_at_ns INTEGER
 ) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS node_dispatches (
+  dispatch_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  run_revision INTEGER NOT NULL,
+  plan_revision INTEGER NOT NULL,
+  node_id TEXT NOT NULL,
+  attempt_id TEXT NOT NULL,
+  component TEXT NOT NULL,
+  operation TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('prepared', 'completed')),
+  result_event_id TEXT,
+  UNIQUE(run_id, node_id, attempt_id)
+) WITHOUT ROWID;
 )sql";
 
 class Statement {
@@ -343,6 +357,33 @@ ResourceLease lease_from_row(sqlite3_stmt* statement) {
   };
 }
 
+Dispatch dispatch_from_row(sqlite3_stmt* statement) {
+  Dispatch dispatch{
+      .dispatch_id = column_text(statement, 0),
+      .run_id = column_text(statement, 1),
+      .run_revision = static_cast<std::uint64_t>(sqlite3_column_int64(statement, 2)),
+      .plan_revision = static_cast<std::uint64_t>(sqlite3_column_int64(statement, 3)),
+      .node_id = column_text(statement, 4),
+      .attempt_id = column_text(statement, 5),
+      .component = column_text(statement, 6),
+      .operation = column_text(statement, 7),
+      .status = column_text(statement, 8) == "completed" ? DispatchStatus::completed
+                                                        : DispatchStatus::prepared,
+      .result_event_id = std::nullopt,
+  };
+  if (sqlite3_column_type(statement, 9) != SQLITE_NULL) {
+    dispatch.result_event_id = column_text(statement, 9);
+  }
+  return dispatch;
+}
+
+bool same_dispatch_identity(const Dispatch& left, const Dispatch& right) {
+  return left.dispatch_id == right.dispatch_id && left.run_id == right.run_id &&
+         left.run_revision == right.run_revision && left.plan_revision == right.plan_revision &&
+         left.node_id == right.node_id && left.attempt_id == right.attempt_id &&
+         left.component == right.component && left.operation == right.operation;
+}
+
 }  // namespace
 
 Journal::Journal(const std::filesystem::path& path) {
@@ -583,6 +624,149 @@ std::optional<RunProjection> Journal::projection(const std::string& run_id) cons
       .last_event_sequence = static_cast<std::uint64_t>(sqlite3_column_int64(query.get(), 10)),
       .failure_summary = column_text(query.get(), 11),
   };
+}
+
+Dispatch Journal::prepare_dispatch(const Dispatch& dispatch, const Event& prepared_event) {
+  if (dispatch.dispatch_id.empty() || dispatch.run_id.empty() || dispatch.node_id.empty() ||
+      dispatch.attempt_id.empty() || dispatch.component.empty() || dispatch.operation.empty()) {
+    throw std::invalid_argument("dispatch identity and operation fields must not be empty");
+  }
+  if (dispatch.status != DispatchStatus::prepared || dispatch.result_event_id) {
+    throw std::invalid_argument("a new dispatch must be prepared without a result event");
+  }
+  if (prepared_event.event_type != "node.dispatch_prepared" ||
+      prepared_event.run_id != dispatch.run_id || prepared_event.node_id != dispatch.node_id ||
+      prepared_event.attempt_id != dispatch.attempt_id ||
+      prepared_event.run_revision != dispatch.run_revision ||
+      prepared_event.plan_revision != dispatch.plan_revision) {
+    throw std::invalid_argument("dispatch preparation event does not match its dispatch");
+  }
+  const auto prepared_dispatch_id = prepared_event.payload.find("dispatch_id");
+  if (prepared_dispatch_id == prepared_event.payload.end() || !prepared_dispatch_id->is_string() ||
+      prepared_dispatch_id->get<std::string>() != dispatch.dispatch_id) {
+    throw std::invalid_argument("dispatch preparation event has the wrong dispatch_id payload");
+  }
+
+  Transaction transaction(database_);
+  Statement existing(database_, R"sql(
+    SELECT dispatch_id, run_id, run_revision, plan_revision, node_id, attempt_id,
+           component, operation, status, result_event_id
+    FROM node_dispatches WHERE dispatch_id=?
+  )sql");
+  bind_text(existing.get(), 1, dispatch.dispatch_id);
+  const int existing_status = sqlite3_step(existing.get());
+  if (existing_status == SQLITE_ROW) {
+    Dispatch stored = dispatch_from_row(existing.get());
+    if (!same_dispatch_identity(stored, dispatch)) {
+      throw std::invalid_argument("dispatch_id already exists with different content");
+    }
+    transaction.commit();
+    return stored;
+  }
+  if (existing_status != SQLITE_DONE) {
+    throw std::runtime_error("could not read dispatch: " + std::string(sqlite3_errmsg(database_)));
+  }
+  {
+    Statement attempt(database_, R"sql(
+      SELECT dispatch_id FROM node_dispatches WHERE run_id=? AND node_id=? AND attempt_id=?
+    )sql");
+    bind_text(attempt.get(), 1, dispatch.run_id);
+    bind_text(attempt.get(), 2, dispatch.node_id);
+    bind_text(attempt.get(), 3, dispatch.attempt_id);
+    if (sqlite3_step(attempt.get()) == SQLITE_ROW) {
+      throw std::invalid_argument("node attempt already has a different dispatch");
+    }
+  }
+
+  append_uncommitted(prepared_event);
+  Statement insert(database_, R"sql(
+    INSERT INTO node_dispatches(
+      dispatch_id, run_id, run_revision, plan_revision, node_id, attempt_id,
+      component, operation, status, result_event_id
+    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'prepared', NULL)
+  )sql");
+  bind_text(insert.get(), 1, dispatch.dispatch_id);
+  bind_text(insert.get(), 2, dispatch.run_id);
+  bind_integer(insert.get(), 3, checked_integer(dispatch.run_revision, "run_revision"));
+  bind_integer(insert.get(), 4, checked_integer(dispatch.plan_revision, "plan_revision"));
+  bind_text(insert.get(), 5, dispatch.node_id);
+  bind_text(insert.get(), 6, dispatch.attempt_id);
+  bind_text(insert.get(), 7, dispatch.component);
+  bind_text(insert.get(), 8, dispatch.operation);
+  require_done(database_, insert.get(), "insert node dispatch");
+  transaction.commit();
+  return dispatch;
+}
+
+void Journal::complete_dispatch(const std::string& dispatch_id, const std::string& result_event_id,
+                                const std::vector<Event>& events) {
+  if (dispatch_id.empty() || result_event_id.empty() || events.empty()) {
+    throw std::invalid_argument("dispatch completion requires IDs and journal events");
+  }
+  if (std::none_of(events.begin(), events.end(), [&](const Event& event) {
+        return event.event_id == result_event_id;
+      })) {
+    throw std::invalid_argument("dispatch completion batch does not contain its result event");
+  }
+  Transaction transaction(database_);
+  Statement query(database_, R"sql(
+    SELECT dispatch_id, run_id, run_revision, plan_revision, node_id, attempt_id,
+           component, operation, status, result_event_id
+    FROM node_dispatches WHERE dispatch_id=?
+  )sql");
+  bind_text(query.get(), 1, dispatch_id);
+  if (sqlite3_step(query.get()) != SQLITE_ROW) {
+    throw std::invalid_argument("cannot complete an unknown dispatch");
+  }
+  const Dispatch stored = dispatch_from_row(query.get());
+  if (stored.status == DispatchStatus::completed) {
+    if (stored.result_event_id != std::optional<std::string>{result_event_id}) {
+      throw std::invalid_argument("dispatch already completed with a different result event");
+    }
+    transaction.commit();
+    return;
+  }
+  for (const Event& event : events) {
+    if (event.run_id != stored.run_id) {
+      throw std::invalid_argument("dispatch completion batch crosses run identities");
+    }
+    if (event.event_id == result_event_id &&
+        (event.node_id != stored.node_id || event.attempt_id != stored.attempt_id ||
+         event.worker_sequence == 0)) {
+      throw std::invalid_argument("dispatch result event does not match the dispatched attempt");
+    }
+  }
+  for (const Event& event : events) {
+    append_uncommitted(event);
+  }
+  Statement update(database_, R"sql(
+    UPDATE node_dispatches SET status='completed', result_event_id=?
+    WHERE dispatch_id=? AND status='prepared'
+  )sql");
+  bind_text(update.get(), 1, result_event_id);
+  bind_text(update.get(), 2, dispatch_id);
+  require_done(database_, update.get(), "complete node dispatch");
+  if (sqlite3_changes(database_) != 1) {
+    throw std::runtime_error("dispatch completion affected an unexpected number of rows");
+  }
+  transaction.commit();
+}
+
+std::optional<Dispatch> Journal::dispatch(const std::string& dispatch_id) const {
+  Statement query(database_, R"sql(
+    SELECT dispatch_id, run_id, run_revision, plan_revision, node_id, attempt_id,
+           component, operation, status, result_event_id
+    FROM node_dispatches WHERE dispatch_id=?
+  )sql");
+  bind_text(query.get(), 1, dispatch_id);
+  const int status = sqlite3_step(query.get());
+  if (status == SQLITE_DONE) {
+    return std::nullopt;
+  }
+  if (status != SQLITE_ROW) {
+    throw std::runtime_error("could not read dispatch: " + std::string(sqlite3_errmsg(database_)));
+  }
+  return dispatch_from_row(query.get());
 }
 
 LeaseAcquireResult Journal::acquire_lease(const std::string& concurrency_key,

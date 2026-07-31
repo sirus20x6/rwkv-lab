@@ -564,7 +564,8 @@ void test_controller_and_fake_worker() {
     check(controller.state().current_node_id == "acquire_gpu" && journal.event_count() == 2U,
           "run creation atomically records run and initial node entry");
 
-    auto first_event = worker.next(controller.plan(), controller.state());
+    const auto first_dispatch = controller.prepare_dispatch();
+    auto first_event = worker.execute(controller.plan(), controller.state(), first_dispatch);
     auto stale_event = first_event;
     stale_event.run_revision = 0;
     bool stale_worker_rejected = false;
@@ -581,17 +582,29 @@ void test_controller_and_fake_worker() {
     } catch (const std::invalid_argument&) {
       reserved_worker_rejected = true;
     }
-    check(stale_worker_rejected && reserved_worker_rejected && journal.event_count() == 2U,
+    check(stale_worker_rejected && reserved_worker_rejected && journal.event_count() == 3U,
           "controller rejects stale revisions and worker use of reserved event types");
-    controller.handle_event(first_event);
+
+    const trainvm::ExecutionState before_receipt_crash = controller.state();
+    trainvm::Controller after_receipt_crash(*compiled.plan, journal, "controller-run");
+    after_receipt_crash.recover();
+    const auto recovered_dispatch = after_receipt_crash.prepare_dispatch();
+    const auto repeated_result =
+        worker.execute(after_receipt_crash.plan(), after_receipt_crash.state(), recovered_dispatch);
+    check(after_receipt_crash.state() == before_receipt_crash &&
+              recovered_dispatch == first_dispatch && repeated_result.event_id == first_event.event_id &&
+              worker.remaining() == 8U,
+          "restart after worker effect reuses dispatch and its idempotent worker receipt");
+    after_receipt_crash.handle_event(repeated_result);
     for (std::size_t index = 1; index < 5U; ++index) {
-      const auto event = worker.next(controller.plan(), controller.state());
-      controller.handle_event(event);
+      const auto dispatch = after_receipt_crash.prepare_dispatch();
+      const auto event = worker.execute(after_receipt_crash.plan(), after_receipt_crash.state(), dispatch);
+      after_receipt_crash.handle_event(event);
     }
-    check(controller.state().current_node_id == "resume_training" &&
-              controller.state().revision == 6U && worker.remaining() == 4U,
+    check(after_receipt_crash.state().current_node_id == "resume_training" &&
+              after_receipt_crash.state().revision == 6U && worker.remaining() == 4U,
           "scripted worker drives the first durable workflow segment");
-    const trainvm::ExecutionState before_restart = controller.state();
+    const trainvm::ExecutionState before_restart = after_receipt_crash.state();
 
     trainvm::Controller restarted(*compiled.plan, journal, "controller-run");
     restarted.recover();
@@ -600,24 +613,25 @@ void test_controller_and_fake_worker() {
 
     trainvm::Event final_cause;
     while (worker.remaining() > 0U) {
-      auto event = worker.next(restarted.plan(), restarted.state());
+      const auto dispatch = restarted.prepare_dispatch();
+      auto event = worker.execute(restarted.plan(), restarted.state(), dispatch);
       final_cause = event;
       restarted.handle_event(event);
     }
     check(restarted.state().status == trainvm::ExecutionStatus::completed &&
               restarted.state().revision == 10U && restarted.state().transition_count == 9U,
           "recovered controller resumes to terminal completion");
-    check(journal.event_count() == 29U,
-          "each cause, transition, and entered/terminal event is committed exactly once");
+    check(journal.event_count() == 47U,
+          "dispatch intents, receipts, causes, transitions, and state observations commit once");
 
     const auto ordered = journal.events_for_run("controller-run");
-    check(ordered.size() == 29U && ordered.front().event_type == "run.created" &&
-              ordered.back().event_type == "run.observed_state_changed",
+    check(ordered.size() == 47U && ordered.front().event_type == "run.created" &&
+              ordered.back().event_type == "node.dispatch_completed",
           "journal exposes a stable run-local replay order");
     check(journal.event(final_cause.event_id).has_value(), "journal resolves exact events for retries");
 
     restarted.handle_event(final_cause);
-    check(journal.event_count() == 29U && restarted.state().status == trainvm::ExecutionStatus::completed,
+    check(journal.event_count() == 47U && restarted.state().status == trainvm::ExecutionStatus::completed,
           "retrying a committed worker event is idempotent even after completion");
 
     const auto before_rebuild = journal.projection("controller-run");
@@ -627,7 +641,7 @@ void test_controller_and_fake_worker() {
           "terminal projection clears stale active-node state and retains training progress");
     std::string reason;
     check(journal.verify_chain(&reason), "controller journal hash chain verifies");
-    check(journal.rebuild_projections() == 29U && journal.projection("controller-run") == before_rebuild,
+    check(journal.rebuild_projections() == 47U && journal.projection("controller-run") == before_rebuild,
           "controller projection survives complete journal replay");
 
     auto mismatched_plan = *compiled.plan;
@@ -648,11 +662,27 @@ void test_controller_and_fake_worker() {
     trainvm::Controller controller(*compiled.plan, journal, "collision-run");
     controller.create();
     trainvm::FakeWorker worker({mageflow_outcomes().front()});
-    const auto cause = worker.next(controller.plan(), controller.state());
-    auto collision = cause;
-    collision.event_id = cause.event_id + ":transition";
-    collision.worker_sequence = 0;
-    collision.event_type = "diagnostic.collision";
+    const auto dispatch = controller.prepare_dispatch();
+    const auto cause = worker.execute(controller.plan(), controller.state(), dispatch);
+    auto holder = created_event(compiled.plan->plan_hash);
+    holder.event_id = "collision-holder-created";
+    holder.run_id = "collision-holder";
+    journal.append(holder);
+    trainvm::Event collision{
+        .event_id = cause.event_id + ":transition",
+        .run_id = "collision-holder",
+        .run_revision = 1,
+        .plan_revision = 1,
+        .node_id = "",
+        .attempt_id = "",
+        .worker_sequence = 0,
+        .event_type = "diagnostic.collision",
+        .event_version = 1,
+        .wall_time_ns = 0,
+        .monotonic_time_ns = 0,
+        .optimizer_step = std::nullopt,
+        .payload = nlohmann::json::object(),
+    };
     journal.append(collision);
     const auto before = controller.state();
     bool collision_rejected = false;
@@ -663,8 +693,12 @@ void test_controller_and_fake_worker() {
     }
     check(collision_rejected, "derived event-ID collision rejects the controller transition batch");
     check(controller.state() == before && !journal.event(cause.event_id).has_value() &&
-              journal.event_count() == 3U,
-          "failed controller batch rolls back its cause and leaves in-memory state unchanged");
+              journal.event_count() == 5U &&
+              journal.dispatch(dispatch.dispatch_id)->status == trainvm::DispatchStatus::prepared,
+          "failed completion rolls back its cause and leaves dispatch plus memory state resumable");
+    trainvm::Controller recovered(*compiled.plan, journal, "collision-run");
+    check(recovered.recover() == before,
+          "controller recovers the prepared dispatch after an atomic completion rollback");
   }
 
   trainvm::FakeWorker wrong_worker({{.expected_node_id = "acquire_gpu",
@@ -674,7 +708,19 @@ void test_controller_and_fake_worker() {
   bool wrong_operation_rejected = false;
   try {
     const auto state = trainvm::start_execution(*compiled.plan, "wrong-operation-run");
-    (void)wrong_worker.next(*compiled.plan, state);
+    const trainvm::Dispatch dispatch{
+        .dispatch_id = "wrong-operation-dispatch",
+        .run_id = state.run_id,
+        .run_revision = state.revision,
+        .plan_revision = 1,
+        .node_id = state.current_node_id,
+        .attempt_id = state.current_attempt_id,
+        .component = "core",
+        .operation = "acquire_resources",
+        .status = trainvm::DispatchStatus::prepared,
+        .result_event_id = std::nullopt,
+    };
+    (void)wrong_worker.execute(*compiled.plan, state, dispatch);
   } catch (const std::logic_error&) {
     wrong_operation_rejected = true;
   }

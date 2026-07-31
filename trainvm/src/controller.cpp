@@ -27,7 +27,51 @@ bool same_worker_event(const Event& stored, const Event& input) {
 
 bool is_controller_event(std::string_view event_type) {
   return event_type == "run.created" || event_type == "node.entered" ||
-         event_type == "fsm.transitioned" || event_type == "run.observed_state_changed";
+         event_type == "fsm.transitioned" || event_type == "run.observed_state_changed" ||
+         event_type == "node.dispatch_prepared" || event_type == "node.dispatch_completed";
+}
+
+std::string dispatch_id_for(const ExecutionState& state) {
+  return state.run_id + ":dispatch:" + state.current_node_id + ":" + state.current_attempt_id;
+}
+
+Event dispatch_prepared_event(const Dispatch& dispatch) {
+  return Event{
+      .event_id = dispatch.dispatch_id + ":prepared",
+      .run_id = dispatch.run_id,
+      .run_revision = dispatch.run_revision,
+      .plan_revision = dispatch.plan_revision,
+      .node_id = dispatch.node_id,
+      .attempt_id = dispatch.attempt_id,
+      .worker_sequence = 0,
+      .event_type = "node.dispatch_prepared",
+      .event_version = 1,
+      .wall_time_ns = 0,
+      .monotonic_time_ns = 0,
+      .optimizer_step = std::nullopt,
+      .payload = {{"dispatch_id", dispatch.dispatch_id},
+                  {"component", dispatch.component},
+                  {"operation", dispatch.operation}},
+  };
+}
+
+Event dispatch_completed_event(const Dispatch& dispatch, const Event& result,
+                               std::uint64_t run_revision) {
+  return Event{
+      .event_id = dispatch.dispatch_id + ":completed",
+      .run_id = dispatch.run_id,
+      .run_revision = run_revision,
+      .plan_revision = dispatch.plan_revision,
+      .node_id = dispatch.node_id,
+      .attempt_id = dispatch.attempt_id,
+      .worker_sequence = 0,
+      .event_type = "node.dispatch_completed",
+      .event_version = 1,
+      .wall_time_ns = result.wall_time_ns,
+      .monotonic_time_ns = result.monotonic_time_ns,
+      .optimizer_step = result.optimizer_step,
+      .payload = {{"dispatch_id", dispatch.dispatch_id}, {"result_event_id", result.event_id}},
+  };
 }
 
 Event created_event(const CompiledPlan& plan, const ExecutionState& state) {
@@ -161,6 +205,7 @@ const ExecutionState& Controller::recover() {
   enum class ReplayPhase { expecting_entry, ready, awaiting_transition, expecting_terminal, terminal };
   ReplayPhase phase = ReplayPhase::expecting_entry;
   std::optional<Event> pending_cause;
+  std::optional<std::pair<std::string, std::string>> expected_completion;
   for (const Event& event : events) {
     if (event.plan_revision != kInitialPlanRevision) {
       throw std::runtime_error("journal recovery encountered an unsupported plan revision");
@@ -181,6 +226,24 @@ const ExecutionState& Controller::recover() {
       require_payload_string(event, "component", node.invoke.component);
       require_payload_string(event, "operation", node.invoke.operation);
       phase = ReplayPhase::ready;
+      continue;
+    }
+    if (event.event_type == "node.dispatch_prepared") {
+      if (phase != ReplayPhase::ready || expected_completion ||
+          event.run_revision != recovered.revision) {
+        throw std::runtime_error("journal contains dispatch preparation outside an active node");
+      }
+      const std::string expected_id = dispatch_id_for(recovered);
+      require_payload_string(event, "dispatch_id", expected_id);
+      const auto stored = journal_.dispatch(expected_id);
+      const Node& node = plan_.experiment.spec.workflow.nodes.at(recovered.current_node_id);
+      if (!stored || stored->run_id != run_id_ || stored->node_id != recovered.current_node_id ||
+          stored->attempt_id != recovered.current_attempt_id ||
+          stored->component != node.invoke.component || stored->operation != node.invoke.operation) {
+        throw std::runtime_error("persisted dispatch disagrees with its preparation event");
+      }
+      require_payload_string(event, "component", node.invoke.component);
+      require_payload_string(event, "operation", node.invoke.operation);
       continue;
     }
     if (event.event_type == "run.observed_state_changed") {
@@ -212,30 +275,83 @@ const ExecutionState& Controller::recover() {
           event.run_revision != result.state.revision) {
         throw std::runtime_error("persisted FSM transition disagrees with deterministic replay");
       }
+      expected_completion = std::pair{dispatch_id_for(recovered), pending_cause->event_id};
       recovered = result.state;
       pending_cause.reset();
       phase = recovered.status == ExecutionStatus::running ? ReplayPhase::expecting_entry
                                                            : ReplayPhase::expecting_terminal;
       continue;
     }
+    if (event.event_type == "node.dispatch_completed") {
+      if ((phase != ReplayPhase::ready && phase != ReplayPhase::terminal) ||
+          event.run_revision != recovered.revision || !expected_completion) {
+        throw std::runtime_error("journal contains dispatch completion at an invalid boundary");
+      }
+      const auto dispatch_id = event.payload.find("dispatch_id");
+      const auto result_id = event.payload.find("result_event_id");
+      if (dispatch_id == event.payload.end() || !dispatch_id->is_string() ||
+          result_id == event.payload.end() || !result_id->is_string()) {
+        throw std::runtime_error("dispatch completion is missing its receipt identity");
+      }
+      if (dispatch_id->get<std::string>() != expected_completion->first ||
+          result_id->get<std::string>() != expected_completion->second) {
+        throw std::runtime_error("dispatch completion does not match the preceding FSM transition");
+      }
+      const auto stored = journal_.dispatch(dispatch_id->get<std::string>());
+      if (!stored || stored->status != DispatchStatus::completed ||
+          stored->result_event_id != std::optional<std::string>{result_id->get<std::string>()}) {
+        throw std::runtime_error("dispatch completion event disagrees with its durable receipt");
+      }
+      expected_completion.reset();
+      continue;
+    }
     if (is_controller_event(event.event_type)) {
       throw std::runtime_error("journal recovery encountered an unsupported controller event");
     }
-    if (phase != ReplayPhase::ready || recovered.status != ExecutionStatus::running) {
+    if (phase != ReplayPhase::ready || expected_completion ||
+        recovered.status != ExecutionStatus::running) {
       throw std::runtime_error("journal contains a causing event outside an active node");
     }
     if (event.run_revision != recovered.revision || event.worker_sequence == 0) {
       throw std::runtime_error("journal contains a causing event with an invalid revision or sequence");
     }
+    const auto receipt = journal_.dispatch(dispatch_id_for(recovered));
+    if (!receipt || receipt->status != DispatchStatus::completed ||
+        receipt->result_event_id != std::optional<std::string>{event.event_id}) {
+      throw std::runtime_error("causing event has no matching completed dispatch receipt");
+    }
     pending_cause = event;
     phase = ReplayPhase::awaiting_transition;
   }
-  if (phase != ReplayPhase::ready && phase != ReplayPhase::terminal) {
+  if ((phase != ReplayPhase::ready && phase != ReplayPhase::terminal) || expected_completion) {
     throw std::runtime_error("run journal ends in an incomplete controller transaction");
   }
   state_ = std::move(recovered);
   initialized_ = true;
   return state_;
+}
+
+Dispatch Controller::prepare_dispatch() {
+  if (!initialized_) {
+    throw std::logic_error("controller must create or recover the run before dispatching work");
+  }
+  if (state_.status != ExecutionStatus::running) {
+    throw std::logic_error("controller cannot dispatch work for a terminal run");
+  }
+  const Node& node = plan_.experiment.spec.workflow.nodes.at(state_.current_node_id);
+  Dispatch dispatch{
+      .dispatch_id = dispatch_id_for(state_),
+      .run_id = run_id_,
+      .run_revision = state_.revision,
+      .plan_revision = kInitialPlanRevision,
+      .node_id = state_.current_node_id,
+      .attempt_id = state_.current_attempt_id,
+      .component = node.invoke.component,
+      .operation = node.invoke.operation,
+      .status = DispatchStatus::prepared,
+      .result_event_id = std::nullopt,
+  };
+  return journal_.prepare_dispatch(dispatch, dispatch_prepared_event(dispatch));
 }
 
 const ExecutionState& Controller::handle_event(const Event& input) {
@@ -260,6 +376,10 @@ const ExecutionState& Controller::handle_event(const Event& input) {
   if (input.worker_sequence == 0) {
     throw std::invalid_argument("worker event sequence must be nonzero");
   }
+  const auto dispatch = journal_.dispatch(dispatch_id_for(state_));
+  if (!dispatch || dispatch->status != DispatchStatus::prepared) {
+    throw std::logic_error("worker event has no prepared dispatch for the active attempt");
+  }
   Event cause = input;
   cause.run_revision = state_.revision;
   cause.plan_revision = kInitialPlanRevision;
@@ -270,7 +390,8 @@ const ExecutionState& Controller::handle_event(const Event& input) {
   } else {
     batch.push_back(terminal_event(cause, result.state));
   }
-  journal_.append_batch(batch);
+  batch.push_back(dispatch_completed_event(*dispatch, cause, result.state.revision));
+  journal_.complete_dispatch(dispatch->dispatch_id, cause.event_id, batch);
   state_ = result.state;
   return state_;
 }

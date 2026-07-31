@@ -3,6 +3,7 @@
 #include <string>
 
 #include "trainvm/document.hpp"
+#include "trainvm/dispatch.hpp"
 #include "trainvm/fsm.hpp"
 #include "trainvm/journal.hpp"
 
@@ -14,6 +15,7 @@ class Controller {
 
   const ExecutionState& create();
   const ExecutionState& recover();
+  Dispatch prepare_dispatch();
   const ExecutionState& handle_event(const Event& event);
 
   [[nodiscard]] const ExecutionState& state() const;
