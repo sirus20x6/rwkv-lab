@@ -65,6 +65,14 @@ Implemented now:
   process-free and structurally excludes dynamic credentials;
 - a strongly typed authority-time sampler that separates display-only wall time from Linux
   `CLOCK_BOOTTIME`, latches one boot UUID, and fails closed on boot-time regression;
+- typed host inventory, probe/context evidence, topology policies, occupancy snapshots, stable
+  accelerator/partition/mutex identities, deterministic bundle selection, and parent/partition
+  conflict closure; inventory is never treated as proof that a resource is free;
+- an authority-bound SQLite host ledger with immutable typed hash-chain evidence, exact projection
+  closure, persistent per-resource generations, atomic all-or-none grant/release CAS, durable busy
+  and exact replay outcomes, stale-inventory revocation, and prior-boot blocking; its retained
+  filesystem authority pins the database/lock inode, protects SQLite auxiliary names, and reports a
+  filesystem boundary only—not the broader host enforcement grade;
 - journal schema v6 boot-scoped lease authority across acquisition, renewal, release, readiness,
   dispatch, control acknowledgement, and host binding; renewal atomically advances mutable expiry
   and appends an immutable exact-input receipt, while v4 wall-clock rows migrate as quarantined
@@ -85,10 +93,11 @@ Implemented now:
 This code does not yet launch or control a trainer. The launch-authorization reconciler first
 persists a fenced `worker.launch_requested` protocol intent; the host resolver can then persist a
 deterministic, non-secret binding while retaining sealed file descriptors, but neither is sufficient
-to spawn or signal an OS process. The next boundary is a single-threaded guarded launcher helper,
-boot-time lease renewal, host-wide resource locks, cgroup cleanup, process-instance credentials, and
-durable spawn/exit receipts. Real MageFlow process ownership follows only after those fault-injection
-tests pass.
+to spawn or signal an OS process. Typed host-resource selection and the durable grant ledger are now
+implemented libraries, but no service RPC can mutate them. The next boundary is the hostd
+filesystem-seqpacket singleton, startup orphan audit, journal/hostd receipt saga, guarded launcher,
+cgroup cleanup, process-instance credentials, and durable spawn/exit receipts. Real trainer process
+ownership follows only after those fault-injection tests pass.
 
 MageFlow is only the first recovery fixture. The runtime is not a MageFlow-specific launcher: RWKV,
 transformer, vision/multimodal, conversion, distillation, post-training, RLVR, external-trainer, and
