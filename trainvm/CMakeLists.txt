@@ -75,7 +75,10 @@ target_link_libraries(trainvm PRIVATE trainvm_service)
 
 enable_testing()
 add_executable(trainvm_tests tests/trainvm_tests.cpp)
-target_compile_options(trainvm_tests PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror)
+target_compile_options(trainvm_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+  -fno-access-control
+)
 target_compile_definitions(trainvm_tests PRIVATE
   TRAINVM_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/.."
 )

@@ -2,6 +2,7 @@
 
 #include "trainvm/reflection_json.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <limits>
 #include <map>
@@ -31,6 +32,7 @@ bool is_controller_event(std::string_view event_type) {
          event_type == "fsm.transitioned" || event_type == "run.desired_state_changed" ||
          event_type == "run.observed_state_changed" ||
          event_type == "resource.lease_acquired" ||
+         event_type == "worker.launch_requested" || event_type == "worker.ready" ||
          event_type == "node.dispatch_prepared" || event_type == "node.dispatch_completed" ||
          event_type.starts_with("control.");
 }
@@ -127,6 +129,67 @@ Event acquisition_event(const ExecutionState& state, std::string event_id,
       .optimizer_step = std::nullopt,
       .payload = std::move(payload),
   };
+}
+
+std::vector<std::string> canonical_capabilities(
+    std::vector<std::string> capabilities) {
+  if (capabilities.size() > 256U ||
+      std::ranges::any_of(capabilities, [](const std::string& capability) {
+        return capability.empty() || capability.size() > 256U;
+      })) {
+    throw std::invalid_argument("worker capabilities contain an invalid entry");
+  }
+  std::ranges::sort(capabilities);
+  if (std::ranges::adjacent_find(capabilities) != capabilities.end()) {
+    throw std::invalid_argument("worker capabilities must be unique");
+  }
+  return capabilities;
+}
+
+std::string worker_launch_event_id(const ExecutionState& state) {
+  return state.run_id + ":worker-launch:" + state.current_node_id + ":" +
+         state.current_attempt_id;
+}
+
+std::string worker_launch_nonce(const CompiledPlan& plan,
+                                const WorkerLaunchTicket& launch) {
+  return sha256_hex(
+      nlohmann::json{{"run_id", launch.run_id},
+                     {"plan_hash", plan.plan_hash},
+                     {"node_id", launch.node_id},
+                     {"attempt_id", launch.attempt_id},
+                     {"adapter", launch.adapter},
+                     {"adapter_version", launch.adapter_version},
+                     {"code_fingerprint", launch.code_fingerprint},
+                     {"required_capabilities", launch.required_capabilities},
+                     {"concurrency_key", launch.concurrency_key},
+                     {"lease_id", launch.lease_id},
+                     {"fencing_token", launch.fencing_token}}
+          .dump());
+}
+
+WorkerLaunchTicket launch_from_event(const Event& event) {
+  try {
+    return WorkerLaunchTicket{
+        .run_id = event.run_id,
+        .node_id = event.node_id,
+        .attempt_id = event.attempt_id,
+        .launch_nonce = event.payload.at("launch_nonce").get<std::string>(),
+        .adapter = event.payload.at("adapter").get<std::string>(),
+        .adapter_version = event.payload.at("adapter_version").get<std::string>(),
+        .code_fingerprint = event.payload.at("code_fingerprint").get<std::string>(),
+        .required_capabilities = canonical_capabilities(
+            event.payload.at("required_capabilities")
+                .get<std::vector<std::string>>()),
+        .concurrency_key =
+            event.payload.at("concurrency_key").get<std::string>(),
+        .lease_id = event.payload.at("lease_id").get<std::string>(),
+        .fencing_token = event.payload.at("fencing_token").get<std::uint64_t>(),
+    };
+  } catch (const nlohmann::json::exception& exception) {
+    throw std::runtime_error(std::string("worker launch event is malformed: ") +
+                             exception.what());
+  }
 }
 
 Event entered_event(const CompiledPlan& plan, const ExecutionState& state,
@@ -269,6 +332,9 @@ const ExecutionState& Controller::recover() {
   if (events.front().event_type != "run.created") {
     throw std::runtime_error("run journal does not begin with run.created");
   }
+  const bool managed_run = std::ranges::any_of(events, [](const Event& event) {
+    return event.event_type == "resource.lease_acquired";
+  });
   require_payload_string(events.front(), "plan_hash", plan_.plan_hash);
   if (events.front().run_revision != 1 || events.front().plan_revision != kInitialPlanRevision) {
     throw std::runtime_error("run.created carries an invalid initial revision");
@@ -280,6 +346,8 @@ const ExecutionState& Controller::recover() {
     acquisition_requested,
     lease_acquired,
     acquiring,
+    launch_requested,
+    worker_ready,
     expecting_entry,
     ready,
     awaiting_transition,
@@ -302,7 +370,10 @@ const ExecutionState& Controller::recover() {
   }
   ReplayPhase phase = initially_queued ? ReplayPhase::queued : ReplayPhase::expecting_entry;
   std::optional<Event> pending_cause;
+  bool pending_builtin_admission = false;
+  std::optional<std::string> expected_worker_entry_id;
   std::optional<std::pair<std::string, std::string>> expected_completion;
+  std::optional<std::string> expected_reacquisition_cause_id;
   std::map<std::string, std::string> replayed_control_status;
   for (const Event& event : events) {
     if (event.plan_revision != kInitialPlanRevision) {
@@ -315,7 +386,8 @@ const ExecutionState& Controller::recover() {
       continue;
     }
     if (event.event_type == "node.entered") {
-      if (phase != ReplayPhase::expecting_entry || recovered.status != ExecutionStatus::running ||
+      if (phase != ReplayPhase::expecting_entry || expected_reacquisition_cause_id ||
+          recovered.status != ExecutionStatus::running ||
           event.node_id != recovered.current_node_id ||
           event.attempt_id != recovered.current_attempt_id ||
           event.run_revision != recovered.revision) {
@@ -324,6 +396,12 @@ const ExecutionState& Controller::recover() {
       const Node& node = plan_.experiment.spec.workflow.nodes.at(recovered.current_node_id);
       require_payload_string(event, "component", node.invoke.component);
       require_payload_string(event, "operation", node.invoke.operation);
+      if ((expected_worker_entry_id && event.event_id != *expected_worker_entry_id) ||
+          event.payload != nlohmann::json{{"component", node.invoke.component},
+                                         {"operation", node.invoke.operation}}) {
+        throw std::runtime_error("journal node entry is not the canonical readiness receipt");
+      }
+      expected_worker_entry_id.reset();
       phase = ReplayPhase::ready;
       continue;
     }
@@ -410,8 +488,18 @@ const ExecutionState& Controller::recover() {
                                runtime_desired_state == "running" &&
                                runtime_observed_state == "queued" &&
                                phase == ReplayPhase::lease_acquired;
+        const bool worker_reacquiring =
+            observed_value == "acquiring" &&
+            runtime_desired_state == "running" &&
+            runtime_observed_state == "running" &&
+            phase == ReplayPhase::expecting_entry && !expected_completion &&
+            expected_reacquisition_cause_id.has_value();
+        const bool worker_started =
+            observed_value == "running" && runtime_desired_state == "running" &&
+            runtime_observed_state == "acquiring" &&
+            phase == ReplayPhase::worker_ready;
         const bool valid_observation =
-            acquiring ||
+            acquiring || worker_reacquiring || worker_started ||
             (observed_value == "pausing" && runtime_desired_state == "paused" &&
              runtime_observed_state == "running") ||
             (observed_value == "paused" && runtime_desired_state == "paused" &&
@@ -421,8 +509,9 @@ const ExecutionState& Controller::recover() {
             (observed_value == "running" && runtime_desired_state == "running" &&
              runtime_observed_state == "resuming");
         if (!valid_observation ||
-            (!acquiring && phase != ReplayPhase::ready) ||
-            expected_completion ||
+            (!acquiring && !worker_reacquiring && !worker_started &&
+             phase != ReplayPhase::ready) ||
+            (!worker_reacquiring && expected_completion) ||
             recovered.status != ExecutionStatus::running ||
             event.run_revision != recovered.revision + 1U ||
             (!event.node_id.empty() &&
@@ -454,6 +543,47 @@ const ExecutionState& Controller::recover() {
             throw std::runtime_error("acquiring observation disagrees with its lease cause");
           }
           phase = ReplayPhase::acquiring;
+        } else if (worker_reacquiring) {
+          const Node& node =
+              plan_.experiment.spec.workflow.nodes.at(recovered.current_node_id);
+          const Component& component =
+              plan_.experiment.spec.components.at(node.invoke.component);
+          const std::string cause_id = *expected_reacquisition_cause_id;
+          if (component.runtime == ComponentRuntime::builtin ||
+              event.event_id != cause_id + ":acquiring" ||
+              event.node_id != recovered.current_node_id ||
+              event.attempt_id != recovered.current_attempt_id ||
+              event.payload != nlohmann::json{{"state", "acquiring"},
+                                              {"cause_event_id", cause_id}}) {
+            throw std::runtime_error(
+                "worker reacquisition observation is not canonical");
+          }
+          expected_reacquisition_cause_id.reset();
+          phase = ReplayPhase::acquiring;
+        } else if (worker_started) {
+          const auto cause_id = event.payload.find("cause_event_id");
+          if (cause_id == event.payload.end() || !cause_id->is_string()) {
+            throw std::runtime_error("running observation lacks worker readiness cause");
+          }
+          const auto cause = journal_.event(cause_id->get<std::string>());
+          if (!cause || cause->event_type != "worker.ready" ||
+              cause->run_id != run_id_ || cause->node_id != recovered.current_node_id ||
+              cause->attempt_id != recovered.current_attempt_id ||
+              event.node_id != recovered.current_node_id ||
+              event.attempt_id != recovered.current_attempt_id ||
+              event.payload != nlohmann::json{{"state", "running"},
+                                              {"cause_event_id", cause->event_id},
+                                              {"launch_nonce", cause->payload.value(
+                                                   "launch_nonce", std::string{})}}) {
+            throw std::runtime_error("running observation disagrees with worker readiness");
+          }
+          const std::string launch_event_id =
+              cause->payload.value("cause_event_id", std::string{});
+          if (launch_event_id.empty()) {
+            throw std::runtime_error("worker readiness has no launch identity");
+          }
+          expected_worker_entry_id = launch_event_id + ":entered";
+          phase = ReplayPhase::expecting_entry;
         }
         continue;
       }
@@ -464,6 +594,150 @@ const ExecutionState& Controller::recover() {
       }
       require_payload_string(event, "state", enum_to_string(recovered.status));
       phase = ReplayPhase::terminal;
+      continue;
+    }
+    if (event.event_type == "worker.launch_requested") {
+      if (phase != ReplayPhase::acquiring ||
+          runtime_observed_state != "acquiring" ||
+          event.run_revision != recovered.revision ||
+          event.node_id != recovered.current_node_id ||
+          event.attempt_id != recovered.current_attempt_id ||
+          event.worker_sequence != 0) {
+        throw std::runtime_error("journal contains a launch request outside acquisition");
+      }
+      const Node& node = plan_.experiment.spec.workflow.nodes.at(recovered.current_node_id);
+      const Component& component =
+          plan_.experiment.spec.components.at(node.invoke.component);
+      if (component.runtime == ComponentRuntime::builtin) {
+        throw std::runtime_error("builtin nodes cannot request an external worker launch");
+      }
+      const WorkerLaunchTicket launch = launch_from_event(event);
+      const nlohmann::json expected_payload{
+          {"launch_nonce", launch.launch_nonce},
+          {"adapter", launch.adapter},
+          {"adapter_version", launch.adapter_version},
+          {"code_fingerprint", launch.code_fingerprint},
+          {"required_capabilities", launch.required_capabilities},
+          {"concurrency_key", launch.concurrency_key},
+          {"lease_id", launch.lease_id},
+          {"fencing_token", launch.fencing_token},
+      };
+      const auto acquisition = journal_.event(run_id_ + ":lease-acquired");
+      if (launch.run_id != run_id_ || launch.adapter != component.adapter ||
+          launch.adapter_version != component.version ||
+          launch.code_fingerprint.empty() || launch.launch_nonce.empty() ||
+          launch.launch_nonce != worker_launch_nonce(plan_, launch) ||
+          event.payload != expected_payload || !acquisition ||
+          launch.concurrency_key !=
+              plan_.experiment.spec.workspace.concurrency_key ||
+          launch.lease_id !=
+              acquisition->payload.value("lease_id", std::string{}) ||
+          launch.fencing_token !=
+              acquisition->payload.value("fencing_token", std::uint64_t{})) {
+        throw std::runtime_error("worker launch request disagrees with plan or lease evidence");
+      }
+      phase = ReplayPhase::launch_requested;
+      continue;
+    }
+    if (event.event_type == "worker.ready") {
+      if (phase != ReplayPhase::launch_requested ||
+          event.run_revision != recovered.revision ||
+          event.node_id != recovered.current_node_id ||
+          event.attempt_id != recovered.current_attempt_id ||
+          event.worker_sequence != 0) {
+        throw std::runtime_error("journal contains readiness without a launch request");
+      }
+      const auto cause_id = event.payload.find("cause_event_id");
+      if (cause_id == event.payload.end() || !cause_id->is_string()) {
+        throw std::runtime_error("worker readiness lacks its launch cause");
+      }
+      const auto launch_event = journal_.event(cause_id->get<std::string>());
+      if (!launch_event || launch_event->event_type != "worker.launch_requested" ||
+          launch_event->run_id != run_id_ ||
+          launch_event->node_id != recovered.current_node_id ||
+          launch_event->attempt_id != recovered.current_attempt_id) {
+        throw std::runtime_error("worker readiness disagrees with its launch request");
+      }
+      const WorkerLaunchTicket launch = launch_from_event(*launch_event);
+      const auto capabilities = event.payload.find("capabilities");
+      if (capabilities == event.payload.end() || !capabilities->is_array()) {
+        throw std::runtime_error("worker readiness lacks capabilities");
+      }
+      std::vector<std::string> ready_capabilities;
+      try {
+        ready_capabilities = canonical_capabilities(
+            capabilities->get<std::vector<std::string>>());
+      } catch (const std::exception& exception) {
+        throw std::runtime_error(std::string("worker readiness is malformed: ") +
+                                 exception.what());
+      }
+      if (!std::ranges::includes(ready_capabilities,
+                                 launch.required_capabilities) ||
+          event.payload.value("launch_nonce", std::string{}) != launch.launch_nonce ||
+          event.payload.value("adapter", std::string{}) != launch.adapter ||
+          event.payload.value("adapter_version", std::string{}) !=
+              launch.adapter_version ||
+          event.payload.value("code_fingerprint", std::string{}) !=
+              launch.code_fingerprint ||
+          event.payload.value("concurrency_key", std::string{}) !=
+              launch.concurrency_key ||
+          event.payload.value("lease_id", std::string{}) != launch.lease_id ||
+          event.payload.value("fencing_token", std::uint64_t{}) !=
+              launch.fencing_token ||
+          event.payload.value("last_acked_controller_sequence", std::uint64_t{}) != 0U) {
+        throw std::runtime_error("worker readiness disagrees with its launch ticket");
+      }
+      const nlohmann::json expected_payload{
+          {"cause_event_id", launch_event->event_id},
+          {"launch_nonce", launch.launch_nonce},
+          {"adapter", launch.adapter},
+          {"adapter_version", launch.adapter_version},
+          {"code_fingerprint", launch.code_fingerprint},
+          {"capabilities", ready_capabilities},
+          {"last_acked_controller_sequence", std::uint64_t{0}},
+          {"concurrency_key", launch.concurrency_key},
+          {"lease_id", launch.lease_id},
+          {"fencing_token", launch.fencing_token},
+      };
+      if (event.payload != expected_payload) {
+        throw std::runtime_error("worker readiness payload is not canonical");
+      }
+      phase = ReplayPhase::worker_ready;
+      continue;
+    }
+    if (event.event_type == "resource.acquired" && phase == ReplayPhase::acquiring) {
+      const Node& node = plan_.experiment.spec.workflow.nodes.at(recovered.current_node_id);
+      const Component& component =
+          plan_.experiment.spec.components.at(node.invoke.component);
+      if (component.runtime != ComponentRuntime::builtin ||
+          component.adapter != "trainvm.core" ||
+          node.invoke.operation != "acquire_resources" ||
+          event.run_revision != recovered.revision ||
+          event.node_id != recovered.current_node_id ||
+          event.attempt_id != recovered.current_attempt_id ||
+          event.worker_sequence != 0 || expected_completion || pending_cause) {
+        throw std::runtime_error("journal contains an invalid builtin admission result");
+      }
+      require_payload_string(event, "concurrency_key",
+                             plan_.experiment.spec.workspace.concurrency_key);
+      const auto acquisition = journal_.event(run_id_ + ":lease-acquired");
+      if (!acquisition ||
+          event.payload.value("lease_id", std::string{}) !=
+              acquisition->payload.value("lease_id", std::string{}) ||
+          event.payload.value("fencing_token", std::uint64_t{}) !=
+              acquisition->payload.value("fencing_token", std::uint64_t{}) ||
+          event.payload !=
+              nlohmann::json{{"concurrency_key",
+                              plan_.experiment.spec.workspace.concurrency_key},
+                             {"lease_id", acquisition->payload.value(
+                                              "lease_id", std::string{})},
+                             {"fencing_token", acquisition->payload.value(
+                                                   "fencing_token", std::uint64_t{})}}) {
+        throw std::runtime_error("builtin admission result disagrees with lease evidence");
+      }
+      pending_cause = event;
+      pending_builtin_admission = true;
+      phase = ReplayPhase::awaiting_transition;
       continue;
     }
     if (event.event_type == "fsm.transitioned") {
@@ -487,15 +761,34 @@ const ExecutionState& Controller::recover() {
           event.run_revision != result.state.revision) {
         throw std::runtime_error("persisted FSM transition disagrees with deterministic replay");
       }
-      expected_completion = std::pair{dispatch_id_for(recovered), pending_cause->event_id};
+      if (!pending_builtin_admission) {
+        expected_completion =
+            std::pair{dispatch_id_for(recovered), pending_cause->event_id};
+      }
       recovered = result.state;
       pending_cause.reset();
-      phase = recovered.status == ExecutionStatus::running ? ReplayPhase::expecting_entry
-                                                           : ReplayPhase::expecting_terminal;
+      if (pending_builtin_admission) {
+        pending_builtin_admission = false;
+        phase = ReplayPhase::acquiring;
+      } else {
+        if (recovered.status == ExecutionStatus::running) {
+          const Node& node =
+              plan_.experiment.spec.workflow.nodes.at(recovered.current_node_id);
+          const Component& component =
+              plan_.experiment.spec.components.at(node.invoke.component);
+          if (managed_run && component.runtime != ComponentRuntime::builtin) {
+            expected_reacquisition_cause_id = expected_completion->second;
+          }
+          phase = ReplayPhase::expecting_entry;
+        } else {
+          phase = ReplayPhase::expecting_terminal;
+        }
+      }
       continue;
     }
     if (event.event_type == "node.dispatch_completed") {
-      if ((phase != ReplayPhase::ready && phase != ReplayPhase::terminal) ||
+      if ((phase != ReplayPhase::ready && phase != ReplayPhase::expecting_entry &&
+           phase != ReplayPhase::terminal) ||
           event.run_revision != recovered.revision || !expected_completion) {
         throw std::runtime_error("journal contains dispatch completion at an invalid boundary");
       }
@@ -606,8 +899,9 @@ const ExecutionState& Controller::recover() {
     phase = ReplayPhase::awaiting_transition;
   }
   if ((phase != ReplayPhase::queued && phase != ReplayPhase::acquiring &&
+       phase != ReplayPhase::launch_requested &&
        phase != ReplayPhase::ready && phase != ReplayPhase::terminal) ||
-      expected_completion) {
+      expected_completion || expected_reacquisition_cause_id) {
     throw std::runtime_error(
         "run journal ends in an incomplete controller transaction");
   }
@@ -649,6 +943,40 @@ const ExecutionState& Controller::recover() {
 LeaseAcquireResult Controller::begin_acquisition(std::int64_t now_ns) {
   if (now_ns < 0) {
     throw std::invalid_argument("lease clock must be nonnegative");
+  }
+  const ExecutionState admission_state = start_execution(plan_, run_id_);
+  const Node& admission_node = plan_.experiment.spec.workflow.nodes.at(
+      admission_state.current_node_id);
+  const Component& admission_component =
+      plan_.experiment.spec.components.at(admission_node.invoke.component);
+  if (admission_component.runtime != ComponentRuntime::builtin ||
+      admission_component.adapter != "trainvm.core" ||
+      admission_node.invoke.operation != "acquire_resources") {
+    throw std::logic_error(
+        "queued admission supports only builtin trainvm.core acquire_resources");
+  }
+  const Transition* admission_transition = nullptr;
+  for (const Transition& transition : admission_node.transitions) {
+    if (transition.on != "resource.acquired") {
+      continue;
+    }
+    if (admission_transition != nullptr || transition.where) {
+      throw std::logic_error(
+          "resource admission requires one unconditional resource.acquired transition");
+    }
+    admission_transition = &transition;
+  }
+  if (admission_transition == nullptr ||
+      admission_transition->target.starts_with('$')) {
+    throw std::logic_error(
+        "resource admission must target one external worker node");
+  }
+  const Node& target_node = plan_.experiment.spec.workflow.nodes.at(
+      admission_transition->target);
+  const Component& target_component =
+      plan_.experiment.spec.components.at(target_node.invoke.component);
+  if (target_component.runtime == ComponentRuntime::builtin) {
+    throw std::logic_error("resource admission target must be an external worker node");
   }
   recover();
   const auto projection = journal_.projection(run_id_);
@@ -692,7 +1020,12 @@ LeaseAcquireResult Controller::begin_acquisition(std::int64_t now_ns) {
       throw std::runtime_error(
           "acquiring run lease has expired and requires a fenced reconciliation decision");
     }
-    return {.status = LeaseAcquireStatus::already_owned, .lease = *lease};
+    LeaseAcquireResult result{.status = LeaseAcquireStatus::already_owned,
+                              .lease = *lease};
+    recover();
+    complete_builtin_admission(result.lease, now_ns);
+    recover();
+    return result;
   }
   if (projection->desired_state != "queued" || projection->observed_state != "queued" ||
       projection->run_revision != state_.revision || !projection->current_node_id.empty() ||
@@ -728,8 +1061,197 @@ LeaseAcquireResult Controller::begin_acquisition(std::int64_t now_ns) {
       concurrency_key, run_id_, lease_id, now_ns, timeout_ns, events);
   if (result.status != LeaseAcquireStatus::busy) {
     recover();
+    complete_builtin_admission(result.lease, now_ns);
+    recover();
   }
   return result;
+}
+
+void Controller::complete_builtin_admission(const ResourceLease& lease,
+                                            std::int64_t now_ns) {
+  const Node& node =
+      plan_.experiment.spec.workflow.nodes.at(state_.current_node_id);
+  const Component& component =
+      plan_.experiment.spec.components.at(node.invoke.component);
+  if (component.runtime != ComponentRuntime::builtin ||
+      component.adapter != "trainvm.core" ||
+      node.invoke.operation != "acquire_resources") {
+    return;
+  }
+  Event acquired{
+      .event_id = run_id_ + ":admission:resource-acquired",
+      .run_id = run_id_,
+      .run_revision = state_.revision,
+      .plan_revision = kInitialPlanRevision,
+      .node_id = state_.current_node_id,
+      .attempt_id = state_.current_attempt_id,
+      .worker_sequence = 0,
+      .event_type = "resource.acquired",
+      .event_version = 1,
+      .wall_time_ns = now_ns,
+      .monotonic_time_ns = 0,
+      .optimizer_step = std::nullopt,
+      .payload = {{"concurrency_key", lease.concurrency_key},
+                  {"lease_id", lease.lease_id},
+                  {"fencing_token", lease.fencing_token}},
+  };
+  const TransitionResult transition = advance_execution(plan_, state_, acquired);
+  if (transition.state.status != ExecutionStatus::running) {
+    throw std::runtime_error("builtin resource admission must advance to a running node");
+  }
+  journal_.complete_builtin_admission(
+      lease, now_ns, {acquired, transitioned_event(acquired, transition)});
+}
+
+WorkerLaunchTicket Controller::prepare_worker_launch(WorkerLaunchRequest request,
+                                                       std::int64_t now_ns) {
+  if (now_ns < 0 || request.code_fingerprint.empty() ||
+      request.code_fingerprint.size() > 512U) {
+    throw std::invalid_argument("worker launch requires a bounded code fingerprint and clock");
+  }
+  request.required_capabilities =
+      canonical_capabilities(std::move(request.required_capabilities));
+  recover();
+  const auto projection = journal_.projection(run_id_);
+  if (!projection || projection->observed_state != "acquiring" ||
+      projection->desired_state != "running" ||
+      projection->run_revision != state_.revision ||
+      !projection->current_node_id.empty() ||
+      !projection->current_attempt_id.empty()) {
+    throw std::logic_error("worker launch requires an unassigned acquiring run");
+  }
+  const Node& node = plan_.experiment.spec.workflow.nodes.at(state_.current_node_id);
+  const Component& component =
+      plan_.experiment.spec.components.at(node.invoke.component);
+  if (component.runtime == ComponentRuntime::builtin) {
+    throw std::logic_error("builtin node must complete before external worker launch");
+  }
+  const auto acquisition = journal_.event(run_id_ + ":lease-acquired");
+  if (!acquisition) {
+    throw std::runtime_error("worker launch has no durable lease evidence");
+  }
+  const std::string& concurrency_key =
+      plan_.experiment.spec.workspace.concurrency_key;
+  const auto active = journal_.active_lease(concurrency_key, now_ns);
+  if (!active || active->owner_run_id != run_id_ ||
+      active->lease_id !=
+          acquisition->payload.value("lease_id", std::string{}) ||
+      active->fencing_token !=
+          acquisition->payload.value("fencing_token", std::uint64_t{}) ||
+      active->acquired_at_ns !=
+          acquisition->payload.value("acquired_at_ns", std::int64_t{})) {
+    throw std::runtime_error("worker launch no longer owns its acquired lease fence");
+  }
+  WorkerLaunchTicket launch{
+      .run_id = run_id_,
+      .node_id = state_.current_node_id,
+      .attempt_id = state_.current_attempt_id,
+      .launch_nonce = "",
+      .adapter = component.adapter,
+      .adapter_version = component.version,
+      .code_fingerprint = std::move(request.code_fingerprint),
+      .required_capabilities = std::move(request.required_capabilities),
+      .concurrency_key = concurrency_key,
+      .lease_id = active->lease_id,
+      .fencing_token = active->fencing_token,
+  };
+  launch.launch_nonce = worker_launch_nonce(plan_, launch);
+  const Event event{
+      .event_id = worker_launch_event_id(state_),
+      .run_id = run_id_,
+      .run_revision = state_.revision,
+      .plan_revision = kInitialPlanRevision,
+      .node_id = state_.current_node_id,
+      .attempt_id = state_.current_attempt_id,
+      .worker_sequence = 0,
+      .event_type = "worker.launch_requested",
+      .event_version = 1,
+      .wall_time_ns = now_ns,
+      .monotonic_time_ns = 0,
+      .optimizer_step = std::nullopt,
+      .payload = {{"launch_nonce", launch.launch_nonce},
+                  {"adapter", launch.adapter},
+                  {"adapter_version", launch.adapter_version},
+                  {"code_fingerprint", launch.code_fingerprint},
+                  {"required_capabilities", launch.required_capabilities},
+                  {"concurrency_key", launch.concurrency_key},
+                  {"lease_id", launch.lease_id},
+                  {"fencing_token", launch.fencing_token}},
+  };
+  journal_.prepare_worker_launch(launch, now_ns, event);
+  recover();
+  return launch;
+}
+
+WorkerReadinessResult Controller::accept_worker_hello(WorkerHelloEvidence hello,
+                                                       std::int64_t now_ns) {
+  if (now_ns < 0) {
+    throw std::invalid_argument("worker hello clock must be nonnegative");
+  }
+  hello.capabilities = canonical_capabilities(std::move(hello.capabilities));
+  recover();
+  const auto launch_event = journal_.event(worker_launch_event_id(state_));
+  if (!launch_event || launch_event->event_type != "worker.launch_requested") {
+    throw std::logic_error("worker hello has no durable launch request");
+  }
+  const WorkerLaunchTicket launch = launch_from_event(*launch_event);
+  if (hello.run_id != launch.run_id || hello.node_id != launch.node_id ||
+      hello.attempt_id != launch.attempt_id ||
+      hello.launch_nonce != launch.launch_nonce || hello.adapter != launch.adapter ||
+      hello.adapter_version != launch.adapter_version ||
+      hello.code_fingerprint != launch.code_fingerprint ||
+      hello.concurrency_key != launch.concurrency_key ||
+      hello.lease_id != launch.lease_id ||
+      hello.fencing_token != launch.fencing_token ||
+      hello.last_acked_controller_sequence != 0U ||
+      !std::ranges::includes(hello.capabilities,
+                             launch.required_capabilities)) {
+    throw std::invalid_argument("worker hello disagrees with its launch ticket");
+  }
+  const std::uint64_t readiness_revision = launch_event->run_revision;
+  const std::uint64_t running_revision = readiness_revision + 1U;
+  const std::string ready_id = launch_event->event_id + ":ready";
+  Event ready{
+      .event_id = ready_id,
+      .run_id = run_id_,
+      .run_revision = readiness_revision,
+      .plan_revision = kInitialPlanRevision,
+      .node_id = state_.current_node_id,
+      .attempt_id = state_.current_attempt_id,
+      .worker_sequence = 0,
+      .event_type = "worker.ready",
+      .event_version = 1,
+      .wall_time_ns = now_ns,
+      .monotonic_time_ns = 0,
+      .optimizer_step = std::nullopt,
+      .payload = {{"cause_event_id", launch_event->event_id},
+                  {"launch_nonce", hello.launch_nonce},
+                  {"adapter", hello.adapter},
+                  {"adapter_version", hello.adapter_version},
+                  {"code_fingerprint", hello.code_fingerprint},
+                  {"capabilities", hello.capabilities},
+                  {"last_acked_controller_sequence",
+                   hello.last_acked_controller_sequence},
+                  {"concurrency_key", hello.concurrency_key},
+                  {"lease_id", hello.lease_id},
+                  {"fencing_token", hello.fencing_token}},
+  };
+  Event running = acquisition_event(
+      state_, launch_event->event_id + ":running", running_revision,
+      "run.observed_state_changed",
+      {{"state", "running"}, {"cause_event_id", ready_id},
+       {"launch_nonce", launch.launch_nonce}},
+      now_ns);
+  running.node_id = state_.current_node_id;
+  running.attempt_id = state_.current_attempt_id;
+  ExecutionState running_state = state_;
+  running_state.revision = running_revision;
+  const Event entered = entered_event(
+      plan_, running_state, launch_event->event_id + ":entered", &running);
+  const WorkerReadinessDisposition disposition = journal_.accept_worker_ready(
+      launch, hello, now_ns, {ready, running, entered});
+  recover();
+  return {.disposition = disposition, .launch = launch};
 }
 
 Dispatch Controller::prepare_dispatch() {
@@ -739,7 +1261,15 @@ Dispatch Controller::prepare_dispatch() {
   if (state_.status != ExecutionStatus::running || paused_) {
     throw std::logic_error("controller cannot dispatch work for a terminal run");
   }
-  const Node& node = plan_.experiment.spec.workflow.nodes.at(state_.current_node_id);
+  const Node& node =
+      plan_.experiment.spec.workflow.nodes.at(state_.current_node_id);
+  const Component& component =
+      plan_.experiment.spec.components.at(node.invoke.component);
+  const bool managed_run = journal_.event(run_id_ + ":lease-acquired").has_value();
+  if (managed_run && component.runtime != ComponentRuntime::builtin) {
+    throw std::logic_error(
+        "worker-backed dispatch requires a fenced dispatch clock");
+  }
   Dispatch dispatch{
       .dispatch_id = dispatch_id_for(state_),
       .run_id = run_id_,
@@ -755,15 +1285,110 @@ Dispatch Controller::prepare_dispatch() {
   return journal_.prepare_dispatch(dispatch, dispatch_prepared_event(dispatch));
 }
 
-const ExecutionState& Controller::handle_event(const Event& input) {
-  if (const auto stored = journal_.event(input.event_id)) {
-    if (!same_worker_event(*stored, input)) {
-      throw std::invalid_argument("event_id already exists with different worker content");
-    }
-    return recover();
+Dispatch Controller::prepare_dispatch(std::int64_t now_ns) {
+  if (now_ns < 0) {
+    throw std::invalid_argument("dispatch clock must be nonnegative");
   }
+  recover();
+  if (state_.status != ExecutionStatus::running || paused_) {
+    throw std::logic_error("controller cannot dispatch work for an inactive run");
+  }
+  const auto launch_event = journal_.event(worker_launch_event_id(state_));
+  if (!launch_event ||
+      !journal_.event(launch_event->event_id + ":ready")) {
+    throw std::logic_error("fenced dispatch requires verified worker readiness");
+  }
+  const WorkerLaunchTicket launch = launch_from_event(*launch_event);
+  const Node& node = plan_.experiment.spec.workflow.nodes.at(state_.current_node_id);
+  Dispatch dispatch{
+      .dispatch_id = dispatch_id_for(state_),
+      .run_id = run_id_,
+      .run_revision = state_.revision,
+      .plan_revision = kInitialPlanRevision,
+      .node_id = state_.current_node_id,
+      .attempt_id = state_.current_attempt_id,
+      .component = node.invoke.component,
+      .operation = node.invoke.operation,
+      .status = DispatchStatus::prepared,
+      .result_event_id = std::nullopt,
+  };
+  return journal_.prepare_fenced_dispatch(
+      dispatch, dispatch_prepared_event(dispatch), launch, now_ns);
+}
+
+const ExecutionState& Controller::handle_event(const Event& input) {
+  return handle_event_impl(input, std::nullopt, std::nullopt);
+}
+
+const ExecutionState& Controller::handle_event(
+    const Event& input, const WorkerSessionIdentity& identity,
+    std::int64_t now_ns) {
+  if (now_ns < 0) {
+    throw std::invalid_argument("worker event clock must be nonnegative");
+  }
+  return handle_event_impl(input, identity, now_ns);
+}
+
+const ExecutionState& Controller::handle_event_impl(
+    const Event& input,
+    const std::optional<WorkerSessionIdentity>& identity,
+    std::optional<std::int64_t> now_ns) {
   if (!initialized_) {
     throw std::logic_error("controller must create or recover the run before handling events");
+  }
+  if (identity) {
+    recover();
+  }
+  const auto stored = journal_.event(input.event_id);
+  if (stored && !same_worker_event(*stored, input)) {
+    throw std::invalid_argument(
+        "event_id already exists with different worker content");
+  }
+  const std::string authority_node_id =
+      stored ? input.node_id : state_.current_node_id;
+  const auto authority_node =
+      plan_.experiment.spec.workflow.nodes.find(authority_node_id);
+  if (authority_node == plan_.experiment.spec.workflow.nodes.end()) {
+    throw std::invalid_argument("worker event names an unknown active node");
+  }
+  const Component& active_component =
+      plan_.experiment.spec.components.at(authority_node->second.invoke.component);
+  const bool managed_run =
+      journal_.event(run_id_ + ":lease-acquired").has_value();
+  const bool worker_authority =
+      managed_run && active_component.runtime != ComponentRuntime::builtin;
+  const std::string launch_id = input.run_id + ":worker-launch:" + input.node_id +
+                                ":" + input.attempt_id;
+  const auto ready = journal_.event(launch_id + ":ready");
+  if (worker_authority) {
+    if (!ready) {
+      throw std::invalid_argument(
+          "worker event has no durable readiness for the active external node");
+    }
+    if (!identity || !now_ns || identity->run_id != input.run_id ||
+        identity->node_id != input.node_id ||
+        identity->attempt_id != input.attempt_id ||
+        identity->launch_nonce !=
+            ready->payload.value("launch_nonce", std::string{}) ||
+        identity->concurrency_key !=
+            ready->payload.value("concurrency_key", std::string{}) ||
+        identity->lease_id != ready->payload.value("lease_id", std::string{}) ||
+        identity->fencing_token !=
+            ready->payload.value("fencing_token", std::uint64_t{})) {
+      throw std::invalid_argument("worker event lacks its accepted session identity");
+    }
+    const auto active = journal_.active_lease(identity->concurrency_key, *now_ns);
+    if (!active || active->owner_run_id != identity->run_id ||
+        active->lease_id != identity->lease_id ||
+        active->fencing_token != identity->fencing_token) {
+      throw std::runtime_error("worker event session no longer owns its active lease");
+    }
+  } else if (identity) {
+    throw std::invalid_argument(
+        "worker session identity is invalid outside managed external execution");
+  }
+  if (stored) {
+    return recover();
   }
   if (paused_) {
     throw std::logic_error("controller cannot accept worker events while paused");
@@ -790,14 +1415,49 @@ const ExecutionState& Controller::handle_event(const Event& input) {
   const TransitionResult result = advance_execution(plan_, state_, cause);
   std::vector<Event> batch{cause, transitioned_event(cause, result)};
   if (result.state.status == ExecutionStatus::running) {
-    batch.push_back(entered_event(plan_, result.state, cause.event_id + ":node-entered", &cause));
+    const Node& target_node =
+        plan_.experiment.spec.workflow.nodes.at(result.state.current_node_id);
+    const Component& target_component =
+        plan_.experiment.spec.components.at(target_node.invoke.component);
+    const bool target_requires_worker =
+        managed_run && target_component.runtime != ComponentRuntime::builtin;
+    if (target_requires_worker) {
+      batch.push_back(
+          dispatch_completed_event(*dispatch, cause, result.state.revision));
+      batch.push_back(Event{
+          .event_id = cause.event_id + ":acquiring",
+          .run_id = run_id_,
+          .run_revision = result.state.revision + 1U,
+          .plan_revision = kInitialPlanRevision,
+          .node_id = result.state.current_node_id,
+          .attempt_id = result.state.current_attempt_id,
+          .worker_sequence = 0,
+          .event_type = "run.observed_state_changed",
+          .event_version = 1,
+          .wall_time_ns = cause.wall_time_ns,
+          .monotonic_time_ns = cause.monotonic_time_ns,
+          .optimizer_step = cause.optimizer_step,
+          .payload = {{"state", "acquiring"},
+                      {"cause_event_id", cause.event_id}},
+      });
+    } else {
+      batch.push_back(
+          entered_event(plan_, result.state, cause.event_id + ":node-entered", &cause));
+      batch.push_back(
+          dispatch_completed_event(*dispatch, cause, result.state.revision));
+    }
   } else {
     batch.push_back(terminal_event(cause, result.state));
+    batch.push_back(
+        dispatch_completed_event(*dispatch, cause, result.state.revision));
   }
-  batch.push_back(dispatch_completed_event(*dispatch, cause, result.state.revision));
-  journal_.complete_dispatch(dispatch->dispatch_id, cause.event_id, batch);
-  state_ = result.state;
-  return state_;
+  if (identity && now_ns) {
+    journal_.complete_fenced_dispatch(dispatch->dispatch_id, cause.event_id,
+                                      batch, *identity, *now_ns);
+  } else {
+    journal_.complete_dispatch(dispatch->dispatch_id, cause.event_id, batch);
+  }
+  return recover();
 }
 
 ControlPatchValidation Controller::request_controls(

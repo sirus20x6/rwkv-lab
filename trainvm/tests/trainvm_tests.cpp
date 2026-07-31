@@ -30,6 +30,22 @@
 
 #include <nlohmann/json.hpp>
 
+namespace trainvm {
+
+class JournalTestAccess {
+ public:
+  static std::uint64_t append(Journal& journal, const Event& event) {
+    return journal.append(event);
+  }
+
+  static std::vector<std::uint64_t> append_batch(
+      Journal& journal, const std::vector<Event>& events) {
+    return journal.append_batch(events);
+  }
+};
+
+}  // namespace trainvm
+
 namespace {
 
 int failures = 0;
@@ -421,15 +437,17 @@ void test_journal() {
 
   trainvm::Journal journal(database_path);
   const auto created = created_event(compiled.plan->plan_hash);
-  check(journal.append(created) == 1U, "first event receives journal sequence one");
-  check(journal.append(created) == 1U, "identical event append is idempotent");
+  check(trainvm::JournalTestAccess::append(journal, created) == 1U,
+        "first event receives journal sequence one");
+  check(trainvm::JournalTestAccess::append(journal, created) == 1U,
+        "identical event append is idempotent");
   check(journal.event_count() == 1U, "idempotent append does not duplicate the event");
 
   auto conflicting = created;
   conflicting.payload["observed_state"] = "running";
   bool conflict_rejected = false;
   try {
-    (void)journal.append(conflicting);
+    (void)trainvm::JournalTestAccess::append(journal, conflicting);
   } catch (const std::invalid_argument&) {
     conflict_rejected = true;
   }
@@ -449,7 +467,7 @@ void test_journal() {
       .monotonic_time_ns = 20,
       .optimizer_step = std::nullopt,
   };
-  journal.append(entered);
+  trainvm::JournalTestAccess::append(journal, entered);
   trainvm::Event heartbeat{
       .event_id = "event-heartbeat",
       .run_id = "run-1",
@@ -463,7 +481,7 @@ void test_journal() {
       .monotonic_time_ns = 30,
       .optimizer_step = 12,
   };
-  journal.append(heartbeat);
+  trainvm::JournalTestAccess::append(journal, heartbeat);
   trainvm::Event desired{
       .event_id = "event-pause",
       .run_id = "run-1",
@@ -479,7 +497,7 @@ void test_journal() {
       .optimizer_step = std::nullopt,
       .payload = {{"state", "paused"}},
   };
-  journal.append(desired);
+  trainvm::JournalTestAccess::append(journal, desired);
 
   const auto before = journal.projection("run-1");
   check(before.has_value(), "run projection exists");
@@ -517,7 +535,8 @@ void test_journal() {
   batch_invalid.run_id = "run-does-not-exist";
   bool batch_rejected = false;
   try {
-    (void)journal.append_batch({batch_first, batch_invalid});
+    (void)trainvm::JournalTestAccess::append_batch(
+        journal, {batch_first, batch_invalid});
   } catch (const std::invalid_argument&) {
     batch_rejected = true;
   }
@@ -530,7 +549,8 @@ void test_journal() {
   batch_second.run_revision = 6;
   batch_second.event_type = "run.observed_state_changed";
   batch_second.payload = {{"state", "paused"}};
-  const auto batch_sequences = journal.append_batch({batch_first, batch_second});
+  const auto batch_sequences = trainvm::JournalTestAccess::append_batch(
+      journal, {batch_first, batch_second});
   check(batch_sequences == std::vector<std::uint64_t>({5U, 6U}),
         "valid batch receives contiguous journal sequences");
   const auto after_batch = journal.projection("run-1");
@@ -544,7 +564,7 @@ void test_journal() {
   regressed.worker_sequence = 1;
   bool sequence_rejected = false;
   try {
-    (void)journal.append(regressed);
+    (void)trainvm::JournalTestAccess::append(journal, regressed);
   } catch (const std::invalid_argument&) {
     sequence_rejected = true;
   }
@@ -556,7 +576,7 @@ void test_journal() {
   stale_revision.run_revision = 2;
   bool revision_rejected = false;
   try {
-    (void)journal.append(stale_revision);
+    (void)trainvm::JournalTestAccess::append(journal, stale_revision);
   } catch (const std::invalid_argument&) {
     revision_rejected = true;
   }
@@ -761,7 +781,7 @@ void test_controller_and_fake_worker() {
     auto holder = created_event(compiled.plan->plan_hash);
     holder.event_id = "collision-holder-created";
     holder.run_id = "collision-holder";
-    journal.append(holder);
+    trainvm::JournalTestAccess::append(journal, holder);
     trainvm::Event collision{
         .event_id = cause.event_id + ":transition",
         .run_id = "collision-holder",
@@ -777,7 +797,7 @@ void test_controller_and_fake_worker() {
         .optimizer_step = std::nullopt,
         .payload = nlohmann::json::object(),
     };
-    journal.append(collision);
+    trainvm::JournalTestAccess::append(journal, collision);
     const auto before = controller.state();
     bool collision_rejected = false;
     try {
@@ -904,7 +924,7 @@ void test_compiled_plan_persistence() {
     auto collision = created_event(compiled.plan->plan_hash);
     collision.event_id = "atomic-run:created";
     collision.run_id = "collision-holder";
-    journal.append(collision);
+    trainvm::JournalTestAccess::append(journal, collision);
     bool creation_rejected = false;
     try {
       trainvm::Controller controller(*unique.plan, journal, "atomic-run");
@@ -1298,7 +1318,7 @@ void test_command_service() {
           .payload = {{"state", std::move(state)}},
       };
     };
-    runtime_journal.append_batch({
+    trainvm::JournalTestAccess::append_batch(runtime_journal, {
         lifecycle_event("service-run:pause-desired", 2, "run.desired_state_changed", "paused"),
         lifecycle_event("service-run:pausing", 3, "run.observed_state_changed", "pausing"),
         lifecycle_event("service-run:paused", 4, "run.observed_state_changed", "paused"),
@@ -1340,7 +1360,7 @@ void test_command_service() {
           .payload = {{"state", std::move(state)}},
       };
     };
-    runtime_journal.append_batch({
+    trainvm::JournalTestAccess::append_batch(runtime_journal, {
         lifecycle_event("service-run:resume-desired", 5, "run.desired_state_changed", "running"),
         lifecycle_event("service-run:resuming", 6, "run.observed_state_changed", "resuming"),
         lifecycle_event("service-run:resumed", 7, "run.observed_state_changed", "running"),
@@ -1594,8 +1614,10 @@ void test_submission_and_queue_boundary() {
 void test_atomic_queue_acquisition_boundary() {
   const auto compiled = trainvm::compile_document(load_fixture());
   check(compiled.valid(), "fixture required by queue acquisition compiles");
-  if (!compiled.valid()) return;
-  const std::filesystem::path directory = std::filesystem::temp_directory_path() /
+  if (!compiled.valid())
+    return;
+  const std::filesystem::path directory =
+      std::filesystem::temp_directory_path() /
       ("trainvm-acquisition-test-" + std::to_string(static_cast<long long>(getpid())));
   std::filesystem::remove_all(directory);
   std::filesystem::create_directories(directory);
@@ -1604,9 +1626,9 @@ void test_atomic_queue_acquisition_boundary() {
   trainvm::Controller controller(*compiled.plan, journal, "queued-acquisition-run");
   controller.create_queued();
 
-  const auto blocker = journal.acquire_lease(
-      compiled.plan->experiment.spec.workspace.concurrency_key, "blocking-run",
-      "blocking-lease", 100, 1'000);
+  const auto blocker =
+      journal.acquire_lease(compiled.plan->experiment.spec.workspace.concurrency_key,
+                            "blocking-run", "blocking-lease", 100, 1'000);
   check(blocker.status == trainvm::LeaseAcquireStatus::acquired,
         "queue acquisition test establishes a competing lease");
   const auto busy = controller.begin_acquisition(200);
@@ -1622,61 +1644,920 @@ void test_atomic_queue_acquisition_boundary() {
   const auto acquired = controller.begin_acquisition(300);
   const auto acquiring = journal.projection("queued-acquisition-run");
   check(acquired.status == trainvm::LeaseAcquireStatus::acquired && acquiring &&
-            acquiring->desired_state == "running" &&
-            acquiring->observed_state == "acquiring" && acquiring->run_revision == 3U &&
-            acquiring->current_node_id.empty() && acquiring->current_attempt_id.empty() &&
-            journal.event_count() == 4U,
-        "lease and queued-to-acquiring lifecycle commit as one three-event boundary");
+            acquiring->desired_state == "running" && acquiring->observed_state == "acquiring" &&
+            acquiring->run_revision == 4U && acquiring->current_node_id.empty() &&
+            acquiring->current_attempt_id.empty() && journal.event_count() == 6U &&
+            controller.state().current_node_id == "train_to_boundary",
+        "lease acquisition advances builtin admission while remaining "
+        "unassigned");
   const auto lease_event = journal.event("queued-acquisition-run:lease-acquired");
   const auto acquisition_events = journal.events_for_run("queued-acquisition-run");
   check(lease_event &&
             lease_event->payload.value("fencing_token", std::uint64_t{}) ==
                 acquired.lease.fencing_token &&
-            lease_event->payload.value("owner_run_id", std::string{}) ==
-                "queued-acquisition-run" && acquisition_events.size() == 4U &&
+            lease_event->payload.value("owner_run_id", std::string{}) == "queued-acquisition-run" &&
+            acquisition_events.size() == 6U &&
             acquisition_events[1].event_type == "run.desired_state_changed" &&
             acquisition_events[2].event_type == "resource.lease_acquired" &&
-            acquisition_events[3].event_type == "run.observed_state_changed",
-        "resource acquisition event records the durable fencing identity");
+            acquisition_events[3].event_type == "run.observed_state_changed" &&
+            acquisition_events[4].event_type == "resource.acquired" &&
+            acquisition_events[5].event_type == "fsm.transitioned",
+        "resource acquisition records its fence and builtin FSM transition");
   bool dispatch_refused = false;
   try {
     (void)controller.prepare_dispatch();
   } catch (const std::logic_error&) {
     dispatch_refused = true;
   }
-  check(dispatch_refused && !journal.dispatch(
-                                  "queued-acquisition-run:dispatch:acquire_gpu:acquire_gpu@1"),
+  check(dispatch_refused && !journal.dispatch("queued-acquisition-run:dispatch:train_to_"
+                                              "boundary:train_to_boundary@1"),
         "acquiring state cannot dispatch before verified worker readiness");
 
   const auto expires_at = acquired.lease.expires_at_ns;
   const auto replayed = controller.begin_acquisition(400);
   check(replayed.status == trainvm::LeaseAcquireStatus::already_owned &&
             replayed.lease.fencing_token == acquired.lease.fencing_token &&
-            replayed.lease.expires_at_ns == expires_at && journal.event_count() == 4U,
-        "acquisition retry neither renews the lease nor duplicates lifecycle events");
+            replayed.lease.expires_at_ns == expires_at && journal.event_count() == 6U,
+        "acquisition retry neither renews the lease nor duplicates admission "
+        "events");
   bool negative_retry_rejected = false;
   try {
     (void)controller.begin_acquisition(-1);
   } catch (const std::invalid_argument&) {
     negative_retry_rejected = true;
   }
-  check(negative_retry_rejected,
-        "acquisition retry rejects a negative lease clock consistently");
+  check(negative_retry_rejected, "acquisition retry rejects a negative lease clock consistently");
   trainvm::Controller restarted(*compiled.plan, journal, "queued-acquisition-run");
-  check(restarted.recover().revision == 3U,
-        "controller recovery accepts acquiring as a stable process-free boundary");
+  check(restarted.recover().revision == 4U &&
+            restarted.state().current_node_id == "train_to_boundary",
+        "controller recovery accepts acquiring as a stable process-free "
+        "boundary");
   bool expired_reconcile_refused = false;
   try {
     (void)restarted.begin_acquisition(expires_at + 1);
   } catch (const std::runtime_error&) {
     expired_reconcile_refused = true;
   }
-  check(expired_reconcile_refused && restarted.recover().revision == 3U,
-        "expired acquiring lease remains replayable but requires a future fenced decision");
+  check(expired_reconcile_refused && restarted.recover().revision == 4U,
+        "expired acquiring lease remains replayable but requires a future "
+        "fenced decision");
   const auto before_rebuild = journal.projection("queued-acquisition-run");
   journal.rebuild_projections();
   check(journal.projection("queued-acquisition-run") == before_rebuild,
         "projection rebuild reproduces queued-to-acquiring lifecycle state");
+  auto invalid_admission_document = load_fixture();
+  invalid_admission_document["spec"]["workflow"]["nodes"]["acquire_gpu"]
+                            ["transitions"][0]["on"] = "resource.unexpected";
+  const auto invalid_admission =
+      trainvm::compile_document(invalid_admission_document);
+  check(invalid_admission.valid(),
+        "unsupported admission transition remains a structurally valid plan fixture");
+  if (invalid_admission.valid()) {
+    trainvm::Journal invalid_journal(directory / "invalid-admission.db");
+    trainvm::Controller invalid_controller(*invalid_admission.plan, invalid_journal,
+                                           "invalid-admission-run");
+    invalid_controller.create_queued();
+    bool rejected_before_lease = false;
+    try {
+      (void)invalid_controller.begin_acquisition(500);
+    } catch (const std::exception&) {
+      rejected_before_lease = true;
+    }
+    const auto invalid_projection = invalid_journal.projection("invalid-admission-run");
+    check(rejected_before_lease && invalid_projection &&
+              invalid_projection->desired_state == "queued" &&
+              invalid_projection->observed_state == "queued" &&
+              invalid_journal.event_count() == 1U &&
+              !invalid_journal.active_lease(
+                  invalid_admission.plan->experiment.spec.workspace.concurrency_key,
+                  500),
+          "unsupported builtin admission is rejected before acquiring its lease");
+  }
+
+  auto conditional_admission_document = load_fixture();
+  conditional_admission_document["spec"]["workflow"]["nodes"]["acquire_gpu"]
+                                ["transitions"] = nlohmann::json::array(
+      {{{"on", "resource.acquired"},
+        {"where", {{"field", "payload.fencing_token"},
+                   {"operator", "exists"},
+                   {"value", nullptr}}},
+        {"target", "$failed"}},
+       {{"on", "resource.acquired"}, {"target", "train_to_boundary"}},
+       {{"on", "operation.failed"}, {"target", "$failed"}}});
+  const auto conditional_admission =
+      trainvm::compile_document(conditional_admission_document);
+  check(conditional_admission.valid(),
+        "conditional admission with an unconditional fallback is compile-valid");
+  if (conditional_admission.valid()) {
+    const std::string conditional_run_id = "conditional-admission-run";
+    const auto admission_state =
+        trainvm::start_execution(*conditional_admission.plan, conditional_run_id);
+    const auto real_payload_route = trainvm::advance_execution(
+        *conditional_admission.plan, admission_state,
+        event_for(admission_state, "conditional-real-payload",
+                  "resource.acquired", {{"fencing_token", 1U}}));
+    check(real_payload_route.transition_index == 0U &&
+              real_payload_route.target == "$failed" &&
+              real_payload_route.state.status == trainvm::ExecutionStatus::failed,
+          "real fenced admission payload selects the conditional branch instead of fallback");
+    trainvm::Journal conditional_journal(directory / "conditional-admission.db");
+    trainvm::Controller conditional_controller(
+        *conditional_admission.plan, conditional_journal, conditional_run_id);
+    conditional_controller.create_queued();
+    const auto projection_before = conditional_journal.projection(conditional_run_id);
+    const auto events_before = conditional_journal.event_count();
+    bool rejected_before_mutation = false;
+    std::string rejection_message;
+    try {
+      (void)conditional_controller.begin_acquisition(600);
+    } catch (const std::exception& exception) {
+      rejected_before_mutation = true;
+      rejection_message = exception.what();
+    }
+    const auto projection_after = conditional_journal.projection(conditional_run_id);
+    const std::string& concurrency_key =
+        conditional_admission.plan->experiment.spec.workspace.concurrency_key;
+    check(rejected_before_mutation && !rejection_message.empty() &&
+              conditional_journal.event_count() == events_before &&
+              events_before == 1U && projection_after == projection_before &&
+              projection_after && projection_after->desired_state == "queued" &&
+              projection_after->observed_state == "queued" &&
+              !conditional_journal.active_lease(concurrency_key, 600),
+          "payload-dependent builtin admission is rejected before lease or "
+          "lifecycle mutation");
+  }
+
+  auto external_admission_document = load_fixture();
+  external_admission_document["spec"]["components"]["core"]["runtime"] =
+      "python_worker";
+  const auto external_admission =
+      trainvm::compile_document(external_admission_document);
+  check(external_admission.valid(),
+        "externalized admission remains a compile-valid negative fixture");
+  if (external_admission.valid()) {
+    const std::string external_run_id = "external-admission-run";
+    trainvm::Journal external_journal(directory / "external-admission.db");
+    trainvm::Controller external_controller(
+        *external_admission.plan, external_journal, external_run_id);
+    external_controller.create_queued();
+    const auto projection_before = external_journal.projection(external_run_id);
+    bool rejected_before_mutation = false;
+    try {
+      (void)external_controller.begin_acquisition(700);
+    } catch (const std::logic_error&) {
+      rejected_before_mutation = true;
+    }
+    check(rejected_before_mutation && external_journal.event_count() == 1U &&
+              external_journal.projection(external_run_id) == projection_before &&
+              !external_journal.active_lease(
+                  external_admission.plan->experiment.spec.workspace.concurrency_key,
+                  700),
+          "non-builtin queued entrypoint is rejected before lease or lifecycle "
+          "mutation");
+  }
+  std::filesystem::remove_all(directory);
+}
+
+void test_worker_launch_and_readiness_boundary() {
+  const auto compiled = trainvm::compile_document(load_fixture());
+  check(compiled.valid(), "fixture required by worker readiness compiles");
+  if (!compiled.valid())
+    return;
+
+  const auto hello_for = [](const trainvm::WorkerLaunchTicket& launch,
+                            std::vector<std::string> capabilities) {
+    return trainvm::WorkerHelloEvidence{
+        .run_id = launch.run_id,
+        .node_id = launch.node_id,
+        .attempt_id = launch.attempt_id,
+        .launch_nonce = launch.launch_nonce,
+        .adapter = launch.adapter,
+        .adapter_version = launch.adapter_version,
+        .code_fingerprint = launch.code_fingerprint,
+        .capabilities = std::move(capabilities),
+        .last_acked_controller_sequence = 0,
+        .concurrency_key = launch.concurrency_key,
+        .lease_id = launch.lease_id,
+        .fencing_token = launch.fencing_token,
+    };
+  };
+  const trainvm::WorkerLaunchRequest launch_request{
+      .code_fingerprint = "sha256:mageflow-worker-v1",
+      .required_capabilities = {"worker.metrics", "worker.controls"},
+  };
+
+  const std::filesystem::path directory =
+      std::filesystem::temp_directory_path() /
+      ("trainvm-worker-readiness-test-" + std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+
+  {
+    const auto database_path = directory / "accepted.db";
+    const std::string run_id = "worker-readiness-run";
+    trainvm::Journal journal(database_path);
+    trainvm::Controller controller(*compiled.plan, journal, run_id);
+    controller.create_queued();
+    const auto acquired = controller.begin_acquisition(1'000);
+    const auto acquiring = journal.projection(run_id);
+    check(acquired.status == trainvm::LeaseAcquireStatus::acquired &&
+              controller.state().revision == 4U &&
+              controller.state().current_node_id == "train_to_boundary" && acquiring &&
+              acquiring->desired_state == "running" && acquiring->observed_state == "acquiring" &&
+              acquiring->run_revision == 4U && acquiring->current_node_id.empty() &&
+              acquiring->current_attempt_id.empty(),
+          "queued acquisition advances builtin admission to an unassigned "
+          "revision-four node");
+
+    const auto launch = controller.prepare_worker_launch(launch_request, 1'100);
+    const auto launch_retry = controller.prepare_worker_launch(launch_request, 1'100);
+    check(launch == launch_retry && launch.run_id == run_id &&
+              launch.node_id == "train_to_boundary" && launch.attempt_id == "train_to_boundary@1" &&
+              launch.code_fingerprint == launch_request.code_fingerprint &&
+              launch.required_capabilities ==
+                  std::vector<std::string>({"worker.controls", "worker.metrics"}) &&
+              !launch.launch_nonce.empty() && journal.event_count() == 7U,
+          "worker launch preparation freezes fingerprint and capabilities "
+          "idempotently");
+
+    auto hello = hello_for(launch, {"worker.metrics", "worker.events", "worker.controls"});
+    auto wrong_nonce = hello;
+    wrong_nonce.launch_nonce += "-wrong";
+    bool wrong_nonce_rejected = false;
+    try {
+      (void)controller.accept_worker_hello(std::move(wrong_nonce), 1'200);
+    } catch (const std::invalid_argument&) {
+      wrong_nonce_rejected = true;
+    }
+    auto missing_capability = hello;
+    missing_capability.capabilities = {"worker.controls"};
+    bool missing_capability_rejected = false;
+    try {
+      (void)controller.accept_worker_hello(std::move(missing_capability), 1'200);
+    } catch (const std::invalid_argument&) {
+      missing_capability_rejected = true;
+    }
+    const auto still_acquiring = journal.projection(run_id);
+    check(wrong_nonce_rejected && missing_capability_rejected && still_acquiring &&
+              still_acquiring->observed_state == "acquiring" &&
+              still_acquiring->current_node_id.empty() && journal.event_count() == 7U,
+          "worker hello rejects wrong nonce and missing required capability "
+          "without mutation");
+
+    const auto ready = controller.accept_worker_hello(hello, 1'200);
+    const auto running = journal.projection(run_id);
+    const auto readiness_events = journal.events_for_run(run_id);
+    check(ready.disposition == trainvm::WorkerReadinessDisposition::accepted && running &&
+              running->desired_state == "running" && running->observed_state == "running" &&
+              running->run_revision == 5U && running->current_node_id == "train_to_boundary" &&
+              running->current_attempt_id == "train_to_boundary@1" &&
+              controller.state().revision == 5U && readiness_events.size() == 10U &&
+              readiness_events[7].event_type == "worker.ready" &&
+              readiness_events[8].event_type == "run.observed_state_changed" &&
+              readiness_events[8].payload.value("state", std::string{}) == "running" &&
+              readiness_events[9].event_type == "node.entered",
+          "matching worker hello atomically publishes readiness, running, and "
+          "node assignment");
+    const auto ready_retry = controller.accept_worker_hello(hello, 1'250);
+    check(ready_retry.disposition == trainvm::WorkerReadinessDisposition::replayed &&
+              ready_retry.launch == launch && journal.event_count() == 10U,
+          "exact worker hello retry replays without duplicate readiness events");
+
+    bool unfenced_dispatch_rejected = false;
+    try {
+      (void)controller.prepare_dispatch();
+    } catch (const std::logic_error&) {
+      unfenced_dispatch_rejected = true;
+    }
+    const auto dispatch = controller.prepare_dispatch(1'300);
+    check(unfenced_dispatch_rejected && dispatch.run_id == run_id && dispatch.run_revision == 5U &&
+              dispatch.node_id == "train_to_boundary" &&
+              dispatch.attempt_id == "train_to_boundary@1" &&
+              dispatch.status == trainvm::DispatchStatus::prepared,
+          "verified worker readiness permits only fenced first-node dispatch preparation");
+    const trainvm::WorkerSessionIdentity session{
+        .run_id = launch.run_id,
+        .node_id = launch.node_id,
+        .attempt_id = launch.attempt_id,
+        .launch_nonce = launch.launch_nonce,
+        .concurrency_key = launch.concurrency_key,
+        .lease_id = launch.lease_id,
+        .fencing_token = launch.fencing_token,
+    };
+    const trainvm::Event result_event{
+        .event_id = dispatch.dispatch_id + ":worker-result",
+        .run_id = run_id,
+        .run_revision = 5,
+        .plan_revision = 1,
+        .node_id = launch.node_id,
+        .attempt_id = launch.attempt_id,
+        .worker_sequence = 1,
+        .event_type = "worker.completed",
+        .event_version = 1,
+        .wall_time_ns = 1'350,
+        .monotonic_time_ns = 1,
+        .optimizer_step = 5'500,
+        .payload = {{"reason", "cache_span_complete"}},
+    };
+    bool unfenced_result_rejected = false;
+    try {
+      (void)controller.handle_event(result_event);
+    } catch (const std::invalid_argument&) {
+      unfenced_result_rejected = true;
+    }
+    check(unfenced_result_rejected,
+          "worker-backed result requires its accepted session identity");
+    trainvm::Controller restarted(*compiled.plan, journal, run_id);
+    const auto& recovered = restarted.recover();
+    check(recovered.revision == 5U && recovered.current_node_id == "train_to_boundary" &&
+              recovered.current_attempt_id == "train_to_boundary@1",
+          "fresh controller recovers the ready worker and assigned first node");
+    const auto before_rebuild = journal.projection(run_id);
+    journal.rebuild_projections();
+    check(journal.projection(run_id) == before_rebuild,
+          "projection rebuild reproduces worker readiness and node assignment");
+    const auto before_takeover = journal.event_count();
+    check(journal.release_lease(acquired.lease.concurrency_key,
+                                acquired.lease.owner_run_id,
+                                acquired.lease.lease_id,
+                                acquired.lease.fencing_token, 1'400),
+          "stale worker fixture releases the accepted fence");
+    const auto successor = journal.acquire_lease(
+        acquired.lease.concurrency_key, "successor-run", "successor-lease",
+        1'401, 60'000'000'000LL);
+    bool stale_result_rejected = false;
+    try {
+      (void)controller.handle_event(result_event, session, 1'500);
+    } catch (const std::runtime_error&) {
+      stale_result_rejected = true;
+    }
+    check(successor.status == trainvm::LeaseAcquireStatus::acquired &&
+              stale_result_rejected && journal.event_count() == before_takeover,
+          "stale worker cannot complete a prepared dispatch after fence takeover");
+  }
+
+  {
+    const auto database_path = directory / "without-launch.db";
+    const std::string run_id = "worker-without-launch-run";
+    trainvm::Journal journal(database_path);
+    trainvm::Controller controller(*compiled.plan, journal, run_id);
+    controller.create_queued();
+    const auto acquired = controller.begin_acquisition(2'000);
+    trainvm::WorkerHelloEvidence hello{
+        .run_id = run_id,
+        .node_id = controller.state().current_node_id,
+        .attempt_id = controller.state().current_attempt_id,
+        .launch_nonce = "unissued-nonce",
+        .adapter = "rwkv-lab.mageflow",
+        .adapter_version = "1.0.0",
+        .code_fingerprint = launch_request.code_fingerprint,
+        .capabilities = launch_request.required_capabilities,
+        .last_acked_controller_sequence = 0,
+        .concurrency_key = acquired.lease.concurrency_key,
+        .lease_id = acquired.lease.lease_id,
+        .fencing_token = acquired.lease.fencing_token,
+    };
+    bool rejected = false;
+    try {
+      (void)controller.accept_worker_hello(std::move(hello), 2'100);
+    } catch (const std::logic_error&) {
+      rejected = true;
+    }
+    check(rejected && journal.event_count() == 6U,
+          "worker hello without a durable launch request is rejected without "
+          "mutation");
+  }
+
+  {
+    const auto database_path = directory / "expired-lease.db";
+    const std::string run_id = "worker-expired-lease-run";
+    trainvm::Journal journal(database_path);
+    trainvm::Controller controller(*compiled.plan, journal, run_id);
+    controller.create_queued();
+    const auto acquired = controller.begin_acquisition(3'000);
+    const auto launch = controller.prepare_worker_launch(launch_request, 3'100);
+    auto hello = hello_for(launch, launch_request.required_capabilities);
+    bool rejected = false;
+    try {
+      (void)controller.accept_worker_hello(std::move(hello), acquired.lease.expires_at_ns + 1);
+    } catch (const std::runtime_error&) {
+      rejected = true;
+    }
+    const auto projection = journal.projection(run_id);
+    check(rejected && projection && projection->observed_state == "acquiring" &&
+              projection->current_node_id.empty() && journal.event_count() == 7U,
+          "worker hello with an expired lease is rejected without readiness "
+          "evidence");
+  }
+
+  {
+    const auto database_path = directory / "released-lease.db";
+    const std::string run_id = "worker-released-lease-run";
+    trainvm::Journal journal(database_path);
+    trainvm::Controller controller(*compiled.plan, journal, run_id);
+    controller.create_queued();
+    const auto acquired = controller.begin_acquisition(4'000);
+    const auto launch = controller.prepare_worker_launch(launch_request, 4'100);
+    check(journal.release_lease(acquired.lease.concurrency_key, acquired.lease.owner_run_id,
+                                acquired.lease.lease_id, acquired.lease.fencing_token, 4'200),
+          "released-lease readiness fixture releases its acquired fence");
+    auto hello = hello_for(launch, launch_request.required_capabilities);
+    bool rejected = false;
+    try {
+      (void)controller.accept_worker_hello(std::move(hello), 4'300);
+    } catch (const std::runtime_error&) {
+      rejected = true;
+    }
+    const auto projection = journal.projection(run_id);
+    check(rejected && projection && projection->observed_state == "acquiring" &&
+              projection->current_node_id.empty() && journal.event_count() == 7U,
+          "worker hello with a released lease is rejected without readiness "
+          "evidence");
+  }
+
+  {
+    const auto database_path = directory / "fenced-result.db";
+    const std::string run_id = "worker-fenced-result-run";
+    trainvm::Journal journal(database_path);
+    trainvm::Controller controller(*compiled.plan, journal, run_id);
+    controller.create_queued();
+    (void)controller.begin_acquisition(5'000);
+    const auto launch = controller.prepare_worker_launch(launch_request, 5'100);
+    (void)controller.accept_worker_hello(
+        hello_for(launch, launch_request.required_capabilities), 5'200);
+    const auto dispatch = controller.prepare_dispatch(5'300);
+    const trainvm::WorkerSessionIdentity session{
+        .run_id = launch.run_id,
+        .node_id = launch.node_id,
+        .attempt_id = launch.attempt_id,
+        .launch_nonce = launch.launch_nonce,
+        .concurrency_key = launch.concurrency_key,
+        .lease_id = launch.lease_id,
+        .fencing_token = launch.fencing_token,
+    };
+    const trainvm::Event result{
+        .event_id = dispatch.dispatch_id + ":result",
+        .run_id = run_id,
+        .run_revision = 5,
+        .plan_revision = 1,
+        .node_id = launch.node_id,
+        .attempt_id = launch.attempt_id,
+        .worker_sequence = 1,
+        .event_type = "worker.completed",
+        .event_version = 1,
+        .wall_time_ns = 5'400,
+        .monotonic_time_ns = 1,
+        .optimizer_step = 5'500,
+        .payload = {{"reason", "cache_span_complete"}},
+    };
+    const auto& advanced = controller.handle_event(result, session, 5'400);
+    const auto receipt = journal.dispatch(dispatch.dispatch_id);
+    const auto reacquiring = journal.projection(run_id);
+    bool unfenced_next_dispatch_rejected = false;
+    bool unready_next_dispatch_rejected = false;
+    try {
+      (void)controller.prepare_dispatch();
+    } catch (const std::logic_error&) {
+      unfenced_next_dispatch_rejected = true;
+    }
+    try {
+      (void)controller.prepare_dispatch(5'450);
+    } catch (const std::logic_error&) {
+      unready_next_dispatch_rejected = true;
+    }
+    check(advanced.revision == 7U && advanced.current_node_id == "prepare_cache" &&
+              reacquiring && reacquiring->observed_state == "acquiring" &&
+              reacquiring->run_revision == 7U &&
+              reacquiring->current_node_id.empty() &&
+              reacquiring->current_attempt_id.empty() &&
+              receipt && receipt->status == trainvm::DispatchStatus::completed &&
+              receipt->result_event_id == std::optional<std::string>{result.event_id} &&
+              unfenced_next_dispatch_rejected && unready_next_dispatch_rejected,
+          "active fenced result returns the next external node to an unassigned "
+          "readiness boundary");
+    const auto next_launch =
+        controller.prepare_worker_launch(launch_request, 5'500);
+    const auto next_ready = controller.accept_worker_hello(
+        hello_for(next_launch, launch_request.required_capabilities), 5'600);
+    const auto next_running = journal.projection(run_id);
+    const auto next_dispatch = controller.prepare_dispatch(5'700);
+    check(next_launch.node_id == "prepare_cache" &&
+              next_launch.attempt_id == "prepare_cache@1" &&
+              next_launch.launch_nonce != launch.launch_nonce &&
+              next_ready.disposition ==
+                  trainvm::WorkerReadinessDisposition::accepted &&
+              next_running && next_running->observed_state == "running" &&
+              next_running->run_revision == 8U &&
+              next_running->current_node_id == "prepare_cache" &&
+              next_running->current_attempt_id == "prepare_cache@1" &&
+              next_dispatch.node_id == "prepare_cache",
+          "each external node requires a distinct launch and WorkerHello before "
+          "fenced dispatch");
+
+    const auto session_for = [](const trainvm::WorkerLaunchTicket& ticket) {
+      return trainvm::WorkerSessionIdentity{
+          .run_id = ticket.run_id,
+          .node_id = ticket.node_id,
+          .attempt_id = ticket.attempt_id,
+          .launch_nonce = ticket.launch_nonce,
+          .concurrency_key = ticket.concurrency_key,
+          .lease_id = ticket.lease_id,
+          .fencing_token = ticket.fencing_token,
+      };
+    };
+    const trainvm::Event cache_prepared{
+        .event_id = next_dispatch.dispatch_id + ":result",
+        .run_id = run_id,
+        .run_revision = 8,
+        .plan_revision = 1,
+        .node_id = next_launch.node_id,
+        .attempt_id = next_launch.attempt_id,
+        .worker_sequence = 1,
+        .event_type = "operation.completed",
+        .event_version = 1,
+        .wall_time_ns = 5'800,
+        .monotonic_time_ns = 2,
+        .optimizer_step = 5'500,
+        .payload = nlohmann::json::object(),
+    };
+    (void)controller.handle_event(cache_prepared, session_for(next_launch),
+                                  5'800);
+    const auto build_launch =
+        controller.prepare_worker_launch(launch_request, 5'900);
+    (void)controller.accept_worker_hello(
+        hello_for(build_launch, launch_request.required_capabilities), 6'000);
+    const auto build_dispatch = controller.prepare_dispatch(6'100);
+    const trainvm::Event cache_built{
+        .event_id = build_dispatch.dispatch_id + ":result",
+        .run_id = run_id,
+        .run_revision = 11,
+        .plan_revision = 1,
+        .node_id = build_launch.node_id,
+        .attempt_id = build_launch.attempt_id,
+        .worker_sequence = 1,
+        .event_type = "operation.completed",
+        .event_version = 1,
+        .wall_time_ns = 6'200,
+        .monotonic_time_ns = 3,
+        .optimizer_step = 5'500,
+        .payload = nlohmann::json::object(),
+    };
+    const auto& builtin = controller.handle_event(
+        cache_built, session_for(build_launch), 6'200);
+    check(builtin.revision == 12U &&
+              builtin.current_node_id == "validate_cache" &&
+              journal.projection(run_id)->observed_state == "running",
+          "external result may enter a managed builtin node immediately");
+    const auto validation_dispatch = controller.prepare_dispatch();
+    const trainvm::Event cache_validated{
+        .event_id = validation_dispatch.dispatch_id + ":result",
+        .run_id = run_id,
+        .run_revision = 12,
+        .plan_revision = 1,
+        .node_id = "validate_cache",
+        .attempt_id = "validate_cache@1",
+        .worker_sequence = 1,
+        .event_type = "artifact.validated",
+        .event_version = 1,
+        .wall_time_ns = 6'300,
+        .monotonic_time_ns = 4,
+        .optimizer_step = 5'500,
+        .payload = nlohmann::json::object(),
+    };
+    const auto& builtin_advanced = controller.handle_event(cache_validated);
+    const auto builtin_reacquiring = journal.projection(run_id);
+    trainvm::Controller builtin_restart(*compiled.plan, journal, run_id);
+    const auto& builtin_recovered = builtin_restart.recover();
+    check(builtin_advanced.revision == 14U &&
+              builtin_advanced.current_node_id == "resume_training" &&
+              builtin_reacquiring &&
+              builtin_reacquiring->observed_state == "acquiring" &&
+              builtin_reacquiring->current_node_id.empty() &&
+              builtin_reacquiring->current_attempt_id.empty() &&
+              builtin_recovered == builtin_advanced,
+          "managed builtin-to-external transition is durably unassigned and "
+          "recoverable");
+    const auto resume_launch =
+        builtin_restart.prepare_worker_launch(launch_request, 6'400);
+    (void)builtin_restart.accept_worker_hello(
+        hello_for(resume_launch, launch_request.required_capabilities), 6'500);
+    check(resume_launch.node_id == "resume_training" &&
+              builtin_restart.state().revision == 15U &&
+              journal.projection(run_id)->current_node_id == "resume_training",
+          "builtin-to-external progress also requires a fresh WorkerHello");
+  }
+
+  std::filesystem::remove_all(directory);
+}
+
+void test_concurrent_worker_launch_and_readiness_replay() {
+  const auto compiled = trainvm::compile_document(load_fixture());
+  check(compiled.valid(), "fixture required by concurrent worker readiness compiles");
+  if (!compiled.valid()) return;
+
+  const std::filesystem::path directory = std::filesystem::temp_directory_path() /
+      ("trainvm-worker-readiness-race-test-" +
+       std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  const auto database_path = directory / "journal.db";
+  const std::string run_id = "worker-readiness-race-run";
+  {
+    trainvm::Journal journal(database_path);
+    trainvm::Controller creator(*compiled.plan, journal, run_id);
+    creator.create_queued();
+    check(creator.begin_acquisition(1'000).status ==
+              trainvm::LeaseAcquireStatus::acquired &&
+              creator.state().revision == 4U &&
+              creator.state().current_node_id == "train_to_boundary",
+          "worker race fixture reaches the external-node acquiring boundary");
+  }
+
+  trainvm::Journal left_journal(database_path);
+  trainvm::Journal right_journal(database_path);
+  trainvm::Controller left(*compiled.plan, left_journal, run_id);
+  trainvm::Controller right(*compiled.plan, right_journal, run_id);
+  check(left.recover().revision == 4U && right.recover().revision == 4U,
+        "both worker race controllers recover acquiring revision four");
+
+  const trainvm::WorkerLaunchRequest request{
+      .code_fingerprint = "sha256:concurrent-mageflow-worker-v1",
+      .required_capabilities = {"worker.metrics", "worker.controls"},
+  };
+  struct LaunchOutcome {
+    std::optional<trainvm::WorkerLaunchTicket> ticket;
+    std::string error;
+  };
+  const auto launch_one = [](trainvm::Controller& controller,
+                             const trainvm::WorkerLaunchRequest& launch_request,
+                             std::int64_t now_ns, std::shared_future<void> start) {
+    start.wait();
+    try {
+      return LaunchOutcome{
+          .ticket = controller.prepare_worker_launch(launch_request, now_ns),
+          .error = {}};
+    } catch (const std::exception& exception) {
+      return LaunchOutcome{.ticket = std::nullopt, .error = exception.what()};
+    }
+  };
+  std::promise<void> launch_start;
+  const std::shared_future<void> launch_gate = launch_start.get_future().share();
+  auto left_launch_future = std::async(std::launch::async, launch_one,
+                                       std::ref(left), std::cref(request),
+                                       1'100, launch_gate);
+  auto right_launch_future = std::async(std::launch::async, launch_one,
+                                        std::ref(right), std::cref(request),
+                                        1'150, launch_gate);
+  launch_start.set_value();
+  const LaunchOutcome left_launch = left_launch_future.get();
+  const LaunchOutcome right_launch = right_launch_future.get();
+  const auto after_launch_events = left_journal.events_for_run(run_id);
+  const auto launch_event_count = static_cast<std::size_t>(std::count_if(
+      after_launch_events.begin(), after_launch_events.end(),
+      [](const trainvm::Event& event) {
+        return event.event_type == "worker.launch_requested";
+      }));
+  if (!left_launch.ticket || !right_launch.ticket) {
+    std::cerr << "worker launch race errors: left='" << left_launch.error
+              << "' right='" << right_launch.error << "'\n";
+  }
+  check(left_launch.ticket && right_launch.ticket &&
+            *left_launch.ticket == *right_launch.ticket &&
+            launch_event_count == 1U && after_launch_events.size() == 7U,
+        "concurrent exact worker launches converge on one durable ticket");
+  if (!left_launch.ticket || !right_launch.ticket) {
+    std::filesystem::remove_all(directory);
+    return;
+  }
+  const trainvm::WorkerLaunchTicket ticket = *left_launch.ticket;
+  const auto hello_for = [](const trainvm::WorkerLaunchTicket& launch) {
+    return trainvm::WorkerHelloEvidence{
+        .run_id = launch.run_id,
+        .node_id = launch.node_id,
+        .attempt_id = launch.attempt_id,
+        .launch_nonce = launch.launch_nonce,
+        .adapter = launch.adapter,
+        .adapter_version = launch.adapter_version,
+        .code_fingerprint = launch.code_fingerprint,
+        .capabilities = {"worker.metrics", "worker.controls"},
+        .last_acked_controller_sequence = 0,
+        .concurrency_key = launch.concurrency_key,
+        .lease_id = launch.lease_id,
+        .fencing_token = launch.fencing_token,
+    };
+  };
+  struct HelloOutcome {
+    std::optional<trainvm::WorkerReadinessResult> result;
+    std::string error;
+  };
+  const auto hello_one = [](trainvm::Controller& controller,
+                            trainvm::WorkerHelloEvidence hello,
+                            std::int64_t now_ns,
+                            std::shared_future<void> start) {
+    start.wait();
+    try {
+      return HelloOutcome{
+          .result = controller.accept_worker_hello(std::move(hello), now_ns),
+          .error = {}};
+    } catch (const std::exception& exception) {
+      return HelloOutcome{.result = std::nullopt, .error = exception.what()};
+    }
+  };
+  std::promise<void> hello_start;
+  const std::shared_future<void> hello_gate = hello_start.get_future().share();
+  auto left_hello_future = std::async(std::launch::async, hello_one,
+                                      std::ref(left), hello_for(ticket), 1'200,
+                                      hello_gate);
+  auto right_hello_future = std::async(std::launch::async, hello_one,
+                                       std::ref(right), hello_for(ticket), 1'250,
+                                       hello_gate);
+  hello_start.set_value();
+  const HelloOutcome left_hello = left_hello_future.get();
+  const HelloOutcome right_hello = right_hello_future.get();
+  if (!left_hello.result || !right_hello.result) {
+    std::cerr << "worker hello race errors: left='" << left_hello.error
+              << "' right='" << right_hello.error << "'\n";
+  }
+  const bool accepted_and_replayed =
+      left_hello.result && right_hello.result &&
+      ((left_hello.result->disposition ==
+            trainvm::WorkerReadinessDisposition::accepted &&
+        right_hello.result->disposition ==
+            trainvm::WorkerReadinessDisposition::replayed) ||
+       (left_hello.result->disposition ==
+            trainvm::WorkerReadinessDisposition::replayed &&
+        right_hello.result->disposition ==
+            trainvm::WorkerReadinessDisposition::accepted));
+  trainvm::Journal observer(database_path);
+  const auto readiness_events = observer.events_for_run(run_id);
+  const auto count_type = [&](std::string_view event_type) {
+    return std::count_if(readiness_events.begin(), readiness_events.end(),
+                         [&](const trainvm::Event& event) {
+                           return event.event_type == event_type;
+                         });
+  };
+  const auto projection = observer.projection(run_id);
+  check(accepted_and_replayed &&
+            left_hello.result->launch == ticket &&
+            right_hello.result->launch == ticket &&
+            count_type("worker.ready") == 1 &&
+            count_type("run.observed_state_changed") == 2 &&
+            count_type("node.entered") == 1 &&
+            readiness_events.size() == 10U && projection &&
+            projection->desired_state == "running" &&
+            projection->observed_state == "running" &&
+            projection->run_revision == 5U &&
+            projection->current_node_id == "train_to_boundary" &&
+            projection->current_attempt_id == "train_to_boundary@1" &&
+            left_hello.result->launch.fencing_token ==
+                right_hello.result->launch.fencing_token &&
+            left_hello.result->launch.lease_id ==
+                right_hello.result->launch.lease_id,
+        "concurrent exact worker hellos commit one readiness triplet on one fence");
+  std::filesystem::remove_all(directory);
+}
+
+void test_concurrent_fenced_result_content_conflict() {
+  const auto compiled = trainvm::compile_document(load_fixture());
+  check(compiled.valid(), "fixture required by concurrent fenced result compiles");
+  if (!compiled.valid()) return;
+
+  const std::filesystem::path directory = std::filesystem::temp_directory_path() /
+      ("trainvm-fenced-result-race-test-" +
+       std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  const auto database_path = directory / "journal.db";
+  const std::string run_id = "fenced-result-race-run";
+  trainvm::WorkerLaunchTicket launch;
+  trainvm::Dispatch dispatch;
+  {
+    trainvm::Journal journal(database_path);
+    trainvm::Controller creator(*compiled.plan, journal, run_id);
+    creator.create_queued();
+    (void)creator.begin_acquisition(1'000);
+    launch = creator.prepare_worker_launch(
+        {.code_fingerprint = "sha256:fenced-result-race-worker-v1",
+         .required_capabilities = {"worker.controls", "worker.metrics"}},
+        1'100);
+    (void)creator.accept_worker_hello(
+        {.run_id = launch.run_id,
+         .node_id = launch.node_id,
+         .attempt_id = launch.attempt_id,
+         .launch_nonce = launch.launch_nonce,
+         .adapter = launch.adapter,
+         .adapter_version = launch.adapter_version,
+         .code_fingerprint = launch.code_fingerprint,
+         .capabilities = launch.required_capabilities,
+         .last_acked_controller_sequence = 0,
+         .concurrency_key = launch.concurrency_key,
+         .lease_id = launch.lease_id,
+         .fencing_token = launch.fencing_token},
+        1'200);
+    dispatch = creator.prepare_dispatch(1'300);
+    check(journal.event_count() == 11U &&
+              dispatch.status == trainvm::DispatchStatus::prepared,
+          "result race fixture prepares one fenced external dispatch");
+  }
+
+  const trainvm::WorkerSessionIdentity session{
+      .run_id = launch.run_id,
+      .node_id = launch.node_id,
+      .attempt_id = launch.attempt_id,
+      .launch_nonce = launch.launch_nonce,
+      .concurrency_key = launch.concurrency_key,
+      .lease_id = launch.lease_id,
+      .fencing_token = launch.fencing_token,
+  };
+  const std::string result_id = dispatch.dispatch_id + ":adversarial-result";
+  const auto result_for = [&](std::string candidate) {
+    return trainvm::Event{
+        .event_id = result_id,
+        .run_id = run_id,
+        .run_revision = 5,
+        .plan_revision = 1,
+        .node_id = launch.node_id,
+        .attempt_id = launch.attempt_id,
+        .worker_sequence = 1,
+        .event_type = "worker.completed",
+        .event_version = 1,
+        .wall_time_ns = 1'400,
+        .monotonic_time_ns = 1,
+        .optimizer_step = 5'500,
+        .payload = {{"reason", "cache_span_complete"},
+                    {"candidate", std::move(candidate)}},
+    };
+  };
+  const trainvm::Event left_event = result_for("left");
+  const trainvm::Event right_event = result_for("right");
+
+  trainvm::Journal left_journal(database_path);
+  trainvm::Journal right_journal(database_path);
+  trainvm::Controller left(*compiled.plan, left_journal, run_id);
+  trainvm::Controller right(*compiled.plan, right_journal, run_id);
+  check(left.recover().revision == 5U && right.recover().revision == 5U,
+        "both result race controllers recover the same prepared attempt");
+  struct Outcome {
+    bool succeeded{};
+    std::string error;
+  };
+  const auto complete = [](trainvm::Controller& controller,
+                           trainvm::Event event,
+                           const trainvm::WorkerSessionIdentity& worker_session,
+                           std::shared_future<void> start) {
+    start.wait();
+    try {
+      (void)controller.handle_event(event, worker_session, 1'400);
+      return Outcome{.succeeded = true, .error = {}};
+    } catch (const std::exception& exception) {
+      return Outcome{.succeeded = false, .error = exception.what()};
+    }
+  };
+  std::promise<void> start;
+  const std::shared_future<void> gate = start.get_future().share();
+  auto left_future = std::async(std::launch::async, complete, std::ref(left),
+                                left_event, std::cref(session), gate);
+  auto right_future = std::async(std::launch::async, complete, std::ref(right),
+                                 right_event, std::cref(session), gate);
+  start.set_value();
+  const Outcome left_outcome = left_future.get();
+  const Outcome right_outcome = right_future.get();
+  if (left_outcome.succeeded == right_outcome.succeeded) {
+    std::cerr << "fenced result race outcomes: left_success="
+              << left_outcome.succeeded << " left_error='" << left_outcome.error
+              << "' right_success=" << right_outcome.succeeded
+              << " right_error='" << right_outcome.error << "'\n";
+  }
+
+  trainvm::Journal observer(database_path);
+  const auto durable_result = observer.event(result_id);
+  const auto durable_transition = observer.event(result_id + ":transition");
+  const auto durable_reacquiring = observer.event(result_id + ":acquiring");
+  const auto durable_receipt = observer.event(dispatch.dispatch_id + ":completed");
+  const auto receipt = observer.dispatch(dispatch.dispatch_id);
+  const auto projection = observer.projection(run_id);
+  const auto events = observer.events_for_run(run_id);
+  const std::string winner = left_outcome.succeeded ? "left" : "right";
+  const bool exactly_one_succeeded =
+      left_outcome.succeeded != right_outcome.succeeded;
+  const bool loser_rejected = left_outcome.succeeded
+                                  ? !right_outcome.error.empty()
+                                  : !left_outcome.error.empty();
+  check(exactly_one_succeeded && loser_rejected && durable_result &&
+            durable_result->payload.value("candidate", std::string{}) == winner &&
+            durable_transition && durable_reacquiring && durable_receipt &&
+            receipt && receipt->status == trainvm::DispatchStatus::completed &&
+            receipt->result_event_id ==
+                std::optional<std::string>{result_id} &&
+            events.size() == 15U && projection &&
+            projection->observed_state == "acquiring" &&
+            projection->run_revision == 7U &&
+            projection->current_node_id.empty() &&
+            projection->current_attempt_id.empty(),
+        "conflicting concurrent result retries commit only the winner's transition and receipt");
+  std::string chain_reason;
+  check(observer.verify_chain(&chain_reason),
+        "conflicting result race retains one valid journal chain");
   std::filesystem::remove_all(directory);
 }
 
@@ -1736,8 +2617,8 @@ void test_concurrent_queue_acquisition_replay() {
             left_result.fencing_token == right_result.fencing_token && projection &&
             projection->desired_state == "running" &&
             projection->observed_state == "acquiring" &&
-            projection->run_revision == 3U && events.size() == 4U,
-        "concurrent exact acquisitions converge on one three-event fence");
+            projection->run_revision == 4U && events.size() == 6U,
+        "concurrent exact acquisitions converge on one fence and admission transition");
   std::filesystem::remove_all(directory);
 }
 
@@ -1764,7 +2645,7 @@ void test_acquiring_recovery_ignores_mutable_lease_lifecycle() {
   bool renewed_recovered = false;
   try {
     trainvm::Controller renewed(*compiled.plan, journal, "acquisition-lifecycle-run");
-    renewed_recovered = renewed.recover().revision == 3U;
+    renewed_recovered = renewed.recover().revision == 4U;
   } catch (const std::exception&) {
   }
   check(renewed_recovered,
@@ -1775,7 +2656,7 @@ void test_acquiring_recovery_ignores_mutable_lease_lifecycle() {
   bool released_recovered = false;
   try {
     trainvm::Controller released(*compiled.plan, journal, "acquisition-lifecycle-run");
-    released_recovered = released.recover().revision == 3U;
+    released_recovered = released.recover().revision == 4U;
   } catch (const std::exception&) {
   }
   check(released_recovered,
@@ -1817,7 +2698,7 @@ void test_acquiring_rejects_fabricated_running_transition() {
   const trainvm::ExecutionState initial = trainvm::start_execution(*compiled.plan, run_id);
   const trainvm::Node& node =
       compiled.plan->experiment.spec.workflow.nodes.at(initial.current_node_id);
-  journal.append_batch({
+  trainvm::JournalTestAccess::append_batch(journal, {
       trainvm::Event{
           .event_id = run_id + ":fabricated-running",
           .run_id = run_id,
@@ -2013,6 +2894,9 @@ int main() {
     test_command_service();
     test_submission_and_queue_boundary();
     test_atomic_queue_acquisition_boundary();
+    test_worker_launch_and_readiness_boundary();
+    test_concurrent_worker_launch_and_readiness_replay();
+    test_concurrent_fenced_result_content_conflict();
     test_concurrent_queue_acquisition_replay();
     test_acquiring_recovery_ignores_mutable_lease_lifecycle();
     test_acquiring_rejects_fabricated_running_transition();

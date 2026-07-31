@@ -14,6 +14,7 @@
 #include "trainvm/dispatch.hpp"
 #include "trainvm/command.hpp"
 #include "trainvm/lease.hpp"
+#include "trainvm/worker.hpp"
 
 namespace trainvm {
 
@@ -76,15 +77,10 @@ public:
   Journal(Journal&&) = delete;
   Journal& operator=(Journal&&) = delete;
 
-  std::uint64_t append(const Event& event);
-  std::vector<std::uint64_t> append_batch(const std::vector<Event>& events);
   [[nodiscard]] std::optional<Event> event(const std::string& event_id) const;
   [[nodiscard]] std::vector<Event> events_for_run(const std::string& run_id) const;
   [[nodiscard]] std::optional<RunProjection> projection(const std::string& run_id) const;
   [[nodiscard]] std::optional<CompiledPlan> compiled_plan(const std::string& plan_hash) const;
-  Dispatch prepare_dispatch(const Dispatch& dispatch, const Event& prepared_event);
-  void complete_dispatch(const std::string& dispatch_id, const std::string& result_event_id,
-                         const std::vector<Event>& events);
   [[nodiscard]] std::optional<Dispatch> dispatch(const std::string& dispatch_id) const;
   [[nodiscard]] std::optional<ControlCommand> control_command(
       const std::string& command_id) const;
@@ -129,6 +125,13 @@ public:
   sqlite3* database_{};
 
   [[nodiscard]] ReadSnapshot read_snapshot() const;
+  std::uint64_t append(const Event& event);
+  std::vector<std::uint64_t> append_batch(const std::vector<Event>& events);
+  Dispatch prepare_dispatch(const Dispatch& dispatch,
+                            const Event& prepared_event);
+  void complete_dispatch(const std::string& dispatch_id,
+                         const std::string& result_event_id,
+                         const std::vector<Event>& events);
   void initialize();
   std::uint64_t append_uncommitted(const Event& event);
   RunCreationResult create_run(const CompiledPlan& plan, const std::vector<Event>& events);
@@ -136,6 +139,31 @@ public:
       const std::string& concurrency_key, const std::string& owner_run_id,
       const std::string& lease_id, std::int64_t now_ns, std::int64_t timeout_ns,
       const std::vector<Event>& events);
+  bool complete_builtin_admission(const ResourceLease& lease, std::int64_t now_ns,
+                                  const std::vector<Event>& events);
+  bool prepare_worker_launch(const WorkerLaunchTicket& launch, std::int64_t now_ns,
+                             const Event& event);
+  WorkerReadinessDisposition accept_worker_ready(
+      const WorkerLaunchTicket& launch, const WorkerHelloEvidence& hello,
+      std::int64_t now_ns, const std::vector<Event>& events);
+  Dispatch prepare_fenced_dispatch(const Dispatch& dispatch,
+                                   const Event& prepared_event,
+                                   const WorkerLaunchTicket& launch,
+                                   std::int64_t now_ns);
+  Dispatch prepare_dispatch_impl(
+      const Dispatch& dispatch, const Event& prepared_event,
+      const std::optional<WorkerLaunchTicket>& launch,
+      std::optional<std::int64_t> now_ns);
+  void complete_fenced_dispatch(const std::string& dispatch_id,
+                                const std::string& result_event_id,
+                                const std::vector<Event>& events,
+                                const WorkerSessionIdentity& identity,
+                                std::int64_t now_ns);
+  void complete_dispatch_impl(
+      const std::string& dispatch_id, const std::string& result_event_id,
+      const std::vector<Event>& events,
+      const std::optional<WorkerSessionIdentity>& identity,
+      std::optional<std::int64_t> now_ns);
   ControlSubmission submit_control_command(ControlCommand command);
   ControlCommand acknowledge_control_command(const std::string& run_id,
                                               const std::string& command_id,

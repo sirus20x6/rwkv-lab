@@ -231,6 +231,7 @@ func TestTrainVMWaitingStatesAreNotRenderedAsTerminalOrControllable(t *testing.T
 		`terminalStates.has(run.observed_state)`,
 		`"waiting for assignment"`,
 		`(!active && !retryLocked)`,
+		`Boolean(vmSelectedRun.current_node_id) && Boolean(vmSelectedRun.current_attempt_id)`,
 	} {
 		if !strings.Contains(string(app), required) {
 			t.Fatalf("TrainVM waiting-state UI is missing %q", required)

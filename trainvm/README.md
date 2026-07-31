@@ -36,14 +36,21 @@ Implemented now:
   journal-bound idempotency identities, atomic queued run creation, and deterministic queued-run
   recovery without launching work;
 - a process-free queue reconciliation boundary that atomically acquires a fenced workspace lease,
-  journals desired-running/resource-acquired/observed-acquiring evidence, recovers at acquiring,
-  and still forbids node entry or dispatch;
+  completes the declarative builtin resource-admission node, and advances to the real worker node
+  while remaining unassigned and observed-acquiring;
+- durable worker launch tickets binding node/attempt, nonce, adapter version, trusted code
+  fingerprint, required capabilities, and workspace fence; exact WorkerHello acceptance atomically
+  journals readiness, observed-running, and node entry; every managed transition into another
+  external node returns to unassigned observed-acquiring and requires a distinct launch/hello;
+- live-fence validation in the same transaction as worker-backed dispatch preparation and result
+  completion, so an expired, released, or superseded worker cannot mutate the FSM;
 - `validate`, `plan`, `simulate`, and journal inspection/replay CLI commands.
 
-This code does not yet launch or control a trainer. The next implementation boundary is verified
-worker readiness: adapter capabilities and launch identity must match the fenced lease before a run
-may enter its first node, become observed-running, or receive a dispatch. Real MageFlow process
-ownership follows only after that boundary and its fault-injection tests pass.
+This code does not yet launch or control a trainer. The next implementation boundary is the
+WorkerControl stream and reconciler: map the existing Protobuf WorkerHello into the verified native
+readiness transaction, issue an explicit welcome receipt, and then own an adapter process. Real
+MageFlow process ownership follows only after that service boundary and its fault-injection tests
+pass.
 
 ## Toolchain
 
@@ -92,18 +99,18 @@ returns either structured diagnostics or the native compiler's canonical plan an
 `serve` is the stateful mutation boundary. The dashboard connects to its Unix socket through gRPC;
 it never opens the journal writable. `SubmitExperiment` supports validation and idempotent queued
 creation; the live-control `CommandRun` variant is also implemented. The dashboard freezes ambiguous
-submissions and retries their exact body and key. Worker launch, pause/resume, and lifecycle
-reconciliation remain subsequent milestones.
+submissions and retries their exact body and key. The process-free worker launch/readiness core is
+implemented; WorkerControl streaming, pause/resume, and lifecycle reconciliation remain subsequent
+milestones.
 
 ## Journal CLI
 
 ```bash
 trainvm/build/trainvm journal init /tmp/trainvm.db
-trainvm/build/trainvm journal append /tmp/trainvm.db event.json
 trainvm/build/trainvm journal verify /tmp/trainvm.db
 trainvm/build/trainvm journal replay /tmp/trainvm.db
 trainvm/build/trainvm journal show /tmp/trainvm.db RUN_ID
 ```
 
-`event.json` follows the fields in `trainvm::Event`. The CLI is diagnostic scaffolding; the daemon
-will receive the equivalent generated Protobuf messages and append them through the same journal API.
+The CLI is diagnostic scaffolding. Runtime mutations are available only through typed controller
+operations; there is intentionally no raw event-append command on an authority journal.

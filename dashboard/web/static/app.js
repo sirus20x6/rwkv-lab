@@ -728,7 +728,8 @@
     if (!target || !vmControlView || !vmSelectedRun) return;
     const catalog = vmControlView.catalog || {};
     const effective = vmControlView.effective_values || {};
-    const active = ["running", "paused"].includes(vmSelectedRun.observed_state);
+    const active = ["running", "paused"].includes(vmSelectedRun.observed_state) &&
+      Boolean(vmSelectedRun.current_node_id) && Boolean(vmSelectedRun.current_attempt_id);
     const retryLocked = vmControlRetries.has(vmSelectedRun.run_id);
     const requested = {};
     for (const command of Array.isArray(vmControlView.commands) ? vmControlView.commands : []) {

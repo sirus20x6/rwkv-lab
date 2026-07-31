@@ -305,8 +305,8 @@ void update_projection(sqlite3* database, const Event& event, std::uint64_t jour
     extra = Extra::desired;
   } else if (event.event_type == "run.observed_state_changed") {
     sql += R"sql(, observed_state=?,
-      current_node_id=CASE WHEN ? IN ('completed','failed','cancelled') THEN '' ELSE current_node_id END,
-      current_attempt_id=CASE WHEN ? IN ('completed','failed','cancelled') THEN '' ELSE current_attempt_id END
+      current_node_id=CASE WHEN ? IN ('acquiring','completed','failed','cancelled') THEN '' ELSE current_node_id END,
+      current_attempt_id=CASE WHEN ? IN ('acquiring','completed','failed','cancelled') THEN '' ELSE current_attempt_id END
     )sql";
     extra = Extra::observed;
   } else if (event.event_type == "node.entered") {
@@ -1172,6 +1172,20 @@ std::optional<CompiledPlan> Journal::compiled_plan(const std::string& plan_hash)
 }
 
 Dispatch Journal::prepare_dispatch(const Dispatch& dispatch, const Event& prepared_event) {
+  return prepare_dispatch_impl(dispatch, prepared_event, std::nullopt, std::nullopt);
+}
+
+Dispatch Journal::prepare_fenced_dispatch(const Dispatch& dispatch,
+                                          const Event& prepared_event,
+                                          const WorkerLaunchTicket& launch,
+                                          std::int64_t now_ns) {
+  return prepare_dispatch_impl(dispatch, prepared_event, launch, now_ns);
+}
+
+Dispatch Journal::prepare_dispatch_impl(
+    const Dispatch& dispatch, const Event& prepared_event,
+    const std::optional<WorkerLaunchTicket>& launch,
+    std::optional<std::int64_t> now_ns) {
   if (dispatch.dispatch_id.empty() || dispatch.run_id.empty() || dispatch.node_id.empty() ||
       dispatch.attempt_id.empty() || dispatch.component.empty() || dispatch.operation.empty()) {
     throw std::invalid_argument("dispatch identity and operation fields must not be empty");
@@ -1193,6 +1207,51 @@ Dispatch Journal::prepare_dispatch(const Dispatch& dispatch, const Event& prepar
   }
 
   Transaction transaction(database_);
+  if (launch) {
+    if (!now_ns || *now_ns < 0 || launch->run_id != dispatch.run_id ||
+        launch->node_id != dispatch.node_id ||
+        launch->attempt_id != dispatch.attempt_id || launch->fencing_token == 0) {
+      throw std::invalid_argument("fenced dispatch has an invalid launch identity");
+    }
+    Statement lease(database_, R"sql(
+      SELECT owner_run_id, lease_id, fencing_token, expires_at_ns, released_at_ns
+      FROM resource_leases WHERE concurrency_key=?
+    )sql");
+    bind_text(lease.get(), 1, launch->concurrency_key);
+    if (sqlite3_step(lease.get()) != SQLITE_ROW ||
+        column_text(lease.get(), 0) != launch->run_id ||
+        column_text(lease.get(), 1) != launch->lease_id ||
+        static_cast<std::uint64_t>(sqlite3_column_int64(lease.get(), 2)) !=
+            launch->fencing_token ||
+        sqlite3_column_int64(lease.get(), 3) <= *now_ns ||
+        sqlite3_column_type(lease.get(), 4) != SQLITE_NULL) {
+      throw std::runtime_error("dispatch no longer owns its active worker lease");
+    }
+    const auto ready = event(dispatch.run_id + ":worker-launch:" +
+                             dispatch.node_id + ":" + dispatch.attempt_id +
+                             ":ready");
+    if (!ready || ready->event_type != "worker.ready" ||
+        ready->payload.value("launch_nonce", std::string{}) !=
+            launch->launch_nonce ||
+        ready->payload.value("lease_id", std::string{}) != launch->lease_id ||
+        ready->payload.value("fencing_token", std::uint64_t{}) !=
+            launch->fencing_token) {
+      throw std::runtime_error("dispatch has no matching durable worker readiness");
+    }
+  }
+  Statement projection(database_, R"sql(
+    SELECT observed_state, run_revision, current_node_id, current_attempt_id
+    FROM run_projection WHERE run_id=?
+  )sql");
+  bind_text(projection.get(), 1, dispatch.run_id);
+  if (sqlite3_step(projection.get()) != SQLITE_ROW ||
+      column_text(projection.get(), 0) != "running" ||
+      static_cast<std::uint64_t>(sqlite3_column_int64(projection.get(), 1)) !=
+          dispatch.run_revision ||
+      column_text(projection.get(), 2) != dispatch.node_id ||
+      column_text(projection.get(), 3) != dispatch.attempt_id) {
+    throw std::runtime_error("dispatch preparation is stale for the active run projection");
+  }
   Statement existing(database_, R"sql(
     SELECT dispatch_id, run_id, run_revision, plan_revision, node_id, attempt_id,
            component, operation, status, result_event_id
@@ -1211,6 +1270,16 @@ Dispatch Journal::prepare_dispatch(const Dispatch& dispatch, const Event& prepar
     // unchanged.
     if (stored.status == DispatchStatus::prepared) {
       stored.run_revision = dispatch.run_revision;
+      Statement refresh(database_, R"sql(
+        UPDATE node_dispatches SET run_revision=? WHERE dispatch_id=?
+      )sql");
+      bind_integer(refresh.get(), 1,
+                   checked_integer(dispatch.run_revision, "run_revision"));
+      bind_text(refresh.get(), 2, dispatch.dispatch_id);
+      require_done(database_, refresh.get(), "refresh prepared dispatch revision");
+      if (sqlite3_changes(database_) != 1) {
+        throw std::runtime_error("dispatch revision refresh affected an unexpected row count");
+      }
     }
     transaction.commit();
     return stored;
@@ -1252,6 +1321,22 @@ Dispatch Journal::prepare_dispatch(const Dispatch& dispatch, const Event& prepar
 
 void Journal::complete_dispatch(const std::string& dispatch_id, const std::string& result_event_id,
                                 const std::vector<Event>& events) {
+  complete_dispatch_impl(dispatch_id, result_event_id, events, std::nullopt,
+                         std::nullopt);
+}
+
+void Journal::complete_fenced_dispatch(
+    const std::string& dispatch_id, const std::string& result_event_id,
+    const std::vector<Event>& events, const WorkerSessionIdentity& identity,
+    std::int64_t now_ns) {
+  complete_dispatch_impl(dispatch_id, result_event_id, events, identity, now_ns);
+}
+
+void Journal::complete_dispatch_impl(
+    const std::string& dispatch_id, const std::string& result_event_id,
+    const std::vector<Event>& events,
+    const std::optional<WorkerSessionIdentity>& identity,
+    std::optional<std::int64_t> now_ns) {
   if (dispatch_id.empty() || result_event_id.empty() || events.empty()) {
     throw std::invalid_argument("dispatch completion requires IDs and journal events");
   }
@@ -1275,8 +1360,61 @@ void Journal::complete_dispatch(const std::string& dispatch_id, const std::strin
     if (stored.result_event_id != std::optional<std::string>{result_event_id}) {
       throw std::invalid_argument("dispatch already completed with a different result event");
     }
+    for (const Event& requested : events) {
+      const auto durable = event(requested.event_id);
+      if (!durable || event_json(*durable) != event_json(requested)) {
+        throw std::invalid_argument(
+            "completed dispatch retry differs from its durable event batch");
+      }
+    }
     transaction.commit();
     return;
+  }
+  Statement projection(database_, R"sql(
+    SELECT observed_state, run_revision, current_node_id, current_attempt_id
+    FROM run_projection WHERE run_id=?
+  )sql");
+  bind_text(projection.get(), 1, stored.run_id);
+  if (sqlite3_step(projection.get()) != SQLITE_ROW ||
+      column_text(projection.get(), 0) != "running" ||
+      static_cast<std::uint64_t>(sqlite3_column_int64(projection.get(), 1)) !=
+          stored.run_revision ||
+      column_text(projection.get(), 2) != stored.node_id ||
+      column_text(projection.get(), 3) != stored.attempt_id) {
+    throw std::runtime_error("dispatch completion is stale for the active run projection");
+  }
+  if (identity) {
+    if (!now_ns || *now_ns < 0 || identity->run_id != stored.run_id ||
+        identity->node_id != stored.node_id ||
+        identity->attempt_id != stored.attempt_id || identity->fencing_token == 0) {
+      throw std::invalid_argument("dispatch completion has an invalid worker session");
+    }
+    Statement lease(database_, R"sql(
+      SELECT owner_run_id, lease_id, fencing_token, expires_at_ns, released_at_ns
+      FROM resource_leases WHERE concurrency_key=?
+    )sql");
+    bind_text(lease.get(), 1, identity->concurrency_key);
+    if (sqlite3_step(lease.get()) != SQLITE_ROW ||
+        column_text(lease.get(), 0) != identity->run_id ||
+        column_text(lease.get(), 1) != identity->lease_id ||
+        static_cast<std::uint64_t>(sqlite3_column_int64(lease.get(), 2)) !=
+            identity->fencing_token ||
+        sqlite3_column_int64(lease.get(), 3) <= *now_ns ||
+        sqlite3_column_type(lease.get(), 4) != SQLITE_NULL) {
+      throw std::runtime_error("dispatch completion lost its active lease fence");
+    }
+    const auto ready = event(identity->run_id + ":worker-launch:" +
+                             identity->node_id + ":" + identity->attempt_id +
+                             ":ready");
+    if (!ready || ready->payload.value("launch_nonce", std::string{}) !=
+                      identity->launch_nonce ||
+        ready->payload.value("concurrency_key", std::string{}) !=
+            identity->concurrency_key ||
+        ready->payload.value("lease_id", std::string{}) != identity->lease_id ||
+        ready->payload.value("fencing_token", std::uint64_t{}) !=
+            identity->fencing_token) {
+      throw std::runtime_error("dispatch completion has no matching readiness receipt");
+    }
   }
   for (const Event& event : events) {
     if (event.run_id != stored.run_id) {
@@ -1730,9 +1868,9 @@ LeaseAcquireResult Journal::acquire_lease_with_events(
                               events[1].plan_revision == 1U &&
                               events[2].plan_revision == 1U;
     if (desired_state == "running" && observed_state == "acquiring") {
-      if (!unassigned || !plan_matches || run_revision != events[2].run_revision ||
-          events[0].run_revision + 1U != run_revision ||
-          events[1].run_revision + 1U != run_revision) {
+      if (!unassigned || !plan_matches || run_revision < events[2].run_revision ||
+          events[0].run_revision + 1U != events[2].run_revision ||
+          events[1].run_revision + 1U != events[2].run_revision) {
         throw std::invalid_argument("acquisition replay disagrees with the acquiring run");
       }
       const auto stored_desired = event(events[0].event_id);
@@ -1885,6 +2023,347 @@ LeaseAcquireResult Journal::acquire_lease_with_events(
   append_events(lease);
   transaction.commit();
   return {.status = LeaseAcquireStatus::acquired, .lease = std::move(lease)};
+}
+
+bool Journal::complete_builtin_admission(const ResourceLease& lease,
+                                         std::int64_t now_ns,
+                                         const std::vector<Event>& events) {
+  require_lease_identity(lease.concurrency_key, lease.owner_run_id,
+                         lease.lease_id);
+  if (now_ns < 0 || lease.fencing_token == 0 || events.size() != 2U) {
+    throw std::invalid_argument("builtin admission requires a valid lease and event pair");
+  }
+  const Event& result = events[0];
+  const Event& transition = events[1];
+  if (result.run_id != lease.owner_run_id ||
+      result.event_type != "resource.acquired" ||
+      result.worker_sequence != 0 || result.node_id.empty() ||
+      result.attempt_id.empty() ||
+      result.payload != nlohmann::json{{"concurrency_key", lease.concurrency_key},
+                                      {"lease_id", lease.lease_id},
+                                      {"fencing_token", lease.fencing_token}} ||
+      transition.run_id != lease.owner_run_id ||
+      transition.event_type != "fsm.transitioned" ||
+      transition.event_id != result.event_id + ":transition" ||
+      transition.run_revision != result.run_revision + 1U ||
+      transition.plan_revision != result.plan_revision ||
+      transition.node_id != result.node_id ||
+      transition.attempt_id != result.attempt_id ||
+      transition.worker_sequence != 0 ||
+      transition.payload.value("cause_event_id", std::string{}) !=
+          result.event_id ||
+      transition.payload.value("source", std::string{}) != result.node_id) {
+    throw std::invalid_argument("builtin admission event pair is malformed");
+  }
+
+  Transaction transaction(database_);
+  std::string chain_reason;
+  if (!verify_chain(&chain_reason)) {
+    throw std::runtime_error("refusing builtin admission: " + chain_reason);
+  }
+  Statement projection(database_, R"sql(
+    SELECT desired_state, observed_state, run_revision,
+           current_node_id, current_attempt_id
+    FROM run_projection WHERE run_id=?
+  )sql");
+  bind_text(projection.get(), 1, lease.owner_run_id);
+  if (sqlite3_step(projection.get()) != SQLITE_ROW ||
+      column_text(projection.get(), 0) != "running" ||
+      column_text(projection.get(), 1) != "acquiring" ||
+      !column_text(projection.get(), 3).empty() ||
+      !column_text(projection.get(), 4).empty()) {
+    throw std::invalid_argument("builtin admission requires an unassigned acquiring run");
+  }
+  const auto run_revision =
+      static_cast<std::uint64_t>(sqlite3_column_int64(projection.get(), 2));
+
+  Statement current_lease(database_, R"sql(
+    SELECT owner_run_id, lease_id, fencing_token, acquired_at_ns, expires_at_ns,
+           released_at_ns
+    FROM resource_leases WHERE concurrency_key=?
+  )sql");
+  bind_text(current_lease.get(), 1, lease.concurrency_key);
+  if (sqlite3_step(current_lease.get()) != SQLITE_ROW ||
+      column_text(current_lease.get(), 0) != lease.owner_run_id ||
+      column_text(current_lease.get(), 1) != lease.lease_id ||
+      static_cast<std::uint64_t>(sqlite3_column_int64(current_lease.get(), 2)) !=
+          lease.fencing_token ||
+      sqlite3_column_int64(current_lease.get(), 3) != lease.acquired_at_ns ||
+      sqlite3_column_int64(current_lease.get(), 4) <= now_ns ||
+      sqlite3_column_type(current_lease.get(), 5) != SQLITE_NULL) {
+    throw std::runtime_error("builtin admission no longer owns its active fenced lease");
+  }
+
+  const auto stored_result = event(result.event_id);
+  const auto stored_transition = event(transition.event_id);
+  if (run_revision == transition.run_revision) {
+    Event replay_result = result;
+    Event replay_transition = transition;
+    if (stored_result && stored_transition) {
+      replay_result.wall_time_ns = stored_result->wall_time_ns;
+      replay_result.monotonic_time_ns = stored_result->monotonic_time_ns;
+      replay_transition.wall_time_ns = stored_transition->wall_time_ns;
+      replay_transition.monotonic_time_ns = stored_transition->monotonic_time_ns;
+    }
+    if (!stored_result || !stored_transition ||
+        event_json(*stored_result) != event_json(replay_result) ||
+        event_json(*stored_transition) != event_json(replay_transition)) {
+      throw std::invalid_argument("builtin admission replay differs from durable events");
+    }
+    transaction.commit();
+    return false;
+  }
+  if (run_revision != result.run_revision || stored_result || stored_transition) {
+    throw std::invalid_argument(
+        "builtin admission disagrees with the acquiring revision: projection=" +
+        std::to_string(run_revision) + ", result=" +
+        std::to_string(result.run_revision) + ", transition=" +
+        std::to_string(transition.run_revision) + ", stored_result=" +
+        (stored_result ? "yes" : "no") + ", stored_transition=" +
+        (stored_transition ? "yes" : "no"));
+  }
+  append_uncommitted(result);
+  append_uncommitted(transition);
+  transaction.commit();
+  return true;
+}
+
+bool Journal::prepare_worker_launch(const WorkerLaunchTicket& launch,
+                                    std::int64_t now_ns,
+                                    const Event& event) {
+  require_lease_identity(launch.concurrency_key, launch.run_id,
+                         launch.lease_id);
+  const nlohmann::json expected_payload{
+      {"launch_nonce", launch.launch_nonce},
+      {"adapter", launch.adapter},
+      {"adapter_version", launch.adapter_version},
+      {"code_fingerprint", launch.code_fingerprint},
+      {"required_capabilities", launch.required_capabilities},
+      {"concurrency_key", launch.concurrency_key},
+      {"lease_id", launch.lease_id},
+      {"fencing_token", launch.fencing_token},
+  };
+  if (now_ns < 0 || launch.fencing_token == 0 || launch.node_id.empty() ||
+      launch.attempt_id.empty() || launch.launch_nonce.empty() ||
+      launch.adapter.empty() || launch.adapter_version.empty() ||
+      launch.code_fingerprint.empty() || event.run_id != launch.run_id ||
+      event.node_id != launch.node_id || event.attempt_id != launch.attempt_id ||
+      event.worker_sequence != 0 ||
+      event.event_type != "worker.launch_requested" ||
+      event.payload != expected_payload) {
+    throw std::invalid_argument("worker launch ticket or event is malformed");
+  }
+  Transaction transaction(database_);
+  std::string chain_reason;
+  if (!verify_chain(&chain_reason)) {
+    throw std::runtime_error("refusing worker launch: " + chain_reason);
+  }
+  Statement projection(database_, R"sql(
+    SELECT desired_state, observed_state, run_revision,
+           current_node_id, current_attempt_id
+    FROM run_projection WHERE run_id=?
+  )sql");
+  bind_text(projection.get(), 1, launch.run_id);
+  if (sqlite3_step(projection.get()) != SQLITE_ROW ||
+      column_text(projection.get(), 0) != "running" ||
+      column_text(projection.get(), 1) != "acquiring" ||
+      static_cast<std::uint64_t>(sqlite3_column_int64(projection.get(), 2)) !=
+          event.run_revision ||
+      !column_text(projection.get(), 3).empty() ||
+      !column_text(projection.get(), 4).empty()) {
+    throw std::invalid_argument("worker launch requires an unassigned acquiring run");
+  }
+  Statement lease(database_, R"sql(
+    SELECT owner_run_id, lease_id, fencing_token, expires_at_ns, released_at_ns
+    FROM resource_leases WHERE concurrency_key=?
+  )sql");
+  bind_text(lease.get(), 1, launch.concurrency_key);
+  if (sqlite3_step(lease.get()) != SQLITE_ROW ||
+      column_text(lease.get(), 0) != launch.run_id ||
+      column_text(lease.get(), 1) != launch.lease_id ||
+      static_cast<std::uint64_t>(sqlite3_column_int64(lease.get(), 2)) !=
+          launch.fencing_token ||
+      sqlite3_column_int64(lease.get(), 3) <= now_ns ||
+      sqlite3_column_type(lease.get(), 4) != SQLITE_NULL) {
+    throw std::runtime_error("worker launch no longer owns its active lease");
+  }
+  const auto stored = this->event(event.event_id);
+  if (stored) {
+    Event replay = event;
+    replay.wall_time_ns = stored->wall_time_ns;
+    replay.monotonic_time_ns = stored->monotonic_time_ns;
+    if (event_json(*stored) != event_json(replay)) {
+      throw std::invalid_argument("worker launch retry differs from durable request");
+    }
+    transaction.commit();
+    return false;
+  }
+  Statement conflicting(database_, R"sql(
+    SELECT 1 FROM events
+    WHERE run_id=? AND event_type='worker.launch_requested'
+      AND node_id=? AND attempt_id=? LIMIT 1
+  )sql");
+  bind_text(conflicting.get(), 1, launch.run_id);
+  bind_text(conflicting.get(), 2, launch.node_id);
+  bind_text(conflicting.get(), 3, launch.attempt_id);
+  if (sqlite3_step(conflicting.get()) == SQLITE_ROW) {
+    throw std::invalid_argument("worker attempt already has another launch request");
+  }
+  append_uncommitted(event);
+  transaction.commit();
+  return true;
+}
+
+WorkerReadinessDisposition Journal::accept_worker_ready(
+    const WorkerLaunchTicket& launch, const WorkerHelloEvidence& hello,
+    std::int64_t now_ns, const std::vector<Event>& events) {
+  require_lease_identity(launch.concurrency_key, launch.run_id,
+                         launch.lease_id);
+  if (now_ns < 0 || events.size() != 3U || hello.run_id != launch.run_id ||
+      hello.node_id != launch.node_id || hello.attempt_id != launch.attempt_id ||
+      hello.launch_nonce != launch.launch_nonce || hello.adapter != launch.adapter ||
+      hello.adapter_version != launch.adapter_version ||
+      hello.code_fingerprint != launch.code_fingerprint ||
+      hello.concurrency_key != launch.concurrency_key ||
+      hello.lease_id != launch.lease_id ||
+      hello.fencing_token != launch.fencing_token ||
+      hello.last_acked_controller_sequence != 0U ||
+      !std::ranges::is_sorted(hello.capabilities) ||
+      std::ranges::adjacent_find(hello.capabilities) != hello.capabilities.end() ||
+      !std::ranges::includes(hello.capabilities,
+                             launch.required_capabilities)) {
+    throw std::invalid_argument("worker hello disagrees with its launch ticket");
+  }
+  const Event& ready = events[0];
+  const Event& running = events[1];
+  const Event& entered = events[2];
+  if (ready.run_id != launch.run_id || ready.node_id != launch.node_id ||
+      ready.attempt_id != launch.attempt_id || ready.worker_sequence != 0 ||
+      ready.event_type != "worker.ready" ||
+      running.run_id != launch.run_id || running.node_id != launch.node_id ||
+      running.attempt_id != launch.attempt_id || running.worker_sequence != 0 ||
+      running.event_type != "run.observed_state_changed" ||
+      running.run_revision != ready.run_revision + 1U ||
+      running.payload.value("state", std::string{}) != "running" ||
+      running.payload.value("cause_event_id", std::string{}) != ready.event_id ||
+      entered.run_id != launch.run_id || entered.node_id != launch.node_id ||
+      entered.attempt_id != launch.attempt_id || entered.worker_sequence != 0 ||
+      entered.event_type != "node.entered" ||
+      entered.run_revision != running.run_revision) {
+    throw std::invalid_argument("worker readiness event sequence is malformed");
+  }
+
+  Transaction transaction(database_);
+  std::string chain_reason;
+  if (!verify_chain(&chain_reason)) {
+    throw std::runtime_error("refusing worker readiness: " + chain_reason);
+  }
+  Statement projection(database_, R"sql(
+    SELECT desired_state, observed_state, run_revision,
+           current_node_id, current_attempt_id
+    FROM run_projection WHERE run_id=?
+  )sql");
+  bind_text(projection.get(), 1, launch.run_id);
+  if (sqlite3_step(projection.get()) != SQLITE_ROW ||
+      column_text(projection.get(), 0) != "running") {
+    throw std::invalid_argument("worker readiness run projection is unavailable");
+  }
+  const std::string observed_state = column_text(projection.get(), 1);
+  const auto run_revision =
+      static_cast<std::uint64_t>(sqlite3_column_int64(projection.get(), 2));
+  const std::string current_node = column_text(projection.get(), 3);
+  const std::string current_attempt = column_text(projection.get(), 4);
+
+  const auto launch_event = event(ready.payload.value("cause_event_id", std::string{}));
+  const nlohmann::json expected_launch_payload{
+      {"launch_nonce", launch.launch_nonce},
+      {"adapter", launch.adapter},
+      {"adapter_version", launch.adapter_version},
+      {"code_fingerprint", launch.code_fingerprint},
+      {"required_capabilities", launch.required_capabilities},
+      {"concurrency_key", launch.concurrency_key},
+      {"lease_id", launch.lease_id},
+      {"fencing_token", launch.fencing_token},
+  };
+  if (!launch_event || launch_event->event_type != "worker.launch_requested" ||
+      launch_event->run_id != launch.run_id ||
+      launch_event->node_id != launch.node_id ||
+      launch_event->attempt_id != launch.attempt_id ||
+      launch_event->payload != expected_launch_payload ||
+      launch_event->run_revision != ready.run_revision) {
+    throw std::invalid_argument("worker readiness has no matching durable launch");
+  }
+  const nlohmann::json expected_ready_payload{
+      {"cause_event_id", launch_event->event_id},
+      {"launch_nonce", hello.launch_nonce},
+      {"adapter", hello.adapter},
+      {"adapter_version", hello.adapter_version},
+      {"code_fingerprint", hello.code_fingerprint},
+      {"capabilities", hello.capabilities},
+      {"last_acked_controller_sequence", hello.last_acked_controller_sequence},
+      {"concurrency_key", hello.concurrency_key},
+      {"lease_id", hello.lease_id},
+      {"fencing_token", hello.fencing_token},
+  };
+  const nlohmann::json expected_running_payload{
+      {"state", "running"},
+      {"cause_event_id", ready.event_id},
+      {"launch_nonce", launch.launch_nonce},
+  };
+  if (ready.payload != expected_ready_payload ||
+      running.payload != expected_running_payload) {
+    throw std::invalid_argument("worker readiness payload differs from verified hello");
+  }
+  Statement lease(database_, R"sql(
+    SELECT owner_run_id, lease_id, fencing_token, expires_at_ns, released_at_ns
+    FROM resource_leases WHERE concurrency_key=?
+  )sql");
+  bind_text(lease.get(), 1, launch.concurrency_key);
+  if (sqlite3_step(lease.get()) != SQLITE_ROW ||
+      column_text(lease.get(), 0) != launch.run_id ||
+      column_text(lease.get(), 1) != launch.lease_id ||
+      static_cast<std::uint64_t>(sqlite3_column_int64(lease.get(), 2)) !=
+          launch.fencing_token ||
+      sqlite3_column_int64(lease.get(), 3) <= now_ns ||
+      sqlite3_column_type(lease.get(), 4) != SQLITE_NULL) {
+    throw std::runtime_error("worker readiness no longer owns its active lease");
+  }
+
+  if (observed_state == "running") {
+    const auto stored_ready = event(ready.event_id);
+    const auto stored_running = event(running.event_id);
+    const auto stored_entered = event(entered.event_id);
+    Event replay_ready = ready;
+    Event replay_running = running;
+    Event replay_entered = entered;
+    if (stored_ready && stored_running && stored_entered) {
+      replay_ready.wall_time_ns = stored_ready->wall_time_ns;
+      replay_ready.monotonic_time_ns = stored_ready->monotonic_time_ns;
+      replay_running.wall_time_ns = stored_running->wall_time_ns;
+      replay_running.monotonic_time_ns = stored_running->monotonic_time_ns;
+      replay_entered.wall_time_ns = stored_entered->wall_time_ns;
+      replay_entered.monotonic_time_ns = stored_entered->monotonic_time_ns;
+    }
+    if (run_revision != entered.run_revision || current_node != launch.node_id ||
+        current_attempt != launch.attempt_id || !stored_ready || !stored_running ||
+        !stored_entered || event_json(*stored_ready) != event_json(replay_ready) ||
+        event_json(*stored_running) != event_json(replay_running) ||
+        event_json(*stored_entered) != event_json(replay_entered)) {
+      throw std::invalid_argument("worker hello retry differs from durable readiness");
+    }
+    transaction.commit();
+    return WorkerReadinessDisposition::replayed;
+  }
+  if (observed_state != "acquiring" || run_revision != ready.run_revision ||
+      !current_node.empty() || !current_attempt.empty() || event(ready.event_id) ||
+      event(running.event_id) || event(entered.event_id)) {
+    throw std::invalid_argument("worker readiness disagrees with acquiring run");
+  }
+  for (const Event& readiness_event : events) {
+    append_uncommitted(readiness_event);
+  }
+  transaction.commit();
+  return WorkerReadinessDisposition::accepted;
 }
 
 bool Journal::renew_lease(const std::string& concurrency_key, const std::string& owner_run_id,

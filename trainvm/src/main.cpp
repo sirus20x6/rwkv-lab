@@ -25,20 +25,9 @@ void usage() {
       << "  trainvm serve --journal <journal.db> --socket <trainvm.sock>\n"
       << "  trainvm simulate <experiment.json> <events.jsonl> [run-id]\n"
       << "  trainvm journal init <journal.db>\n"
-      << "  trainvm journal append <journal.db> <event.json>\n"
       << "  trainvm journal verify <journal.db>\n"
       << "  trainvm journal replay <journal.db>\n"
       << "  trainvm journal show <journal.db> <run-id>\n";
-}
-
-nlohmann::json read_json(const std::filesystem::path& path) {
-  std::ifstream input(path);
-  if (!input) {
-    throw std::runtime_error("could not open " + path.string());
-  }
-  nlohmann::json value;
-  input >> value;
-  return value;
 }
 
 nlohmann::json read_stdin_json() {
@@ -158,7 +147,6 @@ int journal_command(int argc, char** argv) {
   const std::string_view operation(argv[2]);
   const bool valid_operation =
       (operation == "init" && argc == 4) ||
-      (operation == "append" && argc == 5) ||
       (operation == "verify" && argc == 4) ||
       (operation == "replay" && argc == 4) ||
       (operation == "show" && argc == 5);
@@ -170,13 +158,6 @@ int journal_command(int argc, char** argv) {
   trainvm::Journal journal(argv[3]);
   if (operation == "init" && argc == 4) {
     std::cout << nlohmann::json({{"initialized", true}, {"events", journal.event_count()}}).dump(2)
-              << '\n';
-    return 0;
-  }
-  if (operation == "append" && argc == 5) {
-    const auto event = trainvm::event_from_json(read_json(argv[4]));
-    const auto sequence = journal.append(event);
-    std::cout << nlohmann::json({{"journal_sequence", sequence}, {"event_id", event.event_id}}).dump(2)
               << '\n';
     return 0;
   }

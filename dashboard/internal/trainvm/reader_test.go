@@ -117,7 +117,8 @@ func TestQueuedAndAcquiringRunsPreserveEmptyAssignmentAndLeaseTimeline(t *testin
 	_, err = db.Exec(`
 		INSERT INTO run_projection VALUES
 		  ('run-queued','mageflow','hash-q','queued','queued','','',1,0,0,20,''),
-		  ('run-acquiring','mageflow','hash-c','running','acquiring','','',3,0,0,23,'');
+		  ('run-acquiring','mageflow','hash-c','running','acquiring','','',3,0,0,23,''),
+		  ('run-ready','mageflow','hash-r','running','running','train_to_boundary','train_to_boundary@1',5,0,0,27,'');
 		INSERT INTO events VALUES
 		  (20,'run-queued:created','run-queued',1,1,'','',0,'run.created',1,20,0,NULL,
 		   '{"desired_state":"queued","observed_state":"queued"}'),
@@ -126,7 +127,15 @@ func TestQueuedAndAcquiringRunsPreserveEmptyAssignmentAndLeaseTimeline(t *testin
 		  (22,'run-acquiring:lease-acquired','run-acquiring',2,1,'','',0,'resource.lease_acquired',1,22,0,NULL,
 		   '{"concurrency_key":"local-gpu-training","lease_id":"lease-1","fencing_token":7}'),
 		  (23,'run-acquiring:acquiring','run-acquiring',3,1,'','',0,'run.observed_state_changed',1,23,0,NULL,
-		   '{"state":"acquiring","cause_event_id":"run-acquiring:lease-acquired"}');`)
+		   '{"state":"acquiring","cause_event_id":"run-acquiring:lease-acquired"}'),
+		  (24,'run-ready:launch','run-ready',4,1,'train_to_boundary','train_to_boundary@1',0,'worker.launch_requested',1,24,0,NULL,
+		   '{"launch_nonce":"nonce-1","fencing_token":7}'),
+		  (25,'run-ready:ready','run-ready',4,1,'train_to_boundary','train_to_boundary@1',0,'worker.ready',1,25,0,NULL,
+		   '{"cause_event_id":"run-ready:launch","launch_nonce":"nonce-1","fencing_token":7}'),
+		  (26,'run-ready:running','run-ready',5,1,'train_to_boundary','train_to_boundary@1',0,'run.observed_state_changed',1,26,0,NULL,
+		   '{"state":"running","cause_event_id":"run-ready:ready"}'),
+		  (27,'run-ready:entered','run-ready',5,1,'train_to_boundary','train_to_boundary@1',0,'node.entered',1,27,0,NULL,
+		   '{"component":"mageflow","operation":"train"}');`)
 	if err != nil {
 		db.Close()
 		t.Fatal(err)
@@ -155,6 +164,20 @@ func TestQueuedAndAcquiringRunsPreserveEmptyAssignmentAndLeaseTimeline(t *testin
 	if err != nil || len(events) != 3 || events[1].EventType != "resource.lease_acquired" ||
 		string(events[1].Payload) != `{"concurrency_key":"local-gpu-training","lease_id":"lease-1","fencing_token":7}` {
 		t.Fatalf("unexpected acquisition timeline: %#v err=%v", events, err)
+	}
+	ready, found, err := reader.Run(ctx, "run-ready")
+	if err != nil || !found || ready.DesiredState != "running" ||
+		ready.ObservedState != "running" || ready.CurrentNodeID != "train_to_boundary" ||
+		ready.CurrentAttemptID != "train_to_boundary@1" || ready.RunRevision != 5 ||
+		ready.LastEventSeq != 27 {
+		t.Fatalf("unexpected ready projection: %#v found=%v err=%v", ready, found, err)
+	}
+	readyEvents, err := reader.Timeline(ctx, "run-ready", 20, 10)
+	if err != nil || len(readyEvents) != 4 || readyEvents[0].EventType != "worker.launch_requested" ||
+		readyEvents[1].EventType != "worker.ready" ||
+		readyEvents[2].EventType != "run.observed_state_changed" ||
+		readyEvents[3].EventType != "node.entered" {
+		t.Fatalf("unexpected readiness timeline: %#v err=%v", readyEvents, err)
 	}
 }
 
