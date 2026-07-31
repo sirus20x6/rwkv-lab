@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	trainvmstore "trainboard/internal/trainvm"
@@ -46,6 +48,25 @@ func trainVMFixture(t *testing.T) *trainvmstore.Reader {
 	}
 	t.Cleanup(func() { reader.Close() })
 	return reader
+}
+
+func trainVMAuthoringFixture(t *testing.T) *trainvmstore.Authoring {
+	t.Helper()
+	directory := t.TempDir()
+	schema := filepath.Join(directory, "schema.json")
+	example := filepath.Join(directory, "example.json")
+	binary := filepath.Join(directory, "trainvm")
+	if err := os.WriteFile(schema, []byte(`{"title":"TrainVM"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(example, []byte(`{"kind":"Experiment"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"valid\":true,\"plan_hash\":\"native-hash\"}'\n"
+	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return &trainvmstore.Authoring{BinaryPath: binary, SchemaPath: schema, ExamplePath: example}
 }
 
 func TestTrainVMReadModelEndpoints(t *testing.T) {
@@ -90,5 +111,33 @@ func TestTrainVMDisabledIsExplicit(t *testing.T) {
 	srv.Handler().ServeHTTP(response, request)
 	if response.Code != http.StatusOK || response.Body.String() != "{\"enabled\":false,\"runs\":[]}\n" {
 		t.Fatalf("unexpected disabled response: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestTrainVMAuthoringEndpoints(t *testing.T) {
+	srv := New(Config{Authoring: trainVMAuthoringFixture(t)})
+	for path, expected := range map[string]string{
+		"/api/trainvm/schema":  `"title":"TrainVM"`,
+		"/api/trainvm/example": `"kind":"Experiment"`,
+	} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		response := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), expected) {
+			t.Fatalf("%s status=%d body=%s", path, response.Code, response.Body.String())
+		}
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/trainvm/compile",
+		strings.NewReader(`{"kind":"Experiment"}`))
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"plan_hash":"native-hash"`) {
+		t.Fatalf("compile status=%d body=%s", response.Code, response.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodPost, "/api/trainvm/compile", strings.NewReader(`{`))
+	response = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("invalid compile status=%d body=%s", response.Code, response.Body.String())
 	}
 }

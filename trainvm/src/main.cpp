@@ -20,6 +20,7 @@ void usage() {
       << "usage:\n"
       << "  trainvm validate <experiment.json>\n"
       << "  trainvm plan <experiment.json> [--canonical]\n"
+      << "  trainvm compile  # read JSON from stdin; emit canonical preview JSON\n"
       << "  trainvm simulate <experiment.json> <events.jsonl> [run-id]\n"
       << "  trainvm journal init <journal.db>\n"
       << "  trainvm journal append <journal.db> <event.json>\n"
@@ -35,6 +36,15 @@ nlohmann::json read_json(const std::filesystem::path& path) {
   }
   nlohmann::json value;
   input >> value;
+  return value;
+}
+
+nlohmann::json read_stdin_json() {
+  nlohmann::json value;
+  std::cin >> value;
+  if (!std::cin) {
+    throw std::runtime_error("could not read experiment JSON from stdin");
+  }
   return value;
 }
 
@@ -74,6 +84,22 @@ int plan_command(int argc, char** argv) {
   if (!result.diagnostics.empty()) {
     output["diagnostics"] = trainvm::diagnostics_json(result.diagnostics);
   }
+  std::cout << output.dump(2) << '\n';
+  return 0;
+}
+
+int compile_command() {
+  const auto result = trainvm::compile_document(read_stdin_json());
+  if (!result.valid()) {
+    std::cout << nlohmann::json({{"valid", false},
+                                 {"diagnostics", trainvm::diagnostics_json(result.diagnostics)}}).dump(2)
+              << '\n';
+    return 2;
+  }
+  nlohmann::json output = trainvm::plan_summary(*result.plan);
+  output["valid"] = true;
+  output["canonical_plan"] = result.plan->canonical_plan;
+  output["diagnostics"] = trainvm::diagnostics_json(result.diagnostics);
   std::cout << output.dump(2) << '\n';
   return 0;
 }
@@ -175,6 +201,9 @@ int main(int argc, char** argv) {
     }
     if (argc >= 3 && std::string_view(argv[1]) == "plan") {
       return plan_command(argc, argv);
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "compile") {
+      return compile_command();
     }
     if (argc >= 2 && std::string_view(argv[1]) == "simulate") {
       return simulate_command(argc, argv);

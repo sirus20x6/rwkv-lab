@@ -22,6 +22,10 @@ When `<repo>/trainvm.db` exists, the server attaches to it in SQLite read-only/q
 exposes native run projections at `/api/trainvm/runs`, `/api/trainvm/runs/{run}`, and the incremental
 `/api/trainvm/runs/{run}/timeline?after=SEQUENCE&limit=COUNT` endpoint. Use `-trainvm-db PATH` to
 select another journal. The Go process cannot mutate TrainVM lifecycle state.
+The dashboard also serves the checked-in schema and example through `/api/trainvm/schema` and
+`/api/trainvm/example`. Drafts posted to `/api/trainvm/compile` are capped at 2 MiB and passed on
+stdin to the fixed native `trainvm compile` command for reflected decoding, semantic validation,
+canonicalization, and plan hashing; the endpoint cannot launch a run.
 The one-second shared snapshot reads conversion quality from ingestion-time rollups plus one batched
 codec query; it does not fan out KPI/count queries per layer. Run-sidecar and campaign/dataset discovery
 are cached, so multiple panels and browser tabs do not repeatedly walk the 1TB-scale `runs/` tree.

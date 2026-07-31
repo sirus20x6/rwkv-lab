@@ -21,16 +21,17 @@ import (
 
 // Config is the immutable wiring for a Server.
 type Config struct {
-	Addr     string               // e.g. "127.0.0.1:9124"
-	RunsDir  string               // /thearray/git/moe-mla/runs
-	RepoRoot string               // /thearray/git/moe-mla
-	Static   fs.FS                // front-end assets (web.Static())
-	DB       *db.DB               // datastore
-	Sampler  *sysmon.Sampler      // live telemetry
-	Detector *alerts.Detector     // divergence/health detector
-	TrainVM  *trainvmstore.Reader // read-only native control-plane projection
-	LibDir   string               // converted_layers_lib path (conversion board)
-	NLayers  int                  // base-model layer count (0 = autodetect/default)
+	Addr      string                  // e.g. "127.0.0.1:9124"
+	RunsDir   string                  // /thearray/git/moe-mla/runs
+	RepoRoot  string                  // /thearray/git/moe-mla
+	Static    fs.FS                   // front-end assets (web.Static())
+	DB        *db.DB                  // datastore
+	Sampler   *sysmon.Sampler         // live telemetry
+	Detector  *alerts.Detector        // divergence/health detector
+	TrainVM   *trainvmstore.Reader    // read-only native control-plane projection
+	Authoring *trainvmstore.Authoring // schema/example/native semantic preview
+	LibDir    string                  // converted_layers_lib path (conversion board)
+	NLayers   int                     // base-model layer count (0 = autodetect/default)
 	// ImageRoots confines eval-sample image serving: an artifact-listed image
 	// path must resolve (symlinks included) inside one of these directories.
 	// Empty falls back to {RunsDir, RepoRoot}.
@@ -40,12 +41,13 @@ type Config struct {
 // Server owns the HTTP handler, the datastore, the live telemetry sampler, and
 // the (single-user, localhost) selected-run state.
 type Server struct {
-	cfg      Config
-	mux      *http.ServeMux
-	db       *db.DB
-	sampler  *sysmon.Sampler
-	detector *alerts.Detector
-	trainvm  *trainvmstore.Reader
+	cfg       Config
+	mux       *http.ServeMux
+	db        *db.DB
+	sampler   *sysmon.Sampler
+	detector  *alerts.Detector
+	trainvm   *trainvmstore.Reader
+	authoring *trainvmstore.Authoring
 
 	mu sync.RWMutex
 	// Per-viewer selection: each browser tab sends a stable tabId signal, so one
@@ -79,6 +81,7 @@ func New(cfg Config) *Server {
 	s := &Server{
 		cfg: cfg, mux: http.NewServeMux(), db: cfg.DB, sampler: cfg.Sampler, detector: cfg.Detector,
 		trainvm:   cfg.TrainVM,
+		authoring: cfg.Authoring,
 		selected:  map[string]string{},
 		seen:      map[string]time.Time{},
 		discovery: map[string]discoveryEntry{},
@@ -180,6 +183,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/trainvm/runs", s.handleTrainVMRuns)
 	s.mux.HandleFunc("GET /api/trainvm/runs/{run}", s.handleTrainVMRun)
 	s.mux.HandleFunc("GET /api/trainvm/runs/{run}/timeline", s.handleTrainVMTimeline)
+	s.mux.HandleFunc("GET /api/trainvm/schema", s.handleTrainVMSchema)
+	s.mux.HandleFunc("GET /api/trainvm/example", s.handleTrainVMExample)
+	s.mux.HandleFunc("POST /api/trainvm/compile", s.handleTrainVMCompile)
 	// Metric catalog (known cols + extra_json keys) for the dynamic metric picker.
 	s.mux.HandleFunc("GET /api/metrics/{run}", s.handleMetrics)
 	// Qualitative image/reference/generated-caption snapshot for an eval point.

@@ -62,6 +62,8 @@ trainvm/build/trainvm validate \
   docs/experiment-vm/examples/mageflow-cache-resume.json
 trainvm/build/trainvm plan \
   docs/experiment-vm/examples/mageflow-cache-resume.json
+trainvm/build/trainvm compile < \
+  docs/experiment-vm/examples/mageflow-cache-resume.json
 trainvm/build/trainvm simulate \
   docs/experiment-vm/examples/mageflow-cache-resume.json \
   docs/experiment-vm/examples/mageflow-cache-resume.events.jsonl
@@ -70,6 +72,8 @@ trainvm/build/trainvm simulate \
 The reference plan currently has the golden identity
 `783d2860b51374138e7352d39607cb07254c3b774f9d776946a6f2b5e6ad468c`. A deliberate canonical
 format change must update the golden test and supply a plan-schema migration rationale.
+`compile` is the bounded dashboard authoring boundary: it reads one JSON document from stdin and
+returns either structured diagnostics or the native compiler's canonical plan and content hash.
 
 ## Journal CLI
 

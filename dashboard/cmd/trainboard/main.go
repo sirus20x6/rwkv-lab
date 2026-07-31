@@ -34,6 +34,8 @@ func main() {
 	runs := flag.String("runs", "", "runs dir (default <repo>/runs)")
 	dbPath := flag.String("db", "", "sqlite path (default <repo>/dashboard/trainboard.db)")
 	trainVMPath := flag.String("trainvm-db", "", "TrainVM journal path (default <repo>/trainvm.db when present)")
+	trainVMBinary := flag.String("trainvm-bin", "", "TrainVM compiler binary (default <repo>/trainvm/build/trainvm)")
+	trainVMSchema := flag.String("trainvm-schema", "", "TrainVM experiment schema (default <repo>/docs/experiment-vm/experiment-v1.schema.json)")
 	imageRoots := flag.String("image-roots", "/thearray",
 		"comma-separated roots eval-sample images may be served from")
 	scanOnce := flag.Bool("scan-once", false, "ingest one full pass, print counts, exit (verification)")
@@ -71,6 +73,19 @@ func main() {
 		defer vmReader.Close()
 		log.Printf("TrainVM read model attached to %s", vmFile)
 	}
+	vmBinary := *trainVMBinary
+	if vmBinary == "" {
+		vmBinary = filepath.Join(*repo, "trainvm", "build", "trainvm")
+	}
+	vmSchema := *trainVMSchema
+	if vmSchema == "" {
+		vmSchema = filepath.Join(*repo, "docs", "experiment-vm", "experiment-v1.schema.json")
+	}
+	vmAuthoring := &trainvmstore.Authoring{
+		BinaryPath:  vmBinary,
+		SchemaPath:  vmSchema,
+		ExamplePath: filepath.Join(*repo, "docs", "experiment-vm", "examples", "mageflow-cache-resume.json"),
+	}
 
 	ig := ingest.New(database, runsDir, time.Second)
 
@@ -105,14 +120,15 @@ func main() {
 	go detector.Run(ctx)
 
 	srv := server.New(server.Config{
-		Addr:     *addr,
-		RunsDir:  runsDir,
-		RepoRoot: *repo,
-		Static:   web.Static(),
-		DB:       database,
-		Sampler:  sampler,
-		Detector: detector,
-		TrainVM:  vmReader,
+		Addr:      *addr,
+		RunsDir:   runsDir,
+		RepoRoot:  *repo,
+		Static:    web.Static(),
+		DB:        database,
+		Sampler:   sampler,
+		Detector:  detector,
+		TrainVM:   vmReader,
+		Authoring: vmAuthoring,
 		ImageRoots: func() []string {
 			var roots []string
 			for _, root := range strings.Split(*imageRoots, ",") {
