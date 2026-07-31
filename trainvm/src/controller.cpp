@@ -30,6 +30,7 @@ bool is_controller_event(std::string_view event_type) {
   return event_type == "run.created" || event_type == "node.entered" ||
          event_type == "fsm.transitioned" || event_type == "run.desired_state_changed" ||
          event_type == "run.observed_state_changed" ||
+         event_type == "resource.lease_acquired" ||
          event_type == "node.dispatch_prepared" || event_type == "node.dispatch_completed" ||
          event_type.starts_with("control.");
 }
@@ -106,6 +107,26 @@ Event created_event(const CompiledPlan& plan, const ExecutionState& state,
     event.payload["submission"] = std::move(submission);
   }
   return event;
+}
+
+Event acquisition_event(const ExecutionState& state, std::string event_id,
+                        std::uint64_t revision, std::string event_type,
+                        nlohmann::json payload, std::int64_t now_ns) {
+  return Event{
+      .event_id = std::move(event_id),
+      .run_id = state.run_id,
+      .run_revision = revision,
+      .plan_revision = kInitialPlanRevision,
+      .node_id = "",
+      .attempt_id = "",
+      .worker_sequence = 0,
+      .event_type = std::move(event_type),
+      .event_version = 1,
+      .wall_time_ns = now_ns,
+      .monotonic_time_ns = 0,
+      .optimizer_step = std::nullopt,
+      .payload = std::move(payload),
+  };
 }
 
 Event entered_event(const CompiledPlan& plan, const ExecutionState& state,
@@ -228,6 +249,7 @@ const ExecutionState& Controller::create_queued(nlohmann::json submission) {
 }
 
 const ExecutionState& Controller::recover() {
+  [[maybe_unused]] auto snapshot = journal_.read_snapshot();
   const auto persisted_plan = journal_.compiled_plan(plan_.plan_hash);
   if (!persisted_plan) {
     throw std::runtime_error("cannot recover a run whose compiled plan is not persisted");
@@ -255,6 +277,8 @@ const ExecutionState& Controller::recover() {
   ExecutionState recovered = start_execution(plan_, run_id_);
   enum class ReplayPhase {
     queued,
+    acquisition_requested,
+    lease_acquired,
     acquiring,
     expecting_entry,
     ready,
@@ -342,6 +366,35 @@ const ExecutionState& Controller::recover() {
       }
       runtime_desired_state = desired_value;
       recovered.revision = event.run_revision;
+      if (starting) {
+        phase = ReplayPhase::acquisition_requested;
+      }
+      continue;
+    }
+    if (event.event_type == "resource.lease_acquired") {
+      if (phase != ReplayPhase::acquisition_requested ||
+          runtime_desired_state != "running" || runtime_observed_state != "queued" ||
+          event.run_revision != recovered.revision || !event.node_id.empty() ||
+          !event.attempt_id.empty()) {
+        throw std::runtime_error("journal contains lease acquisition outside a queued start");
+      }
+      require_payload_string(event, "concurrency_key",
+                             plan_.experiment.spec.workspace.concurrency_key);
+      require_payload_string(event, "owner_run_id", run_id_);
+      const auto lease_id = event.payload.find("lease_id");
+      const auto fencing_token = event.payload.find("fencing_token");
+      const auto acquired_at = event.payload.find("acquired_at_ns");
+      const auto expires_at = event.payload.find("expires_at_ns");
+      if (lease_id == event.payload.end() || !lease_id->is_string() ||
+          lease_id->get_ref<const std::string&>().empty() ||
+          fencing_token == event.payload.end() || !fencing_token->is_number_unsigned() ||
+          acquired_at == event.payload.end() || !acquired_at->is_number_integer() ||
+          expires_at == event.payload.end() || !expires_at->is_number_integer() ||
+          acquired_at->get<std::int64_t>() != event.wall_time_ns ||
+          expires_at->get<std::int64_t>() <= acquired_at->get<std::int64_t>()) {
+        throw std::runtime_error("lease acquisition event has an invalid fenced identity");
+      }
+      phase = ReplayPhase::lease_acquired;
       continue;
     }
     if (event.event_type == "run.observed_state_changed") {
@@ -355,12 +408,10 @@ const ExecutionState& Controller::recover() {
           observed_value == "running") {
         const bool acquiring = observed_value == "acquiring" &&
                                runtime_desired_state == "running" &&
-                               runtime_observed_state == "queued" && phase == ReplayPhase::queued;
-        const bool started = observed_value == "running" && runtime_desired_state == "running" &&
-                             runtime_observed_state == "acquiring" &&
-                             phase == ReplayPhase::acquiring;
+                               runtime_observed_state == "queued" &&
+                               phase == ReplayPhase::lease_acquired;
         const bool valid_observation =
-            acquiring || started ||
+            acquiring ||
             (observed_value == "pausing" && runtime_desired_state == "paused" &&
              runtime_observed_state == "running") ||
             (observed_value == "paused" && runtime_desired_state == "paused" &&
@@ -370,7 +421,7 @@ const ExecutionState& Controller::recover() {
             (observed_value == "running" && runtime_desired_state == "running" &&
              runtime_observed_state == "resuming");
         if (!valid_observation ||
-            (!acquiring && !started && phase != ReplayPhase::ready) ||
+            (!acquiring && phase != ReplayPhase::ready) ||
             expected_completion ||
             recovered.status != ExecutionStatus::running ||
             event.run_revision != recovered.revision + 1U ||
@@ -384,9 +435,25 @@ const ExecutionState& Controller::recover() {
         runtime_observed_state = observed_value;
         recovered.revision = event.run_revision;
         if (acquiring) {
+          require_payload_string(event, "concurrency_key",
+                                 plan_.experiment.spec.workspace.concurrency_key);
+          const auto cause_id = event.payload.find("cause_event_id");
+          const auto lease_id = event.payload.find("lease_id");
+          const auto fencing_token = event.payload.find("fencing_token");
+          if (cause_id == event.payload.end() || !cause_id->is_string() ||
+              lease_id == event.payload.end() || !lease_id->is_string() ||
+              fencing_token == event.payload.end() || !fencing_token->is_number_unsigned()) {
+            throw std::runtime_error("acquiring observation lacks its lease cause identity");
+          }
+          const auto cause = journal_.event(cause_id->get<std::string>());
+          if (!cause || cause->event_type != "resource.lease_acquired" ||
+              cause->run_id != run_id_ ||
+              cause->payload.value("lease_id", std::string{}) != lease_id->get<std::string>() ||
+              cause->payload.value("fencing_token", std::uint64_t{}) !=
+                  fencing_token->get<std::uint64_t>()) {
+            throw std::runtime_error("acquiring observation disagrees with its lease cause");
+          }
           phase = ReplayPhase::acquiring;
-        } else if (started) {
-          phase = ReplayPhase::expecting_entry;
         }
         continue;
       }
@@ -538,8 +605,8 @@ const ExecutionState& Controller::recover() {
     pending_cause = event;
     phase = ReplayPhase::awaiting_transition;
   }
-  if ((phase != ReplayPhase::queued && phase != ReplayPhase::ready &&
-       phase != ReplayPhase::terminal) ||
+  if ((phase != ReplayPhase::queued && phase != ReplayPhase::acquiring &&
+       phase != ReplayPhase::ready && phase != ReplayPhase::terminal) ||
       expected_completion) {
     throw std::runtime_error(
         "run journal ends in an incomplete controller transaction");
@@ -557,7 +624,8 @@ const ExecutionState& Controller::recover() {
           ? runtime_observed_state
           : std::string(enum_to_string(recovered.status));
   const bool active_node = recovered.status == ExecutionStatus::running &&
-                           runtime_observed_state != "queued";
+                           runtime_observed_state != "queued" &&
+                           runtime_observed_state != "acquiring";
   const std::string expected_node =
       active_node ? recovered.current_node_id : std::string{};
   const std::string expected_attempt =
@@ -576,6 +644,92 @@ const ExecutionState& Controller::recover() {
   initialized_ = true;
   paused_ = runtime_observed_state != "running";
   return state_;
+}
+
+LeaseAcquireResult Controller::begin_acquisition(std::int64_t now_ns) {
+  if (now_ns < 0) {
+    throw std::invalid_argument("lease clock must be nonnegative");
+  }
+  recover();
+  const auto projection = journal_.projection(run_id_);
+  if (!projection) {
+    throw std::runtime_error("initialized controller has no durable run projection");
+  }
+  const std::string& concurrency_key = plan_.experiment.spec.workspace.concurrency_key;
+  const std::string lease_id =
+      "lease-" + sha256_hex(nlohmann::json({{"run_id", run_id_},
+                                            {"plan_hash", plan_.plan_hash},
+                                            {"concurrency_key", concurrency_key}})
+                               .dump());
+  const std::int64_t timeout_seconds =
+      plan_.experiment.spec.resources.lease_timeout_seconds.value_or(30);
+  if (timeout_seconds <= 0 ||
+      timeout_seconds > std::numeric_limits<std::int64_t>::max() / 1'000'000'000LL) {
+    throw std::runtime_error("compiled plan has an invalid resource lease timeout");
+  }
+  const std::int64_t timeout_ns = timeout_seconds * 1'000'000'000LL;
+  if (projection->desired_state == "running" && projection->observed_state == "acquiring") {
+    const auto acquired = journal_.event(run_id_ + ":lease-acquired");
+    if (!acquired || acquired->event_type != "resource.lease_acquired" ||
+        acquired->payload.value("concurrency_key", std::string{}) != concurrency_key ||
+        acquired->payload.value("owner_run_id", std::string{}) != run_id_ ||
+        acquired->payload.value("lease_id", std::string{}) != lease_id) {
+      throw std::runtime_error("acquiring run has no durable lease event");
+    }
+    const auto event_fence = acquired->payload.find("fencing_token");
+    const auto event_acquired_at = acquired->payload.find("acquired_at_ns");
+    if (event_fence == acquired->payload.end() || !event_fence->is_number_unsigned() ||
+        event_acquired_at == acquired->payload.end() || !event_acquired_at->is_number_integer()) {
+      throw std::runtime_error("acquiring run has malformed durable lease evidence");
+    }
+    const auto lease = journal_.active_lease(concurrency_key, acquired->wall_time_ns);
+    if (!lease || lease->owner_run_id != run_id_ || lease->lease_id != lease_id ||
+        lease->fencing_token != event_fence->get<std::uint64_t>() ||
+        lease->acquired_at_ns != event_acquired_at->get<std::int64_t>()) {
+      throw std::runtime_error("acquiring run no longer owns its fenced lease identity");
+    }
+    if (lease->expires_at_ns <= now_ns) {
+      throw std::runtime_error(
+          "acquiring run lease has expired and requires a fenced reconciliation decision");
+    }
+    return {.status = LeaseAcquireStatus::already_owned, .lease = *lease};
+  }
+  if (projection->desired_state != "queued" || projection->observed_state != "queued" ||
+      projection->run_revision != state_.revision || !projection->current_node_id.empty() ||
+      !projection->current_attempt_id.empty()) {
+    throw std::logic_error("controller can acquire resources only for a queued run");
+  }
+  const std::uint64_t desired_revision = state_.revision + 1U;
+  const std::uint64_t acquiring_revision = desired_revision + 1U;
+  const std::string acquired_event_id = run_id_ + ":lease-acquired";
+  const std::vector<Event> events{
+      acquisition_event(state_, run_id_ + ":lease-desired", desired_revision,
+                        "run.desired_state_changed",
+                        {{"state", "running"},
+                         {"cause", "scheduler.lease_acquisition"},
+                         {"lease_id", lease_id},
+                         {"plan_hash", plan_.plan_hash}},
+                        now_ns),
+      acquisition_event(state_, acquired_event_id, desired_revision,
+                        "resource.lease_acquired",
+                        {{"concurrency_key", concurrency_key},
+                         {"owner_run_id", run_id_},
+                         {"lease_id", lease_id}},
+                        now_ns),
+      acquisition_event(state_, run_id_ + ":acquiring", acquiring_revision,
+                        "run.observed_state_changed",
+                        {{"state", "acquiring"},
+                         {"cause_event_id", acquired_event_id},
+                         {"concurrency_key", concurrency_key},
+                         {"lease_id", lease_id}},
+                        now_ns),
+  };
+  LeaseAcquireResult result = journal_.acquire_lease_with_events(
+      concurrency_key, run_id_, lease_id, now_ns, timeout_ns, events);
+  if (result.status != LeaseAcquireStatus::busy) {
+    recover();
+  }
+  return result;
 }
 
 Dispatch Controller::prepare_dispatch() {

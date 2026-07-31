@@ -17,6 +17,7 @@ class Controller {
   const ExecutionState& create();
   const ExecutionState& create_queued(nlohmann::json submission = nlohmann::json::object());
   const ExecutionState& recover();
+  LeaseAcquireResult begin_acquisition(std::int64_t now_ns);
   Dispatch prepare_dispatch();
   const ExecutionState& handle_event(const Event& event);
   ControlPatchValidation request_controls(const std::string& idempotency_key,

@@ -220,3 +220,20 @@ func TestTrainVMSubmissionFreezesPreviewAndRetriesExactIntent(t *testing.T) {
 		}
 	}
 }
+
+func TestTrainVMWaitingStatesAreNotRenderedAsTerminalOrControllable(t *testing.T) {
+	assets := Static()
+	app, err := fs.ReadFile(assets, "app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		`terminalStates.has(run.observed_state)`,
+		`"waiting for assignment"`,
+		`(!active && !retryLocked)`,
+	} {
+		if !strings.Contains(string(app), required) {
+			t.Fatalf("TrainVM waiting-state UI is missing %q", required)
+		}
+	}
+}

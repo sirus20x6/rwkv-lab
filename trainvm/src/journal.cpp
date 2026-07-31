@@ -494,6 +494,9 @@ Event event_from_row(sqlite3_stmt* statement) {
 }
 
 std::int64_t lease_expiration(std::int64_t now_ns, std::int64_t timeout_ns) {
+  if (now_ns < 0) {
+    throw std::invalid_argument("lease clock must be nonnegative");
+  }
   if (timeout_ns <= 0) {
     throw std::invalid_argument("lease timeout must be positive");
   }
@@ -658,6 +661,32 @@ Journal::~Journal() {
   if (database_) {
     sqlite3_close(database_);
   }
+}
+
+Journal::ReadSnapshot::ReadSnapshot(sqlite3* database) : database_(database) {
+  if (database_ == nullptr || sqlite3_get_autocommit(database_) == 0) {
+    throw std::logic_error("journal read snapshot requires an idle database connection");
+  }
+  char* error_message = nullptr;
+  if (sqlite3_exec(database_, "BEGIN", nullptr, nullptr, &error_message) != SQLITE_OK) {
+    const std::string message = error_message ? error_message : sqlite3_errmsg(database_);
+    sqlite3_free(error_message);
+    database_ = nullptr;
+    throw std::runtime_error("sqlite read snapshot failed: " + message);
+  }
+}
+
+Journal::ReadSnapshot::ReadSnapshot(ReadSnapshot&& other) noexcept
+    : database_(std::exchange(other.database_, nullptr)) {}
+
+Journal::ReadSnapshot::~ReadSnapshot() {
+  if (database_ != nullptr) {
+    sqlite3_exec(database_, "ROLLBACK", nullptr, nullptr, nullptr);
+  }
+}
+
+Journal::ReadSnapshot Journal::read_snapshot() const {
+  return ReadSnapshot(database_);
 }
 
 void Journal::initialize() {
@@ -1634,9 +1663,134 @@ LeaseAcquireResult Journal::acquire_lease(const std::string& concurrency_key,
                                           const std::string& owner_run_id,
                                           const std::string& lease_id, std::int64_t now_ns,
                                           std::int64_t timeout_ns) {
+  return acquire_lease_with_events(concurrency_key, owner_run_id, lease_id, now_ns,
+                                   timeout_ns, {});
+}
+
+LeaseAcquireResult Journal::acquire_lease_with_events(
+    const std::string& concurrency_key, const std::string& owner_run_id,
+    const std::string& lease_id, std::int64_t now_ns, std::int64_t timeout_ns,
+    const std::vector<Event>& events) {
   require_lease_identity(concurrency_key, owner_run_id, lease_id);
   const std::int64_t expires_at_ns = lease_expiration(now_ns, timeout_ns);
   Transaction transaction(database_);
+  bool replaying_acquisition = false;
+  std::optional<Event> replayed_resource_event;
+  if (!events.empty()) {
+    std::string chain_reason;
+    if (!verify_chain(&chain_reason)) {
+      throw std::runtime_error("refusing run lease acquisition: " + chain_reason);
+    }
+    const auto requested_plan = events[0].payload.find("plan_hash");
+    const std::string requested_plan_hash =
+        requested_plan != events[0].payload.end() && requested_plan->is_string()
+            ? requested_plan->get<std::string>()
+            : std::string{};
+    if (events.size() != 3U || events[0].run_id != owner_run_id ||
+        events[1].run_id != owner_run_id || events[2].run_id != owner_run_id ||
+        events[0].event_type != "run.desired_state_changed" ||
+        events[0].payload != nlohmann::json{{"state", "running"},
+                                           {"cause", "scheduler.lease_acquisition"},
+                                           {"lease_id", lease_id},
+                                           {"plan_hash", requested_plan_hash}} ||
+        events[1].event_type != "resource.lease_acquired" ||
+        events[1].payload != nlohmann::json{{"concurrency_key", concurrency_key},
+                                           {"owner_run_id", owner_run_id},
+                                           {"lease_id", lease_id}} ||
+        events[2].event_type != "run.observed_state_changed" ||
+        events[2].payload != nlohmann::json{{"state", "acquiring"},
+                                           {"cause_event_id", events[1].event_id},
+                                           {"concurrency_key", concurrency_key},
+                                           {"lease_id", lease_id}} ||
+        events[0].worker_sequence != 0 || events[1].worker_sequence != 0 ||
+        events[2].worker_sequence != 0 || !events[0].node_id.empty() ||
+        !events[1].node_id.empty() || !events[2].node_id.empty() ||
+        !events[0].attempt_id.empty() || !events[1].attempt_id.empty() ||
+        !events[2].attempt_id.empty()) {
+      throw std::invalid_argument("lease acquisition requires its exact lifecycle event pair");
+    }
+    Statement projection(database_, R"sql(
+      SELECT desired_state, observed_state, run_revision,
+             current_node_id, current_attempt_id, plan_hash
+      FROM run_projection WHERE run_id=?
+    )sql");
+    bind_text(projection.get(), 1, owner_run_id);
+    if (sqlite3_step(projection.get()) != SQLITE_ROW) {
+      throw std::invalid_argument("lease acquisition run does not exist");
+    }
+    const auto run_revision =
+        static_cast<std::uint64_t>(sqlite3_column_int64(projection.get(), 2));
+    const std::string desired_state = column_text(projection.get(), 0);
+    const std::string observed_state = column_text(projection.get(), 1);
+    const bool unassigned = column_text(projection.get(), 3).empty() &&
+                            column_text(projection.get(), 4).empty();
+    const bool plan_matches = !requested_plan_hash.empty() &&
+                              requested_plan_hash == column_text(projection.get(), 5) &&
+                              events[0].plan_revision == 1U &&
+                              events[1].plan_revision == 1U &&
+                              events[2].plan_revision == 1U;
+    if (desired_state == "running" && observed_state == "acquiring") {
+      if (!unassigned || !plan_matches || run_revision != events[2].run_revision ||
+          events[0].run_revision + 1U != run_revision ||
+          events[1].run_revision + 1U != run_revision) {
+        throw std::invalid_argument("acquisition replay disagrees with the acquiring run");
+      }
+      const auto stored_desired = event(events[0].event_id);
+      const auto stored_resource = event(events[1].event_id);
+      const auto stored_observed = event(events[2].event_id);
+      const auto same_envelope = [](const Event& stored, const Event& requested) {
+        return stored.event_id == requested.event_id && stored.run_id == requested.run_id &&
+               stored.run_revision == requested.run_revision &&
+               stored.plan_revision == requested.plan_revision &&
+               stored.node_id == requested.node_id && stored.attempt_id == requested.attempt_id &&
+               stored.worker_sequence == requested.worker_sequence &&
+               stored.event_type == requested.event_type &&
+               stored.event_version == requested.event_version;
+      };
+      if (!stored_desired || !stored_resource || !stored_observed ||
+          !same_envelope(*stored_desired, events[0]) ||
+          stored_desired->payload != events[0].payload ||
+          !same_envelope(*stored_resource, events[1]) ||
+          !same_envelope(*stored_observed, events[2])) {
+        throw std::invalid_argument("acquisition retry differs from durable lifecycle events");
+      }
+      nlohmann::json expected_resource = events[1].payload;
+      expected_resource["fencing_token"] =
+          stored_resource->payload.value("fencing_token", std::uint64_t{});
+      expected_resource["acquired_at_ns"] =
+          stored_resource->payload.value("acquired_at_ns", std::int64_t{});
+      expected_resource["expires_at_ns"] =
+          stored_resource->payload.value("expires_at_ns", std::int64_t{});
+      nlohmann::json expected_observed = events[2].payload;
+      expected_observed["fencing_token"] =
+          stored_resource->payload.value("fencing_token", std::uint64_t{});
+      if (stored_resource->payload != expected_resource ||
+          stored_observed->payload != expected_observed) {
+        throw std::invalid_argument("acquisition retry differs from durable lease evidence");
+      }
+      replaying_acquisition = true;
+      replayed_resource_event = *stored_resource;
+    } else if (desired_state != "queued" || observed_state != "queued" || !unassigned ||
+               !plan_matches || events[0].run_revision != run_revision + 1U ||
+               events[1].run_revision != run_revision + 1U ||
+               events[2].run_revision != run_revision + 2U) {
+      throw std::invalid_argument("lease acquisition events disagree with the queued run");
+    }
+  }
+  const auto append_events = [&](const ResourceLease& acquired_lease) {
+    for (std::size_t index = 0; index < events.size(); ++index) {
+      Event event = events[index];
+      if (index == 1U) {
+        event.wall_time_ns = acquired_lease.acquired_at_ns;
+        event.payload["acquired_at_ns"] = acquired_lease.acquired_at_ns;
+        event.payload["expires_at_ns"] = acquired_lease.expires_at_ns;
+        event.payload["fencing_token"] = acquired_lease.fencing_token;
+      } else if (index == 2U) {
+        event.payload["fencing_token"] = acquired_lease.fencing_token;
+      }
+      append_uncommitted(event);
+    }
+  };
   Statement query(database_, R"sql(
     SELECT concurrency_key, owner_run_id, lease_id, fencing_token,
            acquired_at_ns, expires_at_ns, released_at_ns
@@ -1649,6 +1803,22 @@ LeaseAcquireResult Journal::acquire_lease(const std::string& concurrency_key,
   }
 
   ResourceLease lease;
+  if (replaying_acquisition) {
+    if (status != SQLITE_ROW || !replayed_resource_event) {
+      throw std::runtime_error("acquiring run has no durable lease row");
+    }
+    lease = lease_from_row(query.get());
+    const bool released = sqlite3_column_type(query.get(), 6) != SQLITE_NULL;
+    if (released || lease.owner_run_id != owner_run_id || lease.lease_id != lease_id ||
+        lease.fencing_token !=
+            replayed_resource_event->payload.value("fencing_token", std::uint64_t{}) ||
+        lease.acquired_at_ns !=
+            replayed_resource_event->payload.value("acquired_at_ns", std::int64_t{})) {
+      throw std::runtime_error("acquiring run no longer has its durable fenced lease");
+    }
+    transaction.commit();
+    return {.status = LeaseAcquireStatus::already_owned, .lease = std::move(lease)};
+  }
   if (status == SQLITE_DONE) {
     lease = ResourceLease{.concurrency_key = concurrency_key,
                           .owner_run_id = owner_run_id,
@@ -1669,6 +1839,7 @@ LeaseAcquireResult Journal::acquire_lease(const std::string& concurrency_key,
     bind_integer(insert.get(), 5, lease.acquired_at_ns);
     bind_integer(insert.get(), 6, lease.expires_at_ns);
     require_done(database_, insert.get(), "insert resource lease");
+    append_events(lease);
     transaction.commit();
     return {.status = LeaseAcquireStatus::acquired, .lease = std::move(lease)};
   }
@@ -1681,6 +1852,9 @@ LeaseAcquireResult Journal::acquire_lease(const std::string& concurrency_key,
         lease.owner_run_id == owner_run_id && lease.lease_id == lease_id
             ? LeaseAcquireStatus::already_owned
             : LeaseAcquireStatus::busy;
+    if (disposition == LeaseAcquireStatus::already_owned) {
+      append_events(lease);
+    }
     transaction.commit();
     return {.status = disposition, .lease = std::move(lease)};
   }
@@ -1708,6 +1882,7 @@ LeaseAcquireResult Journal::acquire_lease(const std::string& concurrency_key,
   if (sqlite3_changes(database_) != 1) {
     throw std::runtime_error("resource lease replacement affected an unexpected number of rows");
   }
+  append_events(lease);
   transaction.commit();
   return {.status = LeaseAcquireStatus::acquired, .lease = std::move(lease)};
 }
@@ -1802,15 +1977,28 @@ std::string Journal::journal_id() const {
 
 bool Journal::verify_chain(std::string* reason) const {
   Statement query(database_, R"sql(
-    SELECT journal_sequence, event_id, run_id, run_revision, plan_revision, node_id,
-           attempt_id, worker_sequence, event_type, event_version, wall_time_ns,
-           monotonic_time_ns, optimizer_step, payload_json, previous_hash,
-           content_hash, chain_hash
-    FROM events ORDER BY journal_sequence
+    WITH head(value) AS (
+      SELECT value FROM journal_meta WHERE key='chain_head'
+    )
+    SELECT events.journal_sequence, events.event_id, events.run_id,
+           events.run_revision, events.plan_revision, events.node_id,
+           events.attempt_id, events.worker_sequence, events.event_type,
+           events.event_version, events.wall_time_ns, events.monotonic_time_ns,
+           events.optimizer_step, events.payload_json, events.previous_hash,
+           events.content_hash, events.chain_hash, head.value
+    FROM head LEFT JOIN events ON TRUE
+    ORDER BY events.journal_sequence
   )sql");
   std::string expected_previous(64, '0');
+  std::optional<std::string> stored_head;
   int status = SQLITE_OK;
   while ((status = sqlite3_step(query.get())) == SQLITE_ROW) {
+    if (!stored_head) {
+      stored_head = column_text(query.get(), 17);
+    }
+    if (sqlite3_column_type(query.get(), 0) == SQLITE_NULL) {
+      continue;
+    }
     const auto sequence = static_cast<std::uint64_t>(sqlite3_column_int64(query.get(), 0));
     Event event;
     try {
@@ -1841,8 +2029,7 @@ bool Journal::verify_chain(std::string* reason) const {
     }
     return false;
   }
-  Statement head(database_, "SELECT value FROM journal_meta WHERE key='chain_head'");
-  if (sqlite3_step(head.get()) != SQLITE_ROW || column_text(head.get(), 0) != expected_previous) {
+  if (!stored_head || *stored_head != expected_previous) {
     if (reason) {
       *reason = "journal head does not match the final event (possible tail truncation)";
     }

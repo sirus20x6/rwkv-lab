@@ -111,11 +111,31 @@ public:
  private:
   friend class Controller;
 
+  class ReadSnapshot {
+   public:
+    ReadSnapshot(ReadSnapshot&& other) noexcept;
+    ReadSnapshot& operator=(ReadSnapshot&&) = delete;
+    ~ReadSnapshot();
+    ReadSnapshot(const ReadSnapshot&) = delete;
+    ReadSnapshot& operator=(const ReadSnapshot&) = delete;
+
+   private:
+    friend class Journal;
+    explicit ReadSnapshot(sqlite3* database);
+
+    sqlite3* database_{};
+  };
+
   sqlite3* database_{};
 
+  [[nodiscard]] ReadSnapshot read_snapshot() const;
   void initialize();
   std::uint64_t append_uncommitted(const Event& event);
   RunCreationResult create_run(const CompiledPlan& plan, const std::vector<Event>& events);
+  LeaseAcquireResult acquire_lease_with_events(
+      const std::string& concurrency_key, const std::string& owner_run_id,
+      const std::string& lease_id, std::int64_t now_ns, std::int64_t timeout_ns,
+      const std::vector<Event>& events);
   ControlSubmission submit_control_command(ControlCommand command);
   ControlCommand acknowledge_control_command(const std::string& run_id,
                                               const std::string& command_id,

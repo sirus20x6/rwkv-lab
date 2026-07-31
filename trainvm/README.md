@@ -35,12 +35,15 @@ Implemented now:
 - strict in-memory JSON/YAML experiment submission, canonical recompilation by the authority,
   journal-bound idempotency identities, atomic queued run creation, and deterministic queued-run
   recovery without launching work;
+- a process-free queue reconciliation boundary that atomically acquires a fenced workspace lease,
+  journals desired-running/resource-acquired/observed-acquiring evidence, recovers at acquiring,
+  and still forbids node entry or dispatch;
 - `validate`, `plan`, `simulate`, and journal inspection/replay CLI commands.
 
-This code does not yet launch or control a trainer. The next implementation boundary is the FSM
-reconciler service loop that advances submitted runs through lease acquisition and worker startup,
-plus process-free fault injection around dispatch receipts. Real MageFlow process ownership follows
-only after those boundaries pass.
+This code does not yet launch or control a trainer. The next implementation boundary is verified
+worker readiness: adapter capabilities and launch identity must match the fenced lease before a run
+may enter its first node, become observed-running, or receive a dispatch. Real MageFlow process
+ownership follows only after that boundary and its fault-injection tests pass.
 
 ## Toolchain
 

@@ -108,6 +108,56 @@ func TestOpenMissingJournalFails(t *testing.T) {
 	}
 }
 
+func TestQueuedAndAcquiringRunsPreserveEmptyAssignmentAndLeaseTimeline(t *testing.T) {
+	path := fixture(t)
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+		INSERT INTO run_projection VALUES
+		  ('run-queued','mageflow','hash-q','queued','queued','','',1,0,0,20,''),
+		  ('run-acquiring','mageflow','hash-c','running','acquiring','','',3,0,0,23,'');
+		INSERT INTO events VALUES
+		  (20,'run-queued:created','run-queued',1,1,'','',0,'run.created',1,20,0,NULL,
+		   '{"desired_state":"queued","observed_state":"queued"}'),
+		  (21,'run-acquiring:lease-desired','run-acquiring',2,1,'','',0,'run.desired_state_changed',1,21,0,NULL,
+		   '{"state":"running"}'),
+		  (22,'run-acquiring:lease-acquired','run-acquiring',2,1,'','',0,'resource.lease_acquired',1,22,0,NULL,
+		   '{"concurrency_key":"local-gpu-training","lease_id":"lease-1","fencing_token":7}'),
+		  (23,'run-acquiring:acquiring','run-acquiring',3,1,'','',0,'run.observed_state_changed',1,23,0,NULL,
+		   '{"state":"acquiring","cause_event_id":"run-acquiring:lease-acquired"}');`)
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	db.Close()
+	reader, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	ctx := context.Background()
+	queued, found, err := reader.Run(ctx, "run-queued")
+	if err != nil || !found || queued.DesiredState != "queued" ||
+		queued.ObservedState != "queued" || queued.CurrentNodeID != "" ||
+		queued.CurrentAttemptID != "" || queued.RunRevision != 1 {
+		t.Fatalf("unexpected queued projection: %#v found=%v err=%v", queued, found, err)
+	}
+	acquiring, found, err := reader.Run(ctx, "run-acquiring")
+	if err != nil || !found || acquiring.DesiredState != "running" ||
+		acquiring.ObservedState != "acquiring" || acquiring.CurrentNodeID != "" ||
+		acquiring.CurrentAttemptID != "" || acquiring.RunRevision != 3 ||
+		acquiring.LastEventSeq != 23 {
+		t.Fatalf("unexpected acquiring projection: %#v found=%v err=%v", acquiring, found, err)
+	}
+	events, err := reader.Timeline(ctx, "run-acquiring", 20, 10)
+	if err != nil || len(events) != 3 || events[1].EventType != "resource.lease_acquired" ||
+		string(events[1].Payload) != `{"concurrency_key":"local-gpu-training","lease_id":"lease-1","fencing_token":7}` {
+		t.Fatalf("unexpected acquisition timeline: %#v err=%v", events, err)
+	}
+}
+
 func TestControlsRejectsTamperedPersistedPlan(t *testing.T) {
 	path := fixture(t)
 	db, err := sql.Open("sqlite", path)

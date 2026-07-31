@@ -17,6 +17,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <future>
 #include <fstream>
 #include <iostream>
@@ -1590,6 +1591,280 @@ void test_submission_and_queue_boundary() {
   std::filesystem::remove_all(directory);
 }
 
+void test_atomic_queue_acquisition_boundary() {
+  const auto compiled = trainvm::compile_document(load_fixture());
+  check(compiled.valid(), "fixture required by queue acquisition compiles");
+  if (!compiled.valid()) return;
+  const std::filesystem::path directory = std::filesystem::temp_directory_path() /
+      ("trainvm-acquisition-test-" + std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  const auto database_path = directory / "journal.db";
+  trainvm::Journal journal(database_path);
+  trainvm::Controller controller(*compiled.plan, journal, "queued-acquisition-run");
+  controller.create_queued();
+
+  const auto blocker = journal.acquire_lease(
+      compiled.plan->experiment.spec.workspace.concurrency_key, "blocking-run",
+      "blocking-lease", 100, 1'000);
+  check(blocker.status == trainvm::LeaseAcquireStatus::acquired,
+        "queue acquisition test establishes a competing lease");
+  const auto busy = controller.begin_acquisition(200);
+  const auto queued = journal.projection("queued-acquisition-run");
+  check(busy.status == trainvm::LeaseAcquireStatus::busy && queued &&
+            queued->desired_state == "queued" && queued->observed_state == "queued" &&
+            queued->run_revision == 1U && journal.event_count() == 1U,
+        "busy resource lease leaves the queued run and journal unchanged");
+
+  check(journal.release_lease(blocker.lease.concurrency_key, blocker.lease.owner_run_id,
+                              blocker.lease.lease_id, blocker.lease.fencing_token, 250),
+        "queue acquisition test releases its competing lease");
+  const auto acquired = controller.begin_acquisition(300);
+  const auto acquiring = journal.projection("queued-acquisition-run");
+  check(acquired.status == trainvm::LeaseAcquireStatus::acquired && acquiring &&
+            acquiring->desired_state == "running" &&
+            acquiring->observed_state == "acquiring" && acquiring->run_revision == 3U &&
+            acquiring->current_node_id.empty() && acquiring->current_attempt_id.empty() &&
+            journal.event_count() == 4U,
+        "lease and queued-to-acquiring lifecycle commit as one three-event boundary");
+  const auto lease_event = journal.event("queued-acquisition-run:lease-acquired");
+  const auto acquisition_events = journal.events_for_run("queued-acquisition-run");
+  check(lease_event &&
+            lease_event->payload.value("fencing_token", std::uint64_t{}) ==
+                acquired.lease.fencing_token &&
+            lease_event->payload.value("owner_run_id", std::string{}) ==
+                "queued-acquisition-run" && acquisition_events.size() == 4U &&
+            acquisition_events[1].event_type == "run.desired_state_changed" &&
+            acquisition_events[2].event_type == "resource.lease_acquired" &&
+            acquisition_events[3].event_type == "run.observed_state_changed",
+        "resource acquisition event records the durable fencing identity");
+  bool dispatch_refused = false;
+  try {
+    (void)controller.prepare_dispatch();
+  } catch (const std::logic_error&) {
+    dispatch_refused = true;
+  }
+  check(dispatch_refused && !journal.dispatch(
+                                  "queued-acquisition-run:dispatch:acquire_gpu:acquire_gpu@1"),
+        "acquiring state cannot dispatch before verified worker readiness");
+
+  const auto expires_at = acquired.lease.expires_at_ns;
+  const auto replayed = controller.begin_acquisition(400);
+  check(replayed.status == trainvm::LeaseAcquireStatus::already_owned &&
+            replayed.lease.fencing_token == acquired.lease.fencing_token &&
+            replayed.lease.expires_at_ns == expires_at && journal.event_count() == 4U,
+        "acquisition retry neither renews the lease nor duplicates lifecycle events");
+  bool negative_retry_rejected = false;
+  try {
+    (void)controller.begin_acquisition(-1);
+  } catch (const std::invalid_argument&) {
+    negative_retry_rejected = true;
+  }
+  check(negative_retry_rejected,
+        "acquisition retry rejects a negative lease clock consistently");
+  trainvm::Controller restarted(*compiled.plan, journal, "queued-acquisition-run");
+  check(restarted.recover().revision == 3U,
+        "controller recovery accepts acquiring as a stable process-free boundary");
+  bool expired_reconcile_refused = false;
+  try {
+    (void)restarted.begin_acquisition(expires_at + 1);
+  } catch (const std::runtime_error&) {
+    expired_reconcile_refused = true;
+  }
+  check(expired_reconcile_refused && restarted.recover().revision == 3U,
+        "expired acquiring lease remains replayable but requires a future fenced decision");
+  const auto before_rebuild = journal.projection("queued-acquisition-run");
+  journal.rebuild_projections();
+  check(journal.projection("queued-acquisition-run") == before_rebuild,
+        "projection rebuild reproduces queued-to-acquiring lifecycle state");
+  std::filesystem::remove_all(directory);
+}
+
+void test_concurrent_queue_acquisition_replay() {
+  const auto compiled = trainvm::compile_document(load_fixture());
+  check(compiled.valid(), "fixture required by concurrent acquisition compiles");
+  if (!compiled.valid()) return;
+  const std::filesystem::path directory = std::filesystem::temp_directory_path() /
+      ("trainvm-acquisition-race-test-" +
+       std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  const auto database_path = directory / "journal.db";
+  {
+    trainvm::Journal journal(database_path);
+    trainvm::Controller creator(*compiled.plan, journal, "acquisition-race-run");
+    creator.create_queued();
+  }
+
+  trainvm::Journal left_journal(database_path);
+  trainvm::Journal right_journal(database_path);
+  trainvm::Controller left(*compiled.plan, left_journal, "acquisition-race-run");
+  trainvm::Controller right(*compiled.plan, right_journal, "acquisition-race-run");
+  check(left.recover().revision == 1U && right.recover().revision == 1U,
+        "both racing controllers recover the same queued revision");
+
+  struct Outcome {
+    bool succeeded{};
+    trainvm::LeaseAcquireStatus status{};
+    std::uint64_t fencing_token{};
+    std::string error;
+  };
+  const auto acquire = [](trainvm::Controller& controller) {
+    try {
+      const auto result = controller.begin_acquisition(1'000);
+      return Outcome{.succeeded = true,
+                     .status = result.status,
+                     .fencing_token = result.lease.fencing_token,
+                     .error = {}};
+    } catch (const std::exception& exception) {
+      return Outcome{.error = exception.what()};
+    }
+  };
+  auto left_future = std::async(std::launch::async, acquire, std::ref(left));
+  auto right_future = std::async(std::launch::async, acquire, std::ref(right));
+  const Outcome left_result = left_future.get();
+  const Outcome right_result = right_future.get();
+  const auto events = left_journal.events_for_run("acquisition-race-run");
+  const auto projection = left_journal.projection("acquisition-race-run");
+  if (!left_result.succeeded || !right_result.succeeded) {
+    std::cerr << "acquisition race errors: left='" << left_result.error
+              << "' right='" << right_result.error << "'\n";
+  }
+  check(left_result.succeeded && right_result.succeeded &&
+            left_result.status != trainvm::LeaseAcquireStatus::busy &&
+            right_result.status != trainvm::LeaseAcquireStatus::busy &&
+            left_result.fencing_token == right_result.fencing_token && projection &&
+            projection->desired_state == "running" &&
+            projection->observed_state == "acquiring" &&
+            projection->run_revision == 3U && events.size() == 4U,
+        "concurrent exact acquisitions converge on one three-event fence");
+  std::filesystem::remove_all(directory);
+}
+
+void test_acquiring_recovery_ignores_mutable_lease_lifecycle() {
+  const auto compiled = trainvm::compile_document(load_fixture());
+  check(compiled.valid(), "fixture required by lease lifecycle recovery compiles");
+  if (!compiled.valid()) return;
+  const std::filesystem::path directory = std::filesystem::temp_directory_path() /
+      ("trainvm-acquisition-lease-lifecycle-test-" +
+       std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  const auto database_path = directory / "journal.db";
+  trainvm::Journal journal(database_path);
+  trainvm::Controller controller(*compiled.plan, journal, "acquisition-lifecycle-run");
+  controller.create_queued();
+  const auto acquired = controller.begin_acquisition(1'000);
+  check(acquired.status == trainvm::LeaseAcquireStatus::acquired,
+        "lease lifecycle recovery test acquires its initial fence");
+  check(journal.renew_lease(acquired.lease.concurrency_key, acquired.lease.owner_run_id,
+                            acquired.lease.lease_id, acquired.lease.fencing_token,
+                            2'000, 60'000'000'000LL),
+        "lease lifecycle recovery test renews the mutable lease row");
+  bool renewed_recovered = false;
+  try {
+    trainvm::Controller renewed(*compiled.plan, journal, "acquisition-lifecycle-run");
+    renewed_recovered = renewed.recover().revision == 3U;
+  } catch (const std::exception&) {
+  }
+  check(renewed_recovered,
+        "lease renewal does not invalidate immutable acquisition history");
+  check(journal.release_lease(acquired.lease.concurrency_key, acquired.lease.owner_run_id,
+                              acquired.lease.lease_id, acquired.lease.fencing_token, 3'000),
+        "lease lifecycle recovery test releases the mutable lease row");
+  bool released_recovered = false;
+  try {
+    trainvm::Controller released(*compiled.plan, journal, "acquisition-lifecycle-run");
+    released_recovered = released.recover().revision == 3U;
+  } catch (const std::exception&) {
+  }
+  check(released_recovered,
+        "lease release does not invalidate immutable acquisition history");
+  const auto reacquired = journal.acquire_lease(
+      acquired.lease.concurrency_key, acquired.lease.owner_run_id,
+      acquired.lease.lease_id, 4'000, 60'000'000'000LL);
+  check(reacquired.status == trainvm::LeaseAcquireStatus::acquired &&
+            reacquired.lease.fencing_token > acquired.lease.fencing_token,
+        "reacquiring a released textual identity advances its fence");
+  bool replacement_rejected = false;
+  try {
+    trainvm::Controller replacement(*compiled.plan, journal,
+                                    "acquisition-lifecycle-run");
+    (void)replacement.begin_acquisition(5'000);
+  } catch (const std::runtime_error&) {
+    replacement_rejected = true;
+  }
+  check(replacement_rejected,
+        "acquiring retry rejects a newer fence hidden behind the same textual identity");
+  std::filesystem::remove_all(directory);
+}
+
+void test_acquiring_rejects_fabricated_running_transition() {
+  const auto compiled = trainvm::compile_document(load_fixture());
+  check(compiled.valid(), "fixture required by fabricated readiness test compiles");
+  if (!compiled.valid()) return;
+  const std::filesystem::path directory = std::filesystem::temp_directory_path() /
+      ("trainvm-fabricated-readiness-test-" +
+       std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  const auto database_path = directory / "journal.db";
+  trainvm::Journal journal(database_path);
+  const std::string run_id = "fabricated-readiness-run";
+  trainvm::Controller controller(*compiled.plan, journal, run_id);
+  controller.create_queued();
+  (void)controller.begin_acquisition(1'000);
+  const trainvm::ExecutionState initial = trainvm::start_execution(*compiled.plan, run_id);
+  const trainvm::Node& node =
+      compiled.plan->experiment.spec.workflow.nodes.at(initial.current_node_id);
+  journal.append_batch({
+      trainvm::Event{
+          .event_id = run_id + ":fabricated-running",
+          .run_id = run_id,
+          .run_revision = 4,
+          .plan_revision = 1,
+          .node_id = "",
+          .attempt_id = "",
+          .worker_sequence = 0,
+          .event_type = "run.observed_state_changed",
+          .event_version = 1,
+          .wall_time_ns = 2'000,
+          .monotonic_time_ns = 0,
+          .optimizer_step = std::nullopt,
+          .payload = {{"state", "running"}},
+      },
+      trainvm::Event{
+          .event_id = run_id + ":fabricated-node-entry",
+          .run_id = run_id,
+          .run_revision = 4,
+          .plan_revision = 1,
+          .node_id = initial.current_node_id,
+          .attempt_id = initial.current_attempt_id,
+          .worker_sequence = 0,
+          .event_type = "node.entered",
+          .event_version = 1,
+          .wall_time_ns = 2'000,
+          .monotonic_time_ns = 0,
+          .optimizer_step = std::nullopt,
+          .payload = {{"component", node.invoke.component},
+                      {"operation", node.invoke.operation}},
+      },
+  });
+  std::string chain_reason;
+  check(journal.verify_chain(&chain_reason),
+        "fabricated readiness fixture retains a valid journal chain");
+  bool rejected = false;
+  try {
+    trainvm::Controller restarted(*compiled.plan, journal, run_id);
+    (void)restarted.recover();
+  } catch (const std::runtime_error&) {
+    rejected = true;
+  }
+  check(rejected,
+        "acquiring recovery rejects running and node entry without readiness evidence");
+  std::filesystem::remove_all(directory);
+}
+
 void test_legacy_journal_migration_policy() {
   const std::filesystem::path directory = std::filesystem::temp_directory_path() /
       ("trainvm-legacy-journal-test-" +
@@ -1737,6 +2012,10 @@ int main() {
     test_control_command_journal();
     test_command_service();
     test_submission_and_queue_boundary();
+    test_atomic_queue_acquisition_boundary();
+    test_concurrent_queue_acquisition_replay();
+    test_acquiring_recovery_ignores_mutable_lease_lifecycle();
+    test_acquiring_rejects_fabricated_running_transition();
     test_legacy_journal_migration_policy();
   } catch (const std::exception& exception) {
     std::cerr << "UNCAUGHT: " << exception.what() << '\n';

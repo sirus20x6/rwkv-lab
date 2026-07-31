@@ -610,11 +610,13 @@
   function renderVMSummary(run) {
     const target = document.getElementById("trainvm-summary");
     if (!target) return;
+    const terminalStates = new Set(["completed", "cancelled", "failed"]);
+    const nodeFallback = terminalStates.has(run.observed_state) ? "terminal" : "waiting for assignment";
     const fact = (label, value, title = "") =>
       `<div class="vm-fact"><span>${vmEscape(label)}</span><strong title="${vmEscape(title || value)}">${vmEscape(value || "—")}</strong></div>`;
     target.innerHTML =
       fact("desired", run.desired_state) + fact("observed", run.observed_state) +
-      fact("node", run.current_node_id || "terminal", run.current_node_id) +
+      fact("node", run.current_node_id || nodeFallback, run.current_node_id) +
       fact("attempt", run.current_attempt_id || "—") +
       fact("optimizer step", Number(run.optimizer_step || 0).toLocaleString()) +
       fact("revision", String(run.run_revision || 0)) +
@@ -756,10 +758,10 @@
     }).join("") || '<div class="empty">this plan declares no live controls</div>';
     if (revision) revision.textContent =
       `requested r${Number(vmControlView.latest_requested_revision || 0)} · effective r${Number(vmControlView.latest_effective_revision || 0)}`;
-    if (apply) apply.disabled = !vmCommandsEnabled || vmSubmitBusy ||
+    if (apply) apply.disabled = !vmCommandsEnabled || vmSubmitBusy || (!active && !retryLocked) ||
       !Object.keys(vmPendingControls).length || vmInvalidControls.size > 0;
     const reason = document.getElementById("vm-control-reason");
-    if (reason) reason.disabled = vmSubmitBusy || retryLocked;
+    if (reason) reason.disabled = vmSubmitBusy || retryLocked || (!active && !retryLocked);
     renderVMCommandHistory();
   }
 
