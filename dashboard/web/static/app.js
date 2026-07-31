@@ -572,6 +572,123 @@
   }
   wireEvalHistoryControls();
 
+  // ---- TrainVM native read model. The browser only receives read-only
+  // projections; lifecycle mutations remain on the native command boundary.
+  let vmSelected = "";
+  let vmAfter = 0;
+  let vmBusy = false;
+
+  function vmEscape(value) {
+    return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    })[char]);
+  }
+
+  function renderVMRunList(runs) {
+    const target = document.getElementById("trainvm-runs");
+    if (!target) return;
+    target.innerHTML = runs.map((run) => `
+      <button class="vm-run${run.run_id === vmSelected ? " active" : ""}"
+              type="button" data-vm-run="${vmEscape(run.run_id)}">
+        <span class="vm-run-name">${vmEscape(run.experiment_name || run.run_id)}</span>
+        <span class="vm-run-state"><span>${vmEscape(run.observed_state)}</span><span>r${Number(run.run_revision || 0)}</span></span>
+      </button>`).join("") || '<div class="empty">no native runs yet</div>';
+  }
+
+  function renderVMSummary(run) {
+    const target = document.getElementById("trainvm-summary");
+    if (!target) return;
+    const fact = (label, value, title = "") =>
+      `<div class="vm-fact"><span>${vmEscape(label)}</span><strong title="${vmEscape(title || value)}">${vmEscape(value || "—")}</strong></div>`;
+    target.innerHTML =
+      fact("desired", run.desired_state) + fact("observed", run.observed_state) +
+      fact("node", run.current_node_id || "terminal", run.current_node_id) +
+      fact("attempt", run.current_attempt_id || "—") +
+      fact("optimizer step", Number(run.optimizer_step || 0).toLocaleString()) +
+      fact("revision", String(run.run_revision || 0)) +
+      fact("experiment", run.experiment_name, run.experiment_name) +
+      fact("plan", String(run.plan_hash || "").slice(0, 12), run.plan_hash);
+  }
+
+  async function appendVMTimeline() {
+    if (!vmSelected) return;
+    const response = await fetch(
+      `/api/trainvm/runs/${encodeURIComponent(vmSelected)}/timeline?after=${vmAfter}&limit=1000`,
+      { cache: "no-store" });
+    if (!response.ok) return;
+    const events = await response.json();
+    if (!Array.isArray(events) || !events.length) return;
+    const target = document.getElementById("trainvm-timeline");
+    if (!target) return;
+    if (vmAfter === 0) target.textContent = "";
+    const fragment = document.createDocumentFragment();
+    for (const event of events) {
+      if (event.run_id !== vmSelected) continue;
+      const row = document.createElement("div");
+      row.className = "vm-event";
+      row.innerHTML = `<span class="vm-seq">#${Number(event.sequence).toLocaleString()}</span>` +
+        `<span class="vm-type" title="${vmEscape(event.event_type)}">${vmEscape(event.event_type)}</span>` +
+        `<span class="vm-attempt" title="${vmEscape(event.attempt_id)}">${vmEscape(event.attempt_id || "—")}</span>` +
+        `<span class="vm-payload" title="${vmEscape(JSON.stringify(event.payload || {}))}">${vmEscape(JSON.stringify(event.payload || {}))}</span>`;
+      fragment.appendChild(row);
+      vmAfter = Math.max(vmAfter, Number(event.sequence) || 0);
+    }
+    target.appendChild(fragment);
+    while (target.children.length > 500) target.firstElementChild.remove();
+    const cursor = document.getElementById("trainvm-cursor");
+    if (cursor) cursor.textContent = `sequence ${vmAfter.toLocaleString()}`;
+    target.scrollTop = target.scrollHeight;
+  }
+
+  async function refreshTrainVM(force = false) {
+    const panel = document.getElementById("trainvm-panel");
+    if (!panel || !panel.open || vmBusy || (document.hidden && !force)) return;
+    vmBusy = true;
+    try {
+      const response = await fetch("/api/trainvm/runs", { cache: "no-store" });
+      if (!response.ok) return;
+      const payload = await response.json();
+      const runs = Array.isArray(payload.runs) ? payload.runs : [];
+      if (!payload.enabled) {
+        document.getElementById("trainvm-runs").innerHTML =
+          '<div class="empty">native journal not attached · start with -trainvm-db PATH</div>';
+        return;
+      }
+      if (!runs.some((run) => run.run_id === vmSelected)) {
+        vmSelected = runs[0]?.run_id || "";
+        vmAfter = 0;
+        const timeline = document.getElementById("trainvm-timeline");
+        if (timeline) timeline.innerHTML = '<div class="empty">no events loaded</div>';
+      }
+      const selected = runs.find((run) => run.run_id === vmSelected);
+      if (selected && Number(selected.last_event_sequence || 0) < vmAfter) {
+        vmAfter = 0;
+        const timeline = document.getElementById("trainvm-timeline");
+        if (timeline) timeline.textContent = "";
+      }
+      renderVMRunList(runs);
+      if (selected) renderVMSummary(selected);
+      await appendVMTimeline();
+    } catch (_) {
+      // A WAL checkpoint or daemon restart is transient; the next tick retries.
+    } finally {
+      vmBusy = false;
+    }
+  }
+
+  const vmPanel = document.getElementById("trainvm-panel");
+  if (vmPanel) vmPanel.addEventListener("toggle", () => refreshTrainVM(true));
+  document.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-vm-run]");
+    if (!button) return;
+    vmSelected = button.dataset.vmRun || "";
+    vmAfter = 0;
+    const timeline = document.getElementById("trainvm-timeline");
+    if (timeline) timeline.innerHTML = '<div class="empty">loading timeline…</div>';
+    refreshTrainVM(true);
+  });
+  setInterval(refreshTrainVM, 1000);
+
   window.trainboard = { watchActiveRun, openEvalSamples, resetEvalSamples };
   window.addEventListener("resize", () => {
     document.querySelectorAll("article.eval-sample").forEach(layoutEvalBoxOverlay);

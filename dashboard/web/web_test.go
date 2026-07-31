@@ -128,3 +128,24 @@ func TestEvalGalleryHasTimeScrubberAndPinnedHistoryMode(t *testing.T) {
 		t.Fatal("clicking a historical eval marker does not pin history mode")
 	}
 }
+
+func TestTrainVMPanelUsesIncrementalReadOnlyTimeline(t *testing.T) {
+	assets := Static()
+	index, err := fs.ReadFile(assets, "index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := fs.ReadFile(assets, "app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(index), `id="trainvm-panel"`) ||
+		!strings.Contains(string(index), `id="trainvm-timeline"`) {
+		t.Fatal("native TrainVM runs and timeline have no dashboard panel")
+	}
+	if !strings.Contains(string(app), `/api/trainvm/runs`) ||
+		!strings.Contains(string(app), `timeline?after=${vmAfter}&limit=1000`) ||
+		!strings.Contains(string(app), `setInterval(refreshTrainVM, 1000)`) {
+		t.Fatal("TrainVM panel does not incrementally follow the native journal")
+	}
+}

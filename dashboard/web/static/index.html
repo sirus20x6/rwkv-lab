@@ -108,6 +108,23 @@
         <div id="diff-out"></div>
       </div>
 
+      <details class="panel" id="trainvm-panel">
+        <summary class="panel-title">TrainVM control plane
+          <span class="sub">declarative runs · desired/observed state · durable event timeline</span>
+          <span class="d-caret">▸</span>
+        </summary>
+        <div class="vm-layout">
+          <nav id="trainvm-runs" class="vm-runs" aria-label="TrainVM runs">
+            <div class="empty">expand to load native runs</div>
+          </nav>
+          <section class="vm-detail" aria-live="polite">
+            <div id="trainvm-summary" class="vm-summary"><div class="empty">select a native run</div></div>
+            <div class="vm-timeline-head"><span>event timeline</span><span id="trainvm-cursor">sequence —</span></div>
+            <div id="trainvm-timeline" class="vm-timeline"><div class="empty">no events loaded</div></div>
+          </section>
+        </div>
+      </details>
+
       <details class="panel" id="experiments-panel" data-on:toggle="evt.target.open && @get('/api/experiments')">
         <summary class="panel-title">experiments
           <span class="sub">rwkv-lab lever lab · build &amp; launch A/Bs · registry results (not run-specific)</span>

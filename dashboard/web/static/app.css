@@ -148,6 +148,32 @@ details.panel[open] .d-caret { transform: rotate(90deg); color: var(--accent); }
 .chart-box { position: relative; height: 420px; }
 .chart-box canvas { width: 100%; height: 100%; display: block; }
 
+/* ---- native TrainVM projection ---- */
+.vm-layout { display: grid; grid-template-columns: minmax(230px, 28%) 1fr; gap: 14px; min-height: 280px; }
+.vm-runs { border-right: 1px solid var(--divider); padding-right: 12px; display: flex; flex-direction: column; gap: 6px; }
+.vm-run { appearance: none; width: 100%; text-align: left; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg-elev); color: var(--text); padding: 8px 10px; cursor: pointer; }
+.vm-run:hover, .vm-run.active { border-color: var(--accent); }
+.vm-run.active { box-shadow: inset 3px 0 0 var(--accent); }
+.vm-run-name { display: block; font: 600 var(--fs-sm)/1.3 var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vm-run-state { display: flex; justify-content: space-between; gap: 8px; margin-top: 4px; color: var(--muted); font: var(--fs-xs)/1.2 var(--mono); }
+.vm-detail { min-width: 0; }
+.vm-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
+.vm-fact { border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--bg); padding: 7px 9px; min-width: 0; }
+.vm-fact span { display: block; color: var(--muted); font: var(--fs-xs)/1.2 var(--mono); text-transform: uppercase; letter-spacing: .05em; }
+.vm-fact strong { display: block; margin-top: 3px; color: var(--text); font: 600 var(--fs-sm)/1.25 var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vm-timeline-head { display: flex; justify-content: space-between; padding: 5px 7px; color: var(--text-dim); font: 600 var(--fs-xs)/1.2 var(--mono); text-transform: uppercase; letter-spacing: .05em; border-bottom: 1px solid var(--border); }
+.vm-timeline { height: 260px; overflow: auto; font-family: var(--mono); scrollbar-width: thin; scrollbar-color: var(--border-hi) transparent; }
+.vm-event { display: grid; grid-template-columns: 58px minmax(130px, 210px) minmax(110px, 180px) 1fr; gap: 9px; padding: 6px 7px; border-bottom: 1px solid var(--divider); align-items: baseline; }
+.vm-event:hover { background: var(--bg-elev); }
+.vm-seq, .vm-attempt { color: var(--muted); font-size: var(--fs-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vm-type { color: var(--accent); font-size: var(--fs-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vm-payload { color: var(--text-dim); font-size: var(--fs-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 900px) {
+  .vm-layout { grid-template-columns: 1fr; }
+  .vm-runs { border-right: 0; border-bottom: 1px solid var(--divider); padding: 0 0 10px; }
+  .vm-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
 /* ---- qualitative eval drill-down ---- */
 .eval-inline { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--divider); }
 .eval-inline-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; margin-bottom: 12px; }
