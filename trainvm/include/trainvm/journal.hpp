@@ -56,6 +56,8 @@ class Journal {
 
   std::uint64_t append(const Event& event);
   std::vector<std::uint64_t> append_batch(const std::vector<Event>& events);
+  [[nodiscard]] std::optional<Event> event(const std::string& event_id) const;
+  [[nodiscard]] std::vector<Event> events_for_run(const std::string& run_id) const;
   [[nodiscard]] std::optional<RunProjection> projection(const std::string& run_id) const;
   [[nodiscard]] std::uint64_t event_count() const;
   [[nodiscard]] bool verify_chain(std::string* reason = nullptr) const;

@@ -17,11 +17,15 @@ Implemented now:
 - deterministic run-projection replay that refuses a corrupted journal;
 - a deterministic process-free FSM reducer with structured predicates, terminal states, bounded
   visits, monotonic loop progress, and stale-attempt rejection;
+- a durable controller that atomically commits each worker cause, derived transition, and next-node
+  or terminal observation, then reconstructs and verifies execution state after restart;
+- a scripted fake worker adapter used for restart/resume, retry-idempotency, plan-mismatch, and
+  transaction-rollback tests;
 - `validate`, `plan`, `simulate`, and journal inspection/replay CLI commands.
 
 This code does not yet launch or control a trainer. The next implementation boundary is the FSM
-reconciler and a fake worker adapter; real MageFlow ownership follows only after fault-injection tests
-pass against that boundary.
+reconciler service loop, resource leases, and process-free fault injection around dispatch receipts;
+real MageFlow process ownership follows only after those boundaries pass.
 
 ## Toolchain
 

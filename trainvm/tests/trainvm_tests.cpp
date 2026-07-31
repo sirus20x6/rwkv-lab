@@ -1,4 +1,6 @@
+#include "trainvm/controller.hpp"
 #include "trainvm/document.hpp"
+#include "trainvm/fake_worker.hpp"
 #include "trainvm/fsm.hpp"
 #include "trainvm/journal.hpp"
 #include "trainvm/model.hpp"
@@ -498,6 +500,189 @@ void test_journal() {
   std::filesystem::remove_all(directory);
 }
 
+std::vector<trainvm::FakeOutcome> mageflow_outcomes() {
+  return {
+      {.expected_node_id = "acquire_gpu",
+       .expected_operation = "acquire_resources",
+       .event_type = "resource.acquired",
+       .optimizer_step = std::nullopt},
+      {.expected_node_id = "train_to_boundary",
+       .expected_operation = "train",
+       .event_type = "worker.completed",
+       .payload = {{"reason", "cache_span_complete"}},
+       .optimizer_step = 5500},
+      {.expected_node_id = "prepare_cache",
+       .expected_operation = "prepare_cache_span",
+       .event_type = "operation.completed",
+       .optimizer_step = std::nullopt},
+      {.expected_node_id = "build_cache",
+       .expected_operation = "cache_encoders",
+       .event_type = "operation.completed",
+       .optimizer_step = std::nullopt},
+      {.expected_node_id = "validate_cache",
+       .expected_operation = "validate_artifact",
+       .event_type = "artifact.validated",
+       .optimizer_step = std::nullopt},
+      {.expected_node_id = "resume_training",
+       .expected_operation = "train",
+       .event_type = "worker.restart_requested",
+       .optimizer_step = 6000},
+      {.expected_node_id = "resume_training",
+       .expected_operation = "train",
+       .event_type = "worker.restart_requested",
+       .optimizer_step = 6500},
+      {.expected_node_id = "resume_training",
+       .expected_operation = "train",
+       .event_type = "worker.completed",
+       .payload = {{"reason", "training_complete"}},
+       .optimizer_step = 12228},
+      {.expected_node_id = "release_gpu",
+       .expected_operation = "release_resources",
+       .event_type = "resource.released",
+       .optimizer_step = std::nullopt},
+  };
+}
+
+void test_controller_and_fake_worker() {
+  auto compiled = trainvm::compile_document(load_fixture());
+  check(compiled.valid(), "fixture required by controller test compiles");
+  if (!compiled.valid()) {
+    return;
+  }
+  const std::filesystem::path directory = std::filesystem::temp_directory_path() /
+      ("trainvm-controller-test-" + std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  const std::filesystem::path database_path = directory / "journal.db";
+
+  {
+    trainvm::Journal journal(database_path);
+    trainvm::FakeWorker worker(mageflow_outcomes());
+    trainvm::Controller controller(*compiled.plan, journal, "controller-run");
+    check(!controller.initialized(), "controller begins without invented in-memory state");
+    controller.create();
+    check(controller.state().current_node_id == "acquire_gpu" && journal.event_count() == 2U,
+          "run creation atomically records run and initial node entry");
+
+    auto first_event = worker.next(controller.plan(), controller.state());
+    auto stale_event = first_event;
+    stale_event.run_revision = 0;
+    bool stale_worker_rejected = false;
+    try {
+      controller.handle_event(stale_event);
+    } catch (const std::invalid_argument&) {
+      stale_worker_rejected = true;
+    }
+    auto reserved_event = first_event;
+    reserved_event.event_type = "node.entered";
+    bool reserved_worker_rejected = false;
+    try {
+      controller.handle_event(reserved_event);
+    } catch (const std::invalid_argument&) {
+      reserved_worker_rejected = true;
+    }
+    check(stale_worker_rejected && reserved_worker_rejected && journal.event_count() == 2U,
+          "controller rejects stale revisions and worker use of reserved event types");
+    controller.handle_event(first_event);
+    for (std::size_t index = 1; index < 5U; ++index) {
+      const auto event = worker.next(controller.plan(), controller.state());
+      controller.handle_event(event);
+    }
+    check(controller.state().current_node_id == "resume_training" &&
+              controller.state().revision == 6U && worker.remaining() == 4U,
+          "scripted worker drives the first durable workflow segment");
+    const trainvm::ExecutionState before_restart = controller.state();
+
+    trainvm::Controller restarted(*compiled.plan, journal, "controller-run");
+    restarted.recover();
+    check(restarted.state() == before_restart,
+          "controller restart deterministically recovers the exact FSM state");
+
+    trainvm::Event final_cause;
+    while (worker.remaining() > 0U) {
+      auto event = worker.next(restarted.plan(), restarted.state());
+      final_cause = event;
+      restarted.handle_event(event);
+    }
+    check(restarted.state().status == trainvm::ExecutionStatus::completed &&
+              restarted.state().revision == 10U && restarted.state().transition_count == 9U,
+          "recovered controller resumes to terminal completion");
+    check(journal.event_count() == 29U,
+          "each cause, transition, and entered/terminal event is committed exactly once");
+
+    const auto ordered = journal.events_for_run("controller-run");
+    check(ordered.size() == 29U && ordered.front().event_type == "run.created" &&
+              ordered.back().event_type == "run.observed_state_changed",
+          "journal exposes a stable run-local replay order");
+    check(journal.event(final_cause.event_id).has_value(), "journal resolves exact events for retries");
+
+    restarted.handle_event(final_cause);
+    check(journal.event_count() == 29U && restarted.state().status == trainvm::ExecutionStatus::completed,
+          "retrying a committed worker event is idempotent even after completion");
+
+    const auto before_rebuild = journal.projection("controller-run");
+    check(before_rebuild && before_rebuild->observed_state == "completed" &&
+              before_rebuild->current_node_id.empty() && before_rebuild->current_attempt_id.empty() &&
+              before_rebuild->run_revision == 10U && before_rebuild->optimizer_step == 12228U,
+          "terminal projection clears stale active-node state and retains training progress");
+    std::string reason;
+    check(journal.verify_chain(&reason), "controller journal hash chain verifies");
+    check(journal.rebuild_projections() == 29U && journal.projection("controller-run") == before_rebuild,
+          "controller projection survives complete journal replay");
+
+    auto mismatched_plan = *compiled.plan;
+    mismatched_plan.plan_hash = std::string(64, '0');
+    trainvm::Controller mismatch(mismatched_plan, journal, "controller-run");
+    bool mismatch_rejected = false;
+    try {
+      mismatch.recover();
+    } catch (const std::runtime_error&) {
+      mismatch_rejected = true;
+    }
+    check(mismatch_rejected, "controller refuses recovery under a different compiled plan");
+  }
+
+  const std::filesystem::path collision_path = directory / "collision.db";
+  {
+    trainvm::Journal journal(collision_path);
+    trainvm::Controller controller(*compiled.plan, journal, "collision-run");
+    controller.create();
+    trainvm::FakeWorker worker({mageflow_outcomes().front()});
+    const auto cause = worker.next(controller.plan(), controller.state());
+    auto collision = cause;
+    collision.event_id = cause.event_id + ":transition";
+    collision.worker_sequence = 0;
+    collision.event_type = "diagnostic.collision";
+    journal.append(collision);
+    const auto before = controller.state();
+    bool collision_rejected = false;
+    try {
+      controller.handle_event(cause);
+    } catch (const std::invalid_argument&) {
+      collision_rejected = true;
+    }
+    check(collision_rejected, "derived event-ID collision rejects the controller transition batch");
+    check(controller.state() == before && !journal.event(cause.event_id).has_value() &&
+              journal.event_count() == 3U,
+          "failed controller batch rolls back its cause and leaves in-memory state unchanged");
+  }
+
+  trainvm::FakeWorker wrong_worker({{.expected_node_id = "acquire_gpu",
+                                      .expected_operation = "not_the_plan_operation",
+                                      .event_type = "resource.acquired",
+                                      .optimizer_step = std::nullopt}});
+  bool wrong_operation_rejected = false;
+  try {
+    const auto state = trainvm::start_execution(*compiled.plan, "wrong-operation-run");
+    (void)wrong_worker.next(*compiled.plan, state);
+  } catch (const std::logic_error&) {
+    wrong_operation_rejected = true;
+  }
+  check(wrong_operation_rejected && wrong_worker.remaining() == 1U,
+        "fake worker validates node operation before consuming scripted work");
+  std::filesystem::remove_all(directory);
+}
+
 }  // namespace
 
 int main() {
@@ -506,6 +691,7 @@ int main() {
     test_wire_contract();
     test_fsm();
     test_journal();
+    test_controller_and_fake_worker();
   } catch (const std::exception& exception) {
     std::cerr << "UNCAUGHT: " << exception.what() << '\n';
     return 1;

@@ -219,7 +219,10 @@ void update_projection(sqlite3* database, const Event& event, std::uint64_t jour
     sql += ", desired_state=?";
     extra = Extra::desired;
   } else if (event.event_type == "run.observed_state_changed") {
-    sql += ", observed_state=?";
+    sql += R"sql(, observed_state=?,
+      current_node_id=CASE WHEN ? IN ('completed','failed','cancelled') THEN '' ELSE current_node_id END,
+      current_attempt_id=CASE WHEN ? IN ('completed','failed','cancelled') THEN '' ELSE current_attempt_id END
+    )sql";
     extra = Extra::observed;
   } else if (event.event_type == "node.entered") {
     sql += ", current_node_id=?, current_attempt_id=?";
@@ -249,9 +252,15 @@ void update_projection(sqlite3* database, const Event& event, std::uint64_t jour
   };
   switch (extra) {
     case Extra::desired:
-    case Extra::observed:
       bind_text(update.get(), bind_index++, payload_string("state"));
       break;
+    case Extra::observed: {
+      const std::string state = payload_string("state");
+      bind_text(update.get(), bind_index++, state);
+      bind_text(update.get(), bind_index++, state);
+      bind_text(update.get(), bind_index++, state);
+      break;
+    }
     case Extra::node:
       bind_text(update.get(), bind_index++, event.node_id);
       bind_text(update.get(), bind_index++, event.attempt_id);
@@ -472,6 +481,43 @@ std::uint64_t Journal::append_uncommitted(const Event& event) {
     }
   }
   return journal_sequence;
+}
+
+std::optional<Event> Journal::event(const std::string& event_id) const {
+  Statement query(database_, R"sql(
+    SELECT journal_sequence, event_id, run_id, run_revision, plan_revision, node_id,
+           attempt_id, worker_sequence, event_type, event_version, wall_time_ns,
+           monotonic_time_ns, optimizer_step, payload_json
+    FROM events WHERE event_id=?
+  )sql");
+  bind_text(query.get(), 1, event_id);
+  const int status = sqlite3_step(query.get());
+  if (status == SQLITE_DONE) {
+    return std::nullopt;
+  }
+  if (status != SQLITE_ROW) {
+    throw std::runtime_error("could not read journal event: " + std::string(sqlite3_errmsg(database_)));
+  }
+  return event_from_row(query.get());
+}
+
+std::vector<Event> Journal::events_for_run(const std::string& run_id) const {
+  Statement query(database_, R"sql(
+    SELECT journal_sequence, event_id, run_id, run_revision, plan_revision, node_id,
+           attempt_id, worker_sequence, event_type, event_version, wall_time_ns,
+           monotonic_time_ns, optimizer_step, payload_json
+    FROM events WHERE run_id=? ORDER BY journal_sequence
+  )sql");
+  bind_text(query.get(), 1, run_id);
+  std::vector<Event> events;
+  int status = SQLITE_OK;
+  while ((status = sqlite3_step(query.get())) == SQLITE_ROW) {
+    events.push_back(event_from_row(query.get()));
+  }
+  if (status != SQLITE_DONE) {
+    throw std::runtime_error("could not scan run events: " + std::string(sqlite3_errmsg(database_)));
+  }
+  return events;
 }
 
 std::optional<RunProjection> Journal::projection(const std::string& run_id) const {

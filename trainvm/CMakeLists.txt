@@ -49,7 +49,9 @@ target_include_directories(trainvm_protocol SYSTEM PUBLIC "${TRAINVM_GENERATED_D
 target_link_libraries(trainvm_protocol PUBLIC protobuf::libprotobuf gRPC::grpc++)
 
 add_library(trainvm_core
+  src/controller.cpp
   src/document.cpp
+  src/fake_worker.cpp
   src/fsm.cpp
   src/journal.cpp
 )
