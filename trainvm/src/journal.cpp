@@ -101,6 +101,27 @@ CREATE TABLE IF NOT EXISTS node_dispatches (
   result_event_id TEXT,
   UNIQUE(run_id, node_id, attempt_id)
 ) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS control_commands (
+  command_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  expected_run_revision INTEGER NOT NULL,
+  expected_control_revision INTEGER NOT NULL,
+  control_revision INTEGER NOT NULL,
+  plan_revision INTEGER NOT NULL,
+  apply_point TEXT NOT NULL,
+  requires_pause INTEGER NOT NULL,
+  assignments_json TEXT NOT NULL,
+  author TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('requested','applied','rejected','restart_required')),
+  effective_step INTEGER,
+  effective_values_json TEXT NOT NULL,
+  diagnostics_json TEXT NOT NULL,
+  UNIQUE(run_id, idempotency_key),
+  UNIQUE(run_id, control_revision)
+) WITHOUT ROWID;
 )sql";
 
 class Statement {
@@ -382,6 +403,74 @@ bool same_dispatch_identity(const Dispatch& left, const Dispatch& right) {
          left.run_revision == right.run_revision && left.plan_revision == right.plan_revision &&
          left.node_id == right.node_id && left.attempt_id == right.attempt_id &&
          left.component == right.component && left.operation == right.operation;
+}
+
+std::string command_status_name(ControlCommandStatus status) {
+  switch (status) {
+    case ControlCommandStatus::requested:
+      return "requested";
+    case ControlCommandStatus::applied:
+      return "applied";
+    case ControlCommandStatus::rejected:
+      return "rejected";
+    case ControlCommandStatus::restart_required:
+      return "restart_required";
+  }
+  throw std::invalid_argument("invalid control command status");
+}
+
+ControlCommandStatus command_status(std::string_view value) {
+  if (value == "requested") {
+    return ControlCommandStatus::requested;
+  }
+  if (value == "applied") {
+    return ControlCommandStatus::applied;
+  }
+  if (value == "rejected") {
+    return ControlCommandStatus::rejected;
+  }
+  if (value == "restart_required") {
+    return ControlCommandStatus::restart_required;
+  }
+  throw std::runtime_error("stored control command has an invalid status");
+}
+
+ControlCommand command_from_row(sqlite3_stmt* statement) {
+  const auto apply = enum_from_string<ApplyPoint>(column_text(statement, 7));
+  if (!apply) {
+    throw std::runtime_error("stored control command has an invalid application point");
+  }
+  ControlCommand command{
+      .command_id = column_text(statement, 0),
+      .run_id = column_text(statement, 1),
+      .idempotency_key = column_text(statement, 2),
+      .expected_run_revision = static_cast<std::uint64_t>(sqlite3_column_int64(statement, 3)),
+      .expected_control_revision = static_cast<std::uint64_t>(sqlite3_column_int64(statement, 4)),
+      .control_revision = static_cast<std::uint64_t>(sqlite3_column_int64(statement, 5)),
+      .plan_revision = static_cast<std::uint64_t>(sqlite3_column_int64(statement, 6)),
+      .apply_point = *apply,
+      .requires_pause = sqlite3_column_int(statement, 8) != 0,
+      .assignments = nlohmann::json::parse(column_text(statement, 9)),
+      .author = column_text(statement, 10),
+      .reason = column_text(statement, 11),
+      .status = command_status(column_text(statement, 12)),
+      .effective_step = std::nullopt,
+      .effective_values = nlohmann::json::parse(column_text(statement, 14)),
+      .diagnostics = nlohmann::json::parse(column_text(statement, 15)),
+  };
+  if (sqlite3_column_type(statement, 13) != SQLITE_NULL) {
+    command.effective_step = static_cast<std::uint64_t>(sqlite3_column_int64(statement, 13));
+  }
+  return command;
+}
+
+bool same_command_request(const ControlCommand& left, const ControlCommand& right) {
+  return left.run_id == right.run_id && left.idempotency_key == right.idempotency_key &&
+         left.expected_run_revision == right.expected_run_revision &&
+         left.expected_control_revision == right.expected_control_revision &&
+         left.plan_revision == right.plan_revision && left.apply_point == right.apply_point &&
+         left.requires_pause == right.requires_pause && left.assignments == right.assignments &&
+         left.author == right.author && left.reason == right.reason;
 }
 
 }  // namespace
@@ -767,6 +856,238 @@ std::optional<Dispatch> Journal::dispatch(const std::string& dispatch_id) const 
     throw std::runtime_error("could not read dispatch: " + std::string(sqlite3_errmsg(database_)));
   }
   return dispatch_from_row(query.get());
+}
+
+ControlCommand Journal::submit_control_command(ControlCommand command) {
+  if (command.command_id.empty() || command.run_id.empty() || command.idempotency_key.empty() ||
+      command.author.empty() || command.reason.empty()) {
+    throw std::invalid_argument("control command identity, author, and reason must not be empty");
+  }
+  if (!command.assignments.is_object() || command.assignments.empty() ||
+      command.status != ControlCommandStatus::requested || command.control_revision != 0 ||
+      command.effective_step || !command.effective_values.empty() || !command.diagnostics.empty()) {
+    throw std::invalid_argument("new control command has invalid request state");
+  }
+  Transaction transaction(database_);
+  Statement existing(database_, R"sql(
+    SELECT command_id, run_id, idempotency_key, expected_run_revision,
+           expected_control_revision, control_revision, plan_revision, apply_point,
+           requires_pause, assignments_json, author, reason, status, effective_step,
+           effective_values_json, diagnostics_json
+    FROM control_commands
+    WHERE command_id=? OR (run_id=? AND idempotency_key=?)
+  )sql");
+  bind_text(existing.get(), 1, command.command_id);
+  bind_text(existing.get(), 2, command.run_id);
+  bind_text(existing.get(), 3, command.idempotency_key);
+  const int existing_status = sqlite3_step(existing.get());
+  if (existing_status == SQLITE_ROW) {
+    ControlCommand stored = command_from_row(existing.get());
+    if (!same_command_request(stored, command)) {
+      throw std::invalid_argument("control command idempotency identity has different content");
+    }
+    transaction.commit();
+    return stored;
+  }
+  if (existing_status != SQLITE_DONE) {
+    throw std::runtime_error("could not read existing control command");
+  }
+
+  Statement run(database_, "SELECT run_revision FROM run_projection WHERE run_id=?");
+  bind_text(run.get(), 1, command.run_id);
+  if (sqlite3_step(run.get()) != SQLITE_ROW) {
+    throw std::invalid_argument("cannot submit controls for an unknown run");
+  }
+  const auto current_run_revision =
+      static_cast<std::uint64_t>(sqlite3_column_int64(run.get(), 0));
+  if (current_run_revision != command.expected_run_revision) {
+    throw std::invalid_argument("control command expected_run_revision conflict");
+  }
+  Statement latest(database_, R"sql(
+    SELECT COALESCE(MAX(control_revision), 0) FROM control_commands WHERE run_id=?
+  )sql");
+  bind_text(latest.get(), 1, command.run_id);
+  if (sqlite3_step(latest.get()) != SQLITE_ROW) {
+    throw std::runtime_error("could not read latest control revision");
+  }
+  const auto current_control_revision =
+      static_cast<std::uint64_t>(sqlite3_column_int64(latest.get(), 0));
+  if (current_control_revision != command.expected_control_revision) {
+    throw std::invalid_argument("control command expected_control_revision conflict");
+  }
+  if (current_control_revision ==
+      static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+    throw std::overflow_error("control revision is exhausted");
+  }
+  command.control_revision = current_control_revision + 1;
+  Event requested{
+      .event_id = command.command_id + ":requested",
+      .run_id = command.run_id,
+      .run_revision = current_run_revision,
+      .plan_revision = command.plan_revision,
+      .node_id = "",
+      .attempt_id = "",
+      .worker_sequence = 0,
+      .event_type = "control.requested",
+      .event_version = 1,
+      .wall_time_ns = 0,
+      .monotonic_time_ns = 0,
+      .optimizer_step = std::nullopt,
+      .payload = {{"command_id", command.command_id},
+                  {"control_revision", command.control_revision},
+                  {"apply_point", enum_to_string(command.apply_point)},
+                  {"requires_pause", command.requires_pause},
+                  {"assignments", command.assignments},
+                  {"author", command.author},
+                  {"reason", command.reason}},
+  };
+  append_uncommitted(requested);
+
+  Statement insert(database_, R"sql(
+    INSERT INTO control_commands(
+      command_id, run_id, idempotency_key, expected_run_revision,
+      expected_control_revision, control_revision, plan_revision, apply_point,
+      requires_pause, assignments_json, author, reason, status, effective_step,
+      effective_values_json, diagnostics_json
+    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'requested', NULL, '{}', '[]')
+  )sql");
+  bind_text(insert.get(), 1, command.command_id);
+  bind_text(insert.get(), 2, command.run_id);
+  bind_text(insert.get(), 3, command.idempotency_key);
+  bind_integer(insert.get(), 4,
+               checked_integer(command.expected_run_revision, "expected_run_revision"));
+  bind_integer(insert.get(), 5,
+               checked_integer(command.expected_control_revision, "expected_control_revision"));
+  bind_integer(insert.get(), 6, checked_integer(command.control_revision, "control_revision"));
+  bind_integer(insert.get(), 7, checked_integer(command.plan_revision, "plan_revision"));
+  bind_text(insert.get(), 8, enum_to_string(command.apply_point));
+  bind_integer(insert.get(), 9, command.requires_pause ? 1 : 0);
+  bind_text(insert.get(), 10, command.assignments.dump());
+  bind_text(insert.get(), 11, command.author);
+  bind_text(insert.get(), 12, command.reason);
+  require_done(database_, insert.get(), "insert control command");
+  transaction.commit();
+  return command;
+}
+
+ControlCommand Journal::acknowledge_control_command(
+    const std::string& command_id, ControlCommandStatus status,
+    std::optional<std::uint64_t> effective_step, nlohmann::json effective_values,
+    nlohmann::json diagnostics) {
+  if (command_id.empty() || status == ControlCommandStatus::requested ||
+      !effective_values.is_object() || !diagnostics.is_array()) {
+    throw std::invalid_argument("invalid control command acknowledgement");
+  }
+  Transaction transaction(database_);
+  Statement query(database_, R"sql(
+    SELECT command_id, run_id, idempotency_key, expected_run_revision,
+           expected_control_revision, control_revision, plan_revision, apply_point,
+           requires_pause, assignments_json, author, reason, status, effective_step,
+           effective_values_json, diagnostics_json
+    FROM control_commands WHERE command_id=?
+  )sql");
+  bind_text(query.get(), 1, command_id);
+  if (sqlite3_step(query.get()) != SQLITE_ROW) {
+    throw std::invalid_argument("cannot acknowledge an unknown control command");
+  }
+  ControlCommand command = command_from_row(query.get());
+  if (command.status != ControlCommandStatus::requested) {
+    if (command.status == status && command.effective_step == effective_step &&
+        command.effective_values == effective_values && command.diagnostics == diagnostics) {
+      transaction.commit();
+      return command;
+    }
+    throw std::invalid_argument("control command already has a different acknowledgement");
+  }
+  if (status == ControlCommandStatus::applied) {
+    if (effective_values != command.assignments) {
+      throw std::invalid_argument("applied control values differ from the atomic request");
+    }
+  } else if (!effective_values.empty()) {
+    throw std::invalid_argument("non-applied control acknowledgement has effective values");
+  }
+  Statement run(database_, "SELECT run_revision FROM run_projection WHERE run_id=?");
+  bind_text(run.get(), 1, command.run_id);
+  if (sqlite3_step(run.get()) != SQLITE_ROW) {
+    throw std::runtime_error("control command run projection disappeared");
+  }
+  const auto run_revision = static_cast<std::uint64_t>(sqlite3_column_int64(run.get(), 0));
+  command.status = status;
+  command.effective_step = effective_step;
+  command.effective_values = std::move(effective_values);
+  command.diagnostics = std::move(diagnostics);
+  const std::string status_name = command_status_name(status);
+  Event acknowledged{
+      .event_id = command.command_id + ":ack",
+      .run_id = command.run_id,
+      .run_revision = run_revision,
+      .plan_revision = command.plan_revision,
+      .node_id = "",
+      .attempt_id = "",
+      .worker_sequence = 0,
+      .event_type = "control." + status_name,
+      .event_version = 1,
+      .wall_time_ns = 0,
+      .monotonic_time_ns = 0,
+      .optimizer_step = command.effective_step,
+      .payload = {{"command_id", command.command_id},
+                  {"control_revision", command.control_revision},
+                  {"apply_point", enum_to_string(command.apply_point)},
+                  {"status", status_name},
+                  {"effective_values", command.effective_values},
+                  {"diagnostics", command.diagnostics}},
+  };
+  append_uncommitted(acknowledged);
+  Statement update(database_, R"sql(
+    UPDATE control_commands
+    SET status=?, effective_step=?, effective_values_json=?, diagnostics_json=?
+    WHERE command_id=? AND status='requested'
+  )sql");
+  bind_text(update.get(), 1, status_name);
+  if (command.effective_step) {
+    bind_integer(update.get(), 2, checked_integer(*command.effective_step, "effective_step"));
+  } else if (sqlite3_bind_null(update.get(), 2) != SQLITE_OK) {
+    throw std::runtime_error("sqlite null bind failed");
+  }
+  bind_text(update.get(), 3, command.effective_values.dump());
+  bind_text(update.get(), 4, command.diagnostics.dump());
+  bind_text(update.get(), 5, command.command_id);
+  require_done(database_, update.get(), "acknowledge control command");
+  if (sqlite3_changes(database_) != 1) {
+    throw std::runtime_error("control acknowledgement affected an unexpected number of rows");
+  }
+  transaction.commit();
+  return command;
+}
+
+std::optional<ControlCommand> Journal::control_command(const std::string& command_id) const {
+  Statement query(database_, R"sql(
+    SELECT command_id, run_id, idempotency_key, expected_run_revision,
+           expected_control_revision, control_revision, plan_revision, apply_point,
+           requires_pause, assignments_json, author, reason, status, effective_step,
+           effective_values_json, diagnostics_json
+    FROM control_commands WHERE command_id=?
+  )sql");
+  bind_text(query.get(), 1, command_id);
+  const int status = sqlite3_step(query.get());
+  if (status == SQLITE_DONE) {
+    return std::nullopt;
+  }
+  if (status != SQLITE_ROW) {
+    throw std::runtime_error("could not read control command");
+  }
+  return command_from_row(query.get());
+}
+
+std::uint64_t Journal::latest_control_revision(const std::string& run_id) const {
+  Statement query(database_, R"sql(
+    SELECT COALESCE(MAX(control_revision), 0) FROM control_commands WHERE run_id=?
+  )sql");
+  bind_text(query.get(), 1, run_id);
+  if (sqlite3_step(query.get()) != SQLITE_ROW) {
+    throw std::runtime_error("could not read latest control revision");
+  }
+  return static_cast<std::uint64_t>(sqlite3_column_int64(query.get(), 0));
 }
 
 LeaseAcquireResult Journal::acquire_lease(const std::string& concurrency_key,

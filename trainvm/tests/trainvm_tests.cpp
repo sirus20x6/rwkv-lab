@@ -1,4 +1,5 @@
 #include "trainvm/controller.hpp"
+#include "trainvm/control.hpp"
 #include "trainvm/document.hpp"
 #include "trainvm/fake_worker.hpp"
 #include "trainvm/fsm.hpp"
@@ -300,6 +301,47 @@ void test_fsm() {
     visit_limit_rejected = true;
   }
   check(visit_limit_rejected, "loop visit limit is enforced before state advances");
+}
+
+void test_control_validation() {
+  auto compiled = trainvm::compile_document(load_fixture());
+  check(compiled.valid(), "fixture required by control validation compiles");
+  if (!compiled.valid()) {
+    return;
+  }
+  const auto patch = trainvm::validate_control_patch(
+      *compiled.plan, {{"caption_dropout", 0.25}, {"eval_every", 250}}, true, false);
+  check(patch.valid() && patch.assignments.size() == 2U &&
+            patch.apply_point == trainvm::ApplyPoint::next_optimizer_step &&
+            !patch.requires_pause,
+        "atomic control patch selects its latest required safe point");
+
+  const auto invalid = trainvm::validate_control_patch(
+      *compiled.plan, {{"caption_dropout", 2.0}, {"not_declared", 1}}, true, false);
+  check(!invalid.valid() && invalid.assignments.empty() && invalid.diagnostics.size() == 2U,
+        "one invalid control rejects the entire patch with complete diagnostics");
+
+  const auto wrong_type =
+      trainvm::validate_control_patch(*compiled.plan, {{"eval_every", 2.5}}, true, false);
+  check(!wrong_type.valid() && wrong_type.diagnostics.front().code == "control.value_type",
+        "integer controls reject fractional JSON numbers");
+
+  const auto running_restart =
+      trainvm::validate_control_patch(*compiled.plan, {{"mixed_precision", "fp16"}}, true, false);
+  check(!running_restart.valid() && running_restart.requires_pause,
+        "pause-required restart controls reject a running mutation");
+  const auto paused_restart =
+      trainvm::validate_control_patch(*compiled.plan, {{"mixed_precision", "fp16"}}, true, true);
+  check(paused_restart.valid() && paused_restart.requires_pause &&
+            paused_restart.apply_point == trainvm::ApplyPoint::restart,
+        "paused restart control validates with the restart application point");
+
+  auto immutable_plan = *compiled.plan;
+  immutable_plan.experiment.spec.controls.catalog.at("learning_rate").mutable_after_start = false;
+  const auto immutable =
+      trainvm::validate_control_patch(immutable_plan, {{"learning_rate", 0.00001}}, true, false);
+  check(!immutable.valid() && immutable.diagnostics.front().code == "control.immutable",
+        "started runs reject controls declared immutable after start");
 }
 
 trainvm::Event created_event(const std::string& plan_hash) {
@@ -795,6 +837,115 @@ void test_resource_leases() {
   std::filesystem::remove_all(directory);
 }
 
+void test_control_command_journal() {
+  auto compiled = trainvm::compile_document(load_fixture());
+  check(compiled.valid(), "fixture required by control command journal compiles");
+  if (!compiled.valid()) {
+    return;
+  }
+  const std::filesystem::path directory = std::filesystem::temp_directory_path() /
+      ("trainvm-control-test-" + std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  {
+    trainvm::Journal journal(directory / "journal.db");
+    trainvm::Controller controller(*compiled.plan, journal, "control-run");
+    controller.create();
+    const auto validated = trainvm::validate_control_patch(
+        *compiled.plan, {{"learning_rate", 0.00001}, {"eval_every", 250}}, true, false);
+    check(validated.valid(), "control command test patch validates");
+    trainvm::ControlCommand request{
+        .command_id = "control-command-1",
+        .run_id = "control-run",
+        .idempotency_key = "browser-request-1",
+        .expected_run_revision = 1,
+        .expected_control_revision = 0,
+        .control_revision = 0,
+        .plan_revision = 1,
+        .apply_point = validated.apply_point,
+        .requires_pause = validated.requires_pause,
+        .assignments = validated.assignments,
+        .author = "operator",
+        .reason = "test live tuning",
+        .status = trainvm::ControlCommandStatus::requested,
+        .effective_step = std::nullopt,
+        .effective_values = nlohmann::json::object(),
+        .diagnostics = nlohmann::json::array(),
+    };
+    const auto submitted = journal.submit_control_command(request);
+    check(submitted.control_revision == 1U &&
+              submitted.status == trainvm::ControlCommandStatus::requested &&
+              journal.latest_control_revision("control-run") == 1U && journal.event_count() == 3U,
+          "control request atomically receives revision and journal event");
+    check(journal.submit_control_command(request) == submitted && journal.event_count() == 3U,
+          "identical control request is idempotent");
+
+    auto conflicting_identity = request;
+    conflicting_identity.assignments["eval_every"] = 500;
+    bool identity_conflict = false;
+    try {
+      (void)journal.submit_control_command(conflicting_identity);
+    } catch (const std::invalid_argument&) {
+      identity_conflict = true;
+    }
+    check(identity_conflict, "idempotency key rejects different control command content");
+
+    auto stale = request;
+    stale.command_id = "control-command-stale";
+    stale.idempotency_key = "browser-request-stale";
+    bool stale_rejected = false;
+    try {
+      (void)journal.submit_control_command(stale);
+    } catch (const std::invalid_argument&) {
+      stale_rejected = true;
+    }
+    check(stale_rejected, "stale expected control revision loses an optimistic race");
+
+    const auto applied = journal.acknowledge_control_command(
+        submitted.command_id, trainvm::ControlCommandStatus::applied, 300,
+        submitted.assignments, nlohmann::json::array());
+    check(applied.status == trainvm::ControlCommandStatus::applied &&
+              applied.effective_step == std::optional<std::uint64_t>{300} &&
+              journal.event_count() == 4U && journal.control_command(submitted.command_id) == applied,
+          "worker acknowledgement atomically records exact effective values and step");
+    check(journal.acknowledge_control_command(
+              submitted.command_id, trainvm::ControlCommandStatus::applied, 300,
+              submitted.assignments, nlohmann::json::array()) == applied &&
+              journal.event_count() == 4U,
+          "identical worker control acknowledgement is idempotent");
+    bool changed_ack_rejected = false;
+    try {
+      (void)journal.acknowledge_control_command(
+          submitted.command_id, trainvm::ControlCommandStatus::applied, 301,
+          submitted.assignments, nlohmann::json::array());
+    } catch (const std::invalid_argument&) {
+      changed_ack_rejected = true;
+    }
+    check(changed_ack_rejected, "completed control command rejects a different acknowledgement");
+
+    const auto invalid_controller_request = controller.request_controls(
+        "browser-request-invalid", 1, 1, {{"caption_dropout", 4.0}},
+        "operator", "invalid range test", false);
+    check(!invalid_controller_request.valid() && !invalid_controller_request.command &&
+              journal.event_count() == 4U,
+          "controller returns native control diagnostics without journaling an invalid patch");
+    const auto controller_request = controller.request_controls(
+        "browser-request-2", 1, 1, {{"caption_dropout", 0.2}},
+        "operator", "adjust dropout", false);
+    check(controller_request.valid() && controller_request.command &&
+              controller_request.command->control_revision == 2U && journal.event_count() == 5U,
+          "controller validates and durably submits a revision-checked control patch");
+
+    trainvm::Controller restarted(*compiled.plan, journal, "control-run");
+    check(restarted.recover() == controller.state(),
+          "controller recovery tolerates and verifies interleaved control command events");
+    std::string reason;
+    check(journal.verify_chain(&reason) && journal.rebuild_projections() == 5U,
+          "control request and acknowledgement remain replayable journal history");
+  }
+  std::filesystem::remove_all(directory);
+}
+
 }  // namespace
 
 int main() {
@@ -802,9 +953,11 @@ int main() {
     test_reflection_and_compiler();
     test_wire_contract();
     test_fsm();
+    test_control_validation();
     test_journal();
     test_controller_and_fake_worker();
     test_resource_leases();
+    test_control_command_journal();
   } catch (const std::exception& exception) {
     std::cerr << "UNCAUGHT: " << exception.what() << '\n';
     return 1;

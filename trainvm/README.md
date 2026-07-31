@@ -25,6 +25,9 @@ Implemented now:
   monotonic fencing tokens that invalidate stale controllers after takeover;
 - durable per-attempt dispatch intents and completion receipts, with idempotent worker re-execution
   and atomic receipt/cause/FSM commits closing the controller-crash ambiguity window;
+- reflected live-control validation with atomic multi-value patches, declared safe-point selection,
+  pause requirements, optimistic run/control revisions, idempotent command keys, and durable
+  applied/rejected/restart-required acknowledgements;
 - `validate`, `plan`, `simulate`, and journal inspection/replay CLI commands.
 
 This code does not yet launch or control a trainer. The next implementation boundary is the FSM

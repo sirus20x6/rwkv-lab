@@ -4,6 +4,7 @@
 
 #include "trainvm/document.hpp"
 #include "trainvm/dispatch.hpp"
+#include "trainvm/control.hpp"
 #include "trainvm/fsm.hpp"
 #include "trainvm/journal.hpp"
 
@@ -17,6 +18,18 @@ class Controller {
   const ExecutionState& recover();
   Dispatch prepare_dispatch();
   const ExecutionState& handle_event(const Event& event);
+  ControlPatchValidation request_controls(const std::string& idempotency_key,
+                                          std::uint64_t expected_run_revision,
+                                          std::uint64_t expected_control_revision,
+                                          const nlohmann::json& assignments,
+                                          const std::string& author,
+                                          const std::string& reason,
+                                          bool run_paused);
+  ControlCommand acknowledge_controls(const std::string& command_id,
+                                      ControlCommandStatus status,
+                                      std::optional<std::uint64_t> effective_step,
+                                      nlohmann::json effective_values,
+                                      nlohmann::json diagnostics);
 
   [[nodiscard]] const ExecutionState& state() const;
   [[nodiscard]] const CompiledPlan& plan() const;

@@ -10,6 +10,7 @@
 #include <sqlite3.h>
 
 #include "trainvm/dispatch.hpp"
+#include "trainvm/command.hpp"
 #include "trainvm/lease.hpp"
 
 namespace trainvm {
@@ -66,6 +67,15 @@ class Journal {
   void complete_dispatch(const std::string& dispatch_id, const std::string& result_event_id,
                          const std::vector<Event>& events);
   [[nodiscard]] std::optional<Dispatch> dispatch(const std::string& dispatch_id) const;
+  ControlCommand submit_control_command(ControlCommand command);
+  ControlCommand acknowledge_control_command(const std::string& command_id,
+                                             ControlCommandStatus status,
+                                             std::optional<std::uint64_t> effective_step,
+                                             nlohmann::json effective_values,
+                                             nlohmann::json diagnostics);
+  [[nodiscard]] std::optional<ControlCommand> control_command(
+      const std::string& command_id) const;
+  [[nodiscard]] std::uint64_t latest_control_revision(const std::string& run_id) const;
   LeaseAcquireResult acquire_lease(const std::string& concurrency_key,
                                    const std::string& owner_run_id,
                                    const std::string& lease_id, std::int64_t now_ns,

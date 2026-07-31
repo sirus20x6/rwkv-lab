@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <limits>
+#include <map>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -28,7 +29,8 @@ bool same_worker_event(const Event& stored, const Event& input) {
 bool is_controller_event(std::string_view event_type) {
   return event_type == "run.created" || event_type == "node.entered" ||
          event_type == "fsm.transitioned" || event_type == "run.observed_state_changed" ||
-         event_type == "node.dispatch_prepared" || event_type == "node.dispatch_completed";
+         event_type == "node.dispatch_prepared" || event_type == "node.dispatch_completed" ||
+         event_type.starts_with("control.");
 }
 
 std::string dispatch_id_for(const ExecutionState& state) {
@@ -163,6 +165,20 @@ void require_payload_string(const Event& event, std::string_view field, std::str
   }
 }
 
+std::string_view control_status_name(ControlCommandStatus status) {
+  switch (status) {
+    case ControlCommandStatus::requested:
+      return "requested";
+    case ControlCommandStatus::applied:
+      return "applied";
+    case ControlCommandStatus::rejected:
+      return "rejected";
+    case ControlCommandStatus::restart_required:
+      return "restart_required";
+  }
+  throw std::runtime_error("invalid control command status");
+}
+
 }  // namespace
 
 Controller::Controller(const CompiledPlan& plan, Journal& journal, std::string run_id)
@@ -206,6 +222,7 @@ const ExecutionState& Controller::recover() {
   ReplayPhase phase = ReplayPhase::expecting_entry;
   std::optional<Event> pending_cause;
   std::optional<std::pair<std::string, std::string>> expected_completion;
+  std::map<std::string, std::string> replayed_control_status;
   for (const Event& event : events) {
     if (event.plan_revision != kInitialPlanRevision) {
       throw std::runtime_error("journal recovery encountered an unsupported plan revision");
@@ -305,6 +322,32 @@ const ExecutionState& Controller::recover() {
       expected_completion.reset();
       continue;
     }
+    if (event.event_type.starts_with("control.")) {
+      const auto command_id = event.payload.find("command_id");
+      if (command_id == event.payload.end() || !command_id->is_string()) {
+        throw std::runtime_error("control journal event is missing command_id");
+      }
+      const auto command = journal_.control_command(command_id->get<std::string>());
+      if (!command || command->run_id != run_id_) {
+        throw std::runtime_error("control journal event has no durable command record");
+      }
+      const auto revision = event.payload.find("control_revision");
+      if (revision == event.payload.end() || !revision->is_number_unsigned() ||
+          revision->get<std::uint64_t>() != command->control_revision) {
+        throw std::runtime_error("control journal event has the wrong control revision");
+      }
+      const std::string suffix = event.event_type.substr(std::string("control.").size());
+      auto previous = replayed_control_status.find(command->command_id);
+      if (suffix == "requested") {
+        if (previous != replayed_control_status.end()) {
+          throw std::runtime_error("control command has more than one request event");
+        }
+      } else if (previous == replayed_control_status.end() || previous->second != "requested") {
+        throw std::runtime_error("control acknowledgement has no preceding request event");
+      }
+      replayed_control_status[command->command_id] = suffix;
+      continue;
+    }
     if (is_controller_event(event.event_type)) {
       throw std::runtime_error("journal recovery encountered an unsupported controller event");
     }
@@ -325,6 +368,12 @@ const ExecutionState& Controller::recover() {
   }
   if ((phase != ReplayPhase::ready && phase != ReplayPhase::terminal) || expected_completion) {
     throw std::runtime_error("run journal ends in an incomplete controller transaction");
+  }
+  for (const auto& [command_id, status] : replayed_control_status) {
+    const auto command = journal_.control_command(command_id);
+    if (!command || status != control_status_name(command->status)) {
+      throw std::runtime_error("control command projection disagrees with journal replay");
+    }
   }
   state_ = std::move(recovered);
   initialized_ = true;
@@ -394,6 +443,61 @@ const ExecutionState& Controller::handle_event(const Event& input) {
   journal_.complete_dispatch(dispatch->dispatch_id, cause.event_id, batch);
   state_ = result.state;
   return state_;
+}
+
+ControlPatchValidation Controller::request_controls(
+    const std::string& idempotency_key, std::uint64_t expected_run_revision,
+    std::uint64_t expected_control_revision, const nlohmann::json& assignments,
+    const std::string& author, const std::string& reason, bool run_paused) {
+  if (!initialized_) {
+    throw std::logic_error("controller must create or recover the run before requesting controls");
+  }
+  if (state_.status != ExecutionStatus::running) {
+    throw std::logic_error("cannot request controls for a terminal run");
+  }
+  if (expected_run_revision != state_.revision) {
+    throw std::invalid_argument("control request expected_run_revision conflict");
+  }
+  if (idempotency_key.empty() || author.empty() || reason.empty()) {
+    throw std::invalid_argument("control request idempotency key, author, and reason are required");
+  }
+  ControlPatchValidation validation =
+      validate_control_patch(plan_, assignments, true, run_paused);
+  if (!validation.valid()) {
+    return validation;
+  }
+  ControlCommand command{
+      .command_id = "control-" + sha256_hex(run_id_ + ":" + idempotency_key),
+      .run_id = run_id_,
+      .idempotency_key = idempotency_key,
+      .expected_run_revision = expected_run_revision,
+      .expected_control_revision = expected_control_revision,
+      .control_revision = 0,
+      .plan_revision = kInitialPlanRevision,
+      .apply_point = validation.apply_point,
+      .requires_pause = validation.requires_pause,
+      .assignments = validation.assignments,
+      .author = author,
+      .reason = reason,
+      .status = ControlCommandStatus::requested,
+      .effective_step = std::nullopt,
+      .effective_values = nlohmann::json::object(),
+      .diagnostics = nlohmann::json::array(),
+  };
+  validation.command = journal_.submit_control_command(std::move(command));
+  return validation;
+}
+
+ControlCommand Controller::acknowledge_controls(
+    const std::string& command_id, ControlCommandStatus status,
+    std::optional<std::uint64_t> effective_step, nlohmann::json effective_values,
+    nlohmann::json diagnostics) {
+  if (!initialized_) {
+    throw std::logic_error("controller must create or recover before acknowledging controls");
+  }
+  return journal_.acknowledge_control_command(command_id, status, effective_step,
+                                              std::move(effective_values),
+                                              std::move(diagnostics));
 }
 
 const ExecutionState& Controller::state() const {
