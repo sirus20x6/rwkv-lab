@@ -54,16 +54,30 @@ Implemented now:
   effect, idempotency, trusted code fingerprint, and required worker capabilities before mutation;
 - a restart-safe launch-authorization reconciler that resumes partial resource admission, converges
   concurrent/repeated steps on one fenced launch intent, and fails closed on registry drift;
+- a separate immutable host-launch registry and deterministic `worker.launch_bound` receipt that
+  bind the exact active operation to a host/boot, versioned public argv, verified source evidence,
+  and sealed executable/code bytes opened beneath trusted Linux `openat2` dirfds; this resolver is
+  process-free and structurally excludes dynamic credentials;
 - `validate`, `plan`, `simulate`, and journal inspection/replay CLI commands.
 
-This code does not yet launch or control a trainer. The current launch-authorization reconciler can
-resolve an exact authority-owned adapter profile and persist a fenced `worker.launch_requested`
-protocol intent; that ticket is explicitly insufficient to spawn or signal an OS process. The next
-implementation boundary is a host-bound resolved launch-spec receipt and process supervisor. Real
-MageFlow process ownership follows only after that lifecycle boundary and its fault-injection tests
-pass.
+This code does not yet launch or control a trainer. The launch-authorization reconciler first
+persists a fenced `worker.launch_requested` protocol intent; the host resolver can then persist a
+deterministic, non-secret binding while retaining sealed file descriptors, but neither is sufficient
+to spawn or signal an OS process. The next boundary is a single-threaded guarded launcher helper,
+boot-time lease renewal, host-wide resource locks, cgroup cleanup, process-instance credentials, and
+durable spawn/exit receipts. Real MageFlow process ownership follows only after those fault-injection
+tests pass.
+
+The sealed payload hashes cover only the copied executable/interpreter and adapter artifact. They do
+not yet claim a reproducible dynamic-library, Python standard-library, or import closure; real Python
+launch remains disabled until an isolated bootstrap and runtime-closure policy are enforced.
 
 ## Toolchain
+
+Host launch resolution requires Linux 6.3 or newer and matching UAPI headers
+(`openat2`, `MFD_EXEC`, `MFD_NOEXEC_SEAL`, and `F_SEAL_EXEC`). Runtime security
+policy must permit `openat2` and `memfd_create`; unsupported or blocked hosts
+fail closed before a launch can be bound.
 
 TrainVM intentionally requires GCC 16 or newer. CMake rejects other compilers. It builds with
 `-std=c++26 -freflection` and uses reflection to remove handwritten field-registration code. Its
@@ -119,6 +133,12 @@ implemented, as is the initial single-result WorkerControl stream. Process launc
 heartbeats and metrics, and pause/resume remain subsequent milestones. A worker launch ticket is a
 protocol authorization only until it is paired with a trusted descriptor digest, resolved launch
 specification, host identity, and durable process receipt.
+
+Secret-marked parameters are restricted to versioned opaque references of the form
+`secret://provider/name#version`; raw secret values are rejected before canonical plan persistence.
+The host-launch registry contains only fixed `public_arguments`. Future resolved credentials will
+travel over sealed descriptors and will not enter argv, the adapter lock, launch binding, journal,
+or diagnostics.
 
 ## Journal CLI
 

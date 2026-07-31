@@ -4,6 +4,8 @@
 #include "trainvm/document.hpp"
 #include "trainvm/fake_worker.hpp"
 #include "trainvm/fsm.hpp"
+#include "trainvm/host_launch.hpp"
+#include "trainvm/host_launch_registry.hpp"
 #include "trainvm/journal.hpp"
 #include "trainvm/model.hpp"
 #include "trainvm/reflection_json.hpp"
@@ -12,10 +14,14 @@
 #include "trainvm/v1/trainvm.pb.h"
 
 #include <sqlite3.h>
+#include <fcntl.h>
+#include <linux/memfd.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -3760,6 +3766,597 @@ void test_acquiring_rejects_fabricated_running_transition() {
   std::filesystem::remove_all(directory);
 }
 
+void test_host_launch_registry_contract() {
+  check(trainvm::reflected_field_names<trainvm::HostLaunchProfile>() ==
+            std::vector<std::string>({"key", "code_fingerprint",
+                                      "executable_path",
+                                      "executable_fingerprint", "code_path",
+                                      "public_arguments",
+                                      "working_directory"}) &&
+            trainvm::reflected_field_names<
+                trainvm::HostLaunchRegistryDocument>() ==
+                std::vector<std::string>({"api_version", "trusted_roots",
+                                          "profiles"}),
+        "host launch registry types expose their complete reflected schema");
+
+  const auto key = [](std::string adapter, std::string version,
+                      trainvm::ComponentRuntime runtime,
+                      std::string operation, std::string contract) {
+    return trainvm::AdapterKey{
+        .adapter = std::move(adapter),
+        .version = std::move(version),
+        .runtime = runtime,
+        .operation = std::move(operation),
+        .contract = std::move(contract),
+    };
+  };
+  const std::string python_code = "sha256:" + std::string(64, 'a');
+  const std::string python_executable = "sha256:" + std::string(64, 'b');
+  const std::string native_code = "sha256:" + std::string(64, 'c');
+  const trainvm::HostLaunchProfile python_profile{
+      .key = key("rwkv-lab.mageflow", "1.0.0",
+                 trainvm::ComponentRuntime::python_worker, "train",
+                 "rwkv_lab.mageflow.v1.Train"),
+      .code_fingerprint = python_code,
+      .executable_path = "/opt/trainvm/python/bin/python3",
+      .executable_fingerprint = python_executable,
+      .code_path = "/opt/trainvm/adapters/mageflow/worker.py",
+      .public_arguments = {"-I", "/opt/trainvm/adapters/mageflow/worker.py"},
+      .working_directory = "/srv/trainvm/runs/run-1",
+  };
+  const trainvm::HostLaunchProfile native_profile{
+      .key = key("example.native", "2.0.0",
+                 trainvm::ComponentRuntime::native_worker, "execute",
+                 "example.native.v1.Execute"),
+      .code_fingerprint = native_code,
+      .executable_path = "/usr/libexec/trainvm/native-worker",
+      .executable_fingerprint = native_code,
+      .code_path = std::nullopt,
+      .public_arguments = {"--worker"},
+      .working_directory = "/srv/trainvm/runs/run-1",
+  };
+  const trainvm::HostLaunchRegistryDocument document{
+      .api_version = "trainvm.host-launches/v1",
+      .trusted_roots = {"/usr/libexec/trainvm", "/srv/trainvm",
+                        "/opt/trainvm"},
+      .profiles = {native_profile, python_profile},
+  };
+
+  const std::filesystem::path directory =
+      std::filesystem::temp_directory_path() /
+      ("trainvm-host-launch-registry-test-" +
+       std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  const auto set_owner_only = [](const std::filesystem::path& path) {
+    std::filesystem::permissions(
+        path,
+        std::filesystem::perms::owner_read |
+            std::filesystem::perms::owner_write,
+        std::filesystem::perm_options::replace);
+  };
+  const auto write_text = [&](const std::filesystem::path& path,
+                              std::string_view text) {
+    {
+      std::ofstream output(path);
+      output << text;
+    }
+    set_owner_only(path);
+  };
+  const auto write_document = [&](const std::filesystem::path& path,
+                                  const nlohmann::json& value) {
+    write_text(path, value.dump(2) + "\n");
+  };
+
+  const auto registry_path = directory / "host-launches.json";
+  const nlohmann::json encoded = trainvm::encode_json(document);
+  write_document(registry_path, encoded);
+  const trainvm::HostLaunchRegistry loaded =
+      trainvm::HostLaunchRegistry::load_file(registry_path);
+  const auto& resolved_python =
+      loaded.resolve(python_profile.key, python_code);
+  const auto& resolved_native =
+      loaded.resolve(native_profile.key, native_code);
+  auto canonical_document = document;
+  std::ranges::sort(canonical_document.trusted_roots);
+  std::ranges::sort(
+      canonical_document.profiles, {},
+      [](const trainvm::HostLaunchProfile& profile) -> const trainvm::AdapterKey& {
+        return profile.key;
+      });
+  const std::string expected_registry_digest =
+      "sha256:" +
+      trainvm::sha256_hex(trainvm::encode_json(canonical_document).dump());
+  const std::string expected_python_digest =
+      "sha256:" + trainvm::sha256_hex(
+                       nlohmann::json{
+                           {"api_version",
+                            "trainvm.host-launch-profile/v1"},
+                           {"profile", trainvm::encode_json(python_profile)},
+                       }
+                           .dump());
+  check(resolved_python == python_profile &&
+            resolved_native == native_profile &&
+            loaded.trusted_roots() ==
+                std::vector<std::string>({"/opt/trainvm", "/srv/trainvm",
+                                          "/usr/libexec/trainvm"}) &&
+            loaded.registry_digest() == expected_registry_digest &&
+            loaded.profile_digest(python_profile.key, python_code) ==
+                expected_python_digest,
+        "host launch loader reflection-decodes both runtimes and canonicalizes trusted-root and profile order");
+
+  auto reordered = document;
+  std::ranges::reverse(reordered.trusted_roots);
+  std::ranges::reverse(reordered.profiles);
+  const auto reordered_path = directory / "host-launches-reordered.json";
+  write_document(reordered_path, trainvm::encode_json(reordered));
+  const trainvm::HostLaunchRegistry reordered_registry =
+      trainvm::HostLaunchRegistry::load_file(reordered_path);
+  check(reordered_registry.trusted_roots() == loaded.trusted_roots() &&
+            reordered_registry.registry_digest() ==
+                loaded.registry_digest() &&
+            reordered_registry.profile_digest(python_profile.key,
+                                                python_code) ==
+                loaded.profile_digest(python_profile.key, python_code) &&
+            reordered_registry.resolve(python_profile.key, python_code) ==
+                resolved_python &&
+            reordered_registry.resolve(native_profile.key, native_code) ==
+                resolved_native,
+        "host launch registry semantics are invariant to document collection order");
+  auto changed_document = document;
+  changed_document.profiles.at(1).public_arguments.push_back("--changed");
+  const trainvm::HostLaunchRegistry changed_registry(
+      std::move(changed_document));
+  check(changed_registry.registry_digest() != loaded.registry_digest() &&
+            changed_registry.profile_digest(python_profile.key, python_code) !=
+                loaded.profile_digest(python_profile.key, python_code),
+        "host launch registry and profile digests bind launch semantics");
+
+  const auto disabled_path = directory / "host-launches-disabled.json";
+  write_document(
+      disabled_path,
+      trainvm::encode_json(trainvm::HostLaunchRegistryDocument{
+          .api_version = "trainvm.host-launches/v1",
+          .trusted_roots = {},
+          .profiles = {},
+      }));
+  const trainvm::HostLaunchRegistry disabled =
+      trainvm::HostLaunchRegistry::load_file(disabled_path);
+  bool disabled_resolve_rejected = false;
+  try {
+    (void)disabled.resolve(python_profile.key, python_code);
+  } catch (const trainvm::HostLaunchResolutionError&) {
+    disabled_resolve_rejected = true;
+  }
+  check(disabled.trusted_roots().empty() && disabled_resolve_rejected,
+        "empty host launch collections form a valid launch-disabled registry");
+
+  bool fingerprint_mismatch_rejected = false;
+  try {
+    (void)loaded.resolve(python_profile.key,
+                         "sha256:" + std::string(64, 'd'));
+  } catch (const trainvm::HostLaunchResolutionError&) {
+    fingerprint_mismatch_rejected = true;
+  }
+  auto absent_key = python_profile.key;
+  absent_key.contract = "rwkv_lab.mageflow.v2.Train";
+  bool absent_key_rejected = false;
+  try {
+    (void)loaded.resolve(absent_key, python_code);
+  } catch (const trainvm::HostLaunchResolutionError&) {
+    absent_key_rejected = true;
+  }
+  check(fingerprint_mismatch_rejected && absent_key_rejected,
+        "host launch resolution requires an exact adapter key and code fingerprint");
+
+  std::size_t rejection_index = 0;
+  const auto rejects = [&](nlohmann::json candidate) {
+    const auto path = directory /
+        ("rejected-" + std::to_string(rejection_index++) + ".json");
+    write_document(path, candidate);
+    try {
+      (void)trainvm::HostLaunchRegistry::load_file(path);
+      return false;
+    } catch (const std::invalid_argument&) {
+      return true;
+    }
+  };
+
+  auto unknown = encoded;
+  unknown["profiles"].at(0)["unknown"] = true;
+  auto future = encoded;
+  future["api_version"] = "trainvm.host-launches/v2";
+  auto duplicate_profile = encoded;
+  duplicate_profile["profiles"].push_back(duplicate_profile["profiles"].at(0));
+  auto relative_root = encoded;
+  relative_root["trusted_roots"].at(0) = "usr/libexec/trainvm";
+  auto noncanonical_root = encoded;
+  noncanonical_root["trusted_roots"].at(0) = "/usr/libexec/../libexec/trainvm";
+  auto overlapping_roots = encoded;
+  overlapping_roots["trusted_roots"].push_back("/opt/trainvm/python");
+  auto executable_escape = encoded;
+  executable_escape["profiles"].at(0)["executable_path"] = "/bin/worker";
+  auto code_escape = encoded;
+  code_escape["profiles"].at(1)["code_path"] = "/tmp/worker.py";
+  auto working_directory_escape = encoded;
+  working_directory_escape["profiles"].at(0)["working_directory"] =
+      "/tmp/run-1";
+  auto builtin_runtime = encoded;
+  builtin_runtime["profiles"].at(0)["key"]["runtime"] = "builtin";
+  auto external_runtime = encoded;
+  external_runtime["profiles"].at(0)["key"]["runtime"] =
+      "external_worker";
+  auto python_without_code = encoded;
+  python_without_code["profiles"].at(1).erase("code_path");
+  auto native_with_code = encoded;
+  native_with_code["profiles"].at(0)["code_path"] =
+      "/usr/libexec/trainvm/native-worker";
+  auto native_fingerprint_mismatch = encoded;
+  native_fingerprint_mismatch["profiles"].at(0)["code_fingerprint"] =
+      "sha256:" + std::string(64, 'd');
+  auto invalid_fingerprint = encoded;
+  invalid_fingerprint["profiles"].at(1)["executable_fingerprint"] =
+      "sha256:" + std::string(64, 'G');
+  auto too_many_arguments = encoded;
+  too_many_arguments["profiles"].at(0)["public_arguments"] =
+      std::vector<std::string>(257U, "x");
+  auto oversized_argument = encoded;
+  oversized_argument["profiles"].at(0)["public_arguments"] =
+      std::vector<std::string>{std::string(4'097U, 'x')};
+  auto embedded_nul = encoded;
+  embedded_nul["profiles"].at(0)["public_arguments"] =
+      std::vector<std::string>{std::string("left\0right", 10U)};
+  auto secret_argument = encoded;
+  secret_argument["profiles"].at(0)["public_arguments"] =
+      std::vector<std::string>{"--token=secret://trainer-key"};
+  auto dollar_template_argument = encoded;
+  dollar_template_argument["profiles"].at(0)["public_arguments"] =
+      std::vector<std::string>{"${run_id}"};
+  auto brace_template_argument = encoded;
+  brace_template_argument["profiles"].at(0)["public_arguments"] =
+      std::vector<std::string>{"{{run_id}}"};
+  auto empty_roots = encoded;
+  empty_roots["trusted_roots"] = nlohmann::json::array();
+  check(rejects(unknown) && rejects(future) && rejects(duplicate_profile) &&
+            rejects(relative_root) && rejects(noncanonical_root) &&
+            rejects(overlapping_roots) && rejects(executable_escape) &&
+            rejects(code_escape) && rejects(working_directory_escape) &&
+            rejects(builtin_runtime) && rejects(external_runtime) &&
+            rejects(python_without_code) && rejects(native_with_code) &&
+            rejects(native_fingerprint_mismatch) &&
+            rejects(invalid_fingerprint) && rejects(too_many_arguments) &&
+            rejects(oversized_argument) && rejects(embedded_nul) &&
+            rejects(secret_argument) && rejects(dollar_template_argument) &&
+            rejects(brace_template_argument) &&
+            rejects(empty_roots),
+        "host launch registry rejects schema, duplicate, path-containment, runtime, fingerprint, and size violations");
+
+  const auto duplicate_key_path = directory / "duplicate-key.json";
+  write_text(duplicate_key_path,
+             R"({"api_version":"trainvm.host-launches/v1","api_version":"trainvm.host-launches/v1","trusted_roots":["/opt/trainvm"],"profiles":[]})");
+  bool duplicate_key_rejected = false;
+  try {
+    (void)trainvm::HostLaunchRegistry::load_file(duplicate_key_path);
+  } catch (const std::invalid_argument&) {
+    duplicate_key_rejected = true;
+  }
+  const auto nested_duplicate_key_path =
+      directory / "nested-duplicate-key.json";
+  std::string nested_profile = encoded["profiles"].at(0).dump();
+  nested_profile.insert(
+      1U, "\"code_fingerprint\":\"" + native_code + "\",");
+  write_text(nested_duplicate_key_path,
+             "{\"api_version\":\"trainvm.host-launches/v1\","
+             "\"trusted_roots\":" + encoded["trusted_roots"].dump() +
+             ",\"profiles\":[" + nested_profile + "]}");
+  bool nested_duplicate_key_rejected = false;
+  try {
+    (void)trainvm::HostLaunchRegistry::load_file(
+        nested_duplicate_key_path);
+  } catch (const std::invalid_argument&) {
+    nested_duplicate_key_rejected = true;
+  }
+
+  const auto malformed_path = directory / "malformed.json";
+  write_text(malformed_path, "{\"api_version\":");
+  bool malformed_rejected = false;
+  try {
+    (void)trainvm::HostLaunchRegistry::load_file(malformed_path);
+  } catch (const std::invalid_argument&) {
+    malformed_rejected = true;
+  }
+
+  const auto symlink_path = directory / "host-launches-symlink.json";
+  std::filesystem::create_symlink(registry_path, symlink_path);
+  bool symlink_rejected = false;
+  try {
+    (void)trainvm::HostLaunchRegistry::load_file(symlink_path);
+  } catch (const std::invalid_argument&) {
+    symlink_rejected = true;
+  }
+
+  const auto writable_path = directory / "group-writable.json";
+  write_document(writable_path, encoded);
+  std::filesystem::permissions(writable_path,
+                               std::filesystem::perms::group_write,
+                               std::filesystem::perm_options::add);
+  bool writable_rejected = false;
+  try {
+    (void)trainvm::HostLaunchRegistry::load_file(writable_path);
+  } catch (const std::invalid_argument&) {
+    writable_rejected = true;
+  }
+
+  const auto empty_path = directory / "empty.json";
+  write_text(empty_path, "");
+  bool empty_rejected = false;
+  try {
+    (void)trainvm::HostLaunchRegistry::load_file(empty_path);
+  } catch (const std::invalid_argument&) {
+    empty_rejected = true;
+  }
+  const auto oversized_path = directory / "oversized.json";
+  write_text(oversized_path, std::string((1U << 20U) + 1U, ' '));
+  bool oversized_rejected = false;
+  try {
+    (void)trainvm::HostLaunchRegistry::load_file(oversized_path);
+  } catch (const std::invalid_argument&) {
+    oversized_rejected = true;
+  }
+  bool directory_rejected = false;
+  try {
+    (void)trainvm::HostLaunchRegistry::load_file(directory);
+  } catch (const std::invalid_argument&) {
+    directory_rejected = true;
+  }
+  bool relative_file_rejected = false;
+  try {
+    (void)trainvm::HostLaunchRegistry::load_file("host-launches.json");
+  } catch (const std::invalid_argument&) {
+    relative_file_rejected = true;
+  }
+  check(duplicate_key_rejected && nested_duplicate_key_rejected &&
+            malformed_rejected && symlink_rejected && writable_rejected &&
+            empty_rejected && oversized_rejected && directory_rejected &&
+            relative_file_rejected,
+        "host launch file loading rejects duplicate keys at every depth, malformed JSON, symlinks, unsafe modes, non-regular or unbounded files, and relative authority paths");
+
+  std::filesystem::remove_all(directory);
+}
+
+void test_host_launch_resolution_and_binding() {
+  const auto compiled = trainvm::compile_document(load_fixture());
+  check(compiled.valid(), "host launch binding fixture compiles");
+  if (!compiled.valid()) return;
+
+  const std::filesystem::path directory =
+      std::filesystem::temp_directory_path() /
+      ("trainvm-host-launch-resolution-test-" +
+       std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory / "work");
+  std::filesystem::permissions(
+      directory, std::filesystem::perms::owner_all,
+      std::filesystem::perm_options::replace);
+  std::filesystem::permissions(
+      directory / "work", std::filesystem::perms::owner_all,
+      std::filesystem::perm_options::replace);
+  const auto executable = directory / "python";
+  std::filesystem::copy_file("/proc/self/exe", executable);
+  std::filesystem::permissions(
+      executable,
+      std::filesystem::perms::owner_read |
+          std::filesystem::perms::owner_exec,
+      std::filesystem::perm_options::replace);
+  const auto code = directory / "worker.pyz";
+  {
+    std::ofstream output(code, std::ios::binary);
+    output << "PK\003\004immutable-test-zipapp";
+  }
+  std::filesystem::permissions(
+      code, std::filesystem::perms::owner_read,
+      std::filesystem::perm_options::replace);
+  const auto file_digest = [](const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    const std::string bytes((std::istreambuf_iterator<char>(input)),
+                            std::istreambuf_iterator<char>());
+    return "sha256:" + trainvm::sha256_hex(bytes);
+  };
+  const std::string executable_digest = file_digest(executable);
+  const std::string code_digest = file_digest(code);
+  const trainvm::AdapterKey key{
+      .adapter = "rwkv-lab.mageflow",
+      .version = "1.0.0",
+      .runtime = trainvm::ComponentRuntime::python_worker,
+      .operation = "train",
+      .contract = "rwkv_lab.mageflow.v1.Train",
+  };
+  const trainvm::HostLaunchProfile profile{
+      .key = key,
+      .code_fingerprint = code_digest,
+      .executable_path = executable.string(),
+      .executable_fingerprint = executable_digest,
+      .code_path = code.string(),
+      .public_arguments = {"-I", "worker.pyz"},
+      .working_directory = (directory / "work").string(),
+  };
+  const trainvm::HostLaunchRegistry registry({
+      .api_version = "trainvm.host-launches/v1",
+      .trusted_roots = {directory.string()},
+      .profiles = {profile},
+  });
+  const trainvm::HostIdentity host{
+      .host_id = "sha256:" + std::string(64U, '1'),
+      .boot_id = "11111111-1111-1111-1111-111111111111",
+  };
+
+  const auto database = directory / "journal.db";
+  const std::string run_id = "host-launch-binding-run";
+  trainvm::Journal journal(database);
+  trainvm::Controller controller(*compiled.plan, journal, run_id);
+  controller.create_queued();
+  const auto acquisition = controller.begin_acquisition(1'000);
+  const auto ticket = controller.prepare_worker_launch(
+      {.code_fingerprint = code_digest,
+       .required_capabilities = {"worker.metrics", "worker.controls"}},
+      1'100);
+  trainvm::HostLaunchResolver resolver(registry, host);
+  auto first = resolver.resolve(ticket, key);
+  auto second = resolver.resolve(ticket, key);
+  check(first.spec() == second.spec() &&
+            first.spec().spec_digest.starts_with("sha256:") &&
+            first.spec().identity.host_registry_digest ==
+                registry.registry_digest() &&
+            first.spec().identity.host_profile_digest ==
+                registry.profile_digest(key, code_digest),
+        "repeated host resolution produces one deterministic versioned binding");
+
+  const int executable_fd = first.duplicate_executable_fd();
+  const auto code_fd = first.duplicate_code_fd();
+  const int work_fd = first.duplicate_working_directory_fd();
+  const int executable_seals = ::fcntl(executable_fd, F_GET_SEALS);
+  const int code_seals = code_fd ? ::fcntl(*code_fd, F_GET_SEALS) : -1;
+  errno = 0;
+  const bool write_rejected = ::write(executable_fd, "x", 1U) < 0 &&
+                              errno == EPERM;
+  errno = 0;
+  const bool chmod_rejected = ::fchmod(executable_fd, 0400) < 0 &&
+                              errno == EPERM;
+  check(executable_seals >= 0 && code_seals >= 0 &&
+            (executable_seals &
+             (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_EXEC |
+              F_SEAL_SEAL)) ==
+                (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_EXEC |
+                 F_SEAL_SEAL) &&
+            (code_seals &
+             (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL)) ==
+                (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) &&
+            write_rejected && chmod_rejected,
+        "resolved payloads are immutable sealed descriptors with executable mode sealed");
+  (void)::close(executable_fd);
+  if (code_fd) (void)::close(*code_fd);
+  (void)::close(work_fd);
+
+  const nlohmann::json public_manifest =
+      trainvm::resolved_launch_spec_json(first.spec());
+  const auto decoded = trainvm::resolved_launch_spec_from_json(public_manifest);
+  const std::string manifest_text = public_manifest.dump();
+  check(decoded == first.spec() &&
+            manifest_text.find("authorization_token") == std::string::npos &&
+            manifest_text.find("process_instance") == std::string::npos &&
+            manifest_text.find("secret://") == std::string::npos,
+        "resolved binding round-trips canonically without process credentials or secrets");
+  auto forged = first.spec();
+  forged.identity.api_version = "trainvm.resolved-launch/v2";
+  forged.spec_digest =
+      "sha256:" + trainvm::sha256_hex(
+                       trainvm::resolved_launch_identity_json(
+                           forged.identity)
+                           .dump());
+  bool forged_rejected = false;
+  try {
+    (void)trainvm::resolved_launch_spec_from_json(
+        trainvm::resolved_launch_spec_json(forged));
+  } catch (const std::invalid_argument&) {
+    forged_rejected = true;
+  }
+  auto moved = std::move(second);
+  auto move_assigned = resolver.resolve(ticket, key);
+  move_assigned = std::move(moved);
+  const int moved_fd = move_assigned.duplicate_executable_fd();
+  check(forged_rejected && moved_fd >= 0,
+        "self-hashed malformed bindings fail semantics and move-only FD ownership remains valid");
+  if (moved_fd >= 0) (void)::close(moved_fd);
+
+  const auto before_binding = journal.event_count();
+  const auto bound =
+      controller.bind_worker_launch(first, registry, host, 1'200);
+  const auto replayed =
+      controller.bind_worker_launch(first, registry, host, 1'250);
+  const auto historical_replay = controller.bind_worker_launch(
+      first, registry, host, acquisition.lease.expires_at_ns + 1);
+  trainvm::Controller restarted(*compiled.plan, journal, run_id);
+  const auto& recovered = restarted.recover();
+  check(bound == first.spec() && replayed == bound &&
+            historical_replay == bound &&
+            journal.event_count() == before_binding + 1U &&
+            journal.launch_binding(first.spec().identity.launch_event_id) ==
+                std::optional<trainvm::ResolvedLaunchSpec>{bound} &&
+            recovered.revision == controller.state().revision,
+        "opaque host binding commits once, replays exactly, and survives controller recovery");
+
+  auto wrong_host = host;
+  wrong_host.boot_id = "22222222-2222-2222-2222-222222222222";
+  const auto before_rejections = journal.event_count();
+  bool wrong_host_rejected = false;
+  try {
+    (void)controller.bind_worker_launch(first, registry, wrong_host, 1'300);
+  } catch (const std::invalid_argument&) {
+    wrong_host_rejected = true;
+  }
+  auto changed_profile = profile;
+  changed_profile.public_arguments.push_back("--changed");
+  const trainvm::HostLaunchRegistry changed_registry({
+      .api_version = "trainvm.host-launches/v1",
+      .trusted_roots = {directory.string()},
+      .profiles = {changed_profile},
+  });
+  bool changed_profile_rejected = false;
+  try {
+    (void)controller.bind_worker_launch(first, changed_registry, host, 1'300);
+  } catch (const std::invalid_argument&) {
+    changed_profile_rejected = true;
+  }
+  const auto executable_link = directory / "python-link";
+  std::filesystem::create_symlink(executable, executable_link);
+  auto symlink_profile = profile;
+  symlink_profile.executable_path = executable_link.string();
+  const trainvm::HostLaunchRegistry symlink_registry({
+      .api_version = "trainvm.host-launches/v1",
+      .trusted_roots = {directory.string()},
+      .profiles = {symlink_profile},
+  });
+  bool symlink_rejected = false;
+  try {
+    trainvm::HostLaunchResolver symlink_resolver(symlink_registry, host);
+    (void)symlink_resolver.resolve(ticket, key);
+  } catch (const trainvm::HostLaunchResolutionError&) {
+    symlink_rejected = true;
+  }
+  auto fingerprint_profile = profile;
+  fingerprint_profile.executable_fingerprint =
+      "sha256:" + std::string(64U, 'f');
+  const trainvm::HostLaunchRegistry fingerprint_registry({
+      .api_version = "trainvm.host-launches/v1",
+      .trusted_roots = {directory.string()},
+      .profiles = {fingerprint_profile},
+  });
+  bool fingerprint_rejected = false;
+  try {
+    trainvm::HostLaunchResolver fingerprint_resolver(fingerprint_registry,
+                                                     host);
+    (void)fingerprint_resolver.resolve(ticket, key);
+  } catch (const trainvm::HostLaunchResolutionError&) {
+    fingerprint_rejected = true;
+  }
+  std::filesystem::permissions(
+      code, std::filesystem::perms::group_write,
+      std::filesystem::perm_options::add);
+  bool writable_code_rejected = false;
+  try {
+    (void)resolver.resolve(ticket, key);
+  } catch (const trainvm::HostLaunchResolutionError&) {
+    writable_code_rejected = true;
+  }
+  check(wrong_host_rejected && changed_profile_rejected &&
+            symlink_rejected && fingerprint_rejected &&
+            writable_code_rejected &&
+            journal.event_count() == before_rejections,
+        "host, profile, and secure-path mismatches fail before durable mutation");
+
+  std::filesystem::remove_all(directory);
+}
+
 void test_adapter_registry_file_contract() {
   const std::filesystem::path directory =
       std::filesystem::temp_directory_path() /
@@ -4642,6 +5239,8 @@ int main() {
     test_concurrent_queue_acquisition_replay();
     test_acquiring_recovery_ignores_mutable_lease_lifecycle();
     test_acquiring_rejects_fabricated_running_transition();
+    test_host_launch_registry_contract();
+    test_host_launch_resolution_and_binding();
     test_adapter_registry_file_contract();
     test_service_registry_and_reconciliation();
     test_adapter_registry_and_reconciler();

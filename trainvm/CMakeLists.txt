@@ -55,6 +55,8 @@ add_library(trainvm_core
   src/document.cpp
   src/fake_worker.cpp
   src/fsm.cpp
+  src/host_launch.cpp
+  src/host_launch_registry.cpp
   src/journal.cpp
   src/reconciler.cpp
 )

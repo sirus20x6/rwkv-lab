@@ -12,6 +12,7 @@
 
 #include "trainvm/document.hpp"
 #include "trainvm/dispatch.hpp"
+#include "trainvm/host_launch.hpp"
 #include "trainvm/command.hpp"
 #include "trainvm/lease.hpp"
 #include "trainvm/worker.hpp"
@@ -90,6 +91,8 @@ public:
   [[nodiscard]] std::optional<RunProjection> projection(const std::string& run_id) const;
   [[nodiscard]] std::optional<CompiledPlan> compiled_plan(const std::string& plan_hash) const;
   [[nodiscard]] std::optional<Dispatch> dispatch(const std::string& dispatch_id) const;
+  [[nodiscard]] std::optional<ResolvedLaunchSpec> launch_binding(
+      const std::string& launch_event_id) const;
   [[nodiscard]] std::optional<ControlCommand> control_command(
       const std::string& command_id) const;
   [[nodiscard]] std::uint64_t latest_control_revision(const std::string& run_id) const;
@@ -151,6 +154,8 @@ public:
                                   const std::vector<Event>& events);
   bool prepare_worker_launch(const WorkerLaunchTicket& launch, std::int64_t now_ns,
                              const Event& event);
+  bool bind_worker_launch(const ResolvedLaunchSpec& binding,
+                          std::int64_t now_ns, const Event& event);
   WorkerReadinessDisposition accept_worker_ready(
       const WorkerLaunchTicket& launch, const WorkerHelloEvidence& hello,
       std::int64_t now_ns, const std::vector<Event>& events);

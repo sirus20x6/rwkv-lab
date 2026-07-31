@@ -2465,6 +2465,152 @@ bool Journal::prepare_worker_launch(const WorkerLaunchTicket& launch,
   return true;
 }
 
+bool Journal::bind_worker_launch(const ResolvedLaunchSpec& binding,
+                                 std::int64_t now_ns,
+                                 const Event& event) {
+  const ResolvedLaunchSpec canonical = resolved_launch_spec_from_json(
+      resolved_launch_spec_json(binding));
+  const ResolvedLaunchIdentity& identity = canonical.identity;
+  require_lease_identity(identity.concurrency_key, identity.run_id,
+                         identity.lease_id);
+  const nlohmann::json expected_payload{
+      {"cause_event_id", identity.launch_event_id},
+      {"spec", resolved_launch_spec_json(canonical)},
+  };
+  if (now_ns < 0 || identity.fencing_token == 0U ||
+      identity.launch_event_id.empty() || identity.run_id.empty() ||
+      identity.node_id.empty() || identity.attempt_id.empty() ||
+      identity.launch_nonce.empty() || identity.adapter_key.adapter.empty() ||
+      identity.adapter_key.version.empty() ||
+      identity.code_fingerprint.empty() ||
+      event.event_id != identity.launch_event_id + ":bound" ||
+      event.run_id != identity.run_id || event.node_id != identity.node_id ||
+      event.attempt_id != identity.attempt_id || event.worker_sequence != 0U ||
+      event.event_type != "worker.launch_bound" ||
+      event.payload != expected_payload) {
+    throw std::invalid_argument(
+        "worker host launch binding or event is malformed");
+  }
+  Transaction transaction(database_);
+  std::string chain_reason;
+  if (!verify_chain(&chain_reason)) {
+    throw std::runtime_error("refusing host launch binding: " +
+                             chain_reason);
+  }
+  const auto stored = this->event(event.event_id);
+  if (stored) {
+    Event replay = event;
+    replay.wall_time_ns = stored->wall_time_ns;
+    replay.monotonic_time_ns = stored->monotonic_time_ns;
+    if (event_json(*stored) != event_json(replay)) {
+      throw std::invalid_argument(
+          "host launch binding retry differs from durable evidence");
+    }
+    transaction.commit();
+    return false;
+  }
+  Statement projection(database_, R"sql(
+    SELECT desired_state, observed_state, run_revision,
+           current_node_id, current_attempt_id
+    FROM run_projection WHERE run_id=?
+  )sql");
+  bind_text(projection.get(), 1, identity.run_id);
+  if (sqlite3_step(projection.get()) != SQLITE_ROW ||
+      column_text(projection.get(), 0) != "running" ||
+      column_text(projection.get(), 1) != "acquiring" ||
+      static_cast<std::uint64_t>(sqlite3_column_int64(projection.get(), 2)) !=
+          event.run_revision ||
+      !column_text(projection.get(), 3).empty() ||
+      !column_text(projection.get(), 4).empty()) {
+    throw std::invalid_argument(
+        "host launch binding requires an unassigned acquiring run");
+  }
+  const auto launch = this->event(identity.launch_event_id);
+  const nlohmann::json expected_launch_payload{
+      {"launch_nonce", identity.launch_nonce},
+      {"adapter", identity.adapter_key.adapter},
+      {"adapter_version", identity.adapter_key.version},
+      {"code_fingerprint", identity.code_fingerprint},
+      {"required_capabilities", identity.required_capabilities},
+      {"concurrency_key", identity.concurrency_key},
+      {"lease_id", identity.lease_id},
+      {"fencing_token", identity.fencing_token},
+  };
+  if (!launch || launch->event_type != "worker.launch_requested" ||
+      launch->run_id != identity.run_id ||
+      launch->node_id != identity.node_id ||
+      launch->attempt_id != identity.attempt_id ||
+      launch->run_revision != event.run_revision ||
+      launch->payload != expected_launch_payload) {
+    throw std::invalid_argument(
+        "host launch binding has no matching durable launch request");
+  }
+  Statement lease(database_, R"sql(
+    SELECT 1 FROM resource_leases
+    WHERE concurrency_key=? AND owner_run_id=? AND lease_id=?
+      AND fencing_token=? AND expires_at_ns>? AND released_at_ns IS NULL
+      AND NOT EXISTS(
+        SELECT 1 FROM resource_lease_releases AS release
+        WHERE release.concurrency_key=resource_leases.concurrency_key
+          AND release.owner_run_id=resource_leases.owner_run_id
+          AND release.lease_id=resource_leases.lease_id
+          AND release.fencing_token=resource_leases.fencing_token
+      )
+  )sql");
+  bind_text(lease.get(), 1, identity.concurrency_key);
+  bind_text(lease.get(), 2, identity.run_id);
+  bind_text(lease.get(), 3, identity.lease_id);
+  bind_integer(lease.get(), 4,
+               checked_integer(identity.fencing_token, "fencing_token"));
+  bind_integer(lease.get(), 5, now_ns);
+  if (sqlite3_step(lease.get()) != SQLITE_ROW) {
+    throw OperationPreconditionError(
+        "host launch binding no longer owns its active lease");
+  }
+  Statement conflicting(database_, R"sql(
+    SELECT 1 FROM events
+    WHERE run_id=? AND event_type='worker.launch_bound'
+      AND node_id=? AND attempt_id=? LIMIT 1
+  )sql");
+  bind_text(conflicting.get(), 1, identity.run_id);
+  bind_text(conflicting.get(), 2, identity.node_id);
+  bind_text(conflicting.get(), 3, identity.attempt_id);
+  if (sqlite3_step(conflicting.get()) == SQLITE_ROW) {
+    throw std::invalid_argument(
+        "worker attempt already has another host launch binding");
+  }
+  append_uncommitted(event);
+  transaction.commit();
+  return true;
+}
+
+std::optional<ResolvedLaunchSpec> Journal::launch_binding(
+    const std::string& launch_event_id) const {
+  if (launch_event_id.empty()) {
+    throw std::invalid_argument("launch event identity must not be empty");
+  }
+  const auto bound = event(launch_event_id + ":bound");
+  if (!bound) return std::nullopt;
+  if (bound->event_type != "worker.launch_bound" ||
+      bound->event_id != launch_event_id + ":bound" ||
+      bound->event_version != 1U || bound->worker_sequence != 0U ||
+      bound->payload.value("cause_event_id", std::string{}) !=
+          launch_event_id ||
+      !bound->payload.contains("spec")) {
+    throw std::runtime_error("durable host launch binding is malformed");
+  }
+  ResolvedLaunchSpec spec =
+      resolved_launch_spec_from_json(bound->payload.at("spec"));
+  if (spec.identity.launch_event_id != launch_event_id ||
+      spec.identity.run_id != bound->run_id ||
+      spec.identity.node_id != bound->node_id ||
+      spec.identity.attempt_id != bound->attempt_id) {
+    throw std::runtime_error(
+        "durable host launch binding disagrees with its event envelope");
+  }
+  return spec;
+}
+
 WorkerReadinessDisposition Journal::accept_worker_ready(
     const WorkerLaunchTicket& launch, const WorkerHelloEvidence& hello,
     std::int64_t now_ns, const std::vector<Event>& events) {

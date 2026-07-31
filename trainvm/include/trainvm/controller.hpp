@@ -23,6 +23,10 @@ class Controller {
   LeaseAcquireResult begin_acquisition(std::int64_t now_ns);
   WorkerLaunchTicket prepare_worker_launch(WorkerLaunchRequest request,
                                            std::int64_t now_ns);
+  ResolvedLaunchSpec bind_worker_launch(
+      const ResolvedLaunch& resolved,
+      const HostLaunchRegistry& host_registry,
+      const HostIdentity& authority_host, std::int64_t now_ns);
   WorkerReadinessResult accept_worker_hello(WorkerHelloEvidence hello,
                                              std::int64_t now_ns);
   Dispatch prepare_dispatch(std::int64_t now_ns);

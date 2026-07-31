@@ -34,7 +34,8 @@ bool is_controller_event(std::string_view event_type) {
          event_type == "fsm.transitioned" || event_type == "run.desired_state_changed" ||
          event_type == "run.observed_state_changed" ||
          event_type == "resource.lease_acquired" ||
-         event_type == "worker.launch_requested" || event_type == "worker.ready" ||
+         event_type == "worker.launch_requested" ||
+         event_type == "worker.launch_bound" || event_type == "worker.ready" ||
          event_type == "node.dispatch_prepared" || event_type == "node.dispatch_completed" ||
          event_type.starts_with("control.");
 }
@@ -349,6 +350,7 @@ const ExecutionState& Controller::recover() {
     lease_acquired,
     acquiring,
     launch_requested,
+    launch_bound,
     worker_ready,
     expecting_entry,
     ready,
@@ -641,8 +643,74 @@ const ExecutionState& Controller::recover() {
       phase = ReplayPhase::launch_requested;
       continue;
     }
-    if (event.event_type == "worker.ready") {
+    if (event.event_type == "worker.launch_bound") {
       if (phase != ReplayPhase::launch_requested ||
+          event.run_revision != recovered.revision ||
+          event.node_id != recovered.current_node_id ||
+          event.attempt_id != recovered.current_attempt_id ||
+          event.worker_sequence != 0) {
+        throw std::runtime_error(
+            "journal contains a host launch binding without a launch request");
+      }
+      const std::string launch_id = event.payload.value(
+          "cause_event_id", std::string{});
+      const auto launch_event = journal_.event(launch_id);
+      if (!launch_event ||
+          launch_event->event_type != "worker.launch_requested" ||
+          launch_event->run_id != run_id_ ||
+          launch_event->node_id != recovered.current_node_id ||
+          launch_event->attempt_id != recovered.current_attempt_id ||
+          event.event_id != launch_id + ":bound" ||
+          event.event_version != 1U ||
+          !event.payload.contains("spec")) {
+        throw std::runtime_error(
+            "host launch binding has no matching durable launch request");
+      }
+      const WorkerLaunchTicket launch = launch_from_event(*launch_event);
+      const Node& active_node =
+          plan_.experiment.spec.workflow.nodes.at(recovered.current_node_id);
+      const Component& active_component =
+          plan_.experiment.spec.components.at(active_node.invoke.component);
+      const Operation& active_operation = active_component.operations.at(
+          active_node.invoke.operation);
+      ResolvedLaunchSpec binding;
+      try {
+        binding = resolved_launch_spec_from_json(event.payload.at("spec"));
+      } catch (const std::exception& exception) {
+        throw std::runtime_error(
+            std::string("host launch binding is malformed: ") +
+            exception.what());
+      }
+      const ResolvedLaunchIdentity& identity = binding.identity;
+      if (identity.launch_event_id != launch_event->event_id ||
+          identity.run_id != launch.run_id ||
+          identity.node_id != launch.node_id ||
+          identity.attempt_id != launch.attempt_id ||
+          identity.launch_nonce != launch.launch_nonce ||
+          identity.adapter_key.adapter != launch.adapter ||
+          identity.adapter_key.version != launch.adapter_version ||
+          identity.adapter_key.runtime != active_component.runtime ||
+          identity.adapter_key.operation != active_node.invoke.operation ||
+          identity.adapter_key.contract != active_operation.contract ||
+          identity.code_fingerprint != launch.code_fingerprint ||
+          identity.required_capabilities != launch.required_capabilities ||
+          identity.concurrency_key != launch.concurrency_key ||
+          identity.lease_id != launch.lease_id ||
+          identity.fencing_token != launch.fencing_token ||
+          event.payload != nlohmann::json{
+                               {"cause_event_id", launch_event->event_id},
+                               {"spec", resolved_launch_spec_json(binding)}}) {
+        throw std::runtime_error(
+            "host launch binding disagrees with its launch ticket");
+      }
+      phase = ReplayPhase::launch_bound;
+      continue;
+    }
+    if (event.event_type == "worker.ready") {
+      // launch_requested remains temporarily accepted for process-free legacy
+      // fixtures. The production supervisor boundary will require launch_bound.
+      if ((phase != ReplayPhase::launch_requested &&
+           phase != ReplayPhase::launch_bound) ||
           event.run_revision != recovered.revision ||
           event.node_id != recovered.current_node_id ||
           event.attempt_id != recovered.current_attempt_id ||
@@ -954,6 +1022,7 @@ const ExecutionState& Controller::recover() {
   }
   if ((phase != ReplayPhase::queued && phase != ReplayPhase::acquiring &&
        phase != ReplayPhase::launch_requested &&
+       phase != ReplayPhase::launch_bound &&
        phase != ReplayPhase::ready && phase != ReplayPhase::terminal) ||
       expected_completion || expected_reacquisition_cause_id) {
     throw std::runtime_error(
@@ -1236,6 +1305,80 @@ WorkerLaunchTicket Controller::prepare_worker_launch(WorkerLaunchRequest request
   journal_.prepare_worker_launch(launch, now_ns, event);
   recover();
   return launch;
+}
+
+ResolvedLaunchSpec Controller::bind_worker_launch(
+    const ResolvedLaunch& resolved,
+    const HostLaunchRegistry& host_registry,
+    const HostIdentity& authority_host, std::int64_t now_ns) {
+  if (now_ns < 0) {
+    throw std::invalid_argument(
+        "host launch binding clock must be nonnegative");
+  }
+  const ResolvedLaunchSpec& binding = resolved.spec();
+  recover();
+  const std::string launch_id = worker_launch_event_id(state_);
+  const Node& active_node =
+      plan_.experiment.spec.workflow.nodes.at(state_.current_node_id);
+  const Component& active_component =
+      plan_.experiment.spec.components.at(active_node.invoke.component);
+  const Operation& active_operation =
+      active_component.operations.at(active_node.invoke.operation);
+  const AdapterKey expected_key{
+      .adapter = active_component.adapter,
+      .version = active_component.version,
+      .runtime = active_component.runtime,
+      .operation = active_node.invoke.operation,
+      .contract = active_operation.contract,
+  };
+  const HostLaunchProfile& host_profile = host_registry.resolve(
+      expected_key, binding.identity.code_fingerprint);
+  if (binding.identity.launch_event_id != launch_id ||
+      binding.identity.adapter_key != expected_key ||
+      binding.identity.host != authority_host ||
+      binding.identity.host_registry_digest !=
+          host_registry.registry_digest() ||
+      binding.identity.host_profile_digest != host_registry.profile_digest(
+          expected_key, binding.identity.code_fingerprint) ||
+      binding.identity.executable.source_path !=
+          host_profile.executable_path ||
+      binding.identity.executable.sealed_sha256 !=
+          host_profile.executable_fingerprint ||
+      binding.identity.public_arguments != host_profile.public_arguments ||
+      binding.identity.working_directory.source_path !=
+          host_profile.working_directory ||
+      binding.identity.code.has_value() != host_profile.code_path.has_value() ||
+      (binding.identity.code &&
+       (binding.identity.code->source_path != *host_profile.code_path ||
+        binding.identity.code->sealed_sha256 !=
+            host_profile.code_fingerprint))) {
+    throw std::invalid_argument(
+        "host launch binding disagrees with the active operation");
+  }
+  const Event event{
+      .event_id = launch_id + ":bound",
+      .run_id = run_id_,
+      .run_revision = state_.revision,
+      .plan_revision = kInitialPlanRevision,
+      .node_id = state_.current_node_id,
+      .attempt_id = state_.current_attempt_id,
+      .worker_sequence = 0,
+      .event_type = "worker.launch_bound",
+      .event_version = 1,
+      .wall_time_ns = now_ns,
+      .monotonic_time_ns = 0,
+      .optimizer_step = std::nullopt,
+      .payload = {{"cause_event_id", launch_id},
+                  {"spec", resolved_launch_spec_json(binding)}},
+  };
+  (void)journal_.bind_worker_launch(binding, now_ns, event);
+  recover();
+  const auto durable = journal_.launch_binding(launch_id);
+  if (!durable) {
+    throw std::runtime_error(
+        "durable host launch binding disappeared after commit");
+  }
+  return *durable;
 }
 
 WorkerReadinessResult Controller::accept_worker_hello(WorkerHelloEvidence hello,
