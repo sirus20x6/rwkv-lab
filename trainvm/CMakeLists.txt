@@ -59,6 +59,7 @@ add_library(trainvm_core
   src/fsm.cpp
   src/host_launch.cpp
   src/host_launch_registry.cpp
+  src/host_resources.cpp
   src/journal.cpp
   src/lease_renewal.cpp
   src/reconciler.cpp
@@ -132,6 +133,12 @@ target_compile_definitions(coverage_fixture_tests PRIVATE
 )
 target_link_libraries(coverage_fixture_tests PRIVATE trainvm_core)
 add_test(NAME coverage_fixture_tests COMMAND coverage_fixture_tests)
+add_executable(host_resources_tests tests/host_resources_tests.cpp)
+target_compile_options(host_resources_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(host_resources_tests PRIVATE trainvm_core)
+add_test(NAME host_resources_tests COMMAND host_resources_tests)
 
 get_target_property(TRAINVM_SERVICE_LINKS trainvm_service LINK_LIBRARIES)
 if("trainvm_compatibility_catalog" IN_LIST TRAINVM_SERVICE_LINKS)
