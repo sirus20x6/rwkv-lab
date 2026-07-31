@@ -49,12 +49,14 @@ target_include_directories(trainvm_protocol SYSTEM PUBLIC "${TRAINVM_GENERATED_D
 target_link_libraries(trainvm_protocol PUBLIC protobuf::libprotobuf gRPC::grpc++)
 
 add_library(trainvm_core
+  src/adapter_registry.cpp
   src/control.cpp
   src/controller.cpp
   src/document.cpp
   src/fake_worker.cpp
   src/fsm.cpp
   src/journal.cpp
+  src/reconciler.cpp
 )
 target_include_directories(trainvm_core PUBLIC include)
 target_compile_options(trainvm_core PUBLIC -freflection)

@@ -12,6 +12,8 @@ struct WorkerLaunchRequest {
 };
 
 struct WorkerLaunchTicket {
+  // Protocol launch authorization, not sufficient OS-process identity or exec
+  // authority. The process supervisor must bind a resolved launch spec and host.
   std::string run_id;
   std::string node_id;
   std::string attempt_id;

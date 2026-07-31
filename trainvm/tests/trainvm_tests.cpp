@@ -1,3 +1,4 @@
+#include "trainvm/adapter_registry.hpp"
 #include "trainvm/controller.hpp"
 #include "trainvm/control.hpp"
 #include "trainvm/document.hpp"
@@ -6,6 +7,7 @@
 #include "trainvm/journal.hpp"
 #include "trainvm/model.hpp"
 #include "trainvm/reflection_json.hpp"
+#include "trainvm/reconciler.hpp"
 #include "trainvm/service.hpp"
 #include "trainvm/v1/trainvm.pb.h"
 
@@ -68,6 +70,68 @@ nlohmann::json load_fixture() {
   nlohmann::json value;
   input >> value;
   return value;
+}
+
+std::vector<trainvm::AdapterProfile> fixture_adapter_profiles(
+    char fingerprint_digit = 'a') {
+  const std::string worker_fingerprint =
+      "sha256:" + std::string(64, fingerprint_digit);
+  const auto key = [](std::string adapter, std::string version,
+                      trainvm::ComponentRuntime runtime,
+                      std::string operation, std::string contract) {
+    return trainvm::AdapterKey{
+        .adapter = std::move(adapter),
+        .version = std::move(version),
+        .runtime = runtime,
+        .operation = std::move(operation),
+        .contract = std::move(contract),
+    };
+  };
+  return {
+      {.key = key("trainvm.core", "1.0.0",
+                  trainvm::ComponentRuntime::builtin, "acquire_resources",
+                  "trainvm.v1.AcquireResources"),
+       .effect = trainvm::Effect::resource,
+       .idempotency = trainvm::Idempotency::receipt_required,
+       .code_fingerprint = {},
+       .required_capabilities = {}},
+      {.key = key("trainvm.core", "1.0.0",
+                  trainvm::ComponentRuntime::builtin, "validate_artifact",
+                  "trainvm.v1.ValidateArtifact"),
+       .effect = trainvm::Effect::read_only,
+       .idempotency = trainvm::Idempotency::replay_safe,
+       .code_fingerprint = {},
+       .required_capabilities = {}},
+      {.key = key("trainvm.core", "1.0.0",
+                  trainvm::ComponentRuntime::builtin, "release_resources",
+                  "trainvm.v1.ReleaseResources"),
+       .effect = trainvm::Effect::resource,
+       .idempotency = trainvm::Idempotency::replay_safe,
+       .code_fingerprint = {},
+       .required_capabilities = {}},
+      {.key = key("rwkv-lab.mageflow", "1.0.0",
+                  trainvm::ComponentRuntime::python_worker, "train",
+                  "rwkv_lab.mageflow.v1.Train"),
+       .effect = trainvm::Effect::process,
+       .idempotency = trainvm::Idempotency::receipt_required,
+       .code_fingerprint = worker_fingerprint,
+       .required_capabilities = {"worker.metrics", "worker.controls"}},
+      {.key = key("rwkv-lab.mageflow", "1.0.0",
+                  trainvm::ComponentRuntime::python_worker,
+                  "prepare_cache_span",
+                  "rwkv_lab.mageflow.v1.PrepareCacheSpan"),
+       .effect = trainvm::Effect::workspace_write,
+       .idempotency = trainvm::Idempotency::replay_safe,
+       .code_fingerprint = worker_fingerprint,
+       .required_capabilities = {"worker.metrics", "worker.controls"}},
+      {.key = key("rwkv-lab.mageflow", "1.0.0",
+                  trainvm::ComponentRuntime::python_worker, "cache_encoders",
+                  "rwkv_lab.mageflow.v1.CacheEncoders"),
+       .effect = trainvm::Effect::process,
+       .idempotency = trainvm::Idempotency::receipt_required,
+       .code_fingerprint = worker_fingerprint,
+       .required_capabilities = {"worker.metrics", "worker.controls"}},
+  };
 }
 
 bool has_diagnostic(const trainvm::CompileResult& result, std::string_view code) {
@@ -3567,6 +3631,405 @@ void test_acquiring_rejects_fabricated_running_transition() {
   std::filesystem::remove_all(directory);
 }
 
+void test_adapter_registry_and_reconciler() {
+  const auto compiled = trainvm::compile_document(load_fixture());
+  check(compiled.valid(), "fixture required by adapter reconciliation compiles");
+  if (!compiled.valid()) return;
+
+  const std::string expected_fingerprint = "sha256:" + std::string(64, 'a');
+  const trainvm::AdapterRegistry registry(fixture_adapter_profiles());
+  bool plan_validated = true;
+  try {
+    registry.validate_plan(*compiled.plan);
+  } catch (const std::exception& exception) {
+    plan_validated = false;
+    std::cerr << "adapter registry validation error: " << exception.what()
+              << '\n';
+  }
+  const auto& mageflow =
+      compiled.plan->experiment.spec.components.at("mageflow");
+  const auto& train_profile = registry.resolve(mageflow, "train");
+  check(plan_validated &&
+            train_profile.key.adapter == "rwkv-lab.mageflow" &&
+            train_profile.key.version == "1.0.0" &&
+            train_profile.key.runtime ==
+                trainvm::ComponentRuntime::python_worker &&
+            train_profile.key.operation == "train" &&
+            train_profile.key.contract ==
+                "rwkv_lab.mageflow.v1.Train" &&
+            train_profile.effect == trainvm::Effect::process &&
+            train_profile.idempotency ==
+                trainvm::Idempotency::receipt_required &&
+            train_profile.code_fingerprint == expected_fingerprint &&
+            train_profile.required_capabilities ==
+                std::vector<std::string>({"worker.controls",
+                                          "worker.metrics"}),
+        "adapter registry resolves the exact authority-owned operation profile");
+
+  auto duplicate_profiles = fixture_adapter_profiles();
+  duplicate_profiles.push_back(duplicate_profiles.back());
+  bool duplicate_rejected = false;
+  try {
+    trainvm::AdapterRegistry duplicate(std::move(duplicate_profiles));
+  } catch (const std::invalid_argument&) {
+    duplicate_rejected = true;
+  }
+  auto semantic_mismatch_profiles = fixture_adapter_profiles();
+  const auto semantic_profile = std::ranges::find_if(
+      semantic_mismatch_profiles, [](const trainvm::AdapterProfile& profile) {
+        return profile.key.operation == "train";
+      });
+  if (semantic_profile != semantic_mismatch_profiles.end()) {
+    semantic_profile->effect = trainvm::Effect::read_only;
+  }
+  bool semantic_mismatch_rejected = false;
+  try {
+    const trainvm::AdapterRegistry mismatch(
+        std::move(semantic_mismatch_profiles));
+    mismatch.validate_plan(*compiled.plan);
+  } catch (const trainvm::AdapterResolutionError&) {
+    semantic_mismatch_rejected = true;
+  }
+  check(duplicate_rejected && semantic_mismatch_rejected,
+        "adapter registry rejects duplicate keys and under-declared operation semantics");
+
+  const auto launch_bytes = [](const trainvm::WorkerLaunchTicket& launch) {
+    return nlohmann::json{
+        {"run_id", launch.run_id},
+        {"node_id", launch.node_id},
+        {"attempt_id", launch.attempt_id},
+        {"launch_nonce", launch.launch_nonce},
+        {"adapter", launch.adapter},
+        {"adapter_version", launch.adapter_version},
+        {"code_fingerprint", launch.code_fingerprint},
+        {"required_capabilities", launch.required_capabilities},
+        {"concurrency_key", launch.concurrency_key},
+        {"lease_id", launch.lease_id},
+        {"fencing_token", launch.fencing_token},
+    }.dump();
+  };
+
+  const std::filesystem::path directory =
+      std::filesystem::temp_directory_path() /
+      ("trainvm-reconciler-test-" +
+       std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+
+  {
+    const auto database_path = directory / "registry-mismatch.db";
+    const std::string run_id = "registry-mismatch-run";
+    trainvm::Journal journal(database_path);
+    trainvm::Controller controller(*compiled.plan, journal, run_id);
+    controller.create_queued();
+    const auto before_projection = journal.projection(run_id);
+    const auto before_count = journal.event_count();
+    auto missing_profiles = fixture_adapter_profiles();
+    missing_profiles.erase(std::remove_if(
+        missing_profiles.begin(), missing_profiles.end(),
+        [](const trainvm::AdapterProfile& profile) {
+          return profile.key.operation == "train";
+        }), missing_profiles.end());
+    const trainvm::AdapterRegistry missing_registry(
+        std::move(missing_profiles));
+    std::mutex authority_mutex;
+    trainvm::Reconciler reconciler(journal, missing_registry,
+                                   authority_mutex, [] { return 1'000; });
+    bool mismatch_rejected = false;
+    try {
+      (void)reconciler.step(run_id);
+    } catch (const trainvm::AdapterResolutionError&) {
+      mismatch_rejected = true;
+    }
+    check(mismatch_rejected && journal.event_count() == before_count &&
+              journal.projection(run_id) == before_projection &&
+              !journal.active_lease(
+                  compiled.plan->experiment.spec.workspace.concurrency_key,
+                  1'000),
+          "registry mismatch rejects reconciliation before any journal or lease mutation");
+  }
+
+  {
+    const auto database_path = directory / "partial-admission.db";
+    const std::string run_id = "reconciler-partial-admission-run";
+    const std::string& concurrency_key =
+        compiled.plan->experiment.spec.workspace.concurrency_key;
+    const std::string lease_id =
+        "lease-" + trainvm::sha256_hex(
+            nlohmann::json{{"run_id", run_id},
+                           {"plan_hash", compiled.plan->plan_hash},
+                           {"concurrency_key", concurrency_key}}
+                .dump());
+    {
+      trainvm::Journal journal(database_path);
+      trainvm::Controller controller(*compiled.plan, journal, run_id);
+      controller.create_queued();
+      const auto acquisition_event =
+          [&](std::string event_id, std::uint64_t revision,
+              std::string event_type, nlohmann::json payload) {
+            return trainvm::Event{
+                .event_id = std::move(event_id),
+                .run_id = run_id,
+                .run_revision = revision,
+                .plan_revision = 1,
+                .node_id = {},
+                .attempt_id = {},
+                .worker_sequence = 0,
+                .event_type = std::move(event_type),
+                .event_version = 1,
+                .wall_time_ns = 4'000,
+                .monotonic_time_ns = 0,
+                .optimizer_step = std::nullopt,
+                .payload = std::move(payload),
+            };
+          };
+      const std::string acquired_id = run_id + ":lease-acquired";
+      const auto acquired = journal.acquire_lease_with_events(
+          concurrency_key, run_id, lease_id, 4'000, 30'000'000'000LL,
+          {acquisition_event(
+               run_id + ":lease-desired", 2,
+               "run.desired_state_changed",
+               {{"state", "running"},
+                {"cause", "scheduler.lease_acquisition"},
+                {"lease_id", lease_id},
+                {"plan_hash", compiled.plan->plan_hash}}),
+           acquisition_event(
+               acquired_id, 2, "resource.lease_acquired",
+               {{"concurrency_key", concurrency_key},
+                {"owner_run_id", run_id},
+                {"lease_id", lease_id}}),
+           acquisition_event(
+               run_id + ":acquiring", 3,
+               "run.observed_state_changed",
+               {{"state", "acquiring"},
+                {"cause_event_id", acquired_id},
+                {"concurrency_key", concurrency_key},
+                {"lease_id", lease_id}})});
+      const auto partial = journal.projection(run_id);
+      check(acquired.status == trainvm::LeaseAcquireStatus::acquired &&
+                partial && partial->desired_state == "running" &&
+                partial->observed_state == "acquiring" &&
+                partial->run_revision == 3U &&
+                journal.events_for_run(run_id).size() == 4U,
+            "partial admission fixture stops after the durable lease prefix");
+    }
+    trainvm::Journal restarted_journal(database_path);
+    std::mutex authority_mutex;
+    trainvm::Reconciler restarted(restarted_journal, registry,
+                                  authority_mutex, [] { return 4'100; });
+    const auto resumed = restarted.step(run_id);
+    const auto completed = restarted_journal.projection(run_id);
+    trainvm::Controller recovered(*compiled.plan, restarted_journal, run_id);
+    const auto& execution = recovered.recover();
+    check(resumed.disposition ==
+              trainvm::ReconcileDisposition::lease_acquired &&
+              !resumed.launch && completed &&
+              completed->observed_state == "acquiring" &&
+              completed->run_revision == 4U &&
+              completed->current_node_id.empty() &&
+              execution.current_node_id == "train_to_boundary" &&
+              restarted_journal.events_for_run(run_id).size() == 6U &&
+              !restarted_journal.event(
+                  run_id + ":worker-launch:train_to_boundary:"
+                           "train_to_boundary@1"),
+          "reconciler restart completes a partial builtin admission before worker launch");
+  }
+
+  const auto database_path = directory / "restart-replay.db";
+  const std::string run_id = "reconciler-restart-run";
+  {
+    trainvm::Journal journal(database_path);
+    trainvm::Controller controller(*compiled.plan, journal, run_id);
+    controller.create_queued();
+    std::mutex authority_mutex;
+    trainvm::Reconciler reconciler(journal, registry, authority_mutex,
+                                   [] { return 2'000; });
+    const auto acquired = reconciler.step(run_id);
+    const auto projection = journal.projection(run_id);
+    check(acquired.disposition ==
+              trainvm::ReconcileDisposition::lease_acquired &&
+              !acquired.launch && projection &&
+              projection->desired_state == "running" &&
+              projection->observed_state == "acquiring" &&
+              projection->run_revision == 4U &&
+              projection->current_node_id.empty() &&
+              projection->current_attempt_id.empty() &&
+              journal.events_for_run(run_id).size() == 6U,
+          "first reconciler step atomically acquires the queued run without launching");
+  }
+
+  struct ReconcileOutcome {
+    std::optional<trainvm::ReconcileResult> result;
+    std::string error;
+  };
+  trainvm::WorkerLaunchTicket prepared_launch;
+  {
+    trainvm::Journal left_journal(database_path);
+    trainvm::Journal right_journal(database_path);
+    std::mutex authority_mutex;
+    trainvm::Reconciler left(left_journal, registry, authority_mutex,
+                             [] { return 2'100; });
+    trainvm::Reconciler right(right_journal, registry, authority_mutex,
+                              [] { return 2'100; });
+    std::promise<void> start;
+    const auto gate = start.get_future().share();
+    const auto reconcile = [&](trainvm::Reconciler& candidate) {
+      gate.wait();
+      try {
+        return ReconcileOutcome{
+            .result = candidate.step(run_id), .error = {}};
+      } catch (const std::exception& exception) {
+        return ReconcileOutcome{
+            .result = std::nullopt, .error = exception.what()};
+      }
+    };
+    auto left_future =
+        std::async(std::launch::async, reconcile, std::ref(left));
+    auto right_future =
+        std::async(std::launch::async, reconcile, std::ref(right));
+    start.set_value();
+    const auto left_result = left_future.get();
+    const auto right_result = right_future.get();
+    if (!left_result.result || !right_result.result) {
+      std::cerr << "reconciler launch race errors: left='"
+                << left_result.error << "' right='" << right_result.error
+                << "'\n";
+    }
+    const bool prepared_and_replayed =
+        left_result.result && right_result.result &&
+        ((left_result.result->disposition ==
+              trainvm::ReconcileDisposition::launch_prepared &&
+          right_result.result->disposition ==
+              trainvm::ReconcileDisposition::launch_replayed) ||
+         (left_result.result->disposition ==
+              trainvm::ReconcileDisposition::launch_replayed &&
+          right_result.result->disposition ==
+              trainvm::ReconcileDisposition::launch_prepared));
+    if (left_result.result && left_result.result->launch) {
+      prepared_launch = *left_result.result->launch;
+    } else if (right_result.result && right_result.result->launch) {
+      prepared_launch = *right_result.result->launch;
+    }
+    const auto events = left_journal.events_for_run(run_id);
+    const auto launch_count = std::ranges::count_if(
+        events, [](const trainvm::Event& event) {
+          return event.event_type == "worker.launch_requested";
+        });
+    check(prepared_and_replayed && left_result.result->launch &&
+              right_result.result->launch &&
+              launch_bytes(*left_result.result->launch) ==
+                  launch_bytes(*right_result.result->launch) &&
+              prepared_launch.code_fingerprint == expected_fingerprint &&
+              prepared_launch.required_capabilities ==
+                  std::vector<std::string>({"worker.controls",
+                                            "worker.metrics"}) &&
+              launch_count == 1 && events.size() == 7U,
+          "concurrent acquired-run steps prepare one byte-identical registry-authorized launch");
+  }
+
+  std::string durable_launch_payload;
+  {
+    trainvm::Journal restarted_journal(database_path);
+    std::mutex restarted_mutex;
+    trainvm::Reconciler restarted(restarted_journal, registry,
+                                  restarted_mutex, [] { return 2'200; });
+    const auto first = restarted.step(run_id);
+    const auto second = restarted.step(run_id);
+    const std::string launch_id =
+        run_id + ":worker-launch:" + prepared_launch.node_id + ":" +
+        prepared_launch.attempt_id;
+    const auto durable_launch = restarted_journal.event(launch_id);
+    if (durable_launch) durable_launch_payload = durable_launch->payload.dump();
+    check(first.disposition ==
+              trainvm::ReconcileDisposition::launch_replayed &&
+              second.disposition ==
+                  trainvm::ReconcileDisposition::launch_replayed &&
+              first.launch && second.launch &&
+              launch_bytes(*first.launch) == launch_bytes(prepared_launch) &&
+              launch_bytes(*second.launch) == launch_bytes(prepared_launch) &&
+              durable_launch &&
+              durable_launch->event_type == "worker.launch_requested" &&
+              restarted_journal.events_for_run(run_id).size() == 7U,
+          "restart and repeated reconciliation replay the byte-identical launch without events");
+  }
+
+  const auto drift_rejected_without_mutation =
+      [&](std::vector<trainvm::AdapterProfile> profiles,
+          std::string_view message) {
+        const trainvm::AdapterRegistry drifted(std::move(profiles));
+        trainvm::Journal journal(database_path);
+        const auto before_projection = journal.projection(run_id);
+        const auto before_count = journal.event_count();
+        const std::string launch_id =
+            run_id + ":worker-launch:" + prepared_launch.node_id + ":" +
+            prepared_launch.attempt_id;
+        const auto before_launch = journal.event(launch_id);
+        std::mutex authority_mutex;
+        trainvm::Reconciler reconciler(journal, drifted, authority_mutex,
+                                       [] { return 2'400; });
+        bool rejected = false;
+        try {
+          (void)reconciler.step(run_id);
+        } catch (const std::invalid_argument&) {
+          rejected = true;
+        }
+        const auto after_launch = journal.event(launch_id);
+        check(rejected && journal.event_count() == before_count &&
+                  journal.projection(run_id) == before_projection &&
+                  before_launch && after_launch &&
+                  before_launch->payload.dump() == durable_launch_payload &&
+                  after_launch->payload.dump() == durable_launch_payload,
+              message);
+      };
+  drift_rejected_without_mutation(
+      fixture_adapter_profiles('b'),
+      "code fingerprint drift after launch intent fails closed without mutation");
+  auto capability_drift = fixture_adapter_profiles();
+  for (auto& profile : capability_drift) {
+    if (profile.key.runtime != trainvm::ComponentRuntime::builtin) {
+      profile.required_capabilities.push_back("worker.artifacts");
+    }
+  }
+  drift_rejected_without_mutation(
+      std::move(capability_drift),
+      "adapter capability drift after launch intent fails closed without mutation");
+
+  {
+    const auto busy_path = directory / "busy.db";
+    const std::string owner_run = "reconciler-lease-owner";
+    const std::string waiting_run = "reconciler-lease-waiter";
+    trainvm::Journal journal(busy_path);
+    trainvm::Controller owner(*compiled.plan, journal, owner_run);
+    trainvm::Controller waiter(*compiled.plan, journal, waiting_run);
+    owner.create_queued();
+    waiter.create_queued();
+    std::mutex authority_mutex;
+    std::int64_t authority_now_ns = 3'000;
+    trainvm::Reconciler reconciler(
+        journal, registry, authority_mutex,
+        [&authority_now_ns] { return authority_now_ns; });
+    const auto acquired = reconciler.step(owner_run);
+    const auto before_waiter = journal.projection(waiting_run);
+    authority_now_ns = 3'100;
+    const auto busy = reconciler.step(waiting_run);
+    const auto active = journal.active_lease(
+        compiled.plan->experiment.spec.workspace.concurrency_key, 3'100);
+    check(acquired.disposition ==
+              trainvm::ReconcileDisposition::lease_acquired &&
+              busy.disposition == trainvm::ReconcileDisposition::lease_busy &&
+              !busy.launch && journal.projection(waiting_run) == before_waiter &&
+              before_waiter && before_waiter->desired_state == "queued" &&
+              before_waiter->observed_state == "queued" &&
+              journal.events_for_run(waiting_run).size() == 1U && active &&
+              active->owner_run_id == owner_run &&
+              !journal.event(waiting_run + ":worker-launch:acquire_gpu:"
+                                           "acquire_gpu@1"),
+          "busy reconciliation leaves the second run queued and launch-free");
+  }
+
+  std::filesystem::remove_all(directory);
+}
+
 void test_legacy_journal_migration_policy() {
   const std::filesystem::path directory = std::filesystem::temp_directory_path() /
       ("trainvm-legacy-journal-test-" +
@@ -3724,6 +4187,7 @@ int main() {
     test_concurrent_queue_acquisition_replay();
     test_acquiring_recovery_ignores_mutable_lease_lifecycle();
     test_acquiring_rejects_fabricated_running_transition();
+    test_adapter_registry_and_reconciler();
     test_legacy_journal_migration_policy();
   } catch (const std::exception& exception) {
     std::cerr << "UNCAUGHT: " << exception.what() << '\n';

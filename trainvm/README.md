@@ -50,12 +50,18 @@ Implemented now:
 - typed `trainvm.core` artifact-validation and resource-release execution that cannot enter through
   generic worker/simulation hooks, with atomic builtin result, transition, dispatch receipt, and
   immutable lease-release evidence;
+- an authority-owned exact adapter registry that binds adapter/version/runtime/operation/contract,
+  effect, idempotency, trusted code fingerprint, and required worker capabilities before mutation;
+- a restart-safe launch-authorization reconciler that resumes partial resource admission, converges
+  concurrent/repeated steps on one fenced launch intent, and fails closed on registry drift;
 - `validate`, `plan`, `simulate`, and journal inspection/replay CLI commands.
 
-This code does not yet launch or control a trainer. The next implementation boundary is the
-reconciler and process supervisor: converge queued/acquiring runs, execute typed builtins, launch an
-allowlisted adapter process, and reconcile its identity after controller restart. Real MageFlow
-process ownership follows only after that lifecycle boundary and its fault-injection tests pass.
+This code does not yet launch or control a trainer. The current launch-authorization reconciler can
+resolve an exact authority-owned adapter profile and persist a fenced `worker.launch_requested`
+protocol intent; that ticket is explicitly insufficient to spawn or signal an OS process. The next
+implementation boundary is a host-bound resolved launch-spec receipt and process supervisor. Real
+MageFlow process ownership follows only after that lifecycle boundary and its fault-injection tests
+pass.
 
 ## Toolchain
 
@@ -106,7 +112,9 @@ it never opens the journal writable. `SubmitExperiment` supports validation and 
 creation; the live-control `CommandRun` variant is also implemented. The dashboard freezes ambiguous
 submissions and retries their exact body and key. The process-free worker launch/readiness core is
 implemented, as is the initial single-result WorkerControl stream. Process launch/reconciliation,
-heartbeats and metrics, and pause/resume remain subsequent milestones.
+heartbeats and metrics, and pause/resume remain subsequent milestones. A worker launch ticket is a
+protocol authorization only until it is paired with a trusted descriptor digest, resolved launch
+specification, host identity, and durable process receipt.
 
 ## Journal CLI
 
