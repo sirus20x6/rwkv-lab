@@ -97,11 +97,157 @@ def sha256_file(path: Path, block: int = 8 * 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
+FINGERPRINT_SAMPLE_BYTES = 1 << 20   # head and tail probe per artifact
+
+
+def _artifact_signature(label: str, candidate: Path) -> dict:
+    """Cheap change evidence for one artifact: size, mtime and a byte sample.
+
+    ``(size, mtime_ns)`` alone is exactly the signal this module's docstring
+    calls unreliable: ``cp -p``, ``rsync -t`` and ``tar -p`` all restore both
+    from the *replacement's* source, so a same-size swap of a weight file is
+    invisible to stat. Hashing the first and last megabyte costs microseconds
+    even on a multi-GB safetensors file and no swap that changes the encoder
+    leaves both ends byte-identical (safetensors carries its own header and
+    tensor tail, both of which move under any real change).
+    """
+    stat = candidate.stat()
+    digest = hashlib.sha256()
+    with candidate.open("rb") as handle:
+        digest.update(handle.read(FINGERPRINT_SAMPLE_BYTES))
+        if stat.st_size > FINGERPRINT_SAMPLE_BYTES:
+            handle.seek(stat.st_size - FINGERPRINT_SAMPLE_BYTES)
+            digest.update(handle.read(FINGERPRINT_SAMPLE_BYTES))
+    return {
+        "path": label,
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "sample_sha256": digest.hexdigest(),
+    }
+
+
+def v4h_artifact_fingerprint(
+        model_path: str | Path, *, include_adaptors: bool = False,
+        fingerprint_cache: str | Path | None = None) -> str:
+    """Content fingerprint every artifact that determines cached V4H vectors.
+
+    Directory mtimes do not change when an existing weight file is replaced,
+    and a human-readable cache revision can accidentally be reused. Hashing the
+    actual model, remote source, and (for fused caches) teacher adaptors makes
+    the checkpoint contract independent of both failure modes.
+
+    Cost: the full digest streams several GB, so it is computed once and stored
+    in ``fingerprint_cache``. The stored short-circuit is keyed on size, mtime
+    AND a bounded content sample (see ``_artifact_signature``) rather than stat
+    alone, so a mtime-preserving replacement re-hashes instead of returning the
+    previous fingerprint. ``include_adaptors=True`` additionally requires the
+    fused-cache artifacts; every required file is named individually when one is
+    absent, because "which file, and why is it required" is the only thing the
+    operator needs from this failure.
+    """
+    path = Path(model_path).resolve()
+    artifacts = [
+        ("model/config.json", path / "config.json",
+         "encoder geometry and feature width"),
+        ("model/model.safetensors", path / "model.safetensors",
+         "the encoder weights themselves"),
+        ("producer/radio_v4h.py", Path(__file__).resolve(),
+         "the snapping, packing and cache conventions of this producer"),
+    ]
+    if include_adaptors:
+        import rwkv_lab.radio_v4h_adaptors as adaptor_module
+        artifacts.extend((
+            ("model/" + adaptor_module.DEFAULT_ADAPTOR_CHECKPOINT,
+             path / adaptor_module.DEFAULT_ADAPTOR_CHECKPOINT,
+             "teacher adaptor weights for the fused 4096-wide cache "
+             "(include_adaptors=True)"),
+            ("model/" + adaptor_module.DEFAULT_COMPACTOR,
+             path / adaptor_module.DEFAULT_COMPACTOR,
+             "the pinned DINO QR compactor for the fused cache; build it with "
+             "scripts/build_v4h_dino_compactor.py"),
+            ("producer/radio_v4h_adaptors.py",
+             Path(adaptor_module.__file__).resolve(),
+             "the fusion order and calibration scales"),
+        ))
+    artifacts.extend(
+        (f"model/{candidate.name}", candidate,
+         "pinned remote model source")
+        for candidate in sorted(path.glob("*.py")))
+    missing = [(candidate, reason) for _, candidate, reason in artifacts
+               if not candidate.is_file()]
+    if missing:
+        detail = "; ".join(f"{candidate} ({reason})" for candidate, reason in missing)
+        raise FileNotFoundError(
+            f"C-RADIOv4-H fingerprint needs {len(missing)} absent "
+            f"artifact(s) under {path}: {detail}")
+    signatures = [_artifact_signature(label, candidate)
+                  for label, candidate, _ in artifacts]
+    cache_file = (
+        Path(fingerprint_cache) if fingerprint_cache is not None else None)
+    if cache_file is not None and cache_file.is_file():
+        try:
+            cached = json.loads(cache_file.read_text())
+            fingerprint = str(cached["fingerprint"])
+            if (cached.get("schema") == "radio-v4h-artifact-fingerprint-v2"
+                    and cached.get("model_path") == str(path)
+                    and cached.get("artifacts") == signatures
+                    and len(fingerprint) == 64):
+                return fingerprint
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            pass
+    digest = hashlib.sha256()
+    digest.update(b"radio-v4h-artifacts-v1\0")
+    for (label, candidate, _reason), signature in zip(artifacts, signatures):
+        encoded_label = label.encode()
+        digest.update(len(encoded_label).to_bytes(4, "big"))
+        digest.update(encoded_label)
+        digest.update(int(signature["size"]).to_bytes(8, "big"))
+        with candidate.open("rb") as handle:
+            while chunk := handle.read(8 * 1024 * 1024):
+                digest.update(chunk)
+    fingerprint = digest.hexdigest()
+    if cache_file is not None:
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        temporary = cache_file.parent / (
+            f".{cache_file.name}.{os.getpid()}.tmp")
+        temporary.write_text(json.dumps({
+            "schema": "radio-v4h-artifact-fingerprint-v2",
+            "model_path": str(path),
+            "artifacts": signatures,
+            "fingerprint": fingerprint,
+        }, sort_keys=True))
+        os.replace(temporary, cache_file)
+    return fingerprint
+
+
 def cache_path(cache_dir: Path, source: Path) -> Path:
-    """Same identity scheme as the 1D cache: sha256 of the real source path."""
+    """Same identity scheme as the 1D cache: sha256 of the real source path.
+
+    The path deliberately encodes only the SOURCE, not the producing
+    configuration, so that an existing 117k-entry cache stays addressable when
+    the reader's revision or feature width changes; re-pathing every entry would
+    orphan a cache that is otherwise perfectly valid. The configuration
+    discriminator lives in the entry's own metadata instead, and
+    ``save_native_cache`` refuses to replace an entry written under a different
+    ``(hidden_size, revision, snapping steps)`` configuration -- so pointing a
+    4096-wide writer at a 1280-wide cache directory now fails loudly per image
+    rather than silently destroying it.
+    """
     resolved = os.path.realpath(os.fsencode(source))
     name = hashlib.sha256(resolved).hexdigest()
     return Path(cache_dir) / name[:2] / f"{name}.safetensors"
+
+
+def _pinned_package_name(path: Path, kind: str) -> str:
+    """Deterministic synthetic package name for one pinned model directory.
+
+    ``hash(str)`` is salted per interpreter (PYTHONHASHSEED), so a name built
+    from it differs between processes and between a worker and its parent. A
+    digest keeps one directory mapped to one package, which is what lets the
+    encoder and the adaptor loader share a single copy of the remote classes.
+    """
+    digest = hashlib.sha256(os.fsencode(str(Path(path).resolve()))).hexdigest()
+    return f"_rwkv_{kind}_{digest[:16]}"
 
 
 def load_radio_v4h(model_path: str | Path, *, device: str | torch.device = "cuda",
@@ -125,7 +271,7 @@ def load_radio_v4h(model_path: str | Path, *, device: str | torch.device = "cuda
         raise FileNotFoundError(f"C-RADIOv4-H model.safetensors is missing from {path}")
 
     with _flash_attn_2_reported_unavailable():
-        package = f"_rwkv_radio_v4h_{abs(hash(str(path))):x}"
+        package = _pinned_package_name(path, "radio_v4h")
         module_name = f"{package}.hf_model"
         if module_name in sys.modules:
             remote = sys.modules[module_name]
@@ -228,12 +374,27 @@ def pool_to_lattice(grids: Tensor, lattice: int = V4H_LATTICE) -> Tensor:
 
 
 V4H_MAX_EDGE = 2048          # this checkpoint's max_resolution
-V4H_NATIVE_STEP = 32         # /16 patches, and an even column count for pairing
+V4H_NATIVE_HEIGHT_STEP = 16  # one native patch; rows are never channel-paired
+V4H_NATIVE_WIDTH_STEP = 32   # two patches so column-packing has no ragged edge
+V4H_NATIVE_STEP = V4H_NATIVE_WIDTH_STEP  # compatibility alias
 NATIVE_CACHE_SCHEMA = "radio-v4h-native-v1"
+# Single source of truth. The writer and the reader MUST agree: a mismatch does
+# not look like a mismatch, it looks like a totally absent cache, because
+# native_cache_is_current folds "wrong revision" into the same False.
+#
+# The suffix names the snapping convention, and MUST be bumped whenever the
+# steps change. It was bumped from the unqualified "c-radiov4-h-native" when
+# height stopped sharing width's 32-pixel step: a 1500px page snapped to 92
+# rows under the shared step and to 93 under the split one, both entries claim
+# the same revision, and native_cache_is_current has no way to tell them apart
+# -- so one cache directory silently held two incompatible geometries.
+DEFAULT_NATIVE_REVISION = "c-radiov4-h-native-h16w32"
 
 
 def native_image_size(width: int, height: int, *, max_edge: int = V4H_MAX_EDGE,
-                      step: int = V4H_NATIVE_STEP) -> tuple[int, int]:
+                      step: int | None = None,
+                      height_step: int = V4H_NATIVE_HEIGHT_STEP,
+                      width_step: int = V4H_NATIVE_WIDTH_STEP) -> tuple[int, int]:
     """Return ``(height, width)`` at native scale, downscaling only past the cap.
 
     Tiling existed because RADIO1D emitted a fixed 256 nested tokens per tile,
@@ -244,19 +405,25 @@ def native_image_size(width: int, height: int, *, max_edge: int = V4H_MAX_EDGE,
     the 2048 cap, so this never invents pixels: it is a pure identity for all but
     ~6% of OCR pages.
 
-    ``step`` is 32 rather than 16 so the patch-grid width stays even and
-    ``pool_and_pair`` can pair columns without a ragged edge.
+    Only width needs a 32-pixel step so the patch-grid width stays even for
+    legacy column pairing. Height uses the native 16-pixel patch step. The old
+    shared 32-pixel step introduced avoidable aspect distortion.
     """
-    if width < 1 or height < 1 or max_edge < step or step < 1:
+    if step is not None:
+        # Compatibility for callers that intentionally request one shared
+        # quantum. New code should use the per-axis defaults.
+        height_step = width_step = int(step)
+    if (width < 1 or height < 1 or max_edge < max(height_step, width_step)
+            or height_step < 1 or width_step < 1):
         raise ValueError("image geometry must be positive")
     scale = min(1.0, max_edge / max(width, height))
     sized = []
-    for value in (height, width):
+    for value, axis_step in ((height, height_step), (width, width_step)):
         # FLOOR, not round: rounding to the nearest step can round UP (1650 ->
         # 1664) and invent pixels, which is exactly what this path exists to
         # avoid. Flooring costs at most `step`-1 pixels of true resolution.
-        snapped = int(value * scale // step) * step
-        sized.append(max(step, min(max_edge, snapped)))
+        snapped = int(value * scale // axis_step) * axis_step
+        sized.append(max(axis_step, min(max_edge, snapped)))
     return sized[0], sized[1]
 
 
@@ -288,7 +455,9 @@ def resize_array(array: "np.ndarray", height: int, width: int, *,
 
 
 def build_native_image(image: Image.Image, *, max_edge: int = V4H_MAX_EDGE,
-                       step: int = V4H_NATIVE_STEP,
+                       step: int | None = None,
+                       height_step: int = V4H_NATIVE_HEIGHT_STEP,
+                       width_step: int = V4H_NATIVE_WIDTH_STEP,
                        downscale: str = "area", upscale: str = "lanczos",
                        threads: int | None = None
                        ) -> tuple["np.ndarray", tuple[int, int]]:
@@ -300,7 +469,9 @@ def build_native_image(image: Image.Image, *, max_edge: int = V4H_MAX_EDGE,
     from PIL import ImageOps
 
     source = ImageOps.exif_transpose(image).convert("RGB")
-    height, width = native_image_size(*source.size, max_edge=max_edge, step=step)
+    height, width = native_image_size(
+        *source.size, max_edge=max_edge, step=step,
+        height_step=height_step, width_step=width_step)
     array = np.asarray(source)
     array = resize_array(array, height, width, downscale=downscale,
                          upscale=upscale, threads=threads)
@@ -385,12 +556,67 @@ def encode_native(model: nn.Module, image: Image.Image, *,
     return grid, (grid_h, grid_w)
 
 
+def native_cache_config(path: Path) -> dict | None:
+    """The producing configuration of one cache entry, or None if unreadable."""
+    from safetensors import safe_open
+
+    try:
+        with safe_open(str(path), framework="pt", device="cpu") as handle:
+            header = handle.metadata() or {}
+        meta = json.loads(header["radio_metadata"])
+        return {
+            "hidden_size": int(meta["hidden_size"]),
+            "checkpoint_revision": str(meta["checkpoint_revision"]),
+            "max_edge": int(meta["max_edge"]),
+            "height_step": meta.get("height_step"),
+            "width_step": meta.get("width_step"),
+        }
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+        return None
+
+
 def save_native_cache(path: Path, grid: Tensor, *, revision: str,
                       source: Path, source_sha256: str | None = None,
-                      max_edge: int = V4H_MAX_EDGE) -> None:
+                      max_edge: int = V4H_MAX_EDGE,
+                      height_step: int = V4H_NATIVE_HEIGHT_STEP,
+                      width_step: int = V4H_NATIVE_WIDTH_STEP,
+                      allow_reconfigure: bool = False) -> None:
+    """Atomically write one native grid, refusing cross-configuration clobbers.
+
+    ``cache_path`` hashes only the source, so a 4096-wide fused writer aimed at
+    a 1280-wide native cache directory addresses exactly the same files. Every
+    entry would fail its currency check, get re-encoded, and ``os.replace`` the
+    old one away: a silent one-way destruction of a 117k-image cache. An entry
+    written under a different feature width, revision or snapping convention is
+    therefore an error here, not an overwrite; pass ``allow_reconfigure=True``
+    to deliberately rewrite a directory in place.
+
+    The snapping steps are recorded so a future convention change is visible in
+    the entry itself rather than only in a revision string somebody remembered
+    to bump.
+    """
     from safetensors.torch import save_file
 
     path = Path(path)
+    hidden_size = int(grid.shape[-1])
+    if not allow_reconfigure and path.is_file():
+        existing = native_cache_config(path)
+        incoming = {
+            "hidden_size": hidden_size,
+            "checkpoint_revision": revision,
+            "max_edge": int(max_edge),
+            "height_step": int(height_step),
+            "width_step": int(width_step),
+        }
+        if existing is not None and any(
+                existing[key] is not None and existing[key] != value
+                for key, value in incoming.items()):
+            raise ValueError(
+                f"refusing to overwrite {path}: it was written as {existing} "
+                f"but this writer produces {incoming}. Cache entries are keyed "
+                f"on the source path alone, so writing here would destroy a "
+                f"cache built for a different configuration. Use a separate "
+                f"--cache-dir, or pass allow_reconfigure=True to rewrite it.")
     path.parent.mkdir(parents=True, exist_ok=True)
     stat = Path(source).stat()
     meta = json.dumps({
@@ -400,7 +626,9 @@ def save_native_cache(path: Path, grid: Tensor, *, revision: str,
         "source_size": stat.st_size,
         "source_mtime_ns": stat.st_mtime_ns,
         "max_edge": max_edge,
-        "hidden_size": V4H_HIDDEN_SIZE,
+        "height_step": int(height_step),
+        "width_step": int(width_step),
+        "hidden_size": hidden_size,
         "grid": [int(grid.shape[1]), int(grid.shape[2])],
     }, sort_keys=True)
     temporary = path.parent / f".{path.name}.{os.getpid()}.tmp"
@@ -411,7 +639,20 @@ def save_native_cache(path: Path, grid: Tensor, *, revision: str,
 
 def native_cache_is_current(path: Path, source: Path, revision: str, *,
                             max_edge: int = V4H_MAX_EDGE,
+                            hidden_size: int = V4H_HIDDEN_SIZE,
+                            height_step: int = V4H_NATIVE_HEIGHT_STEP,
+                            width_step: int = V4H_NATIVE_WIDTH_STEP,
                             source_sha256: str | None = None) -> bool:
+    """Whether one entry was produced by exactly this configuration.
+
+    Entries written before the snapping steps were recorded carry no step
+    fields; those are read as "the caller's convention" rather than rejected,
+    because the revision string is what separates them (it was bumped when the
+    height step split off from the width step) and re-encoding an otherwise
+    valid 117k-entry cache for a metadata addition would be gratuitous. Once a
+    step field is present it is compared exactly, so the next convention change
+    cannot pass silently.
+    """
     from safetensors import safe_open
 
     path = Path(path)
@@ -420,6 +661,10 @@ def native_cache_is_current(path: Path, source: Path, revision: str, *,
     try:
         with safe_open(str(path), framework="pt", device="cpu") as handle:
             header = handle.metadata() or {}
+            keys = list(handle.keys())
+            tensor_shape = (
+                list(handle.get_slice("grid").get_shape())
+                if keys == ["grid"] else None)
         if header.get("schema") != NATIVE_CACHE_SCHEMA:
             return False
         meta = json.loads(header["radio_metadata"])
@@ -427,9 +672,13 @@ def native_cache_is_current(path: Path, source: Path, revision: str, *,
         identity = (meta["source_mtime_ns"] == stat.st_mtime_ns
                     or (source_sha256 is not None and len(source_sha256) == 64
                         and meta["source_sha256"] == source_sha256))
+        steps = (meta.get("height_step", height_step) == height_step
+                 and meta.get("width_step", width_step) == width_step)
         return (meta["checkpoint_revision"] == revision
                 and meta["max_edge"] == max_edge
-                and meta["hidden_size"] == V4H_HIDDEN_SIZE
+                and meta["hidden_size"] == hidden_size
+                and steps
+                and tensor_shape == [1, *meta["grid"], hidden_size]
                 and meta["source_size"] == stat.st_size and identity)
     except (OSError, ValueError, KeyError, RuntimeError):
         return False
@@ -448,6 +697,69 @@ def load_native_grid(path: Path) -> tuple[Tensor, tuple[int, int]]:
     if list(shape) != list(meta["grid"]):
         raise ValueError("cached grid shape disagrees with its metadata")
     return grid, shape
+
+
+def native_cache_token_count(path: Path, *, hidden_size: int,
+                             exact_header: bool = False) -> int:
+    """Return the cached cell count from file geometry without mmaping the tensor.
+
+    Native caches contain exactly one contiguous bf16 ``grid`` tensor, so the
+    cell count is ``(file size - header) / (hidden_size * 2)``.
+
+    ``exact_header`` selects how the header length is obtained, and the default
+    is load-bearing. Reading safetensors' little-endian u64 prefix is only 8
+    bytes of *syscall*, but opening the file and touching one byte faults in a
+    filesystem readahead window -- measured at ~1.6 MB of real block I/O per
+    entry on the array holding these caches. Planning a sampler over ~110k rows
+    therefore turned a pure-metadata pass into a multi-gigabyte read and added
+    hours to every trainer startup, on a run that restarts every 500 steps.
+    ``stat()`` alone touches no data blocks, so the default infers the header
+    from the size remainder and stays metadata-only.
+
+    The inferred form is exact whenever the header fits in one cell, which the
+    bounds below assert. It can only be wrong if a very long free-form
+    ``--revision`` string pushes the header past ``hidden_size * 2`` bytes --
+    and since the revision is uniform across a cache directory, that is a
+    property of the cache, not of an entry. Pass ``exact_header=True`` where a
+    single authoritative answer is wanted (validation, audits, one probe entry)
+    rather than in a per-row loop.
+
+    The inferred form also cannot validate ``hidden_size``: an incorrect width
+    is absorbed into the inferred header and yields a plausible but wrong count
+    (1279 reads a 1280-wide entry as 1201 cells rather than raising). Only
+    ``exact_header=True`` divides by a known payload and rejects it. This is
+    tolerable for planning because ``load_native_features`` checks the width
+    against the real tensor when the row loads, so a mismatch fails loudly
+    there instead of training on mis-bucketed geometry -- but do not treat a
+    default-form count as evidence that a cache has the width you asked for.
+    """
+    if hidden_size < 1:
+        raise ValueError("native cache hidden size must be positive")
+    path = Path(path)
+    size = path.stat().st_size
+    cell_bytes = int(hidden_size) * torch.bfloat16.itemsize
+    if exact_header:
+        with path.open("rb") as handle:
+            prefix = handle.read(8)
+        if len(prefix) != 8:
+            raise ValueError(f"{path} is too short to be a safetensors file")
+        header_bytes = 8 + int.from_bytes(prefix, "little")
+        payload = size - header_bytes
+        cells, remainder = divmod(max(payload, 0), cell_bytes)
+        if payload < cell_bytes or remainder:
+            raise ValueError(
+                f"{path} does not have valid native-cache file geometry "
+                f"for hidden size {hidden_size}: {payload} payload bytes after "
+                f"a {header_bytes}-byte header is not a positive multiple of "
+                f"{cell_bytes}")
+        return cells
+    cells, remainder = divmod(max(size, 0), cell_bytes)
+    if cells < 1 or not 8 <= remainder < cell_bytes:
+        raise ValueError(
+            f"{path} does not have valid native-cache file geometry "
+            f"for hidden size {hidden_size}: {size} bytes is not one bf16 "
+            f"grid plus a header smaller than one {cell_bytes}-byte cell")
+    return cells
 
 
 def native_token_boxes(grid_h: int, grid_w: int) -> Tensor:
@@ -469,13 +781,28 @@ def native_token_boxes(grid_h: int, grid_w: int) -> Tensor:
         (cols * 2 + 2) / grid_w, (rows + 1) / grid_h), dim=-1)
 
 
+def native_cell_boxes(grid_h: int, grid_w: int) -> Tensor:
+    """Normalized image-frame extent of each unpaired native patch cell."""
+    if grid_h < 1 or grid_w < 1:
+        raise ValueError("grid must be positive")
+    rows = torch.arange(grid_h, dtype=torch.float32).repeat_interleave(grid_w)
+    cols = torch.arange(grid_w, dtype=torch.float32).repeat(grid_h)
+    return torch.stack((
+        cols / grid_w, rows / grid_h,
+        (cols + 1) / grid_w, (rows + 1) / grid_h), dim=-1)
+
+
 def load_native_features(rows: Sequence[dict], cache_dir: Path, *, revision: str,
-                         root: Path | None = None, max_edge: int = V4H_MAX_EDGE
+                         root: Path | None = None, max_edge: int = V4H_MAX_EDGE,
+                         hidden_size: int = V4H_HIDDEN_SIZE,
+                         packing: str = "pair_columns",
                          ) -> list[tuple[Tensor, Tensor, Tensor]]:
-    """Load native grids as one whole-image "tile" per row, paired to 2560.
+    """Load native grids as one whole-image "tile" per row.
 
     Read-only by design: a miss raises rather than encoding inline, so a
-    prefetch worker never touches CUDA from a foreign thread.
+    prefetch worker never touches CUDA from a foreign thread. ``pair_columns``
+    concatenates adjacent cells and doubles feature width; ``cells`` preserves
+    every patch as an independent token at the cached feature width.
     """
     root = Path(root) if root is not None else Path.cwd()
     output = []
@@ -483,27 +810,76 @@ def load_native_features(rows: Sequence[dict], cache_dir: Path, *, revision: str
         source = Path(row["image"])
         source = source if source.is_absolute() else root / source
         target = cache_path(cache_dir, source)
-        if not native_cache_is_current(target, source, revision, max_edge=max_edge,
-                                       source_sha256=row.get("image_sha256")):
+        if not native_cache_is_current(
+                target, source, revision, max_edge=max_edge,
+                hidden_size=hidden_size,
+                source_sha256=row.get("image_sha256")):
+            if not target.is_file():
+                raise FileNotFoundError(
+                    f"no native C-RADIOv4-H cache entry for {source}")
             raise FileNotFoundError(
-                f"no current native C-RADIOv4-H cache entry for {source}")
+                f"stale native cache entry for {source}: it exists but does not "
+                f"validate. Check revision (asked {revision!r}) and max_edge "
+                f"(asked {max_edge}) against what wrote it.")
         grid, (grid_h, grid_w) = load_native_grid(target)
-        tokens = pair_columns(grid)[0]                    # [gh*gw/2, 2560]
-        boxes = native_token_boxes(grid_h, grid_w)        # [gh*gw/2, 4]
+        if grid.shape[-1] != hidden_size:
+            raise ValueError(
+                f"cached feature width {grid.shape[-1]} != {hidden_size}")
+        if packing == "pair_columns":
+            tokens = pair_columns(grid)[0]
+            boxes = native_token_boxes(grid_h, grid_w)
+        elif packing == "cells":
+            tokens = grid.flatten(1, 2)[0]
+            boxes = native_cell_boxes(grid_h, grid_w)
+        else:
+            raise ValueError(f"unknown native packing {packing!r}")
         roles = torch.zeros(tokens.shape[0], dtype=torch.long)
         output.append((tokens, boxes, roles))
     return output
 
 
+EXIF_ORIENTATION_TAG = 0x0112
+# The four orientations ImageOps.exif_transpose implements with a transpose.
+EXIF_TRANSPOSED_ORIENTATIONS = frozenset({5, 6, 7, 8})
+
+
+def exif_swaps_axes(image: Image.Image) -> bool:
+    """Whether EXIF orientation makes the stored size the transposed one."""
+    try:
+        orientation = image.getexif().get(EXIF_ORIENTATION_TAG)
+    except (OSError, ValueError, AttributeError):
+        return False
+    return orientation in EXIF_TRANSPOSED_ORIENTATIONS
+
+
 def native_grid_for(row: dict, *, root: Path | None = None,
-                    max_edge: int = V4H_MAX_EDGE) -> tuple[int, int]:
-    """Patch grid a row will produce, for sampler bucketing without decoding."""
+                    max_edge: int = V4H_MAX_EDGE,
+                    exif: bool = True) -> tuple[int, int]:
+    """Patch grid a row will produce, for sampler bucketing without decoding.
+
+    ``build_native_image`` runs ``ImageOps.exif_transpose`` first, so a stored
+    1500x1008 page with an EXIF 90-degree flag is encoded as 1008x1500. Under
+    the old shared 32-pixel step the transposed prediction still gave the same
+    cell count; with 16 rows / 32 columns it does not (63x93 = 5859 predicted
+    against 93x62 = 5766 written), and the sampler then batches a row against a
+    grid the encoder never produced. Orientation is read from the file header --
+    a row may supply ``exif_orientation`` to skip even that -- because it is not
+    recoverable from manifest width/height, which are the pre-transpose values.
+    """
     root = Path(root) if root is not None else Path.cwd()
+    source = Path(row["image"])
+    source = source if source.is_absolute() else root / source
     width, height = row.get("width"), row.get("height")
-    if not width or not height:
-        source = Path(row["image"])
-        with Image.open(source if source.is_absolute() else root / source) as image:
-            width, height = image.size
+    orientation = row.get("exif_orientation")
+    swap = exif and orientation in EXIF_TRANSPOSED_ORIENTATIONS
+    if not width or not height or (exif and orientation is None):
+        with Image.open(source) as image:      # header only, never decoded
+            if not width or not height:
+                width, height = image.size
+            if exif and orientation is None:
+                swap = exif_swaps_axes(image)
+    if swap:
+        width, height = height, width
     h, w = native_image_size(int(width), int(height), max_edge=max_edge)
     return h // V4H_PATCH, w // V4H_PATCH
 
@@ -674,10 +1050,13 @@ __all__ = [
     "load_v4h_features", "make_v4h_metadata", "pool_and_pair",
     "pool_to_lattice",
     "save_v4h_cache", "sha256_file", "tiles_to_tensor",
+    "v4h_artifact_fingerprint",
     "v4h_cache_is_current", "v4h_tile_counts", "build_native_image",
     "encode_native", "load_native_features", "load_native_grid",
-    "native_cache_is_current", "native_grid_for", "native_image_size",
-    "native_token_boxes", "pair_columns", "resize_array",
+    "DEFAULT_NATIVE_REVISION", "exif_swaps_axes", "native_cache_config",
+    "native_cache_is_current",
+    "native_cache_token_count", "native_grid_for", "native_image_size",
+    "native_cell_boxes", "native_token_boxes", "pair_columns", "resize_array",
     "save_native_cache", "V4H_MAX_EDGE",
-    "NATIVE_CACHE_SCHEMA",
+    "NATIVE_CACHE_SCHEMA", "V4H_NATIVE_HEIGHT_STEP", "V4H_NATIVE_WIDTH_STEP",
 ]

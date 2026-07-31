@@ -1,6 +1,7 @@
 package alerts
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -221,5 +222,80 @@ func TestMonitoringSuspendedAlertIsOneShotAndClears(t *testing.T) {
 	detector.noteMonitoringGate(proc, "train stats query failed: disk I/O error")
 	if kinds := alertKinds(t, database); kinds["monitoring_suspended"] != 2 {
 		t.Fatalf("re-entry after recovery did not re-alert: %v", kinds)
+	}
+}
+
+func TestMemoryPathDeadRequiresPersistentValidRecallEvidence(t *testing.T) {
+	mostlyLive := make([]float64, 20)
+	for i := range mostlyLive {
+		mostlyLive[i] = 5e-3
+	}
+	mostlyLive[0] = 0
+	if got := classifyMemoryPath(mostlyLive).verdict; got != memoryPathAlive {
+		t.Fatalf("one zero-injection batch gave verdict %d", got)
+	}
+	dead := make([]float64, 20)
+	dead[len(dead)-1] = 1e-2
+	if got := classifyMemoryPath(dead).verdict; got != memoryPathDead {
+		t.Fatalf("persistent near-zero injection gave verdict %d", got)
+	}
+}
+
+func TestMemoryPathThinEvidenceIsUnknownRatherThanHealthy(t *testing.T) {
+	// A run with no such path at all stays silent.
+	if got := classifyMemoryPath(nil).verdict; got != memoryPathAbsent {
+		t.Fatalf("run without the path gave verdict %d", got)
+	}
+	// Fewer injection rows than the evidence floor is UNKNOWN, not healthy:
+	// injection stats ride a coarse --log-grokking-metrics cadence, so a
+	// 50-train-row window can legitimately hold only a handful.
+	thin := make([]float64, memDeadMinSamples-1)
+	evidence := classifyMemoryPath(thin)
+	if evidence.verdict != memoryPathUnknown {
+		t.Fatalf("thin window gave verdict %d", evidence.verdict)
+	}
+	if evidence.rows != memDeadMinSamples-1 || evidence.finite != memDeadMinSamples-1 {
+		t.Fatalf("thin window evidence counts = %+v", evidence)
+	}
+}
+
+func TestMemoryPathNaNDilutionDoesNotRaiseDead(t *testing.T) {
+	// injection_rms returns a/b, so NaN is reachable. 45 NaNs beside 10 zeros
+	// must not be read as "persistently ~0 on 10/50 rows".
+	diluted := make([]float64, 50)
+	for i := range diluted {
+		diluted[i] = math.NaN()
+	}
+	for i := 0; i < 10; i++ {
+		diluted[i] = 0
+	}
+	evidence := classifyMemoryPath(diluted)
+	if evidence.verdict != memoryPathUnknown {
+		t.Fatalf("NaN-diluted window gave verdict %d (%+v)", evidence.verdict, evidence)
+	}
+	if evidence.finite != 10 || evidence.dead != 10 || evidence.rows != 50 {
+		t.Fatalf("NaN-diluted evidence counts = %+v", evidence)
+	}
+	// The same ten zeros with no NaN padding remain a real dead-path finding.
+	if got := classifyMemoryPath(diluted[:10]).verdict; got != memoryPathDead {
+		t.Fatalf("undiluted near-zero window gave verdict %d", got)
+	}
+}
+
+func TestCodecCollapseUsesRobustWindowNotOneBatch(t *testing.T) {
+	if _, ok := robustCodecRel([]float64{0.9, 0.9}); ok {
+		t.Fatal("codec collapse judged a window thinner than its evidence floor")
+	}
+	// One atypical batch above the threshold must not carry the window.
+	if median, ok := robustCodecRel([]float64{0.9, 0.1, 0.11, 0.12, 0.1}); !ok || median > codecRelWarn {
+		t.Fatalf("single spike drove the codec median: %v ok=%v", median, ok)
+	}
+	// A genuinely collapsed codec still fires.
+	if median, ok := robustCodecRel([]float64{0.62, 0.58, 0.61, 0.6}); !ok || median <= codecRelWarn {
+		t.Fatalf("persistent codec collapse was not detected: %v ok=%v", median, ok)
+	}
+	// Non-finite rows are dropped, not counted toward the evidence floor.
+	if _, ok := robustCodecRel([]float64{math.NaN(), math.Inf(1), 0.6}); ok {
+		t.Fatal("non-finite codec rows satisfied the evidence floor")
 	}
 }

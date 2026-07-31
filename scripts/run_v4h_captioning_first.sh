@@ -32,8 +32,10 @@ export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}src"
 RUN="${V4H_RUN:-runs/radio_v4h_captioning_first}"
 SRC="${V4H_SOURCE:-runs/radio1d_rwkv_captioning_first/last.pt}"
 CACHE="${V4H_CACHE:-/workspace/downloads/cache/moe-mla/radio_v4h_native_captioning_first}"
-TRAIN=curated_vision/captioning_first_train.jsonl
-EVAL=curated_vision/captioning_first_eval.jsonl
+REVISION="${V4H_REVISION:-c-radiov4-h-native-h16w32}"
+TRAIN="${V4H_TRAIN:-curated_vision/captioning_first_train.jsonl}"
+EVAL="${V4H_EVAL:-curated_vision/captioning_first_eval.jsonl}"
+INIT_MODE="${V4H_INIT_MODE:-text}"
 
 for required in "$TRAIN" "$EVAL" "$SRC" "$CACHE" \
                 models/vision/C-RADIOv4-H \
@@ -49,7 +51,11 @@ flock -n 9 || { echo "another launcher already owns $RUN" >&2; exit 75; }
 if [[ -f "$RUN/last.pt" ]]; then
   resume=(--resume auto)
 else
-  resume=(--resume none --init-text-adapters-from "$SRC")
+  case "$INIT_MODE" in
+    text) resume=(--resume none --init-text-adapters-from "$SRC") ;;
+    full) resume=(--resume none --init-adapters-from "$SRC") ;;
+    *) echo "V4H_INIT_MODE must be text or full" >&2; exit 2 ;;
+  esac
 fi
 
 FAST_FAILURES=0
@@ -58,6 +64,7 @@ while true; do
   "$PYTHON_BIN" -m rwkv_lab.vision_train \
     --vision-backend radio_v4h \
     --radio-v4h-model models/vision/C-RADIOv4-H \
+    --radio-v4h-revision "$REVISION" \
     --radio-v4h-native --radio-v4h-max-edge 2048 \
     --radio-v4h-bridge-rank 256 --radio-v4h-pair-axis columns \
     --no-radio-adaptive-complexity \
@@ -66,6 +73,8 @@ while true; do
     --radio-max-detail-tiles 48 --radio-tile-batch 8 \
     --steps "${V4H_STEPS:-45000}" --lr 2e-4 --weight-decay 0.01 \
     --batch 1 --min-batch 1 --max-batch 4 --target-batch-tokens 4096 \
+    --ocr-update-ratio "${OCR_UPDATE_RATIO:-0}" \
+    --structured-update-ratio "${STRUCTURED_UPDATE_RATIO:-0}" \
     --activation-checkpoint-min-tokens 4096 \
     --max-text-tokens 768 --prefix-tokens 256 \
     --sandwich-prompt --sandwich-lead-prompt $'An image follows:\n' \
@@ -75,8 +84,9 @@ while true; do
     --grounding-early-tokens 24 --grounding-early-weight 3 \
     --grounding-contrastive-weight 0.1 --grounding-contrastive-dim 512 \
     --grounding-temperature 0.07 \
-    --structured-head --structured-weight 1.0 \
-    --structured-coordinate-weight 4.0 \
+    --structured-head --structured-weight "${STRUCTURED_WEIGHT:-1.0}" \
+    --structured-lr "${STRUCTURED_LR:-0}" \
+    --structured-coordinate-weight "${STRUCTURED_COORDINATE_WEIGHT:-4.0}" \
     --structured-invalid-box-weight 0.5 --structured-invalid-box-margin 1.0 \
     --structured-width 256 --structured-object-queries 16 \
     --structured-spatial-layers 2 --structured-object-layers 2 \
@@ -90,6 +100,8 @@ while true; do
     --checkpoint-every 50 --eval-every 500 \
     --eval-examples 448 --eval-batch-size 4 \
     --eval-sample-every 1000 --eval-samples 14 \
+    --eval-ocr-samples "${EVAL_OCR_SAMPLES:-4}" \
+    --eval-structured-samples "${EVAL_STRUCTURED_SAMPLES:-4}" \
     --eval-sample-exclude-sources joy,community_gallery,restricted,private_web,manga,pose_vr,grid \
     --eval-sample-max-new 768 --require-fused-ce \
     --restart-before-eval --profile-steps 3 \

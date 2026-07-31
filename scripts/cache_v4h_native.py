@@ -2,7 +2,10 @@
 """Cache C-RADIOv4-H features at native resolution, one grid per image.
 
 No tiling: the image is encoded whole at its own resolution (snapped down to a
-multiple of 32, capped at RADIO's 2048). Tiling existed because RADIO1D emitted
+multiple of 16 rows / 32 columns, capped at RADIO's 2048). The revision string
+names that snapping convention, so a cache written under the older shared
+32-pixel step no longer validates instead of quietly mixing two geometries.
+Tiling existed because RADIO1D emitted
 a fixed 256 nested tokens per tile, so splitting was the only way to buy detail.
 v4h's token count is (H/16)*(W/16), so resolution buys it directly -- and the
 tiled path was spending tokens on a redundant thumbnail, 12.5% overlap, and an
@@ -22,10 +25,10 @@ sys.path.insert(0, str(ROOT / "src"))
 from PIL import Image  # noqa: E402
 
 from rwkv_lab.radio_v4h import (  # noqa: E402
-    V4H_MAX_EDGE, cache_path, encode_native, native_cache_is_current,
-    save_native_cache)
+    DEFAULT_NATIVE_REVISION, V4H_MAX_EDGE, cache_path, encode_native,
+    native_cache_is_current, save_native_cache)
 
-DEFAULT_REVISION = "c-radiov4-h-native"
+DEFAULT_REVISION = DEFAULT_NATIVE_REVISION
 
 
 def rows(manifest: Path, start: int, limit: int | None):
@@ -54,6 +57,10 @@ def main() -> int:
     ap.add_argument("--max-edge", type=int, default=V4H_MAX_EDGE)
     ap.add_argument("--start", type=int, default=0)
     ap.add_argument("--limit", type=int)
+    ap.add_argument(
+        "--allow-reconfigure", action="store_true",
+        help="replace entries written by a different revision/width/snapping "
+             "contract; without this, cross-configuration overwrites fail")
     args = ap.parse_args()
     if args.max_edge < 32 or args.start < 0:
         ap.error("max-edge must be >= 32 and start non-negative")
@@ -81,7 +88,8 @@ def main() -> int:
                         model, image, max_edge=args.max_edge)
                 save_native_cache(target, grid, revision=args.revision,
                                   source=source, source_sha256=sha,
-                                  max_edge=args.max_edge)
+                                  max_edge=args.max_edge,
+                                  allow_reconfigure=args.allow_reconfigure)
             except Exception as error:  # noqa: BLE001 - one bad image must not end the pass
                 failed += 1
                 print(json.dumps({"phase": "error", "source": str(source),

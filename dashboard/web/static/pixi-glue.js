@@ -782,7 +782,7 @@
             Math.hypot(e.clientX - downX, e.clientY - downY) < 4 &&
             window.trainboard && window.trainboard.openEvalSamples) {
           dragging = false;
-          window.trainboard.openEvalSamples(curRun, cand.step, cand.ppl);
+          window.trainboard.openEvalSamples(curRun, cand.step, cand.ppl, 0, "manual");
           return;
         }
         if (boxing) {
@@ -1330,15 +1330,33 @@
   }
 
   function showNewestEvalSample(run, series) {
-    if (!series || !series.step || !series.step.length || !series.cols || !series.cols.ppl) return;
+    if (!series || !series.step || !series.step.length || !series.cols) {
+      // Image-generation runs can publish their immutable base-model snapshot
+      // before the first scalar eval exists. Probe step 0 once so the gallery
+      // is visible immediately instead of waiting for the step-100 loss point.
+      if (shownEvalSampleStep < 0 &&
+          window.trainboard && window.trainboard.openEvalSamples) {
+        shownEvalSampleStep = 0;
+        window.trainboard.openEvalSamples(run, 0, NaN, 90);
+      }
+      return;
+    }
+    const pplColumn = series.cols.ppl || [];
+    const lossColumn = series.cols.loss || [];
     for (let i = series.step.length - 1; i >= 0; i--) {
-      const ppl = series.cols.ppl[i];
-      if (ppl == null || !isFinite(ppl)) continue;
+      const ppl = pplColumn[i];
+      const loss = lossColumn[i];
+      if ((ppl == null || !isFinite(ppl)) &&
+          (loss == null || !isFinite(loss))) continue;
       const step = series.step[i];
       if (step === shownEvalSampleStep) return;
       shownEvalSampleStep = step;
       if (window.trainboard && window.trainboard.openEvalSamples) {
-        window.trainboard.openEvalSamples(run, step, ppl);
+        // Diffusion runs report eval loss, not language-model perplexity.
+        // Passing NaN suppresses PPL stale checks while retaining exact-step
+        // artifact discovery and generation rendering.
+        window.trainboard.openEvalSamples(
+          run, step, ppl != null && isFinite(ppl) ? ppl : NaN);
       }
       return;
     }

@@ -1,0 +1,36 @@
+{
+  "tread": {
+    "enabled": true,
+    "route_start": 2,
+    "route_end": -4,
+    "route_fraction": 0.5,
+    "image_tokens_only": true,
+    "selection": "random",
+    "same_mask_across_loop_iterations": true,
+    "min_active_image_tokens": 1,
+    "active_timestep_min": null,
+    "active_timestep_max": null,
+    "inference_enabled": false
+  },
+  "looping": {
+    "enabled": true,
+    "loop_count": 3,
+    "loop_embedding": true,
+    "use_auxiliary_loss": true,
+    "auxiliary_weight": 0.1,
+    "auxiliary_schedule": "increasing",
+    "factorization": {
+      "enabled": true,
+      "gate_mode": "factored",
+      "gate_cap": 0.25,
+      "adaptive_halt": true,
+      "ponder_prior": 0.1,
+      "ponder_weight": 0.01,
+      "inference_gate_threshold": 0.0001
+    }
+  },
+  "combined": {
+    "enabled": true,
+    "tread_mask_policy": "fixed_per_forward"
+  }
+}

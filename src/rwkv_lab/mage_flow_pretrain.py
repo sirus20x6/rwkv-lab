@@ -36,7 +36,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from queue import Queue
+from queue import Full, Queue
 from typing import Any
 
 RUN_SCHEMA = "rwkv-lab.mage-flow-pretrain.v1"
@@ -682,27 +682,41 @@ def _prefetched(iterable: Iterable[Any], transform, *, depth: int) -> Iterator[A
         return
     queue: Queue[Any] = Queue(maxsize=depth)
     sentinel = object()
+    stopped = threading.Event()
+
+    def publish(value: Any) -> bool:
+        while not stopped.is_set():
+            try:
+                queue.put(value, timeout=0.1)
+                return True
+            except Full:
+                continue
+        return False
 
     def producer() -> None:
         try:
             for item in iterable:
-                queue.put(transform(item))
+                if stopped.is_set() or not publish(transform(item)):
+                    return
         except Exception as error:  # noqa: BLE001 - propagate worker failures
-            queue.put(error)
+            publish(error)
         finally:
-            queue.put(sentinel)
+            publish(sentinel)
 
     thread = threading.Thread(
         target=producer, name="mage-flow-data-prefetch", daemon=True
     )
     thread.start()
-    while True:
-        item = queue.get()
-        if item is sentinel:
-            break
-        if isinstance(item, BaseException):
-            raise item
-        yield item
+    try:
+        while True:
+            item = queue.get()
+            if item is sentinel:
+                break
+            if isinstance(item, BaseException):
+                raise item
+            yield item
+    finally:
+        stopped.set()
 
 
 def _sample_timesteps(config: MageFlowTrainConfig, count: int, device):

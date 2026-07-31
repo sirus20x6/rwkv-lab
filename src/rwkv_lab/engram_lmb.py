@@ -476,6 +476,43 @@ class BatchedStreamingEngramState:
     def batch_size(self) -> int:
         return len(self.recallers)
 
+    def select_rows(self, indices: Sequence[int] | torch.Tensor) -> None:
+        """Discard completed decode rows while preserving active stream state.
+
+        The shared bank still holds the previous batch width in
+        ``lmb.ctx.ids``, ``lmb.last_recall`` and the per-site buffers installed
+        by the last :meth:`step`.  Those are invalidated here rather than
+        resized: a forward between compaction and the next :meth:`step` would
+        otherwise inject a ``[B_old,1,D]`` feature into a ``B_new`` stream and
+        fail deep inside a layer hook.  Injection is inactive until the next
+        :meth:`step` reinstalls features at the new width.
+        """
+        if torch.is_tensor(indices):
+            selected = indices.detach().cpu().reshape(-1).long()
+            index_values = selected.tolist()
+        else:
+            index_values = [int(index) for index in indices]
+            selected = torch.tensor(index_values, dtype=torch.long)
+        if not index_values:
+            raise ValueError("batched streaming Engram cannot select zero rows")
+        if len(set(index_values)) != len(index_values):
+            raise ValueError("batched streaming Engram row indices must be unique")
+        if min(index_values) < 0 or max(index_values) >= self.batch_size:
+            raise IndexError("batched streaming Engram row index is out of range")
+        self.recallers = [self.recallers[index] for index in index_values]
+        self.histories = [
+            history.index_select(0, selected.to(history.device))
+            for history in self.histories
+        ]
+        if self.last_feature is not None:
+            self.last_feature = self.last_feature.index_select(
+                0, selected.to(self.last_feature.device))
+        self.lmb.ctx.clear()
+        self.lmb.last_recall = None
+        self.lmb._feat_version = -1
+        for site in self.lmb.sites.values():
+            site.invalidate()
+
     def step(self, tokens: Sequence[int] | torch.Tensor, *,
              active: Sequence[bool] | torch.Tensor | None = None
              ) -> RecallResult:

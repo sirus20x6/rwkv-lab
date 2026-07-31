@@ -431,6 +431,22 @@ def test_eval_gallery_is_balanced_routed_and_dashboard_compatible(tmp_path):
     assert controller.generated_routes == ["photo", "animation"]
     assert all(Path(item["image"]).is_file() for item in payload["items"])
     assert all(Path(item["target_image"]).is_file() for item in payload["items"])
+    generate_eval_gallery(
+        Pipeline(),
+        Transformer(),
+        controller,
+        rows,
+        config,
+        torch.device("cpu"),
+        tmp_path / "output",
+        step=500,
+    )
+    assert controller.generated_routes == [
+        "photo",
+        "animation",
+        "photo",
+        "animation",
+    ]
     assert not unified_evaluation_is_complete(tmp_path / "output", 500)
     (tmp_path / "output" / "train.jsonl").write_text(
         json.dumps({"kind": "eval", "step": 500}) + "\n"

@@ -174,10 +174,16 @@
           <div class="kpi"><div class="kpi-label">caption ppl</div>
             <div class="kpi-val" data-text="typeof $kpi.caption_ppl==='number' ? $kpi.caption_ppl.toFixed(3) : '—'">—</div></div>
           <div class="kpi"><div class="kpi-label">OCR ppl</div>
-            <div class="kpi-val" data-text="typeof $kpi.ocr_ppl==='number' ? $kpi.ocr_ppl.toFixed(3) : '—'">—</div></div>
-          <div class="kpi"><div class="kpi-label">box/mask ppl</div>
+            <div class="kpi-val" data-text="typeof $kpi.ocr_ppl==='number' ? $kpi.ocr_ppl.toFixed(3) : '—'">—</div>
+            <!-- Must stay byte-identical to renderKPIs() in internal/server/render.go:
+                 that renderer replaces this whole strip on every live/SSE patch. -->
+            <div class="kpi-sub" data-text="'shuffle '+(typeof $kpi.ocr_shuffled_ppl==='number'?$kpi.ocr_shuffled_ppl.toFixed(3):'—')+' · ΔNLL '+(typeof $kpi.ocr_image_conditioning_nll_delta==='number'?$kpi.ocr_image_conditioning_nll_delta.toFixed(3):'—')+' · coverage ex '+(typeof $kpi.ocr_image_conditioning_example_coverage==='number'?Math.round(100*$kpi.ocr_image_conditioning_example_coverage)+'%':'—')+' · tok '+(typeof $kpi.ocr_image_conditioning_token_coverage==='number'?Math.round(100*$kpi.ocr_image_conditioning_token_coverage)+'%':'—')"></div></div>
+          <div class="kpi"><div class="kpi-label">structured text ppl</div>
             <div class="kpi-val" data-text="typeof $kpi.structured_ppl==='number' ? $kpi.structured_ppl.toFixed(3) : '—'">—</div>
-            <div class="kpi-sub" data-text="'IoU '+(typeof $kpi.structured_box_iou==='number'?$kpi.structured_box_iou.toFixed(3):'—')+' · Dice '+(typeof $kpi.structured_mask_dice==='number'?$kpi.structured_mask_dice.toFixed(3):'—')"></div></div>
+            <!-- structured_box_iou is RETIRED; the instance-weighted value ships as
+                 structured_box_iou_instance. Pre-rename rows surface through
+                 structured_box_iou_legacy and are labelled as such. -->
+            <div class="kpi-sub" data-text="'coord TF '+(typeof $kpi.structured_coordinate_ppl==='number'?$kpi.structured_coordinate_ppl.toFixed(3):'—')+' · IoU '+(typeof $kpi.structured_box_iou_instance==='number'?$kpi.structured_box_iou_instance.toFixed(3):(typeof $kpi.structured_box_iou_legacy==='number'?$kpi.structured_box_iou_legacy.toFixed(3)+' (legacy)':'—'))+' · GIoU '+(typeof $kpi.structured_box_giou==='number'?$kpi.structured_box_giou.toFixed(3):'—')+' · Dice '+(typeof $kpi.structured_mask_dice==='number'?$kpi.structured_mask_dice.toFixed(3):'—')"></div></div>
           <div class="kpi"><div class="kpi-label">best ppl</div>
             <div class="kpi-val good" data-text="typeof $kpi.best_ppl==='number' ? $kpi.best_ppl.toFixed(3) : '—'">—</div>
             <div class="kpi-sub good" data-text="typeof $kpi.best_ppl_step==='number' ? '@ step '+$kpi.best_ppl_step.toLocaleString() : ''"></div></div>
@@ -232,7 +238,19 @@
         <div class="panel" id="loss-panel"><div class="panel-title">loss &amp; perplexity</div>
           <div class="chart-box"><canvas id="chart-loss"></canvas></div>
           <section id="eval-sample-inline" class="eval-inline">
-            <header class="eval-inline-head"><div><h2 id="eval-inline-title">eval captions</h2><div id="eval-inline-meta" class="sub">The newest qualitative eval snapshot appears here automatically.</div></div></header>
+            <header class="eval-inline-head">
+              <div><h2 id="eval-inline-title">eval captions</h2><div id="eval-inline-meta" class="sub">The newest qualitative eval snapshot appears here automatically.</div></div>
+              <div id="eval-history-controls" class="eval-history-controls" hidden>
+                <button id="eval-history-prev" class="btn sm" type="button" title="previous eval generation" aria-label="Previous eval generation">‹</button>
+                <label class="eval-history-slider">
+                  <span class="sr-only">Eval generation through training time</span>
+                  <input id="eval-history-range" type="range" min="0" max="0" step="1" value="0" />
+                </label>
+                <button id="eval-history-next" class="btn sm" type="button" title="next eval generation" aria-label="Next eval generation">›</button>
+                <span id="eval-history-step" class="eval-history-step">step —</span>
+                <button id="eval-history-latest" class="btn sm" type="button" title="follow the newest eval generation">latest</button>
+              </div>
+            </header>
             <div id="eval-inline-body" class="eval-sample-grid"><div class="empty">waiting for a caption snapshot…</div></div>
           </section>
         </div>

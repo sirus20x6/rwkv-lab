@@ -79,3 +79,52 @@ func TestEvalGalleryRendersTargetAndPredictedBoxOverlays(t *testing.T) {
 		t.Fatal("eval box streams do not have distinct visual styles")
 	}
 }
+
+func TestEvalGalleryPairsEveryGeneratedImageWithItsOriginal(t *testing.T) {
+	assets := Static()
+	app, err := fs.ReadFile(assets, "app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	css, err := fs.ReadFile(assets, "app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(app), `items.some(item => Boolean(item.target_image_url))`) ||
+		!strings.Contains(string(app), `const paired = Boolean(item.target_image_url)`) {
+		t.Fatal("target images do not force generated/original paired rendering")
+	}
+	if !strings.Contains(string(css),
+		`.eval-generation .eval-image-comparison { display: grid; grid-template-columns: repeat(2`) {
+		t.Fatal("paired eval images are not laid out side by side")
+	}
+}
+
+func TestEvalGalleryHasTimeScrubberAndPinnedHistoryMode(t *testing.T) {
+	assets := Static()
+	index, err := fs.ReadFile(assets, "index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := fs.ReadFile(assets, "app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pixi, err := fs.ReadFile(assets, "pixi-glue.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(index), `id="eval-history-range"`) ||
+		!strings.Contains(string(index), `id="eval-history-latest"`) {
+		t.Fatal("eval gallery has no scrubber or latest control")
+	}
+	if !strings.Contains(string(app), `/eval-samples`) ||
+		!strings.Contains(string(app), `evalHistoryManual`) ||
+		!strings.Contains(string(app), `openEvalHistoryIndex`) {
+		t.Fatal("eval gallery does not discover or navigate historical snapshots")
+	}
+	if !strings.Contains(string(pixi),
+		`openEvalSamples(curRun, cand.step, cand.ppl, 0, "manual")`) {
+		t.Fatal("clicking a historical eval marker does not pin history mode")
+	}
+}

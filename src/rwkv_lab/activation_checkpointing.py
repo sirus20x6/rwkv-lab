@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from functools import partial
+import math
 from typing import Iterator, Sequence
 
 import torch
@@ -20,19 +21,41 @@ from torch.utils.checkpoint import checkpoint
 def checkpointed_layer_indices(layer_count: int, *, sequence_tokens: int,
                                min_tokens: int,
                                excluded_layers: Sequence[int] = (),
+                               max_layers: int = 0,
                                grad_enabled: bool = True) -> tuple[int, ...]:
     """Return decoder layers to checkpoint for this particular forward."""
     if min_tokens <= 0 or sequence_tokens < min_tokens or not grad_enabled:
         return ()
     excluded = {int(index) for index in excluded_layers}
-    return tuple(index for index in range(int(layer_count))
-                 if index not in excluded)
+    eligible = tuple(index for index in range(int(layer_count))
+                     if index not in excluded)
+    if 0 < max_layers < len(eligible) and min_tokens > 0:
+        # ``max_layers`` is the cap at the activation threshold, not at the
+        # largest native image. Increase recomputation smoothly as sequence
+        # memory grows, reaching the original all-eligible safe path at twice
+        # the threshold. A fixed partial cap made medium rows faster but OOMed
+        # on a rare 10k-token grid.
+        progress = min(
+            1.0, max(0.0, (sequence_tokens - min_tokens) / min_tokens))
+        max_layers += math.ceil(
+            (len(eligible) - max_layers) * progress)
+    if max_layers <= 0 or max_layers >= len(eligible):
+        return eligible
+    if max_layers == 1:
+        return (eligible[len(eligible) // 2],)
+    denominator = max_layers - 1
+    positions = [
+        (offset * (len(eligible) - 1) + denominator // 2) // denominator
+        for offset in range(max_layers)
+    ]
+    return tuple(eligible[position] for position in positions)
 
 
 @contextmanager
 def selective_activation_checkpointing(
         layers: Sequence[nn.Module], *, sequence_tokens: int, min_tokens: int,
-        excluded_layers: Sequence[int] = ()) -> Iterator[tuple[int, ...]]:
+        excluded_layers: Sequence[int] = (),
+        max_layers: int = 0) -> Iterator[tuple[int, ...]]:
     """Temporarily checkpoint selected FLA ``GradientCheckpointingLayer``s.
 
     Non-reentrant checkpointing correctly handles FLA's tensor-valued keyword
@@ -42,7 +65,8 @@ def selective_activation_checkpointing(
     """
     selected = checkpointed_layer_indices(
         len(layers), sequence_tokens=sequence_tokens, min_tokens=min_tokens,
-        excluded_layers=excluded_layers, grad_enabled=torch.is_grad_enabled())
+        excluded_layers=excluded_layers, max_layers=max_layers,
+        grad_enabled=torch.is_grad_enabled())
     if not selected:
         yield selected
         return

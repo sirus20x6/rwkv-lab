@@ -4,6 +4,8 @@ from torch import nn
 
 from rwkv_lab.vision_loop import (
     FLAFactoredTimeMix,
+    LoopRefinementCacheSnapshot,
+    RefinementCacheEntry,
     capture_loop_refinement_caches,
     install_factored_timemix,
     load_loop_adapter_state,
@@ -12,6 +14,8 @@ from rwkv_lab.vision_loop import (
     reset_loop_adapters,
     reset_loop_inference_cache,
     restore_loop_refinement_caches,
+    select_legacy_fla_cache_rows,
+    select_loop_refinement_cache_rows,
     set_loop_scale,
     stack_legacy_fla_caches,
     stack_loop_refinement_cache_snapshots,
@@ -166,6 +170,49 @@ def test_checkpoint_loader_rejects_partial_adapter_state():
         load_loop_adapter_state([wrapper], [saved])
 
 
+def test_checkpoint_loader_can_explicitly_append_zero_init_loop_pass():
+    source = FLAFactoredTimeMix(
+        FakeAttention(), hidden_size=8, num_heads=2, n_loops=1,
+        loop_index=True)
+    with torch.no_grad():
+        source.loop.residual_weight[0].fill_(0.01)
+        source.loop.gate_chan[0].fill_(0.02)
+        source.loop.loop_index_embed[0].fill_(0.03)
+        source.loop.iter_norm.weight.fill_(0.9)
+    saved = loop_adapter_state([source])
+    destination = FLAFactoredTimeMix(
+        FakeAttention(), hidden_size=8, num_heads=2, n_loops=2,
+        loop_index=True)
+
+    load_loop_adapter_state(
+        [destination], saved, allow_loop_count_increase_from=1)
+
+    torch.testing.assert_close(
+        destination.loop.residual_weight[0],
+        source.loop.residual_weight[0])
+    torch.testing.assert_close(
+        destination.loop.gate_chan[0], source.loop.gate_chan[0])
+    torch.testing.assert_close(
+        destination.loop.loop_index_embed[0],
+        source.loop.loop_index_embed[0])
+    assert torch.count_nonzero(destination.loop.residual_weight[1]) == 0
+    assert torch.count_nonzero(destination.loop.gate_chan[1]) == 0
+    assert torch.count_nonzero(destination.loop.loop_index_embed[1]) == 0
+    torch.testing.assert_close(
+        destination.loop.iter_norm.weight,
+        source.loop.iter_norm.weight)
+
+
+def test_checkpoint_loader_refuses_implicit_loop_count_change():
+    source = FLAFactoredTimeMix(
+        FakeAttention(), hidden_size=8, num_heads=2, n_loops=1)
+    destination = FLAFactoredTimeMix(
+        FakeAttention(), hidden_size=8, num_heads=2, n_loops=2)
+    with pytest.raises(ValueError, match="incompatible loop tensor"):
+        load_loop_adapter_state(
+            [destination], loop_adapter_state([source]))
+
+
 def test_runtime_scale_and_reset_preserve_safe_loop_start():
     torch.manual_seed(2)
     wrapper = FLAFactoredTimeMix(
@@ -317,6 +364,96 @@ def test_stack_legacy_fla_caches_concatenates_nested_batch_states():
     assert stacked[0]["attn_state"] is None
     assert stacked[0]["ffn_state"][0].shape == (2, 5)
     assert stacked[0]["ffn_state"][1][0].shape == (2, 1)
+
+
+def _prefill_rows(wrapper, prefills, order):
+    """Prefill the given rows independently, capturing both cache streams."""
+    caches, snapshots = [], []
+    for row in order:
+        cache = FakeLegacyFLACache()
+        wrapper(prefills[row], past_key_values=cache, use_cache=True)
+        caches.append(cache)
+        snapshots.append(capture_loop_refinement_caches([wrapper], owner=cache))
+    return caches, snapshots
+
+
+def _decode(wrapper, cache, refinement, steps):
+    restore_loop_refinement_caches([wrapper], refinement, owner=cache)
+    return torch.cat([
+        wrapper(step, past_key_values=cache, use_cache=True)[0]
+        for step in steps
+    ], dim=1)
+
+
+def test_compacting_a_decode_batch_equals_decoding_those_rows_alone():
+    """Dropping a finished row must not disturb the rows that remain."""
+    torch.manual_seed(29)
+    wrapper = FLAFactoredTimeMix(
+        FakeRecurrentAttention(), hidden_size=8, num_heads=2, n_loops=2,
+        gate_cap=0.25, loop_index=True)
+    wrapper.enabled = True
+    with torch.no_grad():
+        wrapper.loop.residual_weight[1].copy_(torch.tensor([0.12, -0.08]))
+        wrapper.loop.gate_chan[1].copy_(torch.linspace(-0.15, 0.2, 8))
+        wrapper.loop.loop_index_embed[1].copy_(torch.linspace(-0.1, 0.1, 8))
+    # Independent prompts of different lengths, exactly as batched decode sees.
+    prefills = [torch.randn(1, length, 8) for length in (3, 2, 4)]
+    steps = [torch.randn(2, 1, 8) for _ in range(3)]
+
+    caches, snapshots = _prefill_rows(wrapper, prefills, (0, 1, 2))
+    three_row = stack_legacy_fla_caches(caches)
+    three_refinement = stack_loop_refinement_cache_snapshots(snapshots)
+    compacted = select_legacy_fla_cache_rows(three_row, [2, 0])
+    compacted_refinement = select_loop_refinement_cache_rows(
+        three_refinement, [2, 0])
+    compacted_out = _decode(wrapper, compacted, compacted_refinement, steps)
+
+    # The same two rows, never batched with the dropped one.
+    caches, snapshots = _prefill_rows(wrapper, prefills, (2, 0))
+    two_row = stack_legacy_fla_caches(caches)
+    two_refinement = stack_loop_refinement_cache_snapshots(snapshots)
+    two_row_out = _decode(wrapper, two_row, two_refinement, steps)
+
+    torch.testing.assert_close(compacted_out, two_row_out, rtol=0, atol=0)
+    torch.testing.assert_close(
+        compacted[0]["recurrent_state"], two_row[0]["recurrent_state"],
+        rtol=0, atol=0)
+    torch.testing.assert_close(
+        compacted[0]["conv_state"], two_row[0]["conv_state"], rtol=0, atol=0)
+    assert wrapper._cache_owner is two_row
+
+
+def test_cache_row_selection_rejects_aliased_and_out_of_range_indices():
+    cache = FakeLegacyFLACache.from_legacy_cache([{
+        "recurrent_state": torch.randn(3, 2, 4), "attn_state": None,
+        "conv_state": torch.randn(3, 4), "ffn_state": None,
+    }])
+    with pytest.raises(ValueError, match="non-empty 1D"):
+        select_legacy_fla_cache_rows(cache, [])
+    with pytest.raises(ValueError, match="unique"):
+        select_legacy_fla_cache_rows(cache, [1, 1])
+    with pytest.raises(IndexError, match="out of range"):
+        select_legacy_fla_cache_rows(cache, [0, 3])
+    with pytest.raises(IndexError, match="out of range"):
+        select_legacy_fla_cache_rows(cache, [-1])
+    assert len(select_legacy_fla_cache_rows(cache, [2, 0])) == 1
+
+
+def test_cache_row_selection_rejects_a_slot_that_is_not_batched():
+    snapshot = stack_loop_refinement_cache_snapshots([
+        LoopRefinementCacheSnapshot(((RefinementCacheEntry(
+            layer_idx=0, seen_tokens=1,
+            state={"recurrent_state": torch.randn(1, 2, 4),
+                   "attn_state": None, "conv_state": torch.randn(1, 4),
+                   "ffn_state": None}),),))
+        for _ in range(3)
+    ])
+    # A per-layer counter or cu_seqlens vector in a cache slot would be sliced
+    # into garbage without an explicit batch-axis invariant.
+    entry = snapshot.wrappers[0][0]
+    entry.state["ffn_state"] = torch.arange(4)
+    with pytest.raises(ValueError, match="disagree on batch size"):
+        select_loop_refinement_cache_rows(snapshot, [2, 0])
 
 
 def test_stack_legacy_fla_caches_rejects_nonbatch_shape_mismatch():

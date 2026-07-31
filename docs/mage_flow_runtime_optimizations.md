@@ -50,11 +50,11 @@ The next run can enable the runtime stack with:
 
 ```json
 {
-  "attention_backend": "flash4",
-  "activation_checkpointing_mode": "trainable",
-  "compile_transformer_blocks": true,
+  "attention_backend": "flash2",
+  "activation_checkpointing_mode": "none",
+  "compile_transformer_blocks": false,
   "compile_transformer_mode": "default",
-  "compile_transformer_dynamic": true,
+  "compile_transformer_dynamic": false,
   "float8_training": false,
   "float8_recipe": "tensorwise",
   "encoder_cache_dir": "/workspace/git/moe-mla/caches/mage_flow_encoders",
@@ -66,6 +66,11 @@ The next run can enable the runtime stack with:
 The generated launcher automatically selects `.venv-mage-flow-fa4` whenever
 FA4 or FP8 is enabled. Every selection and its resolved module/block allowlist
 is written into `run_contract.json`.
+
+The qualified terminal trainer uses checkpointable FP32 master parameters and
+FP32 AdamW moments while leaving executable model weights in BF16. This keeps
+FlashAttention inputs supported without rounding optimizer history through
+BF16 on every update or resume.
 
 ### Activation checkpointing
 
@@ -89,6 +94,11 @@ checkpoint restoration and FP8 conversion. This preserves state-dict names
 while allowing a small graph family for varying image and caption lengths.
 First-use compilation is expected and must be excluded from steady-state
 throughput measurements.
+
+Regional compilation remains disabled for the current run. On the fixed
+1024-square terminal-expert probe it was slower than eager execution, and
+dynamic shapes are incompatible with Mage's packed-attention buffer
+allocation. Any future compile experiment must use static-per-bucket graphs.
 
 ### FP8
 
@@ -143,3 +153,9 @@ samples/seeds, and at least ten post-warmup optimizer updates:
 
 Do not combine a REPA objective in these measurements. Runtime improvements
 and fewer-updates-to-quality are separate axes.
+
+The July 30 qualification selected FA2 eager execution. FA4 and regional
+compilation did not improve this workload. Encoder caching and disabling
+activation checkpointing were the only individually positive runtime changes;
+the hot single-entry result is an upper bound until repeated with a shuffled
+production-shaped cache benchmark.

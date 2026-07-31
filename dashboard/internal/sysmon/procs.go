@@ -1,6 +1,7 @@
 package sysmon
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -17,23 +18,27 @@ var trainingScripts = []string{
 	"convert_train.py", "distill_consolidate.py", "drive_isolation.py",
 	"train_mla.py", "train_mla_engram.py", "rlvr_train.py", "rlvr_campaign.py",
 	"recursive_improve.py", "adapter_recursive.py", "posttrain_train.py", "posttrain_campaign.py",
-	"vision_train.py", "vision_cache.py",
+	"vision_train.py", "vision_cache.py", "qwen_private_text_cpt.py", "mage_flow_pretrain.py",
+	"mage_flow_expert_train.py",
 }
 
 var trainingModules = map[string]string{
-	"convert_train.py":       "rwkv_lab.convert_train",
-	"distill_consolidate.py": "rwkv_lab.distill_consolidate",
-	"drive_isolation.py":     "rwkv_lab.drive_isolation",
-	"train_mla.py":           "rwkv_lab.train_mla",
-	"train_mla_engram.py":    "rwkv_lab.train_mla_engram",
-	"rlvr_train.py":          "rwkv_lab.rlvr_train",
-	"rlvr_campaign.py":       "rwkv_lab.rlvr_campaign",
-	"recursive_improve.py":   "rwkv_lab.recursive_improve",
-	"posttrain_train.py":     "rwkv_lab.posttrain_train",
-	"posttrain_campaign.py":  "rwkv_lab.posttrain_campaign",
-	"adapter_recursive.py":   "rwkv_lab.adapter_recursive",
-	"vision_train.py":        "rwkv_lab.vision_train",
-	"vision_cache.py":        "rwkv_lab.vision_cache",
+	"convert_train.py":          "rwkv_lab.convert_train",
+	"distill_consolidate.py":    "rwkv_lab.distill_consolidate",
+	"drive_isolation.py":        "rwkv_lab.drive_isolation",
+	"train_mla.py":              "rwkv_lab.train_mla",
+	"train_mla_engram.py":       "rwkv_lab.train_mla_engram",
+	"rlvr_train.py":             "rwkv_lab.rlvr_train",
+	"rlvr_campaign.py":          "rwkv_lab.rlvr_campaign",
+	"recursive_improve.py":      "rwkv_lab.recursive_improve",
+	"posttrain_train.py":        "rwkv_lab.posttrain_train",
+	"posttrain_campaign.py":     "rwkv_lab.posttrain_campaign",
+	"adapter_recursive.py":      "rwkv_lab.adapter_recursive",
+	"vision_train.py":           "rwkv_lab.vision_train",
+	"vision_cache.py":           "rwkv_lab.vision_cache",
+	"qwen_private_text_cpt.py":           "rwkv_lab.qwen_private_text_cpt",
+	"mage_flow_pretrain.py":     "rwkv_lab.mage_flow_pretrain",
+	"mage_flow_expert_train.py": "rwkv_lab.mage_flow_expert_train",
 }
 
 // AllowedScript reports whether basename(path) is a recognized training
@@ -112,6 +117,32 @@ func readProcs(runsDir string) []Proc {
 
 		if v, ok := argValue(cmdline, "--out-dir", "--out", "--output"); ok {
 			pr.RunName = filepath.Base(v)
+		}
+		if script == "qwen_private_text_cpt.py" ||
+			script == "mage_flow_pretrain.py" ||
+			script == "mage_flow_expert_train.py" {
+			if v, ok := argValue(cmdline, "--config"); ok {
+				if raw, err := os.ReadFile(v); err == nil {
+					var cfg struct {
+						RunDir    string `json:"run_dir"`
+						OutputDir string `json:"output_dir"`
+						MaxSteps  int    `json:"max_steps"`
+					}
+					if json.Unmarshal(raw, &cfg) == nil {
+						runDir := cfg.RunDir
+						if runDir == "" {
+							runDir = cfg.OutputDir
+						}
+						if runDir != "" {
+							pr.RunName = filepath.Base(runDir)
+						}
+						if cfg.MaxSteps > 0 {
+							maxSteps := cfg.MaxSteps
+							pr.MaxSteps = &maxSteps
+						}
+					}
+				}
+			}
 		}
 		if script == "vision_cache.py" {
 			if v, ok := argValue(cmdline, "--cache"); ok {

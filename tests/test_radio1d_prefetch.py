@@ -79,3 +79,53 @@ def test_radio_prefetch_rejects_mixed_tile_counts_before_encoding(
         assert not called
     finally:
         vision_train._FEATURE_MEMORY_CACHE.clear()
+
+
+def test_native_v4h_prefetch_really_loads_then_serves_resident_features(
+        tmp_path):
+    from rwkv_lab.radio_v4h import cache_path, save_native_cache
+
+    cache = tmp_path / "native-cache"
+    rows = []
+    for index in range(2):
+        source = tmp_path / f"native-{index}.png"
+        Image.new("RGB", (32, 32), (index, 0, 0)).save(source)
+        save_native_cache(
+            cache_path(cache, source),
+            torch.full(
+                (1, 2, 2, 4), index + 1,
+                dtype=torch.bfloat16),
+            revision="native-revision", source=source, max_edge=32)
+        rows.append({
+            "image": str(source), "tokens": [1, 2], "prompt_len": 1,
+            "_visual_tokens": 4,
+        })
+    tower = SimpleNamespace(
+        v4h_native=True, v4h_cache_dir=cache,
+        radio_revision="native-revision", v4h_max_edge=32,
+        v4h_feature_width=4, v4h_native_packing="cells",
+    )
+    projector = RadioFeatureProjector()
+    vision_train._FEATURE_MEMORY_CACHE.clear()
+    try:
+        cold = vision_train.prefetch_training_batch(
+            rows, tower, projector, cache, None)
+        assert cold.ready == cold.disk_hits == 2
+        assert cold.resident_hits == cold.generated == 0
+        assert cold.native_features is not None
+        assert cold.native_features[0].shape == (2, 4, 4)
+        assert cold.text_batch is not None
+        assert cold.positions is not None
+
+        for row in rows:
+            cache_path(cache, row["image"]).unlink()
+        loaded = vision_train.runtime_cached_features(
+            rows, tower, projector, cache)
+        assert [item[0][0, 0].item() for item in loaded] == [1, 2]
+
+        warm = vision_train.prefetch_training_batch(
+            rows, tower, projector, cache, None)
+        assert warm.ready == warm.resident_hits == 2
+        assert warm.disk_hits == warm.generated == 0
+    finally:
+        vision_train._FEATURE_MEMORY_CACHE.clear()

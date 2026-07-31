@@ -56,6 +56,12 @@ type Server struct {
 	discoveryMu sync.Mutex
 	discovery   map[string]discoveryEntry // short-lived filesystem discovery cache
 
+	// eval_samples listings, cached per run against the directory mtime so the
+	// 2s gallery retry loop cannot turn into a ReadDir per request over a
+	// directory that grows one file per eval step (eval_samples.go).
+	evalIndexMu sync.Mutex
+	evalIndex   map[string]*evalSampleIndex
+
 	// tick is the shared per-second snapshot every stream connection renders.
 	// Computed once by refreshLoop (tickcache.go) so N tabs cost one query suite.
 	tick atomic.Pointer[tickSnap]
@@ -72,6 +78,7 @@ func New(cfg Config) *Server {
 		selected:  map[string]string{},
 		seen:      map[string]time.Time{},
 		discovery: map[string]discoveryEntry{},
+		evalIndex: map[string]*evalSampleIndex{},
 	}
 	s.routes()
 	return s
@@ -169,9 +176,11 @@ func (s *Server) routes() {
 	// Metric catalog (known cols + extra_json keys) for the dynamic metric picker.
 	s.mux.HandleFunc("GET /api/metrics/{run}", s.handleMetrics)
 	// Qualitative image/reference/generated-caption snapshot for an eval point.
+	s.mux.HandleFunc("GET /api/runs/{name}/eval-samples", s.handleEvalSampleIndex)
 	s.mux.HandleFunc("GET /api/runs/{name}/eval-samples/latest", s.handleLatestEvalSamples)
 	s.mux.HandleFunc("GET /api/runs/{name}/eval-samples/{step}", s.handleEvalSamples)
 	s.mux.HandleFunc("GET /api/runs/{name}/eval-samples/{step}/image/{index}", s.handleEvalSampleImage)
+	s.mux.HandleFunc("GET /api/runs/{name}/eval-samples/{step}/target-image/{index}", s.handleEvalSampleTargetImage)
 
 	// Control actions (confirm-gated client-side, validated + audited here).
 	s.mux.HandleFunc("POST /api/runs/{name}/stop", s.handleStop)

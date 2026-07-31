@@ -20,7 +20,9 @@ import argparse
 import contextlib
 import hashlib
 import heapq
+import io
 import json
+import math
 import os
 import random
 import re
@@ -93,7 +95,10 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--imagenet22k", type=int, default=30_000)
     ap.add_argument("--places365", type=int, default=20_000)
     ap.add_argument("--inaturalist", type=int, default=12_000)
-    ap.add_argument("--doclingmatix", type=int, default=4_445)
+    ap.add_argument("--doclingmatix", type=int, default=0,
+                    help="OCR rows; 0 derives a final-share target")
+    ap.add_argument("--ocr-ratio", type=float, default=0.10,
+                    help="OCR share when --doclingmatix is 0")
     ap.add_argument("--fluxreason", type=int, default=5_000)
     ap.add_argument("--midjourneyv6", type=int, default=3_555)
     ap.add_argument("--coco-sam", type=int, default=5_000)
@@ -121,6 +126,10 @@ def parse_args() -> argparse.Namespace:
                     default=ROOT / "curated_vision/captioning_first_train.jsonl")
     ap.add_argument("--eval-output", type=Path,
                     default=ROOT / "curated_vision/captioning_first_eval.jsonl")
+    ap.add_argument("--print-ocr-target", action="store_true",
+                    help="print the derived DoclingMatix row target for this "
+                         "exact source mix and exit, so the OCR builder can be "
+                         "asked for that many rows instead of a stale constant")
     return ap.parse_args()
 
 
@@ -290,6 +299,11 @@ def final_row(source: str, key: str, payload: bytes, caption: str,
               variant: str, image_dir: Path) -> dict:
     image, digest, width, height = materialize_image(
         payload, image_dir, source, key)
+    with Image.open(io.BytesIO(payload)) as opened:
+        try:
+            exif_orientation = int(opened.getexif().get(0x0112, 1) or 1)
+        except (OSError, ValueError, AttributeError, TypeError):
+            exif_orientation = 1
     return {
         "image": image,
         "text": caption,
@@ -304,6 +318,10 @@ def final_row(source: str, key: str, payload: bytes, caption: str,
         "image_sha256": digest,
         "width": width,
         "height": height,
+        # C-RADIO applies ImageOps.exif_transpose before sizing. Recording the
+        # flag here lets every trainer restart plan native grids from the
+        # manifest instead of opening more than 100k image headers.
+        "exif_orientation": exif_orientation,
     }
 
 
@@ -682,6 +700,31 @@ def _normalized_box(annotation: dict, width: int, height: int) -> list[int]:
     return [max(0, min(999, round(value * 999))) for value in values]
 
 
+def _structured_instance(annotation: dict, width: int, height: int) -> dict:
+    x, y, box_width, box_height = map(float, annotation["bbox"])
+    box = [
+        max(0.0, min(1.0, x / width)),
+        max(0.0, min(1.0, y / height)),
+        max(0.0, min(1.0, (x + box_width) / width)),
+        max(0.0, min(1.0, (y + box_height) / height)),
+    ]
+    polygons = []
+    for polygon in annotation.get("segmentation") or []:
+        if not isinstance(polygon, list) or len(polygon) < 6:
+            continue
+        normalized = []
+        for index in range(0, len(polygon) - 1, 2):
+            normalized.extend((
+                max(0.0, min(1.0, float(polygon[index]) / width)),
+                max(0.0, min(1.0, float(polygon[index + 1]) / height)),
+            ))
+        if len(normalized) >= 6:
+            polygons.append(normalized)
+    if not polygons:
+        raise ValueError("structured annotation has no polygon")
+    return {"box_xyxy": box, "polygons": polygons}
+
+
 def _mask_row_spans(annotation: dict, width: int, height: int,
                     grid: int = 16) -> str:
     canvas = Image.new("1", (grid, grid), 0)
@@ -714,9 +757,11 @@ def _mask_row_spans(annotation: dict, width: int, height: int,
 
 
 def _coco_sam_target(annotations: list[dict], categories: dict[int, str],
-                     width: int, height: int) -> tuple[str, list[int]]:
+                     width: int, height: int
+                     ) -> tuple[str, list[int], list[dict]]:
     lines = []
     annotation_ids = []
+    instances = []
     for annotation in sorted(
             annotations, key=lambda item: float(item.get("area") or 0),
             reverse=True):
@@ -728,11 +773,12 @@ def _coco_sam_target(annotations: list[dict], categories: dict[int, str],
             annotation, width, height))
         lines.append(f"{label}; box=[{box}]; mask16={spans}")
         annotation_ids.append(int(annotation["id"]))
+        instances.append(_structured_instance(annotation, width, height))
         if len(lines) == 3:
             break
     if not lines:
         raise ValueError("COCO image has no polygon instance masks")
-    return "\n".join(lines), annotation_ids
+    return "\n".join(lines), annotation_ids, instances
 
 
 def coco_sam_prompt(target: str) -> str:
@@ -764,7 +810,13 @@ def build_coco_sam(args: argparse.Namespace, count: int,
                    eval_count: int) -> tuple[list[dict], list[dict]]:
     total = count + eval_count
     part = args.work_dir / "coco_sam.jsonl"
-    if (rows := valid_part(part, total)) is None:
+    rows = valid_part(part, total)
+    if rows is not None and any(
+            "structured_instances" not in row for row in rows):
+        # The old resumable shard irreversibly discarded the source polygons.
+        # Rebuild it from COCO rather than pretending a 16x16 raster is native.
+        rows = None
+    if rows is None:
         annotations_zip = args.coco_root / "annotations_trainval2017.zip"
         images_zip = args.coco_root / "train2017.zip"
         with zipfile.ZipFile(annotations_zip) as archive:
@@ -800,7 +852,7 @@ def build_coco_sam(args: argparse.Namespace, count: int,
                 if image is None:
                     continue
                 image_id = int(image["id"])
-                target, annotation_ids = _coco_sam_target(
+                target, annotation_ids, instances = _coco_sam_target(
                     annotations_by_image[image_id], categories,
                     int(image["width"]), int(image["height"]))
                 row = final_row(
@@ -813,6 +865,7 @@ def build_coco_sam(args: argparse.Namespace, count: int,
                     "caption_policy": "coco_polygon_mask16_v2_explicit_request",
                     "coco_image_id": image_id,
                     "coco_annotation_ids": annotation_ids,
+                    "structured_instances": instances,
                     "mask_grid": 16,
                 })
                 rows.append(row)
@@ -840,10 +893,11 @@ def build_coco_sam(args: argparse.Namespace, count: int,
 
 
 def _concept_sam_target(annotations: list[dict], width: int,
-                        height: int) -> tuple[str, list[int]]:
+                        height: int) -> tuple[str, list[int], list[dict]]:
     """Serialize every usable instance of one prompted concept."""
     lines = []
     annotation_ids = []
+    instances = []
     for index, annotation in enumerate(sorted(
             annotations, key=lambda item: float(item.get("area") or 0),
             reverse=True), 1):
@@ -854,11 +908,12 @@ def _concept_sam_target(annotations: list[dict], width: int,
             annotation, width, height))
         lines.append(f"instance {index}; box=[{box}]; mask16={spans}")
         annotation_ids.append(int(annotation["id"]))
+        instances.append(_structured_instance(annotation, width, height))
         if len(lines) == 6:
             break
     if not lines:
         raise ValueError("concept has no polygon instance masks")
-    return "\n".join(lines), annotation_ids
+    return "\n".join(lines), annotation_ids, instances
 
 
 def build_lvis_sam(args: argparse.Namespace, count: int, eval_count: int,
@@ -872,7 +927,11 @@ def build_lvis_sam(args: argparse.Namespace, count: int, eval_count: int,
     """
     total = count + eval_count
     part = args.work_dir / "lvis_sam_v1.jsonl"
-    if (rows := valid_part(part, total)) is None:
+    rows = valid_part(part, total)
+    if rows is not None and any(
+            "structured_instances" not in row for row in rows):
+        rows = None
+    if rows is None:
         annotations_zip = args.coco_root / "lvis_v1_train.json.zip"
         images_zip = args.coco_root / "train2017.zip"
         with zipfile.ZipFile(annotations_zip) as archive:
@@ -940,9 +999,9 @@ def build_lvis_sam(args: argparse.Namespace, count: int, eval_count: int,
                 category_id = int(selected_row["category_id"])
                 image_id = int(selected_row["image_id"])
                 if selected_row["negative"]:
-                    target, annotation_ids = "none", []
+                    target, annotation_ids, instances = "none", [], []
                 else:
-                    target, annotation_ids = _concept_sam_target(
+                    target, annotation_ids, instances = _concept_sam_target(
                         grouped[image_id][category_id],
                         int(selected_row["width"]), int(selected_row["height"]))
                 concept = categories[category_id]
@@ -959,6 +1018,7 @@ def build_lvis_sam(args: argparse.Namespace, count: int, eval_count: int,
                     "lvis_concept": concept,
                     "lvis_negative": bool(selected_row["negative"]),
                     "lvis_annotation_ids": annotation_ids,
+                    "structured_instances": instances,
                     "mask_grid": 16,
                 })
                 rows.append(row)
@@ -1075,9 +1135,11 @@ def validate(args: argparse.Namespace, train: list[dict],
             str(row["task"]) for row in train).items())),
         "caption_policy": (
             "full-image grounded selection across i1 variants; aesthetic and "
-            "hidden generation metadata removed; explicit OCR transcription; "
-            "COCO and LVIS concept-conditioned mask supervision for RADIO's "
-            "distilled SAM 3 features"),
+            "hidden generation metadata removed; explicit OCR transcription"
+            + ("; COCO and LVIS concept-conditioned mask supervision for "
+               "RADIO's distilled SAM 3 features"
+               if any(row.get("task") == "sam_mask"
+                      for row in train + eval_rows) else "")),
         "intentionally_deferred_sources": [
             "yfcc", "redcaps", "megalith10m", "rendered_text", "textatlas",
             "gptedit"],
@@ -1086,6 +1148,21 @@ def validate(args: argparse.Namespace, train: list[dict],
 
 def main() -> None:
     args = parse_args()
+    if not 0 < args.ocr_ratio < 1:
+        raise SystemExit("--ocr-ratio must be between zero and one")
+    if args.doclingmatix == 0:
+        non_ocr = sum((
+            args.pexels, args.imagenet22k, args.places365,
+            args.inaturalist, args.fluxreason, args.midjourneyv6,
+            args.coco_sam, args.lvis_sam,
+        ))
+        args.doclingmatix = math.ceil(
+            non_ocr * args.ocr_ratio / (1.0 - args.ocr_ratio))
+    if args.print_ocr_target:
+        # Queried before any input is required so a builder script can size its
+        # OCR supplement from the same flags it will pass to the real run.
+        print(args.doclingmatix)
+        return
     targets = {
         "pexels": args.pexels,
         "imagenet22k": args.imagenet22k,
@@ -1097,8 +1174,13 @@ def main() -> None:
         "coco_sam": args.coco_sam,
         "lvis_sam": args.lvis_sam,
     }
-    if min(targets.values()) < 1:
-        raise SystemExit("every source target must be positive")
+    caption_ocr_targets = {
+        name: count for name, count in targets.items()
+        if name not in {"coco_sam", "lvis_sam"}}
+    if min(caption_ocr_targets.values()) < 1:
+        raise SystemExit("every caption/OCR source target must be positive")
+    if args.coco_sam < 0 or args.lvis_sam < 0:
+        raise SystemExit("structured source targets must be non-negative")
     required = [
         args.captions, args.source_root / "pexels",
         args.source_root / "imagenet22k",
@@ -1108,10 +1190,13 @@ def main() -> None:
         args.legacy_selection / "pexels_selection.jsonl",
         args.legacy_selection / "midjourneyv6_selection.jsonl",
         args.legacy_eval, args.ocr_train, args.ocr_eval,
-        args.coco_root / "annotations_trainval2017.zip",
-        args.coco_root / "lvis_v1_train.json.zip",
-        args.coco_root / "train2017.zip",
     ]
+    if args.coco_sam or args.lvis_sam:
+        required.append(args.coco_root / "train2017.zip")
+    if args.coco_sam:
+        required.append(args.coco_root / "annotations_trainval2017.zip")
+    if args.lvis_sam:
+        required.append(args.coco_root / "lvis_v1_train.json.zip")
     missing = [str(path) for path in required if not path.exists()]
     if missing:
         raise SystemExit(f"missing required inputs: {missing}")
@@ -1155,7 +1240,10 @@ def main() -> None:
     train.extend(ocr_train)
     ocr_eval = read_jsonl(args.ocr_eval)
     if len(ocr_eval) < args.eval_per_source:
-        raise RuntimeError("DoclingMatix eval is smaller than eval-per-source")
+        raise RuntimeError(
+            f"{args.ocr_eval} holds {len(ocr_eval)} rows but --eval-per-source "
+            f"is {args.eval_per_source}: raise --eval-rows on "
+            f"build_doclingmatix_ocr_mix.py, which produces that file")
     for row in ocr_eval[:args.eval_per_source]:
         row["source"] = "doclingmatix"
         row["prompt"] = OCR_PROMPT
@@ -1169,15 +1257,17 @@ def main() -> None:
     eval_rows.extend(legacy_eval(
         args, "midjourneyv6", args.eval_per_source))
 
-    rows, heldout = build_coco_sam(
-        args, args.coco_sam, args.eval_per_source)
-    train.extend(rows); eval_rows.extend(heldout)
-
-    coco_image_ids = {
-        int(row["coco_image_id"]) for row in rows + heldout}
-    rows, heldout = build_lvis_sam(
-        args, args.lvis_sam, args.eval_per_source, coco_image_ids)
-    train.extend(rows); eval_rows.extend(heldout)
+    coco_image_ids: set[int] = set()
+    if args.coco_sam:
+        rows, heldout = build_coco_sam(
+            args, args.coco_sam, args.eval_per_source)
+        train.extend(rows); eval_rows.extend(heldout)
+        coco_image_ids = {
+            int(row["coco_image_id"]) for row in rows + heldout}
+    if args.lvis_sam:
+        rows, heldout = build_lvis_sam(
+            args, args.lvis_sam, args.eval_per_source, coco_image_ids)
+        train.extend(rows); eval_rows.extend(heldout)
 
     random.Random(args.seed).shuffle(train)
     eval_rows = sorted(eval_rows, key=lambda row: (
