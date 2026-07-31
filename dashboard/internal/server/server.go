@@ -16,19 +16,21 @@ import (
 	"trainboard/internal/alerts"
 	"trainboard/internal/db"
 	"trainboard/internal/sysmon"
+	trainvmstore "trainboard/internal/trainvm"
 )
 
 // Config is the immutable wiring for a Server.
 type Config struct {
-	Addr     string           // e.g. "127.0.0.1:9124"
-	RunsDir  string           // /thearray/git/moe-mla/runs
-	RepoRoot string           // /thearray/git/moe-mla
-	Static   fs.FS            // front-end assets (web.Static())
-	DB       *db.DB           // datastore
-	Sampler  *sysmon.Sampler  // live telemetry
-	Detector *alerts.Detector // divergence/health detector
-	LibDir   string           // converted_layers_lib path (conversion board)
-	NLayers  int              // base-model layer count (0 = autodetect/default)
+	Addr     string               // e.g. "127.0.0.1:9124"
+	RunsDir  string               // /thearray/git/moe-mla/runs
+	RepoRoot string               // /thearray/git/moe-mla
+	Static   fs.FS                // front-end assets (web.Static())
+	DB       *db.DB               // datastore
+	Sampler  *sysmon.Sampler      // live telemetry
+	Detector *alerts.Detector     // divergence/health detector
+	TrainVM  *trainvmstore.Reader // read-only native control-plane projection
+	LibDir   string               // converted_layers_lib path (conversion board)
+	NLayers  int                  // base-model layer count (0 = autodetect/default)
 	// ImageRoots confines eval-sample image serving: an artifact-listed image
 	// path must resolve (symlinks included) inside one of these directories.
 	// Empty falls back to {RunsDir, RepoRoot}.
@@ -43,6 +45,7 @@ type Server struct {
 	db       *db.DB
 	sampler  *sysmon.Sampler
 	detector *alerts.Detector
+	trainvm  *trainvmstore.Reader
 
 	mu sync.RWMutex
 	// Per-viewer selection: each browser tab sends a stable tabId signal, so one
@@ -75,6 +78,7 @@ const tabTTL = 10 * time.Minute
 func New(cfg Config) *Server {
 	s := &Server{
 		cfg: cfg, mux: http.NewServeMux(), db: cfg.DB, sampler: cfg.Sampler, detector: cfg.Detector,
+		trainvm:   cfg.TrainVM,
 		selected:  map[string]string{},
 		seen:      map[string]time.Time{},
 		discovery: map[string]discoveryEntry{},
@@ -173,6 +177,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/series/{run}", s.handleSeries)
 	// Timeline markers (checkpoints/alerts/controls/actions) for chart overlays.
 	s.mux.HandleFunc("GET /api/timeline/{run}", s.handleTimeline)
+	s.mux.HandleFunc("GET /api/trainvm/runs", s.handleTrainVMRuns)
+	s.mux.HandleFunc("GET /api/trainvm/runs/{run}", s.handleTrainVMRun)
+	s.mux.HandleFunc("GET /api/trainvm/runs/{run}/timeline", s.handleTrainVMTimeline)
 	// Metric catalog (known cols + extra_json keys) for the dynamic metric picker.
 	s.mux.HandleFunc("GET /api/metrics/{run}", s.handleMetrics)
 	// Qualitative image/reference/generated-caption snapshot for an eval point.

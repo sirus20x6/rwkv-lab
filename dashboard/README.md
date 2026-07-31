@@ -18,6 +18,10 @@ go -C /thearray/git/moe-mla/dashboard run ./cmd/trainboard
 
 Reads `/thearray/git/moe-mla/runs/`. Ingests all `train.jsonl` logs + system telemetry into a local
 SQLite DB (`trainboard.db`). GPU-light — safe to run alongside live training.
+When `<repo>/trainvm.db` exists, the server attaches to it in SQLite read-only/query-only mode and
+exposes native run projections at `/api/trainvm/runs`, `/api/trainvm/runs/{run}`, and the incremental
+`/api/trainvm/runs/{run}/timeline?after=SEQUENCE&limit=COUNT` endpoint. Use `-trainvm-db PATH` to
+select another journal. The Go process cannot mutate TrainVM lifecycle state.
 The one-second shared snapshot reads conversion quality from ingestion-time rollups plus one batched
 codec query; it does not fan out KPI/count queries per layer. Run-sidecar and campaign/dataset discovery
 are cached, so multiple panels and browser tabs do not repeatedly walk the 1TB-scale `runs/` tree.
