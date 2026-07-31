@@ -96,7 +96,8 @@ trainvm/build/trainvm plan \
   docs/experiment-vm/examples/mageflow-cache-resume.json
 trainvm/build/trainvm compile < \
   docs/experiment-vm/examples/mageflow-cache-resume.json
-trainvm/build/trainvm serve --journal /tmp/trainvm.db --socket /tmp/trainvm.sock
+trainvm/build/trainvm serve --journal /tmp/trainvm.db --socket /tmp/trainvm.sock \
+  --registry /etc/trainvm/adapters.json
 trainvm/build/trainvm simulate \
   docs/experiment-vm/examples/mageflow-cache-resume.json \
   docs/experiment-vm/examples/mageflow-cache-resume.events.jsonl
@@ -108,7 +109,10 @@ format change must update the golden test and supply a plan-schema migration rat
 `compile` is the bounded dashboard authoring boundary: it reads one JSON document from stdin and
 returns either structured diagnostics or the native compiler's canonical plan and content hash.
 `serve` is the stateful mutation boundary. The dashboard connects to its Unix socket through gRPC;
-it never opens the journal writable. `SubmitExperiment` supports validation and idempotent queued
+it never opens the journal writable. Startup requires one bounded `trainvm.adapters/v1` registry
+document, decoded strictly and retained immutably for the daemon lifetime. `SubmitExperiment`
+validates every exact adapter profile before validation succeeds or a run is created, and supports
+idempotent queued
 creation; the live-control `CommandRun` variant is also implemented. The dashboard freezes ambiguous
 submissions and retries their exact body and key. The process-free worker launch/readiness core is
 implemented, as is the initial single-result WorkerControl stream. Process launch/reconciliation,

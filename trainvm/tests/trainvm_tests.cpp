@@ -134,6 +134,33 @@ std::vector<trainvm::AdapterProfile> fixture_adapter_profiles(
   };
 }
 
+std::vector<trainvm::AdapterProfile> fixture_external_adapter_profiles(
+    char fingerprint_digit = 'a') {
+  auto profiles = fixture_adapter_profiles(fingerprint_digit);
+  profiles.erase(
+      std::remove_if(profiles.begin(), profiles.end(),
+                     [](const trainvm::AdapterProfile& profile) {
+                       return profile.key.runtime ==
+                              trainvm::ComponentRuntime::builtin;
+                     }),
+      profiles.end());
+  return profiles;
+}
+
+nlohmann::json adapter_locked_submission(
+    const trainvm::CompiledPlan& plan,
+    const trainvm::AdapterRegistry& registry) {
+  const std::string manifest = registry.plan_lock_manifest(plan);
+  return {{"adapter_lock_digest", registry.plan_lock_digest(plan)},
+          {"adapter_lock", nlohmann::json::parse(manifest)}};
+}
+
+nlohmann::json fixture_adapter_locked_submission(
+    const trainvm::CompiledPlan& plan) {
+  return adapter_locked_submission(
+      plan, trainvm::AdapterRegistry(fixture_adapter_profiles()));
+}
+
 bool has_diagnostic(const trainvm::CompileResult& result, std::string_view code) {
   return std::any_of(result.diagnostics.begin(), result.diagnostics.end(),
                      [&](const trainvm::Diagnostic& diagnostic) { return diagnostic.code == code; });
@@ -1285,7 +1312,8 @@ void test_command_service() {
     journal_id = journal.journal_id();
   }
 
-  trainvm::TrainVMService service(database_path);
+  trainvm::TrainVMService service(
+      database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()));
   auto request = [&] (std::string idempotency_key, std::uint64_t expected_control_revision,
                      double value) {
     trainvm::v1::RunCommandRequest output;
@@ -1515,7 +1543,9 @@ void test_submission_and_queue_boundary() {
     trainvm::Journal journal(database_path);
     journal_id = journal.journal_id();
   }
-  trainvm::TrainVMService service(database_path);
+  auto service = std::make_unique<trainvm::TrainVMService>(
+      database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()));
+  std::string adapter_lock_digest;
   const auto request = [&](bool create_run, std::string key, std::string source = {}) {
     trainvm::v1::SubmitExperimentRequest output;
     output.set_source_document(source.empty() ? json_source : std::move(source));
@@ -1524,6 +1554,9 @@ void test_submission_and_queue_boundary() {
     output.set_idempotency_key(std::move(key));
     output.set_expected_journal_id(journal_id);
     output.set_expected_plan_hash(json_result.plan->plan_hash);
+    if (create_run && !adapter_lock_digest.empty()) {
+      output.set_expected_adapter_lock_digest(adapter_lock_digest);
+    }
     output.set_author("dashboard");
     output.set_reason("submission test");
     return output;
@@ -1531,22 +1564,35 @@ void test_submission_and_queue_boundary() {
 
   auto validate = request(false, "");
   trainvm::v1::SubmitExperimentResponse validate_response;
-  const auto validate_status = service.SubmitExperiment(nullptr, &validate, &validate_response);
+  const auto validate_status = service->SubmitExperiment(nullptr, &validate, &validate_response);
   check(validate_status.ok() && !validate_response.has_run() &&
             validate_response.plan_hash() == json_result.plan->plan_hash &&
+            validate_response.adapter_lock_digest().starts_with("sha256:") &&
+            validate_response.adapter_lock_digest().size() == 71U &&
             validate_response.canonical_document() == validate_response.canonical_plan(),
         "validation-only submission returns canonical content without a run");
+  adapter_lock_digest = validate_response.adapter_lock_digest();
   {
     trainvm::Journal journal(database_path);
     check(journal.event_count() == 0U,
           "validation-only submission leaves the authority journal unchanged");
   }
 
+  auto missing_adapter_lock = request(true, "missing-adapter-lock");
+  missing_adapter_lock.clear_expected_adapter_lock_digest();
+  trainvm::v1::SubmitExperimentResponse missing_adapter_lock_response;
+  const auto missing_adapter_lock_status = service->SubmitExperiment(
+      nullptr, &missing_adapter_lock, &missing_adapter_lock_response);
+  check(missing_adapter_lock_status.error_code() ==
+            grpc::StatusCode::INVALID_ARGUMENT,
+        "run submission requires the adapter lock returned by preview");
+
   auto create = request(true, "submission-1");
   trainvm::v1::SubmitExperimentResponse created;
-  const auto create_status = service.SubmitExperiment(nullptr, &create, &created);
+  const auto create_status = service->SubmitExperiment(nullptr, &create, &created);
   check(create_status.ok() && created.has_run() && created.run().revision() == 1U &&
-            created.run().plan_hash() == json_result.plan->plan_hash,
+            created.run().plan_hash() == json_result.plan->plan_hash &&
+            created.adapter_lock_digest() == adapter_lock_digest,
         "run submission creates a deterministic revision-one run");
   const std::string run_id = created.run().run_id();
   {
@@ -1559,7 +1605,7 @@ void test_submission_and_queue_boundary() {
   }
 
   trainvm::v1::SubmitExperimentResponse replayed;
-  const auto replay_status = service.SubmitExperiment(nullptr, &create, &replayed);
+  const auto replay_status = service->SubmitExperiment(nullptr, &create, &replayed);
   check(replay_status.ok() && replayed.has_run() && replayed.run().run_id() == run_id,
         "exact submission retry returns the original run identity");
   {
@@ -1568,10 +1614,49 @@ void test_submission_and_queue_boundary() {
           "exact submission retry does not duplicate durable creation events");
   }
 
+  {
+    service.reset();
+    auto unresolved_profiles = fixture_adapter_profiles();
+    unresolved_profiles.erase(
+        std::remove_if(unresolved_profiles.begin(), unresolved_profiles.end(),
+                       [](const trainvm::AdapterProfile& profile) {
+                         return profile.key.operation == "train";
+                       }),
+        unresolved_profiles.end());
+    trainvm::TrainVMService unresolved_registry_service(
+        database_path,
+        trainvm::AdapterRegistry(std::move(unresolved_profiles)));
+    trainvm::v1::SubmitExperimentResponse unresolved_registry_replay;
+    const auto unresolved_registry_replay_status =
+        unresolved_registry_service.SubmitExperiment(
+            nullptr, &create, &unresolved_registry_replay);
+    auto unresolved_registry_conflict = create;
+    unresolved_registry_conflict.set_reason("changed retry identity");
+    trainvm::v1::SubmitExperimentResponse
+        unresolved_registry_conflict_response;
+    const auto unresolved_registry_conflict_status =
+        unresolved_registry_service.SubmitExperiment(
+            nullptr, &unresolved_registry_conflict,
+            &unresolved_registry_conflict_response);
+    trainvm::Journal journal(database_path);
+    check(unresolved_registry_replay_status.ok() &&
+              unresolved_registry_replay.has_run() &&
+              unresolved_registry_replay.run().run_id() == run_id &&
+              unresolved_registry_replay.run().revision() == 1U &&
+              unresolved_registry_replay.adapter_lock_digest() ==
+                  adapter_lock_digest &&
+              unresolved_registry_conflict_status.error_code() ==
+                  grpc::StatusCode::ALREADY_EXISTS &&
+              journal.event_count() == 1U,
+          "durable submission identity replays before current registry resolution and still rejects changed retries");
+  }
+  service = std::make_unique<trainvm::TrainVMService>(
+      database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()));
+
   auto concurrent_request = request(true, "concurrent-submission");
   auto concurrent_submit = [&] {
     trainvm::v1::SubmitExperimentResponse response;
-    const auto status = service.SubmitExperiment(nullptr, &concurrent_request, &response);
+    const auto status = service->SubmitExperiment(nullptr, &concurrent_request, &response);
     return std::pair{status, response.run().run_id()};
   };
   auto concurrent_left = std::async(std::launch::async, concurrent_submit);
@@ -1589,14 +1674,14 @@ void test_submission_and_queue_boundary() {
   check(changed_compiled.valid(), "changed submission conflict fixture compiles");
   changed.set_expected_plan_hash(changed_compiled.plan->plan_hash);
   trainvm::v1::SubmitExperimentResponse changed_response;
-  const auto changed_status = service.SubmitExperiment(nullptr, &changed, &changed_response);
+  const auto changed_status = service->SubmitExperiment(nullptr, &changed, &changed_response);
   check(changed_status.error_code() == grpc::StatusCode::ALREADY_EXISTS,
         "same submission key with changed canonical content conflicts");
   auto changed_reason = create;
   changed_reason.set_reason("different retry content");
   trainvm::v1::SubmitExperimentResponse changed_reason_response;
   const auto changed_reason_status =
-      service.SubmitExperiment(nullptr, &changed_reason, &changed_reason_response);
+      service->SubmitExperiment(nullptr, &changed_reason, &changed_reason_response);
   check(changed_reason_status.error_code() == grpc::StatusCode::ALREADY_EXISTS,
         "same submission key with changed audit content conflicts");
 
@@ -1604,7 +1689,7 @@ void test_submission_and_queue_boundary() {
   wrong_authority.set_expected_journal_id("00000000000000000000000000000000");
   trainvm::v1::SubmitExperimentResponse wrong_authority_response;
   const auto wrong_authority_status =
-      service.SubmitExperiment(nullptr, &wrong_authority, &wrong_authority_response);
+      service->SubmitExperiment(nullptr, &wrong_authority, &wrong_authority_response);
   check(wrong_authority_status.error_code() == grpc::StatusCode::FAILED_PRECONDITION,
         "submission refuses a mismatched journal authority identity");
 
@@ -1612,9 +1697,19 @@ void test_submission_and_queue_boundary() {
   wrong_preview.set_expected_plan_hash(std::string(64, '0'));
   trainvm::v1::SubmitExperimentResponse wrong_preview_response;
   const auto wrong_preview_status =
-      service.SubmitExperiment(nullptr, &wrong_preview, &wrong_preview_response);
+      service->SubmitExperiment(nullptr, &wrong_preview, &wrong_preview_response);
   check(wrong_preview_status.error_code() == grpc::StatusCode::FAILED_PRECONDITION,
         "submission refuses compiler skew from the validated preview plan");
+
+  auto wrong_adapter_lock = request(true, "wrong-adapter-lock");
+  wrong_adapter_lock.set_expected_adapter_lock_digest(
+      "sha256:" + std::string(64, '0'));
+  trainvm::v1::SubmitExperimentResponse wrong_adapter_lock_response;
+  const auto wrong_adapter_lock_status = service->SubmitExperiment(
+      nullptr, &wrong_adapter_lock, &wrong_adapter_lock_response);
+  check(wrong_adapter_lock_status.error_code() ==
+            grpc::StatusCode::FAILED_PRECONDITION,
+        "submission refuses adapter registry skew from the validated preview");
 
   sqlite3* raw_database = nullptr;
   check(sqlite3_open(database_path.c_str(), &raw_database) == SQLITE_OK,
@@ -1629,7 +1724,7 @@ void test_submission_and_queue_boundary() {
   }
   trainvm::v1::SubmitExperimentResponse inconsistent_replay;
   const auto inconsistent_status =
-      service.SubmitExperiment(nullptr, &create, &inconsistent_replay);
+      service->SubmitExperiment(nullptr, &create, &inconsistent_replay);
   check(inconsistent_status.error_code() == grpc::StatusCode::DATA_LOSS,
         "idempotent replay refuses projection and journal disagreement");
   check(sqlite3_open(database_path.c_str(), &raw_database) == SQLITE_OK,
@@ -1670,7 +1765,8 @@ void test_submission_and_queue_boundary() {
     sqlite3_close(raw_database);
   }
   trainvm::v1::SubmitExperimentResponse corrupt_replay;
-  const auto corrupt_status = service.SubmitExperiment(nullptr, &create, &corrupt_replay);
+  const auto corrupt_status =
+      service->SubmitExperiment(nullptr, &create, &corrupt_replay);
   check(corrupt_status.error_code() == grpc::StatusCode::DATA_LOSS,
         "idempotent replay refuses a tampered global event chain");
   std::filesystem::remove_all(directory);
@@ -2352,6 +2448,8 @@ void test_worker_control_service_boundary() {
   const auto compiled = trainvm::compile_document(load_fixture());
   check(compiled.valid(), "fixture required by WorkerControl service compiles");
   if (!compiled.valid()) return;
+  const nlohmann::json submission_identity =
+      fixture_adapter_locked_submission(*compiled.plan);
 
   const auto wire_hello = [](const trainvm::WorkerLaunchTicket& launch) {
     trainvm::v1::WorkerHello hello;
@@ -2424,7 +2522,7 @@ void test_worker_control_service_boundary() {
     {
       trainvm::Journal journal(database_path);
       trainvm::Controller controller(*compiled.plan, journal, run_id);
-      controller.create_queued();
+      controller.create_queued(submission_identity);
       (void)controller.begin_acquisition(1'000);
       launch = controller.prepare_worker_launch(launch_request, 1'100);
       check(journal.event_count() == 7U,
@@ -2433,7 +2531,8 @@ void test_worker_control_service_boundary() {
 
     std::int64_t authority_now_ns = 1'200;
     trainvm::TrainVMService service(
-        database_path, [&authority_now_ns] { return authority_now_ns; });
+        database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
+        [&authority_now_ns] { return authority_now_ns; });
     trainvm::TrainVMService::WorkerConnection connection;
     const auto hello = wire_hello(launch);
     const grpc::Status open =
@@ -2573,16 +2672,18 @@ void test_worker_control_service_boundary() {
     {
       trainvm::Journal journal(database_path);
       trainvm::Controller controller(*compiled.plan, journal, run_id);
-      controller.create_queued();
+      controller.create_queued(submission_identity);
       lease = controller.begin_acquisition(3'000).lease;
       launch = controller.prepare_worker_launch(launch_request, 3'100);
     }
     std::size_t clock_sample = 0;
-    trainvm::TrainVMService service(database_path, [&] {
-      ++clock_sample;
-      return clock_sample == 1U ? lease.expires_at_ns - 1
-                                : lease.expires_at_ns;
-    });
+    trainvm::TrainVMService service(
+        database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
+        [&] {
+          ++clock_sample;
+          return clock_sample == 1U ? lease.expires_at_ns - 1
+                                    : lease.expires_at_ns;
+        });
     trainvm::TrainVMService::WorkerConnection connection;
     const grpc::Status expired =
         service.open_worker_connection(wire_hello(launch), connection);
@@ -2621,13 +2722,14 @@ void test_worker_control_service_boundary() {
     {
       trainvm::Journal journal(database_path);
       trainvm::Controller controller(*compiled.plan, journal, run_id);
-      controller.create_queued();
+      controller.create_queued(submission_identity);
       (void)controller.begin_acquisition(2'000);
       launch = controller.prepare_worker_launch(launch_request, 2'100);
     }
     std::int64_t authority_now_ns = 2'200;
     trainvm::TrainVMService service(
-        database_path, [&authority_now_ns] { return authority_now_ns; });
+        database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
+        [&authority_now_ns] { return authority_now_ns; });
     trainvm::TrainVMService::WorkerConnection connection;
     const grpc::Status open =
         service.open_worker_connection(wire_hello(launch), connection);
@@ -2660,11 +2762,13 @@ void test_worker_control_service_boundary() {
     {
       trainvm::Journal journal(database_path);
       trainvm::Controller controller(*compiled.plan, journal, run_id);
-      controller.create_queued();
+      controller.create_queued(submission_identity);
       (void)controller.begin_acquisition(4'000);
       launch = controller.prepare_worker_launch(launch_request, 4'100);
     }
-    trainvm::TrainVMService service(database_path, [] { return 4'200; });
+    trainvm::TrainVMService service(
+        database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
+        [] { return 4'200; });
     trainvm::TrainVMService::WorkerConnection connection;
     const grpc::Status open =
         service.open_worker_connection(wire_hello(launch), connection);
@@ -2704,6 +2808,10 @@ void test_worker_control_grpc_stream() {
   check(compiled.valid() && eof_compiled.valid(),
         "fixtures required by WorkerControl gRPC stream compile");
   if (!compiled.valid() || !eof_compiled.valid()) return;
+  const nlohmann::json submission_identity =
+      fixture_adapter_locked_submission(*compiled.plan);
+  const nlohmann::json eof_submission_identity =
+      fixture_adapter_locked_submission(*eof_compiled.plan);
 
   const std::filesystem::path directory =
       std::filesystem::temp_directory_path() /
@@ -2719,7 +2827,7 @@ void test_worker_control_grpc_stream() {
   {
     trainvm::Journal journal(database_path);
     trainvm::Controller controller(*compiled.plan, journal, run_id);
-    controller.create_queued();
+    controller.create_queued(submission_identity);
     (void)controller.begin_acquisition(1'000);
     launch = controller.prepare_worker_launch(
         {.code_fingerprint = "sha256:worker-control-grpc-v1",
@@ -2727,7 +2835,7 @@ void test_worker_control_grpc_stream() {
         1'100);
     trainvm::Controller eof_controller(
         *eof_compiled.plan, journal, eof_run_id);
-    eof_controller.create_queued();
+    eof_controller.create_queued(eof_submission_identity);
     (void)eof_controller.begin_acquisition(1'000);
     eof_launch = eof_controller.prepare_worker_launch(
         {.code_fingerprint = "sha256:worker-control-grpc-eof-v1",
@@ -2774,7 +2882,9 @@ void test_worker_control_grpc_stream() {
     return message;
   };
 
-  trainvm::TrainVMService service(database_path, [] { return 1'200; });
+  trainvm::TrainVMService service(
+      database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
+      [] { return 1'200; });
   grpc::ServerBuilder builder;
   int port = 0;
   builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(),
@@ -3631,6 +3741,330 @@ void test_acquiring_rejects_fabricated_running_transition() {
   std::filesystem::remove_all(directory);
 }
 
+void test_adapter_registry_file_contract() {
+  const std::filesystem::path directory =
+      std::filesystem::temp_directory_path() /
+      ("trainvm-adapter-registry-file-test-" +
+       std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  const auto set_owner_only = [](const std::filesystem::path& path) {
+    std::filesystem::permissions(
+        path,
+        std::filesystem::perms::owner_read |
+            std::filesystem::perms::owner_write,
+        std::filesystem::perm_options::replace);
+  };
+  const auto write_json = [&](const std::filesystem::path& path,
+                              const nlohmann::json& value) {
+    {
+      std::ofstream output(path);
+      output << value.dump(2) << '\n';
+    }
+    set_owner_only(path);
+  };
+
+  const auto original_profiles = fixture_external_adapter_profiles();
+  const nlohmann::json original_document = trainvm::encode_json(
+      trainvm::AdapterRegistryDocument{
+          .api_version = "trainvm.adapters/v1",
+          .profiles = original_profiles,
+      });
+  const auto original_path = directory / "registry.json";
+  write_json(original_path, original_document);
+  const trainvm::AdapterRegistry loaded =
+      trainvm::AdapterRegistry::load_file(original_path);
+
+  auto reversed_profiles = original_profiles;
+  std::ranges::reverse(reversed_profiles);
+  for (auto& profile : reversed_profiles) {
+    std::ranges::reverse(profile.required_capabilities);
+  }
+  const auto reordered_path = directory / "registry-reordered.json";
+  write_json(reordered_path,
+             trainvm::encode_json(trainvm::AdapterRegistryDocument{
+                 .api_version = "trainvm.adapters/v1",
+                 .profiles = std::move(reversed_profiles),
+             }));
+  const trainvm::AdapterRegistry reordered =
+      trainvm::AdapterRegistry::load_file(reordered_path);
+  const auto compiled = trainvm::compile_document(load_fixture());
+  check(compiled.valid(), "registry file fixture plan compiles");
+  if (compiled.valid()) {
+    const auto& mageflow =
+        compiled.plan->experiment.spec.components.at("mageflow");
+    const auto& resolved = loaded.resolve(mageflow, "train");
+    check(resolved.code_fingerprint ==
+              "sha256:" + std::string(64, 'a') &&
+              resolved.required_capabilities ==
+                  std::vector<std::string>({"worker.controls",
+                                            "worker.metrics"}) &&
+              loaded.registry_digest().starts_with("sha256:") &&
+              loaded.registry_digest().size() == 71U &&
+              loaded.registry_digest() == reordered.registry_digest() &&
+              loaded.registry_digest() ==
+                  trainvm::AdapterRegistry(fixture_adapter_profiles())
+                      .registry_digest(),
+          "reflection-decoded external sibling profiles may repeat schema field names and canonicalize order into a stable full-registry digest");
+  }
+
+  const auto symlink_path = directory / "registry-symlink.json";
+  std::filesystem::create_symlink(original_path, symlink_path);
+  bool symlink_rejected = false;
+  try {
+    (void)trainvm::AdapterRegistry::load_file(symlink_path);
+  } catch (const std::invalid_argument&) {
+    symlink_rejected = true;
+  }
+
+  auto unknown_document = original_document;
+  unknown_document["unknown_authority_field"] = true;
+  const auto unknown_path = directory / "registry-unknown.json";
+  write_json(unknown_path, unknown_document);
+  bool unknown_rejected = false;
+  try {
+    (void)trainvm::AdapterRegistry::load_file(unknown_path);
+  } catch (const std::invalid_argument&) {
+    unknown_rejected = true;
+  }
+
+  auto future_document = original_document;
+  future_document["api_version"] = "trainvm.adapters/v2";
+  const auto future_path = directory / "registry-future.json";
+  write_json(future_path, future_document);
+  bool version_rejected = false;
+  try {
+    (void)trainvm::AdapterRegistry::load_file(future_path);
+  } catch (const std::invalid_argument&) {
+    version_rejected = true;
+  }
+
+  auto reserved_namespace_document = original_document;
+  reserved_namespace_document["profiles"].at(0)["key"]["adapter"] =
+      "trainvm.core";
+  const auto reserved_namespace_path =
+      directory / "registry-reserved-namespace.json";
+  write_json(reserved_namespace_path, reserved_namespace_document);
+  bool reserved_namespace_rejected = false;
+  try {
+    (void)trainvm::AdapterRegistry::load_file(reserved_namespace_path);
+  } catch (const std::invalid_argument&) {
+    reserved_namespace_rejected = true;
+  }
+
+  const auto duplicate_key_path = directory / "registry-duplicate-key.json";
+  {
+    std::ofstream duplicate_key(duplicate_key_path);
+    duplicate_key << R"({"api_version":"trainvm.adapters/v1","api_version":"trainvm.adapters/v1","profiles":[]})";
+  }
+  set_owner_only(duplicate_key_path);
+  bool duplicate_key_rejected = false;
+  try {
+    (void)trainvm::AdapterRegistry::load_file(duplicate_key_path);
+  } catch (const std::invalid_argument&) {
+    duplicate_key_rejected = true;
+  }
+
+  const auto empty_path = directory / "registry-empty.json";
+  {
+    std::ofstream empty(empty_path);
+  }
+  set_owner_only(empty_path);
+  bool empty_rejected = false;
+  try {
+    (void)trainvm::AdapterRegistry::load_file(empty_path);
+  } catch (const std::invalid_argument&) {
+    empty_rejected = true;
+  }
+
+  const auto oversized_path = directory / "registry-oversized.json";
+  {
+    std::ofstream oversized(oversized_path);
+    oversized << std::string((1U << 20U) + 1U, ' ');
+  }
+  set_owner_only(oversized_path);
+  bool oversized_rejected = false;
+  try {
+    (void)trainvm::AdapterRegistry::load_file(oversized_path);
+  } catch (const std::invalid_argument&) {
+    oversized_rejected = true;
+  }
+  check(symlink_rejected && unknown_rejected && version_rejected &&
+            reserved_namespace_rejected && duplicate_key_rejected &&
+            empty_rejected && oversized_rejected,
+        "registry file loading rejects symlinks, unknown fields, unsupported versions, reserved trainvm.core names, duplicate keys, and unbounded files");
+  std::filesystem::remove_all(directory);
+}
+
+void test_service_registry_and_reconciliation() {
+  const auto fixture = load_fixture();
+  const auto compiled = trainvm::compile_document(fixture);
+  check(compiled.valid(),
+        "fixture required by service registry reconciliation compiles");
+  if (!compiled.valid()) return;
+
+  const std::filesystem::path directory =
+      std::filesystem::temp_directory_path() /
+      ("trainvm-service-reconciler-test-" +
+       std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  const auto request_for = [&](std::string journal_id, bool create_run,
+                               std::string key,
+                               std::string adapter_lock_digest = {}) {
+    trainvm::v1::SubmitExperimentRequest request;
+    request.set_source_document(fixture.dump());
+    request.set_source_format("json");
+    request.set_create_run(create_run);
+    request.set_idempotency_key(std::move(key));
+    request.set_expected_journal_id(std::move(journal_id));
+    request.set_author(create_run ? "scheduler" : "");
+    request.set_reason(create_run ? "service reconciliation test" : "");
+    if (create_run) {
+      request.set_expected_plan_hash(compiled.plan->plan_hash);
+      request.set_expected_adapter_lock_digest(
+          std::move(adapter_lock_digest));
+    }
+    return request;
+  };
+  const auto has_adapter_error = [](const auto& response) {
+    return std::ranges::any_of(response.diagnostics(),
+                               [](const trainvm::v1::Diagnostic& diagnostic) {
+      return diagnostic.severity() ==
+                 trainvm::v1::Diagnostic::SEVERITY_ERROR &&
+             diagnostic.code() == "adapter.registry" &&
+             diagnostic.document_path() == "/spec/components";
+    });
+  };
+
+  {
+    const auto database_path = directory / "mismatch.db";
+    std::string journal_id;
+    {
+      trainvm::Journal journal(database_path);
+      journal_id = journal.journal_id();
+    }
+    auto incomplete_profiles = fixture_adapter_profiles();
+    incomplete_profiles.erase(
+        std::remove_if(incomplete_profiles.begin(), incomplete_profiles.end(),
+                       [](const trainvm::AdapterProfile& profile) {
+                         return profile.key.operation == "train";
+                       }),
+        incomplete_profiles.end());
+    trainvm::TrainVMService service(
+        database_path,
+        trainvm::AdapterRegistry(std::move(incomplete_profiles)));
+
+    auto preview_request = request_for(journal_id, false, "");
+    trainvm::v1::SubmitExperimentResponse preview;
+    const grpc::Status preview_status =
+        service.SubmitExperiment(nullptr, &preview_request, &preview);
+    auto create_request = request_for(
+        journal_id, true, "registry-mismatch",
+        "sha256:" + std::string(64, '0'));
+    trainvm::v1::SubmitExperimentResponse create;
+    const grpc::Status create_status =
+        service.SubmitExperiment(nullptr, &create_request, &create);
+    trainvm::Journal observer(database_path);
+    check(preview_status.ok() && create_status.ok() &&
+              has_adapter_error(preview) && has_adapter_error(create) &&
+              preview.canonical_document() == compiled.plan->canonical_plan.dump() &&
+              preview.canonical_plan() == preview.canonical_document() &&
+              preview.plan_hash() == compiled.plan->plan_hash &&
+              create.canonical_document() == preview.canonical_document() &&
+              create.plan_hash() == compiled.plan->plan_hash &&
+              !preview.has_run() && !create.has_run() &&
+              observer.event_count() == 0U &&
+              !observer.compiled_plan(compiled.plan->plan_hash) &&
+              !observer.active_lease(
+                  compiled.plan->experiment.spec.workspace.concurrency_key,
+                  1'000),
+          "preview and creation retain canonical identity but reject registry mismatch without mutation");
+  }
+
+  {
+    const auto database_path = directory / "reconcile.db";
+    std::string journal_id;
+    {
+      trainvm::Journal journal(database_path);
+      journal_id = journal.journal_id();
+    }
+    std::int64_t authority_now_ns = 5'000;
+    trainvm::TrainVMService service(
+        database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
+        [&authority_now_ns] { return authority_now_ns; });
+    auto preview_request = request_for(journal_id, false, "");
+    trainvm::v1::SubmitExperimentResponse preview;
+    const grpc::Status preview_status =
+        service.SubmitExperiment(nullptr, &preview_request, &preview);
+    auto create_request = request_for(
+        journal_id, true, "service-reconcile",
+        preview.adapter_lock_digest());
+    trainvm::v1::SubmitExperimentResponse created;
+    const grpc::Status create_status =
+        service.SubmitExperiment(nullptr, &create_request, &created);
+    const std::string run_id = created.has_run() ? created.run().run_id() : "";
+    {
+      trainvm::Journal observer(database_path);
+      const auto queued = observer.projection(run_id);
+      const auto created_event = observer.event(run_id + ":created");
+      check(preview_status.ok() &&
+                preview.adapter_lock_digest().starts_with("sha256:") &&
+                preview.adapter_lock_digest().size() == 71U &&
+                !preview.canonical_adapter_lock().empty() &&
+                create_status.ok() && !has_adapter_error(created) &&
+                created.adapter_lock_digest() ==
+                    preview.adapter_lock_digest() &&
+                created.canonical_adapter_lock() ==
+                    preview.canonical_adapter_lock() &&
+                created.has_run() && queued && created_event &&
+                created_event->payload.at("submission")
+                        .at("adapter_lock_digest") ==
+                    preview.adapter_lock_digest() &&
+                created_event->payload.at("submission").at("adapter_lock") ==
+                    nlohmann::json::parse(
+                        preview.canonical_adapter_lock()) &&
+                queued->desired_state == "queued" &&
+                queued->observed_state == "queued" &&
+                observer.events_for_run(run_id).size() == 1U,
+            "valid service submission remains queued until explicit reconciliation");
+    }
+
+    const auto acquired = service.reconcile_once(run_id);
+    authority_now_ns = 5'100;
+    const auto launched = service.reconcile_once(run_id);
+    authority_now_ns = 5'200;
+    const auto replayed = service.reconcile_once(run_id);
+    trainvm::Journal observer(database_path);
+    const auto projection = observer.projection(run_id);
+    const auto events = observer.events_for_run(run_id);
+    const auto launch_event = std::ranges::find_if(
+        events, [](const trainvm::Event& event) {
+          return event.event_type == "worker.launch_requested";
+        });
+    check(acquired.disposition ==
+              trainvm::ReconcileDisposition::lease_acquired &&
+              launched.disposition ==
+                  trainvm::ReconcileDisposition::launch_prepared &&
+              replayed.disposition ==
+                  trainvm::ReconcileDisposition::launch_replayed &&
+              launched.launch && replayed.launch &&
+              *launched.launch == *replayed.launch &&
+              launched.launch->code_fingerprint ==
+                  "sha256:" + std::string(64, 'a') &&
+              launched.launch->required_capabilities ==
+                  std::vector<std::string>({"worker.controls",
+                                            "worker.metrics"}) &&
+              projection && projection->observed_state == "acquiring" &&
+              projection->run_revision == 4U && events.size() == 7U &&
+              launch_event != events.end() &&
+              launch_event->wall_time_ns == 5'100,
+          "service-owned reconcile path uses its registry, mutation gate, and authority clock for acquisition then launch");
+  }
+
+  std::filesystem::remove_all(directory);
+}
+
 void test_adapter_registry_and_reconciler() {
   const auto compiled = trainvm::compile_document(load_fixture());
   check(compiled.valid(), "fixture required by adapter reconciliation compiles");
@@ -3638,6 +4072,8 @@ void test_adapter_registry_and_reconciler() {
 
   const std::string expected_fingerprint = "sha256:" + std::string(64, 'a');
   const trainvm::AdapterRegistry registry(fixture_adapter_profiles());
+  const nlohmann::json submission_identity =
+      adapter_locked_submission(*compiled.plan, registry);
   bool plan_validated = true;
   try {
     registry.validate_plan(*compiled.plan);
@@ -3721,7 +4157,7 @@ void test_adapter_registry_and_reconciler() {
     const std::string run_id = "registry-mismatch-run";
     trainvm::Journal journal(database_path);
     trainvm::Controller controller(*compiled.plan, journal, run_id);
-    controller.create_queued();
+    controller.create_queued(submission_identity);
     const auto before_projection = journal.projection(run_id);
     const auto before_count = journal.event_count();
     auto missing_profiles = fixture_adapter_profiles();
@@ -3763,7 +4199,7 @@ void test_adapter_registry_and_reconciler() {
     {
       trainvm::Journal journal(database_path);
       trainvm::Controller controller(*compiled.plan, journal, run_id);
-      controller.create_queued();
+      controller.create_queued(submission_identity);
       const auto acquisition_event =
           [&](std::string event_id, std::uint64_t revision,
               std::string event_type, nlohmann::json payload) {
@@ -3840,7 +4276,7 @@ void test_adapter_registry_and_reconciler() {
   {
     trainvm::Journal journal(database_path);
     trainvm::Controller controller(*compiled.plan, journal, run_id);
-    controller.create_queued();
+    controller.create_queued(submission_identity);
     std::mutex authority_mutex;
     trainvm::Reconciler reconciler(journal, registry, authority_mutex,
                                    [] { return 2'000; });
@@ -3970,7 +4406,7 @@ void test_adapter_registry_and_reconciler() {
         bool rejected = false;
         try {
           (void)reconciler.step(run_id);
-        } catch (const std::invalid_argument&) {
+        } catch (const trainvm::AdapterResolutionError&) {
           rejected = true;
         }
         const auto after_launch = journal.event(launch_id);
@@ -4001,8 +4437,8 @@ void test_adapter_registry_and_reconciler() {
     trainvm::Journal journal(busy_path);
     trainvm::Controller owner(*compiled.plan, journal, owner_run);
     trainvm::Controller waiter(*compiled.plan, journal, waiting_run);
-    owner.create_queued();
-    waiter.create_queued();
+    owner.create_queued(submission_identity);
+    waiter.create_queued(submission_identity);
     std::mutex authority_mutex;
     std::int64_t authority_now_ns = 3'000;
     trainvm::Reconciler reconciler(
@@ -4187,6 +4623,8 @@ int main() {
     test_concurrent_queue_acquisition_replay();
     test_acquiring_recovery_ignores_mutable_lease_lifecycle();
     test_acquiring_rejects_fabricated_running_transition();
+    test_adapter_registry_file_contract();
+    test_service_registry_and_reconciliation();
     test_adapter_registry_and_reconciler();
     test_legacy_journal_migration_policy();
   } catch (const std::exception& exception) {

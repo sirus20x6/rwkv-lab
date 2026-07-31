@@ -117,6 +117,7 @@ message SubmitExperimentRequest {
   string author = 6;
   string reason = 7;
   string expected_plan_hash = 8; // required for create_run; fences preview/compiler skew
+  string expected_adapter_lock_digest = 9; // required for create_run; fences registry skew
 }
 
 message SubmitExperimentResponse {
@@ -125,6 +126,8 @@ message SubmitExperimentResponse {
   string plan_hash = 3;
   repeated Diagnostic diagnostics = 4;
   RunIdentity run = 5; // absent when create_run is false or validation fails
+  string adapter_lock_digest = 6;
+  string canonical_adapter_lock = 7;
 }
 
 message PlanDiffRequest {

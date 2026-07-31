@@ -142,6 +142,7 @@
       }
       const payload = JSON.parse(submissionIntent.body);
       if (!payload.expected_journal_id || !payload.expected_plan_hash ||
+          !payload.expected_adapter_lock_digest ||
           typeof payload.source_document !== "string") {
         submissionIntent = null;
         return;
@@ -149,6 +150,7 @@
       submissionIntent.source ||= payload.source_document;
       submissionIntent.journalID ||= payload.expected_journal_id;
       submissionIntent.planHash ||= payload.expected_plan_hash;
+      submissionIntent.adapterLockDigest ||= payload.expected_adapter_lock_digest;
       const reason = byID("vm-submit-reason");
       if (reason) reason.value = payload.reason || "";
     } catch (_) {
@@ -241,8 +243,9 @@
       const result = JSON.parse(text);
       renderDiagnostics(result);
       renderPlan(result);
-      validatedDraft = result.valid && result.plan_hash ? {
+      validatedDraft = result.valid && result.plan_hash && result.adapter_lock_digest ? {
         generation, source, planHash: String(result.plan_hash),
+        adapterLockDigest: String(result.adapter_lock_digest),
       } : null;
       updateSubmitState();
       if (state) state.textContent = result.valid ? `valid · ${String(result.plan_hash || "").slice(0, 12)}` : "native compiler rejected draft";
@@ -268,11 +271,13 @@
           idempotency_key: crypto.randomUUID(),
           expected_journal_id: authorityJournalID,
           expected_plan_hash: validatedDraft.planHash,
+          expected_adapter_lock_digest: validatedDraft.adapterLockDigest,
           reason: reason.value.trim(),
         }),
         source: validatedDraft.source,
         journalID: authorityJournalID,
         planHash: validatedDraft.planHash,
+        adapterLockDigest: validatedDraft.adapterLockDigest,
       };
       persistSubmissionIntent();
     }
@@ -309,7 +314,8 @@
       }
       const runID = result?.run?.run_id || "";
       if (!runID || result.plan_hash !== intent.planHash ||
-          result.run?.plan_hash !== intent.planHash) {
+          result.run?.plan_hash !== intent.planHash ||
+          result.adapter_lock_digest !== intent.adapterLockDigest) {
         finalMessage = "authority returned an inconsistent result · retry exact submission";
         return;
       }

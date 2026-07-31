@@ -201,6 +201,8 @@ func TestTrainVMSubmissionFreezesPreviewAndRetriesExactIntent(t *testing.T) {
 	for _, required := range []string{
 		`expected_journal_id: authorityJournalID`,
 		`expected_plan_hash: validatedDraft.planHash`,
+		`expected_adapter_lock_digest: validatedDraft.adapterLockDigest`,
+		`result.adapter_lock_digest !== intent.adapterLockDigest`,
 		`sessionStorage.setItem`,
 		`body: intent.body`,
 		`submissionBusy`,

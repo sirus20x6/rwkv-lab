@@ -40,6 +40,13 @@ ReconcileResult Reconciler::step(const std::string& run_id) {
   }
   // Registry authority is checked before any state or lease mutation.
   registry_.validate_plan(*plan);
+  const auto created = journal_.event(run_id + ":created");
+  if (!created || created->event_type != "run.created" ||
+      !created->payload.contains("submission")) {
+    throw std::runtime_error("run has no durable adapter lock identity");
+  }
+  registry_.validate_submission_lock(
+      *plan, created->payload.at("submission"));
 
   Controller controller(*plan, journal_, run_id);
   controller.recover();

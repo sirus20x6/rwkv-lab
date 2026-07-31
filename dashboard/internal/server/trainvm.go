@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -148,6 +149,62 @@ func (s *Server) handleTrainVMCompile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	if s.commander != nil && s.trainvm != nil {
+		var merged map[string]any
+		if json.Unmarshal(result, &merged) != nil {
+			http.Error(w, "native compiler preview could not be merged", http.StatusBadGateway)
+			return
+		}
+		valid, _ := merged["valid"].(bool)
+		if !valid {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "no-store")
+			_, _ = w.Write(result)
+			return
+		}
+		journalID, journalErr := s.trainvm.JournalID(ctx)
+		if journalErr != nil {
+			http.Error(w, journalErr.Error(), http.StatusBadGateway)
+			return
+		}
+		preview, previewErr := s.commander.SubmitExperiment(ctx, trainvmstore.SubmissionRequest{
+			SourceDocument: string(document), SourceFormat: "json",
+			ExpectedJournalID: journalID,
+		})
+		if previewErr != nil {
+			http.Error(w, previewErr.Error(), http.StatusBadGateway)
+			return
+		}
+		localPlanHash, hashOK := merged["plan_hash"].(string)
+		localCanonicalPlan, canonicalOK := merged["canonical_plan"]
+		var authorityCanonicalPlan any
+		if !hashOK || localPlanHash == "" || !canonicalOK ||
+			preview.PlanHash != localPlanHash || preview.CanonicalPlan == "" ||
+			json.Unmarshal([]byte(preview.CanonicalPlan), &authorityCanonicalPlan) != nil ||
+			!reflect.DeepEqual(localCanonicalPlan, authorityCanonicalPlan) {
+			http.Error(w, "dashboard and authority compiler previews disagree", http.StatusBadGateway)
+			return
+		}
+		merged["adapter_lock_digest"] = preview.AdapterLockDigest
+		merged["canonical_adapter_lock"] = preview.CanonicalAdapterLock
+		if len(preview.Diagnostics) != 0 {
+			existing, _ := merged["diagnostics"].([]any)
+			for _, diagnostic := range preview.Diagnostics {
+				existing = append(existing, map[string]any{
+					"severity": diagnostic.Severity, "code": diagnostic.Code,
+					"path": diagnostic.Path, "message": diagnostic.Message,
+					"help": diagnostic.Help,
+				})
+			}
+			merged["diagnostics"] = existing
+			merged["valid"] = false
+		}
+		result, err = json.Marshal(merged)
+		if err != nil {
+			http.Error(w, "native compiler preview could not be encoded", http.StatusBadGateway)
+			return
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(result)
@@ -162,13 +219,14 @@ type trainVMControlRequest struct {
 }
 
 type trainVMSubmissionRequest struct {
-	SourceDocument    string `json:"source_document"`
-	SourceFormat      string `json:"source_format"`
-	CreateRun         bool   `json:"create_run"`
-	IdempotencyKey    string `json:"idempotency_key"`
-	ExpectedJournalID string `json:"expected_journal_id"`
-	ExpectedPlanHash  string `json:"expected_plan_hash"`
-	Reason            string `json:"reason"`
+	SourceDocument            string `json:"source_document"`
+	SourceFormat              string `json:"source_format"`
+	CreateRun                 bool   `json:"create_run"`
+	IdempotencyKey            string `json:"idempotency_key"`
+	ExpectedJournalID         string `json:"expected_journal_id"`
+	ExpectedPlanHash          string `json:"expected_plan_hash"`
+	ExpectedAdapterLockDigest string `json:"expected_adapter_lock_digest"`
+	Reason                    string `json:"reason"`
 }
 
 func (s *Server) handleTrainVMSubmit(w http.ResponseWriter, r *http.Request) {
@@ -192,8 +250,9 @@ func (s *Server) handleTrainVMSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	input.ExpectedJournalID = strings.TrimSpace(input.ExpectedJournalID)
 	input.ExpectedPlanHash = strings.TrimSpace(input.ExpectedPlanHash)
-	if input.ExpectedJournalID == "" || (input.CreateRun && input.ExpectedPlanHash == "") {
-		http.Error(w, "submission requires expected journal and plan identities", http.StatusBadRequest)
+	input.ExpectedAdapterLockDigest = strings.TrimSpace(input.ExpectedAdapterLockDigest)
+	if input.ExpectedJournalID == "" || (input.CreateRun && (input.ExpectedPlanHash == "" || input.ExpectedAdapterLockDigest == "")) {
+		http.Error(w, "submission requires expected journal, plan, and adapter-lock identities", http.StatusBadRequest)
 		return
 	}
 	if input.ExpectedJournalID != journalID {
@@ -204,7 +263,8 @@ func (s *Server) handleTrainVMSubmit(w http.ResponseWriter, r *http.Request) {
 		SourceDocument: input.SourceDocument, SourceFormat: input.SourceFormat,
 		CreateRun: input.CreateRun, IdempotencyKey: input.IdempotencyKey,
 		ExpectedJournalID: input.ExpectedJournalID, ExpectedPlanHash: input.ExpectedPlanHash,
-		Author: "dashboard", Reason: input.Reason,
+		ExpectedAdapterLockDigest: input.ExpectedAdapterLockDigest,
+		Author:                    "dashboard", Reason: input.Reason,
 	})
 	if err != nil {
 		writeTrainVMAuthorityError(w, err)
@@ -220,6 +280,7 @@ func (s *Server) handleTrainVMSubmit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if result.PlanHash != input.ExpectedPlanHash || result.Run.PlanHash != input.ExpectedPlanHash ||
+			result.AdapterLockDigest != input.ExpectedAdapterLockDigest ||
 			strings.TrimSpace(result.Run.RunID) == "" {
 			http.Error(w, "native authority returned a mismatched submission identity", http.StatusBadGateway)
 			return

@@ -601,6 +601,9 @@ grpc::Status worker_failure(const std::exception& exception) {
   if (dynamic_cast<const OperationPreconditionError*>(&exception) != nullptr) {
     return {grpc::StatusCode::FAILED_PRECONDITION, exception.what()};
   }
+  if (dynamic_cast<const AdapterResolutionError*>(&exception) != nullptr) {
+    return {grpc::StatusCode::FAILED_PRECONDITION, exception.what()};
+  }
   if (dynamic_cast<const std::logic_error*>(&exception) != nullptr) {
     return {grpc::StatusCode::FAILED_PRECONDITION, exception.what()};
   }
@@ -611,18 +614,21 @@ grpc::Status worker_failure(const std::exception& exception) {
 
 TrainVMService::TrainVMService(
     const std::filesystem::path& journal_path,
+    AdapterRegistry adapter_registry,
     std::function<std::int64_t()> authority_clock)
     : authority_lock_(std::make_unique<AuthorityLock>(journal_path)),
       journal_(journal_path),
-      authority_clock_(std::move(authority_clock)) {
-  if (!authority_clock_) {
-    authority_clock_ = [] {
-      return std::chrono::duration_cast<std::chrono::nanoseconds>(
-                 std::chrono::system_clock::now().time_since_epoch())
-          .count();
-    };
-  }
-}
+      authority_clock_(authority_clock ? std::move(authority_clock)
+                                       : std::function<std::int64_t()>{[] {
+                                           return std::chrono::duration_cast<
+                                                      std::chrono::nanoseconds>(
+                                                      std::chrono::system_clock::now()
+                                                          .time_since_epoch())
+                                               .count();
+                                         }}),
+      adapter_registry_(std::move(adapter_registry)),
+      reconciler_(journal_, adapter_registry_, command_mutex_,
+                  [this] { return authority_now_ns(); }) {}
 
 TrainVMService::~TrainVMService() = default;
 
@@ -632,6 +638,10 @@ std::int64_t TrainVMService::authority_now_ns() const {
     throw std::runtime_error("authority clock returned a negative timestamp");
   }
   return now_ns;
+}
+
+ReconcileResult TrainVMService::reconcile_once(const std::string& run_id) {
+  return reconciler_.step(run_id);
 }
 
 bool TrainVMService::claim_worker_attempt(const std::string& key) {
@@ -740,6 +750,15 @@ grpc::Status TrainVMService::open_worker_connection(
       connection.completed_receipt = std::move(receipt);
       return grpc::Status::OK;
     }
+
+    const auto created = journal_.event(hello.run_id + ":created");
+    if (!created || created->event_type != "run.created" ||
+        !created->payload.contains("submission")) {
+      return {grpc::StatusCode::DATA_LOSS,
+              "worker run has no durable adapter lock identity"};
+    }
+    adapter_registry_.validate_submission_lock(
+        *plan, created->payload.at("submission"));
 
     const WorkerReadinessResult readiness =
         controller.accept_worker_hello(hello, authority_now_ns());
@@ -972,10 +991,11 @@ grpc::Status TrainVMService::SubmitExperiment(grpc::ServerContext* context,
     }
     if (request->create_run() &&
         (request->idempotency_key().empty() || request->author().empty() ||
-         request->reason().empty() || request->expected_plan_hash().empty())) {
+         request->reason().empty() || request->expected_plan_hash().empty() ||
+         request->expected_adapter_lock_digest().empty())) {
       return {grpc::StatusCode::INVALID_ARGUMENT,
               "run creation requires an idempotency key, author, reason, and "
-              "expected plan hash"};
+              "expected plan and adapter-lock hashes"};
     }
     if (cancelled(context))
       return cancellation_status();
@@ -994,12 +1014,26 @@ grpc::Status TrainVMService::SubmitExperiment(grpc::ServerContext* context,
     // intentionally carry the same normalized, hashed experiment document.
     response->set_canonical_plan(canonical);
     response->set_plan_hash(compiled.plan->plan_hash);
-    if (!request->create_run()) {
-      return grpc::Status::OK;
-    }
-    if (request->expected_plan_hash() != compiled.plan->plan_hash) {
+    if (request->create_run() &&
+        request->expected_plan_hash() != compiled.plan->plan_hash) {
       return {grpc::StatusCode::FAILED_PRECONDITION,
               "authority compiler plan hash differs from the validated preview"};
+    }
+    if (!request->create_run()) {
+      try {
+        const std::string adapter_lock_manifest =
+            adapter_registry_.plan_lock_manifest(*compiled.plan);
+        response->set_adapter_lock_digest(
+            "sha256:" + sha256_hex(adapter_lock_manifest));
+        response->set_canonical_adapter_lock(adapter_lock_manifest);
+      } catch (const AdapterResolutionError& exception) {
+        add_diagnostic(*response,
+                       Diagnostic{.severity = Diagnostic::Severity::error,
+                                  .code = "adapter.registry",
+                                  .path = "/spec/components",
+                                  .message = exception.what()});
+      }
+      return grpc::Status::OK;
     }
     if (cancelled(context))
       return cancellation_status();
@@ -1011,6 +1045,85 @@ grpc::Status TrainVMService::SubmitExperiment(grpc::ServerContext* context,
         "run-" + sha256_hex(nlohmann::json({{"journal_id", journal_.journal_id()},
                                             {"idempotency_key", request->idempotency_key()}})
                                 .dump());
+    if (const auto created = journal_.event(run_id + ":created")) {
+      if (created->event_type != "run.created" || created->run_id != run_id ||
+          created->payload.value("plan_hash", std::string{}) !=
+              compiled.plan->plan_hash ||
+          !created->payload.contains("submission") ||
+          !created->payload.at("submission").is_object()) {
+        throw RunCreationConflict(
+            "run already exists with a different run.created event");
+      }
+      const auto stored_plan = journal_.compiled_plan(compiled.plan->plan_hash);
+      if (!stored_plan ||
+          stored_plan->canonical_plan != compiled.plan->canonical_plan ||
+          stored_plan->experiment.metadata.name !=
+              compiled.plan->experiment.metadata.name) {
+        throw RunCreationConflict(
+            "run already exists with a different compiled plan");
+      }
+      const nlohmann::json& stored_submission =
+          created->payload.at("submission");
+      const auto stored_lock = stored_submission.find("adapter_lock");
+      if (stored_lock == stored_submission.end() || !stored_lock->is_object()) {
+        throw std::runtime_error(
+            "durable run submission has no canonical adapter lock");
+      }
+      const std::string stored_lock_manifest = stored_lock->dump();
+      const std::string stored_lock_digest =
+          "sha256:" + sha256_hex(stored_lock_manifest);
+      const nlohmann::json expected_submission{
+          {"idempotency_key", request->idempotency_key()},
+          {"source_format", request->source_format()},
+          {"create_run", true},
+          {"author", request->author()},
+          {"reason", request->reason()},
+          {"plan_hash", compiled.plan->plan_hash},
+          {"adapter_lock_digest", request->expected_adapter_lock_digest()},
+          {"adapter_lock", *stored_lock},
+      };
+      if (stored_lock_digest != request->expected_adapter_lock_digest() ||
+          stored_submission != expected_submission) {
+        throw RunCreationConflict(
+            "run already exists with a different submission identity");
+      }
+      Controller recovered(*stored_plan, journal_, run_id);
+      const ExecutionState& recovered_state = recovered.recover();
+      const auto projection = journal_.projection(run_id);
+      if (!projection || projection->plan_hash != compiled.plan->plan_hash ||
+          projection->run_revision != recovered_state.revision) {
+        throw std::runtime_error(
+            "durable run creation has no matching projection");
+      }
+      response->set_adapter_lock_digest(stored_lock_digest);
+      response->set_canonical_adapter_lock(stored_lock_manifest);
+      auto* identity = response->mutable_run();
+      identity->set_run_id(projection->run_id);
+      identity->set_revision(projection->run_revision);
+      identity->set_plan_hash(projection->plan_hash);
+      return grpc::Status::OK;
+    }
+
+    std::string adapter_lock_manifest;
+    try {
+      adapter_lock_manifest =
+          adapter_registry_.plan_lock_manifest(*compiled.plan);
+    } catch (const AdapterResolutionError& exception) {
+      add_diagnostic(*response,
+                     Diagnostic{.severity = Diagnostic::Severity::error,
+                                .code = "adapter.registry",
+                                .path = "/spec/components",
+                                .message = exception.what()});
+      return grpc::Status::OK;
+    }
+    const std::string adapter_lock_digest =
+        "sha256:" + sha256_hex(adapter_lock_manifest);
+    response->set_adapter_lock_digest(adapter_lock_digest);
+    response->set_canonical_adapter_lock(adapter_lock_manifest);
+    if (request->expected_adapter_lock_digest() != adapter_lock_digest) {
+      return {grpc::StatusCode::FAILED_PRECONDITION,
+              "authority adapter lock differs from the validated preview"};
+    }
     const nlohmann::json submission_identity{
         {"idempotency_key", request->idempotency_key()},
         {"source_format", request->source_format()},
@@ -1018,6 +1131,8 @@ grpc::Status TrainVMService::SubmitExperiment(grpc::ServerContext* context,
         {"author", request->author()},
         {"reason", request->reason()},
         {"plan_hash", compiled.plan->plan_hash},
+        {"adapter_lock_digest", adapter_lock_digest},
+        {"adapter_lock", nlohmann::json::parse(adapter_lock_manifest)},
     };
     Controller controller(*compiled.plan, journal_, run_id);
     controller.create_queued(submission_identity);
@@ -1122,7 +1237,9 @@ grpc::Status TrainVMService::CommandRun(grpc::ServerContext* context,
   }
 }
 
-int serve(const std::filesystem::path& journal_path, const std::filesystem::path& socket_path) {
+int serve(const std::filesystem::path& journal_path,
+          const std::filesystem::path& socket_path,
+          AdapterRegistry adapter_registry) {
   if (journal_path.empty() || socket_path.empty()) {
     throw std::invalid_argument("serve requires journal and socket paths");
   }
@@ -1136,7 +1253,7 @@ int serve(const std::filesystem::path& journal_path, const std::filesystem::path
   // Acquire journal authority before touching the socket. Otherwise a second
   // daemon pointed at the same paths could unlink the live authority's socket
   // and only then discover that it cannot acquire the journal lock.
-  TrainVMService service(journal_path);
+  TrainVMService service(journal_path, std::move(adapter_registry));
   SocketAuthorityLock socket_authority(absolute_socket);
   remove_stale_socket(absolute_socket);
   SocketCleanupGuard socket_cleanup(absolute_socket);

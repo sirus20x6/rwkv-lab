@@ -22,7 +22,8 @@ void usage() {
       << "  trainvm validate <experiment.json>\n"
       << "  trainvm plan <experiment.json> [--canonical]\n"
       << "  trainvm compile  # read JSON from stdin; emit canonical preview JSON\n"
-      << "  trainvm serve --journal <journal.db> --socket <trainvm.sock>\n"
+      << "  trainvm serve --journal <journal.db> --socket <trainvm.sock> "
+         "--registry <adapters.json>\n"
       << "  trainvm simulate <experiment.json> <events.jsonl> [run-id]\n"
       << "  trainvm journal init <journal.db>\n"
       << "  trainvm journal verify <journal.db>\n"
@@ -186,12 +187,14 @@ int journal_command(int argc, char** argv) {
 }
 
 int serve_command(int argc, char** argv) {
-  if (argc != 6 || std::string_view(argv[2]) != "--journal" ||
-      std::string_view(argv[4]) != "--socket") {
+  if (argc != 8 || std::string_view(argv[2]) != "--journal" ||
+      std::string_view(argv[4]) != "--socket" ||
+      std::string_view(argv[6]) != "--registry") {
     usage();
     return 64;
   }
-  return trainvm::serve(argv[3], argv[5]);
+  return trainvm::serve(argv[3], argv[5],
+                        trainvm::AdapterRegistry::load_file(argv[7]));
 }
 
 }  // namespace

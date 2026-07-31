@@ -25,22 +25,25 @@ type Commander interface {
 }
 
 type SubmissionRequest struct {
-	SourceDocument    string
-	SourceFormat      string
-	CreateRun         bool
-	IdempotencyKey    string
-	ExpectedJournalID string
-	ExpectedPlanHash  string
-	Author            string
-	Reason            string
+	SourceDocument            string
+	SourceFormat              string
+	CreateRun                 bool
+	IdempotencyKey            string
+	ExpectedJournalID         string
+	ExpectedPlanHash          string
+	ExpectedAdapterLockDigest string
+	Author                    string
+	Reason                    string
 }
 
 type SubmissionResult struct {
-	CanonicalDocument string              `json:"canonical_document,omitempty"`
-	CanonicalPlan     string              `json:"canonical_plan,omitempty"`
-	PlanHash          string              `json:"plan_hash,omitempty"`
-	Run               *RunIdentity        `json:"run,omitempty"`
-	Diagnostics       []ControlDiagnostic `json:"diagnostics,omitempty"`
+	CanonicalDocument    string              `json:"canonical_document,omitempty"`
+	CanonicalPlan        string              `json:"canonical_plan,omitempty"`
+	PlanHash             string              `json:"plan_hash,omitempty"`
+	AdapterLockDigest    string              `json:"adapter_lock_digest,omitempty"`
+	CanonicalAdapterLock string              `json:"canonical_adapter_lock,omitempty"`
+	Run                  *RunIdentity        `json:"run,omitempty"`
+	Diagnostics          []ControlDiagnostic `json:"diagnostics,omitempty"`
 }
 
 type RunIdentity struct {
@@ -175,7 +178,9 @@ func (c *GRPCCommander) SubmitExperiment(ctx context.Context, request Submission
 	}
 	result := SubmissionResult{
 		CanonicalDocument: response.GetCanonicalDocument(), CanonicalPlan: response.GetCanonicalPlan(),
-		PlanHash: response.GetPlanHash(),
+		PlanHash:             response.GetPlanHash(),
+		AdapterLockDigest:    response.GetAdapterLockDigest(),
+		CanonicalAdapterLock: response.GetCanonicalAdapterLock(),
 	}
 	if run := response.GetRun(); run != nil {
 		result.Run = &RunIdentity{RunID: run.GetRunId(), Revision: run.GetRevision(), PlanHash: run.GetPlanHash()}
@@ -195,6 +200,7 @@ func submissionRPCRequest(request SubmissionRequest) (*trainvmv1.SubmitExperimen
 	request.IdempotencyKey = strings.TrimSpace(request.IdempotencyKey)
 	request.ExpectedJournalID = strings.TrimSpace(request.ExpectedJournalID)
 	request.ExpectedPlanHash = strings.TrimSpace(request.ExpectedPlanHash)
+	request.ExpectedAdapterLockDigest = strings.TrimSpace(request.ExpectedAdapterLockDigest)
 	request.Author = strings.TrimSpace(request.Author)
 	request.Reason = strings.TrimSpace(request.Reason)
 	if request.SourceDocument == "" || request.ExpectedJournalID == "" ||
@@ -202,14 +208,15 @@ func submissionRPCRequest(request SubmissionRequest) (*trainvmv1.SubmitExperimen
 		return nil, &ValidationError{Message: "source document, json/yaml format, and journal ID are required"}
 	}
 	if request.CreateRun && (request.IdempotencyKey == "" || request.Author == "" ||
-		request.Reason == "" || request.ExpectedPlanHash == "") {
-		return nil, &ValidationError{Message: "run creation requires an idempotency key, author, reason, and expected plan hash"}
+		request.Reason == "" || request.ExpectedPlanHash == "" || request.ExpectedAdapterLockDigest == "") {
+		return nil, &ValidationError{Message: "run creation requires an idempotency key, author, reason, and expected plan and adapter-lock hashes"}
 	}
 	return &trainvmv1.SubmitExperimentRequest{
 		SourceDocument: request.SourceDocument, SourceFormat: request.SourceFormat,
 		CreateRun: request.CreateRun, IdempotencyKey: request.IdempotencyKey,
 		ExpectedJournalId: request.ExpectedJournalID, Author: request.Author, Reason: request.Reason,
-		ExpectedPlanHash: request.ExpectedPlanHash,
+		ExpectedPlanHash:          request.ExpectedPlanHash,
+		ExpectedAdapterLockDigest: request.ExpectedAdapterLockDigest,
 	}, nil
 }
 

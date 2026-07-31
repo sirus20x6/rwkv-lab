@@ -970,17 +970,18 @@ func (x *RunSummary) GetLatestEffectiveControlRevision() uint64 {
 }
 
 type SubmitExperimentRequest struct {
-	state             protoimpl.MessageState `protogen:"open.v1"`
-	SourceDocument    string                 `protobuf:"bytes,1,opt,name=source_document,json=sourceDocument,proto3" json:"source_document,omitempty"`
-	SourceFormat      string                 `protobuf:"bytes,2,opt,name=source_format,json=sourceFormat,proto3" json:"source_format,omitempty"` // json or yaml
-	CreateRun         bool                   `protobuf:"varint,3,opt,name=create_run,json=createRun,proto3" json:"create_run,omitempty"`
-	IdempotencyKey    string                 `protobuf:"bytes,4,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
-	ExpectedJournalId string                 `protobuf:"bytes,5,opt,name=expected_journal_id,json=expectedJournalId,proto3" json:"expected_journal_id,omitempty"`
-	Author            string                 `protobuf:"bytes,6,opt,name=author,proto3" json:"author,omitempty"`
-	Reason            string                 `protobuf:"bytes,7,opt,name=reason,proto3" json:"reason,omitempty"`
-	ExpectedPlanHash  string                 `protobuf:"bytes,8,opt,name=expected_plan_hash,json=expectedPlanHash,proto3" json:"expected_plan_hash,omitempty"` // required for create_run; fences preview/compiler skew
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	state                     protoimpl.MessageState `protogen:"open.v1"`
+	SourceDocument            string                 `protobuf:"bytes,1,opt,name=source_document,json=sourceDocument,proto3" json:"source_document,omitempty"`
+	SourceFormat              string                 `protobuf:"bytes,2,opt,name=source_format,json=sourceFormat,proto3" json:"source_format,omitempty"` // json or yaml
+	CreateRun                 bool                   `protobuf:"varint,3,opt,name=create_run,json=createRun,proto3" json:"create_run,omitempty"`
+	IdempotencyKey            string                 `protobuf:"bytes,4,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
+	ExpectedJournalId         string                 `protobuf:"bytes,5,opt,name=expected_journal_id,json=expectedJournalId,proto3" json:"expected_journal_id,omitempty"`
+	Author                    string                 `protobuf:"bytes,6,opt,name=author,proto3" json:"author,omitempty"`
+	Reason                    string                 `protobuf:"bytes,7,opt,name=reason,proto3" json:"reason,omitempty"`
+	ExpectedPlanHash          string                 `protobuf:"bytes,8,opt,name=expected_plan_hash,json=expectedPlanHash,proto3" json:"expected_plan_hash,omitempty"`                              // required for create_run; fences preview/compiler skew
+	ExpectedAdapterLockDigest string                 `protobuf:"bytes,9,opt,name=expected_adapter_lock_digest,json=expectedAdapterLockDigest,proto3" json:"expected_adapter_lock_digest,omitempty"` // required for create_run; fences registry skew
+	unknownFields             protoimpl.UnknownFields
+	sizeCache                 protoimpl.SizeCache
 }
 
 func (x *SubmitExperimentRequest) Reset() {
@@ -1069,15 +1070,24 @@ func (x *SubmitExperimentRequest) GetExpectedPlanHash() string {
 	return ""
 }
 
+func (x *SubmitExperimentRequest) GetExpectedAdapterLockDigest() string {
+	if x != nil {
+		return x.ExpectedAdapterLockDigest
+	}
+	return ""
+}
+
 type SubmitExperimentResponse struct {
-	state             protoimpl.MessageState `protogen:"open.v1"`
-	CanonicalDocument string                 `protobuf:"bytes,1,opt,name=canonical_document,json=canonicalDocument,proto3" json:"canonical_document,omitempty"`
-	CanonicalPlan     string                 `protobuf:"bytes,2,opt,name=canonical_plan,json=canonicalPlan,proto3" json:"canonical_plan,omitempty"`
-	PlanHash          string                 `protobuf:"bytes,3,opt,name=plan_hash,json=planHash,proto3" json:"plan_hash,omitempty"`
-	Diagnostics       []*Diagnostic          `protobuf:"bytes,4,rep,name=diagnostics,proto3" json:"diagnostics,omitempty"`
-	Run               *RunIdentity           `protobuf:"bytes,5,opt,name=run,proto3" json:"run,omitempty"` // absent when create_run is false or validation fails
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	state                protoimpl.MessageState `protogen:"open.v1"`
+	CanonicalDocument    string                 `protobuf:"bytes,1,opt,name=canonical_document,json=canonicalDocument,proto3" json:"canonical_document,omitempty"`
+	CanonicalPlan        string                 `protobuf:"bytes,2,opt,name=canonical_plan,json=canonicalPlan,proto3" json:"canonical_plan,omitempty"`
+	PlanHash             string                 `protobuf:"bytes,3,opt,name=plan_hash,json=planHash,proto3" json:"plan_hash,omitempty"`
+	Diagnostics          []*Diagnostic          `protobuf:"bytes,4,rep,name=diagnostics,proto3" json:"diagnostics,omitempty"`
+	Run                  *RunIdentity           `protobuf:"bytes,5,opt,name=run,proto3" json:"run,omitempty"` // absent when create_run is false or validation fails
+	AdapterLockDigest    string                 `protobuf:"bytes,6,opt,name=adapter_lock_digest,json=adapterLockDigest,proto3" json:"adapter_lock_digest,omitempty"`
+	CanonicalAdapterLock string                 `protobuf:"bytes,7,opt,name=canonical_adapter_lock,json=canonicalAdapterLock,proto3" json:"canonical_adapter_lock,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *SubmitExperimentResponse) Reset() {
@@ -1143,6 +1153,20 @@ func (x *SubmitExperimentResponse) GetRun() *RunIdentity {
 		return x.Run
 	}
 	return nil
+}
+
+func (x *SubmitExperimentResponse) GetAdapterLockDigest() string {
+	if x != nil {
+		return x.AdapterLockDigest
+	}
+	return ""
+}
+
+func (x *SubmitExperimentResponse) GetCanonicalAdapterLock() string {
+	if x != nil {
+		return x.CanonicalAdapterLock
+	}
+	return ""
 }
 
 type PlanDiffRequest struct {
@@ -3761,7 +3785,7 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\x0ffailure_summary\x18\f \x01(\tR\x0efailureSummary\x12@\n" +
 	"\x1aeffective_control_revision\x18\r \x01(\x04B\x02\x18\x01R\x18effectiveControlRevision\x12I\n" +
 	"!latest_requested_control_revision\x18\x0e \x01(\x04R\x1elatestRequestedControlRevision\x12I\n" +
-	"!latest_effective_control_revision\x18\x0f \x01(\x04R\x1elatestEffectiveControlRevision\"\xbd\x02\n" +
+	"!latest_effective_control_revision\x18\x0f \x01(\x04R\x1elatestEffectiveControlRevision\"\xfe\x02\n" +
 	"\x17SubmitExperimentRequest\x12'\n" +
 	"\x0fsource_document\x18\x01 \x01(\tR\x0esourceDocument\x12#\n" +
 	"\rsource_format\x18\x02 \x01(\tR\fsourceFormat\x12\x1d\n" +
@@ -3771,13 +3795,16 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\x13expected_journal_id\x18\x05 \x01(\tR\x11expectedJournalId\x12\x16\n" +
 	"\x06author\x18\x06 \x01(\tR\x06author\x12\x16\n" +
 	"\x06reason\x18\a \x01(\tR\x06reason\x12,\n" +
-	"\x12expected_plan_hash\x18\b \x01(\tR\x10expectedPlanHash\"\xf2\x01\n" +
+	"\x12expected_plan_hash\x18\b \x01(\tR\x10expectedPlanHash\x12?\n" +
+	"\x1cexpected_adapter_lock_digest\x18\t \x01(\tR\x19expectedAdapterLockDigest\"\xd8\x02\n" +
 	"\x18SubmitExperimentResponse\x12-\n" +
 	"\x12canonical_document\x18\x01 \x01(\tR\x11canonicalDocument\x12%\n" +
 	"\x0ecanonical_plan\x18\x02 \x01(\tR\rcanonicalPlan\x12\x1b\n" +
 	"\tplan_hash\x18\x03 \x01(\tR\bplanHash\x128\n" +
 	"\vdiagnostics\x18\x04 \x03(\v2\x16.trainvm.v1.DiagnosticR\vdiagnostics\x12)\n" +
-	"\x03run\x18\x05 \x01(\v2\x17.trainvm.v1.RunIdentityR\x03run\"\xb4\x01\n" +
+	"\x03run\x18\x05 \x01(\v2\x17.trainvm.v1.RunIdentityR\x03run\x12.\n" +
+	"\x13adapter_lock_digest\x18\x06 \x01(\tR\x11adapterLockDigest\x124\n" +
+	"\x16canonical_adapter_lock\x18\a \x01(\tR\x14canonicalAdapterLock\"\xb4\x01\n" +
 	"\x0fPlanDiffRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12+\n" +
 	"\x11expected_revision\x18\x02 \x01(\x04R\x10expectedRevision\x128\n" +

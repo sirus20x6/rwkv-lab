@@ -12,6 +12,7 @@
 #include <grpcpp/grpcpp.h>
 
 #include "trainvm/journal.hpp"
+#include "trainvm/reconciler.hpp"
 #include "trainvm/v1/trainvm.grpc.pb.h"
 
 namespace trainvm {
@@ -34,6 +35,7 @@ class TrainVMService final : public v1::TrainVM::Service,
  public:
   explicit TrainVMService(
       const std::filesystem::path& journal_path,
+      AdapterRegistry adapter_registry,
       std::function<std::int64_t()> authority_clock = {});
   ~TrainVMService() override;
 
@@ -66,11 +68,14 @@ class TrainVMService final : public v1::TrainVM::Service,
   bool claim_worker_attempt(const std::string& key);
   void release_worker_attempt(const std::string& key);
   [[nodiscard]] std::int64_t authority_now_ns() const;
+  ReconcileResult reconcile_once(const std::string& run_id);
 
   std::unique_ptr<AuthorityLock> authority_lock_;
   Journal journal_;
   std::mutex command_mutex_;
   std::function<std::int64_t()> authority_clock_;
+  const AdapterRegistry adapter_registry_;
+  Reconciler reconciler_;
   std::mutex worker_sessions_mutex_;
   std::set<std::string> active_worker_attempts_;
 };
@@ -78,6 +83,7 @@ class TrainVMService final : public v1::TrainVM::Service,
 // Blocks until SIGINT or SIGTERM after binding a permission-restricted Unix
 // socket. Throws if another authority owns the journal lock.
 int serve(const std::filesystem::path& journal_path,
-          const std::filesystem::path& socket_path);
+          const std::filesystem::path& socket_path,
+          AdapterRegistry adapter_registry);
 
 }  // namespace trainvm
