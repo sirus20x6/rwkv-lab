@@ -229,4 +229,128 @@ HostdJournalFenceEvidence HostdJournalFenceAttestor::attest(
   }
 }
 
+HostdJournalChallengeBoundary::HostdJournalChallengeBoundary(Journal& journal)
+    : journal_(journal) {}
+
+JournalAuthoritySnapshot HostdJournalChallengeBoundary::authority() {
+  return journal_.journal_authority_snapshot();
+}
+
+void HostdJournalChallengeBoundary::require_current(
+    const JournalControllerFence& controller) {
+  journal_.require_current_hostd_controller_fence(controller);
+}
+
+JournalLogicalFenceSnapshot HostdJournalChallengeBoundary::logical_fence(
+    const HostdSessionAttribution& attribution,
+    const AuthorityTimeSample& now) {
+  return journal_.journal_logical_fence_snapshot(
+      attribution.concurrency_key, attribution.run_id,
+      attribution.logical_lease_id, attribution.logical_fencing_token, now);
+}
+
+HostdDynamicJournalFenceAttestor::HostdDynamicJournalFenceAttestor(
+    std::shared_ptr<IHostdJournalChallengeBoundary> journal,
+    HostdDynamicJournalFenceAttestorConfig config,
+    std::shared_ptr<IHostdSessionChallengeTimeSource> time_source)
+    : journal_(std::move(journal)), config_(std::move(config)),
+      time_source_(std::move(time_source)) {
+  if (!journal_ || !time_source_ ||
+      config_.api_version != kHostdJournalFenceAttestorApiVersion ||
+      !valid_identifier(config_.host_id) ||
+      !valid_identifier(config_.boot_id) ||
+      !valid_identifier(config_.broker_epoch)) {
+    throw HostdJournalFenceAttestorError(
+        "dynamic journal fence attestor configuration is invalid");
+  }
+}
+
+HostdDynamicJournalFenceAttestor::HostdDynamicJournalFenceAttestor(
+    Journal& journal, HostdDynamicJournalFenceAttestorConfig config,
+    std::shared_ptr<IHostdSessionChallengeTimeSource> time_source)
+    : HostdDynamicJournalFenceAttestor(
+          std::make_shared<HostdJournalChallengeBoundary>(journal),
+          std::move(config), std::move(time_source)) {}
+
+HostdJournalFenceEvidence HostdDynamicJournalFenceAttestor::attest(
+    const HostdJournalFenceQuery& query) {
+  try {
+    if (!valid_query_shape(query) || query.host_id != config_.host_id ||
+        query.boot_id != config_.boot_id ||
+        query.broker_epoch != config_.broker_epoch ||
+        !valid_controller(query.claim.controller)) {
+      fail();
+    }
+    const HostdSessionChallengeTime before = time_source_->now();
+    if (before.boot_id != config_.boot_id ||
+        before.boottime_ns < query.issued_boottime_ns ||
+        before.boottime_ns >= query.expires_boottime_ns) {
+      fail();
+    }
+    const JournalAuthoritySnapshot authority = journal_->authority();
+    if (challenge_identity(authority) != query.claim.journal ||
+        authority.host.host_id != config_.host_id ||
+        authority.host.boot_id != config_.boot_id) {
+      fail();
+    }
+    const auto& claimed = query.claim.controller;
+    const JournalControllerFence controller{
+        .broker_epoch = config_.broker_epoch,
+        .run_id = claimed.run_id,
+        .concurrency_key = claimed.concurrency_key,
+        .controller_id = claimed.controller_id,
+        .controller_generation = claimed.controller_generation,
+        .logical_lease_id = claimed.logical_lease_id,
+        .logical_fencing_token = claimed.logical_fencing_token,
+    };
+    journal_->require_current(controller);
+    const HostdSessionAttribution attribution{
+        .journal_id = query.claim.journal.journal_id,
+        .run_id = claimed.run_id,
+        .concurrency_key = claimed.concurrency_key,
+        .logical_lease_id = claimed.logical_lease_id,
+        .logical_fencing_token = claimed.logical_fencing_token,
+    };
+    const AuthorityTimeSample observed{
+        .wall = {.nanoseconds = 0},
+        .boot = {.nanoseconds = before.boottime_ns},
+        .boot_id = before.boot_id,
+    };
+    const JournalLogicalFenceSnapshot live =
+        journal_->logical_fence(attribution, observed);
+    journal_->require_current(controller);
+    const HostdSessionChallengeTime after = time_source_->now();
+    if (after.boot_id != before.boot_id ||
+        after.boottime_ns < before.boottime_ns ||
+        after.boottime_ns >= query.expires_boottime_ns ||
+        live.authority != authority ||
+        live.lease.concurrency_key != claimed.concurrency_key ||
+        live.lease.owner_run_id != claimed.run_id ||
+        live.lease.lease_id != claimed.logical_lease_id ||
+        live.lease.fencing_token != claimed.logical_fencing_token ||
+        live.lease.clock_domain != ResourceLease::kBootTimeDomain ||
+        live.lease.boot_id != config_.boot_id ||
+        live.lease.expires_boottime_ns <= after.boottime_ns) {
+      fail();
+    }
+    return hostd_seal_journal_fence_evidence({
+        .api_version = std::string(kHostdJournalFenceEvidenceApiVersion),
+        .challenge_id = query.challenge_id,
+        .session_nonce = query.session_nonce,
+        .host_id = config_.host_id,
+        .boot_id = config_.boot_id,
+        .broker_epoch = config_.broker_epoch,
+        .observed_boottime_ns = after.boottime_ns,
+        .journal = query.claim.journal,
+        .controller = claimed,
+        .live = true,
+        .evidence_digest = {},
+    });
+  } catch (const HostdJournalFenceAttestorError&) {
+    throw;
+  } catch (...) {
+    fail();
+  }
+}
+
 }  // namespace trainvm

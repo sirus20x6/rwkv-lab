@@ -173,6 +173,9 @@ Implemented now:
   attributed run/concurrency/lease/token only through an already retained journal boundary, binds
   host/boot and journal inode authority into its evidence, and rejects expired, released, stale, or
   mismatched leases instead of trusting the mutation claim;
+- a dynamic read-only journal challenge attestor for the daemon that accepts any exact current
+  per-concurrency controller generation in the retained dashboard journal, checks supersession both
+  before and after the live-lease snapshot, and never registers or advances controller authority;
 - a canonical hostd mutation-envelope contract that binds one open journal/controller claim to the
   issued single-use challenge, echoed response, exactly attributed grant/reconcile/release/process
   payload, sealed command digest, and operation-compatible reply, now dispatched over a bounded

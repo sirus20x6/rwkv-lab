@@ -794,6 +794,33 @@ void restart_rotates_controller_generation_without_losing_fence() {
           "restart retains the exact live lease under a new controller generation");
 }
 
+void dynamic_attestor_tracks_current_scoped_controller_read_only() {
+  Fixture fixture;
+  HostdDynamicJournalFenceAttestor dynamic(
+      *fixture.journal,
+      {.api_version = std::string(kHostdJournalFenceAttestorApiVersion),
+       .host_id = "host-001",
+       .boot_id = std::string(kBootId),
+       .broker_epoch = "broker-001"},
+      fixture.time);
+  const HostdJournalFenceQuery old_query = fixture.query();
+  const auto first = dynamic.attest(old_query);
+  require(first.live && first.controller == fixture.controller &&
+              first.journal == old_query.claim.journal,
+          "dynamic attestor accepts the exact current journal controller");
+
+  HostdJournalControllerFence next = fixture.controller;
+  next.controller_id = "controller-dynamic-next";
+  ++next.controller_generation;
+  fixture.rebuild_attestor(next);
+  require_throws<HostdJournalFenceAttestorError>(
+      [&] { (void)dynamic.attest(old_query); },
+      "dynamic attestor rejects a controller superseded after construction");
+  const auto current = dynamic.attest(fixture.query());
+  require(current.live && current.controller == next,
+          "dynamic attestor follows a newly durable current scope without mutation");
+}
+
 }  // namespace
 
 int main() {
@@ -818,6 +845,8 @@ int main() {
     std::cout << "PASS long-lived-renewal-head\n";
     restart_rotates_controller_generation_without_losing_fence();
     std::cout << "PASS restart-generation\n";
+    dynamic_attestor_tracks_current_scoped_controller_read_only();
+    std::cout << "PASS dynamic-controller\n";
     std::cout << "hostd journal fence attestor tests passed\n";
     return 0;
   } catch (const std::exception& error) {

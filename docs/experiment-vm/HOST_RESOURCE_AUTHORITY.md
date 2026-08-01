@@ -701,6 +701,9 @@ On the daemon side, a production logical-fence evidence source performs a fresh 
 already retained Journal boundary for every grant, binds the exact journal/run/concurrency/lease/token,
 host/boot and authority inodes, and rejects expired or mismatched authority. Request claims remain
 selectors for that read, never bearer capabilities.
+A matching dynamic challenge attestor is read-only and is no longer fixed to one startup controller:
+it accepts any exact current per-concurrency controller generation in that retained journal and
+rechecks supersession after taking the live logical-fence snapshot.
 The remaining P0.3 gate is the unified privileged daemon entry point and the
 privileged end-to-end process-crash matrix at strict
 socket-pidfd/host-namespace grade. Deterministic transport checkpoints already prove that interruption at
