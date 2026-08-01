@@ -584,6 +584,7 @@
   let vmGalleryManual = false;
   let vmGallerySignature = "";
   let vmGalleryLoadGeneration = 0;
+  let vmProfileSignature = "";
   let vmBusy = false;
   let vmSelectedRun = null;
   let vmControlView = null;
@@ -651,6 +652,7 @@
     vmControlIntent = "";
     vmInvalidControls.clear();
     resetVMGallery(runID);
+    resetVMProfiles(runID);
     if (vmControlLoadAbort) vmControlLoadAbort.abort();
     vmControlLoadAbort = null;
     vmControlLoadGeneration += 1;
@@ -689,6 +691,70 @@
     if (state) state.textContent = "no published revisions";
     if (revision) revision.textContent = runID ? "loading immutable history…" : "select a native run";
     if (items) items.innerHTML = `<div class="empty">${runID ? "loading published eval galleries…" : "select a native run"}</div>`;
+  }
+
+  function resetVMProfiles(runID = "") {
+    vmProfileSignature = "";
+    const state = document.getElementById("vm-profile-state");
+    const items = document.getElementById("vm-profile-items");
+    if (state) state.textContent = "no published traces";
+    if (items) items.innerHTML = `<div class="empty">${runID ? "loading verified trace summaries…" : "select a native run"}</div>`;
+  }
+
+  function vmDurationUS(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric < 0) return "—";
+    if (numeric >= 1e6) return `${(numeric / 1e6).toFixed(2)} s`;
+    if (numeric >= 1e3) return `${(numeric / 1e3).toFixed(2)} ms`;
+    return `${numeric.toFixed(1)} μs`;
+  }
+
+  function renderVMProfiles(profiles) {
+    const state = document.getElementById("vm-profile-state");
+    const target = document.getElementById("vm-profile-items");
+    if (state) state.textContent = profiles.length ?
+      `${profiles.length} restricted trace${profiles.length === 1 ? "" : "s"} · explicit download only` :
+      "no published traces";
+    if (!target) return;
+    target.innerHTML = profiles.map((profile) => {
+      const summary = profile.summary || {};
+      const operators = Array.isArray(summary.top_operators) ? summary.top_operators.slice(0, 5) : [];
+      const windowLabel = `${Number(profile.first_optimizer_step || 0).toLocaleString()}–${Number(profile.last_optimizer_step || 0).toLocaleString()}`;
+      return `<article class="vm-profile-card">` +
+        `<div class="vm-profile-head"><strong title="${vmEscape(profile.artifact_id)}">${vmEscape(profile.backend)} · steps ${vmEscape(windowLabel)}</strong><span>#${Number(profile.sequence || 0).toLocaleString()}</span></div>` +
+        `<div class="vm-profile-facts">` +
+          `<div class="vm-profile-fact"><span>accelerator time</span><strong>${vmEscape(vmDurationUS(summary.accelerator_time_us))}</strong></div>` +
+          `<div class="vm-profile-fact"><span>CPU time</span><strong>${vmEscape(vmDurationUS(summary.cpu_time_us))}</strong></div>` +
+          `<div class="vm-profile-fact"><span>raw trace</span><strong>${Number(profile.trace_size_bytes || 0).toLocaleString()} B</strong></div>` +
+        `</div>` +
+        `<div class="vm-profile-operators">${operators.map((operator) =>
+          `<div class="vm-profile-operator"><span title="${vmEscape(operator.name)}">${vmEscape(operator.name)}</span><span>${Number(operator.calls || 0).toLocaleString()}×</span><span>${vmEscape(vmDurationUS(operator.accelerator_time_us))}</span></div>`
+        ).join("") || '<span class="vm-profile-meta">no operator rows in summary</span>'}</div>` +
+        `<div class="vm-profile-meta">${vmEscape(profile.attempt_id)} · ${Number(profile.capture_steps || 0)} captured · ${Number(profile.skip_steps || 0)} skipped · ${Number(profile.warmup_steps || 0)} warmup</div>` +
+        `<a class="vm-profile-download" href="${vmEscape(profile.trace_download_url)}" download>download restricted Chrome trace</a>` +
+      `</article>`;
+    }).join("") || '<div class="empty">no bounded GPU traces published yet</div>';
+  }
+
+  async function refreshVMProfiles(force = false) {
+    if (!vmSelected) return;
+    const runID = vmSelected;
+    const selectionGeneration = vmSelectionGeneration;
+    try {
+      const response = await fetch(`/api/trainvm/runs/${encodeURIComponent(runID)}/profiles`, { cache: "no-store" });
+      if (selectionGeneration !== vmSelectionGeneration || runID !== vmSelected) return;
+      if (!response.ok) throw new Error((await response.text()).trim() || `HTTP ${response.status}`);
+      const profiles = await response.json();
+      if (!Array.isArray(profiles)) throw new Error("profile response is not an array");
+      const signature = JSON.stringify(profiles.map((profile) => [profile.sequence, profile.artifact_id, profile.trace_sha256]));
+      if (!force && signature === vmProfileSignature) return;
+      vmProfileSignature = signature;
+      renderVMProfiles(profiles);
+    } catch (error) {
+      if (selectionGeneration !== vmSelectionGeneration || runID !== vmSelected) return;
+      const target = document.getElementById("vm-profile-items");
+      if (target) target.innerHTML = `<div class="empty">GPU trace history unavailable · ${vmEscape(error.message)}</div>`;
+    }
   }
 
   function renderVMGalleryControls() {
@@ -1087,6 +1153,7 @@
     if (!vmSelected) return;
     const selected = vmSelected;
     let galleryPublished = false;
+    let profilePublished = false;
     const [metricResponse, artifactResponse] = await Promise.all([
       fetch(`/api/trainvm/runs/${encodeURIComponent(selected)}/metrics?after=${vmMetricAfter}&limit=250`,
         { cache: "no-store" }),
@@ -1130,6 +1197,9 @@
           if (artifact.kind === "image_gallery" && artifact.schema === "rwkv-lab.eval-gallery.v2") {
             galleryPublished = true;
           }
+          if (artifact.kind === "opaque" && artifact.schema === "trainvm.gpu-trace.v1") {
+            profilePublished = true;
+          }
           const row = document.createElement("div");
           row.className = "vm-telemetry-row";
           row.innerHTML = `<span class="vm-telemetry-name" title="${vmEscape(artifact.logical_name)}">${vmEscape(artifact.logical_name)}</span>` +
@@ -1145,6 +1215,7 @@
       if (cursor) cursor.textContent = `sequence ${vmArtifactAfter.toLocaleString()}`;
     }
     if (galleryPublished) await refreshVMGalleries(true);
+    if (profilePublished) await refreshVMProfiles(true);
   }
 
   async function refreshTrainVM(force = false) {
@@ -1160,6 +1231,7 @@
         vmAfter = 0;
         resetVMTelemetry();
         resetVMGallery(vmSelected);
+        resetVMProfiles(vmSelected);
         const timeline = document.getElementById("trainvm-timeline");
         if (timeline) timeline.innerHTML = '<div class="empty">native journal changed · reloading authoritative history…</div>';
       }
@@ -1205,6 +1277,7 @@
       await appendVMTimeline();
       await appendVMTelemetry();
       if (selected && !vmGallerySignature) await refreshVMGalleries(true);
+      if (selected && !vmProfileSignature) await refreshVMProfiles(true);
     } catch (_) {
       // An authority or dashboard restart is transient; the next tick retries.
     } finally {

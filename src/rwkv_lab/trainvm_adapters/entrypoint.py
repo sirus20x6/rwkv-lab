@@ -7,7 +7,9 @@ from rwkv_lab.trainvm_worker import (
     WorkerBootstrap,
     WorkerInvocation,
     WorkerSession,
+    WorkerStepProfiler,
     read_worker_bootstrap_fd,
+    step_profiler_from_invocation,
 )
 
 from .handlers import HandlerResult, execute_invocation
@@ -20,7 +22,7 @@ class WorkerEntrypointError(RuntimeError):
 
 
 BootstrapReader = Callable[[int], WorkerBootstrap]
-InvocationExecutor = Callable[[WorkerInvocation], HandlerResult]
+InvocationExecutor = Callable[[WorkerInvocation, WorkerStepProfiler], HandlerResult]
 SessionFactory = Callable[[WorkerBootstrap], WorkerSession]
 
 
@@ -47,7 +49,10 @@ def run_worker(
         if session.completed_before_connect:
             return 0
         try:
-            result = executor(session.invocation)
+            with step_profiler_from_invocation(
+                session, session.invocation
+            ) as step_profiler:
+                result = executor(session.invocation, step_profiler)
         except Exception as error:  # noqa: BLE001 - trainer failures are terminal events
             # The durable event is intentionally bounded and contains neither the
             # exception message nor invocation values, which may disclose paths.
@@ -68,7 +73,9 @@ def run_worker(
 
 
 def main(arguments: Sequence[str] | None = None) -> int:
-    return run_worker(_bootstrap_descriptor(sys.argv[1:] if arguments is None else arguments))
+    return run_worker(
+        _bootstrap_descriptor(sys.argv[1:] if arguments is None else arguments)
+    )
 
 
 __all__ = [

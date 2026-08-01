@@ -770,6 +770,26 @@ void test_reflection_and_compiler() {
                            "execution.trace_artifact"),
         "GPU trace output rejects an incompatible artifact type");
 
+  auto wrong_trace_schema = fixture;
+  wrong_trace_schema["spec"]["artifacts"]["gpu_trace"]["schema"] =
+      "user.trace.v1";
+  const auto wrong_trace_schema_result =
+      trainvm::compile_document(wrong_trace_schema);
+  check(!wrong_trace_schema_result.valid() &&
+            has_diagnostic(wrong_trace_schema_result,
+                           "execution.trace_artifact"),
+        "GPU trace output requires the closed trace manifest contract");
+
+  auto wrong_trace_fingerprint = fixture;
+  wrong_trace_fingerprint["spec"]["artifacts"]["gpu_trace"]
+                         ["fingerprint"] = "sha256";
+  const auto wrong_trace_fingerprint_result =
+      trainvm::compile_document(wrong_trace_fingerprint);
+  check(!wrong_trace_fingerprint_result.valid() &&
+            has_diagnostic(wrong_trace_fingerprint_result,
+                           "execution.trace_artifact"),
+        "GPU trace output requires adapter-owned tree fingerprinting");
+
   auto cpuset_conflict = fixture;
   cpuset_conflict["spec"]["resources"]["cpu_io_policy"]["cpus"] =
       {0, 1, 2, 3};

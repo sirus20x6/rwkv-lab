@@ -65,9 +65,7 @@ def test_run_directory_must_equal_the_authority_workspace(tmp_path) -> None:
         "allowed_read_roots": [str(tmp_path)],
         "allowed_write_roots": [str(tmp_path)],
     }
-    assert require_run_directory(
-        str(run_directory), workspace
-    ) == run_directory
+    assert require_run_directory(str(run_directory), workspace) == run_directory
     with pytest.raises(AdapterInputError, match="workspace authority"):
         require_run_directory(str(tmp_path / "other"), workspace)
     with pytest.raises(AdapterInputError, match="absolute normalized"):
@@ -91,12 +89,11 @@ def test_workspace_path_authority_confines_reads_writes_and_symlinks(tmp_path) -
         }
     )
 
-    assert authority.read_path(
-        str(source), label="manifest", kind="file"
-    ) == source
-    assert authority.write_directory(
-        str(write_root / "cache" / "new"), label="cache"
-    ) == write_root / "cache" / "new"
+    assert authority.read_path(str(source), label="manifest", kind="file") == source
+    assert (
+        authority.write_directory(str(write_root / "cache" / "new"), label="cache")
+        == write_root / "cache" / "new"
+    )
     with pytest.raises(AdapterInputError, match="outside declared read roots"):
         authority.read_path(
             str(read_root / "escape"), label="dataset", kind="directory"
@@ -120,8 +117,8 @@ def test_appearance_handler_passes_only_canonical_authorized_paths(
     monkeypatch.setattr(
         mage_flow_expert_train,
         "train",
-        lambda config, *, worker_components: observed.append(
-            (config, worker_components)
+        lambda config, *, worker_components, worker_step_profiler: observed.append(
+            (config, worker_components, worker_step_profiler)
         ),
     )
     invocation = SimpleNamespace(
@@ -210,7 +207,7 @@ def test_runner_reports_success_with_optimizer_step() -> None:
             else pytest.fail("wrong descriptor")
         ),
         session_factory=factory,
-        executor=lambda invocation: HandlerResult(
+        executor=lambda invocation, _profiler: HandlerResult(
             "worker.completed", {"reason": "training_complete"}, 41
         ),
     )
@@ -225,7 +222,7 @@ def test_runner_reports_sanitized_failure_and_skips_completed_replay() -> None:
     bootstrap = SimpleNamespace(run_id="run-1")
     failed = FakeSession(bootstrap)
 
-    def raise_secret(_invocation: object) -> HandlerResult:
+    def raise_secret(_invocation: object, _profiler: object) -> HandlerResult:
         raise RuntimeError("secret dataset path")
 
     assert (
@@ -250,7 +247,9 @@ def test_runner_reports_sanitized_failure_and_skips_completed_replay() -> None:
         run_worker(
             bootstrap_reader=lambda _descriptor: bootstrap,
             session_factory=lambda _bootstrap: completed,
-            executor=lambda _invocation: pytest.fail("replayed completed work"),
+            executor=lambda _invocation, _profiler: pytest.fail(
+                "replayed completed work"
+            ),
         )
         == 0
     )

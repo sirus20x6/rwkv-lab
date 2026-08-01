@@ -4,7 +4,11 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
-from rwkv_lab.trainvm_worker import WorkerInvocation
+from rwkv_lab.trainvm_worker import (
+    NullStepProfiler,
+    WorkerInvocation,
+    WorkerStepProfiler,
+)
 
 from .components import WorkerTrainingComponents
 from .io import WorkspacePathAuthority, read_inline_config
@@ -22,11 +26,15 @@ class HandlerResult:
 
 
 AdapterKey = tuple[str, str, str, str]
-Handler = Callable[[WorkerInvocation, WorkerTrainingComponents], HandlerResult]
+Handler = Callable[
+    [WorkerInvocation, WorkerTrainingComponents, WorkerStepProfiler], HandlerResult
+]
 
 
 def _appearance_expert(
-    invocation: WorkerInvocation, components: WorkerTrainingComponents
+    invocation: WorkerInvocation,
+    components: WorkerTrainingComponents,
+    step_profiler: WorkerStepProfiler | None = None,
 ) -> HandlerResult:
     from rwkv_lab.mage_flow_expert_train import MageFlowExpertTrainConfig, train
 
@@ -39,12 +47,20 @@ def _appearance_expert(
         ),
         output_dir=str(paths.exact_run_directory(config.output_dir)),
         eval_manifest=(
-            str(paths.read_path(config.eval_manifest, label="eval_manifest", kind="file"))
+            str(
+                paths.read_path(
+                    config.eval_manifest, label="eval_manifest", kind="file"
+                )
+            )
             if config.eval_manifest
             else None
         ),
         resume_from=(
-            str(paths.read_path(config.resume_from, label="resume_from", kind="directory"))
+            str(
+                paths.read_path(
+                    config.resume_from, label="resume_from", kind="directory"
+                )
+            )
             if config.resume_from
             else None
         ),
@@ -63,12 +79,18 @@ def _appearance_expert(
             paths, config.encoder_cache_dir, config.encoder_cache_mode
         ),
     )
-    train(config, worker_components=components)
+    train(
+        config,
+        worker_components=components,
+        worker_step_profiler=step_profiler or NullStepProfiler(),
+    )
     return HandlerResult("worker.completed", {"reason": "training_complete"})
 
 
 def _terminal_expert(
-    invocation: WorkerInvocation, components: WorkerTrainingComponents
+    invocation: WorkerInvocation,
+    components: WorkerTrainingComponents,
+    step_profiler: WorkerStepProfiler | None = None,
 ) -> HandlerResult:
     from rwkv_lab.mage_flow_terminal_train import TerminalExpertTrainConfig, train
 
@@ -137,12 +159,18 @@ def _terminal_expert(
         ),
         expert_checkpoints=expert_checkpoints,
     )
-    train(config, worker_components=components)
+    train(
+        config,
+        worker_components=components,
+        worker_step_profiler=step_profiler or NullStepProfiler(),
+    )
     return HandlerResult("worker.completed", {"reason": "training_complete"})
 
 
 def _qwen_ao3(
-    invocation: WorkerInvocation, components: WorkerTrainingComponents
+    invocation: WorkerInvocation,
+    components: WorkerTrainingComponents,
+    step_profiler: WorkerStepProfiler | None = None,
 ) -> HandlerResult:
     from rwkv_lab.qwen_ao3_cpt import QwenAO3Config, train
 
@@ -150,12 +178,18 @@ def _qwen_ao3(
     paths = WorkspacePathAuthority.from_workspace(invocation.workspace)
     config = replace(
         config,
-        model_dir=str(paths.read_path(config.model_dir, label="model_dir", kind="directory")),
+        model_dir=str(
+            paths.read_path(config.model_dir, label="model_dir", kind="directory")
+        ),
         train_pack_dir=str(
-            paths.read_path(config.train_pack_dir, label="train_pack_dir", kind="directory")
+            paths.read_path(
+                config.train_pack_dir, label="train_pack_dir", kind="directory"
+            )
         ),
         eval_pack_dir=str(
-            paths.read_path(config.eval_pack_dir, label="eval_pack_dir", kind="directory")
+            paths.read_path(
+                config.eval_pack_dir, label="eval_pack_dir", kind="directory"
+            )
         ),
         run_dir=str(paths.exact_run_directory(config.run_dir)),
         resume=_optional_read_path(
@@ -163,7 +197,11 @@ def _qwen_ao3(
         )
         or "",
     )
-    result = train(config, worker_components=components)
+    result = train(
+        config,
+        worker_components=components,
+        worker_step_profiler=step_profiler or NullStepProfiler(),
+    )
     step = result.get("step")
     return HandlerResult(
         "worker.completed",
@@ -225,7 +263,10 @@ def supported_adapter_keys() -> frozenset[AdapterKey]:
     return frozenset(_HANDLERS)
 
 
-def execute_invocation(invocation: WorkerInvocation) -> HandlerResult:
+def execute_invocation(
+    invocation: WorkerInvocation,
+    step_profiler: WorkerStepProfiler | None = None,
+) -> HandlerResult:
     adapter = invocation.adapter
     key = (
         adapter["adapter"],
@@ -244,4 +285,4 @@ def execute_invocation(invocation: WorkerInvocation) -> HandlerResult:
     components = WorkerTrainingComponents(
         invocation.training, invocation.training.model_family
     )
-    return handler(invocation, components)
+    return handler(invocation, components, step_profiler or NullStepProfiler())

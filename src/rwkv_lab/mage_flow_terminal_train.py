@@ -106,6 +106,7 @@ from rwkv_lab.training_components import (
 
 if TYPE_CHECKING:
     from rwkv_lab.trainvm_adapters import WorkerTrainingComponents
+    from rwkv_lab.trainvm_worker import WorkerStepProfiler
 
 RUN_SCHEMA = "rwkv-lab.mage-flow-terminal-train.v3"
 CACHE_SPAN_SCHEMA = "rwkv-lab.mage-flow-cache-span.v1"
@@ -2480,6 +2481,7 @@ def train(
     config: TerminalExpertTrainConfig,
     *,
     worker_components: WorkerTrainingComponents | None = None,
+    worker_step_profiler: WorkerStepProfiler | None = None,
 ) -> None:
     config.validate()
     try:
@@ -3386,6 +3388,8 @@ def train(
             optimizer.zero_grad(set_to_none=True)
             optimizer_step_seconds = time.perf_counter() - optimizer_step_started_at
             step += 1
+            if worker_step_profiler is not None:
+                worker_step_profiler.step(step)
             learning_rates = {
                 str(group.get("group_name")): float(group["lr"])
                 for group in optimizer.param_groups

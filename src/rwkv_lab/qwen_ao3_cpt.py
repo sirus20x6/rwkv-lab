@@ -33,6 +33,7 @@ from rwkv_lab.training_components import (
 
 if TYPE_CHECKING:
     from rwkv_lab.trainvm_adapters import WorkerTrainingComponents
+    from rwkv_lab.trainvm_worker import WorkerStepProfiler
 
 SCHEMA = "rwkv-lab.qwen-ao3-cpt.v1"
 ROUTER_TARGET = "mlp.gate.weight"
@@ -986,6 +987,7 @@ def train(
     config: QwenAO3Config,
     *,
     worker_components: WorkerTrainingComponents | None = None,
+    worker_step_profiler: WorkerStepProfiler | None = None,
 ) -> dict[str, Any]:
     run_dir = Path(config.run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -1170,6 +1172,8 @@ def train(
         if scheduler is not None:
             scheduler.step()
         step += 1
+        if worker_step_profiler is not None:
+            worker_step_profiler.step(step)
         should_log = step % config.log_every == 0
         should_save = bool(config.save_every and step % config.save_every == 0)
         # Converting CUDA scalars to Python values synchronizes the device.

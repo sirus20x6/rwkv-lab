@@ -52,6 +52,15 @@ them into a SHA-256 object store beneath the run directory. It then atomically s
 manifest, publishes that manifest through `WorkerSession.artifact()`, and returns the durable worker
 sequence. Generated and target/source images, held-out membership, condition digest, evaluator,
 checkpoint, policy, seed, sampling attributes, producer attempt, and optimizer step are all bound.
+
+GPU profiling is likewise a worker service rather than trainer-local CLI state. A native training
+adapter receives one `WorkerStepProfiler` and calls `step()` exactly once after each optimizer
+update. The service owns the bounded skip/warmup/capture state machine, Torch profiler lifetime,
+immutable trace publication, invocation binding, and restricted-artifact metadata. Trainers do not
+construct profiler schedules or publish raw trace paths themselves. A null implementation keeps
+non-profiled invocations free of profiler setup overhead. Nsight backends require dedicated sealed
+host launch profiles and fail closed in the in-process Torch adapter path.
+
 The helper is deliberately trainer-family-neutral; MageFlow, RWKV vision, and transformer vision
 adapters must not implement their own gallery-directory conventions.
 

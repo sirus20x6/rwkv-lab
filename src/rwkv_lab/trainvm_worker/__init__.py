@@ -21,6 +21,18 @@ from .invocation import (
     WorkerInvocation,
     load_worker_invocation,
 )
+from .profiling import (
+    GPU_TRACE_SCHEMA,
+    GpuProfileError,
+    GpuTracePublisher,
+    GpuTraceRequest,
+    NullStepProfiler,
+    PublishedGpuTrace,
+    TorchStepProfiler,
+    WorkerStepProfiler,
+    step_profiler_from_invocation,
+    trace_request_from_invocation,
+)
 from .session import (
     CommandKind,
     ControlAssignment,
@@ -41,6 +53,7 @@ from .training import (
 
 __all__ = [
     "EVAL_GALLERY_SCHEMA",
+    "GPU_TRACE_SCHEMA",
     "MAXIMUM_BOOTSTRAP_BYTES",
     "MAXIMUM_COMPONENT_SLOTS",
     "MAXIMUM_INVOCATION_BYTES",
@@ -53,10 +66,16 @@ __all__ = [
     "EvalGalleryItem",
     "EvalGalleryPublisher",
     "GalleryImage",
+    "GpuProfileError",
+    "GpuTracePublisher",
+    "GpuTraceRequest",
     "InvocationError",
+    "NullStepProfiler",
     "PublishedEvalGallery",
+    "PublishedGpuTrace",
     "ResolvedTrainingComponent",
     "ResolvedTrainingComposition",
+    "TorchStepProfiler",
     "TrainingCompositionError",
     "WorkerBootstrap",
     "WorkerCommand",
@@ -64,8 +83,11 @@ __all__ = [
     "WorkerReceipt",
     "WorkerSession",
     "WorkerSessionError",
+    "WorkerStepProfiler",
     "load_resolved_training_composition",
     "load_worker_bootstrap",
     "load_worker_invocation",
     "read_worker_bootstrap_fd",
+    "step_profiler_from_invocation",
+    "trace_request_from_invocation",
 ]

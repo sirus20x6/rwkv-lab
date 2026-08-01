@@ -75,6 +75,7 @@ from rwkv_lab.training_parameter_routing import ParameterRoutingResult
 
 if TYPE_CHECKING:
     from rwkv_lab.trainvm_adapters import WorkerTrainingComponents
+    from rwkv_lab.trainvm_worker import WorkerStepProfiler
 
 RUN_SCHEMA = "rwkv-lab.mage-flow-expert-train.v1"
 OFFICIAL_REPOSITORY = "https://github.com/microsoft/Mage"
@@ -1939,6 +1940,7 @@ def train(
     config: MageFlowExpertTrainConfig,
     *,
     worker_components: WorkerTrainingComponents | None = None,
+    worker_step_profiler: WorkerStepProfiler | None = None,
 ) -> None:
     """Run single-GPU routed expert/shared-backbone optimization."""
     config.validate()
@@ -2470,6 +2472,8 @@ def train(
             )
             accumulation_index = 0
             global_step += 1
+            if worker_step_profiler is not None:
+                worker_step_profiler.step(global_step)
 
             metrics = {
                 "kind": "train",

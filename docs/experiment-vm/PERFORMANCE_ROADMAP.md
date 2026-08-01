@@ -161,6 +161,18 @@ Single-run speedrun results are hypotheses, not production defaults.
 - Expose compiler/cache/warmup state and trace artifacts generically in the dashboard; adapters may
   add family-specific panels without changing lifecycle code.
 
+The bounded Torch path is implemented end to end for the native MageFlow appearance/terminal and
+Qwen adapters. One shared optimizer-step hook drives the declared wait/warmup/capture schedule; it
+freezes a Chrome trace and bounded operator summary into `trainvm.gpu-trace.v1`, binds the exact
+worker invocation and optimizer-step interval, marks timing as instrumented and the raw trace as
+restricted, and publishes it through the worker artifact protocol. The dashboard verifies the
+manifest before rendering summaries and hashes the raw trace only on an explicit download. It does
+not fetch multi-gigabyte or potentially sensitive traces during polling. Nsight Systems and Nsight
+Compute remain separate host-launch profiles: an in-process worker must not pretend that selecting
+their enum has wrapped the process. GPU-active ratio, input-stall attribution, allocator pressure,
+and launch-count normalization remain required summary fields once the corresponding qualified
+backend supplies them.
+
 No P0 item authorizes TrainVM to start a GPU process. Launch remains disabled until durable
 boot-scoped leases, host resource fencing, orphan checks, sealed launch identity, and spawn/exit
 receipts are complete. The in-process service coordinator now enforces prepare -> durable journal
@@ -272,7 +284,8 @@ startup orphan recovery are defined in
   terminal process/resource release, and exact lease renewal) with typed executors for
   compile/warmup/qualification nodes and dashboard-visible supervisor health.
 - Fingerprinted cache namespaces and typed CPU/I/O policy.
-- Declarative bounded GPU profiling and dashboard trace artifacts.
+- Declarative bounded Torch GPU profiling and dashboard trace artifacts are implemented; qualified
+  Nsight launch profiles and richer cross-backend summaries remain.
 
 ### P1 — runtime speed qualification
 

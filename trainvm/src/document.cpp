@@ -762,12 +762,15 @@ void validate_experiment(const Experiment& experiment, std::vector<Diagnostic>& 
                 child_path(std::string(path), "output_artifact"),
                 "unknown GPU trace output artifact: " +
                     *trace.output_artifact);
-        } else if (artifact->second.type != ArtifactType::path &&
-                   artifact->second.type != ArtifactType::report &&
-                   artifact->second.type != ArtifactType::opaque) {
+        } else if (artifact->second.type != ArtifactType::opaque ||
+                   artifact->second.schema !=
+                       std::optional<std::string>{"trainvm.gpu-trace.v1"} ||
+                   artifact->second.immutability !=
+                       Immutability::mutable_until_publish ||
+                   artifact->second.fingerprint != Fingerprint::adapter) {
           error(diagnostics, "execution.trace_artifact",
                 child_path(std::string(path), "output_artifact"),
-                "GPU trace output must target a path, report, or opaque artifact");
+                "GPU trace output must target the opaque trainvm.gpu-trace.v1 mutable-until-publish adapter-fingerprinted contract");
         }
       }
     }
