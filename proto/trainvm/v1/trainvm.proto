@@ -106,6 +106,16 @@ message RunSummary {
   uint64 effective_control_revision = 13 [deprecated = true];
   uint64 latest_requested_control_revision = 14;
   uint64 latest_effective_control_revision = 15;
+  uint64 last_event_sequence = 16;
+}
+
+enum ControlType {
+  CONTROL_TYPE_UNSPECIFIED = 0;
+  CONTROL_TYPE_NUMBER = 1;
+  CONTROL_TYPE_INTEGER = 2;
+  CONTROL_TYPE_BOOLEAN = 3;
+  CONTROL_TYPE_STRING = 4;
+  CONTROL_TYPE_ENUMERATION = 5;
 }
 
 message SubmitExperimentRequest {
@@ -415,12 +425,54 @@ message ListRunsRequest {
 message ListRunsResponse {
   repeated RunSummary runs = 1;
   string next_page_token = 2;
+  string journal_id = 3;
 }
 
 message WatchEventsRequest {
   repeated string run_ids = 1;
   uint64 after_journal_sequence = 2;
   repeated string event_types = 3;
+  // A bounded replay closes successfully after this many events, or after the
+  // current durable prefix is exhausted. Zero keeps the live stream open.
+  uint32 replay_limit = 4;
+}
+
+message GetControlViewRequest {
+  string run_id = 1;
+}
+
+message ControlDescriptor {
+  ControlType type = 1;
+  ScalarValue default_value = 2;
+  optional double minimum = 3;
+  optional double maximum = 4;
+  repeated ScalarValue values = 5;
+  ApplyPoint apply_point = 6;
+  bool mutable_after_start = 7;
+  bool requires_pause = 8;
+  string description = 9;
+  string unit = 10;
+}
+
+message ControlCommandView {
+  string command_id = 1;
+  uint64 control_revision = 2;
+  ApplyPoint apply_point = 3;
+  repeated ControlAssignment assignments = 4;
+  string author = 5;
+  string reason = 6;
+  ControlCommandResult.Status status = 7;
+  optional uint64 effective_step = 8;
+  repeated ControlAssignment effective_values = 9;
+  repeated Diagnostic diagnostics = 10;
+}
+
+message GetControlViewResponse {
+  map<string, ControlDescriptor> catalog = 1;
+  repeated ControlAssignment effective_values = 2;
+  uint64 latest_requested_revision = 3;
+  uint64 latest_effective_revision = 4;
+  repeated ControlCommandView commands = 5;
 }
 
 message DescriptorRequest {
@@ -441,6 +493,7 @@ service TrainVM {
   rpc GetRun(GetRunRequest) returns (RunSummary);
   rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
   rpc WatchEvents(WatchEventsRequest) returns (stream EventEnvelope);
+  rpc GetControlView(GetControlViewRequest) returns (GetControlViewResponse);
   rpc GetDescriptor(DescriptorRequest) returns (DescriptorResponse);
 }
 

@@ -264,6 +264,8 @@ public:
   [[nodiscard]] std::vector<ControlCommand> pending_control_commands(
       const std::string& run_id,
       std::uint64_t after_control_revision) const;
+  [[nodiscard]] std::vector<ControlCommand> control_commands(
+      const std::string& run_id, std::size_t limit) const;
   [[nodiscard]] std::uint64_t latest_control_revision(const std::string& run_id) const;
   [[nodiscard]] std::uint64_t latest_effective_control_revision(
       const std::string& run_id) const;

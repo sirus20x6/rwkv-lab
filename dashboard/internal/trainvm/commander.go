@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"path/filepath"
 	"sort"
@@ -13,8 +14,11 @@ import (
 	trainvmv1 "trainboard/gen/trainvm/v1"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // Commander is the dashboard's mutation boundary. Implementations send typed
@@ -118,6 +122,8 @@ type GRPCCommander struct {
 	client     trainvmv1.TrainVMClient
 }
 
+var _ ReadModel = (*GRPCCommander)(nil)
+
 func DialCommander(socketPath string) (*GRPCCommander, error) {
 	if socketPath == "" {
 		return nil, fmt.Errorf("TrainVM authority socket is not configured")
@@ -161,6 +167,135 @@ func (c *GRPCCommander) Reachable(ctx context.Context) bool {
 			return false
 		}
 	}
+}
+
+func (c *GRPCCommander) JournalID(ctx context.Context) (string, error) {
+	if c == nil || c.client == nil {
+		return "", fmt.Errorf("TrainVM authority client is not configured")
+	}
+	response, err := c.client.ListRuns(ctx, &trainvmv1.ListRunsRequest{Limit: 1})
+	if err != nil {
+		return "", err
+	}
+	identity := response.GetJournalId()
+	if len(identity) != 32 {
+		return "", fmt.Errorf("TrainVM authority returned a malformed journal identity")
+	}
+	return identity, nil
+}
+
+func (c *GRPCCommander) Runs(ctx context.Context) ([]Run, error) {
+	if c == nil || c.client == nil {
+		return nil, fmt.Errorf("TrainVM authority client is not configured")
+	}
+	const maximumRuns = 10_000
+	result := make([]Run, 0)
+	token := ""
+	journalID := ""
+	for {
+		response, err := c.client.ListRuns(ctx, &trainvmv1.ListRunsRequest{
+			Limit: 250, PageToken: token,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if len(response.GetJournalId()) != 32 ||
+			(journalID != "" && response.GetJournalId() != journalID) {
+			return nil, fmt.Errorf("TrainVM authority changed or malformed its journal identity during pagination")
+		}
+		journalID = response.GetJournalId()
+		for _, summary := range response.GetRuns() {
+			run, err := runFromProto(summary)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, run)
+			if len(result) > maximumRuns {
+				return nil, fmt.Errorf("TrainVM run listing exceeds the dashboard bound")
+			}
+		}
+		next := response.GetNextPageToken()
+		if next == "" {
+			return result, nil
+		}
+		if next == token {
+			return nil, fmt.Errorf("TrainVM authority repeated a pagination token")
+		}
+		token = next
+	}
+}
+
+func (c *GRPCCommander) Run(ctx context.Context, runID string) (Run, bool, error) {
+	if c == nil || c.client == nil {
+		return Run{}, false, fmt.Errorf("TrainVM authority client is not configured")
+	}
+	runID = strings.TrimSpace(runID)
+	if runID == "" || len(runID) > 256 {
+		return Run{}, false, &ValidationError{Message: "bounded run ID is required"}
+	}
+	response, err := c.client.GetRun(ctx, &trainvmv1.GetRunRequest{RunId: runID})
+	if status.Code(err) == codes.NotFound {
+		return Run{}, false, nil
+	}
+	if err != nil {
+		return Run{}, false, err
+	}
+	run, err := runFromProto(response)
+	return run, err == nil, err
+}
+
+func (c *GRPCCommander) Timeline(ctx context.Context, runID string, after uint64, limit int) ([]Event, error) {
+	if c == nil || c.client == nil {
+		return nil, fmt.Errorf("TrainVM authority client is not configured")
+	}
+	runID = strings.TrimSpace(runID)
+	if runID == "" || len(runID) > 256 {
+		return nil, &ValidationError{Message: "bounded run ID is required"}
+	}
+	if limit <= 0 || limit > 1_000 {
+		limit = 250
+	}
+	stream, err := c.client.WatchEvents(ctx, &trainvmv1.WatchEventsRequest{
+		RunIds: []string{runID}, AfterJournalSequence: after,
+		ReplayLimit: uint32(limit),
+	})
+	if err != nil {
+		return nil, err
+	}
+	result := make([]Event, 0, limit)
+	for {
+		envelope, recvErr := stream.Recv()
+		if recvErr == io.EOF {
+			return result, nil
+		}
+		if recvErr != nil {
+			return nil, recvErr
+		}
+		event, convertErr := eventFromProto(envelope)
+		if convertErr != nil {
+			return nil, convertErr
+		}
+		result = append(result, event)
+	}
+}
+
+func (c *GRPCCommander) Controls(ctx context.Context, runID string) (ControlView, bool, error) {
+	if c == nil || c.client == nil {
+		return ControlView{}, false, fmt.Errorf("TrainVM authority client is not configured")
+	}
+	runID = strings.TrimSpace(runID)
+	if runID == "" || len(runID) > 256 {
+		return ControlView{}, false, &ValidationError{Message: "bounded run ID is required"}
+	}
+	response, err := c.client.GetControlView(ctx, &trainvmv1.GetControlViewRequest{RunId: runID})
+	if status.Code(err) == codes.NotFound {
+		return ControlView{}, false, nil
+	}
+	if err != nil {
+		return ControlView{}, false, err
+	}
+	view, err := controlViewFromProto(response)
+	return view, err == nil, err
 }
 
 func (c *GRPCCommander) RequestControls(ctx context.Context, request ControlRequest) (ControlResult, error) {
@@ -258,6 +393,222 @@ func submissionRPCRequest(request SubmissionRequest) (*trainvmv1.SubmitExperimen
 		ExpectedAdapterLockDigest:           request.ExpectedAdapterLockDigest,
 		ExpectedTrainingComponentLockDigest: request.ExpectedTrainingComponentLockDigest,
 	}, nil
+}
+
+func timestampNS(value *timestamppb.Timestamp) (int64, error) {
+	if value == nil {
+		return 0, nil
+	}
+	if err := value.CheckValid(); err != nil {
+		return 0, fmt.Errorf("TrainVM authority returned an invalid timestamp: %w", err)
+	}
+	return value.AsTime().UnixNano(), nil
+}
+
+func runFromProto(summary *trainvmv1.RunSummary) (Run, error) {
+	if summary == nil || summary.GetIdentity() == nil ||
+		strings.TrimSpace(summary.GetIdentity().GetRunId()) == "" ||
+		summary.GetIdentity().GetPlanHash() == "" ||
+		summary.GetDesiredState() == trainvmv1.DesiredState_DESIRED_STATE_UNSPECIFIED ||
+		summary.GetObservedState() == trainvmv1.ObservedState_OBSERVED_STATE_UNSPECIFIED {
+		return Run{}, fmt.Errorf("TrainVM authority returned a malformed run summary")
+	}
+	heartbeat, err := timestampNS(summary.GetLastHeartbeatAt())
+	if err != nil {
+		return Run{}, err
+	}
+	return Run{
+		RunID:            summary.GetIdentity().GetRunId(),
+		ExperimentName:   summary.GetExperimentName(),
+		PlanHash:         summary.GetIdentity().GetPlanHash(),
+		DesiredState:     strings.ToLower(strings.TrimPrefix(summary.GetDesiredState().String(), "DESIRED_STATE_")),
+		ObservedState:    strings.ToLower(strings.TrimPrefix(summary.GetObservedState().String(), "OBSERVED_STATE_")),
+		CurrentNodeID:    summary.GetCurrentNodeId(),
+		CurrentAttemptID: summary.GetCurrentAttemptId(),
+		RunRevision:      summary.GetIdentity().GetRevision(),
+		OptimizerStep:    summary.GetOptimizerStep(),
+		LastHeartbeatNS:  heartbeat,
+		LastEventSeq:     summary.GetLastEventSequence(),
+		FailureSummary:   summary.GetFailureSummary(),
+	}, nil
+}
+
+func eventFromProto(envelope *trainvmv1.EventEnvelope) (Event, error) {
+	if envelope == nil || envelope.GetJournalSequence() == 0 ||
+		envelope.GetEventId() == "" || envelope.GetRunId() == "" ||
+		envelope.GetEventType() == "" || envelope.GetEventVersion() == 0 {
+		return Event{}, fmt.Errorf("TrainVM authority returned a malformed event identity")
+	}
+	wallTime, err := timestampNS(envelope.GetWallTime())
+	if err != nil {
+		return Event{}, err
+	}
+	payload := envelope.GetCanonicalJsonPayload()
+	if !json.Valid(payload) {
+		return Event{}, fmt.Errorf("TrainVM event %q contains invalid payload JSON", envelope.GetEventId())
+	}
+	result := Event{
+		Sequence: envelope.GetJournalSequence(), EventID: envelope.GetEventId(),
+		RunID: envelope.GetRunId(), RunRevision: envelope.GetRunRevision(),
+		PlanRevision: envelope.GetPlanRevision(), NodeID: envelope.GetNodeId(),
+		AttemptID: envelope.GetAttemptId(), WorkerSequence: envelope.GetWorkerSequence(),
+		EventType: envelope.GetEventType(), EventVersion: envelope.GetEventVersion(),
+		WallTimeNS: wallTime, MonotonicTimeNS: envelope.GetMonotonicTimeNs(),
+		Payload: append(json.RawMessage(nil), payload...),
+	}
+	if envelope.OptimizerStep != nil {
+		step := envelope.GetOptimizerStep()
+		result.OptimizerStep = &step
+	}
+	return result, nil
+}
+
+func controlTypeName(value trainvmv1.ControlType) (string, error) {
+	switch value {
+	case trainvmv1.ControlType_CONTROL_TYPE_NUMBER:
+		return "number", nil
+	case trainvmv1.ControlType_CONTROL_TYPE_INTEGER:
+		return "integer", nil
+	case trainvmv1.ControlType_CONTROL_TYPE_BOOLEAN:
+		return "boolean", nil
+	case trainvmv1.ControlType_CONTROL_TYPE_STRING:
+		return "string", nil
+	case trainvmv1.ControlType_CONTROL_TYPE_ENUMERATION:
+		return "enum", nil
+	default:
+		return "", fmt.Errorf("TrainVM authority returned an unknown control type")
+	}
+}
+
+func assignmentMap(values []*trainvmv1.ControlAssignment) (map[string]any, error) {
+	result := make(map[string]any, len(values))
+	for _, assignment := range values {
+		if assignment == nil || assignment.GetKey() == "" || assignment.GetValue() == nil {
+			return nil, fmt.Errorf("TrainVM authority returned a malformed control assignment")
+		}
+		if _, exists := result[assignment.GetKey()]; exists {
+			return nil, fmt.Errorf("TrainVM authority returned a duplicate control assignment")
+		}
+		value, err := checkedScalarJSONValue(assignment.GetValue())
+		if err != nil {
+			return nil, err
+		}
+		result[assignment.GetKey()] = value
+	}
+	return result, nil
+}
+
+func rawJSON(value any) (json.RawMessage, error) {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("encode TrainVM control view: %w", err)
+	}
+	return json.RawMessage(encoded), nil
+}
+
+func controlViewFromProto(response *trainvmv1.GetControlViewResponse) (ControlView, error) {
+	if response == nil {
+		return ControlView{}, fmt.Errorf("TrainVM authority returned no control view")
+	}
+	view := ControlView{
+		Catalog:                 make(map[string]ControlDescriptor, len(response.GetCatalog())),
+		EffectiveValues:         make(map[string]any, len(response.GetEffectiveValues())),
+		LatestRequestedRevision: response.GetLatestRequestedRevision(),
+		LatestEffectiveRevision: response.GetLatestEffectiveRevision(),
+		Commands:                []ControlCommandView{},
+	}
+	for name, wire := range response.GetCatalog() {
+		if name == "" || wire == nil || wire.GetDefaultValue() == nil {
+			return ControlView{}, fmt.Errorf("TrainVM authority returned a malformed control descriptor")
+		}
+		typeName, err := controlTypeName(wire.GetType())
+		if err != nil {
+			return ControlView{}, err
+		}
+		defaultValue, err := checkedScalarJSONValue(wire.GetDefaultValue())
+		if err != nil || wire.GetApplyPoint() == trainvmv1.ApplyPoint_APPLY_POINT_UNSPECIFIED {
+			return ControlView{}, fmt.Errorf("TrainVM authority returned a malformed control descriptor")
+		}
+		descriptor := ControlDescriptor{
+			Type: typeName, Default: defaultValue,
+			Apply:             strings.ToLower(strings.TrimPrefix(wire.GetApplyPoint().String(), "APPLY_POINT_")),
+			MutableAfterStart: wire.GetMutableAfterStart(), RequiresPause: wire.GetRequiresPause(),
+			Description: wire.GetDescription(), Unit: wire.GetUnit(),
+		}
+		if wire.Minimum != nil {
+			value := wire.GetMinimum()
+			descriptor.Minimum = &value
+		}
+		if wire.Maximum != nil {
+			value := wire.GetMaximum()
+			descriptor.Maximum = &value
+		}
+		for _, value := range wire.GetValues() {
+			converted, convertErr := checkedScalarJSONValue(value)
+			if convertErr != nil {
+				return ControlView{}, convertErr
+			}
+			descriptor.Values = append(descriptor.Values, converted)
+		}
+		view.Catalog[name] = descriptor
+	}
+	effective, err := assignmentMap(response.GetEffectiveValues())
+	if err != nil {
+		return ControlView{}, err
+	}
+	view.EffectiveValues = effective
+	for _, wire := range response.GetCommands() {
+		if wire == nil || wire.GetCommandId() == "" || wire.GetControlRevision() == 0 ||
+			wire.GetApplyPoint() == trainvmv1.ApplyPoint_APPLY_POINT_UNSPECIFIED ||
+			wire.GetStatus() == trainvmv1.ControlCommandResult_STATUS_UNSPECIFIED {
+			return ControlView{}, fmt.Errorf("TrainVM authority returned a malformed control command")
+		}
+		assignments, err := assignmentMap(wire.GetAssignments())
+		if err != nil {
+			return ControlView{}, err
+		}
+		effectiveValues, err := assignmentMap(wire.GetEffectiveValues())
+		if err != nil {
+			return ControlView{}, err
+		}
+		diagnostics := make([]ControlDiagnostic, 0, len(wire.GetDiagnostics()))
+		for _, diagnostic := range wire.GetDiagnostics() {
+			if diagnostic == nil ||
+				diagnostic.GetSeverity() == trainvmv1.Diagnostic_SEVERITY_UNSPECIFIED {
+				return ControlView{}, fmt.Errorf("TrainVM authority returned a malformed control diagnostic")
+			}
+			diagnostics = append(diagnostics, ControlDiagnostic{
+				Severity: strings.ToLower(strings.TrimPrefix(diagnostic.GetSeverity().String(), "SEVERITY_")),
+				Code:     diagnostic.GetCode(), Path: diagnostic.GetDocumentPath(),
+				Message: diagnostic.GetMessage(), Help: diagnostic.GetHelp(),
+			})
+		}
+		assignmentsJSON, err := rawJSON(assignments)
+		if err != nil {
+			return ControlView{}, err
+		}
+		effectiveJSON, err := rawJSON(effectiveValues)
+		if err != nil {
+			return ControlView{}, err
+		}
+		diagnosticsJSON, err := rawJSON(diagnostics)
+		if err != nil {
+			return ControlView{}, err
+		}
+		command := ControlCommandView{
+			CommandID: wire.GetCommandId(), ControlRevision: wire.GetControlRevision(),
+			ApplyPoint:  strings.ToLower(strings.TrimPrefix(wire.GetApplyPoint().String(), "APPLY_POINT_")),
+			Assignments: assignmentsJSON, Author: wire.GetAuthor(), Reason: wire.GetReason(),
+			Status:          strings.ToLower(strings.TrimPrefix(wire.GetStatus().String(), "STATUS_")),
+			EffectiveValues: effectiveJSON, Diagnostics: diagnosticsJSON,
+		}
+		if wire.EffectiveStep != nil {
+			step := wire.GetEffectiveStep()
+			command.EffectiveStep = &step
+		}
+		view.Commands = append(view.Commands, command)
+	}
+	return view, nil
 }
 
 func controlRPCRequest(request ControlRequest) (*trainvmv1.RunCommandRequest, error) {
@@ -380,4 +731,12 @@ func scalarJSONValue(value *trainvmv1.ScalarValue) any {
 	default:
 		return nil
 	}
+}
+
+func checkedScalarJSONValue(value *trainvmv1.ScalarValue) (any, error) {
+	converted := scalarJSONValue(value)
+	if converted == nil {
+		return nil, fmt.Errorf("TrainVM authority returned an unset scalar value")
+	}
+	return converted, nil
 }

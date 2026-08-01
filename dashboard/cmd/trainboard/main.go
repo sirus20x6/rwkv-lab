@@ -33,7 +33,7 @@ func main() {
 	repo := flag.String("repo", "/thearray/git/moe-mla", "moe-mla repo root")
 	runs := flag.String("runs", "", "runs dir (default <repo>/runs)")
 	dbPath := flag.String("db", "", "sqlite path (default <repo>/dashboard/trainboard.db)")
-	trainVMPath := flag.String("trainvm-db", "", "TrainVM journal path (default <repo>/trainvm.db when present)")
+	trainVMPath := flag.String("trainvm-db", "", "legacy read-only TrainVM journal path (explicit compatibility fallback only)")
 	trainVMBinary := flag.String("trainvm-bin", "", "TrainVM compiler binary (default <repo>/trainvm/build/trainvm)")
 	trainVMSchema := flag.String("trainvm-schema", "", "TrainVM experiment schema (default <repo>/docs/experiment-vm/experiment-v1.schema.json)")
 	trainVMSocket := flag.String("trainvm-socket", "", "TrainVM authority Unix socket (default <repo>/trainvm.sock)")
@@ -58,22 +58,6 @@ func main() {
 	}
 	defer database.Close()
 
-	vmFile := *trainVMPath
-	if vmFile == "" {
-		candidate := filepath.Join(*repo, "trainvm.db")
-		if _, statErr := os.Stat(candidate); statErr == nil {
-			vmFile = candidate
-		}
-	}
-	var vmReader *trainvmstore.Reader
-	if vmFile != "" {
-		vmReader, err = trainvmstore.Open(vmFile)
-		if err != nil {
-			log.Fatalf("TrainVM journal open: %v", err)
-		}
-		defer vmReader.Close()
-		log.Printf("TrainVM read model attached to %s", vmFile)
-	}
 	vmBinary := *trainVMBinary
 	if vmBinary == "" {
 		vmBinary = filepath.Join(*repo, "trainvm", "build", "trainvm")
@@ -99,6 +83,18 @@ func main() {
 		}
 		defer vmCommander.Close()
 		log.Printf("TrainVM command authority configured for %s", vmSocket)
+	}
+	var vmReader trainvmstore.ReadModel = vmCommander
+	if *trainVMPath != "" {
+		legacyReader, openErr := trainvmstore.Open(*trainVMPath)
+		if openErr != nil {
+			log.Fatalf("legacy TrainVM journal open: %v", openErr)
+		}
+		defer legacyReader.Close()
+		vmReader = legacyReader
+		log.Printf("legacy TrainVM read model attached explicitly to %s", *trainVMPath)
+	} else {
+		log.Printf("TrainVM read model uses the native authority at %s", vmSocket)
 	}
 
 	ig := ingest.New(database, runsDir, time.Second)

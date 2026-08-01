@@ -87,6 +87,11 @@ class TrainVMService final : public v1::TrainVM::Service,
       const v1::WatchEventsRequest* request,
       grpc::ServerWriter<v1::EventEnvelope>* writer) override;
 
+  grpc::Status GetControlView(
+      grpc::ServerContext* context,
+      const v1::GetControlViewRequest* request,
+      v1::GetControlViewResponse* response) override;
+
   grpc::Status GetDescriptor(
       grpc::ServerContext* context,
       const v1::DescriptorRequest* request,

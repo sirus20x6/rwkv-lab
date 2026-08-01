@@ -19,6 +19,17 @@ type Reader struct {
 	db *sql.DB
 }
 
+// ReadModel is the dashboard's bounded TrainVM projection API. Production
+// wiring uses the native gRPC authority; Reader remains only as an explicit
+// legacy compatibility adapter for offline journals and migration tests.
+type ReadModel interface {
+	JournalID(context.Context) (string, error)
+	Runs(context.Context) ([]Run, error)
+	Run(context.Context, string) (Run, bool, error)
+	Timeline(context.Context, string, uint64, int) ([]Event, error)
+	Controls(context.Context, string) (ControlView, bool, error)
+}
+
 type Run struct {
 	RunID            string `json:"run_id"`
 	ExperimentName   string `json:"experiment_name"`

@@ -295,6 +295,64 @@ func (ArtifactKind) EnumDescriptor() ([]byte, []int) {
 	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{3}
 }
 
+type ControlType int32
+
+const (
+	ControlType_CONTROL_TYPE_UNSPECIFIED ControlType = 0
+	ControlType_CONTROL_TYPE_NUMBER      ControlType = 1
+	ControlType_CONTROL_TYPE_INTEGER     ControlType = 2
+	ControlType_CONTROL_TYPE_BOOLEAN     ControlType = 3
+	ControlType_CONTROL_TYPE_STRING      ControlType = 4
+	ControlType_CONTROL_TYPE_ENUMERATION ControlType = 5
+)
+
+// Enum value maps for ControlType.
+var (
+	ControlType_name = map[int32]string{
+		0: "CONTROL_TYPE_UNSPECIFIED",
+		1: "CONTROL_TYPE_NUMBER",
+		2: "CONTROL_TYPE_INTEGER",
+		3: "CONTROL_TYPE_BOOLEAN",
+		4: "CONTROL_TYPE_STRING",
+		5: "CONTROL_TYPE_ENUMERATION",
+	}
+	ControlType_value = map[string]int32{
+		"CONTROL_TYPE_UNSPECIFIED": 0,
+		"CONTROL_TYPE_NUMBER":      1,
+		"CONTROL_TYPE_INTEGER":     2,
+		"CONTROL_TYPE_BOOLEAN":     3,
+		"CONTROL_TYPE_STRING":      4,
+		"CONTROL_TYPE_ENUMERATION": 5,
+	}
+)
+
+func (x ControlType) Enum() *ControlType {
+	p := new(ControlType)
+	*p = x
+	return p
+}
+
+func (x ControlType) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ControlType) Descriptor() protoreflect.EnumDescriptor {
+	return file_trainvm_v1_trainvm_proto_enumTypes[4].Descriptor()
+}
+
+func (ControlType) Type() protoreflect.EnumType {
+	return &file_trainvm_v1_trainvm_proto_enumTypes[4]
+}
+
+func (x ControlType) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ControlType.Descriptor instead.
+func (ControlType) EnumDescriptor() ([]byte, []int) {
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{4}
+}
+
 type Diagnostic_Severity int32
 
 const (
@@ -331,11 +389,11 @@ func (x Diagnostic_Severity) String() string {
 }
 
 func (Diagnostic_Severity) Descriptor() protoreflect.EnumDescriptor {
-	return file_trainvm_v1_trainvm_proto_enumTypes[4].Descriptor()
+	return file_trainvm_v1_trainvm_proto_enumTypes[5].Descriptor()
 }
 
 func (Diagnostic_Severity) Type() protoreflect.EnumType {
-	return &file_trainvm_v1_trainvm_proto_enumTypes[4]
+	return &file_trainvm_v1_trainvm_proto_enumTypes[5]
 }
 
 func (x Diagnostic_Severity) Number() protoreflect.EnumNumber {
@@ -386,11 +444,11 @@ func (x ControlCommandResult_Status) String() string {
 }
 
 func (ControlCommandResult_Status) Descriptor() protoreflect.EnumDescriptor {
-	return file_trainvm_v1_trainvm_proto_enumTypes[5].Descriptor()
+	return file_trainvm_v1_trainvm_proto_enumTypes[6].Descriptor()
 }
 
 func (ControlCommandResult_Status) Type() protoreflect.EnumType {
-	return &file_trainvm_v1_trainvm_proto_enumTypes[5]
+	return &file_trainvm_v1_trainvm_proto_enumTypes[6]
 }
 
 func (x ControlCommandResult_Status) Number() protoreflect.EnumNumber {
@@ -441,11 +499,11 @@ func (x RunCommandResponse_Disposition) String() string {
 }
 
 func (RunCommandResponse_Disposition) Descriptor() protoreflect.EnumDescriptor {
-	return file_trainvm_v1_trainvm_proto_enumTypes[6].Descriptor()
+	return file_trainvm_v1_trainvm_proto_enumTypes[7].Descriptor()
 }
 
 func (RunCommandResponse_Disposition) Type() protoreflect.EnumType {
-	return &file_trainvm_v1_trainvm_proto_enumTypes[6]
+	return &file_trainvm_v1_trainvm_proto_enumTypes[7]
 }
 
 func (x RunCommandResponse_Disposition) Number() protoreflect.EnumNumber {
@@ -493,11 +551,11 @@ func (x ControlPatchAcknowledgement_Disposition) String() string {
 }
 
 func (ControlPatchAcknowledgement_Disposition) Descriptor() protoreflect.EnumDescriptor {
-	return file_trainvm_v1_trainvm_proto_enumTypes[7].Descriptor()
+	return file_trainvm_v1_trainvm_proto_enumTypes[8].Descriptor()
 }
 
 func (ControlPatchAcknowledgement_Disposition) Type() protoreflect.EnumType {
-	return &file_trainvm_v1_trainvm_proto_enumTypes[7]
+	return &file_trainvm_v1_trainvm_proto_enumTypes[8]
 }
 
 func (x ControlPatchAcknowledgement_Disposition) Number() protoreflect.EnumNumber {
@@ -545,11 +603,11 @@ func (x WorkerWelcome_Disposition) String() string {
 }
 
 func (WorkerWelcome_Disposition) Descriptor() protoreflect.EnumDescriptor {
-	return file_trainvm_v1_trainvm_proto_enumTypes[8].Descriptor()
+	return file_trainvm_v1_trainvm_proto_enumTypes[9].Descriptor()
 }
 
 func (WorkerWelcome_Disposition) Type() protoreflect.EnumType {
-	return &file_trainvm_v1_trainvm_proto_enumTypes[8]
+	return &file_trainvm_v1_trainvm_proto_enumTypes[9]
 }
 
 func (x WorkerWelcome_Disposition) Number() protoreflect.EnumNumber {
@@ -829,6 +887,7 @@ type RunSummary struct {
 	EffectiveControlRevision       uint64 `protobuf:"varint,13,opt,name=effective_control_revision,json=effectiveControlRevision,proto3" json:"effective_control_revision,omitempty"`
 	LatestRequestedControlRevision uint64 `protobuf:"varint,14,opt,name=latest_requested_control_revision,json=latestRequestedControlRevision,proto3" json:"latest_requested_control_revision,omitempty"`
 	LatestEffectiveControlRevision uint64 `protobuf:"varint,15,opt,name=latest_effective_control_revision,json=latestEffectiveControlRevision,proto3" json:"latest_effective_control_revision,omitempty"`
+	LastEventSequence              uint64 `protobuf:"varint,16,opt,name=last_event_sequence,json=lastEventSequence,proto3" json:"last_event_sequence,omitempty"`
 	unknownFields                  protoimpl.UnknownFields
 	sizeCache                      protoimpl.SizeCache
 }
@@ -965,6 +1024,13 @@ func (x *RunSummary) GetLatestRequestedControlRevision() uint64 {
 func (x *RunSummary) GetLatestEffectiveControlRevision() uint64 {
 	if x != nil {
 		return x.LatestEffectiveControlRevision
+	}
+	return 0
+}
+
+func (x *RunSummary) GetLastEventSequence() uint64 {
+	if x != nil {
+		return x.LastEventSequence
 	}
 	return 0
 }
@@ -3608,6 +3674,7 @@ type ListRunsResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Runs          []*RunSummary          `protobuf:"bytes,1,rep,name=runs,proto3" json:"runs,omitempty"`
 	NextPageToken string                 `protobuf:"bytes,2,opt,name=next_page_token,json=nextPageToken,proto3" json:"next_page_token,omitempty"`
+	JournalId     string                 `protobuf:"bytes,3,opt,name=journal_id,json=journalId,proto3" json:"journal_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3656,13 +3723,23 @@ func (x *ListRunsResponse) GetNextPageToken() string {
 	return ""
 }
 
+func (x *ListRunsResponse) GetJournalId() string {
+	if x != nil {
+		return x.JournalId
+	}
+	return ""
+}
+
 type WatchEventsRequest struct {
 	state                protoimpl.MessageState `protogen:"open.v1"`
 	RunIds               []string               `protobuf:"bytes,1,rep,name=run_ids,json=runIds,proto3" json:"run_ids,omitempty"`
 	AfterJournalSequence uint64                 `protobuf:"varint,2,opt,name=after_journal_sequence,json=afterJournalSequence,proto3" json:"after_journal_sequence,omitempty"`
 	EventTypes           []string               `protobuf:"bytes,3,rep,name=event_types,json=eventTypes,proto3" json:"event_types,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	// A bounded replay closes successfully after this many events, or after the
+	// current durable prefix is exhausted. Zero keeps the live stream open.
+	ReplayLimit   uint32 `protobuf:"varint,4,opt,name=replay_limit,json=replayLimit,proto3" json:"replay_limit,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *WatchEventsRequest) Reset() {
@@ -3716,6 +3793,365 @@ func (x *WatchEventsRequest) GetEventTypes() []string {
 	return nil
 }
 
+func (x *WatchEventsRequest) GetReplayLimit() uint32 {
+	if x != nil {
+		return x.ReplayLimit
+	}
+	return 0
+}
+
+type GetControlViewRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RunId         string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetControlViewRequest) Reset() {
+	*x = GetControlViewRequest{}
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[33]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetControlViewRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetControlViewRequest) ProtoMessage() {}
+
+func (x *GetControlViewRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[33]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetControlViewRequest.ProtoReflect.Descriptor instead.
+func (*GetControlViewRequest) Descriptor() ([]byte, []int) {
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{33}
+}
+
+func (x *GetControlViewRequest) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+type ControlDescriptor struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	Type              ControlType            `protobuf:"varint,1,opt,name=type,proto3,enum=trainvm.v1.ControlType" json:"type,omitempty"`
+	DefaultValue      *ScalarValue           `protobuf:"bytes,2,opt,name=default_value,json=defaultValue,proto3" json:"default_value,omitempty"`
+	Minimum           *float64               `protobuf:"fixed64,3,opt,name=minimum,proto3,oneof" json:"minimum,omitempty"`
+	Maximum           *float64               `protobuf:"fixed64,4,opt,name=maximum,proto3,oneof" json:"maximum,omitempty"`
+	Values            []*ScalarValue         `protobuf:"bytes,5,rep,name=values,proto3" json:"values,omitempty"`
+	ApplyPoint        ApplyPoint             `protobuf:"varint,6,opt,name=apply_point,json=applyPoint,proto3,enum=trainvm.v1.ApplyPoint" json:"apply_point,omitempty"`
+	MutableAfterStart bool                   `protobuf:"varint,7,opt,name=mutable_after_start,json=mutableAfterStart,proto3" json:"mutable_after_start,omitempty"`
+	RequiresPause     bool                   `protobuf:"varint,8,opt,name=requires_pause,json=requiresPause,proto3" json:"requires_pause,omitempty"`
+	Description       string                 `protobuf:"bytes,9,opt,name=description,proto3" json:"description,omitempty"`
+	Unit              string                 `protobuf:"bytes,10,opt,name=unit,proto3" json:"unit,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *ControlDescriptor) Reset() {
+	*x = ControlDescriptor{}
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[34]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ControlDescriptor) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ControlDescriptor) ProtoMessage() {}
+
+func (x *ControlDescriptor) ProtoReflect() protoreflect.Message {
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[34]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ControlDescriptor.ProtoReflect.Descriptor instead.
+func (*ControlDescriptor) Descriptor() ([]byte, []int) {
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{34}
+}
+
+func (x *ControlDescriptor) GetType() ControlType {
+	if x != nil {
+		return x.Type
+	}
+	return ControlType_CONTROL_TYPE_UNSPECIFIED
+}
+
+func (x *ControlDescriptor) GetDefaultValue() *ScalarValue {
+	if x != nil {
+		return x.DefaultValue
+	}
+	return nil
+}
+
+func (x *ControlDescriptor) GetMinimum() float64 {
+	if x != nil && x.Minimum != nil {
+		return *x.Minimum
+	}
+	return 0
+}
+
+func (x *ControlDescriptor) GetMaximum() float64 {
+	if x != nil && x.Maximum != nil {
+		return *x.Maximum
+	}
+	return 0
+}
+
+func (x *ControlDescriptor) GetValues() []*ScalarValue {
+	if x != nil {
+		return x.Values
+	}
+	return nil
+}
+
+func (x *ControlDescriptor) GetApplyPoint() ApplyPoint {
+	if x != nil {
+		return x.ApplyPoint
+	}
+	return ApplyPoint_APPLY_POINT_UNSPECIFIED
+}
+
+func (x *ControlDescriptor) GetMutableAfterStart() bool {
+	if x != nil {
+		return x.MutableAfterStart
+	}
+	return false
+}
+
+func (x *ControlDescriptor) GetRequiresPause() bool {
+	if x != nil {
+		return x.RequiresPause
+	}
+	return false
+}
+
+func (x *ControlDescriptor) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+func (x *ControlDescriptor) GetUnit() string {
+	if x != nil {
+		return x.Unit
+	}
+	return ""
+}
+
+type ControlCommandView struct {
+	state           protoimpl.MessageState      `protogen:"open.v1"`
+	CommandId       string                      `protobuf:"bytes,1,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
+	ControlRevision uint64                      `protobuf:"varint,2,opt,name=control_revision,json=controlRevision,proto3" json:"control_revision,omitempty"`
+	ApplyPoint      ApplyPoint                  `protobuf:"varint,3,opt,name=apply_point,json=applyPoint,proto3,enum=trainvm.v1.ApplyPoint" json:"apply_point,omitempty"`
+	Assignments     []*ControlAssignment        `protobuf:"bytes,4,rep,name=assignments,proto3" json:"assignments,omitempty"`
+	Author          string                      `protobuf:"bytes,5,opt,name=author,proto3" json:"author,omitempty"`
+	Reason          string                      `protobuf:"bytes,6,opt,name=reason,proto3" json:"reason,omitempty"`
+	Status          ControlCommandResult_Status `protobuf:"varint,7,opt,name=status,proto3,enum=trainvm.v1.ControlCommandResult_Status" json:"status,omitempty"`
+	EffectiveStep   *uint64                     `protobuf:"varint,8,opt,name=effective_step,json=effectiveStep,proto3,oneof" json:"effective_step,omitempty"`
+	EffectiveValues []*ControlAssignment        `protobuf:"bytes,9,rep,name=effective_values,json=effectiveValues,proto3" json:"effective_values,omitempty"`
+	Diagnostics     []*Diagnostic               `protobuf:"bytes,10,rep,name=diagnostics,proto3" json:"diagnostics,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *ControlCommandView) Reset() {
+	*x = ControlCommandView{}
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[35]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ControlCommandView) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ControlCommandView) ProtoMessage() {}
+
+func (x *ControlCommandView) ProtoReflect() protoreflect.Message {
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[35]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ControlCommandView.ProtoReflect.Descriptor instead.
+func (*ControlCommandView) Descriptor() ([]byte, []int) {
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{35}
+}
+
+func (x *ControlCommandView) GetCommandId() string {
+	if x != nil {
+		return x.CommandId
+	}
+	return ""
+}
+
+func (x *ControlCommandView) GetControlRevision() uint64 {
+	if x != nil {
+		return x.ControlRevision
+	}
+	return 0
+}
+
+func (x *ControlCommandView) GetApplyPoint() ApplyPoint {
+	if x != nil {
+		return x.ApplyPoint
+	}
+	return ApplyPoint_APPLY_POINT_UNSPECIFIED
+}
+
+func (x *ControlCommandView) GetAssignments() []*ControlAssignment {
+	if x != nil {
+		return x.Assignments
+	}
+	return nil
+}
+
+func (x *ControlCommandView) GetAuthor() string {
+	if x != nil {
+		return x.Author
+	}
+	return ""
+}
+
+func (x *ControlCommandView) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *ControlCommandView) GetStatus() ControlCommandResult_Status {
+	if x != nil {
+		return x.Status
+	}
+	return ControlCommandResult_STATUS_UNSPECIFIED
+}
+
+func (x *ControlCommandView) GetEffectiveStep() uint64 {
+	if x != nil && x.EffectiveStep != nil {
+		return *x.EffectiveStep
+	}
+	return 0
+}
+
+func (x *ControlCommandView) GetEffectiveValues() []*ControlAssignment {
+	if x != nil {
+		return x.EffectiveValues
+	}
+	return nil
+}
+
+func (x *ControlCommandView) GetDiagnostics() []*Diagnostic {
+	if x != nil {
+		return x.Diagnostics
+	}
+	return nil
+}
+
+type GetControlViewResponse struct {
+	state                   protoimpl.MessageState        `protogen:"open.v1"`
+	Catalog                 map[string]*ControlDescriptor `protobuf:"bytes,1,rep,name=catalog,proto3" json:"catalog,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	EffectiveValues         []*ControlAssignment          `protobuf:"bytes,2,rep,name=effective_values,json=effectiveValues,proto3" json:"effective_values,omitempty"`
+	LatestRequestedRevision uint64                        `protobuf:"varint,3,opt,name=latest_requested_revision,json=latestRequestedRevision,proto3" json:"latest_requested_revision,omitempty"`
+	LatestEffectiveRevision uint64                        `protobuf:"varint,4,opt,name=latest_effective_revision,json=latestEffectiveRevision,proto3" json:"latest_effective_revision,omitempty"`
+	Commands                []*ControlCommandView         `protobuf:"bytes,5,rep,name=commands,proto3" json:"commands,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
+}
+
+func (x *GetControlViewResponse) Reset() {
+	*x = GetControlViewResponse{}
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[36]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetControlViewResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetControlViewResponse) ProtoMessage() {}
+
+func (x *GetControlViewResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[36]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetControlViewResponse.ProtoReflect.Descriptor instead.
+func (*GetControlViewResponse) Descriptor() ([]byte, []int) {
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{36}
+}
+
+func (x *GetControlViewResponse) GetCatalog() map[string]*ControlDescriptor {
+	if x != nil {
+		return x.Catalog
+	}
+	return nil
+}
+
+func (x *GetControlViewResponse) GetEffectiveValues() []*ControlAssignment {
+	if x != nil {
+		return x.EffectiveValues
+	}
+	return nil
+}
+
+func (x *GetControlViewResponse) GetLatestRequestedRevision() uint64 {
+	if x != nil {
+		return x.LatestRequestedRevision
+	}
+	return 0
+}
+
+func (x *GetControlViewResponse) GetLatestEffectiveRevision() uint64 {
+	if x != nil {
+		return x.LatestEffectiveRevision
+	}
+	return 0
+}
+
+func (x *GetControlViewResponse) GetCommands() []*ControlCommandView {
+	if x != nil {
+		return x.Commands
+	}
+	return nil
+}
+
 type DescriptorRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Adapter       string                 `protobuf:"bytes,1,opt,name=adapter,proto3" json:"adapter,omitempty"`
@@ -3726,7 +4162,7 @@ type DescriptorRequest struct {
 
 func (x *DescriptorRequest) Reset() {
 	*x = DescriptorRequest{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[33]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3738,7 +4174,7 @@ func (x *DescriptorRequest) String() string {
 func (*DescriptorRequest) ProtoMessage() {}
 
 func (x *DescriptorRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[33]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3751,7 +4187,7 @@ func (x *DescriptorRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DescriptorRequest.ProtoReflect.Descriptor instead.
 func (*DescriptorRequest) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{33}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *DescriptorRequest) GetAdapter() string {
@@ -3779,7 +4215,7 @@ type DescriptorResponse struct {
 
 func (x *DescriptorResponse) Reset() {
 	*x = DescriptorResponse{}
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[34]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3791,7 +4227,7 @@ func (x *DescriptorResponse) String() string {
 func (*DescriptorResponse) ProtoMessage() {}
 
 func (x *DescriptorResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_trainvm_v1_trainvm_proto_msgTypes[34]
+	mi := &file_trainvm_v1_trainvm_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3804,7 +4240,7 @@ func (x *DescriptorResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DescriptorResponse.ProtoReflect.Descriptor instead.
 func (*DescriptorResponse) Descriptor() ([]byte, []int) {
-	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{34}
+	return file_trainvm_v1_trainvm_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *DescriptorResponse) GetSchemaJson() string {
@@ -3848,7 +4284,7 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\vRunIdentity\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1a\n" +
 	"\brevision\x18\x02 \x01(\x04R\brevision\x12\x1b\n" +
-	"\tplan_hash\x18\x03 \x01(\tR\bplanHash\"\xc8\x06\n" +
+	"\tplan_hash\x18\x03 \x01(\tR\bplanHash\"\xf8\x06\n" +
 	"\n" +
 	"RunSummary\x123\n" +
 	"\bidentity\x18\x01 \x01(\v2\x17.trainvm.v1.RunIdentityR\bidentity\x12'\n" +
@@ -3869,7 +4305,8 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\x0ffailure_summary\x18\f \x01(\tR\x0efailureSummary\x12@\n" +
 	"\x1aeffective_control_revision\x18\r \x01(\x04B\x02\x18\x01R\x18effectiveControlRevision\x12I\n" +
 	"!latest_requested_control_revision\x18\x0e \x01(\x04R\x1elatestRequestedControlRevision\x12I\n" +
-	"!latest_effective_control_revision\x18\x0f \x01(\x04R\x1elatestEffectiveControlRevision\"\xd4\x03\n" +
+	"!latest_effective_control_revision\x18\x0f \x01(\x04R\x1elatestEffectiveControlRevision\x12.\n" +
+	"\x13last_event_sequence\x18\x10 \x01(\x04R\x11lastEventSequence\"\xd4\x03\n" +
 	"\x17SubmitExperimentRequest\x12'\n" +
 	"\x0fsource_document\x18\x01 \x01(\tR\x0esourceDocument\x12#\n" +
 	"\rsource_format\x18\x02 \x01(\tR\fsourceFormat\x12\x1d\n" +
@@ -4142,15 +4579,61 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"page_token\x18\x04 \x01(\tR\tpageToken\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"f\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x85\x01\n" +
 	"\x10ListRunsResponse\x12*\n" +
 	"\x04runs\x18\x01 \x03(\v2\x16.trainvm.v1.RunSummaryR\x04runs\x12&\n" +
-	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"\x84\x01\n" +
+	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\x12\x1d\n" +
+	"\n" +
+	"journal_id\x18\x03 \x01(\tR\tjournalId\"\xa7\x01\n" +
 	"\x12WatchEventsRequest\x12\x17\n" +
 	"\arun_ids\x18\x01 \x03(\tR\x06runIds\x124\n" +
 	"\x16after_journal_sequence\x18\x02 \x01(\x04R\x14afterJournalSequence\x12\x1f\n" +
 	"\vevent_types\x18\x03 \x03(\tR\n" +
-	"eventTypes\"G\n" +
+	"eventTypes\x12!\n" +
+	"\freplay_limit\x18\x04 \x01(\rR\vreplayLimit\".\n" +
+	"\x15GetControlViewRequest\x12\x15\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\"\xcb\x03\n" +
+	"\x11ControlDescriptor\x12+\n" +
+	"\x04type\x18\x01 \x01(\x0e2\x17.trainvm.v1.ControlTypeR\x04type\x12<\n" +
+	"\rdefault_value\x18\x02 \x01(\v2\x17.trainvm.v1.ScalarValueR\fdefaultValue\x12\x1d\n" +
+	"\aminimum\x18\x03 \x01(\x01H\x00R\aminimum\x88\x01\x01\x12\x1d\n" +
+	"\amaximum\x18\x04 \x01(\x01H\x01R\amaximum\x88\x01\x01\x12/\n" +
+	"\x06values\x18\x05 \x03(\v2\x17.trainvm.v1.ScalarValueR\x06values\x127\n" +
+	"\vapply_point\x18\x06 \x01(\x0e2\x16.trainvm.v1.ApplyPointR\n" +
+	"applyPoint\x12.\n" +
+	"\x13mutable_after_start\x18\a \x01(\bR\x11mutableAfterStart\x12%\n" +
+	"\x0erequires_pause\x18\b \x01(\bR\rrequiresPause\x12 \n" +
+	"\vdescription\x18\t \x01(\tR\vdescription\x12\x12\n" +
+	"\x04unit\x18\n" +
+	" \x01(\tR\x04unitB\n" +
+	"\n" +
+	"\b_minimumB\n" +
+	"\n" +
+	"\b_maximum\"\x8c\x04\n" +
+	"\x12ControlCommandView\x12\x1d\n" +
+	"\n" +
+	"command_id\x18\x01 \x01(\tR\tcommandId\x12)\n" +
+	"\x10control_revision\x18\x02 \x01(\x04R\x0fcontrolRevision\x127\n" +
+	"\vapply_point\x18\x03 \x01(\x0e2\x16.trainvm.v1.ApplyPointR\n" +
+	"applyPoint\x12?\n" +
+	"\vassignments\x18\x04 \x03(\v2\x1d.trainvm.v1.ControlAssignmentR\vassignments\x12\x16\n" +
+	"\x06author\x18\x05 \x01(\tR\x06author\x12\x16\n" +
+	"\x06reason\x18\x06 \x01(\tR\x06reason\x12?\n" +
+	"\x06status\x18\a \x01(\x0e2'.trainvm.v1.ControlCommandResult.StatusR\x06status\x12*\n" +
+	"\x0eeffective_step\x18\b \x01(\x04H\x00R\reffectiveStep\x88\x01\x01\x12H\n" +
+	"\x10effective_values\x18\t \x03(\v2\x1d.trainvm.v1.ControlAssignmentR\x0feffectiveValues\x128\n" +
+	"\vdiagnostics\x18\n" +
+	" \x03(\v2\x16.trainvm.v1.DiagnosticR\vdiagnosticsB\x11\n" +
+	"\x0f_effective_step\"\xbc\x03\n" +
+	"\x16GetControlViewResponse\x12I\n" +
+	"\acatalog\x18\x01 \x03(\v2/.trainvm.v1.GetControlViewResponse.CatalogEntryR\acatalog\x12H\n" +
+	"\x10effective_values\x18\x02 \x03(\v2\x1d.trainvm.v1.ControlAssignmentR\x0feffectiveValues\x12:\n" +
+	"\x19latest_requested_revision\x18\x03 \x01(\x04R\x17latestRequestedRevision\x12:\n" +
+	"\x19latest_effective_revision\x18\x04 \x01(\x04R\x17latestEffectiveRevision\x12:\n" +
+	"\bcommands\x18\x05 \x03(\v2\x1e.trainvm.v1.ControlCommandViewR\bcommands\x1aY\n" +
+	"\fCatalogEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x123\n" +
+	"\x05value\x18\x02 \x01(\v2\x1d.trainvm.v1.ControlDescriptorR\x05value:\x028\x01\"G\n" +
 	"\x11DescriptorRequest\x12\x18\n" +
 	"\aadapter\x18\x01 \x01(\tR\aadapter\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\"V\n" +
@@ -4201,7 +4684,14 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\x1bARTIFACT_KIND_IMAGE_GALLERY\x10\x04\x12\x19\n" +
 	"\x15ARTIFACT_KIND_METRICS\x10\x05\x12\x18\n" +
 	"\x14ARTIFACT_KIND_REPORT\x10\x06\x12\x18\n" +
-	"\x14ARTIFACT_KIND_OPAQUE\x10\a2\x9c\x04\n" +
+	"\x14ARTIFACT_KIND_OPAQUE\x10\a*\xaf\x01\n" +
+	"\vControlType\x12\x1c\n" +
+	"\x18CONTROL_TYPE_UNSPECIFIED\x10\x00\x12\x17\n" +
+	"\x13CONTROL_TYPE_NUMBER\x10\x01\x12\x18\n" +
+	"\x14CONTROL_TYPE_INTEGER\x10\x02\x12\x18\n" +
+	"\x14CONTROL_TYPE_BOOLEAN\x10\x03\x12\x17\n" +
+	"\x13CONTROL_TYPE_STRING\x10\x04\x12\x1c\n" +
+	"\x18CONTROL_TYPE_ENUMERATION\x10\x052\xf5\x04\n" +
 	"\aTrainVM\x12]\n" +
 	"\x10SubmitExperiment\x12#.trainvm.v1.SubmitExperimentRequest\x1a$.trainvm.v1.SubmitExperimentResponse\x12E\n" +
 	"\bDiffPlan\x12\x1b.trainvm.v1.PlanDiffRequest\x1a\x1c.trainvm.v1.PlanDiffResponse\x12K\n" +
@@ -4209,7 +4699,8 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"CommandRun\x12\x1d.trainvm.v1.RunCommandRequest\x1a\x1e.trainvm.v1.RunCommandResponse\x12;\n" +
 	"\x06GetRun\x12\x19.trainvm.v1.GetRunRequest\x1a\x16.trainvm.v1.RunSummary\x12E\n" +
 	"\bListRuns\x12\x1b.trainvm.v1.ListRunsRequest\x1a\x1c.trainvm.v1.ListRunsResponse\x12J\n" +
-	"\vWatchEvents\x12\x1e.trainvm.v1.WatchEventsRequest\x1a\x19.trainvm.v1.EventEnvelope0\x01\x12N\n" +
+	"\vWatchEvents\x12\x1e.trainvm.v1.WatchEventsRequest\x1a\x19.trainvm.v1.EventEnvelope0\x01\x12W\n" +
+	"\x0eGetControlView\x12!.trainvm.v1.GetControlViewRequest\x1a\".trainvm.v1.GetControlViewResponse\x12N\n" +
 	"\rGetDescriptor\x12\x1d.trainvm.v1.DescriptorRequest\x1a\x1e.trainvm.v1.DescriptorResponse2^\n" +
 	"\rWorkerControl\x12M\n" +
 	"\aConnect\x12\x1e.trainvm.v1.WorkerToController\x1a\x1e.trainvm.v1.ControllerToWorker(\x010\x01B%Z#trainboard/gen/trainvm/v1;trainvmv1b\x06proto3"
@@ -4226,140 +4717,161 @@ func file_trainvm_v1_trainvm_proto_rawDescGZIP() []byte {
 	return file_trainvm_v1_trainvm_proto_rawDescData
 }
 
-var file_trainvm_v1_trainvm_proto_enumTypes = make([]protoimpl.EnumInfo, 9)
-var file_trainvm_v1_trainvm_proto_msgTypes = make([]protoimpl.MessageInfo, 37)
+var file_trainvm_v1_trainvm_proto_enumTypes = make([]protoimpl.EnumInfo, 10)
+var file_trainvm_v1_trainvm_proto_msgTypes = make([]protoimpl.MessageInfo, 42)
 var file_trainvm_v1_trainvm_proto_goTypes = []any{
 	(DesiredState)(0),                            // 0: trainvm.v1.DesiredState
 	(ObservedState)(0),                           // 1: trainvm.v1.ObservedState
 	(ApplyPoint)(0),                              // 2: trainvm.v1.ApplyPoint
 	(ArtifactKind)(0),                            // 3: trainvm.v1.ArtifactKind
-	(Diagnostic_Severity)(0),                     // 4: trainvm.v1.Diagnostic.Severity
-	(ControlCommandResult_Status)(0),             // 5: trainvm.v1.ControlCommandResult.Status
-	(RunCommandResponse_Disposition)(0),          // 6: trainvm.v1.RunCommandResponse.Disposition
-	(ControlPatchAcknowledgement_Disposition)(0), // 7: trainvm.v1.ControlPatchAcknowledgement.Disposition
-	(WorkerWelcome_Disposition)(0),               // 8: trainvm.v1.WorkerWelcome.Disposition
-	(*Diagnostic)(nil),                           // 9: trainvm.v1.Diagnostic
-	(*ScalarValue)(nil),                          // 10: trainvm.v1.ScalarValue
-	(*RunIdentity)(nil),                          // 11: trainvm.v1.RunIdentity
-	(*RunSummary)(nil),                           // 12: trainvm.v1.RunSummary
-	(*SubmitExperimentRequest)(nil),              // 13: trainvm.v1.SubmitExperimentRequest
-	(*SubmitExperimentResponse)(nil),             // 14: trainvm.v1.SubmitExperimentResponse
-	(*PlanDiffRequest)(nil),                      // 15: trainvm.v1.PlanDiffRequest
-	(*PlanDiffResponse)(nil),                     // 16: trainvm.v1.PlanDiffResponse
-	(*PauseCommand)(nil),                         // 17: trainvm.v1.PauseCommand
-	(*ResumeCommand)(nil),                        // 18: trainvm.v1.ResumeCommand
-	(*CheckpointCommand)(nil),                    // 19: trainvm.v1.CheckpointCommand
-	(*CancelCommand)(nil),                        // 20: trainvm.v1.CancelCommand
-	(*ControlAssignment)(nil),                    // 21: trainvm.v1.ControlAssignment
-	(*ControlPatchCommand)(nil),                  // 22: trainvm.v1.ControlPatchCommand
-	(*AdoptPlanRevisionCommand)(nil),             // 23: trainvm.v1.AdoptPlanRevisionCommand
-	(*RunCommandRequest)(nil),                    // 24: trainvm.v1.RunCommandRequest
-	(*ControlCommandResult)(nil),                 // 25: trainvm.v1.ControlCommandResult
-	(*RunCommandResponse)(nil),                   // 26: trainvm.v1.RunCommandResponse
-	(*ArtifactManifest)(nil),                     // 27: trainvm.v1.ArtifactManifest
-	(*EventEnvelope)(nil),                        // 28: trainvm.v1.EventEnvelope
-	(*MetricSample)(nil),                         // 29: trainvm.v1.MetricSample
-	(*WorkerHello)(nil),                          // 30: trainvm.v1.WorkerHello
-	(*WorkerHeartbeat)(nil),                      // 31: trainvm.v1.WorkerHeartbeat
-	(*ControlPatchAcknowledgement)(nil),          // 32: trainvm.v1.ControlPatchAcknowledgement
-	(*WorkerToController)(nil),                   // 33: trainvm.v1.WorkerToController
-	(*WorkerCommand)(nil),                        // 34: trainvm.v1.WorkerCommand
-	(*WorkerWelcome)(nil),                        // 35: trainvm.v1.WorkerWelcome
-	(*WorkerReceipt)(nil),                        // 36: trainvm.v1.WorkerReceipt
-	(*ControllerToWorker)(nil),                   // 37: trainvm.v1.ControllerToWorker
-	(*GetRunRequest)(nil),                        // 38: trainvm.v1.GetRunRequest
-	(*ListRunsRequest)(nil),                      // 39: trainvm.v1.ListRunsRequest
-	(*ListRunsResponse)(nil),                     // 40: trainvm.v1.ListRunsResponse
-	(*WatchEventsRequest)(nil),                   // 41: trainvm.v1.WatchEventsRequest
-	(*DescriptorRequest)(nil),                    // 42: trainvm.v1.DescriptorRequest
-	(*DescriptorResponse)(nil),                   // 43: trainvm.v1.DescriptorResponse
-	nil,                                          // 44: trainvm.v1.MetricSample.LabelsEntry
-	nil,                                          // 45: trainvm.v1.ListRunsRequest.LabelsEntry
-	(*timestamppb.Timestamp)(nil),                // 46: google.protobuf.Timestamp
-	(*durationpb.Duration)(nil),                  // 47: google.protobuf.Duration
-	(*anypb.Any)(nil),                            // 48: google.protobuf.Any
+	(ControlType)(0),                             // 4: trainvm.v1.ControlType
+	(Diagnostic_Severity)(0),                     // 5: trainvm.v1.Diagnostic.Severity
+	(ControlCommandResult_Status)(0),             // 6: trainvm.v1.ControlCommandResult.Status
+	(RunCommandResponse_Disposition)(0),          // 7: trainvm.v1.RunCommandResponse.Disposition
+	(ControlPatchAcknowledgement_Disposition)(0), // 8: trainvm.v1.ControlPatchAcknowledgement.Disposition
+	(WorkerWelcome_Disposition)(0),               // 9: trainvm.v1.WorkerWelcome.Disposition
+	(*Diagnostic)(nil),                           // 10: trainvm.v1.Diagnostic
+	(*ScalarValue)(nil),                          // 11: trainvm.v1.ScalarValue
+	(*RunIdentity)(nil),                          // 12: trainvm.v1.RunIdentity
+	(*RunSummary)(nil),                           // 13: trainvm.v1.RunSummary
+	(*SubmitExperimentRequest)(nil),              // 14: trainvm.v1.SubmitExperimentRequest
+	(*SubmitExperimentResponse)(nil),             // 15: trainvm.v1.SubmitExperimentResponse
+	(*PlanDiffRequest)(nil),                      // 16: trainvm.v1.PlanDiffRequest
+	(*PlanDiffResponse)(nil),                     // 17: trainvm.v1.PlanDiffResponse
+	(*PauseCommand)(nil),                         // 18: trainvm.v1.PauseCommand
+	(*ResumeCommand)(nil),                        // 19: trainvm.v1.ResumeCommand
+	(*CheckpointCommand)(nil),                    // 20: trainvm.v1.CheckpointCommand
+	(*CancelCommand)(nil),                        // 21: trainvm.v1.CancelCommand
+	(*ControlAssignment)(nil),                    // 22: trainvm.v1.ControlAssignment
+	(*ControlPatchCommand)(nil),                  // 23: trainvm.v1.ControlPatchCommand
+	(*AdoptPlanRevisionCommand)(nil),             // 24: trainvm.v1.AdoptPlanRevisionCommand
+	(*RunCommandRequest)(nil),                    // 25: trainvm.v1.RunCommandRequest
+	(*ControlCommandResult)(nil),                 // 26: trainvm.v1.ControlCommandResult
+	(*RunCommandResponse)(nil),                   // 27: trainvm.v1.RunCommandResponse
+	(*ArtifactManifest)(nil),                     // 28: trainvm.v1.ArtifactManifest
+	(*EventEnvelope)(nil),                        // 29: trainvm.v1.EventEnvelope
+	(*MetricSample)(nil),                         // 30: trainvm.v1.MetricSample
+	(*WorkerHello)(nil),                          // 31: trainvm.v1.WorkerHello
+	(*WorkerHeartbeat)(nil),                      // 32: trainvm.v1.WorkerHeartbeat
+	(*ControlPatchAcknowledgement)(nil),          // 33: trainvm.v1.ControlPatchAcknowledgement
+	(*WorkerToController)(nil),                   // 34: trainvm.v1.WorkerToController
+	(*WorkerCommand)(nil),                        // 35: trainvm.v1.WorkerCommand
+	(*WorkerWelcome)(nil),                        // 36: trainvm.v1.WorkerWelcome
+	(*WorkerReceipt)(nil),                        // 37: trainvm.v1.WorkerReceipt
+	(*ControllerToWorker)(nil),                   // 38: trainvm.v1.ControllerToWorker
+	(*GetRunRequest)(nil),                        // 39: trainvm.v1.GetRunRequest
+	(*ListRunsRequest)(nil),                      // 40: trainvm.v1.ListRunsRequest
+	(*ListRunsResponse)(nil),                     // 41: trainvm.v1.ListRunsResponse
+	(*WatchEventsRequest)(nil),                   // 42: trainvm.v1.WatchEventsRequest
+	(*GetControlViewRequest)(nil),                // 43: trainvm.v1.GetControlViewRequest
+	(*ControlDescriptor)(nil),                    // 44: trainvm.v1.ControlDescriptor
+	(*ControlCommandView)(nil),                   // 45: trainvm.v1.ControlCommandView
+	(*GetControlViewResponse)(nil),               // 46: trainvm.v1.GetControlViewResponse
+	(*DescriptorRequest)(nil),                    // 47: trainvm.v1.DescriptorRequest
+	(*DescriptorResponse)(nil),                   // 48: trainvm.v1.DescriptorResponse
+	nil,                                          // 49: trainvm.v1.MetricSample.LabelsEntry
+	nil,                                          // 50: trainvm.v1.ListRunsRequest.LabelsEntry
+	nil,                                          // 51: trainvm.v1.GetControlViewResponse.CatalogEntry
+	(*timestamppb.Timestamp)(nil),                // 52: google.protobuf.Timestamp
+	(*durationpb.Duration)(nil),                  // 53: google.protobuf.Duration
+	(*anypb.Any)(nil),                            // 54: google.protobuf.Any
 }
 var file_trainvm_v1_trainvm_proto_depIdxs = []int32{
-	4,  // 0: trainvm.v1.Diagnostic.severity:type_name -> trainvm.v1.Diagnostic.Severity
-	11, // 1: trainvm.v1.RunSummary.identity:type_name -> trainvm.v1.RunIdentity
+	5,  // 0: trainvm.v1.Diagnostic.severity:type_name -> trainvm.v1.Diagnostic.Severity
+	12, // 1: trainvm.v1.RunSummary.identity:type_name -> trainvm.v1.RunIdentity
 	0,  // 2: trainvm.v1.RunSummary.desired_state:type_name -> trainvm.v1.DesiredState
 	1,  // 3: trainvm.v1.RunSummary.observed_state:type_name -> trainvm.v1.ObservedState
-	46, // 4: trainvm.v1.RunSummary.created_at:type_name -> google.protobuf.Timestamp
-	46, // 5: trainvm.v1.RunSummary.updated_at:type_name -> google.protobuf.Timestamp
-	46, // 6: trainvm.v1.RunSummary.last_heartbeat_at:type_name -> google.protobuf.Timestamp
-	9,  // 7: trainvm.v1.SubmitExperimentResponse.diagnostics:type_name -> trainvm.v1.Diagnostic
-	11, // 8: trainvm.v1.SubmitExperimentResponse.run:type_name -> trainvm.v1.RunIdentity
-	9,  // 9: trainvm.v1.PlanDiffResponse.diagnostics:type_name -> trainvm.v1.Diagnostic
-	47, // 10: trainvm.v1.CancelCommand.graceful_timeout:type_name -> google.protobuf.Duration
-	10, // 11: trainvm.v1.ControlAssignment.value:type_name -> trainvm.v1.ScalarValue
-	21, // 12: trainvm.v1.ControlPatchCommand.assignments:type_name -> trainvm.v1.ControlAssignment
+	52, // 4: trainvm.v1.RunSummary.created_at:type_name -> google.protobuf.Timestamp
+	52, // 5: trainvm.v1.RunSummary.updated_at:type_name -> google.protobuf.Timestamp
+	52, // 6: trainvm.v1.RunSummary.last_heartbeat_at:type_name -> google.protobuf.Timestamp
+	10, // 7: trainvm.v1.SubmitExperimentResponse.diagnostics:type_name -> trainvm.v1.Diagnostic
+	12, // 8: trainvm.v1.SubmitExperimentResponse.run:type_name -> trainvm.v1.RunIdentity
+	10, // 9: trainvm.v1.PlanDiffResponse.diagnostics:type_name -> trainvm.v1.Diagnostic
+	53, // 10: trainvm.v1.CancelCommand.graceful_timeout:type_name -> google.protobuf.Duration
+	11, // 11: trainvm.v1.ControlAssignment.value:type_name -> trainvm.v1.ScalarValue
+	22, // 12: trainvm.v1.ControlPatchCommand.assignments:type_name -> trainvm.v1.ControlAssignment
 	2,  // 13: trainvm.v1.ControlPatchCommand.apply_point:type_name -> trainvm.v1.ApplyPoint
-	17, // 14: trainvm.v1.RunCommandRequest.pause:type_name -> trainvm.v1.PauseCommand
-	18, // 15: trainvm.v1.RunCommandRequest.resume:type_name -> trainvm.v1.ResumeCommand
-	19, // 16: trainvm.v1.RunCommandRequest.checkpoint:type_name -> trainvm.v1.CheckpointCommand
-	20, // 17: trainvm.v1.RunCommandRequest.cancel:type_name -> trainvm.v1.CancelCommand
-	22, // 18: trainvm.v1.RunCommandRequest.controls:type_name -> trainvm.v1.ControlPatchCommand
-	23, // 19: trainvm.v1.RunCommandRequest.adopt_plan:type_name -> trainvm.v1.AdoptPlanRevisionCommand
+	18, // 14: trainvm.v1.RunCommandRequest.pause:type_name -> trainvm.v1.PauseCommand
+	19, // 15: trainvm.v1.RunCommandRequest.resume:type_name -> trainvm.v1.ResumeCommand
+	20, // 16: trainvm.v1.RunCommandRequest.checkpoint:type_name -> trainvm.v1.CheckpointCommand
+	21, // 17: trainvm.v1.RunCommandRequest.cancel:type_name -> trainvm.v1.CancelCommand
+	23, // 18: trainvm.v1.RunCommandRequest.controls:type_name -> trainvm.v1.ControlPatchCommand
+	24, // 19: trainvm.v1.RunCommandRequest.adopt_plan:type_name -> trainvm.v1.AdoptPlanRevisionCommand
 	2,  // 20: trainvm.v1.ControlCommandResult.apply_point:type_name -> trainvm.v1.ApplyPoint
-	5,  // 21: trainvm.v1.ControlCommandResult.status:type_name -> trainvm.v1.ControlCommandResult.Status
-	21, // 22: trainvm.v1.ControlCommandResult.assignments:type_name -> trainvm.v1.ControlAssignment
-	6,  // 23: trainvm.v1.RunCommandResponse.disposition:type_name -> trainvm.v1.RunCommandResponse.Disposition
-	12, // 24: trainvm.v1.RunCommandResponse.run:type_name -> trainvm.v1.RunSummary
-	9,  // 25: trainvm.v1.RunCommandResponse.diagnostics:type_name -> trainvm.v1.Diagnostic
-	25, // 26: trainvm.v1.RunCommandResponse.control:type_name -> trainvm.v1.ControlCommandResult
+	6,  // 21: trainvm.v1.ControlCommandResult.status:type_name -> trainvm.v1.ControlCommandResult.Status
+	22, // 22: trainvm.v1.ControlCommandResult.assignments:type_name -> trainvm.v1.ControlAssignment
+	7,  // 23: trainvm.v1.RunCommandResponse.disposition:type_name -> trainvm.v1.RunCommandResponse.Disposition
+	13, // 24: trainvm.v1.RunCommandResponse.run:type_name -> trainvm.v1.RunSummary
+	10, // 25: trainvm.v1.RunCommandResponse.diagnostics:type_name -> trainvm.v1.Diagnostic
+	26, // 26: trainvm.v1.RunCommandResponse.control:type_name -> trainvm.v1.ControlCommandResult
 	3,  // 27: trainvm.v1.ArtifactManifest.kind:type_name -> trainvm.v1.ArtifactKind
-	46, // 28: trainvm.v1.ArtifactManifest.published_at:type_name -> google.protobuf.Timestamp
-	46, // 29: trainvm.v1.EventEnvelope.wall_time:type_name -> google.protobuf.Timestamp
-	48, // 30: trainvm.v1.EventEnvelope.payload:type_name -> google.protobuf.Any
-	10, // 31: trainvm.v1.MetricSample.value:type_name -> trainvm.v1.ScalarValue
-	44, // 32: trainvm.v1.MetricSample.labels:type_name -> trainvm.v1.MetricSample.LabelsEntry
-	46, // 33: trainvm.v1.MetricSample.observed_at:type_name -> google.protobuf.Timestamp
-	46, // 34: trainvm.v1.WorkerHeartbeat.observed_at:type_name -> google.protobuf.Timestamp
-	7,  // 35: trainvm.v1.ControlPatchAcknowledgement.disposition:type_name -> trainvm.v1.ControlPatchAcknowledgement.Disposition
+	52, // 28: trainvm.v1.ArtifactManifest.published_at:type_name -> google.protobuf.Timestamp
+	52, // 29: trainvm.v1.EventEnvelope.wall_time:type_name -> google.protobuf.Timestamp
+	54, // 30: trainvm.v1.EventEnvelope.payload:type_name -> google.protobuf.Any
+	11, // 31: trainvm.v1.MetricSample.value:type_name -> trainvm.v1.ScalarValue
+	49, // 32: trainvm.v1.MetricSample.labels:type_name -> trainvm.v1.MetricSample.LabelsEntry
+	52, // 33: trainvm.v1.MetricSample.observed_at:type_name -> google.protobuf.Timestamp
+	52, // 34: trainvm.v1.WorkerHeartbeat.observed_at:type_name -> google.protobuf.Timestamp
+	8,  // 35: trainvm.v1.ControlPatchAcknowledgement.disposition:type_name -> trainvm.v1.ControlPatchAcknowledgement.Disposition
 	2,  // 36: trainvm.v1.ControlPatchAcknowledgement.apply_point:type_name -> trainvm.v1.ApplyPoint
-	21, // 37: trainvm.v1.ControlPatchAcknowledgement.effective_values:type_name -> trainvm.v1.ControlAssignment
-	9,  // 38: trainvm.v1.ControlPatchAcknowledgement.diagnostics:type_name -> trainvm.v1.Diagnostic
-	46, // 39: trainvm.v1.ControlPatchAcknowledgement.acknowledged_at:type_name -> google.protobuf.Timestamp
-	30, // 40: trainvm.v1.WorkerToController.hello:type_name -> trainvm.v1.WorkerHello
-	31, // 41: trainvm.v1.WorkerToController.heartbeat:type_name -> trainvm.v1.WorkerHeartbeat
-	28, // 42: trainvm.v1.WorkerToController.event:type_name -> trainvm.v1.EventEnvelope
-	29, // 43: trainvm.v1.WorkerToController.metric:type_name -> trainvm.v1.MetricSample
-	27, // 44: trainvm.v1.WorkerToController.artifact:type_name -> trainvm.v1.ArtifactManifest
-	32, // 45: trainvm.v1.WorkerToController.control_ack:type_name -> trainvm.v1.ControlPatchAcknowledgement
-	17, // 46: trainvm.v1.WorkerCommand.pause:type_name -> trainvm.v1.PauseCommand
-	18, // 47: trainvm.v1.WorkerCommand.resume:type_name -> trainvm.v1.ResumeCommand
-	19, // 48: trainvm.v1.WorkerCommand.checkpoint:type_name -> trainvm.v1.CheckpointCommand
-	20, // 49: trainvm.v1.WorkerCommand.cancel:type_name -> trainvm.v1.CancelCommand
-	22, // 50: trainvm.v1.WorkerCommand.controls:type_name -> trainvm.v1.ControlPatchCommand
-	8,  // 51: trainvm.v1.WorkerWelcome.disposition:type_name -> trainvm.v1.WorkerWelcome.Disposition
+	22, // 37: trainvm.v1.ControlPatchAcknowledgement.effective_values:type_name -> trainvm.v1.ControlAssignment
+	10, // 38: trainvm.v1.ControlPatchAcknowledgement.diagnostics:type_name -> trainvm.v1.Diagnostic
+	52, // 39: trainvm.v1.ControlPatchAcknowledgement.acknowledged_at:type_name -> google.protobuf.Timestamp
+	31, // 40: trainvm.v1.WorkerToController.hello:type_name -> trainvm.v1.WorkerHello
+	32, // 41: trainvm.v1.WorkerToController.heartbeat:type_name -> trainvm.v1.WorkerHeartbeat
+	29, // 42: trainvm.v1.WorkerToController.event:type_name -> trainvm.v1.EventEnvelope
+	30, // 43: trainvm.v1.WorkerToController.metric:type_name -> trainvm.v1.MetricSample
+	28, // 44: trainvm.v1.WorkerToController.artifact:type_name -> trainvm.v1.ArtifactManifest
+	33, // 45: trainvm.v1.WorkerToController.control_ack:type_name -> trainvm.v1.ControlPatchAcknowledgement
+	18, // 46: trainvm.v1.WorkerCommand.pause:type_name -> trainvm.v1.PauseCommand
+	19, // 47: trainvm.v1.WorkerCommand.resume:type_name -> trainvm.v1.ResumeCommand
+	20, // 48: trainvm.v1.WorkerCommand.checkpoint:type_name -> trainvm.v1.CheckpointCommand
+	21, // 49: trainvm.v1.WorkerCommand.cancel:type_name -> trainvm.v1.CancelCommand
+	23, // 50: trainvm.v1.WorkerCommand.controls:type_name -> trainvm.v1.ControlPatchCommand
+	9,  // 51: trainvm.v1.WorkerWelcome.disposition:type_name -> trainvm.v1.WorkerWelcome.Disposition
 	1,  // 52: trainvm.v1.WorkerReceipt.observed_state:type_name -> trainvm.v1.ObservedState
-	34, // 53: trainvm.v1.ControllerToWorker.command:type_name -> trainvm.v1.WorkerCommand
-	35, // 54: trainvm.v1.ControllerToWorker.welcome:type_name -> trainvm.v1.WorkerWelcome
-	36, // 55: trainvm.v1.ControllerToWorker.receipt:type_name -> trainvm.v1.WorkerReceipt
+	35, // 53: trainvm.v1.ControllerToWorker.command:type_name -> trainvm.v1.WorkerCommand
+	36, // 54: trainvm.v1.ControllerToWorker.welcome:type_name -> trainvm.v1.WorkerWelcome
+	37, // 55: trainvm.v1.ControllerToWorker.receipt:type_name -> trainvm.v1.WorkerReceipt
 	1,  // 56: trainvm.v1.ListRunsRequest.observed_states:type_name -> trainvm.v1.ObservedState
-	45, // 57: trainvm.v1.ListRunsRequest.labels:type_name -> trainvm.v1.ListRunsRequest.LabelsEntry
-	12, // 58: trainvm.v1.ListRunsResponse.runs:type_name -> trainvm.v1.RunSummary
-	13, // 59: trainvm.v1.TrainVM.SubmitExperiment:input_type -> trainvm.v1.SubmitExperimentRequest
-	15, // 60: trainvm.v1.TrainVM.DiffPlan:input_type -> trainvm.v1.PlanDiffRequest
-	24, // 61: trainvm.v1.TrainVM.CommandRun:input_type -> trainvm.v1.RunCommandRequest
-	38, // 62: trainvm.v1.TrainVM.GetRun:input_type -> trainvm.v1.GetRunRequest
-	39, // 63: trainvm.v1.TrainVM.ListRuns:input_type -> trainvm.v1.ListRunsRequest
-	41, // 64: trainvm.v1.TrainVM.WatchEvents:input_type -> trainvm.v1.WatchEventsRequest
-	42, // 65: trainvm.v1.TrainVM.GetDescriptor:input_type -> trainvm.v1.DescriptorRequest
-	33, // 66: trainvm.v1.WorkerControl.Connect:input_type -> trainvm.v1.WorkerToController
-	14, // 67: trainvm.v1.TrainVM.SubmitExperiment:output_type -> trainvm.v1.SubmitExperimentResponse
-	16, // 68: trainvm.v1.TrainVM.DiffPlan:output_type -> trainvm.v1.PlanDiffResponse
-	26, // 69: trainvm.v1.TrainVM.CommandRun:output_type -> trainvm.v1.RunCommandResponse
-	12, // 70: trainvm.v1.TrainVM.GetRun:output_type -> trainvm.v1.RunSummary
-	40, // 71: trainvm.v1.TrainVM.ListRuns:output_type -> trainvm.v1.ListRunsResponse
-	28, // 72: trainvm.v1.TrainVM.WatchEvents:output_type -> trainvm.v1.EventEnvelope
-	43, // 73: trainvm.v1.TrainVM.GetDescriptor:output_type -> trainvm.v1.DescriptorResponse
-	37, // 74: trainvm.v1.WorkerControl.Connect:output_type -> trainvm.v1.ControllerToWorker
-	67, // [67:75] is the sub-list for method output_type
-	59, // [59:67] is the sub-list for method input_type
-	59, // [59:59] is the sub-list for extension type_name
-	59, // [59:59] is the sub-list for extension extendee
-	0,  // [0:59] is the sub-list for field type_name
+	50, // 57: trainvm.v1.ListRunsRequest.labels:type_name -> trainvm.v1.ListRunsRequest.LabelsEntry
+	13, // 58: trainvm.v1.ListRunsResponse.runs:type_name -> trainvm.v1.RunSummary
+	4,  // 59: trainvm.v1.ControlDescriptor.type:type_name -> trainvm.v1.ControlType
+	11, // 60: trainvm.v1.ControlDescriptor.default_value:type_name -> trainvm.v1.ScalarValue
+	11, // 61: trainvm.v1.ControlDescriptor.values:type_name -> trainvm.v1.ScalarValue
+	2,  // 62: trainvm.v1.ControlDescriptor.apply_point:type_name -> trainvm.v1.ApplyPoint
+	2,  // 63: trainvm.v1.ControlCommandView.apply_point:type_name -> trainvm.v1.ApplyPoint
+	22, // 64: trainvm.v1.ControlCommandView.assignments:type_name -> trainvm.v1.ControlAssignment
+	6,  // 65: trainvm.v1.ControlCommandView.status:type_name -> trainvm.v1.ControlCommandResult.Status
+	22, // 66: trainvm.v1.ControlCommandView.effective_values:type_name -> trainvm.v1.ControlAssignment
+	10, // 67: trainvm.v1.ControlCommandView.diagnostics:type_name -> trainvm.v1.Diagnostic
+	51, // 68: trainvm.v1.GetControlViewResponse.catalog:type_name -> trainvm.v1.GetControlViewResponse.CatalogEntry
+	22, // 69: trainvm.v1.GetControlViewResponse.effective_values:type_name -> trainvm.v1.ControlAssignment
+	45, // 70: trainvm.v1.GetControlViewResponse.commands:type_name -> trainvm.v1.ControlCommandView
+	44, // 71: trainvm.v1.GetControlViewResponse.CatalogEntry.value:type_name -> trainvm.v1.ControlDescriptor
+	14, // 72: trainvm.v1.TrainVM.SubmitExperiment:input_type -> trainvm.v1.SubmitExperimentRequest
+	16, // 73: trainvm.v1.TrainVM.DiffPlan:input_type -> trainvm.v1.PlanDiffRequest
+	25, // 74: trainvm.v1.TrainVM.CommandRun:input_type -> trainvm.v1.RunCommandRequest
+	39, // 75: trainvm.v1.TrainVM.GetRun:input_type -> trainvm.v1.GetRunRequest
+	40, // 76: trainvm.v1.TrainVM.ListRuns:input_type -> trainvm.v1.ListRunsRequest
+	42, // 77: trainvm.v1.TrainVM.WatchEvents:input_type -> trainvm.v1.WatchEventsRequest
+	43, // 78: trainvm.v1.TrainVM.GetControlView:input_type -> trainvm.v1.GetControlViewRequest
+	47, // 79: trainvm.v1.TrainVM.GetDescriptor:input_type -> trainvm.v1.DescriptorRequest
+	34, // 80: trainvm.v1.WorkerControl.Connect:input_type -> trainvm.v1.WorkerToController
+	15, // 81: trainvm.v1.TrainVM.SubmitExperiment:output_type -> trainvm.v1.SubmitExperimentResponse
+	17, // 82: trainvm.v1.TrainVM.DiffPlan:output_type -> trainvm.v1.PlanDiffResponse
+	27, // 83: trainvm.v1.TrainVM.CommandRun:output_type -> trainvm.v1.RunCommandResponse
+	13, // 84: trainvm.v1.TrainVM.GetRun:output_type -> trainvm.v1.RunSummary
+	41, // 85: trainvm.v1.TrainVM.ListRuns:output_type -> trainvm.v1.ListRunsResponse
+	29, // 86: trainvm.v1.TrainVM.WatchEvents:output_type -> trainvm.v1.EventEnvelope
+	46, // 87: trainvm.v1.TrainVM.GetControlView:output_type -> trainvm.v1.GetControlViewResponse
+	48, // 88: trainvm.v1.TrainVM.GetDescriptor:output_type -> trainvm.v1.DescriptorResponse
+	38, // 89: trainvm.v1.WorkerControl.Connect:output_type -> trainvm.v1.ControllerToWorker
+	81, // [81:90] is the sub-list for method output_type
+	72, // [72:81] is the sub-list for method input_type
+	72, // [72:72] is the sub-list for extension type_name
+	72, // [72:72] is the sub-list for extension extendee
+	0,  // [0:72] is the sub-list for field type_name
 }
 
 func init() { file_trainvm_v1_trainvm_proto_init() }
@@ -4403,13 +4915,15 @@ func file_trainvm_v1_trainvm_proto_init() {
 		(*ControllerToWorker_Welcome)(nil),
 		(*ControllerToWorker_Receipt)(nil),
 	}
+	file_trainvm_v1_trainvm_proto_msgTypes[34].OneofWrappers = []any{}
+	file_trainvm_v1_trainvm_proto_msgTypes[35].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_trainvm_v1_trainvm_proto_rawDesc), len(file_trainvm_v1_trainvm_proto_rawDesc)),
-			NumEnums:      9,
-			NumMessages:   37,
+			NumEnums:      10,
+			NumMessages:   42,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

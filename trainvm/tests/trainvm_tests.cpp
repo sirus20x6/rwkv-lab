@@ -3052,6 +3052,9 @@ void test_control_command_journal() {
     std::string reason;
     check(journal.verify_chain(&reason) && journal.rebuild_projections() == 12U &&
               journal.control_command(fenced_applied.command_id) == fenced_applied &&
+              journal.control_commands("control-run", 2U).size() == 2U &&
+              journal.control_commands("control-run", 2U).front().control_revision ==
+                  4U &&
               journal.latest_control_revision("control-run") == 4U &&
               journal.latest_effective_control_revision("control-run") == 4U,
           "control request, acknowledgement, and effective revisions rebuild from journal history");
@@ -3111,6 +3114,30 @@ void test_command_service() {
             first_response.control().control_revision() == 1U &&
             first_response.run().latest_requested_control_revision() == 1U,
         "native command service validates, persists, and returns a typed control result");
+
+  trainvm::v1::GetControlViewRequest view_request;
+  view_request.set_run_id("service-run");
+  trainvm::v1::GetControlViewResponse view_response;
+  const auto view_status =
+      service.GetControlView(nullptr, &view_request, &view_response);
+  const auto learning_rate = view_response.catalog().find("learning_rate");
+  const auto effective_learning_rate = std::ranges::find_if(
+      view_response.effective_values(), [](const auto& assignment) {
+        return assignment.key() == "learning_rate";
+      });
+  check(view_status.ok() && learning_rate != view_response.catalog().end() &&
+            learning_rate->second.type() == trainvm::v1::CONTROL_TYPE_NUMBER &&
+            learning_rate->second.apply_point() ==
+                trainvm::v1::APPLY_POINT_NEXT_OPTIMIZER_STEP &&
+            effective_learning_rate != view_response.effective_values().end() &&
+            effective_learning_rate->value().has_number_value() &&
+            view_response.latest_requested_revision() == 1U &&
+            view_response.latest_effective_revision() == 0U &&
+            view_response.commands_size() == 1 &&
+            view_response.commands(0).status() ==
+                trainvm::v1::ControlCommandResult::STATUS_REQUESTED &&
+            view_response.commands(0).assignments_size() == 1,
+        "native control view returns typed catalog, effective defaults, and newest-first command history");
 
   trainvm::v1::RunCommandResponse retry_response;
   const auto retry_status = service.CommandRun(nullptr, &first_request, &retry_response);
@@ -4871,10 +4898,12 @@ void test_worker_control_grpc_stream() {
     trainvm::v1::WatchEventsRequest request;
     request.add_run_ids(run_id);
     request.add_event_types("worker.launch_requested");
+    request.set_replay_limit(1U);
     auto stream = read_stub->WatchEvents(&context, request);
     trainvm::v1::EventEnvelope envelope;
     const bool received = stream->Read(&envelope);
-    context.TryCancel();
+    trainvm::v1::EventEnvelope unexpected;
+    const bool received_more = stream->Read(&unexpected);
     const grpc::Status status = stream->Finish();
     check(received && envelope.journal_sequence() > 0U &&
               envelope.run_id() == run_id &&
@@ -4882,8 +4911,8 @@ void test_worker_control_grpc_stream() {
               !envelope.canonical_json_payload().empty() &&
               nlohmann::json::parse(envelope.canonical_json_payload())
                   .is_object() &&
-              status.error_code() == grpc::StatusCode::CANCELLED,
-          "TrainVM gRPC event stream replays filtered durable events with a resumable cursor");
+              !received_more && status.ok(),
+          "TrainVM gRPC event stream performs a bounded filtered replay with a resumable cursor");
   }
 
   {
@@ -7370,8 +7399,10 @@ void test_service_registry_and_reconciliation() {
               run_summary.identity().run_id() == run_id &&
               run_summary.observed_state() ==
                   trainvm::v1::OBSERVED_STATE_QUEUED &&
+              run_summary.last_event_sequence() > 0U &&
               run_summary.has_created_at() && run_summary.has_updated_at() &&
               first_page_status.ok() && first_page.runs_size() == 1 &&
+              first_page.journal_id() == journal_id &&
               !first_page.next_page_token().empty() &&
               second_page_status.ok() && second_page.runs_size() == 1 &&
               second_page.next_page_token().empty() &&

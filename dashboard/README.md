@@ -18,15 +18,16 @@ go -C /thearray/git/moe-mla/dashboard run ./cmd/trainboard
 
 Reads `/thearray/git/moe-mla/runs/`. Ingests all `train.jsonl` logs + system telemetry into a local
 SQLite DB (`trainboard.db`). GPU-light — safe to run alongside live training.
-When `<repo>/trainvm.db` exists, the server attaches to it in SQLite read-only/query-only mode and
-exposes native run projections at `/api/trainvm/runs`, `/api/trainvm/runs/{run}`, and the incremental
-`/api/trainvm/runs/{run}/timeline?after=SEQUENCE&limit=COUNT` endpoint. Use `-trainvm-db PATH` to
-select another journal. The Go process cannot mutate TrainVM lifecycle state.
-The dashboard configures a lazy gRPC client for `<repo>/trainvm.sock` (or `-trainvm-socket PATH`) even
-when the independently supervised native authority starts later. Live controls are generated
-from the selected run's persisted compiled plan and submitted as typed, revision-checked,
-idempotent patches. A short readiness probe disables mutations while the authority is unavailable;
-Go still never writes the TrainVM journal, and read-only run/timeline views remain usable.
+The dashboard uses one lazy gRPC client for `<repo>/trainvm.sock` (or `-trainvm-socket PATH`) for
+bounded run projections, query-bound pagination, resumable timeline replay, typed control views,
+descriptors, submissions, and revision-checked control patches. The independently supervised native
+authority remains the only process that opens or mutates its journal; an unavailable authority is
+reported as unavailable instead of serving an unsynchronized database snapshot. `-trainvm-db PATH`
+is retained only as an explicit read-only compatibility fallback for offline legacy journals and is
+never selected automatically. The HTTP surface remains `/api/trainvm/runs`,
+`/api/trainvm/runs/{run}`, and
+`/api/trainvm/runs/{run}/timeline?after=SEQUENCE&limit=COUNT`.
+A short readiness probe disables mutations while the authority is unavailable.
 Mutation requests are intentionally restricted to loopback HTTP hosts to prevent DNS-rebinding
 access to the local command authority.
 The dashboard also serves the checked-in schema and example through `/api/trainvm/schema` and

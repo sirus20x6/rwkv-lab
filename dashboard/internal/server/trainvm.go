@@ -69,12 +69,12 @@ func (s *Server) handleTrainVMRuns(w http.ResponseWriter, r *http.Request) {
 	}
 	runs, err := s.trainvm.Runs(r.Context())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeTrainVMAuthorityError(w, err)
 		return
 	}
 	journalID, err := s.trainvm.JournalID(r.Context())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeTrainVMAuthorityError(w, err)
 		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{
@@ -103,7 +103,7 @@ func (s *Server) handleTrainVMRun(w http.ResponseWriter, r *http.Request) {
 	}
 	run, found, err := s.trainvm.Run(r.Context(), r.PathValue("run"))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeTrainVMAuthorityError(w, err)
 		return
 	}
 	if !found {
@@ -124,7 +124,7 @@ func (s *Server) handleTrainVMTimeline(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	events, err := s.trainvm.Timeline(r.Context(), r.PathValue("run"), after, limit)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeTrainVMAuthorityError(w, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -486,7 +486,7 @@ func (s *Server) handleTrainVMControlView(w http.ResponseWriter, r *http.Request
 	}
 	view, found, err := s.trainvm.Controls(r.Context(), r.PathValue("run"))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeTrainVMAuthorityError(w, err)
 		return
 	}
 	if !found {

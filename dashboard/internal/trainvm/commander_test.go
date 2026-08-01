@@ -10,6 +10,8 @@ import (
 	"time"
 
 	trainvmv1 "trainboard/gen/trainvm/v1"
+
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func TestControlRPCRequestPreservesTypedScalarsAndSortsKeys(t *testing.T) {
@@ -161,5 +163,85 @@ func TestControlResultMapsTypedNativeResponse(t *testing.T) {
 		result.Status != "APPLIED" || result.Assignments["rate"] != 0.125 ||
 		len(result.Diagnostics) != 1 || result.Diagnostics[0].Code != "control.note" {
 		t.Fatalf("unexpected control result: %#v", result)
+	}
+}
+
+func TestNativeReadProjectionConversionsPreserveCursorsAndTypedControls(t *testing.T) {
+	heartbeat := timestamppb.New(time.Unix(12, 34))
+	run, err := runFromProto(&trainvmv1.RunSummary{
+		Identity:       &trainvmv1.RunIdentity{RunId: "run-1", Revision: 7, PlanHash: "plan-1"},
+		ExperimentName: "mageflow", DesiredState: trainvmv1.DesiredState_DESIRED_STATE_RUNNING,
+		ObservedState: trainvmv1.ObservedState_OBSERVED_STATE_RUNNING,
+		CurrentNodeId: "train", CurrentAttemptId: "train@1", OptimizerStep: 42,
+		LastHeartbeatAt: heartbeat, LastEventSequence: 19,
+	})
+	if err != nil || run.RunID != "run-1" || run.RunRevision != 7 ||
+		run.DesiredState != "running" || run.ObservedState != "running" ||
+		run.LastHeartbeatNS != heartbeat.AsTime().UnixNano() || run.LastEventSeq != 19 {
+		t.Fatalf("unexpected native run conversion: %#v err=%v", run, err)
+	}
+	step := uint64(42)
+	event, err := eventFromProto(&trainvmv1.EventEnvelope{
+		JournalSequence: 19, EventId: "event-19", RunId: "run-1",
+		RunRevision: 7, PlanRevision: 1, NodeId: "train", AttemptId: "train@1",
+		WorkerSequence: 3, EventType: "worker.metric", EventVersion: 1,
+		WallTime: heartbeat, MonotonicTimeNs: 50, OptimizerStep: &step,
+		CanonicalJsonPayload: []byte(`{"loss":1.25}`),
+	})
+	if err != nil || event.Sequence != 19 || event.OptimizerStep == nil ||
+		*event.OptimizerStep != 42 || string(event.Payload) != `{"loss":1.25}` {
+		t.Fatalf("unexpected native event conversion: %#v err=%v", event, err)
+	}
+	minimum, maximum := 0.0, 1.0
+	effectiveStep := uint64(44)
+	view, err := controlViewFromProto(&trainvmv1.GetControlViewResponse{
+		Catalog: map[string]*trainvmv1.ControlDescriptor{
+			"learning_rate": {
+				Type:         trainvmv1.ControlType_CONTROL_TYPE_NUMBER,
+				DefaultValue: &trainvmv1.ScalarValue{Value: &trainvmv1.ScalarValue_NumberValue{NumberValue: 0.001}},
+				Minimum:      &minimum, Maximum: &maximum,
+				ApplyPoint:        trainvmv1.ApplyPoint_APPLY_POINT_NEXT_OPTIMIZER_STEP,
+				MutableAfterStart: true, Unit: "ratio",
+			},
+		},
+		EffectiveValues: []*trainvmv1.ControlAssignment{{
+			Key: "learning_rate", Value: &trainvmv1.ScalarValue{Value: &trainvmv1.ScalarValue_NumberValue{NumberValue: 0.0005}},
+		}},
+		LatestRequestedRevision: 2, LatestEffectiveRevision: 1,
+		Commands: []*trainvmv1.ControlCommandView{{
+			CommandId: "control-2", ControlRevision: 2,
+			ApplyPoint: trainvmv1.ApplyPoint_APPLY_POINT_NEXT_OPTIMIZER_STEP,
+			Assignments: []*trainvmv1.ControlAssignment{{
+				Key: "learning_rate", Value: &trainvmv1.ScalarValue{Value: &trainvmv1.ScalarValue_NumberValue{NumberValue: 0.00025}},
+			}},
+			Author: "operator", Reason: "tune", Status: trainvmv1.ControlCommandResult_STATUS_APPLIED,
+			EffectiveStep: &effectiveStep,
+			EffectiveValues: []*trainvmv1.ControlAssignment{{
+				Key: "learning_rate", Value: &trainvmv1.ScalarValue{Value: &trainvmv1.ScalarValue_NumberValue{NumberValue: 0.00025}},
+			}},
+		}},
+	})
+	if err != nil || view.Catalog["learning_rate"].Type != "number" ||
+		view.Catalog["learning_rate"].Minimum == nil ||
+		view.EffectiveValues["learning_rate"] != 0.0005 ||
+		view.LatestRequestedRevision != 2 || len(view.Commands) != 1 ||
+		view.Commands[0].Status != "applied" || view.Commands[0].EffectiveStep == nil ||
+		string(view.Commands[0].Assignments) != `{"learning_rate":0.00025}` {
+		t.Fatalf("unexpected native control view conversion: %#v err=%v", view, err)
+	}
+}
+
+func TestNativeReadProjectionConversionsRejectUnsetWireScalars(t *testing.T) {
+	_, err := controlViewFromProto(&trainvmv1.GetControlViewResponse{
+		Catalog: map[string]*trainvmv1.ControlDescriptor{
+			"rate": {
+				Type:         trainvmv1.ControlType_CONTROL_TYPE_NUMBER,
+				DefaultValue: &trainvmv1.ScalarValue{},
+				ApplyPoint:   trainvmv1.ApplyPoint_APPLY_POINT_NEXT_OPTIMIZER_STEP,
+			},
+		},
+	})
+	if err == nil {
+		t.Fatal("unset authority scalar unexpectedly crossed the dashboard boundary")
 	}
 }

@@ -28,7 +28,7 @@ type Config struct {
 	DB        *db.DB                  // datastore
 	Sampler   *sysmon.Sampler         // live telemetry
 	Detector  *alerts.Detector        // divergence/health detector
-	TrainVM   *trainvmstore.Reader    // read-only native control-plane projection
+	TrainVM   trainvmstore.ReadModel  // read-only native control-plane projection
 	Authoring *trainvmstore.Authoring // schema/example/native semantic preview
 	Commander trainvmstore.Commander  // mutations through native gRPC authority only
 	LibDir    string                  // converted_layers_lib path (conversion board)
@@ -47,7 +47,7 @@ type Server struct {
 	db        *db.DB
 	sampler   *sysmon.Sampler
 	detector  *alerts.Detector
-	trainvm   *trainvmstore.Reader
+	trainvm   trainvmstore.ReadModel
 	authoring *trainvmstore.Authoring
 	commander trainvmstore.Commander
 

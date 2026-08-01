@@ -4777,6 +4777,40 @@ std::vector<ControlCommand> Journal::pending_control_commands(
   return commands;
 }
 
+std::vector<ControlCommand> Journal::control_commands(
+    const std::string& run_id, std::size_t limit) const {
+  constexpr std::size_t kMaximumControlHistory = 50U;
+  if (run_id.empty() || run_id.size() > 256U || limit == 0U ||
+      limit > kMaximumControlHistory) {
+    throw std::invalid_argument(
+        "control history requires a bounded run ID and limit");
+  }
+  Statement query(database_, R"sql(
+    SELECT command_id, run_id, idempotency_key, expected_run_revision,
+           expected_control_revision, control_revision, plan_revision,
+           apply_point, requires_pause, assignments_json, author, reason,
+           status, effective_step, effective_values_json, diagnostics_json,
+           ack_concurrency_key, ack_lease_id, ack_fencing_token, ack_node_id,
+           ack_attempt_id, ack_worker_sequence, acknowledged_at_ns
+    FROM control_commands
+    WHERE run_id=?
+    ORDER BY control_revision DESC
+    LIMIT ?
+  )sql");
+  bind_text(query.get(), 1, run_id);
+  bind_integer(query.get(), 2, static_cast<std::int64_t>(limit));
+  std::vector<ControlCommand> commands;
+  commands.reserve(limit);
+  int status = SQLITE_ROW;
+  while ((status = sqlite3_step(query.get())) == SQLITE_ROW) {
+    commands.push_back(command_from_row(query.get()));
+  }
+  if (status != SQLITE_DONE) {
+    throw std::runtime_error("could not scan control command history");
+  }
+  return commands;
+}
+
 std::uint64_t Journal::latest_control_revision(const std::string& run_id) const {
   Statement query(database_, R"sql(
     SELECT COALESCE(MAX(control_revision), 0) FROM control_commands WHERE run_id=?

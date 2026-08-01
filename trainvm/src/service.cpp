@@ -13,6 +13,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -484,33 +485,41 @@ void add_diagnostic(v1::PlanDiffResponse& response,
   output->set_message(diagnostic.message);
 }
 
+void fill_stored_diagnostic(const nlohmann::json& diagnostic,
+                            v1::Diagnostic& output) {
+  if (!diagnostic.is_object()) {
+    throw std::runtime_error("stored control diagnostic is not an object");
+  }
+  const auto severity = diagnostic.find("severity");
+  if (severity != diagnostic.end() && severity->is_string()) {
+    const auto value = severity->get<std::string>();
+    if (value == "info") output.set_severity(v1::Diagnostic::SEVERITY_INFO);
+    if (value == "warning")
+      output.set_severity(v1::Diagnostic::SEVERITY_WARNING);
+    if (value == "error") output.set_severity(v1::Diagnostic::SEVERITY_ERROR);
+  }
+  const auto string_value = [&](std::string_view key) -> std::string {
+    const auto value = diagnostic.find(std::string(key));
+    if (value != diagnostic.end() && value->is_string()) {
+      return value->get<std::string>();
+    }
+    return {};
+  };
+  output.set_code(string_value("code"));
+  output.set_document_path(string_value("document_path"));
+  if (output.document_path().empty()) {
+    output.set_document_path(string_value("path"));
+  }
+  output.set_message(string_value("message"));
+  output.set_help(string_value("help"));
+}
+
 void add_stored_diagnostics(v1::RunCommandResponse& response,
                             const nlohmann::json& diagnostics) {
   if (!diagnostics.is_array()) return;
   for (const auto& diagnostic : diagnostics) {
     if (!diagnostic.is_object()) continue;
-    auto* output = response.add_diagnostics();
-    const auto severity = diagnostic.find("severity");
-    if (severity != diagnostic.end() && severity->is_string()) {
-      const auto value = severity->get<std::string>();
-      if (value == "info") output->set_severity(v1::Diagnostic::SEVERITY_INFO);
-      if (value == "warning") output->set_severity(v1::Diagnostic::SEVERITY_WARNING);
-      if (value == "error") output->set_severity(v1::Diagnostic::SEVERITY_ERROR);
-    }
-    const auto string_value = [&](std::string_view key) -> std::string {
-      const auto value = diagnostic.find(std::string(key));
-      if (value != diagnostic.end() && value->is_string()) {
-        return value->get<std::string>();
-      }
-      return {};
-    };
-    output->set_code(string_value("code"));
-    output->set_document_path(string_value("document_path"));
-    if (output->document_path().empty()) {
-      output->set_document_path(string_value("path"));
-    }
-    output->set_message(string_value("message"));
-    output->set_help(string_value("help"));
+    fill_stored_diagnostic(diagnostic, *response.add_diagnostics());
   }
 }
 
@@ -530,6 +539,22 @@ v1::ApplyPoint wire_apply_point(ApplyPoint point) {
       return v1::APPLY_POINT_RESTART;
   }
   return v1::APPLY_POINT_UNSPECIFIED;
+}
+
+v1::ControlType wire_control_type(ControlType type) {
+  switch (type) {
+    case ControlType::number:
+      return v1::CONTROL_TYPE_NUMBER;
+    case ControlType::integer:
+      return v1::CONTROL_TYPE_INTEGER;
+    case ControlType::boolean:
+      return v1::CONTROL_TYPE_BOOLEAN;
+    case ControlType::string:
+      return v1::CONTROL_TYPE_STRING;
+    case ControlType::enumeration:
+      return v1::CONTROL_TYPE_ENUMERATION;
+  }
+  return v1::CONTROL_TYPE_UNSPECIFIED;
 }
 
 v1::ControlCommandResult::Status wire_command_status(ControlCommandStatus status) {
@@ -596,6 +621,19 @@ void set_wire_scalar(const nlohmann::json& value, v1::ScalarValue& output) {
   }
 }
 
+template <typename AddAssignment>
+void fill_wire_assignments(const nlohmann::json& values,
+                           AddAssignment&& add_assignment) {
+  if (!values.is_object()) {
+    throw std::runtime_error("stored control values are not an object");
+  }
+  for (auto iterator = values.begin(); iterator != values.end(); ++iterator) {
+    auto* assignment = add_assignment();
+    assignment->set_key(iterator.key());
+    set_wire_scalar(iterator.value(), *assignment->mutable_value());
+  }
+}
+
 void fill_control_result(const ControlCommand& command, v1::RunCommandResponse& response) {
   response.set_command_sequence(command.control_revision);
   auto* output = response.mutable_control();
@@ -604,11 +642,8 @@ void fill_control_result(const ControlCommand& command, v1::RunCommandResponse& 
   output->set_apply_point(wire_apply_point(command.apply_point));
   output->set_requires_pause(command.requires_pause);
   output->set_status(wire_command_status(command.status));
-  for (auto iterator = command.assignments.begin(); iterator != command.assignments.end(); ++iterator) {
-    auto* assignment = output->add_assignments();
-    assignment->set_key(iterator.key());
-    set_wire_scalar(iterator.value(), *assignment->mutable_value());
-  }
+  fill_wire_assignments(command.assignments,
+                        [&] { return output->add_assignments(); });
   add_stored_diagnostics(response, command.diagnostics);
 }
 
@@ -747,6 +782,7 @@ void fill_run_summary(const RunProjection& projection, const Journal& journal,
 #pragma GCC diagnostic pop
   output.set_latest_requested_control_revision(requested);
   output.set_latest_effective_control_revision(effective);
+  output.set_last_event_sequence(projection.last_event_sequence);
   const auto times = journal.run_wall_time_bounds(projection.run_id);
   if (times) {
     set_timestamp_ns(times->created_wall_time_ns, *output.mutable_created_at());
@@ -3033,6 +3069,7 @@ grpc::Status TrainVMService::ListRuns(grpc::ServerContext* context,
         fill_run_summary(projection, journal_, *response->add_runs());
       }
     }
+    response->set_journal_id(journal_.journal_id());
     response->set_next_page_token(std::move(next_page_token));
     for (int index = 0; index < response->runs_size(); ++index) {
       if (const auto failure = reconciliation_failure(
@@ -3055,9 +3092,11 @@ grpc::Status TrainVMService::WatchEvents(
     grpc::ServerContext* context, const v1::WatchEventsRequest* request,
     grpc::ServerWriter<v1::EventEnvelope>* writer) {
   constexpr std::size_t kEventPageSize = 256U;
+  constexpr std::uint32_t kMaximumReplayEvents = 1'000U;
   if (context == nullptr || request == nullptr || writer == nullptr ||
       request->ByteSizeLong() > kMaximumCommandBytes ||
-      request->run_ids_size() > 64 || request->event_types_size() > 64) {
+      request->run_ids_size() > 64 || request->event_types_size() > 64 ||
+      request->replay_limit() > kMaximumReplayEvents) {
     return {grpc::StatusCode::INVALID_ARGUMENT,
             "watch-events request exceeds its bounds"};
   }
@@ -3073,7 +3112,15 @@ grpc::Status TrainVMService::WatchEvents(
               "watch-events filters must be unique"};
     }
     std::uint64_t cursor = request->after_journal_sequence();
+    std::size_t replayed = 0U;
     while (!cancelled(context)) {
+      const std::size_t query_limit =
+          request->replay_limit() == 0U
+              ? kEventPageSize
+              : std::min<std::size_t>(
+                    kEventPageSize,
+                    static_cast<std::size_t>(request->replay_limit()) -
+                        replayed);
       std::vector<SequencedEvent> events;
       {
         std::scoped_lock lock(command_mutex_);
@@ -3081,7 +3128,7 @@ grpc::Status TrainVMService::WatchEvents(
             .after_journal_sequence = cursor,
             .run_ids = run_ids,
             .event_types = event_types,
-            .limit = kEventPageSize,
+            .limit = query_limit,
         });
       }
       for (const SequencedEvent& event : events) {
@@ -3091,11 +3138,113 @@ grpc::Status TrainVMService::WatchEvents(
                   "event stream closed by its reader"};
         }
         cursor = event.journal_sequence;
+        ++replayed;
       }
-      if (events.size() == kEventPageSize) continue;
+      if (request->replay_limit() != 0U &&
+          (replayed == static_cast<std::size_t>(request->replay_limit()) ||
+           events.size() < query_limit)) {
+        return grpc::Status::OK;
+      }
+      if (events.size() == query_limit) continue;
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     return {grpc::StatusCode::CANCELLED, "event stream was cancelled"};
+  } catch (const std::invalid_argument& exception) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, exception.what()};
+  } catch (const std::exception& exception) {
+    return {grpc::StatusCode::DATA_LOSS, exception.what()};
+  }
+}
+
+grpc::Status TrainVMService::GetControlView(
+    grpc::ServerContext* context, const v1::GetControlViewRequest* request,
+    v1::GetControlViewResponse* response) {
+  constexpr std::size_t kControlHistoryLimit = 50U;
+  if (request == nullptr || response == nullptr ||
+      request->ByteSizeLong() > 4'096U || request->run_id().empty() ||
+      request->run_id().size() > 256U) {
+    return {grpc::StatusCode::INVALID_ARGUMENT,
+            "control view requires a bounded run identity"};
+  }
+  if (cancelled(context)) return cancellation_status();
+  try {
+    std::scoped_lock lock(command_mutex_);
+    const auto projection = journal_.projection(request->run_id());
+    if (!projection) {
+      return {grpc::StatusCode::NOT_FOUND, "run does not exist"};
+    }
+    const auto plan = journal_.compiled_plan(projection->plan_hash);
+    if (!plan) {
+      return {grpc::StatusCode::DATA_LOSS,
+              "run has no persisted compiled plan"};
+    }
+    nlohmann::json effective_values = nlohmann::json::object();
+    for (const auto& [name, control] :
+         plan->experiment.spec.controls.catalog) {
+      v1::ControlDescriptor& descriptor =
+          (*response->mutable_catalog())[name];
+      descriptor.set_type(wire_control_type(control.type));
+      set_wire_scalar(control.default_value,
+                      *descriptor.mutable_default_value());
+      if (control.minimum) descriptor.set_minimum(*control.minimum);
+      if (control.maximum) descriptor.set_maximum(*control.maximum);
+      if (control.values) {
+        for (const nlohmann::json& value : *control.values) {
+          set_wire_scalar(value, *descriptor.add_values());
+        }
+      }
+      descriptor.set_apply_point(wire_apply_point(control.apply));
+      descriptor.set_mutable_after_start(control.mutable_after_start);
+      descriptor.set_requires_pause(control.requires_pause.value_or(false));
+      descriptor.set_description(control.description.value_or(""));
+      descriptor.set_unit(control.unit.value_or(""));
+      effective_values[name] = control.default_value;
+    }
+    const EffectiveControlSnapshot effective =
+        journal_.effective_controls(request->run_id());
+    for (const auto& [name, value] : effective.values.items()) {
+      if (!effective_values.contains(name)) {
+        throw std::runtime_error(
+            "effective controls contain an unknown catalog key");
+      }
+      effective_values[name] = value;
+    }
+    fill_wire_assignments(effective_values,
+                          [&] { return response->add_effective_values(); });
+    response->set_latest_requested_revision(
+        journal_.latest_control_revision(request->run_id()));
+    response->set_latest_effective_revision(effective.revision);
+    for (const ControlCommand& command : journal_.control_commands(
+             request->run_id(), kControlHistoryLimit)) {
+      auto* output = response->add_commands();
+      output->set_command_id(command.command_id);
+      output->set_control_revision(command.control_revision);
+      output->set_apply_point(wire_apply_point(command.apply_point));
+      fill_wire_assignments(command.assignments,
+                            [&] { return output->add_assignments(); });
+      output->set_author(command.author);
+      output->set_reason(command.reason);
+      output->set_status(wire_command_status(command.status));
+      if (command.effective_step) {
+        output->set_effective_step(*command.effective_step);
+      }
+      fill_wire_assignments(command.effective_values,
+                            [&] { return output->add_effective_values(); });
+      if (!command.diagnostics.is_array()) {
+        throw std::runtime_error(
+            "stored control diagnostics are not an array");
+      }
+      for (const nlohmann::json& diagnostic : command.diagnostics) {
+        auto* wire_diagnostic = output->add_diagnostics();
+        fill_stored_diagnostic(diagnostic, *wire_diagnostic);
+        if (wire_diagnostic->severity() ==
+            v1::Diagnostic::SEVERITY_UNSPECIFIED) {
+          throw std::runtime_error(
+              "stored control diagnostic has an invalid severity");
+        }
+      }
+    }
+    return grpc::Status::OK;
   } catch (const std::invalid_argument& exception) {
     return {grpc::StatusCode::INVALID_ARGUMENT, exception.what()};
   } catch (const std::exception& exception) {

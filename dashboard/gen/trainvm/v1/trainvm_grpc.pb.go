@@ -25,6 +25,7 @@ const (
 	TrainVM_GetRun_FullMethodName           = "/trainvm.v1.TrainVM/GetRun"
 	TrainVM_ListRuns_FullMethodName         = "/trainvm.v1.TrainVM/ListRuns"
 	TrainVM_WatchEvents_FullMethodName      = "/trainvm.v1.TrainVM/WatchEvents"
+	TrainVM_GetControlView_FullMethodName   = "/trainvm.v1.TrainVM/GetControlView"
 	TrainVM_GetDescriptor_FullMethodName    = "/trainvm.v1.TrainVM/GetDescriptor"
 )
 
@@ -38,6 +39,7 @@ type TrainVMClient interface {
 	GetRun(ctx context.Context, in *GetRunRequest, opts ...grpc.CallOption) (*RunSummary, error)
 	ListRuns(ctx context.Context, in *ListRunsRequest, opts ...grpc.CallOption) (*ListRunsResponse, error)
 	WatchEvents(ctx context.Context, in *WatchEventsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[EventEnvelope], error)
+	GetControlView(ctx context.Context, in *GetControlViewRequest, opts ...grpc.CallOption) (*GetControlViewResponse, error)
 	GetDescriptor(ctx context.Context, in *DescriptorRequest, opts ...grpc.CallOption) (*DescriptorResponse, error)
 }
 
@@ -118,6 +120,16 @@ func (c *trainVMClient) WatchEvents(ctx context.Context, in *WatchEventsRequest,
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type TrainVM_WatchEventsClient = grpc.ServerStreamingClient[EventEnvelope]
 
+func (c *trainVMClient) GetControlView(ctx context.Context, in *GetControlViewRequest, opts ...grpc.CallOption) (*GetControlViewResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetControlViewResponse)
+	err := c.cc.Invoke(ctx, TrainVM_GetControlView_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *trainVMClient) GetDescriptor(ctx context.Context, in *DescriptorRequest, opts ...grpc.CallOption) (*DescriptorResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(DescriptorResponse)
@@ -138,6 +150,7 @@ type TrainVMServer interface {
 	GetRun(context.Context, *GetRunRequest) (*RunSummary, error)
 	ListRuns(context.Context, *ListRunsRequest) (*ListRunsResponse, error)
 	WatchEvents(*WatchEventsRequest, grpc.ServerStreamingServer[EventEnvelope]) error
+	GetControlView(context.Context, *GetControlViewRequest) (*GetControlViewResponse, error)
 	GetDescriptor(context.Context, *DescriptorRequest) (*DescriptorResponse, error)
 	mustEmbedUnimplementedTrainVMServer()
 }
@@ -166,6 +179,9 @@ func (UnimplementedTrainVMServer) ListRuns(context.Context, *ListRunsRequest) (*
 }
 func (UnimplementedTrainVMServer) WatchEvents(*WatchEventsRequest, grpc.ServerStreamingServer[EventEnvelope]) error {
 	return status.Error(codes.Unimplemented, "method WatchEvents not implemented")
+}
+func (UnimplementedTrainVMServer) GetControlView(context.Context, *GetControlViewRequest) (*GetControlViewResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetControlView not implemented")
 }
 func (UnimplementedTrainVMServer) GetDescriptor(context.Context, *DescriptorRequest) (*DescriptorResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetDescriptor not implemented")
@@ -292,6 +308,24 @@ func _TrainVM_WatchEvents_Handler(srv interface{}, stream grpc.ServerStream) err
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type TrainVM_WatchEventsServer = grpc.ServerStreamingServer[EventEnvelope]
 
+func _TrainVM_GetControlView_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetControlViewRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TrainVMServer).GetControlView(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TrainVM_GetControlView_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TrainVMServer).GetControlView(ctx, req.(*GetControlViewRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _TrainVM_GetDescriptor_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(DescriptorRequest)
 	if err := dec(in); err != nil {
@@ -336,6 +370,10 @@ var TrainVM_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListRuns",
 			Handler:    _TrainVM_ListRuns_Handler,
+		},
+		{
+			MethodName: "GetControlView",
+			Handler:    _TrainVM_GetControlView_Handler,
 		},
 		{
 			MethodName: "GetDescriptor",

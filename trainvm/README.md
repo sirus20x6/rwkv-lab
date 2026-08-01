@@ -42,9 +42,10 @@ Implemented now:
   journal-bound idempotency identities, atomic queued run creation, and deterministic queued-run
   recovery without launching work;
 - native dashboard read APIs for bounded run summaries, state/label-filtered cursor pagination,
-  revision-fenced semantic plan diffs, and resumable filtered event streaming from durable journal
-  sequence numbers; page tokens are bound to the exact journal and query rather than trusted as
-  client-provided SQL cursors;
+  revision-fenced semantic plan diffs, typed control catalog/effective/history snapshots, and
+  resumable filtered event streaming or bounded replay from durable journal sequence numbers; page
+  tokens are bound to the exact journal and query rather than trusted as client-provided SQL
+  cursors, and the production Go dashboard now consumes these RPCs instead of opening the journal;
 - a process-free queue reconciliation boundary that atomically acquires a fenced workspace lease,
   completes the declarative builtin resource-admission node, and advances to the real worker node
   while remaining unassigned and observed-acquiring;
