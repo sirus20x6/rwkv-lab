@@ -202,6 +202,41 @@ nvidia_frontend_major_impl(std::string_view devices) {
   return result;
 }
 
+std::optional<std::uint32_t> character_major_impl(
+    std::string_view devices, std::string_view expected_name) {
+  if (devices.empty() || devices.size() > kMaximumFileBytes ||
+      expected_name.empty())
+    return std::nullopt;
+  std::optional<std::uint32_t> result;
+  bool character_section = false;
+  std::size_t begin = 0U;
+  while (begin < devices.size()) {
+    const auto end = devices.find('\n', begin);
+    const std::string line = trim_ascii(std::string(devices.substr(
+        begin,
+        (end == std::string_view::npos ? devices.size() : end) - begin)));
+    if (line == "Character devices:")
+      character_section = true;
+    else if (line == "Block devices:")
+      character_section = false;
+    const auto separator = line.find_first_of(" \t");
+    if (character_section && separator != std::string::npos &&
+        trim_ascii(line.substr(separator + 1U)) == expected_name) {
+      std::uint32_t parsed = 0U;
+      const auto converted =
+          std::from_chars(line.data(), line.data() + separator, parsed);
+      if (converted.ec != std::errc{} ||
+          converted.ptr != line.data() + separator ||
+          (result && *result != parsed))
+        return std::nullopt;
+      result = parsed;
+    }
+    if (end == std::string_view::npos) break;
+    begin = end + 1U;
+  }
+  return result;
+}
+
 bool pinned_pci_mapping_impl(std::string_view pci_uevent,
                              std::string_view gpu_information,
                              std::string_view uuid, std::string_view bdf,
@@ -506,6 +541,7 @@ struct NvmlSample final {
   bool loader_attested{};
   std::string loader_detail;
   std::string driver;
+  std::vector<HostDeviceNodeCapability> shared_device_nodes;
   std::vector<LinuxNvidiaRawDevice> devices;
 
   bool operator==(const NvmlSample &) const = default;
@@ -937,6 +973,11 @@ std::string sample_revision(const std::string &boot,
   };
   for (const auto &bdf : structural)
     evidence += "s:" + bdf + "\n";
+  for (const auto &node : sample.shared_device_nodes)
+    evidence += "c:" + std::to_string(node.major) + ":" +
+                std::to_string(node.minor) + ":" +
+                (node.read ? "r" : "-") + (node.write ? "w" : "-") +
+                "\n";
   for (const auto &device : sample.devices) {
     evidence +=
         "d:" + device.uuid + ":" + device.pci_bdf + ":" +
@@ -1019,6 +1060,7 @@ public:
                                  second.loader_attested;
     result.capture_started_monotonic_ns = capture_started;
     result.capture_finished_monotonic_ns = monotonic_now_ns();
+    result.shared_device_nodes = first.shared_device_nodes;
     result.devices = first.devices;
     result.structural_pci_bdfs =
         structural_begin.value_or(std::vector<std::string>{});
@@ -1080,7 +1122,49 @@ private:
   static bool apply_structural(const SecureRoot &proc, const SecureRoot &sys,
                                const SecureRoot &dev, NvmlSample &sample) {
     const auto registered_major = nvidia_frontend_major(proc);
-    bool all_complete = true;
+    const auto devices_text = proc.read("devices", kMaximumFileBytes);
+    const auto uvm_major =
+        devices_text ? character_major_impl(*devices_text, "nvidia-uvm")
+                     : std::nullopt;
+    const auto control = dev.character_device("nvidiactl");
+    const auto uvm = dev.character_device("nvidia-uvm");
+    const auto uvm_tools = dev.character_device("nvidia-uvm-tools");
+    bool all_complete = registered_major && uvm_major && control && uvm &&
+                        uvm_tools && control->first == *registered_major &&
+                        control->second == 255U && uvm->first == *uvm_major &&
+                        uvm->second == 0U && uvm_tools->first == *uvm_major &&
+                        uvm_tools->second == 1U;
+    sample.shared_device_nodes.clear();
+    if (all_complete) {
+      sample.shared_device_nodes = {
+          {.type = HostDeviceNodeType::character,
+           .purpose = HostDeviceNodePurpose::shared_driver_control,
+           .major = control->first,
+           .minor = control->second,
+           .read = true,
+           .write = true},
+          {.type = HostDeviceNodeType::character,
+           .purpose = HostDeviceNodePurpose::shared_driver_control,
+           .major = uvm->first,
+           .minor = uvm->second,
+           .read = true,
+           .write = true},
+          {.type = HostDeviceNodeType::character,
+           .purpose = HostDeviceNodePurpose::shared_driver_control,
+           .major = uvm_tools->first,
+           .minor = uvm_tools->second,
+           .read = true,
+           .write = true},
+      };
+      std::ranges::sort(sample.shared_device_nodes,
+                        [](const auto &left, const auto &right) {
+                          return std::tie(left.type, left.purpose, left.major,
+                                          left.minor, left.read, left.write) <
+                                 std::tie(right.type, right.purpose,
+                                          right.major, right.minor, right.read,
+                                          right.write);
+                        });
+    }
     for (auto &device : sample.devices) {
       bool complete = !device.pci_bdf.empty() && device.device_minor;
       const std::string prefix = "bus/pci/devices/" + device.pci_bdf + "/";
@@ -1273,8 +1357,9 @@ HostKernelSnapshot LinuxNvidiaInventoryCollector::capture_inventory() {
       !bounded_identifier(raw.begin_revision) ||
       !bounded_identifier(raw.end_revision) ||
       !printable_bounded(
-          raw.detail, HostResourceBounds::maximum_probe_detail_bytes - 96U) ||
+      raw.detail, HostResourceBounds::maximum_probe_detail_bytes - 96U) ||
       raw.devices.size() > implementation_->config.maximum_devices ||
+      raw.shared_device_nodes.size() > 32U ||
       raw.structural_pci_bdfs.size() >
           implementation_->config.maximum_devices ||
       raw.capture_started_monotonic_ns == 0U ||
@@ -1294,7 +1379,8 @@ HostKernelSnapshot LinuxNvidiaInventoryCollector::capture_inventory() {
       raw.capture_finished_monotonic_ns - raw.capture_started_monotonic_ns <=
           implementation_->config.maximum_capture_duration_ns &&
       observed_now - raw.capture_finished_monotonic_ns <=
-          implementation_->config.maximum_snapshot_age_ns;
+          implementation_->config.maximum_snapshot_age_ns &&
+      !raw.shared_device_nodes.empty();
   std::set<std::string> ids;
   std::set<std::string> bdfs;
   std::size_t raw_resource_count = raw.devices.size();
@@ -1433,6 +1519,22 @@ HostKernelSnapshot LinuxNvidiaInventoryCollector::capture_inventory() {
           device.device_minor) {
         resource.device_major = device.device_major;
         resource.device_minor = device.device_minor;
+        resource.device_nodes = raw.shared_device_nodes;
+        resource.device_nodes.push_back(
+            {.type = HostDeviceNodeType::character,
+             .purpose = HostDeviceNodePurpose::assigned_accelerator,
+             .major = *device.device_major,
+             .minor = *device.device_minor,
+             .read = true,
+             .write = true});
+        std::ranges::sort(resource.device_nodes,
+                          [](const auto &left, const auto &right) {
+                            return std::tie(left.type, left.purpose, left.major,
+                                            left.minor, left.read, left.write) <
+                                   std::tie(right.type, right.purpose,
+                                            right.major, right.minor,
+                                            right.read, right.write);
+                          });
       }
       if (device.numa_node && *device.numa_node >= 0)
         resource.numa_node = device.numa_node;

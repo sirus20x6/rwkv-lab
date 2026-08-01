@@ -11,7 +11,7 @@
 namespace trainvm {
 
 inline constexpr std::string_view kLinuxNvidiaInventoryApiVersion =
-    "trainvm.linux-nvidia-inventory/v1";
+    "trainvm.linux-nvidia-inventory/v2";
 
 struct LinuxNvidiaObservedContexts final {
   ResourceContextDisposition compute{ResourceContextDisposition::unknown};
@@ -93,6 +93,7 @@ struct LinuxNvidiaRawSnapshot final {
   std::uint64_t capture_started_monotonic_ns{};
   std::uint64_t capture_finished_monotonic_ns{};
   std::vector<std::string> structural_pci_bdfs;
+  std::vector<HostDeviceNodeCapability> shared_device_nodes;
   std::vector<LinuxNvidiaRawDevice> devices;
   std::string detail;
 

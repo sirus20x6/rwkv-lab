@@ -638,6 +638,14 @@ the matching logical lease.
 
 ### P0.1 — typed inventory and fake kernel
 
+The implemented v2 host inventory now binds a canonical per-resource device-node capability set
+into topology, inventory, selection, and degradation identity. The Linux NVIDIA collector
+double-samples the assigned frontend node plus `nvidiactl`, `nvidia-uvm`, and
+`nvidia-uvm-tools`, cross-checking their registered majors and fixed minors. Scheduling evidence may
+still omit capabilities, but such a resource cannot authorize launch. MIG children deliberately
+remain without a capability set until their complete instance/capability-node mapping is proven;
+the parent GPU node is never substituted.
+
 Implement the receipt/data types, canonical codecs, `IHostKernel`, stable accelerator inventory, MIG
 hierarchy, topology digests, and deterministic bundle selection. Add read-only hostd status output.
 

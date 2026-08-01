@@ -85,6 +85,7 @@ ObservedHostResource mutex_resource(std::string id) {
           .pci_bdf = std::nullopt,
           .device_major = std::nullopt,
           .device_minor = std::nullopt,
+          .device_nodes = {},
           .numa_node = std::nullopt,
           .pcie_root_id = std::nullopt,
           .fabric_clique_id = std::nullopt,

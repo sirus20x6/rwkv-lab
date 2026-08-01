@@ -102,6 +102,25 @@ LinuxNvidiaRawSnapshot complete_snapshot() {
       .capture_started_monotonic_ns = 1'000'000U,
       .capture_finished_monotonic_ns = 1'000'100U,
       .structural_pci_bdfs = {"0000:01:00.0", "0000:02:00.0"},
+      .shared_device_nodes =
+          {{.type = HostDeviceNodeType::character,
+            .purpose = HostDeviceNodePurpose::shared_driver_control,
+            .major = 195U,
+            .minor = 255U,
+            .read = true,
+            .write = true},
+           {.type = HostDeviceNodeType::character,
+            .purpose = HostDeviceNodePurpose::shared_driver_control,
+            .major = 511U,
+            .minor = 0U,
+            .read = true,
+            .write = true},
+           {.type = HostDeviceNodeType::character,
+            .purpose = HostDeviceNodePurpose::shared_driver_control,
+            .major = 511U,
+            .minor = 1U,
+            .read = true,
+            .write = true}},
       .devices = {device(std::string(kGpuB), "0000:02:00.0", 1U,
                          {.compute = ResourceContextDisposition::absent,
                           .graphics = ResourceContextDisposition::absent},
@@ -183,7 +202,8 @@ void complete_capture_is_stable_and_display_is_occupied() {
   require(partition_parent.disposition ==
                   ResourceObservationDisposition::probe_unknown &&
               partition_parent.device_major == 195U &&
-              partition_parent.device_minor == 0U,
+              partition_parent.device_minor == 0U &&
+              partition_parent.device_nodes.size() == 4U,
           "MIG parent remains nonselectable rather than aggregating children");
   const auto &display_gpu = resource(first, kGpuB);
   require(display_gpu.disposition == ResourceObservationDisposition::occupied &&

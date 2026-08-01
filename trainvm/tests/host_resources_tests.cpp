@@ -417,14 +417,14 @@ int main() {
         *select_host_resources(inventory, exact, free);
     require(
         inventory.receipt_digest ==
-            "sha256:3c1bd76e43d91c32d3b048d26b44fbe5de353c4bc2809c9512beeeb8f9258b6a" &&
+            "sha256:26e3f78b79eef7c4411261449fbb11bd4d046c10abd7dd3e92bf1e567bfa9f70" &&
         exact.canonical_request_digest ==
             "sha256:846e1019a1034ec1447a55048e54f3dc69a007afbc7b5b448e1dd5bd691a3e7e" &&
         free.occupancy_digest ==
-            "sha256:8a43481b704915028eda7f35d0157a6ec8092c9d1d1703a63c9ffad82d019f04" &&
+            "sha256:9a55192945c5c60d49c28f33ab6a29c60c17f9a2a3edff59660ea6c7063fbfe8" &&
         selection.selection_digest ==
-            "sha256:604e4e2280cc418b94b38855f367253df5c2f5f8f3ffca2cd6eeede03741619d",
-        "v1 inventory/request/occupancy/selection golden digests are pinned");
+            "sha256:3354094910119e43fbd85817cd01e47a565abea5b574feb7574fcb3c5f4ff939",
+        "versioned inventory/request/occupancy/selection digests are pinned");
     require(resource_selection_from_json(resource_selection_json(selection)) ==
                 selection,
             "strict reflected selection codec round trips");
@@ -561,6 +561,49 @@ int main() {
     negative_numa.resources.front().numa_node = -1;
     require_rejected([&] { (void)capture(negative_numa); },
                      "unknown NUMA has one canonical null encoding");
+
+    auto capability_snapshot = base_snapshot("revision-capability-nodes");
+    auto& capability_gpu = *std::ranges::find_if(
+        capability_snapshot.resources, [](const auto& resource) {
+          return resource.id.stable_id == kGpuA;
+        });
+    capability_gpu.device_nodes = {
+        {.type = HostDeviceNodeType::character,
+         .purpose = HostDeviceNodePurpose::assigned_accelerator,
+         .major = 195U,
+         .minor = 1U,
+         .read = true,
+         .write = true},
+        {.type = HostDeviceNodeType::character,
+         .purpose = HostDeviceNodePurpose::shared_driver_control,
+         .major = 195U,
+         .minor = 255U,
+         .read = true,
+         .write = true}};
+    const auto capability_inventory = capture(capability_snapshot);
+    const auto& captured_capability = *std::ranges::find_if(
+        capability_inventory.resources, [](const auto& resource) {
+          return resource.id.stable_id == kGpuA;
+        });
+    require(captured_capability.device_nodes == capability_gpu.device_nodes,
+            "exact assigned and shared device capabilities enter inventory identity");
+    auto mismatched_capability = capability_snapshot;
+    auto& mismatched_gpu = *std::ranges::find_if(
+        mismatched_capability.resources, [](const auto& resource) {
+          return resource.id.stable_id == kGpuA;
+        });
+    mismatched_gpu.device_nodes.front().minor = 9U;
+    require_rejected([&] { (void)capture(mismatched_capability); },
+                     "assigned capability must match the observed GPU node");
+    auto partition_capability = base_snapshot("revision-partition-capability");
+    auto& partition_node = *std::ranges::find_if(
+        partition_capability.resources, [](const auto& resource) {
+          return resource.id.stable_id == kMig0;
+        });
+    partition_node.device_nodes = capability_gpu.device_nodes;
+    require_rejected([&] { (void)capture(partition_capability); },
+                     "a parent GPU capability map cannot authorize a partition");
+
     auto nvidia_alias = request(ResourceAccessMode::exclusive_device,
                                 TopologyPolicy::exact_resources, 1U);
     HostResourceId alias{};

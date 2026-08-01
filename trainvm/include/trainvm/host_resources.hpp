@@ -13,11 +13,11 @@
 namespace trainvm {
 
 inline constexpr std::string_view kHostInventoryApiVersion =
-    "trainvm.host-inventory/v1";
+    "trainvm.host-inventory/v2";
 inline constexpr std::string_view kHostResourceRequestApiVersion =
     "trainvm.host-resource-request/v1";
 inline constexpr std::string_view kHostResourceSelectionApiVersion =
-    "trainvm.host-resource-selection/v1";
+    "trainvm.host-resource-selection/v2";
 inline constexpr std::string_view kHostResourceOccupancyApiVersion =
     "trainvm.host-resource-occupancy/v1";
 
@@ -105,6 +105,27 @@ struct HostProbeResult final {
   bool operator==(const HostProbeResult&) const = default;
 };
 
+enum class HostDeviceNodeType {
+  character,
+  block,
+};
+
+enum class HostDeviceNodePurpose {
+  assigned_accelerator,
+  shared_driver_control,
+};
+
+struct HostDeviceNodeCapability final {
+  HostDeviceNodeType type{};
+  HostDeviceNodePurpose purpose{};
+  std::uint32_t major{};
+  std::uint32_t minor{};
+  bool read{};
+  bool write{};
+
+  bool operator==(const HostDeviceNodeCapability&) const = default;
+};
+
 struct ObservedHostResource final {
   HostResourceId id;
   // Disposition and context observations are owned by this exact stable ID.
@@ -119,6 +140,11 @@ struct ObservedHostResource final {
   // pair absent; it must never be interpreted as an isolation allowlist.
   std::optional<std::uint32_t> device_major;
   std::optional<std::uint32_t> device_minor;
+  // Exact open capabilities used by the cgroup-device policy. An empty set is
+  // valid scheduling evidence but cannot authorize process launch. Partition
+  // resources remain launch-ineligible until their complete capability-node
+  // map is observed; a parent GPU node is never substituted for that map.
+  std::vector<HostDeviceNodeCapability> device_nodes;
   std::optional<std::int32_t> numa_node;
   std::optional<std::string> pcie_root_id;
   std::optional<std::string> fabric_clique_id;

@@ -191,6 +191,46 @@ bool resource_less(const ObservedHostResource& left,
   return id_less(left.id, right.id);
 }
 
+bool device_node_less(const HostDeviceNodeCapability& left,
+                      const HostDeviceNodeCapability& right) {
+  return std::tie(left.type, left.purpose, left.major, left.minor, left.read,
+                  left.write) <
+         std::tie(right.type, right.purpose, right.major, right.minor,
+                  right.read, right.write);
+}
+
+void validate_device_nodes(const ObservedHostResource& resource) {
+  if (resource.device_nodes.size() > 32U ||
+      !std::ranges::is_sorted(resource.device_nodes, device_node_less)) {
+    throw HostResourceError(
+        "device-node capabilities are unbounded or noncanonical");
+  }
+  std::set<std::tuple<HostDeviceNodeType, std::uint32_t, std::uint32_t>> nodes;
+  std::size_t assigned = 0U;
+  for (const auto& node : resource.device_nodes) {
+    if ((!node.read && !node.write) || node.major > 0xfffU ||
+        node.minor > 0xfffffU ||
+        !nodes.emplace(node.type, node.major, node.minor).second) {
+      throw HostResourceError(
+          "device-node capability is unusable or duplicate");
+    }
+    if (node.purpose == HostDeviceNodePurpose::assigned_accelerator) {
+      ++assigned;
+      if (!resource.device_major || !resource.device_minor ||
+          node.type != HostDeviceNodeType::character ||
+          node.major != *resource.device_major ||
+          node.minor != *resource.device_minor) {
+        throw HostResourceError(
+            "assigned device-node capability disagrees with topology");
+      }
+    }
+  }
+  if (!resource.device_nodes.empty() && assigned != 1U) {
+    throw HostResourceError(
+        "nonempty accelerator capability map requires one assigned node");
+  }
+}
+
 void validate_observed_resource(const ObservedHostResource& resource) {
   validate_resource_id(resource.id);
   if (resource.labels.size() > HostResourceBounds::maximum_labels_per_resource) {
@@ -201,6 +241,7 @@ void validate_observed_resource(const ObservedHostResource& resource) {
   if (resource.device_major.has_value() != resource.device_minor.has_value()) {
     throw HostResourceError("device major and minor must be observed together");
   }
+  validate_device_nodes(resource);
   if (resource.pci_bdf && !canonical_pci_bdf(*resource.pci_bdf)) {
     throw HostResourceError("PCI BDF must use canonical lowercase dddd:bb:ss.f");
   }
@@ -216,7 +257,8 @@ void validate_observed_resource(const ObservedHostResource& resource) {
   if (resource.id.kind == HostResourceKind::host_mutex) {
     if (resource.total_memory_bytes != 0U || resource.pci_bdf ||
         resource.device_major || resource.device_minor ||
-        resource.numa_node || resource.pcie_root_id ||
+        !resource.device_nodes.empty() || resource.numa_node ||
+        resource.pcie_root_id ||
         resource.fabric_clique_id) {
       throw HostResourceError("host mutexes cannot carry accelerator topology");
     }
@@ -228,7 +270,8 @@ void validate_observed_resource(const ObservedHostResource& resource) {
     throw HostResourceError("accelerator resources require nonzero capacity");
   }
   if (resource.id.kind == HostResourceKind::accelerator_partition &&
-      (resource.device_major || resource.device_minor)) {
+      (resource.device_major || resource.device_minor ||
+       !resource.device_nodes.empty())) {
     throw HostResourceError(
         "partition single-node evidence is not an isolation mapping");
   }
@@ -250,6 +293,7 @@ nlohmann::json topology_json(
         {"pci_bdf", resource.pci_bdf},
         {"device_major", resource.device_major},
         {"device_minor", resource.device_minor},
+        {"device_nodes", encode_json(resource.device_nodes)},
         {"numa_node", resource.numa_node},
         {"pcie_root_id", resource.pcie_root_id},
         {"fabric_clique_id", resource.fabric_clique_id},
@@ -553,6 +597,7 @@ bool topology_facts_equal(const ObservedHostResource& left,
   return left.id == right.id && left.pci_bdf == right.pci_bdf &&
          left.device_major == right.device_major &&
          left.device_minor == right.device_minor &&
+         left.device_nodes == right.device_nodes &&
          left.numa_node == right.numa_node &&
          left.pcie_root_id == right.pcie_root_id &&
          left.fabric_clique_id == right.fabric_clique_id &&
@@ -674,11 +719,11 @@ void validate_host_inventory(const HostInventoryReceipt& receipt) {
     total += resource->total_memory_bytes;
   }
   const auto expected_topology =
-      sha256("trainvm.host-topology/v1", topology_json(receipt.resources));
+      sha256("trainvm.host-topology/v2", topology_json(receipt.resources));
   const auto expected_inventory = sha256(
-      "trainvm.host-inventory-content/v1", inventory_digest_json(receipt));
+      "trainvm.host-inventory-content/v2", inventory_digest_json(receipt));
   const auto expected_receipt = sha256(
-      "trainvm.host-inventory-receipt/v1",
+      "trainvm.host-inventory-receipt/v2",
       inventory_receipt_digest_json(receipt));
   if (receipt.topology_digest != expected_topology ||
       receipt.inventory_digest != expected_inventory ||
@@ -834,7 +879,7 @@ void validate_resource_selection(const ResourceBundleSelection& selection) {
       }
     }
   }
-  const auto expected = sha256("trainvm.host-resource-selection/v1",
+  const auto expected = sha256("trainvm.host-resource-selection/v2",
                                selection_digest_json(selection));
   if (selection.selection_digest != expected) {
     throw HostResourceError("resource selection digest validation failed");
@@ -878,10 +923,10 @@ HostInventoryReceipt capture_host_inventory(IHostKernel& kernel) {
       .receipt_digest = {},
   };
   receipt.topology_digest =
-      sha256("trainvm.host-topology/v1", topology_json(receipt.resources));
-  receipt.inventory_digest = sha256("trainvm.host-inventory-content/v1",
+      sha256("trainvm.host-topology/v2", topology_json(receipt.resources));
+  receipt.inventory_digest = sha256("trainvm.host-inventory-content/v2",
                                     inventory_digest_json(receipt));
-  receipt.receipt_digest = sha256("trainvm.host-inventory-receipt/v1",
+  receipt.receipt_digest = sha256("trainvm.host-inventory-receipt/v2",
                                   inventory_receipt_digest_json(receipt));
   validate_host_inventory(receipt);
   return receipt;
@@ -986,7 +1031,7 @@ std::optional<ResourceBundleSelection> select_host_resources(
       .resources = std::move(chosen),
       .selection_digest = {},
   };
-  selection.selection_digest = sha256("trainvm.host-resource-selection/v1",
+  selection.selection_digest = sha256("trainvm.host-resource-selection/v2",
                                       selection_digest_json(selection));
   validate_resource_selection(selection);
   return selection;

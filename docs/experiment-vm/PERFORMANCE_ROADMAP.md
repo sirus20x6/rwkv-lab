@@ -262,6 +262,9 @@ startup orphan recovery are defined in
   endpoint only after admission. It exposes grant/release and restart reconciliation but keeps new
   process launch unavailable until a durable cgroup-device BPF receipt exists. Device enforcement
   and real-host crash qualification remain before training admission can rely on this path.
+  The prerequisite v2 inventory capability model is implemented: exact assigned and shared NVIDIA
+  driver nodes are topology-bound, capability drift degrades the resource, and unmapped partitions
+  fail launch eligibility rather than borrowing their parent node.
 - Resolve the remaining stock-SQLite auxiliary pathname race in the declared host threat model:
   trusted isolated authority directory, controlled VFS, or host-global lock broker. Do not treat
   the network-namespace-local abstract socket as the host-wide GPU/resource fence.
