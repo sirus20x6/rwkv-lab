@@ -4196,9 +4196,8 @@ void test_worker_control_service_boundary() {
       .required_capabilities = {"worker.controls", "worker.metrics"},
   };
 
-  // WorkerToController is deliberately a closed oneof. Connect additionally
-  // requires kHello first and currently rejects every subsequent case except
-  // kEvent; the helper boundary below covers the accepted event path.
+  // WorkerToController is deliberately a closed oneof. Connect requires
+  // kHello first and durably dispatches every subsequent variant.
   trainvm::v1::WorkerToController first_message;
   check(first_message.message_case() ==
             trainvm::v1::WorkerToController::MESSAGE_NOT_SET,
@@ -4211,7 +4210,7 @@ void test_worker_control_service_boundary() {
   first_message.mutable_metric()->set_name("loss");
   check(first_message.message_case() == trainvm::v1::WorkerToController::kMetric &&
             !first_message.has_heartbeat() && !first_message.has_event(),
-        "unsupported WorkerControl variants cannot alias the result event case");
+        "WorkerControl telemetry variants cannot alias the result event case");
 
   const std::filesystem::path directory =
       std::filesystem::temp_directory_path() /
@@ -4316,8 +4315,8 @@ void test_worker_control_service_boundary() {
     auto wrong_sequence = canonical;
     wrong_sequence.set_worker_sequence(2);
     reject_without_mutation(
-        wrong_sequence, grpc::StatusCode::INVALID_ARGUMENT,
-        "WorkerControl rejects a noncanonical worker sequence without mutation");
+        wrong_sequence, grpc::StatusCode::FAILED_PRECONDITION,
+        "WorkerControl rejects a worker sequence gap without mutation");
     auto any_payload = canonical;
     any_payload.mutable_payload()->set_type_url("type.googleapis.com/test.Unsupported");
     any_payload.mutable_payload()->set_value("opaque");
@@ -4382,6 +4381,164 @@ void test_worker_control_service_boundary() {
                     first_receipt &&
                 observer.event_count() == 16U,
             "lost WorkerControl receipts replay exactly without duplicate commits");
+    }
+  }
+
+  {
+    const auto database_path = directory / "telemetry.db";
+    const std::string run_id = "worker-control-telemetry-run";
+    trainvm::WorkerLaunchTicket launch;
+    {
+      trainvm::Journal journal(
+          database_path, std::nullopt,
+          trainvm::HostGrantEnforcement::legacy_process_free_test);
+      trainvm::Controller controller(*compiled.plan, journal, run_id);
+      controller.create_queued(submission_identity);
+      (void)controller.begin_acquisition(test_time(2'000));
+      launch = controller.prepare_worker_launch(launch_request, test_time(2'100));
+      (void)bind_test_worker_launch(controller, launch, 2'150);
+    }
+    trainvm::TrainVMService service(
+        database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
+        fixture_test_host_launch_registry(*compiled.plan, launch),
+        fixture_test_host_identity(), [] { return test_time(2'200); },
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
+    prime_test_service_launch(service, launch);
+    trainvm::TrainVMService::WorkerConnection connection;
+    const grpc::Status open =
+        service.open_worker_connection(wire_hello(launch), connection);
+
+    trainvm::v1::WorkerHeartbeat heartbeat;
+    heartbeat.set_worker_sequence(1);
+    heartbeat.set_optimizer_step(10);
+    heartbeat.set_phase("train");
+    heartbeat.mutable_observed_at()->set_seconds(1);
+    std::uint64_t acknowledged = 0;
+    const grpc::Status heartbeat_status =
+        service.record_worker_heartbeat(heartbeat, connection, acknowledged);
+    const std::size_t after_heartbeat =
+        trainvm::Journal(database_path).event_count();
+    std::uint64_t replayed_acknowledgement = 0;
+    const grpc::Status heartbeat_replay = service.record_worker_heartbeat(
+        heartbeat, connection, replayed_acknowledgement);
+
+    trainvm::v1::MetricSample metric;
+    metric.set_worker_sequence(2);
+    metric.set_name("loss");
+    metric.mutable_value()->set_number_value(1.25);
+    metric.set_unit("loss");
+    metric.set_step_domain("optimizer_step");
+    metric.set_step(11);
+    metric.set_sample_weight(1.0);
+    (*metric.mutable_labels())["route"] = "animation";
+    metric.mutable_observed_at()->set_seconds(2);
+    std::uint64_t metric_acknowledgement = 0;
+    const grpc::Status metric_status = service.record_worker_metric(
+        metric, connection, metric_acknowledgement);
+
+    trainvm::v1::ArtifactManifest artifact;
+    artifact.set_worker_sequence(3);
+    artifact.set_artifact_id("eval-gallery-step-11");
+    artifact.set_logical_name("eval/gallery");
+    artifact.set_kind(trainvm::v1::ARTIFACT_KIND_IMAGE_GALLERY);
+    artifact.set_schema("trainvm.eval-gallery/v1");
+    artifact.set_uri("file:///sealed/eval-gallery-step-11");
+    artifact.set_size_bytes(4096);
+    artifact.set_fingerprint_algorithm("sha256");
+    artifact.set_fingerprint(std::string(64U, 'a'));
+    artifact.set_complete(true);
+    artifact.set_producer_node_id(connection.identity.node_id);
+    artifact.set_producer_attempt_id(connection.identity.attempt_id);
+    artifact.mutable_published_at()->set_seconds(3);
+    std::uint64_t artifact_acknowledgement = 0;
+    const grpc::Status artifact_status = service.record_worker_artifact(
+        artifact, connection, artifact_acknowledgement);
+
+    trainvm::Controller control_controller(*compiled.plan, service.journal_,
+                                           run_id);
+    control_controller.recover();
+    const auto control_request = control_controller.request_controls(
+        "telemetry-control", 5, 0, {{"caption_dropout", 0.2}}, "operator",
+        "exercise streamed acknowledgement");
+    trainvm::v1::ControlPatchAcknowledgement control_ack;
+    if (control_request.command) {
+      control_ack.set_command_id(control_request.command->command_id);
+      control_ack.set_control_revision(control_request.command->control_revision);
+    }
+    control_ack.set_disposition(
+        trainvm::v1::ControlPatchAcknowledgement::DISPOSITION_APPLIED);
+    control_ack.set_apply_point(trainvm::v1::APPLY_POINT_NEXT_MICROBATCH);
+    control_ack.set_effective_step(12);
+    auto* effective = control_ack.add_effective_values();
+    effective->set_key("caption_dropout");
+    effective->mutable_value()->set_number_value(0.2);
+    control_ack.set_concurrency_key(connection.identity.concurrency_key);
+    control_ack.set_lease_id(connection.identity.lease_id);
+    control_ack.set_fencing_token(connection.identity.fencing_token);
+    control_ack.set_worker_sequence(4);
+    control_ack.mutable_acknowledged_at()->set_seconds(4);
+    std::uint64_t control_acknowledgement = 0;
+    const grpc::Status control_status = service.acknowledge_worker_control(
+        control_ack, connection, control_acknowledgement);
+    const std::size_t after_control =
+        trainvm::Journal(database_path).event_count();
+    std::uint64_t replayed_control_acknowledgement = 0;
+    const grpc::Status control_replay = service.acknowledge_worker_control(
+        control_ack, connection, replayed_control_acknowledgement);
+
+    auto gap = heartbeat;
+    gap.set_worker_sequence(6);
+    std::uint64_t ignored = 0;
+    const grpc::Status gap_status =
+        service.record_worker_heartbeat(gap, connection, ignored);
+
+    trainvm::TrainVMService::WorkerConnection reconnected;
+    const grpc::Status reconnect =
+        service.open_worker_connection(wire_hello(launch), reconnected);
+    auto result = wire_result(reconnected);
+    result.set_worker_sequence(5);
+    trainvm::v1::WorkerReceipt receipt;
+    const grpc::Status complete = service.complete_worker_connection(
+        result, reconnected, receipt);
+    {
+      trainvm::Journal observer(database_path);
+      const auto projection = observer.projection(run_id);
+      const auto events = observer.events_for_run(run_id);
+      const auto durable_heartbeat = observer.event(
+          connection.dispatch.dispatch_id + ":heartbeat:1");
+      check(open.ok() && heartbeat_status.ok() && acknowledged == 1U &&
+                heartbeat_replay.ok() && replayed_acknowledgement == 1U &&
+                after_heartbeat == 13U && observer.event_count() == 21U &&
+                metric_status.ok() && metric_acknowledgement == 2U &&
+                artifact_status.ok() && artifact_acknowledgement == 3U &&
+                control_request.command && control_status.ok() &&
+                control_acknowledgement == 4U && control_replay.ok() &&
+                replayed_control_acknowledgement == 4U &&
+                after_control == 17U &&
+                gap_status.error_code() == grpc::StatusCode::FAILED_PRECONDITION &&
+                reconnect.ok() &&
+                reconnected.welcome.disposition() ==
+                    trainvm::v1::WorkerWelcome::DISPOSITION_REPLAYED &&
+                reconnected.welcome.acknowledged_worker_sequence() == 4U &&
+                complete.ok() &&
+                receipt.acknowledged_worker_sequence() == 5U && projection &&
+                projection->optimizer_step == 5'500U &&
+                projection->last_heartbeat_ns == 2'200 &&
+                durable_heartbeat &&
+                durable_heartbeat->wall_time_ns == 2'200 &&
+                durable_heartbeat->payload.value("observed_at_ns",
+                                                  std::int64_t{}) ==
+                    1'000'000'000LL &&
+                std::ranges::count_if(events, [](const trainvm::Event& event) {
+                  return event.event_type == "worker.heartbeat";
+                }) == 1 &&
+                std::ranges::count_if(events, [](const trainvm::Event& event) {
+                  return event.event_type == "metric.sampled";
+                }) == 1 &&
+                std::ranges::count_if(events, [](const trainvm::Event& event) {
+                  return event.event_type == "artifact.published";
+                }) == 1,
+            "WorkerControl durably acknowledges replay-safe heartbeat, metric, and artifact observations without advancing the FSM");
     }
   }
 
@@ -4769,12 +4926,119 @@ void test_worker_control_grpc_stream() {
           "WorkerControl gRPC rejects a duplicate active attempt while its first stream is open");
   }
 
+  trainvm::v1::RunCommandRequest live_control_request;
+  live_control_request.set_run_id(launch.run_id);
+  live_control_request.set_expected_run_revision(5);
+  live_control_request.set_idempotency_key("grpc-live-control");
+  live_control_request.set_author("operator");
+  live_control_request.set_reason("exercise live worker command delivery");
+  live_control_request.set_expected_journal_id(service.journal_.journal_id());
+  live_control_request.set_expected_plan_hash(compiled.plan->plan_hash);
+  live_control_request.mutable_controls()->set_expected_control_revision(0);
+  auto* live_assignment =
+      live_control_request.mutable_controls()->add_assignments();
+  live_assignment->set_key("caption_dropout");
+  live_assignment->mutable_value()->set_number_value(0.25);
+  trainvm::v1::RunCommandResponse live_control_response;
+  const grpc::Status live_control_status = service.CommandRun(
+      nullptr, &live_control_request, &live_control_response);
+
   bool result_written = false;
+  bool telemetry_acknowledged = false;
   trainvm::v1::ControllerToWorker receipt_message;
   bool receipt_received = false;
   grpc::Status primary_status;
   if (welcome_received && welcome_message.has_welcome()) {
-    result_written = primary->Write(result_for(welcome_message.welcome()));
+    trainvm::v1::WorkerToController heartbeat_message;
+    auto* heartbeat = heartbeat_message.mutable_heartbeat();
+    heartbeat->set_worker_sequence(1);
+    heartbeat->set_optimizer_step(20);
+    heartbeat->set_phase("train");
+    heartbeat->mutable_observed_at()->set_seconds(1);
+    trainvm::v1::ControllerToWorker heartbeat_ack;
+    const bool heartbeat_written = primary->Write(heartbeat_message);
+    const bool heartbeat_received = primary->Read(&heartbeat_ack);
+
+    trainvm::v1::ControllerToWorker worker_command_message;
+    const bool worker_command_received = primary->Read(&worker_command_message);
+    const bool worker_command_valid =
+        live_control_status.ok() && live_control_response.has_control() &&
+        worker_command_received && worker_command_message.has_command() &&
+        worker_command_message.command().has_controls() &&
+        worker_command_message.command().command_id() ==
+            live_control_response.control().command_id() &&
+        worker_command_message.command().controller_sequence() == 1U &&
+        worker_command_message.command().controls().control_revision() == 1U &&
+        worker_command_message.command().controls().apply_point() ==
+            trainvm::v1::APPLY_POINT_NEXT_MICROBATCH;
+
+    trainvm::v1::WorkerToController control_ack_message;
+    auto* control_ack = control_ack_message.mutable_control_ack();
+    control_ack->set_command_id(live_control_response.control().command_id());
+    control_ack->set_control_revision(1);
+    control_ack->set_disposition(
+        trainvm::v1::ControlPatchAcknowledgement::DISPOSITION_APPLIED);
+    control_ack->set_apply_point(trainvm::v1::APPLY_POINT_NEXT_MICROBATCH);
+    control_ack->set_effective_step(20);
+    auto* applied = control_ack->add_effective_values();
+    applied->set_key("caption_dropout");
+    applied->mutable_value()->set_number_value(0.25);
+    control_ack->set_concurrency_key(launch.concurrency_key);
+    control_ack->set_lease_id(launch.lease_id);
+    control_ack->set_fencing_token(launch.fencing_token);
+    control_ack->set_worker_sequence(2);
+    control_ack->mutable_acknowledged_at()->set_seconds(2);
+    trainvm::v1::ControllerToWorker control_receipt;
+    const bool control_ack_written = primary->Write(control_ack_message);
+    const bool control_ack_received = primary->Read(&control_receipt);
+
+    trainvm::v1::WorkerToController metric_message;
+    auto* metric = metric_message.mutable_metric();
+    metric->set_worker_sequence(3);
+    metric->set_name("loss");
+    metric->mutable_value()->set_number_value(0.75);
+    metric->set_unit("loss");
+    metric->set_step_domain("optimizer_step");
+    metric->set_step(21);
+    metric->set_sample_weight(1.0);
+    metric->mutable_observed_at()->set_seconds(3);
+    trainvm::v1::ControllerToWorker metric_ack;
+    const bool metric_written = primary->Write(metric_message);
+    const bool metric_received = primary->Read(&metric_ack);
+
+    trainvm::v1::WorkerToController artifact_message;
+    auto* artifact = artifact_message.mutable_artifact();
+    artifact->set_worker_sequence(4);
+    artifact->set_artifact_id("grpc-eval-gallery");
+    artifact->set_logical_name("eval/gallery");
+    artifact->set_kind(trainvm::v1::ARTIFACT_KIND_IMAGE_GALLERY);
+    artifact->set_schema("trainvm.eval-gallery/v1");
+    artifact->set_uri("file:///sealed/grpc-eval-gallery");
+    artifact->set_size_bytes(8192);
+    artifact->set_fingerprint_algorithm("sha256");
+    artifact->set_fingerprint(std::string(64U, 'b'));
+    artifact->set_complete(true);
+    artifact->set_producer_node_id(welcome_message.welcome().node_id());
+    artifact->set_producer_attempt_id(welcome_message.welcome().attempt_id());
+    artifact->mutable_published_at()->set_seconds(4);
+    trainvm::v1::ControllerToWorker artifact_ack;
+    const bool artifact_written = primary->Write(artifact_message);
+    const bool artifact_received = primary->Read(&artifact_ack);
+    telemetry_acknowledged =
+        heartbeat_written && heartbeat_received &&
+        heartbeat_ack.has_acknowledge_worker_sequence() &&
+        heartbeat_ack.acknowledge_worker_sequence() == 1U &&
+        worker_command_valid && control_ack_written && control_ack_received &&
+        control_receipt.has_acknowledge_worker_sequence() &&
+        control_receipt.acknowledge_worker_sequence() == 2U && metric_written &&
+        metric_received && metric_ack.has_acknowledge_worker_sequence() &&
+        metric_ack.acknowledge_worker_sequence() == 3U && artifact_written &&
+        artifact_received && artifact_ack.has_acknowledge_worker_sequence() &&
+        artifact_ack.acknowledge_worker_sequence() == 4U;
+
+    auto result = result_for(welcome_message.welcome());
+    result.mutable_event()->set_worker_sequence(5);
+    result_written = primary->Write(result);
     primary->WritesDone();
     receipt_received = primary->Read(&receipt_message);
     trainvm::v1::ControllerToWorker trailing;
@@ -4793,13 +5057,14 @@ void test_worker_control_grpc_stream() {
                                     welcome_message.welcome().dispatch_id())
                               : std::nullopt;
     const auto projection = observer.projection(run_id);
-    check(result_written && receipt_received && receipt_message.has_receipt() &&
+    check(telemetry_acknowledged && result_written && receipt_received &&
+              receipt_message.has_receipt() &&
               receipt_message.message_case() ==
                   trainvm::v1::ControllerToWorker::kReceipt &&
               primary_status.ok() &&
               receipt_message.receipt().event_id() ==
                   welcome_message.welcome().dispatch_id() + ":result" &&
-              receipt_message.receipt().acknowledged_worker_sequence() == 1U &&
+              receipt_message.receipt().acknowledged_worker_sequence() == 5U &&
               receipt_message.receipt().committed_run_revision() == 7U &&
               dispatch &&
               dispatch->status == trainvm::DispatchStatus::completed &&
@@ -4808,8 +5073,8 @@ void test_worker_control_grpc_stream() {
                       receipt_message.receipt().event_id()} &&
               projection && projection->observed_state == "acquiring" &&
               projection->run_revision == 7U &&
-              observer.events_for_run(run_id).size() == 16U,
-          "WorkerControl gRPC orders Hello, durable Welcome, Event, and durable Receipt");
+              observer.events_for_run(run_id).size() == 21U,
+          "WorkerControl gRPC orders Hello, durable telemetry acknowledgements, Event, and durable Receipt");
   }
 
   server->Shutdown();

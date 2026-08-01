@@ -3,10 +3,13 @@
 #include "trainvm/reflection_json.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstddef>
 #include <limits>
 #include <map>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -39,6 +42,128 @@ bool is_controller_event(std::string_view event_type) {
          event_type == "node.dispatch_prepared" || event_type == "node.dispatch_completed" ||
          event_type.starts_with("host.resource_") ||
          event_type.starts_with("control.");
+}
+
+bool is_worker_observation(std::string_view event_type) {
+  return event_type == "worker.heartbeat" ||
+         event_type == "metric.sampled" ||
+         event_type == "artifact.published";
+}
+
+void require_worker_observation_shape(const Event& event) {
+  if (!is_worker_observation(event.event_type) || event.event_version != 1U ||
+      event.worker_sequence == 0U || !event.payload.is_object()) {
+    throw std::invalid_argument("worker observation is not canonical");
+  }
+  if (event.event_type == "worker.heartbeat") {
+    if (!event.optimizer_step || event.payload.size() != 2U ||
+        !event.payload.contains("phase") ||
+        !event.payload.at("phase").is_string() ||
+        event.payload.at("phase").get_ref<const std::string&>().empty() ||
+        !event.payload.contains("observed_at_ns") ||
+        !event.payload.at("observed_at_ns").is_number_integer()) {
+      throw std::invalid_argument("worker heartbeat is not canonical");
+    }
+    return;
+  }
+  if (event.event_type == "metric.sampled") {
+    constexpr std::array<std::string_view, 7> fields{
+        "name", "value", "unit", "step_domain", "step", "sample_weight",
+        "labels"};
+    const auto& value = event.payload.contains("value")
+                            ? event.payload.at("value")
+                            : nlohmann::json{};
+    const auto& labels = event.payload.contains("labels")
+                             ? event.payload.at("labels")
+                             : nlohmann::json{};
+    if (!event.optimizer_step || event.payload.size() != fields.size() ||
+        !std::ranges::all_of(fields, [&](std::string_view field) {
+          return event.payload.contains(std::string(field));
+        }) ||
+        !event.payload.at("name").is_string() ||
+        event.payload.at("name").get_ref<const std::string&>().empty() ||
+        !event.payload.at("unit").is_string() ||
+        !event.payload.at("step_domain").is_string() ||
+        event.payload.at("step_domain").get_ref<const std::string&>().empty() ||
+        !event.payload.at("step").is_number_unsigned() ||
+        event.payload.at("step").get<std::uint64_t>() != *event.optimizer_step ||
+        !event.payload.at("sample_weight").is_number() ||
+        !std::isfinite(event.payload.at("sample_weight").get<double>()) ||
+        event.payload.at("sample_weight").get<double>() <= 0.0 ||
+        !labels.is_object() ||
+        !std::ranges::all_of(labels.items(), [](const auto& item) {
+          return !item.key().empty() && item.value().is_string();
+        }) ||
+        !(value.is_number() || value.is_boolean() || value.is_string()) ||
+        (value.is_number_float() && !std::isfinite(value.get<double>()))) {
+      throw std::invalid_argument("worker metric sample is not canonical");
+    }
+    return;
+  }
+  constexpr std::array<std::string_view, 13> fields{
+      "artifact_id", "logical_name", "kind", "schema", "uri",
+      "size_bytes", "fingerprint_algorithm", "fingerprint", "complete",
+      "producer_node_id", "producer_attempt_id", "parent_artifact_ids",
+      "published_at_ns"};
+  const auto& parents = event.payload.contains("parent_artifact_ids")
+                            ? event.payload.at("parent_artifact_ids")
+                            : nlohmann::json{};
+  const std::string artifact_id =
+      event.payload.value("artifact_id", std::string{});
+  std::set<std::string> parent_ids;
+  const bool canonical_parents = parents.is_array() &&
+      std::ranges::all_of(parents, [&](const nlohmann::json& parent) {
+        return parent.is_string() && !parent.get_ref<const std::string&>().empty() &&
+               parent.get_ref<const std::string&>() != artifact_id &&
+               parent_ids.insert(parent.get_ref<const std::string&>()).second;
+      });
+  const std::string kind = event.payload.value("kind", std::string{});
+  if (event.optimizer_step || event.payload.size() != fields.size() ||
+      !std::ranges::all_of(fields, [&](std::string_view field) {
+        return event.payload.contains(std::string(field));
+      }) ||
+      !event.payload.at("artifact_id").is_string() ||
+      event.payload.at("artifact_id").get_ref<const std::string&>().empty() ||
+      !event.payload.at("logical_name").is_string() ||
+      !event.payload.at("kind").is_string() ||
+      !event.payload.at("schema").is_string() ||
+      !event.payload.at("uri").is_string() ||
+      event.payload.at("uri").get_ref<const std::string&>().empty() ||
+      !event.payload.at("size_bytes").is_number_unsigned() ||
+      !event.payload.at("fingerprint_algorithm").is_string() ||
+      event.payload.at("fingerprint_algorithm")
+          .get_ref<const std::string&>().empty() ||
+      !event.payload.at("fingerprint").is_string() ||
+      event.payload.at("fingerprint").get_ref<const std::string&>().empty() ||
+      !event.payload.at("complete").is_boolean() ||
+      !event.payload.at("complete").get<bool>() ||
+      !event.payload.at("producer_node_id").is_string() ||
+      event.payload.at("producer_node_id").get<std::string>() != event.node_id ||
+      !event.payload.at("producer_attempt_id").is_string() ||
+      event.payload.at("producer_attempt_id").get<std::string>() !=
+          event.attempt_id ||
+      !canonical_parents ||
+      (kind != "path" && kind != "checkpoint" && kind != "dataset" &&
+       kind != "image_gallery" && kind != "metrics" && kind != "report" &&
+       kind != "opaque") ||
+      !event.payload.at("published_at_ns").is_number_integer() ||
+      event.payload.at("published_at_ns").get<std::int64_t>() !=
+          event.wall_time_ns) {
+    throw std::invalid_argument("worker artifact manifest is not canonical");
+  }
+}
+
+std::string worker_observation_event_id(const Event& event,
+                                        const std::string& dispatch_id) {
+  if (event.event_type == "worker.heartbeat") {
+    return dispatch_id + ":heartbeat:" +
+           std::to_string(event.worker_sequence);
+  }
+  if (event.event_type == "metric.sampled") {
+    return dispatch_id + ":metric:" + std::to_string(event.worker_sequence);
+  }
+  return dispatch_id + ":artifact:" + sha256_hex(
+      event.payload.value("artifact_id", std::string{}));
 }
 
 std::string dispatch_id_for(const ExecutionState& state) {
@@ -986,6 +1111,26 @@ const ExecutionState& Controller::recover() {
       replayed_control_status[command->command_id] = suffix;
       continue;
     }
+    if (is_worker_observation(event.event_type)) {
+      try {
+        require_worker_observation_shape(event);
+      } catch (const std::invalid_argument& exception) {
+        throw std::runtime_error(exception.what());
+      }
+      if (phase != ReplayPhase::ready || expected_completion ||
+          recovered.status != ExecutionStatus::running ||
+          runtime_observed_state != "running" ||
+          event.run_revision != recovered.revision ||
+          event.plan_revision != kInitialPlanRevision ||
+          event.node_id != recovered.current_node_id ||
+          event.attempt_id != recovered.current_attempt_id ||
+          event.event_id != worker_observation_event_id(
+                                event, dispatch_id_for(recovered))) {
+        throw std::runtime_error(
+            "journal contains a worker observation outside its active attempt");
+      }
+      continue;
+    }
     if (phase == ReplayPhase::ready && managed_run &&
         recovered.status == ExecutionStatus::running &&
         runtime_observed_state == "running" && event.worker_sequence == 0) {
@@ -1570,6 +1715,41 @@ const ExecutionState& Controller::handle_event(
     const Event& input, const WorkerSessionIdentity& identity,
     const AuthorityTimeSample& now) {
   return handle_event_impl(input, identity, now);
+}
+
+const ExecutionState& Controller::record_worker_observation(
+    const Event& input, const WorkerSessionIdentity& identity,
+    const AuthorityTimeSample& now) {
+  if (!initialized_) {
+    throw std::logic_error(
+        "controller must create or recover before recording worker observations");
+  }
+  recover();
+  require_worker_observation_shape(input);
+  const auto stored = journal_.event(input.event_id);
+  if (stored && !same_worker_event(*stored, input)) {
+    throw std::invalid_argument(
+        "worker observation event_id already has different content");
+  }
+  if (input.run_id != run_id_ || input.run_revision != state_.revision ||
+      input.plan_revision != kInitialPlanRevision ||
+      input.node_id != state_.current_node_id ||
+      input.attempt_id != state_.current_attempt_id || paused_ ||
+      state_.status != ExecutionStatus::running ||
+      identity.run_id != input.run_id || identity.node_id != input.node_id ||
+      identity.attempt_id != input.attempt_id ||
+      input.event_id != worker_observation_event_id(
+                            input, dispatch_id_for(state_))) {
+    throw OperationPreconditionError(
+        "worker observation is stale for the active controller attempt");
+  }
+  const auto dispatch = journal_.dispatch(dispatch_id_for(state_));
+  if (!dispatch || dispatch->status != DispatchStatus::prepared) {
+    throw OperationPreconditionError(
+        "worker observation has no active prepared dispatch");
+  }
+  journal_.append_fenced_worker_observation(input, identity, now);
+  return recover();
 }
 
 const ExecutionState& Controller::complete_artifact_validation(

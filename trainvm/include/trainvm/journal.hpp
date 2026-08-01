@@ -167,6 +167,9 @@ public:
 
   [[nodiscard]] std::optional<Event> event(const std::string& event_id) const;
   [[nodiscard]] std::vector<Event> events_for_run(const std::string& run_id) const;
+  [[nodiscard]] std::uint64_t latest_worker_sequence(
+      const std::string& run_id, const std::string& node_id,
+      const std::string& attempt_id) const;
   [[nodiscard]] std::optional<RunProjection> projection(const std::string& run_id) const;
   [[nodiscard]] std::optional<CompiledPlan> compiled_plan(const std::string& plan_hash) const;
   [[nodiscard]] std::optional<Dispatch> dispatch(const std::string& dispatch_id) const;
@@ -174,6 +177,9 @@ public:
       const std::string& launch_event_id) const;
   [[nodiscard]] std::optional<ControlCommand> control_command(
       const std::string& command_id) const;
+  [[nodiscard]] std::vector<ControlCommand> pending_control_commands(
+      const std::string& run_id,
+      std::uint64_t after_control_revision) const;
   [[nodiscard]] std::uint64_t latest_control_revision(const std::string& run_id) const;
   [[nodiscard]] std::uint64_t latest_effective_control_revision(
       const std::string& run_id) const;
@@ -333,6 +339,9 @@ public:
                                 const std::vector<Event>& events,
                                 const WorkerSessionIdentity& identity,
                                 const AuthorityTimeSample& now);
+  void append_fenced_worker_observation(
+      const Event& event, const WorkerSessionIdentity& identity,
+      const AuthorityTimeSample& now);
   void complete_dispatch_impl(
       const std::string& dispatch_id, const std::string& result_event_id,
       const std::vector<Event>& events,

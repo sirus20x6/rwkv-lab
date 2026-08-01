@@ -76,6 +76,21 @@ class TrainVMService final : public v1::TrainVM::Service,
   grpc::Status complete_worker_connection(
       const v1::EventEnvelope& envelope,
       const WorkerConnection& connection, v1::WorkerReceipt& receipt);
+  grpc::Status record_worker_heartbeat(
+      const v1::WorkerHeartbeat& heartbeat,
+      const WorkerConnection& connection, std::uint64_t& acknowledged);
+  grpc::Status record_worker_metric(
+      const v1::MetricSample& metric, const WorkerConnection& connection,
+      std::uint64_t& acknowledged);
+  grpc::Status record_worker_artifact(
+      const v1::ArtifactManifest& artifact,
+      const WorkerConnection& connection, std::uint64_t& acknowledged);
+  grpc::Status acknowledge_worker_control(
+      const v1::ControlPatchAcknowledgement& acknowledgement,
+      const WorkerConnection& connection, std::uint64_t& acknowledged);
+  grpc::Status commit_worker_observation(
+      Event event, const WorkerConnection& connection,
+      std::uint64_t& acknowledged);
   bool claim_worker_attempt(const std::string& key);
   void release_worker_attempt(const std::string& key);
   [[nodiscard]] AuthorityTimeSample authority_now() const;

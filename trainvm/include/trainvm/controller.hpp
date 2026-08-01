@@ -33,6 +33,9 @@ class Controller {
   const ExecutionState& handle_event(const Event& event,
                                      const WorkerSessionIdentity& identity,
                                      const AuthorityTimeSample& now);
+  const ExecutionState& record_worker_observation(
+      const Event& event, const WorkerSessionIdentity& identity,
+      const AuthorityTimeSample& now);
   const ExecutionState& complete_artifact_validation(
       ArtifactValidationOutcome outcome, const AuthorityTimeSample& now);
   const ExecutionState& release_managed_resources(

@@ -3432,6 +3432,26 @@ std::vector<Event> Journal::events_for_run(const std::string& run_id) const {
   return events;
 }
 
+std::uint64_t Journal::latest_worker_sequence(
+    const std::string& run_id, const std::string& node_id,
+    const std::string& attempt_id) const {
+  if (run_id.empty() || node_id.empty() || attempt_id.empty()) {
+    throw std::invalid_argument(
+        "worker sequence lookup requires run, node, and attempt identity");
+  }
+  Statement query(database_, R"sql(
+    SELECT COALESCE(MAX(worker_sequence), 0) FROM events
+    WHERE run_id=? AND node_id=? AND attempt_id=?
+  )sql");
+  bind_text(query.get(), 1, run_id);
+  bind_text(query.get(), 2, node_id);
+  bind_text(query.get(), 3, attempt_id);
+  if (sqlite3_step(query.get()) != SQLITE_ROW) {
+    throw std::runtime_error("could not read latest worker sequence");
+  }
+  return static_cast<std::uint64_t>(sqlite3_column_int64(query.get(), 0));
+}
+
 std::optional<RunProjection> Journal::projection(const std::string& run_id) const {
   Statement query(database_, R"sql(
     SELECT run_id, experiment_name, plan_hash, desired_state, observed_state,
@@ -3670,6 +3690,107 @@ void Journal::complete_fenced_dispatch(
     const std::vector<Event>& events, const WorkerSessionIdentity& identity,
     const AuthorityTimeSample& now) {
   complete_dispatch_impl(dispatch_id, result_event_id, events, identity, now);
+}
+
+void Journal::append_fenced_worker_observation(
+    const Event& observation, const WorkerSessionIdentity& identity,
+    const AuthorityTimeSample& now) {
+  require_authority_time(now);
+  if (observation.run_id != identity.run_id ||
+      observation.node_id != identity.node_id ||
+      observation.attempt_id != identity.attempt_id ||
+      observation.worker_sequence == 0U || identity.launch_nonce.empty() ||
+      identity.concurrency_key.empty() || identity.lease_id.empty() ||
+      identity.fencing_token == 0U) {
+    throw std::invalid_argument(
+        "worker observation has an invalid fenced session identity");
+  }
+
+  Transaction transaction(database_);
+  const std::string launch_id = identity.run_id + ":worker-launch:" +
+                                identity.node_id + ":" + identity.attempt_id;
+  const auto binding = launch_binding(launch_id);
+  if (!binding || binding->identity.run_id != identity.run_id ||
+      binding->identity.node_id != identity.node_id ||
+      binding->identity.attempt_id != identity.attempt_id ||
+      binding->identity.launch_nonce != identity.launch_nonce ||
+      binding->identity.concurrency_key != identity.concurrency_key ||
+      binding->identity.lease_id != identity.lease_id ||
+      binding->identity.fencing_token != identity.fencing_token) {
+    throw OperationPreconditionError(
+        "worker observation has no exact durable launch binding");
+  }
+  require_live_host_grant_claim(
+      binding->identity.host_grant, identity.run_id,
+      identity.concurrency_key, identity.lease_id, identity.fencing_token);
+
+  Statement projection(database_, R"sql(
+    SELECT observed_state, run_revision, current_node_id, current_attempt_id
+    FROM run_projection WHERE run_id=?
+  )sql");
+  bind_text(projection.get(), 1, identity.run_id);
+  if (sqlite3_step(projection.get()) != SQLITE_ROW ||
+      column_text(projection.get(), 0) != "running" ||
+      static_cast<std::uint64_t>(sqlite3_column_int64(projection.get(), 1)) !=
+          observation.run_revision ||
+      column_text(projection.get(), 2) != identity.node_id ||
+      column_text(projection.get(), 3) != identity.attempt_id) {
+    throw OperationPreconditionError(
+        "worker observation is stale for the active run projection");
+  }
+
+  Statement dispatch(database_, R"sql(
+    SELECT status FROM node_dispatches
+    WHERE run_id=? AND node_id=? AND attempt_id=?
+  )sql");
+  bind_text(dispatch.get(), 1, identity.run_id);
+  bind_text(dispatch.get(), 2, identity.node_id);
+  bind_text(dispatch.get(), 3, identity.attempt_id);
+  if (sqlite3_step(dispatch.get()) != SQLITE_ROW ||
+      column_text(dispatch.get(), 0) != "prepared") {
+    throw OperationPreconditionError(
+        "worker observation has no active prepared dispatch");
+  }
+
+  Statement lease(database_, R"sql(
+    SELECT owner_run_id, lease_id, fencing_token, clock_domain, boot_id,
+           expires_boottime_ns, released_wall_time_ns
+    FROM resource_leases WHERE concurrency_key=?
+      AND NOT EXISTS(
+        SELECT 1 FROM resource_lease_releases AS release
+        WHERE release.concurrency_key=resource_leases.concurrency_key
+          AND release.owner_run_id=resource_leases.owner_run_id
+          AND release.lease_id=resource_leases.lease_id
+          AND release.fencing_token=resource_leases.fencing_token
+      )
+  )sql");
+  bind_text(lease.get(), 1, identity.concurrency_key);
+  if (sqlite3_step(lease.get()) != SQLITE_ROW ||
+      column_text(lease.get(), 0) != identity.run_id ||
+      column_text(lease.get(), 1) != identity.lease_id ||
+      static_cast<std::uint64_t>(sqlite3_column_int64(lease.get(), 2)) !=
+          identity.fencing_token ||
+      column_text(lease.get(), 3) != ResourceLease::kBootTimeDomain ||
+      column_text(lease.get(), 4) != now.boot_id ||
+      sqlite3_column_int64(lease.get(), 5) <= now.boot.nanoseconds ||
+      sqlite3_column_type(lease.get(), 6) != SQLITE_NULL) {
+    throw OperationPreconditionError(
+        "worker observation lost its active lease fence");
+  }
+
+  const auto ready = event(launch_id + ":ready");
+  if (!ready || ready->payload.value("launch_nonce", std::string{}) !=
+                    identity.launch_nonce ||
+      ready->payload.value("concurrency_key", std::string{}) !=
+          identity.concurrency_key ||
+      ready->payload.value("lease_id", std::string{}) != identity.lease_id ||
+      ready->payload.value("fencing_token", std::uint64_t{}) !=
+          identity.fencing_token) {
+    throw OperationPreconditionError(
+        "worker observation has no matching readiness receipt");
+  }
+  (void)append_uncommitted(observation);
+  transaction.commit();
 }
 
 void Journal::complete_dispatch_impl(
@@ -4380,6 +4501,39 @@ std::optional<ControlCommand> Journal::control_command(const std::string& comman
     throw std::runtime_error("could not read control command");
   }
   return command_from_row(query.get());
+}
+
+std::vector<ControlCommand> Journal::pending_control_commands(
+    const std::string& run_id,
+    std::uint64_t after_control_revision) const {
+  if (run_id.empty()) {
+    throw std::invalid_argument(
+        "pending control lookup requires a run identity");
+  }
+  Statement query(database_, R"sql(
+    SELECT command_id, run_id, idempotency_key, expected_run_revision,
+           expected_control_revision, control_revision, plan_revision,
+           apply_point, requires_pause, assignments_json, author, reason,
+           status, effective_step, effective_values_json, diagnostics_json,
+           ack_concurrency_key, ack_lease_id, ack_fencing_token, ack_node_id,
+           ack_attempt_id, ack_worker_sequence, acknowledged_at_ns
+    FROM control_commands
+    WHERE run_id=? AND status='requested' AND control_revision>?
+    ORDER BY control_revision
+  )sql");
+  bind_text(query.get(), 1, run_id);
+  bind_integer(query.get(), 2,
+               checked_integer(after_control_revision,
+                               "after_control_revision"));
+  std::vector<ControlCommand> commands;
+  int status = SQLITE_OK;
+  while ((status = sqlite3_step(query.get())) == SQLITE_ROW) {
+    commands.push_back(command_from_row(query.get()));
+  }
+  if (status != SQLITE_DONE) {
+    throw std::runtime_error("could not scan pending control commands");
+  }
+  return commands;
 }
 
 std::uint64_t Journal::latest_control_revision(const std::string& run_id) const {

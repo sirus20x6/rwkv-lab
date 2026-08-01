@@ -1545,6 +1545,9 @@ type ControlPatchCommand struct {
 	state                   protoimpl.MessageState `protogen:"open.v1"`
 	ExpectedControlRevision uint64                 `protobuf:"varint,1,opt,name=expected_control_revision,json=expectedControlRevision,proto3" json:"expected_control_revision,omitempty"`
 	Assignments             []*ControlAssignment   `protobuf:"bytes,2,rep,name=assignments,proto3" json:"assignments,omitempty"`
+	ControlRevision         uint64                 `protobuf:"varint,3,opt,name=control_revision,json=controlRevision,proto3" json:"control_revision,omitempty"`
+	ApplyPoint              ApplyPoint             `protobuf:"varint,4,opt,name=apply_point,json=applyPoint,proto3,enum=trainvm.v1.ApplyPoint" json:"apply_point,omitempty"`
+	RequiresPause           bool                   `protobuf:"varint,5,opt,name=requires_pause,json=requiresPause,proto3" json:"requires_pause,omitempty"`
 	unknownFields           protoimpl.UnknownFields
 	sizeCache               protoimpl.SizeCache
 }
@@ -1591,6 +1594,27 @@ func (x *ControlPatchCommand) GetAssignments() []*ControlAssignment {
 		return x.Assignments
 	}
 	return nil
+}
+
+func (x *ControlPatchCommand) GetControlRevision() uint64 {
+	if x != nil {
+		return x.ControlRevision
+	}
+	return 0
+}
+
+func (x *ControlPatchCommand) GetApplyPoint() ApplyPoint {
+	if x != nil {
+		return x.ApplyPoint
+	}
+	return ApplyPoint_APPLY_POINT_UNSPECIFIED
+}
+
+func (x *ControlPatchCommand) GetRequiresPause() bool {
+	if x != nil {
+		return x.RequiresPause
+	}
+	return false
 }
 
 type AdoptPlanRevisionCommand struct {
@@ -2030,8 +2054,12 @@ type ArtifactManifest struct {
 	ProducerAttemptId    string                 `protobuf:"bytes,11,opt,name=producer_attempt_id,json=producerAttemptId,proto3" json:"producer_attempt_id,omitempty"`
 	ParentArtifactIds    []string               `protobuf:"bytes,12,rep,name=parent_artifact_ids,json=parentArtifactIds,proto3" json:"parent_artifact_ids,omitempty"`
 	PublishedAt          *timestamppb.Timestamp `protobuf:"bytes,13,opt,name=published_at,json=publishedAt,proto3" json:"published_at,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	// Monotonic within the accepted run/node/attempt worker session. The
+	// controller durably acknowledges this sequence only after the manifest is
+	// committed to the journal.
+	WorkerSequence uint64 `protobuf:"varint,14,opt,name=worker_sequence,json=workerSequence,proto3" json:"worker_sequence,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *ArtifactManifest) Reset() {
@@ -2153,6 +2181,13 @@ func (x *ArtifactManifest) GetPublishedAt() *timestamppb.Timestamp {
 		return x.PublishedAt
 	}
 	return nil
+}
+
+func (x *ArtifactManifest) GetWorkerSequence() uint64 {
+	if x != nil {
+		return x.WorkerSequence
+	}
+	return 0
 }
 
 type EventEnvelope struct {
@@ -2315,17 +2350,19 @@ func (x *EventEnvelope) GetCanonicalJsonPayload() []byte {
 }
 
 type MetricSample struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Value         *ScalarValue           `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
-	Unit          string                 `protobuf:"bytes,3,opt,name=unit,proto3" json:"unit,omitempty"`
-	StepDomain    string                 `protobuf:"bytes,4,opt,name=step_domain,json=stepDomain,proto3" json:"step_domain,omitempty"`
-	Step          uint64                 `protobuf:"varint,5,opt,name=step,proto3" json:"step,omitempty"`
-	SampleWeight  float64                `protobuf:"fixed64,6,opt,name=sample_weight,json=sampleWeight,proto3" json:"sample_weight,omitempty"`
-	Labels        map[string]string      `protobuf:"bytes,7,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	ObservedAt    *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=observed_at,json=observedAt,proto3" json:"observed_at,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	Name         string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Value        *ScalarValue           `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
+	Unit         string                 `protobuf:"bytes,3,opt,name=unit,proto3" json:"unit,omitempty"`
+	StepDomain   string                 `protobuf:"bytes,4,opt,name=step_domain,json=stepDomain,proto3" json:"step_domain,omitempty"`
+	Step         uint64                 `protobuf:"varint,5,opt,name=step,proto3" json:"step,omitempty"`
+	SampleWeight float64                `protobuf:"fixed64,6,opt,name=sample_weight,json=sampleWeight,proto3" json:"sample_weight,omitempty"`
+	Labels       map[string]string      `protobuf:"bytes,7,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	ObservedAt   *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=observed_at,json=observedAt,proto3" json:"observed_at,omitempty"`
+	// Monotonic within the accepted run/node/attempt worker session.
+	WorkerSequence uint64 `protobuf:"varint,9,opt,name=worker_sequence,json=workerSequence,proto3" json:"worker_sequence,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *MetricSample) Reset() {
@@ -2412,6 +2449,13 @@ func (x *MetricSample) GetObservedAt() *timestamppb.Timestamp {
 		return x.ObservedAt
 	}
 	return nil
+}
+
+func (x *MetricSample) GetWorkerSequence() uint64 {
+	if x != nil {
+		return x.WorkerSequence
+	}
+	return 0
 }
 
 type WorkerHello struct {
@@ -3826,10 +3870,14 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\x10graceful_timeout\x18\x02 \x01(\v2\x19.google.protobuf.DurationR\x0fgracefulTimeout\"T\n" +
 	"\x11ControlAssignment\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12-\n" +
-	"\x05value\x18\x02 \x01(\v2\x17.trainvm.v1.ScalarValueR\x05value\"\x92\x01\n" +
+	"\x05value\x18\x02 \x01(\v2\x17.trainvm.v1.ScalarValueR\x05value\"\x9d\x02\n" +
 	"\x13ControlPatchCommand\x12:\n" +
 	"\x19expected_control_revision\x18\x01 \x01(\x04R\x17expectedControlRevision\x12?\n" +
-	"\vassignments\x18\x02 \x03(\v2\x1d.trainvm.v1.ControlAssignmentR\vassignments\"\xa7\x01\n" +
+	"\vassignments\x18\x02 \x03(\v2\x1d.trainvm.v1.ControlAssignmentR\vassignments\x12)\n" +
+	"\x10control_revision\x18\x03 \x01(\x04R\x0fcontrolRevision\x127\n" +
+	"\vapply_point\x18\x04 \x01(\x0e2\x16.trainvm.v1.ApplyPointR\n" +
+	"applyPoint\x12%\n" +
+	"\x0erequires_pause\x18\x05 \x01(\bR\rrequiresPause\"\xa7\x01\n" +
 	"\x18AdoptPlanRevisionCommand\x128\n" +
 	"\x18proposed_source_document\x18\x01 \x01(\tR\x16proposedSourceDocument\x12#\n" +
 	"\rsource_format\x18\x02 \x01(\tR\fsourceFormat\x12,\n" +
@@ -3879,7 +3927,7 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\x14DISPOSITION_ACCEPTED\x10\x01\x12\x1f\n" +
 	"\x1bDISPOSITION_ALREADY_APPLIED\x10\x02\x12\x18\n" +
 	"\x14DISPOSITION_REJECTED\x10\x03\x12\x18\n" +
-	"\x14DISPOSITION_CONFLICT\x10\x04\"\x89\x04\n" +
+	"\x14DISPOSITION_CONFLICT\x10\x04\"\xb2\x04\n" +
 	"\x10ArtifactManifest\x12\x1f\n" +
 	"\vartifact_id\x18\x01 \x01(\tR\n" +
 	"artifactId\x12!\n" +
@@ -3896,7 +3944,8 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	" \x01(\tR\x0eproducerNodeId\x12.\n" +
 	"\x13producer_attempt_id\x18\v \x01(\tR\x11producerAttemptId\x12.\n" +
 	"\x13parent_artifact_ids\x18\f \x03(\tR\x11parentArtifactIds\x12=\n" +
-	"\fpublished_at\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\vpublishedAt\"\xe3\x04\n" +
+	"\fpublished_at\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\vpublishedAt\x12'\n" +
+	"\x0fworker_sequence\x18\x0e \x01(\x04R\x0eworkerSequence\"\xe3\x04\n" +
 	"\rEventEnvelope\x12)\n" +
 	"\x10journal_sequence\x18\x01 \x01(\x04R\x0fjournalSequence\x12\x19\n" +
 	"\bevent_id\x18\x02 \x01(\tR\aeventId\x12\x15\n" +
@@ -3916,7 +3965,7 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\apayload\x18\r \x01(\v2\x14.google.protobuf.AnyR\apayload\x12!\n" +
 	"\frun_revision\x18\x0e \x01(\x04R\vrunRevision\x124\n" +
 	"\x16canonical_json_payload\x18\x0f \x01(\fR\x14canonicalJsonPayloadB\x11\n" +
-	"\x0f_optimizer_step\"\xf5\x02\n" +
+	"\x0f_optimizer_step\"\x9e\x03\n" +
 	"\fMetricSample\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12-\n" +
 	"\x05value\x18\x02 \x01(\v2\x17.trainvm.v1.ScalarValueR\x05value\x12\x12\n" +
@@ -3927,7 +3976,8 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\rsample_weight\x18\x06 \x01(\x01R\fsampleWeight\x12<\n" +
 	"\x06labels\x18\a \x03(\v2$.trainvm.v1.MetricSample.LabelsEntryR\x06labels\x12;\n" +
 	"\vobserved_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\n" +
-	"observedAt\x1a9\n" +
+	"observedAt\x12'\n" +
+	"\x0fworker_sequence\x18\t \x01(\x04R\x0eworkerSequence\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xbf\x03\n" +
@@ -4197,72 +4247,73 @@ var file_trainvm_v1_trainvm_proto_depIdxs = []int32{
 	47, // 10: trainvm.v1.CancelCommand.graceful_timeout:type_name -> google.protobuf.Duration
 	10, // 11: trainvm.v1.ControlAssignment.value:type_name -> trainvm.v1.ScalarValue
 	21, // 12: trainvm.v1.ControlPatchCommand.assignments:type_name -> trainvm.v1.ControlAssignment
-	17, // 13: trainvm.v1.RunCommandRequest.pause:type_name -> trainvm.v1.PauseCommand
-	18, // 14: trainvm.v1.RunCommandRequest.resume:type_name -> trainvm.v1.ResumeCommand
-	19, // 15: trainvm.v1.RunCommandRequest.checkpoint:type_name -> trainvm.v1.CheckpointCommand
-	20, // 16: trainvm.v1.RunCommandRequest.cancel:type_name -> trainvm.v1.CancelCommand
-	22, // 17: trainvm.v1.RunCommandRequest.controls:type_name -> trainvm.v1.ControlPatchCommand
-	23, // 18: trainvm.v1.RunCommandRequest.adopt_plan:type_name -> trainvm.v1.AdoptPlanRevisionCommand
-	2,  // 19: trainvm.v1.ControlCommandResult.apply_point:type_name -> trainvm.v1.ApplyPoint
-	5,  // 20: trainvm.v1.ControlCommandResult.status:type_name -> trainvm.v1.ControlCommandResult.Status
-	21, // 21: trainvm.v1.ControlCommandResult.assignments:type_name -> trainvm.v1.ControlAssignment
-	6,  // 22: trainvm.v1.RunCommandResponse.disposition:type_name -> trainvm.v1.RunCommandResponse.Disposition
-	12, // 23: trainvm.v1.RunCommandResponse.run:type_name -> trainvm.v1.RunSummary
-	9,  // 24: trainvm.v1.RunCommandResponse.diagnostics:type_name -> trainvm.v1.Diagnostic
-	25, // 25: trainvm.v1.RunCommandResponse.control:type_name -> trainvm.v1.ControlCommandResult
-	3,  // 26: trainvm.v1.ArtifactManifest.kind:type_name -> trainvm.v1.ArtifactKind
-	46, // 27: trainvm.v1.ArtifactManifest.published_at:type_name -> google.protobuf.Timestamp
-	46, // 28: trainvm.v1.EventEnvelope.wall_time:type_name -> google.protobuf.Timestamp
-	48, // 29: trainvm.v1.EventEnvelope.payload:type_name -> google.protobuf.Any
-	10, // 30: trainvm.v1.MetricSample.value:type_name -> trainvm.v1.ScalarValue
-	44, // 31: trainvm.v1.MetricSample.labels:type_name -> trainvm.v1.MetricSample.LabelsEntry
-	46, // 32: trainvm.v1.MetricSample.observed_at:type_name -> google.protobuf.Timestamp
-	46, // 33: trainvm.v1.WorkerHeartbeat.observed_at:type_name -> google.protobuf.Timestamp
-	7,  // 34: trainvm.v1.ControlPatchAcknowledgement.disposition:type_name -> trainvm.v1.ControlPatchAcknowledgement.Disposition
-	2,  // 35: trainvm.v1.ControlPatchAcknowledgement.apply_point:type_name -> trainvm.v1.ApplyPoint
-	21, // 36: trainvm.v1.ControlPatchAcknowledgement.effective_values:type_name -> trainvm.v1.ControlAssignment
-	9,  // 37: trainvm.v1.ControlPatchAcknowledgement.diagnostics:type_name -> trainvm.v1.Diagnostic
-	46, // 38: trainvm.v1.ControlPatchAcknowledgement.acknowledged_at:type_name -> google.protobuf.Timestamp
-	30, // 39: trainvm.v1.WorkerToController.hello:type_name -> trainvm.v1.WorkerHello
-	31, // 40: trainvm.v1.WorkerToController.heartbeat:type_name -> trainvm.v1.WorkerHeartbeat
-	28, // 41: trainvm.v1.WorkerToController.event:type_name -> trainvm.v1.EventEnvelope
-	29, // 42: trainvm.v1.WorkerToController.metric:type_name -> trainvm.v1.MetricSample
-	27, // 43: trainvm.v1.WorkerToController.artifact:type_name -> trainvm.v1.ArtifactManifest
-	32, // 44: trainvm.v1.WorkerToController.control_ack:type_name -> trainvm.v1.ControlPatchAcknowledgement
-	17, // 45: trainvm.v1.WorkerCommand.pause:type_name -> trainvm.v1.PauseCommand
-	18, // 46: trainvm.v1.WorkerCommand.resume:type_name -> trainvm.v1.ResumeCommand
-	19, // 47: trainvm.v1.WorkerCommand.checkpoint:type_name -> trainvm.v1.CheckpointCommand
-	20, // 48: trainvm.v1.WorkerCommand.cancel:type_name -> trainvm.v1.CancelCommand
-	22, // 49: trainvm.v1.WorkerCommand.controls:type_name -> trainvm.v1.ControlPatchCommand
-	8,  // 50: trainvm.v1.WorkerWelcome.disposition:type_name -> trainvm.v1.WorkerWelcome.Disposition
-	1,  // 51: trainvm.v1.WorkerReceipt.observed_state:type_name -> trainvm.v1.ObservedState
-	34, // 52: trainvm.v1.ControllerToWorker.command:type_name -> trainvm.v1.WorkerCommand
-	35, // 53: trainvm.v1.ControllerToWorker.welcome:type_name -> trainvm.v1.WorkerWelcome
-	36, // 54: trainvm.v1.ControllerToWorker.receipt:type_name -> trainvm.v1.WorkerReceipt
-	1,  // 55: trainvm.v1.ListRunsRequest.observed_states:type_name -> trainvm.v1.ObservedState
-	45, // 56: trainvm.v1.ListRunsRequest.labels:type_name -> trainvm.v1.ListRunsRequest.LabelsEntry
-	12, // 57: trainvm.v1.ListRunsResponse.runs:type_name -> trainvm.v1.RunSummary
-	13, // 58: trainvm.v1.TrainVM.SubmitExperiment:input_type -> trainvm.v1.SubmitExperimentRequest
-	15, // 59: trainvm.v1.TrainVM.DiffPlan:input_type -> trainvm.v1.PlanDiffRequest
-	24, // 60: trainvm.v1.TrainVM.CommandRun:input_type -> trainvm.v1.RunCommandRequest
-	38, // 61: trainvm.v1.TrainVM.GetRun:input_type -> trainvm.v1.GetRunRequest
-	39, // 62: trainvm.v1.TrainVM.ListRuns:input_type -> trainvm.v1.ListRunsRequest
-	41, // 63: trainvm.v1.TrainVM.WatchEvents:input_type -> trainvm.v1.WatchEventsRequest
-	42, // 64: trainvm.v1.TrainVM.GetDescriptor:input_type -> trainvm.v1.DescriptorRequest
-	33, // 65: trainvm.v1.WorkerControl.Connect:input_type -> trainvm.v1.WorkerToController
-	14, // 66: trainvm.v1.TrainVM.SubmitExperiment:output_type -> trainvm.v1.SubmitExperimentResponse
-	16, // 67: trainvm.v1.TrainVM.DiffPlan:output_type -> trainvm.v1.PlanDiffResponse
-	26, // 68: trainvm.v1.TrainVM.CommandRun:output_type -> trainvm.v1.RunCommandResponse
-	12, // 69: trainvm.v1.TrainVM.GetRun:output_type -> trainvm.v1.RunSummary
-	40, // 70: trainvm.v1.TrainVM.ListRuns:output_type -> trainvm.v1.ListRunsResponse
-	28, // 71: trainvm.v1.TrainVM.WatchEvents:output_type -> trainvm.v1.EventEnvelope
-	43, // 72: trainvm.v1.TrainVM.GetDescriptor:output_type -> trainvm.v1.DescriptorResponse
-	37, // 73: trainvm.v1.WorkerControl.Connect:output_type -> trainvm.v1.ControllerToWorker
-	66, // [66:74] is the sub-list for method output_type
-	58, // [58:66] is the sub-list for method input_type
-	58, // [58:58] is the sub-list for extension type_name
-	58, // [58:58] is the sub-list for extension extendee
-	0,  // [0:58] is the sub-list for field type_name
+	2,  // 13: trainvm.v1.ControlPatchCommand.apply_point:type_name -> trainvm.v1.ApplyPoint
+	17, // 14: trainvm.v1.RunCommandRequest.pause:type_name -> trainvm.v1.PauseCommand
+	18, // 15: trainvm.v1.RunCommandRequest.resume:type_name -> trainvm.v1.ResumeCommand
+	19, // 16: trainvm.v1.RunCommandRequest.checkpoint:type_name -> trainvm.v1.CheckpointCommand
+	20, // 17: trainvm.v1.RunCommandRequest.cancel:type_name -> trainvm.v1.CancelCommand
+	22, // 18: trainvm.v1.RunCommandRequest.controls:type_name -> trainvm.v1.ControlPatchCommand
+	23, // 19: trainvm.v1.RunCommandRequest.adopt_plan:type_name -> trainvm.v1.AdoptPlanRevisionCommand
+	2,  // 20: trainvm.v1.ControlCommandResult.apply_point:type_name -> trainvm.v1.ApplyPoint
+	5,  // 21: trainvm.v1.ControlCommandResult.status:type_name -> trainvm.v1.ControlCommandResult.Status
+	21, // 22: trainvm.v1.ControlCommandResult.assignments:type_name -> trainvm.v1.ControlAssignment
+	6,  // 23: trainvm.v1.RunCommandResponse.disposition:type_name -> trainvm.v1.RunCommandResponse.Disposition
+	12, // 24: trainvm.v1.RunCommandResponse.run:type_name -> trainvm.v1.RunSummary
+	9,  // 25: trainvm.v1.RunCommandResponse.diagnostics:type_name -> trainvm.v1.Diagnostic
+	25, // 26: trainvm.v1.RunCommandResponse.control:type_name -> trainvm.v1.ControlCommandResult
+	3,  // 27: trainvm.v1.ArtifactManifest.kind:type_name -> trainvm.v1.ArtifactKind
+	46, // 28: trainvm.v1.ArtifactManifest.published_at:type_name -> google.protobuf.Timestamp
+	46, // 29: trainvm.v1.EventEnvelope.wall_time:type_name -> google.protobuf.Timestamp
+	48, // 30: trainvm.v1.EventEnvelope.payload:type_name -> google.protobuf.Any
+	10, // 31: trainvm.v1.MetricSample.value:type_name -> trainvm.v1.ScalarValue
+	44, // 32: trainvm.v1.MetricSample.labels:type_name -> trainvm.v1.MetricSample.LabelsEntry
+	46, // 33: trainvm.v1.MetricSample.observed_at:type_name -> google.protobuf.Timestamp
+	46, // 34: trainvm.v1.WorkerHeartbeat.observed_at:type_name -> google.protobuf.Timestamp
+	7,  // 35: trainvm.v1.ControlPatchAcknowledgement.disposition:type_name -> trainvm.v1.ControlPatchAcknowledgement.Disposition
+	2,  // 36: trainvm.v1.ControlPatchAcknowledgement.apply_point:type_name -> trainvm.v1.ApplyPoint
+	21, // 37: trainvm.v1.ControlPatchAcknowledgement.effective_values:type_name -> trainvm.v1.ControlAssignment
+	9,  // 38: trainvm.v1.ControlPatchAcknowledgement.diagnostics:type_name -> trainvm.v1.Diagnostic
+	46, // 39: trainvm.v1.ControlPatchAcknowledgement.acknowledged_at:type_name -> google.protobuf.Timestamp
+	30, // 40: trainvm.v1.WorkerToController.hello:type_name -> trainvm.v1.WorkerHello
+	31, // 41: trainvm.v1.WorkerToController.heartbeat:type_name -> trainvm.v1.WorkerHeartbeat
+	28, // 42: trainvm.v1.WorkerToController.event:type_name -> trainvm.v1.EventEnvelope
+	29, // 43: trainvm.v1.WorkerToController.metric:type_name -> trainvm.v1.MetricSample
+	27, // 44: trainvm.v1.WorkerToController.artifact:type_name -> trainvm.v1.ArtifactManifest
+	32, // 45: trainvm.v1.WorkerToController.control_ack:type_name -> trainvm.v1.ControlPatchAcknowledgement
+	17, // 46: trainvm.v1.WorkerCommand.pause:type_name -> trainvm.v1.PauseCommand
+	18, // 47: trainvm.v1.WorkerCommand.resume:type_name -> trainvm.v1.ResumeCommand
+	19, // 48: trainvm.v1.WorkerCommand.checkpoint:type_name -> trainvm.v1.CheckpointCommand
+	20, // 49: trainvm.v1.WorkerCommand.cancel:type_name -> trainvm.v1.CancelCommand
+	22, // 50: trainvm.v1.WorkerCommand.controls:type_name -> trainvm.v1.ControlPatchCommand
+	8,  // 51: trainvm.v1.WorkerWelcome.disposition:type_name -> trainvm.v1.WorkerWelcome.Disposition
+	1,  // 52: trainvm.v1.WorkerReceipt.observed_state:type_name -> trainvm.v1.ObservedState
+	34, // 53: trainvm.v1.ControllerToWorker.command:type_name -> trainvm.v1.WorkerCommand
+	35, // 54: trainvm.v1.ControllerToWorker.welcome:type_name -> trainvm.v1.WorkerWelcome
+	36, // 55: trainvm.v1.ControllerToWorker.receipt:type_name -> trainvm.v1.WorkerReceipt
+	1,  // 56: trainvm.v1.ListRunsRequest.observed_states:type_name -> trainvm.v1.ObservedState
+	45, // 57: trainvm.v1.ListRunsRequest.labels:type_name -> trainvm.v1.ListRunsRequest.LabelsEntry
+	12, // 58: trainvm.v1.ListRunsResponse.runs:type_name -> trainvm.v1.RunSummary
+	13, // 59: trainvm.v1.TrainVM.SubmitExperiment:input_type -> trainvm.v1.SubmitExperimentRequest
+	15, // 60: trainvm.v1.TrainVM.DiffPlan:input_type -> trainvm.v1.PlanDiffRequest
+	24, // 61: trainvm.v1.TrainVM.CommandRun:input_type -> trainvm.v1.RunCommandRequest
+	38, // 62: trainvm.v1.TrainVM.GetRun:input_type -> trainvm.v1.GetRunRequest
+	39, // 63: trainvm.v1.TrainVM.ListRuns:input_type -> trainvm.v1.ListRunsRequest
+	41, // 64: trainvm.v1.TrainVM.WatchEvents:input_type -> trainvm.v1.WatchEventsRequest
+	42, // 65: trainvm.v1.TrainVM.GetDescriptor:input_type -> trainvm.v1.DescriptorRequest
+	33, // 66: trainvm.v1.WorkerControl.Connect:input_type -> trainvm.v1.WorkerToController
+	14, // 67: trainvm.v1.TrainVM.SubmitExperiment:output_type -> trainvm.v1.SubmitExperimentResponse
+	16, // 68: trainvm.v1.TrainVM.DiffPlan:output_type -> trainvm.v1.PlanDiffResponse
+	26, // 69: trainvm.v1.TrainVM.CommandRun:output_type -> trainvm.v1.RunCommandResponse
+	12, // 70: trainvm.v1.TrainVM.GetRun:output_type -> trainvm.v1.RunSummary
+	40, // 71: trainvm.v1.TrainVM.ListRuns:output_type -> trainvm.v1.ListRunsResponse
+	28, // 72: trainvm.v1.TrainVM.WatchEvents:output_type -> trainvm.v1.EventEnvelope
+	43, // 73: trainvm.v1.TrainVM.GetDescriptor:output_type -> trainvm.v1.DescriptorResponse
+	37, // 74: trainvm.v1.WorkerControl.Connect:output_type -> trainvm.v1.ControllerToWorker
+	67, // [67:75] is the sub-list for method output_type
+	59, // [59:67] is the sub-list for method input_type
+	59, // [59:59] is the sub-list for extension type_name
+	59, // [59:59] is the sub-list for extension extendee
+	0,  // [0:59] is the sub-list for field type_name
 }
 
 func init() { file_trainvm_v1_trainvm_proto_init() }

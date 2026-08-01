@@ -51,8 +51,11 @@ Implemented now:
 - live-fence validation in the same transaction as worker-backed dispatch preparation and result
   completion, so an expired, released, or superseded worker cannot mutate the FSM;
 - a bounded `WorkerControl.Connect` stream that requires `WorkerHello` first, persists readiness
-  and dispatch before `WorkerWelcome`, admits one exact fenced result, persists its transition and
-  receipt before acknowledging it, rejects duplicate live streams, and replays lost receipts;
+  and dispatch before `WorkerWelcome`, durably ingests replay-safe heartbeats, scalar metrics,
+  artifact manifests, and ordered control acknowledgements without advancing the FSM, delivers
+  pending live-control patches by controller sequence, and persists the terminal transition and
+  receipt before acknowledging it; duplicate live streams are rejected and lost acknowledgements
+  or receipts replay exactly;
 - typed `trainvm.core` artifact-validation and resource-release execution that cannot enter through
   generic worker/simulation hooks, with atomic builtin result, transition, dispatch receipt, and
   immutable lease-release evidence;
@@ -266,11 +269,13 @@ configuration; missing or invalid host authority fails startup. `SubmitExperimen
 validates every exact adapter profile before validation succeeds or a run is created, and supports
 idempotent queued
 creation; the live-control `CommandRun` variant is also implemented. The dashboard freezes ambiguous
-submissions and retries their exact body and key. The process-free worker launch/readiness core is
-implemented, as is the initial single-result WorkerControl stream. Process launch/reconciliation,
-heartbeats and metrics, and pause/resume remain subsequent milestones. A worker launch ticket is a
-protocol authorization only until it is paired with a trusted descriptor digest, resolved launch
-specification, host identity, and durable process receipt.
+submissions and retries their exact body and key. The worker stream now carries durable telemetry,
+artifacts, live-control delivery/acknowledgement, and a terminal result. The Linux host authority
+has a stopped-child cgroup/pidfd launcher and durable process intent, spawn, and exit receipts;
+exposing that process supervisor through the daemon command surface and implementing pause/resume
+remain subsequent milestones. A worker launch ticket is a protocol authorization only until it is
+paired with a trusted descriptor digest, resolved launch specification, host identity, and durable
+process receipt.
 
 Secret-marked parameters are restricted to versioned opaque references of the form
 `secret://provider/name#version`; raw secret values are rejected before canonical plan persistence.

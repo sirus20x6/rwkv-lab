@@ -168,6 +168,9 @@ message ControlAssignment {
 message ControlPatchCommand {
   uint64 expected_control_revision = 1;
   repeated ControlAssignment assignments = 2;
+  uint64 control_revision = 3;
+  ApplyPoint apply_point = 4;
+  bool requires_pause = 5;
 }
 
 message AdoptPlanRevisionCommand {
@@ -241,6 +244,10 @@ message ArtifactManifest {
   string producer_attempt_id = 11;
   repeated string parent_artifact_ids = 12;
   google.protobuf.Timestamp published_at = 13;
+  // Monotonic within the accepted run/node/attempt worker session. The
+  // controller durably acknowledges this sequence only after the manifest is
+  // committed to the journal.
+  uint64 worker_sequence = 14;
 }
 
 message EventEnvelope {
@@ -273,6 +280,8 @@ message MetricSample {
   double sample_weight = 6;
   map<string, string> labels = 7;
   google.protobuf.Timestamp observed_at = 8;
+  // Monotonic within the accepted run/node/attempt worker session.
+  uint64 worker_sequence = 9;
 }
 
 message WorkerHello {

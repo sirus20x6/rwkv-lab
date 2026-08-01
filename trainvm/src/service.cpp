@@ -14,6 +14,7 @@
 
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -599,6 +600,29 @@ void fill_control_result(const ControlCommand& command, v1::RunCommandResponse& 
   add_stored_diagnostics(response, command.diagnostics);
 }
 
+v1::WorkerCommand worker_control_command(const ControlCommand& command) {
+  if (command.status != ControlCommandStatus::requested ||
+      command.command_id.empty() || command.control_revision == 0U) {
+    throw std::invalid_argument(
+        "only a durable requested control can be sent to a worker");
+  }
+  v1::WorkerCommand output;
+  output.set_controller_sequence(command.control_revision);
+  output.set_command_id(command.command_id);
+  auto* controls = output.mutable_controls();
+  controls->set_expected_control_revision(command.expected_control_revision);
+  controls->set_control_revision(command.control_revision);
+  controls->set_apply_point(wire_apply_point(command.apply_point));
+  controls->set_requires_pause(command.requires_pause);
+  for (auto iterator = command.assignments.begin();
+       iterator != command.assignments.end(); ++iterator) {
+    auto* assignment = controls->add_assignments();
+    assignment->set_key(iterator.key());
+    set_wire_scalar(iterator.value(), *assignment->mutable_value());
+  }
+  return output;
+}
+
 v1::RunCommandResponse::Disposition replay_disposition(const ControlCommand& command) {
   switch (command.status) {
     case ControlCommandStatus::requested:
@@ -770,6 +794,81 @@ std::int64_t timestamp_ns(const google::protobuf::Timestamp& timestamp) {
     throw std::invalid_argument("worker event wall timestamp is out of range");
   }
   return timestamp.seconds() * kNanosecondsPerSecond + timestamp.nanos();
+}
+
+std::string artifact_kind_name(v1::ArtifactKind kind) {
+  switch (kind) {
+    case v1::ARTIFACT_KIND_PATH:
+      return "path";
+    case v1::ARTIFACT_KIND_CHECKPOINT:
+      return "checkpoint";
+    case v1::ARTIFACT_KIND_DATASET:
+      return "dataset";
+    case v1::ARTIFACT_KIND_IMAGE_GALLERY:
+      return "image_gallery";
+    case v1::ARTIFACT_KIND_METRICS:
+      return "metrics";
+    case v1::ARTIFACT_KIND_REPORT:
+      return "report";
+    case v1::ARTIFACT_KIND_OPAQUE:
+      return "opaque";
+    case v1::ARTIFACT_KIND_UNSPECIFIED:
+      break;
+    default:
+      break;
+  }
+  throw std::invalid_argument("artifact manifest kind is unspecified");
+}
+
+std::string diagnostic_severity_name(v1::Diagnostic::Severity severity) {
+  switch (severity) {
+    case v1::Diagnostic::SEVERITY_INFO:
+      return "info";
+    case v1::Diagnostic::SEVERITY_WARNING:
+      return "warning";
+    case v1::Diagnostic::SEVERITY_ERROR:
+      return "error";
+    case v1::Diagnostic::SEVERITY_UNSPECIFIED:
+      break;
+    default:
+      break;
+  }
+  throw std::invalid_argument("control acknowledgement diagnostic severity is unspecified");
+}
+
+nlohmann::json acknowledgement_assignments(
+    const v1::ControlPatchAcknowledgement& acknowledgement) {
+  nlohmann::json output = nlohmann::json::object();
+  for (const auto& assignment : acknowledgement.effective_values()) {
+    if (assignment.key().empty() || output.contains(assignment.key())) {
+      throw std::invalid_argument(
+          "control acknowledgement has an empty or duplicate assignment key");
+    }
+    if (assignment.value().value_case() == v1::ScalarValue::kNumberValue &&
+        !std::isfinite(assignment.value().number_value())) {
+      throw std::invalid_argument(
+          "control acknowledgement assignment must be finite");
+    }
+    output[assignment.key()] = assignment_value(assignment.value());
+  }
+  return output;
+}
+
+nlohmann::json acknowledgement_diagnostics(
+    const v1::ControlPatchAcknowledgement& acknowledgement) {
+  nlohmann::json output = nlohmann::json::array();
+  for (const auto& diagnostic : acknowledgement.diagnostics()) {
+    if (diagnostic.code().empty() || diagnostic.message().empty()) {
+      throw std::invalid_argument(
+          "control acknowledgement diagnostic requires code and message");
+    }
+    output.push_back({{"severity", diagnostic_severity_name(diagnostic.severity())},
+                      {"code", diagnostic.code()},
+                      {"document_path", diagnostic.document_path()},
+                      {"message", diagnostic.message()},
+                      {"help", diagnostic.help()}});
+  }
+  return output;
 }
 
 grpc::Status worker_failure(const std::exception& exception) {
@@ -1202,7 +1301,8 @@ grpc::Status TrainVMService::open_worker_connection(
     welcome.set_dispatch_id(dispatch.dispatch_id);
     welcome.set_component(dispatch.component);
     welcome.set_operation(dispatch.operation);
-    welcome.set_acknowledged_worker_sequence(0);
+    welcome.set_acknowledged_worker_sequence(journal_.latest_worker_sequence(
+        hello.run_id, hello.node_id, hello.attempt_id));
     return grpc::Status::OK;
   } catch (const nlohmann::json::exception& exception) {
     return {grpc::StatusCode::DATA_LOSS, exception.what()};
@@ -1225,7 +1325,7 @@ grpc::Status TrainVMService::complete_worker_connection(
       envelope.plan_revision() != connection.dispatch.plan_revision ||
       envelope.node_id() != connection.identity.node_id ||
       envelope.attempt_id() != connection.identity.attempt_id ||
-      envelope.worker_sequence() != 1U || envelope.event_type().empty() ||
+      envelope.worker_sequence() == 0U || envelope.event_type().empty() ||
       envelope.event_type().size() > 256U || envelope.event_version() != 1U ||
       !envelope.has_wall_time() || envelope.has_payload() ||
       envelope.canonical_json_payload().empty() ||
@@ -1274,6 +1374,15 @@ grpc::Status TrainVMService::complete_worker_connection(
                               : std::nullopt,
         .payload = payload,
     };
+    const std::uint64_t latest = journal_.latest_worker_sequence(
+        event.run_id, event.node_id, event.attempt_id);
+    const auto stored = journal_.event(event.event_id);
+    if (latest == std::numeric_limits<std::uint64_t>::max() ||
+        event.worker_sequence > latest + 1U ||
+        (event.worker_sequence <= latest && !stored)) {
+      return {grpc::StatusCode::FAILED_PRECONDITION,
+              "worker result sequence is not the next durable message or an exact replay"};
+    }
     const ExecutionState& committed =
         controller.handle_event(event, connection.identity, authority_now());
     const auto committed_projection =
@@ -1296,6 +1405,291 @@ grpc::Status TrainVMService::complete_worker_connection(
                                   connection.identity.node_id + ":" +
                                   connection.identity.attempt_id;
     resolved_launches_.erase(launch_id);
+    return grpc::Status::OK;
+  } catch (const std::exception& exception) {
+    return worker_failure(exception);
+  }
+}
+
+grpc::Status TrainVMService::commit_worker_observation(
+    Event event, const WorkerConnection& connection,
+    std::uint64_t& acknowledged) {
+  try {
+    std::scoped_lock lock(command_mutex_);
+    const auto projection = journal_.projection(connection.identity.run_id);
+    if (!projection) {
+      return {grpc::StatusCode::NOT_FOUND, "worker run does not exist"};
+    }
+    const auto plan = journal_.compiled_plan(projection->plan_hash);
+    if (!plan) {
+      return {grpc::StatusCode::DATA_LOSS,
+              "worker run has no persisted compiled plan"};
+    }
+    const std::uint64_t latest = journal_.latest_worker_sequence(
+        connection.identity.run_id, connection.identity.node_id,
+        connection.identity.attempt_id);
+    const auto stored = journal_.event(event.event_id);
+    if (latest == std::numeric_limits<std::uint64_t>::max() ||
+        event.worker_sequence > latest + 1U ||
+        (event.worker_sequence <= latest && !stored)) {
+      return {grpc::StatusCode::FAILED_PRECONDITION,
+              "worker observation sequence is not the next durable message or an exact replay"};
+    }
+    const AuthorityTimeSample now = authority_now();
+    if (event.event_type == "worker.heartbeat") {
+      event.wall_time_ns = stored ? stored->wall_time_ns : now.wall.nanoseconds;
+    }
+    Controller controller(*plan, journal_, connection.identity.run_id);
+    controller.recover();
+    (void)controller.record_worker_observation(
+        event, connection.identity, now);
+    acknowledged = event.worker_sequence;
+    return grpc::Status::OK;
+  } catch (const std::exception& exception) {
+    return worker_failure(exception);
+  }
+}
+
+grpc::Status TrainVMService::record_worker_heartbeat(
+    const v1::WorkerHeartbeat& heartbeat,
+    const WorkerConnection& connection, std::uint64_t& acknowledged) {
+  if (heartbeat.ByteSizeLong() > kMaximumWorkerMessageBytes) {
+    return {grpc::StatusCode::RESOURCE_EXHAUSTED,
+            "worker heartbeat exceeds 64 KiB"};
+  }
+  try {
+    if (heartbeat.worker_sequence() == 0U || heartbeat.phase().empty() ||
+        !heartbeat.has_observed_at()) {
+      return {grpc::StatusCode::INVALID_ARGUMENT,
+              "worker heartbeat requires sequence, phase, and observed_at"};
+    }
+    const std::int64_t observed_at_ns = timestamp_ns(heartbeat.observed_at());
+    const Event event{
+        .event_id = connection.dispatch.dispatch_id + ":heartbeat:" +
+                    std::to_string(heartbeat.worker_sequence()),
+        .run_id = connection.identity.run_id,
+        .run_revision = connection.dispatch.run_revision,
+        .plan_revision = connection.dispatch.plan_revision,
+        .node_id = connection.identity.node_id,
+        .attempt_id = connection.identity.attempt_id,
+        .worker_sequence = heartbeat.worker_sequence(),
+        .event_type = "worker.heartbeat",
+        .event_version = 1,
+        .wall_time_ns = 0,
+        .monotonic_time_ns = 0,
+        .optimizer_step = heartbeat.optimizer_step(),
+        .payload = {{"phase", heartbeat.phase()},
+                    {"observed_at_ns", observed_at_ns}},
+    };
+    return commit_worker_observation(event, connection, acknowledged);
+  } catch (const std::exception& exception) {
+    return worker_failure(exception);
+  }
+}
+
+grpc::Status TrainVMService::record_worker_metric(
+    const v1::MetricSample& metric, const WorkerConnection& connection,
+    std::uint64_t& acknowledged) {
+  if (metric.ByteSizeLong() > kMaximumWorkerMessageBytes) {
+    return {grpc::StatusCode::RESOURCE_EXHAUSTED,
+            "worker metric exceeds 64 KiB"};
+  }
+  try {
+    if (metric.worker_sequence() == 0U || metric.name().empty() ||
+        metric.step_domain().empty() || !metric.has_observed_at() ||
+        metric.value().value_case() == v1::ScalarValue::VALUE_NOT_SET ||
+        !std::isfinite(metric.sample_weight()) || metric.sample_weight() <= 0.0 ||
+        (metric.value().value_case() == v1::ScalarValue::kNumberValue &&
+         !std::isfinite(metric.value().number_value()))) {
+      return {grpc::StatusCode::INVALID_ARGUMENT,
+              "worker metric requires a finite value, positive weight, identity, sequence, and timestamp"};
+    }
+    nlohmann::json labels = nlohmann::json::object();
+    for (const auto& [key, value] : metric.labels()) {
+      if (key.empty()) {
+        return {grpc::StatusCode::INVALID_ARGUMENT,
+                "worker metric label keys must not be empty"};
+      }
+      labels[key] = value;
+    }
+    const Event event{
+        .event_id = connection.dispatch.dispatch_id + ":metric:" +
+                    std::to_string(metric.worker_sequence()),
+        .run_id = connection.identity.run_id,
+        .run_revision = connection.dispatch.run_revision,
+        .plan_revision = connection.dispatch.plan_revision,
+        .node_id = connection.identity.node_id,
+        .attempt_id = connection.identity.attempt_id,
+        .worker_sequence = metric.worker_sequence(),
+        .event_type = "metric.sampled",
+        .event_version = 1,
+        .wall_time_ns = timestamp_ns(metric.observed_at()),
+        .monotonic_time_ns = 0,
+        .optimizer_step = metric.step(),
+        .payload = {{"name", metric.name()},
+                    {"value", assignment_value(metric.value())},
+                    {"unit", metric.unit()},
+                    {"step_domain", metric.step_domain()},
+                    {"step", metric.step()},
+                    {"sample_weight", metric.sample_weight()},
+                    {"labels", std::move(labels)}},
+    };
+    return commit_worker_observation(event, connection, acknowledged);
+  } catch (const std::exception& exception) {
+    return worker_failure(exception);
+  }
+}
+
+grpc::Status TrainVMService::record_worker_artifact(
+    const v1::ArtifactManifest& artifact,
+    const WorkerConnection& connection, std::uint64_t& acknowledged) {
+  if (artifact.ByteSizeLong() > kMaximumWorkerMessageBytes) {
+    return {grpc::StatusCode::RESOURCE_EXHAUSTED,
+            "worker artifact manifest exceeds 64 KiB"};
+  }
+  try {
+    if (artifact.worker_sequence() == 0U || artifact.artifact_id().empty() ||
+        artifact.logical_name().empty() || artifact.uri().empty() ||
+        artifact.fingerprint_algorithm().empty() || artifact.fingerprint().empty() ||
+        !artifact.complete() || !artifact.has_published_at() ||
+        artifact.producer_node_id() != connection.identity.node_id ||
+        artifact.producer_attempt_id() != connection.identity.attempt_id) {
+      return {grpc::StatusCode::INVALID_ARGUMENT,
+              "published artifact requires complete content identity and the active producer attempt"};
+    }
+    std::set<std::string> parents;
+    nlohmann::json parent_ids = nlohmann::json::array();
+    for (const auto& parent : artifact.parent_artifact_ids()) {
+      if (parent.empty() || parent == artifact.artifact_id() ||
+          !parents.insert(parent).second) {
+        return {grpc::StatusCode::INVALID_ARGUMENT,
+                "artifact parent identities must be unique, nonempty, and non-self"};
+      }
+      parent_ids.push_back(parent);
+    }
+    const std::int64_t published_at_ns = timestamp_ns(artifact.published_at());
+    const Event event{
+        .event_id = connection.dispatch.dispatch_id + ":artifact:" +
+                    sha256_hex(artifact.artifact_id()),
+        .run_id = connection.identity.run_id,
+        .run_revision = connection.dispatch.run_revision,
+        .plan_revision = connection.dispatch.plan_revision,
+        .node_id = connection.identity.node_id,
+        .attempt_id = connection.identity.attempt_id,
+        .worker_sequence = artifact.worker_sequence(),
+        .event_type = "artifact.published",
+        .event_version = 1,
+        .wall_time_ns = published_at_ns,
+        .monotonic_time_ns = 0,
+        .optimizer_step = std::nullopt,
+        .payload = {{"artifact_id", artifact.artifact_id()},
+                    {"logical_name", artifact.logical_name()},
+                    {"kind", artifact_kind_name(artifact.kind())},
+                    {"schema", artifact.schema()},
+                    {"uri", artifact.uri()},
+                    {"size_bytes", artifact.size_bytes()},
+                    {"fingerprint_algorithm", artifact.fingerprint_algorithm()},
+                    {"fingerprint", artifact.fingerprint()},
+                    {"complete", artifact.complete()},
+                    {"producer_node_id", artifact.producer_node_id()},
+                    {"producer_attempt_id", artifact.producer_attempt_id()},
+                    {"parent_artifact_ids", std::move(parent_ids)},
+                    {"published_at_ns", published_at_ns}},
+    };
+    return commit_worker_observation(event, connection, acknowledged);
+  } catch (const std::exception& exception) {
+    return worker_failure(exception);
+  }
+}
+
+grpc::Status TrainVMService::acknowledge_worker_control(
+    const v1::ControlPatchAcknowledgement& acknowledgement,
+    const WorkerConnection& connection, std::uint64_t& acknowledged) {
+  if (acknowledgement.ByteSizeLong() > kMaximumWorkerMessageBytes) {
+    return {grpc::StatusCode::RESOURCE_EXHAUSTED,
+            "worker control acknowledgement exceeds 64 KiB"};
+  }
+  try {
+    if (acknowledgement.command_id().empty() ||
+        acknowledgement.control_revision() == 0U ||
+        acknowledgement.worker_sequence() == 0U ||
+        acknowledgement.concurrency_key() != connection.identity.concurrency_key ||
+        acknowledgement.lease_id() != connection.identity.lease_id ||
+        acknowledgement.fencing_token() != connection.identity.fencing_token ||
+        !acknowledgement.has_acknowledged_at()) {
+      return {grpc::StatusCode::INVALID_ARGUMENT,
+              "control acknowledgement has an invalid command or fenced identity"};
+    }
+    (void)timestamp_ns(acknowledgement.acknowledged_at());
+    ControlCommandStatus status;
+    switch (acknowledgement.disposition()) {
+      case v1::ControlPatchAcknowledgement::DISPOSITION_APPLIED:
+        status = ControlCommandStatus::applied;
+        break;
+      case v1::ControlPatchAcknowledgement::DISPOSITION_REJECTED:
+        status = ControlCommandStatus::rejected;
+        break;
+      case v1::ControlPatchAcknowledgement::DISPOSITION_RESTART_REQUIRED:
+        status = ControlCommandStatus::restart_required;
+        break;
+      case v1::ControlPatchAcknowledgement::DISPOSITION_UNSPECIFIED:
+        return {grpc::StatusCode::INVALID_ARGUMENT,
+                "control acknowledgement disposition is unspecified"};
+      default:
+        return {grpc::StatusCode::INVALID_ARGUMENT,
+                "control acknowledgement disposition is invalid"};
+    }
+    std::scoped_lock lock(command_mutex_);
+    const auto projection = journal_.projection(connection.identity.run_id);
+    const auto command = journal_.control_command(acknowledgement.command_id());
+    if (!projection || !command || command->run_id != connection.identity.run_id ||
+        command->control_revision != acknowledgement.control_revision() ||
+        wire_apply_point(command->apply_point) != acknowledgement.apply_point()) {
+      return {grpc::StatusCode::FAILED_PRECONDITION,
+              "control acknowledgement does not match a durable command"};
+    }
+    const std::uint64_t latest = journal_.latest_worker_sequence(
+        connection.identity.run_id, connection.identity.node_id,
+        connection.identity.attempt_id);
+    const auto stored = journal_.event(acknowledgement.command_id() + ":ack");
+    if (latest == std::numeric_limits<std::uint64_t>::max() ||
+        acknowledgement.worker_sequence() > latest + 1U ||
+        (acknowledgement.worker_sequence() <= latest && !stored)) {
+      return {grpc::StatusCode::FAILED_PRECONDITION,
+              "control acknowledgement sequence is not the next durable message or an exact replay"};
+    }
+    const auto plan = journal_.compiled_plan(projection->plan_hash);
+    if (!plan) {
+      return {grpc::StatusCode::DATA_LOSS,
+              "worker run has no persisted compiled plan"};
+    }
+    std::optional<std::uint64_t> effective_step;
+    if (status == ControlCommandStatus::applied &&
+        command->apply_point != ApplyPoint::immediate) {
+      if (acknowledgement.effective_step() == 0U) {
+        return {grpc::StatusCode::INVALID_ARGUMENT,
+                "safe-point control acknowledgement requires an effective step"};
+      }
+      effective_step = acknowledgement.effective_step();
+    } else if (acknowledgement.effective_step() != 0U) {
+      return {grpc::StatusCode::INVALID_ARGUMENT,
+              "control acknowledgement has an inapplicable effective step"};
+    }
+    Controller controller(*plan, journal_, connection.identity.run_id);
+    controller.recover();
+    (void)controller.acknowledge_controls(
+        acknowledgement.command_id(),
+        ControlAcknowledgementIdentity{
+            .concurrency_key = connection.identity.concurrency_key,
+            .lease_id = connection.identity.lease_id,
+            .fencing_token = connection.identity.fencing_token,
+            .node_id = connection.identity.node_id,
+            .attempt_id = connection.identity.attempt_id,
+            .worker_sequence = acknowledgement.worker_sequence()},
+        status, effective_step,
+        acknowledgement_assignments(acknowledgement),
+        acknowledgement_diagnostics(acknowledgement), authority_now());
+    acknowledged = acknowledgement.worker_sequence();
     return grpc::Status::OK;
   } catch (const std::exception& exception) {
     return worker_failure(exception);
@@ -1357,33 +1751,85 @@ grpc::Status TrainVMService::Connect(
     }
     return finish(grpc::Status::OK);
   }
-  v1::WorkerToController result;
-  if (!stream->Read(&result)) {
-    return finish(cancelled(context)
-                      ? grpc::Status(grpc::StatusCode::CANCELLED,
-                                     "worker stream cancelled before result")
-                      : grpc::Status(
-                            grpc::StatusCode::FAILED_PRECONDITION,
-                            "worker stream closed before its required result"));
-  }
-  if (result.ByteSizeLong() > kMaximumWorkerMessageBytes) {
-    return finish({grpc::StatusCode::RESOURCE_EXHAUSTED,
-                   "worker result exceeds 64 KiB"});
-  }
-  if (!result.has_event()) {
-    return finish({grpc::StatusCode::UNIMPLEMENTED,
-                   "this WorkerControl revision accepts one result event only"});
-  }
-  v1::WorkerReceipt committed;
-  status = complete_worker_connection(result.event(), connection, committed);
+  std::uint64_t last_sent_controller_sequence =
+      hello.last_acked_controller_sequence();
+  const auto send_pending_commands = [&]() -> grpc::Status {
+    std::vector<ControlCommand> commands;
+    try {
+      std::scoped_lock lock(command_mutex_);
+      commands = journal_.pending_control_commands(
+          connection.identity.run_id, last_sent_controller_sequence);
+    } catch (const std::exception& exception) {
+      return worker_failure(exception);
+    }
+    for (const auto& command : commands) {
+      v1::ControllerToWorker response;
+      *response.mutable_command() = worker_control_command(command);
+      if (!stream->Write(response)) {
+        return {grpc::StatusCode::CANCELLED,
+                "worker disconnected before a durable controller command"};
+      }
+      last_sent_controller_sequence = command.control_revision;
+    }
+    return grpc::Status::OK;
+  };
+  status = send_pending_commands();
   if (!status.ok()) return finish(std::move(status));
-  v1::ControllerToWorker response;
-  *response.mutable_receipt() = std::move(committed);
-  if (!stream->Write(response)) {
-    return finish({grpc::StatusCode::CANCELLED,
-                   "worker disconnected after durable result commit"});
+  for (;;) {
+    v1::WorkerToController message;
+    if (!stream->Read(&message)) {
+      return finish(cancelled(context)
+                        ? grpc::Status(grpc::StatusCode::CANCELLED,
+                                       "worker stream cancelled before result")
+                        : grpc::Status(
+                              grpc::StatusCode::FAILED_PRECONDITION,
+                              "worker stream closed before its required result"));
+    }
+    if (message.ByteSizeLong() > kMaximumWorkerMessageBytes) {
+      return finish({grpc::StatusCode::RESOURCE_EXHAUSTED,
+                     "worker stream message exceeds 64 KiB"});
+    }
+    if (message.has_event()) {
+      v1::WorkerReceipt committed;
+      status = complete_worker_connection(message.event(), connection, committed);
+      if (!status.ok()) return finish(std::move(status));
+      v1::ControllerToWorker response;
+      *response.mutable_receipt() = std::move(committed);
+      if (!stream->Write(response)) {
+        return finish({grpc::StatusCode::CANCELLED,
+                       "worker disconnected after durable result commit"});
+      }
+      return finish(grpc::Status::OK);
+    }
+
+    std::uint64_t acknowledged = 0U;
+    if (message.has_heartbeat()) {
+      status = record_worker_heartbeat(message.heartbeat(), connection,
+                                       acknowledged);
+    } else if (message.has_metric()) {
+      status = record_worker_metric(message.metric(), connection, acknowledged);
+    } else if (message.has_artifact()) {
+      status = record_worker_artifact(message.artifact(), connection,
+                                      acknowledged);
+    } else if (message.has_control_ack()) {
+      status = acknowledge_worker_control(message.control_ack(), connection,
+                                          acknowledged);
+    } else {
+      return finish({grpc::StatusCode::INVALID_ARGUMENT,
+                     message.has_hello()
+                         ? "worker hello may only be the first stream message"
+                         : "worker stream message variant is required"});
+    }
+    if (!status.ok()) return finish(std::move(status));
+    v1::ControllerToWorker response;
+    response.set_acknowledge_worker_sequence(acknowledged);
+    if (!stream->Write(response)) {
+      return finish({grpc::StatusCode::CANCELLED,
+                     "worker disconnected after durable message commit"});
+    }
+    status = send_pending_commands();
+    if (!status.ok()) return finish(std::move(status));
   }
-  return finish(grpc::Status::OK);
 }
 
 grpc::Status TrainVMService::SubmitExperiment(grpc::ServerContext* context,
