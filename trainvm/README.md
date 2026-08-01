@@ -376,8 +376,12 @@ are excluded from durable identity. A bounded strict hostd client now delegates 
 executable, optional code, working-directory, and bootstrap descriptors over the authenticated
 mutation transport and revalidates typed replies. The normal CLI remains launch-disabled by
 default; an explicit pinned hostd-client document now bootstraps the implemented journal-backed
-claim provider and both typed clients after a read-only host/boot/broker status check. The unified
-hostd daemon entry point is still required before this path can be qualified for production;
+claim provider and both typed clients after a read-only host/boot/broker status check. The reflected
+`trainvm.hostd-daemon/v1` startup document rejects unknown or duplicate fields, unsafe authority
+paths/names, trust downgrades, incompatible service roles, and unbounded recovery, then compiles
+every ledger, inventory, cgroup, socket, session, challenge, and startup sub-policy from one source
+of truth. The unified hostd daemon assembly and entry point are still required before this path can
+be qualified for production;
 pause/resume and durable hostd adoption remain subsequent milestones. A worker launch ticket is a protocol authorization only
 until it is paired with a trusted descriptor digest, resolved launch specification, host identity,
 and durable process receipt.

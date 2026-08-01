@@ -91,6 +91,12 @@ Hostd is a systemd-owned singleton for the physical host. The default deployment
 Paths may be configured only by a root- or dedicated-authority-owned startup configuration. They are
 not experiment fields.
 
+The implemented reflected `trainvm.hostd-daemon/v1` document is that sole configuration boundary.
+It is closed to unknown and duplicate fields and compiles all authority sub-policies, including
+transport peer identity, service roles, retained journal identity, recovery bounds, and trusted
+inventory settings. Journal lock and socket leaves must be safe bounded basenames; no experiment or
+adapter may override them.
+
 Hostd uses a filesystem `AF_UNIX` `SOCK_SEQPACKET` endpoint with peer credentials and preferably
 systemd socket activation. It does not use the abstract Unix namespace. Services in another mount
 namespace must receive the same socket through an explicit bind mount or an inherited descriptor.

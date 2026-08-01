@@ -66,6 +66,7 @@ add_library(trainvm_core
   src/hostd.cpp
   src/hostd_client_bootstrap.cpp
   src/hostd_client_configuration.cpp
+  src/hostd_daemon_configuration.cpp
   src/hostd_journal_fence_attestor.cpp
   src/hostd_journal_logical_fence.cpp
   src/hostd_linux_cgroup_authority.cpp
@@ -374,6 +375,16 @@ target_compile_options(hostd_client_configuration_tests PRIVATE
 target_link_libraries(hostd_client_configuration_tests PRIVATE trainvm_core)
 add_test(NAME hostd_client_configuration_tests
   COMMAND hostd_client_configuration_tests
+)
+add_executable(hostd_daemon_configuration_tests
+  tests/hostd_daemon_configuration_tests.cpp
+)
+target_compile_options(hostd_daemon_configuration_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(hostd_daemon_configuration_tests PRIVATE trainvm_core)
+add_test(NAME hostd_daemon_configuration_tests
+  COMMAND hostd_daemon_configuration_tests
 )
 add_executable(hostd_client_bootstrap_tests
   tests/hostd_client_bootstrap_tests.cpp
