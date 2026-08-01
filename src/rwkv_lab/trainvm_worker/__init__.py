@@ -30,11 +30,21 @@ from .session import (
     WorkerSession,
     WorkerSessionError,
 )
+from .training import (
+    MAXIMUM_COMPONENT_SLOTS,
+    RESOLVED_TRAINING_API_VERSION,
+    ResolvedTrainingComponent,
+    ResolvedTrainingComposition,
+    TrainingCompositionError,
+    load_resolved_training_composition,
+)
 
 __all__ = [
     "EVAL_GALLERY_SCHEMA",
     "MAXIMUM_BOOTSTRAP_BYTES",
+    "MAXIMUM_COMPONENT_SLOTS",
     "MAXIMUM_INVOCATION_BYTES",
+    "RESOLVED_TRAINING_API_VERSION",
     "BootstrapError",
     "CommandKind",
     "ControlAssignment",
@@ -45,12 +55,16 @@ __all__ = [
     "GalleryImage",
     "InvocationError",
     "PublishedEvalGallery",
+    "ResolvedTrainingComponent",
+    "ResolvedTrainingComposition",
+    "TrainingCompositionError",
     "WorkerBootstrap",
     "WorkerCommand",
     "WorkerInvocation",
     "WorkerReceipt",
     "WorkerSession",
     "WorkerSessionError",
+    "load_resolved_training_composition",
     "load_worker_bootstrap",
     "load_worker_invocation",
     "read_worker_bootstrap_fd",

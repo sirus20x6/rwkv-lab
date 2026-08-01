@@ -15,6 +15,7 @@ from ._canonical import (
     is_uint64,
     sha256_digest,
 )
+from .training import ResolvedTrainingComposition, load_resolved_training_composition
 
 INVOCATION_API_VERSION = "trainvm.worker-invocation/v1"
 MAXIMUM_INVOCATION_BYTES = 48 * 1024
@@ -41,9 +42,7 @@ _FIELDS = frozenset(
         "workspace",
     }
 )
-_ADAPTER_FIELDS = frozenset(
-    {"adapter", "contract", "operation", "runtime", "version"}
-)
+_ADAPTER_FIELDS = frozenset({"adapter", "contract", "operation", "runtime", "version"})
 
 
 class InvocationError(ValueError):
@@ -68,7 +67,7 @@ class WorkerInvocation:
     publishes: Mapping[str, Any]
     observability: Mapping[str, Any]
     execution: Mapping[str, Any] | None
-    training: Mapping[str, Any] | None
+    training: ResolvedTrainingComposition | None
     invocation_digest: str
 
 
@@ -95,7 +94,14 @@ def load_worker_invocation(
         digest = document["invocation_digest"]
         body = dict(document)
         del body["invocation_digest"]
-        objects = ("workspace", "resources", "inputs", "controls", "publishes", "observability")
+        objects = (
+            "workspace",
+            "resources",
+            "inputs",
+            "controls",
+            "publishes",
+            "observability",
+        )
         valid = (
             document["api_version"] == INVOCATION_API_VERSION
             and is_bounded_text(document["run_id"], 1024)
@@ -104,7 +110,9 @@ def load_worker_invocation(
             and is_bounded_text(document["dispatch_id"], 4096)
             and isinstance(document["plan_hash"], str)
             and len(document["plan_hash"]) == 64
-            and all(character in "0123456789abcdef" for character in document["plan_hash"])
+            and all(
+                character in "0123456789abcdef" for character in document["plan_hash"]
+            )
             and is_uint64(document["plan_revision"], positive=True)
             and is_digest(document["host_id"])
             and all(isinstance(document[name], dict) for name in objects)
@@ -145,7 +153,11 @@ def load_worker_invocation(
             publishes=deep_freeze(document["publishes"]),
             observability=deep_freeze(document["observability"]),
             execution=deep_freeze(document["execution"]),
-            training=deep_freeze(document["training"]),
+            training=(
+                load_resolved_training_composition(document["training"])
+                if document["training"] is not None
+                else None
+            ),
             invocation_digest=digest,
         )
     except InvocationError:

@@ -25,7 +25,13 @@ Both documents use exact canonical JSON, a 16/48 KiB bound, and SHA-256. The
 Python and C++ implementations share golden digests, reject duplicate members,
 reject noncanonical encodings, and verify all Welcome/bootstrap identity joins.
 The Python decoder recursively freezes the invocation before adapter code sees
-it.
+it. A non-null training composition is also decoded into
+`ResolvedTrainingComposition`: it independently verifies the composition and every descriptor
+digest, enforces the exact slot/envelope shape and model-family binding, and exposes
+`require(slot, category=...)`. The returned `ResolvedTrainingComponent.runtime_envelope()` is the
+only object passed to the category-owned optimizer, LR-schedule, router, activation, or other
+tensor-runtime factory. This keeps authority resolution, adapter topology integration, and tensor
+implementation as separate layers.
 
 ## Session API
 
