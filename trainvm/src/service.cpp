@@ -948,13 +948,22 @@ TrainVMService::TrainVMService(
     AdapterRegistry adapter_registry,
     HostLaunchRegistry host_launch_registry,
     std::function<AuthorityTimeSample()> authority_clock,
-    TrainingComponentRegistry training_components)
+    TrainingComponentRegistry training_components,
+    std::optional<HostdClientConfiguration> hostd_configuration,
+    std::string controller_target)
     : TrainVMService(journal_path, std::move(adapter_registry),
                      std::move(host_launch_registry),
                      HostLaunchResolver::local_host_identity(),
                      std::move(authority_clock),
                      HostGrantEnforcement::required,
-                     std::move(training_components)) {}
+                     std::move(training_components)) {
+  if (hostd_configuration) {
+    configure_hostd(*hostd_configuration, std::move(controller_target));
+  } else if (!controller_target.empty()) {
+    throw std::invalid_argument(
+        "controller target requires hostd client configuration");
+  }
+}
 
 TrainVMService::TrainVMService(
     const std::filesystem::path& journal_path,
@@ -1008,6 +1017,29 @@ TrainVMService::~TrainVMService() = default;
 
 AuthorityTimeSample TrainVMService::authority_now() const {
   return authority_clock_->sample();
+}
+
+void TrainVMService::configure_hostd(
+    const HostdClientConfiguration& configuration,
+    std::string controller_target) {
+  if (hostd_claim_provider_ || host_grant_client_ || host_process_client_ ||
+      host_grant_saga_ || host_process_saga_ ||
+      controller_target.empty() || controller_target.size() > 4'096U ||
+      !controller_target.starts_with("unix:/")) {
+    throw std::invalid_argument(
+        "hostd clients require one canonical Unix controller target");
+  }
+  HostdClientBundle bundle = bootstrap_hostd_clients(
+      journal_, authority_host_, configuration,
+      [this] { return authority_now(); });
+  hostd_claim_provider_ = std::move(bundle.claim_provider);
+  host_grant_client_ = std::move(bundle.resource_client);
+  host_process_client_ = std::move(bundle.process_client);
+  controller_target_ = std::move(controller_target);
+  host_grant_saga_ = std::make_unique<HostGrantSagaReconciler>(
+      journal_, *host_grant_client_);
+  host_process_saga_ = std::make_unique<HostProcessSagaReconciler>(
+      journal_, *host_process_client_);
 }
 
 ReconcileResult TrainVMService::reconcile_once(const std::string& run_id) {
@@ -2373,7 +2405,8 @@ int serve(const std::filesystem::path& journal_path,
           const std::filesystem::path& socket_path,
           AdapterRegistry adapter_registry,
           HostLaunchRegistry host_launch_registry,
-          TrainingComponentRegistry training_components) {
+          TrainingComponentRegistry training_components,
+          std::optional<HostdClientConfiguration> hostd_configuration) {
   if (journal_path.empty() || socket_path.empty()) {
     throw std::invalid_argument("serve requires journal and socket paths");
   }
@@ -2389,7 +2422,9 @@ int serve(const std::filesystem::path& journal_path,
   // and only then discover that it cannot acquire the journal lock.
   TrainVMService service(journal_path, std::move(adapter_registry),
                          std::move(host_launch_registry), {},
-                         std::move(training_components));
+                         std::move(training_components),
+                         std::move(hostd_configuration),
+                         "unix:" + absolute_socket.string());
   SocketAuthorityLock socket_authority(absolute_socket);
   remove_stale_socket(absolute_socket);
   SocketCleanupGuard socket_cleanup(absolute_socket);

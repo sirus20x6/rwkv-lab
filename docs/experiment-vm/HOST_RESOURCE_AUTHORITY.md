@@ -688,7 +688,10 @@ mutation transport with exact descriptor delegation and typed response checks. J
 mutation-claim provisioning now derives resource scope from immutable request/release records and
 process scope from durable launch bindings. It uses cryptographically random controller identities,
 durable per-concurrency generations, exact replay within a service process, restart generation
-advancement, and fail-closed supersession. The remaining P0.3 gate is daemon bootstrap integration and the
+advancement, and fail-closed supersession. TrainVM now accepts an optional strict hostd client
+document that pins the socket inode and owner credentials, bounds request time, obtains the broker
+epoch from read-only status, and rejects host/boot mismatch before constructing both typed clients.
+The remaining P0.3 gate is the unified privileged daemon entry point and the
 privileged end-to-end process-crash matrix at strict
 socket-pidfd/host-namespace grade. Deterministic transport checkpoints already prove that interruption at
 each pre-dispatch boundary leaves no ledger outcome, while interruption after

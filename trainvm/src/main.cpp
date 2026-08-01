@@ -10,10 +10,12 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -28,12 +30,13 @@ void usage() {
       << "  trainvm compile  # read JSON from stdin; emit canonical preview JSON\n"
       << "  trainvm validate-catalog <compatibility.json> <repository-root>\n"
       << "  trainvm inspect-training-components <training-components.json>\n"
+      << "  trainvm inspect-hostd-client <hostd-client.json>\n"
       << "  trainvm inspect-registry <experiments.db> [--task <task>] "
          "[--metric <metric>] [--baseline <config>] [--limit <count>]\n"
       << "  trainvm serve --journal <journal.db> --socket <trainvm.sock> "
          "--registry <adapters.json> --host-launch-registry "
          "<host-launches.json> --training-component-registry "
-         "<training-components.json>\n"
+         "<training-components.json> [--hostd-client <hostd-client.json>]\n"
       << "  trainvm simulate <experiment.json> <events.jsonl> [run-id]\n"
       << "  trainvm journal init <journal.db>\n"
       << "  trainvm journal verify <journal.db>\n"
@@ -136,6 +139,20 @@ int inspect_training_components_command(
                    {"components", document.at("components").size()},
                    {"registry_digest", registry.registry_digest()},
                    {"canonical_registry", document},
+               }
+                   .dump(2)
+            << '\n';
+  return 0;
+}
+
+int inspect_hostd_client_command(const std::filesystem::path& path) {
+  const trainvm::HostdClientConfiguration configuration =
+      trainvm::HostdClientConfiguration::load_file(
+          std::filesystem::absolute(path).lexically_normal());
+  std::cout << nlohmann::json{
+                   {"valid", true},
+                   {"canonical_configuration",
+                    trainvm::encode_json(configuration.document())},
                }
                    .dump(2)
             << '\n';
@@ -268,19 +285,28 @@ int journal_command(int argc, char** argv) {
 }
 
 int serve_command(int argc, char** argv) {
-  if (argc != 12 || std::string_view(argv[2]) != "--journal" ||
+  const bool with_hostd = argc == 14;
+  if ((argc != 12 && !with_hostd) ||
+      std::string_view(argv[2]) != "--journal" ||
       std::string_view(argv[4]) != "--socket" ||
       std::string_view(argv[6]) != "--registry" ||
       std::string_view(argv[8]) != "--host-launch-registry" ||
-      std::string_view(argv[10]) != "--training-component-registry") {
+      std::string_view(argv[10]) != "--training-component-registry" ||
+      (with_hostd && std::string_view(argv[12]) != "--hostd-client")) {
     usage();
     return 64;
+  }
+  std::optional<trainvm::HostdClientConfiguration> hostd;
+  if (with_hostd) {
+    hostd = trainvm::HostdClientConfiguration::load_file(
+        std::filesystem::absolute(argv[13]).lexically_normal());
   }
   return trainvm::serve(argv[3], argv[5],
                         trainvm::AdapterRegistry::load_file(argv[7]),
                         trainvm::HostLaunchRegistry::load_file(argv[9]),
                         trainvm::TrainingComponentRegistry::load_file(
-                            argv[11]));
+                            argv[11]),
+                        std::move(hostd));
 }
 
 }  // namespace
@@ -302,6 +328,10 @@ int main(int argc, char** argv) {
     if (argc == 3 &&
         std::string_view(argv[1]) == "inspect-training-components") {
       return inspect_training_components_command(argv[2]);
+    }
+    if (argc == 3 &&
+        std::string_view(argv[1]) == "inspect-hostd-client") {
+      return inspect_hostd_client_command(argv[2]);
     }
     if (argc >= 3 && std::string_view(argv[1]) == "inspect-registry") {
       return inspect_registry_command(argc, argv);

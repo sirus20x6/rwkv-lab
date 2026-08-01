@@ -15,6 +15,7 @@
 #include "trainvm/journal.hpp"
 #include "trainvm/authority_time.hpp"
 #include "trainvm/host_launch.hpp"
+#include "trainvm/hostd_client_bootstrap.hpp"
 #include "trainvm/host_process_saga.hpp"
 #include "trainvm/resource_request_builder.hpp"
 #include "trainvm/reconciler.hpp"
@@ -52,7 +53,10 @@ class TrainVMService final : public v1::TrainVM::Service,
       HostLaunchRegistry host_launch_registry,
       std::function<AuthorityTimeSample()> authority_clock = {},
       TrainingComponentRegistry training_components =
-          TrainingComponentRegistry({}));
+          TrainingComponentRegistry({}),
+      std::optional<HostdClientConfiguration> hostd_configuration =
+          std::nullopt,
+      std::string controller_target = {});
   ~TrainVMService() override;
 
   grpc::Status SubmitExperiment(grpc::ServerContext* context,
@@ -113,6 +117,8 @@ class TrainVMService final : public v1::TrainVM::Service,
       const std::string& launch_id);
   [[nodiscard]] std::optional<ReconcileDisposition> reconcile_host_grant(
       const std::string& run_id);
+  void configure_hostd(const HostdClientConfiguration& configuration,
+                       std::string controller_target);
 
   // Deterministic host-identity injection is restricted to focused authority
   // tests. Production construction always captures the local Linux identity.
@@ -143,6 +149,8 @@ class TrainVMService final : public v1::TrainVM::Service,
   const TrainingComponentRegistry training_components_;
   const HostIdentity authority_host_;
   HostLaunchResolver host_launch_resolver_;
+  std::shared_ptr<JournalHostdMutationClaimProvider>
+      hostd_claim_provider_;
   std::shared_ptr<IHostGrantClient> host_grant_client_;
   std::unique_ptr<HostGrantSagaReconciler> host_grant_saga_;
   std::shared_ptr<IHostProcessClient> host_process_client_;
@@ -161,6 +169,8 @@ int serve(const std::filesystem::path& journal_path,
           AdapterRegistry adapter_registry,
           HostLaunchRegistry host_launch_registry,
           TrainingComponentRegistry training_components =
-              TrainingComponentRegistry({}));
+              TrainingComponentRegistry({}),
+          std::optional<HostdClientConfiguration> hostd_configuration =
+              std::nullopt);
 
 }  // namespace trainvm

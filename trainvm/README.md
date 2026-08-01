@@ -159,14 +159,18 @@ Implemented now:
   driver/runtime closure, compiler configuration, and compile inputs. Cache reuse remains disabled
   until an authority builder verifies those receipts and an immutable cache-publication protocol
   prevents poisoning;
-- `validate`, `plan`, `simulate`, and journal inspection/replay CLI commands.
+- `validate`, `plan`, `simulate`, journal inspection/replay, and strict hostd-client configuration
+  inspection CLI commands.
 
 The launch-authorization reconciler first persists a fenced `worker.launch_requested` protocol
 intent; the host resolver then persists a deterministic, non-secret descriptor binding while
 retaining the sealed files. The guarded host daemon exposes exact-replay prepare, commit, and
 finalize process commands backed by the stopped-child cgroup/pidfd supervisor. The TrainVM service
-does not yet drive that daemon process surface end to end, so production trainer launch remains
-disabled at the orchestration boundary. Production launch preparation requires an exact, live
+can now opt into the typed hostd resource/process clients with
+`--hostd-client <hostd-client.json>`. Startup securely reads a declarative pinned socket identity,
+queries that exact endpoint for its runtime broker epoch, verifies its host/boot identity against
+the retained journal authority, and then constructs journal-derived mutation claims. The default
+without that flag remains launch-disabled. Production launch preparation requires an exact, live
 durable host grant and binds its request identity, receipt digest, and physical fences into the
 worker ticket and resolved launch identity; process-free unit fixtures can opt into a visibly
 test-only legacy mode.
@@ -182,10 +186,10 @@ coordinator connection, durable dispatch, and reply delivery; pre-dispatch inter
 outcome, while a post-commit lost reply converges to the exact replay and remains releasable.
 Current end-to-end transport tests use the visibly cooperative enforcement grade. The strict
 service-cgroup authority and strict namespace/socket-pidfd primitives are implemented, but
-production mutation admission remains disabled until daemon bootstrap wires their externally
-guarded policies together; the dashboard/service also does not yet route all admission/release work
-through this endpoint. The remaining process-ownership work is wiring TrainVM to the guarded daemon
-surface, completing daemon-restart recovery of retained launches, and qualifying the end-to-end
+production mutation admission remains disabled until the unified daemon bootstrap wires their externally
+guarded policies together; the service-side optional connection and admission path are now present,
+but terminal process/release reconciliation is not complete. The remaining process-ownership work
+is the guarded daemon entry point, completing daemon-restart recovery of retained launches, and qualifying the end-to-end
 crash windows before real trainer ownership is enabled. The transport and stopped-launcher layers
 now carry and attest sealed Python code and per-attempt bootstrap descriptors, install them at the
 fixed exec-surviving fd 3/fd 4 ABI, and bind both into durable launch evidence without exposing
@@ -309,9 +313,10 @@ a stopped child, copies the exact spawn receipt into the TrainVM hash chain, and
 exec commit. Lost prepare and commit replies converge by exact replay, and transport replay flags
 are excluded from durable identity. A bounded strict hostd client now delegates the resolved
 executable, optional code, working-directory, and bootstrap descriptors over the authenticated
-mutation transport and revalidates typed replies. The normal CLI remains launch-disabled until
-daemon bootstrap configuration wires the implemented journal-backed mutation-claim provider into
-the two typed clients;
+mutation transport and revalidates typed replies. The normal CLI remains launch-disabled by
+default; an explicit pinned hostd-client document now bootstraps the implemented journal-backed
+claim provider and both typed clients after a read-only host/boot/broker status check. The unified
+hostd daemon entry point is still required before this path can be qualified for production;
 pause/resume and durable hostd adoption remain subsequent milestones. A worker launch ticket is a protocol authorization only
 until it is paired with a trusted descriptor digest, resolved launch specification, host identity,
 and durable process receipt.
