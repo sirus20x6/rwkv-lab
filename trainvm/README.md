@@ -151,6 +151,10 @@ Implemented now:
   exact terminal-pending-release view and idempotent recovery step resume cgroup removal and bundle
   release, clean abandoned intent-only cgroups in the same allocation pass, and group sibling
   launches so one closed process cannot hide an unclosed spawned one;
+- a bounded pre-audit restart reconciler with an explicit `leave_and_block` versus
+  `terminate_and_reconcile` policy; the latter transfers each exact pidfd into the daemon supervisor
+  once, delivers SIGKILL only through that handle, retries pending terminal observation without
+  duplicating authority, commits v6 evidence, then re-runs idempotent cgroup/bundle cleanup;
 - a process-free, single-use journal-fence challenge verifier binding socket peer process instance,
   host/boot/broker, pinned-journal claims, controller generation, logical fence, nonce, and bounded
   boottime lifetime, with per-peer quotas and no bearer-capability interpretation of decoded data;

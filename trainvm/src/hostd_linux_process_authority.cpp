@@ -330,7 +330,8 @@ HostProcessRecoveryExitResult LinuxProcessAuthority::finalize_recovered_exit(
     }
     state = launch.process_.state();
     if (state == LinuxPidfdState::live) {
-      reject("recovered process termination is pending terminal observation");
+      throw LinuxRecoveredProcessPending(
+          "recovered process termination is pending terminal observation");
     }
   }
   if (state != LinuxPidfdState::terminal) {
@@ -382,6 +383,10 @@ struct HostdLinuxProcessSupervisor::Entry final {
   bool released_to_exec{};
   std::optional<HostdProcessExitCommand> exit_command;
   std::optional<HostProcessExitResult> exit_result;
+};
+
+struct HostdLinuxProcessSupervisor::RecoveredEntry final {
+  LinuxRecoveredLaunch launch;
 };
 
 void HostdLinuxProcessSupervisor::require_process_binding(
@@ -509,6 +514,58 @@ HostProcessExitResult HostdLinuxProcessSupervisor::finalize(
   entry.exit_command = request;
   entry.exit_result = result;
   return result;
+}
+
+std::size_t HostdLinuxProcessSupervisor::adopt_exact_recovered_processes(
+    LinuxProcessRecoverySet& recovery) {
+  std::scoped_lock lock(mutex_);
+  std::size_t adopted = 0U;
+  for (const LinuxProcessRecoveryEntry& entry : recovery.entries()) {
+    if (entry.disposition !=
+            LinuxProcessRecoveryDisposition::exact_live_process ||
+        !entry.process) {
+      continue;
+    }
+    const std::string& launch_id = entry.record.intent.request.launch_id;
+    if (recovered_entries_.contains(launch_id)) continue;
+    if (entries_.contains(launch_id)) {
+      reject("recovered launch identity is already retained");
+    }
+    std::optional<LinuxRecoveredProcess> process =
+        recovery.take_exact_live_process_for_adoption(launch_id);
+    if (!process) reject("exact recovered pidfd transfer was lost");
+    LinuxRecoveredLaunch launch = authority_.adopt_recovered(
+        entry.record, std::move(*process));
+    recovered_entries_.emplace(
+        launch_id, std::make_unique<RecoveredEntry>(
+                       RecoveredEntry{.launch = std::move(launch)}));
+    ++adopted;
+  }
+  return adopted;
+}
+
+HostdRecoveredProcessProgress
+HostdLinuxProcessSupervisor::progress_recovered_terminations() {
+  std::scoped_lock lock(mutex_);
+  HostdRecoveredProcessProgress progress{
+      .retained_before = recovered_entries_.size(),
+  };
+  auto entry = recovered_entries_.begin();
+  while (entry != recovered_entries_.end()) {
+    LinuxRecoveredLaunch& launch = entry->second->launch;
+    try {
+      (void)authority_.finalize_recovered_exit(
+          launch, launch.record().grant,
+          "hostd-recovered-exit:" + entry->first, true);
+      entry = recovered_entries_.erase(entry);
+      ++progress.finalized;
+    } catch (const LinuxRecoveredProcessPending&) {
+      ++progress.pending;
+      ++entry;
+    }
+  }
+  progress.retained_after = recovered_entries_.size();
+  return progress;
 }
 
 }  // namespace trainvm

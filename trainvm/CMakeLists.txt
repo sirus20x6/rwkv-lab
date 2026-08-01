@@ -79,6 +79,7 @@ add_library(trainvm_core
   src/hostd_process_client.cpp
   src/hostd_process_protocol.cpp
   src/hostd_resource_client.cpp
+  src/hostd_restart_process_recovery.cpp
   src/hostd_session_challenge.cpp
   src/hostd_startup_auditor.cpp
   src/hostd_terminal_release_recovery.cpp
@@ -312,6 +313,16 @@ target_compile_options(hostd_terminal_release_recovery_tests PRIVATE
 target_link_libraries(hostd_terminal_release_recovery_tests PRIVATE trainvm_core)
 add_test(NAME hostd_terminal_release_recovery_tests
   COMMAND hostd_terminal_release_recovery_tests
+)
+add_executable(hostd_restart_process_recovery_tests
+  tests/hostd_restart_process_recovery_tests.cpp
+)
+target_compile_options(hostd_restart_process_recovery_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(hostd_restart_process_recovery_tests PRIVATE trainvm_core)
+add_test(NAME hostd_restart_process_recovery_tests
+  COMMAND hostd_restart_process_recovery_tests
 )
 add_executable(hostd_session_challenge_tests
   tests/hostd_session_challenge_tests.cpp

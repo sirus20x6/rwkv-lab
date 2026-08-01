@@ -1,9 +1,11 @@
 #pragma once
 
+#include <cstddef>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 
 #include "trainvm/authority_time.hpp"
 #include "trainvm/host_launch.hpp"
@@ -14,6 +16,11 @@
 #include "trainvm/hostd_process_protocol.hpp"
 
 namespace trainvm {
+
+class LinuxRecoveredProcessPending final : public std::runtime_error {
+ public:
+  using std::runtime_error::runtime_error;
+};
 
 struct LinuxProcessContextAudit final {
   bool complete{};
@@ -136,11 +143,30 @@ class IHostdProcessSupervisor {
       const HostdProcessExitCommand& request) = 0;
 };
 
-// Retains the stopped child, pidfd, cgroup descriptor, and grant until a
-// terminal exit is durably recorded. Exact retries are replay-safe for the
-// lifetime of one hostd process. Durable daemon-restart adoption remains a
-// separate recovery boundary and is not claimed by this class.
-class HostdLinuxProcessSupervisor final : public IHostdProcessSupervisor {
+struct HostdRecoveredProcessProgress final {
+  std::size_t retained_before{};
+  std::size_t finalized{};
+  std::size_t pending{};
+  std::size_t retained_after{};
+
+  bool operator==(const HostdRecoveredProcessProgress&) const = default;
+};
+
+class IHostdRecoveredProcessSupervisor {
+ public:
+  virtual ~IHostdRecoveredProcessSupervisor() = default;
+  [[nodiscard]] virtual std::size_t adopt_exact_recovered_processes(
+      LinuxProcessRecoverySet& recovery) = 0;
+  [[nodiscard]] virtual HostdRecoveredProcessProgress
+  progress_recovered_terminations() = 0;
+};
+
+// Retains current stopped launches and explicitly adopted restart pidfds,
+// cgroup descriptors, and grants until terminal evidence is durable. Ordinary
+// command retries remain scoped to one daemon lifetime; restart adoption is a
+// separate explicit method and never happens from a numeric PID alone.
+class HostdLinuxProcessSupervisor final : public IHostdProcessSupervisor,
+                                          public IHostdRecoveredProcessSupervisor {
  public:
   explicit HostdLinuxProcessSupervisor(LinuxProcessAuthority& authority);
   ~HostdLinuxProcessSupervisor() override;
@@ -153,14 +179,21 @@ class HostdLinuxProcessSupervisor final : public IHostdProcessSupervisor {
       const HostdProcessCommitRequest& request) override;
   [[nodiscard]] HostProcessExitResult finalize(
       const HostdProcessExitCommand& request) override;
+  [[nodiscard]] std::size_t adopt_exact_recovered_processes(
+      LinuxProcessRecoverySet& recovery) override;
+  [[nodiscard]] HostdRecoveredProcessProgress
+  progress_recovered_terminations() override;
 
  private:
   struct Entry;
+  struct RecoveredEntry;
   static void require_process_binding(
       const HostdProcessCommitRequest& request, const Entry& entry);
   LinuxProcessAuthority& authority_;
   std::mutex mutex_;
   std::map<std::string, std::unique_ptr<Entry>, std::less<>> entries_;
+  std::map<std::string, std::unique_ptr<RecoveredEntry>, std::less<>>
+      recovered_entries_;
 };
 
 }  // namespace trainvm

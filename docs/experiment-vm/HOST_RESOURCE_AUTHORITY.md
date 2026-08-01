@@ -750,6 +750,12 @@ deterministic cgroup as idempotent, validates all sibling records before
 mutation, cleans each terminal or abandoned intent-only cgroup, and releases
 the bundle only when no unclosed spawned sibling remains. This combined pass
 avoids a terminal sibling and intent-only sibling blocking one another forever.
+The bounded pre-audit orchestrator exposes `leave_and_block` and
+`terminate_and_reconcile` as explicit policy. The mutating policy transfers
+each exact pidfd into the daemon supervisor once, progresses SIGKILL/terminal
+observation across repeated steps, commits v6 evidence, and re-runs the
+idempotent cleanup pass. Identity mismatch and incomplete observation remain
+blocked; neither is converted into signalling authority.
 CPU/I/O policy evidence, device BPF,
 privileged end-to-end qualification, and daemon bootstrap/policy wiring remain
 in this gate. A daemon crash is not claimed as ordinary in-memory supervisor
