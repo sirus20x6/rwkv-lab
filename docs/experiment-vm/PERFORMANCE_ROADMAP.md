@@ -262,10 +262,12 @@ startup orphan recovery are defined in
   rates/decay, activations, normalization, objectives, precision, clipping/accumulation, and
   curricula; migrate MageFlow, RWKV, and transformer workers away from duplicated string switches.
   The typed C++ registry, exact composition/submission locks, capability-augmented launches, native
-  descriptor RPC, descriptor-generated dashboard composer, concrete MageFlow optimizer/schedule
-  factories, and exhaustive appearance/terminal expert parameter routers are implemented. RWKV and
-  transformer migration, additional component families, and removal of the remaining legacy family
-  switches remain.
+  descriptor RPC, descriptor-generated dashboard composer, category-separated tensor runtime,
+  typed worker-composition bridge, concrete MageFlow optimizer/schedule factories, and exhaustive
+  appearance/terminal expert parameter routers are implemented. Both MageFlow expert trainers and
+  the Qwen AO3 transformer continuation path now consume verified worker slots and bind composition
+  identity into resume state. Scratch RWKV, MLA/Engram transformer variants, additional component
+  families, and removal of the remaining legacy family switches remain.
 - Keep implementation boundaries aligned with component ownership: optimizer algorithms,
   parameter routing, LR schedules, weight-decay schedules, activations, normalization, objectives,
   precision/scaling, gradient policy, and curricula live in separate source/test modules. Shared

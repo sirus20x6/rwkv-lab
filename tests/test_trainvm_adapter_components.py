@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -86,3 +87,31 @@ def test_worker_component_bridge_rejects_family_and_slot_category_confusion() ->
     parameter = torch.nn.Parameter(torch.tensor([1.0]))
     with pytest.raises(ValueError, match="not 'optimizer'"):
         runtime.optimizer([parameter], slot="learning_rate")
+
+
+def test_worker_optimizer_and_schedule_resume_the_same_next_update() -> None:
+    runtime = WorkerTrainingComponents(composition(), "rwkv")
+    parameter = torch.nn.Parameter(torch.tensor([1.0]))
+    optimizer = runtime.optimizer([parameter])
+    schedule = runtime.learning_rate_schedule(optimizer)
+    for _ in range(2):
+        parameter.grad = torch.tensor([0.25])
+        optimizer.step()
+        schedule.step()
+
+    resumed_parameter = torch.nn.Parameter(parameter.detach().clone())
+    resumed_optimizer = runtime.optimizer([resumed_parameter])
+    resumed_schedule = runtime.learning_rate_schedule(resumed_optimizer)
+    resumed_optimizer.load_state_dict(copy.deepcopy(optimizer.state_dict()))
+    resumed_schedule.load_state_dict(copy.deepcopy(schedule.state_dict()))
+    assert resumed_schedule.last_epoch == schedule.last_epoch
+    assert resumed_schedule.get_last_lr() == pytest.approx(schedule.get_last_lr())
+
+    parameter.grad = torch.tensor([0.5])
+    resumed_parameter.grad = torch.tensor([0.5])
+    optimizer.step()
+    schedule.step()
+    resumed_optimizer.step()
+    resumed_schedule.step()
+    assert resumed_parameter.detach() == pytest.approx(parameter.detach())
+    assert resumed_schedule.get_last_lr() == pytest.approx(schedule.get_last_lr())

@@ -42,8 +42,11 @@ The initial concrete cross-family catalog contains:
 - appearance-expert versus shared-backbone exclusive parameter routing;
 - terminal-expert versus shared-backbone versus VAE-REPA exclusive parameter routing.
 
-The three MageFlow training paths, RWKV AdamW path, and Qwen transformer AdamW/PowerCool path now
-use the common boundary. Routing aggregates aliased names,
+The three MageFlow training paths, RWKV AdamW path, and Qwen transformer AdamW/PowerCool path use
+the common tensor boundary. The MageFlow appearance/terminal expert trainers and Qwen AO3
+continuation additionally consume authority-resolved worker compositions; their composition digest
+is resume identity, and Qwen persists the registered scheduler cursor alongside optimizer state.
+Routing aggregates aliased names,
 deduplicates tensor identities, rejects overlap and unclaimed trainable tensors, and records an
 exact group/count/rate audit in the run contract. The catalog does not claim another
 activation, objective, optimizer, router, or kernel until a real adapter path consumes the symbolic

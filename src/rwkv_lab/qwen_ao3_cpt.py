@@ -18,7 +18,7 @@ import time
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -30,6 +30,9 @@ from rwkv_lab.training_components import (
     build_registered_optimizer,
     powercool_multiplier,
 )
+
+if TYPE_CHECKING:
+    from rwkv_lab.trainvm_adapters import WorkerTrainingComponents
 
 SCHEMA = "rwkv-lab.qwen-ao3-cpt.v1"
 ROUTER_TARGET = "mlp.gate.weight"
@@ -314,10 +317,12 @@ def checkpoint_fit_audit(
             group = "other"
         groups[group] += count * 2
 
-        is_language_weight = (
-            name.startswith("model.language_model.layers.")
-            or name.startswith("model.language_model.embed_tokens.")
-            or name.startswith("lm_head.")
+        is_language_weight = name.startswith(
+            (
+                "model.language_model.layers.",
+                "model.language_model.embed_tokens.",
+                "lm_head.",
+            )
         )
         if is_language_weight and ".mlp.experts." in name and len(shape) == 3:
             experts, out_features, in_features = shape
@@ -448,7 +453,7 @@ def _install_grouped_expert_adapters(base, config: QwenAO3Config) -> None:
     for layer in layers:
         experts = layer.mlp.experts
         if isinstance(experts, GroupedExpertLoRA):
-            raise RuntimeError("expert adapters were installed more than once")
+            raise TypeError("expert adapters were installed more than once")
         layer.mlp.experts = GroupedExpertLoRA(
             experts, rank=config.expert_rank, alpha=config.expert_alpha
         )
@@ -715,10 +720,16 @@ def _learning_rate_schedule(
     )
 
 
-def _optimizer(model, config: QwenAO3Config):
+def _optimizer(
+    model,
+    config: QwenAO3Config,
+    worker_components: WorkerTrainingComponents | None = None,
+):
     parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
     if not parameters:
         raise RuntimeError("model has no trainable adapter parameters")
+    if worker_components is not None:
+        return worker_components.optimizer(parameters)
     return build_registered_optimizer(
         OptimizerImplementation.TORCH_ADAMW_V1,
         parameters,
@@ -734,6 +745,36 @@ def _resume_contract(config: QwenAO3Config | dict[str, Any]) -> dict[str, Any]:
     # adjustment after real step latency is known.
     value.pop("log_every", None)
     return value
+
+
+def resolved_worker_component_contract(
+    config: QwenAO3Config,
+    total_steps: int,
+    worker_components: WorkerTrainingComponents | None,
+) -> tuple[dict[str, dict[str, str]] | None, str | None]:
+    if worker_components is None:
+        return None, None
+    expected = {
+        "optimizer": asdict(_optimizer_configuration(config)),
+        "learning_rate": asdict(_learning_rate_schedule(config, total_steps)),
+    }
+    categories = {
+        "optimizer": "optimizer",
+        "learning_rate": "learning_rate_schedule",
+    }
+    for slot, configuration in expected.items():
+        actual = dict(
+            worker_components.configuration(slot, category=categories[slot])
+        )
+        if actual != configuration:
+            raise ValueError(
+                f"authority {categories[slot]} composition disagrees with "
+                "Qwen training configuration"
+            )
+    return (
+        dict(worker_components.evidence()),
+        worker_components.composition.composition_digest,
+    )
 
 
 def _write_status(
@@ -766,11 +807,13 @@ def _write_status(
 def _save_checkpoint(
     model,
     optimizer,
+    scheduler,
     config: QwenAO3Config,
     step: int,
     cursor: int,
     run_dir: Path,
     metrics: dict[str, Any],
+    component_composition_digest: str | None = None,
 ) -> Path:
     final = run_dir / f"step-{step:06d}"
     temporary = run_dir / f".step-{step:06d}.tmp-{time.time_ns()}"
@@ -784,20 +827,22 @@ def _save_checkpoint(
         save_embedding_layers=False,
     )
     _save_expert_adapters(model, temporary / "expert-adapter.safetensors")
-    torch.save(
-        {
-            "schema": SCHEMA,
-            "step": step,
-            "cursor": cursor,
-            "config": _resume_contract(config),
-            "optimizer": optimizer.state_dict(),
-            "torch_rng": torch.get_rng_state(),
-            "cuda_rng": torch.cuda.get_rng_state(config.cuda_index),
-            "python_rng": random.getstate(),
-            "numpy_rng": np.random.get_state(),
-        },
-        temporary / "trainer-state.pt",
-    )
+    state = {
+        "schema": SCHEMA,
+        "step": step,
+        "cursor": cursor,
+        "config": _resume_contract(config),
+        "optimizer": optimizer.state_dict(),
+        "torch_rng": torch.get_rng_state(),
+        "cuda_rng": torch.cuda.get_rng_state(config.cuda_index),
+        "python_rng": random.getstate(),
+        "numpy_rng": np.random.get_state(),
+    }
+    if scheduler is not None:
+        state["scheduler"] = scheduler.state_dict()
+    if component_composition_digest is not None:
+        state["component_composition_digest"] = component_composition_digest
+    torch.save(state, temporary / "trainer-state.pt")
     (temporary / "state.json").write_text(
         json.dumps(
             {"schema": SCHEMA, "step": step, "cursor": cursor, "metrics": metrics},
@@ -815,7 +860,13 @@ def _save_checkpoint(
     return final
 
 
-def _restore_state(optimizer, config: QwenAO3Config) -> tuple[int, int]:
+def _restore_state(
+    optimizer,
+    scheduler,
+    config: QwenAO3Config,
+    *,
+    component_composition_digest: str | None = None,
+) -> tuple[int, int]:
     if not config.resume:
         return 0, 0
     state = torch.load(
@@ -827,7 +878,14 @@ def _restore_state(optimizer, config: QwenAO3Config) -> tuple[int, int]:
         raise ValueError("resume checkpoint schema mismatch")
     if _resume_contract(state.get("config", {})) != _resume_contract(config):
         raise ValueError("resume checkpoint training contract mismatch")
+    if component_composition_digest is not None:
+        if state.get("component_composition_digest") != component_composition_digest:
+            raise ValueError("resume training-component composition mismatch")
+        if scheduler is None or "scheduler" not in state:
+            raise ValueError("resume checkpoint has no exact LR-schedule state")
     optimizer.load_state_dict(state["optimizer"])
+    if scheduler is not None:
+        scheduler.load_state_dict(state["scheduler"])
     torch.set_rng_state(state["torch_rng"].cpu())
     torch.cuda.set_rng_state(state["cuda_rng"].cpu(), config.cuda_index)
     random.setstate(state["python_rng"])
@@ -924,7 +982,11 @@ def _smoke_backward(model, rows: PackedRows, config: QwenAO3Config) -> dict[str,
     }
 
 
-def train(config: QwenAO3Config) -> dict[str, Any]:
+def train(
+    config: QwenAO3Config,
+    *,
+    worker_components: WorkerTrainingComponents | None = None,
+) -> dict[str, Any]:
     run_dir = Path(config.run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     complete_path = run_dir / "complete.json"
@@ -958,6 +1020,9 @@ def train(config: QwenAO3Config) -> dict[str, Any]:
     if total_steps < 1:
         raise ValueError("packed train corpus has no complete optimizer step")
     learning_rate_schedule = _learning_rate_schedule(config, total_steps)
+    component_evidence, component_digest = resolved_worker_component_contract(
+        config, total_steps, worker_components
+    )
     random.seed(config.seed)
     np.random.seed(config.seed)
     torch.manual_seed(config.seed)
@@ -967,8 +1032,18 @@ def train(config: QwenAO3Config) -> dict[str, Any]:
 
     model = load_hybrid_qlora(config)
     coverage = model_coverage_report(model)
-    optimizer = _optimizer(model, config)
-    step, cursor = _restore_state(optimizer, config)
+    optimizer = _optimizer(model, config, worker_components)
+    scheduler = (
+        worker_components.learning_rate_schedule(optimizer)
+        if worker_components is not None
+        else None
+    )
+    step, cursor = _restore_state(
+        optimizer,
+        scheduler,
+        config,
+        component_composition_digest=component_digest,
+    )
     order = np.random.default_rng(config.seed).permutation(train_rows.rows)
     expected_cursor = min(
         step * config.gradient_accumulation_steps, train_rows.rows
@@ -995,6 +1070,8 @@ def train(config: QwenAO3Config) -> dict[str, Any]:
             "configuration": asdict(learning_rate_schedule),
             "step_domain": "optimizer_step",
         },
+        "training_components": component_evidence,
+        "component_composition_digest": component_digest,
         "dropped_rows": train_rows.rows
         - min(
             train_rows.rows,
@@ -1081,12 +1158,17 @@ def train(config: QwenAO3Config) -> dict[str, Any]:
             config.max_grad_norm,
             error_if_nonfinite=True,
         )
-        lr = config.learning_rate * powercool_multiplier(
-            step, learning_rate_schedule
-        )
-        for group in optimizer.param_groups:
-            group["lr"] = lr
+        if scheduler is None:
+            lr = config.learning_rate * powercool_multiplier(
+                step, learning_rate_schedule
+            )
+            for group in optimizer.param_groups:
+                group["lr"] = lr
+        else:
+            lr = float(scheduler.get_last_lr()[0])
         optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
         step += 1
         should_log = step % config.log_every == 0
         should_save = bool(config.save_every and step % config.save_every == 0)
@@ -1131,14 +1213,30 @@ def train(config: QwenAO3Config) -> dict[str, Any]:
             log.flush()
         if should_save:
             latest_checkpoint = _save_checkpoint(
-                model, optimizer, config, step, cursor, run_dir, last_metrics
+                model,
+                optimizer,
+                scheduler,
+                config,
+                step,
+                cursor,
+                run_dir,
+                last_metrics,
+                component_composition_digest=component_digest,
             )
             latest_checkpoint_step = step
         if interrupted["value"]:
             checkpoint = latest_checkpoint
             if checkpoint is None or latest_checkpoint_step != step:
                 checkpoint = _save_checkpoint(
-                    model, optimizer, config, step, cursor, run_dir, last_metrics
+                    model,
+                    optimizer,
+                    scheduler,
+                    config,
+                    step,
+                    cursor,
+                    run_dir,
+                    last_metrics,
+                    component_composition_digest=component_digest,
                 )
             log.close()
             _write_status(
@@ -1154,7 +1252,15 @@ def train(config: QwenAO3Config) -> dict[str, Any]:
     checkpoint = latest_checkpoint
     if checkpoint is None or latest_checkpoint_step != step:
         checkpoint = _save_checkpoint(
-            model, optimizer, config, step, cursor, run_dir, final_eval
+            model,
+            optimizer,
+            scheduler,
+            config,
+            step,
+            cursor,
+            run_dir,
+            final_eval,
+            component_composition_digest=component_digest,
         )
     log.write(
         json.dumps(

@@ -1,4 +1,6 @@
 import json
+from dataclasses import asdict
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -13,6 +15,7 @@ from rwkv_lab.qwen_ao3_cpt import (
     _resolve_auto_resume,
     _resume_contract,
     _write_status,
+    resolved_worker_component_contract,
 )
 
 
@@ -135,3 +138,43 @@ def test_qwen_optimizer_uses_registered_fused_adamw_configuration(tmp_path):
     schedule = _learning_rate_schedule(config(tmp_path), total_steps=100)
     assert schedule.max_steps == 100
     assert schedule.minimum_ratio == pytest.approx(0.1)
+
+
+def test_qwen_worker_components_are_exact_and_enter_checkpoint_identity(tmp_path):
+    value = config(tmp_path, max_steps=100)
+    total_steps = 80
+    configurations = {
+        "optimizer": asdict(_optimizer_configuration(value)),
+        "learning_rate": asdict(_learning_rate_schedule(value, total_steps)),
+    }
+
+    class Components:
+        composition = SimpleNamespace(composition_digest="sha256:" + "c" * 64)
+
+        def configuration(self, slot, *, category):
+            assert category in {"optimizer", "learning_rate_schedule"}
+            return configurations[slot]
+
+        def evidence(self):
+            return {
+                slot: {
+                    "category": slot,
+                    "implementation": slot,
+                    "descriptor_digest": "sha256:" + "d" * 64,
+                }
+                for slot in configurations
+            }
+
+    components = Components()
+    evidence, composition_digest = resolved_worker_component_contract(
+        value, total_steps, components
+    )
+    assert set(evidence) == {"optimizer", "learning_rate"}
+    assert composition_digest == components.composition.composition_digest
+
+    configurations["learning_rate"] = {
+        **configurations["learning_rate"],
+        "minimum_ratio": 0.5,
+    }
+    with pytest.raises(ValueError, match="learning_rate_schedule composition"):
+        resolved_worker_component_contract(value, total_steps, components)
