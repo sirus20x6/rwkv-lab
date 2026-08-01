@@ -575,9 +575,15 @@
   // ---- TrainVM native read model. The browser only receives read-only
   // projections; lifecycle mutations remain on the native command boundary.
   let vmSelected = "";
+  let vmJournalID = "";
   let vmAfter = 0;
   let vmMetricAfter = 0;
   let vmArtifactAfter = 0;
+  let vmGalleries = [];
+  let vmGalleryIndex = -1;
+  let vmGalleryManual = false;
+  let vmGallerySignature = "";
+  let vmGalleryLoadGeneration = 0;
   let vmBusy = false;
   let vmSelectedRun = null;
   let vmControlView = null;
@@ -644,6 +650,7 @@
     vmPendingControls = {};
     vmControlIntent = "";
     vmInvalidControls.clear();
+    resetVMGallery(runID);
     if (vmControlLoadAbort) vmControlLoadAbort.abort();
     vmControlLoadAbort = null;
     vmControlLoadGeneration += 1;
@@ -664,6 +671,122 @@
       state.className = "sub";
     }
     return true;
+  }
+
+  function resetVMGallery(runID = "") {
+    vmGalleries = [];
+    vmGalleryIndex = -1;
+    vmGalleryManual = false;
+    vmGallerySignature = "";
+    vmGalleryLoadGeneration += 1;
+    const range = document.getElementById("vm-gallery-range");
+    const latest = document.getElementById("vm-gallery-latest");
+    const state = document.getElementById("vm-gallery-state");
+    const revision = document.getElementById("vm-gallery-revision");
+    const items = document.getElementById("vm-gallery-items");
+    if (range) { range.min = "0"; range.max = "0"; range.value = "0"; range.disabled = true; }
+    if (latest) latest.disabled = true;
+    if (state) state.textContent = "no published revisions";
+    if (revision) revision.textContent = runID ? "loading immutable history…" : "select a native run";
+    if (items) items.innerHTML = `<div class="empty">${runID ? "loading published eval galleries…" : "select a native run"}</div>`;
+  }
+
+  function renderVMGalleryControls() {
+    const range = document.getElementById("vm-gallery-range");
+    const latest = document.getElementById("vm-gallery-latest");
+    const state = document.getElementById("vm-gallery-state");
+    const revision = document.getElementById("vm-gallery-revision");
+    const gallery = vmGalleries[vmGalleryIndex];
+    if (range) {
+      range.min = "0";
+      range.max = String(Math.max(0, vmGalleries.length - 1));
+      range.value = String(Math.max(0, vmGalleryIndex));
+      range.disabled = vmGalleries.length < 2;
+    }
+    if (latest) latest.disabled = !vmGalleries.length || vmGalleryIndex === vmGalleries.length - 1;
+    if (state) state.textContent = vmGalleries.length ?
+      `${vmGalleryIndex + 1}/${vmGalleries.length} immutable revisions${vmGalleryManual ? " · pinned" : " · following latest"}` :
+      "no published revisions";
+    if (revision) revision.textContent = gallery ?
+      `${vmEscape(gallery.step_domain)} ${Number(gallery.step || 0).toLocaleString()} · ${vmEscape(gallery.attempt_id)} · #${Number(gallery.sequence || 0).toLocaleString()}` :
+      "no rwkv-lab.eval-gallery.v2 artifact published";
+  }
+
+  function renderVMGallery(gallery) {
+    const target = document.getElementById("vm-gallery-items");
+    if (!target) return;
+    const items = Array.isArray(gallery.items) ? gallery.items : [];
+    target.innerHTML = items.map((item) => {
+      const originalURL = item.target_image_url || item.source_image_url || "";
+      const originalLabel = item.target_image_url ? "original / target" : "source";
+      const attributes = Object.entries(item.sampling_attributes || {})
+        .map(([key, value]) => `${key}=${value}`).join(" · ");
+      return `<article class="vm-gallery-item">` +
+        `<div class="vm-gallery-pair${originalURL ? "" : " single"}">` +
+          (originalURL ? `<div class="vm-gallery-image"><img src="${vmEscape(originalURL)}" alt="${vmEscape(originalLabel)}" loading="lazy"><span>${originalLabel}</span></div>` : "") +
+          `<div class="vm-gallery-image"><img src="${vmEscape(item.generated_image_url)}" alt="generated eval image" loading="lazy"><span>generated</span></div>` +
+        `</div>` +
+        `<div class="vm-gallery-copy"><strong title="${vmEscape(item.item_id)}">${vmEscape(item.item_id)}</strong>` +
+          `<span title="${vmEscape(item.heldout_item_id)}">held-out ${vmEscape(item.heldout_item_id)}</span>` +
+          `<span title="${vmEscape(item.prompt_or_condition_digest)}">condition ${vmEscape(String(item.prompt_or_condition_digest || "").slice(0, 20))} · seed ${Number(item.seed || 0).toLocaleString()}</span>` +
+          (attributes ? `<span title="${vmEscape(attributes)}">${vmEscape(attributes)}</span>` : "") +
+        `</div></article>`;
+    }).join("") || '<div class="empty">published gallery contains no displayable items</div>';
+  }
+
+  async function loadVMGallery(index) {
+    const summary = vmGalleries[index];
+    if (!summary || !vmSelected) return;
+    const runID = vmSelected;
+    const selectionGeneration = vmSelectionGeneration;
+    const loadGeneration = ++vmGalleryLoadGeneration;
+    const target = document.getElementById("vm-gallery-items");
+    if (target) target.innerHTML = '<div class="empty">verifying published manifest and image identities…</div>';
+    try {
+      const response = await fetch(`/api/trainvm/runs/${encodeURIComponent(runID)}/galleries/${encodeURIComponent(summary.artifact_id)}`,
+        { cache: "no-store" });
+      if (selectionGeneration !== vmSelectionGeneration || loadGeneration !== vmGalleryLoadGeneration || runID !== vmSelected) return;
+      if (!response.ok) throw new Error((await response.text()).trim() || `HTTP ${response.status}`);
+      const gallery = await response.json();
+      if (selectionGeneration !== vmSelectionGeneration || loadGeneration !== vmGalleryLoadGeneration || runID !== vmSelected) return;
+      renderVMGallery(gallery);
+    } catch (error) {
+      if (selectionGeneration !== vmSelectionGeneration || loadGeneration !== vmGalleryLoadGeneration || runID !== vmSelected) return;
+      if (target) target.innerHTML = `<div class="empty">gallery verification failed · ${vmEscape(error.message)}</div>`;
+    }
+  }
+
+  async function refreshVMGalleries(force = false) {
+    if (!vmSelected) return;
+    const runID = vmSelected;
+    const selectionGeneration = vmSelectionGeneration;
+    try {
+      const response = await fetch(`/api/trainvm/runs/${encodeURIComponent(runID)}/galleries`, { cache: "no-store" });
+      if (selectionGeneration !== vmSelectionGeneration || runID !== vmSelected) return;
+      if (!response.ok) throw new Error((await response.text()).trim() || `HTTP ${response.status}`);
+      const galleries = await response.json();
+      if (selectionGeneration !== vmSelectionGeneration || runID !== vmSelected || !Array.isArray(galleries)) return;
+      const signature = JSON.stringify(galleries.map((gallery) => [gallery.sequence, gallery.artifact_id, gallery.step, gallery.item_count]));
+      if (!force && signature === vmGallerySignature) return;
+      const pinnedArtifact = vmGalleryManual ? vmGalleries[vmGalleryIndex]?.artifact_id : "";
+      vmGalleries = galleries;
+      vmGallerySignature = signature;
+      vmGalleryIndex = pinnedArtifact ? galleries.findIndex((gallery) => gallery.artifact_id === pinnedArtifact) : galleries.length - 1;
+      if (vmGalleryIndex < 0 && galleries.length) {
+        vmGalleryIndex = galleries.length - 1;
+        vmGalleryManual = false;
+      }
+      renderVMGalleryControls();
+      if (vmGalleryIndex >= 0) await loadVMGallery(vmGalleryIndex);
+      else {
+        const target = document.getElementById("vm-gallery-items");
+        if (target) target.innerHTML = '<div class="empty">no immutable eval galleries published yet</div>';
+      }
+    } catch (error) {
+      if (selectionGeneration !== vmSelectionGeneration || runID !== vmSelected) return;
+      const target = document.getElementById("vm-gallery-items");
+      if (target) target.innerHTML = `<div class="empty">gallery history unavailable · ${vmEscape(error.message)}</div>`;
+    }
   }
 
   function vmCompactJSON(value, limit = 260) {
@@ -963,6 +1086,7 @@
   async function appendVMTelemetry() {
     if (!vmSelected) return;
     const selected = vmSelected;
+    let galleryPublished = false;
     const [metricResponse, artifactResponse] = await Promise.all([
       fetch(`/api/trainvm/runs/${encodeURIComponent(selected)}/metrics?after=${vmMetricAfter}&limit=250`,
         { cache: "no-store" }),
@@ -1003,6 +1127,9 @@
         const fragment = document.createDocumentFragment();
         for (const artifact of artifacts) {
           if (artifact.run_id !== vmSelected) continue;
+          if (artifact.kind === "image_gallery" && artifact.schema === "rwkv-lab.eval-gallery.v2") {
+            galleryPublished = true;
+          }
           const row = document.createElement("div");
           row.className = "vm-telemetry-row";
           row.innerHTML = `<span class="vm-telemetry-name" title="${vmEscape(artifact.logical_name)}">${vmEscape(artifact.logical_name)}</span>` +
@@ -1017,6 +1144,7 @@
       const cursor = document.getElementById("trainvm-artifact-cursor");
       if (cursor) cursor.textContent = `sequence ${vmArtifactAfter.toLocaleString()}`;
     }
+    if (galleryPublished) await refreshVMGalleries(true);
   }
 
   async function refreshTrainVM(force = false) {
@@ -1027,6 +1155,15 @@
       const response = await fetch("/api/trainvm/runs", { cache: "no-store" });
       if (!response.ok) return;
       const payload = await response.json();
+      const journalID = String(payload.journal_id || "");
+      if (vmJournalID && journalID && journalID !== vmJournalID) {
+        vmAfter = 0;
+        resetVMTelemetry();
+        resetVMGallery(vmSelected);
+        const timeline = document.getElementById("trainvm-timeline");
+        if (timeline) timeline.innerHTML = '<div class="empty">native journal changed · reloading authoritative history…</div>';
+      }
+      if (journalID) vmJournalID = journalID;
       const commandsEnabled = Boolean(payload.commands_enabled);
       const commandAvailabilityChanged = commandsEnabled !== vmCommandsEnabled;
       vmCommandsEnabled = commandsEnabled;
@@ -1067,6 +1204,7 @@
       }
       await appendVMTimeline();
       await appendVMTelemetry();
+      if (selected && !vmGallerySignature) await refreshVMGalleries(true);
     } catch (_) {
       // An authority or dashboard restart is transient; the next tick retries.
     } finally {
@@ -1120,6 +1258,21 @@
     renderVMControls();
   });
   document.getElementById("vm-control-apply")?.addEventListener("click", requestVMControls);
+  document.getElementById("vm-gallery-range")?.addEventListener("input", (event) => {
+    const index = Number(event.target.value);
+    if (!Number.isInteger(index) || index < 0 || index >= vmGalleries.length) return;
+    vmGalleryManual = index !== vmGalleries.length - 1;
+    vmGalleryIndex = index;
+    renderVMGalleryControls();
+    loadVMGallery(index);
+  });
+  document.getElementById("vm-gallery-latest")?.addEventListener("click", () => {
+    if (!vmGalleries.length) return;
+    vmGalleryManual = false;
+    vmGalleryIndex = vmGalleries.length - 1;
+    renderVMGalleryControls();
+    loadVMGallery(vmGalleryIndex);
+  });
   document.addEventListener("click", (event) => {
     const button = event.target.closest("[data-vm-run]");
     if (!button) return;

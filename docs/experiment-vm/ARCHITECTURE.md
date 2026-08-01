@@ -239,6 +239,20 @@ there is no optimizer-, schedule-, or activation-specific dashboard handler.
 The implementation and extension rules are specified in
 [`TRAINING_COMPONENTS.md`](TRAINING_COMPONENTS.md).
 
+### Immutable evaluation galleries
+
+The dashboard discovers qualitative evaluations only from complete `artifact.published` events for
+the versioned `rwkv-lab.eval-gallery.v2` manifest. The scrubber orders revisions by declared step and
+journal sequence, preserving multiple attempts at the same step, and follows the newest revision
+until the operator pins an older one. It does not poll or enumerate run directories. Generated and
+target/source images are shown side by side when the manifest declares a pair.
+
+The HTTP projection revalidates the published manifest's SHA-256 on every metadata or image request,
+strictly decodes its bounded schema, checks run/node/attempt lineage, and confines `file:` locators to
+configured image roots. Image bytes are streamed from the same opened file descriptor only after
+their declared SHA-256 has been verified. URIs are location hints; journal identity, artifact
+fingerprints, and per-object hashes remain the authority.
+
 ## VM and finite-state semantics
 
 The plan graph is a durable hierarchical state machine. The top-level run states are:

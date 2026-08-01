@@ -129,6 +129,33 @@ func TestEvalGalleryHasTimeScrubberAndPinnedHistoryMode(t *testing.T) {
 	}
 }
 
+func TestNativeEvalGalleryUsesPublishedHistoryAndSideBySideViewer(t *testing.T) {
+	assets := Static()
+	index, err := fs.ReadFile(assets, "index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := fs.ReadFile(assets, "app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	css, err := fs.ReadFile(assets, "app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(index), `id="vm-gallery-range"`) ||
+		!strings.Contains(string(index), `id="vm-gallery-latest"`) {
+		t.Fatal("native gallery has no immutable-history scrubber")
+	}
+	if !strings.Contains(string(app), `/galleries/${encodeURIComponent(summary.artifact_id)}`) ||
+		!strings.Contains(string(app), `item.target_image_url || item.source_image_url`) {
+		t.Fatal("native gallery is not driven by published revisions or lacks original-image fallback")
+	}
+	if !strings.Contains(string(css), `.vm-gallery-pair { display: grid; grid-template-columns: repeat(2`) {
+		t.Fatal("native generated/original images are not rendered side by side")
+	}
+}
+
 func TestTrainVMPanelUsesIncrementalReadOnlyTimeline(t *testing.T) {
 	assets := Static()
 	index, err := fs.ReadFile(assets, "index.html")

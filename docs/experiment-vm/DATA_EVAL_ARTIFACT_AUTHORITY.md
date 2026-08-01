@@ -367,8 +367,11 @@ struct EvalGalleryItem {
   std::string heldout_manifest_digest;
   std::string prompt_or_condition_digest;
   std::string generated_object_sha256;
+  std::string generated_object_uri;
   std::optional<std::string> target_object_sha256;
+  std::optional<std::string> target_object_uri;
   std::optional<std::string> source_object_sha256;
+  std::optional<std::string> source_object_uri;
   std::uint64_t seed;
   std::map<std::string, std::string> sampling_attributes;
 };
@@ -392,6 +395,10 @@ Generated, target/original, and held-out identities are mandatory as applicable.
 without a target content hash is not a valid side-by-side pair. Captions, prompts, masks, controls,
 audio, or video conditioning use typed sibling artifacts and hashes rather than unbounded strings in
 the gallery manifest. Sensitive text may be encrypted/restricted while its digest remains bound.
+Object URIs are locators, never identity or read authority: the dashboard resolves only `file:`
+objects beneath configured data roots and verifies the corresponding SHA-256 before returning bytes.
+The published artifact fingerprint similarly binds the exact gallery-manifest bytes. Moving an
+object therefore requires republishing a new immutable revision even when its content hash is stable.
 
 Each published revision is append-only and indexed by `(run, eval node, step domain, step, attempt)`.
 The scrubber reads these revisions, never rescans run directories. Re-evaluation at the same step
