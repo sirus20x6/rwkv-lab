@@ -262,6 +262,17 @@ struct HostProcessExitResult final {
   bool operator==(const HostProcessExitResult&) const = default;
 };
 
+// Read-only, exact persisted evidence for a process boundary that has no
+// terminal exit receipt. A missing spawn means the durable intent committed
+// before any stopped-child receipt; it is cleanup evidence, not a live PID.
+struct HostProcessRecoveryRecord final {
+  ResourceBundleGrant grant;
+  HostProcessLaunchIntent intent;
+  std::optional<HostProcessSpawnReceipt> spawn;
+
+  bool operator==(const HostProcessRecoveryRecord&) const = default;
+};
+
 enum class HostLedgerFaultPoint {
   after_startup_audit_migration_schema,
   after_startup_audit_record,
@@ -346,6 +357,10 @@ class SQLiteHostLedger final {
       const HostProcessSpawnRequest& request, const HostLedgerTime& now);
   [[nodiscard]] HostProcessExitResult commit_process_exit(
       const HostProcessExitRequest& request, const HostLedgerTime& now);
+  [[nodiscard]] std::vector<HostProcessRecoveryRecord>
+  active_process_recovery_records(
+      std::size_t maximum_records =
+          HostResourceBounds::maximum_active_fences) const;
   [[nodiscard]] HostLedgerChainHead chain_head() const;
   [[nodiscard]] ResourceOccupancySnapshot occupancy() const;
   [[nodiscard]] std::uint64_t generation(

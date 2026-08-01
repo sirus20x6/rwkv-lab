@@ -39,13 +39,17 @@ std::string audit_id() {
   return result;
 }
 
-HostStartupAuditFinding active_fence_finding(std::size_t count) {
+HostStartupAuditFinding active_fence_finding(std::size_t count,
+                                             std::size_t spawned,
+                                             std::size_t intent_only) {
   return canonicalize_host_startup_audit_finding({
       .severity = HostStartupAuditFindingSeverity::blocking,
       .code = "process-adoption-required",
       .subject = "host-ledger",
       .detail = "startup found " + std::to_string(count) +
-                " active resource fences; durable process adoption is required",
+                " active resource fences (" + std::to_string(spawned) +
+                " unclosed spawns, " + std::to_string(intent_only) +
+                " intent-only launches); durable process adoption is required",
       .evidence_digest = {},
   });
 }
@@ -72,11 +76,19 @@ HostStartupAuditReport HostdConfiguredStartupAuditor::audit() {
   const HostInventoryReceipt inventory = ledger_.inventory();
   const HostLedgerChainHead head_before = ledger_.chain_head();
   const ResourceOccupancySnapshot occupancy_before = ledger_.occupancy();
+  const std::vector<HostProcessRecoveryRecord> recovery =
+      ledger_.active_process_recovery_records();
 
   std::vector<HostStartupAuditFinding> findings;
-  if (!occupancy_before.active_fences.empty())
-    findings.push_back(
-        active_fence_finding(occupancy_before.active_fences.size()));
+  if (!occupancy_before.active_fences.empty()) {
+    const std::size_t spawned = static_cast<std::size_t>(std::ranges::count_if(
+        recovery, [](const HostProcessRecoveryRecord& record) {
+          return record.spawn.has_value();
+        }));
+    findings.push_back(active_fence_finding(
+        occupancy_before.active_fences.size(), spawned,
+        recovery.size() - spawned));
+  }
 
   const HostLedgerChainHead head_after = ledger_.chain_head();
   const ResourceOccupancySnapshot occupancy_after = ledger_.occupancy();

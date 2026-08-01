@@ -246,8 +246,10 @@ startup orphan recovery are defined in
   locks.
 - Startup orphan/resource audit before any process authority can be granted.
   The production configured auditor now constructs exact clock/head/occupancy evidence and blocks
-  retained fences; durable pidfd/cgroup process adoption must convert that conservative block into
-  a proved recovered launch before admission can resume.
+  retained fences. The host ledger now exposes a bounded, integrity-checked read-only recovery view
+  joining each active process intent to its exact grant and optional unclosed spawn receipt; durable
+  pidfd/cgroup process adoption must convert that conservative block into a proved recovered launch
+  before admission can resume.
 - Resolve the remaining stock-SQLite auxiliary pathname race in the declared host threat model:
   trusted isolated authority directory, controlled VFS, or host-global lock broker. Do not treat
   the network-namespace-local abstract socket as the host-wide GPU/resource fence.

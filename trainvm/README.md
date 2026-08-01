@@ -121,9 +121,10 @@ Implemented now:
   configured-policy admission, historical inventory/occupancy reconstruction, predecessor-chain
   proof, atomic report/projection/receipt commit, strict replay closure, and post-commit re-read;
 - a concrete configured hostd startup auditor that samples the authority clock around exact pinned
-  ledger head/occupancy evidence, binds host/boot/broker/process identity, and blocks startup on any
-  retained resource fence until durable process adoption can account for it rather than treating
-  an old allocation as free;
+  ledger head/occupancy evidence, binds host/boot/broker/process identity, reads an integrity-checked
+  bounded recovery view joining active grants to intent-only or unclosed spawn receipts, and blocks
+  startup on any retained resource fence until durable process adoption can account for it rather
+  than treating an old allocation as free;
 - an additive host-ledger v3 admission epoch that atomically finalizes an exact current audit and
   occupancy, keeps policy-enabled grants sealed beforehand, binds every later request to the active
   epoch, preserves release-only cleanup while startup is blocked, and exposes a read-only exact

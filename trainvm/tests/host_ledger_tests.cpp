@@ -534,6 +534,14 @@ void process_authority_is_durable_and_replay_safe() {
     require(host_process_launch_intent_from_json(
                 host_process_launch_intent_json(intent.intent)) == intent.intent,
             "launch intent has a strict canonical codec");
+    auto recovery = ledger.active_process_recovery_records();
+    require(recovery.size() == 1U && recovery.front().grant == *bundle.grant &&
+                recovery.front().intent == intent.intent &&
+                !recovery.front().spawn,
+            "recovery view exposes an active intent without inventing a PID");
+    require_throws<HostLedgerError>(
+        [&] { (void)ledger.active_process_recovery_records(0U); },
+        "recovery view rejects an unusable bound");
     auto changed_launch = launch;
     changed_launch.resolved_launch_digest = test_digest('3');
     changed_launch = seal_host_process_launch_request(std::move(changed_launch));
@@ -554,6 +562,10 @@ void process_authority_is_durable_and_replay_safe() {
                 host_process_spawn_receipt_json(receipt.receipt)) ==
                 receipt.receipt,
             "spawn receipt has a strict canonical codec");
+    recovery = ledger.active_process_recovery_records();
+    require(recovery.size() == 1U &&
+                recovery.front().spawn == receipt.receipt,
+            "recovery view joins the exact unclosed spawn receipt");
     auto changed_spawn = spawn;
     changed_spawn.host_pid += 1;
     changed_spawn = seal_host_process_spawn_request(std::move(changed_spawn));
@@ -576,6 +588,8 @@ void process_authority_is_durable_and_replay_safe() {
     require(!exited.replayed && exit_replay.replayed &&
                 exit_replay.receipt == exited.receipt && ledger.verify(),
             "terminal process exit commits once and exactly replays");
+    require(ledger.active_process_recovery_records().empty(),
+            "terminal process disappears from the recovery view");
     require(!ledger.release_bundle(
                         release_request(*bundle.grant, "release-after-exit"),
                         {90, 100})
