@@ -1,3 +1,4 @@
+import ast
 import json
 from pathlib import Path
 
@@ -25,6 +26,50 @@ from rwkv_lab.training_components import (
     supported_implementation_ids,
     supported_worker_capabilities,
 )
+
+
+def test_runtime_categories_have_one_way_dependency_boundaries():
+    root = Path(__file__).resolve().parents[1]
+    runtime = root / "src/rwkv_lab/training_runtime"
+    category_names = {"optimizers", "routers", "schedules"}
+    family_fragments = {
+        "mage_flow",
+        "rwkv_pretrain",
+        "rwkv_finetune",
+        "qwen",
+        "transformer",
+        "vision_train",
+    }
+
+    for category in sorted(category_names):
+        source = (runtime / f"{category}.py").read_text(encoding="utf-8")
+        imports = []
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Import):
+                imports.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                prefix = "." * node.level
+                imports.append(prefix + (node.module or ""))
+
+        sibling_imports = {
+            imported.removeprefix("rwkv_lab.training_runtime.").removeprefix(".")
+            for imported in imports
+            if imported.startswith((".", "rwkv_lab.training_runtime."))
+        }
+        assert not sibling_imports.intersection(category_names - {category})
+        assert not any(
+            fragment in imported
+            for imported in imports
+            for fragment in family_fragments
+        )
+
+
+def test_training_components_remains_a_logic_free_stable_facade():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "src/rwkv_lab/training_components.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    forbidden = (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+    assert not [node for node in tree.body if isinstance(node, forbidden)]
 
 
 def test_linear_warmup_cosine_has_one_optimizer_step_domain_trajectory():

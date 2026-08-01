@@ -18,11 +18,20 @@ compatibility-grade component.
 
 ## Tensor-runtime implementation (Python/CUDA)
 
-Tensor code stays in the runtime that implements it well. `rwkv_lab.training_components` exposes
-closed enums, typed immutable configuration objects, and small factories. It has no dynamic import
-path. The resolved-worker dispatch functions accept only the canonical envelope from TrainVM and
-fail on extra keys, unknown implementation IDs, wrong categories, missing defaults, nonfinite
-numbers, or incorrect scalar types.
+Tensor code stays in the runtime that implements it well. `rwkv_lab.training_components` is a
+stable compatibility facade; implementations are physically separated under
+`rwkv_lab.training_runtime` into `optimizers.py`, `schedules.py`, and `routers.py`, with only the
+shared resolved-envelope decoder at the package root. Each category owns its closed enum, typed
+immutable configuration, validation, construction, and resolved dispatch. Category modules do not
+import one another or any family trainer. The facade has no implementation logic and trainers do
+not depend on the category internals.
+
+Future categories follow the same rule: add `activations.py`, `normalizations.py`, `objectives.py`,
+`precision.py`, `gradient_policy.py`, `weight_decay_schedules.py`, or `curricula.py` only when a
+real adapter consumes the descriptor. Do not create a placeholder module or advertise decorative
+configuration. The resolved-worker dispatch functions accept only the canonical envelope from
+TrainVM and fail on extra keys, unknown implementation IDs, wrong categories, missing defaults,
+nonfinite numbers, or incorrect scalar types.
 
 The initial concrete cross-family catalog contains:
 
@@ -58,7 +67,8 @@ does not add a Go endpoint or component-specific JavaScript.
 ## Adding a component
 
 1. Add the exact authority descriptor and state schema.
-2. Add a closed implementation enum and typed configuration/factory in the tensor runtime.
+2. Add a closed implementation enum and typed configuration/factory in the category-owned tensor
+   runtime module, preserving the one-way dependency into family adapters.
 3. Add cross-runtime tests proving descriptor fields/defaults match the factory.
 4. Add reference output, gradient/update, state round-trip, and resumed-trajectory parity evidence.
 5. Integrate it into an adapter and advertise the exact worker capability.

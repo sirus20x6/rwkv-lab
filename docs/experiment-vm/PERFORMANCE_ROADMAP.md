@@ -271,7 +271,11 @@ startup orphan recovery are defined in
   precision/scaling, gradient policy, and curricula live in separate source/test modules. Shared
   modules may not import family trainers; family adapters compose them through typed registry
   contracts. Add a component only when a runtime path consumes it, so the registry cannot advertise
-  decorative configuration that training silently ignores.
+  decorative configuration that training silently ignores. The Python runtime now physically
+  separates the implemented optimizer, LR-schedule, and parameter-router categories behind the
+  stable `training_components` facade; category dependency checks prevent regressions. Activation,
+  normalization, objective, precision, gradient-policy, decay-schedule, and curriculum modules are
+  created as their first real adapter migrations land, not as empty scaffolding.
 - Make component state and schedule domains explicit in checkpoint manifests, with exhaustive
   parameter ownership and exact-resume trajectory tests.
 - Add representative benchmark fixtures for MageFlow/flow, RWKV LM, transformer LM, vision/RWKV,
