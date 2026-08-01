@@ -1890,12 +1890,14 @@ HostdServeResult HostdMutationServer::serve_one(
           throw HostdTransportError(
               "hostd process prepare authority is unavailable");
         const auto& descriptors = command_packet.descriptors;
-        const bool has_code = descriptors.size() == 3U;
+        const bool has_code = command.process_prepare->launch.identity.code.has_value();
+        const std::size_t working_index = has_code ? 2U : 1U;
+        const std::size_t bootstrap_index = has_code ? 3U : 2U;
         reply.kind = HostdMutationReplyKind::process_prepared;
         reply.process_prepared = process_supervisor_->prepare(
             *command.process_prepare, descriptors[0].get(),
             has_code ? std::optional<int>(descriptors[1].get()) : std::nullopt,
-            descriptors[has_code ? 2U : 1U].get());
+            descriptors[working_index].get(), descriptors[bootstrap_index].get());
         break;
       }
       case HostdMutationKind::commit_process: {
@@ -2177,7 +2179,7 @@ HostdMutationReply request_mutation_impl(
       .command_digest = {},
   });
   validate_hostd_mutation_exchange(request.open, challenge, command);
-  std::array<int, 3U> descriptor_storage{};
+  std::array<int, 4U> descriptor_storage{};
   std::span<const int> descriptors;
   if (request.mutation == HostdMutationKind::prepare_process) {
     if (!request.process_prepare || !request.delegated_launch)
@@ -2185,10 +2187,13 @@ HostdMutationReply request_mutation_impl(
           "hostd process prepare descriptors are missing");
     const auto& delegated = *request.delegated_launch;
     const bool has_code = delegated.code_fd.has_value();
-    const std::size_t count = has_code ? 3U : 2U;
+    const std::size_t count = has_code ? 4U : 3U;
     descriptor_storage[0] = delegated.executable_fd;
-    descriptor_storage[has_code ? 2U : 1U] =
+    const std::size_t working_index = has_code ? 2U : 1U;
+    const std::size_t bootstrap_index = has_code ? 3U : 2U;
+    descriptor_storage[working_index] =
         delegated.working_directory_fd;
+    descriptor_storage[bootstrap_index] = delegated.worker_bootstrap_fd;
     if (has_code) descriptor_storage[1] = *delegated.code_fd;
     descriptors = std::span<const int>(descriptor_storage.data(), count);
     if (request.process_prepare->descriptor_roles.size() != count)

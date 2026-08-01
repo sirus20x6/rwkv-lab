@@ -72,7 +72,8 @@ class LinuxProcessAuthority final {
   // The returned gate remains closed until the caller has durably copied the
   // spawn receipt into its journal and calls release_to_exec().
   [[nodiscard]] LinuxPreparedLaunch prepare(
-      const ResolvedLaunch& resolved, const ResourceBundleGrant& grant);
+      const ResolvedLaunch& resolved, const ResourceBundleGrant& grant,
+      int worker_bootstrap_fd, std::string_view worker_bootstrap_digest);
   [[nodiscard]] HostProcessExitResult finalize_exit(
       LinuxPreparedLaunch& launch, const ResourceBundleGrant& grant,
       std::string exit_request_id, bool request_termination);
@@ -91,7 +92,8 @@ class IHostdProcessSupervisor {
   // Descriptor arguments are borrowed for the duration of prepare().
   [[nodiscard]] virtual HostdProcessPreparedResult prepare(
       const HostdProcessPrepareRequest& request, int executable_fd,
-      std::optional<int> code_fd, int working_directory_fd) = 0;
+      std::optional<int> code_fd, int working_directory_fd,
+      int worker_bootstrap_fd) = 0;
   [[nodiscard]] virtual HostdProcessCommittedResult commit(
       const HostdProcessCommitRequest& request) = 0;
   [[nodiscard]] virtual HostProcessExitResult finalize(
@@ -109,7 +111,8 @@ class HostdLinuxProcessSupervisor final : public IHostdProcessSupervisor {
 
   [[nodiscard]] HostdProcessPreparedResult prepare(
       const HostdProcessPrepareRequest& request, int executable_fd,
-      std::optional<int> code_fd, int working_directory_fd) override;
+      std::optional<int> code_fd, int working_directory_fd,
+      int worker_bootstrap_fd) override;
   [[nodiscard]] HostdProcessCommittedResult commit(
       const HostdProcessCommitRequest& request) override;
   [[nodiscard]] HostProcessExitResult finalize(

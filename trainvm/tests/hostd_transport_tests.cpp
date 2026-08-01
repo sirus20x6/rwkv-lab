@@ -1,5 +1,6 @@
 #include "trainvm/hostd_transport.hpp"
 #include "trainvm/document.hpp"
+#include "trainvm/worker_bootstrap.hpp"
 
 #include <fcntl.h>
 #include <openssl/sha.h>
@@ -487,11 +488,17 @@ class LedgerProcessSupervisor final : public IHostdProcessSupervisor {
 
   HostdProcessPreparedResult prepare(
       const HostdProcessPrepareRequest& request, int executable_fd,
-      std::optional<int> code_fd, int working_directory_fd) override {
+      std::optional<int> code_fd, int working_directory_fd,
+      int worker_bootstrap_fd) override {
     require(executable_fd >= 0 && !code_fd && working_directory_fd >= 0 &&
+                worker_bootstrap_fd >= 0 &&
                 ::fcntl(executable_fd, F_GETFD) >= 0 &&
-                ::fcntl(working_directory_fd, F_GETFD) >= 0,
-            "process supervisor receives two live role-ordered descriptors");
+                ::fcntl(working_directory_fd, F_GETFD) >= 0 &&
+                worker_bootstrap_from_sealed_fd(
+                    worker_bootstrap_fd,
+                    request.worker_bootstrap_digest).run_id ==
+                    request.launch.identity.run_id,
+            "process supervisor receives three live role-ordered descriptors");
     ++prepare_calls;
     const auto intended = ledger_.commit_process_launch_intent(
         seal_host_process_launch_request({
@@ -505,7 +512,8 @@ class LedgerProcessSupervisor final : public IHostdProcessSupervisor {
             .logical_lease_id = request.grant.logical_lease_id,
             .logical_fencing_token =
                 request.grant.logical_fencing_token,
-            .resolved_launch_digest = request.launch.spec_digest,
+            .resolved_launch_digest = hostd_bound_process_launch_digest(
+                request.launch, request.worker_bootstrap_digest),
             .executable_path = request.launch.identity.executable.source_path,
             .executable_digest =
                 request.launch.identity.executable.sealed_sha256,
@@ -1680,11 +1688,31 @@ void mutation_transport_dispatches_replays_and_disconnects() {
 
   const auto &grant = *granted.bundle_result->grant;
   const ResolvedLaunchSpec process_launch = process_launch_for(grant);
+  auto process_bootstrap = create_sealed_worker_bootstrap({
+      .api_version = std::string(kWorkerBootstrapApiVersion),
+      .controller_target = "unix:/run/trainvm/test.sock",
+      .run_id = process_launch.identity.run_id,
+      .node_id = process_launch.identity.node_id,
+      .attempt_id = process_launch.identity.attempt_id,
+      .launch_nonce = process_launch.identity.launch_nonce,
+      .adapter = process_launch.identity.adapter_key.adapter,
+      .adapter_version = process_launch.identity.adapter_key.version,
+      .code_fingerprint = process_launch.identity.code_fingerprint,
+      .capabilities = process_launch.identity.required_capabilities,
+      .last_acked_controller_sequence = 0U,
+      .concurrency_key = process_launch.identity.concurrency_key,
+      .lease_id = process_launch.identity.lease_id,
+      .fencing_token = process_launch.identity.fencing_token,
+      .bootstrap_digest = {},
+  });
+  const int delegated_bootstrap = process_bootstrap.duplicate_fd();
   const HostdProcessPrepareRequest process_prepare{
       .api_version = std::string(kHostdProcessPrepareApiVersion),
       .launch = process_launch,
       .grant = grant,
-      .descriptor_roles = {"executable", "working_directory"},
+      .worker_bootstrap_digest = process_bootstrap.spec().bootstrap_digest,
+      .descriptor_roles = {"executable", "working_directory",
+                           "worker_bootstrap"},
   };
   const int delegated_executable =
       ::open("/dev/null", O_RDONLY | O_CLOEXEC);
@@ -1698,7 +1726,8 @@ void mutation_transport_dispatches_replays_and_disconnects() {
           HostdMutationRequest::DelegatedLaunchDescriptors{
               .executable_fd = delegated_executable,
               .code_fd = std::nullopt,
-              .working_directory_fd = directory.parent_fd()},
+              .working_directory_fd = directory.parent_fd(),
+              .worker_bootstrap_fd = delegated_bootstrap},
   };
   const auto prepared = exchange(prepare_request, 120U);
   require(prepared.kind == HostdMutationReplyKind::process_prepared &&
@@ -1762,6 +1791,8 @@ void mutation_transport_dispatches_replays_and_disconnects() {
           "process exit is durable, terminal, and replay-safe");
   require(::close(delegated_executable) == 0,
           "close delegated process executable test descriptor");
+  require(::close(delegated_bootstrap) == 0,
+          "close delegated process bootstrap test descriptor");
   const ResourceReleaseRequest release = seal_resource_release_request({
       .api_version = std::string(kHostLedgerReleaseRequestApiVersion),
       .release_request_id = "release-transport",

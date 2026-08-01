@@ -155,14 +155,30 @@ bool pidfd_alive(int descriptor) {
          (status > 0 && (item.revents & (POLLIN | POLLHUP | POLLERR)) == 0);
 }
 
+bool install_inherited_worker_descriptors(std::optional<int> code_fd,
+                                          int worker_bootstrap_fd) noexcept {
+  if ((code_fd && *code_fd <= kLinuxWorkerBootstrapDescriptor) ||
+      worker_bootstrap_fd <= kLinuxWorkerBootstrapDescriptor)
+    return false;
+  if (code_fd &&
+      ::dup3(*code_fd, kLinuxWorkerCodeDescriptor, 0) < 0)
+    return false;
+  return ::dup3(worker_bootstrap_fd, kLinuxWorkerBootstrapDescriptor, 0) >= 0;
+}
+
 void require_descriptor_identity(const LinuxStoppedLaunchSpec& spec) {
   struct stat cgroup {};
   struct stat executable {};
+  struct stat code {};
+  struct stat bootstrap {};
   struct stat working_directory {};
   const int seals = ::fcntl(spec.executable_fd, F_GET_SEALS);
+  const int code_seals = spec.code_fd ? ::fcntl(*spec.code_fd, F_GET_SEALS) : 0;
+  const int bootstrap_seals = ::fcntl(spec.worker_bootstrap_fd, F_GET_SEALS);
   constexpr int required_seals =
       F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
   if (spec.cgroup_fd < 0 || spec.executable_fd < 0 ||
+      spec.worker_bootstrap_fd < 0 ||
       spec.working_directory_fd < 0 ||
       ::fstat(spec.cgroup_fd, &cgroup) != 0 || !S_ISDIR(cgroup.st_mode) ||
       static_cast<std::uint64_t>(cgroup.st_dev) !=
@@ -172,6 +188,12 @@ void require_descriptor_identity(const LinuxStoppedLaunchSpec& spec) {
       ::fstat(spec.executable_fd, &executable) != 0 ||
       !S_ISREG(executable.st_mode) || seals < 0 ||
       (seals & required_seals) != required_seals ||
+      (spec.code_fd &&
+       (::fstat(*spec.code_fd, &code) != 0 || !S_ISREG(code.st_mode) ||
+        code_seals < 0 || (code_seals & required_seals) != required_seals)) ||
+      ::fstat(spec.worker_bootstrap_fd, &bootstrap) != 0 ||
+      !S_ISREG(bootstrap.st_mode) || bootstrap_seals < 0 ||
+      (bootstrap_seals & required_seals) != required_seals ||
       ::fstat(spec.working_directory_fd, &working_directory) != 0 ||
       !S_ISDIR(working_directory.st_mode)) {
     reject("stopped launch descriptors do not match sealed authority");
@@ -191,6 +213,15 @@ void validate_spec(const LinuxStoppedLaunchSpec& spec) {
       }) ||
       spec.arguments.size() > 256U) {
     reject("stopped launch specification is malformed or unbounded");
+  }
+  const std::string bootstrap_argument =
+      "--trainvm-bootstrap-fd=" +
+      std::to_string(kLinuxWorkerBootstrapDescriptor);
+  if (spec.arguments.empty() || spec.arguments.back() != bootstrap_argument ||
+      (spec.code_fd &&
+       spec.arguments.front() !=
+           "/proc/self/fd/" + std::to_string(kLinuxWorkerCodeDescriptor))) {
+    reject("stopped launch inherited-descriptor argv ABI is invalid");
   }
   std::size_t argument_bytes = spec.executable_name.size();
   for (const std::string& argument : spec.arguments) {
@@ -317,6 +348,14 @@ std::optional<LinuxChildExitObservation> LinuxStoppedChild::reap(
 LinuxStoppedChild LinuxStoppedLauncherKernel::spawn_stopped(
     const LinuxStoppedLaunchSpec& spec) const {
   validate_spec(spec);
+  Descriptor inherited_code(
+      spec.code_fd ? ::fcntl(*spec.code_fd, F_DUPFD_CLOEXEC, 64) : -1);
+  Descriptor inherited_bootstrap(
+      ::fcntl(spec.worker_bootstrap_fd, F_DUPFD_CLOEXEC, 64));
+  if ((spec.code_fd && inherited_code.get() < 0) ||
+      inherited_bootstrap.get() < 0) {
+    reject(system_error("could not duplicate inherited worker descriptor"));
+  }
   std::vector<char*> arguments;
   arguments.reserve(spec.arguments.size() + 2U);
   arguments.push_back(const_cast<char*>(spec.executable_name.c_str()));
@@ -346,7 +385,11 @@ LinuxStoppedChild LinuxStoppedLauncherKernel::spawn_stopped(
       count = ::read(gate_read.get(), &command, 1U);
     } while (count < 0 && errno == EINTR);
     if (count != 1 || command != 'G' ||
-        ::fchdir(spec.working_directory_fd) != 0) {
+        ::fchdir(spec.working_directory_fd) != 0 ||
+        !install_inherited_worker_descriptors(
+            spec.code_fd ? std::optional<int>{inherited_code.get()}
+                         : std::nullopt,
+            inherited_bootstrap.get())) {
       ::_exit(125);
     }
     char* const environment[] = {nullptr};
@@ -395,6 +438,12 @@ std::uint64_t parse_proc_starttime(std::string_view stat) {
 
 std::string parse_unified_cgroup(std::string_view cgroup) {
   return parse_cgroup(cgroup);
+}
+
+bool install_inherited_worker_descriptors(
+    std::optional<int> code_fd, int worker_bootstrap_fd) noexcept {
+  return trainvm::install_inherited_worker_descriptors(code_fd,
+                                                        worker_bootstrap_fd);
 }
 
 }  // namespace hostd_linux_stopped_launcher_test_seam

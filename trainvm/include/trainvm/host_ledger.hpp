@@ -139,8 +139,9 @@ struct HostLedgerAdmissionFinalizeResult final {
   bool operator==(const HostLedgerAdmissionFinalizeResult&) const = default;
 };
 
-// The resolved launch digest commits to the complete launcher input (including
-// argv/environment material that may be inappropriate to persist). The ledger
+// The resolved launch digest commits to the complete launcher input and may be
+// a typed compound digest that also binds sealed per-attempt bootstrap data.
+// The ledger
 // separately persists the security-sensitive executable and cgroup identity so
 // a later spawn receipt cannot be attached to a different launch boundary.
 struct HostProcessLaunchRequest final {

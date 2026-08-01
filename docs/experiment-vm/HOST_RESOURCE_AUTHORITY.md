@@ -715,7 +715,7 @@ durable spawn receipt. The additive v5 terminal receipt is implemented as well: 
 the exact spawn identity, twice-empty cgroup evidence, and a complete trusted
 accelerator-context audit must all agree before commit. Resource release now
 fails closed for every spawned allocation without that receipt, and the empty
-cgroup is removed only afterward. Python code-fd argv binding, CPU/I/O policy
+cgroup is removed only afterward. CPU/I/O policy
 evidence, device BPF, privileged end-to-end qualification, and durable adoption
 after a hostd restart remain in this gate. A daemon crash is therefore not
 claimed as an in-memory supervisor replay boundary; startup audit must

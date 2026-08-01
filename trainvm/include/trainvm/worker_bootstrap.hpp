@@ -42,4 +42,29 @@ struct WorkerBootstrapSpec final {
 [[nodiscard]] WorkerBootstrapSpec worker_bootstrap_from_canonical_json(
     std::string_view value);
 
+class SealedWorkerBootstrap final {
+ public:
+  SealedWorkerBootstrap(SealedWorkerBootstrap&& other) noexcept;
+  SealedWorkerBootstrap& operator=(SealedWorkerBootstrap&& other) noexcept;
+  ~SealedWorkerBootstrap();
+
+  SealedWorkerBootstrap(const SealedWorkerBootstrap&) = delete;
+  SealedWorkerBootstrap& operator=(const SealedWorkerBootstrap&) = delete;
+
+  [[nodiscard]] const WorkerBootstrapSpec& spec() const;
+  [[nodiscard]] int duplicate_fd() const;
+
+ private:
+  friend SealedWorkerBootstrap create_sealed_worker_bootstrap(
+      WorkerBootstrapSpec value);
+  SealedWorkerBootstrap(WorkerBootstrapSpec spec, int descriptor) noexcept;
+  WorkerBootstrapSpec spec_;
+  int descriptor_{-1};
+};
+
+[[nodiscard]] SealedWorkerBootstrap create_sealed_worker_bootstrap(
+    WorkerBootstrapSpec value);
+[[nodiscard]] WorkerBootstrapSpec worker_bootstrap_from_sealed_fd(
+    int descriptor, std::string_view expected_digest = {});
+
 }  // namespace trainvm

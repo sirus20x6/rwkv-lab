@@ -5,6 +5,8 @@
 #include <string>
 #include <string_view>
 
+#include <unistd.h>
+
 #include <nlohmann/json.hpp>
 
 namespace {
@@ -85,11 +87,30 @@ void changes_and_noncanonical_inputs_fail_closed() {
         "capabilities must be a sorted duplicate-free set");
 }
 
+void sealed_descriptor_round_trips_and_rejects_wrong_digest() {
+  const auto expected = fixture();
+  auto sealed = trainvm::create_sealed_worker_bootstrap(expected);
+  const int descriptor = sealed.duplicate_fd();
+  check(trainvm::worker_bootstrap_from_sealed_fd(
+            descriptor, expected.bootstrap_digest) == expected,
+        "sealed worker bootstrap descriptor round trips exactly");
+  bool rejected = false;
+  try {
+    (void)trainvm::worker_bootstrap_from_sealed_fd(
+        descriptor, "sha256:" + std::string(64U, 'f'));
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  check(rejected, "sealed worker bootstrap rejects a mismatched request digest");
+  (void)::close(descriptor);
+}
+
 }  // namespace
 
 int main() {
   round_trip_is_exact();
   changes_and_noncanonical_inputs_fail_closed();
+  sealed_descriptor_round_trips_and_rejects_wrong_digest();
   if (failures != 0) return 1;
   std::cout << "worker bootstrap tests passed\n";
   return 0;

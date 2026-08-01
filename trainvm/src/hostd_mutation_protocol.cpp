@@ -548,7 +548,8 @@ void validate_hostd_mutation_reply(const HostdMutationCommand& command,
             result.intent.request.allocation_id != request.grant.allocation_id ||
             result.intent.request.grant_digest != request.grant.receipt_digest ||
             result.intent.request.resolved_launch_digest !=
-                request.launch.spec_digest ||
+                hostd_bound_process_launch_digest(
+                    request.launch, request.worker_bootstrap_digest) ||
             result.spawn.request.launch_id !=
                 request.launch.identity.launch_event_id) {
           reject("process prepare reply disagrees with its exact request");

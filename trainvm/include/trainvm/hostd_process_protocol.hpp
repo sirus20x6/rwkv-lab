@@ -11,7 +11,7 @@
 namespace trainvm {
 
 inline constexpr std::string_view kHostdProcessPrepareApiVersion =
-    "trainvm.hostd-process-prepare/v1";
+    "trainvm.hostd-process-prepare/v2";
 inline constexpr std::string_view kHostdProcessCommitApiVersion =
     "trainvm.hostd-process-commit/v1";
 inline constexpr std::string_view kHostdProcessExitApiVersion =
@@ -25,6 +25,7 @@ struct HostdProcessPrepareRequest final {
   std::string api_version;
   ResolvedLaunchSpec launch;
   ResourceBundleGrant grant;
+  std::string worker_bootstrap_digest;
   std::vector<std::string> descriptor_roles;
 
   bool operator==(const HostdProcessPrepareRequest&) const = default;
@@ -83,6 +84,10 @@ struct HostdProcessCommittedResult final {
     const HostdProcessPrepareRequest& value);
 [[nodiscard]] HostdProcessPrepareRequest
 hostd_process_prepare_from_canonical_json(std::string_view value);
+// Durable host-ledger binding of the immutable resolved launch and the sealed
+// per-attempt bootstrap descriptor without widening the ledger schema.
+[[nodiscard]] std::string hostd_bound_process_launch_digest(
+    const ResolvedLaunchSpec& launch, std::string_view worker_bootstrap_digest);
 [[nodiscard]] std::string hostd_process_commit_canonical_json(
     const HostdProcessCommitRequest& value);
 [[nodiscard]] HostdProcessCommitRequest

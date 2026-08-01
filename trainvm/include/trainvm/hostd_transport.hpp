@@ -306,6 +306,7 @@ struct HostdMutationRequest final {
     int executable_fd{-1};
     std::optional<int> code_fd;
     int working_directory_fd{-1};
+    int worker_bootstrap_fd{-1};
 
     bool operator==(const DelegatedLaunchDescriptors &) const = default;
   };

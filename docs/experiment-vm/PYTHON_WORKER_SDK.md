@@ -56,6 +56,9 @@ Regenerate checked-in Python protobuf bindings after changing the protocol:
 scripts/generate_trainvm_python_proto.sh
 ```
 
-Production process launch remains disabled until the bootstrap memfd is wired
-through hostd's descriptor delegation and the Python adapter entry points are
-qualified end to end.
+Hostd descriptor delegation and the stopped launcher now attest the bootstrap,
+install sealed Python code at fd 3 and the bootstrap at fd 4, and bind their
+combined identity into durable launch evidence. Production process launch
+remains disabled until TrainVM drives that guarded hostd transaction, runtime
+closure is enforced, and the Python adapter entry points are qualified end to
+end.

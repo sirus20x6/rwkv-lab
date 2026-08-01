@@ -6,6 +6,8 @@
 #include <unistd.h>
 #include <utility>
 
+#include "trainvm/worker_bootstrap.hpp"
+
 namespace trainvm {
 namespace {
 
@@ -91,15 +93,27 @@ LinuxProcessAuthority::LinuxProcessAuthority(
       context_auditor_(context_auditor) {}
 
 LinuxPreparedLaunch LinuxProcessAuthority::prepare(
-    const ResolvedLaunch& resolved, const ResourceBundleGrant& grant) {
+    const ResolvedLaunch& resolved, const ResourceBundleGrant& grant,
+    int worker_bootstrap_fd, std::string_view worker_bootstrap_digest) {
   const ResolvedLaunchSpec spec = resolved_launch_spec_from_json(
       resolved_launch_spec_json(resolved.spec()));
   const HostInventoryReceipt inventory = ledger_.inventory();
   validate_binding(spec, grant, inventory);
-  const std::optional<int> code = resolved.duplicate_code_fd();
-  if (code) {
-    (void)::close(*code);
-    reject("Python code-fd argv binding is not yet process-authority enabled");
+  const WorkerBootstrapSpec bootstrap = worker_bootstrap_from_sealed_fd(
+      worker_bootstrap_fd, worker_bootstrap_digest);
+  const auto& identity = spec.identity;
+  if (bootstrap.run_id != identity.run_id ||
+      bootstrap.node_id != identity.node_id ||
+      bootstrap.attempt_id != identity.attempt_id ||
+      bootstrap.launch_nonce != identity.launch_nonce ||
+      bootstrap.adapter != identity.adapter_key.adapter ||
+      bootstrap.adapter_version != identity.adapter_key.version ||
+      bootstrap.code_fingerprint != identity.code_fingerprint ||
+      bootstrap.capabilities != identity.required_capabilities ||
+      bootstrap.concurrency_key != identity.concurrency_key ||
+      bootstrap.lease_id != identity.lease_id ||
+      bootstrap.fencing_token != identity.fencing_token) {
+    reject("worker bootstrap disagrees with resolved launch authority");
   }
   LinuxAllocationCgroup cgroup = cgroups_.open_or_create(
       grant.allocation_id, spec.identity.launch_event_id);
@@ -114,7 +128,8 @@ LinuxPreparedLaunch LinuxProcessAuthority::prepare(
           .run_id = grant.run_id,
           .logical_lease_id = grant.logical_lease_id,
           .logical_fencing_token = grant.logical_fencing_token,
-          .resolved_launch_digest = spec.spec_digest,
+          .resolved_launch_digest = hostd_bound_process_launch_digest(
+              spec, worker_bootstrap_digest),
           .executable_path = spec.identity.executable.source_path,
           .executable_digest = spec.identity.executable.sealed_sha256,
           .cgroup_path = cgroup_identity.unified_path,
@@ -127,8 +142,19 @@ LinuxPreparedLaunch LinuxProcessAuthority::prepare(
   cgroup.retain_for_durable_intent();
   Descriptor cgroup_fd(cgroup.duplicate_fd());
   Descriptor executable_fd(resolved.duplicate_executable_fd());
+  const std::optional<int> code = resolved.duplicate_code_fd();
+  Descriptor code_fd(code.value_or(-1));
   Descriptor working_directory_fd(
       resolved.duplicate_working_directory_fd());
+  std::vector<std::string> arguments = spec.identity.public_arguments;
+  if (code) {
+    if (arguments.empty())
+      reject("Python launch has no fixed code argument slot");
+    arguments.front() =
+        "/proc/self/fd/" + std::to_string(kLinuxWorkerCodeDescriptor);
+  }
+  arguments.push_back("--trainvm-bootstrap-fd=" +
+                      std::to_string(kLinuxWorkerBootstrapDescriptor));
   LinuxStoppedChild child = launcher_.spawn_stopped({
       .launch_id = request.launch_id,
       .cgroup_fd = cgroup_fd.get(),
@@ -136,10 +162,12 @@ LinuxPreparedLaunch LinuxProcessAuthority::prepare(
       .expected_cgroup_device = cgroup_identity.device,
       .expected_cgroup_inode = cgroup_identity.inode,
       .executable_fd = executable_fd.get(),
+      .code_fd = code ? std::optional<int>{code_fd.get()} : std::nullopt,
+      .worker_bootstrap_fd = worker_bootstrap_fd,
       .executable_name = spec.identity.executable.source_path,
       .executable_digest = spec.identity.executable.sealed_sha256,
       .working_directory_fd = working_directory_fd.get(),
-      .arguments = spec.identity.public_arguments,
+      .arguments = std::move(arguments),
   });
   const LinuxStoppedChildIdentity& observed = child.identity();
   const HostProcessSpawnRequest spawn_request =
@@ -266,7 +294,8 @@ HostdLinuxProcessSupervisor::~HostdLinuxProcessSupervisor() = default;
 
 HostdProcessPreparedResult HostdLinuxProcessSupervisor::prepare(
     const HostdProcessPrepareRequest& request, int executable_fd,
-    std::optional<int> code_fd, int working_directory_fd) {
+    std::optional<int> code_fd, int working_directory_fd,
+    int worker_bootstrap_fd) {
   // Reattestation happens on retries too, so a successful replay never turns
   // descriptor role/count validation into a confused-deputy bypass.
   ResolvedLaunch resolved = ResolvedLaunch::adopt_delegated(
@@ -283,7 +312,9 @@ HostdProcessPreparedResult HostdLinuxProcessSupervisor::prepare(
         .replayed = true,
     };
   }
-  LinuxPreparedLaunch launch = authority_.prepare(resolved, request.grant);
+  LinuxPreparedLaunch launch = authority_.prepare(
+      resolved, request.grant, worker_bootstrap_fd,
+      request.worker_bootstrap_digest);
   auto entry = std::make_unique<Entry>(Entry{
       .request = request,
       .launch = std::move(launch),

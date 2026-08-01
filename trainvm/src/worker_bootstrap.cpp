@@ -1,8 +1,16 @@
 #include "trainvm/worker_bootstrap.hpp"
 
 #include <algorithm>
+#include <cerrno>
+#include <cstring>
+#include <fcntl.h>
+#include <linux/memfd.h>
 #include <ranges>
 #include <stdexcept>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#include <utility>
 
 #include <nlohmann/json.hpp>
 
@@ -81,6 +89,20 @@ Json bootstrap_body(const WorkerBootstrapSpec& value) {
   };
 }
 
+void write_all(int descriptor, std::string_view value) {
+  std::size_t offset = 0U;
+  while (offset < value.size()) {
+    const ssize_t count =
+        ::write(descriptor, value.data() + offset, value.size() - offset);
+    if (count < 0 && errno == EINTR) continue;
+    if (count <= 0) reject("could not write sealed worker bootstrap");
+    offset += static_cast<std::size_t>(count);
+  }
+}
+
+constexpr int kRequiredSeals =
+    F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+
 }  // namespace
 
 WorkerBootstrapSpec seal_worker_bootstrap(WorkerBootstrapSpec value) {
@@ -150,6 +172,85 @@ WorkerBootstrapSpec worker_bootstrap_from_canonical_json(
   } catch (...) {
     reject("worker bootstrap decoding failed closed");
   }
+}
+
+SealedWorkerBootstrap::SealedWorkerBootstrap(WorkerBootstrapSpec spec,
+                                             int descriptor) noexcept
+    : spec_(std::move(spec)), descriptor_(descriptor) {}
+
+SealedWorkerBootstrap::SealedWorkerBootstrap(
+    SealedWorkerBootstrap&& other) noexcept
+    : spec_(std::move(other.spec_)),
+      descriptor_(std::exchange(other.descriptor_, -1)) {}
+
+SealedWorkerBootstrap& SealedWorkerBootstrap::operator=(
+    SealedWorkerBootstrap&& other) noexcept {
+  if (this != &other) {
+    if (descriptor_ >= 0) (void)::close(descriptor_);
+    spec_ = std::move(other.spec_);
+    descriptor_ = std::exchange(other.descriptor_, -1);
+  }
+  return *this;
+}
+
+SealedWorkerBootstrap::~SealedWorkerBootstrap() {
+  if (descriptor_ >= 0) (void)::close(descriptor_);
+}
+
+const WorkerBootstrapSpec& SealedWorkerBootstrap::spec() const { return spec_; }
+
+int SealedWorkerBootstrap::duplicate_fd() const {
+  const int duplicate = ::fcntl(descriptor_, F_DUPFD_CLOEXEC, 5);
+  if (duplicate < 0)
+    reject("could not duplicate sealed worker bootstrap descriptor");
+  return duplicate;
+}
+
+SealedWorkerBootstrap create_sealed_worker_bootstrap(
+    WorkerBootstrapSpec value) {
+  value = seal_worker_bootstrap(std::move(value));
+  const std::string encoded = worker_bootstrap_canonical_json(value);
+  const int descriptor = static_cast<int>(::syscall(
+      SYS_memfd_create, "trainvm-worker-bootstrap", MFD_CLOEXEC | MFD_ALLOW_SEALING));
+  if (descriptor < 0)
+    reject("could not create sealed worker bootstrap descriptor");
+  try {
+    write_all(descriptor, encoded);
+    if (::fcntl(descriptor, F_ADD_SEALS, kRequiredSeals) != 0)
+      reject("could not seal worker bootstrap descriptor");
+    return SealedWorkerBootstrap(std::move(value), descriptor);
+  } catch (...) {
+    (void)::close(descriptor);
+    throw;
+  }
+}
+
+WorkerBootstrapSpec worker_bootstrap_from_sealed_fd(
+    int descriptor, std::string_view expected_digest) {
+  struct stat metadata {};
+  const int seals = ::fcntl(descriptor, F_GET_SEALS);
+  if (descriptor < 0 || ::fstat(descriptor, &metadata) != 0 ||
+      !S_ISREG(metadata.st_mode) || metadata.st_size <= 0 ||
+      static_cast<std::uintmax_t>(metadata.st_size) >
+          kMaximumWorkerBootstrapBytes ||
+      seals < 0 || (seals & kRequiredSeals) != kRequiredSeals) {
+    reject("worker bootstrap descriptor is not sealed authority");
+  }
+  std::string encoded(static_cast<std::size_t>(metadata.st_size), '\0');
+  std::size_t offset = 0U;
+  while (offset < encoded.size()) {
+    const ssize_t count = ::pread(descriptor, encoded.data() + offset,
+                                  encoded.size() - offset,
+                                  static_cast<off_t>(offset));
+    if (count < 0 && errno == EINTR) continue;
+    if (count <= 0) reject("could not read sealed worker bootstrap descriptor");
+    offset += static_cast<std::size_t>(count);
+  }
+  const WorkerBootstrapSpec result =
+      worker_bootstrap_from_canonical_json(encoded);
+  if (!expected_digest.empty() && result.bootstrap_digest != expected_digest)
+    reject("worker bootstrap descriptor digest disagrees with request");
+  return result;
 }
 
 }  // namespace trainvm

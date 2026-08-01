@@ -7,6 +7,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "trainvm/document.hpp"
+
 namespace trainvm {
 namespace {
 
@@ -83,15 +85,19 @@ Json prepare_json(const HostdProcessPrepareRequest& value) {
   }
   const std::vector<std::string> expected_roles =
       identity.code ? std::vector<std::string>{"executable", "code",
-                                                "working_directory"}
+                                                "working_directory",
+                                                "worker_bootstrap"}
                     : std::vector<std::string>{"executable",
-                                                "working_directory"};
-  if (value.descriptor_roles != expected_roles)
+                                                "working_directory",
+                                                "worker_bootstrap"};
+  if (!valid_digest(value.worker_bootstrap_digest) ||
+      value.descriptor_roles != expected_roles)
     reject("hostd process prepare descriptor roles are inexact");
   return {{"api_version", value.api_version},
           {"descriptor_roles", value.descriptor_roles},
           {"grant", resource_bundle_grant_json(value.grant)},
-          {"launch", resolved_launch_spec_json(value.launch)}};
+          {"launch", resolved_launch_spec_json(value.launch)},
+          {"worker_bootstrap_digest", value.worker_bootstrap_digest}};
 }
 
 Json commit_json(const HostdProcessCommitRequest& value) {
@@ -169,17 +175,33 @@ std::string hostd_process_prepare_canonical_json(
 HostdProcessPrepareRequest hostd_process_prepare_from_canonical_json(
     std::string_view value) {
   const Json parsed = parse_canonical(value);
-  exact_fields(parsed, {"api_version", "descriptor_roles", "grant", "launch"});
+  exact_fields(parsed, {"api_version", "descriptor_roles", "grant", "launch",
+                        "worker_bootstrap_digest"});
   HostdProcessPrepareRequest result{
       .api_version = parsed.at("api_version").get<std::string>(),
       .launch = resolved_launch_spec_from_json(parsed.at("launch")),
       .grant = resource_bundle_grant_from_json(parsed.at("grant")),
+      .worker_bootstrap_digest =
+          parsed.at("worker_bootstrap_digest").get<std::string>(),
       .descriptor_roles =
           parsed.at("descriptor_roles").get<std::vector<std::string>>(),
   };
   if (prepare_json(result) != parsed)
     reject("hostd process prepare is not canonical");
   return result;
+}
+
+std::string hostd_bound_process_launch_digest(
+    const ResolvedLaunchSpec& launch,
+    std::string_view worker_bootstrap_digest) {
+  if (!valid_digest(launch.spec_digest) ||
+      !valid_digest(worker_bootstrap_digest))
+    reject("hostd bound process launch digest input is invalid");
+  return "sha256:" + sha256_hex(Json{
+      {"api_version", "trainvm.hostd-bound-process-launch/v1"},
+      {"resolved_launch_digest", launch.spec_digest},
+      {"worker_bootstrap_digest", worker_bootstrap_digest},
+  }.dump());
 }
 
 std::string hostd_process_commit_canonical_json(

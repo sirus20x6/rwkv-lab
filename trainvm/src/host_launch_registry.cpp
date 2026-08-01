@@ -118,6 +118,10 @@ void validate_profile(HostLaunchProfile& profile,
       throw std::invalid_argument(
           "python host launch profiles require a canonical trusted code_path");
     }
+    if (profile.public_arguments.empty()) {
+      throw std::invalid_argument(
+          "python host launch profiles require a fixed code argument slot");
+    }
   } else {
     if (profile.code_path) {
       throw std::invalid_argument(

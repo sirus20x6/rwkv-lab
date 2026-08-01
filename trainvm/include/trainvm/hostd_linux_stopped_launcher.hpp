@@ -11,6 +11,9 @@
 
 namespace trainvm {
 
+inline constexpr int kLinuxWorkerCodeDescriptor = 3;
+inline constexpr int kLinuxWorkerBootstrapDescriptor = 4;
+
 struct LinuxStoppedLaunchSpec final {
   std::string launch_id;
   int cgroup_fd{-1};
@@ -18,6 +21,8 @@ struct LinuxStoppedLaunchSpec final {
   std::uint64_t expected_cgroup_device{};
   std::uint64_t expected_cgroup_inode{};
   int executable_fd{-1};
+  std::optional<int> code_fd;
+  int worker_bootstrap_fd{-1};
   std::string executable_name;
   std::string executable_digest;
   int working_directory_fd{-1};
@@ -97,6 +102,8 @@ namespace hostd_linux_stopped_launcher_test_seam {
 
 [[nodiscard]] std::uint64_t parse_proc_starttime(std::string_view stat);
 [[nodiscard]] std::string parse_unified_cgroup(std::string_view cgroup);
+[[nodiscard]] bool install_inherited_worker_descriptors(
+    std::optional<int> code_fd, int worker_bootstrap_fd) noexcept;
 
 }  // namespace hostd_linux_stopped_launcher_test_seam
 

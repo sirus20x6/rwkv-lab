@@ -185,9 +185,11 @@ service-cgroup authority and strict namespace/socket-pidfd primitives are implem
 production mutation admission remains disabled until daemon bootstrap wires their externally
 guarded policies together; the dashboard/service also does not yet route all admission/release work
 through this endpoint. The remaining process-ownership work is wiring TrainVM to the guarded daemon
-surface, completing daemon-restart recovery of retained launches, enabling sealed Python
-code-descriptor invocation, and qualifying the end-to-end crash windows before real trainer
-ownership is enabled.
+surface, completing daemon-restart recovery of retained launches, and qualifying the end-to-end
+crash windows before real trainer ownership is enabled. The transport and stopped-launcher layers
+now carry and attest sealed Python code and per-attempt bootstrap descriptors, install them at the
+fixed exec-surviving fd 3/fd 4 ABI, and bind both into durable launch evidence without exposing
+dynamic values through argv or the environment.
 MIG evidence is collected and attributed per instance, but grants remain disabled: the generic
 conflict selector intentionally blocks a child while its full-device parent is nonselectable, until
 a partition-aware enforcement policy proves that scheduling relationship end to end.
@@ -216,9 +218,10 @@ the trusted host boundary or a controlled VFS is used. The abstract-socket names
 network-namespace-local. These residuals are explicit host-isolation/lock-broker design inputs, not
 authorization to enable worker spawning.
 
-The sealed payload hashes cover only the copied executable/interpreter and adapter artifact. They do
-not yet claim a reproducible dynamic-library, Python standard-library, or import closure; real Python
-launch remains disabled until an isolated bootstrap and runtime-closure policy are enforced.
+The sealed payload hashes cover only the copied executable/interpreter, adapter artifact, and worker
+bootstrap. They do not yet claim a reproducible dynamic-library, Python standard-library, or import
+closure; real Python launch remains disabled until TrainVM is wired to hostd and an isolated
+runtime-closure policy is enforced.
 
 ## Toolchain
 
