@@ -207,9 +207,11 @@ Implemented now:
   insufficiently trusted evidence ineligible;
 - a canonical, explicitly untrusted compiler/JIT namespace-claim format covering
   adapter/code/executable fingerprints, compute compatibility and optional placement, host ABI,
-  driver/runtime closure, compiler configuration, and compile inputs. Cache reuse remains disabled
-  until an authority builder verifies those receipts and an immutable cache-publication protocol
-  prevents poisoning;
+  driver/runtime closure, compiler configuration, and compile inputs; plus a separate authority
+  builder that binds those fields to active registries, sealed invocation/launch identity, host
+  inventory/resource fences, and bounded runtime/compile evidence. Cache reuse remains disabled
+  until the production sealed-runtime probe and immutable cache-publication/qualification protocol
+  prevent poisoning;
 - `validate`, `plan`, `simulate`, journal inspection/replay, and strict hostd-client configuration
   inspection CLI commands.
 

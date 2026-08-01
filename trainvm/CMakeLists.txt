@@ -54,6 +54,7 @@ add_library(trainvm_core
   src/authority_time.cpp
   src/authority_document.cpp
   src/cache_namespace.cpp
+  src/cache_namespace_authority.cpp
   src/control.cpp
   src/controller.cpp
   src/document.cpp
@@ -220,6 +221,14 @@ target_compile_options(cache_namespace_tests PRIVATE
 )
 target_link_libraries(cache_namespace_tests PRIVATE trainvm_core)
 add_test(NAME cache_namespace_tests COMMAND cache_namespace_tests)
+add_executable(cache_namespace_authority_tests
+  tests/cache_namespace_authority_tests.cpp)
+target_compile_options(cache_namespace_authority_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(cache_namespace_authority_tests PRIVATE trainvm_core)
+add_test(NAME cache_namespace_authority_tests
+  COMMAND cache_namespace_authority_tests)
 add_executable(compatibility_catalog_tests tests/compatibility_catalog_tests.cpp)
 target_compile_options(compatibility_catalog_tests PRIVATE
   -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror

@@ -171,11 +171,14 @@ Single-run speedrun results are hypotheses, not production defaults.
   model graph/topology, bounded shapes, dtypes/precision, runtime options, and any embedded constant
   or checkpoint fingerprints. A mismatch produces a cold namespace rather than an optimistic cache
   hit.
-- Treat the current namespace document as an untrusted claim. Before reuse, an authority-owned
-  builder must recompute it from the adapter registry, sealed launch, bounded runtime/host/device
-  probes, and canonical compile manifests. Publication additionally requires the active owner/fence,
-  symlink-safe paths, atomic immutable promotion, and an artifact-tree digest receipt; a claim digest
-  alone never authorizes reuse.
+- Treat a namespace document as an untrusted claim. The separate authority builder now recomputes
+  it from the exact adapter and host-launch registries, sealed invocation/launch, validated host
+  inventory and selected-resource fences, a bounded runtime-probe interface, and a digest-only
+  compile-input manifest. It emits a self-bound authority receipt and makes any registry, launch,
+  device, runtime, topology, shape, precision, option, constant, or checkpoint change cold. Cache
+  reuse remains disabled until the production sealed-runtime probe and publication layer also bind
+  the active owner/fence, symlink-safe paths, atomic immutable promotion, qualification, and an
+  artifact-tree digest receipt; neither a claim nor an authority receipt alone authorizes bytes.
 - Add typed CPU/I/O policy: CPU set, CPU weight, I/O weight, worker count, OpenMP thread count, and
   nice level. Record effective policy and throttling as evidence. The non-root worker runtime now
   parses the sealed policy in one category-owned module, narrows and reattests CPU affinity, applies

@@ -339,6 +339,24 @@ const AdapterProfile& AdapterRegistry::resolve(
   return profile->second;
 }
 
+const AdapterProfile& AdapterRegistry::resolve(const AdapterKey& key) const {
+  const auto profile = profiles_.find(key);
+  if (profile == profiles_.end()) {
+    throw AdapterResolutionError(
+        "no authority-owned adapter profile matches the exact key");
+  }
+  return profile->second;
+}
+
+std::string AdapterRegistry::profile_digest(const AdapterKey& key) const {
+  return "sha256:" +
+         sha256_hex(nlohmann::json{
+                        {"api_version", "trainvm.adapter-profile/v1"},
+                        {"profile", encode_json(resolve(key))},
+                    }
+                        .dump());
+}
+
 void AdapterRegistry::validate_plan(const CompiledPlan& plan) const {
   const Workflow& workflow = plan.experiment.spec.workflow;
   std::set<std::string> reachable;

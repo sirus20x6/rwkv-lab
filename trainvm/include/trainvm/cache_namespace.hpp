@@ -45,9 +45,10 @@ struct CacheNamespaceClaimEvidence {
 };
 
 // A canonical, untrusted claim. This format can be persisted and compared, but
-// it does not authorize cache reuse. Only a future authority-owned builder may
-// bind it to verified registry, sealed-launch, runtime-probe, compile-manifest,
-// and immutable artifact-publication receipts.
+// it does not authorize cache reuse. CacheNamespaceAuthority, kept in a
+// separate module, can bind it to registries, sealed launch/invocation,
+// inventory, a runtime probe, and compile inputs. Immutable cache publication,
+// owner/fence checks, and qualification remain separate reuse gates.
 struct CacheNamespaceClaim {
   std::string api_version;
   CacheNamespaceClaimEvidence evidence;

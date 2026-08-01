@@ -80,6 +80,8 @@ class AdapterRegistry {
 
   [[nodiscard]] const AdapterProfile& resolve(
       const Component& component, std::string_view operation) const;
+  [[nodiscard]] const AdapterProfile& resolve(const AdapterKey& key) const;
+  [[nodiscard]] std::string profile_digest(const AdapterKey& key) const;
   void validate_plan(const CompiledPlan& plan) const;
   [[nodiscard]] WorkerLaunchRequest worker_launch_request(
       const Component& component, std::string_view operation) const;
