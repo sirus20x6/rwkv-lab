@@ -67,13 +67,16 @@ class LinuxRecoveredProcess final {
 struct LinuxProcessRecoveryResult final {
   LinuxProcessRecoveryDisposition disposition{};
   std::string detail;
+  std::string evidence_digest;
   std::optional<LinuxRecoveredProcess> process;
 
   LinuxProcessRecoveryResult(
       LinuxProcessRecoveryDisposition disposition_value,
       std::string detail_value,
+      std::string evidence_digest_value,
       std::optional<LinuxRecoveredProcess> process_value = std::nullopt)
       : disposition(disposition_value), detail(std::move(detail_value)),
+        evidence_digest(std::move(evidence_digest_value)),
         process(std::move(process_value)) {}
 
   LinuxProcessRecoveryResult(LinuxProcessRecoveryResult&&) noexcept = default;
@@ -109,16 +112,19 @@ struct LinuxProcessRecoveryEntry final {
   HostProcessRecoveryRecord record;
   LinuxProcessRecoveryDisposition disposition{};
   std::string detail;
+  std::string evidence_digest;
   std::optional<LinuxRecoveredProcess> process;
 
   LinuxProcessRecoveryEntry(
       HostProcessRecoveryRecord record_value,
       LinuxProcessRecoveryDisposition disposition_value,
       std::string detail_value,
+      std::string evidence_digest_value,
       std::optional<LinuxRecoveredProcess> process_value = std::nullopt)
       : record(std::move(record_value)),
         disposition(disposition_value),
         detail(std::move(detail_value)),
+        evidence_digest(std::move(evidence_digest_value)),
         process(std::move(process_value)) {}
   LinuxProcessRecoveryEntry(LinuxProcessRecoveryEntry&&) noexcept = default;
   LinuxProcessRecoveryEntry& operator=(LinuxProcessRecoveryEntry&&) noexcept =

@@ -377,6 +377,75 @@ HostProcessRecoveryExitResult LinuxProcessAuthority::finalize_recovered_exit(
   return terminal;
 }
 
+HostProcessRecoveryExitResult
+LinuxProcessAuthority::finalize_nonlive_recovered_exit(
+    const HostProcessRecoveryRecord& record,
+    LinuxProcessRecoveryDisposition disposition,
+    std::string observation_digest) {
+  if (!record.spawn ||
+      (disposition != LinuxProcessRecoveryDisposition::already_gone &&
+       disposition != LinuxProcessRecoveryDisposition::identity_mismatch)) {
+    reject("nonlive recovery requires a conclusive spawned observation");
+  }
+  const HostInventoryReceipt inventory = ledger_.inventory();
+  const auto& spawn = *record.spawn;
+  if (record.intent.request.allocation_id != record.grant.allocation_id ||
+      record.intent.request.grant_digest != record.grant.receipt_digest ||
+      spawn.request.launch_id != record.intent.request.launch_id ||
+      spawn.request.boot_id != inventory.boot_id ||
+      record.grant.host_id != inventory.host_id ||
+      record.grant.boot_id != inventory.boot_id ||
+      record.grant.broker_epoch != inventory.broker_epoch) {
+    reject("nonlive recovery crossed its durable host or grant authority");
+  }
+  const std::vector<HostProcessRecoveryRecord> active =
+      ledger_.active_process_recovery_records();
+  const auto found = std::ranges::find_if(
+      active, [&record](const HostProcessRecoveryRecord& candidate) {
+        return candidate.intent.request.launch_id ==
+               record.intent.request.launch_id;
+      });
+  if (found == active.end() || *found != record) {
+    reject("nonlive recovery evidence is no longer active in the ledger");
+  }
+  const auto& identity = spawn.request;
+  (void)cgroups_.cleanup_terminal_or_confirm_absent(
+      record.grant.allocation_id, record.intent.request.launch_id,
+      {.unified_path = identity.cgroup_path,
+       .device = identity.cgroup_device,
+       .inode = identity.cgroup_inode});
+  const LinuxProcessContextAudit context =
+      context_auditor_.audit(record.grant, spawn);
+  if (!context.complete || !context.accelerator_contexts_empty) {
+    reject("nonlive recovered process retains accelerator context authority");
+  }
+  const HostProcessRecoveryExitRequest request =
+      seal_host_process_recovery_exit_request({
+          .api_version =
+              std::string(kHostProcessRecoveryExitRequestApiVersion),
+          .recovery_exit_request_id =
+              "hostd-observed-recovery-exit:" + identity.launch_id,
+          .launch_id = identity.launch_id,
+          .spawn_receipt_digest = spawn.receipt_digest,
+          .host_pid = identity.host_pid,
+          .process_starttime_ticks = identity.process_starttime_ticks,
+          .observation =
+              disposition == LinuxProcessRecoveryDisposition::already_gone
+                  ? HostProcessRecoveryExitObservation::pid_absent
+                  : HostProcessRecoveryExitObservation::identity_superseded,
+          .observation_digest = std::move(observation_digest),
+          .cgroup_path = identity.cgroup_path,
+          .cgroup_device = identity.cgroup_device,
+          .cgroup_inode = identity.cgroup_inode,
+          .cgroup_empty = true,
+          .accelerator_contexts_empty = true,
+          .context_audit_digest = context.evidence_digest,
+          .canonical_request_digest = {},
+      });
+  return ledger_.commit_process_recovery_exit(
+      request, ledger_time(clock_.sample(), identity.boot_id));
+}
+
 struct HostdLinuxProcessSupervisor::Entry final {
   HostdProcessPrepareRequest request;
   LinuxPreparedLaunch launch;
@@ -542,6 +611,23 @@ std::size_t HostdLinuxProcessSupervisor::adopt_exact_recovered_processes(
     ++adopted;
   }
   return adopted;
+}
+
+std::size_t HostdLinuxProcessSupervisor::finalize_observed_nonlive_processes(
+    const LinuxProcessRecoverySet& recovery) {
+  std::scoped_lock lock(mutex_);
+  std::size_t finalized = 0U;
+  for (const LinuxProcessRecoveryEntry& entry : recovery.entries()) {
+    if (entry.disposition != LinuxProcessRecoveryDisposition::already_gone &&
+        entry.disposition !=
+            LinuxProcessRecoveryDisposition::identity_mismatch) {
+      continue;
+    }
+    (void)authority_.finalize_nonlive_recovered_exit(
+        entry.record, entry.disposition, entry.evidence_digest);
+    ++finalized;
+  }
+  return finalized;
 }
 
 HostdRecoveredProcessProgress

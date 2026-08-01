@@ -15,6 +15,7 @@ enum class HostdExactRecoveredProcessPolicy {
 struct HostdRestartProcessRecoveryConfig final {
   HostdExactRecoveredProcessPolicy exact_live_policy{
       HostdExactRecoveredProcessPolicy::leave_and_block};
+  bool reconcile_observed_nonlive{};
 
   bool operator==(const HostdRestartProcessRecoveryConfig&) const = default;
 };
@@ -23,6 +24,7 @@ struct HostdRestartProcessRecoverySummary final {
   HostdTerminalReleaseRecoverySummary cleanup_before;
   LinuxProcessRecoverySummary observed;
   std::size_t newly_adopted{};
+  std::size_t nonlive_finalized{};
   HostdRecoveredProcessProgress progress;
   HostdTerminalReleaseRecoverySummary cleanup_after;
   std::size_t remaining_unclosed_records{};

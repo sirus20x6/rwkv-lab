@@ -120,6 +120,11 @@ class LinuxProcessAuthority final {
   [[nodiscard]] HostProcessRecoveryExitResult finalize_recovered_exit(
       LinuxRecoveredLaunch& launch, const ResourceBundleGrant& grant,
       std::string recovery_exit_request_id, bool request_termination);
+  [[nodiscard]] HostProcessRecoveryExitResult
+  finalize_nonlive_recovered_exit(
+      const HostProcessRecoveryRecord& record,
+      LinuxProcessRecoveryDisposition disposition,
+      std::string observation_digest);
 
  private:
   SQLiteHostLedger& ledger_;
@@ -157,6 +162,8 @@ class IHostdRecoveredProcessSupervisor {
   virtual ~IHostdRecoveredProcessSupervisor() = default;
   [[nodiscard]] virtual std::size_t adopt_exact_recovered_processes(
       LinuxProcessRecoverySet& recovery) = 0;
+  [[nodiscard]] virtual std::size_t finalize_observed_nonlive_processes(
+      const LinuxProcessRecoverySet& recovery) = 0;
   [[nodiscard]] virtual HostdRecoveredProcessProgress
   progress_recovered_terminations() = 0;
 };
@@ -181,6 +188,8 @@ class HostdLinuxProcessSupervisor final : public IHostdProcessSupervisor,
       const HostdProcessExitCommand& request) override;
   [[nodiscard]] std::size_t adopt_exact_recovered_processes(
       LinuxProcessRecoverySet& recovery) override;
+  [[nodiscard]] std::size_t finalize_observed_nonlive_processes(
+      const LinuxProcessRecoverySet& recovery) override;
   [[nodiscard]] HostdRecoveredProcessProgress
   progress_recovered_terminations() override;
 

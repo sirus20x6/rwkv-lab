@@ -130,7 +130,9 @@ void exact_current_process_is_pinned_without_mutation() {
                   LinuxProcessRecoveryDisposition::exact_live_process &&
               recovered.process && recovered.process->alive() &&
               recovered.process->state() == LinuxPidfdState::live &&
-              recovered.process->identity() == expected,
+              recovered.process->identity() == expected &&
+              recovered.evidence_digest.starts_with("sha256:") &&
+              recovered.evidence_digest.size() == 71U,
           "probe returns one pidfd-pinned exact live process");
 
   auto forged = expected;
@@ -139,8 +141,10 @@ void exact_current_process_is_pinned_without_mutation() {
   forged = seal_host_process_spawn_request(std::move(forged));
   auto mismatch = probe.observe(forged);
   require(mismatch.disposition ==
-                  LinuxProcessRecoveryDisposition::identity_mismatch &&
-              !mismatch.process,
+              LinuxProcessRecoveryDisposition::identity_mismatch &&
+              !mismatch.process &&
+              mismatch.evidence_digest.starts_with("sha256:") &&
+              mismatch.evidence_digest != recovered.evidence_digest,
           "PID reuse/starttime mismatch never yields authority");
 }
 
@@ -158,7 +162,8 @@ void exited_pid_is_classified_without_signalling() {
   LinuxProcessRecoveryProbe probe;
   auto gone = probe.observe(expected);
   require(gone.disposition == LinuxProcessRecoveryDisposition::already_gone &&
-              !gone.process,
+              !gone.process && gone.evidence_digest.starts_with("sha256:") &&
+              gone.evidence_digest.size() == 71U,
           "a terminal recorded PID is reported gone without mutation");
 }
 

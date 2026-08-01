@@ -249,9 +249,11 @@ startup orphan recovery are defined in
   retained fences. The host ledger now exposes a bounded, integrity-checked read-only recovery view
   joining each active process intent to its exact grant and optional unclosed spawn receipt; durable
   process recovery now has a read-only pidfd/proc/executable/cgroup-inode double-attestation probe.
-  Retaining that handle in a recovered supervisor, closing already-gone processes with explicit
-  terminal evidence, and then converting the conservative block into a proved recovered launch
-  remain before admission can resume.
+  A one-shot recovery set retains each exact pidfd for a single supervisor transfer; bounded policy
+  can terminate and reconcile exact live processes, while independently gated conclusive-nonlive
+  repair closes PID-absent or identity-superseded records only after exact cgroup and accelerator
+  context closure. The remaining gate is the unified guarded daemon bootstrap and real-host crash
+  qualification before admission can rely on this path.
 - Resolve the remaining stock-SQLite auxiliary pathname race in the declared host threat model:
   trusted isolated authority directory, controlled VFS, or host-global lock broker. Do not treat
   the network-namespace-local abstract socket as the host-wide GPU/resource fence.

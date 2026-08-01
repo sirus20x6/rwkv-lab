@@ -754,8 +754,11 @@ The bounded pre-audit orchestrator exposes `leave_and_block` and
 `terminate_and_reconcile` as explicit policy. The mutating policy transfers
 each exact pidfd into the daemon supervisor once, progresses SIGKILL/terminal
 observation across repeated steps, commits v6 evidence, and re-runs the
-idempotent cleanup pass. Identity mismatch and incomplete observation remain
-blocked; neither is converted into signalling authority.
+idempotent cleanup pass. A separate conclusive-nonlive switch can close a
+PID-absent or identity-superseded durable spawn, but only after the exact
+recorded cgroup is empty or absent and the trusted accelerator-context audit is
+complete and empty. It never signals the current PID. Incomplete observation
+remains blocked and is never converted into process authority.
 CPU/I/O policy evidence, device BPF,
 privileged end-to-end qualification, and daemon bootstrap/policy wiring remain
 in this gate. A daemon crash is not claimed as ordinary in-memory supervisor

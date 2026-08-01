@@ -155,6 +155,9 @@ Implemented now:
   `terminate_and_reconcile` policy; the latter transfers each exact pidfd into the daemon supervisor
   once, delivers SIGKILL only through that handle, retries pending terminal observation without
   duplicating authority, commits v6 evidence, then re-runs idempotent cgroup/bundle cleanup;
+  independently enabled conclusive-nonlive reconciliation closes PID-absent or identity-superseded
+  records only after the exact durable cgroup is empty or absent and a complete accelerator-context
+  audit is empty, while incomplete observations continue to block admission;
 - a process-free, single-use journal-fence challenge verifier binding socket peer process instance,
   host/boot/broker, pinned-journal claims, controller generation, logical fence, nonce, and bounded
   boottime lifetime, with per-peer quotas and no bearer-capability interpretation of decoded data;

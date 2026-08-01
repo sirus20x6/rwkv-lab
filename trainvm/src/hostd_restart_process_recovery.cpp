@@ -23,6 +23,10 @@ HostdRestartProcessRecoverySummary HostdRestartProcessRecovery::step() {
   LinuxProcessRecoverySet recovery;
   recovery.recover(std::move(records), probe);
   summary.observed = recovery.summary();
+  if (config_.reconcile_observed_nonlive) {
+    summary.nonlive_finalized =
+        supervisor_.finalize_observed_nonlive_processes(recovery);
+  }
   if (config_.exact_live_policy ==
       HostdExactRecoveredProcessPolicy::terminate_and_reconcile) {
     summary.newly_adopted =

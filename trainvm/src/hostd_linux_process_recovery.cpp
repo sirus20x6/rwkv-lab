@@ -225,9 +225,41 @@ bool cgroup_identity_matches(const HostProcessSpawnRequest& expected) {
          static_cast<std::uint64_t>(status.st_ino) == expected.cgroup_inode;
 }
 
-LinuxProcessRecoveryResult result(LinuxProcessRecoveryDisposition disposition,
-                                  std::string detail) {
-  return LinuxProcessRecoveryResult(disposition, std::move(detail));
+std::string disposition_name(LinuxProcessRecoveryDisposition disposition) {
+  switch (disposition) {
+    case LinuxProcessRecoveryDisposition::intent_only:
+      return "intent_only";
+    case LinuxProcessRecoveryDisposition::exact_live_process:
+      return "exact_live_process";
+    case LinuxProcessRecoveryDisposition::already_gone:
+      return "already_gone";
+    case LinuxProcessRecoveryDisposition::identity_mismatch:
+      return "identity_mismatch";
+    case LinuxProcessRecoveryDisposition::observation_failed:
+      return "observation_failed";
+  }
+  throw HostLedgerError("process recovery disposition is invalid");
+}
+
+std::string recovery_evidence_digest(
+    const HostProcessSpawnRequest& expected,
+    LinuxProcessRecoveryDisposition disposition, std::string_view detail) {
+  std::string material("trainvm.linux-process-recovery-observation/v1");
+  material.push_back('\0');
+  material.append(host_process_spawn_request_json(expected).dump());
+  material.push_back('\0');
+  material.append(disposition_name(disposition));
+  material.push_back('\0');
+  material.append(detail);
+  return sha256_material(material);
+}
+
+LinuxProcessRecoveryResult result(
+    const HostProcessSpawnRequest& expected,
+    LinuxProcessRecoveryDisposition disposition, std::string detail) {
+  const std::string digest =
+      recovery_evidence_digest(expected, disposition, detail);
+  return LinuxProcessRecoveryResult(disposition, std::move(detail), digest);
 }
 
 }  // namespace
@@ -311,7 +343,7 @@ LinuxProcessRecoveryResult LinuxProcessRecoveryProbe::observe(
   if (seal_host_process_spawn_request(expected) != expected)
     throw HostLedgerError("process recovery identity is not canonical");
 #ifndef SYS_pidfd_open
-  return result(LinuxProcessRecoveryDisposition::observation_failed,
+  return result(expected, LinuxProcessRecoveryDisposition::observation_failed,
                 "pidfd_open is unavailable");
 #else
   errno = 0;
@@ -319,23 +351,23 @@ LinuxProcessRecoveryResult LinuxProcessRecoveryProbe::observe(
       ::syscall(SYS_pidfd_open, expected.host_pid, 0U)));
   if (pidfd.get() < 0) {
     if (errno == ESRCH)
-      return result(LinuxProcessRecoveryDisposition::already_gone,
+      return result(expected, LinuxProcessRecoveryDisposition::already_gone,
                     "recorded process no longer exists");
-    return result(LinuxProcessRecoveryDisposition::observation_failed,
+    return result(expected, LinuxProcessRecoveryDisposition::observation_failed,
                   "pidfd_open failed");
   }
   const LinuxPidfdState initial_state = pidfd_state(pidfd.get());
   if (initial_state == LinuxPidfdState::terminal)
-    return result(LinuxProcessRecoveryDisposition::already_gone,
+    return result(expected, LinuxProcessRecoveryDisposition::already_gone,
                   "recorded process is already terminal");
   if (initial_state == LinuxPidfdState::observation_failed)
-    return result(LinuxProcessRecoveryDisposition::observation_failed,
+    return result(expected, LinuxProcessRecoveryDisposition::observation_failed,
                   "recorded pidfd state could not be observed");
   const std::string proc_path = "/proc/" + std::to_string(expected.host_pid);
   Descriptor process(
       ::open(proc_path.c_str(), O_PATH | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
   if (process.get() < 0)
-    return result(LinuxProcessRecoveryDisposition::observation_failed,
+    return result(expected, LinuxProcessRecoveryDisposition::observation_failed,
                   "recorded process directory is unavailable");
   try {
     const std::uint64_t start_before = parse_starttime(read_file(process.get(), "stat"));
@@ -346,25 +378,29 @@ LinuxProcessRecoveryResult LinuxProcessRecoveryProbe::observe(
     const std::string cgroup_after = parse_cgroup(read_file(process.get(), "cgroup"));
     const LinuxPidfdState final_state = pidfd_state(pidfd.get());
     if (final_state == LinuxPidfdState::terminal)
-      return result(LinuxProcessRecoveryDisposition::already_gone,
+      return result(expected, LinuxProcessRecoveryDisposition::already_gone,
                     "recorded process exited during observation");
     if (final_state == LinuxPidfdState::observation_failed)
-      return result(LinuxProcessRecoveryDisposition::observation_failed,
+      return result(expected, LinuxProcessRecoveryDisposition::observation_failed,
                     "recorded pidfd state failed during observation");
     if (start_before != expected.process_starttime_ticks ||
         start_after != expected.process_starttime_ticks ||
         cgroup_before != expected.cgroup_path ||
         cgroup_after != expected.cgroup_path || !cgroup_identity ||
         digest != expected.executable_digest) {
-      return result(LinuxProcessRecoveryDisposition::identity_mismatch,
+      return result(expected, LinuxProcessRecoveryDisposition::identity_mismatch,
                     "live process identity differs from the spawn receipt");
     }
     LinuxRecoveredProcess recovered_process(expected, pidfd.release());
     return LinuxProcessRecoveryResult(
         LinuxProcessRecoveryDisposition::exact_live_process,
-        "exact live process identity recovered", std::move(recovered_process));
+        "exact live process identity recovered",
+        recovery_evidence_digest(
+            expected, LinuxProcessRecoveryDisposition::exact_live_process,
+            "exact live process identity recovered"),
+        std::move(recovered_process));
   } catch (const std::exception&) {
-    return result(LinuxProcessRecoveryDisposition::observation_failed,
+    return result(expected, LinuxProcessRecoveryDisposition::observation_failed,
                   "process identity observation failed");
   }
 #endif
@@ -404,7 +440,7 @@ void LinuxProcessRecoverySet::recover(
       ++summary.intent_only;
       entries.emplace_back(
           std::move(record), LinuxProcessRecoveryDisposition::intent_only,
-          "launch intent has no durable spawn receipt");
+          "launch intent has no durable spawn receipt", std::string{});
       continue;
     }
     LinuxProcessRecoveryResult observed = probe.observe(record.spawn->request);
@@ -436,6 +472,7 @@ void LinuxProcessRecoverySet::recover(
     }
     entries.emplace_back(std::move(record), observed.disposition,
                          std::move(observed.detail),
+                         std::move(observed.evidence_digest),
                          std::move(observed.process));
   }
   summary.records = entries.size();

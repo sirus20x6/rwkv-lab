@@ -62,12 +62,19 @@ class FakeCleaner final : public IHostdTerminalCgroupCleaner {
 class FakeSupervisor final : public IHostdRecoveredProcessSupervisor {
  public:
   std::size_t adopt_calls{};
+  std::size_t nonlive_calls{};
   std::size_t progress_calls{};
+  std::size_t nonlive_result{};
 
   std::size_t adopt_exact_recovered_processes(
       LinuxProcessRecoverySet&) override {
     ++adopt_calls;
     return 0U;
+  }
+  std::size_t finalize_observed_nonlive_processes(
+      const LinuxProcessRecoverySet&) override {
+    ++nonlive_calls;
+    return nonlive_result;
   }
   HostdRecoveredProcessProgress progress_recovered_terminations() override {
     ++progress_calls;
@@ -83,7 +90,8 @@ void restart_step_closes_intent_then_becomes_noop() {
   HostdRestartProcessRecovery recovery(
       authority, cleanup, supervisor,
       {.exact_live_policy =
-           HostdExactRecoveredProcessPolicy::terminate_and_reconcile});
+           HostdExactRecoveredProcessPolicy::terminate_and_reconcile,
+       .reconcile_observed_nonlive = true});
   const auto first = recovery.step();
   require(first.cleanup_before.intent_only_records == 1U &&
               first.cleanup_before.intent_cgroups_already_absent == 1U &&
@@ -92,7 +100,8 @@ void restart_step_closes_intent_then_becomes_noop() {
               first.remaining_unclosed_records == 0U &&
               first.remaining_terminal_release_records == 0U &&
               authority.releases == 1U && cleaner.intents == 1U &&
-              supervisor.adopt_calls == 1U && supervisor.progress_calls == 1U,
+              supervisor.adopt_calls == 1U && supervisor.nonlive_calls == 1U &&
+              supervisor.progress_calls == 1U,
           "restart step cleans abandoned intent before final observation");
   const auto second = recovery.step();
   require(second.cleanup_before.terminal_records == 0U &&
@@ -110,11 +119,30 @@ void leave_policy_never_invokes_mutating_supervisor() {
   HostdTerminalReleaseRecovery cleanup(authority, cleaner);
   HostdRestartProcessRecovery recovery(
       authority, cleanup, supervisor,
-      {.exact_live_policy = HostdExactRecoveredProcessPolicy::leave_and_block});
+      {.exact_live_policy = HostdExactRecoveredProcessPolicy::leave_and_block,
+       .reconcile_observed_nonlive = false});
   const auto summary = recovery.step();
   require(summary.remaining_unclosed_records == 0U &&
-              supervisor.adopt_calls == 0U && supervisor.progress_calls == 0U,
+              supervisor.adopt_calls == 0U && supervisor.nonlive_calls == 0U &&
+              supervisor.progress_calls == 0U,
           "leave policy has no recovered-process mutation path");
+}
+
+void nonlive_reconciliation_is_independently_configurable() {
+  FakeAuthority authority;
+  authority.unclosed.clear();
+  FakeCleaner cleaner;
+  FakeSupervisor supervisor;
+  supervisor.nonlive_result = 2U;
+  HostdTerminalReleaseRecovery cleanup(authority, cleaner);
+  HostdRestartProcessRecovery recovery(
+      authority, cleanup, supervisor,
+      {.exact_live_policy = HostdExactRecoveredProcessPolicy::leave_and_block,
+       .reconcile_observed_nonlive = true});
+  const auto summary = recovery.step();
+  require(summary.nonlive_finalized == 2U && supervisor.nonlive_calls == 1U &&
+              supervisor.adopt_calls == 0U && supervisor.progress_calls == 0U,
+          "conclusive nonlive observations reconcile without adopting live pids");
 }
 
 }  // namespace
@@ -123,6 +151,7 @@ int main() {
   try {
     restart_step_closes_intent_then_becomes_noop();
     leave_policy_never_invokes_mutating_supervisor();
+    nonlive_reconciliation_is_independently_configurable();
     std::cout << "hostd restart process recovery tests passed\n";
     return 0;
   } catch (const std::exception& error) {
