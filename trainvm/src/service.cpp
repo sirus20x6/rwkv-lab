@@ -798,17 +798,20 @@ TrainVMService::TrainVMService(
     : TrainVMService(journal_path, std::move(adapter_registry),
                      std::move(host_launch_registry),
                      HostLaunchResolver::local_host_identity(),
-                     std::move(authority_clock)) {}
+                     std::move(authority_clock),
+                     HostGrantEnforcement::required) {}
 
 TrainVMService::TrainVMService(
     const std::filesystem::path& journal_path,
     AdapterRegistry adapter_registry,
     HostLaunchRegistry host_launch_registry,
     HostIdentity authority_host,
-    std::function<AuthorityTimeSample()> authority_clock)
+    std::function<AuthorityTimeSample()> authority_clock,
+    HostGrantEnforcement host_grant_enforcement)
     : authority_lock_(std::make_unique<AuthorityLock>(journal_path)),
       journal_(authority_lock_->journal_path(),
-               authority_lock_->journal_identity()),
+               authority_lock_->journal_identity(),
+               host_grant_enforcement, authority_host),
       authority_clock_(
           authority_clock
               ? std::make_shared<AuthorityClock>(std::move(authority_clock))
@@ -965,7 +968,7 @@ ResolvedLaunchSpec TrainVMService::bind_worker_launch(
   const auto durable_launch = journal_.event(launch_id);
   const auto active_lease =
       journal_.active_lease(launch.concurrency_key, now);
-  const nlohmann::json expected_payload{
+  nlohmann::json expected_payload{
       {"launch_nonce", launch.launch_nonce},
       {"adapter", launch.adapter},
       {"adapter_version", launch.adapter_version},
@@ -975,6 +978,9 @@ ResolvedLaunchSpec TrainVMService::bind_worker_launch(
       {"lease_id", launch.lease_id},
       {"fencing_token", launch.fencing_token},
   };
+  if (launch.host_grant) {
+    expected_payload["host_grant"] = encode_json(*launch.host_grant);
+  }
   if (launch.node_id != state.current_node_id ||
       launch.attempt_id != state.current_attempt_id ||
       launch.adapter != key.adapter ||

@@ -37,6 +37,7 @@ bool is_controller_event(std::string_view event_type) {
          event_type == "worker.launch_requested" ||
          event_type == "worker.launch_bound" || event_type == "worker.ready" ||
          event_type == "node.dispatch_prepared" || event_type == "node.dispatch_completed" ||
+         event_type.starts_with("host.resource_") ||
          event_type.starts_with("control.");
 }
 
@@ -156,24 +157,41 @@ std::string worker_launch_event_id(const ExecutionState& state) {
 
 std::string worker_launch_nonce(const CompiledPlan& plan,
                                 const WorkerLaunchTicket& launch) {
-  return sha256_hex(
-      nlohmann::json{{"run_id", launch.run_id},
-                     {"plan_hash", plan.plan_hash},
-                     {"node_id", launch.node_id},
-                     {"attempt_id", launch.attempt_id},
-                     {"adapter", launch.adapter},
-                     {"adapter_version", launch.adapter_version},
-                     {"code_fingerprint", launch.code_fingerprint},
-                     {"required_capabilities", launch.required_capabilities},
-                     {"concurrency_key", launch.concurrency_key},
-                     {"lease_id", launch.lease_id},
-                     {"fencing_token", launch.fencing_token}}
-          .dump());
+  nlohmann::json identity{{"run_id", launch.run_id},
+                          {"plan_hash", plan.plan_hash},
+                          {"node_id", launch.node_id},
+                          {"attempt_id", launch.attempt_id},
+                          {"adapter", launch.adapter},
+                          {"adapter_version", launch.adapter_version},
+                          {"code_fingerprint", launch.code_fingerprint},
+                          {"required_capabilities", launch.required_capabilities},
+                          {"concurrency_key", launch.concurrency_key},
+                          {"lease_id", launch.lease_id},
+                          {"fencing_token", launch.fencing_token}};
+  if (launch.host_grant) {
+    identity["host_grant"] = encode_json(*launch.host_grant);
+  }
+  return sha256_hex(identity.dump());
+}
+
+nlohmann::json worker_launch_payload(const WorkerLaunchTicket& launch) {
+  nlohmann::json payload{{"launch_nonce", launch.launch_nonce},
+                         {"adapter", launch.adapter},
+                         {"adapter_version", launch.adapter_version},
+                         {"code_fingerprint", launch.code_fingerprint},
+                         {"required_capabilities", launch.required_capabilities},
+                         {"concurrency_key", launch.concurrency_key},
+                         {"lease_id", launch.lease_id},
+                         {"fencing_token", launch.fencing_token}};
+  if (launch.host_grant) {
+    payload["host_grant"] = encode_json(*launch.host_grant);
+  }
+  return payload;
 }
 
 WorkerLaunchTicket launch_from_event(const Event& event) {
   try {
-    return WorkerLaunchTicket{
+    WorkerLaunchTicket launch{
         .run_id = event.run_id,
         .node_id = event.node_id,
         .attempt_id = event.attempt_id,
@@ -188,7 +206,18 @@ WorkerLaunchTicket launch_from_event(const Event& event) {
             event.payload.at("concurrency_key").get<std::string>(),
         .lease_id = event.payload.at("lease_id").get<std::string>(),
         .fencing_token = event.payload.at("fencing_token").get<std::uint64_t>(),
+        .host_grant = std::nullopt,
     };
+    if (event.payload.contains("host_grant")) {
+      HostLaunchGrantClaim claim;
+      std::vector<Diagnostic> diagnostics;
+      if (!decode_json(event.payload.at("host_grant"), claim, "host_grant",
+                       diagnostics)) {
+        throw std::runtime_error("worker launch host grant is malformed");
+      }
+      launch.host_grant = std::move(claim);
+    }
+    return launch;
   } catch (const nlohmann::json::exception& exception) {
     throw std::runtime_error(std::string("worker launch event is malformed: ") +
                              exception.what());
@@ -386,6 +415,20 @@ const ExecutionState& Controller::recover() {
     if (event.event_type == "run.created") {
       if (event.event_id != events.front().event_id) {
         throw std::runtime_error("journal recovery found more than one run.created event");
+      }
+      continue;
+    }
+    if (event.event_type.starts_with("host.resource_")) {
+      if ((event.event_type != "host.resource_request_recorded" &&
+           event.event_type != "host.resource_grant_recorded" &&
+           event.event_type != "host.resource_busy_recorded" &&
+           event.event_type != "host.resource_release_intent_recorded" &&
+           event.event_type != "host.resource_release_receipt_recorded") ||
+          event.event_version != 1U || event.worker_sequence != 0U ||
+          !event.node_id.empty() || !event.attempt_id.empty() ||
+          event.run_revision != recovered.revision) {
+        throw std::runtime_error(
+            "journal recovery found malformed host saga authority evidence");
       }
       continue;
     }
@@ -622,16 +665,7 @@ const ExecutionState& Controller::recover() {
         throw std::runtime_error("builtin nodes cannot request an external worker launch");
       }
       const WorkerLaunchTicket launch = launch_from_event(event);
-      const nlohmann::json expected_payload{
-          {"launch_nonce", launch.launch_nonce},
-          {"adapter", launch.adapter},
-          {"adapter_version", launch.adapter_version},
-          {"code_fingerprint", launch.code_fingerprint},
-          {"required_capabilities", launch.required_capabilities},
-          {"concurrency_key", launch.concurrency_key},
-          {"lease_id", launch.lease_id},
-          {"fencing_token", launch.fencing_token},
-      };
+      const nlohmann::json expected_payload = worker_launch_payload(launch);
       const auto acquisition = journal_.event(run_id_ + ":lease-acquired");
       if (launch.run_id != run_id_ || launch.adapter != component.adapter ||
           launch.adapter_version != component.version ||
@@ -703,6 +737,7 @@ const ExecutionState& Controller::recover() {
           identity.concurrency_key != launch.concurrency_key ||
           identity.lease_id != launch.lease_id ||
           identity.fencing_token != launch.fencing_token ||
+          identity.host_grant != launch.host_grant ||
           event.payload != nlohmann::json{
                                {"cause_event_id", launch_event->event_id},
                                {"spec", resolved_launch_spec_json(binding)}}) {
@@ -1302,7 +1337,11 @@ WorkerLaunchTicket Controller::prepare_worker_launch(WorkerLaunchRequest request
       .concurrency_key = concurrency_key,
       .lease_id = active->lease_id,
       .fencing_token = active->fencing_token,
+      .host_grant = std::nullopt,
   };
+  launch.host_grant = journal_.host_launch_grant_claim(
+      launch.run_id, launch.concurrency_key, launch.lease_id,
+      launch.fencing_token, now);
   launch.launch_nonce = worker_launch_nonce(plan_, launch);
   const Event event{
       .event_id = worker_launch_event_id(state_),
@@ -1317,14 +1356,7 @@ WorkerLaunchTicket Controller::prepare_worker_launch(WorkerLaunchRequest request
       .wall_time_ns = now.wall.nanoseconds,
       .monotonic_time_ns = 0,
       .optimizer_step = std::nullopt,
-      .payload = {{"launch_nonce", launch.launch_nonce},
-                  {"adapter", launch.adapter},
-                  {"adapter_version", launch.adapter_version},
-                  {"code_fingerprint", launch.code_fingerprint},
-                  {"required_capabilities", launch.required_capabilities},
-                  {"concurrency_key", launch.concurrency_key},
-                  {"lease_id", launch.lease_id},
-                  {"fencing_token", launch.fencing_token}},
+      .payload = worker_launch_payload(launch),
   };
   journal_.prepare_worker_launch(launch, now, event);
   recover();

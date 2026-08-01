@@ -853,6 +853,10 @@ void validate_experiment(const Experiment& experiment, std::vector<Diagnostic>& 
       if (transition.on.empty()) {
         error(diagnostics, "transition.event", child_path(transition_path, "on"),
               "event type must not be empty");
+      } else if (transition.on.starts_with("host.resource_")) {
+        error(diagnostics, "transition.event_reserved",
+              child_path(transition_path, "on"),
+              "host.resource_* is reserved for typed host saga authority");
       }
       if (transition.where) {
         validate_predicate(*transition.where, child_path(transition_path, "where"), diagnostics);

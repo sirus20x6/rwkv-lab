@@ -1,14 +1,25 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
+
+#include "trainvm/host_resources.hpp"
 
 namespace trainvm {
 
 struct WorkerLaunchRequest {
   std::string code_fingerprint;
   std::vector<std::string> required_capabilities;
+};
+
+struct HostLaunchGrantClaim final {
+  std::string request_id;
+  std::string grant_digest;
+  std::vector<ResourceFence> fences;
+
+  bool operator==(const HostLaunchGrantClaim&) const = default;
 };
 
 struct WorkerLaunchTicket {
@@ -25,6 +36,7 @@ struct WorkerLaunchTicket {
   std::string concurrency_key;
   std::string lease_id;
   std::uint64_t fencing_token{};
+  std::optional<HostLaunchGrantClaim> host_grant;
 
   bool operator==(const WorkerLaunchTicket&) const = default;
 };

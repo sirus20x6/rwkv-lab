@@ -91,7 +91,9 @@ class TrainVMService final : public v1::TrainVM::Service,
                  AdapterRegistry adapter_registry,
                  HostLaunchRegistry host_launch_registry,
                  HostIdentity authority_host,
-                 std::function<AuthorityTimeSample()> authority_clock);
+                 std::function<AuthorityTimeSample()> authority_clock,
+                 HostGrantEnforcement host_grant_enforcement =
+                     HostGrantEnforcement::required);
 
   static constexpr std::size_t kMaximumRetainedLaunches = 32U;
   static constexpr std::uint64_t kMaximumRetainedLaunchBytes = 2ULL << 30U;

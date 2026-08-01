@@ -754,7 +754,24 @@ void validate_resource_request(const ResourceBundleRequest& request) {
 void validate_resource_fences(
     const HostInventoryReceipt& inventory,
     const std::vector<ResourceFence>& active_fences) {
-  if (active_fences.size() > HostResourceBounds::maximum_active_fences) {
+  validate_resource_fence_shape(active_fences,
+                                HostResourceBounds::maximum_active_fences);
+  for (const auto& fence : active_fences) {
+    const auto found = std::ranges::find_if(
+        inventory.resources, [&](const auto& resource) {
+          return resource.id.stable_id == fence.resource.stable_id;
+        });
+    if (found == inventory.resources.end() || found->id != fence.resource) {
+      throw HostResourceError(
+          "active fence resource vanished or changed identity");
+    }
+  }
+}
+
+void validate_resource_fence_shape(
+    const std::vector<ResourceFence>& active_fences,
+    std::size_t maximum_count) {
+  if (active_fences.size() > maximum_count) {
     throw HostResourceError("active fence count exceeds its bound");
   }
   if (!std::ranges::is_sorted(active_fences, [](const auto& left,
@@ -770,14 +787,6 @@ void validate_resource_fences(
         !digest_valid(fence.topology_digest) ||
         !ids.insert(fence.resource.stable_id).second) {
       throw HostResourceError("active fence evidence is invalid or duplicate");
-    }
-    const auto found = std::ranges::find_if(
-        inventory.resources, [&](const auto& resource) {
-          return resource.id.stable_id == fence.resource.stable_id;
-        });
-    if (found == inventory.resources.end() || found->id != fence.resource) {
-      throw HostResourceError(
-          "active fence resource vanished or changed identity");
     }
   }
   for (std::size_t left = 0; left < active_fences.size(); ++left) {

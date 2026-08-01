@@ -33,6 +33,50 @@ struct ReconcileResult {
   std::optional<WorkerLaunchTicket> launch;
 };
 
+enum class HostGrantSagaFaultPoint {
+  journal_before_host,
+  host_before_journal,
+  replay_boundary,
+};
+
+class IHostGrantSagaFaultInjector {
+ public:
+  virtual ~IHostGrantSagaFaultInjector() = default;
+  virtual void hit(HostGrantSagaFaultPoint point) = 0;
+};
+
+class IHostGrantClient {
+ public:
+  virtual ~IHostGrantClient() = default;
+  [[nodiscard]] virtual BundleRequestResult request_bundle(
+      const ResourceBundleRequest& request) = 0;
+  [[nodiscard]] virtual BundleReleaseResult release_bundle(
+      const ResourceReleaseRequest& request) = 0;
+};
+
+// This coordinator is intentionally not constructed by TrainVMService yet.
+// Production wiring must give it the same authority mutex used by Reconciler
+// and WorkerControl before a real host RPC client is admitted; otherwise a
+// grant/release can race launch, hello, dispatch, or result authority checks.
+class HostGrantSagaReconciler final {
+ public:
+  HostGrantSagaReconciler(Journal& journal, IHostGrantClient& host,
+                          IHostGrantSagaFaultInjector* faults = nullptr);
+
+  [[nodiscard]] HostGrantSagaSnapshot reconcile_request(
+      const ResourceBundleRequest& request, const AuthorityTimeSample& now);
+  [[nodiscard]] HostGrantSagaSnapshot reconcile_release(
+      const std::string& request_id, const ResourceReleaseRequest& release,
+      const AuthorityTimeSample& now);
+
+ private:
+  void fault(HostGrantSagaFaultPoint point) const;
+
+  Journal& journal_;
+  IHostGrantClient& host_;
+  IHostGrantSagaFaultInjector* faults_{};
+};
+
 // This is launch authorization only: it may persist worker.launch_requested as
 // a protocol intent, but it MUST NOT spawn or signal an OS process. A later
 // supervisor must require a host-bound resolved launch-spec digest before exec.

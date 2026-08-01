@@ -364,6 +364,7 @@ trainvm::ResolvedLaunchSpec bind_test_worker_launch(
       .concurrency_key = launch.concurrency_key,
       .lease_id = launch.lease_id,
       .fencing_token = launch.fencing_token,
+      .host_grant = launch.host_grant,
       .host = host,
       .executable = executable,
       .code = code,
@@ -1336,7 +1337,9 @@ void test_controller_and_fake_worker() {
   const std::filesystem::path database_path = directory / "journal.db";
 
   {
-    trainvm::Journal journal(database_path);
+    trainvm::Journal journal(
+        database_path, std::nullopt,
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
     trainvm::FakeWorker worker(mageflow_outcomes());
     trainvm::Controller controller(*compiled.plan, journal, "controller-run");
     check(!controller.initialized(), "controller begins without invented in-memory state");
@@ -1532,7 +1535,9 @@ void test_compiled_plan_persistence() {
   const std::filesystem::path database_path = directory / "journal.db";
 
   {
-    trainvm::Journal journal(database_path);
+    trainvm::Journal journal(
+        database_path, std::nullopt,
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
     trainvm::Controller controller(*compiled.plan, journal, "persisted-plan-run");
     controller.create();
     const auto stored = journal.compiled_plan(compiled.plan->plan_hash);
@@ -1541,7 +1546,9 @@ void test_compiled_plan_persistence() {
           "run creation atomically stores its content-addressed canonical plan");
   }
   {
-    trainvm::Journal journal(database_path);
+    trainvm::Journal journal(
+        database_path, std::nullopt,
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
     const auto reloaded = journal.compiled_plan(compiled.plan->plan_hash);
     trainvm::Controller restarted(*compiled.plan, journal, "persisted-plan-run");
     check(reloaded && restarted.recover().current_node_id == "acquire_gpu",
@@ -1572,7 +1579,9 @@ void test_compiled_plan_persistence() {
     sqlite3_close(tamper_database);
   }
   {
-    trainvm::Journal journal(database_path);
+    trainvm::Journal journal(
+        database_path, std::nullopt,
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
     bool load_rejected = false;
     try {
       (void)journal.compiled_plan(compiled.plan->plan_hash);
@@ -2257,6 +2266,18 @@ void test_lease_renewal_authority() {
   if (database != nullptr) {
     check(sqlite3_exec(database, R"sql(
             BEGIN IMMEDIATE;
+            DROP TRIGGER host_resource_requests_no_update;
+            DROP TRIGGER host_resource_requests_no_delete;
+            DROP TRIGGER host_resource_grants_no_update;
+            DROP TRIGGER host_resource_grants_no_delete;
+            DROP TRIGGER host_resource_release_intents_no_update;
+            DROP TRIGGER host_resource_release_intents_no_delete;
+            DROP TRIGGER host_resource_release_receipts_no_update;
+            DROP TRIGGER host_resource_release_receipts_no_delete;
+            DROP TABLE host_resource_release_receipts;
+            DROP TABLE host_resource_release_intents;
+            DROP TABLE host_resource_grants;
+            DROP TABLE host_resource_requests;
             DROP TRIGGER resource_lease_renewals_no_update;
             DROP TRIGGER resource_lease_renewals_no_delete;
             DROP TABLE resource_lease_renewals;
@@ -2279,7 +2300,7 @@ void test_lease_renewal_authority() {
   if (database != nullptr) {
     check(scalar(database,
                  "SELECT value FROM journal_meta WHERE key='schema_version'") ==
-                  "6" &&
+                  "7" &&
               scalar(database,
                      "SELECT COUNT(*) FROM resource_lease_renewals") == "0" &&
               scalar(database, R"sql(
@@ -2304,6 +2325,18 @@ void test_lease_renewal_authority() {
   if (database != nullptr) {
     check(sqlite3_exec(database, R"sql(
             BEGIN IMMEDIATE;
+            DROP TRIGGER host_resource_requests_no_update;
+            DROP TRIGGER host_resource_requests_no_delete;
+            DROP TRIGGER host_resource_grants_no_update;
+            DROP TRIGGER host_resource_grants_no_delete;
+            DROP TRIGGER host_resource_release_intents_no_update;
+            DROP TRIGGER host_resource_release_intents_no_delete;
+            DROP TRIGGER host_resource_release_receipts_no_update;
+            DROP TRIGGER host_resource_release_receipts_no_delete;
+            DROP TABLE host_resource_release_receipts;
+            DROP TABLE host_resource_release_intents;
+            DROP TABLE host_resource_grants;
+            DROP TABLE host_resource_requests;
             DROP TRIGGER resource_lease_renewals_no_update;
             DROP TRIGGER resource_lease_renewals_no_delete;
             DROP TABLE resource_lease_renewals;
@@ -2809,7 +2842,9 @@ void test_control_command_journal() {
   std::filesystem::remove_all(directory);
   std::filesystem::create_directories(directory);
   {
-    trainvm::Journal journal(directory / "journal.db");
+    trainvm::Journal journal(
+        directory / "journal.db", std::nullopt,
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
     trainvm::Controller controller(*compiled.plan, journal, "control-run");
     controller.create();
     const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -3013,7 +3048,9 @@ void test_command_service() {
   const auto database_path = directory / "journal.db";
   std::string journal_id;
   {
-    trainvm::Journal journal(database_path);
+    trainvm::Journal journal(
+        database_path, std::nullopt,
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
     trainvm::Controller controller(*compiled.plan, journal, "service-run");
     controller.create();
     (void)controller.prepare_dispatch();
@@ -3062,7 +3099,9 @@ void test_command_service() {
         "native command service reports a pending idempotent retry as accepted, not applied");
 
   {
-    trainvm::Journal worker_journal(database_path);
+    trainvm::Journal worker_journal(
+        database_path, std::nullopt,
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
     trainvm::Controller worker(*compiled.plan, worker_journal, "service-run");
     worker.recover();
     const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -3661,7 +3700,9 @@ void test_worker_launch_and_readiness_boundary() {
   {
     const auto database_path = directory / "accepted.db";
     const std::string run_id = "worker-readiness-run";
-    trainvm::Journal journal(database_path);
+    trainvm::Journal journal(
+        database_path, std::nullopt,
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
     trainvm::Controller controller(*compiled.plan, journal, run_id);
     controller.create_queued();
     const auto acquired = controller.begin_acquisition(test_time(1'000));
@@ -3806,7 +3847,9 @@ void test_worker_launch_and_readiness_boundary() {
   {
     const auto database_path = directory / "without-launch.db";
     const std::string run_id = "worker-without-launch-run";
-    trainvm::Journal journal(database_path);
+    trainvm::Journal journal(
+        database_path, std::nullopt,
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
     trainvm::Controller controller(*compiled.plan, journal, run_id);
     controller.create_queued();
     const auto acquired = controller.begin_acquisition(test_time(2'000));
@@ -3838,7 +3881,9 @@ void test_worker_launch_and_readiness_boundary() {
   {
     const auto database_path = directory / "expired-lease.db";
     const std::string run_id = "worker-expired-lease-run";
-    trainvm::Journal journal(database_path);
+    trainvm::Journal journal(
+        database_path, std::nullopt,
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
     trainvm::Controller controller(*compiled.plan, journal, run_id);
     controller.create_queued();
     const auto acquired = controller.begin_acquisition(test_time(3'000));
@@ -3861,7 +3906,9 @@ void test_worker_launch_and_readiness_boundary() {
   {
     const auto database_path = directory / "released-lease.db";
     const std::string run_id = "worker-released-lease-run";
-    trainvm::Journal journal(database_path);
+    trainvm::Journal journal(
+        database_path, std::nullopt,
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
     trainvm::Controller controller(*compiled.plan, journal, run_id);
     controller.create_queued();
     const auto acquired = controller.begin_acquisition(test_time(4'000));
@@ -3887,7 +3934,9 @@ void test_worker_launch_and_readiness_boundary() {
   {
     const auto database_path = directory / "fenced-result.db";
     const std::string run_id = "worker-fenced-result-run";
-    trainvm::Journal journal(database_path);
+    trainvm::Journal journal(
+        database_path, std::nullopt,
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
     trainvm::Controller controller(*compiled.plan, journal, run_id);
     controller.create_queued();
     (void)controller.begin_acquisition(test_time(5'000));
@@ -4176,7 +4225,9 @@ void test_worker_control_service_boundary() {
     const std::string run_id = "worker-control-service-run";
     trainvm::WorkerLaunchTicket launch;
     {
-      trainvm::Journal journal(database_path);
+      trainvm::Journal journal(
+          database_path, std::nullopt,
+          trainvm::HostGrantEnforcement::legacy_process_free_test);
       trainvm::Controller controller(*compiled.plan, journal, run_id);
       controller.create_queued(submission_identity);
       (void)controller.begin_acquisition(test_time(1'000));
@@ -4191,7 +4242,8 @@ void test_worker_control_service_boundary() {
         database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
         fixture_test_host_launch_registry(*compiled.plan, launch),
         fixture_test_host_identity(),
-        [&authority_now_ns] { return test_time(authority_now_ns); });
+        [&authority_now_ns] { return test_time(authority_now_ns); },
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
     const auto hello = wire_hello(launch);
     trainvm::TrainVMService::WorkerConnection unbound_connection;
     const std::size_t before_unbound =
@@ -4339,7 +4391,9 @@ void test_worker_control_service_boundary() {
     trainvm::WorkerLaunchTicket launch;
     trainvm::ResourceLease lease;
     {
-      trainvm::Journal journal(database_path);
+      trainvm::Journal journal(
+          database_path, std::nullopt,
+          trainvm::HostGrantEnforcement::legacy_process_free_test);
       trainvm::Controller controller(*compiled.plan, journal, run_id);
       controller.create_queued(submission_identity);
       lease = controller.begin_acquisition(test_time(3'000)).lease;
@@ -4356,7 +4410,8 @@ void test_worker_control_service_boundary() {
           return test_time(clock_sample == 1U
                                ? lease.expires_boottime_ns - 1
                                : lease.expires_boottime_ns);
-        });
+        },
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
     prime_test_service_launch(service, launch);
     trainvm::TrainVMService::WorkerConnection connection;
     const grpc::Status expired =
@@ -4397,7 +4452,9 @@ void test_worker_control_service_boundary() {
     const std::string run_id = "worker-control-stale-fence-run";
     trainvm::WorkerLaunchTicket launch;
     {
-      trainvm::Journal journal(database_path);
+      trainvm::Journal journal(
+          database_path, std::nullopt,
+          trainvm::HostGrantEnforcement::legacy_process_free_test);
       trainvm::Controller controller(*compiled.plan, journal, run_id);
       controller.create_queued(submission_identity);
       (void)controller.begin_acquisition(test_time(2'000));
@@ -4409,7 +4466,8 @@ void test_worker_control_service_boundary() {
         database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
         fixture_test_host_launch_registry(*compiled.plan, launch),
         fixture_test_host_identity(),
-        [&authority_now_ns] { return test_time(authority_now_ns); });
+        [&authority_now_ns] { return test_time(authority_now_ns); },
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
     prime_test_service_launch(service, launch);
     trainvm::TrainVMService::WorkerConnection connection;
     const grpc::Status open =
@@ -4444,7 +4502,9 @@ void test_worker_control_service_boundary() {
     const std::string run_id = "worker-control-authority-corruption-run";
     trainvm::WorkerLaunchTicket launch;
     {
-      trainvm::Journal journal(database_path);
+      trainvm::Journal journal(
+          database_path, std::nullopt,
+          trainvm::HostGrantEnforcement::legacy_process_free_test);
       trainvm::Controller controller(*compiled.plan, journal, run_id);
       controller.create_queued(submission_identity);
       (void)controller.begin_acquisition(test_time(4'000));
@@ -4455,7 +4515,8 @@ void test_worker_control_service_boundary() {
         database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
         fixture_test_host_launch_registry(*compiled.plan, launch),
         fixture_test_host_identity(),
-        [] { return test_time(4'200); });
+        [] { return test_time(4'200); },
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
     prime_test_service_launch(service, launch);
     trainvm::TrainVMService::WorkerConnection connection;
     const grpc::Status open =
@@ -4513,7 +4574,9 @@ void test_worker_control_grpc_stream() {
   trainvm::WorkerLaunchTicket launch;
   trainvm::WorkerLaunchTicket eof_launch;
   {
-    trainvm::Journal journal(database_path);
+    trainvm::Journal journal(
+        database_path, std::nullopt,
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
     trainvm::Controller controller(*compiled.plan, journal, run_id);
     controller.create_queued(submission_identity);
     (void)controller.begin_acquisition(test_time(1'000));
@@ -4576,7 +4639,8 @@ void test_worker_control_grpc_stream() {
       database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
       fixture_test_host_launch_registry(*compiled.plan, launch),
       fixture_test_host_identity(),
-      [] { return test_time(1'200); });
+      [] { return test_time(1'200); },
+      trainvm::HostGrantEnforcement::legacy_process_free_test);
   prime_test_service_launch(service, launch);
   prime_test_service_launch(service, eof_launch);
   grpc::ServerBuilder builder;
@@ -4765,7 +4829,9 @@ void test_typed_managed_resource_release() {
   std::filesystem::create_directories(directory);
   const auto database_path = directory / "journal.db";
   const std::string run_id = "managed-release-run";
-  trainvm::Journal journal(database_path);
+  trainvm::Journal journal(
+      database_path, std::nullopt,
+      trainvm::HostGrantEnforcement::legacy_process_free_test);
   trainvm::Controller controller(*compiled.plan, journal, run_id);
   controller.create_queued();
   const auto acquired = controller.begin_acquisition(test_time(1'000));
@@ -4963,8 +5029,12 @@ void test_concurrent_worker_launch_and_readiness_replay() {
           "worker race fixture reaches the external-node acquiring boundary");
   }
 
-  trainvm::Journal left_journal(database_path);
-  trainvm::Journal right_journal(database_path);
+  trainvm::Journal left_journal(
+      database_path, std::nullopt,
+      trainvm::HostGrantEnforcement::legacy_process_free_test);
+  trainvm::Journal right_journal(
+      database_path, std::nullopt,
+      trainvm::HostGrantEnforcement::legacy_process_free_test);
   trainvm::Controller left(*compiled.plan, left_journal, run_id);
   trainvm::Controller right(*compiled.plan, right_journal, run_id);
   check(left.recover().revision == 4U && right.recover().revision == 4U,
@@ -5123,7 +5193,9 @@ void test_concurrent_fenced_result_content_conflict() {
   trainvm::WorkerLaunchTicket launch;
   trainvm::Dispatch dispatch;
   {
-    trainvm::Journal journal(database_path);
+    trainvm::Journal journal(
+        database_path, std::nullopt,
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
     trainvm::Controller creator(*compiled.plan, journal, run_id);
     creator.create_queued();
     (void)creator.begin_acquisition(test_time(1'000));
@@ -5183,8 +5255,12 @@ void test_concurrent_fenced_result_content_conflict() {
   const trainvm::Event left_event = result_for("left");
   const trainvm::Event right_event = result_for("right");
 
-  trainvm::Journal left_journal(database_path);
-  trainvm::Journal right_journal(database_path);
+  trainvm::Journal left_journal(
+      database_path, std::nullopt,
+      trainvm::HostGrantEnforcement::legacy_process_free_test);
+  trainvm::Journal right_journal(
+      database_path, std::nullopt,
+      trainvm::HostGrantEnforcement::legacy_process_free_test);
   trainvm::Controller left(*compiled.plan, left_journal, run_id);
   trainvm::Controller right(*compiled.plan, right_journal, run_id);
   check(left.recover().revision == 5U && right.recover().revision == 5U,
@@ -5864,7 +5940,9 @@ void test_host_launch_resolution_and_binding() {
 
   const auto database = directory / "journal.db";
   const std::string run_id = "host-launch-binding-run";
-  trainvm::Journal journal(database);
+  trainvm::Journal journal(
+      database, std::nullopt,
+      trainvm::HostGrantEnforcement::legacy_process_free_test);
   trainvm::Controller controller(*compiled.plan, journal, run_id);
   controller.create_queued();
   const auto acquisition = controller.begin_acquisition(test_time(1'000));
@@ -6173,7 +6251,8 @@ void test_service_host_launch_binding() {
     trainvm::TrainVMService service(
         database, trainvm::AdapterRegistry(adapter_profiles),
         trainvm::HostLaunchRegistry(host_document), host,
-        [&now_ns] { return test_time(now_ns); });
+        [&now_ns] { return test_time(now_ns); },
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
     const auto acquired = service.reconcile_once(run_id);
     now_ns = 1'100;
     const auto prepared = service.reconcile_once(run_id);
@@ -6252,7 +6331,8 @@ void test_service_host_launch_binding() {
     trainvm::TrainVMService restarted(
         database, trainvm::AdapterRegistry(adapter_profiles),
         trainvm::HostLaunchRegistry(host_document), host,
-        [] { return test_time(1'250); });
+        [] { return test_time(1'250); },
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
     trainvm::v1::WorkerHello hello;
     hello.set_run_id(ticket.run_id);
     hello.set_node_id(ticket.node_id);
@@ -6292,7 +6372,8 @@ void test_service_host_launch_binding() {
           trainvm::TrainVMService service(
               database, trainvm::AdapterRegistry(std::move(adapters)),
               std::move(registry), std::move(authority_host),
-              [] { return test_time(1'300); });
+              [] { return test_time(1'300); },
+              trainvm::HostGrantEnforcement::legacy_process_free_test);
           (void)service.bind_worker_launch(ticket);
         } catch (const std::exception&) {
           rejected = true;
@@ -6351,7 +6432,8 @@ void test_service_host_launch_binding() {
     trainvm::TrainVMService service(
         disabled_database, trainvm::AdapterRegistry(adapter_profiles),
         fixture_disabled_host_launch_registry(), host,
-        [] { return test_time(2'000); });
+        [] { return test_time(2'000); },
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
     (void)service.reconcile_once(disabled_run);
     const auto prepared = service.reconcile_once(disabled_run);
     const std::size_t before = trainvm::Journal(disabled_database).event_count();
@@ -6693,7 +6775,9 @@ void test_service_registry_and_reconciliation() {
     trainvm::TrainVMService service(
         database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
         fixture_disabled_host_launch_registry(),
-        [&authority_now_ns] { return test_time(authority_now_ns); });
+        fixture_test_host_identity(),
+        [&authority_now_ns] { return test_time(authority_now_ns); },
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
     auto preview_request = request_for(journal_id, false, "");
     trainvm::v1::SubmitExperimentResponse preview;
     const grpc::Status preview_status =
@@ -7236,8 +7320,12 @@ void test_adapter_registry_and_reconciler() {
   };
   trainvm::WorkerLaunchTicket prepared_launch;
   {
-    trainvm::Journal left_journal(database_path);
-    trainvm::Journal right_journal(database_path);
+    trainvm::Journal left_journal(
+        database_path, std::nullopt,
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
+    trainvm::Journal right_journal(
+        database_path, std::nullopt,
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
     std::mutex authority_mutex;
     trainvm::Reconciler left(left_journal, registry, authority_mutex,
                              [] { return test_time(2'100); });
@@ -7301,7 +7389,9 @@ void test_adapter_registry_and_reconciler() {
 
   std::string durable_launch_payload;
   {
-    trainvm::Journal restarted_journal(database_path);
+    trainvm::Journal restarted_journal(
+        database_path, std::nullopt,
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
     std::mutex restarted_mutex;
     trainvm::Reconciler restarted(restarted_journal, registry,
                                   restarted_mutex, [] { return test_time(2'200); });
@@ -7639,6 +7729,18 @@ void test_legacy_journal_migration_policy() {
     if (database != nullptr) {
       check(sqlite3_exec(database, R"sql(
         BEGIN IMMEDIATE;
+        DROP TRIGGER host_resource_requests_no_update;
+        DROP TRIGGER host_resource_requests_no_delete;
+        DROP TRIGGER host_resource_grants_no_update;
+        DROP TRIGGER host_resource_grants_no_delete;
+        DROP TRIGGER host_resource_release_intents_no_update;
+        DROP TRIGGER host_resource_release_intents_no_delete;
+        DROP TRIGGER host_resource_release_receipts_no_update;
+        DROP TRIGGER host_resource_release_receipts_no_delete;
+        DROP TABLE host_resource_release_receipts;
+        DROP TABLE host_resource_release_intents;
+        DROP TABLE host_resource_grants;
+        DROP TABLE host_resource_requests;
         DROP TRIGGER resource_lease_renewals_no_update;
         DROP TRIGGER resource_lease_renewals_no_delete;
         DROP TABLE resource_lease_renewals;
@@ -7733,6 +7835,18 @@ void test_legacy_journal_migration_policy() {
     if (database != nullptr) {
       const char* downgrade = R"sql(
         BEGIN IMMEDIATE;
+        DROP TRIGGER host_resource_requests_no_update;
+        DROP TRIGGER host_resource_requests_no_delete;
+        DROP TRIGGER host_resource_grants_no_update;
+        DROP TRIGGER host_resource_grants_no_delete;
+        DROP TRIGGER host_resource_release_intents_no_update;
+        DROP TRIGGER host_resource_release_intents_no_delete;
+        DROP TRIGGER host_resource_release_receipts_no_update;
+        DROP TRIGGER host_resource_release_receipts_no_delete;
+        DROP TABLE host_resource_release_receipts;
+        DROP TABLE host_resource_release_intents;
+        DROP TABLE host_resource_grants;
+        DROP TABLE host_resource_requests;
         DROP TRIGGER resource_lease_renewals_no_update;
         DROP TRIGGER resource_lease_renewals_no_delete;
         DROP TABLE resource_lease_renewals;
@@ -7888,6 +8002,18 @@ void test_legacy_journal_migration_policy() {
       const char* downgrade = R"sql(
         PRAGMA journal_mode=DELETE;
         BEGIN IMMEDIATE;
+        DROP TRIGGER host_resource_requests_no_update;
+        DROP TRIGGER host_resource_requests_no_delete;
+        DROP TRIGGER host_resource_grants_no_update;
+        DROP TRIGGER host_resource_grants_no_delete;
+        DROP TRIGGER host_resource_release_intents_no_update;
+        DROP TRIGGER host_resource_release_intents_no_delete;
+        DROP TRIGGER host_resource_release_receipts_no_update;
+        DROP TRIGGER host_resource_release_receipts_no_delete;
+        DROP TABLE host_resource_release_receipts;
+        DROP TABLE host_resource_release_intents;
+        DROP TABLE host_resource_grants;
+        DROP TABLE host_resource_requests;
         DROP TRIGGER resource_lease_renewals_no_update;
         DROP TRIGGER resource_lease_renewals_no_delete;
         DROP TABLE resource_lease_renewals;
@@ -7971,6 +8097,18 @@ void test_legacy_journal_migration_policy() {
   if (database != nullptr) {
     check(sqlite3_exec(database, R"sql(
       BEGIN IMMEDIATE;
+      DROP TRIGGER host_resource_requests_no_update;
+      DROP TRIGGER host_resource_requests_no_delete;
+      DROP TRIGGER host_resource_grants_no_update;
+      DROP TRIGGER host_resource_grants_no_delete;
+      DROP TRIGGER host_resource_release_intents_no_update;
+      DROP TRIGGER host_resource_release_intents_no_delete;
+      DROP TRIGGER host_resource_release_receipts_no_update;
+      DROP TRIGGER host_resource_release_receipts_no_delete;
+      DROP TABLE host_resource_release_receipts;
+      DROP TABLE host_resource_release_intents;
+      DROP TABLE host_resource_grants;
+      DROP TABLE host_resource_requests;
       DROP TRIGGER resource_lease_renewals_no_update;
       DROP TRIGGER resource_lease_renewals_no_delete;
       DROP TABLE resource_lease_renewals;
@@ -8064,7 +8202,7 @@ void test_legacy_journal_migration_policy() {
   if (database != nullptr) {
     check(scalar(database,
                  "SELECT value FROM journal_meta WHERE key='schema_version'") ==
-                  "6" &&
+                  "7" &&
               scalar(database,
                      "SELECT COUNT(*) FROM journal_meta WHERE key='chain_head'") ==
                   "0" &&
@@ -8088,6 +8226,18 @@ void test_legacy_journal_migration_policy() {
   if (database != nullptr) {
     const char* downgrade = R"sql(
       BEGIN IMMEDIATE;
+      DROP TRIGGER host_resource_requests_no_update;
+      DROP TRIGGER host_resource_requests_no_delete;
+      DROP TRIGGER host_resource_grants_no_update;
+      DROP TRIGGER host_resource_grants_no_delete;
+      DROP TRIGGER host_resource_release_intents_no_update;
+      DROP TRIGGER host_resource_release_intents_no_delete;
+      DROP TRIGGER host_resource_release_receipts_no_update;
+      DROP TRIGGER host_resource_release_receipts_no_delete;
+      DROP TABLE host_resource_release_receipts;
+      DROP TABLE host_resource_release_intents;
+      DROP TABLE host_resource_grants;
+      DROP TABLE host_resource_requests;
       DROP TRIGGER resource_lease_renewals_no_update;
       DROP TRIGGER resource_lease_renewals_no_delete;
       DROP TABLE resource_lease_renewals;
@@ -8189,7 +8339,7 @@ void test_legacy_journal_migration_policy() {
     )sql");
     const std::string head_after = scalar(
         database, "SELECT value FROM journal_meta WHERE key='chain_head'");
-    check(version == "6" && released_history == "legacy-wall/v1|NULL|NULL|NULL|10|20|30" &&
+    check(version == "7" && released_history == "legacy-wall/v1|NULL|NULL|NULL|10|20|30" &&
               release_receipt == "legacy-wall/v1|NULL|30",
           "v4 lease and release history migrates into explicit legacy-wall quarantine");
     check(event_after == event_before && head_after == head_before,
@@ -8207,6 +8357,18 @@ void test_legacy_journal_migration_policy() {
   if (database != nullptr) {
     const char* downgrade = R"sql(
       BEGIN IMMEDIATE;
+      DROP TRIGGER host_resource_requests_no_update;
+      DROP TRIGGER host_resource_requests_no_delete;
+      DROP TRIGGER host_resource_grants_no_update;
+      DROP TRIGGER host_resource_grants_no_delete;
+      DROP TRIGGER host_resource_release_intents_no_update;
+      DROP TRIGGER host_resource_release_intents_no_delete;
+      DROP TRIGGER host_resource_release_receipts_no_update;
+      DROP TRIGGER host_resource_release_receipts_no_delete;
+      DROP TABLE host_resource_release_receipts;
+      DROP TABLE host_resource_release_intents;
+      DROP TABLE host_resource_grants;
+      DROP TABLE host_resource_requests;
       DROP TRIGGER resource_lease_renewals_no_update;
       DROP TRIGGER resource_lease_renewals_no_delete;
       DROP TABLE resource_lease_renewals;
@@ -8294,6 +8456,720 @@ void test_legacy_journal_migration_policy() {
   std::filesystem::remove_all(directory);
 }
 
+class SagaHostClient final : public trainvm::IHostGrantClient {
+ public:
+  explicit SagaHostClient(trainvm::SQLiteHostLedger& ledger) : ledger_(ledger) {}
+
+  trainvm::BundleRequestResult request_bundle(
+      const trainvm::ResourceBundleRequest& request) override {
+    ++request_calls;
+    auto result = ledger_.request_bundle(request, {100, 1'000});
+    if (result.replayed) ++request_replays;
+    return result;
+  }
+
+  trainvm::BundleReleaseResult release_bundle(
+      const trainvm::ResourceReleaseRequest& request) override {
+    ++release_calls;
+    auto result = ledger_.release_bundle(request, {200, 2'000});
+    if (result.replayed) ++release_replays;
+    return result;
+  }
+
+  std::size_t request_calls{};
+  std::size_t request_replays{};
+  std::size_t release_calls{};
+  std::size_t release_replays{};
+
+ private:
+  trainvm::SQLiteHostLedger& ledger_;
+};
+
+class SagaOneShotFault final : public trainvm::IHostGrantSagaFaultInjector {
+ public:
+  explicit SagaOneShotFault(trainvm::HostGrantSagaFaultPoint point)
+      : point_(point) {}
+
+  void hit(trainvm::HostGrantSagaFaultPoint point) override {
+    if (armed_ && point == point_) {
+      armed_ = false;
+      throw std::runtime_error("injected host saga boundary fault");
+    }
+  }
+
+ private:
+  trainvm::HostGrantSagaFaultPoint point_;
+  bool armed_{true};
+};
+
+class SagaStaticResultClient final : public trainvm::IHostGrantClient {
+ public:
+  explicit SagaStaticResultClient(trainvm::BundleRequestResult result)
+      : result_(std::move(result)) {}
+
+  trainvm::BundleRequestResult request_bundle(
+      const trainvm::ResourceBundleRequest&) override {
+    ++request_calls;
+    return result_;
+  }
+
+  trainvm::BundleReleaseResult release_bundle(
+      const trainvm::ResourceReleaseRequest&) override {
+    throw std::runtime_error("static request client cannot release");
+  }
+
+  std::size_t request_calls{};
+
+ private:
+  trainvm::BundleRequestResult result_;
+};
+
+trainvm::ObservedHostResource saga_mutex_resource() {
+  return {
+      .id = {.kind = trainvm::HostResourceKind::host_mutex,
+             .vendor = std::nullopt,
+             .stable_id = "host-mutex:saga",
+             .parent_id = std::nullopt},
+      .disposition =
+          trainvm::ResourceObservationDisposition::audited_eligible,
+      .compute_contexts = trainvm::ResourceContextDisposition::absent,
+      .graphics_contexts = trainvm::ResourceContextDisposition::absent,
+      .pci_bdf = std::nullopt,
+      .device_major = std::nullopt,
+      .device_minor = std::nullopt,
+      .numa_node = std::nullopt,
+      .pcie_root_id = std::nullopt,
+      .fabric_clique_id = std::nullopt,
+      .total_memory_bytes = 0,
+      .labels = {{"scope", "saga-test"}},
+  };
+}
+
+void test_host_grant_saga() {
+  const auto directory = std::filesystem::temp_directory_path() /
+                         ("trainvm-host-saga-test-" +
+                          std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  check(::chmod(directory.c_str(), 0700) == 0,
+        "host saga fixture protects its directory");
+
+  trainvm::HostKernelSnapshot kernel_snapshot{
+      .api_version = std::string(trainvm::kHostInventoryApiVersion),
+      .host_id = "host-saga",
+      .boot_id = "boot-saga",
+      .broker_epoch = "broker-saga",
+      .begin_revision = "revision-saga",
+      .end_revision = "revision-saga",
+      .probes = {},
+      .resources = {saga_mutex_resource()},
+  };
+  trainvm::FakeHostKernel kernel(
+      {{.snapshot = std::move(kernel_snapshot), .failure = std::nullopt}});
+  const auto inventory = trainvm::capture_host_inventory(kernel);
+  auto authority =
+      std::make_shared<trainvm::HostLedgerFilesystemAuthority>(
+          trainvm::HostLedgerFilesystemAuthority::acquire({
+              .api_version =
+                  std::string(trainvm::kHostLedgerAuthorityApiVersion),
+              .ledger_path = directory / "host-resource.db",
+              .expected_owner_uid = ::geteuid(),
+              .expected_owner_gid = ::getegid(),
+              .enforcement_grade =
+                  trainvm::HostLedgerEnforcementGrade::cooperative_test,
+          }));
+  trainvm::SQLiteHostLedger host_ledger(authority, inventory);
+  SagaHostClient host(host_ledger);
+  trainvm::Journal journal(
+      directory / "journal.db", std::nullopt,
+      trainvm::HostGrantEnforcement::required,
+      trainvm::HostIdentity{.host_id = inventory.host_id,
+                            .boot_id = inventory.boot_id});
+  const auto compiled = trainvm::compile_document(load_fixture());
+  check(compiled.valid(), "host saga fixture compiles its external worker plan");
+  if (!compiled.plan) {
+    std::filesystem::remove_all(directory);
+    return;
+  }
+  {
+    trainvm::Journal unanchored(directory / "unanchored-journal.db");
+    const auto unanchored_request = trainvm::seal_resource_request({
+        .api_version = std::string(trainvm::kHostResourceRequestApiVersion),
+        .request_id = "unanchored-request",
+        .journal_id = unanchored.journal_id(),
+        .run_id = "unanchored-run",
+        .logical_lease_id = "unanchored-lease",
+        .logical_fencing_token = 1,
+        .count = 1,
+        .access_mode = trainvm::ResourceAccessMode::mutex_exclusive,
+        .topology = trainvm::TopologyPolicy::any,
+        .selector = {},
+        .canonical_request_digest = {},
+    });
+    const std::size_t host_calls_before_unanchored = host.request_calls;
+    const std::uint64_t events_before_unanchored = unanchored.event_count();
+    bool unanchored_rejected = false;
+    try {
+      trainvm::HostGrantSagaReconciler unsafe(unanchored, host);
+      (void)unsafe.reconcile_request(unanchored_request, test_time(1));
+    } catch (const trainvm::OperationPreconditionError&) {
+      unanchored_rejected = true;
+    }
+    check(unanchored_rejected &&
+              host.request_calls == host_calls_before_unanchored &&
+              unanchored.event_count() == events_before_unanchored &&
+              !unanchored.host_grant_saga(unanchored_request.request_id),
+          "host saga refuses an unanchored journal before host contact or journal mutation");
+  }
+  const std::string saga_key =
+      compiled.plan->experiment.spec.workspace.concurrency_key;
+  trainvm::Controller controller(*compiled.plan, journal, "run-1");
+  controller.create_queued();
+  const auto lease = controller.begin_acquisition(test_time(10));
+  check(lease.status == trainvm::LeaseAcquireStatus::acquired,
+        "host saga fixture has a live logical lease");
+  const auto request = trainvm::seal_resource_request({
+      .api_version = std::string(trainvm::kHostResourceRequestApiVersion),
+      .request_id = "saga-request",
+      .journal_id = journal.journal_id(),
+      .run_id = "run-1",
+      .logical_lease_id = lease.lease.lease_id,
+      .logical_fencing_token = lease.lease.fencing_token,
+      .count = 1,
+      .access_mode = trainvm::ResourceAccessMode::mutex_exclusive,
+      .topology = trainvm::TopologyPolicy::any,
+      .selector = {},
+      .canonical_request_digest = {},
+  });
+  const auto recover_matches = [&](const trainvm::ExecutionState& expected,
+                                   std::string_view boundary) {
+    trainvm::Controller restarted(*compiled.plan, journal, "run-1");
+    check(restarted.recover() == expected, boundary);
+  };
+  const trainvm::ExecutionState acquiring_state = controller.state();
+
+  bool zero_request_launch_rejected = false;
+  try {
+    (void)journal.host_launch_grant_claim(
+        request.run_id, saga_key, request.logical_lease_id,
+        request.logical_fencing_token, test_time(11));
+  } catch (const trainvm::OperationPreconditionError&) {
+    zero_request_launch_rejected = true;
+  }
+  check(zero_request_launch_rejected,
+        "default-strict launch authority rejects a live logical lease with no host request or grant");
+
+  SagaOneShotFault grant_gap(
+      trainvm::HostGrantSagaFaultPoint::host_before_journal);
+  trainvm::HostGrantSagaReconciler interrupted(journal, host, &grant_gap);
+  bool grant_interrupted = false;
+  try {
+    (void)interrupted.reconcile_request(request, test_time(20));
+  } catch (const std::runtime_error&) {
+    grant_interrupted = true;
+  }
+  const auto pending = journal.host_grant_saga(request.request_id);
+  check(grant_interrupted && pending && !pending->grant,
+        "host-before-journal fault leaves only the chained request intent");
+  recover_matches(acquiring_state,
+                  "controller restart ignores durable host request intent without changing FSM state");
+  bool premature_launch = false;
+  try {
+    journal.require_host_launch_eligible(
+        {.request_id = request.request_id,
+         .grant_digest = std::string(71U, '0'),
+         .fences = {}},
+        test_time(21));
+  } catch (const trainvm::OperationPreconditionError&) {
+    premature_launch = true;
+  }
+  check(premature_launch, "launch is blocked until both authorities are durable");
+
+  const auto host_replay = host_ledger.request_bundle(request, {101, 1'001});
+  SagaStaticResultClient unknown_status({
+      .status = static_cast<trainvm::BundleRequestStatus>(99),
+      .grant = std::nullopt,
+      .outcome_digest = std::string(71U, '0'),
+      .replayed = false,
+  });
+  SagaStaticResultClient mismatched_outcome({
+      .status = trainvm::BundleRequestStatus::granted,
+      .grant = host_replay.grant,
+      .outcome_digest = "sha256:" + std::string(64U, '0'),
+      .replayed = false,
+  });
+  bool unknown_status_rejected = false;
+  bool outcome_mismatch_rejected = false;
+  try {
+    trainvm::HostGrantSagaReconciler invalid(journal, unknown_status);
+    (void)invalid.reconcile_request(request, test_time(21));
+  } catch (const std::runtime_error&) {
+    unknown_status_rejected = true;
+  }
+  try {
+    trainvm::HostGrantSagaReconciler invalid(journal, mismatched_outcome);
+    (void)invalid.reconcile_request(request, test_time(21));
+  } catch (const std::runtime_error&) {
+    outcome_mismatch_rejected = true;
+  }
+  check(host_replay.grant && unknown_status_rejected &&
+            outcome_mismatch_rejected && unknown_status.request_calls == 1U &&
+            mismatched_outcome.request_calls == 1U &&
+            !journal.host_grant_saga(request.request_id)->grant,
+        "reconciler rejects unknown host status and outcome/grant digest disagreement without journal mutation");
+
+  trainvm::HostGrantSagaReconciler reconciler(journal, host);
+  const auto granted = reconciler.reconcile_request(request, test_time(22));
+  check(granted.grant && host.request_calls == 2U &&
+            host.request_replays == 1U && granted.grant->fences.size() == 1U &&
+            granted.grant->fences.front().generation == 1U,
+        "request retry converges on one host-issued physical generation");
+  recover_matches(acquiring_state,
+                  "controller restart ignores durable host grant receipt without changing FSM state");
+  const auto grant_copy_rejected = [&](trainvm::ResourceBundleGrant candidate) {
+    try {
+      (void)journal.record_host_grant_receipt(candidate);
+      return false;
+    } catch (const std::exception&) {
+      return true;
+    }
+  };
+  auto wrong_host = *granted.grant;
+  wrong_host.host_id = "different-host";
+  auto wrong_boot = *granted.grant;
+  wrong_boot.boot_id = "different-boot";
+  auto empty_fences = *granted.grant;
+  empty_fences.fences.clear();
+  auto too_many_fences = *granted.grant;
+  too_many_fences.fences.resize(
+      trainvm::HostResourceBounds::maximum_bundle_count + 1U,
+      granted.grant->fences.front());
+  auto oversized_id = *granted.grant;
+  oversized_id.fences.front().resource.stable_id =
+      std::string(trainvm::HostResourceBounds::maximum_identifier_bytes + 1U,
+                  'x');
+  auto noncanonical_kind_vendor = *granted.grant;
+  noncanonical_kind_vendor.fences.front().resource.vendor =
+      trainvm::HostAcceleratorVendor::nvidia;
+  check(grant_copy_rejected(std::move(wrong_host)) &&
+            grant_copy_rejected(std::move(wrong_boot)) &&
+            grant_copy_rejected(std::move(empty_fences)) &&
+            grant_copy_rejected(std::move(too_many_fences)) &&
+            grant_copy_rejected(std::move(oversized_id)) &&
+            grant_copy_rejected(std::move(noncanonical_kind_vendor)),
+        "grant ingress rejects wrong host epochs and empty, oversized, or noncanonical nested fence identities before hashing");
+  journal.require_host_launch_eligible(
+      {.request_id = request.request_id,
+       .grant_digest = granted.grant->receipt_digest,
+       .fences = granted.grant->fences},
+      test_time(23));
+  const auto selected_claim = journal.host_launch_grant_claim(
+      request.run_id, saga_key, request.logical_lease_id,
+      request.logical_fencing_token, test_time(23));
+  check(selected_claim &&
+            selected_claim->request_id == request.request_id &&
+            selected_claim->grant_digest == granted.grant->receipt_digest &&
+            selected_claim->fences == granted.grant->fences,
+        "strict launch selection binds the exact durable grant digest and physical fences");
+  const auto launch = controller.prepare_worker_launch(
+      {.code_fingerprint = "sha256:" + std::string(64U, 'a'),
+       .required_capabilities = {"worker.controls", "worker.metrics"}},
+      test_time(23));
+  const auto binding = bind_test_worker_launch(controller, launch, 23);
+  const auto durable_launch = journal.event(
+      launch.run_id + ":worker-launch:" + launch.node_id + ":" +
+      launch.attempt_id);
+  check(launch.host_grant == selected_claim &&
+            binding.identity.host_grant == selected_claim && durable_launch &&
+            durable_launch->payload.contains("host_grant") &&
+            journal.launch_binding(durable_launch->event_id)
+                    ->identity.host_grant == selected_claim,
+        "worker ticket, launch intent, and resolved binding seal the same exact host grant claim");
+  const trainvm::WorkerHelloEvidence hello{
+      .run_id = launch.run_id,
+      .node_id = launch.node_id,
+      .attempt_id = launch.attempt_id,
+      .launch_nonce = launch.launch_nonce,
+      .adapter = launch.adapter,
+      .adapter_version = launch.adapter_version,
+      .code_fingerprint = launch.code_fingerprint,
+      .capabilities = launch.required_capabilities,
+      .last_acked_controller_sequence = 0,
+      .concurrency_key = launch.concurrency_key,
+      .lease_id = launch.lease_id,
+      .fencing_token = launch.fencing_token,
+  };
+  check(controller.accept_worker_hello(hello, test_time(23)).disposition ==
+            trainvm::WorkerReadinessDisposition::accepted,
+        "worker readiness accepts while its exact physical grant remains live");
+  const auto dispatch = controller.prepare_dispatch(test_time(23));
+  const trainvm::ExecutionState running_state = controller.state();
+  const auto pending_control = controller.request_controls(
+      "saga-control-before-release", running_state.revision, 0,
+      {{"learning_rate", 0.00001}}, "operator",
+      "verify physical grant revokes control acknowledgement");
+  check(pending_control.valid() && pending_control.command,
+        "host saga fixture records a pending control for its live worker");
+  if (!pending_control.command) {
+    std::filesystem::remove_all(directory);
+    return;
+  }
+  auto malicious_document = load_fixture();
+  malicious_document["spec"]["workflow"]["nodes"].begin()
+      .value()["transitions"][0]["on"] =
+      "host.resource_grant_recorded";
+  const auto malicious_compile = trainvm::compile_document(malicious_document);
+  const std::uint64_t before_namespace_attack = journal.event_count();
+  bool worker_namespace_rejected = false;
+  bool journal_namespace_rejected = false;
+  try {
+    (void)trainvm::JournalTestAccess::append(
+        journal,
+        {.event_id = "forged-host-saga-event",
+         .run_id = launch.run_id,
+         .run_revision = running_state.revision,
+         .plan_revision = 1,
+         .node_id = {},
+         .attempt_id = {},
+         .worker_sequence = 0,
+         .event_type = "host.resource_grant_recorded",
+         .event_version = 1,
+         .wall_time_ns = 23,
+         .monotonic_time_ns = 23,
+         .optimizer_step = std::nullopt,
+         .payload = {}});
+  } catch (const std::invalid_argument&) {
+    journal_namespace_rejected = true;
+  }
+  try {
+    (void)controller.handle_event(
+        {.event_id = dispatch.dispatch_id + ":host-namespace-attack",
+         .run_id = dispatch.run_id,
+         .run_revision = dispatch.run_revision,
+         .plan_revision = dispatch.plan_revision,
+         .node_id = dispatch.node_id,
+         .attempt_id = dispatch.attempt_id,
+         .worker_sequence = 1,
+         .event_type = "host.resource_grant_recorded",
+         .event_version = 1,
+         .wall_time_ns = 23,
+         .monotonic_time_ns = 23,
+         .optimizer_step = std::nullopt,
+         .payload = {}},
+        {.run_id = launch.run_id,
+         .node_id = launch.node_id,
+         .attempt_id = launch.attempt_id,
+         .launch_nonce = launch.launch_nonce,
+         .concurrency_key = launch.concurrency_key,
+         .lease_id = launch.lease_id,
+         .fencing_token = launch.fencing_token},
+        test_time(23));
+  } catch (const std::invalid_argument&) {
+    worker_namespace_rejected = true;
+  }
+  check(!malicious_compile.valid() && worker_namespace_rejected &&
+            journal_namespace_rejected &&
+            journal.event_count() == before_namespace_attack &&
+            journal.verify_chain(),
+        "compiler and worker ingress reserve host.resource_* without journal mutation");
+  (void)journal.rebuild_projections();
+  check(journal.verify_chain(),
+        "reserved namespace attack leaves projection rebuild healthy");
+  bool mismatch_rejected = false;
+  try {
+    journal.require_host_launch_eligible(
+        {.request_id = request.request_id,
+         .grant_digest = granted.grant->receipt_digest,
+         .fences = {}},
+        test_time(23));
+  } catch (const trainvm::OperationPreconditionError&) {
+    mismatch_rejected = true;
+  }
+  check(mismatch_rejected, "launch rejects a mismatched physical fence set");
+
+  const auto busy_request = trainvm::seal_resource_request({
+      .api_version = std::string(trainvm::kHostResourceRequestApiVersion),
+      .request_id = "saga-busy-request",
+      .journal_id = request.journal_id,
+      .run_id = request.run_id,
+      .logical_lease_id = request.logical_lease_id,
+      .logical_fencing_token = request.logical_fencing_token,
+      .count = 1,
+      .access_mode = trainvm::ResourceAccessMode::mutex_exclusive,
+      .topology = trainvm::TopologyPolicy::any,
+      .selector = {},
+      .canonical_request_digest = {},
+  });
+  const std::size_t calls_before_busy = host.request_calls;
+  SagaOneShotFault before_host_fault(
+      trainvm::HostGrantSagaFaultPoint::journal_before_host);
+  trainvm::HostGrantSagaReconciler before_host(journal, host,
+                                               &before_host_fault);
+  bool before_host_interrupted = false;
+  try {
+    (void)before_host.reconcile_request(busy_request, test_time(24));
+  } catch (const std::runtime_error&) {
+    before_host_interrupted = true;
+  }
+  check(before_host_interrupted && host.request_calls == calls_before_busy &&
+            journal.host_grant_saga(busy_request.request_id) &&
+            !journal.host_grant_saga(busy_request.request_id)
+                 ->busy_outcome_digest,
+        "journal-before-host fault durably records intent without contacting host authority");
+  recover_matches(running_state,
+                  "controller restart ignores a second host request intent while running");
+
+  SagaOneShotFault busy_copy_fault(
+      trainvm::HostGrantSagaFaultPoint::host_before_journal);
+  trainvm::HostGrantSagaReconciler busy_copy_interrupted(
+      journal, host, &busy_copy_fault);
+  bool busy_copy_gap = false;
+  try {
+    (void)busy_copy_interrupted.reconcile_request(busy_request,
+                                                  test_time(25));
+  } catch (const std::runtime_error&) {
+    busy_copy_gap = true;
+  }
+  check(busy_copy_gap && host.request_calls == calls_before_busy + 1U &&
+            !journal.host_grant_saga(busy_request.request_id)
+                 ->busy_outcome_digest,
+        "host-before-journal fault leaves a terminal busy outcome replayable but not falsely durable");
+
+  const auto durable_busy = reconciler.reconcile_request(busy_request,
+                                                          test_time(26));
+  check(durable_busy.busy_outcome_digest && !durable_busy.grant &&
+            host.request_calls == calls_before_busy + 2U &&
+            host.request_replays == 2U,
+        "busy retry copies the exact terminal host outcome digest into the journal chain");
+  recover_matches(running_state,
+                  "controller restart ignores durable host busy evidence while running");
+  const std::size_t calls_after_busy = host.request_calls;
+  SagaOneShotFault busy_replay_fault(
+      trainvm::HostGrantSagaFaultPoint::replay_boundary);
+  trainvm::HostGrantSagaReconciler busy_replay_interrupted(
+      journal, host, &busy_replay_fault);
+  bool busy_replay_gap = false;
+  try {
+    (void)busy_replay_interrupted.reconcile_request(busy_request,
+                                                    test_time(27));
+  } catch (const std::runtime_error&) {
+    busy_replay_gap = true;
+  }
+  const auto busy_replayed = reconciler.reconcile_request(busy_request,
+                                                           test_time(28));
+  check(busy_replay_gap && busy_replayed == durable_busy &&
+            host.request_calls == calls_after_busy,
+        "replay-boundary retry returns the durable busy decision without another host call");
+
+  sqlite3* raw = nullptr;
+  check(sqlite3_open((directory / "journal.db").c_str(), &raw) == SQLITE_OK,
+        "host saga projection tamper connection opens");
+  if (raw != nullptr) {
+    check(sqlite3_exec(raw, R"sql(
+      DROP TRIGGER host_resource_grants_no_update;
+      DROP TRIGGER host_resource_grants_no_delete;
+      DELETE FROM host_resource_grants;
+    )sql", nullptr, nullptr, nullptr) == SQLITE_OK,
+          "host saga projection can be removed only after raw trigger tamper");
+    sqlite3_close(raw);
+  }
+  std::string reason;
+  check(!journal.verify_chain(&reason),
+        "event chain detects a missing host grant projection");
+  (void)journal.rebuild_projections();
+  check(journal.verify_chain() &&
+            journal.host_grant_saga(request.request_id)->grant == granted.grant,
+        "projection rebuild restores exact host grant state from chained events");
+
+  check(sqlite3_open((directory / "journal.db").c_str(), &raw) == SQLITE_OK,
+        "host saga orphan projection connection opens");
+  if (raw != nullptr) {
+    check(sqlite3_exec(raw, R"sql(
+      PRAGMA foreign_keys=OFF;
+      INSERT INTO host_resource_grants(
+        request_id, allocation_id, request_digest, grant_digest,
+        canonical_grant_json
+      ) VALUES(
+        'orphan-request', 'orphan-allocation', 'orphan-request-digest',
+        'orphan-grant-digest', '{}'
+      );
+    )sql", nullptr, nullptr, nullptr) == SQLITE_OK,
+          "raw connection injects an unreachable grant child with FK checks disabled");
+    sqlite3_close(raw);
+  }
+  check(!journal.verify_chain(&reason),
+        "host saga verification rejects unreachable child projection rows");
+  (void)journal.rebuild_projections();
+  check(journal.verify_chain(),
+        "projection rebuild removes unreachable host saga child rows");
+
+  const auto release = trainvm::seal_resource_release_request({
+      .api_version = std::string(trainvm::kHostLedgerReleaseRequestApiVersion),
+      .release_request_id = "saga-release",
+      .allocation_id = granted.grant->allocation_id,
+      .grant_digest = granted.grant->receipt_digest,
+      .journal_id = request.journal_id,
+      .run_id = request.run_id,
+      .logical_lease_id = request.logical_lease_id,
+      .logical_fencing_token = request.logical_fencing_token,
+      .canonical_request_digest = {},
+  });
+  SagaOneShotFault release_gap(
+      trainvm::HostGrantSagaFaultPoint::host_before_journal);
+  trainvm::HostGrantSagaReconciler release_interrupted(journal, host,
+                                                       &release_gap);
+  bool release_interrupted_once = false;
+  try {
+    (void)release_interrupted.reconcile_release(request.request_id, release,
+                                                test_time(30));
+  } catch (const std::runtime_error&) {
+    release_interrupted_once = true;
+  }
+  check(release_interrupted_once &&
+            journal.host_grant_saga(request.request_id)->release_intent &&
+            !journal.host_grant_saga(request.request_id)->release_receipt,
+        "host release gap remains durably blocked and replayable");
+  recover_matches(running_state,
+                  "controller restart ignores durable host release intent without changing FSM state");
+  const auto released = reconciler.reconcile_release(
+      request.request_id, release, test_time(31));
+  check(released.release_receipt && host.release_calls == 2U &&
+            host.release_replays == 1U,
+        "release retry converges without a second physical release");
+  recover_matches(running_state,
+                  "controller restart ignores durable host release receipt without changing FSM state");
+  bool released_launch = false;
+  try {
+    journal.require_host_launch_eligible(
+        {.request_id = request.request_id,
+         .grant_digest = granted.grant->receipt_digest,
+         .fences = granted.grant->fences},
+        test_time(32));
+  } catch (const trainvm::OperationPreconditionError&) {
+    released_launch = true;
+  }
+  check(released_launch, "released host grants are never launch eligible");
+
+  const auto replacement_request = trainvm::seal_resource_request({
+      .api_version = std::string(trainvm::kHostResourceRequestApiVersion),
+      .request_id = "saga-replacement-request",
+      .journal_id = request.journal_id,
+      .run_id = request.run_id,
+      .logical_lease_id = request.logical_lease_id,
+      .logical_fencing_token = request.logical_fencing_token,
+      .count = 1,
+      .access_mode = trainvm::ResourceAccessMode::mutex_exclusive,
+      .topology = trainvm::TopologyPolicy::any,
+      .selector = {},
+      .canonical_request_digest = {},
+  });
+  const auto replacement = reconciler.reconcile_request(
+      replacement_request, test_time(33));
+  const auto replacement_claim = journal.host_launch_grant_claim(
+      request.run_id, saga_key, request.logical_lease_id,
+      request.logical_fencing_token, test_time(34));
+  bool old_claim_rejected_after_regrant = false;
+  try {
+    journal.require_host_launch_eligible(*selected_claim, test_time(34));
+  } catch (const trainvm::OperationPreconditionError&) {
+    old_claim_rejected_after_regrant = true;
+  }
+  check(replacement.grant && replacement_claim &&
+            replacement_claim->request_id == replacement_request.request_id &&
+            replacement_claim->grant_digest ==
+                replacement.grant->receipt_digest &&
+            replacement.grant->fences.front().generation == 2U &&
+            old_claim_rejected_after_regrant,
+        "release and regrant select generation two without substituting it for the released launch claim");
+  recover_matches(running_state,
+                  "controller restart ignores replacement host saga evidence without changing FSM state");
+  const std::uint64_t before_revocation_checks = journal.event_count();
+  bool stale_hello_rejected = false;
+  bool stale_dispatch_rejected = false;
+  bool stale_result_rejected = false;
+  bool stale_control_ack_rejected = false;
+  try {
+    (void)controller.accept_worker_hello(hello, test_time(35));
+  } catch (const trainvm::OperationPreconditionError&) {
+    stale_hello_rejected = true;
+  }
+  try {
+    (void)controller.prepare_dispatch(test_time(35));
+  } catch (const trainvm::OperationPreconditionError&) {
+    stale_dispatch_rejected = true;
+  }
+  try {
+    (void)controller.handle_event(
+        {.event_id = dispatch.dispatch_id + ":stale-result",
+         .run_id = dispatch.run_id,
+         .run_revision = dispatch.run_revision,
+         .plan_revision = dispatch.plan_revision,
+         .node_id = dispatch.node_id,
+         .attempt_id = dispatch.attempt_id,
+         .worker_sequence = 1,
+         .event_type = "worker.completed",
+         .event_version = 1,
+         .wall_time_ns = 35,
+         .monotonic_time_ns = 35,
+         .optimizer_step = std::uint64_t{1},
+         .payload = {{"reason", "cache_span_complete"}}},
+        {.run_id = launch.run_id,
+         .node_id = launch.node_id,
+         .attempt_id = launch.attempt_id,
+         .launch_nonce = launch.launch_nonce,
+         .concurrency_key = launch.concurrency_key,
+         .lease_id = launch.lease_id,
+         .fencing_token = launch.fencing_token},
+        test_time(35));
+  } catch (const trainvm::OperationPreconditionError&) {
+    stale_result_rejected = true;
+  }
+  try {
+    (void)controller.acknowledge_controls(
+        pending_control.command->command_id,
+        {.concurrency_key = launch.concurrency_key,
+         .lease_id = launch.lease_id,
+         .fencing_token = launch.fencing_token,
+         .node_id = launch.node_id,
+         .attempt_id = launch.attempt_id,
+         .worker_sequence = 1},
+        trainvm::ControlCommandStatus::applied, std::uint64_t{1},
+        pending_control.command->assignments, nlohmann::json::array(),
+        test_time(35));
+  } catch (const trainvm::OperationPreconditionError&) {
+    stale_control_ack_rejected = true;
+  }
+  const auto still_pending_control =
+      journal.control_command(pending_control.command->command_id);
+  check(stale_hello_rejected && stale_dispatch_rejected &&
+            stale_result_rejected && stale_control_ack_rejected &&
+            still_pending_control &&
+            still_pending_control->status ==
+                trainvm::ControlCommandStatus::requested &&
+            journal.event_count() == before_revocation_checks,
+        "release and regrant revoke old hello, dispatch, result, and control-ack authority without journal mutation");
+
+  check(sqlite3_open((directory / "journal.db").c_str(), &raw) == SQLITE_OK,
+        "host saga event tamper connection opens");
+  if (raw != nullptr) {
+    check(sqlite3_exec(raw, R"sql(
+      UPDATE events SET payload_json='{}'
+      WHERE event_type='host.resource_grant_recorded';
+    )sql", nullptr, nullptr, nullptr) == SQLITE_OK,
+          "host saga chained event tamper is injected");
+    sqlite3_close(raw);
+  }
+  bool forged_rebuild_blocked = false;
+  try {
+    (void)journal.rebuild_projections();
+  } catch (const std::runtime_error&) {
+    forged_rebuild_blocked = true;
+  }
+  check(forged_rebuild_blocked,
+        "tampered chained host receipt blocks projection rebuild");
+  std::filesystem::remove_all(directory);
+}
+
 }  // namespace
 
 int main() {
@@ -8328,6 +9204,7 @@ int main() {
     test_adapter_registry_file_contract();
     test_service_registry_and_reconciliation();
     test_adapter_registry_and_reconciler();
+    test_host_grant_saga();
     test_legacy_journal_migration_policy();
   } catch (const std::exception& exception) {
     std::cerr << "UNCAUGHT: " << exception.what() << '\n';

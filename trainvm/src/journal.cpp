@@ -1,6 +1,7 @@
 #include "trainvm/journal.hpp"
 
 #include "trainvm/document.hpp"
+#include "trainvm/reflection_json.hpp"
 
 #include <sqlite3.h>
 
@@ -10,6 +11,7 @@
 #include <array>
 #include <chrono>
 #include <cerrno>
+#include <cctype>
 #include <cstdint>
 #include <cstring>
 #include <fcntl.h>
@@ -45,7 +47,7 @@ CREATE TABLE IF NOT EXISTS journal_meta (
   value TEXT NOT NULL
 ) WITHOUT ROWID;
 
-INSERT INTO journal_meta(key, value) VALUES('schema_version', '6')
+INSERT INTO journal_meta(key, value) VALUES('schema_version', '7')
 ON CONFLICT(key) DO NOTHING;
 
 INSERT INTO journal_meta(key, value) VALUES(
@@ -233,6 +235,63 @@ CREATE TABLE IF NOT EXISTS control_commands (
   UNIQUE(run_id, idempotency_key),
   UNIQUE(run_id, control_revision)
 ) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS host_resource_requests (
+  request_id TEXT PRIMARY KEY,
+  journal_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  concurrency_key TEXT NOT NULL,
+  logical_lease_id TEXT NOT NULL,
+  logical_fencing_token INTEGER NOT NULL CHECK(logical_fencing_token > 0),
+  request_digest TEXT NOT NULL UNIQUE,
+  canonical_request_json TEXT NOT NULL
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS host_resource_grants (
+  request_id TEXT PRIMARY KEY REFERENCES host_resource_requests(request_id),
+  allocation_id TEXT NOT NULL UNIQUE,
+  request_digest TEXT NOT NULL,
+  grant_digest TEXT NOT NULL UNIQUE,
+  canonical_grant_json TEXT NOT NULL
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS host_resource_release_intents (
+  release_request_id TEXT PRIMARY KEY,
+  request_id TEXT NOT NULL UNIQUE REFERENCES host_resource_requests(request_id),
+  allocation_id TEXT NOT NULL UNIQUE,
+  grant_digest TEXT NOT NULL,
+  release_request_digest TEXT NOT NULL UNIQUE,
+  canonical_release_request_json TEXT NOT NULL
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS host_resource_release_receipts (
+  release_request_id TEXT PRIMARY KEY
+    REFERENCES host_resource_release_intents(release_request_id),
+  request_id TEXT NOT NULL UNIQUE REFERENCES host_resource_requests(request_id),
+  release_receipt_digest TEXT NOT NULL UNIQUE,
+  canonical_release_receipt_json TEXT NOT NULL
+) WITHOUT ROWID;
+
+CREATE TRIGGER host_resource_requests_no_update BEFORE UPDATE ON host_resource_requests
+BEGIN SELECT RAISE(ABORT, 'host resource requests are immutable'); END;
+CREATE TRIGGER host_resource_requests_no_delete BEFORE DELETE ON host_resource_requests
+BEGIN SELECT RAISE(ABORT, 'host resource requests are immutable'); END;
+CREATE TRIGGER host_resource_grants_no_update BEFORE UPDATE ON host_resource_grants
+BEGIN SELECT RAISE(ABORT, 'host resource grants are immutable'); END;
+CREATE TRIGGER host_resource_grants_no_delete BEFORE DELETE ON host_resource_grants
+BEGIN SELECT RAISE(ABORT, 'host resource grants are immutable'); END;
+CREATE TRIGGER host_resource_release_intents_no_update
+BEFORE UPDATE ON host_resource_release_intents
+BEGIN SELECT RAISE(ABORT, 'host resource release intents are immutable'); END;
+CREATE TRIGGER host_resource_release_intents_no_delete
+BEFORE DELETE ON host_resource_release_intents
+BEGIN SELECT RAISE(ABORT, 'host resource release intents are immutable'); END;
+CREATE TRIGGER host_resource_release_receipts_no_update
+BEFORE UPDATE ON host_resource_release_receipts
+BEGIN SELECT RAISE(ABORT, 'host resource release receipts are immutable'); END;
+CREATE TRIGGER host_resource_release_receipts_no_delete
+BEFORE DELETE ON host_resource_release_receipts
+BEGIN SELECT RAISE(ABORT, 'host resource release receipts are immutable'); END;
 )sql";
 
 constexpr std::string_view kSchemaV6Migration = R"sql(
@@ -295,6 +354,62 @@ BEGIN
 END;
 
 UPDATE journal_meta SET value='6' WHERE key='schema_version' AND value='5';
+)sql";
+
+constexpr std::string_view kSchemaV7Migration = R"sql(
+CREATE TABLE host_resource_requests (
+  request_id TEXT PRIMARY KEY,
+  journal_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  concurrency_key TEXT NOT NULL,
+  logical_lease_id TEXT NOT NULL,
+  logical_fencing_token INTEGER NOT NULL CHECK(logical_fencing_token > 0),
+  request_digest TEXT NOT NULL UNIQUE,
+  canonical_request_json TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE host_resource_grants (
+  request_id TEXT PRIMARY KEY REFERENCES host_resource_requests(request_id),
+  allocation_id TEXT NOT NULL UNIQUE,
+  request_digest TEXT NOT NULL,
+  grant_digest TEXT NOT NULL UNIQUE,
+  canonical_grant_json TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE host_resource_release_intents (
+  release_request_id TEXT PRIMARY KEY,
+  request_id TEXT NOT NULL UNIQUE REFERENCES host_resource_requests(request_id),
+  allocation_id TEXT NOT NULL UNIQUE,
+  grant_digest TEXT NOT NULL,
+  release_request_digest TEXT NOT NULL UNIQUE,
+  canonical_release_request_json TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE host_resource_release_receipts (
+  release_request_id TEXT PRIMARY KEY
+    REFERENCES host_resource_release_intents(release_request_id),
+  request_id TEXT NOT NULL UNIQUE REFERENCES host_resource_requests(request_id),
+  release_receipt_digest TEXT NOT NULL UNIQUE,
+  canonical_release_receipt_json TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TRIGGER host_resource_requests_no_update BEFORE UPDATE ON host_resource_requests
+BEGIN SELECT RAISE(ABORT, 'host resource requests are immutable'); END;
+CREATE TRIGGER host_resource_requests_no_delete BEFORE DELETE ON host_resource_requests
+BEGIN SELECT RAISE(ABORT, 'host resource requests are immutable'); END;
+CREATE TRIGGER host_resource_grants_no_update BEFORE UPDATE ON host_resource_grants
+BEGIN SELECT RAISE(ABORT, 'host resource grants are immutable'); END;
+CREATE TRIGGER host_resource_grants_no_delete BEFORE DELETE ON host_resource_grants
+BEGIN SELECT RAISE(ABORT, 'host resource grants are immutable'); END;
+CREATE TRIGGER host_resource_release_intents_no_update
+BEFORE UPDATE ON host_resource_release_intents
+BEGIN SELECT RAISE(ABORT, 'host resource release intents are immutable'); END;
+CREATE TRIGGER host_resource_release_intents_no_delete
+BEFORE DELETE ON host_resource_release_intents
+BEGIN SELECT RAISE(ABORT, 'host resource release intents are immutable'); END;
+CREATE TRIGGER host_resource_release_receipts_no_update
+BEFORE UPDATE ON host_resource_release_receipts
+BEGIN SELECT RAISE(ABORT, 'host resource release receipts are immutable'); END;
+CREATE TRIGGER host_resource_release_receipts_no_delete
+BEFORE DELETE ON host_resource_release_receipts
+BEGIN SELECT RAISE(ABORT, 'host resource release receipts are immutable'); END;
+UPDATE journal_meta SET value='7' WHERE key='schema_version' AND value='6';
 )sql";
 
 constexpr std::string_view kSchemaV4 = R"sql(
@@ -574,6 +689,21 @@ const SchemaSnapshot& canonical_schema_v4() {
 const SchemaSnapshot& canonical_schema_v5() {
   static const SchemaSnapshot schema = [] {
     SchemaSnapshot result = canonical_schema(kSchema);
+    for (const std::string_view object : {
+             "table\nhost_resource_requests",
+             "table\nhost_resource_grants",
+             "table\nhost_resource_release_intents",
+             "table\nhost_resource_release_receipts",
+             "trigger\nhost_resource_requests_no_update",
+             "trigger\nhost_resource_requests_no_delete",
+             "trigger\nhost_resource_grants_no_update",
+             "trigger\nhost_resource_grants_no_delete",
+             "trigger\nhost_resource_release_intents_no_update",
+             "trigger\nhost_resource_release_intents_no_delete",
+             "trigger\nhost_resource_release_receipts_no_update",
+             "trigger\nhost_resource_release_receipts_no_delete"}) {
+      result.erase(std::string(object));
+    }
     result.erase("table\nresource_lease_renewals");
     result.erase("trigger\nresource_lease_renewals_no_conflicting_insert");
     result.erase("trigger\nresource_lease_renewals_no_update");
@@ -584,6 +714,29 @@ const SchemaSnapshot& canonical_schema_v5() {
 }
 
 const SchemaSnapshot& canonical_schema_v6() {
+  static const SchemaSnapshot schema = [] {
+    SchemaSnapshot result = canonical_schema(kSchema);
+    for (const std::string_view object : {
+             "table\nhost_resource_requests",
+             "table\nhost_resource_grants",
+             "table\nhost_resource_release_intents",
+             "table\nhost_resource_release_receipts",
+             "trigger\nhost_resource_requests_no_update",
+             "trigger\nhost_resource_requests_no_delete",
+             "trigger\nhost_resource_grants_no_update",
+             "trigger\nhost_resource_grants_no_delete",
+             "trigger\nhost_resource_release_intents_no_update",
+             "trigger\nhost_resource_release_intents_no_delete",
+             "trigger\nhost_resource_release_receipts_no_update",
+             "trigger\nhost_resource_release_receipts_no_delete"}) {
+      result.erase(std::string(object));
+    }
+    return result;
+  }();
+  return schema;
+}
+
+const SchemaSnapshot& canonical_schema_v7() {
   static const SchemaSnapshot schema = canonical_schema(kSchema);
   return schema;
 }
@@ -989,6 +1142,525 @@ ResourceLease lease_from_row(sqlite3_stmt* statement) {
   };
 }
 
+nlohmann::json release_request_json(const ResourceReleaseRequest& request) {
+  const ResourceReleaseRequest sealed = seal_resource_release_request(request);
+  if (sealed != request) {
+    throw OperationPreconditionError(
+        "host release request digest is not canonical");
+  }
+  return {{"api_version", request.api_version},
+          {"release_request_id", request.release_request_id},
+          {"allocation_id", request.allocation_id},
+          {"grant_digest", request.grant_digest},
+          {"journal_id", request.journal_id},
+          {"run_id", request.run_id},
+          {"logical_lease_id", request.logical_lease_id},
+          {"logical_fencing_token", request.logical_fencing_token},
+          {"canonical_request_digest", request.canonical_request_digest}};
+}
+
+ResourceReleaseRequest release_request_from_json(const nlohmann::json& source) {
+  static const std::set<std::string> keys{
+      "api_version",          "release_request_id", "allocation_id",
+      "grant_digest",         "journal_id",         "run_id",
+      "logical_lease_id",     "logical_fencing_token",
+      "canonical_request_digest"};
+  if (!source.is_object() || source.size() != keys.size() ||
+      !std::ranges::all_of(source.items(), [&](const auto& item) {
+        return keys.contains(item.key());
+      })) {
+    throw std::runtime_error("host release request JSON shape is invalid");
+  }
+  ResourceReleaseRequest request{
+      .api_version = source.at("api_version").get<std::string>(),
+      .release_request_id = source.at("release_request_id").get<std::string>(),
+      .allocation_id = source.at("allocation_id").get<std::string>(),
+      .grant_digest = source.at("grant_digest").get<std::string>(),
+      .journal_id = source.at("journal_id").get<std::string>(),
+      .run_id = source.at("run_id").get<std::string>(),
+      .logical_lease_id = source.at("logical_lease_id").get<std::string>(),
+      .logical_fencing_token =
+          source.at("logical_fencing_token").get<std::uint64_t>(),
+      .canonical_request_digest =
+          source.at("canonical_request_digest").get<std::string>(),
+  };
+  (void)release_request_json(request);
+  return request;
+}
+
+std::optional<HostGrantSagaSnapshot> load_host_grant_saga(
+    sqlite3* database, const std::string& request_id) {
+  if (request_id.empty()) {
+    throw std::invalid_argument("host resource request_id must not be empty");
+  }
+  Statement query(database, R"sql(
+    SELECT request.canonical_request_json,
+           grant.canonical_grant_json,
+           release_intent.canonical_release_request_json,
+           release_receipt.canonical_release_receipt_json
+    FROM host_resource_requests AS request
+    LEFT JOIN host_resource_grants AS grant
+      ON grant.request_id=request.request_id
+    LEFT JOIN host_resource_release_intents AS release_intent
+      ON release_intent.request_id=request.request_id
+    LEFT JOIN host_resource_release_receipts AS release_receipt
+      ON release_receipt.request_id=request.request_id
+    WHERE request.request_id=?
+  )sql");
+  bind_text(query.get(), 1, request_id);
+  const int status = sqlite3_step(query.get());
+  if (status == SQLITE_DONE) return std::nullopt;
+  if (status != SQLITE_ROW) {
+    throw std::runtime_error("could not read host grant saga");
+  }
+  HostGrantSagaSnapshot result{
+      .request = resource_request_from_json(
+          nlohmann::json::parse(column_text(query.get(), 0))),
+      .busy_outcome_digest = std::nullopt,
+      .grant = std::nullopt,
+      .release_intent = std::nullopt,
+      .release_receipt = std::nullopt,
+  };
+  if (sqlite3_column_type(query.get(), 1) != SQLITE_NULL) {
+    result.grant = resource_bundle_grant_from_json(
+        nlohmann::json::parse(column_text(query.get(), 1)));
+  }
+  if (sqlite3_column_type(query.get(), 2) != SQLITE_NULL) {
+    result.release_intent = release_request_from_json(
+        nlohmann::json::parse(column_text(query.get(), 2)));
+  }
+  if (sqlite3_column_type(query.get(), 3) != SQLITE_NULL) {
+    result.release_receipt = resource_release_receipt_from_json(
+        nlohmann::json::parse(column_text(query.get(), 3)));
+  }
+  if (sqlite3_step(query.get()) != SQLITE_DONE) {
+    throw std::runtime_error("host grant saga identity is not unique");
+  }
+  Statement busy(database, R"sql(
+    SELECT run_id, event_type, payload_json FROM events WHERE event_id=?
+  )sql");
+  bind_text(busy.get(), 1, "host-resource-busy:" + request_id);
+  const int busy_status = sqlite3_step(busy.get());
+  if (busy_status == SQLITE_ROW) {
+    const auto payload = nlohmann::json::parse(column_text(busy.get(), 2));
+    if (column_text(busy.get(), 0) != result.request.run_id ||
+        column_text(busy.get(), 1) != "host.resource_busy_recorded" ||
+        !payload.is_object() || payload.size() != 3U ||
+        payload.value("request_id", std::string{}) != request_id ||
+        payload.value("request_digest", std::string{}) !=
+            result.request.canonical_request_digest ||
+        !payload.contains("outcome_digest") ||
+        !payload.at("outcome_digest").is_string()) {
+      throw std::runtime_error("host busy outcome event is malformed");
+    }
+    result.busy_outcome_digest =
+        payload.at("outcome_digest").get<std::string>();
+    if (sqlite3_step(busy.get()) != SQLITE_DONE) {
+      throw std::runtime_error("host busy outcome identity is not unique");
+    }
+  } else if (busy_status != SQLITE_DONE) {
+    throw std::runtime_error("could not read host busy outcome");
+  }
+  return result;
+}
+
+Event host_saga_event(sqlite3* database, std::string event_id,
+                      std::string event_type, std::string run_id,
+                      std::int64_t wall_time_ns,
+                      std::uint64_t monotonic_time_ns,
+                      nlohmann::json payload) {
+  Statement projection(database, R"sql(
+    SELECT run_revision FROM run_projection WHERE run_id=?
+  )sql");
+  bind_text(projection.get(), 1, run_id);
+  if (sqlite3_step(projection.get()) != SQLITE_ROW) {
+    throw OperationPreconditionError(
+        "host grant saga requires a durable run projection");
+  }
+  const auto run_revision =
+      static_cast<std::uint64_t>(sqlite3_column_int64(projection.get(), 0));
+  Statement plan(database,
+                 "SELECT COALESCE(MAX(plan_revision),0) FROM events WHERE run_id=?");
+  bind_text(plan.get(), 1, run_id);
+  if (sqlite3_step(plan.get()) != SQLITE_ROW) {
+    throw std::runtime_error("could not bind host saga plan revision");
+  }
+  return {.event_id = std::move(event_id),
+          .run_id = std::move(run_id),
+          .run_revision = run_revision,
+          .plan_revision =
+              static_cast<std::uint64_t>(sqlite3_column_int64(plan.get(), 0)),
+          .node_id = {},
+          .attempt_id = {},
+          .worker_sequence = 0,
+          .event_type = std::move(event_type),
+          .event_version = 1,
+          .wall_time_ns = wall_time_ns,
+          .monotonic_time_ns = monotonic_time_ns,
+          .optimizer_step = std::nullopt,
+          .payload = std::move(payload)};
+}
+
+bool verify_host_saga_projection(sqlite3* database, std::string* reason) {
+  const auto fail = [&](std::string message) {
+    if (reason != nullptr) *reason = std::move(message);
+    return false;
+  };
+  try {
+    const auto require_event = [&](const std::string& event_id,
+                                   std::string_view event_type,
+                                   const std::string& run_id,
+                                   const nlohmann::json& payload) {
+      Statement event(database, R"sql(
+        SELECT run_id, event_type, payload_json FROM events WHERE event_id=?
+      )sql");
+      bind_text(event.get(), 1, event_id);
+      if (sqlite3_step(event.get()) != SQLITE_ROW ||
+          column_text(event.get(), 0) != run_id ||
+          column_text(event.get(), 1) != event_type ||
+          nlohmann::json::parse(column_text(event.get(), 2)) != payload ||
+          sqlite3_step(event.get()) != SQLITE_DONE) {
+        throw std::runtime_error("host saga projection has no exact chained event " +
+                                 event_id);
+      }
+    };
+    std::uint64_t requests = 0;
+    std::uint64_t busy_outcomes = 0;
+    std::uint64_t grants = 0;
+    std::uint64_t release_intents = 0;
+    std::uint64_t release_receipts = 0;
+    Statement rows(database, R"sql(
+      SELECT request_id, journal_id, run_id, concurrency_key,
+             logical_lease_id, logical_fencing_token, request_digest,
+             canonical_request_json
+      FROM host_resource_requests ORDER BY request_id
+    )sql");
+    int status = SQLITE_OK;
+    while ((status = sqlite3_step(rows.get())) == SQLITE_ROW) {
+      ++requests;
+      const std::string request_id = column_text(rows.get(), 0);
+      const std::string concurrency_key = column_text(rows.get(), 3);
+      const auto saga = load_host_grant_saga(database, request_id);
+      if (!saga || saga->request.journal_id != column_text(rows.get(), 1) ||
+          saga->request.run_id != column_text(rows.get(), 2) ||
+          saga->request.logical_lease_id != column_text(rows.get(), 4) ||
+          saga->request.logical_fencing_token !=
+              static_cast<std::uint64_t>(sqlite3_column_int64(rows.get(), 5)) ||
+          saga->request.canonical_request_digest != column_text(rows.get(), 6) ||
+          resource_request_json(saga->request).dump() != column_text(rows.get(), 7)) {
+        return fail("host resource request projection diverges from canonical JSON");
+      }
+      Statement lease(database, R"sql(
+        SELECT owner_run_id, lease_id, fencing_token
+        FROM resource_leases WHERE concurrency_key=?
+      )sql");
+      bind_text(lease.get(), 1, concurrency_key);
+      if (sqlite3_step(lease.get()) != SQLITE_ROW) {
+        return fail("host resource request has no logical lease lineage");
+      }
+      const auto current_token =
+          static_cast<std::uint64_t>(sqlite3_column_int64(lease.get(), 2));
+      if (current_token < saga->request.logical_fencing_token ||
+          (current_token == saga->request.logical_fencing_token &&
+           (column_text(lease.get(), 0) != saga->request.run_id ||
+            column_text(lease.get(), 1) != saga->request.logical_lease_id))) {
+        return fail("host resource request disagrees with logical lease lineage");
+      }
+      require_event("host-resource-request:" + request_id,
+                    "host.resource_request_recorded", saga->request.run_id,
+                    {{"concurrency_key", concurrency_key},
+                     {"request", resource_request_json(saga->request)}});
+      if (saga->busy_outcome_digest) {
+        ++busy_outcomes;
+        if (saga->grant || saga->release_intent || saga->release_receipt) {
+          return fail("host busy outcome conflicts with a grant saga");
+        }
+        require_event("host-resource-busy:" + request_id,
+                      "host.resource_busy_recorded", saga->request.run_id,
+                      {{"request_id", request_id},
+                       {"request_digest",
+                        saga->request.canonical_request_digest},
+                       {"outcome_digest", *saga->busy_outcome_digest}});
+      }
+      if (saga->grant) {
+        ++grants;
+        if (saga->grant->request_id != request_id ||
+            saga->grant->request_digest !=
+                saga->request.canonical_request_digest ||
+            saga->grant->journal_id != saga->request.journal_id ||
+            saga->grant->run_id != saga->request.run_id ||
+            saga->grant->logical_lease_id != saga->request.logical_lease_id ||
+            saga->grant->logical_fencing_token !=
+                saga->request.logical_fencing_token) {
+          return fail("host grant projection is not closed over its request");
+        }
+        Statement grant(database, R"sql(
+          SELECT allocation_id, request_digest, grant_digest,
+                 canonical_grant_json FROM host_resource_grants WHERE request_id=?
+        )sql");
+        bind_text(grant.get(), 1, request_id);
+        if (sqlite3_step(grant.get()) != SQLITE_ROW ||
+            column_text(grant.get(), 0) != saga->grant->allocation_id ||
+            column_text(grant.get(), 1) != saga->grant->request_digest ||
+            column_text(grant.get(), 2) != saga->grant->receipt_digest ||
+            column_text(grant.get(), 3) !=
+                resource_bundle_grant_json(*saga->grant).dump()) {
+          return fail("host grant scalar projection diverges from its receipt");
+        }
+        require_event("host-resource-grant:" + request_id,
+                      "host.resource_grant_recorded", saga->request.run_id,
+                      {{"request_id", request_id},
+                       {"grant", resource_bundle_grant_json(*saga->grant)}});
+      }
+      if (saga->release_intent) {
+        ++release_intents;
+        if (!saga->grant ||
+            saga->release_intent->allocation_id != saga->grant->allocation_id ||
+            saga->release_intent->grant_digest != saga->grant->receipt_digest ||
+            saga->release_intent->journal_id != saga->request.journal_id ||
+            saga->release_intent->run_id != saga->request.run_id ||
+            saga->release_intent->logical_lease_id !=
+                saga->request.logical_lease_id ||
+            saga->release_intent->logical_fencing_token !=
+                saga->request.logical_fencing_token) {
+          return fail("host release intent is not closed over its grant");
+        }
+        Statement intent(database, R"sql(
+          SELECT release_request_id, allocation_id, grant_digest,
+                 release_request_digest, canonical_release_request_json
+          FROM host_resource_release_intents WHERE request_id=?
+        )sql");
+        bind_text(intent.get(), 1, request_id);
+        if (sqlite3_step(intent.get()) != SQLITE_ROW ||
+            column_text(intent.get(), 0) !=
+                saga->release_intent->release_request_id ||
+            column_text(intent.get(), 1) != saga->release_intent->allocation_id ||
+            column_text(intent.get(), 2) != saga->release_intent->grant_digest ||
+            column_text(intent.get(), 3) !=
+                saga->release_intent->canonical_request_digest ||
+            column_text(intent.get(), 4) !=
+                release_request_json(*saga->release_intent).dump()) {
+          return fail("host release intent scalar projection diverges");
+        }
+        require_event("host-resource-release-intent:" + request_id,
+                      "host.resource_release_intent_recorded",
+                      saga->request.run_id,
+                      {{"request_id", request_id},
+                       {"release", release_request_json(*saga->release_intent)}});
+      }
+      if (saga->release_receipt) {
+        ++release_receipts;
+        if (!saga->grant || !saga->release_intent ||
+            saga->release_receipt->release_request_id !=
+                saga->release_intent->release_request_id ||
+            saga->release_receipt->release_request_digest !=
+                saga->release_intent->canonical_request_digest ||
+            saga->release_receipt->allocation_id != saga->grant->allocation_id ||
+            saga->release_receipt->grant_digest != saga->grant->receipt_digest ||
+            saga->release_receipt->host_id != saga->grant->host_id ||
+            saga->release_receipt->boot_id != saga->grant->boot_id ||
+            saga->release_receipt->broker_epoch != saga->grant->broker_epoch) {
+          return fail("host release receipt is not closed over its intent");
+        }
+        Statement receipt(database, R"sql(
+          SELECT release_request_id, release_receipt_digest,
+                 canonical_release_receipt_json
+          FROM host_resource_release_receipts WHERE request_id=?
+        )sql");
+        bind_text(receipt.get(), 1, request_id);
+        if (sqlite3_step(receipt.get()) != SQLITE_ROW ||
+            column_text(receipt.get(), 0) !=
+                saga->release_receipt->release_request_id ||
+            column_text(receipt.get(), 1) !=
+                saga->release_receipt->receipt_digest ||
+            column_text(receipt.get(), 2) !=
+                resource_release_receipt_json(*saga->release_receipt).dump()) {
+          return fail("host release receipt scalar projection diverges");
+        }
+        require_event(
+            "host-resource-release-receipt:" + request_id,
+            "host.resource_release_receipt_recorded", saga->request.run_id,
+            {{"request_id", request_id},
+             {"receipt",
+              resource_release_receipt_json(*saga->release_receipt)}});
+      }
+    }
+    if (status != SQLITE_DONE) {
+      return fail("could not scan host saga projections");
+    }
+    const auto require_projection_count = [&](std::string_view table,
+                                              std::uint64_t expected) {
+      Statement count(database,
+                      "SELECT COUNT(*) FROM " + std::string(table));
+      if (sqlite3_step(count.get()) != SQLITE_ROW ||
+          static_cast<std::uint64_t>(sqlite3_column_int64(count.get(), 0)) !=
+              expected ||
+          sqlite3_step(count.get()) != SQLITE_DONE) {
+        throw std::runtime_error(
+            "host saga projection contains unreachable child rows");
+      }
+    };
+    require_projection_count("host_resource_requests", requests);
+    require_projection_count("host_resource_grants", grants);
+    require_projection_count("host_resource_release_intents", release_intents);
+    require_projection_count("host_resource_release_receipts",
+                             release_receipts);
+    const auto require_count = [&](std::string_view type,
+                                   std::uint64_t expected) {
+      Statement count(database, "SELECT COUNT(*) FROM events WHERE event_type=?");
+      bind_text(count.get(), 1, std::string(type));
+      if (sqlite3_step(count.get()) != SQLITE_ROW ||
+          static_cast<std::uint64_t>(sqlite3_column_int64(count.get(), 0)) !=
+              expected) {
+        throw std::runtime_error("host saga chained event count diverges");
+      }
+    };
+    require_count("host.resource_request_recorded", requests);
+    require_count("host.resource_busy_recorded", busy_outcomes);
+    require_count("host.resource_grant_recorded", grants);
+    require_count("host.resource_release_intent_recorded", release_intents);
+    require_count("host.resource_release_receipt_recorded", release_receipts);
+    return true;
+  } catch (const std::exception& error) {
+    return fail(error.what());
+  }
+}
+
+void replay_host_saga_projection(sqlite3* database, const Event& event) {
+  if (event.event_type == "host.resource_request_recorded") {
+    if (!event.payload.is_object() || event.payload.size() != 2U ||
+        !event.payload.contains("concurrency_key") ||
+        !event.payload.at("concurrency_key").is_string() ||
+        !event.payload.contains("request")) {
+      throw std::runtime_error("chained host request event is malformed");
+    }
+    const auto request =
+        resource_request_from_json(event.payload.at("request"));
+    const std::string concurrency_key =
+        event.payload.at("concurrency_key").get<std::string>();
+    if (request.run_id != event.run_id || concurrency_key.empty()) {
+      throw std::runtime_error("chained host request identity diverges");
+    }
+    Statement insert(database, R"sql(
+      INSERT INTO host_resource_requests(
+        request_id, journal_id, run_id, concurrency_key, logical_lease_id,
+        logical_fencing_token, request_digest, canonical_request_json
+      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+    )sql");
+    bind_text(insert.get(), 1, request.request_id);
+    bind_text(insert.get(), 2, request.journal_id);
+    bind_text(insert.get(), 3, request.run_id);
+    bind_text(insert.get(), 4, concurrency_key);
+    bind_text(insert.get(), 5, request.logical_lease_id);
+    bind_integer(insert.get(), 6,
+                 checked_integer(request.logical_fencing_token,
+                                 "logical_fencing_token"));
+    bind_text(insert.get(), 7, request.canonical_request_digest);
+    bind_text(insert.get(), 8, resource_request_json(request).dump());
+    require_done(database, insert.get(), "replay host resource request");
+    return;
+  }
+  const auto required_request_id = [&]() {
+    if (!event.payload.is_object() || !event.payload.contains("request_id") ||
+        !event.payload.at("request_id").is_string()) {
+      throw std::runtime_error("chained host saga event has no request identity");
+    }
+    return event.payload.at("request_id").get<std::string>();
+  };
+  if (event.event_type == "host.resource_grant_recorded") {
+    if (event.payload.size() != 2U || !event.payload.contains("grant")) {
+      throw std::runtime_error("chained host grant event is malformed");
+    }
+    const std::string request_id = required_request_id();
+    const auto grant =
+        resource_bundle_grant_from_json(event.payload.at("grant"));
+    if (grant.request_id != request_id || grant.run_id != event.run_id) {
+      throw std::runtime_error("chained host grant identity diverges");
+    }
+    Statement insert(database, R"sql(
+      INSERT INTO host_resource_grants(
+        request_id, allocation_id, request_digest, grant_digest,
+        canonical_grant_json
+      ) VALUES(?, ?, ?, ?, ?)
+    )sql");
+    bind_text(insert.get(), 1, request_id);
+    bind_text(insert.get(), 2, grant.allocation_id);
+    bind_text(insert.get(), 3, grant.request_digest);
+    bind_text(insert.get(), 4, grant.receipt_digest);
+    bind_text(insert.get(), 5, resource_bundle_grant_json(grant).dump());
+    require_done(database, insert.get(), "replay host grant receipt");
+    return;
+  }
+  if (event.event_type == "host.resource_busy_recorded") {
+    if (!event.payload.is_object() || event.payload.size() != 3U ||
+        !event.payload.contains("request_digest") ||
+        !event.payload.at("request_digest").is_string() ||
+        !event.payload.contains("outcome_digest") ||
+        !event.payload.at("outcome_digest").is_string()) {
+      throw std::runtime_error("chained host busy outcome is malformed");
+    }
+    const std::string request_id = required_request_id();
+    Statement request(database, R"sql(
+      SELECT run_id, request_digest FROM host_resource_requests
+      WHERE request_id=?
+    )sql");
+    bind_text(request.get(), 1, request_id);
+    if (sqlite3_step(request.get()) != SQLITE_ROW ||
+        column_text(request.get(), 0) != event.run_id ||
+        column_text(request.get(), 1) !=
+            event.payload.at("request_digest").get<std::string>() ||
+        sqlite3_step(request.get()) != SQLITE_DONE) {
+      throw std::runtime_error("chained host busy outcome identity diverges");
+    }
+    return;
+  }
+  if (event.event_type == "host.resource_release_intent_recorded") {
+    if (event.payload.size() != 2U || !event.payload.contains("release")) {
+      throw std::runtime_error("chained host release intent is malformed");
+    }
+    const std::string request_id = required_request_id();
+    const auto release =
+        release_request_from_json(event.payload.at("release"));
+    if (release.run_id != event.run_id) {
+      throw std::runtime_error("chained host release intent identity diverges");
+    }
+    Statement insert(database, R"sql(
+      INSERT INTO host_resource_release_intents(
+        release_request_id, request_id, allocation_id, grant_digest,
+        release_request_digest, canonical_release_request_json
+      ) VALUES(?, ?, ?, ?, ?, ?)
+    )sql");
+    bind_text(insert.get(), 1, release.release_request_id);
+    bind_text(insert.get(), 2, request_id);
+    bind_text(insert.get(), 3, release.allocation_id);
+    bind_text(insert.get(), 4, release.grant_digest);
+    bind_text(insert.get(), 5, release.canonical_request_digest);
+    bind_text(insert.get(), 6, release_request_json(release).dump());
+    require_done(database, insert.get(), "replay host release intent");
+    return;
+  }
+  if (event.event_type == "host.resource_release_receipt_recorded") {
+    if (event.payload.size() != 2U || !event.payload.contains("receipt")) {
+      throw std::runtime_error("chained host release receipt is malformed");
+    }
+    const std::string request_id = required_request_id();
+    const auto receipt =
+        resource_release_receipt_from_json(event.payload.at("receipt"));
+    Statement insert(database, R"sql(
+      INSERT INTO host_resource_release_receipts(
+        release_request_id, request_id, release_receipt_digest,
+        canonical_release_receipt_json
+      ) VALUES(?, ?, ?, ?)
+    )sql");
+    bind_text(insert.get(), 1, receipt.release_request_id);
+    bind_text(insert.get(), 2, request_id);
+    bind_text(insert.get(), 3, receipt.receipt_digest);
+    bind_text(insert.get(), 4,
+              resource_release_receipt_json(receipt).dump());
+    require_done(database, insert.get(), "replay host release receipt");
+  }
+}
+
 LeaseRenewalReceipt renewal_receipt_from_row(sqlite3_stmt* statement) {
   return {
       .concurrency_key = column_text(statement, 0),
@@ -1158,8 +1830,29 @@ bool safe_authority_file(const struct stat& status, std::uint64_t owner_uid) {
 }  // namespace
 
 Journal::Journal(const std::filesystem::path& path,
-                 std::optional<JournalFileIdentity> expected_file)
-    : expected_file_(std::move(expected_file)) {
+                 std::optional<JournalFileIdentity> expected_file,
+                 HostGrantEnforcement host_grant_enforcement,
+                 std::optional<HostIdentity> expected_host_grant_authority)
+    : expected_file_(std::move(expected_file)),
+      host_grant_enforcement_(host_grant_enforcement),
+      expected_host_grant_authority_(
+          std::move(expected_host_grant_authority)) {
+  if (expected_host_grant_authority_) {
+    const auto valid_host_identifier = [](std::string_view value) {
+      return !value.empty() &&
+             value.size() <= HostResourceBounds::maximum_identifier_bytes &&
+             std::ranges::all_of(value, [](char character) {
+               return std::isalnum(static_cast<unsigned char>(character)) != 0 ||
+                      character == '.' || character == '_' || character == ':' ||
+                      character == '/' || character == '-';
+             });
+    };
+    if (!valid_host_identifier(expected_host_grant_authority_->host_id) ||
+        !valid_host_identifier(expected_host_grant_authority_->boot_id)) {
+      throw std::invalid_argument(
+          "trusted host grant authority has a malformed host or boot identity");
+    }
+  }
   const auto parent = path.parent_path();
   if (!expected_file_ && !parent.empty()) {
     std::filesystem::create_directories(parent);
@@ -1367,7 +2060,7 @@ void Journal::initialize() {
     stored_version = column_text(version.get(), 0);
     if (stored_version != "1" && stored_version != "2" && stored_version != "3" &&
         stored_version != "4" && stored_version != "5" &&
-        stored_version != "6") {
+        stored_version != "6" && stored_version != "7") {
       throw std::runtime_error("unsupported journal schema version");
     }
   }
@@ -1390,8 +2083,8 @@ void Journal::initialize() {
       throw std::runtime_error(
           "refusing to initialize a SQLite database claimed by another application");
     }
-    execute_sql(kSchema, "could not create journal schema v6");
-    require_exact_schema(database_, canonical_schema_v6(), "v6");
+    execute_sql(kSchema, "could not create journal schema v7");
+    require_exact_schema(database_, canonical_schema_v7(), "v7");
     Statement insert(database_, R"sql(
       INSERT INTO journal_meta(key, value) VALUES('journal_id', ?)
     )sql");
@@ -1512,7 +2205,7 @@ void Journal::initialize() {
     require_exact_schema(database_, canonical_schema_v4(), "v4");
     require_authority_metadata("4");
     std::string chain_reason;
-    if (!verify_chain(&chain_reason)) {
+    if (!verify_event_chain(&chain_reason)) {
       throw std::runtime_error(
           "refusing to migrate journal schema v4 with an invalid event chain: " +
           chain_reason);
@@ -1667,7 +2360,8 @@ void Journal::initialize() {
     migration_transaction = std::make_unique<Transaction>(database_);
   }
   std::map<std::string, ResourceLease> attested_leases;
-  if (stored_version == "5" || stored_version == "6") {
+  if (stored_version == "5" || stored_version == "6" ||
+      stored_version == "7") {
     const std::string authority_version = stored_version;
     for (const std::string_view table :
          std::array<std::string_view, 8>{
@@ -1680,13 +2374,15 @@ void Journal::initialize() {
                                  std::string(table));
       }
     }
-    if (stored_version == "6" && !table_exists("resource_lease_renewals")) {
+    if ((stored_version == "6" || stored_version == "7") &&
+        !table_exists("resource_lease_renewals")) {
       throw std::runtime_error(
           "journal schema v6 is partial: missing resource_lease_renewals");
     }
     require_exact_schema(database_,
                          stored_version == "5" ? canonical_schema_v5()
-                                               : canonical_schema_v6(),
+                         : stored_version == "6" ? canonical_schema_v6()
+                                                   : canonical_schema_v7(),
                          "v" + authority_version);
     require_authority_metadata(authority_version);
     require_columns(
@@ -1807,6 +2503,12 @@ void Journal::initialize() {
       throw std::runtime_error("journal schema v5 lease release data is unreadable");
     }
     if (stored_version == "5") {
+      std::string chain_reason;
+      if (!verify_event_chain(&chain_reason)) {
+        throw std::runtime_error(
+            "refusing v5 journal migration with invalid event chain: " +
+            chain_reason);
+      }
       execute_sql(kSchemaV6Migration,
                   "journal schema migration to version 6 failed");
       stored_version = "6";
@@ -1814,7 +2516,7 @@ void Journal::initialize() {
       require_authority_metadata("6");
     }
   }
-  if (stored_version == "6") {
+  if (stored_version == "6" || stored_version == "7") {
     require_columns(
         "resource_lease_renewals",
         {"concurrency_key", "owner_run_id", "lease_id", "fencing_token",
@@ -1955,10 +2657,42 @@ void Journal::initialize() {
       }
     }
   }
+  if (stored_version == "6") {
+    if (!migration_transaction) {
+      migration_transaction = std::make_unique<Transaction>(database_);
+    }
+    std::string chain_reason;
+    if (!verify_event_chain(&chain_reason)) {
+      throw std::runtime_error(
+          "refusing v6 journal migration with invalid event chain: " +
+          chain_reason);
+    }
+    execute_sql(kSchemaV7Migration,
+                "journal schema migration to version 7 failed");
+    stored_version = "7";
+    require_exact_schema(database_, canonical_schema_v7(), "v7");
+    require_authority_metadata("7");
+  }
+  if (stored_version == "7") {
+    for (const std::string_view table :
+         {"host_resource_requests", "host_resource_grants",
+          "host_resource_release_intents", "host_resource_release_receipts"}) {
+      if (!table_exists(table)) {
+        throw std::runtime_error("journal schema v7 is partial: missing " +
+                                 std::string(table));
+      }
+    }
+  }
   if (migration_transaction) {
     migration_transaction->commit();
   }
-  execute_sql(kWalPragma, "could not enable WAL for journal schema v6");
+  std::string saga_reason;
+  if (!verify_event_chain(&saga_reason) ||
+      !verify_host_saga_projection(database_, &saga_reason)) {
+    throw std::runtime_error("journal host-grant saga is inconsistent: " +
+                             saga_reason);
+  }
+  execute_sql(kWalPragma, "could not enable WAL for journal schema v7");
 }
 
 std::uint64_t Journal::append(const Event& event) {
@@ -2108,12 +2842,17 @@ RunCreationResult Journal::create_run(const CompiledPlan& plan,
           .created_event = requested_creation};
 }
 
-std::uint64_t Journal::append_uncommitted(const Event& event) {
+std::uint64_t Journal::append_uncommitted(const Event& event,
+                                          bool allow_host_saga) {
   if (event.event_id.empty() || event.run_id.empty() || event.event_type.empty()) {
     throw std::invalid_argument("event_id, run_id, and event_type must not be empty");
   }
   if (!event.payload.is_object()) {
     throw std::invalid_argument("event payload must be an object");
+  }
+  if (event.event_type.starts_with("host.resource_") && !allow_host_saga) {
+    throw std::invalid_argument(
+        "host.resource_* is reserved for typed host saga authority");
   }
   if (event.worker_sequence > 0 && (event.node_id.empty() || event.attempt_id.empty())) {
     throw std::invalid_argument("sequenced worker events require node_id and attempt_id");
@@ -2394,6 +3133,9 @@ Dispatch Journal::prepare_dispatch_impl(
       throw OperationPreconditionError(
           "dispatch no longer owns its active worker lease");
     }
+    require_live_host_grant_claim(
+        launch->host_grant, launch->run_id, launch->concurrency_key,
+        launch->lease_id, launch->fencing_token);
     const auto ready = event(dispatch.run_id + ":worker-launch:" +
                              dispatch.node_id + ":" + dispatch.attempt_id +
                              ":ready");
@@ -2527,6 +3269,26 @@ void Journal::complete_dispatch_impl(
     throw std::invalid_argument("cannot complete an unknown dispatch");
   }
   const Dispatch stored = dispatch_from_row(query.get());
+  if (identity) {
+    const std::string launch_id = identity->run_id + ":worker-launch:" +
+                                  identity->node_id + ":" +
+                                  identity->attempt_id;
+    const auto binding = launch_binding(launch_id);
+    if (!binding || binding->identity.run_id != identity->run_id ||
+        binding->identity.node_id != identity->node_id ||
+        binding->identity.attempt_id != identity->attempt_id ||
+        binding->identity.launch_nonce != identity->launch_nonce ||
+        binding->identity.concurrency_key != identity->concurrency_key ||
+        binding->identity.lease_id != identity->lease_id ||
+        binding->identity.fencing_token != identity->fencing_token) {
+      throw OperationPreconditionError(
+          "dispatch completion has no exact durable launch binding");
+    }
+    require_live_host_grant_claim(
+        binding->identity.host_grant, identity->run_id,
+        identity->concurrency_key, identity->lease_id,
+        identity->fencing_token);
+  }
   if (stored.status == DispatchStatus::completed) {
     if (stored.result_event_id != std::optional<std::string>{result_event_id}) {
       throw std::invalid_argument("dispatch already completed with a different result event");
@@ -3006,6 +3768,25 @@ ControlCommand Journal::acknowledge_control_command(
   ControlCommand command = command_from_row(query.get());
   if (command.run_id != run_id) {
     throw std::invalid_argument("control command belongs to a different run");
+  }
+  if (host_grant_enforcement_ == HostGrantEnforcement::required) {
+    const std::string launch_id = command.run_id + ":worker-launch:" +
+                                  identity.node_id + ":" +
+                                  identity.attempt_id;
+    const auto binding = launch_binding(launch_id);
+    if (!binding || binding->identity.run_id != command.run_id ||
+        binding->identity.node_id != identity.node_id ||
+        binding->identity.attempt_id != identity.attempt_id ||
+        binding->identity.concurrency_key != identity.concurrency_key ||
+        binding->identity.lease_id != identity.lease_id ||
+        binding->identity.fencing_token != identity.fencing_token) {
+      throw OperationPreconditionError(
+          "control acknowledgement has no exact durable worker launch binding");
+    }
+    require_live_host_grant_claim(
+        binding->identity.host_grant, command.run_id,
+        identity.concurrency_key, identity.lease_id,
+        identity.fencing_token);
   }
   if (command.status != ControlCommandStatus::requested) {
     if (command.status == status && command.effective_step == effective_step &&
@@ -3584,7 +4365,7 @@ bool Journal::prepare_worker_launch(const WorkerLaunchTicket& launch,
                                     const Event& event) {
   require_lease_identity(launch.concurrency_key, launch.run_id,
                          launch.lease_id);
-  const nlohmann::json expected_payload{
+  nlohmann::json expected_payload{
       {"launch_nonce", launch.launch_nonce},
       {"adapter", launch.adapter},
       {"adapter_version", launch.adapter_version},
@@ -3594,6 +4375,9 @@ bool Journal::prepare_worker_launch(const WorkerLaunchTicket& launch,
       {"lease_id", launch.lease_id},
       {"fencing_token", launch.fencing_token},
   };
+  if (launch.host_grant) {
+    expected_payload["host_grant"] = encode_json(*launch.host_grant);
+  }
   require_authority_time(now);
   if (launch.fencing_token == 0 || launch.node_id.empty() ||
       launch.attempt_id.empty() || launch.launch_nonce.empty() ||
@@ -3650,6 +4434,9 @@ bool Journal::prepare_worker_launch(const WorkerLaunchTicket& launch,
     throw OperationPreconditionError(
         "worker launch no longer owns its active lease");
   }
+  require_live_host_grant_claim(
+      launch.host_grant, launch.run_id, launch.concurrency_key,
+      launch.lease_id, launch.fencing_token);
   const auto stored = this->event(event.event_id);
   if (stored) {
     Event replay = event;
@@ -3739,7 +4526,7 @@ bool Journal::bind_worker_launch(const ResolvedLaunchSpec& binding,
         "host launch binding requires an unassigned acquiring run");
   }
   const auto launch = this->event(identity.launch_event_id);
-  const nlohmann::json expected_launch_payload{
+  nlohmann::json expected_launch_payload{
       {"launch_nonce", identity.launch_nonce},
       {"adapter", identity.adapter_key.adapter},
       {"adapter_version", identity.adapter_key.version},
@@ -3749,6 +4536,9 @@ bool Journal::bind_worker_launch(const ResolvedLaunchSpec& binding,
       {"lease_id", identity.lease_id},
       {"fencing_token", identity.fencing_token},
   };
+  if (identity.host_grant) {
+    expected_launch_payload["host_grant"] = encode_json(*identity.host_grant);
+  }
   if (!launch || launch->event_type != "worker.launch_requested" ||
       launch->run_id != identity.run_id ||
       launch->node_id != identity.node_id ||
@@ -3782,6 +4572,9 @@ bool Journal::bind_worker_launch(const ResolvedLaunchSpec& binding,
     throw OperationPreconditionError(
         "host launch binding no longer owns its active lease");
   }
+  require_live_host_grant_claim(
+      identity.host_grant, identity.run_id, identity.concurrency_key,
+      identity.lease_id, identity.fencing_token);
   Statement conflicting(database_, R"sql(
     SELECT 1 FROM events
     WHERE run_id=? AND event_type='worker.launch_bound'
@@ -3871,6 +4664,9 @@ WorkerReadinessDisposition Journal::accept_worker_ready(
   if (!verify_chain(&chain_reason)) {
     throw std::runtime_error("refusing worker readiness: " + chain_reason);
   }
+  require_live_host_grant_claim(
+      launch.host_grant, launch.run_id, launch.concurrency_key,
+      launch.lease_id, launch.fencing_token);
   Statement projection(database_, R"sql(
     SELECT desired_state, observed_state, run_revision,
            current_node_id, current_attempt_id
@@ -3888,7 +4684,7 @@ WorkerReadinessDisposition Journal::accept_worker_ready(
   const std::string current_attempt = column_text(projection.get(), 4);
 
   const auto launch_event = event(ready.payload.value("cause_event_id", std::string{}));
-  const nlohmann::json expected_launch_payload{
+  nlohmann::json expected_launch_payload{
       {"launch_nonce", launch.launch_nonce},
       {"adapter", launch.adapter},
       {"adapter_version", launch.adapter_version},
@@ -3898,6 +4694,9 @@ WorkerReadinessDisposition Journal::accept_worker_ready(
       {"lease_id", launch.lease_id},
       {"fencing_token", launch.fencing_token},
   };
+  if (launch.host_grant) {
+    expected_launch_payload["host_grant"] = encode_json(*launch.host_grant);
+  }
   if (!launch_event || launch_event->event_type != "worker.launch_requested" ||
       launch_event->run_id != launch.run_id ||
       launch_event->node_id != launch.node_id ||
@@ -4225,6 +5024,525 @@ std::optional<ResourceLease> Journal::active_lease(const std::string& concurrenc
   return lease_from_row(query.get());
 }
 
+HostGrantSagaSnapshot Journal::record_host_resource_request(
+    const ResourceBundleRequest& request, const AuthorityTimeSample& now) {
+  validate_resource_request(request);
+  require_authority_time(now);
+  if (!expected_host_grant_authority_) {
+    throw OperationPreconditionError(
+        "host resource request requires a configured trusted local host epoch");
+  }
+  if (request.journal_id != journal_id()) {
+    throw OperationPreconditionError(
+        "host resource request targets a different journal authority");
+  }
+  const std::string canonical = resource_request_json(request).dump();
+  Transaction transaction(database_);
+  std::string authority_reason;
+  if (!verify_chain(&authority_reason)) {
+    throw std::runtime_error("refusing host request saga: " + authority_reason);
+  }
+  if (const auto existing = load_host_grant_saga(database_, request.request_id)) {
+    if (existing->request != request) {
+      throw OperationPreconditionError(
+          "host resource request_id already has different content");
+    }
+    transaction.commit();
+    return *existing;
+  }
+  Statement lease(database_, R"sql(
+    SELECT concurrency_key FROM resource_leases
+    WHERE owner_run_id=? AND lease_id=? AND fencing_token=?
+      AND clock_domain='boottime/v1' AND boot_id=?
+      AND expires_boottime_ns>? AND released_wall_time_ns IS NULL
+      AND NOT EXISTS(
+        SELECT 1 FROM resource_lease_releases AS release
+        WHERE release.concurrency_key=resource_leases.concurrency_key
+          AND release.owner_run_id=resource_leases.owner_run_id
+          AND release.lease_id=resource_leases.lease_id
+          AND release.fencing_token=resource_leases.fencing_token
+      )
+    ORDER BY concurrency_key
+  )sql");
+  bind_text(lease.get(), 1, request.run_id);
+  bind_text(lease.get(), 2, request.logical_lease_id);
+  bind_integer(lease.get(), 3,
+               checked_integer(request.logical_fencing_token,
+                               "logical_fencing_token"));
+  bind_text(lease.get(), 4, now.boot_id);
+  bind_integer(lease.get(), 5, now.boot.nanoseconds);
+  if (sqlite3_step(lease.get()) != SQLITE_ROW) {
+    throw OperationPreconditionError(
+        "host resource request has no matching live logical lease");
+  }
+  const std::string concurrency_key = column_text(lease.get(), 0);
+  if (sqlite3_step(lease.get()) != SQLITE_DONE) {
+    throw OperationPreconditionError(
+        "host resource request lease identity is ambiguous");
+  }
+  Statement insert(database_, R"sql(
+    INSERT INTO host_resource_requests(
+      request_id, journal_id, run_id, concurrency_key, logical_lease_id,
+      logical_fencing_token, request_digest, canonical_request_json
+    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+  )sql");
+  bind_text(insert.get(), 1, request.request_id);
+  bind_text(insert.get(), 2, request.journal_id);
+  bind_text(insert.get(), 3, request.run_id);
+  bind_text(insert.get(), 4, concurrency_key);
+  bind_text(insert.get(), 5, request.logical_lease_id);
+  bind_integer(insert.get(), 6,
+               checked_integer(request.logical_fencing_token,
+                               "logical_fencing_token"));
+  bind_text(insert.get(), 7, request.canonical_request_digest);
+  bind_text(insert.get(), 8, canonical);
+  require_done(database_, insert.get(), "record host resource request intent");
+  (void)append_uncommitted(host_saga_event(
+      database_, "host-resource-request:" + request.request_id,
+      "host.resource_request_recorded", request.run_id, now.wall.nanoseconds,
+      static_cast<std::uint64_t>(now.boot.nanoseconds),
+      {{"concurrency_key", concurrency_key},
+       {"request", resource_request_json(request)}}), true);
+  auto result = load_host_grant_saga(database_, request.request_id);
+  if (!result) throw std::runtime_error("host resource request insert vanished");
+  transaction.commit();
+  return *result;
+}
+
+HostGrantSagaSnapshot Journal::record_host_grant_receipt(
+    const ResourceBundleGrant& grant) {
+  const auto bounded = [](const std::string& value) {
+    return !value.empty() &&
+           value.size() <= HostResourceBounds::maximum_identifier_bytes;
+  };
+  if (grant.fences.empty() ||
+      grant.fences.size() > HostResourceBounds::maximum_bundle_count) {
+    throw OperationPreconditionError("host grant fence count exceeds its bound");
+  }
+  if (!bounded(grant.api_version) || !bounded(grant.allocation_id) ||
+      !bounded(grant.request_id) || !bounded(grant.request_digest) ||
+      !bounded(grant.journal_id) || !bounded(grant.run_id) ||
+      !bounded(grant.logical_lease_id) || !bounded(grant.host_id) ||
+      !bounded(grant.boot_id) || !bounded(grant.broker_epoch) ||
+      !bounded(grant.previous_receipt_digest) ||
+      !bounded(grant.receipt_digest)) {
+    throw OperationPreconditionError("host grant identity exceeds its bound");
+  }
+  if (!expected_host_grant_authority_ ||
+      grant.host_id != expected_host_grant_authority_->host_id ||
+      grant.boot_id != expected_host_grant_authority_->boot_id) {
+    throw OperationPreconditionError(
+        "host grant receipt disagrees with the trusted local host epoch");
+  }
+  validate_resource_fence_shape(grant.fences,
+                                HostResourceBounds::maximum_bundle_count);
+  const std::string canonical = resource_bundle_grant_json(grant).dump();
+  Transaction transaction(database_);
+  std::string authority_reason;
+  if (!verify_chain(&authority_reason)) {
+    throw std::runtime_error("refusing host grant copy: " + authority_reason);
+  }
+  auto saga = load_host_grant_saga(database_, grant.request_id);
+  if (!saga) {
+    throw OperationPreconditionError(
+        "host grant has no durable journal request intent");
+  }
+  if (saga->grant) {
+    if (*saga->grant != grant) {
+      throw OperationPreconditionError(
+          "host grant receipt diverges from its durable copy");
+    }
+    transaction.commit();
+    return *saga;
+  }
+  if (saga->busy_outcome_digest) {
+    throw OperationPreconditionError(
+        "host grant conflicts with the durable busy outcome");
+  }
+  const auto& request = saga->request;
+  if (grant.fences.size() != request.count ||
+      grant.fences.size() > HostResourceBounds::maximum_bundle_count ||
+      grant.request_digest != request.canonical_request_digest ||
+      grant.journal_id != request.journal_id || grant.run_id != request.run_id ||
+      grant.logical_lease_id != request.logical_lease_id ||
+      grant.logical_fencing_token != request.logical_fencing_token) {
+    throw OperationPreconditionError(
+        "host grant does not exactly match its journal request intent");
+  }
+  Statement insert(database_, R"sql(
+    INSERT INTO host_resource_grants(
+      request_id, allocation_id, request_digest, grant_digest,
+      canonical_grant_json
+    ) VALUES(?, ?, ?, ?, ?)
+  )sql");
+  bind_text(insert.get(), 1, grant.request_id);
+  bind_text(insert.get(), 2, grant.allocation_id);
+  bind_text(insert.get(), 3, grant.request_digest);
+  bind_text(insert.get(), 4, grant.receipt_digest);
+  bind_text(insert.get(), 5, canonical);
+  require_done(database_, insert.get(), "copy exact host grant receipt");
+  (void)append_uncommitted(host_saga_event(
+      database_, "host-resource-grant:" + grant.request_id,
+      "host.resource_grant_recorded", grant.run_id, grant.granted_wall_time_ns,
+      static_cast<std::uint64_t>(grant.granted_boottime_ns),
+      {{"request_id", grant.request_id},
+       {"grant", resource_bundle_grant_json(grant)}}), true);
+  saga = load_host_grant_saga(database_, grant.request_id);
+  transaction.commit();
+  return *saga;
+}
+
+HostGrantSagaSnapshot Journal::record_host_busy_outcome(
+    const std::string& request_id, const std::string& outcome_digest,
+    const AuthorityTimeSample& now) {
+  require_authority_time(now);
+  const auto valid_digest = [](std::string_view value) {
+    return value.size() == 71U && value.starts_with("sha256:") &&
+           std::ranges::all_of(value.substr(7U), [](char character) {
+             return (character >= '0' && character <= '9') ||
+                    (character >= 'a' && character <= 'f');
+           });
+  };
+  if (!valid_digest(outcome_digest)) {
+    throw OperationPreconditionError("host busy outcome digest is invalid");
+  }
+  Transaction transaction(database_);
+  std::string authority_reason;
+  if (!verify_chain(&authority_reason)) {
+    throw std::runtime_error("refusing host busy copy: " + authority_reason);
+  }
+  auto saga = load_host_grant_saga(database_, request_id);
+  if (!saga) {
+    throw OperationPreconditionError(
+        "host busy outcome has no durable journal request intent");
+  }
+  if (saga->grant) {
+    throw OperationPreconditionError(
+        "host busy outcome conflicts with a durable grant");
+  }
+  if (saga->busy_outcome_digest) {
+    if (*saga->busy_outcome_digest != outcome_digest) {
+      throw OperationPreconditionError(
+          "host busy outcome diverges from its durable copy");
+    }
+    transaction.commit();
+    return *saga;
+  }
+  (void)append_uncommitted(host_saga_event(
+      database_, "host-resource-busy:" + request_id,
+      "host.resource_busy_recorded", saga->request.run_id,
+      now.wall.nanoseconds, static_cast<std::uint64_t>(now.boot.nanoseconds),
+      {{"request_id", request_id},
+       {"request_digest", saga->request.canonical_request_digest},
+       {"outcome_digest", outcome_digest}}), true);
+  saga = load_host_grant_saga(database_, request_id);
+  transaction.commit();
+  return *saga;
+}
+
+HostGrantSagaSnapshot Journal::record_host_release_intent(
+    const std::string& request_id, const ResourceReleaseRequest& release,
+    const AuthorityTimeSample& now) {
+  require_authority_time(now);
+  const auto bounded = [](const std::string& value) {
+    return !value.empty() &&
+           value.size() <= HostResourceBounds::maximum_identifier_bytes;
+  };
+  if (!bounded(request_id) || !bounded(release.api_version) ||
+      !bounded(release.release_request_id) ||
+      !bounded(release.allocation_id) || !bounded(release.grant_digest) ||
+      !bounded(release.journal_id) || !bounded(release.run_id) ||
+      !bounded(release.logical_lease_id) ||
+      !bounded(release.canonical_request_digest)) {
+    throw OperationPreconditionError(
+        "host release request identity exceeds its bound");
+  }
+  const std::string canonical = release_request_json(release).dump();
+  Transaction transaction(database_);
+  std::string authority_reason;
+  if (!verify_chain(&authority_reason)) {
+    throw std::runtime_error("refusing host release intent: " + authority_reason);
+  }
+  auto saga = load_host_grant_saga(database_, request_id);
+  if (!saga || !saga->grant) {
+    throw OperationPreconditionError(
+        "host release has no durable exact grant receipt");
+  }
+  if (saga->release_intent) {
+    if (*saga->release_intent != release) {
+      throw OperationPreconditionError(
+          "host release intent diverges from its durable copy");
+    }
+    transaction.commit();
+    return *saga;
+  }
+  const auto& request = saga->request;
+  const auto& grant = *saga->grant;
+  if (release.allocation_id != grant.allocation_id ||
+      release.grant_digest != grant.receipt_digest ||
+      release.journal_id != request.journal_id ||
+      release.run_id != request.run_id ||
+      release.logical_lease_id != request.logical_lease_id ||
+      release.logical_fencing_token != request.logical_fencing_token) {
+    throw OperationPreconditionError(
+        "host release intent does not exactly match the durable grant");
+  }
+  Statement insert(database_, R"sql(
+    INSERT INTO host_resource_release_intents(
+      release_request_id, request_id, allocation_id, grant_digest,
+      release_request_digest, canonical_release_request_json
+    ) VALUES(?, ?, ?, ?, ?, ?)
+  )sql");
+  bind_text(insert.get(), 1, release.release_request_id);
+  bind_text(insert.get(), 2, request_id);
+  bind_text(insert.get(), 3, release.allocation_id);
+  bind_text(insert.get(), 4, release.grant_digest);
+  bind_text(insert.get(), 5, release.canonical_request_digest);
+  bind_text(insert.get(), 6, canonical);
+  require_done(database_, insert.get(), "record host release intent");
+  (void)append_uncommitted(host_saga_event(
+      database_, "host-resource-release-intent:" + request_id,
+      "host.resource_release_intent_recorded", release.run_id,
+      now.wall.nanoseconds, static_cast<std::uint64_t>(now.boot.nanoseconds),
+      {{"request_id", request_id}, {"release", release_request_json(release)}}),
+      true);
+  saga = load_host_grant_saga(database_, request_id);
+  transaction.commit();
+  return *saga;
+}
+
+HostGrantSagaSnapshot Journal::record_host_release_receipt(
+    const std::string& request_id, const ResourceReleaseReceipt& receipt) {
+  const auto bounded = [](const std::string& value) {
+    return !value.empty() &&
+           value.size() <= HostResourceBounds::maximum_identifier_bytes;
+  };
+  if (!bounded(request_id) || !bounded(receipt.api_version) ||
+      !bounded(receipt.release_request_id) ||
+      !bounded(receipt.release_request_digest) ||
+      !bounded(receipt.allocation_id) || !bounded(receipt.grant_digest) ||
+      !bounded(receipt.host_id) || !bounded(receipt.boot_id) ||
+      !bounded(receipt.broker_epoch) ||
+      !bounded(receipt.previous_receipt_digest) ||
+      !bounded(receipt.receipt_digest)) {
+    throw OperationPreconditionError(
+        "host release receipt identity exceeds its bound");
+  }
+  const std::string canonical = resource_release_receipt_json(receipt).dump();
+  Transaction transaction(database_);
+  std::string authority_reason;
+  if (!verify_chain(&authority_reason)) {
+    throw std::runtime_error("refusing host release copy: " + authority_reason);
+  }
+  auto saga = load_host_grant_saga(database_, request_id);
+  if (!saga || !saga->grant || !saga->release_intent) {
+    throw OperationPreconditionError(
+        "host release receipt has no durable release intent");
+  }
+  if (saga->release_receipt) {
+    if (*saga->release_receipt != receipt) {
+      throw OperationPreconditionError(
+          "host release receipt diverges from its durable copy");
+    }
+    transaction.commit();
+    return *saga;
+  }
+  const auto& grant = *saga->grant;
+  const auto& intent = *saga->release_intent;
+  if (receipt.release_request_id != intent.release_request_id ||
+      receipt.release_request_digest != intent.canonical_request_digest ||
+      receipt.allocation_id != grant.allocation_id ||
+      receipt.grant_digest != grant.receipt_digest ||
+      receipt.host_id != grant.host_id || receipt.boot_id != grant.boot_id ||
+      receipt.broker_epoch != grant.broker_epoch) {
+    throw OperationPreconditionError(
+        "host release receipt does not exactly match its durable intent");
+  }
+  Statement insert(database_, R"sql(
+    INSERT INTO host_resource_release_receipts(
+      release_request_id, request_id, release_receipt_digest,
+      canonical_release_receipt_json
+    ) VALUES(?, ?, ?, ?)
+  )sql");
+  bind_text(insert.get(), 1, receipt.release_request_id);
+  bind_text(insert.get(), 2, request_id);
+  bind_text(insert.get(), 3, receipt.receipt_digest);
+  bind_text(insert.get(), 4, canonical);
+  require_done(database_, insert.get(), "copy exact host release receipt");
+  (void)append_uncommitted(host_saga_event(
+      database_, "host-resource-release-receipt:" + request_id,
+      "host.resource_release_receipt_recorded", saga->request.run_id,
+      receipt.released_wall_time_ns,
+      static_cast<std::uint64_t>(receipt.released_boottime_ns),
+      {{"request_id", request_id},
+       {"receipt", resource_release_receipt_json(receipt)}}), true);
+  saga = load_host_grant_saga(database_, request_id);
+  transaction.commit();
+  return *saga;
+}
+
+std::optional<HostGrantSagaSnapshot> Journal::host_grant_saga(
+    const std::string& request_id) const {
+  auto snapshot = read_snapshot();
+  (void)snapshot;
+  return load_host_grant_saga(database_, request_id);
+}
+
+std::optional<HostLaunchGrantClaim> Journal::host_launch_grant_claim(
+    const std::string& run_id, const std::string& concurrency_key,
+    const std::string& lease_id, std::uint64_t fencing_token,
+    const AuthorityTimeSample& now) const {
+  require_authority_time(now);
+  if (run_id.empty() || concurrency_key.empty() || lease_id.empty() ||
+      fencing_token == 0U) {
+    throw std::invalid_argument("host launch grant lookup is malformed");
+  }
+  std::optional<HostLaunchGrantClaim> claim;
+  {
+    auto snapshot = read_snapshot();
+    (void)snapshot;
+    Statement query(database_, R"sql(
+      SELECT request.request_id, grant.canonical_grant_json
+      FROM host_resource_requests AS request
+      JOIN host_resource_grants AS grant ON grant.request_id=request.request_id
+      LEFT JOIN host_resource_release_intents AS release
+        ON release.request_id=request.request_id
+      WHERE request.run_id=? AND request.concurrency_key=?
+        AND request.logical_lease_id=? AND request.logical_fencing_token=?
+        AND release.request_id IS NULL
+      ORDER BY request.request_id
+    )sql");
+    bind_text(query.get(), 1, run_id);
+    bind_text(query.get(), 2, concurrency_key);
+    bind_text(query.get(), 3, lease_id);
+    bind_integer(query.get(), 4,
+                 checked_integer(fencing_token, "fencing_token"));
+    const int status = sqlite3_step(query.get());
+    if (status == SQLITE_ROW) {
+      const auto grant = resource_bundle_grant_from_json(
+          nlohmann::json::parse(column_text(query.get(), 1)));
+      claim = HostLaunchGrantClaim{
+          .request_id = column_text(query.get(), 0),
+          .grant_digest = grant.receipt_digest,
+          .fences = grant.fences,
+      };
+      if (grant.request_id != claim->request_id || grant.run_id != run_id ||
+          grant.logical_lease_id != lease_id ||
+          grant.logical_fencing_token != fencing_token ||
+          sqlite3_step(query.get()) != SQLITE_DONE) {
+        throw OperationPreconditionError(
+            "host launch grant authority is ambiguous or mismatched");
+      }
+    } else if (status != SQLITE_DONE) {
+      throw std::runtime_error("could not inspect host launch grant authority");
+    }
+  }
+  if (!claim) {
+    if (host_grant_enforcement_ == HostGrantEnforcement::required) {
+      throw OperationPreconditionError(
+          "external worker launch requires an exact durable host grant");
+    }
+    return std::nullopt;
+  }
+  require_live_host_grant_claim(claim, run_id, concurrency_key, lease_id,
+                                fencing_token);
+  require_host_launch_eligible(*claim, now);
+  return claim;
+}
+
+void Journal::require_host_launch_eligible(
+    const HostLaunchGrantClaim& claim, const AuthorityTimeSample& now) const {
+  require_authority_time(now);
+  auto snapshot = read_snapshot();
+  (void)snapshot;
+  const auto saga = load_host_grant_saga(database_, claim.request_id);
+  if (!saga || !saga->grant) {
+    throw OperationPreconditionError(
+        "launch requires both durable request and exact host grant receipt");
+  }
+  if (saga->release_intent || saga->release_receipt) {
+    throw OperationPreconditionError(
+        "launch is blocked after durable host release intent");
+  }
+  if (!expected_host_grant_authority_ ||
+      saga->grant->host_id != expected_host_grant_authority_->host_id ||
+      saga->grant->boot_id != expected_host_grant_authority_->boot_id) {
+    throw OperationPreconditionError(
+        "launch grant disagrees with the trusted local host epoch");
+  }
+  if (claim.grant_digest != saga->grant->receipt_digest ||
+      claim.fences != saga->grant->fences) {
+    throw OperationPreconditionError(
+        "launch host grant digest or physical fences do not exactly match");
+  }
+  Statement lease(database_, R"sql(
+    SELECT 1
+    FROM host_resource_requests AS request
+    JOIN resource_leases AS lease
+      ON lease.concurrency_key=request.concurrency_key
+     AND lease.owner_run_id=request.run_id
+     AND lease.lease_id=request.logical_lease_id
+     AND lease.fencing_token=request.logical_fencing_token
+    WHERE request.request_id=? AND lease.clock_domain='boottime/v1'
+      AND lease.boot_id=? AND lease.expires_boottime_ns>?
+      AND lease.released_wall_time_ns IS NULL
+      AND NOT EXISTS(
+        SELECT 1 FROM resource_lease_releases AS release
+        WHERE release.concurrency_key=lease.concurrency_key
+          AND release.owner_run_id=lease.owner_run_id
+          AND release.lease_id=lease.lease_id
+          AND release.fencing_token=lease.fencing_token
+      )
+  )sql");
+  bind_text(lease.get(), 1, claim.request_id);
+  bind_text(lease.get(), 2, now.boot_id);
+  bind_integer(lease.get(), 3, now.boot.nanoseconds);
+  if (sqlite3_step(lease.get()) != SQLITE_ROW) {
+    throw OperationPreconditionError(
+        "launch logical lease is stale, released, or fenced");
+  }
+}
+
+void Journal::require_live_host_grant_claim(
+    const std::optional<HostLaunchGrantClaim>& claim,
+    const std::string& run_id, const std::string& concurrency_key,
+    const std::string& lease_id, std::uint64_t fencing_token) const {
+  if (!claim) {
+    if (host_grant_enforcement_ == HostGrantEnforcement::required) {
+      throw OperationPreconditionError(
+          "worker authority has no exact physical host grant claim");
+    }
+    return;
+  }
+  if (!expected_host_grant_authority_) {
+    throw OperationPreconditionError(
+        "host grant claim has no configured trusted host epoch");
+  }
+  const auto saga = load_host_grant_saga(database_, claim->request_id);
+  Statement request(database_, R"sql(
+    SELECT 1 FROM host_resource_requests
+    WHERE request_id=? AND run_id=? AND concurrency_key=?
+      AND logical_lease_id=? AND logical_fencing_token=?
+  )sql");
+  bind_text(request.get(), 1, claim->request_id);
+  bind_text(request.get(), 2, run_id);
+  bind_text(request.get(), 3, concurrency_key);
+  bind_text(request.get(), 4, lease_id);
+  bind_integer(request.get(), 5,
+               checked_integer(fencing_token, "fencing_token"));
+  if (!saga || !saga->grant || saga->release_intent ||
+      saga->busy_outcome_digest ||
+      saga->grant->receipt_digest != claim->grant_digest ||
+      saga->grant->fences != claim->fences ||
+      saga->grant->host_id != expected_host_grant_authority_->host_id ||
+      saga->grant->boot_id != expected_host_grant_authority_->boot_id ||
+      sqlite3_step(request.get()) != SQLITE_ROW ||
+      sqlite3_step(request.get()) != SQLITE_DONE) {
+    throw OperationPreconditionError(
+        "worker physical host grant is released, stale, or mismatched");
+  }
+}
+
 bool Journal::has_lease_release_receipt(
     const std::string& concurrency_key, const std::string& owner_run_id,
     const std::string& lease_id, std::uint64_t fencing_token,
@@ -4278,7 +5596,7 @@ std::string Journal::journal_id() const {
   return identity;
 }
 
-bool Journal::verify_chain(std::string* reason) const {
+bool Journal::verify_event_chain(std::string* reason) const {
   Statement query(database_, R"sql(
     WITH head(value) AS (
       SELECT value FROM journal_meta WHERE key='chain_head'
@@ -4344,12 +5662,36 @@ bool Journal::verify_chain(std::string* reason) const {
   return true;
 }
 
+bool Journal::verify_chain(std::string* reason) const {
+  if (!verify_event_chain(reason)) return false;
+  return verify_host_saga_projection(database_, reason);
+}
+
 std::uint64_t Journal::rebuild_projections() {
   std::string reason;
-  if (!verify_chain(&reason)) {
+  Transaction transaction(database_);
+  if (!verify_event_chain(&reason)) {
     throw std::runtime_error("refusing replay: " + reason);
   }
-  Transaction transaction(database_);
+  constexpr std::string_view reset_host_saga = R"sql(
+    DROP TRIGGER IF EXISTS host_resource_requests_no_update;
+    DROP TRIGGER IF EXISTS host_resource_requests_no_delete;
+    DROP TRIGGER IF EXISTS host_resource_grants_no_update;
+    DROP TRIGGER IF EXISTS host_resource_grants_no_delete;
+    DROP TRIGGER IF EXISTS host_resource_release_intents_no_update;
+    DROP TRIGGER IF EXISTS host_resource_release_intents_no_delete;
+    DROP TRIGGER IF EXISTS host_resource_release_receipts_no_update;
+    DROP TRIGGER IF EXISTS host_resource_release_receipts_no_delete;
+    DELETE FROM host_resource_release_receipts;
+    DELETE FROM host_resource_release_intents;
+    DELETE FROM host_resource_grants;
+    DELETE FROM host_resource_requests;
+  )sql";
+  if (sqlite3_exec(database_, std::string(reset_host_saga).c_str(), nullptr,
+                   nullptr, nullptr) != SQLITE_OK) {
+    throw std::runtime_error("could not clear host saga projections: " +
+                             std::string(sqlite3_errmsg(database_)));
+  }
   if (sqlite3_exec(database_, "DELETE FROM run_projection", nullptr, nullptr, nullptr) != SQLITE_OK) {
     throw std::runtime_error("could not clear run projections");
   }
@@ -4370,11 +5712,45 @@ std::uint64_t Journal::rebuild_projections() {
     const Event event = event_from_row(query.get());
     update_projection(database_, event, sequence);
     update_control_projection(database_, event);
+    replay_host_saga_projection(database_, event);
     ++replayed;
   }
   if (status != SQLITE_DONE) {
     throw std::runtime_error("could not scan events while rebuilding projections: " +
                              std::string(sqlite3_errmsg(database_)));
+  }
+  constexpr std::string_view restore_host_saga_triggers = R"sql(
+    CREATE TRIGGER host_resource_requests_no_update BEFORE UPDATE ON host_resource_requests
+    BEGIN SELECT RAISE(ABORT, 'host resource requests are immutable'); END;
+    CREATE TRIGGER host_resource_requests_no_delete BEFORE DELETE ON host_resource_requests
+    BEGIN SELECT RAISE(ABORT, 'host resource requests are immutable'); END;
+    CREATE TRIGGER host_resource_grants_no_update BEFORE UPDATE ON host_resource_grants
+    BEGIN SELECT RAISE(ABORT, 'host resource grants are immutable'); END;
+    CREATE TRIGGER host_resource_grants_no_delete BEFORE DELETE ON host_resource_grants
+    BEGIN SELECT RAISE(ABORT, 'host resource grants are immutable'); END;
+    CREATE TRIGGER host_resource_release_intents_no_update
+    BEFORE UPDATE ON host_resource_release_intents
+    BEGIN SELECT RAISE(ABORT, 'host resource release intents are immutable'); END;
+    CREATE TRIGGER host_resource_release_intents_no_delete
+    BEFORE DELETE ON host_resource_release_intents
+    BEGIN SELECT RAISE(ABORT, 'host resource release intents are immutable'); END;
+    CREATE TRIGGER host_resource_release_receipts_no_update
+    BEFORE UPDATE ON host_resource_release_receipts
+    BEGIN SELECT RAISE(ABORT, 'host resource release receipts are immutable'); END;
+    CREATE TRIGGER host_resource_release_receipts_no_delete
+    BEFORE DELETE ON host_resource_release_receipts
+    BEGIN SELECT RAISE(ABORT, 'host resource release receipts are immutable'); END;
+  )sql";
+  if (sqlite3_exec(database_, std::string(restore_host_saga_triggers).c_str(),
+                   nullptr, nullptr, nullptr) != SQLITE_OK) {
+    throw std::runtime_error("could not restore host saga immutability: " +
+                             std::string(sqlite3_errmsg(database_)));
+  }
+  if (!verify_host_saga_projection(database_, &reason)) {
+    throw std::runtime_error("rebuilt host saga projection is invalid: " + reason);
+  }
+  if (!verify_event_chain(&reason)) {
+    throw std::runtime_error("rebuilt journal chain changed: " + reason);
   }
   transaction.commit();
   return replayed;

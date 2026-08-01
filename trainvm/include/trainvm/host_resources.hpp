@@ -267,6 +267,9 @@ class FakeHostKernel final : public IHostKernel {
 
 void validate_host_inventory(const HostInventoryReceipt& receipt);
 void validate_resource_request(const ResourceBundleRequest& request);
+void validate_resource_fence_shape(
+    const std::vector<ResourceFence>& fences,
+    std::size_t maximum_count = HostResourceBounds::maximum_active_fences);
 void validate_resource_fences(const HostInventoryReceipt& inventory,
                               const std::vector<ResourceFence>& active_fences);
 void validate_resource_occupancy(

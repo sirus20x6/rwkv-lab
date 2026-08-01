@@ -63,6 +63,7 @@ struct ResolvedLaunchIdentity {
   std::string concurrency_key;
   std::string lease_id;
   std::uint64_t fencing_token{};
+  std::optional<HostLaunchGrantClaim> host_grant;
   HostIdentity host;
   VerifiedLaunchArtifact executable;
   std::optional<VerifiedLaunchArtifact> code;

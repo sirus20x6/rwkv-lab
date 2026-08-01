@@ -73,7 +73,7 @@ Implemented now:
   and exact replay outcomes, stale-inventory revocation, and prior-boot blocking; its retained
   filesystem authority pins the database/lock inode, protects SQLite auxiliary names, and reports a
   filesystem boundary only—not the broader host enforcement grade;
-- journal schema v6 boot-scoped lease authority across acquisition, renewal, release, readiness,
+- journal schema v7 boot-scoped lease authority across acquisition, renewal, release, readiness,
   dispatch, control acknowledgement, and host binding; renewal atomically advances mutable expiry
   and appends an immutable exact-input receipt, while v4 wall-clock rows migrate as quarantined
   `legacy-wall/v1` evidence and can never satisfy active authority;
@@ -93,11 +93,15 @@ Implemented now:
 This code does not yet launch or control a trainer. The launch-authorization reconciler first
 persists a fenced `worker.launch_requested` protocol intent; the host resolver can then persist a
 deterministic, non-secret binding while retaining sealed file descriptors, but neither is sufficient
-to spawn or signal an OS process. Typed host-resource selection and the durable grant ledger are now
-implemented libraries, but no service RPC can mutate them. The next boundary is the hostd
-filesystem-seqpacket singleton, startup orphan audit, journal/hostd receipt saga, guarded launcher,
-cgroup cleanup, process-instance credentials, and durable spawn/exit receipts. Real trainer process
-ownership follows only after those fault-injection tests pass.
+to spawn or signal an OS process. Typed host-resource selection, the durable grant ledger, the
+process-free host coordinator, and the hash-chained journal/host grant-and-release saga are
+implemented libraries. Production launch preparation requires an exact, live durable host grant and
+binds its request identity, receipt digest, and physical fences into the worker ticket and resolved
+launch identity; process-free unit fixtures can opt into a visibly test-only legacy mode. No service
+RPC can yet mutate host authority. The next boundary is the filesystem `SOCK_SEQPACKET` hostd
+singleton, startup orphan audit wiring, guarded launcher, cgroup cleanup, process-instance
+credentials, and durable spawn/exit receipts. Real trainer process ownership follows only after
+those fault-injection tests pass.
 
 MageFlow is only the first recovery fixture. The runtime is not a MageFlow-specific launcher: RWKV,
 transformer, vision/multimodal, conversion, distillation, post-training, RLVR, external-trainer, and
@@ -106,7 +110,7 @@ adapter operations. The coverage and optimization inventories live in
 [`WORKFLOW_COVERAGE.md`](../docs/experiment-vm/WORKFLOW_COVERAGE.md) and
 [`PERFORMANCE_ROADMAP.md`](../docs/experiment-vm/PERFORMANCE_ROADMAP.md).
 
-The v6 renewal authority includes a manually tickable coordinator bounded to 256 exact targets that
+The v7 renewal authority includes a manually tickable coordinator bounded to 256 exact targets that
 samples authority time separately for each target and permanently stops on clock or receipt
 failure. Renewal receipts bind acquisition identity, prior and new expiry, the equal boot/wall
 timeout delta, and a continuous per-fence history; conflicting inserts, replacements, updates, and

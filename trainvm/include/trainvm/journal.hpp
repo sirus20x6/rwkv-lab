@@ -15,6 +15,7 @@
 #include "trainvm/document.hpp"
 #include "trainvm/dispatch.hpp"
 #include "trainvm/host_launch.hpp"
+#include "trainvm/host_ledger.hpp"
 #include "trainvm/command.hpp"
 #include "trainvm/lease.hpp"
 #include "trainvm/worker.hpp"
@@ -93,11 +94,30 @@ struct JournalFileIdentity final {
   std::uint64_t owner_uid{};
 };
 
+struct HostGrantSagaSnapshot final {
+  ResourceBundleRequest request;
+  std::optional<std::string> busy_outcome_digest;
+  std::optional<ResourceBundleGrant> grant;
+  std::optional<ResourceReleaseRequest> release_intent;
+  std::optional<ResourceReleaseReceipt> release_receipt;
+
+  bool operator==(const HostGrantSagaSnapshot&) const = default;
+};
+
+enum class HostGrantEnforcement {
+  required,
+  legacy_process_free_test,
+};
+
 class Journal {
 public:
   explicit Journal(
       const std::filesystem::path& path,
-      std::optional<JournalFileIdentity> expected_file = std::nullopt);
+      std::optional<JournalFileIdentity> expected_file = std::nullopt,
+      HostGrantEnforcement host_grant_enforcement =
+          HostGrantEnforcement::required,
+      std::optional<HostIdentity> expected_host_grant_authority =
+          std::nullopt);
   ~Journal();
 
   Journal(const Journal&) = delete;
@@ -143,6 +163,31 @@ public:
   [[nodiscard]] std::string journal_id() const;
   [[nodiscard]] bool verify_chain(std::string* reason = nullptr) const;
   std::uint64_t rebuild_projections();
+  // Journal-side half of the host-grant saga. These methods copy exact host
+  // receipts; they never allocate or advance physical resource generations.
+  [[nodiscard]] HostGrantSagaSnapshot record_host_resource_request(
+      const ResourceBundleRequest& request, const AuthorityTimeSample& now);
+  [[nodiscard]] HostGrantSagaSnapshot record_host_grant_receipt(
+      const ResourceBundleGrant& grant);
+  [[nodiscard]] HostGrantSagaSnapshot record_host_busy_outcome(
+      const std::string& request_id, const std::string& outcome_digest,
+      const AuthorityTimeSample& now);
+  [[nodiscard]] HostGrantSagaSnapshot record_host_release_intent(
+      const std::string& request_id, const ResourceReleaseRequest& release,
+      const AuthorityTimeSample& now);
+  [[nodiscard]] HostGrantSagaSnapshot record_host_release_receipt(
+      const std::string& request_id, const ResourceReleaseReceipt& receipt);
+  [[nodiscard]] std::optional<HostGrantSagaSnapshot> host_grant_saga(
+      const std::string& request_id) const;
+  [[nodiscard]] std::optional<HostLaunchGrantClaim> host_launch_grant_claim(
+      const std::string& run_id, const std::string& concurrency_key,
+      const std::string& lease_id, std::uint64_t fencing_token,
+      const AuthorityTimeSample& now) const;
+  // Throws OperationPreconditionError unless the claim exactly matches the
+  // durable host receipt and its logical lease is still live under the same
+  // boot-scoped fencing token.
+  void require_host_launch_eligible(const HostLaunchGrantClaim& claim,
+                                    const AuthorityTimeSample& now) const;
 
  private:
   friend class Controller;
@@ -164,9 +209,15 @@ public:
 
   sqlite3* database_{};
   std::optional<JournalFileIdentity> expected_file_;
+  HostGrantEnforcement host_grant_enforcement_;
+  std::optional<HostIdentity> expected_host_grant_authority_;
   mutable std::atomic<bool> authority_poisoned_{false};
 
   [[nodiscard]] ReadSnapshot read_snapshot() const;
+  void require_live_host_grant_claim(
+      const std::optional<HostLaunchGrantClaim>& claim,
+      const std::string& run_id, const std::string& concurrency_key,
+      const std::string& lease_id, std::uint64_t fencing_token) const;
   std::uint64_t append(const Event& event);
   std::vector<std::uint64_t> append_batch(const std::vector<Event>& events);
   Dispatch prepare_dispatch(const Dispatch& dispatch,
@@ -178,11 +229,13 @@ public:
   void require_file_identity(const JournalFileIdentity& expected) const;
   void require_namespace_identity(const JournalFileIdentity& expected) const;
   [[nodiscard]] bool validate_authority_boundary() const noexcept;
+  [[nodiscard]] bool verify_event_chain(std::string* reason = nullptr) const;
   static int authorize_database_operation(void* context, int action,
                                           const char*, const char*,
                                           const char*, const char*) noexcept;
   static int authorize_commit(void* context) noexcept;
-  std::uint64_t append_uncommitted(const Event& event);
+  std::uint64_t append_uncommitted(const Event& event,
+                                   bool allow_host_saga = false);
   RunCreationResult create_run(const CompiledPlan& plan, const std::vector<Event>& events);
   LeaseAcquireResult acquire_lease_with_events(
       const std::string& concurrency_key, const std::string& owner_run_id,

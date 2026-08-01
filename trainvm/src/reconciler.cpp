@@ -7,6 +7,68 @@
 
 namespace trainvm {
 
+HostGrantSagaReconciler::HostGrantSagaReconciler(
+    Journal& journal, IHostGrantClient& host,
+    IHostGrantSagaFaultInjector* faults)
+    : journal_(journal), host_(host), faults_(faults) {}
+
+void HostGrantSagaReconciler::fault(HostGrantSagaFaultPoint point) const {
+  if (faults_ != nullptr) faults_->hit(point);
+}
+
+HostGrantSagaSnapshot HostGrantSagaReconciler::reconcile_request(
+    const ResourceBundleRequest& request, const AuthorityTimeSample& now) {
+  HostGrantSagaSnapshot saga =
+      journal_.record_host_resource_request(request, now);
+  if (saga.grant || saga.busy_outcome_digest) {
+    fault(HostGrantSagaFaultPoint::replay_boundary);
+    return saga;
+  }
+  fault(HostGrantSagaFaultPoint::journal_before_host);
+  const BundleRequestResult result = host_.request_bundle(request);
+  if (result.status == BundleRequestStatus::busy) {
+    if (result.grant) {
+      throw std::runtime_error("busy host bundle result contains a grant");
+    }
+    fault(HostGrantSagaFaultPoint::host_before_journal);
+    saga = journal_.record_host_busy_outcome(request.request_id,
+                                             result.outcome_digest, now);
+    fault(HostGrantSagaFaultPoint::replay_boundary);
+    return saga;
+  }
+  if (result.status != BundleRequestStatus::granted) {
+    throw std::runtime_error("host returned an unknown bundle request status");
+  }
+  if (!result.grant) {
+    throw std::runtime_error("granted host bundle result has no receipt");
+  }
+  if (result.outcome_digest != result.grant->receipt_digest) {
+    throw std::runtime_error(
+        "host bundle outcome digest disagrees with its grant receipt");
+  }
+  fault(HostGrantSagaFaultPoint::host_before_journal);
+  saga = journal_.record_host_grant_receipt(*result.grant);
+  fault(HostGrantSagaFaultPoint::replay_boundary);
+  return saga;
+}
+
+HostGrantSagaSnapshot HostGrantSagaReconciler::reconcile_release(
+    const std::string& request_id, const ResourceReleaseRequest& release,
+    const AuthorityTimeSample& now) {
+  HostGrantSagaSnapshot saga =
+      journal_.record_host_release_intent(request_id, release, now);
+  if (saga.release_receipt) {
+    fault(HostGrantSagaFaultPoint::replay_boundary);
+    return saga;
+  }
+  fault(HostGrantSagaFaultPoint::journal_before_host);
+  const BundleReleaseResult result = host_.release_bundle(release);
+  fault(HostGrantSagaFaultPoint::host_before_journal);
+  saga = journal_.record_host_release_receipt(request_id, result.receipt);
+  fault(HostGrantSagaFaultPoint::replay_boundary);
+  return saga;
+}
+
 Reconciler::Reconciler(Journal& journal, const AdapterRegistry& registry,
                        std::mutex& authority_mutex,
                        std::function<AuthorityTimeSample()> authority_clock)

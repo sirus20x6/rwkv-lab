@@ -436,6 +436,18 @@ void validate_resolved_identity(const ResolvedLaunchIdentity& identity) {
     throw std::invalid_argument(
         "resolved launch identity has malformed authority fields");
   }
+  if (identity.host_grant) {
+    const auto& claim = *identity.host_grant;
+    if (claim.request_id.empty() ||
+        claim.request_id.size() > HostResourceBounds::maximum_identifier_bytes ||
+        !sha256_digest(claim.grant_digest) || claim.fences.empty() ||
+        claim.fences.size() > HostResourceBounds::maximum_bundle_count) {
+      throw std::invalid_argument(
+          "resolved launch host grant claim is malformed");
+    }
+    validate_resource_fence_shape(
+        claim.fences, HostResourceBounds::maximum_bundle_count);
+  }
   if (identity.required_capabilities.size() > 256U ||
       !std::ranges::is_sorted(identity.required_capabilities) ||
       std::ranges::adjacent_find(identity.required_capabilities) !=
@@ -538,6 +550,9 @@ nlohmann::json resolved_launch_identity_json(
        directory_identity_json(identity.working_directory)},
   };
   if (identity.code) output["code"] = file_identity_json(*identity.code);
+  if (identity.host_grant) {
+    output["host_grant"] = encode_json(*identity.host_grant);
+  }
   return output;
 }
 
@@ -691,6 +706,7 @@ ResolvedLaunch HostLaunchResolver::resolve(
       .concurrency_key = ticket.concurrency_key,
       .lease_id = ticket.lease_id,
       .fencing_token = ticket.fencing_token,
+      .host_grant = ticket.host_grant,
       .host = host_,
       .executable = executable.identity,
       .code = code ? std::optional<VerifiedLaunchArtifact>(code->identity)
