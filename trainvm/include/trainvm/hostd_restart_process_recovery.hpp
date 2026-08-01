@@ -33,10 +33,17 @@ struct HostdRestartProcessRecoverySummary final {
   bool operator==(const HostdRestartProcessRecoverySummary&) const = default;
 };
 
+class IHostdRestartProcessRecovery {
+ public:
+  virtual ~IHostdRestartProcessRecovery() = default;
+  [[nodiscard]] virtual HostdRestartProcessRecoverySummary step() = 0;
+};
+
 // One bounded reconciliation step performed before the final startup audit.
 // Callers may repeat it while exact recovered SIGKILL delivery is pending; all
 // ledger/cgroup actions are exact-replay or already-absent safe.
-class HostdRestartProcessRecovery final {
+class HostdRestartProcessRecovery final
+    : public IHostdRestartProcessRecovery {
  public:
   HostdRestartProcessRecovery(
       IHostdTerminalReleaseAuthority& records,
@@ -44,7 +51,7 @@ class HostdRestartProcessRecovery final {
       IHostdRecoveredProcessSupervisor& supervisor,
       HostdRestartProcessRecoveryConfig config);
 
-  [[nodiscard]] HostdRestartProcessRecoverySummary step();
+  [[nodiscard]] HostdRestartProcessRecoverySummary step() override;
 
  private:
   IHostdTerminalReleaseAuthority& records_;

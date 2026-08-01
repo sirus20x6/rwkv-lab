@@ -162,6 +162,10 @@ Implemented now:
   independently enabled conclusive-nonlive reconciliation closes PID-absent or identity-superseded
   records only after the exact durable cgroup is empty or absent and a complete accelerator-context
   audit is empty, while incomplete observations continue to block admission;
+- a wake-driven hostd startup controller that performs at most one recovery pass per advance,
+  enforces a configured step bound, refuses to consume the one-shot admission audit while any
+  unclosed process or terminal-release record remains, and latches recovery/audit failure rather
+  than silently retrying a partially consumed startup boundary;
 - a process-free, single-use journal-fence challenge verifier binding socket peer process instance,
   host/boot/broker, pinned-journal claims, controller generation, logical fence, nonce, and bounded
   boottime lifetime, with per-peer quotas and no bearer-capability interpretation of decoded data;

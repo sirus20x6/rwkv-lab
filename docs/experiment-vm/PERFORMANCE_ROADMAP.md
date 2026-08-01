@@ -252,7 +252,9 @@ startup orphan recovery are defined in
   A one-shot recovery set retains each exact pidfd for a single supervisor transfer; bounded policy
   can terminate and reconcile exact live processes, while independently gated conclusive-nonlive
   repair closes PID-absent or identity-superseded records only after exact cgroup and accelerator
-  context closure. The remaining gate is the unified guarded daemon bootstrap and real-host crash
+  context closure. A bounded wake-driven startup FSM now keeps the one-shot admission audit behind
+  complete process/release convergence, and the shared socket has one status/mutation listener
+  router. The remaining gate is concrete daemon configuration/assembly and real-host crash
   qualification before admission can rely on this path.
 - Resolve the remaining stock-SQLite auxiliary pathname race in the declared host threat model:
   trusted isolated authority directory, controlled VFS, or host-global lock broker. Do not treat

@@ -83,6 +83,7 @@ add_library(trainvm_core
   src/hostd_restart_process_recovery.cpp
   src/hostd_session_challenge.cpp
   src/hostd_startup_auditor.cpp
+  src/hostd_startup_controller.cpp
   src/hostd_terminal_release_recovery.cpp
   src/hostd_transport.cpp
   src/host_launch.cpp
@@ -324,6 +325,16 @@ target_compile_options(hostd_restart_process_recovery_tests PRIVATE
 target_link_libraries(hostd_restart_process_recovery_tests PRIVATE trainvm_core)
 add_test(NAME hostd_restart_process_recovery_tests
   COMMAND hostd_restart_process_recovery_tests
+)
+add_executable(hostd_startup_controller_tests
+  tests/hostd_startup_controller_tests.cpp
+)
+target_compile_options(hostd_startup_controller_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(hostd_startup_controller_tests PRIVATE trainvm_core)
+add_test(NAME hostd_startup_controller_tests
+  COMMAND hostd_startup_controller_tests
 )
 add_executable(hostd_session_challenge_tests
   tests/hostd_session_challenge_tests.cpp

@@ -766,6 +766,11 @@ PID-absent or identity-superseded durable spawn, but only after the exact
 recorded cgroup is empty or absent and the trusted accelerator-context audit is
 complete and empty. It never signals the current PID. Incomplete observation
 remains blocked and is never converted into process authority.
+The surrounding startup controller is wake-driven: each call performs at most
+one reconciliation step, so a daemon can wait on pidfds or timers rather than
+spin. It admits only after both unclosed-process and terminal-release views are
+empty, consumes the startup audit exactly once, and latches configured-bound,
+recovery, or admission failure.
 CPU/I/O policy evidence, device BPF,
 privileged end-to-end qualification, and daemon bootstrap/policy wiring remain
 in this gate. A daemon crash is not claimed as ordinary in-memory supervisor
