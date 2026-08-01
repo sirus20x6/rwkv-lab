@@ -22,7 +22,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -72,6 +72,9 @@ from rwkv_lab.training_components import (
     build_registered_schedule,
 )
 from rwkv_lab.training_parameter_routing import ParameterRoutingResult
+
+if TYPE_CHECKING:
+    from rwkv_lab.trainvm_adapters import WorkerTrainingComponents
 
 RUN_SCHEMA = "rwkv-lab.mage-flow-expert-train.v1"
 OFFICIAL_REPOSITORY = "https://github.com/microsoft/Mage"
@@ -359,7 +362,11 @@ class MageFlowExpertTrainConfig:
                     )
 
 
-def training_contract_fingerprint(config: MageFlowExpertTrainConfig) -> str:
+def training_contract_fingerprint(
+    config: MageFlowExpertTrainConfig,
+    *,
+    component_composition_digest: str | None = None,
+) -> str:
     """Fingerprint every setting and input that can change optimization."""
     values = asdict(config)
     values.pop("resume_from", None)
@@ -378,8 +385,71 @@ def training_contract_fingerprint(config: MageFlowExpertTrainConfig) -> str:
             _file_sha256(Path(config.eval_manifest)) if config.eval_manifest else None
         ),
     }
+    if component_composition_digest is not None:
+        payload["component_composition_digest"] = component_composition_digest
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def resolved_worker_component_contract(
+    config: MageFlowExpertTrainConfig,
+    worker_components: WorkerTrainingComponents | None,
+) -> tuple[float, Mapping[str, Mapping[str, str]] | None, str | None]:
+    """Bind duplicated legacy config fields until the worker adapter removes them."""
+
+    if worker_components is None:
+        return config.learning_rate, None, None
+    optimizer_configuration = dict(
+        worker_components.configuration("optimizer", category="optimizer")
+    )
+    router_configuration = dict(
+        worker_components.configuration(
+            "parameter_router", category="parameter_router"
+        )
+    )
+    schedule_configuration = dict(
+        worker_components.configuration(
+            "learning_rate", category="learning_rate_schedule"
+        )
+    )
+    expected_optimizer = {
+        "learning_rate": config.learning_rate,
+        "beta1": config.adam_beta1,
+        "beta2": config.adam_beta2,
+        "epsilon": config.adam_epsilon,
+        "weight_decay": config.weight_decay,
+        "foreach": True,
+        "fused": False,
+    }
+    expected_router = {
+        "shared_backbone_multiplier": config.shared_learning_rate_multiplier
+    }
+    expected_schedule = {
+        "warmup_steps": config.warmup_steps,
+        "max_steps": (
+            config.learning_rate_schedule_steps
+            if config.learning_rate_schedule_steps is not None
+            else config.max_steps
+        ),
+        "minimum_ratio": config.min_learning_rate_ratio,
+    }
+    if optimizer_configuration != expected_optimizer:
+        raise ValueError(
+            "authority optimizer composition disagrees with MageFlow configuration"
+        )
+    if router_configuration != expected_router:
+        raise ValueError(
+            "authority parameter-router composition disagrees with MageFlow configuration"
+        )
+    if schedule_configuration != expected_schedule:
+        raise ValueError(
+            "authority LR-schedule composition disagrees with MageFlow configuration"
+        )
+    return (
+        float(optimizer_configuration["learning_rate"]),
+        worker_components.evidence(),
+        worker_components.composition.composition_digest,
+    )
 
 
 def effective_conditioning_prompts(
@@ -935,10 +1005,17 @@ def optimizer_parameter_routing(
     *,
     learning_rate: float,
     shared_learning_rate_multiplier: float,
+    worker_components: WorkerTrainingComponents | None = None,
 ) -> ParameterRoutingResult:
     """Prove exclusive appearance-expert/backbone ownership before grouping."""
 
     expert_ids = frozenset(id(parameter) for parameter in controller.parameters())
+    if worker_components is not None:
+        return worker_components.parameter_routing(
+            transformer.named_parameters(remove_duplicate=False),
+            {"expert": expert_ids},
+            base_learning_rate=learning_rate,
+        )
     return build_registered_parameter_routing(
         ParameterRouterImplementation.MAGEFLOW_APPEARANCE_EXPERT_V1,
         transformer.named_parameters(remove_duplicate=False),
@@ -1858,7 +1935,11 @@ def cache_frozen_encoders(config: MageFlowExpertTrainConfig) -> dict[str, Any]:
     return receipt
 
 
-def train(config: MageFlowExpertTrainConfig) -> None:
+def train(
+    config: MageFlowExpertTrainConfig,
+    *,
+    worker_components: WorkerTrainingComponents | None = None,
+) -> None:
     """Run single-GPU routed expert/shared-backbone optimization."""
     config.validate()
     try:
@@ -1955,37 +2036,45 @@ def train(config: MageFlowExpertTrainConfig) -> None:
     preflight = training_scope_preflight_report(transformer, controller, scope)
     if not preflight["passed"]:
         raise RuntimeError(f"training-scope preflight failed: {preflight}")
+    optimizer_learning_rate, component_evidence, component_digest = (
+        resolved_worker_component_contract(config, worker_components)
+    )
     optimizer_routing = optimizer_parameter_routing(
         transformer,
         controller,
-        learning_rate=config.learning_rate,
+        learning_rate=optimizer_learning_rate,
         shared_learning_rate_multiplier=config.shared_learning_rate_multiplier,
+        worker_components=worker_components,
     )
     optimizer_groups = list(optimizer_routing.groups)
-    optimizer = build_registered_optimizer(
-        OptimizerImplementation.FP32_MASTER_ADAMW_V1,
-        optimizer_groups,
-        AdamWConfiguration(
-            learning_rate=config.learning_rate,
-            beta1=config.adam_beta1,
-            beta2=config.adam_beta2,
-            epsilon=config.adam_epsilon,
-            weight_decay=config.weight_decay,
-        ),
-    )
-    scheduler = build_registered_schedule(
-        ScheduleImplementation.LINEAR_WARMUP_COSINE_V1,
-        optimizer,
-        LinearWarmupCosineConfiguration(
-            warmup_steps=config.warmup_steps,
-            max_steps=(
-                config.learning_rate_schedule_steps
-                if config.learning_rate_schedule_steps is not None
-                else config.max_steps
+    if worker_components is not None:
+        optimizer = worker_components.optimizer(optimizer_groups)
+        scheduler = worker_components.learning_rate_schedule(optimizer)
+    else:
+        optimizer = build_registered_optimizer(
+            OptimizerImplementation.FP32_MASTER_ADAMW_V1,
+            optimizer_groups,
+            AdamWConfiguration(
+                learning_rate=config.learning_rate,
+                beta1=config.adam_beta1,
+                beta2=config.adam_beta2,
+                epsilon=config.adam_epsilon,
+                weight_decay=config.weight_decay,
             ),
-            minimum_ratio=config.min_learning_rate_ratio,
-        ),
-    )
+        )
+        scheduler = build_registered_schedule(
+            ScheduleImplementation.LINEAR_WARMUP_COSINE_V1,
+            optimizer,
+            LinearWarmupCosineConfiguration(
+                warmup_steps=config.warmup_steps,
+                max_steps=(
+                    config.learning_rate_schedule_steps
+                    if config.learning_rate_schedule_steps is not None
+                    else config.max_steps
+                ),
+                minimum_ratio=config.min_learning_rate_ratio,
+            ),
+        )
 
     train_rows = load_domain_manifest(Path(config.train_manifest))
     eval_rows = (
@@ -2047,7 +2136,9 @@ def train(config: MageFlowExpertTrainConfig) -> None:
             model._training_vae_encoder_offloaded = True
     if not eval_rows:
         _drop_vae_decoder(model)
-    contract_fingerprint = training_contract_fingerprint(config)
+    contract_fingerprint = training_contract_fingerprint(
+        config, component_composition_digest=component_digest
+    )
 
     global_step, start_epoch, start_batch = 0, 0, 0
     loaded_checkpoint: Path | None = None
@@ -2200,6 +2291,7 @@ def train(config: MageFlowExpertTrainConfig) -> None:
                 for group in optimizer_groups
             ],
             "parameter_routing": optimizer_routing.report,
+            "training_components": component_evidence,
             "trainable_parameters": sum(parameter.numel() for parameter in trainable),
             "trainable_parameters_per_domain": {
                 domain: (

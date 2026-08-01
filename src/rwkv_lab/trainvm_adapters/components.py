@@ -48,6 +48,11 @@ class WorkerTrainingComponents:
             component.runtime_envelope(), parameters
         )
 
+    def configuration(
+        self, slot: str, *, category: str
+    ) -> Mapping[str, bool | int | float | str]:
+        return self.composition.require(slot, category=category).configuration
+
     def learning_rate_schedule(
         self,
         optimizer: torch.optim.Optimizer,

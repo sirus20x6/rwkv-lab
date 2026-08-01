@@ -1,3 +1,4 @@
+import hashlib
 import json
 import random
 from collections import Counter
@@ -33,11 +34,77 @@ from rwkv_lab.mage_flow_expert_train import (
     optimizer_parameter_routing,
     prepare_fixed_expert_cache,
     prepare_run,
+    resolved_worker_component_contract,
     save_training_checkpoint,
     training_contract_fingerprint,
     training_scope_preflight_report,
     unified_evaluation_is_complete,
 )
+from rwkv_lab.trainvm_adapters import WorkerTrainingComponents
+from rwkv_lab.trainvm_worker import load_resolved_training_composition
+
+
+def _worker_components(config: MageFlowExpertTrainConfig) -> WorkerTrainingComponents:
+    root = Path(__file__).resolve().parents[1]
+    registry = json.loads(
+        (root / "docs/experiment-vm/examples/training-components.v1.json").read_text()
+    )
+    requested = {
+        "optimizer": (
+            "fp32_master_adamw",
+            {
+                "learning_rate": config.learning_rate,
+                "beta1": config.adam_beta1,
+                "beta2": config.adam_beta2,
+                "epsilon": config.adam_epsilon,
+                "weight_decay": config.weight_decay,
+                "foreach": True,
+                "fused": False,
+            },
+        ),
+        "parameter_router": (
+            "mageflow_appearance_expert",
+            {
+                "shared_backbone_multiplier": config.shared_learning_rate_multiplier
+            },
+        ),
+        "learning_rate": (
+            "linear_warmup_cosine",
+            {
+                "warmup_steps": config.warmup_steps,
+                "max_steps": config.learning_rate_schedule_steps or config.max_steps,
+                "minimum_ratio": config.min_learning_rate_ratio,
+            },
+        ),
+    }
+    components = {}
+    for slot, (name, configuration) in requested.items():
+        descriptor = next(
+            item for item in registry["components"] if item["key"]["name"] == name
+        )
+        descriptor_bytes = json.dumps(
+            descriptor, separators=(",", ":"), sort_keys=True
+        ).encode()
+        components[slot] = {
+            "configuration": configuration,
+            "descriptor": descriptor,
+            "descriptor_digest": "sha256:"
+            + hashlib.sha256(descriptor_bytes).hexdigest(),
+        }
+    body = {
+        "api_version": "trainvm.resolved-training-composition/v1",
+        "components": components,
+        "model_family": "mageflow",
+        "registry_digest": "sha256:" + "a" * 64,
+    }
+    body_bytes = json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
+    resolved = load_resolved_training_composition(
+        {
+            **body,
+            "composition_digest": "sha256:" + hashlib.sha256(body_bytes).hexdigest(),
+        }
+    )
+    return WorkerTrainingComponents(resolved, "mageflow")
 
 
 def _row(index, domain, *, source="source", captioned=True):
@@ -131,6 +198,9 @@ def test_continuation_path_is_lineage_not_contract_and_modes_are_exclusive(tmp_p
     )
     assert training_contract_fingerprint(base) == training_contract_fingerprint(
         alternate
+    )
+    assert training_contract_fingerprint(base) != training_contract_fingerprint(
+        base, component_composition_digest="sha256:" + "a" * 64
     )
     invalid = MageFlowExpertTrainConfig(
         **{**base.__dict__, "resume_from": "/checkpoint/exact"}
@@ -609,6 +679,55 @@ def test_unfrozen_experts_use_twice_the_shared_tail_learning_rate():
     assert routing.report["trainable_tensor_count"] == sum(
         route["trainable_tensor_count"] for route in routing.report["routes"]
     )
+
+
+def test_worker_composition_drives_expert_optimizer_contract_and_routing(tmp_path):
+    config = MageFlowExpertTrainConfig(
+        train_manifest=str(tmp_path / "train.jsonl"),
+        output_dir=str(tmp_path / "run"),
+        max_steps=20,
+        warmup_steps=2,
+        learning_rate=2.0e-5,
+        shared_learning_rate_multiplier=0.5,
+    )
+    components = _worker_components(config)
+    learning_rate, evidence, composition_digest = resolved_worker_component_contract(
+        config, components
+    )
+    assert learning_rate == pytest.approx(2.0e-5)
+    assert evidence["parameter_router"]["category"] == "parameter_router"
+    assert composition_digest == components.composition.composition_digest
+
+    model = _Transformer(depth=6)
+    controller = inject_appearance_experts(
+        model,
+        final_block_fraction=0.5,
+        expert_parameter_fraction=None,
+        expert_width_fraction=0.25,
+        expert_dtype=torch.float32,
+    )
+    configure_training_scope(
+        model,
+        controller,
+        train_experts=True,
+        shared_final_fraction=1 / 3,
+    )
+    routing = optimizer_parameter_routing(
+        model,
+        controller,
+        learning_rate=learning_rate,
+        shared_learning_rate_multiplier=config.shared_learning_rate_multiplier,
+        worker_components=components,
+    )
+    assert [group["lr"] for group in routing.groups] == pytest.approx(
+        [2.0e-5, 1.0e-5]
+    )
+
+    mismatched = MageFlowExpertTrainConfig(
+        **{**config.__dict__, "weight_decay": 0.02}
+    )
+    with pytest.raises(ValueError, match="optimizer composition disagrees"):
+        resolved_worker_component_contract(mismatched, components)
 
 
 def test_fp32_master_experts_run_under_bf16_autocast():
