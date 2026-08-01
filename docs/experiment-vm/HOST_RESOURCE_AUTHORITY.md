@@ -699,6 +699,13 @@ the same still-active grant and bind boot ID, PID starttime, cgroup inode, and
 executable digest. Pre-commit fault points roll back both chain and projection,
 while post-commit lost replies resolve only to the exact canonical replay.
 
+The client side now shares bounded deadline/correlation transport machinery while keeping resource
+and process semantics in separate typed clients. Accelerator-backed experiment resources lower
+deterministically to an exact sealed bundle request, and the service performs the durable grant saga
+before worker-launch authorization. A durable busy outcome is surfaced as its own reconciliation
+state and does not cause repeated mutation. Retry policy after busy and a typed CPU process-slot
+resource are still required before general production admission is enabled.
+
 ### P0.4 — guarded launcher and strict cgroup enforcement
 
 Integrate sealed launch descriptors, allocation cgroups, stopped `clone3`, pidfds, effective CPU/I/O

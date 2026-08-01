@@ -964,6 +964,7 @@ TrainVMService::TrainVMService(
     std::function<AuthorityTimeSample()> authority_clock,
     HostGrantEnforcement host_grant_enforcement,
     TrainingComponentRegistry training_components,
+    std::shared_ptr<IHostGrantClient> host_grant_client,
     std::shared_ptr<IHostProcessClient> host_process_client,
     std::string controller_target)
     : authority_lock_(std::make_unique<AuthorityLock>(journal_path)),
@@ -979,6 +980,12 @@ TrainVMService::TrainVMService(
       training_components_(std::move(training_components)),
       authority_host_(std::move(authority_host)),
       host_launch_resolver_(host_launch_registry_, authority_host_),
+      host_grant_client_(std::move(host_grant_client)),
+      host_grant_saga_(
+          host_grant_client_
+              ? std::make_unique<HostGrantSagaReconciler>(
+                    journal_, *host_grant_client_)
+              : nullptr),
       host_process_client_(std::move(host_process_client)),
       controller_target_(std::move(controller_target)),
       host_process_saga_(
@@ -989,9 +996,11 @@ TrainVMService::TrainVMService(
       reconciler_(journal_, adapter_registry_, training_components_,
                   command_mutex_,
                   [this] { return authority_now(); }) {
-  if (static_cast<bool>(host_process_client_) != !controller_target_.empty()) {
+  if (static_cast<bool>(host_process_client_) != !controller_target_.empty() ||
+      static_cast<bool>(host_grant_client_) !=
+          static_cast<bool>(host_process_client_)) {
     throw std::invalid_argument(
-        "host process client and controller target must be configured together");
+        "host grant/process clients and controller target must be configured together");
   }
 }
 
@@ -1002,12 +1011,74 @@ AuthorityTimeSample TrainVMService::authority_now() const {
 }
 
 ReconcileResult TrainVMService::reconcile_once(const std::string& run_id) {
+  if (host_grant_saga_) {
+    if (const auto disposition = reconcile_host_grant(run_id)) {
+      return {.disposition = *disposition,
+              .run_id = run_id,
+              .launch = std::nullopt};
+    }
+  }
   ReconcileResult result = reconciler_.step(run_id);
   if (result.launch && host_process_saga_) {
     const ResolvedLaunchSpec binding = bind_worker_launch(*result.launch);
     (void)launch_worker_process(binding.identity.launch_event_id);
   }
   return result;
+}
+
+std::optional<ReconcileDisposition> TrainVMService::reconcile_host_grant(
+    const std::string& run_id) {
+  std::scoped_lock lock(command_mutex_);
+  const AuthorityTimeSample now = authority_now();
+  const auto projection = journal_.projection(run_id);
+  if (!projection) {
+    throw std::invalid_argument("cannot reconcile host grant for unknown run");
+  }
+  if (projection->desired_state != "running" ||
+      projection->observed_state != "acquiring") {
+    return std::nullopt;
+  }
+  const auto plan = journal_.compiled_plan(projection->plan_hash);
+  if (!plan) {
+    throw std::runtime_error(
+        "cannot reconcile host grant without persisted plan");
+  }
+  Controller controller(*plan, journal_, run_id);
+  controller.recover();
+  if (controller.state().status != ExecutionStatus::running ||
+      controller.state().current_node_id.empty()) {
+    throw std::runtime_error(
+        "acquiring run has no deterministic current node");
+  }
+  const Node& node = plan->experiment.spec.workflow.nodes.at(
+      controller.state().current_node_id);
+  const Component& component =
+      plan->experiment.spec.components.at(node.invoke.component);
+  if (component.runtime == ComponentRuntime::builtin) return std::nullopt;
+  const std::string& concurrency_key =
+      plan->experiment.spec.workspace.concurrency_key;
+  const auto lease = journal_.active_lease(concurrency_key, now);
+  if (!lease || lease->owner_run_id != run_id) {
+    throw OperationPreconditionError(
+        "host grant reconciliation lost its logical lease");
+  }
+  const ResourceBundleRequest request = build_resource_bundle_request({
+      .journal_id = journal_.journal_id(),
+      .plan_hash = plan->plan_hash,
+      .run_id = run_id,
+      .resources = plan->experiment.spec.resources,
+      .lease = *lease,
+  });
+  if (const auto existing = journal_.host_grant_saga(request.request_id)) {
+    if (existing->grant) return std::nullopt;
+    if (existing->busy_outcome_digest) {
+      return ReconcileDisposition::host_grant_busy;
+    }
+  }
+  const HostGrantSagaSnapshot saga =
+      host_grant_saga_->reconcile_request(request, now);
+  return saga.grant ? ReconcileDisposition::host_grant_acquired
+                    : ReconcileDisposition::host_grant_busy;
 }
 
 void TrainVMService::prune_retained_launches(

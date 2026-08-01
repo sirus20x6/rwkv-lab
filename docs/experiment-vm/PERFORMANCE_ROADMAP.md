@@ -148,6 +148,11 @@ receipt -> exec commit ordering behind an injected host-process client; producti
 disabled while strict mutation-client startup configuration, orphan adoption, and privileged
 qualification are unfinished.
 
+Resource admission lowering is a separate pure module: experiment accelerator requirements become
+one deterministic host bundle request, independently of adapter and trainer code. CPU-only external
+workers stay disabled until a typed host process-slot resource is available; they must not borrow a
+GPU or an unrelated mutex merely to satisfy the launcher protocol.
+
 ## Modded NanoGPT adaptation matrix
 
 Reviewed source: [KellerJordan/modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt),

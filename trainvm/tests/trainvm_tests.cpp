@@ -6781,6 +6781,101 @@ void test_service_host_launch_binding() {
   std::filesystem::remove_all(directory);
 }
 
+class ServiceBusyGrantClient final : public trainvm::IHostGrantClient {
+ public:
+  trainvm::BundleRequestResult request_bundle(
+      const trainvm::ResourceBundleRequest& request) override {
+    ++calls;
+    last_request = request;
+    return {.status = trainvm::BundleRequestStatus::busy,
+            .grant = std::nullopt,
+            .outcome_digest = "sha256:" + std::string(64U, 'b'),
+            .replayed = false};
+  }
+
+  trainvm::BundleReleaseResult release_bundle(
+      const trainvm::ResourceReleaseRequest&) override {
+    throw std::runtime_error("busy service fixture cannot release");
+  }
+
+  std::size_t calls{};
+  std::optional<trainvm::ResourceBundleRequest> last_request;
+};
+
+class ServiceNeverProcessClient final : public trainvm::IHostProcessClient {
+ public:
+  trainvm::HostdProcessPreparedResult prepare_process(
+      const trainvm::HostdProcessPrepareRequest&,
+      const trainvm::ResolvedLaunch&,
+      const trainvm::SealedWorkerBootstrap&) override {
+    throw std::runtime_error("busy service fixture cannot prepare a process");
+  }
+
+  trainvm::HostdProcessCommittedResult commit_process(
+      const trainvm::HostdProcessCommitRequest&) override {
+    throw std::runtime_error("busy service fixture cannot commit a process");
+  }
+};
+
+void test_service_host_grant_reconciliation() {
+  const auto compiled = trainvm::compile_document(load_fixture());
+  check(compiled.valid(), "service host grant fixture compiles");
+  if (!compiled.plan) return;
+  const auto directory = std::filesystem::temp_directory_path() /
+                         ("trainvm-service-grant-test-" +
+                          std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  const auto database = directory / "journal.db";
+  const std::string run_id = "service-grant-run";
+  const auto adapters = fixture_adapter_profiles();
+  {
+    trainvm::AdapterRegistry registry(adapters);
+    trainvm::Journal journal(database);
+    trainvm::Controller controller(*compiled.plan, journal, run_id);
+    controller.create_queued(
+        adapter_locked_submission(*compiled.plan, registry));
+  }
+  auto grant = std::make_shared<ServiceBusyGrantClient>();
+  auto process = std::make_shared<ServiceNeverProcessClient>();
+  const trainvm::HostIdentity host{
+      .host_id = "sha256:" + std::string(64U, '7'),
+      .boot_id = kTestBootId,
+  };
+  std::int64_t now = 1'000;
+  trainvm::TrainVMService service(
+      database, trainvm::AdapterRegistry(adapters),
+      fixture_disabled_host_launch_registry(), host,
+      [&now] { return test_time(now); },
+      trainvm::HostGrantEnforcement::required,
+      trainvm::TrainingComponentRegistry({}), grant, process,
+      "unix:/tmp/trainvm-service-grant.sock");
+  const auto acquired = service.reconcile_once(run_id);
+  now = 1'100;
+  const auto busy = service.reconcile_once(run_id);
+  now = 1'200;
+  const auto busy_replay = service.reconcile_once(run_id);
+  check(acquired.disposition ==
+            trainvm::ReconcileDisposition::lease_acquired &&
+            busy.disposition ==
+                trainvm::ReconcileDisposition::host_grant_busy &&
+            busy_replay.disposition ==
+                trainvm::ReconcileDisposition::host_grant_busy &&
+            grant->calls == 1U && grant->last_request &&
+            grant->last_request->journal_id == service.journal_.journal_id() &&
+            grant->last_request->run_id == run_id &&
+            grant->last_request->count == 1U &&
+            grant->last_request->selector.vendor ==
+                trainvm::HostAcceleratorVendor::nvidia &&
+            service.journal_
+                .host_grant_saga(grant->last_request->request_id)
+                ->busy_outcome_digest ==
+                std::optional<std::string>{"sha256:" +
+                                           std::string(64U, 'b')},
+        "service lowers one exact resource request and replays durable busy without contacting hostd twice");
+  std::filesystem::remove_all(directory);
+}
+
 void test_adapter_registry_file_contract() {
   const std::filesystem::path directory =
       std::filesystem::temp_directory_path() /
@@ -9897,6 +9992,7 @@ int main() {
     test_host_launch_registry_contract();
     test_host_launch_resolution_and_binding();
     test_service_host_launch_binding();
+    test_service_host_grant_reconciliation();
     test_adapter_registry_file_contract();
     test_service_registry_and_reconciliation();
     test_adapter_registry_and_reconciler();

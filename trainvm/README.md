@@ -315,6 +315,14 @@ pause/resume and durable hostd adoption remain subsequent milestones. A worker l
 until it is paired with a trusted descriptor digest, resolved launch specification, host identity,
 and durable process receipt.
 
+Host resource admission uses a separate typed client above the same bounded mutation channel.
+Portable accelerator declarations are lowered by a pure deterministic builder into one sealed
+host bundle request (vendor, count, memory floor, labels, access mode, logical lease, and plan
+identity). TrainVMService can now run the journal/hostd grant saga before creating a worker launch;
+durable busy results replay without repeated host mutation. CPU-only external workers remain
+explicitly disabled until hostd has a real typed process-slot resource rather than an invented GPU
+or mutex claim.
+
 Secret-marked parameters are restricted to versioned opaque references of the form
 `secret://provider/name#version`; raw secret values are rejected before canonical plan persistence.
 The host-launch registry contains only fixed `public_arguments`. Future resolved credentials will

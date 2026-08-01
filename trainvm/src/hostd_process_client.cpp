@@ -1,6 +1,5 @@
 #include "trainvm/hostd_process_client.hpp"
 
-#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <unistd.h>
@@ -8,8 +7,6 @@
 
 namespace trainvm {
 namespace {
-
-constexpr std::int64_t kMaximumRequestTimeoutNs = 30'000'000'000LL;
 
 class Descriptor final {
  public:
@@ -48,20 +45,11 @@ void require_bootstrap_binding(const HostdProcessPrepareRequest& request,
 }  // namespace
 
 HostdProcessClient::HostdProcessClient(HostdProcessClientOptions options)
-    : options_(std::move(options)) {
-  if (!options_.open_for_launch || !options_.monotonic_now ||
-      options_.request_timeout_ns <= 0 ||
-      options_.request_timeout_ns > kMaximumRequestTimeoutNs) {
+    : open_for_launch_(std::move(options.open_for_launch)),
+      channel_(std::move(options.channel)) {
+  if (!open_for_launch_) {
     throw std::invalid_argument(
-        "hostd process client options are incomplete or unbounded");
-  }
-  if (!options_.exchange) {
-    options_.exchange = [](const HostdMutationClientConfig& config,
-                           const HostdMutationRequest& request,
-                           std::uint64_t correlation,
-                           std::int64_t deadline) {
-      return hostd_request_mutation(config, request, correlation, deadline);
-    };
+        "hostd process client has no mutation-open authority source");
   }
 }
 
@@ -70,7 +58,7 @@ HostdMutationOpen HostdProcessClient::open_for(
     std::string_view run_id, std::string_view logical_lease_id,
     std::uint64_t logical_fencing_token,
     std::string_view concurrency_key) const {
-  HostdMutationOpen open = options_.open_for_launch(launch_id);
+  HostdMutationOpen open = open_for_launch_(launch_id);
   (void)hostd_mutation_open_canonical_json(open);
   const auto& claim = open.claim;
   if (claim.journal.journal_id != journal_id ||
@@ -83,23 +71,6 @@ HostdMutationOpen HostdProcessClient::open_for(
         "hostd mutation claim disagrees with process attribution");
   }
   return open;
-}
-
-HostdMutationReply HostdProcessClient::exchange(
-    HostdMutationRequest request) {
-  const std::int64_t now = options_.monotonic_now();
-  if (now < 0 || options_.request_timeout_ns >
-                     std::numeric_limits<std::int64_t>::max() - now) {
-    throw HostdTransportError("hostd process client deadline overflowed");
-  }
-  const std::uint64_t correlation =
-      next_correlation_.fetch_add(1U, std::memory_order_relaxed);
-  if (correlation == 0U ||
-      correlation == std::numeric_limits<std::uint64_t>::max()) {
-    throw HostdTransportError("hostd process client correlation exhausted");
-  }
-  return options_.exchange(options_.transport, request, correlation,
-                           now + options_.request_timeout_ns);
 }
 
 HostdProcessPreparedResult HostdProcessClient::prepare_process(
@@ -135,7 +106,7 @@ HostdProcessPreparedResult HostdProcessClient::prepare_process(
               .working_directory_fd = working_directory.get(),
               .worker_bootstrap_fd = bootstrap_descriptor.get()},
   };
-  const HostdMutationReply reply = exchange(std::move(mutation));
+  const HostdMutationReply reply = channel_.request(std::move(mutation));
   if (reply.kind != HostdMutationReplyKind::process_prepared ||
       !reply.process_prepared) {
     throw HostdTransportError(
@@ -166,7 +137,7 @@ HostdProcessCommittedResult HostdProcessClient::commit_process(
       .mutation = HostdMutationKind::commit_process,
       .process_commit = request,
   };
-  const HostdMutationReply reply = exchange(std::move(mutation));
+  const HostdMutationReply reply = channel_.request(std::move(mutation));
   if (reply.kind != HostdMutationReplyKind::process_committed ||
       !reply.process_committed) {
     throw HostdTransportError(

@@ -70,9 +70,11 @@ add_library(trainvm_core
   src/hostd_linux_service_identity.cpp
   src/hostd_linux_session_authority.cpp
   src/hostd_linux_stopped_launcher.cpp
+  src/hostd_mutation_client.cpp
   src/hostd_mutation_protocol.cpp
   src/hostd_process_client.cpp
   src/hostd_process_protocol.cpp
+  src/hostd_resource_client.cpp
   src/hostd_session_challenge.cpp
   src/hostd_transport.cpp
   src/host_launch.cpp
@@ -82,6 +84,7 @@ add_library(trainvm_core
   src/lease_renewal.cpp
   src/linux_nvidia_inventory.cpp
   src/reconciler.cpp
+  src/resource_request_builder.cpp
   src/training_component_registry.cpp
   src/worker_bootstrap.cpp
 )
@@ -237,6 +240,16 @@ target_compile_options(host_resources_tests PRIVATE
 )
 target_link_libraries(host_resources_tests PRIVATE trainvm_core)
 add_test(NAME host_resources_tests COMMAND host_resources_tests)
+add_executable(resource_request_builder_tests
+  tests/resource_request_builder_tests.cpp
+)
+target_compile_options(resource_request_builder_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(resource_request_builder_tests PRIVATE trainvm_core)
+add_test(NAME resource_request_builder_tests
+  COMMAND resource_request_builder_tests
+)
 add_executable(host_ledger_tests tests/host_ledger_tests.cpp)
 target_compile_options(host_ledger_tests PRIVATE
   -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror

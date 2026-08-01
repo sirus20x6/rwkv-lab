@@ -1,6 +1,7 @@
 #include "trainvm/hostd_transport.hpp"
 #include "trainvm/document.hpp"
 #include "trainvm/hostd_process_client.hpp"
+#include "trainvm/hostd_resource_client.hpp"
 #include "trainvm/worker_bootstrap.hpp"
 
 #include <fcntl.h>
@@ -1676,6 +1677,42 @@ void mutation_transport_dispatches_replays_and_disconnects() {
                   granted.bundle_result->outcome_digest,
           "duplicate socket request returns the exact durable replay");
 
+  std::size_t resource_open_calls = 0U;
+  HostdResourceClient resource_client({
+      .channel = {.transport = client,
+                  .monotonic_now = [] { return hostd_monotonic_now_ns(); },
+                  .request_timeout_ns = 2'000'000'000LL,
+                  .exchange = {}},
+      .open_for_request = [&](std::string_view) {
+        ++resource_open_calls;
+        return open;
+      },
+  });
+  const auto call_resource_client = [&](auto&& operation) {
+    using Result = std::invoke_result_t<decltype(operation)>;
+    std::optional<Result> result;
+    std::exception_ptr client_error;
+    std::jthread client_thread([&] {
+      try {
+        result = operation();
+      } catch (...) {
+        client_error = std::current_exception();
+      }
+    });
+    const HostdServeResult served = server.serve_one(deadline());
+    client_thread.join();
+    if (client_error) std::rethrow_exception(client_error);
+    require(served == HostdServeResult::served && result,
+            "typed hostd resource client receives one authenticated reply");
+    return *result;
+  };
+  const auto typed_grant_replay = call_resource_client(
+      [&] { return resource_client.request_bundle(request); });
+  require(typed_grant_replay.replayed &&
+              typed_grant_replay.outcome_digest ==
+                  replayed.bundle_result->outcome_digest,
+          "typed hostd resource client replays the exact durable grant");
+
   const HostdMutationRequest reconcile_request{
       .open = open,
       .mutation = HostdMutationKind::reconcile_bundle_outcome,
@@ -1778,19 +1815,20 @@ void mutation_transport_dispatches_replays_and_disconnects() {
                                std::nullopt, client_working_directory);
   std::size_t rejected_exchange_calls = 0U;
   HostdProcessClient misattributed_client({
-      .transport = client,
+      .channel = {.transport = client,
+                  .monotonic_now = [] { return hostd_monotonic_now_ns(); },
+                  .request_timeout_ns = 2'000'000'000LL,
+                  .exchange = [&](const HostdMutationClientConfig&,
+                                  const HostdMutationRequest&, std::uint64_t,
+                                  std::int64_t) -> HostdMutationReply {
+                    ++rejected_exchange_calls;
+                    throw std::runtime_error(
+                        "misattributed request reached transport");
+                  }},
       .open_for_launch = [&](std::string_view) {
         auto wrong = open;
         wrong.claim.controller.run_id = "wrong-run";
         return wrong;
-      },
-      .monotonic_now = [] { return hostd_monotonic_now_ns(); },
-      .request_timeout_ns = 2'000'000'000LL,
-      .exchange = [&](const HostdMutationClientConfig&,
-                      const HostdMutationRequest&, std::uint64_t,
-                      std::int64_t) -> HostdMutationReply {
-        ++rejected_exchange_calls;
-        throw std::runtime_error("misattributed request reached transport");
       },
   });
   bool misattributed_rejected = false;
@@ -1804,16 +1842,16 @@ void mutation_transport_dispatches_replays_and_disconnects() {
           "typed hostd client rejects a journal/controller claim mismatch before descriptor transfer");
   std::size_t open_calls = 0U;
   HostdProcessClient process_client({
-      .transport = client,
+      .channel = {.transport = client,
+                  .monotonic_now = [] { return hostd_monotonic_now_ns(); },
+                  .request_timeout_ns = 2'000'000'000LL,
+                  .exchange = {}},
       .open_for_launch = [&](std::string_view launch_id) {
         ++open_calls;
         require(launch_id == process_launch.identity.launch_event_id,
                 "typed hostd client requests authority for the exact launch");
         return open;
       },
-      .monotonic_now = [] { return hostd_monotonic_now_ns(); },
-      .request_timeout_ns = 2'000'000'000LL,
-      .exchange = {},
   });
   const auto typed_exchange = [&](auto&& operation) {
     using Result = std::invoke_result_t<decltype(operation)>;
@@ -1895,6 +1933,12 @@ void mutation_transport_dispatches_replays_and_disconnects() {
               released.release_result->receipt.allocation_id ==
                   grant.allocation_id,
           "socket release returns the exact committed release receipt");
+  const auto typed_release_replay = call_resource_client(
+      [&] { return resource_client.release_bundle(release); });
+  require(typed_release_replay.replayed &&
+              typed_release_replay.receipt == released.release_result->receipt &&
+              resource_open_calls == 2U,
+          "typed hostd resource client replays the exact durable release");
 
   const auto rejected_exchange = [&](HostdMutationRequest mutation,
                                      std::uint64_t correlation) {
@@ -1932,7 +1976,7 @@ void mutation_transport_dispatches_replays_and_disconnects() {
        .bundle_request = mutation_request("request-stale-fence"),
        .release_request = std::nullopt},
       106U);
-  require(ledger_time->calls == 3U,
+  require(ledger_time->calls == 5U,
           "stale logical fence is rejected before host time or ledger mutation");
 
   logical->live = true;
@@ -1954,7 +1998,7 @@ void mutation_transport_dispatches_replays_and_disconnects() {
         110U + index);
     require(!fault->selected &&
                 !fixture.ledger->reconcile_bundle_outcome(interrupted) &&
-                ledger_time->calls == 3U &&
+                ledger_time->calls == 5U &&
                 verifier->outstanding_challenges() == 0U,
             "every pre-dispatch interruption leaves no durable outcome or challenge");
   }
@@ -2001,10 +2045,10 @@ void mutation_transport_dispatches_replays_and_disconnects() {
               recovered_released.release_result->receipt.allocation_id ==
                   recovered_grant.allocation_id,
           "lost-reply replay remains exactly releasable");
-  require(ledger_time->calls == 6U,
+  require(ledger_time->calls == 8U,
           "only dispatched grants and releases sample host ledger time");
-  require(journal->calls == 18U && service->calls >= 24U &&
-              logical->calls >= 22U &&
+  require(journal->calls == 20U && service->calls >= 26U &&
+              logical->calls >= 24U &&
               verifier->outstanding_challenges() == 0U,
           "every connection consumes a journal challenge and reattests peer and fence");
 }

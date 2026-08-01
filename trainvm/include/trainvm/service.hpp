@@ -16,6 +16,7 @@
 #include "trainvm/authority_time.hpp"
 #include "trainvm/host_launch.hpp"
 #include "trainvm/host_process_saga.hpp"
+#include "trainvm/resource_request_builder.hpp"
 #include "trainvm/reconciler.hpp"
 #include "trainvm/training_component_registry.hpp"
 #include "trainvm/v1/trainvm.grpc.pb.h"
@@ -110,6 +111,8 @@ class TrainVMService final : public v1::TrainVM::Service,
   ResolvedLaunchSpec bind_worker_launch(const WorkerLaunchTicket& launch);
   HostProcessSagaSnapshot launch_worker_process(
       const std::string& launch_id);
+  [[nodiscard]] std::optional<ReconcileDisposition> reconcile_host_grant(
+      const std::string& run_id);
 
   // Deterministic host-identity injection is restricted to focused authority
   // tests. Production construction always captures the local Linux identity.
@@ -122,6 +125,7 @@ class TrainVMService final : public v1::TrainVM::Service,
                      HostGrantEnforcement::required,
                  TrainingComponentRegistry training_components =
                      TrainingComponentRegistry({}),
+                 std::shared_ptr<IHostGrantClient> host_grant_client = {},
                  std::shared_ptr<IHostProcessClient> host_process_client = {},
                  std::string controller_target = {});
 
@@ -139,6 +143,8 @@ class TrainVMService final : public v1::TrainVM::Service,
   const TrainingComponentRegistry training_components_;
   const HostIdentity authority_host_;
   HostLaunchResolver host_launch_resolver_;
+  std::shared_ptr<IHostGrantClient> host_grant_client_;
+  std::unique_ptr<HostGrantSagaReconciler> host_grant_saga_;
   std::shared_ptr<IHostProcessClient> host_process_client_;
   std::string controller_target_;
   std::unique_ptr<HostProcessSagaReconciler> host_process_saga_;

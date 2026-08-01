@@ -20,6 +20,8 @@ class TrainVMService;
 enum class ReconcileDisposition {
   lease_acquired,
   lease_busy,
+  host_grant_acquired,
+  host_grant_busy,
   launch_prepared,
   launch_replayed,
   awaiting_worker,
