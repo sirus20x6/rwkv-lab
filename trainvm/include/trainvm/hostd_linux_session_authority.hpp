@@ -66,6 +66,7 @@ struct HostdLinuxNamespaceIdentity final {
 struct HostdLinuxHostNamespacePolicy final {
   HostdLinuxNamespaceIdentity mount_namespace;
   HostdLinuxNamespaceIdentity pid_namespace;
+  HostdLinuxNamespaceIdentity cgroup_namespace;
   HostdLinuxNamespaceIdentity time_namespace;
   HostdLinuxNamespaceIdentity time_for_children_namespace;
 
@@ -73,9 +74,10 @@ struct HostdLinuxHostNamespacePolicy final {
 };
 
 enum class HostdLinuxSessionEnforcementGrade {
-  // Pins and continuously reattests the current proc mount plus mount/PID/time
-  // namespace identities, but does not claim that an external host authority
-  // selected those namespace identities or that SO_PEERPIDFD is available.
+  // Pins and continuously reattests the current proc mount plus
+  // mount/PID/cgroup/time namespace identities, but does not claim that an
+  // external host authority selected those identities or that SO_PEERPIDFD is
+  // available.
   cooperative_namespace_observation,
   // Requires exact externally configured host namespace identities and a
   // socket-derived SO_PEERPIDFD for every bound peer.
@@ -229,7 +231,7 @@ parse_proc_status_effective_credentials(std::string_view status);
 // mutable state, a mutex, CLOCK_BOOTTIME, entropy, or procfs. Callers must keep
 // each authority on one owner thread and construct a fresh authority after
 // transfer or exec; concurrent work uses one authority per thread. This is
-// required because mount and time namespaces are task scoped. No
+// required because mount, cgroup, and time namespaces are authority inputs. No
 // cgroup-membership, delegation, containment, signal, mutation, or launch
 // grade is claimed.
 

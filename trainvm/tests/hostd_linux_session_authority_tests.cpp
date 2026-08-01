@@ -164,6 +164,7 @@ HostdLinuxNamespaceIdentity namespace_identity(const char *path) {
 HostdLinuxHostNamespacePolicy current_namespace_policy() {
   return {.mount_namespace = namespace_identity("/proc/self/ns/mnt"),
           .pid_namespace = namespace_identity("/proc/self/ns/pid"),
+          .cgroup_namespace = namespace_identity("/proc/self/ns/cgroup"),
           .time_namespace = namespace_identity("/proc/self/ns/time"),
           .time_for_children_namespace =
               namespace_identity("/proc/self/ns/time_for_children")};
@@ -524,6 +525,19 @@ void strict_namespace_grade_rejects_unproven_host_identity() {
              .expected_host_namespaces = wrong});
       },
       "strict factory rejects a mismatched host time namespace");
+  wrong = policy;
+  ++wrong.cgroup_namespace.inode;
+  require_throws<HostdSessionChallengeError>(
+      [&] {
+        (void)make_hostd_linux_session_kernel(
+            {.api_version =
+                 std::string(kHostdLinuxSessionAuthorityApiVersion),
+             .enforcement_grade =
+                 HostdLinuxSessionEnforcementGrade::
+                     strict_host_namespaces_and_socket_pidfd,
+             .expected_host_namespaces = wrong});
+      },
+      "strict factory rejects a mismatched host cgroup namespace");
 }
 
 void real_kernel_rejects_a_sibling_linux_task() {

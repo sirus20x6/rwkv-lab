@@ -115,7 +115,7 @@ Implemented now:
   controller IDs, so takeover invalidates only the affected logical resource scope while aliased,
   rolled-back, or legacy-global controller metadata fails closed;
 - Linux production challenge primitives using `getrandom`, boot-bound `CLOCK_BOOTTIME`, strict
-  mount/PID/time namespace identity, `SO_PEERCRED` plus `SO_PEERPIDFD`, and pinned-proc process
+  mount/PID/cgroup/time namespace identity, `SO_PEERCRED` plus `SO_PEERPIDFD`, and pinned-proc process
   identity, together with a read-only pinned-Journal attestor rooted in hash-chained controller,
   acquisition, renewal, release, and current-fence authority events;
 - a read-only Linux NVIDIA inventory collector that pins procfs/sysfs/devfs roots, dynamically loads

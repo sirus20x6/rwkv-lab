@@ -390,6 +390,7 @@ private:
   valid_namespace_policy(const HostdLinuxHostNamespacePolicy &policy) {
     return valid_namespace_identity(policy.mount_namespace) &&
            valid_namespace_identity(policy.pid_namespace) &&
+           valid_namespace_identity(policy.cgroup_namespace) &&
            valid_namespace_identity(policy.time_namespace) &&
            valid_namespace_identity(policy.time_for_children_namespace);
   }
@@ -424,13 +425,14 @@ private:
           "Linux creator process namespace directory is unavailable");
     return {.mount_namespace = observe_namespace(process.get(), "mnt"),
             .pid_namespace = observe_namespace(process.get(), "pid"),
+            .cgroup_namespace = observe_namespace(process.get(), "cgroup"),
             .time_namespace = observe_namespace(process.get(), "time"),
             .time_for_children_namespace =
                 observe_namespace(process.get(), "time_for_children")};
   }
 
   void attest_context() const {
-    // Linux mount and time namespaces are task scoped. Reject before any
+    // Linux namespace identity is part of this authority. Reject before any
     // namespace, procfs, clock, entropy, or peer observation so a caller on a
     // sibling thread can never borrow the creator task's authority.
     if (!is_creator_task(creator_pid_, creator_tid_))

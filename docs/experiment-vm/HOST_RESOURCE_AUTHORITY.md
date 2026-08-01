@@ -588,6 +588,9 @@ The systemd host unit and protected ledger directory are the singleton boundary.
 
 Hostd runs in the initial/host PID and cgroup namespaces. Durable receipts store host PIDs and
 namespace inode identities. A worker-visible PID is never used for adoption or signalling.
+The strict Linux session authority pins and continuously reattests the configured cgroup namespace
+alongside mount, PID, and both time namespace identities before service-cgroup membership can become
+an authorization input.
 
 ### User namespaces and same UID
 
