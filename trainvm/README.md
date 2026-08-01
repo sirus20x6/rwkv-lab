@@ -87,6 +87,16 @@ Implemented now:
   SHA-256 payload framing, exact correlation, `SO_PEERCRED` plus per-packet `SCM_CREDENTIALS`,
   deadline-bounded I/O, descriptor-delegation rejection, protected endpoint identity, and truthful
   sealed/auditing/admitting/poisoned lifecycle reporting;
+- additive host-ledger v2 startup-audit evidence with exact v1 migration, canonical bounded reports,
+  configured-policy admission, historical inventory/occupancy reconstruction, predecessor-chain
+  proof, atomic report/projection/receipt commit, strict replay closure, and post-commit re-read;
+- a process-free, single-use journal-fence challenge verifier binding socket peer process instance,
+  host/boot/broker, pinned-journal claims, controller generation, logical fence, nonce, and bounded
+  boottime lifetime, with per-peer quotas and no bearer-capability interpretation of decoded data;
+- a read-only Linux NVIDIA inventory collector that pins procfs/sysfs/devfs roots, dynamically loads
+  and grades NVML evidence, double-samples bounded device/MIG/display/context state, retains process
+  instance observations, proves device-node mappings, and makes incomplete, torn, stale, or
+  insufficiently trusted evidence ineligible;
 - a canonical, explicitly untrusted compiler/JIT namespace-claim format covering
   adapter/code/executable fingerprints, compute compatibility and optional placement, host ABI,
   driver/runtime closure, compiler configuration, and compile inputs. Cache reuse remains disabled
@@ -105,10 +115,15 @@ launch identity; process-free unit fixtures can opt into a visibly test-only leg
 RPC can yet mutate host authority. The status-only filesystem `SOCK_SEQPACKET` boundary is
 implemented at an explicitly cooperative enforcement grade: it proves framing, endpoint identity,
 and UID/GID credentials, but does not claim hostile same-UID isolation or grant, release, launch, or
-signal authority. The next boundary is durable startup orphan-audit wiring and real accelerator
-inventory, followed by a guarded launcher, cgroup cleanup, process-instance credentials, and
-durable spawn/exit receipts. Real trainer process ownership follows only after those fault-injection
-tests pass.
+signal authority. Durable startup-audit evidence, a fail-closed NVIDIA inventory collector, and the
+session journal-fence challenge are implemented libraries, but production CSPRNG/time/process and
+pinned-journal attestors plus hostd lifecycle/transport integration remain mandatory before they can
+authorize admission. The next boundary is that integration and process-free service reconciliation,
+followed by a guarded launcher, cgroup cleanup, process-instance credentials, and durable spawn/exit
+receipts. Real trainer process ownership follows only after those fault-injection tests pass.
+MIG evidence is collected and attributed per instance, but grants remain disabled: the generic
+conflict selector intentionally blocks a child while its full-device parent is nonselectable, until
+a partition-aware enforcement policy proves that scheduling relationship end to end.
 
 MageFlow is only the first recovery fixture. The runtime is not a MageFlow-specific launcher: RWKV,
 transformer, vision/multimodal, conversion, distillation, post-training, RLVR, external-trainer, and

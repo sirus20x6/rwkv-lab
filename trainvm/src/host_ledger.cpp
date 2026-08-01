@@ -13,11 +13,13 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <ranges>
 #include <set>
 #include <sstream>
 #include <string_view>
 #include <sys/stat.h>
+#include <tuple>
 #include <unistd.h>
 #include <utility>
 
@@ -29,7 +31,7 @@ namespace {
 constexpr std::string_view kGenesisDigest =
     "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
-constexpr std::string_view kSchema = R"sql(
+constexpr std::string_view kSchemaV1 = R"sql(
 CREATE TABLE ledger_identity (
   singleton INTEGER PRIMARY KEY CHECK(singleton=1),
   schema_version INTEGER NOT NULL CHECK(schema_version=1),
@@ -130,6 +132,37 @@ CREATE TRIGGER ledger_records_no_update BEFORE UPDATE ON ledger_records
 BEGIN SELECT RAISE(ABORT, 'ledger records are immutable'); END;
 CREATE TRIGGER ledger_records_no_delete BEFORE DELETE ON ledger_records
 BEGIN SELECT RAISE(ABORT, 'ledger records are immutable'); END;
+)sql";
+
+// Version 2 is an additive migration. In particular, ledger_records and every
+// v1 canonical/hash-chain byte remain untouched. ledger_identity.schema_version
+// intentionally continues to describe that immutable core v1 schema; the
+// extension row and PRAGMA user_version identify the additive audit schema.
+constexpr std::string_view kStartupAuditSchemaV2 = R"sql(
+CREATE TABLE ledger_schema_extensions (
+  feature TEXT PRIMARY KEY,
+  schema_version INTEGER NOT NULL CHECK(schema_version > 1)
+) WITHOUT ROWID;
+CREATE TABLE startup_audit_outcomes (
+  audit_id TEXT PRIMARY KEY,
+  report_digest TEXT NOT NULL UNIQUE,
+  canonical_report_json TEXT NOT NULL,
+  record_receipt_digest TEXT NOT NULL UNIQUE,
+  record_sequence INTEGER NOT NULL UNIQUE CHECK(record_sequence > 0),
+  record_chain_hash TEXT NOT NULL UNIQUE,
+  record_previous_sequence INTEGER NOT NULL
+    CHECK(record_previous_sequence >= 0 AND
+          record_previous_sequence + 1 = record_sequence),
+  record_previous_hash TEXT NOT NULL,
+  receipt_digest TEXT NOT NULL UNIQUE,
+  canonical_receipt_json TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TRIGGER startup_audit_outcomes_no_update
+BEFORE UPDATE ON startup_audit_outcomes
+BEGIN SELECT RAISE(ABORT, 'startup audit outcomes are immutable'); END;
+CREATE TRIGGER startup_audit_outcomes_no_delete
+BEFORE DELETE ON startup_audit_outcomes
+BEGIN SELECT RAISE(ABORT, 'startup audit outcomes are immutable'); END;
 )sql";
 
 class Statement final {
@@ -411,14 +444,35 @@ SchemaSnapshot schema_snapshot(sqlite3* database) {
   return result;
 }
 
-const SchemaSnapshot& canonical_schema() {
+const SchemaSnapshot& canonical_schema_v1() {
   static const SchemaSnapshot snapshot = [] {
     sqlite3* database = nullptr;
     if (sqlite3_open(":memory:", &database) != SQLITE_OK) {
       throw HostLedgerError("could not construct canonical ledger schema");
     }
     try {
-      execute(database, kSchema, "canonical schema creation failed");
+      execute(database, kSchemaV1, "canonical v1 schema creation failed");
+      auto value = schema_snapshot(database);
+      sqlite3_close(database);
+      return value;
+    } catch (...) {
+      sqlite3_close(database);
+      throw;
+    }
+  }();
+  return snapshot;
+}
+
+const SchemaSnapshot& canonical_schema_v2() {
+  static const SchemaSnapshot snapshot = [] {
+    sqlite3* database = nullptr;
+    if (sqlite3_open(":memory:", &database) != SQLITE_OK) {
+      throw HostLedgerError("could not construct canonical ledger schema");
+    }
+    try {
+      execute(database, kSchemaV1, "canonical v1 schema creation failed");
+      execute(database, kStartupAuditSchemaV2,
+              "canonical startup-audit schema creation failed");
       auto value = schema_snapshot(database);
       sqlite3_close(database);
       return value;
@@ -433,11 +487,16 @@ const SchemaSnapshot& canonical_schema() {
 }  // namespace
 
 struct SQLiteHostLedger::Implementation final {
+  explicit Implementation(
+      std::optional<HostStartupAuditPolicy> trusted_policy)
+      : trusted_startup_audit_policy(std::move(trusted_policy)) {}
+
   sqlite3* database{};
   std::shared_ptr<HostLedgerFilesystemAuthority> authority;
   int sqlite_database_fd{-1};
   HostInventoryReceipt inventory;
   IHostLedgerFaultInjector* faults{};
+  const std::optional<HostStartupAuditPolicy> trusted_startup_audit_policy;
   mutable std::mutex mutex;
 
   ~Implementation() {
@@ -490,6 +549,7 @@ struct SQLiteHostLedger::Implementation final {
     if (sqlite3_step(head.get()) != SQLITE_ROW) {
       throw HostLedgerError("ledger chain head is missing");
     }
+    const std::int64_t previous_sequence = sqlite3_column_int64(head.get(), 0);
     const std::string previous = column_text(head.get(), 1);
     const std::string chain = sha256(
         "trainvm.host-ledger-chain/v1", previous + "\n" + content);
@@ -511,15 +571,30 @@ struct SQLiteHostLedger::Implementation final {
     const std::int64_t sequence = sqlite3_last_insert_rowid(database);
     Statement update(database, R"sql(
       UPDATE ledger_chain_head SET last_sequence=?, chain_hash=?
-      WHERE singleton=1
+      WHERE singleton=1 AND last_sequence=? AND chain_hash=?
     )sql");
     bind_integer(update.get(), 1, sequence);
     bind_text(update.get(), 2, chain);
+    bind_integer(update.get(), 3, previous_sequence);
+    bind_text(update.get(), 4, previous);
     require_done(database, update.get(), "ledger chain update failed");
     if (sqlite3_changes(database) != 1) {
       throw HostLedgerError("ledger chain update lost its CAS row");
     }
     return record.at("receipt_digest").get<std::string>();
+  }
+
+  HostLedgerChainHead chain_head_unlocked() const {
+    Statement query(database,
+                    "SELECT last_sequence, chain_hash FROM ledger_chain_head "
+                    "WHERE singleton=1");
+    if (sqlite3_step(query.get()) != SQLITE_ROW) {
+      throw HostLedgerError("ledger chain head is missing");
+    }
+    const auto sequence = sqlite3_column_int64(query.get(), 0);
+    if (sequence < 0) throw HostLedgerError("ledger sequence is negative");
+    return {.ledger_sequence = static_cast<std::uint64_t>(sequence),
+            .chain_hash = column_text(query.get(), 1)};
   }
 
   void sync_projection_head() {
@@ -577,7 +652,8 @@ struct SQLiteHostLedger::Implementation final {
   }
 
   bool verify_unlocked(std::string* reason,
-                       bool bind_instance_inventory = true) const {
+                       bool bind_instance_inventory = true,
+                       unsigned int schema_version = 2U) const {
     const auto fail = [&](std::string message) {
       if (reason != nullptr) *reason = std::move(message);
       return false;
@@ -590,8 +666,12 @@ struct SQLiteHostLedger::Implementation final {
           defensive != 1) {
         return fail("SQLite defensive mode is not active");
       }
-      if (schema_snapshot(database) != canonical_schema()) {
-        return fail("ledger schema does not exactly match v1");
+      if ((schema_version == 1U &&
+           schema_snapshot(database) != canonical_schema_v1()) ||
+          (schema_version == 2U &&
+           schema_snapshot(database) != canonical_schema_v2()) ||
+          (schema_version != 1U && schema_version != 2U)) {
+        return fail("ledger schema does not exactly match its declared version");
       }
       Statement application(database, "PRAGMA application_id");
       Statement version(database, "PRAGMA user_version");
@@ -602,7 +682,8 @@ struct SQLiteHostLedger::Implementation final {
       if (sqlite3_step(application.get()) != SQLITE_ROW ||
           sqlite3_column_int64(application.get(), 0) != 0x5456484cLL ||
           sqlite3_step(version.get()) != SQLITE_ROW ||
-          sqlite3_column_int64(version.get(), 0) != 1 ||
+          sqlite3_column_int64(version.get(), 0) !=
+              static_cast<std::int64_t>(schema_version) ||
           sqlite3_step(journal_mode.get()) != SQLITE_ROW ||
           column_text(journal_mode.get(), 0) != "wal" ||
           sqlite3_step(synchronous.get()) != SQLITE_ROW ||
@@ -629,6 +710,13 @@ struct SQLiteHostLedger::Implementation final {
       std::map<std::string, nlohmann::json> busy_evidence;
       std::map<std::string, nlohmann::json> release_request_evidence;
       std::map<std::string, ResourceReleaseReceipt> release_evidence;
+      std::optional<HostInventoryReceipt> replay_inventory;
+      std::map<std::string, std::vector<ResourceFence>> replay_active_grants;
+      std::map<std::string, HostStartupAuditReport> startup_audit_evidence;
+      std::map<std::string,
+               std::tuple<std::uint64_t, std::string, std::uint64_t,
+                          std::string, std::string>>
+          startup_audit_record_evidence;
       Statement records(database, R"sql(
         SELECT ledger_sequence, record_id, record_type, subject_id,
                canonical_json, receipt_digest, content_hash, previous_hash,
@@ -666,7 +754,75 @@ struct SQLiteHostLedger::Implementation final {
         const std::string record_type =
             record.at("record_type").get<std::string>();
         const nlohmann::json& payload = record.at("payload");
-        if (record_type == "bundle.requested") {
+        if (record_type == "inventory.observed") {
+          const HostInventoryReceipt observed = host_inventory_from_json(payload);
+          if (record.value("record_id", std::string{}) !=
+                  "inventory:" + observed.receipt_digest ||
+              record.value("subject_id", std::string{}) !=
+                  observed.inventory_digest ||
+              record.value("host_id", std::string{}) != observed.host_id ||
+              record.value("boot_id", std::string{}) != observed.boot_id ||
+              record.value("broker_epoch", std::string{}) !=
+                  observed.broker_epoch) {
+            return fail("inventory record wrapper diverges from its evidence");
+          }
+          replay_inventory = observed;
+        } else if (record_type == "startup.audit_committed") {
+          if (schema_version != 2U) {
+            return fail("v1 ledger contains v2 startup-audit evidence");
+          }
+          const HostStartupAuditReport report =
+              decode_untrusted_host_startup_audit_report(payload);
+          if (!replay_inventory.has_value()) {
+            return fail("startup audit precedes inventory authority evidence");
+          }
+          std::vector<ResourceFence> active_fences;
+          for (const auto& [allocation_id, fences] : replay_active_grants) {
+            (void)allocation_id;
+            active_fences.insert(active_fences.end(), fences.begin(),
+                                 fences.end());
+          }
+          const auto replay_occupancy = seal_resource_occupancy(
+              *replay_inventory,
+              {.api_version = std::string(kHostResourceOccupancyApiVersion),
+               .host_id = replay_inventory->host_id,
+               .boot_id = replay_inventory->boot_id,
+               .inventory_digest = replay_inventory->inventory_digest,
+               .ledger_sequence =
+                   static_cast<std::uint64_t>(last_sequence - 1),
+               .active_fences = std::move(active_fences),
+               .occupancy_digest = {}});
+          const HostLedgerChainHead actual_predecessor{
+              .ledger_sequence = static_cast<std::uint64_t>(last_sequence - 1),
+              .chain_hash = previous};
+          if (!record.is_object() || record.size() != 9U ||
+              record.value("api_version", std::string{}) !=
+                  "trainvm.host-ledger-record/v1" ||
+              report.inventory != *replay_inventory ||
+              report.pre_audit_occupancy != replay_occupancy ||
+              report.post_audit_occupancy != replay_occupancy ||
+              report.ledger_head_before != actual_predecessor ||
+              report.ledger_head_after_observation != actual_predecessor ||
+              !startup_audit_evidence.emplace(report.audit_id, report).second ||
+              !startup_audit_record_evidence
+                   .emplace(report.audit_id,
+                            std::tuple{static_cast<std::uint64_t>(last_sequence),
+                                       expected_chain,
+                                       actual_predecessor.ledger_sequence,
+                                       actual_predecessor.chain_hash,
+                                       expected_receipt})
+                   .second ||
+              record.value("record_id", std::string{}) !=
+                  "startup-audit:" + report.audit_id ||
+              record.value("subject_id", std::string{}) !=
+                  report.broker_instance_id ||
+              record.value("host_id", std::string{}) != report.host_id ||
+              record.value("boot_id", std::string{}) != report.boot_id ||
+              record.value("broker_epoch", std::string{}) !=
+                  report.broker_epoch) {
+            return fail("duplicate or malformed startup-audit authority evidence");
+          }
+        } else if (record_type == "bundle.requested") {
           const ResourceBundleRequest request =
               resource_request_from_json(payload);
           if (!request_evidence.emplace(request.request_id, request).second) {
@@ -675,7 +831,9 @@ struct SQLiteHostLedger::Implementation final {
         } else if (record_type == "bundle.granted") {
           const ResourceBundleGrant grant =
               resource_bundle_grant_from_json(payload);
-          if (!grant_evidence.emplace(grant.allocation_id, grant).second) {
+          if (!grant_evidence.emplace(grant.allocation_id, grant).second ||
+              !replay_active_grants.emplace(grant.allocation_id, grant.fences)
+                   .second) {
             return fail("duplicate bundle grant authority evidence");
           }
         } else if (record_type == "bundle.denied") {
@@ -697,7 +855,8 @@ struct SQLiteHostLedger::Implementation final {
         } else if (record_type == "bundle.released") {
           const ResourceReleaseReceipt receipt =
               resource_release_receipt_from_json(payload);
-          if (!release_evidence.emplace(receipt.allocation_id, receipt).second) {
+          if (!release_evidence.emplace(receipt.allocation_id, receipt).second ||
+              replay_active_grants.erase(receipt.allocation_id) != 1U) {
             return fail("duplicate bundle release authority evidence");
           }
         }
@@ -1052,6 +1211,83 @@ struct SQLiteHostLedger::Implementation final {
           release_request_evidence.size() != release_evidence.size()) {
         return fail("grant/release authority evidence has missing projections");
       }
+      if (schema_version == 2U) {
+        Statement extension(database, R"sql(
+          SELECT schema_version FROM ledger_schema_extensions
+          WHERE feature='startup_audit'
+        )sql");
+        if (sqlite3_step(extension.get()) != SQLITE_ROW ||
+            sqlite3_column_int64(extension.get(), 0) != 2) {
+          return fail("startup-audit schema extension marker is invalid");
+        }
+        Statement extension_count(database,
+                                  "SELECT COUNT(*) FROM ledger_schema_extensions");
+        if (sqlite3_step(extension_count.get()) != SQLITE_ROW ||
+            sqlite3_column_int64(extension_count.get(), 0) != 1) {
+          return fail("unknown ledger schema extension is present");
+        }
+        Statement audits(database, R"sql(
+          SELECT audit_id, report_digest, canonical_report_json,
+                 record_receipt_digest, record_sequence, record_chain_hash,
+                 record_previous_sequence, record_previous_hash,
+                 receipt_digest, canonical_receipt_json
+          FROM startup_audit_outcomes ORDER BY audit_id
+        )sql");
+        std::size_t audit_projection_count = 0U;
+        while ((status = sqlite3_step(audits.get())) == SQLITE_ROW) {
+          ++audit_projection_count;
+          const std::string audit_id = column_text(audits.get(), 0);
+          const auto evidence = startup_audit_evidence.find(audit_id);
+          const auto record_evidence =
+              startup_audit_record_evidence.find(audit_id);
+          if (evidence == startup_audit_evidence.end() ||
+              record_evidence == startup_audit_record_evidence.end()) {
+            return fail("startup-audit projection has no authority record");
+          }
+          const HostStartupAuditReport projected_report =
+              decode_untrusted_host_startup_audit_report(
+                  nlohmann::json::parse(column_text(audits.get(), 2)));
+          const HostStartupAuditReceipt projected_receipt =
+              decode_untrusted_host_startup_audit_receipt(
+                  nlohmann::json::parse(column_text(audits.get(), 9)),
+                  projected_report);
+          const auto& [record_sequence, record_chain_hash,
+                       record_previous_sequence, record_previous_hash,
+                       record_receipt_digest] = record_evidence->second;
+          if (projected_report != evidence->second ||
+              column_text(audits.get(), 1) != projected_report.report_digest ||
+              column_text(audits.get(), 2) !=
+                  host_startup_audit_report_json(projected_report).dump() ||
+              column_text(audits.get(), 3) != record_receipt_digest ||
+              static_cast<std::uint64_t>(sqlite3_column_int64(audits.get(), 4)) !=
+                  record_sequence ||
+              column_text(audits.get(), 5) != record_chain_hash ||
+              static_cast<std::uint64_t>(sqlite3_column_int64(audits.get(), 6)) !=
+                  record_previous_sequence ||
+              column_text(audits.get(), 7) != record_previous_hash ||
+              projected_report.ledger_head_before !=
+                  HostLedgerChainHead{.ledger_sequence = record_previous_sequence,
+                                      .chain_hash = record_previous_hash} ||
+              column_text(audits.get(), 8) != projected_receipt.receipt_digest ||
+              column_text(audits.get(), 9) !=
+                  host_startup_audit_receipt_json(projected_receipt,
+                                                  projected_report)
+                      .dump() ||
+              projected_receipt.commit_record_digest !=
+                  record_receipt_digest ||
+              projected_receipt.committed_ledger_head !=
+                  HostLedgerChainHead{.ledger_sequence = record_sequence,
+                                      .chain_hash = record_chain_hash}) {
+            return fail("startup-audit projection is not canonical");
+          }
+        }
+        if (status != SQLITE_DONE ||
+            audit_projection_count != startup_audit_evidence.size()) {
+          return fail("startup-audit evidence and projections are not closed");
+        }
+      } else if (!startup_audit_evidence.empty()) {
+        return fail("v1 ledger contains startup-audit evidence");
+      }
       if (reason != nullptr) reason->clear();
       return true;
     } catch (const std::exception& error) {
@@ -1063,8 +1299,22 @@ struct SQLiteHostLedger::Implementation final {
 SQLiteHostLedger::SQLiteHostLedger(
     std::shared_ptr<HostLedgerFilesystemAuthority> authority,
     HostInventoryReceipt inventory,
-    IHostLedgerFaultInjector* fault_injector)
-    : implementation_(std::make_unique<Implementation>()) {
+    IHostLedgerFaultInjector* fault_injector,
+    std::optional<HostStartupAuditPolicy> trusted_startup_audit_policy)
+    : implementation_(std::make_unique<Implementation>(
+          std::move(trusted_startup_audit_policy))) {
+  if (implementation_->trusted_startup_audit_policy) {
+    try {
+      if (canonicalize_host_startup_audit_policy(
+              *implementation_->trusted_startup_audit_policy) !=
+          *implementation_->trusted_startup_audit_policy) {
+        throw HostLedgerError(
+            "trusted startup-audit policy is not canonical");
+      }
+    } catch (const HostStartupAuditError&) {
+      throw HostLedgerError("trusted startup-audit policy is invalid");
+    }
+  }
   if (!authority) {
     throw HostLedgerError("host ledger requires filesystem authority");
   }
@@ -1120,9 +1370,12 @@ SQLiteHostLedger::SQLiteHostLedger(
     execute(implementation_->database, "PRAGMA journal_mode=WAL;",
             "could not enable host ledger WAL");
     Transaction transaction(implementation_->database);
-    execute(implementation_->database, kSchema, "could not create host ledger v1");
+    execute(implementation_->database, kSchemaV1,
+            "could not create host ledger core v1");
+    execute(implementation_->database, kStartupAuditSchemaV2,
+            "could not create startup-audit schema v2");
     execute(implementation_->database,
-            "PRAGMA application_id=0x5456484c; PRAGMA user_version=1;",
+            "PRAGMA application_id=0x5456484c; PRAGMA user_version=2;",
             "could not mark host ledger schema");
     Statement identity(implementation_->database, R"sql(
       INSERT INTO ledger_identity(singleton, schema_version, ledger_id, host_id,
@@ -1134,6 +1387,10 @@ SQLiteHostLedger::SQLiteHostLedger(
     bind_text(identity.get(), 3, implementation_->inventory.boot_id);
     require_done(implementation_->database, identity.get(),
                  "host ledger identity insert failed");
+    execute(implementation_->database,
+            "INSERT INTO ledger_schema_extensions(feature, schema_version) "
+            "VALUES('startup_audit', 2);",
+            "startup-audit extension marker insert failed");
     Statement head(implementation_->database, R"sql(
       INSERT INTO ledger_chain_head VALUES(1, 0, ?)
     )sql");
@@ -1177,6 +1434,38 @@ SQLiteHostLedger::SQLiteHostLedger(
     }
     transaction.commit();
   } else {
+    const SchemaSnapshot opened_schema =
+        schema_snapshot(implementation_->database);
+    Statement opened_version(implementation_->database, "PRAGMA user_version");
+    if (sqlite3_step(opened_version.get()) != SQLITE_ROW) {
+      throw HostLedgerError("could not read host ledger schema version");
+    }
+    const std::int64_t user_version =
+        sqlite3_column_int64(opened_version.get(), 0);
+    if (opened_schema == canonical_schema_v1() && user_version == 1) {
+      Transaction migration(implementation_->database);
+      std::string migration_reason;
+      if (!implementation_->verify_unlocked(&migration_reason, false, 1U)) {
+        throw HostLedgerError("refusing startup-audit migration: " +
+                              migration_reason);
+      }
+      execute(implementation_->database, kStartupAuditSchemaV2,
+              "could not create startup-audit schema v2");
+      implementation_->fault(
+          HostLedgerFaultPoint::after_startup_audit_migration_schema);
+      execute(implementation_->database,
+              "INSERT INTO ledger_schema_extensions(feature, schema_version) "
+              "VALUES('startup_audit', 2); PRAGMA user_version=2;",
+              "could not mark startup-audit schema v2");
+      if (!implementation_->verify_unlocked(&migration_reason, false, 2U)) {
+        throw HostLedgerError("startup-audit migration verification failed: " +
+                              migration_reason);
+      }
+      migration.commit();
+    } else if (opened_schema != canonical_schema_v2() || user_version != 2) {
+      throw HostLedgerError(
+          "refusing unknown or partially migrated host ledger schema");
+    }
     Transaction transaction(implementation_->database);
     std::string reason;
     if (!implementation_->verify_unlocked(&reason, false)) {
@@ -1578,6 +1867,170 @@ BundleReleaseResult SQLiteHostLedger::release_bundle(
   implementation_->fault(HostLedgerFaultPoint::before_commit);
   transaction.commit();
   return {.receipt = std::move(receipt), .replayed = false};
+}
+
+HostStartupAuditLedgerCommitResult SQLiteHostLedger::commit_startup_audit(
+    const HostStartupAuditReport& report, const HostLedgerTime& now) {
+  if (!implementation_->trusted_startup_audit_policy) {
+    throw HostLedgerError(
+        "startup-audit authority was not configured for this ledger");
+  }
+  validate_host_startup_audit_report(report);
+  if (report.policy != *implementation_->trusted_startup_audit_policy) {
+    throw HostLedgerConflict(
+        "startup-audit report policy differs from configured trusted policy");
+  }
+  if (!valid_time(now) || now.boottime_ns < report.observed_end_boottime_ns) {
+    throw HostLedgerError("startup-audit commit time is invalid");
+  }
+  std::scoped_lock lock(implementation_->mutex);
+
+  const auto reread = [&](bool replayed) {
+    Transaction reread_transaction(implementation_->database);
+    std::string reread_reason;
+    if (!implementation_->verify_unlocked(&reread_reason)) {
+      throw HostLedgerError("committed startup audit failed re-read: " +
+                            reread_reason);
+    }
+    Statement query(implementation_->database, R"sql(
+      SELECT report_digest, canonical_report_json, canonical_receipt_json
+      FROM startup_audit_outcomes WHERE audit_id=?
+    )sql");
+    bind_text(query.get(), 1, report.audit_id);
+    if (sqlite3_step(query.get()) != SQLITE_ROW ||
+        column_text(query.get(), 0) != report.report_digest) {
+      throw HostLedgerError("committed startup audit cannot be re-read exactly");
+    }
+    const HostStartupAuditReport persisted_report =
+        decode_untrusted_host_startup_audit_report(
+            nlohmann::json::parse(column_text(query.get(), 1)));
+    const HostStartupAuditReceipt persisted_receipt =
+        decode_untrusted_host_startup_audit_receipt(
+            nlohmann::json::parse(column_text(query.get(), 2)),
+            persisted_report);
+    if (persisted_report != report) {
+      throw HostLedgerError("startup-audit re-read report changed content");
+    }
+    reread_transaction.commit();
+    return HostStartupAuditLedgerCommitResult{.receipt = persisted_receipt,
+                                              .replayed = replayed};
+  };
+
+  Transaction transaction(implementation_->database);
+  std::string reason;
+  if (!implementation_->verify_unlocked(&reason)) {
+    throw HostLedgerError("refusing startup-audit commit: " + reason);
+  }
+  Statement replay(implementation_->database, R"sql(
+    SELECT report_digest FROM startup_audit_outcomes WHERE audit_id=?
+  )sql");
+  bind_text(replay.get(), 1, report.audit_id);
+  const int replay_status = sqlite3_step(replay.get());
+  if (replay_status == SQLITE_ROW) {
+    if (column_text(replay.get(), 0) != report.report_digest) {
+      throw HostLedgerConflict("audit_id already has different content");
+    }
+    transaction.commit();
+    return reread(true);
+  }
+  if (replay_status != SQLITE_DONE) {
+    throw HostLedgerError("startup-audit replay query failed");
+  }
+  const HostLedgerChainHead before = implementation_->chain_head_unlocked();
+  const ResourceOccupancySnapshot occupancy =
+      implementation_->occupancy_unlocked();
+  if (report.host_id != implementation_->inventory.host_id ||
+      report.boot_id != implementation_->inventory.boot_id ||
+      report.broker_epoch != implementation_->inventory.broker_epoch ||
+      report.inventory != implementation_->inventory ||
+      report.ledger_head_before != before ||
+      report.ledger_head_after_observation != before ||
+      report.pre_audit_occupancy != occupancy ||
+      report.post_audit_occupancy != occupancy) {
+    throw HostLedgerConflict(
+        "startup-audit report lost its host-ledger evidence CAS");
+  }
+
+  const nlohmann::json canonical_report =
+      host_startup_audit_report_json(report);
+  if (decode_untrusted_host_startup_audit_report(canonical_report) != report) {
+    throw HostLedgerError(
+        "startup-audit canonical report is not precommit-readable");
+  }
+  const auto record = implementation_->make_record(
+      "startup.audit_committed", "startup-audit:" + report.audit_id,
+      report.broker_instance_id, canonical_report);
+  const std::string record_receipt = implementation_->append_record(record);
+  implementation_->fault(HostLedgerFaultPoint::after_startup_audit_record);
+  const HostLedgerChainHead committed = implementation_->chain_head_unlocked();
+  HostStartupAuditReceipt receipt = canonicalize_host_startup_audit_receipt(
+      {.api_version = std::string(kHostStartupAuditReceiptApiVersion),
+       .audit_id = report.audit_id,
+       .report_digest = report.report_digest,
+       .host_id = report.host_id,
+       .boot_id = report.boot_id,
+       .broker_epoch = report.broker_epoch,
+       .broker_instance_id = report.broker_instance_id,
+       .inventory_digest = report.inventory.inventory_digest,
+       .topology_digest = report.inventory.topology_digest,
+       .pre_occupancy_digest = report.pre_audit_occupancy.occupancy_digest,
+       .post_occupancy_digest = report.post_audit_occupancy.occupancy_digest,
+       .policy_digest = report.policy.policy_digest,
+       .findings_digest = report.findings_digest,
+       .disposition = report.disposition,
+       .ledger_head_before = before,
+       .committed_ledger_head = committed,
+       .commit_record_digest = record_receipt,
+       .committed_boottime_ns = now.boottime_ns,
+       .committed_wall_time_ns = now.wall_time_ns,
+       .receipt_digest = {}},
+      report);
+  const nlohmann::json canonical_receipt =
+      host_startup_audit_receipt_json(receipt, report);
+  if (decode_untrusted_host_startup_audit_receipt(canonical_receipt, report) !=
+      receipt) {
+    throw HostLedgerError(
+        "startup-audit canonical receipt is not precommit-readable");
+  }
+  Statement projection(implementation_->database, R"sql(
+    INSERT INTO startup_audit_outcomes(
+      audit_id, report_digest, canonical_report_json, record_receipt_digest,
+      record_sequence, record_chain_hash, record_previous_sequence,
+      record_previous_hash, receipt_digest, canonical_receipt_json
+    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  )sql");
+  bind_text(projection.get(), 1, report.audit_id);
+  bind_text(projection.get(), 2, report.report_digest);
+  bind_text(projection.get(), 3, canonical_report.dump());
+  bind_text(projection.get(), 4, record_receipt);
+  bind_integer(projection.get(), 5,
+               checked_integer(committed.ledger_sequence, "ledger sequence"));
+  bind_text(projection.get(), 6, committed.chain_hash);
+  bind_integer(projection.get(), 7,
+               checked_integer(before.ledger_sequence, "ledger sequence"));
+  bind_text(projection.get(), 8, before.chain_hash);
+  bind_text(projection.get(), 9, receipt.receipt_digest);
+  bind_text(projection.get(), 10, canonical_receipt.dump());
+  require_done(implementation_->database, projection.get(),
+               "startup-audit projection insert failed");
+  implementation_->fault(HostLedgerFaultPoint::after_startup_audit_projection);
+  implementation_->sync_projection_head();
+  implementation_->fault(HostLedgerFaultPoint::before_commit);
+  transaction.commit();
+  implementation_->fault(HostLedgerFaultPoint::after_startup_audit_commit);
+  return reread(false);
+}
+
+HostLedgerChainHead SQLiteHostLedger::chain_head() const {
+  std::scoped_lock lock(implementation_->mutex);
+  Transaction transaction(implementation_->database);
+  std::string reason;
+  if (!implementation_->verify_unlocked(&reason)) {
+    throw HostLedgerError("refusing chain-head read: " + reason);
+  }
+  const HostLedgerChainHead result = implementation_->chain_head_unlocked();
+  transaction.commit();
+  return result;
 }
 
 ResourceOccupancySnapshot SQLiteHostLedger::occupancy() const {

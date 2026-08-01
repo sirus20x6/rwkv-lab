@@ -59,13 +59,16 @@ add_library(trainvm_core
   src/fsm.cpp
   src/host_ledger.cpp
   src/host_ledger_authority.cpp
+  src/host_startup_audit.cpp
   src/hostd.cpp
+  src/hostd_session_challenge.cpp
   src/hostd_transport.cpp
   src/host_launch.cpp
   src/host_launch_registry.cpp
   src/host_resources.cpp
   src/journal.cpp
   src/lease_renewal.cpp
+  src/linux_nvidia_inventory.cpp
   src/reconciler.cpp
 )
 target_include_directories(trainvm_core PUBLIC include)
@@ -73,7 +76,7 @@ target_compile_options(trainvm_core PUBLIC -freflection)
 target_compile_options(trainvm_core PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror)
 target_link_libraries(trainvm_core
   PUBLIC nlohmann_json::nlohmann_json
-  PRIVATE OpenSSL::Crypto SQLite3::SQLite3 yaml-cpp::yaml-cpp
+  PRIVATE OpenSSL::Crypto SQLite3::SQLite3 yaml-cpp::yaml-cpp ${CMAKE_DL_LIBS}
 )
 
 add_library(trainvm_compatibility_catalog src/compatibility_catalog.cpp)
@@ -167,6 +170,28 @@ target_compile_options(hostd_transport_tests PRIVATE
 )
 target_link_libraries(hostd_transport_tests PRIVATE trainvm_core)
 add_test(NAME hostd_transport_tests COMMAND hostd_transport_tests)
+add_executable(host_startup_audit_tests tests/host_startup_audit_tests.cpp)
+target_compile_options(host_startup_audit_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(host_startup_audit_tests PRIVATE trainvm_core)
+add_test(NAME host_startup_audit_tests COMMAND host_startup_audit_tests)
+add_executable(hostd_session_challenge_tests
+  tests/hostd_session_challenge_tests.cpp
+)
+target_compile_options(hostd_session_challenge_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(hostd_session_challenge_tests PRIVATE trainvm_core)
+add_test(NAME hostd_session_challenge_tests COMMAND hostd_session_challenge_tests)
+add_executable(linux_nvidia_inventory_tests
+  tests/linux_nvidia_inventory_tests.cpp
+)
+target_compile_options(linux_nvidia_inventory_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(linux_nvidia_inventory_tests PRIVATE trainvm_core)
+add_test(NAME linux_nvidia_inventory_tests COMMAND linux_nvidia_inventory_tests)
 
 get_target_property(TRAINVM_SERVICE_LINKS trainvm_service LINK_LIBRARIES)
 if("trainvm_compatibility_catalog" IN_LIST TRAINVM_SERVICE_LINKS)

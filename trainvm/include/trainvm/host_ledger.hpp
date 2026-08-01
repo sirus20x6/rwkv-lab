@@ -11,6 +11,7 @@
 
 #include "trainvm/host_ledger_authority.hpp"
 #include "trainvm/host_resources.hpp"
+#include "trainvm/host_startup_audit.hpp"
 
 namespace trainvm {
 
@@ -99,6 +100,10 @@ struct BundleReleaseResult final {
 };
 
 enum class HostLedgerFaultPoint {
+  after_startup_audit_migration_schema,
+  after_startup_audit_record,
+  after_startup_audit_projection,
+  after_startup_audit_commit,
   after_request_record,
   after_generation_update,
   after_grant_projection,
@@ -132,7 +137,9 @@ class SQLiteHostLedger final {
   explicit SQLiteHostLedger(
       std::shared_ptr<HostLedgerFilesystemAuthority> authority,
       HostInventoryReceipt inventory,
-      IHostLedgerFaultInjector* fault_injector = nullptr);
+      IHostLedgerFaultInjector* fault_injector = nullptr,
+      std::optional<HostStartupAuditPolicy> trusted_startup_audit_policy =
+          std::nullopt);
   ~SQLiteHostLedger();
 
   SQLiteHostLedger(const SQLiteHostLedger&) = delete;
@@ -144,6 +151,12 @@ class SQLiteHostLedger final {
       const ResourceBundleRequest& request, const HostLedgerTime& now);
   [[nodiscard]] BundleReleaseResult release_bundle(
       const ResourceReleaseRequest& request, const HostLedgerTime& now);
+  // This operation exists only when construction retained a trusted policy.
+  // Its return value and every decoded report/receipt remain inspection data;
+  // this API does not mint an admission capability.
+  [[nodiscard]] HostStartupAuditLedgerCommitResult commit_startup_audit(
+      const HostStartupAuditReport& report, const HostLedgerTime& now);
+  [[nodiscard]] HostLedgerChainHead chain_head() const;
   [[nodiscard]] ResourceOccupancySnapshot occupancy() const;
   [[nodiscard]] std::uint64_t generation(
       const HostResourceId& resource) const;
