@@ -77,6 +77,7 @@ add_library(trainvm_core
   src/hostd_linux_inventory_context_auditor.cpp
   src/hostd_linux_process_authority.cpp
   src/hostd_linux_process_policy.cpp
+  src/hostd_linux_process_policy_kernel.cpp
   src/hostd_linux_process_recovery.cpp
   src/hostd_linux_service_identity.cpp
   src/hostd_linux_session_authority.cpp
@@ -513,6 +514,19 @@ target_compile_options(hostd_linux_process_policy_tests PRIVATE
 target_link_libraries(hostd_linux_process_policy_tests PRIVATE trainvm_core)
 add_test(NAME hostd_linux_process_policy_tests
   COMMAND hostd_linux_process_policy_tests
+)
+add_executable(hostd_linux_process_policy_kernel_tests
+  tests/hostd_linux_process_policy_kernel_tests.cpp
+)
+target_compile_options(hostd_linux_process_policy_kernel_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+  -fno-access-control
+)
+target_link_libraries(hostd_linux_process_policy_kernel_tests PRIVATE
+  trainvm_core
+)
+add_test(NAME hostd_linux_process_policy_kernel_tests
+  COMMAND hostd_linux_process_policy_kernel_tests
 )
 add_executable(linux_nvidia_inventory_tests
   tests/linux_nvidia_inventory_tests.cpp
