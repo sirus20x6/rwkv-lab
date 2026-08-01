@@ -144,6 +144,10 @@ Implemented now:
   twice-empty allocation-cgroup evidence, and a complete host-side accelerator-context audit;
   spawned allocations are structurally unreleasable until this receipt exists, while v4 histories
   migrate additively only when they contain no unsafe released/nonterminal process;
+- a conservative inventory-backed Linux process-context auditor that re-captures trusted host/NVML
+  evidence, binds it to the durable grant and spawn identities, and accepts only absent compute and
+  graphics contexts on every granted NVIDIA accelerator; identity drift, unsupported vendors,
+  missing resources, and partial/unknown evidence remain incomplete and block release;
 - an additive host-ledger v6 recovery-terminal receipt for a restarted daemon that cannot claim
   parent-only wait status; exact pidfd-terminal, PID-absent, and identity-superseded observations
   have a separate typed request/receipt and immutable projection, remain mutually exclusive with v5

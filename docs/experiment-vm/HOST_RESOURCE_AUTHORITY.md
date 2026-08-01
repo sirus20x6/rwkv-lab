@@ -734,7 +734,11 @@ connections, makes prepare/commit/finalize exact-replay safe within one daemon
 lifetime, and releases the private pre-exec gate only after the caller has the
 durable spawn receipt. The additive v5 terminal receipt is implemented as well: pidfd wait status,
 the exact spawn identity, twice-empty cgroup evidence, and a complete trusted
-accelerator-context audit must all agree before commit. The v6 recovery-terminal
+accelerator-context audit must all agree before commit. The Linux context
+auditor takes a fresh trusted inventory/NVML sample, verifies the durable host,
+boot, broker, and granted resource identities, and requires both compute and
+graphics contexts to be absent on every granted NVIDIA resource. Unsupported
+vendors and any partial, stale, missing, or unknown evidence block. The v6 recovery-terminal
 receipt is a separate contract for a restarted daemon that is no longer the
 worker's parent: it records exact pidfd-terminal, PID-absent, or
 identity-superseded evidence and never invents a wait code/status. It is
