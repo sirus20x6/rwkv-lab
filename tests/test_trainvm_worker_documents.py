@@ -1,0 +1,161 @@
+from __future__ import annotations
+
+import fcntl
+import hashlib
+import json
+import os
+import ctypes
+
+import pytest
+
+from rwkv_lab.trainvm_worker import (
+    BootstrapError,
+    InvocationError,
+    load_worker_bootstrap,
+    load_worker_invocation,
+    read_worker_bootstrap_fd,
+)
+
+
+def canonical(value: object) -> bytes:
+    return json.dumps(
+        value, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    ).encode()
+
+
+def digest(value: bytes) -> str:
+    return "sha256:" + hashlib.sha256(value).hexdigest()
+
+
+def memfd_create(name: str) -> int:
+    function = ctypes.CDLL(None, use_errno=True).memfd_create
+    function.argtypes = (ctypes.c_char_p, ctypes.c_uint)
+    function.restype = ctypes.c_int
+    descriptor = function(name.encode(), 0x0002)  # MFD_ALLOW_SEALING
+    if descriptor < 0:
+        raise OSError(ctypes.get_errno(), "memfd_create failed")
+    return descriptor
+
+
+def bootstrap_document() -> bytes:
+    body = {
+        "adapter": "rwkv-lab.mageflow",
+        "adapter_version": "1.0.0",
+        "api_version": "trainvm.worker-bootstrap/v1",
+        "attempt_id": "attempt-1",
+        "capabilities": ["artifact.manifest.v1", "metric.scalar.v1"],
+        "code_fingerprint": "sha256:" + "a" * 64,
+        "concurrency_key": "gpu:0",
+        "controller_target": "unix:/run/user/1000/trainvm.sock",
+        "fencing_token": 4,
+        "last_acked_controller_sequence": 7,
+        "launch_nonce": "launch-1",
+        "lease_id": "lease-1",
+        "node_id": "train",
+        "run_id": "run-1",
+    }
+    return canonical({**body, "bootstrap_digest": digest(canonical(body))})
+
+
+def invocation_document() -> bytes:
+    body = {
+        "adapter": {
+            "adapter": "rwkv-lab.mageflow",
+            "contract": "rwkv-lab.mageflow.train/v1",
+            "operation": "train",
+            "runtime": "python_worker",
+            "version": "1.0.0",
+        },
+        "api_version": "trainvm.worker-invocation/v1",
+        "attempt_id": "attempt-1",
+        "controls": {"learning_rate": 2e-6},
+        "dispatch_id": "dispatch-1",
+        "effective_control_revision": 2,
+        "execution": None,
+        "host_id": "sha256:" + "b" * 64,
+        "inputs": {"caption": "雪"},
+        "node_id": "train",
+        "observability": {},
+        "plan_hash": "c" * 64,
+        "plan_revision": 3,
+        "publishes": {},
+        "resources": {},
+        "run_id": "run-1",
+        "training": None,
+        "workspace": {},
+    }
+    return canonical({**body, "invocation_digest": digest(canonical(body))})
+
+
+def test_bootstrap_is_exact_content_addressed_and_reads_sealed_memfd() -> None:
+    raw = bootstrap_document()
+    value = load_worker_bootstrap(raw)
+    assert value.bootstrap_digest == (
+        "sha256:55996b8d641668a7c0b989df4f94561e"
+        "93109fe45f3cdd819e8e10fe763e106b"
+    )
+    assert value.capabilities == ("artifact.manifest.v1", "metric.scalar.v1")
+    descriptor = memfd_create("trainvm-bootstrap")
+    try:
+        os.write(descriptor, raw)
+        fcntl.fcntl(
+            descriptor,
+            getattr(fcntl, "F_ADD_SEALS", 1033),
+            getattr(fcntl, "F_SEAL_WRITE", 0x0008)
+            | getattr(fcntl, "F_SEAL_GROW", 0x0004)
+            | getattr(fcntl, "F_SEAL_SHRINK", 0x0002)
+            | getattr(fcntl, "F_SEAL_SEAL", 0x0001),
+        )
+        assert read_worker_bootstrap_fd(descriptor) == value
+    finally:
+        os.close(descriptor)
+
+
+def test_bootstrap_rejects_tampering_duplicates_and_unsealed_fd() -> None:
+    changed = json.loads(bootstrap_document())
+    changed["attempt_id"] = "attempt-2"
+    with pytest.raises(BootstrapError):
+        load_worker_bootstrap(canonical(changed))
+    with pytest.raises(BootstrapError):
+        load_worker_bootstrap(b'{"a":1,"a":2}')
+    descriptor = memfd_create("trainvm-bootstrap")
+    try:
+        os.write(descriptor, bootstrap_document())
+        with pytest.raises(BootstrapError):
+            read_worker_bootstrap_fd(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def test_invocation_is_immutable_and_bound_to_welcome_identity() -> None:
+    assert json.loads(invocation_document())["invocation_digest"] == (
+        "sha256:b0b5333370726a775514778a019a88e0"
+        "8c6d445cc8758e4c60aa26c399686781"
+    )
+    value = load_worker_invocation(
+        invocation_document(),
+        expected_digest=digest(canonical({
+            key: item
+            for key, item in json.loads(invocation_document()).items()
+            if key != "invocation_digest"
+        })),
+        expected_run_id="run-1",
+        expected_node_id="train",
+        expected_attempt_id="attempt-1",
+        expected_plan_revision=3,
+    )
+    assert value.inputs["caption"] == "雪"
+    with pytest.raises(TypeError):
+        value.controls["learning_rate"] = 1e-3  # type: ignore[index]
+
+
+def test_invocation_rejects_tampering_noncanonical_json_and_wrong_binding() -> None:
+    raw = invocation_document()
+    changed = json.loads(raw)
+    changed["inputs"]["caption"] = "tampered"
+    with pytest.raises(InvocationError):
+        load_worker_invocation(canonical(changed))
+    with pytest.raises(InvocationError):
+        load_worker_invocation(json.dumps(json.loads(raw), indent=2).encode())
+    with pytest.raises(InvocationError, match="attempt binding"):
+        load_worker_invocation(raw, expected_attempt_id="attempt-2")

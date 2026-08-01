@@ -69,6 +69,16 @@ Implementation boundaries:
 - Dashboard editors and comparison views are generated from component descriptors, so adding a
   registered optimizer or activation does not require a new Go handler or bespoke form.
 
+Keep the source tree equally explicit. The common training-component namespace has one module per
+category (`optimizers`, `parameter_routing`, `lr_schedules`, `weight_decay_schedules`, `activations`,
+`normalization`, `objectives`, `precision`, `gradient_policy`, and `curricula`), plus only shared
+protocol/configuration types at its root. Family adapters may depend on those modules; common
+modules must never import a MageFlow, RWKV, transformer, or vision trainer. CLI parsing and training
+loops consume a resolved composition rather than construct components ad hoc. Backend-specific
+kernels live below their semantic component, and tests mirror the same categories with shared
+contract suites plus backend parity fixtures. This directory/dependency rule is an enforceable
+architecture check, not merely a naming convention.
+
 Roadmap deliverables are a common component schema/registry, family compatibility predicates,
 parameter-routing audits, state serialization contracts, cross-runtime golden tests, and migration
 of existing duplicated trainer switches. Promotion requires representative end-to-end quality and

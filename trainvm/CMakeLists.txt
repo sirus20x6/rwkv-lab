@@ -81,6 +81,7 @@ add_library(trainvm_core
   src/linux_nvidia_inventory.cpp
   src/reconciler.cpp
   src/training_component_registry.cpp
+  src/worker_bootstrap.cpp
 )
 target_include_directories(trainvm_core PUBLIC include)
 target_compile_options(trainvm_core PUBLIC -freflection)
@@ -148,6 +149,12 @@ target_compile_definitions(adapter_invocation_tests PRIVATE
 )
 target_link_libraries(adapter_invocation_tests PRIVATE trainvm_core)
 add_test(NAME adapter_invocation_tests COMMAND adapter_invocation_tests)
+add_executable(worker_bootstrap_tests tests/worker_bootstrap_tests.cpp)
+target_compile_options(worker_bootstrap_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(worker_bootstrap_tests PRIVATE trainvm_core)
+add_test(NAME worker_bootstrap_tests COMMAND worker_bootstrap_tests)
 add_executable(training_component_registry_tests
   tests/training_component_registry_tests.cpp
 )

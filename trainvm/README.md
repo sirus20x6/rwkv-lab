@@ -56,6 +56,10 @@ Implemented now:
   pending live-control patches by controller sequence, and persists the terminal transition and
   receipt before acknowledging it; duplicate live streams are rejected and lost acknowledgements
   or receipts replay exactly;
+- a matching Python worker SDK with sealed bootstrap and immutable invocation decoders, checked-in
+  protobuf bindings, strict bidirectional stream sequencing, typed telemetry/artifact/control APIs,
+  adapter-owned safe-point polling, and cross-runtime canonical JSON golden digests; see
+  [`PYTHON_WORKER_SDK.md`](../docs/experiment-vm/PYTHON_WORKER_SDK.md);
 - typed `trainvm.core` artifact-validation and resource-release execution that cannot enter through
   generic worker/simulation hooks, with atomic builtin result, transition, dispatch receipt, and
   immutable lease-release evidence;

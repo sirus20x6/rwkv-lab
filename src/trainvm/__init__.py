@@ -1,0 +1,1 @@
+"""Generated TrainVM protocol bindings."""

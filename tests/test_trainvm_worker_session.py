@@ -1,0 +1,157 @@
+from __future__ import annotations
+
+import json
+import threading
+import time
+from collections.abc import Iterable
+
+from rwkv_lab.trainvm_worker import (
+    CommandKind,
+    ControlDisposition,
+    WorkerSession,
+    load_worker_bootstrap,
+)
+from rwkv_lab.trainvm_worker.session import wire
+
+from test_trainvm_worker_documents import bootstrap_document, invocation_document
+
+
+class FakeController:
+    def __init__(self, *, send_control: bool = False) -> None:
+        self.received: list[wire.WorkerToController] = []
+        self.send_control = send_control
+        self.control_sent = threading.Event()
+
+    def __call__(
+        self, requests: Iterable[wire.WorkerToController]
+    ) -> Iterable[wire.ControllerToWorker]:
+        iterator = iter(requests)
+        hello_message = next(iterator)
+        self.received.append(hello_message)
+        hello = hello_message.hello
+        invocation = json.loads(invocation_document())
+        yield wire.ControllerToWorker(
+            welcome=wire.WorkerWelcome(
+                disposition=wire.WorkerWelcome.DISPOSITION_ACCEPTED,
+                journal_id="journal-1",
+                plan_hash=invocation["plan_hash"],
+                plan_revision=invocation["plan_revision"],
+                run_id=hello.run_id,
+                run_revision=9,
+                node_id=hello.node_id,
+                attempt_id=hello.attempt_id,
+                launch_nonce=hello.launch_nonce,
+                concurrency_key=hello.concurrency_key,
+                lease_id=hello.lease_id,
+                fencing_token=hello.fencing_token,
+                dispatch_id=invocation["dispatch_id"],
+                component="trainer",
+                operation="train",
+                acknowledged_worker_sequence=0,
+                canonical_invocation_json=invocation_document(),
+                invocation_digest=invocation["invocation_digest"],
+            )
+        )
+        if self.send_control:
+            yield wire.ControllerToWorker(
+                command=wire.WorkerCommand(
+                    controller_sequence=8,
+                    command_id="control-1",
+                    controls=wire.ControlPatchCommand(
+                        expected_control_revision=0,
+                        assignments=[
+                            wire.ControlAssignment(
+                                key="learning_rate",
+                                value=wire.ScalarValue(number_value=1e-6),
+                            )
+                        ],
+                        control_revision=8,
+                        apply_point=wire.APPLY_POINT_NEXT_OPTIMIZER_STEP,
+                    ),
+                )
+            )
+            self.control_sent.set()
+        for message in iterator:
+            self.received.append(message)
+            selected = message.WhichOneof("message")
+            sequence = getattr(message, selected).worker_sequence
+            if selected == "event":
+                yield wire.ControllerToWorker(
+                    receipt=wire.WorkerReceipt(
+                        event_id=message.event.event_id,
+                        acknowledged_worker_sequence=sequence,
+                        run_id=hello.run_id,
+                        committed_run_revision=10,
+                        observed_state=wire.OBSERVED_STATE_COMPLETED,
+                    )
+                )
+                return
+            yield wire.ControllerToWorker(acknowledge_worker_sequence=sequence)
+
+
+def wait_for_commands(session: WorkerSession) -> tuple:
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        values = session.poll_commands()
+        if values:
+            return values
+        time.sleep(0.001)
+    raise AssertionError("controller command was not delivered")
+
+
+def test_session_orders_hello_telemetry_and_terminal_receipt() -> None:
+    controller = FakeController()
+    session = WorkerSession(
+        load_worker_bootstrap(bootstrap_document()), connector=controller
+    )
+    invocation = session.start()
+    assert invocation.controls["learning_rate"] == 2e-6
+    assert session.heartbeat(2, "training", wait=True) == 1
+    assert (
+        session.metric(
+            "loss",
+            0.25,
+            unit="ratio",
+            step_domain="optimizer_step",
+            step=2,
+            wait=True,
+        )
+        == 2
+    )
+    receipt = session.finish("node.completed", {"ok": True}, optimizer_step=2)
+    assert receipt.acknowledged_worker_sequence == 3
+    assert [message.WhichOneof("message") for message in controller.received] == [
+        "hello",
+        "heartbeat",
+        "metric",
+        "event",
+    ]
+    assert controller.received[-1].event.canonical_json_payload == b'{"ok":true}'
+    session.close()
+
+
+def test_control_command_is_typed_and_acknowledged_at_safe_point() -> None:
+    controller = FakeController(send_control=True)
+    session = WorkerSession(
+        load_worker_bootstrap(bootstrap_document()), connector=controller
+    )
+    session.start()
+    assert controller.control_sent.wait(2)
+    (command,) = wait_for_commands(session)
+    assert command.kind is CommandKind.CONTROLS
+    assert command.apply_point == wire.APPLY_POINT_NEXT_OPTIMIZER_STEP
+    assert command.assignments[0].key == "learning_rate"
+    assert command.assignments[0].value == 1e-6
+    session.acknowledge_controls(
+        command,
+        ControlDisposition.APPLIED,
+        effective_values={"learning_rate": 1e-6},
+        effective_step=4,
+        wait=True,
+    )
+    session.finish("node.completed", {"ok": True}, optimizer_step=4)
+    acknowledgement = controller.received[-2].control_ack
+    assert acknowledgement.control_revision == 8
+    assert acknowledgement.effective_step == 4
+    assert acknowledgement.effective_values[0].key == "learning_rate"
+    session.close()

@@ -52,6 +52,13 @@ test = [
     "pytest>=8",
     "pytest-xdist>=3.6",
 ]
+# The TrainVM control plane is optional for standalone algorithm imports, but
+# every authority-launched trainer installs this extra. Generated protobuf
+# bindings are checked in so workers never need protoc at runtime.
+trainvm-worker = [
+    "grpcio>=1.82",
+    "protobuf>=6.33,<7",
+]
 # NVIDIA's Operator API is optional: ordinary CUDA and CPU installs retain the
 # cuBLAS/Triton fallback. Native adoption additionally requires an SM120 kernel
 # in the installed registry and a parity/latency qualification receipt.

@@ -224,6 +224,37 @@ void resolved_training_composition_is_frozen_into_invocation() {
         "declared training composition cannot dispatch without authority resolution");
 }
 
+void python_worker_invocation_has_cross_runtime_golden_digest() {
+  trainvm::WorkerInvocationSpec invocation;
+  invocation.api_version = trainvm::kWorkerInvocationApiVersion;
+  invocation.run_id = "run-1";
+  invocation.host_id = "sha256:" + std::string(64U, 'b');
+  invocation.plan_hash = std::string(64U, 'c');
+  invocation.plan_revision = 3U;
+  invocation.node_id = "train";
+  invocation.attempt_id = "attempt-1";
+  invocation.dispatch_id = "dispatch-1";
+  invocation.adapter.adapter = "rwkv-lab.mageflow";
+  invocation.adapter.version = "1.0.0";
+  invocation.adapter.runtime = trainvm::ComponentRuntime::python_worker;
+  invocation.adapter.operation = "train";
+  invocation.adapter.contract = "rwkv-lab.mageflow.train/v1";
+  invocation.workspace = nlohmann::json::object();
+  invocation.resources = nlohmann::json::object();
+  invocation.inputs = {{"caption", "雪"}};
+  invocation.controls = {{"learning_rate", 0.000002}};
+  invocation.effective_control_revision = 2U;
+  invocation.publishes = nlohmann::json::object();
+  invocation.observability = nlohmann::json::object();
+  invocation.execution = nullptr;
+  invocation.training = nullptr;
+  invocation.invocation_digest =
+      "sha256:b0b5333370726a775514778a019a88e08c6d445cc8758e4c60aa26c399686781";
+  check(trainvm::worker_invocation_from_canonical_json(
+            trainvm::worker_invocation_canonical_json(invocation)) == invocation,
+        "C++ and Python invocation canonicalization share one golden digest");
+}
+
 }  // namespace
 
 int main() {
@@ -231,6 +262,7 @@ int main() {
     round_trip_and_resolve_public_inputs();
     artifact_and_control_validation_fail_closed();
     resolved_training_composition_is_frozen_into_invocation();
+    python_worker_invocation_has_cross_runtime_golden_digest();
   } catch (const std::exception& exception) {
     std::cerr << "UNCAUGHT: " << exception.what() << '\n';
     return 1;
