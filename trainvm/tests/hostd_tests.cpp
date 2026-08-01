@@ -358,6 +358,12 @@ public:
     return result;
   }
 
+  std::optional<BundleRequestResult>
+  reconcile_bundle_outcome(
+      const ResourceBundleRequest &request) const override {
+    return ledger_->reconcile_bundle_outcome(request);
+  }
+
   BundleReleaseResult
   release_bundle(const ResourceReleaseRequest &request,
                  const HostLedgerTime &now) override {
@@ -857,6 +863,73 @@ void blocked_startup_allows_only_exact_release_cleanup() {
             {70, 80});
       },
       "blocked release-only cleanup capability cannot request grants");
+}
+
+void blocked_startup_recovers_stale_exact_outcomes_read_only() {
+  Fixture fixture;
+  const auto scope = attribution("journal-recovery", "run-recovery",
+                                 "lease-recovery", 4U);
+  const auto exact_request = request_for(scope, "restart-recovery-grant");
+  BundleRequestResult original;
+  {
+    auto first = fixture.coordinator();
+    admit(*first, *fixture.ledger);
+    const auto session =
+        connect_admission(*first, scope, *fixture.logical_fences);
+    original = first->request_bundle(session.session_id, exact_request,
+                                     {50, 60});
+    require(original.grant.has_value(),
+            "recovery fixture commits an exact grant before restart");
+  }
+
+  auto restarted = fixture.coordinator();
+  FakeAuditor failed(
+      audit_report(*fixture.ledger, HostStartupAuditDisposition::failed));
+  require_throws<HostdStateError>(
+      [&] { (void)restarted->run_startup_audit(failed, {70, 80}); },
+      "restart enters startup-blocked after committing failed evidence");
+
+  auto superseding = scope;
+  ++superseding.logical_fencing_token;
+  fixture.logical_fences->set_live(superseding);
+  auto recovery_peer =
+      std::make_shared<FakePeer>(HostdSessionAccess::read_only);
+  const auto recovery_session = restarted->connect(
+      {.attribution = scope}, recovery_peer);
+  const auto records_before = fixture.ledger->record_count();
+  const auto generation_before = fixture.ledger->generation(
+      original.grant->fences.front().resource);
+  const auto occupancy_before = fixture.ledger->occupancy();
+  const auto recovered = restarted->reconcile_bundle_outcome(
+      recovery_session.session_id, exact_request);
+  require(recovered && recovered->replayed &&
+              recovered->grant == original.grant &&
+              recovered->outcome_digest == original.outcome_digest,
+          "attributed service session recovers stale exact lost-reply grant while blocked");
+
+  const auto absent_request = request_for(scope, "blocked-recovery-absent");
+  const auto absent = restarted->reconcile_bundle_outcome(
+      recovery_session.session_id, absent_request);
+  require(!absent && fixture.ledger->record_count() == records_before &&
+              fixture.ledger->generation(
+                  original.grant->fences.front().resource) ==
+                  generation_before &&
+              fixture.ledger->occupancy() == occupancy_before,
+          "blocked recovery cannot admit a missing request or mutate projections");
+  require_throws<HostdUnauthorized>(
+      [&] {
+        (void)restarted->request_bundle(recovery_session.session_id,
+                                        absent_request, {90, 100});
+      },
+      "read-only recovery session cannot use the mutating grant path");
+
+  recovery_peer->evidence_.access = HostdSessionAccess::denied;
+  require_throws<HostdUnauthorized>(
+      [&] {
+        (void)restarted->reconcile_bundle_outcome(
+            recovery_session.session_id, exact_request);
+      },
+      "a peer re-observed as denied cannot recover a receipt");
 }
 
 void admission_finalize_boundary_is_atomic_and_recoverable() {
@@ -1614,6 +1687,7 @@ int main() {
     stale_startup_report_is_rejected_by_ledger_cas();
     crash_after_commit_retries_by_exact_ledger_replay();
     blocked_startup_allows_only_exact_release_cleanup();
+    blocked_startup_recovers_stale_exact_outcomes_read_only();
     admission_finalize_boundary_is_atomic_and_recoverable();
     admission_finalize_lost_reply_and_async_poison_recover();
     unauthorized_and_read_only_peers();

@@ -18,8 +18,8 @@ class HostdJournalFenceAttestorError final : public std::runtime_error {
 };
 
 // Requested controller bootstrap identity. Construction registers it into the
-// durable Journal controller authority and accepts only the next monotonic
-// generation with a never-before-used controller ID.
+// durable Journal controller authority and accepts only the next generation
+// with a never-before-used controller ID in the exact concurrency-key scope.
 struct HostdJournalFenceAttestorConfig final {
   std::string api_version{
       std::string(kHostdJournalFenceAttestorApiVersion)};

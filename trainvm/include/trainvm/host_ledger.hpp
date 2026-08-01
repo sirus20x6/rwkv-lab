@@ -181,6 +181,11 @@ class SQLiteHostLedger final {
   [[nodiscard]] BundleRequestResult request_bundle(
       const ResourceBundleRequest& request, const HostLedgerTime& now,
       const HostLedgerAdmissionEpoch& admission_epoch);
+  // Inspection-only lost-reply recovery. This never consults or advances the
+  // active admission epoch and never creates request evidence, occupancy, or
+  // generations. A missing outcome is therefore distinct from a busy outcome.
+  [[nodiscard]] std::optional<BundleRequestResult> reconcile_bundle_outcome(
+      const ResourceBundleRequest& request) const;
   [[nodiscard]] BundleReleaseResult release_bundle(
       const ResourceReleaseRequest& request, const HostLedgerTime& now);
   // This operation exists only when construction retained a trusted policy.

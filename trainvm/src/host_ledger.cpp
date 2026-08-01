@@ -273,6 +273,34 @@ class Transaction final {
   bool committed_{};
 };
 
+class ReadTransaction final {
+ public:
+  explicit ReadTransaction(sqlite3* database) : database_(database) {
+    execute("BEGIN", "begin read transaction");
+  }
+  ~ReadTransaction() {
+    if (!committed_)
+      sqlite3_exec(database_, "ROLLBACK", nullptr, nullptr, nullptr);
+  }
+  void commit() {
+    execute("COMMIT", "commit read transaction");
+    committed_ = true;
+  }
+
+ private:
+  void execute(const char* sql, std::string_view action) {
+    char* error = nullptr;
+    if (sqlite3_exec(database_, sql, nullptr, nullptr, &error) != SQLITE_OK) {
+      const std::string detail = error ? error : sqlite3_errmsg(database_);
+      sqlite3_free(error);
+      throw HostLedgerError("sqlite " + std::string(action) + " failed: " +
+                            detail);
+    }
+  }
+  sqlite3* database_{};
+  bool committed_{};
+};
+
 void execute(sqlite3* database, std::string_view sql,
              std::string_view description) {
   const std::string owned(sql);
@@ -1844,6 +1872,65 @@ BundleRequestResult SQLiteHostLedger::request_bundle(
         "an admission epoch is invalid for a ledger without startup policy");
   }
   return request_bundle_authorized(request, now, &admission_epoch);
+}
+
+std::optional<BundleRequestResult> SQLiteHostLedger::reconcile_bundle_outcome(
+    const ResourceBundleRequest& request) const {
+  validate_resource_request(request);
+  std::scoped_lock lock(implementation_->mutex);
+  ReadTransaction transaction(implementation_->database);
+  std::string reason;
+  if (!implementation_->verify_unlocked(&reason)) {
+    throw HostLedgerError("refusing request outcome reconciliation: " + reason);
+  }
+
+  Statement outcome(implementation_->database, R"sql(
+    SELECT request_digest, status, canonical_outcome_json, outcome_digest
+    FROM request_outcomes WHERE request_id=?
+  )sql");
+  bind_text(outcome.get(), 1, request.request_id);
+  const int status = sqlite3_step(outcome.get());
+  if (status == SQLITE_DONE) {
+    transaction.commit();
+    return std::nullopt;
+  }
+  if (status != SQLITE_ROW)
+    throw HostLedgerError("request outcome reconciliation query failed");
+  if (column_text(outcome.get(), 0) != request.canonical_request_digest) {
+    throw HostLedgerConflict("request_id already has different content");
+  }
+
+  const std::string outcome_status = column_text(outcome.get(), 1);
+  if (outcome_status != "granted" && outcome_status != "busy")
+    throw HostLedgerError("request outcome reconciliation status is invalid");
+  BundleRequestResult result{
+      .status = outcome_status == "granted" ? BundleRequestStatus::granted
+                                             : BundleRequestStatus::busy,
+      .grant = std::nullopt,
+      .outcome_digest = column_text(outcome.get(), 3),
+      .replayed = true};
+  if (result.status == BundleRequestStatus::granted) {
+    result.grant = resource_bundle_grant_from_json(
+        nlohmann::json::parse(column_text(outcome.get(), 2)));
+    if (result.grant->request_id != request.request_id ||
+        result.grant->request_digest != request.canonical_request_digest ||
+        result.grant->journal_id != request.journal_id ||
+        result.grant->run_id != request.run_id ||
+        result.grant->logical_lease_id != request.logical_lease_id ||
+        result.grant->logical_fencing_token !=
+            request.logical_fencing_token ||
+        result.grant->receipt_digest != result.outcome_digest) {
+      throw HostLedgerError(
+          "reconciled grant does not exactly match request attribution");
+    }
+  } else if (nlohmann::json::parse(column_text(outcome.get(), 2))
+                 .value("status", std::string{}) != "busy") {
+    throw HostLedgerError("reconciled busy outcome is malformed");
+  }
+  if (sqlite3_step(outcome.get()) != SQLITE_DONE)
+    throw HostLedgerError("request outcome reconciliation is not unique");
+  transaction.commit();
+  return result;
 }
 
 BundleRequestResult SQLiteHostLedger::request_bundle_authorized(

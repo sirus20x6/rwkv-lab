@@ -207,8 +207,9 @@ public:
       const std::string& lease_id, std::uint64_t fencing_token,
       const AuthorityTimeSample& now) const;
   // Explicit authority mutation. Registration appends a hash-chained durable
-  // controller epoch and accepts only a fresh, monotonically increasing
-  // generation bound to the exact currently live logical fence.
+  // controller epoch and accepts only a fresh generation monotonically
+  // increasing within the exact concurrency-key scope and bound to its
+  // currently live logical fence.
   [[nodiscard]] JournalControllerFence register_hostd_controller_fence(
       const JournalControllerFence& requested,
       const AuthorityTimeSample& now);

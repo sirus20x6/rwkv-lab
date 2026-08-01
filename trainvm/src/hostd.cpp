@@ -125,6 +125,11 @@ public:
                  const HostLedgerAdmissionEpoch &admission_epoch) override {
     return ledger_->request_bundle(request, now, admission_epoch);
   }
+  [[nodiscard]] std::optional<BundleRequestResult>
+  reconcile_bundle_outcome(
+      const ResourceBundleRequest &request) const override {
+    return ledger_->reconcile_bundle_outcome(request);
+  }
   [[nodiscard]] BundleReleaseResult
   release_bundle(const ResourceReleaseRequest &request,
                  const HostLedgerTime &now) override {
@@ -994,6 +999,76 @@ HostGrantCoordinator::request_bundle(std::string_view session_id,
     implementation_->poison_and_throw(
         "host ledger returned an unsealed or inexact grant outcome");
   if (implementation_->lifecycle != HostdLifecycle::admitting)
+    throw HostdStateError(implementation_->poison_reason);
+  return result;
+}
+
+std::optional<BundleRequestResult>
+HostGrantCoordinator::reconcile_bundle_outcome(
+    std::string_view session_id, const ResourceBundleRequest &request) {
+  if (!Implementation::request_is_exactly_sealed(request))
+    throw HostdUnauthorized("bundle request is not exactly sealed");
+  Implementation::SessionSnapshot snapshot;
+  {
+    std::scoped_lock lock(implementation_->mutex);
+    snapshot = implementation_->snapshot_session(
+        session_id, Implementation::MutationKind::none);
+    if (snapshot.session.effective_access == HostdSessionAccess::denied ||
+        snapshot.session.peer.access == HostdSessionAccess::denied ||
+        snapshot.session.peer.enforcement_grade !=
+            HostdPeerEnforcementGrade::service_identity_enforced ||
+        !snapshot.session.attribution) {
+      throw HostdUnauthorized(
+          "request outcome recovery requires an attributed service session");
+    }
+  }
+  const HostdSessionAttribution attribution = *snapshot.session.attribution;
+  if (request.journal_id != attribution.journal_id ||
+      request.run_id != attribution.run_id ||
+      request.logical_lease_id != attribution.logical_lease_id ||
+      request.logical_fencing_token != attribution.logical_fencing_token) {
+    throw HostdUnauthorized(
+        "bundle request does not match the recovery session attribution");
+  }
+  const HostdPeerEvidence peer =
+      Implementation::observe_peer(snapshot.peer_source);
+  // Exact stale attribution is deliberately recoverable: a lost grant reply
+  // may be the evidence needed to construct cleanup after its logical lease
+  // has expired or been superseded. This observation still validates durable
+  // evidence shape and attribution, but liveness is not grant authority here.
+  (void)implementation_->observe_logical_fence(attribution);
+  const Implementation::RuntimeIdentityEvidence runtime =
+      implementation_->observe_runtime_identity();
+  {
+    std::scoped_lock lock(implementation_->mutex);
+    Implementation::SessionRecord &record =
+        implementation_->revalidate_session(
+            snapshot, Implementation::MutationKind::none);
+    implementation_->require_exact_peer(snapshot, peer);
+    implementation_->apply_runtime_identity(runtime, true);
+    ++record.active_mutations;
+  }
+
+  std::optional<BundleRequestResult> result;
+  try {
+    result = implementation_->ledger->reconcile_bundle_outcome(request);
+  } catch (...) {
+    std::scoped_lock lock(implementation_->mutex);
+    auto &record = implementation_->exact_session(snapshot);
+    implementation_->finish_mutation(record, false);
+    throw;
+  }
+  std::scoped_lock lock(implementation_->mutex);
+  Implementation::SessionRecord &record =
+      implementation_->exact_session(snapshot);
+  implementation_->finish_mutation(record, false);
+  if (result &&
+      (!result->replayed ||
+       !implementation_->valid_grant_result(*result, request, attribution))) {
+    implementation_->poison_and_throw(
+        "host ledger returned an unsealed or inexact recovery outcome");
+  }
+  if (implementation_->lifecycle == HostdLifecycle::poisoned)
     throw HostdStateError(implementation_->poison_reason);
   return result;
 }

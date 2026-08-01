@@ -178,6 +178,8 @@ public:
   request_bundle(const ResourceBundleRequest &request,
                  const HostLedgerTime &now,
                  const HostLedgerAdmissionEpoch &admission_epoch) = 0;
+  [[nodiscard]] virtual std::optional<BundleRequestResult>
+  reconcile_bundle_outcome(const ResourceBundleRequest &request) const = 0;
   [[nodiscard]] virtual BundleReleaseResult
   release_bundle(const ResourceReleaseRequest &request,
                  const HostLedgerTime &now) = 0;
@@ -225,6 +227,14 @@ public:
   request_bundle(std::string_view session_id,
                  const ResourceBundleRequest &request,
                  const HostLedgerTime &now);
+  // Recovers only an already committed exact request outcome. This path is
+  // available while sealed or startup-blocked, but requires a freshly
+  // observed service-identity session, exact attribution, and well-formed
+  // durable logical-fence evidence. A stale exact fence remains recoverable so
+  // a lost grant reply can be turned into cleanup; it is never grant authority.
+  [[nodiscard]] std::optional<BundleRequestResult>
+  reconcile_bundle_outcome(std::string_view session_id,
+                           const ResourceBundleRequest &request);
   [[nodiscard]] BundleReleaseResult
   release_bundle(std::string_view session_id,
                  const ResourceReleaseRequest &request,

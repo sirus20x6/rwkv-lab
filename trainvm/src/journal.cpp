@@ -842,8 +842,10 @@ std::string content_hash(const Event& event) {
 
 constexpr std::string_view kLeaseAuthorityMetadataPrefix =
     "lease_authority_head:";
-constexpr std::string_view kControllerAuthorityMetadataKey =
+constexpr std::string_view kLegacyControllerAuthorityMetadataKey =
     "hostd_controller_head";
+constexpr std::string_view kControllerAuthorityMetadataPrefix =
+    "hostd_controller_head:";
 constexpr std::string_view kControllerIdentityMetadataPrefix =
     "hostd_controller_id:";
 
@@ -877,6 +879,94 @@ std::string lease_authority_event_id(std::string_view concurrency_key,
   return "journal-lease-authority-" +
          lease_authority_identity(concurrency_key, fencing_token) + "-" +
          std::to_string(revision);
+}
+
+std::string controller_scope_identity(std::string_view concurrency_key) {
+  std::string framed("trainvm.hostd-controller-scope/v1");
+  framed.push_back('\0');
+  framed.append(std::to_string(concurrency_key.size()));
+  framed.push_back('\0');
+  framed.append(concurrency_key);
+  return sha256_hex(framed);
+}
+
+std::string controller_authority_metadata_key(
+    std::string_view concurrency_key) {
+  return std::string(kControllerAuthorityMetadataPrefix) +
+         controller_scope_identity(concurrency_key);
+}
+
+std::string controller_event_id(std::string_view concurrency_key,
+                                std::uint64_t generation) {
+  return "journal-hostd-controller-" +
+         controller_scope_identity(concurrency_key) + "-" +
+         std::to_string(generation);
+}
+
+std::string controller_identity_metadata_key(
+    std::string_view concurrency_key, std::string_view controller_id) {
+  std::string framed("trainvm.hostd-controller-identity/v1");
+  framed.push_back('\0');
+  framed.append(std::to_string(concurrency_key.size()));
+  framed.push_back('\0');
+  framed.append(concurrency_key);
+  framed.push_back('\0');
+  framed.append(std::to_string(controller_id.size()));
+  framed.push_back('\0');
+  framed.append(controller_id);
+  return std::string(kControllerIdentityMetadataPrefix) + sha256_hex(framed);
+}
+
+bool verify_controller_scope_metadata(sqlite3* database,
+                                      std::string* reason = nullptr) {
+  const auto fail = [&](std::string_view detail) {
+    if (reason != nullptr) *reason = std::string(detail);
+    return false;
+  };
+  Statement query(database,
+                  "SELECT key, value FROM journal_meta ORDER BY key");
+  int status = SQLITE_ROW;
+  while ((status = sqlite3_step(query.get())) == SQLITE_ROW) {
+    const std::string key = column_text(query.get(), 0);
+    if (key == kLegacyControllerAuthorityMetadataKey)
+      return fail("legacy global hostd controller authority is present");
+    if (!key.starts_with(kControllerAuthorityMetadataPrefix)) continue;
+    const std::string encoded = column_text(query.get(), 1);
+    try {
+      const nlohmann::json head = nlohmann::json::parse(encoded);
+      const bool exact_shape =
+          head.is_object() && head.size() == 9U &&
+          head.contains("broker_epoch") &&
+          head.contains("concurrency_key") &&
+          head.contains("controller_generation") &&
+          head.contains("controller_id") && head.contains("event_sequence") &&
+          head.contains("event_hash") &&
+          head.contains("logical_fencing_token") &&
+          head.contains("logical_lease_id") && head.contains("run_id");
+      if (!exact_shape || head.dump() != encoded ||
+          !head.at("broker_epoch").is_string() ||
+          !head.at("concurrency_key").is_string() ||
+          !head.at("controller_generation").is_number_unsigned() ||
+          !head.at("controller_id").is_string() ||
+          !head.at("event_sequence").is_number_unsigned() ||
+          !head.at("event_hash").is_string() ||
+          !head.at("logical_fencing_token").is_number_unsigned() ||
+          !head.at("logical_lease_id").is_string() ||
+          !head.at("run_id").is_string() ||
+          !valid_hash_hex(head.at("event_hash").get<std::string>()))
+        return fail("hostd controller scope head is noncanonical");
+      const std::string concurrency_key =
+          head.at("concurrency_key").get<std::string>();
+      if (concurrency_key.empty() ||
+          controller_authority_metadata_key(concurrency_key) != key)
+        return fail("hostd controller scope head key does not match its scope");
+    } catch (...) {
+      return fail("hostd controller scope head is malformed");
+    }
+  }
+  if (status != SQLITE_DONE)
+    return fail("hostd controller scope metadata is unreadable");
+  return true;
 }
 
 struct LeaseAuthorityHead final {
@@ -2313,17 +2403,25 @@ void Journal::initialize() {
                    valid_hash_hex(std::string_view(key).substr(prefix.size())) &&
                    !value.empty() && value.size() <= 4096U;
           };
-          return (key == kControllerAuthorityMetadataKey && !value.empty() &&
-                  value.size() <= 4096U) ||
+          return (key == kLegacyControllerAuthorityMetadataKey &&
+                  !value.empty() && value.size() <= 4096U) ||
                  valid_hashed_extension(kLeaseAuthorityMetadataPrefix) ||
+                 valid_hashed_extension(kControllerAuthorityMetadataPrefix) ||
                  valid_hashed_extension(kControllerIdentityMetadataPrefix);
         });
+    std::string controller_scope_reason;
     if (chain == metadata.end() || identity == metadata.end() ||
         schema_version == metadata.end() || !extension_metadata_valid ||
         schema_version->second != version || !valid_hash(chain->second) ||
-        !valid_journal_id(identity->second)) {
+        !valid_journal_id(identity->second) ||
+        !verify_controller_scope_metadata(database_,
+                                          &controller_scope_reason)) {
       throw std::runtime_error(
-          "established journal authority metadata is missing, malformed, or unexpected");
+          "established journal authority metadata is missing, malformed, or "
+          "unexpected" +
+          (controller_scope_reason.empty()
+               ? std::string{}
+               : ": " + controller_scope_reason));
     }
   };
   if (stored_version == "1" || stored_version == "2" || stored_version == "3") {
@@ -5996,6 +6094,13 @@ JournalAuthoritySnapshot Journal::journal_authority_snapshot() const {
   require_attested_authority();
   auto read = read_snapshot();
   (void)read;
+  std::string controller_scope_reason;
+  if (!verify_controller_scope_metadata(database_, &controller_scope_reason)) {
+    authority_poisoned_.store(true, std::memory_order_release);
+    throw OperationPreconditionError(
+        "journal controller scope authority is corrupt: " +
+        controller_scope_reason);
+  }
   Statement query(database_,
                   "SELECT value FROM journal_meta WHERE key='journal_id'");
   if (sqlite3_step(query.get()) != SQLITE_ROW) {
@@ -6366,11 +6471,29 @@ JournalControllerFence Journal::register_hostd_controller_fence(
         "hostd controller registration found corrupt journal authority");
   }
 
+  {
+    Statement legacy(database_, "SELECT 1 FROM journal_meta WHERE key=?");
+    bind_text(legacy.get(), 1,
+              std::string(kLegacyControllerAuthorityMetadataKey));
+    const int legacy_status = sqlite3_step(legacy.get());
+    if (legacy_status == SQLITE_ROW) {
+      authority_poisoned_.store(true, std::memory_order_release);
+      throw OperationPreconditionError(
+          "legacy global hostd controller authority cannot be safely scoped");
+    }
+    if (legacy_status != SQLITE_DONE)
+      throw std::runtime_error(
+          "could not inspect legacy hostd controller authority");
+  }
+
+  const std::string authority_metadata_key =
+      controller_authority_metadata_key(requested.concurrency_key);
+
   std::optional<nlohmann::json> prior;
   std::string prior_encoded;
   {
     Statement query(database_, "SELECT value FROM journal_meta WHERE key=?");
-    bind_text(query.get(), 1, std::string(kControllerAuthorityMetadataKey));
+    bind_text(query.get(), 1, authority_metadata_key);
     const int status = sqlite3_step(query.get());
     if (status == SQLITE_ROW) {
       prior_encoded = column_text(query.get(), 0);
@@ -6412,10 +6535,25 @@ JournalControllerFence Journal::register_hostd_controller_fence(
   }
   if (!prior) {
     Statement history(database_, R"sql(
-      SELECT 1 FROM events
-      WHERE event_type='authority.hostd_controller_registered' LIMIT 1
+      SELECT event_id FROM events
+      WHERE event_type='authority.hostd_controller_registered'
+      ORDER BY journal_sequence
     )sql");
-    if (sqlite3_step(history.get()) == SQLITE_ROW) {
+    const std::string scope_event_prefix =
+        "journal-hostd-controller-" +
+        controller_scope_identity(requested.concurrency_key) + "-";
+    bool scope_history_exists = false;
+    int history_status = SQLITE_ROW;
+    while ((history_status = sqlite3_step(history.get())) == SQLITE_ROW) {
+      if (column_text(history.get(), 0).starts_with(scope_event_prefix)) {
+        scope_history_exists = true;
+        break;
+      }
+    }
+    if (history_status != SQLITE_ROW && history_status != SQLITE_DONE)
+      throw std::runtime_error(
+          "could not inspect hostd controller authority history");
+    if (scope_history_exists) {
       authority_poisoned_.store(true, std::memory_order_release);
       throw OperationPreconditionError(
           "hostd controller authority head was deleted");
@@ -6423,13 +6561,12 @@ JournalControllerFence Journal::register_hostd_controller_fence(
   } else {
     const std::uint64_t prior_generation =
         prior->at("controller_generation").get<std::uint64_t>();
-    const auto prior_event =
-        event("journal-hostd-controller-" + std::to_string(prior_generation));
+    const std::string prior_event_id =
+        controller_event_id(requested.concurrency_key, prior_generation);
+    const auto prior_event = event(prior_event_id);
     Statement prior_sequence(
         database_, "SELECT journal_sequence FROM events WHERE event_id=?");
-    bind_text(prior_sequence.get(), 1,
-              "journal-hostd-controller-" +
-                  std::to_string(prior_generation));
+    bind_text(prior_sequence.get(), 1, prior_event_id);
     const nlohmann::json expected_payload{
         {"broker_epoch", prior->at("broker_epoch")},
         {"concurrency_key", prior->at("concurrency_key")},
@@ -6477,8 +6614,8 @@ JournalControllerFence Journal::register_hostd_controller_fence(
     Statement later_controller(database_,
                                "SELECT 1 FROM events WHERE event_id=?");
     bind_text(later_controller.get(), 1,
-              "journal-hostd-controller-" +
-                  std::to_string(prior_generation + 1U));
+              controller_event_id(requested.concurrency_key,
+                                  prior_generation + 1U));
     const int later_status = sqlite3_step(later_controller.get());
     if (later_status == SQLITE_ROW) {
       authority_poisoned_.store(true, std::memory_order_release);
@@ -6497,8 +6634,8 @@ JournalControllerFence Journal::register_hostd_controller_fence(
     }
   }
   const std::string controller_identity_key =
-      std::string(kControllerIdentityMetadataPrefix) +
-      sha256_hex(requested.controller_id);
+      controller_identity_metadata_key(requested.concurrency_key,
+                                       requested.controller_id);
   {
     Statement reused(database_, "SELECT 1 FROM journal_meta WHERE key=?");
     bind_text(reused.get(), 1, controller_identity_key);
@@ -6560,8 +6697,8 @@ JournalControllerFence Journal::register_hostd_controller_fence(
       prior ? prior->at("event_hash").get<std::string>()
             : std::string(64U, '0');
   Event event{
-      .event_id = "journal-hostd-controller-" +
-                  std::to_string(requested.controller_generation),
+      .event_id = controller_event_id(requested.concurrency_key,
+                                      requested.controller_generation),
       .run_id = requested.run_id,
       .run_revision = 0U,
       .plan_revision = 0U,
@@ -6601,7 +6738,7 @@ JournalControllerFence Journal::register_hostd_controller_fence(
     Statement update(database_,
                      "UPDATE journal_meta SET value=? WHERE key=? AND value=?");
     bind_text(update.get(), 1, next.dump());
-    bind_text(update.get(), 2, std::string(kControllerAuthorityMetadataKey));
+    bind_text(update.get(), 2, authority_metadata_key);
     bind_text(update.get(), 3, prior_encoded);
     require_done(database_, update.get(), "advance hostd controller authority");
     if (sqlite3_changes(database_) != 1)
@@ -6609,7 +6746,7 @@ JournalControllerFence Journal::register_hostd_controller_fence(
   } else {
     Statement insert(database_,
                      "INSERT INTO journal_meta(key, value) VALUES(?, ?)");
-    bind_text(insert.get(), 1, std::string(kControllerAuthorityMetadataKey));
+    bind_text(insert.get(), 1, authority_metadata_key);
     bind_text(insert.get(), 2, next.dump());
     require_done(database_, insert.get(), "create hostd controller authority");
   }
@@ -6636,8 +6773,20 @@ void Journal::require_current_hostd_controller_fence(
   if (!verify_event_chain(&chain_reason))
     corrupt("hostd controller event authority is corrupt");
 
+  {
+    Statement legacy(database_, "SELECT 1 FROM journal_meta WHERE key=?");
+    bind_text(legacy.get(), 1,
+              std::string(kLegacyControllerAuthorityMetadataKey));
+    const int legacy_status = sqlite3_step(legacy.get());
+    if (legacy_status == SQLITE_ROW)
+      corrupt("legacy global hostd controller authority cannot be safely scoped");
+    if (legacy_status != SQLITE_DONE)
+      corrupt("legacy hostd controller authority is unreadable");
+  }
+
   Statement query(database_, "SELECT value FROM journal_meta WHERE key=?");
-  bind_text(query.get(), 1, std::string(kControllerAuthorityMetadataKey));
+  bind_text(query.get(), 1,
+            controller_authority_metadata_key(requested.concurrency_key));
   if (sqlite3_step(query.get()) != SQLITE_ROW)
     corrupt("hostd controller authority head is missing");
   const std::string encoded = column_text(query.get(), 0);
@@ -6675,12 +6824,12 @@ void Journal::require_current_hostd_controller_fence(
 
   const std::uint64_t generation =
       head.at("controller_generation").get<std::uint64_t>();
-  const auto authority_event =
-      event("journal-hostd-controller-" + std::to_string(generation));
+  const std::string authority_event_id =
+      controller_event_id(requested.concurrency_key, generation);
+  const auto authority_event = event(authority_event_id);
   Statement authority_sequence(
       database_, "SELECT journal_sequence FROM events WHERE event_id=?");
-  bind_text(authority_sequence.get(), 1,
-            "journal-hostd-controller-" + std::to_string(generation));
+  bind_text(authority_sequence.get(), 1, authority_event_id);
   const std::string previous_hash =
       authority_event && authority_event->payload.is_object()
           ? authority_event->payload.value("previous_controller_hash",
@@ -6723,17 +6872,16 @@ void Journal::require_current_hostd_controller_fence(
   Statement later_controller(database_,
                              "SELECT 1 FROM events WHERE event_id=?");
   bind_text(later_controller.get(), 1,
-            "journal-hostd-controller-" +
-                std::to_string(generation + 1U));
+            controller_event_id(requested.concurrency_key, generation + 1U));
   const int later_status = sqlite3_step(later_controller.get());
   if (later_status == SQLITE_ROW)
     corrupt("hostd controller authority head was rolled back");
   if (later_status != SQLITE_DONE)
     corrupt("hostd controller later authority is unreadable");
 
-  const std::string identity_key =
-      std::string(kControllerIdentityMetadataPrefix) +
-      sha256_hex(head.at("controller_id").get<std::string>());
+  const std::string identity_key = controller_identity_metadata_key(
+      requested.concurrency_key,
+      head.at("controller_id").get<std::string>());
   Statement identity(database_, "SELECT value FROM journal_meta WHERE key=?");
   bind_text(identity.get(), 1, identity_key);
   if (sqlite3_step(identity.get()) != SQLITE_ROW ||

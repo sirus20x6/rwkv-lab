@@ -360,6 +360,143 @@ void controller_generation_is_durable_monotonic_and_unique() {
       "a newer durable controller generation supersedes the old attestor");
 }
 
+void controller_generations_are_independent_per_exact_scope() {
+  Fixture fixture;
+  const auto first_attestor = fixture.attestor;
+  const auto first_query = fixture.query();
+  const LeaseAcquireResult second_lease = fixture.journal->acquire_lease(
+      "gpu:1", "run-002", "lease-002", authority_time(1'000'000'000LL),
+      10'000'000'000LL);
+  require(second_lease.status == LeaseAcquireStatus::acquired,
+          "second scope acquires an independent logical fence");
+  const HostdJournalControllerFence second_controller{
+      .run_id = "run-002",
+      .concurrency_key = "gpu:1",
+      // A process controller identity may legitimately control more than one
+      // resource scope; its durable reuse authority is therefore per scope.
+      .controller_id = fixture.controller.controller_id,
+      .controller_generation = fixture.controller.controller_generation,
+      .logical_lease_id = second_lease.lease.lease_id,
+      .logical_fencing_token = second_lease.lease.fencing_token};
+  const auto construct = [&](const HostdJournalControllerFence& controller) {
+    return std::make_shared<HostdJournalFenceAttestor>(
+        *fixture.journal,
+        HostdJournalFenceAttestorConfig{
+            .api_version =
+                std::string(kHostdJournalFenceAttestorApiVersion),
+            .broker_epoch = "broker-001",
+            .controller = controller},
+        fixture.time);
+  };
+  const auto second_attestor = construct(second_controller);
+  const auto query_for = [&](const auto& attestor, char challenge,
+                             char nonce) {
+    return HostdJournalFenceQuery{
+        .api_version = std::string(kHostdJournalFenceQueryApiVersion),
+        .challenge_id = "hostd-challenge-" + std::string(64U, challenge),
+        .session_nonce =
+            "hostd-session-nonce-" + std::string(64U, nonce),
+        .host_id = "host-001",
+        .boot_id = std::string(kBootId),
+        .broker_epoch = "broker-001",
+        .claim = attestor->claim(),
+        .issued_boottime_ns = 1'000'000'000LL,
+        .expires_boottime_ns = 3'000'000'000LL};
+  };
+  const auto second_query = query_for(second_attestor, 'c', 'd');
+  require(first_attestor->attest(first_query).controller ==
+              fixture.controller &&
+              second_attestor->attest(second_query).controller ==
+                  second_controller,
+          "equal generations and controller IDs remain live in two scopes");
+
+  HostdJournalControllerFence advanced_first = fixture.controller;
+  advanced_first.controller_id = "controller-002";
+  ++advanced_first.controller_generation;
+  const auto advanced_first_attestor = construct(advanced_first);
+  require_throws<HostdJournalFenceAttestorError>(
+      [&] { (void)first_attestor->attest(first_query); },
+      "a newer controller invalidates the old controller in the same scope");
+  require(second_attestor->attest(second_query).controller ==
+              second_controller,
+          "advancing one scope does not invalidate another scope");
+  require(advanced_first_attestor
+              ->attest(query_for(advanced_first_attestor, 'e', 'f'))
+              .controller == advanced_first,
+          "the advanced same-scope controller remains live");
+}
+
+void controller_scope_aliases_and_legacy_global_heads_fail_closed() {
+  {
+    Fixture fixture;
+    const LeaseAcquireResult second_lease = fixture.journal->acquire_lease(
+        "gpu:1", "run-002", "lease-002", authority_time(1'000'000'000LL),
+        10'000'000'000LL);
+    require(second_lease.status == LeaseAcquireStatus::acquired,
+            "alias fixture acquires a second logical scope");
+    const HostdJournalControllerFence second_controller{
+        .run_id = "run-002",
+        .concurrency_key = "gpu:1",
+        .controller_id = "controller-scope-1",
+        .controller_generation = fixture.controller.controller_generation,
+        .logical_lease_id = second_lease.lease.lease_id,
+        .logical_fencing_token = second_lease.lease.fencing_token};
+    auto second_attestor = std::make_shared<HostdJournalFenceAttestor>(
+        *fixture.journal,
+        HostdJournalFenceAttestorConfig{
+            .api_version =
+                std::string(kHostdJournalFenceAttestorApiVersion),
+            .broker_epoch = "broker-001",
+            .controller = second_controller},
+        fixture.time);
+    execute_external(
+        fixture.authority.database(),
+        "UPDATE journal_meta AS target SET value=(SELECT value FROM "
+        "journal_meta WHERE key LIKE 'hostd_controller_head:%' AND "
+        "value LIKE '%\"concurrency_key\":\"gpu:0\"%') WHERE "
+        "target.key LIKE 'hostd_controller_head:%' AND target.value LIKE "
+        "'%\"concurrency_key\":\"gpu:1\"%'");
+    require_throws<OperationPreconditionError>(
+        [&] { (void)fixture.journal->journal_authority_snapshot(); },
+        "generic authority verification immediately detects a copied "
+        "cross-scope head");
+    require_throws<OperationPreconditionError>(
+        [&] { (void)fixture.journal->journal_authority_snapshot(); },
+        "a cross-scope authority alias permanently poisons the Journal");
+    second_attestor.reset();
+    fixture.attestor.reset();
+    fixture.journal.reset();
+    require_throws<std::runtime_error>(
+        [&] {
+          fixture.journal = std::make_unique<Journal>(
+              fixture.authority.database(), fixture.authority.identity(),
+              HostGrantEnforcement::required,
+              HostIdentity{.host_id = "host-001",
+                           .boot_id = std::string(kBootId)});
+        },
+        "startup rejects a scoped head whose key hashes a different scope");
+  }
+  {
+    Fixture fixture;
+    execute_external(
+        fixture.authority.database(),
+        "UPDATE journal_meta SET key='hostd_controller_head' WHERE key LIKE "
+        "'hostd_controller_head:%'");
+    fixture.attestor.reset();
+    fixture.journal.reset();
+    require_throws<std::runtime_error>(
+        [&] {
+          fixture.journal = std::make_unique<Journal>(
+              fixture.authority.database(), fixture.authority.identity(),
+              HostGrantEnforcement::required,
+              HostIdentity{.host_id = "host-001",
+                           .boot_id = std::string(kBootId)});
+        },
+        "startup preserves but fails closed on a legacy global controller "
+        "head");
+  }
+}
+
 void release_expiry_and_superseding_fence_fail_closed() {
   {
     Fixture fixture;
@@ -494,7 +631,8 @@ void authority_head_rollback_cannot_reenable_immutable_history() {
     Fixture fixture;
     const std::string prior_head = query_external_text(
         fixture.authority.database(),
-        "SELECT value FROM journal_meta WHERE key='hostd_controller_head'");
+        "SELECT value FROM journal_meta WHERE key LIKE "
+        "'hostd_controller_head:%'");
     HostdJournalControllerFence next = fixture.controller;
     next.controller_id = "controller-rollback-next";
     ++next.controller_generation;
@@ -509,7 +647,7 @@ void authority_head_rollback_cannot_reenable_immutable_history() {
     execute_external(
         fixture.authority.database(),
         "UPDATE journal_meta SET value='" + prior_head +
-            "' WHERE key='hostd_controller_head'");
+            "' WHERE key LIKE 'hostd_controller_head:%'");
     require_throws<HostdJournalFenceAttestorError>(
         [&] { (void)fixture.attestor->attest(fixture.query()); },
         "rolled-back controller head cannot hide the immutable next epoch");
@@ -666,6 +804,10 @@ int main() {
     std::cout << "PASS controller-binding\n";
     controller_generation_is_durable_monotonic_and_unique();
     std::cout << "PASS controller-authority\n";
+    controller_generations_are_independent_per_exact_scope();
+    std::cout << "PASS controller-scoped-authority\n";
+    controller_scope_aliases_and_legacy_global_heads_fail_closed();
+    std::cout << "PASS controller-scope-alias-legacy\n";
     release_expiry_and_superseding_fence_fail_closed();
     std::cout << "PASS release-expiry-fence-race\n";
     torn_projection_and_namespace_replacement_poison_fail_closed();

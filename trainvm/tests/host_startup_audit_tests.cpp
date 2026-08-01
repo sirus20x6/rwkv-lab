@@ -71,7 +71,7 @@ std::shared_ptr<HostLedgerFilesystemAuthority> authority_for(
       }));
 }
 
-HostInventoryReceipt inventory() {
+HostInventoryReceipt inventory(std::string broker_epoch = "epoch-audit") {
   const HostResourceId id{.kind = HostResourceKind::host_mutex,
                           .vendor = std::nullopt,
                           .stable_id = "host-mutex:audit",
@@ -94,7 +94,7 @@ HostInventoryReceipt inventory() {
       .api_version = std::string(kHostInventoryApiVersion),
       .host_id = "host-audit",
       .boot_id = "boot-audit",
-      .broker_epoch = "epoch-audit",
+      .broker_epoch = std::move(broker_epoch),
       .begin_revision = "revision-audit",
       .end_revision = "revision-audit",
       .probes = {},
@@ -599,6 +599,91 @@ void admission_epoch_seals_grants_and_replays_exactly() {
           "lost finalize reply recovers the exact durable epoch");
 }
 
+void prior_epoch_outcomes_reconcile_without_readmission() {
+  const auto path = test_path("prior-epoch-reconciliation");
+  auto authority = authority_for(path);
+  const ResourceBundleRequest granted_request = request("prior-epoch-grant");
+  const ResourceBundleRequest busy_request = request("prior-epoch-busy");
+  std::optional<HostLedgerAdmissionEpoch> prior_epoch;
+  BundleRequestResult granted;
+  BundleRequestResult busy;
+  {
+    SQLiteHostLedger ledger(authority, inventory(), nullptr, trusted_policy());
+    const auto report = report_for(ledger, "prior-epoch-audit");
+    const auto committed = ledger.commit_startup_audit(report, {30, 40});
+    prior_epoch = ledger
+                      .finalize_startup_admission(report, committed.receipt,
+                                                  {31, 41})
+                      .epoch;
+    granted = ledger.request_bundle(granted_request, {50, 60}, *prior_epoch);
+    busy = ledger.request_bundle(busy_request, {51, 61}, *prior_epoch);
+    require(granted.grant && busy.status == BundleRequestStatus::busy,
+            "prior epoch commits exact grant and busy outcomes");
+  }
+
+  {
+    SQLiteHostLedger restarted(authority, inventory(), nullptr,
+                               trusted_policy());
+    const auto records_before = restarted.record_count();
+    const auto generation_before =
+        restarted.generation(granted.grant->fences.front().resource);
+    const auto occupancy_before = restarted.occupancy();
+    const auto recovered_grant =
+        restarted.reconcile_bundle_outcome(granted_request);
+    const auto recovered_busy =
+        restarted.reconcile_bundle_outcome(busy_request);
+    require(recovered_grant && recovered_grant->replayed &&
+                *recovered_grant == BundleRequestResult{
+                                        .status = granted.status,
+                                        .grant = granted.grant,
+                                        .outcome_digest = granted.outcome_digest,
+                                        .replayed = true} &&
+                recovered_busy && recovered_busy->replayed &&
+                recovered_busy->status == BundleRequestStatus::busy &&
+                recovered_busy->outcome_digest == busy.outcome_digest,
+            "restart recovers exact prior-epoch grant and busy outcomes");
+
+    auto mismatched = granted_request;
+    mismatched.run_id = "different-run";
+    mismatched = seal_resource_request(std::move(mismatched));
+    require_throws<HostLedgerConflict>(
+        [&] { (void)restarted.reconcile_bundle_outcome(mismatched); },
+        "same request ID with changed attribution/digest cannot reconcile");
+    const auto absent =
+        restarted.reconcile_bundle_outcome(request("never-admitted-request"));
+    require(!absent && restarted.record_count() == records_before &&
+                restarted.generation(
+                    granted.grant->fences.front().resource) ==
+                    generation_before &&
+                restarted.occupancy() == occupancy_before,
+            "missing reconciliation is read-only and cannot create a grant");
+  }
+
+  SQLiteHostLedger next_runtime(authority, inventory("epoch-audit-next"),
+                                nullptr, trusted_policy());
+  const auto next_report =
+      report_for(next_runtime, "next-admission-audit");
+  const auto next_commit =
+      next_runtime.commit_startup_audit(next_report, {70, 80});
+  const auto next_epoch = next_runtime.finalize_startup_admission(
+      next_report, next_commit.receipt, {71, 81});
+  require_throws<HostLedgerConflict>(
+      [&] {
+        (void)next_runtime.request_bundle(granted_request, {90, 100},
+                                          *prior_epoch);
+      },
+      "stale prior epoch cannot replay through the mutating admission path");
+  const auto after_new_epoch =
+      next_runtime.reconcile_bundle_outcome(granted_request);
+  require(after_new_epoch && after_new_epoch->grant == granted.grant &&
+              after_new_epoch->outcome_digest == granted.outcome_digest,
+          "new admission epoch does not hide immutable prior outcomes");
+  const auto no_new_grant =
+      next_runtime.reconcile_bundle_outcome(request("new-epoch-absent"));
+  require(!no_new_grant && next_epoch.epoch != *prior_epoch,
+          "reconciliation never borrows the new epoch to admit missing work");
+}
+
 void deleted_admission_authorization_fails_verify_and_reopen() {
   const auto path = test_path("deleted-admission-authorization");
   auto authority = authority_for(path);
@@ -629,6 +714,12 @@ void deleted_admission_authorization_fails_verify_and_reopen() {
                     "missing admission authorization or durable exemption") !=
                     std::string::npos,
             "deleted post-v3 authorization is not reclassified as legacy");
+    require_throws<HostLedgerError>(
+        [&] {
+          (void)ledger.reconcile_bundle_outcome(
+              request("post-v3-authorized-request"));
+        },
+        "reconciliation refuses an outcome missing epoch authorization");
   }
   require_throws<HostLedgerError>(
       [&] {
@@ -636,6 +727,28 @@ void deleted_admission_authorization_fails_verify_and_reopen() {
                                   trusted_policy());
       },
       "ledger with omitted post-v3 authorization fails closed on reopen");
+}
+
+void missing_outcome_projection_poison_reconciliation() {
+  const auto path = test_path("missing-recovery-projection");
+  auto authority = authority_for(path);
+  SQLiteHostLedger ledger(authority, inventory(), nullptr, trusted_policy());
+  const auto report = report_for(ledger, "projection-recovery-audit");
+  const auto committed = ledger.commit_startup_audit(report, {30, 40});
+  const auto epoch = ledger.finalize_startup_admission(
+      report, committed.receipt, {31, 41});
+  const auto exact = request("projection-recovery-request");
+  require(ledger.request_bundle(exact, {50, 60}, epoch.epoch).grant.has_value(),
+          "projection corruption fixture commits a grant");
+  raw_execute(path,
+              "DELETE FROM request_outcomes "
+              "WHERE request_id='projection-recovery-request';");
+  std::string reason;
+  require(!ledger.verify(&reason),
+          "missing request outcome projection breaks closure");
+  require_throws<HostLedgerError>(
+      [&] { (void)ledger.reconcile_bundle_outcome(exact); },
+      "reconciliation poisons instead of treating a missing projection as absent");
 }
 
 void additive_migration_preserves_v1_evidence() {
@@ -784,7 +897,9 @@ int main() {
     commit_replay_cas_and_reopen();
     transactional_faults_and_lost_reply();
     admission_epoch_seals_grants_and_replays_exactly();
+    prior_epoch_outcomes_reconcile_without_readmission();
     deleted_admission_authorization_fails_verify_and_reopen();
+    missing_outcome_projection_poison_reconciliation();
     additive_migration_preserves_v1_evidence();
     projection_corruption_fails_closed();
     predecessor_projection_corruption_fails_closed();

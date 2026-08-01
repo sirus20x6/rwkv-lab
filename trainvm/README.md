@@ -95,11 +95,15 @@ Implemented now:
   proof, atomic report/projection/receipt commit, strict replay closure, and post-commit re-read;
 - an additive host-ledger v3 admission epoch that atomically finalizes an exact current audit and
   occupancy, keeps policy-enabled grants sealed beforehand, binds every later request to the active
-  epoch, supports exact lost-reply replay, and preserves release-only cleanup while startup is
-  blocked;
+  epoch, preserves release-only cleanup while startup is blocked, and exposes a read-only exact
+  outcome reconciler that can recover an immutable grant or busy receipt across broker epochs
+  without admitting missing work or mutating occupancy/generations;
 - a process-free, single-use journal-fence challenge verifier binding socket peer process instance,
   host/boot/broker, pinned-journal claims, controller generation, logical fence, nonce, and bounded
   boottime lifetime, with per-peer quotas and no bearer-capability interpretation of decoded data;
+- per-concurrency-scope durable hostd controller heads, generations, event identities, and retained
+  controller IDs, so takeover invalidates only the affected logical resource scope while aliased,
+  rolled-back, or legacy-global controller metadata fails closed;
 - Linux production challenge primitives using `getrandom`, boot-bound `CLOCK_BOOTTIME`, strict
   mount/PID/time namespace identity, `SO_PEERCRED` plus `SO_PEERPIDFD`, and pinned-proc process
   identity, together with a read-only pinned-Journal attestor rooted in hash-chained controller,
