@@ -1,0 +1,3241 @@
+{
+  "api_version": "trainvm.source-dispositions/v1",
+  "authority": "compatibility_evidence_only",
+  "source_repository": "moe-mla",
+  "source_revision": "git-sha1:bae678b94a0744f4b1dfd8685dde826f4c775197",
+  "source_scope": {
+    "prefix": "src/rwkv_lab",
+    "recursive": false,
+    "extensions": [
+      ".py"
+    ]
+  },
+  "source_tree_digest": "sha256:88a4a565730b4905c69bf6045fdb9da73e63ea1bcdb75956bbbb2da12d6caedf",
+  "entries": [
+    {
+      "source_path": "src/rwkv_lab/__init__.py",
+      "language": "python",
+      "class": "explicit_exclusion",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "read_source"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:ba4e82c780343a93a3115f4fd235b72fa1d5ecb98c7eaffe71b023bd6740e6a1",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/activation_checkpointing.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:7dd9121c2553c650890bb07898536818b375117bc2044a84c86be8d440f85192",
+      "family": "vision_multimodal",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/vision_train.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/adapter_consolidation.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "oracle.adapter-consolidation",
+      "source_sha256": "sha256:726af29bd1cb88628ccd70c08529c8abf2b82db348c2afc3fab9ea9cc4747642",
+      "family": "rwkv_posttraining",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "oracle.adapter-consolidation"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/adapter_recursive.py",
+      "language": "python",
+      "class": "executable_operation",
+      "canonical_entry_point": "python -m rwkv_lab.adapter_recursive",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "subprocess",
+        "write_artifact"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "posttraining.adapter-recursive",
+      "source_sha256": "sha256:fcf45d011f30f353bfcb9d707403d5242f44985103aa36cab5570bfdce6fcc15",
+      "family": "rwkv_posttraining",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "posttraining.adapter-recursive"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/adapters.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:1a5bef1e86d712e124c3532d04045b8a942c36255514eeb6b077611671c85680",
+      "family": "rwkv_posttraining",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/adapter_recursive.py",
+        "src/rwkv_lab/posttrain_kernels.py",
+        "src/rwkv_lab/posttrain_train.py",
+        "src/rwkv_lab/quantization.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/ao3_cpt_data.py",
+      "language": "python",
+      "class": "data_eval_export_tool",
+      "canonical_entry_point": "python -m rwkv_lab.ao3_cpt_data",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "data.ao3-source-preparation",
+      "source_sha256": "sha256:f92a6ba363a4aed7306afa60aff270f3410d48bead4c78f9bc1ecebafc2934aa",
+      "family": "data_cache",
+      "coverage": "direct",
+      "consumers": [
+        "scripts/prepare_ao3_cpt.py"
+      ],
+      "compatibility_workflow_ids": [
+        "data.ao3-source-preparation"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/ao3_cpt_tokens.py",
+      "language": "python",
+      "class": "data_eval_export_tool",
+      "canonical_entry_point": "python -m rwkv_lab.ao3_cpt_tokens",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "data.ao3-tokenize",
+      "source_sha256": "sha256:7fa5131b1b98f5ba966b7f724e2d8dde83cafc93536ac6f893f6d48d40644b04",
+      "family": "data_cache",
+      "coverage": "direct",
+      "consumers": [
+        "scripts/prepare_ao3_cpt_tokens.py"
+      ],
+      "compatibility_workflow_ids": [
+        "data.ao3-tokenize",
+        "data.ao3-pack",
+        "data.ao3-rewrite-eos"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/assemble_looped.py",
+      "language": "python",
+      "class": "data_eval_export_tool",
+      "canonical_entry_point": "python -m rwkv_lab.assemble_looped",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "conversion.assemble-looped",
+      "source_sha256": "sha256:775a5c3badbb9596ef02d25c1aa8c5aaf99870a8593fc225d5b89bc94598eca3",
+      "family": "conversion_distillation",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "conversion.assemble-looped"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/attn_L3_poc.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "python -m rwkv_lab.attn_L3_poc",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "terminal_checkpoint",
+      "compatibility_workflow_id": "conversion.attention-l3-poc",
+      "source_sha256": "sha256:9f3ceea46eff1b8122f5932af1b5237853a86fc402b04866ed43252d10eaedf6",
+      "family": "conversion_distillation",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "conversion.attention-l3-poc"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/build_corpus.py",
+      "language": "python",
+      "class": "data_eval_export_tool",
+      "canonical_entry_point": "python -m rwkv_lab.build_corpus",
+      "effects": [
+        "read_source",
+        "subprocess",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "data.rwkv-corpus-preparation",
+      "source_sha256": "sha256:9b0456a17d016faee5ab7f72e03349574e41dee340908c5db3532aa23a78bfa5",
+      "family": "data_cache",
+      "coverage": "direct",
+      "consumers": [
+        "src/rwkv_lab/config.py"
+      ],
+      "compatibility_workflow_ids": [
+        "data.rwkv-corpus-preparation"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/build_engram_patch.py",
+      "language": "python",
+      "class": "data_eval_export_tool",
+      "canonical_entry_point": "python -m rwkv_lab.build_engram_patch",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "conversion.engram-patch",
+      "source_sha256": "sha256:33692b21883c4f6b34fb461bab97519429e4935cd315260a8d1a8f7d0b6dc47d",
+      "family": "conversion_distillation",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "conversion.engram-patch"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/build_memory_targets.py",
+      "language": "python",
+      "class": "data_eval_export_tool",
+      "canonical_entry_point": "python -m rwkv_lab.build_memory_targets",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "conversion.memory-target-cache",
+      "source_sha256": "sha256:0e58332828042169d3fa1fe1fcd1ea434f745db6472f695836cd14506a04907a",
+      "family": "conversion_distillation",
+      "coverage": "direct",
+      "consumers": [
+        "src/rwkv_lab/attn_L3_poc.py",
+        "src/rwkv_lab/convert_gdn_lossless.py",
+        "src/rwkv_lab/convert_train.py",
+        "src/rwkv_lab/distill_consolidate.py",
+        "src/rwkv_lab/eval_baseline.py",
+        "src/rwkv_lab/loop_probe.py"
+      ],
+      "compatibility_workflow_ids": [
+        "conversion.memory-target-cache"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/build_qwen35_data.py",
+      "language": "python",
+      "class": "data_eval_export_tool",
+      "canonical_entry_point": "python -m rwkv_lab.build_qwen35_data",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "data.qwen35-conversion-corpus",
+      "source_sha256": "sha256:f7b99a8bdd80236886770eaa11d690ebd23a47140f89dc915cdd9f5952379569",
+      "family": "data_cache",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "data.qwen35-conversion-corpus"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/byte_patches.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:1870785803780575ab1a57b0409e3535ba6d28c38c036891c9e19ea625f3469e",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/cca_attention.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:f2aec77849870a90653c0614c72b76d4f32822cbd1c718acb5f82561ef77ff53",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/circuit_trace.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:d60a05466f8a73d926cad984eb81571985feb279dff5b3f961d73470598a0f51",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/coconut.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:a9815364878c594ede817f0fed99987b18b2d25e5460533119c9d194c137ac9f",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/coda.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:fbbef1d7a04eb9b8cc8dbb6f356370c8c9eb0db70253e8df6e699b827f30021b",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/compositional_muon.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:551e08994939e96b93f0bbd86f21dae28d8158a190496edff9d2e911f7ef9b29",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/config.py",
+      "language": "python",
+      "class": "executable_operation",
+      "canonical_entry_point": "python -m rwkv_lab.config",
+      "effects": [
+        "process_control",
+        "read_source",
+        "subprocess",
+        "write_artifact"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "rwkv.config-campaign",
+      "source_sha256": "sha256:a077f1cbc4d1a8768848da7f0ee1a878f602d4f2bd71bcda2f948f1184e7f671",
+      "family": "rwkv",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "rwkv.config-campaign"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/convert_gdn_lossless.py",
+      "language": "python",
+      "class": "data_eval_export_tool",
+      "canonical_entry_point": "python -m rwkv_lab.convert_gdn_lossless",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "qualification.lossless-gdn-map",
+      "source_sha256": "sha256:d2407ee2bffe822f0705d5f9fec131c37056fe039cbb0532945c0f6686ac7e74",
+      "family": "conversion_distillation",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "qualification.lossless-gdn-map",
+        "oracle.lossless-gdn-map"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/convert_train.py",
+      "language": "python",
+      "class": "executable_operation",
+      "canonical_entry_point": "python -m rwkv_lab.convert_train",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "conversion.per-layer-rwkv-train",
+      "source_sha256": "sha256:775ac0dc58446c97c71911eb2b9e7e1fd431bb403c92c113e2cdba378168f83a",
+      "family": "conversion_distillation",
+      "coverage": "direct",
+      "consumers": [
+        "src/rwkv_lab/distill_consolidate.py",
+        "src/rwkv_lab/eval_baseline.py",
+        "scripts/gate_ab.sh",
+        "scripts/gate_ab2.sh",
+        "scripts/gdn_sweep.sh",
+        "scripts/rel_sweep.sh"
+      ],
+      "compatibility_workflow_ids": [
+        "conversion.per-layer-rwkv-train"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/data_filter_audit.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:bcff0b0432e3fa4f1f47d253d2ccde4a76c78aaa4b47e074519b0a091c38ca09",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/data_mixture.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:79f349d0c2530f3d07d979762e61ee26c4d68137dff3c9f679639b792bb06efe",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/decoding_eval.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "oracle.decoding-evaluation",
+      "source_sha256": "sha256:ce7fb7af354d060362f7fafc9b55cfcaa689d4da4a25ae478bafbbacddc749b7",
+      "family": "evaluation_profile_export",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "oracle.decoding-evaluation"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/decoding_policy.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:c3d43af6a6affddad39c6297bb90c4659a164ceb131b9a215116f5bef511e666",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/deep_vision.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:b6110e8e0740c7188edcd1fde901d6f66041798909f0088d9423f2a1c1427f8b",
+      "family": "vision_multimodal",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/vision_caption.py",
+        "src/rwkv_lab/vision_native_train.py",
+        "src/rwkv_lab/vision_train.py",
+        "scripts/caption_radio1d_directory.py",
+        "src/rwkv_lab/radio1d_rwkv.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/diffusion_rwkv.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "oracle.diffusion-rwkv-head",
+      "source_sha256": "sha256:c4b0f0afdd913bc85ee6aac5468ce767d549b537c8a6bfbec8e8211733ee7816",
+      "family": "rwkv",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "oracle.diffusion-rwkv-head"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/diloco.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:ed9ed83e402ae6cf457a8408b95fe283bd919e1be33e7e79d18fec84773710ab",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/distill_consolidate.py",
+      "language": "python",
+      "class": "data_eval_export_tool",
+      "canonical_entry_point": "python -m rwkv_lab.distill_consolidate",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "restart_only",
+      "compatibility_workflow_id": "conversion.stack-consolidation",
+      "source_sha256": "sha256:1fdc8cdec8762f6c6e673183e61ad96308768b69a5cd1bbd0277058c8c6d0110",
+      "family": "conversion_distillation",
+      "coverage": "direct",
+      "consumers": [
+        "src/rwkv_lab/loop_probe.py"
+      ],
+      "compatibility_workflow_ids": [
+        "conversion.stack-consolidation"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/distill_objectives.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:173f4f4fa7dcd179384aa6395deeaffcfe03747a1b54d0a7dcd32907cee021b0",
+      "family": "conversion_distillation",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/convert_train.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/distillation_merge.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "oracle.distillation-merge",
+      "source_sha256": "sha256:b6e66e8dd51853e2394a41b1405b18d719badef01ed58fdf8afe982dcb527b1e",
+      "family": "conversion_distillation",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "oracle.distillation-merge"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/distributed.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:f68526f0a3b31551691a88fb764090e816831385c39702fae4b17f264f171361",
+      "family": "rwkv",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/rwkv_pretrain.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/drive_isolation.py",
+      "language": "python",
+      "class": "data_eval_export_tool",
+      "canonical_entry_point": "python -m rwkv_lab.drive_isolation",
+      "effects": [
+        "read_source",
+        "subprocess",
+        "write_artifact"
+      ],
+      "resume_relevance": "restart_only",
+      "compatibility_workflow_id": "conversion.drive-isolation",
+      "source_sha256": "sha256:434618d2036b30ae3f3d4638293fd3e3f1d24f0fd8dd2d300b112e0d58fddb94",
+      "family": "conversion_distillation",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "conversion.drive-isolation"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/energy_refinement.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:50398500dbe167506c933ca94191e4f9bb28b6be62b8a15fff0d78e9cd7d0a47",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/engram_integration.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:264793ab4503c04a6686646591a53ab9fcb2b2c7ce010d775076aeb6b58ca73e",
+      "family": "transformer",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/train_mla.py",
+        "src/rwkv_lab/train_mla_engram.py",
+        "src/rwkv_lab/load_mla_engram.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/engram_lmb.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "python -m rwkv_lab.engram_lmb",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "oracle.engram-lmb",
+      "source_sha256": "sha256:84e53ec2c61673727e87352f42b1d03a20ed617aff4fbb0c9e704a741c584d07",
+      "family": "transformer",
+      "coverage": "direct",
+      "consumers": [
+        "src/rwkv_lab/rwkv_pretrain.py",
+        "src/rwkv_lab/vision_caption.py",
+        "src/rwkv_lab/vision_native_train.py",
+        "src/rwkv_lab/vision_train.py",
+        "scripts/caption_radio1d_directory.py"
+      ],
+      "compatibility_workflow_ids": [
+        "oracle.engram-lmb"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/engram_lmb_build.py",
+      "language": "python",
+      "class": "data_eval_export_tool",
+      "canonical_entry_point": "python -m rwkv_lab.engram_lmb_build",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "data.engram-frequency",
+      "source_sha256": "sha256:8e16b91a665dd5cdc199b1bfb74e59a4c4feefbf9c0327127f53b2da18ed9b79",
+      "family": "data_cache",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "data.engram-frequency",
+        "data.engram-allocation"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/eval_baseline.py",
+      "language": "python",
+      "class": "data_eval_export_tool",
+      "canonical_entry_point": "python -m rwkv_lab.eval_baseline",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "evaluation.conversion-baseline",
+      "source_sha256": "sha256:e06613f275234b1c5404950565710b08914974d9fe191887d948513437817450",
+      "family": "evaluation_profile_export",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "evaluation.conversion-baseline"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/execution_plan.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:096366debd3c72992599e4f6ade3f8f6e1ca1a50e83bfa09362e099e936b4631",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/experiment.py",
+      "language": "python",
+      "class": "executable_operation",
+      "canonical_entry_point": "python -m rwkv_lab.experiment",
+      "effects": [
+        "gpu_compute",
+        "process_control",
+        "read_source",
+        "subprocess",
+        "write_artifact"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "rwkv.synthetic-campaign",
+      "source_sha256": "sha256:36409bbb9f08f0facd4fc950b74f77b6f30ab466d5ea025412c18449bedad0f5",
+      "family": "rwkv",
+      "coverage": "direct",
+      "consumers": [
+        "src/rwkv_lab/config.py"
+      ],
+      "compatibility_workflow_ids": [
+        "rwkv.synthetic-campaign"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/experiment_analysis.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:5e7a2493d928bd87e22ad7c34fa9cdda8895210e871b94b943f71e36f089c4da",
+      "family": "rwkv",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/experiment.py",
+        "src/rwkv_lab/posttrain_campaign.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/export_bundle.py",
+      "language": "python",
+      "class": "data_eval_export_tool",
+      "canonical_entry_point": "python -m rwkv_lab.export_bundle",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "export.legacy-mutable-bundle",
+      "source_sha256": "sha256:13b3d0442fd046680ea6c2182b1a112fefd2ce2fdfebec5a0771c8392d541eeb",
+      "family": "evaluation_profile_export",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "export.legacy-mutable-bundle"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/fsp_module.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:ee73269937654078749f3c921b36870a2c24c53dcc2e259530f3c19af998cd3a",
+      "family": "transformer",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/train_mla.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/fused_ce.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:f5eb0536f4980880f68c8c25aee6d471383485568aae276b68767f114a00226a",
+      "family": "rwkv",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/convert_train.py",
+        "src/rwkv_lab/qwen_ao3_cpt.py",
+        "src/rwkv_lab/rwkv_pretrain.py",
+        "src/rwkv_lab/train_mla.py",
+        "src/rwkv_lab/vision_train.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/fused_channelmix.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:6adee931ea45a0370df3ab02133867b574b6a90e2f24d4b4839fc1bb17054c76",
+      "family": "rwkv",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/rwkv_pretrain.py",
+        "src/rwkv_lab/rwkv8_deltanet.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/fwpkm.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:5453e8056abea5b7be1d5dbe753413f2df6bc7acc57155533e0d15b45ae0dd97",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/generate.py",
+      "language": "python",
+      "class": "data_eval_export_tool",
+      "canonical_entry_point": "python -m rwkv_lab.generate",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "evaluation.rwkv-generation",
+      "source_sha256": "sha256:81b4d9d5d2d3618ba3a5d4e030f7ecee090c6d7accb7c300091c00affad40e33",
+      "family": "evaluation_profile_export",
+      "coverage": "direct",
+      "consumers": [
+        "src/rwkv_lab/adapter_recursive.py",
+        "src/rwkv_lab/megakernel.py",
+        "src/rwkv_lab/posttrain_train.py",
+        "src/rwkv_lab/production_kernels.py",
+        "src/rwkv_lab/rlvr_train.py",
+        "src/rwkv_lab/vision_caption.py"
+      ],
+      "compatibility_workflow_ids": [
+        "evaluation.rwkv-generation"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/gpu_engram_prefill.py",
+      "language": "python",
+      "class": "data_eval_export_tool",
+      "canonical_entry_point": "python -m rwkv_lab.gpu_engram_prefill",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "transformer.engram-prefill",
+      "source_sha256": "sha256:f3d483d80956be191b87a48ce4bac49940f835563dae15eb79360bcfce4e7f3a",
+      "family": "transformer",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "transformer.engram-prefill"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/grok_autopilot.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:1a7e5c58b9cacee8d65989f4f5747fad964fb75ccb6db761037fb913712cb4cb",
+      "family": "conversion_distillation",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/convert_train.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/grokking_metrics.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:e6a7bfe04e466b9b0bb4f7bceb68adc8ddf9756579af4152a548373b6ed52f38",
+      "family": "conversion_distillation",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/convert_train.py",
+        "src/rwkv_lab/looped_rwkv_rosa_engram_v3.py",
+        "src/rwkv_lab/rosa.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/hedgehog.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:a2d6cf97b283e661adc68c812115d8b1597925dcfe922eea4735db2cd4d5fe70",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/hils_attention.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:ca9897da050d0ccf7176e2dd0dd61d46ca828b10125f09bf765d5424c3116233",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/kernel_candidates.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:9068b34f10e49dc2923c8eaa06404f700ccfa2627b5530f7d1354da292034b5c",
+      "family": "rwkv",
+      "coverage": "uncovered",
+      "consumers": [
+        "src/rwkv_lab/execution_plan.py",
+        "src/rwkv_lab/runtime_backends.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/key_value_means.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:e7a993c18d78505167d94ed3dd7cf7fad0e37ea443e64695b22196b5728538b6",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/kimi_teacher.py",
+      "language": "python",
+      "class": "executable_operation",
+      "canonical_entry_point": "python -m rwkv_lab.kimi_teacher",
+      "effects": [
+        "network",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "acquisition.kimi-teacher",
+      "source_sha256": "sha256:f33477d57b77d2e68a10194eab214ea1b2a6993cd2d488d7743f8c3edbe727a1",
+      "family": "data_cache",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "acquisition.kimi-teacher"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/l3_lookup.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:3b24eeb28a5af38de523c0260d77e0d55b8b31857b53aa282b498b1f43568078",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/layer_swap.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "python -m rwkv_lab.layer_swap",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "oracle.mla-training-components",
+      "source_sha256": "sha256:201775e93e47dc99457f66b40c3fe9380410b597be934d0b5e3befaa5f01933e",
+      "family": "transformer",
+      "coverage": "direct",
+      "consumers": [
+        "src/rwkv_lab/convert_train.py",
+        "src/rwkv_lab/load_converted.py"
+      ],
+      "compatibility_workflow_ids": [
+        "oracle.mla-training-components"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/live_controls.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:be2d3d3eb1a4e9777b827388b196c77f279e682e8bf4d608d3f0bdf7cc4e7b33",
+      "family": "conversion_distillation",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/convert_train.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/llm_jepa.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:8d4d55de2f4f79c342508e223fefd5b9dc6b988086282ae7e2cf1fea930b2e11",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/llr.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:8c0dd83f43b351cefc8155c6b998e18ea94a1818a3cbe70825f161c07759996d",
+      "family": "conversion_distillation",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/convert_train.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/load_converted.py",
+      "language": "python",
+      "class": "data_eval_export_tool",
+      "canonical_entry_point": "python -m rwkv_lab.load_converted",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "qualification.converted-forward",
+      "source_sha256": "sha256:6b7ad17e8fe9fcf8b47f31e4f975dac3dd80b576787b864575a693a4825f5697",
+      "family": "evaluation_profile_export",
+      "coverage": "direct",
+      "consumers": [
+        "src/rwkv_lab/convert_train.py",
+        "src/rwkv_lab/train_mla.py",
+        "src/rwkv_lab/load_mla_engram.py"
+      ],
+      "compatibility_workflow_ids": [
+        "qualification.converted-forward"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/load_mla_engram.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:ef12705dd9c92fdb57e3b659dbb0cd1054236d40e27b149d9b4239b308e61176",
+      "family": "transformer",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/train_mla.py",
+        "src/rwkv_lab/train_mla_engram.py",
+        "src/rwkv_lab/verify_engram.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/lookahead_module.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:d2513245c5c5be058ff3b8a1b30e36f50a09c938acce7fa61a62d9b2646c81e5",
+      "family": "rwkv",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/convert_train.py",
+        "src/rwkv_lab/distill_consolidate.py",
+        "src/rwkv_lab/experiment.py",
+        "src/rwkv_lab/rwkv_pretrain.py",
+        "src/rwkv_lab/vision_native_train.py",
+        "src/rwkv_lab/vision_train.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/loop_probe.py",
+      "language": "python",
+      "class": "data_eval_export_tool",
+      "canonical_entry_point": "python -m rwkv_lab.loop_probe",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "evaluation.loop-probe",
+      "source_sha256": "sha256:78bce124fe7f1b19fecf1d6a35b2ff3111a16aba72c818dfb3f34feb8c756e6f",
+      "family": "evaluation_profile_export",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "evaluation.loop-probe"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/looped_rwkv.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:156991456799cb6a1ac9b977b6168e1665dec6704bc9181d7610edf19228ee05",
+      "family": "rwkv",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/convert_train.py",
+        "src/rwkv_lab/distill_consolidate.py",
+        "src/rwkv_lab/experiment.py",
+        "src/rwkv_lab/native_g1g.py",
+        "src/rwkv_lab/rwkv_pretrain.py",
+        "src/rwkv_lab/vision_loop.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/looped_rwkv_rosa_engram_v3.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "python -m rwkv_lab.looped_rwkv_rosa_engram_v3",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "oracle.looped-rwkv-integrated",
+      "source_sha256": "sha256:b438dbc054323d6ec4a5cf5f554b3699092d4da99159e0085ed29f0882aba9f7",
+      "family": "rwkv",
+      "coverage": "direct",
+      "consumers": [
+        "src/rwkv_lab/smt_dmt.py"
+      ],
+      "compatibility_workflow_ids": [
+        "oracle.looped-rwkv-integrated"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/ltx23_lora.py",
+      "language": "python",
+      "class": "executable_operation",
+      "canonical_entry_point": "python -m rwkv_lab.ltx23_lora",
+      "effects": [
+        "read_source",
+        "subprocess",
+        "write_artifact"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "external.ltx23-lora",
+      "source_sha256": "sha256:737af7401930107548a32943d6440257c67315199c1126747be7467eb60ca7ee",
+      "family": "external_trainer",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "external.ltx23-lora",
+        "external.ltx23-plan",
+        "external.ltx23-prepare",
+        "external.ltx23-run"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/m2rnn.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:1f8876dd0bbcb94b148303a8af999e8ad81836f44c224f19bc2ad76143a549a3",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/mage_flow_adaptation.py",
+      "language": "python",
+      "class": "data_eval_export_tool",
+      "canonical_entry_point": "python -m rwkv_lab.mage_flow_adaptation",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "mageflow.adaptation-benchmark-spec",
+      "source_sha256": "sha256:2dabfea1c351ceb14c5aa5b6dd37afb97ed1c483993d9c53a73c574a9fc7ac43",
+      "family": "mageflow_diffusion",
+      "coverage": "direct",
+      "consumers": [
+        "src/rwkv_lab/mage_flow_expert_train.py",
+        "src/rwkv_lab/mage_flow_terminal_train.py",
+        "scripts/benchmark_mage_flow_runtime.py",
+        "scripts/convert_terminal_mageflow_to_tread_looped.py",
+        "scripts/materialize_midjourney_v6_continuation.py",
+        "scripts/materialize_midjourney_v6_expert_stage.py"
+      ],
+      "compatibility_workflow_ids": [
+        "mageflow.adaptation-benchmark-spec",
+        "mageflow.adaptation-domain-prepare",
+        "mageflow.adaptation-domain-audit"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/mage_flow_expert_train.py",
+      "language": "python",
+      "class": "executable_operation",
+      "canonical_entry_point": "python -m rwkv_lab.mage_flow_expert_train",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "mageflow.routed-expert-train",
+      "source_sha256": "sha256:ed93ae0fa3408ae2b9698191b63ba87516102efb6b466db8ac7a5331dc95d0af",
+      "family": "mageflow_diffusion",
+      "coverage": "direct",
+      "consumers": [
+        "src/rwkv_lab/mage_flow_terminal_train.py",
+        "scripts/benchmark_mage_flow_runtime.py"
+      ],
+      "compatibility_workflow_ids": [
+        "mageflow.routed-expert-train",
+        "mageflow.expert-plan",
+        "mageflow.expert-encoder-cache"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/mage_flow_optimizations.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:b378a96a27f4e7ad86530560ca940b5037b29c1b0f486940e9c0387598dc9c04",
+      "family": "mageflow_diffusion",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/mage_flow_expert_train.py",
+        "src/rwkv_lab/mage_flow_terminal_train.py",
+        "scripts/benchmark_mage_flow_runtime.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/mage_flow_pretrain.py",
+      "language": "python",
+      "class": "executable_operation",
+      "canonical_entry_point": "python -m rwkv_lab.mage_flow_pretrain",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "mageflow.full-backbone-pretrain",
+      "source_sha256": "sha256:161dd8bb772c4e547aa2aab4d21af85747b4f7c61cb108a2a150e3d66b3a7c94",
+      "family": "mageflow_diffusion",
+      "coverage": "direct",
+      "consumers": [
+        "src/rwkv_lab/mage_flow_adaptation.py",
+        "src/rwkv_lab/mage_flow_expert_train.py",
+        "src/rwkv_lab/mage_flow_terminal_train.py",
+        "scripts/benchmark_mage_flow_runtime.py",
+        "src/rwkv_lab/mage_flow_training_objectives.py",
+        "scripts/prepare_mage_flow_edit_pretrain.sh"
+      ],
+      "compatibility_workflow_ids": [
+        "mageflow.full-backbone-pretrain",
+        "data.mageflow-manifest-preparation",
+        "mageflow.full-backbone-plan"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/mage_flow_terminal_experts.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:07e0e616d65d7d030810971b9d88dc4f9be2c5b9cdbd337522e7c5ff4ca48fc2",
+      "family": "mageflow_diffusion",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/mage_flow_terminal_train.py",
+        "scripts/benchmark_mage_flow_runtime.py",
+        "scripts/convert_terminal_mageflow_to_tread_looped.py",
+        "scripts/migrate_mage_flow_terminal_experts.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/mage_flow_terminal_train.py",
+      "language": "python",
+      "class": "executable_operation",
+      "canonical_entry_point": "python -m rwkv_lab.mage_flow_terminal_train",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "mageflow.terminal-tread-train",
+      "source_sha256": "sha256:1ba3aa392e827e7fb884bffca4a67c37c850bb20d19827088bcebfd4052d659d",
+      "family": "mageflow_diffusion",
+      "coverage": "direct",
+      "consumers": [
+        "scripts/benchmark_mage_flow_runtime.py",
+        "scripts/mageflow_cache_rest_and_resume.sh",
+        "scripts/mageflow_finish_cache_and_resume.sh"
+      ],
+      "compatibility_workflow_ids": [
+        "mageflow.terminal-tread-train",
+        "mageflow.cache-resume-supervisor",
+        "mageflow.terminal-preparation",
+        "mageflow.terminal-encoder-cache",
+        "mageflow.terminal-cache-span-plan",
+        "mageflow.terminal-cache-span-prepare",
+        "mageflow.terminal-domain-window-plan"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/mage_flow_training_objectives.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:77f5895a732f6ea89d38518d23ec056e60e1e0b46689aa880ba02a77c5419c78",
+      "family": "mageflow_diffusion",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/mage_flow_terminal_train.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/mage_flow_tread_looping.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:22dee95b0b7f68d6a0b317a0a13e46f569ce0853706b73b5176e66e6e3f47b47",
+      "family": "mageflow_diffusion",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/mage_flow_terminal_train.py",
+        "scripts/convert_terminal_mageflow_to_tread_looped.py",
+        "src/rwkv_lab/mage_flow_terminal_experts.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/mamba3_recurrence.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:6512ed5e1699235ef08037f5f0be78a14c2c7c7145b9ab353cc993e2b61e5cd8",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/megakernel.py",
+      "language": "python",
+      "class": "data_eval_export_tool",
+      "canonical_entry_point": "python -m rwkv_lab.megakernel",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "export.megakernel-aot",
+      "source_sha256": "sha256:d9e94e0e04ec61c0e3a0efa84c1af405dfd5575ceb0a85d1341a2e2e4a175e7e",
+      "family": "evaluation_profile_export",
+      "coverage": "direct",
+      "consumers": [
+        "src/rwkv_lab/generate.py",
+        "src/rwkv_lab/production_kernels.py",
+        "src/rwkv_lab/rwkv8_deltanet.py",
+        "src/rwkv_lab/sm120_kernels.py"
+      ],
+      "compatibility_workflow_ids": [
+        "export.megakernel-aot"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/megakernel_linear.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:94481873fbb41e2435c18e7aaecae9942d2f7a380f5fd0ad508deea3ddf7c82e",
+      "family": "rwkv",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/megakernel.py",
+        "src/rwkv_lab/rwkv_pretrain.py",
+        "src/rwkv_lab/rwkv8_deltanet.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/megakernel_ops.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:3da97120b85f9a516efcd7a73cbfcaa365ef6076b9a42520267fdc82aa3de86d",
+      "family": "rwkv",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/rwkv_pretrain.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/mla_module.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "python -m rwkv_lab.mla_module",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "oracle.mla-training-components",
+      "source_sha256": "sha256:5df74c280052042992df25c2b42e7e9f29631af82761de54ad9f18b4bbd82482",
+      "family": "transformer",
+      "coverage": "direct",
+      "consumers": [
+        "src/rwkv_lab/layer_swap.py",
+        "src/rwkv_lab/load_converted.py",
+        "src/rwkv_lab/train_mla.py"
+      ],
+      "compatibility_workflow_ids": [
+        "oracle.mla-training-components"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/moonvit.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:ed43b141a685e7b9a2cf09105d14abfd065441976d307a2870ebc1e86ecee358",
+      "family": "vision_multimodal",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/vision_cache.py",
+        "src/rwkv_lab/vision_caption.py",
+        "src/rwkv_lab/vision_fusion_cache.py",
+        "src/rwkv_lab/vision_native_train.py",
+        "src/rwkv_lab/vision_sam_dense_cache.py",
+        "src/rwkv_lab/vision_teacher_compressor.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/mtp_module.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:b36c5f217ec2bbfab74aa3d0391240819fa55d3eb264bc484fb7f0d04fd7dc85",
+      "family": "transformer",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/load_converted.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/muon_helpers.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:55995420c73ea7c8d13af39c7939757345af540aa94d6eadcea63d5ece22bffd",
+      "family": "transformer",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/convert_train.py",
+        "src/rwkv_lab/train_mla.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/mutor_module.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:a1dd859999f2febc4966f118ed7536855be9a910f4eb3e0304f87ea9586b27cb",
+      "family": "transformer",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/train_mla.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/native_g1g.py",
+      "language": "python",
+      "class": "data_eval_export_tool",
+      "canonical_entry_point": "python -m rwkv_lab.native_g1g",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "qualification.native-g1g",
+      "source_sha256": "sha256:096880f6a1f40fa8cef17914676012c5ab63cd8b5203192971158724b7416fe7",
+      "family": "evaluation_profile_export",
+      "coverage": "direct",
+      "consumers": [
+        "src/rwkv_lab/rwkv_pretrain.py"
+      ],
+      "compatibility_workflow_ids": [
+        "qualification.native-g1g"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/nvfp4.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:f297f65e420fc183c478829395e0e73925697a115ef36bdb79b1c59170a19244",
+      "family": "rwkv",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/generate.py",
+        "src/rwkv_lab/production_kernels.py",
+        "src/rwkv_lab/rwkv_pretrain.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/online_memory.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:5a8ed9f1cc32d3b006da250a65a7f7871517d22cc7b8e9ad5b411e0981509113",
+      "family": "rwkv",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/generate.py",
+        "src/rwkv_lab/production_kernels.py",
+        "src/rwkv_lab/rwkv_pretrain.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/optimizer_speedups.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:29adc2f13ca07d900d488e771fff8f722d0dfec73cfa7ed6174d95d6fa4294cd",
+      "family": "rwkv",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/rwkv_pretrain.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/parallel_heads_module.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:44aacc893e2370ee7db57ddbd0e2f81a8c37a370d5005e53ec52453ea8f972e0",
+      "family": "transformer",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/train_mla.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/pc_layer.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:12ad91f0019320e071c576a7ca6e6ed3d23257702d728db46a3d42185f1b88a7",
+      "family": "conversion_distillation",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/convert_train.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/posttrain_campaign.py",
+      "language": "python",
+      "class": "executable_operation",
+      "canonical_entry_point": "python -m rwkv_lab.posttrain_campaign",
+      "effects": [
+        "process_control",
+        "read_source",
+        "subprocess",
+        "write_artifact"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "posttraining.rwkv-campaign",
+      "source_sha256": "sha256:dd46d5cde650604ce8be35c37e69f15fb4b0717c7c25cb2bde376bc30cf12ab2",
+      "family": "rwkv_posttraining",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "posttraining.rwkv-campaign"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/posttrain_data.py",
+      "language": "python",
+      "class": "data_eval_export_tool",
+      "canonical_entry_point": "python -m rwkv_lab.posttrain_data",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "data.posttraining-validation",
+      "source_sha256": "sha256:4b0fd03049ed1a35a91ffed1bdabb9a5f2273d83ea42e15e7c704b3e90ad7f12",
+      "family": "data_cache",
+      "coverage": "direct",
+      "consumers": [
+        "src/rwkv_lab/adapter_recursive.py",
+        "src/rwkv_lab/export_bundle.py",
+        "src/rwkv_lab/posttrain_campaign.py",
+        "src/rwkv_lab/posttrain_train.py"
+      ],
+      "compatibility_workflow_ids": [
+        "data.posttraining-validation"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/posttrain_kernels.py",
+      "language": "python",
+      "class": "data_eval_export_tool",
+      "canonical_entry_point": "python -m rwkv_lab.posttrain_kernels",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "qualification.posttraining-kernels",
+      "source_sha256": "sha256:466e2f269637a3ee65bb381d2d45bdb53fa09a7784a9c36e63ed00c79c9cfd93",
+      "family": "evaluation_profile_export",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "qualification.posttraining-kernels"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/posttrain_train.py",
+      "language": "python",
+      "class": "executable_operation",
+      "canonical_entry_point": "python -m rwkv_lab.posttrain_train",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "restart_only",
+      "compatibility_workflow_id": "posttraining.rwkv-adapter",
+      "source_sha256": "sha256:02eb9619762c1cdff410b2ddebd0be1952017f8fef84b2269e6315019f3f0cc4",
+      "family": "rwkv_posttraining",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "posttraining.rwkv-adapter"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/powercool.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:7ffc689c2e0e7bf7b54f9c528e2333e294be1c9fc1c886ad7d2a8eb05b92590c",
+      "family": "rwkv",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/experiment.py",
+        "src/rwkv_lab/qwen_ao3_cpt.py",
+        "src/rwkv_lab/rwkv_pretrain.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/preference.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:03d5fb5bfeb3e697200624db8d8304ca0d20fccaf334eef41a8c01a02c82f304",
+      "family": "rwkv_posttraining",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/posttrain_kernels.py",
+        "src/rwkv_lab/posttrain_train.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/procedural_memory.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:f5776f87b2509c21822e3c9addccd5fb13d7588cb70d5eacb21b3773d19b5259",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/production_kernels.py",
+      "language": "python",
+      "class": "data_eval_export_tool",
+      "canonical_entry_point": "python -m rwkv_lab.production_kernels",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "qualification.production-kernels",
+      "source_sha256": "sha256:7380c2b37958ce0550cbd486a24204fcee63c958797175a678261375aa48b50e",
+      "family": "evaluation_profile_export",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "qualification.production-kernels",
+        "export.production-kernels-aot"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/quantization.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:b4bde618401aca11bfeb1ee1a883b274bd6142406de45c0822409fe41814f82d",
+      "family": "rwkv_posttraining",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/adapter_recursive.py",
+        "src/rwkv_lab/posttrain_train.py",
+        "src/rwkv_lab/production_kernels.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/qwen_ao3_cpt.py",
+      "language": "python",
+      "class": "executable_operation",
+      "canonical_entry_point": "python -m rwkv_lab.qwen_ao3_cpt",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "transformer.qwen-ao3-cpt",
+      "source_sha256": "sha256:eb9ac900e1d57896395ba783b2d60f6967c3921cafdc99b3573629534bdf134b",
+      "family": "transformer",
+      "coverage": "direct",
+      "consumers": [
+        "scripts/prepare_qwen_ao3_cpt.sh",
+        "scripts/prepare_qwen_ao3_cpt_run.py"
+      ],
+      "compatibility_workflow_ids": [
+        "transformer.qwen-ao3-cpt",
+        "transformer.qwen-ao3-audit",
+        "transformer.qwen-ao3-plan"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/radio1d_cache.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:e9add1d7f6988402b1f6f5e8baad82ee211cc23831b95b5fb253f840e276d76f",
+      "family": "vision_multimodal",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/vision_train.py",
+        "scripts/cache_radio1d_features.py",
+        "scripts/reuse_radio1d_cache.py",
+        "scripts/verify_captioning_first_cache.py",
+        "scripts/warm_captioning_first_cache.sh"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/radio1d_rwkv.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:1c6ccd93b07b721354ab5c79e031a4217c28536446f3044028b881418f734e6c",
+      "family": "vision_multimodal",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/vision_train.py",
+        "scripts/cache_radio1d_features.py",
+        "scripts/caption_radio1d_directory.py",
+        "src/rwkv_lab/radio1d_cache.py",
+        "src/rwkv_lab/radio_v4h.py",
+        "scripts/reuse_radio1d_cache.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/radio_v4h.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:4550c8f5c61895d0aafe1e01361fc8df9c6f9ae7028f48d34b4e1a7cff9f707a",
+      "family": "vision_multimodal",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/vision_train.py",
+        "scripts/cache_v4h_all_adaptors.py",
+        "scripts/cache_v4h_features.py",
+        "scripts/cache_v4h_native.py",
+        "src/rwkv_lab/radio_v4h_adaptors.py",
+        "scripts/verify_v4h_all_adaptors_cache.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/radio_v4h_adaptors.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:9308cee2faa74d4ee2c20306b5f77c9617e82b7797a0141fde2ce7bf787bd2fb",
+      "family": "vision_multimodal",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/vision_train.py",
+        "scripts/build_v4h_dino_compactor.py",
+        "scripts/cache_v4h_all_adaptors.py",
+        "src/rwkv_lab/radio_v4h.py",
+        "scripts/verify_v4h_all_adaptors_cache.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/reasoning_cache.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "read_source"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "oracle.reasoning-cache",
+      "source_sha256": "sha256:1605c7e97273363c3c8c5da5668757377a1ecd8c82b2a5a0daf26196b7f69473",
+      "family": "rwkv_rlvr",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "oracle.reasoning-cache"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/recurrent_serving.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "oracle.recurrent-serving",
+      "source_sha256": "sha256:11353cd2d2ef565cf1d5a9ad8214b309ffffd2bd73a8200f969e8d236590eecd",
+      "family": "evaluation_profile_export",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "oracle.recurrent-serving"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/recursive_improve.py",
+      "language": "python",
+      "class": "executable_operation",
+      "canonical_entry_point": "python -m rwkv_lab.recursive_improve",
+      "effects": [
+        "read_source",
+        "subprocess",
+        "write_artifact"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "rlvr.recursive-improve",
+      "source_sha256": "sha256:e8ee9e8e1fc3979e0ab8ec1e109e4a9ba8881e741ef547b73a0afcf826b3256b",
+      "family": "rwkv_rlvr",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "rlvr.recursive-improve"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/registry.py",
+      "language": "python",
+      "class": "executable_operation",
+      "canonical_entry_point": "python -m rwkv_lab.registry",
+      "effects": [
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:1d7a06445fac68dfa95515884e5984e9594313633beb4e9e9ffe6f46e7826781",
+      "family": "rwkv",
+      "coverage": "direct_gap",
+      "consumers": [
+        "src/rwkv_lab/config.py",
+        "src/rwkv_lab/experiment.py",
+        "src/rwkv_lab/posttrain_campaign.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/rlvr.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:d4ca6c2e656c6de9a69e4edff1eb99033112b66374a2651557965c6e6d2fb546",
+      "family": "rwkv_rlvr",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/rlvr_train.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/rlvr_campaign.py",
+      "language": "python",
+      "class": "executable_operation",
+      "canonical_entry_point": "python -m rwkv_lab.rlvr_campaign",
+      "effects": [
+        "process_control",
+        "read_source",
+        "subprocess",
+        "write_artifact"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "rlvr.rwkv-campaign",
+      "source_sha256": "sha256:2bdac353731a5acb7e83944f4a74381da3b8792ff4385030acad4e1366a34218",
+      "family": "rwkv_rlvr",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "rlvr.rwkv-campaign"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/rlvr_evaluation.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:80243b6992ac52f244b6811f284d81d7c50612475a4c428008ce5ecad65b5881",
+      "family": "rwkv_posttraining",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/posttrain_campaign.py",
+        "src/rwkv_lab/rlvr_train.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/rlvr_train.py",
+      "language": "python",
+      "class": "executable_operation",
+      "canonical_entry_point": "python -m rwkv_lab.rlvr_train",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "subprocess",
+        "write_artifact"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "rlvr.rwkv-train",
+      "source_sha256": "sha256:79fddebc0c58654f85d00bb442a77f7f4368e8d802ca97d3f91162fbef72ae20",
+      "family": "rwkv_rlvr",
+      "coverage": "direct",
+      "consumers": [
+        "src/rwkv_lab/recursive_improve.py"
+      ],
+      "compatibility_workflow_ids": [
+        "rlvr.rwkv-train"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/rosa.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "python -m rwkv_lab.rosa",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "oracle.rosa-retrieval",
+      "source_sha256": "sha256:3f1d7fe6ebe54698847b88ef07acfbb9fafdaab9cac4bd106c629754e0e91c87",
+      "family": "rwkv",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "oracle.rosa-retrieval"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/rosa_backends.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:0ec9b4fb15b79750e0a50f6910a8cb6081bcf21e8ef19ad35a1119129e51c332",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/rosa_plus.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:72eb6c0d943372c56b0955e603895b43c02a257bc62842905e4a487593f49ff4",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/rosa_reference.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:38c65e2fc01f6b59e6373240d74d2d5da97031b945d8f3c25d849e85fcea3bd1",
+      "family": "rwkv",
+      "coverage": "uncovered",
+      "consumers": [
+        "src/rwkv_lab/rosa_backends.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/rosa_sam.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "python -m rwkv_lab.rosa_sam",
+      "effects": [
+        "read_source"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "oracle.rosa-sam",
+      "source_sha256": "sha256:4e309152a06e89127a9a5c2abc6fcfd72818212a96e00dc79fc5a9fe12fc3c25",
+      "family": "conversion_distillation",
+      "coverage": "direct",
+      "consumers": [
+        "src/rwkv_lab/production_kernels.py",
+        "src/rwkv_lab/rosa.py"
+      ],
+      "compatibility_workflow_ids": [
+        "oracle.rosa-sam"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/rosa_soft_layer.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "python -m rwkv_lab.rosa_soft_layer",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "oracle.rosa-soft-layer",
+      "source_sha256": "sha256:50b0a42b18a05e3ee3126e082bc65fc5b79b281af0531d6436e4758b1ee7fd27",
+      "family": "conversion_distillation",
+      "coverage": "direct",
+      "consumers": [
+        "src/rwkv_lab/convert_train.py"
+      ],
+      "compatibility_workflow_ids": [
+        "oracle.rosa-soft-layer"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/routing_free_moe.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:848fe3a3b9c681bac7ac48314c092d6ce17d97851eecab632612584913fccc3b",
+      "family": "rwkv",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/rwkv_pretrain.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/runtime_backends.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:c2b0176c2fc6382d0e52acfa5b78a4d9375b16945f825fcb3021905805cef681",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/rwkv8_deltanet.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:d6b44a1d8d82ed79a979a79fb8bc68732b41815ea80549b4b135b4208dd6eb3b",
+      "family": "rwkv",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/attn_L3_poc.py",
+        "src/rwkv_lab/convert_gdn_lossless.py",
+        "src/rwkv_lab/convert_train.py",
+        "src/rwkv_lab/distill_consolidate.py",
+        "src/rwkv_lab/layer_swap.py",
+        "src/rwkv_lab/load_converted.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/rwkv_finetune.py",
+      "language": "python",
+      "class": "executable_operation",
+      "canonical_entry_point": "python -m rwkv_lab.rwkv_finetune",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "restart_only",
+      "compatibility_workflow_id": "rwkv.optimizer-finetune",
+      "source_sha256": "sha256:9669abee452204c036045ae12ac3a6b76a54052ac2c451b7727695f7ae429adc",
+      "family": "rwkv",
+      "coverage": "direct",
+      "consumers": [
+        "src/rwkv_lab/vision_caption.py",
+        "src/rwkv_lab/vision_native_train.py",
+        "src/rwkv_lab/vision_train.py",
+        "scripts/caption_radio1d_directory.py",
+        "scripts/g1g_sweep.sh",
+        "src/rwkv_lab/radio1d_rwkv.py"
+      ],
+      "compatibility_workflow_ids": [
+        "rwkv.optimizer-finetune"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/rwkv_pretrain.py",
+      "language": "python",
+      "class": "executable_operation",
+      "canonical_entry_point": "python -m rwkv_lab.rwkv_pretrain",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "terminal_checkpoint",
+      "compatibility_workflow_id": "rwkv.scratch-pretrain",
+      "source_sha256": "sha256:af3ed21bdd0e3dfe07746529c47651c269247d00a29304f4529f4a6a81d8d097",
+      "family": "rwkv",
+      "coverage": "direct",
+      "consumers": [
+        "src/rwkv_lab/config.py",
+        "src/rwkv_lab/experiment.py",
+        "src/rwkv_lab/generate.py",
+        "src/rwkv_lab/native_g1g.py",
+        "src/rwkv_lab/rlvr_train.py",
+        "scripts/factored_loop_sweep.sh"
+      ],
+      "compatibility_workflow_ids": [
+        "rwkv.scratch-pretrain"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/rwkv_product.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:1be07993856404793b95e0956ecbf9c2eafac485f3bff8c8e54a2aa127cba9a1",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/safe_torch.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:b5114a6926af377181dc86a50659ae3254b31199ac8eb15260b3024f7aeef63c",
+      "family": "transformer",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/export_bundle.py",
+        "src/rwkv_lab/gpu_engram_prefill.py",
+        "src/rwkv_lab/train_mla.py",
+        "src/rwkv_lab/train_mla_engram.py",
+        "src/rwkv_lab/fsp_module.py",
+        "src/rwkv_lab/load_mla_engram.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/sm120_kernels.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:004908de5c8486eaf10afe77cd73c2581843385622bbaac276f0bf1cdeee94cf",
+      "family": "rwkv",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/megakernel.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/smt_dmt.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "python -m rwkv_lab.smt_dmt",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "oracle.smt-dmt-losses",
+      "source_sha256": "sha256:917207af6797d4fbe31bfc01848ac0d40a110b9cd936418007e042591f93b8eb",
+      "family": "conversion_distillation",
+      "coverage": "direct",
+      "consumers": [
+        "src/rwkv_lab/convert_train.py"
+      ],
+      "compatibility_workflow_ids": [
+        "oracle.smt-dmt-losses"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/sparse_transfer.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:bc63440ca175e678abf70883ef6bb42305619e25983f134855afecbe72a7ec01",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/spectral_muon.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:46ac2f7da9d7118d11db2233ae39d4a9934a14de8a8b84300fa20284476d7cf6",
+      "family": "rwkv",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/convert_train.py",
+        "src/rwkv_lab/rwkv_finetune.py",
+        "src/rwkv_lab/rwkv_pretrain.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/speculative.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:9d54e2f6eb5d5d378fc46b702888e625543f51eb27141305a5222f2d02d294a2",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/state_bank.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:ae1c0649d40a60efea7b3bf3fda089058968e794f2b0221e9f69f24c11ca1e37",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/state_expansion.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:6884752de9e6110867578c08da7ef284d714a580ca5915bafd92dde3dad3135b",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/state_tuning.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:c63b7d336d8387a0cac2d02e6c9e51b122d15ad15e6dfdd78480131676e509a2",
+      "family": "rwkv",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/generate.py",
+        "src/rwkv_lab/rwkv_pretrain.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/supervised_memory.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:e17f22c4a6cf5ca4ba0844e4b32110847df28b23057e2645ba15355aae8cb9ef",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/svd_init.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "python -m rwkv_lab.svd_init",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "oracle.mla-training-components",
+      "source_sha256": "sha256:2db06e88244fa0d4e2aed427c39aa9170e79677a4174d59c1e7e5dbcd19a9ecf",
+      "family": "transformer",
+      "coverage": "direct",
+      "consumers": [
+        "src/rwkv_lab/layer_swap.py",
+        "src/rwkv_lab/load_converted.py",
+        "src/rwkv_lab/mla_module.py"
+      ],
+      "compatibility_workflow_ids": [
+        "oracle.mla-training-components"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/synthetic_tasks.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:60093b5f6d5916acb477d21e4d3fb8188cacd5409680eb2cd4802d7fda008100",
+      "family": "rwkv",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/experiment.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/taylor_calibrate.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:1b4f8ad29c8ad7c5615ee2b607639f50d0c370c06180b3cca435abc44014ddcc",
+      "family": "conversion_distillation",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/attn_L3_poc.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/test_time_training.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "oracle.test-time-training",
+      "source_sha256": "sha256:21de37c3914f36b875052c77b8fdefaba0f4689a8df7911f29431716bdba2093",
+      "family": "rwkv_posttraining",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "oracle.test-time-training"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/tokenizer_experiments.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:8713d5f40904dad0e9c4dcab0cc8a677a330d5e9fe6dde6d270afec6ec08e3a5",
+      "family": "rwkv",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/generate.py",
+        "src/rwkv_lab/rwkv_pretrain.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/tool_length_generalization.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:e23544dd3cdb2b93c7a80f208cd375d6f20448558d2e9a2e0e029cbf8591edc7",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/train_mla.py",
+      "language": "python",
+      "class": "executable_operation",
+      "canonical_entry_point": "python -m rwkv_lab.train_mla",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "transformer.mla-train",
+      "source_sha256": "sha256:d12119430e19723b55d22ad91d85e646f9024bcf891a9a9706c6ac754581f02f",
+      "family": "transformer",
+      "coverage": "direct",
+      "consumers": [
+        "src/rwkv_lab/train_mla_engram.py",
+        "src/rwkv_lab/verify_engram.py",
+        "scripts/supervisor_night.sh"
+      ],
+      "compatibility_workflow_ids": [
+        "transformer.mla-train"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/train_mla_engram.py",
+      "language": "python",
+      "class": "executable_operation",
+      "canonical_entry_point": "python -m rwkv_lab.train_mla_engram",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "transformer.mla-engram-train",
+      "source_sha256": "sha256:9dc4972b08233b9e9625e649dfe8462f738b930312ed170c6459171ae5e6c354",
+      "family": "transformer",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "transformer.mla-engram-train"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/training_speedups.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:3c1592227fdf316f3edcdca5117be76b6845aa86b65c3439311079d2edfe7a2e",
+      "family": "rwkv",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/rwkv_pretrain.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/triangular_delta.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:b0f90adfe73254653005a23eefd64ca9423e6518e05a328467cfe8494e24d988",
+      "family": "evaluation_profile_export",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/production_kernels.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/u_mup.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:a1f68a1a9453f2334a7dc418739cbeff5f986bded15519134a471c9fe572a7a7",
+      "family": "rwkv",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/rlvr_train.py",
+        "src/rwkv_lab/rwkv_pretrain.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/verify_engram.py",
+      "language": "python",
+      "class": "data_eval_export_tool",
+      "canonical_entry_point": "python -m rwkv_lab.verify_engram",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "qualification.engram-integration",
+      "source_sha256": "sha256:7c58c9ad7e5c788ffc93e1c38d6734a88addc795cda0e976ec702e8df95ef00d",
+      "family": "evaluation_profile_export",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "qualification.engram-integration"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/vision_cache.py",
+      "language": "python",
+      "class": "data_eval_export_tool",
+      "canonical_entry_point": "python -m rwkv_lab.vision_cache",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "cache.vision-features",
+      "source_sha256": "sha256:ae8ad453eb804358b6631267d796690cbae00553fa346736b0bd4a756ebb360b",
+      "family": "data_cache",
+      "coverage": "direct",
+      "consumers": [
+        "scripts/finalize_vision_cache.py",
+        "scripts/run_vision_finish_grounded.sh",
+        "scripts/run_vision_i1_next.sh",
+        "scripts/cache_vision_teacher_manifest.sh",
+        "scripts/cache_vision_teacher_shard_001.sh",
+        "scripts/prepare_vision_next_levers.sh"
+      ],
+      "compatibility_workflow_ids": [
+        "cache.vision-features"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/vision_caption.py",
+      "language": "python",
+      "class": "data_eval_export_tool",
+      "canonical_entry_point": "python -m rwkv_lab.vision_caption",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "evaluation.vision-caption",
+      "source_sha256": "sha256:5fb8b5595a1316cf7a335b84c1cb5fbc47d05128a00c4ad55795c49a369527d0",
+      "family": "evaluation_profile_export",
+      "coverage": "direct",
+      "consumers": [
+        "src/rwkv_lab/vision_native_train.py",
+        "scripts/caption_radio1d_directory.py"
+      ],
+      "compatibility_workflow_ids": [
+        "evaluation.vision-caption"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/vision_compressor_features.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:ab9fa259b578b84298104246ab6cdf04dd9bc84e00aadcc1e3a8cef6aec2a5d7",
+      "family": "vision_multimodal",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/vision_native_train.py",
+        "src/rwkv_lab/vision_rwkv_student_train.py",
+        "src/rwkv_lab/vision_train.py",
+        "scripts/export_frozen_vision_compressor.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/vision_fusion.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:f9d078605a31ba0a92e3b14b7dfc2262a9be026b4c4c7c8fe0fd839f9b0f2163",
+      "family": "vision_multimodal",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/vision_caption.py",
+        "src/rwkv_lab/vision_fusion_cache.py",
+        "src/rwkv_lab/vision_sam_dense_cache.py",
+        "src/rwkv_lab/vision_teacher_compressor.py",
+        "src/rwkv_lab/vision_train.py",
+        "src/rwkv_lab/radio1d_rwkv.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/vision_fusion_cache.py",
+      "language": "python",
+      "class": "data_eval_export_tool",
+      "canonical_entry_point": "python -m rwkv_lab.vision_fusion_cache",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "cache.vision-fusion-features",
+      "source_sha256": "sha256:869c6ca0bd1bdb2b677642cca96951b694f10c0df72de46db1e9b75a20d25bd8",
+      "family": "data_cache",
+      "coverage": "direct",
+      "consumers": [
+        "scripts/cache_vision_teacher_manifest.sh",
+        "scripts/cache_vision_teacher_shard_001.sh",
+        "scripts/prepare_vision_next_levers.sh"
+      ],
+      "compatibility_workflow_ids": [
+        "cache.vision-fusion-features"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/vision_grounding.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:b143329ac31f483749cad618ab694d8eb5005b96609d190a9d6ba01bb0eadd1a",
+      "family": "vision_multimodal",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/vision_native_train.py",
+        "src/rwkv_lab/vision_train.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/vision_loop.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:382406e43b460dd7ea4b7c6f610448bda5e7efd255f01525d045234248def5c0",
+      "family": "vision_multimodal",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/vision_caption.py",
+        "src/rwkv_lab/vision_native_train.py",
+        "src/rwkv_lab/vision_train.py",
+        "scripts/caption_radio1d_directory.py",
+        "scripts/write_vision_loop_telemetry.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/vision_native_train.py",
+      "language": "python",
+      "class": "executable_operation",
+      "canonical_entry_point": "python -m rwkv_lab.vision_native_train",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "vision.native-head-train",
+      "source_sha256": "sha256:f49349122fb95633cb1eaca9748f1f67d9b90cb5577bb25a3b0b2a0a1dec2646",
+      "family": "vision_multimodal",
+      "coverage": "direct",
+      "consumers": [
+        "src/rwkv_lab/vision_rwkv_student_train.py",
+        "scripts/run_vision_native_arm2.sh"
+      ],
+      "compatibility_workflow_ids": [
+        "vision.native-head-train"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/vision_ocr.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:0a1f2a7537e5100863ea5861aa97cb704302953cc61af1ef10ec6ecdb25e6d34",
+      "family": "vision_multimodal",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/vision_train.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/vision_rwkv_student.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:8e305df28816399f65386680b6e0aecbd98d3abe0b432f1859bb729176e16ad6",
+      "family": "vision_multimodal",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/vision_rwkv_student_train.py",
+        "scripts/run_vision_rwkv_student.sh"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/vision_rwkv_student_train.py",
+      "language": "python",
+      "class": "executable_operation",
+      "canonical_entry_point": "python -m rwkv_lab.vision_rwkv_student_train",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "compatible",
+      "compatibility_workflow_id": "vision.raw-pixel-student",
+      "source_sha256": "sha256:ce6f32aa0f2f830bce32e7776b107684b62fbbf7d4c57897df71efbc1b0b823c",
+      "family": "vision_multimodal",
+      "coverage": "direct",
+      "consumers": [
+        "scripts/run_vision_rwkv_student.sh"
+      ],
+      "compatibility_workflow_ids": [
+        "vision.raw-pixel-student"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/vision_sam_dense_cache.py",
+      "language": "python",
+      "class": "data_eval_export_tool",
+      "canonical_entry_point": "python -m rwkv_lab.vision_sam_dense_cache",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": "cache.vision-sam-dense",
+      "source_sha256": "sha256:2a003de7a5df32ace21ef6c3c0280245f0ce5af8b0724dfa6057ebc37d527ed5",
+      "family": "data_cache",
+      "coverage": "direct",
+      "compatibility_workflow_ids": [
+        "cache.vision-sam-dense"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/vision_structured.py",
+      "language": "python",
+      "class": "internal_model_layer_kernel_optimizer_library",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "consumer_owned",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:7e77d0e63ac1c04037e2e569cbbc963caa222c5164b912754b3fe63e31699782",
+      "family": "vision_multimodal",
+      "coverage": "transitive",
+      "consumers": [
+        "src/rwkv_lab/vision_train.py"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/vision_teacher_compressor.py",
+      "language": "python",
+      "class": "executable_operation",
+      "canonical_entry_point": "python -m rwkv_lab.vision_teacher_compressor",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "exact_candidate",
+      "compatibility_workflow_id": "vision.teacher-compressor",
+      "source_sha256": "sha256:8ab953ee5cc2c2e6f237e86d48c82a763f8b52d14a33809756124f74c51eaf2c",
+      "family": "vision_multimodal",
+      "coverage": "direct",
+      "consumers": [
+        "src/rwkv_lab/vision_native_train.py",
+        "src/rwkv_lab/vision_rwkv_student_train.py",
+        "scripts/run_vision_teacher_compressor.sh",
+        "src/rwkv_lab/vision_compressor_features.py"
+      ],
+      "compatibility_workflow_ids": [
+        "vision.teacher-compressor"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/vision_teacher_native.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:1e02dc35f47d934a39ae2b280ab3ae4b818787fb01dd50f6af84412c6fdc46d9",
+      "family": "vision_multimodal",
+      "coverage": "uncovered"
+    },
+    {
+      "source_path": "src/rwkv_lab/vision_train.py",
+      "language": "python",
+      "class": "executable_operation",
+      "canonical_entry_point": "python -m rwkv_lab.vision_train",
+      "effects": [
+        "gpu_compute",
+        "read_source",
+        "write_artifact"
+      ],
+      "resume_relevance": "exact_candidate",
+      "compatibility_workflow_id": "vision.frozen-adapter-train",
+      "source_sha256": "sha256:c0940032c073c39ed7f3ae213288380bed414af8a55b846df329dfc08c7927ec",
+      "family": "vision_multimodal",
+      "coverage": "direct",
+      "consumers": [
+        "src/rwkv_lab/vision_caption.py",
+        "src/rwkv_lab/vision_native_train.py",
+        "src/rwkv_lab/vision_rwkv_student_train.py",
+        "scripts/caption_radio1d_directory.py",
+        "scripts/run_radio1d_captioning_first.sh",
+        "scripts/run_radio1d_civitai_joy_continuation.sh"
+      ],
+      "compatibility_workflow_ids": [
+        "vision.frozen-adapter-train"
+      ]
+    },
+    {
+      "source_path": "src/rwkv_lab/write_sae.py",
+      "language": "python",
+      "class": "research_oracle_poc",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "gpu_compute",
+        "read_source"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:0728b5dcd3a4349c097111bca564c58a124d4fe82922194a51fd5e180f5fbc77",
+      "family": "rwkv",
+      "coverage": "uncovered"
+    }
+  ]
+}

@@ -1,5 +1,8 @@
 # TrainVM native control plane
 
+Legacy migration coverage is tracked by the strict, evidence-only
+[source disposition catalogs](../docs/experiment-vm/SOURCE_DISPOSITIONS.md).
+
 This directory contains the first executable slice of the declarative experiment runtime described
 in [`docs/experiment-vm/ARCHITECTURE.md`](../docs/experiment-vm/ARCHITECTURE.md).
 

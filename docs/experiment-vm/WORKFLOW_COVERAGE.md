@@ -155,6 +155,20 @@ Protocol-only fixtures additionally cover a shadow legacy observer that can neve
 authority rejection of library-only/design-only/unregistered shell or verifier entries, and stale
 fork/code-hash rejection. Artifact schemas are shared variants, not bespoke dashboard handlers.
 
+## Exhaustive source disposition evidence
+
+The compatibility workflow catalog is complemented by two versioned,
+evidence-only source inventories. `source-dispositions.scripts.v1.json` binds all
+128 top-level `scripts/*.{py,sh}` files; `source-dispositions.rwkv-lab.v1.json`
+binds all 165 top-level `src/rwkv_lab/*.py` modules. Each row records exact source
+SHA-256, a closed role/effect/resume classification, a canonical entry point,
+and compatibility linkage. Optional live-root validation rejects missing, stale,
+or byte-drifted sources. Neither catalog grants execution authority.
+
+RWKV compatibility coverage is 68 direct, 60 transitive, 36 uncovered library
+or research surfaces, and one runnable direct gap: `rwkv_lab.registry`. That gap
+is a migration decision, not implicit permission to launch it.
+
 ## Acceptance scenarios
 
 The first runtime is not ready to own training until these scenarios pass without manual file edits:

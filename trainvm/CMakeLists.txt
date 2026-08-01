@@ -81,7 +81,10 @@ target_link_libraries(trainvm_core
   PRIVATE OpenSSL::Crypto SQLite3::SQLite3 yaml-cpp::yaml-cpp ${CMAKE_DL_LIBS}
 )
 
-add_library(trainvm_compatibility_catalog src/compatibility_catalog.cpp)
+add_library(trainvm_compatibility_catalog
+  src/compatibility_catalog.cpp
+  src/source_disposition_catalog.cpp
+)
 target_include_directories(trainvm_compatibility_catalog PUBLIC include)
 target_compile_options(trainvm_compatibility_catalog PUBLIC -freflection)
 target_compile_options(trainvm_compatibility_catalog PRIVATE
@@ -133,6 +136,29 @@ target_compile_definitions(compatibility_catalog_tests PRIVATE
 )
 target_link_libraries(compatibility_catalog_tests PRIVATE trainvm_compatibility_catalog)
 add_test(NAME compatibility_catalog_tests COMMAND compatibility_catalog_tests)
+add_executable(source_disposition_catalog_tests
+  tests/source_disposition_catalog_tests.cpp
+)
+target_compile_options(source_disposition_catalog_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_compile_definitions(source_disposition_catalog_tests PRIVATE
+  TRAINVM_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/.."
+)
+target_link_libraries(source_disposition_catalog_tests PRIVATE
+  trainvm_compatibility_catalog OpenSSL::Crypto
+)
+add_test(NAME source_disposition_catalog_tests
+  COMMAND source_disposition_catalog_tests
+)
+set(TRAINVM_LEGACY_SOURCE_ROOT "" CACHE PATH
+  "Optional original moe-mla root for live source-disposition digest checks"
+)
+if(TRAINVM_LEGACY_SOURCE_ROOT)
+  set_tests_properties(source_disposition_catalog_tests PROPERTIES
+    ENVIRONMENT "TRAINVM_LEGACY_SOURCE_ROOT=${TRAINVM_LEGACY_SOURCE_ROOT}"
+  )
+endif()
 add_executable(coverage_fixture_tests tests/coverage_fixture_tests.cpp)
 target_compile_options(coverage_fixture_tests PRIVATE
   -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
