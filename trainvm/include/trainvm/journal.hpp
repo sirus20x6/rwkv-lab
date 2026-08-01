@@ -3,7 +3,9 @@
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -66,6 +68,41 @@ struct RunProjection {
   std::string failure_summary;
 
   bool operator==(const RunProjection&) const = default;
+};
+
+struct RunProjectionCursor final {
+  std::uint64_t last_event_sequence{};
+  std::string run_id;
+
+  bool operator==(const RunProjectionCursor&) const = default;
+};
+
+struct RunProjectionQuery final {
+  std::set<std::string, std::less<>> observed_states;
+  std::map<std::string, std::string, std::less<>> labels;
+  std::optional<RunProjectionCursor> after;
+  std::size_t limit{};
+};
+
+struct SequencedEvent final {
+  std::uint64_t journal_sequence{};
+  Event event;
+
+  bool operator==(const SequencedEvent&) const = default;
+};
+
+struct EventScanQuery final {
+  std::uint64_t after_journal_sequence{};
+  std::set<std::string, std::less<>> run_ids;
+  std::set<std::string, std::less<>> event_types;
+  std::size_t limit{};
+};
+
+struct RunWallTimeBounds final {
+  std::int64_t created_wall_time_ns{};
+  std::int64_t updated_wall_time_ns{};
+
+  bool operator==(const RunWallTimeBounds&) const = default;
 };
 
 enum class RunCreationDisposition { inserted, replayed };
@@ -212,6 +249,12 @@ public:
   // history therefore does not make daemon restart scans grow without bound.
   [[nodiscard]] std::vector<RunProjection> reconcilable_projections(
       std::string_view after_run_id, std::size_t limit) const;
+  [[nodiscard]] std::vector<RunProjection> run_projections(
+      const RunProjectionQuery& query) const;
+  [[nodiscard]] std::vector<SequencedEvent> sequenced_events(
+      const EventScanQuery& query) const;
+  [[nodiscard]] std::optional<RunWallTimeBounds> run_wall_time_bounds(
+      const std::string& run_id) const;
   [[nodiscard]] std::optional<CompiledPlan> compiled_plan(const std::string& plan_hash) const;
   [[nodiscard]] std::optional<Dispatch> dispatch(const std::string& dispatch_id) const;
   [[nodiscard]] std::optional<ResolvedLaunchSpec> launch_binding(

@@ -66,9 +66,26 @@ class TrainVMService final : public v1::TrainVM::Service,
                                 const v1::SubmitExperimentRequest* request,
                                 v1::SubmitExperimentResponse* response) override;
 
+  grpc::Status DiffPlan(grpc::ServerContext* context,
+                        const v1::PlanDiffRequest* request,
+                        v1::PlanDiffResponse* response) override;
+
   grpc::Status CommandRun(grpc::ServerContext* context,
                           const v1::RunCommandRequest* request,
                           v1::RunCommandResponse* response) override;
+
+  grpc::Status GetRun(grpc::ServerContext* context,
+                      const v1::GetRunRequest* request,
+                      v1::RunSummary* response) override;
+
+  grpc::Status ListRuns(grpc::ServerContext* context,
+                        const v1::ListRunsRequest* request,
+                        v1::ListRunsResponse* response) override;
+
+  grpc::Status WatchEvents(
+      grpc::ServerContext* context,
+      const v1::WatchEventsRequest* request,
+      grpc::ServerWriter<v1::EventEnvelope>* writer) override;
 
   grpc::Status GetDescriptor(
       grpc::ServerContext* context,

@@ -1275,6 +1275,26 @@ Event event_from_row(sqlite3_stmt* statement) {
   return event;
 }
 
+RunProjection run_projection_from_row(sqlite3_stmt* statement) {
+  return {
+      .run_id = column_text(statement, 0),
+      .experiment_name = column_text(statement, 1),
+      .plan_hash = column_text(statement, 2),
+      .desired_state = column_text(statement, 3),
+      .observed_state = column_text(statement, 4),
+      .current_node_id = column_text(statement, 5),
+      .current_attempt_id = column_text(statement, 6),
+      .run_revision = static_cast<std::uint64_t>(
+          sqlite3_column_int64(statement, 7)),
+      .optimizer_step = static_cast<std::uint64_t>(
+          sqlite3_column_int64(statement, 8)),
+      .last_heartbeat_ns = sqlite3_column_int64(statement, 9),
+      .last_event_sequence = static_cast<std::uint64_t>(
+          sqlite3_column_int64(statement, 10)),
+      .failure_summary = column_text(statement, 11),
+  };
+}
+
 bool canonical_boot_id(std::string_view value) {
   if (value.size() != 36U || value[8U] != '-' || value[13U] != '-' ||
       value[18U] != '-' || value[23U] != '-') {
@@ -3465,20 +3485,7 @@ std::optional<RunProjection> Journal::projection(const std::string& run_id) cons
   if (sqlite3_step(query.get()) != SQLITE_ROW) {
     return std::nullopt;
   }
-  return RunProjection{
-      .run_id = column_text(query.get(), 0),
-      .experiment_name = column_text(query.get(), 1),
-      .plan_hash = column_text(query.get(), 2),
-      .desired_state = column_text(query.get(), 3),
-      .observed_state = column_text(query.get(), 4),
-      .current_node_id = column_text(query.get(), 5),
-      .current_attempt_id = column_text(query.get(), 6),
-      .run_revision = static_cast<std::uint64_t>(sqlite3_column_int64(query.get(), 7)),
-      .optimizer_step = static_cast<std::uint64_t>(sqlite3_column_int64(query.get(), 8)),
-      .last_heartbeat_ns = sqlite3_column_int64(query.get(), 9),
-      .last_event_sequence = static_cast<std::uint64_t>(sqlite3_column_int64(query.get(), 10)),
-      .failure_summary = column_text(query.get(), 11),
-  };
+  return run_projection_from_row(query.get());
 }
 
 std::vector<RunProjection> Journal::reconcilable_projections(
@@ -3506,26 +3513,209 @@ std::vector<RunProjection> Journal::reconcilable_projections(
   result.reserve(limit);
   int status = SQLITE_ROW;
   while ((status = sqlite3_step(query.get())) == SQLITE_ROW) {
-    result.push_back({
-        .run_id = column_text(query.get(), 0),
-        .experiment_name = column_text(query.get(), 1),
-        .plan_hash = column_text(query.get(), 2),
-        .desired_state = column_text(query.get(), 3),
-        .observed_state = column_text(query.get(), 4),
-        .current_node_id = column_text(query.get(), 5),
-        .current_attempt_id = column_text(query.get(), 6),
-        .run_revision = static_cast<std::uint64_t>(
-            sqlite3_column_int64(query.get(), 7)),
-        .optimizer_step = static_cast<std::uint64_t>(
-            sqlite3_column_int64(query.get(), 8)),
-        .last_heartbeat_ns = sqlite3_column_int64(query.get(), 9),
-        .last_event_sequence = static_cast<std::uint64_t>(
-            sqlite3_column_int64(query.get(), 10)),
-        .failure_summary = column_text(query.get(), 11),
-    });
+    result.push_back(run_projection_from_row(query.get()));
   }
   if (status != SQLITE_DONE) {
     throw std::runtime_error("could not scan reconcilable run projections");
+  }
+  return result;
+}
+
+std::vector<RunProjection> Journal::run_projections(
+    const RunProjectionQuery& input) const {
+  constexpr std::size_t kMaximumPageSize = 1'001U;
+  constexpr std::size_t kMaximumFilters = 64U;
+  static const std::set<std::string, std::less<>> kObservedStates{
+      "draft",      "validated", "queued",     "acquiring",
+      "running",    "pausing",   "paused",     "recovering",
+      "completing", "completed", "cancelling", "cancelled",
+      "failing",    "failed",    "blocked"};
+  if (input.limit == 0U || input.limit > kMaximumPageSize ||
+      input.observed_states.size() > kMaximumFilters ||
+      input.labels.size() > kMaximumFilters ||
+      (input.after &&
+       (input.after->last_event_sequence == 0U ||
+        input.after->run_id.empty() || input.after->run_id.size() > 256U))) {
+    throw std::invalid_argument("run projection query exceeds its bounds");
+  }
+  for (const std::string& state : input.observed_states) {
+    if (!kObservedStates.contains(state)) {
+      throw std::invalid_argument(
+          "run projection query has an unknown observed state");
+    }
+  }
+  for (const auto& [key, value] : input.labels) {
+    if (key.empty() || key.size() > 128U || value.size() > 512U) {
+      throw std::invalid_argument(
+          "run projection label filter exceeds its bounds");
+    }
+  }
+
+  std::string sql = R"sql(
+    SELECT projection.run_id, projection.experiment_name,
+           projection.plan_hash, projection.desired_state,
+           projection.observed_state, projection.current_node_id,
+           projection.current_attempt_id, projection.run_revision,
+           projection.optimizer_step, projection.last_heartbeat_ns,
+           projection.last_event_sequence, projection.failure_summary
+    FROM run_projection AS projection
+    JOIN compiled_plans AS plan ON plan.plan_hash=projection.plan_hash
+    WHERE 1=1
+  )sql";
+  if (input.after) {
+    sql += R"sql(
+      AND (projection.last_event_sequence < ? OR
+           (projection.last_event_sequence = ? AND projection.run_id > ?))
+    )sql";
+  }
+  if (!input.observed_states.empty()) {
+    sql += " AND projection.observed_state IN (";
+    for (std::size_t index = 0U; index < input.observed_states.size(); ++index) {
+      if (index != 0U) sql += ',';
+      sql += '?';
+    }
+    sql += ')';
+  }
+  std::size_t label_index = 0U;
+  for (const auto& [key, value] : input.labels) {
+    (void)key;
+    (void)value;
+    sql += " AND EXISTS (SELECT 1 FROM json_each(";
+    sql += "plan.canonical_plan_json, '$.metadata.labels') AS label_";
+    sql += std::to_string(label_index++);
+    sql += " WHERE label_" + std::to_string(label_index - 1U) +
+           ".key=? AND label_" + std::to_string(label_index - 1U) +
+           ".value=? AND label_" + std::to_string(label_index - 1U) +
+           ".type='text')";
+  }
+  sql += R"sql(
+    ORDER BY projection.last_event_sequence DESC, projection.run_id
+    LIMIT ?
+  )sql";
+  Statement query(database_, sql);
+  int parameter = 1;
+  if (input.after) {
+    bind_integer(query.get(), parameter++,
+                 checked_integer(input.after->last_event_sequence,
+                                 "run page sequence"));
+    bind_integer(query.get(), parameter++,
+                 checked_integer(input.after->last_event_sequence,
+                                 "run page sequence"));
+    bind_text(query.get(), parameter++, input.after->run_id);
+  }
+  for (const std::string& state : input.observed_states) {
+    bind_text(query.get(), parameter++, state);
+  }
+  for (const auto& [key, value] : input.labels) {
+    bind_text(query.get(), parameter++, key);
+    bind_text(query.get(), parameter++, value);
+  }
+  bind_integer(query.get(), parameter,
+               static_cast<std::int64_t>(input.limit));
+  std::vector<RunProjection> result;
+  result.reserve(input.limit);
+  int status = SQLITE_ROW;
+  while ((status = sqlite3_step(query.get())) == SQLITE_ROW) {
+    result.push_back(run_projection_from_row(query.get()));
+  }
+  if (status != SQLITE_DONE) {
+    throw std::runtime_error("could not list run projections");
+  }
+  return result;
+}
+
+std::vector<SequencedEvent> Journal::sequenced_events(
+    const EventScanQuery& input) const {
+  constexpr std::size_t kMaximumPageSize = 1'024U;
+  constexpr std::size_t kMaximumFilters = 64U;
+  if (input.limit == 0U || input.limit > kMaximumPageSize ||
+      input.run_ids.size() > kMaximumFilters ||
+      input.event_types.size() > kMaximumFilters) {
+    throw std::invalid_argument("event scan query exceeds its bounds");
+  }
+  const auto invalid = [](const std::string& value) {
+    return value.empty() || value.size() > 256U;
+  };
+  if (std::ranges::any_of(input.run_ids, invalid) ||
+      std::ranges::any_of(input.event_types, invalid)) {
+    throw std::invalid_argument("event scan filter is malformed");
+  }
+  std::string sql = R"sql(
+    SELECT journal_sequence, event_id, run_id, run_revision, plan_revision,
+           node_id, attempt_id, worker_sequence, event_type, event_version,
+           wall_time_ns, monotonic_time_ns, optimizer_step, payload_json
+    FROM events WHERE journal_sequence>?
+  )sql";
+  const auto append_filter = [&sql](std::string_view column,
+                                    std::size_t count) {
+    if (count == 0U) return;
+    sql += " AND ";
+    sql += column;
+    sql += " IN (";
+    for (std::size_t index = 0U; index < count; ++index) {
+      if (index != 0U) sql += ',';
+      sql += '?';
+    }
+    sql += ')';
+  };
+  append_filter("run_id", input.run_ids.size());
+  append_filter("event_type", input.event_types.size());
+  sql += " ORDER BY journal_sequence LIMIT ?";
+  Statement query(database_, sql);
+  int parameter = 1;
+  bind_integer(query.get(), parameter++,
+               checked_integer(input.after_journal_sequence,
+                               "event scan sequence"));
+  for (const std::string& run_id : input.run_ids) {
+    bind_text(query.get(), parameter++, run_id);
+  }
+  for (const std::string& event_type : input.event_types) {
+    bind_text(query.get(), parameter++, event_type);
+  }
+  bind_integer(query.get(), parameter,
+               static_cast<std::int64_t>(input.limit));
+  std::vector<SequencedEvent> result;
+  result.reserve(input.limit);
+  int status = SQLITE_ROW;
+  while ((status = sqlite3_step(query.get())) == SQLITE_ROW) {
+    result.push_back({
+        .journal_sequence = static_cast<std::uint64_t>(
+            sqlite3_column_int64(query.get(), 0)),
+        .event = event_from_row(query.get()),
+    });
+  }
+  if (status != SQLITE_DONE) {
+    throw std::runtime_error("could not scan sequenced journal events");
+  }
+  return result;
+}
+
+std::optional<RunWallTimeBounds> Journal::run_wall_time_bounds(
+    const std::string& run_id) const {
+  if (run_id.empty() || run_id.size() > 256U) {
+    throw std::invalid_argument("run wall-time query requires a bounded run ID");
+  }
+  Statement query(database_, R"sql(
+    SELECT MIN(wall_time_ns), MAX(wall_time_ns)
+    FROM events
+    WHERE run_id=? AND event_type NOT LIKE 'authority.%'
+  )sql");
+  bind_text(query.get(), 1, run_id);
+  if (sqlite3_step(query.get()) != SQLITE_ROW) {
+    throw std::runtime_error("could not read run wall-time bounds");
+  }
+  if (sqlite3_column_type(query.get(), 0) == SQLITE_NULL ||
+      sqlite3_column_type(query.get(), 1) == SQLITE_NULL) {
+    return std::nullopt;
+  }
+  const RunWallTimeBounds result{
+      .created_wall_time_ns = sqlite3_column_int64(query.get(), 0),
+      .updated_wall_time_ns = sqlite3_column_int64(query.get(), 1),
+  };
+  if (result.created_wall_time_ns < 0 ||
+      result.updated_wall_time_ns < result.created_wall_time_ns ||
+      sqlite3_step(query.get()) != SQLITE_DONE) {
+    throw std::runtime_error("run wall-time bounds are malformed");
   }
   return result;
 }

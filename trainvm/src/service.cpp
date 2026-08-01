@@ -475,6 +475,15 @@ void add_diagnostic(v1::SubmitExperimentResponse& response, const Diagnostic& di
   output->set_message(diagnostic.message);
 }
 
+void add_diagnostic(v1::PlanDiffResponse& response,
+                    const Diagnostic& diagnostic) {
+  auto* output = response.add_diagnostics();
+  output->set_severity(wire_severity(diagnostic.severity));
+  output->set_code(diagnostic.code);
+  output->set_document_path(diagnostic.path);
+  output->set_message(diagnostic.message);
+}
+
 void add_stored_diagnostics(v1::RunCommandResponse& response,
                             const nlohmann::json& diagnostics) {
   if (!diagnostics.is_array()) return;
@@ -667,27 +676,179 @@ v1::ObservedState observed_state(std::string_view state) {
   return v1::OBSERVED_STATE_UNSPECIFIED;
 }
 
+std::string observed_state_name(v1::ObservedState state) {
+  switch (state) {
+    case v1::OBSERVED_STATE_DRAFT:
+      return "draft";
+    case v1::OBSERVED_STATE_VALIDATED:
+      return "validated";
+    case v1::OBSERVED_STATE_QUEUED:
+      return "queued";
+    case v1::OBSERVED_STATE_ACQUIRING:
+      return "acquiring";
+    case v1::OBSERVED_STATE_RUNNING:
+      return "running";
+    case v1::OBSERVED_STATE_PAUSING:
+      return "pausing";
+    case v1::OBSERVED_STATE_PAUSED:
+      return "paused";
+    case v1::OBSERVED_STATE_RECOVERING:
+      return "recovering";
+    case v1::OBSERVED_STATE_COMPLETING:
+      return "completing";
+    case v1::OBSERVED_STATE_COMPLETED:
+      return "completed";
+    case v1::OBSERVED_STATE_CANCELLING:
+      return "cancelling";
+    case v1::OBSERVED_STATE_CANCELLED:
+      return "cancelled";
+    case v1::OBSERVED_STATE_FAILING:
+      return "failing";
+    case v1::OBSERVED_STATE_FAILED:
+      return "failed";
+    case v1::OBSERVED_STATE_BLOCKED:
+      return "blocked";
+    case v1::OBSERVED_STATE_UNSPECIFIED:
+      break;
+    default:
+      break;
+  }
+  throw std::invalid_argument("observed-state filter is unspecified");
+}
+
+void set_timestamp_ns(std::int64_t nanoseconds,
+                      google::protobuf::Timestamp& output) {
+  constexpr std::int64_t kNanosecondsPerSecond = 1'000'000'000LL;
+  if (nanoseconds < 0) {
+    throw std::runtime_error("durable event contains a negative wall timestamp");
+  }
+  output.set_seconds(nanoseconds / kNanosecondsPerSecond);
+  output.set_nanos(static_cast<std::int32_t>(
+      nanoseconds % kNanosecondsPerSecond));
+}
+
 void fill_run_summary(const RunProjection& projection, const Journal& journal,
-                      v1::RunCommandResponse& response) {
-  auto* output = response.mutable_run();
-  output->mutable_identity()->set_run_id(projection.run_id);
-  output->mutable_identity()->set_revision(projection.run_revision);
-  output->mutable_identity()->set_plan_hash(projection.plan_hash);
-  output->set_experiment_name(projection.experiment_name);
-  output->set_desired_state(desired_state(projection.desired_state));
-  output->set_observed_state(observed_state(projection.observed_state));
-  output->set_current_node_id(projection.current_node_id);
-  output->set_current_attempt_id(projection.current_attempt_id);
-  output->set_optimizer_step(projection.optimizer_step);
-  output->set_failure_summary(projection.failure_summary);
+                      v1::RunSummary& output) {
+  output.mutable_identity()->set_run_id(projection.run_id);
+  output.mutable_identity()->set_revision(projection.run_revision);
+  output.mutable_identity()->set_plan_hash(projection.plan_hash);
+  output.set_experiment_name(projection.experiment_name);
+  output.set_desired_state(desired_state(projection.desired_state));
+  output.set_observed_state(observed_state(projection.observed_state));
+  output.set_current_node_id(projection.current_node_id);
+  output.set_current_attempt_id(projection.current_attempt_id);
+  output.set_optimizer_step(projection.optimizer_step);
+  output.set_failure_summary(projection.failure_summary);
   const auto requested = journal.latest_control_revision(projection.run_id);
   const auto effective = journal.latest_effective_control_revision(projection.run_id);
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-  output->set_effective_control_revision(effective);
+  output.set_effective_control_revision(effective);
 #pragma GCC diagnostic pop
-  output->set_latest_requested_control_revision(requested);
-  output->set_latest_effective_control_revision(effective);
+  output.set_latest_requested_control_revision(requested);
+  output.set_latest_effective_control_revision(effective);
+  const auto times = journal.run_wall_time_bounds(projection.run_id);
+  if (times) {
+    set_timestamp_ns(times->created_wall_time_ns, *output.mutable_created_at());
+    set_timestamp_ns(times->updated_wall_time_ns, *output.mutable_updated_at());
+  }
+  if (projection.last_heartbeat_ns > 0) {
+    set_timestamp_ns(projection.last_heartbeat_ns,
+                     *output.mutable_last_heartbeat_at());
+  }
+  if (projection.observed_state == "queued") {
+    output.set_wait_reason("waiting for resource admission");
+  } else if (projection.observed_state == "acquiring") {
+    output.set_wait_reason("waiting for host grant or worker readiness");
+  } else if (projection.observed_state == "paused") {
+    output.set_wait_reason("run is paused by desired state");
+  } else if (projection.observed_state == "blocked") {
+    output.set_wait_reason("run requires operator input");
+  }
+}
+
+void fill_run_summary(const RunProjection& projection, const Journal& journal,
+                      v1::RunCommandResponse& response) {
+  fill_run_summary(projection, journal, *response.mutable_run());
+}
+
+v1::EventEnvelope wire_event(const SequencedEvent& input) {
+  v1::EventEnvelope output;
+  const Event& event = input.event;
+  output.set_journal_sequence(input.journal_sequence);
+  output.set_event_id(event.event_id);
+  output.set_run_id(event.run_id);
+  output.set_run_revision(event.run_revision);
+  output.set_plan_revision(event.plan_revision);
+  output.set_node_id(event.node_id);
+  output.set_attempt_id(event.attempt_id);
+  output.set_worker_sequence(event.worker_sequence);
+  output.set_event_type(event.event_type);
+  output.set_event_version(event.event_version);
+  set_timestamp_ns(event.wall_time_ns, *output.mutable_wall_time());
+  output.set_monotonic_time_ns(event.monotonic_time_ns);
+  if (event.optimizer_step) output.set_optimizer_step(*event.optimizer_step);
+  output.set_canonical_json_payload(event.payload.dump());
+  return output;
+}
+
+std::string run_list_filter_digest(
+    std::string_view journal_id,
+    const std::set<std::string, std::less<>>& observed_states,
+    const std::map<std::string, std::string, std::less<>>& labels) {
+  return "sha256:" + sha256_hex(nlohmann::json{
+      {"api_version", "trainvm.run-list-filter/v1"},
+      {"journal_id", journal_id},
+      {"labels", labels},
+      {"observed_states", observed_states},
+  }.dump());
+}
+
+std::string encode_run_page_token(const RunProjection& projection,
+                                  std::string_view filter_digest) {
+  return nlohmann::json{
+      {"api_version", "trainvm.run-page/v1"},
+      {"filter_digest", filter_digest},
+      {"last_event_sequence", projection.last_event_sequence},
+      {"run_id", projection.run_id},
+  }.dump();
+}
+
+RunProjectionCursor decode_run_page_token(std::string_view encoded,
+                                          std::string_view filter_digest) {
+  if (encoded.empty() || encoded.size() > 4'096U) {
+    throw std::invalid_argument("run page token exceeds its bound");
+  }
+  const nlohmann::json token = nlohmann::json::parse(encoded);
+  static const std::set<std::string> kAllowed{
+      "api_version", "filter_digest", "last_event_sequence", "run_id"};
+  if (!token.is_object() || token.size() != kAllowed.size()) {
+    throw std::invalid_argument("run page token is not canonical");
+  }
+  for (auto field = token.begin(); field != token.end(); ++field) {
+    if (!kAllowed.contains(field.key())) {
+      throw std::invalid_argument("run page token has an unknown field");
+    }
+  }
+  if (token.dump() != encoded ||
+      token.value("api_version", std::string{}) != "trainvm.run-page/v1" ||
+      token.value("filter_digest", std::string{}) != filter_digest ||
+      !token.contains("last_event_sequence") ||
+      !token.at("last_event_sequence").is_number_unsigned() ||
+      !token.contains("run_id") || !token.at("run_id").is_string()) {
+    throw std::invalid_argument(
+        "run page token is malformed or belongs to another query");
+  }
+  RunProjectionCursor cursor{
+      .last_event_sequence =
+          token.at("last_event_sequence").get<std::uint64_t>(),
+      .run_id = token.at("run_id").get<std::string>(),
+  };
+  if (cursor.last_event_sequence == 0U || cursor.run_id.empty() ||
+      cursor.run_id.size() > 256U) {
+    throw std::invalid_argument("run page token cursor is malformed");
+  }
+  return cursor;
 }
 
 void remove_stale_socket(const std::filesystem::path& path) {
@@ -2634,6 +2795,69 @@ grpc::Status TrainVMService::SubmitExperiment(grpc::ServerContext* context,
   }
 }
 
+grpc::Status TrainVMService::DiffPlan(grpc::ServerContext* context,
+                                      const v1::PlanDiffRequest* request,
+                                      v1::PlanDiffResponse* response) {
+  if (request == nullptr || response == nullptr) {
+    return {grpc::StatusCode::INVALID_ARGUMENT,
+            "plan diff request and response are required"};
+  }
+  if (request->ByteSizeLong() > kMaximumSubmissionBytes ||
+      request->run_id().empty() || request->run_id().size() > 256U ||
+      request->proposed_source_document().empty() ||
+      request->source_format().empty()) {
+    return {grpc::StatusCode::INVALID_ARGUMENT,
+            "plan diff requires a bounded run ID, source, and format"};
+  }
+  if (cancelled(context)) return cancellation_status();
+  try {
+    const CompileResult proposed = compile_document_source(
+        request->proposed_source_document(), request->source_format());
+    for (const Diagnostic& diagnostic : proposed.diagnostics) {
+      add_diagnostic(*response, diagnostic);
+    }
+    if (!proposed.valid() || !proposed.plan) return grpc::Status::OK;
+    response->set_proposed_plan_hash(proposed.plan->plan_hash);
+    std::scoped_lock lock(command_mutex_);
+    const auto projection = journal_.projection(request->run_id());
+    if (!projection) {
+      return {grpc::StatusCode::NOT_FOUND, "run does not exist"};
+    }
+    if (request->expected_revision() != projection->run_revision) {
+      return {grpc::StatusCode::FAILED_PRECONDITION,
+              "plan diff run revision is stale"};
+    }
+    const auto current = journal_.compiled_plan(projection->plan_hash);
+    if (!current) {
+      return {grpc::StatusCode::DATA_LOSS,
+              "run has no persisted compiled plan"};
+    }
+    response->set_semantic_diff(
+        nlohmann::json::diff(current->canonical_plan,
+                             proposed.plan->canonical_plan)
+            .dump());
+    const bool unchanged = current->plan_hash == proposed.plan->plan_hash;
+    response->set_adoptable_in_place(unchanged);
+    if (!unchanged) {
+      add_diagnostic(
+          *response,
+          {.severity = Diagnostic::Severity::warning,
+           .code = "plan.adoption_requires_new_run",
+           .path = "/",
+           .message =
+               "this protocol revision can preview the semantic diff but "
+               "does not mutate an active plan in place"});
+    }
+    return grpc::Status::OK;
+  } catch (const nlohmann::json::exception& exception) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, exception.what()};
+  } catch (const std::invalid_argument& exception) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, exception.what()};
+  } catch (const std::exception& exception) {
+    return {grpc::StatusCode::DATA_LOSS, exception.what()};
+  }
+}
+
 grpc::Status TrainVMService::CommandRun(grpc::ServerContext* context,
                                         const v1::RunCommandRequest* request,
                                         v1::RunCommandResponse* response) {
@@ -2712,6 +2936,168 @@ grpc::Status TrainVMService::CommandRun(grpc::ServerContext* context,
       fill_run_summary(*projection, journal_, *response);
     }
     return grpc::Status::OK;
+  } catch (const std::exception& exception) {
+    return {grpc::StatusCode::DATA_LOSS, exception.what()};
+  }
+}
+
+grpc::Status TrainVMService::GetRun(grpc::ServerContext* context,
+                                    const v1::GetRunRequest* request,
+                                    v1::RunSummary* response) {
+  if (request == nullptr || response == nullptr ||
+      request->ByteSizeLong() > 4'096U || request->run_id().empty() ||
+      request->run_id().size() > 256U) {
+    return {grpc::StatusCode::INVALID_ARGUMENT,
+            "get-run requires a bounded run identity"};
+  }
+  if (cancelled(context)) return cancellation_status();
+  try {
+    {
+      std::scoped_lock lock(command_mutex_);
+      const auto projection = journal_.projection(request->run_id());
+      if (!projection) {
+        return {grpc::StatusCode::NOT_FOUND, "run does not exist"};
+      }
+      fill_run_summary(*projection, journal_, *response);
+    }
+    if (const auto failure = reconciliation_failure(request->run_id())) {
+      response->set_wait_reason("reconciliation failure: " + *failure);
+    }
+    return grpc::Status::OK;
+  } catch (const std::exception& exception) {
+    return {grpc::StatusCode::DATA_LOSS, exception.what()};
+  }
+}
+
+grpc::Status TrainVMService::ListRuns(grpc::ServerContext* context,
+                                      const v1::ListRunsRequest* request,
+                                      v1::ListRunsResponse* response) {
+  constexpr std::size_t kDefaultLimit = 100U;
+  constexpr std::size_t kMaximumLimit = 250U;
+  if (request == nullptr || response == nullptr ||
+      request->ByteSizeLong() > kMaximumCommandBytes ||
+      request->observed_states_size() > 64 || request->labels_size() > 64 ||
+      request->page_token().size() > 4'096U) {
+    return {grpc::StatusCode::INVALID_ARGUMENT,
+            "list-runs query exceeds its bounds"};
+  }
+  if (cancelled(context)) return cancellation_status();
+  try {
+    std::set<std::string, std::less<>> states;
+    for (const int state : request->observed_states()) {
+      if (!v1::ObservedState_IsValid(state)) {
+        return {grpc::StatusCode::INVALID_ARGUMENT,
+                "list-runs observed-state filter is unknown"};
+      }
+      states.insert(
+          observed_state_name(static_cast<v1::ObservedState>(state)));
+    }
+    if (states.size() !=
+        static_cast<std::size_t>(request->observed_states_size())) {
+      return {grpc::StatusCode::INVALID_ARGUMENT,
+              "list-runs observed-state filters must be unique"};
+    }
+    std::map<std::string, std::string, std::less<>> labels;
+    for (const auto& [key, value] : request->labels()) {
+      labels.emplace(key, value);
+    }
+    const std::size_t limit =
+        request->limit() == 0U ? kDefaultLimit
+                              : static_cast<std::size_t>(request->limit());
+    if (limit > kMaximumLimit) {
+      return {grpc::StatusCode::INVALID_ARGUMENT,
+              "list-runs limit exceeds 250"};
+    }
+    std::vector<RunProjection> projections;
+    std::string next_page_token;
+    {
+      std::scoped_lock lock(command_mutex_);
+      const std::string filter_digest =
+          run_list_filter_digest(journal_.journal_id(), states, labels);
+      std::optional<RunProjectionCursor> after;
+      if (!request->page_token().empty()) {
+        after = decode_run_page_token(request->page_token(), filter_digest);
+      }
+      projections = journal_.run_projections({
+          .observed_states = states,
+          .labels = labels,
+          .after = std::move(after),
+          .limit = limit + 1U,
+      });
+      if (projections.size() > limit) {
+        next_page_token = encode_run_page_token(
+            projections.at(limit - 1U), filter_digest);
+        projections.resize(limit);
+      }
+      for (const RunProjection& projection : projections) {
+        fill_run_summary(projection, journal_, *response->add_runs());
+      }
+    }
+    response->set_next_page_token(std::move(next_page_token));
+    for (int index = 0; index < response->runs_size(); ++index) {
+      if (const auto failure = reconciliation_failure(
+              response->runs(index).identity().run_id())) {
+        response->mutable_runs(index)->set_wait_reason(
+            "reconciliation failure: " + *failure);
+      }
+    }
+    return grpc::Status::OK;
+  } catch (const nlohmann::json::exception& exception) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, exception.what()};
+  } catch (const std::invalid_argument& exception) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, exception.what()};
+  } catch (const std::exception& exception) {
+    return {grpc::StatusCode::DATA_LOSS, exception.what()};
+  }
+}
+
+grpc::Status TrainVMService::WatchEvents(
+    grpc::ServerContext* context, const v1::WatchEventsRequest* request,
+    grpc::ServerWriter<v1::EventEnvelope>* writer) {
+  constexpr std::size_t kEventPageSize = 256U;
+  if (context == nullptr || request == nullptr || writer == nullptr ||
+      request->ByteSizeLong() > kMaximumCommandBytes ||
+      request->run_ids_size() > 64 || request->event_types_size() > 64) {
+    return {grpc::StatusCode::INVALID_ARGUMENT,
+            "watch-events request exceeds its bounds"};
+  }
+  try {
+    std::set<std::string, std::less<>> run_ids(request->run_ids().begin(),
+                                               request->run_ids().end());
+    std::set<std::string, std::less<>> event_types(
+        request->event_types().begin(), request->event_types().end());
+    if (run_ids.size() != static_cast<std::size_t>(request->run_ids_size()) ||
+        event_types.size() !=
+            static_cast<std::size_t>(request->event_types_size())) {
+      return {grpc::StatusCode::INVALID_ARGUMENT,
+              "watch-events filters must be unique"};
+    }
+    std::uint64_t cursor = request->after_journal_sequence();
+    while (!cancelled(context)) {
+      std::vector<SequencedEvent> events;
+      {
+        std::scoped_lock lock(command_mutex_);
+        events = journal_.sequenced_events({
+            .after_journal_sequence = cursor,
+            .run_ids = run_ids,
+            .event_types = event_types,
+            .limit = kEventPageSize,
+        });
+      }
+      for (const SequencedEvent& event : events) {
+        v1::EventEnvelope output = wire_event(event);
+        if (!writer->Write(output)) {
+          return {grpc::StatusCode::CANCELLED,
+                  "event stream closed by its reader"};
+        }
+        cursor = event.journal_sequence;
+      }
+      if (events.size() == kEventPageSize) continue;
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    return {grpc::StatusCode::CANCELLED, "event stream was cancelled"};
+  } catch (const std::invalid_argument& exception) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, exception.what()};
   } catch (const std::exception& exception) {
     return {grpc::StatusCode::DATA_LOSS, exception.what()};
   }

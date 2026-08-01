@@ -85,6 +85,26 @@ of existing duplicated trainer switches. Promotion requires representative end-t
 throughput evidence; tidy separation alone does not imply that two families share a mathematically
 valid implementation.
 
+Separation is complete only when every training loop receives one immutable resolved composition
+and the following responsibilities have no family-local duplicate:
+
+| Responsibility | Owned interface | Persisted/reproducible state | Required contract tests |
+|---|---|---|---|
+| Optimizer update | optimizer factory + update/state protocol | exact tensor groups, hyperparameters, implementation key, moment/master-weight state | reference update, state round-trip, resumed trajectory, backend parity |
+| Parameter ownership and relative rates | exhaustive parameter router | ordered group membership, exclusions, freeze state, per-group LR/decay multipliers | no overlap, no unclaimed trainable tensor, stable aliases/order, exact audit replay |
+| Learning rate and weight decay | independent schedule state machines | step domain, phase/cursor, base value, warmup/cooldown boundaries | golden trajectory, boundary values, resume at every phase transition |
+| Activation and normalization | topology installation contract + tensor backend | exact component/version/config at every installation point | forward/backward parity, dtype/shape coverage, fused/reference equivalence |
+| Objective/loss | objective protocol over declared model outputs and batch fields | reduction, weighting, masks, auxiliary terms, implementation key | value/gradient parity, empty/masked edge cases, distributed reduction parity |
+| Precision and scaling | precision/scaler policy | parameter/compute/accumulator dtypes, scaler state, overflow history | overflow/recovery trajectory, checkpoint resume, backend capability rejection |
+| Gradient policy | accumulation, clipping, synchronization protocol | accumulation cursor, clip mode/threshold, synchronization domain | boundary/update-count trajectory, distributed parity, resume mid-accumulation |
+| Curriculum/data phase | deterministic curriculum state machine | sample/token domain, bucket/phase cursor, frozen dataset identity | phase-boundary trajectory, restart membership/order, cache-identity checks |
+
+The architecture check rejects dependency edges from a common component back into a family trainer,
+direct optimizer/schedule/activation construction inside a training loop, and descriptor entries
+without a consuming runtime factory. Migration is not done while legacy switches remain reachable
+for a supported workflow: they must either be removed or isolated behind an explicitly versioned
+compatibility adapter with deprecation evidence.
+
 ## Qualification contract
 
 Every optimization is admitted through a baseline-versus-candidate qualification node. A receipt

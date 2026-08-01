@@ -4850,6 +4850,8 @@ void test_worker_control_grpc_stream() {
                            &port);
   builder.RegisterService(
       static_cast<trainvm::v1::WorkerControl::Service*>(&service));
+  builder.RegisterService(
+      static_cast<trainvm::v1::TrainVM::Service*>(&service));
   std::unique_ptr<grpc::Server> server = builder.BuildAndStart();
   check(server != nullptr && port > 0,
         "WorkerControl integration fixture starts an in-process gRPC server");
@@ -4862,6 +4864,27 @@ void test_worker_control_grpc_stream() {
       "127.0.0.1:" + std::to_string(port),
       grpc::InsecureChannelCredentials());
   const auto stub = trainvm::v1::WorkerControl::NewStub(channel);
+  const auto read_stub = trainvm::v1::TrainVM::NewStub(channel);
+
+  {
+    grpc::ClientContext context;
+    trainvm::v1::WatchEventsRequest request;
+    request.add_run_ids(run_id);
+    request.add_event_types("worker.launch_requested");
+    auto stream = read_stub->WatchEvents(&context, request);
+    trainvm::v1::EventEnvelope envelope;
+    const bool received = stream->Read(&envelope);
+    context.TryCancel();
+    const grpc::Status status = stream->Finish();
+    check(received && envelope.journal_sequence() > 0U &&
+              envelope.run_id() == run_id &&
+              envelope.event_type() == "worker.launch_requested" &&
+              !envelope.canonical_json_payload().empty() &&
+              nlohmann::json::parse(envelope.canonical_json_payload())
+                  .is_object() &&
+              status.error_code() == grpc::StatusCode::CANCELLED,
+          "TrainVM gRPC event stream replays filtered durable events with a resumable cursor");
+  }
 
   {
     grpc::ClientContext context;
@@ -7277,6 +7300,101 @@ void test_service_registry_and_reconciliation() {
             "valid service submission remains queued until explicit reconciliation");
     }
 
+    auto second_request = request_for(
+        journal_id, true, "service-reconcile-second",
+        preview.adapter_lock_digest());
+    trainvm::v1::SubmitExperimentResponse second_created;
+    const grpc::Status second_status = service.SubmitExperiment(
+        nullptr, &second_request, &second_created);
+    const std::string second_run_id =
+        second_created.has_run() ? second_created.run().run_id() : "";
+    trainvm::v1::GetRunRequest get_request;
+    get_request.set_run_id(run_id);
+    trainvm::v1::RunSummary run_summary;
+    const grpc::Status get_status =
+        service.GetRun(nullptr, &get_request, &run_summary);
+    trainvm::v1::ListRunsRequest list_request;
+    list_request.add_observed_states(
+        trainvm::v1::OBSERVED_STATE_QUEUED);
+    (*list_request.mutable_labels())["family"] = "mageflow";
+    list_request.set_limit(1U);
+    trainvm::v1::ListRunsResponse first_page;
+    const grpc::Status first_page_status =
+        service.ListRuns(nullptr, &list_request, &first_page);
+    trainvm::v1::ListRunsRequest next_request = list_request;
+    next_request.set_page_token(first_page.next_page_token());
+    trainvm::v1::ListRunsResponse second_page;
+    const grpc::Status second_page_status =
+        service.ListRuns(nullptr, &next_request, &second_page);
+    trainvm::v1::ListRunsRequest mismatched_page = next_request;
+    (*mismatched_page.mutable_labels())["family"] = "rwkv";
+    trainvm::v1::ListRunsResponse mismatched_response;
+    const grpc::Status mismatched_status = service.ListRuns(
+        nullptr, &mismatched_page, &mismatched_response);
+    trainvm::v1::ListRunsRequest malformed_page = list_request;
+    malformed_page.set_page_token("{}");
+    trainvm::v1::ListRunsResponse malformed_response;
+    const grpc::Status malformed_status = service.ListRuns(
+        nullptr, &malformed_page, &malformed_response);
+    trainvm::v1::PlanDiffRequest same_diff;
+    same_diff.set_run_id(run_id);
+    same_diff.set_expected_revision(created.run().revision());
+    same_diff.set_proposed_source_document(fixture.dump());
+    same_diff.set_source_format("json");
+    trainvm::v1::PlanDiffResponse same_diff_response;
+    const grpc::Status same_diff_status =
+        service.DiffPlan(nullptr, &same_diff, &same_diff_response);
+    auto changed_fixture = fixture;
+    changed_fixture["metadata"]["description"] =
+        "read-plane semantic diff fixture";
+    trainvm::v1::PlanDiffRequest changed_diff = same_diff;
+    changed_diff.set_proposed_source_document(changed_fixture.dump());
+    trainvm::v1::PlanDiffResponse changed_diff_response;
+    const grpc::Status changed_diff_status =
+        service.DiffPlan(nullptr, &changed_diff, &changed_diff_response);
+    trainvm::v1::PlanDiffRequest stale_diff = same_diff;
+    stale_diff.set_expected_revision(created.run().revision() + 1U);
+    trainvm::v1::PlanDiffResponse stale_diff_response;
+    const grpc::Status stale_diff_status =
+        service.DiffPlan(nullptr, &stale_diff, &stale_diff_response);
+    const auto first_page_id =
+        first_page.runs_size() == 1
+            ? first_page.runs(0).identity().run_id()
+            : std::string{};
+    const auto second_page_id =
+        second_page.runs_size() == 1
+            ? second_page.runs(0).identity().run_id()
+            : std::string{};
+    check(second_status.ok() && second_created.has_run() &&
+              !second_run_id.empty() && get_status.ok() &&
+              run_summary.identity().run_id() == run_id &&
+              run_summary.observed_state() ==
+                  trainvm::v1::OBSERVED_STATE_QUEUED &&
+              run_summary.has_created_at() && run_summary.has_updated_at() &&
+              first_page_status.ok() && first_page.runs_size() == 1 &&
+              !first_page.next_page_token().empty() &&
+              second_page_status.ok() && second_page.runs_size() == 1 &&
+              second_page.next_page_token().empty() &&
+              first_page_id != second_page_id &&
+              std::set<std::string>({first_page_id, second_page_id}) ==
+                  std::set<std::string>({run_id, second_run_id}) &&
+              mismatched_status.error_code() ==
+                  grpc::StatusCode::INVALID_ARGUMENT &&
+              malformed_status.error_code() ==
+                  grpc::StatusCode::INVALID_ARGUMENT &&
+              same_diff_status.ok() &&
+              same_diff_response.adoptable_in_place() &&
+              same_diff_response.semantic_diff() == "[]" &&
+              same_diff_response.proposed_plan_hash() ==
+                  compiled.plan->plan_hash &&
+              changed_diff_status.ok() &&
+              !changed_diff_response.adoptable_in_place() &&
+              changed_diff_response.semantic_diff() != "[]" &&
+              changed_diff_response.diagnostics_size() == 1 &&
+              stale_diff_status.error_code() ==
+                  grpc::StatusCode::FAILED_PRECONDITION,
+          "native read APIs expose bounded summaries, query-bound pagination, and honest semantic plan diffs");
+
     const auto acquired = service.reconcile_once(run_id);
     authority_now_ns = 5'100;
     const auto launched = service.reconcile_once(run_id);
@@ -7289,6 +7407,21 @@ void test_service_registry_and_reconciliation() {
         events, [](const trainvm::Event& event) {
           return event.event_type == "worker.launch_requested";
         });
+    const auto sequenced_launches = observer.sequenced_events({
+        .after_journal_sequence = 0U,
+        .run_ids = {run_id},
+        .event_types = {"worker.launch_requested"},
+        .limit = 8U,
+    });
+    const auto no_more_launches = observer.sequenced_events({
+        .after_journal_sequence =
+            sequenced_launches.empty()
+                ? 0U
+                : sequenced_launches.back().journal_sequence,
+        .run_ids = {run_id},
+        .event_types = {"worker.launch_requested"},
+        .limit = 8U,
+    });
     check(acquired.disposition ==
               trainvm::ReconcileDisposition::lease_acquired &&
               launched.disposition ==
@@ -7305,7 +7438,16 @@ void test_service_registry_and_reconciliation() {
               projection && projection->observed_state == "acquiring" &&
               projection->run_revision == 4U && events.size() == 7U &&
               launch_event != events.end() &&
-              launch_event->wall_time_ns == 5'100,
+              launch_event->wall_time_ns == 5'100 &&
+              sequenced_launches.size() == 1U &&
+              sequenced_launches.front().journal_sequence > 0U &&
+              sequenced_launches.front().event.event_id ==
+                  launch_event->event_id &&
+              sequenced_launches.front().event.event_type ==
+                  launch_event->event_type &&
+              sequenced_launches.front().event.payload ==
+                  launch_event->payload &&
+              no_more_launches.empty(),
           "service-owned reconcile path uses its registry, mutation gate, and authority clock for acquisition then launch");
   }
 
