@@ -166,6 +166,12 @@ public:
                     HostdStatusTransportLimits limits = {});
   [[nodiscard]] HostdServeResult
   serve_one(std::int64_t absolute_monotonic_deadline_ns);
+  // Takes ownership of one accepted SOCK_SEQPACKET descriptor. This exists so
+  // the unified listener can route the first opcode without duplicating the
+  // status protocol implementation.
+  [[nodiscard]] HostdServeResult
+  serve_accepted(int connection_fd,
+                 std::int64_t absolute_monotonic_deadline_ns);
 
 private:
   std::shared_ptr<HostdSocketAuthority> authority_;
@@ -280,6 +286,11 @@ public:
       std::shared_ptr<IHostdProcessSupervisor> process_supervisor = nullptr);
   [[nodiscard]] HostdServeResult
   serve_one(std::int64_t absolute_monotonic_deadline_ns);
+  // Takes ownership of one accepted SOCK_SEQPACKET descriptor. The first
+  // packet remains unread and is still subject to the full mutation protocol.
+  [[nodiscard]] HostdServeResult
+  serve_accepted(int connection_fd,
+                 std::int64_t absolute_monotonic_deadline_ns);
 
 private:
   std::shared_ptr<HostdSocketAuthority> authority_;
@@ -291,6 +302,25 @@ private:
   std::shared_ptr<IHostdLedgerTimeSource> ledger_time_source_;
   std::shared_ptr<IHostdProcessSupervisor> process_supervisor_;
   HostdMutationTransportConfig config_;
+};
+
+// One listener serves both the status handshake and the authenticated
+// mutation exchange. It peeks only the fixed wire prefix, consumes no payload
+// or ancillary descriptors, and transfers the accepted descriptor to exactly
+// one protocol server. This removes accept-order races between independent
+// status and mutation loops on the shared configured endpoint.
+class HostdUnifiedServer final {
+ public:
+  HostdUnifiedServer(std::shared_ptr<HostdSocketAuthority> authority,
+                     HostdStatusServer& status,
+                     HostdMutationServer& mutation);
+  [[nodiscard]] HostdServeResult
+  serve_one(std::int64_t absolute_monotonic_deadline_ns);
+
+ private:
+  std::shared_ptr<HostdSocketAuthority> authority_;
+  HostdStatusServer& status_;
+  HostdMutationServer& mutation_;
 };
 
 struct HostdMutationClientConfig final {

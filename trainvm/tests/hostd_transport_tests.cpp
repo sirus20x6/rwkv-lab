@@ -1615,6 +1615,9 @@ void mutation_transport_dispatches_replays_and_disconnects() {
   auto fault = std::make_shared<MutationFaultInjector>();
   auto process_supervisor =
       std::make_shared<LedgerProcessSupervisor>(*fixture.ledger);
+  HostdStatusServer status_server(
+      authority, fixture.coordinator,
+      {.allowed_uid = ::geteuid(), .allowed_gid = ::getegid()});
   HostdMutationServer server(
       authority, fixture.coordinator, verifier, kernel, service, ledger_time,
       {.api_version = std::string(kHostdMutationTransportApiVersion),
@@ -1628,6 +1631,7 @@ void mutation_transport_dispatches_replays_and_disconnects() {
        .per_session_timeout_ns = 2'000'000'000LL,
        .fault_injector = fault},
       process_supervisor);
+  HostdUnifiedServer unified(authority, status_server, server);
   const HostdMutationClientConfig client{
       .socket_path = authority->socket_path(),
       .expected_endpoint = authority->reattest(),
@@ -1637,6 +1641,24 @@ void mutation_transport_dispatches_replays_and_disconnects() {
   const HostdMutationOpen open{
       .api_version = std::string(kHostdMutationProtocolApiVersion),
       .claim = mutation_claim()};
+
+  std::optional<HostdStatusReply> routed_status;
+  std::exception_ptr status_error;
+  std::jthread status_thread([&] {
+    try {
+      routed_status =
+          hostd_request_status(client_config(*authority), 100U, deadline());
+    } catch (...) {
+      status_error = std::current_exception();
+    }
+  });
+  const HostdServeResult status_served = unified.serve_one(deadline());
+  status_thread.join();
+  if (status_error) std::rethrow_exception(status_error);
+  require(status_served == HostdServeResult::served && routed_status &&
+              routed_status->status &&
+              routed_status->status->lifecycle == HostdLifecycle::admitting,
+          "unified listener routes a status request without consuming it");
 
   const auto exchange = [&](HostdMutationRequest request,
                             std::uint64_t correlation) {
@@ -1649,7 +1671,7 @@ void mutation_transport_dispatches_replays_and_disconnects() {
         client_error = std::current_exception();
       }
     });
-    const HostdServeResult served = server.serve_one(deadline());
+    const HostdServeResult served = unified.serve_one(deadline());
     client_thread.join();
     if (client_error)
       std::rethrow_exception(client_error);

@@ -215,7 +215,10 @@ durable host grant and binds its request identity, receipt digest, and physical 
 worker ticket and resolved launch identity; process-free unit fixtures can opt into a visibly
 test-only legacy mode.
 
-The filesystem `SOCK_SEQPACKET` boundary has separate status and mutation servers. The mutation
+The filesystem `SOCK_SEQPACKET` boundary has separate status and mutation protocol handlers behind
+a single listener router. The router peeks only the fixed wire prefix and hands the unread accepted
+connection to exactly one handler, preventing competing accept loops from stealing each other's
+traffic. The mutation
 exchange now binds the accepted socket process instance to a single-use journal challenge, obtains
 service access only from an injected host-owned identity authority, samples grant/release time only
 on the server, dispatches request/reconcile/release through `HostGrantCoordinator`, and disconnects

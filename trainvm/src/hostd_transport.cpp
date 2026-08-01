@@ -1581,28 +1581,31 @@ HostdStatusServer::HostdStatusServer(
 HostdServeResult
 HostdStatusServer::serve_one(std::int64_t absolute_monotonic_deadline_ns) {
   try {
-  try {
     (void)authority_->reattest();
-  } catch (...) {
-    return HostdServeResult::rejected;
-  }
-  if (!wait_ready(authority_->listener_fd(), POLLIN,
-                  absolute_monotonic_deadline_ns))
-    return HostdServeResult::timed_out;
-  FileDescriptor connection;
-  for (;;) {
-    const int accepted = ::accept4(authority_->listener_fd(), nullptr, nullptr,
-                                   SOCK_CLOEXEC | SOCK_NONBLOCK);
-    if (accepted >= 0) {
-      connection = FileDescriptor(accepted);
-      break;
-    }
-    if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)
-      throw_errno("hostd accept4 failed");
     if (!wait_ready(authority_->listener_fd(), POLLIN,
                     absolute_monotonic_deadline_ns))
       return HostdServeResult::timed_out;
+    for (;;) {
+      const int accepted =
+          ::accept4(authority_->listener_fd(), nullptr, nullptr,
+                    SOCK_CLOEXEC | SOCK_NONBLOCK);
+      if (accepted >= 0)
+        return serve_accepted(accepted, absolute_monotonic_deadline_ns);
+      if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)
+        throw_errno("hostd accept4 failed");
+      if (!wait_ready(authority_->listener_fd(), POLLIN,
+                      absolute_monotonic_deadline_ns))
+        return HostdServeResult::timed_out;
+    }
+  } catch (...) {
+    return HostdServeResult::rejected;
   }
+}
+
+HostdServeResult HostdStatusServer::serve_accepted(
+    int connection_fd, std::int64_t absolute_monotonic_deadline_ns) {
+  FileDescriptor connection(connection_fd);
+  if (connection.get() < 0) return HostdServeResult::rejected;
   try {
     (void)authority_->reattest();
     enable_passcred(connection.get());
@@ -1660,14 +1663,6 @@ HostdStatusServer::serve_one(std::int64_t absolute_monotonic_deadline_ns) {
     send_packet(connection.get(), response, session_deadline);
     (void)::shutdown(connection.get(), SHUT_RDWR);
     return HostdServeResult::served;
-  } catch (const HostdTransportError &error) {
-    (void)error;
-    return HostdServeResult::rejected;
-  }
-  } catch (const HostdTransportError &) {
-    return HostdServeResult::rejected;
-  } catch (const std::exception &) {
-    return HostdServeResult::rejected;
   } catch (...) {
     return HostdServeResult::rejected;
   }
@@ -1714,31 +1709,32 @@ HostdMutationServer::HostdMutationServer(
 HostdServeResult HostdMutationServer::serve_one(
     std::int64_t absolute_monotonic_deadline_ns) {
   try {
-    try {
-      (void)authority_->reattest();
-    } catch (...) {
-      return HostdServeResult::rejected;
-    }
+    (void)authority_->reattest();
     if (!wait_ready(authority_->listener_fd(), POLLIN,
                     absolute_monotonic_deadline_ns))
       return HostdServeResult::timed_out;
-
-    FileDescriptor connection;
     for (;;) {
       const int accepted =
           ::accept4(authority_->listener_fd(), nullptr, nullptr,
                     SOCK_CLOEXEC | SOCK_NONBLOCK);
-      if (accepted >= 0) {
-        connection = FileDescriptor(accepted);
-        break;
-      }
+      if (accepted >= 0)
+        return serve_accepted(accepted, absolute_monotonic_deadline_ns);
       if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)
         throw_errno("hostd mutation accept4 failed");
       if (!wait_ready(authority_->listener_fd(), POLLIN,
                       absolute_monotonic_deadline_ns))
         return HostdServeResult::timed_out;
     }
+  } catch (...) {
+    return HostdServeResult::rejected;
+  }
+}
 
+HostdServeResult HostdMutationServer::serve_accepted(
+    int connection_fd, std::int64_t absolute_monotonic_deadline_ns) {
+  FileDescriptor connection(connection_fd);
+  if (connection.get() < 0) return HostdServeResult::rejected;
+  try {
     (void)authority_->reattest();
     enable_passcred(connection.get());
     const ucred credentials = peer_credentials(connection.get());
@@ -1955,7 +1951,73 @@ HostdServeResult HostdMutationServer::serve_one(
       send_error("mutation_rejected", "mutation failed closed");
       return HostdServeResult::rejected;
     }
-  } catch (const std::exception &) {
+  } catch (...) {
+    return HostdServeResult::rejected;
+  }
+}
+
+HostdUnifiedServer::HostdUnifiedServer(
+    std::shared_ptr<HostdSocketAuthority> authority,
+    HostdStatusServer& status, HostdMutationServer& mutation)
+    : authority_(std::move(authority)), status_(status), mutation_(mutation) {
+  if (!authority_)
+    throw HostdTransportError("hostd unified server requires socket authority");
+}
+
+HostdServeResult HostdUnifiedServer::serve_one(
+    std::int64_t absolute_monotonic_deadline_ns) {
+  try {
+    (void)authority_->reattest();
+    if (!wait_ready(authority_->listener_fd(), POLLIN,
+                    absolute_monotonic_deadline_ns))
+      return HostdServeResult::timed_out;
+    FileDescriptor connection;
+    for (;;) {
+      const int accepted =
+          ::accept4(authority_->listener_fd(), nullptr, nullptr,
+                    SOCK_CLOEXEC | SOCK_NONBLOCK);
+      if (accepted >= 0) {
+        connection = FileDescriptor(accepted);
+        break;
+      }
+      if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)
+        throw_errno("hostd unified accept4 failed");
+      if (!wait_ready(authority_->listener_fd(), POLLIN,
+                      absolute_monotonic_deadline_ns))
+        return HostdServeResult::timed_out;
+    }
+    (void)authority_->reattest();
+    std::array<std::byte, 12U> prefix{};
+    for (;;) {
+      if (!wait_ready(connection.get(), POLLIN,
+                      absolute_monotonic_deadline_ns))
+        return HostdServeResult::rejected;
+      const ssize_t received =
+          ::recv(connection.get(), prefix.data(), prefix.size(),
+                 MSG_DONTWAIT | MSG_PEEK);
+      if (received < 0) {
+        if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
+          continue;
+        throw_errno("hostd unified protocol peek failed");
+      }
+      if (received < static_cast<ssize_t>(prefix.size()))
+        return HostdServeResult::rejected;
+      break;
+    }
+    const std::vector<std::byte> wire_prefix(prefix.begin(), prefix.end());
+    if (!std::ranges::equal(kWireMagic,
+                            wire_prefix | std::views::take(4)) ||
+        get_u16(wire_prefix, 4U) != kHostdStatusWireVersion ||
+        get_u16(wire_prefix, 6U) != kHostdStatusWireHeaderBytes ||
+        get_u16(wire_prefix, 10U) != 0U)
+      return HostdServeResult::rejected;
+    const std::uint16_t opcode = get_u16(wire_prefix, 8U);
+    if (opcode == kStatusRequestOpcode)
+      return status_.serve_accepted(connection.release(),
+                                    absolute_monotonic_deadline_ns);
+    if (opcode == kMutationOpenOpcode)
+      return mutation_.serve_accepted(connection.release(),
+                                      absolute_monotonic_deadline_ns);
     return HostdServeResult::rejected;
   } catch (...) {
     return HostdServeResult::rejected;

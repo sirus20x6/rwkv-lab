@@ -674,7 +674,10 @@ now dispatches that exchange through the accepted `SOCK_SEQPACKET` peer into
 the coordinator. It reobserves the Linux process instance, consumes the
 journal challenge once, obtains service access from a host-side authority
 rather than request data, uses host-sampled ledger time, and always disconnects
-the scoped coordinator session. Duplicate grant, exact reconciliation,
+the scoped coordinator session. A single endpoint router now accepts each
+connection once, validates and peeks only the fixed protocol prefix, and
+transfers the still-unread connection to either the status or mutation handler;
+there are no competing accept loops on the shared socket. Duplicate grant, exact reconciliation,
 release, stale-fence, cross-scope, malformed-command, and abandoned-challenge
 paths are covered at the cooperative test grade. Process prepare is the sole
 command allowed to carry `SCM_RIGHTS`; descriptor roles and counts are exact,
