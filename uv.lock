@@ -2986,6 +2986,7 @@ test = [
 ]
 trainvm-worker = [
     { name = "grpcio" },
+    { name = "pillow" },
     { name = "protobuf" },
 ]
 vision = [
@@ -3013,6 +3014,7 @@ requires-dist = [
     { name = "nvidia-cutlass-operators", marker = "extra == 'sm120'", specifier = ">=0.1.0" },
     { name = "peft", marker = "extra == 'full'", specifier = ">=0.18.1" },
     { name = "pillow", marker = "extra == 'full'", specifier = ">=10" },
+    { name = "pillow", marker = "extra == 'trainvm-worker'", specifier = ">=10" },
     { name = "pillow", marker = "extra == 'vision'", specifier = ">=10" },
     { name = "protobuf", marker = "extra == 'trainvm-worker'", specifier = ">=6.33,<7" },
     { name = "psutil", marker = "extra == 'full'", specifier = ">=6.0" },

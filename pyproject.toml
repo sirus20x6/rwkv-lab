@@ -57,6 +57,7 @@ test = [
 # bindings are checked in so workers never need protoc at runtime.
 trainvm-worker = [
     "grpcio>=1.82",
+    "pillow>=10",
     "protobuf>=6.33,<7",
 ]
 # NVIDIA's Operator API is optional: ordinary CUDA and CPU installs retain the

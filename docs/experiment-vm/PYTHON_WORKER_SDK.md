@@ -39,6 +39,16 @@ it.
 - explicit control acknowledgement at adapter-selected safe points;
 - one canonical terminal result and durable receipt.
 
+`EvalGalleryPublisher` is the shared qualitative-evaluation publication path. It requires an exact
+`rwkv-lab.eval-gallery.v2` output declaration from the immutable invocation, confines all input
+images to declared read/write roots, fully decodes supported raster formats with Pillow, and copies
+them into a SHA-256 object store beneath the run directory. It then atomically seals a canonical
+manifest, publishes that manifest through `WorkerSession.artifact()`, and returns the durable worker
+sequence. Generated and target/source images, held-out membership, condition digest, evaluator,
+checkpoint, policy, seed, sampling attributes, producer attempt, and optimizer step are all bound.
+The helper is deliberately trainer-family-neutral; MageFlow, RWKV vision, and transformer vision
+adapters must not implement their own gallery-directory conventions.
+
 The receive thread never performs tensor work and never opens dashboard or
 journal storage. A trainer polls `poll_commands()` at its own microbatch,
 optimizer-step, eval, or checkpoint boundary, applies an eligible control, and

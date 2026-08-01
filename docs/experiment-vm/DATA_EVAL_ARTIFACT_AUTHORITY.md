@@ -360,6 +360,12 @@ show them as **live/unpublished**, but they are not historical evidence and disa
 attempt is reconciled. Publication validates decodability, size limits, expected pair cardinality,
 and policy before creating an immutable gallery revision.
 
+Python tensor workers use the common `EvalGalleryPublisher` for this transition. It validates the
+invocation's declared output contract, freezes image bytes in the run-scoped SHA-256 object store,
+atomically renames a sealed canonical revision, and only then emits `artifact.published`. A replay of
+the same producer/step/content resolves to the same artifact ID and bytes; a changed evaluator result
+creates a distinct revision.
+
 ```cpp
 struct EvalGalleryItem {
   std::string item_id;

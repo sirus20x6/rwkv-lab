@@ -7,6 +7,14 @@ from .bootstrap import (
     load_worker_bootstrap,
     read_worker_bootstrap_fd,
 )
+from .eval_gallery import (
+    EVAL_GALLERY_SCHEMA,
+    EvalGalleryError,
+    EvalGalleryItem,
+    EvalGalleryPublisher,
+    GalleryImage,
+    PublishedEvalGallery,
+)
 from .invocation import (
     MAXIMUM_INVOCATION_BYTES,
     InvocationError,
@@ -24,13 +32,19 @@ from .session import (
 )
 
 __all__ = [
+    "EVAL_GALLERY_SCHEMA",
     "MAXIMUM_BOOTSTRAP_BYTES",
     "MAXIMUM_INVOCATION_BYTES",
     "BootstrapError",
     "CommandKind",
     "ControlAssignment",
     "ControlDisposition",
+    "EvalGalleryError",
+    "EvalGalleryItem",
+    "EvalGalleryPublisher",
+    "GalleryImage",
     "InvocationError",
+    "PublishedEvalGallery",
     "WorkerBootstrap",
     "WorkerCommand",
     "WorkerInvocation",
