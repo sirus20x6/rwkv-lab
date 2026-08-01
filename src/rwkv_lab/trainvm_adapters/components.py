@@ -7,8 +7,12 @@ from typing import Any
 import torch
 
 from rwkv_lab.training_components import (
+    LinearWarmupCosineConfiguration,
+    PowerCoolConfiguration,
+    ScheduleImplementation,
     optimizer_from_resolved_component,
     parameter_routing_from_resolved_component,
+    schedule_configuration_from_resolved_component,
     schedule_from_resolved_component,
 )
 from rwkv_lab.training_parameter_routing import ParameterRoutingResult
@@ -61,6 +65,17 @@ class WorkerTrainingComponents:
     ) -> torch.optim.lr_scheduler.LRScheduler:
         component = self.composition.require(slot, category="learning_rate_schedule")
         return schedule_from_resolved_component(component.runtime_envelope(), optimizer)
+
+    def learning_rate_configuration(
+        self, *, slot: str = "learning_rate"
+    ) -> tuple[
+        ScheduleImplementation,
+        LinearWarmupCosineConfiguration | PowerCoolConfiguration,
+    ]:
+        component = self.composition.require(slot, category="learning_rate_schedule")
+        return schedule_configuration_from_resolved_component(
+            component.runtime_envelope()
+        )
 
     def parameter_routing(
         self,

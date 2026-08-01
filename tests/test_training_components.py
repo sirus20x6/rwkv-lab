@@ -22,6 +22,7 @@ from rwkv_lab.training_components import (
     optimizer_from_resolved_component,
     parameter_routing_from_resolved_component,
     powercool_multiplier,
+    schedule_configuration_from_resolved_component,
     schedule_from_resolved_component,
     supported_implementation_ids,
     supported_worker_capabilities,
@@ -227,6 +228,22 @@ def test_resolved_worker_component_dispatch_is_closed_and_typed():
         optimizer,
     )
     assert isinstance(powercool, torch.optim.lr_scheduler.LRScheduler)
+
+    implementation, typed = schedule_configuration_from_resolved_component(
+        {
+            "descriptor": powercool_descriptor,
+            "descriptor_digest": "sha256:" + "d" * 64,
+            "configuration": {
+                "warmup_steps": 0,
+                "max_steps": 10,
+                "minimum_ratio": 0.1,
+                "cooldown_fraction": 0.2,
+                "power": 2.0,
+            },
+        }
+    )
+    assert implementation is ScheduleImplementation.POWERCOOL_V1
+    assert isinstance(typed, PowerCoolConfiguration)
 
     forged = dict(optimizer_component)
     forged["runtime_import"] = "malicious.module"

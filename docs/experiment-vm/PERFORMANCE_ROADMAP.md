@@ -265,9 +265,11 @@ startup orphan recovery are defined in
   descriptor RPC, descriptor-generated dashboard composer, category-separated tensor runtime,
   typed worker-composition bridge, concrete MageFlow optimizer/schedule factories, and exhaustive
   appearance/terminal expert parameter routers are implemented. Both MageFlow expert trainers and
-  the Qwen AO3 transformer continuation path now consume verified worker slots and bind composition
-  identity into resume state. Scratch RWKV, MLA/Engram transformer variants, additional component
-  families, and removal of the remaining legacy family switches remain.
+  the Qwen AO3 transformer continuation and scratch-RWKV PowerCool paths now consume verified
+  worker slots and bind composition identity into resume state. RWKV retains a pure schedule state
+  machine because its optimizer topology can change during training. MLA/Engram transformer
+  variants, additional component families, and removal of the remaining legacy family switches
+  remain.
 - Keep implementation boundaries aligned with component ownership: optimizer algorithms,
   parameter routing, LR schedules, weight-decay schedules, activations, normalization, objectives,
   precision/scaling, gradient policy, and curricula live in separate source/test modules. Shared

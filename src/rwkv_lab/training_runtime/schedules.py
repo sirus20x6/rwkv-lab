@@ -170,6 +170,18 @@ def build_registered_schedule(
 def schedule_from_resolved_component(
     component: Mapping[str, Any], optimizer: torch.optim.Optimizer
 ) -> torch.optim.lr_scheduler.LRScheduler:
+    selected, typed_configuration = schedule_configuration_from_resolved_component(
+        component
+    )
+    return build_registered_schedule(selected, optimizer, typed_configuration)
+
+
+def schedule_configuration_from_resolved_component(
+    component: Mapping[str, Any],
+) -> tuple[
+    ScheduleImplementation,
+    LinearWarmupCosineConfiguration | PowerCoolConfiguration,
+]:
     implementation, configuration = resolved_component_parts(
         component, "learning_rate_schedule"
     )
@@ -184,4 +196,4 @@ def schedule_from_resolved_component(
         if selected is ScheduleImplementation.LINEAR_WARMUP_COSINE_V1
         else PowerCoolConfiguration.from_resolved(configuration)
     )
-    return build_registered_schedule(selected, optimizer, typed_configuration)
+    return selected, typed_configuration

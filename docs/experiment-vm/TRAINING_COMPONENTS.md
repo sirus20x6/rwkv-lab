@@ -46,6 +46,9 @@ The three MageFlow training paths, RWKV AdamW path, and Qwen transformer AdamW/P
 the common tensor boundary. The MageFlow appearance/terminal expert trainers and Qwen AO3
 continuation additionally consume authority-resolved worker compositions; their composition digest
 is resume identity, and Qwen persists the registered scheduler cursor alongside optimizer state.
+Scratch RWKV consumes the same optimizer slot and the typed PowerCool configuration directly; its
+optimizer-step cursor remains the schedule state because tied-head and sparse-routing transitions
+can change parameter-group topology during the run.
 Routing aggregates aliased names,
 deduplicates tensor identities, rejects overlap and unclaimed trainable tensors, and records an
 exact group/count/rate audit in the run contract. The catalog does not claim another

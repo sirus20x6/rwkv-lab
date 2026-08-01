@@ -20,6 +20,8 @@ import json
 import math
 import os
 import time
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -39,9 +41,13 @@ from rwkv_lab.training_components import (
     AdamWConfiguration,
     OptimizerImplementation,
     PowerCoolConfiguration,
+    ScheduleImplementation,
     build_registered_optimizer,
     powercool_multiplier,
 )
+
+if TYPE_CHECKING:
+    from rwkv_lab.trainvm_adapters import WorkerTrainingComponents
 from rwkv_lab.training_speedups import (
     AsyncCPUBatchPrefetcher,
     context_batch_for_step,
@@ -474,7 +480,8 @@ def _adamw8bit(params, lr, wd, paged):
 
 
 def build_optimizer(named_params, name, lr, wd, adam_lr=0.0, muon_opts=None,
-                    u_mup_config=None, replicated_params=None):
+                    u_mup_config=None, replicated_params=None,
+                    worker_components: WorkerTrainingComponents | None = None):
     """AdamW, 8-bit AdamW (bitsandbytes), or spectral_muon (Muon on 2D weight matrices, AdamW on
     embeds/norms/1D). Shared by the LM and synthetic harnesses so the card's optimizer dropdown
     drives both. adam_lr (0 = use lr) is the fallback LR for non-matrix params under Muon — Muon
@@ -514,6 +521,8 @@ def build_optimizer(named_params, name, lr, wd, adam_lr=0.0, muon_opts=None,
                   if replicated else ordinary)
     if name in ("adamw8bit", "paged-adamw8bit"):
         return _adamw8bit(params, lr, wd, paged=(name == "paged-adamw8bit"))
+    if worker_components is not None:
+        return worker_components.optimizer(params)
     first = params[0]["params"][0] if params and isinstance(params[0], dict) else (params[0] if params else None)
     fused = first is not None and first.is_cuda     # fused AdamW = one fused CUDA kernel (CUDA-only)
     return build_registered_optimizer(
@@ -680,7 +689,62 @@ def loop_kwargs(a):
                 adaptive_halt=bool(a.loop_adaptive_halt))
 
 
-def main():
+def resolved_worker_component_contract(
+    args: argparse.Namespace,
+    powercool_configuration: PowerCoolConfiguration | None,
+    worker_components: WorkerTrainingComponents | None,
+) -> tuple[
+    PowerCoolConfiguration | None,
+    dict[str, dict[str, str]] | None,
+    str | None,
+]:
+    if worker_components is None:
+        return powercool_configuration, None, None
+    if args.optimizer != "adamw":
+        raise ValueError("RWKV worker composition currently requires AdamW")
+    if args.lr_schedule != "powercool" or powercool_configuration is None:
+        raise ValueError("RWKV worker composition currently requires PowerCool")
+    if args.u_mup_base_width:
+        raise ValueError("RWKV worker composition does not yet encode u-muP routing")
+    optimizer_configuration = dict(
+        worker_components.configuration("optimizer", category="optimizer")
+    )
+    expected_optimizer = {
+        "learning_rate": args.lr,
+        "beta1": 0.9,
+        "beta2": 0.95,
+        "epsilon": 1.0e-8,
+        "weight_decay": args.weight_decay,
+    }
+    if any(
+        optimizer_configuration.get(name) != value
+        for name, value in expected_optimizer.items()
+    ):
+        raise ValueError(
+            "authority optimizer composition disagrees with RWKV configuration"
+        )
+    implementation, resolved_schedule = (
+        worker_components.learning_rate_configuration()
+    )
+    if (
+        implementation is not ScheduleImplementation.POWERCOOL_V1
+        or resolved_schedule != powercool_configuration
+    ):
+        raise ValueError(
+            "authority LR-schedule composition disagrees with RWKV configuration"
+        )
+    return (
+        resolved_schedule,
+        dict(worker_components.evidence()),
+        worker_components.composition.composition_digest,
+    )
+
+
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    worker_components: WorkerTrainingComponents | None = None,
+):
     enable_fast_matmul()
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default=""); ap.add_argument("--out", default="runs/rwkv_scratch")
@@ -823,7 +887,7 @@ def main():
                     help="tie embedding/head until this fraction of training; 0 disables")
     ap.add_argument("--lmtp-cooldown-fraction", type=float, default=0.0,
                     help="linearly decay LMTP weight from this fraction to zero at the horizon")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     if args.loop_iter_readout:
         ap.error("--loop-iter-readout is only supported in convert_train.py "
                  "(this harness implements no per-iteration readout loss)")
@@ -890,6 +954,14 @@ def main():
             )
         except (TypeError, ValueError) as error:
             ap.error(f"invalid PowerCool schedule: {error}")
+    try:
+        powercool_schedule, component_evidence, component_digest = (
+            resolved_worker_component_contract(
+                args, powercool_schedule, worker_components
+            )
+        )
+    except ValueError as error:
+        ap.error(str(error))
     if not args.data and not args.ctx_buckets:
         ap.error("one of --data or --ctx-buckets is required")
     if args.ctx_buckets:                       # mixed-context mode: fixed-width features rejected
@@ -1189,6 +1261,8 @@ def main():
                "byte_aware": bool(args.byte_aware_vocab) and not args.init_g1g,
                "nvfp4": bool(args.nvfp4),
                "mixed_ctx": bool(args.ctx_buckets),
+               "training_components": component_evidence,
+               "component_composition_digest": component_digest,
                "params_m": round(nparam / 1e6, 2)}, open(os.path.join(args.out, "loop_rw.json"), "w"))
 
     heads = None
@@ -1423,7 +1497,8 @@ def main():
     named = list(model.named_parameters()) + (list(heads.named_parameters()) if heads else [])
     opt = build_optimizer(named, args.optimizer, args.lr, args.weight_decay,
                           muon_opts=muon_opts_from(args), u_mup_config=u_mup_cfg,
-                          replicated_params=sparse_ignored_params)
+                          replicated_params=sparse_ignored_params,
+                          worker_components=worker_components)
     print(f"optimizer={args.optimizer} lr={args.lr} wd={args.weight_decay}", flush=True)
     step = 0; resume_recall_rng = None; did_resume = False
     if args.resume and os.path.exists(args.resume):
@@ -1434,6 +1509,10 @@ def main():
         else:
             ck = resume_blob
             model.load_state_dict(ck["model"]); opt.load_state_dict(ck["opt"]); step = ck.get("step", 0)
+        if worker_components is not None and ck.get(
+            "component_composition_digest"
+        ) != component_digest:
+            raise ValueError("resume training-component composition mismatch")
         if heads is not None and ck.get("heads") is not None:
             heads.load_state_dict(ck["heads"])
         if ema is not None:                  # saved EMA if present, else re-seed from loaded weights
@@ -1790,6 +1869,8 @@ def main():
                      "recall_numpy_rng": (recall_rng.bit_generator.state
                                            if lmb is not None and not use_gpu_data else None),
                      "torch_rng": torch.get_rng_state()}
+        if component_digest is not None:
+            rng_extra["component_composition_digest"] = component_digest
         if torch.cuda.is_available():
             rng_extra["cuda_rng"] = torch.cuda.get_rng_state(dev).cpu()
         if args.distributed == "fsdp2":

@@ -29,6 +29,7 @@ from rwkv_lab.training_runtime.schedules import (
     build_registered_schedule,
     linear_warmup_cosine_multiplier,
     powercool_multiplier,
+    schedule_configuration_from_resolved_component,
     schedule_from_resolved_component,
 )
 
@@ -48,6 +49,7 @@ __all__ = [
     "optimizer_from_resolved_component",
     "parameter_routing_from_resolved_component",
     "powercool_multiplier",
+    "schedule_configuration_from_resolved_component",
     "schedule_from_resolved_component",
     "supported_implementation_ids",
     "supported_worker_capabilities",
