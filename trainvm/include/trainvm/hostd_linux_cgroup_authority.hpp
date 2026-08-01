@@ -73,6 +73,13 @@ class LinuxCgroupAuthority final {
 
   [[nodiscard]] LinuxAllocationCgroup open_or_create(
       const std::string& allocation_id, const std::string& launch_id) const;
+  // Opens only the deterministic existing directory and requires its pinned
+  // device/inode/path to match the durable spawn receipt. Unlike launch-time
+  // open_or_create(), a nonempty cgroup is expected while a recovered worker
+  // is still live.
+  [[nodiscard]] LinuxAllocationCgroup open_existing_for_recovery(
+      const std::string& allocation_id, const std::string& launch_id,
+      const LinuxAllocationCgroupIdentity& expected) const;
 
  private:
   struct Implementation;

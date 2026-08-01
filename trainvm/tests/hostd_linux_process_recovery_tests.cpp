@@ -2,6 +2,7 @@
 
 #include <fcntl.h>
 #include <openssl/evp.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -128,6 +129,7 @@ void exact_current_process_is_pinned_without_mutation() {
   require(recovered.disposition ==
                   LinuxProcessRecoveryDisposition::exact_live_process &&
               recovered.process && recovered.process->alive() &&
+              recovered.process->state() == LinuxPidfdState::live &&
               recovered.process->identity() == expected,
           "probe returns one pidfd-pinned exact live process");
 
@@ -221,6 +223,50 @@ void recovery_set_rejects_duplicate_durable_launches() {
   require(rejected, "duplicate launch identities fail closed before probing");
 }
 
+void exact_recovered_pidfd_can_terminate_without_numeric_pid_fallback() {
+  const pid_t child = ::fork();
+  if (child < 0) throw std::runtime_error("termination test fork failed");
+  if (child == 0) {
+    while (true) ::pause();
+  }
+  struct ChildCleanup final {
+    pid_t pid;
+    bool reaped{};
+    ~ChildCleanup() {
+      if (!reaped) {
+        (void)::kill(pid, SIGKILL);
+        (void)::waitpid(pid, nullptr, 0);
+      }
+    }
+  } cleanup{.pid = child, .reaped = false};
+  LinuxProcessRecoveryProbe probe;
+  auto recovered = probe.observe(current_identity(child));
+  require(recovered.disposition ==
+                  LinuxProcessRecoveryDisposition::exact_live_process &&
+              recovered.process &&
+              !recovered.process->terminal_observation_digest(),
+          "termination fixture recovers the exact live child");
+  const auto requested = recovered.process->request_termination();
+  require(requested.disposition ==
+              LinuxRecoveredTerminationDisposition::delivered,
+          "termination is delivered through the retained pidfd");
+  int status = 0;
+  require(::waitpid(child, &status, 0) == child && WIFSIGNALED(status) &&
+              WTERMSIG(status) == SIGKILL,
+          "exact recovered child terminates by SIGKILL");
+  cleanup.reaped = true;
+  const auto terminal_digest =
+      recovered.process->terminal_observation_digest();
+  require(recovered.process->state() == LinuxPidfdState::terminal &&
+              terminal_digest && terminal_digest->starts_with("sha256:") &&
+              terminal_digest->size() == 71U &&
+              recovered.process->terminal_observation_digest() ==
+                  terminal_digest &&
+              recovered.process->request_termination().disposition ==
+                  LinuxRecoveredTerminationDisposition::already_terminal,
+          "terminal pidfd yields stable evidence and is never signalled twice");
+}
+
 }  // namespace
 
 int main() {
@@ -230,6 +276,7 @@ int main() {
     parser_seams_reject_ambiguous_proc_values();
     recovery_set_pins_once_and_transfers_exact_authority();
     recovery_set_rejects_duplicate_durable_launches();
+    exact_recovered_pidfd_can_terminate_without_numeric_pid_fallback();
     std::cout << "hostd Linux process recovery tests passed\n";
     return 0;
   } catch (const std::exception& error) {

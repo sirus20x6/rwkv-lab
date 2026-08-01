@@ -129,8 +129,8 @@ Implemented now:
   double-samples proc starttime and unified cgroup membership around executable hashing, pins the
   recorded cgroup-v2 inode, and returns separate exact-live, already-gone, identity-mismatch, or
   observation-failed dispositions without signalling the process; the startup auditor runs this
-  probe for every unclosed spawn, retains exact pidfds through its final ledger observation, and
-  records bounded disposition counts in its blocking evidence;
+  probe for every unclosed spawn, freezes a one-shot recovery set, retains exact pidfds for explicit
+  one-time adoption, and records bounded disposition counts in its blocking evidence;
 - an additive host-ledger v3 admission epoch that atomically finalizes an exact current audit and
   occupancy, keeps policy-enabled grants sealed beforehand, binds every later request to the active
   epoch, preserves release-only cleanup while startup is blocked, and exposes a read-only exact
@@ -144,6 +144,10 @@ Implemented now:
   twice-empty allocation-cgroup evidence, and a complete host-side accelerator-context audit;
   spawned allocations are structurally unreleasable until this receipt exists, while v4 histories
   migrate additively only when they contain no unsafe released/nonterminal process;
+- an additive host-ledger v6 recovery-terminal receipt for a restarted daemon that cannot claim
+  parent-only wait status; exact pidfd-terminal, PID-absent, and identity-superseded observations
+  have a separate typed request/receipt and immutable projection, remain mutually exclusive with v5
+  child exits, and require the same empty cgroup and accelerator-context closure before release;
 - a process-free, single-use journal-fence challenge verifier binding socket peer process instance,
   host/boot/broker, pinned-journal claims, controller generation, logical fence, nonce, and bounded
   boottime lifetime, with per-peer quotas and no bearer-capability interpretation of decoded data;
@@ -169,7 +173,9 @@ Implemented now:
   membership are double-attested before the v4 spawn receipt, while every error closes the gate and
   kills/reaps only through the pidfd; a hostd-owned supervisor retains that stopped identity across
   request connections, replays exact prepare/commit/finalize commands, releases the pre-exec gate
-  once, and keeps the launch until terminal v5 evidence is durable;
+  once, and keeps the launch until terminal v5 evidence is durable; recovery primitives reopen only
+  the exact durable cgroup inode, transfer a pinned pidfd once, signal only through that pidfd, and
+  produce v6 terminal evidence without falling back to a numeric PID;
 - a read-only Linux NVIDIA inventory collector that pins procfs/sysfs/devfs roots, dynamically loads
   and grades NVML evidence, double-samples bounded device/MIG/display/context state, retains process
   instance observations, proves device-node mappings, and makes incomplete, torn, stale, or
@@ -208,9 +214,10 @@ Current end-to-end transport tests use the visibly cooperative enforcement grade
 service-cgroup authority and strict namespace/socket-pidfd primitives are implemented, but
 production mutation admission remains disabled until the unified daemon bootstrap wires their externally
 guarded policies together; the service-side optional connection and admission path are now present,
-but terminal process/release reconciliation is not complete. The configured startup auditor now
-fails closed on retained fences. The remaining process-ownership work is the guarded daemon entry
-point, completing daemon-restart recovery/adoption of retained launches, and qualifying the end-to-end
+but automatic terminal process/release reconciliation is not complete. The configured startup
+auditor now fails closed on retained fences, retains exact recovery authority, and the ledger can
+truthfully close a restarted process through v6 evidence. The remaining process-ownership work is
+the guarded daemon entry point, wiring daemon-restart recovery policy to those primitives, and qualifying the end-to-end
 crash windows before real trainer ownership is enabled. The transport and stopped-launcher layers
 now carry and attest sealed Python code and per-attempt bootstrap descriptors, install them at the
 fixed exec-surviving fd 3/fd 4 ABI, and bind both into durable launch evidence without exposing

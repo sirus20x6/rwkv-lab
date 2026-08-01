@@ -19,6 +19,25 @@ enum class LinuxProcessRecoveryDisposition {
   observation_failed,
 };
 
+enum class LinuxPidfdState {
+  live,
+  terminal,
+  observation_failed,
+};
+
+enum class LinuxRecoveredTerminationDisposition {
+  delivered,
+  already_terminal,
+  observation_failed,
+};
+
+struct LinuxRecoveredTerminationResult final {
+  LinuxRecoveredTerminationDisposition disposition{};
+  std::string detail;
+
+  bool operator==(const LinuxRecoveredTerminationResult&) const = default;
+};
+
 class LinuxRecoveredProcess final {
  public:
   LinuxRecoveredProcess(LinuxRecoveredProcess&& other) noexcept;
@@ -29,7 +48,13 @@ class LinuxRecoveredProcess final {
   LinuxRecoveredProcess& operator=(const LinuxRecoveredProcess&) = delete;
 
   [[nodiscard]] const HostProcessSpawnRequest& identity() const noexcept;
+  [[nodiscard]] LinuxPidfdState state() const noexcept;
   [[nodiscard]] bool alive() const noexcept;
+  [[nodiscard]] std::optional<std::string> terminal_observation_digest()
+      const;
+  // Sends SIGKILL only through the already-pinned exact pidfd. It never falls
+  // back to kill(numeric_pid), so PID reuse cannot redirect the signal.
+  [[nodiscard]] LinuxRecoveredTerminationResult request_termination() noexcept;
 
  private:
   friend class LinuxProcessRecoveryProbe;

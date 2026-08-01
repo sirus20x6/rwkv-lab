@@ -5,6 +5,7 @@
 #include <linux/openat2.h>
 #include <openssl/evp.h>
 #include <poll.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
 #include <sys/syscall.h>
@@ -50,11 +51,18 @@ class Descriptor final {
   int value_;
 };
 
-bool pidfd_alive(int descriptor) noexcept {
+LinuxPidfdState pidfd_state(int descriptor) noexcept {
   pollfd item{.fd = descriptor, .events = POLLIN, .revents = 0};
-  const int status = ::poll(&item, 1U, 0);
-  return status == 0 ||
-         (status > 0 && (item.revents & (POLLIN | POLLHUP | POLLERR)) == 0);
+  int status = 0;
+  do {
+    status = ::poll(&item, 1U, 0);
+  } while (status < 0 && errno == EINTR);
+  if (status < 0 || (item.revents & (POLLERR | POLLNVAL)) != 0 ||
+      ((item.revents & POLLHUP) != 0 && (item.revents & POLLIN) == 0))
+    return LinuxPidfdState::observation_failed;
+  if (status > 0 && (item.revents & POLLIN) != 0)
+    return LinuxPidfdState::terminal;
+  return LinuxPidfdState::live;
 }
 
 std::optional<std::uint64_t> unsigned_value(std::string_view value) {
@@ -165,6 +173,30 @@ std::string executable_digest(int process) {
   return result;
 }
 
+std::string sha256_material(std::string_view material) {
+  std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> context(
+      EVP_MD_CTX_new(), EVP_MD_CTX_free);
+  if (!context || EVP_DigestInit_ex(context.get(), EVP_sha256(), nullptr) != 1 ||
+      EVP_DigestUpdate(context.get(), material.data(), material.size()) != 1) {
+    throw HostLedgerError("process recovery evidence hash failed");
+  }
+  std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+  unsigned int digest_size = 0U;
+  if (EVP_DigestFinal_ex(context.get(), digest.data(), &digest_size) != 1 ||
+      digest_size != 32U) {
+    throw HostLedgerError("process recovery evidence hash final failed");
+  }
+  constexpr std::string_view digits = "0123456789abcdef";
+  std::string result = "sha256:";
+  result.reserve(71U);
+  for (std::size_t index = 0U; index < digest_size; ++index) {
+    const unsigned char byte = digest[index];
+    result.push_back(digits[byte >> 4U]);
+    result.push_back(digits[byte & 0x0fU]);
+  }
+  return result;
+}
+
 bool cgroup_identity_matches(const HostProcessSpawnRequest& expected) {
   Descriptor root(::open("/sys/fs/cgroup",
                          O_PATH | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
@@ -228,7 +260,50 @@ const HostProcessSpawnRequest& LinuxRecoveredProcess::identity() const noexcept 
 }
 
 bool LinuxRecoveredProcess::alive() const noexcept {
-  return pidfd_ >= 0 && pidfd_alive(pidfd_);
+  return state() == LinuxPidfdState::live;
+}
+
+std::optional<std::string>
+LinuxRecoveredProcess::terminal_observation_digest() const {
+  if (state() != LinuxPidfdState::terminal) return std::nullopt;
+  std::string material("trainvm.linux-pidfd-terminal-observation/v1");
+  material.push_back('\0');
+  material.append(host_process_spawn_request_json(identity_).dump());
+  return sha256_material(material);
+}
+
+LinuxPidfdState LinuxRecoveredProcess::state() const noexcept {
+  if (pidfd_ < 0) return LinuxPidfdState::observation_failed;
+  return pidfd_state(pidfd_);
+}
+
+LinuxRecoveredTerminationResult
+LinuxRecoveredProcess::request_termination() noexcept {
+  const LinuxPidfdState before = state();
+  if (before == LinuxPidfdState::terminal) {
+    return {LinuxRecoveredTerminationDisposition::already_terminal,
+            "recovered process was already terminal"};
+  }
+  if (before != LinuxPidfdState::live) {
+    return {LinuxRecoveredTerminationDisposition::observation_failed,
+            "recovered pidfd state could not be observed"};
+  }
+#ifndef SYS_pidfd_send_signal
+  return {LinuxRecoveredTerminationDisposition::observation_failed,
+          "pidfd_send_signal is unavailable"};
+#else
+  errno = 0;
+  if (::syscall(SYS_pidfd_send_signal, pidfd_, SIGKILL, nullptr, 0U) == 0) {
+    return {LinuxRecoveredTerminationDisposition::delivered,
+            "SIGKILL delivered through exact recovered pidfd"};
+  }
+  if (errno == ESRCH) {
+    return {LinuxRecoveredTerminationDisposition::already_terminal,
+            "recovered process became terminal before signal delivery"};
+  }
+  return {LinuxRecoveredTerminationDisposition::observation_failed,
+          "pidfd_send_signal failed"};
+#endif
 }
 
 LinuxProcessRecoveryResult LinuxProcessRecoveryProbe::observe(
@@ -249,9 +324,13 @@ LinuxProcessRecoveryResult LinuxProcessRecoveryProbe::observe(
     return result(LinuxProcessRecoveryDisposition::observation_failed,
                   "pidfd_open failed");
   }
-  if (!pidfd_alive(pidfd.get()))
+  const LinuxPidfdState initial_state = pidfd_state(pidfd.get());
+  if (initial_state == LinuxPidfdState::terminal)
     return result(LinuxProcessRecoveryDisposition::already_gone,
                   "recorded process is already terminal");
+  if (initial_state == LinuxPidfdState::observation_failed)
+    return result(LinuxProcessRecoveryDisposition::observation_failed,
+                  "recorded pidfd state could not be observed");
   const std::string proc_path = "/proc/" + std::to_string(expected.host_pid);
   Descriptor process(
       ::open(proc_path.c_str(), O_PATH | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
@@ -265,9 +344,13 @@ LinuxProcessRecoveryResult LinuxProcessRecoveryProbe::observe(
     const bool cgroup_identity = cgroup_identity_matches(expected);
     const std::uint64_t start_after = parse_starttime(read_file(process.get(), "stat"));
     const std::string cgroup_after = parse_cgroup(read_file(process.get(), "cgroup"));
-    if (!pidfd_alive(pidfd.get()))
+    const LinuxPidfdState final_state = pidfd_state(pidfd.get());
+    if (final_state == LinuxPidfdState::terminal)
       return result(LinuxProcessRecoveryDisposition::already_gone,
                     "recorded process exited during observation");
+    if (final_state == LinuxPidfdState::observation_failed)
+      return result(LinuxProcessRecoveryDisposition::observation_failed,
+                    "recorded pidfd state failed during observation");
     if (start_before != expected.process_starttime_ticks ||
         start_after != expected.process_starttime_ticks ||
         cgroup_before != expected.cgroup_path ||

@@ -734,13 +734,20 @@ connections, makes prepare/commit/finalize exact-replay safe within one daemon
 lifetime, and releases the private pre-exec gate only after the caller has the
 durable spawn receipt. The additive v5 terminal receipt is implemented as well: pidfd wait status,
 the exact spawn identity, twice-empty cgroup evidence, and a complete trusted
-accelerator-context audit must all agree before commit. Resource release now
-fails closed for every spawned allocation without that receipt, and the empty
-cgroup is removed only afterward. CPU/I/O policy
-evidence, device BPF, privileged end-to-end qualification, and durable adoption
-after a hostd restart remain in this gate. A daemon crash is therefore not
-claimed as an in-memory supervisor replay boundary; startup audit must
-reconcile its durable intent/spawn records.
+accelerator-context audit must all agree before commit. The v6 recovery-terminal
+receipt is a separate contract for a restarted daemon that is no longer the
+worker's parent: it records exact pidfd-terminal, PID-absent, or
+identity-superseded evidence and never invents a wait code/status. It is
+mutually exclusive with v5 evidence and requires the same empty cgroup and
+accelerator-context audit before release. The startup auditor now freezes a
+one-shot recovery set and retains exact pidfds; recovery can reopen only the
+durable cgroup inode, transfer a pidfd once, signal only through that handle,
+and commit v6 evidence after terminal observation. Resource release fails
+closed for every spawned allocation without either receipt, and the empty
+cgroup is removed only afterward. CPU/I/O policy evidence, device BPF,
+privileged end-to-end qualification, and daemon bootstrap/policy wiring remain
+in this gate. A daemon crash is not claimed as ordinary in-memory supervisor
+replay; startup policy must consume the durable recovery records.
 
 Gate:
 

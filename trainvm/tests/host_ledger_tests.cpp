@@ -174,6 +174,28 @@ HostProcessExitRequest exit_request(const HostProcessSpawnReceipt& spawn,
   });
 }
 
+HostProcessRecoveryExitRequest recovery_exit_request(
+    const HostProcessSpawnReceipt& spawn, std::string request_id) {
+  return seal_host_process_recovery_exit_request({
+      .api_version =
+          std::string(kHostProcessRecoveryExitRequestApiVersion),
+      .recovery_exit_request_id = std::move(request_id),
+      .launch_id = spawn.request.launch_id,
+      .spawn_receipt_digest = spawn.receipt_digest,
+      .host_pid = spawn.request.host_pid,
+      .process_starttime_ticks = spawn.request.process_starttime_ticks,
+      .observation = HostProcessRecoveryExitObservation::pidfd_terminal,
+      .observation_digest = test_digest('5'),
+      .cgroup_path = spawn.request.cgroup_path,
+      .cgroup_device = spawn.request.cgroup_device,
+      .cgroup_inode = spawn.request.cgroup_inode,
+      .cgroup_empty = true,
+      .accelerator_contexts_empty = true,
+      .context_audit_digest = test_digest('6'),
+      .canonical_request_digest = {},
+  });
+}
+
 std::vector<std::filesystem::path>& test_directories() {
   static std::vector<std::filesystem::path> value;
   return value;
@@ -247,6 +269,24 @@ void raw_execute(const std::filesystem::path& path, const std::string& sql) {
   sqlite3_free(error);
   sqlite3_close(database);
   require(status == SQLITE_OK, "raw tamper SQL succeeds: " + detail);
+}
+
+std::string raw_scalar(const std::filesystem::path& path,
+                       const std::string& sql) {
+  sqlite3* database = nullptr;
+  require(sqlite3_open(path.c_str(), &database) == SQLITE_OK,
+          "raw scalar connection opens");
+  sqlite3_stmt* statement = nullptr;
+  require(sqlite3_prepare_v2(database, sql.c_str(), -1, &statement, nullptr) ==
+              SQLITE_OK,
+          "raw scalar query prepares");
+  require(sqlite3_step(statement) == SQLITE_ROW, "raw scalar query has a row");
+  const auto* bytes = sqlite3_column_text(statement, 0);
+  const std::string result =
+      bytes == nullptr ? std::string{} : reinterpret_cast<const char*>(bytes);
+  sqlite3_finalize(statement);
+  sqlite3_close(database);
+  return result;
 }
 
 class OneShotFault final : public IHostLedgerFaultInjector {
@@ -603,6 +643,92 @@ void process_authority_is_durable_and_replay_safe() {
         "nonempty cgroup can never produce terminal exit authority");
   }
 
+  const auto recovery_terminal_path =
+      test_path("process-recovery-terminal-basic");
+  {
+    SQLiteHostLedger ledger(authority_for(recovery_terminal_path), observed);
+    const auto bundle =
+        ledger.request_bundle(request("recovery-terminal-grant"), {10, 20});
+    const auto intent = ledger.commit_process_launch_intent(
+        launch_request(*bundle.grant, "launch-recovery-terminal"), {30, 40});
+    const auto spawn = ledger.commit_process_spawn(
+        spawn_request(intent.intent, 4343), {50, 60});
+    const auto terminal =
+        recovery_exit_request(spawn.receipt, "recovery-exit-basic");
+    require(host_process_recovery_exit_request_from_json(
+                host_process_recovery_exit_request_json(terminal)) == terminal,
+            "recovery terminal evidence has a strict canonical codec");
+    const auto exited =
+        ledger.commit_process_recovery_exit(terminal, {70, 80});
+    const auto replayed =
+        ledger.commit_process_recovery_exit(terminal, {700, 800});
+    require(!exited.replayed && replayed.replayed &&
+                exited.receipt == replayed.receipt && ledger.verify() &&
+                ledger.active_process_recovery_records().empty(),
+            "recovery terminal receipt commits once and closes recovery view");
+    require(host_process_recovery_exit_receipt_from_json(
+                host_process_recovery_exit_receipt_json(exited.receipt)) ==
+                exited.receipt,
+            "recovery terminal receipt has a strict canonical codec");
+    require_throws<HostLedgerConflict>(
+        [&] {
+          (void)ledger.commit_process_exit(
+              exit_request(spawn.receipt, "ordinary-after-recovery"),
+              {81, 82});
+        },
+        "child-wait exit cannot coexist with a recovery exit");
+    require(!ledger.release_bundle(
+                        release_request(*bundle.grant,
+                                        "release-after-recovery-exit"),
+                        {90, 100})
+                 .replayed &&
+                ledger.verify(),
+            "recovery terminal authority permits exact bundle release");
+    auto incomplete = terminal;
+    incomplete.cgroup_empty = false;
+    require_throws<HostLedgerError>(
+        [&] {
+          (void)seal_host_process_recovery_exit_request(
+              std::move(incomplete));
+        },
+        "recovery exit cannot claim a nonempty allocation cgroup");
+  }
+
+  const auto multi_spawn_path = test_path("process-multiple-spawn-closure");
+  {
+    SQLiteHostLedger ledger(authority_for(multi_spawn_path), observed);
+    const auto bundle =
+        ledger.request_bundle(request("multi-spawn-grant"), {10, 20});
+    const auto first_intent = ledger.commit_process_launch_intent(
+        launch_request(*bundle.grant, "multi-spawn-first"), {30, 40});
+    const auto first_spawn = ledger.commit_process_spawn(
+        spawn_request(first_intent.intent, 5041), {50, 60});
+    (void)ledger.commit_process_exit(
+        exit_request(first_spawn.receipt, "multi-spawn-first-exit"), {70, 80});
+    const auto second_intent = ledger.commit_process_launch_intent(
+        launch_request(*bundle.grant, "multi-spawn-second"), {81, 82});
+    const auto second_spawn = ledger.commit_process_spawn(
+        spawn_request(second_intent.intent, 5042), {83, 84});
+    require_throws<HostLedgerConflict>(
+        [&] {
+          (void)ledger.release_bundle(
+              release_request(*bundle.grant, "multi-spawn-early-release"),
+              {90, 91});
+        },
+        "one terminal launch cannot hide another unclosed spawn");
+    (void)ledger.commit_process_recovery_exit(
+        recovery_exit_request(second_spawn.receipt,
+                              "multi-spawn-second-exit"),
+        {92, 93});
+    require(!ledger.release_bundle(
+                        release_request(*bundle.grant,
+                                        "multi-spawn-complete-release"),
+                        {94, 95})
+                 .replayed &&
+                ledger.verify(),
+            "every spawned launch must close before allocation release");
+  }
+
   const auto rollback_path = test_path("process-intent-rollback");
   OneShotFault intent_projection_fault(
       HostLedgerFaultPoint::after_process_intent_projection);
@@ -736,6 +862,59 @@ void process_authority_is_durable_and_replay_safe() {
             "lost exit reply resolves to exact durable replay");
   }
 
+  const auto recovery_exit_rollback_path =
+      test_path("process-recovery-exit-rollback");
+  OneShotFault recovery_exit_projection_fault(
+      HostLedgerFaultPoint::after_process_recovery_exit_projection);
+  {
+    SQLiteHostLedger ledger(authority_for(recovery_exit_rollback_path),
+                            observed, &recovery_exit_projection_fault);
+    const auto bundle = ledger.request_bundle(
+        request("process-recovery-exit-rollback-grant"), {10, 20});
+    const auto intent = ledger.commit_process_launch_intent(
+        launch_request(*bundle.grant, "launch-recovery-exit-rollback"),
+        {30, 40});
+    const auto spawn = ledger.commit_process_spawn(
+        spawn_request(intent.intent, 4848), {50, 60});
+    const auto terminal =
+        recovery_exit_request(spawn.receipt, "recovery-exit-rollback");
+    require_throws<HostLedgerError>(
+        [&] {
+          (void)ledger.commit_process_recovery_exit(terminal, {70, 80});
+        },
+        "pre-commit recovery exit fault rolls back record and projection");
+    const auto retry =
+        ledger.commit_process_recovery_exit(terminal, {71, 81});
+    require(!retry.replayed && ledger.verify(),
+            "rolled-back recovery exit retries as a fresh mutation");
+  }
+
+  const auto lost_recovery_exit_path =
+      test_path("process-recovery-exit-lost-reply");
+  OneShotFault recovery_exit_commit_fault(
+      HostLedgerFaultPoint::after_process_recovery_exit_commit);
+  {
+    SQLiteHostLedger ledger(authority_for(lost_recovery_exit_path), observed,
+                            &recovery_exit_commit_fault);
+    const auto bundle = ledger.request_bundle(
+        request("process-lost-recovery-exit-grant"), {10, 20});
+    const auto intent = ledger.commit_process_launch_intent(
+        launch_request(*bundle.grant, "launch-lost-recovery-exit"), {30, 40});
+    const auto spawn = ledger.commit_process_spawn(
+        spawn_request(intent.intent, 4949), {50, 60});
+    const auto terminal =
+        recovery_exit_request(spawn.receipt, "recovery-exit-lost-reply");
+    require_throws<HostLedgerError>(
+        [&] {
+          (void)ledger.commit_process_recovery_exit(terminal, {70, 80});
+        },
+        "post-commit recovery exit fault simulates a lost reply");
+    const auto retry =
+        ledger.commit_process_recovery_exit(terminal, {71, 81});
+    require(retry.replayed && ledger.verify(),
+            "lost recovery exit reply resolves to exact durable replay");
+  }
+
   const auto tamper_path = test_path("process-chain-tamper");
   {
     SQLiteHostLedger ledger(authority_for(tamper_path), observed);
@@ -779,18 +958,63 @@ void process_authority_is_durable_and_replay_safe() {
   const auto v4_path = test_path("process-exit-v4-migration");
   {
     SQLiteHostLedger ledger(authority_for(v4_path), observed);
-    require(ledger.verify(), "v4 migration fixture begins as valid v5");
+    require(ledger.verify(), "v4 migration fixture begins as valid v6");
   }
   raw_execute(v4_path,
+              "DROP TRIGGER process_recovery_exits_no_update; "
+              "DROP TRIGGER process_recovery_exits_no_delete; "
+              "DROP TABLE process_recovery_exits; "
               "DROP TRIGGER process_exits_no_update; "
               "DROP TRIGGER process_exits_no_delete; "
               "DROP TABLE process_exits; "
               "DELETE FROM ledger_schema_extensions "
-              "WHERE feature='process_exit'; PRAGMA user_version=4;");
+              "WHERE feature IN ('process_exit','process_recovery_exit'); "
+              "PRAGMA user_version=4;");
   {
     SQLiteHostLedger migrated(authority_for(v4_path), observed);
     require(migrated.verify(),
-            "empty v4 process authority migrates additively to v5");
+            "empty v4 process authority migrates additively through v6");
+  }
+
+  const auto v5_path = test_path("process-recovery-exit-v5-migration");
+  std::string v5_process_bytes;
+  {
+    SQLiteHostLedger ledger(authority_for(v5_path), observed);
+    const auto bundle =
+        ledger.request_bundle(request("v5-migration-grant"), {10, 20});
+    const auto intent = ledger.commit_process_launch_intent(
+        launch_request(*bundle.grant, "v5-migration-launch"), {30, 40});
+    const auto spawn = ledger.commit_process_spawn(
+        spawn_request(intent.intent, 5151), {50, 60});
+    (void)ledger.commit_process_exit(
+        exit_request(spawn.receipt, "v5-migration-exit"), {70, 80});
+    require(!ledger.release_bundle(
+                        release_request(*bundle.grant,
+                                        "v5-migration-release"),
+                        {90, 100})
+                 .replayed,
+            "v5 migration fixture has a released terminal process");
+  }
+  v5_process_bytes = raw_scalar(
+      v5_path,
+      "SELECT group_concat(canonical_json, char(10)) FROM process_records "
+      "ORDER BY process_sequence");
+  raw_execute(v5_path,
+              "DROP TRIGGER process_recovery_exits_no_update; "
+              "DROP TRIGGER process_recovery_exits_no_delete; "
+              "DROP TABLE process_recovery_exits; "
+              "DELETE FROM ledger_schema_extensions "
+              "WHERE feature='process_recovery_exit'; PRAGMA user_version=5;");
+  {
+    SQLiteHostLedger migrated(authority_for(v5_path), observed);
+    require(migrated.verify() &&
+                raw_scalar(v5_path, "PRAGMA user_version") == "6" &&
+                raw_scalar(
+                    v5_path,
+                    "SELECT group_concat(canonical_json, char(10)) FROM "
+                    "process_records ORDER BY process_sequence") ==
+                    v5_process_bytes,
+            "v5 terminal history migrates to v6 without changing chain bytes");
   }
 }
 

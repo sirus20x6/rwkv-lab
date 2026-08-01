@@ -275,6 +275,38 @@ LinuxAllocationCgroup LinuxCgroupAuthority::open_or_create(
   }
 }
 
+LinuxAllocationCgroup LinuxCgroupAuthority::open_existing_for_recovery(
+    const std::string& allocation_id, const std::string& launch_id,
+    const LinuxAllocationCgroupIdentity& expected) const {
+  implementation_->reattest();
+  const std::string name = cgroup_name(allocation_id, launch_id);
+  int descriptor = -1;
+  try {
+    descriptor = openat2_directory(
+        implementation_->root, name.c_str(),
+        RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS |
+            RESOLVE_NO_XDEV);
+    const std::string unified_path =
+        implementation_->config.root_unified_path == "/"
+            ? "/" + name
+            : implementation_->config.root_unified_path + "/" + name;
+    auto identity = identity_of(
+        descriptor, unified_path,
+        implementation_->config.expected_owner_uid,
+        implementation_->config.expected_owner_gid);
+    if (identity != expected) {
+      reject("recovery cgroup identity differs from durable spawn evidence");
+    }
+    const int parent = ::fcntl(implementation_->root, F_DUPFD_CLOEXEC, 3);
+    if (parent < 0) reject(system_error("could not retain cgroup parent"));
+    return LinuxAllocationCgroup(std::move(identity), descriptor, parent, name,
+                                 false);
+  } catch (...) {
+    if (descriptor >= 0) (void)::close(descriptor);
+    throw;
+  }
+}
+
 namespace hostd_linux_cgroup_authority_test_seam {
 
 std::string allocation_cgroup_name(const std::string& allocation_id,

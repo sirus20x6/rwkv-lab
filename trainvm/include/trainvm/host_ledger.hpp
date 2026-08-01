@@ -36,6 +36,10 @@ inline constexpr std::string_view kHostProcessExitRequestApiVersion =
     "trainvm.host-process-exit-request/v1";
 inline constexpr std::string_view kHostProcessExitReceiptApiVersion =
     "trainvm.host-process-exit-receipt/v1";
+inline constexpr std::string_view kHostProcessRecoveryExitRequestApiVersion =
+    "trainvm.host-process-recovery-exit-request/v1";
+inline constexpr std::string_view kHostProcessRecoveryExitReceiptApiVersion =
+    "trainvm.host-process-recovery-exit-receipt/v1";
 
 struct HostLedgerTime final {
   std::int64_t boottime_ns{};
@@ -262,6 +266,55 @@ struct HostProcessExitResult final {
   bool operator==(const HostProcessExitResult&) const = default;
 };
 
+// Terminal observations available to a restarted daemon that is no longer the
+// worker's parent. None of these claims a waitpid/waitid status.
+enum class HostProcessRecoveryExitObservation {
+  pidfd_terminal,
+  pid_absent,
+  identity_superseded,
+};
+
+struct HostProcessRecoveryExitRequest final {
+  std::string api_version;
+  std::string recovery_exit_request_id;
+  std::string launch_id;
+  std::string spawn_receipt_digest;
+  std::int64_t host_pid{};
+  std::uint64_t process_starttime_ticks{};
+  HostProcessRecoveryExitObservation observation{};
+  std::string observation_digest;
+  std::string cgroup_path;
+  std::uint64_t cgroup_device{};
+  std::uint64_t cgroup_inode{};
+  bool cgroup_empty{};
+  bool accelerator_contexts_empty{};
+  std::string context_audit_digest;
+  std::string canonical_request_digest;
+
+  bool operator==(const HostProcessRecoveryExitRequest&) const = default;
+};
+
+struct HostProcessRecoveryExitReceipt final {
+  std::string api_version;
+  HostProcessRecoveryExitRequest request;
+  std::string host_id;
+  std::string boot_id;
+  std::string broker_epoch;
+  std::int64_t observed_boottime_ns{};
+  std::int64_t observed_wall_time_ns{};
+  std::string previous_process_receipt_digest;
+  std::string receipt_digest;
+
+  bool operator==(const HostProcessRecoveryExitReceipt&) const = default;
+};
+
+struct HostProcessRecoveryExitResult final {
+  HostProcessRecoveryExitReceipt receipt;
+  bool replayed{};
+
+  bool operator==(const HostProcessRecoveryExitResult&) const = default;
+};
+
 // Read-only, exact persisted evidence for a process boundary that has no
 // terminal exit receipt. A missing spawn means the durable intent committed
 // before any stopped-child receipt; it is cleanup evidence, not a live PID.
@@ -293,6 +346,9 @@ enum class HostLedgerFaultPoint {
   after_process_exit_record,
   after_process_exit_projection,
   after_process_exit_commit,
+  after_process_recovery_exit_record,
+  after_process_recovery_exit_projection,
+  after_process_recovery_exit_commit,
 };
 
 class IHostLedgerFaultInjector {
@@ -357,6 +413,9 @@ class SQLiteHostLedger final {
       const HostProcessSpawnRequest& request, const HostLedgerTime& now);
   [[nodiscard]] HostProcessExitResult commit_process_exit(
       const HostProcessExitRequest& request, const HostLedgerTime& now);
+  [[nodiscard]] HostProcessRecoveryExitResult commit_process_recovery_exit(
+      const HostProcessRecoveryExitRequest& request,
+      const HostLedgerTime& now);
   [[nodiscard]] std::vector<HostProcessRecoveryRecord>
   active_process_recovery_records(
       std::size_t maximum_records =
@@ -429,5 +488,15 @@ class SQLiteHostLedger final {
     const HostProcessExitReceipt& receipt);
 [[nodiscard]] HostProcessExitReceipt host_process_exit_receipt_from_json(
     const nlohmann::json& source);
+[[nodiscard]] HostProcessRecoveryExitRequest
+seal_host_process_recovery_exit_request(HostProcessRecoveryExitRequest request);
+[[nodiscard]] nlohmann::json host_process_recovery_exit_request_json(
+    const HostProcessRecoveryExitRequest& request);
+[[nodiscard]] HostProcessRecoveryExitRequest
+host_process_recovery_exit_request_from_json(const nlohmann::json& source);
+[[nodiscard]] nlohmann::json host_process_recovery_exit_receipt_json(
+    const HostProcessRecoveryExitReceipt& receipt);
+[[nodiscard]] HostProcessRecoveryExitReceipt
+host_process_recovery_exit_receipt_from_json(const nlohmann::json& source);
 
 }  // namespace trainvm

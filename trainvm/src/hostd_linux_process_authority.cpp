@@ -2,6 +2,7 @@
 
 #include <fcntl.h>
 #include <optional>
+#include <ranges>
 #include <string>
 #include <unistd.h>
 #include <utility>
@@ -84,6 +85,25 @@ const std::optional<HostProcessExitReceipt>& LinuxPreparedLaunch::exit_receipt()
 }
 
 void LinuxPreparedLaunch::release_to_exec() { child_.release_to_exec(); }
+
+LinuxRecoveredLaunch::LinuxRecoveredLaunch(
+    HostProcessRecoveryRecord record, LinuxRecoveredProcess process,
+    LinuxAllocationCgroup cgroup) noexcept
+    : record_(std::move(record)), process_(std::move(process)),
+      cgroup_(std::move(cgroup)) {}
+
+const HostProcessRecoveryRecord& LinuxRecoveredLaunch::record() const noexcept {
+  return record_;
+}
+
+const LinuxRecoveredProcess& LinuxRecoveredLaunch::process() const noexcept {
+  return process_;
+}
+
+const std::optional<HostProcessRecoveryExitReceipt>&
+LinuxRecoveredLaunch::exit_receipt() const noexcept {
+  return exit_receipt_;
+}
 
 LinuxProcessAuthority::LinuxProcessAuthority(
     SQLiteHostLedger& ledger, AuthorityClock& clock,
@@ -237,6 +257,118 @@ HostProcessExitResult LinuxProcessAuthority::finalize_exit(
       .canonical_request_digest = {},
   });
   const auto terminal = ledger_.commit_process_exit(
+      request, ledger_time(clock_.sample(), spawn.request.boot_id));
+  launch.exit_receipt_ = terminal.receipt;
+  launch.cgroup_.remove_if_empty();
+  launch.cgroup_removed_ = true;
+  return terminal;
+}
+
+LinuxRecoveredLaunch LinuxProcessAuthority::adopt_recovered(
+    HostProcessRecoveryRecord record, LinuxRecoveredProcess process) {
+  if (!record.spawn || process.identity() != record.spawn->request ||
+      record.intent.request.launch_id != record.spawn->request.launch_id ||
+      record.intent.request.allocation_id != record.grant.allocation_id ||
+      record.intent.request.grant_digest != record.grant.receipt_digest ||
+      process.state() == LinuxPidfdState::observation_failed) {
+    reject("recovered process does not bind its durable ledger authority");
+  }
+  const HostInventoryReceipt inventory = ledger_.inventory();
+  if (record.grant.host_id != inventory.host_id ||
+      record.grant.boot_id != inventory.boot_id ||
+      record.grant.broker_epoch != inventory.broker_epoch ||
+      record.spawn->request.boot_id != inventory.boot_id) {
+    reject("recovered process crossed its durable host or boot authority");
+  }
+  const std::vector<HostProcessRecoveryRecord> active =
+      ledger_.active_process_recovery_records();
+  const auto found = std::ranges::find_if(
+      active, [&record](const HostProcessRecoveryRecord& candidate) {
+        return candidate.intent.request.launch_id ==
+               record.intent.request.launch_id;
+      });
+  if (found == active.end() || *found != record) {
+    reject("recovered process evidence is no longer the active ledger record");
+  }
+  const auto& spawn = record.spawn->request;
+  LinuxAllocationCgroup cgroup = cgroups_.open_existing_for_recovery(
+      record.grant.allocation_id, record.intent.request.launch_id,
+      {.unified_path = spawn.cgroup_path,
+       .device = spawn.cgroup_device,
+       .inode = spawn.cgroup_inode});
+  return LinuxRecoveredLaunch(std::move(record), std::move(process),
+                              std::move(cgroup));
+}
+
+HostProcessRecoveryExitResult LinuxProcessAuthority::finalize_recovered_exit(
+    LinuxRecoveredLaunch& launch, const ResourceBundleGrant& grant,
+    std::string recovery_exit_request_id, bool request_termination) {
+  if (!launch.record_.spawn || launch.record_.grant != grant ||
+      launch.process_.identity() != launch.record_.spawn->request) {
+    reject("recovered terminal request does not match the durable grant");
+  }
+  if (launch.exit_receipt_) {
+    if (!launch.cgroup_removed_) {
+      launch.cgroup_.remove_if_empty();
+      launch.cgroup_removed_ = true;
+    }
+    return {.receipt = *launch.exit_receipt_, .replayed = true};
+  }
+  LinuxPidfdState state = launch.process_.state();
+  if (state == LinuxPidfdState::live) {
+    if (!request_termination) {
+      reject("recovered process remains live and termination was not requested");
+    }
+    if (!launch.termination_requested_) {
+      const LinuxRecoveredTerminationResult termination =
+          launch.process_.request_termination();
+      if (termination.disposition ==
+          LinuxRecoveredTerminationDisposition::observation_failed) {
+        reject("recovered process termination could not be delivered");
+      }
+      launch.termination_requested_ = true;
+    }
+    state = launch.process_.state();
+    if (state == LinuxPidfdState::live) {
+      reject("recovered process termination is pending terminal observation");
+    }
+  }
+  if (state != LinuxPidfdState::terminal) {
+    reject("recovered process terminal state could not be observed");
+  }
+  const std::optional<std::string> observation_digest =
+      launch.process_.terminal_observation_digest();
+  if (!observation_digest || !launch.cgroup_.empty()) {
+    reject("recovered process still has live allocation authority");
+  }
+  const LinuxProcessContextAudit context =
+      context_auditor_.audit(grant, *launch.record_.spawn);
+  if (!context.complete || !context.accelerator_contexts_empty) {
+    reject("recovered process still has accelerator context authority");
+  }
+  const auto& spawn = *launch.record_.spawn;
+  const auto& cgroup = launch.cgroup_.identity();
+  const HostProcessRecoveryExitRequest request =
+      seal_host_process_recovery_exit_request({
+          .api_version =
+              std::string(kHostProcessRecoveryExitRequestApiVersion),
+          .recovery_exit_request_id = std::move(recovery_exit_request_id),
+          .launch_id = spawn.request.launch_id,
+          .spawn_receipt_digest = spawn.receipt_digest,
+          .host_pid = spawn.request.host_pid,
+          .process_starttime_ticks = spawn.request.process_starttime_ticks,
+          .observation =
+              HostProcessRecoveryExitObservation::pidfd_terminal,
+          .observation_digest = *observation_digest,
+          .cgroup_path = cgroup.unified_path,
+          .cgroup_device = cgroup.device,
+          .cgroup_inode = cgroup.inode,
+          .cgroup_empty = true,
+          .accelerator_contexts_empty = true,
+          .context_audit_digest = context.evidence_digest,
+          .canonical_request_digest = {},
+      });
+  const auto terminal = ledger_.commit_process_recovery_exit(
       request, ledger_time(clock_.sample(), spawn.request.boot_id));
   launch.exit_receipt_ = terminal.receipt;
   launch.cgroup_.remove_if_empty();

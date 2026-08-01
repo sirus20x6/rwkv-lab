@@ -9,6 +9,7 @@
 #include "trainvm/host_launch.hpp"
 #include "trainvm/host_ledger.hpp"
 #include "trainvm/hostd_linux_cgroup_authority.hpp"
+#include "trainvm/hostd_linux_process_recovery.hpp"
 #include "trainvm/hostd_linux_stopped_launcher.hpp"
 #include "trainvm/hostd_process_protocol.hpp"
 
@@ -61,6 +62,33 @@ class LinuxPreparedLaunch final {
   bool cgroup_removed_{};
 };
 
+class LinuxRecoveredLaunch final {
+ public:
+  LinuxRecoveredLaunch(LinuxRecoveredLaunch&&) noexcept = default;
+  LinuxRecoveredLaunch& operator=(LinuxRecoveredLaunch&&) noexcept = default;
+
+  LinuxRecoveredLaunch(const LinuxRecoveredLaunch&) = delete;
+  LinuxRecoveredLaunch& operator=(const LinuxRecoveredLaunch&) = delete;
+
+  [[nodiscard]] const HostProcessRecoveryRecord& record() const noexcept;
+  [[nodiscard]] const LinuxRecoveredProcess& process() const noexcept;
+  [[nodiscard]] const std::optional<HostProcessRecoveryExitReceipt>&
+  exit_receipt() const noexcept;
+
+ private:
+  friend class LinuxProcessAuthority;
+  LinuxRecoveredLaunch(HostProcessRecoveryRecord record,
+                       LinuxRecoveredProcess process,
+                       LinuxAllocationCgroup cgroup) noexcept;
+
+  HostProcessRecoveryRecord record_;
+  LinuxRecoveredProcess process_;
+  LinuxAllocationCgroup cgroup_;
+  bool termination_requested_{};
+  std::optional<HostProcessRecoveryExitReceipt> exit_receipt_;
+  bool cgroup_removed_{};
+};
+
 class LinuxProcessAuthority final {
  public:
   LinuxProcessAuthority(SQLiteHostLedger& ledger, AuthorityClock& clock,
@@ -77,6 +105,14 @@ class LinuxProcessAuthority final {
   [[nodiscard]] HostProcessExitResult finalize_exit(
       LinuxPreparedLaunch& launch, const ResourceBundleGrant& grant,
       std::string exit_request_id, bool request_termination);
+  [[nodiscard]] LinuxRecoveredLaunch adopt_recovered(
+      HostProcessRecoveryRecord record, LinuxRecoveredProcess process);
+  // If SIGKILL was just delivered and the pidfd remains live, this fails
+  // closed with a retryable authority error; no terminal receipt is written
+  // until a later call observes the pidfd terminal.
+  [[nodiscard]] HostProcessRecoveryExitResult finalize_recovered_exit(
+      LinuxRecoveredLaunch& launch, const ResourceBundleGrant& grant,
+      std::string recovery_exit_request_id, bool request_termination);
 
  private:
   SQLiteHostLedger& ledger_;
