@@ -15,6 +15,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -102,6 +103,24 @@ HostProcessSpawnRequest current_identity(pid_t pid = ::getpid()) {
   });
 }
 
+HostProcessRecoveryRecord recovery_record(
+    const HostProcessSpawnRequest& identity) {
+  HostProcessRecoveryRecord result;
+  result.intent.request.launch_id = identity.launch_id;
+  result.intent.receipt_digest = identity.launch_intent_digest;
+  result.spawn = HostProcessSpawnReceipt{
+      .api_version = {},
+      .request = identity,
+      .host_id = {},
+      .broker_epoch = {},
+      .observed_boottime_ns = 0,
+      .observed_wall_time_ns = 0,
+      .previous_process_receipt_digest = {},
+      .receipt_digest = {},
+  };
+  return result;
+}
+
 void exact_current_process_is_pinned_without_mutation() {
   const HostProcessSpawnRequest expected = current_identity();
   LinuxProcessRecoveryProbe probe;
@@ -152,6 +171,56 @@ void parser_seams_reject_ambiguous_proc_values() {
   require(rejected, "multiple cgroup memberships are rejected");
 }
 
+void recovery_set_pins_once_and_transfers_exact_authority() {
+  const HostProcessSpawnRequest expected = current_identity();
+  LinuxProcessRecoveryProbe probe;
+  LinuxProcessRecoverySet recovered;
+  recovered.recover({recovery_record(expected)}, probe);
+  require(recovered.initialized() && recovered.entries().size() == 1U &&
+              recovered.summary() ==
+                  LinuxProcessRecoverySummary{
+                      .records = 1U,
+                      .exact_live = 1U,
+                      .already_gone = 0U,
+                      .identity_mismatch = 0U,
+                      .observation_failed = 0U,
+                      .intent_only = 0U,
+                  } &&
+              recovered.exact_live_process(expected.launch_id) != nullptr,
+          "recovery set retains one exact pidfd and exact class summary");
+  auto adopted =
+      recovered.take_exact_live_process_for_adoption(expected.launch_id);
+  require(adopted && adopted->alive() &&
+              recovered.exact_live_process(expected.launch_id) == nullptr &&
+              !recovered.take_exact_live_process_for_adoption(
+                  expected.launch_id),
+          "recovery authority transfers at most once without re-probing PID");
+
+  bool rejected = false;
+  try {
+    recovered.recover({}, probe);
+  } catch (const HostLedgerError&) {
+    rejected = true;
+  }
+  require(rejected, "recovery set rejects a second classification pass");
+}
+
+void recovery_set_rejects_duplicate_durable_launches() {
+  const HostProcessSpawnRequest expected = current_identity();
+  LinuxProcessRecoveryProbe probe;
+  LinuxProcessRecoverySet recovered;
+  std::vector<HostProcessRecoveryRecord> records;
+  records.push_back(recovery_record(expected));
+  records.push_back(recovery_record(expected));
+  bool rejected = false;
+  try {
+    recovered.recover(std::move(records), probe);
+  } catch (const HostLedgerError&) {
+    rejected = true;
+  }
+  require(rejected, "duplicate launch identities fail closed before probing");
+}
+
 }  // namespace
 
 int main() {
@@ -159,6 +228,8 @@ int main() {
     exact_current_process_is_pinned_without_mutation();
     exited_pid_is_classified_without_signalling();
     parser_seams_reject_ambiguous_proc_values();
+    recovery_set_pins_once_and_transfers_exact_authority();
+    recovery_set_rejects_duplicate_durable_launches();
     std::cout << "hostd Linux process recovery tests passed\n";
     return 0;
   } catch (const std::exception& error) {

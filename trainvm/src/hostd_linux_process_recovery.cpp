@@ -16,6 +16,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <ranges>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -284,6 +285,126 @@ LinuxProcessRecoveryResult LinuxProcessRecoveryProbe::observe(
                   "process identity observation failed");
   }
 #endif
+}
+
+void LinuxProcessRecoverySet::recover(
+    std::vector<HostProcessRecoveryRecord> records,
+    const LinuxProcessRecoveryProbe& probe) {
+  if (initialized_)
+    throw HostLedgerError("process recovery set is already initialized");
+  if (records.size() > HostResourceBounds::maximum_active_fences)
+    throw HostLedgerError("process recovery set exceeds its record bound");
+
+  std::ranges::sort(records, {}, [](const HostProcessRecoveryRecord& record) {
+    return record.intent.request.launch_id;
+  });
+  for (std::size_t index = 0U; index < records.size(); ++index) {
+    const HostProcessRecoveryRecord& record = records[index];
+    const std::string& launch_id = record.intent.request.launch_id;
+    if (launch_id.empty() ||
+        (index > 0U &&
+         records[index - 1U].intent.request.launch_id == launch_id))
+      throw HostLedgerError(
+          "process recovery set has an invalid or duplicate launch identity");
+    if (record.spawn &&
+        (record.spawn->request.launch_id != launch_id ||
+        record.spawn->request.launch_intent_digest !=
+            record.intent.receipt_digest))
+      throw HostLedgerError("process recovery set evidence binding disagrees");
+  }
+
+  LinuxProcessRecoverySummary summary;
+  std::vector<LinuxProcessRecoveryEntry> entries;
+  entries.reserve(records.size());
+  for (HostProcessRecoveryRecord& record : records) {
+    if (!record.spawn) {
+      ++summary.intent_only;
+      entries.emplace_back(
+          std::move(record), LinuxProcessRecoveryDisposition::intent_only,
+          "launch intent has no durable spawn receipt");
+      continue;
+    }
+    LinuxProcessRecoveryResult observed = probe.observe(record.spawn->request);
+    switch (observed.disposition) {
+      case LinuxProcessRecoveryDisposition::intent_only:
+        throw HostLedgerError(
+            "spawned process recovery was classified as intent-only");
+      case LinuxProcessRecoveryDisposition::exact_live_process:
+        if (!observed.process || !observed.process->alive())
+          throw HostLedgerError(
+              "exact process recovery did not retain a live pidfd");
+        ++summary.exact_live;
+        break;
+      case LinuxProcessRecoveryDisposition::already_gone:
+        if (observed.process)
+          throw HostLedgerError("terminal process recovery retained authority");
+        ++summary.already_gone;
+        break;
+      case LinuxProcessRecoveryDisposition::identity_mismatch:
+        if (observed.process)
+          throw HostLedgerError("mismatched process recovery retained authority");
+        ++summary.identity_mismatch;
+        break;
+      case LinuxProcessRecoveryDisposition::observation_failed:
+        if (observed.process)
+          throw HostLedgerError("failed process recovery retained authority");
+        ++summary.observation_failed;
+        break;
+    }
+    entries.emplace_back(std::move(record), observed.disposition,
+                         std::move(observed.detail),
+                         std::move(observed.process));
+  }
+  summary.records = entries.size();
+  summary_ = summary;
+  entries_ = std::move(entries);
+  initialized_ = true;
+}
+
+bool LinuxProcessRecoverySet::initialized() const noexcept {
+  return initialized_;
+}
+
+const LinuxProcessRecoverySummary& LinuxProcessRecoverySet::summary()
+    const noexcept {
+  return summary_;
+}
+
+const std::vector<LinuxProcessRecoveryEntry>& LinuxProcessRecoverySet::entries()
+    const noexcept {
+  return entries_;
+}
+
+const LinuxRecoveredProcess* LinuxProcessRecoverySet::exact_live_process(
+    std::string_view launch_id) const noexcept {
+  const auto found = std::ranges::find_if(
+      entries_, [launch_id](const LinuxProcessRecoveryEntry& entry) {
+        return entry.record.intent.request.launch_id == launch_id;
+      });
+  if (found == entries_.end() ||
+      found->disposition !=
+          LinuxProcessRecoveryDisposition::exact_live_process ||
+      !found->process)
+    return nullptr;
+  return &*found->process;
+}
+
+std::optional<LinuxRecoveredProcess>
+LinuxProcessRecoverySet::take_exact_live_process_for_adoption(
+    std::string_view launch_id) {
+  const auto found = std::ranges::find_if(
+      entries_, [launch_id](const LinuxProcessRecoveryEntry& entry) {
+        return entry.record.intent.request.launch_id == launch_id;
+      });
+  if (found == entries_.end() ||
+      found->disposition !=
+          LinuxProcessRecoveryDisposition::exact_live_process ||
+      !found->process)
+    return std::nullopt;
+  std::optional<LinuxRecoveredProcess> result(
+      std::in_place, std::move(*found->process));
+  found->process.reset();
+  return result;
 }
 
 namespace hostd_linux_process_recovery_test_seam {

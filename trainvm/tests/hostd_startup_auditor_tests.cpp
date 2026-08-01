@@ -150,6 +150,9 @@ void clean_ledger_produces_exact_passing_report() {
   require(report.disposition == HostStartupAuditDisposition::passed,
           "clean startup passes");
   require(report.findings.empty(), "clean startup has no findings");
+  require(auditor.process_recovery().initialized() &&
+              auditor.process_recovery().summary().records == 0U,
+          "clean startup freezes an empty one-shot recovery set");
   require(report.pre_audit_occupancy == report.post_audit_occupancy &&
               report.ledger_head_before ==
                   report.ledger_head_after_observation,
@@ -181,6 +184,9 @@ void retained_fence_blocks_until_process_adoption_exists() {
                   HostStartupAuditFindingSeverity::blocking &&
               report.findings.front().detail.contains("intent_only=0"),
           "blocking finding identifies adoption gap");
+  require(auditor.process_recovery().initialized() &&
+              auditor.process_recovery().summary().records == 0U,
+          "active grant without launch evidence does not invent a process");
 }
 
 void invalid_configuration_fails_closed() {

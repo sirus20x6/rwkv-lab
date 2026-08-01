@@ -1,14 +1,18 @@
 #pragma once
 
+#include <cstddef>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 #include "trainvm/host_ledger.hpp"
 
 namespace trainvm {
 
 enum class LinuxProcessRecoveryDisposition {
+  intent_only,
   exact_live_process,
   already_gone,
   identity_mismatch,
@@ -63,6 +67,64 @@ class LinuxProcessRecoveryProbe final {
  public:
   [[nodiscard]] LinuxProcessRecoveryResult observe(
       const HostProcessSpawnRequest& expected) const;
+};
+
+struct LinuxProcessRecoverySummary final {
+  std::size_t records{};
+  std::size_t exact_live{};
+  std::size_t already_gone{};
+  std::size_t identity_mismatch{};
+  std::size_t observation_failed{};
+  std::size_t intent_only{};
+
+  bool operator==(const LinuxProcessRecoverySummary&) const = default;
+};
+
+struct LinuxProcessRecoveryEntry final {
+  HostProcessRecoveryRecord record;
+  LinuxProcessRecoveryDisposition disposition{};
+  std::string detail;
+  std::optional<LinuxRecoveredProcess> process;
+
+  LinuxProcessRecoveryEntry(
+      HostProcessRecoveryRecord record_value,
+      LinuxProcessRecoveryDisposition disposition_value,
+      std::string detail_value,
+      std::optional<LinuxRecoveredProcess> process_value = std::nullopt)
+      : record(std::move(record_value)),
+        disposition(disposition_value),
+        detail(std::move(detail_value)),
+        process(std::move(process_value)) {}
+  LinuxProcessRecoveryEntry(LinuxProcessRecoveryEntry&&) noexcept = default;
+  LinuxProcessRecoveryEntry& operator=(LinuxProcessRecoveryEntry&&) noexcept =
+      default;
+  LinuxProcessRecoveryEntry(const LinuxProcessRecoveryEntry&) = delete;
+  LinuxProcessRecoveryEntry& operator=(const LinuxProcessRecoveryEntry&) =
+      delete;
+};
+
+// One-shot recovery boundary. Durable records are classified exactly once and
+// exact live identities remain pinned by pidfd until a future supervisor takes
+// the handle for adoption or this set is destroyed. Re-reading a numeric PID
+// after this boundary is deliberately not an adoption mechanism.
+class LinuxProcessRecoverySet final {
+ public:
+  void recover(std::vector<HostProcessRecoveryRecord> records,
+               const LinuxProcessRecoveryProbe& probe);
+
+  [[nodiscard]] bool initialized() const noexcept;
+  [[nodiscard]] const LinuxProcessRecoverySummary& summary() const noexcept;
+  [[nodiscard]] const std::vector<LinuxProcessRecoveryEntry>& entries()
+      const noexcept;
+  [[nodiscard]] const LinuxRecoveredProcess* exact_live_process(
+      std::string_view launch_id) const noexcept;
+  [[nodiscard]] std::optional<LinuxRecoveredProcess>
+  take_exact_live_process_for_adoption(std::string_view launch_id);
+
+ private:
+  bool initialized_{};
+  LinuxProcessRecoverySummary summary_;
+  std::vector<LinuxProcessRecoveryEntry> entries_;
 };
 
 namespace hostd_linux_process_recovery_test_seam {

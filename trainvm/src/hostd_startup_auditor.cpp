@@ -1,7 +1,5 @@
 #include "trainvm/hostd_startup_auditor.hpp"
 
-#include "trainvm/hostd_linux_process_recovery.hpp"
-
 #include <openssl/rand.h>
 
 #include <array>
@@ -85,47 +83,21 @@ HostStartupAuditReport HostdConfiguredStartupAuditor::audit() {
   const HostInventoryReceipt inventory = ledger_.inventory();
   const HostLedgerChainHead head_before = ledger_.chain_head();
   const ResourceOccupancySnapshot occupancy_before = ledger_.occupancy();
-  const std::vector<HostProcessRecoveryRecord> recovery =
+  std::vector<HostProcessRecoveryRecord> recovery =
       ledger_.active_process_recovery_records();
 
   std::vector<HostStartupAuditFinding> findings;
-  std::vector<LinuxRecoveredProcess> retained_processes;
   if (!occupancy_before.active_fences.empty()) {
-    std::size_t exact_live = 0U;
-    std::size_t gone = 0U;
-    std::size_t mismatch = 0U;
-    std::size_t failed = 0U;
-    std::size_t intent_only = 0U;
-    retained_processes.reserve(recovery.size());
     LinuxProcessRecoveryProbe probe;
-    for (const HostProcessRecoveryRecord& record : recovery) {
-      if (!record.spawn) {
-        ++intent_only;
-        continue;
-      }
-      LinuxProcessRecoveryResult observed = probe.observe(record.spawn->request);
-      switch (observed.disposition) {
-        case LinuxProcessRecoveryDisposition::exact_live_process:
-          if (!observed.process)
-            throw HostStartupAuditError(
-                "exact process recovery has no retained pidfd");
-          ++exact_live;
-          retained_processes.push_back(std::move(*observed.process));
-          break;
-        case LinuxProcessRecoveryDisposition::already_gone:
-          ++gone;
-          break;
-        case LinuxProcessRecoveryDisposition::identity_mismatch:
-          ++mismatch;
-          break;
-        case LinuxProcessRecoveryDisposition::observation_failed:
-          ++failed;
-          break;
-      }
-    }
+    process_recovery_.recover(std::move(recovery), probe);
+    const LinuxProcessRecoverySummary& summary = process_recovery_.summary();
     findings.push_back(active_fence_finding(
-        occupancy_before.active_fences.size(), exact_live, gone, mismatch,
-        failed, intent_only));
+        occupancy_before.active_fences.size(), summary.exact_live,
+        summary.already_gone, summary.identity_mismatch,
+        summary.observation_failed, summary.intent_only));
+  } else {
+    LinuxProcessRecoveryProbe probe;
+    process_recovery_.recover({}, probe);
   }
 
   const HostLedgerChainHead head_after = ledger_.chain_head();
@@ -165,6 +137,16 @@ HostStartupAuditReport HostdConfiguredStartupAuditor::audit() {
       .findings_digest = {},
       .report_digest = {},
   });
+}
+
+const LinuxProcessRecoverySet&
+HostdConfiguredStartupAuditor::process_recovery() const noexcept {
+  return process_recovery_;
+}
+
+LinuxProcessRecoverySet& HostdConfiguredStartupAuditor::process_recovery()
+    noexcept {
+  return process_recovery_;
 }
 
 }  // namespace trainvm

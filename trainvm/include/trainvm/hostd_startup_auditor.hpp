@@ -4,6 +4,7 @@
 
 #include "trainvm/authority_time.hpp"
 #include "trainvm/host_ledger.hpp"
+#include "trainvm/hostd_linux_process_recovery.hpp"
 #include "trainvm/host_startup_audit.hpp"
 
 namespace trainvm {
@@ -22,8 +23,9 @@ struct HostdConfiguredStartupAuditorConfig final {
 
 // Production startup evidence assembled from the already-open, pinned host
 // ledger and the authority clock. This class has no process mutation methods.
-// Until durable process adoption exists, any retained active fence is a
-// blocking finding rather than something the daemon guesses how to recover.
+// It classifies durable process records once and pins exact live identities for
+// explicit transfer to the recovery supervisor. Until terminal reconciliation
+// exists, any retained active fence remains a blocking finding.
 class HostdConfiguredStartupAuditor final
     : public IConfiguredHostStartupAuditorV2 {
  public:
@@ -32,11 +34,15 @@ class HostdConfiguredStartupAuditor final
                                 HostdConfiguredStartupAuditorConfig config);
 
   [[nodiscard]] HostStartupAuditReport audit() override;
+  [[nodiscard]] const LinuxProcessRecoverySet& process_recovery() const
+      noexcept;
+  [[nodiscard]] LinuxProcessRecoverySet& process_recovery() noexcept;
 
  private:
   SQLiteHostLedger& ledger_;
   AuthorityClock& clock_;
   HostdConfiguredStartupAuditorConfig config_;
+  LinuxProcessRecoverySet process_recovery_;
 };
 
 }  // namespace trainvm
