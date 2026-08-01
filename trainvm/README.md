@@ -104,6 +104,10 @@ Implemented now:
   epoch, preserves release-only cleanup while startup is blocked, and exposes a read-only exact
   outcome reconciler that can recover an immutable grant or busy receipt across broker epochs
   without admitting missing work or mutating occupancy/generations;
+- an additive host-ledger v4 process-authority chain that leaves the v1 resource evidence
+  byte-for-byte unchanged, commits an exact active-grant/cgroup/executable launch intent before any
+  child may exist, binds a stopped child's boot/PID/starttime/cgroup/executable identity to that
+  intent, and provides atomic rollback plus exact post-commit lost-reply replay for both boundaries;
 - a process-free, single-use journal-fence challenge verifier binding socket peer process instance,
   host/boot/broker, pinned-journal claims, controller generation, logical fence, nonce, and bounded
   boottime lifetime, with per-peer quotas and no bearer-capability interpretation of decoded data;

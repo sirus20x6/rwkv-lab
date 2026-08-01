@@ -681,6 +681,15 @@ integration of the implemented service-cgroup authority at strict
 socket-pidfd/host-namespace grade. Deterministic transport checkpoints already prove that interruption at
 each pre-dispatch boundary leaves no ledger outcome, while interruption after
 the durable dispatch recovers the exact replay and remains releasable.
+The additive host-ledger v4 process-authority extension is also implemented:
+it maintains a separate immutable hash chain, preserving all v1 resource-chain
+bytes, and atomically projects exact launch intents and stopped-child spawn
+receipts. Intents require the exact active allocation attribution and persist
+the resolved-launch, executable, and cgroup identities; spawn receipts require
+the same still-active grant and bind boot ID, PID starttime, cgroup inode, and
+executable digest. Pre-commit fault points roll back both chain and projection,
+while post-commit lost replies resolve only to the exact canonical replay. No
+child creation is enabled by this ledger milestone.
 
 ### P0.4 — guarded launcher and strict cgroup enforcement
 

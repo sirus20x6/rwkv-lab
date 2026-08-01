@@ -111,6 +111,48 @@ ResourceReleaseRequest release_request(const ResourceBundleGrant& grant,
   });
 }
 
+std::string test_digest(char digit) {
+  return "sha256:" + std::string(64U, digit);
+}
+
+HostProcessLaunchRequest launch_request(const ResourceBundleGrant& grant,
+                                        std::string launch_id) {
+  return seal_host_process_launch_request({
+      .api_version = std::string(kHostProcessLaunchRequestApiVersion),
+      .launch_id = std::move(launch_id),
+      .allocation_id = grant.allocation_id,
+      .grant_digest = grant.receipt_digest,
+      .journal_id = grant.journal_id,
+      .run_id = grant.run_id,
+      .logical_lease_id = grant.logical_lease_id,
+      .logical_fencing_token = grant.logical_fencing_token,
+      .resolved_launch_digest = test_digest('1'),
+      .executable_path = "/usr/bin/trainvm-test-worker",
+      .executable_digest = test_digest('2'),
+      .cgroup_path = "/sys/fs/cgroup/trainvm/test-launch",
+      .cgroup_device = 31,
+      .cgroup_inode = 41,
+      .canonical_request_digest = {},
+  });
+}
+
+HostProcessSpawnRequest spawn_request(const HostProcessLaunchIntent& intent,
+                                      std::int64_t pid = 4242) {
+  return seal_host_process_spawn_request({
+      .api_version = std::string(kHostProcessSpawnRequestApiVersion),
+      .launch_id = intent.request.launch_id,
+      .launch_intent_digest = intent.receipt_digest,
+      .host_pid = pid,
+      .process_starttime_ticks = 91234,
+      .boot_id = intent.boot_id,
+      .cgroup_path = intent.request.cgroup_path,
+      .cgroup_device = intent.request.cgroup_device,
+      .cgroup_inode = intent.request.cgroup_inode,
+      .executable_digest = intent.request.executable_digest,
+      .canonical_request_digest = {},
+  });
+}
+
 std::vector<std::filesystem::path>& test_directories() {
   static std::vector<std::filesystem::path> value;
   return value;
@@ -446,6 +488,191 @@ void request_and_release_rollback() {
   remove_database(path);
 }
 
+void process_authority_is_durable_and_replay_safe() {
+  const auto observed = inventory({"mutex-process"});
+  const auto path = test_path("process-basic");
+  {
+    SQLiteHostLedger ledger(authority_for(path), observed);
+    const auto bundle = ledger.request_bundle(request("process-grant"), {10, 20});
+    require(bundle.grant.has_value(), "process fixture obtains an active grant");
+    const auto launch = launch_request(*bundle.grant, "launch-basic");
+    require(host_process_launch_request_from_json(
+                host_process_launch_request_json(launch)) == launch,
+            "launch request has a strict canonical codec");
+    auto forged_launch = host_process_launch_request_json(launch);
+    forged_launch["unknown"] = true;
+    require_throws<HostLedgerError>(
+        [&] { (void)host_process_launch_request_from_json(forged_launch); },
+        "launch request codec rejects unknown fields");
+    const auto intent = ledger.commit_process_launch_intent(launch, {30, 40});
+    const auto intent_replay =
+        ledger.commit_process_launch_intent(launch, {300, 400});
+    require(!intent.replayed && intent_replay.replayed &&
+                intent_replay.intent == intent.intent && ledger.verify(),
+            "launch intent commits once and exactly replays");
+    require(host_process_launch_intent_from_json(
+                host_process_launch_intent_json(intent.intent)) == intent.intent,
+            "launch intent has a strict canonical codec");
+    auto changed_launch = launch;
+    changed_launch.resolved_launch_digest = test_digest('3');
+    changed_launch = seal_host_process_launch_request(std::move(changed_launch));
+    require_throws<HostLedgerConflict>(
+        [&] { (void)ledger.commit_process_launch_intent(changed_launch, {31, 41}); },
+        "launch ID reuse with changed content conflicts");
+
+    const auto spawn = spawn_request(intent.intent);
+    require(host_process_spawn_request_from_json(
+                host_process_spawn_request_json(spawn)) == spawn,
+            "spawn observation has a strict canonical codec");
+    const auto receipt = ledger.commit_process_spawn(spawn, {50, 60});
+    const auto receipt_replay = ledger.commit_process_spawn(spawn, {500, 600});
+    require(!receipt.replayed && receipt_replay.replayed &&
+                receipt_replay.receipt == receipt.receipt && ledger.verify(),
+            "spawn receipt commits once and exactly replays");
+    require(host_process_spawn_receipt_from_json(
+                host_process_spawn_receipt_json(receipt.receipt)) ==
+                receipt.receipt,
+            "spawn receipt has a strict canonical codec");
+    auto changed_spawn = spawn;
+    changed_spawn.host_pid += 1;
+    changed_spawn = seal_host_process_spawn_request(std::move(changed_spawn));
+    require_throws<HostLedgerConflict>(
+        [&] { (void)ledger.commit_process_spawn(changed_spawn, {51, 61}); },
+        "spawn replay with a changed kernel identity conflicts");
+  }
+
+  const auto rollback_path = test_path("process-intent-rollback");
+  OneShotFault intent_projection_fault(
+      HostLedgerFaultPoint::after_process_intent_projection);
+  {
+    SQLiteHostLedger ledger(authority_for(rollback_path), observed,
+                            &intent_projection_fault);
+    const auto bundle =
+        ledger.request_bundle(request("process-rollback-grant"), {10, 20});
+    const auto launch = launch_request(*bundle.grant, "launch-rollback");
+    require_throws<HostLedgerError>(
+        [&] { (void)ledger.commit_process_launch_intent(launch, {30, 40}); },
+        "pre-commit launch-intent fault rolls back record and projection");
+    const auto retry = ledger.commit_process_launch_intent(launch, {31, 41});
+    require(!retry.replayed && ledger.verify(),
+            "rolled-back launch intent retries as a fresh mutation");
+  }
+
+  const auto lost_intent_path = test_path("process-intent-lost-reply");
+  OneShotFault intent_commit_fault(
+      HostLedgerFaultPoint::after_process_intent_commit);
+  {
+    SQLiteHostLedger ledger(authority_for(lost_intent_path), observed,
+                            &intent_commit_fault);
+    const auto bundle =
+        ledger.request_bundle(request("process-lost-intent-grant"), {10, 20});
+    const auto launch = launch_request(*bundle.grant, "launch-lost-intent");
+    require_throws<HostLedgerError>(
+        [&] { (void)ledger.commit_process_launch_intent(launch, {30, 40}); },
+        "post-commit launch-intent fault simulates a lost reply");
+    const auto retry = ledger.commit_process_launch_intent(launch, {31, 41});
+    require(retry.replayed && ledger.verify(),
+            "lost launch-intent reply resolves to exact durable replay");
+  }
+
+  const auto lost_spawn_path = test_path("process-spawn-lost-reply");
+  OneShotFault spawn_commit_fault(
+      HostLedgerFaultPoint::after_process_spawn_commit);
+  {
+    SQLiteHostLedger ledger(authority_for(lost_spawn_path), observed,
+                            &spawn_commit_fault);
+    const auto bundle =
+        ledger.request_bundle(request("process-lost-spawn-grant"), {10, 20});
+    const auto intent = ledger.commit_process_launch_intent(
+        launch_request(*bundle.grant, "launch-lost-spawn"), {30, 40});
+    const auto spawn = spawn_request(intent.intent, 4343);
+    require_throws<HostLedgerError>(
+        [&] { (void)ledger.commit_process_spawn(spawn, {50, 60}); },
+        "post-commit spawn fault simulates a lost reply");
+    const auto retry = ledger.commit_process_spawn(spawn, {51, 61});
+    require(retry.replayed && ledger.verify(),
+            "lost spawn reply resolves to exact durable replay");
+  }
+
+  const auto spawn_rollback_path = test_path("process-spawn-rollback");
+  OneShotFault spawn_projection_fault(
+      HostLedgerFaultPoint::after_process_spawn_projection);
+  {
+    SQLiteHostLedger ledger(authority_for(spawn_rollback_path), observed,
+                            &spawn_projection_fault);
+    const auto bundle =
+        ledger.request_bundle(request("process-spawn-rollback-grant"), {10, 20});
+    const auto intent = ledger.commit_process_launch_intent(
+        launch_request(*bundle.grant, "launch-spawn-rollback"), {30, 40});
+    const auto spawn = spawn_request(intent.intent, 4444);
+    require_throws<HostLedgerError>(
+        [&] { (void)ledger.commit_process_spawn(spawn, {50, 60}); },
+        "pre-commit spawn fault rolls back record and projection");
+    const auto retry = ledger.commit_process_spawn(spawn, {51, 61});
+    require(!retry.replayed && ledger.verify(),
+            "rolled-back spawn observation retries as a fresh mutation");
+  }
+
+  const auto released_path = test_path("process-released-before-spawn");
+  {
+    SQLiteHostLedger ledger(authority_for(released_path), observed);
+    const auto bundle =
+        ledger.request_bundle(request("process-released-grant"), {10, 20});
+    const auto intent = ledger.commit_process_launch_intent(
+        launch_request(*bundle.grant, "launch-released"), {30, 40});
+    (void)ledger.release_bundle(
+        release_request(*bundle.grant, "process-release-before-spawn"),
+        {41, 42});
+    require_throws<HostLedgerConflict>(
+        [&] {
+          (void)ledger.commit_process_spawn(spawn_request(intent.intent, 4545),
+                                            {50, 60});
+        },
+        "a released allocation can never acquire a spawn receipt");
+    require(ledger.verify(), "abandoned launch intent remains valid evidence");
+  }
+
+  const auto tamper_path = test_path("process-chain-tamper");
+  {
+    SQLiteHostLedger ledger(authority_for(tamper_path), observed);
+    const auto bundle =
+        ledger.request_bundle(request("process-tamper-grant"), {10, 20});
+    (void)ledger.commit_process_launch_intent(
+        launch_request(*bundle.grant, "launch-tamper"), {30, 40});
+  }
+  raw_execute(tamper_path,
+              "DROP TRIGGER process_records_no_update; "
+              "UPDATE process_records SET canonical_json='{}'; "
+              "CREATE TRIGGER process_records_no_update BEFORE UPDATE ON "
+              "process_records BEGIN SELECT RAISE(ABORT, 'process records are "
+              "immutable'); END;");
+  require_throws<HostLedgerError>(
+      [&] { SQLiteHostLedger rejected(authority_for(tamper_path), observed); },
+      "process hash-chain tampering fails closed on reopen");
+
+  const auto projection_path = test_path("process-projection-tamper");
+  {
+    SQLiteHostLedger ledger(authority_for(projection_path), observed);
+    const auto bundle =
+        ledger.request_bundle(request("process-projection-grant"), {10, 20});
+    (void)ledger.commit_process_launch_intent(
+        launch_request(*bundle.grant, "launch-projection"), {30, 40});
+  }
+  raw_execute(
+      projection_path,
+      "DROP TRIGGER process_launch_intents_no_update; "
+      "UPDATE process_launch_intents SET "
+      "request_digest='sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'; "
+      "CREATE TRIGGER process_launch_intents_no_update BEFORE UPDATE ON "
+      "process_launch_intents BEGIN SELECT RAISE(ABORT, 'process launch "
+      "intents are immutable'); END;");
+  require_throws<HostLedgerError>(
+      [&] {
+        SQLiteHostLedger rejected(authority_for(projection_path), observed);
+      },
+      "process projection tampering fails closed on reopen");
+}
+
 void tamper_is_fail_closed() {
   const auto path = test_path("tamper");
   const auto observed = inventory({"mutex-tamper"});
@@ -705,6 +932,7 @@ int main() {
     independent_connection_race();
     stale_inventory_instances_fail_closed();
     request_and_release_rollback();
+    process_authority_is_durable_and_replay_safe();
     tamper_is_fail_closed();
     degraded_inventory_publication_rolls_back();
     filesystem_authority_remains_bound();

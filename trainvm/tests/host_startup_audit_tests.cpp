@@ -254,6 +254,16 @@ std::string raw_scalar(const std::filesystem::path& path,
 
 void downgrade_empty_v2_to_v1(const std::filesystem::path& path) {
   raw_execute(path, R"sql(
+    DROP TRIGGER process_spawns_no_update;
+    DROP TRIGGER process_spawns_no_delete;
+    DROP TRIGGER process_launch_intents_no_update;
+    DROP TRIGGER process_launch_intents_no_delete;
+    DROP TRIGGER process_records_no_update;
+    DROP TRIGGER process_records_no_delete;
+    DROP TABLE process_spawns;
+    DROP TABLE process_launch_intents;
+    DROP TABLE process_records;
+    DROP TABLE process_chain_head;
     DROP TRIGGER request_admission_epochs_no_update;
     DROP TRIGGER request_admission_epochs_no_delete;
     DROP TRIGGER request_admission_exemptions_no_update;
@@ -820,8 +830,8 @@ void additive_migration_preserves_v1_evidence() {
             "ledger_records WHERE ledger_sequence<=" +
                 std::to_string(v1_record_count) + " ORDER BY ledger_sequence");
   require(evidence_after == evidence_before &&
-              raw_scalar(path, "PRAGMA user_version") == "3",
-          "migration preserves every v1 evidence byte and marks v3");
+              raw_scalar(path, "PRAGMA user_version") == "4",
+          "migration preserves every v1 evidence byte and marks v4");
 
   const auto rollback_path = test_path("migration-rollback");
   auto rollback_authority = authority_for(rollback_path);
