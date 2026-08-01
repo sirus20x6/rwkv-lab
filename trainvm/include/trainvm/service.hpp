@@ -111,6 +111,7 @@ class TrainVMService final : public v1::TrainVM::Service,
   struct WorkerConnection {
     WorkerSessionIdentity identity;
     Dispatch dispatch;
+    nlohmann::json publishes = nlohmann::json::object();
     v1::WorkerWelcome welcome;
     std::optional<v1::WorkerReceipt> completed_receipt;
   };

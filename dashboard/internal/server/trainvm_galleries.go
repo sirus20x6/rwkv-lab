@@ -199,7 +199,7 @@ func (s *Server) loadGallery(artifact trainvmstore.PublishedArtifact) (trainVMGa
 	}
 	expected, ok := normalizedSHA256(artifact.Fingerprint)
 	actual := sha256.Sum256(data)
-	if artifact.FingerprintAlgorithm != "sha256" || !ok || expected != hex.EncodeToString(actual[:]) {
+	if artifact.FingerprintAlgorithm != "manifest_sha256" || !ok || expected != hex.EncodeToString(actual[:]) {
 		return manifest, fmt.Errorf("published gallery manifest fingerprint mismatch")
 	}
 	if err := strictJSONDocument(data, &manifest); err != nil {

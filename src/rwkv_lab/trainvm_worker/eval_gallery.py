@@ -444,7 +444,7 @@ class EvalGalleryPublisher:
             schema=EVAL_GALLERY_SCHEMA,
             uri=manifest_path.resolve(strict=True).as_uri(),
             size_bytes=len(manifest_bytes),
-            fingerprint_algorithm="sha256",
+            fingerprint_algorithm="manifest_sha256",
             fingerprint=manifest_sha256,
             parent_artifact_ids=parents,
             wait=True,

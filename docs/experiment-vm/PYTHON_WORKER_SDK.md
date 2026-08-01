@@ -68,6 +68,24 @@ manifest, publishes that manifest through `WorkerSession.artifact()`, and return
 sequence. Generated and target/source images, held-out membership, condition digest, evaluator,
 checkpoint, policy, seed, sampling attributes, producer attempt, and optimizer step are all bound.
 
+`CheckpointPublisher` is the independent state-artifact path. A family handler returns only a
+typed publication request after its trainer has atomically completed a checkpoint; it never gets a
+controller session or implements transport. The fixed runner then requires a declared immutable
+checkpoint output, confines the source beneath the exact run directory, rejects symlinks and
+nonregular entries, and reflinks every file out of rolling trainer retention when the filesystem
+supports copy-on-write cloning, with descriptor-copy fallback. It detects identity or
+tree changes during the copy, hashes each object, records the closed resume grade, optimizer step,
+state-component inventory, producer attempt, and parent artifact lineage, then atomically promotes
+a content-addressed `trainvm.checkpoint-snapshot.v1` revision. Replays verify both the canonical
+manifest and every frozen payload object before repeating the artifact announcement. Only after
+that durable publication succeeds does the runner emit its terminal worker event, which carries the
+published checkpoint artifact ID rather than a mutable trainer path. MageFlow appearance,
+MageFlow terminal/TREAD, and Qwen AO3 handlers all use this one publication service when their
+invocation declares a checkpoint output; their current honest resume grade remains `compatible`.
+The native controller independently matches every worker artifact's logical name, kind, schema,
+and fingerprint algorithm against that sealed output declaration before it journals the event;
+undeclared, ambiguous, or shape-changing publications fail without consuming a worker sequence.
+
 GPU profiling is likewise a worker service rather than trainer-local CLI state. A native training
 adapter receives one `WorkerStepProfiler` and calls `step()` exactly once after each optimizer
 update. The service owns the bounded skip/warmup/capture state machine, Torch profiler lifetime,
@@ -110,7 +128,8 @@ relative or non-normalized paths fail before trainer code runs. Larger configura
 immutable artifact manifests with authority-verified fingerprints rather than path references.
 
 The fixed runner returns an already-completed replay without executing tensor work, publishes a
-durably receipted terminal result on success, and converts trainer exceptions to a bounded
+durably receipted terminal result on success, freezes any declared checkpoint before that terminal
+result, and converts trainer exceptions to a bounded
 `operation.failed` event containing only an error class. It deliberately does not claim live
 pause/checkpoint/control support yet: trainers must first expose safe-point hooks through this
 session before their registry capability can advertise those controls. Top-level paths are now

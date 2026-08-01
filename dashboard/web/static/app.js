@@ -1242,11 +1242,45 @@
     if (artifactCursor) artifactCursor.textContent = "sequence —";
   }
 
+  async function refreshVMCheckpointRows() {
+    if (!vmSelected) return;
+    const selected = vmSelected;
+    const response = await fetch(
+      `/api/trainvm/runs/${encodeURIComponent(selected)}/checkpoints`,
+      { cache: "no-store" });
+    if (!response.ok || selected !== vmSelected) return;
+    const checkpoints = await response.json();
+    if (!Array.isArray(checkpoints) || selected !== vmSelected) return;
+    const summaries = new Map(checkpoints.map((checkpoint) =>
+      [checkpoint.artifact_id, checkpoint]));
+    const target = document.getElementById("trainvm-artifacts");
+    if (!target) return;
+    for (const row of target.querySelectorAll("[data-vm-checkpoint]")) {
+      const checkpoint = summaries.get(row.dataset.vmCheckpoint);
+      if (!checkpoint) continue;
+      const value = row.querySelector(".vm-telemetry-value");
+      const meta = row.querySelector(".vm-telemetry-meta");
+      const state = Array.isArray(checkpoint.state_components) ?
+        checkpoint.state_components.join(", ") : "";
+      const parents = Array.isArray(checkpoint.parent_artifact_ids) ?
+        checkpoint.parent_artifact_ids.join(", ") : "";
+      if (value) {
+        value.textContent = `${checkpoint.resume_grade} · step ${Number(checkpoint.optimizer_step || 0).toLocaleString()}`;
+        value.title = `${checkpoint.checkpoint_schema}\nstate: ${state || "unspecified"}`;
+      }
+      if (meta) {
+        meta.textContent = `${Number(checkpoint.file_count || 0).toLocaleString()} files · ${Number(checkpoint.payload_size_bytes || 0).toLocaleString()} B · #${Number(checkpoint.sequence || 0).toLocaleString()}`;
+        meta.title = `tree ${checkpoint.canonical_tree_digest || "—"}\nparents: ${parents || "none"}`;
+      }
+    }
+  }
+
   async function appendVMTelemetry() {
     if (!vmSelected) return;
     const selected = vmSelected;
     let galleryPublished = false;
     let profilePublished = false;
+    let checkpointPublished = false;
     const [metricResponse, artifactResponse] = await Promise.all([
       fetch(`/api/trainvm/runs/${encodeURIComponent(selected)}/metrics?after=${vmMetricAfter}&limit=250`,
         { cache: "no-store" }),
@@ -1293,8 +1327,10 @@
           if (artifact.kind === "opaque" && artifact.schema === "trainvm.gpu-trace.v1") {
             profilePublished = true;
           }
+          if (artifact.kind === "checkpoint") checkpointPublished = true;
           const row = document.createElement("div");
           row.className = "vm-telemetry-row";
+          if (artifact.kind === "checkpoint") row.dataset.vmCheckpoint = artifact.artifact_id;
           row.innerHTML = `<span class="vm-telemetry-name" title="${vmEscape(artifact.logical_name)}">${vmEscape(artifact.logical_name)}</span>` +
             `<span class="vm-telemetry-value" title="${vmEscape(artifact.kind)}">${vmEscape(artifact.kind)}</span>` +
             `<span class="vm-telemetry-meta" title="${vmEscape(artifact.uri)}">${Number(artifact.size_bytes || 0).toLocaleString()} B · #${Number(artifact.sequence || 0).toLocaleString()}</span>`;
@@ -1309,6 +1345,7 @@
     }
     if (galleryPublished) await refreshVMGalleries(true);
     if (profilePublished) await refreshVMProfiles(true);
+    if (checkpointPublished) await refreshVMCheckpointRows();
   }
 
   async function refreshTrainVM(force = false) {

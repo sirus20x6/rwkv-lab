@@ -91,7 +91,7 @@ func trainVMGalleryFixture(t *testing.T) (*Server, string, string) {
 	payload, err := json.Marshal(map[string]any{
 		"artifact_id": "gallery-75", "logical_name": "eval/gallery", "kind": "image_gallery",
 		"schema": trainVMGallerySchema, "uri": testFileURI(manifestPath), "size_bytes": len(manifestData),
-		"fingerprint_algorithm": "sha256", "fingerprint": testSHA256(manifestData), "complete": true,
+		"fingerprint_algorithm": "manifest_sha256", "fingerprint": testSHA256(manifestData), "complete": true,
 		"producer_node_id": "eval", "producer_attempt_id": "eval@2",
 		"parent_artifact_ids": []string{"checkpoint-75"}, "published_at_ns": int64(99),
 	})

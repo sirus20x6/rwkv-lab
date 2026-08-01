@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 
 from rwkv_lab.trainvm_worker import (
     WorkerBootstrap,
@@ -11,6 +12,7 @@ from rwkv_lab.trainvm_worker import (
     WorkerStepProfiler,
     apply_worker_runtime_policy,
     observability_from_invocation,
+    publish_checkpoint_requests,
     read_worker_bootstrap_fd,
     step_profiler_from_invocation,
 )
@@ -68,6 +70,24 @@ def run_worker(
                     session.invocation,
                     step_profiler,
                     observability,
+                )
+            published_checkpoints = publish_checkpoint_requests(
+                session,
+                result.checkpoint_requests,
+                progress=lambda step: observability.optimizer_step(
+                    step, "publishing_checkpoint"
+                ),
+            )
+            if published_checkpoints:
+                result = replace(
+                    result,
+                    payload={
+                        **result.payload,
+                        "checkpoint_artifact_ids": [
+                            checkpoint.artifact_id
+                            for checkpoint in published_checkpoints
+                        ],
+                    },
                 )
         except Exception as error:  # noqa: BLE001 - trainer failures are terminal events
             # The durable event is intentionally bounded and contains neither the

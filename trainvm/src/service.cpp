@@ -1984,6 +1984,7 @@ grpc::Status TrainVMService::open_worker_connection(
         return {grpc::StatusCode::DATA_LOSS,
                 "completed worker attempt has no immutable invocation"};
       }
+      connection.publishes = invocation->publishes;
       auto& welcome = connection.welcome;
       welcome.set_disposition(
           v1::WorkerWelcome::DISPOSITION_ALREADY_COMPLETED);
@@ -2084,6 +2085,7 @@ grpc::Status TrainVMService::open_worker_connection(
           candidate, connection.identity, authority_now());
     }
     auto& welcome = connection.welcome;
+    connection.publishes = invocation->publishes;
     welcome.set_disposition(
         readiness.disposition == WorkerReadinessDisposition::accepted
             ? v1::WorkerWelcome::DISPOSITION_ACCEPTED
@@ -2359,6 +2361,41 @@ grpc::Status TrainVMService::record_worker_artifact(
         artifact.producer_attempt_id() != connection.identity.attempt_id) {
       return {grpc::StatusCode::INVALID_ARGUMENT,
               "published artifact requires complete content identity and the active producer attempt"};
+    }
+    const nlohmann::json* publication = nullptr;
+    if (!connection.publishes.is_object()) {
+      return {grpc::StatusCode::DATA_LOSS,
+              "worker invocation publication authority is malformed"};
+    }
+    for (const auto& [output_name, candidate] : connection.publishes.items()) {
+      (void)output_name;
+      if (!candidate.is_object() || !candidate.contains("logical_name") ||
+          !candidate.contains("declaration")) {
+        return {grpc::StatusCode::DATA_LOSS,
+                "worker invocation publication declaration is malformed"};
+      }
+      if (candidate.value("logical_name", std::string{}) ==
+          artifact.logical_name()) {
+        if (publication != nullptr) {
+          return {grpc::StatusCode::DATA_LOSS,
+                  "worker invocation has ambiguous publication authority"};
+        }
+        publication = &candidate;
+      }
+    }
+    if (publication == nullptr) {
+      return {grpc::StatusCode::PERMISSION_DENIED,
+              "worker artifact is not declared by its immutable invocation"};
+    }
+    const auto& declaration = publication->at("declaration");
+    if (!declaration.is_object() ||
+        declaration.value("type", std::string{}) !=
+            artifact_kind_name(artifact.kind()) ||
+        declaration.value("schema", std::string{}) != artifact.schema() ||
+        declaration.value("fingerprint", std::string{}) !=
+            artifact.fingerprint_algorithm()) {
+      return {grpc::StatusCode::INVALID_ARGUMENT,
+              "worker artifact disagrees with its immutable output declaration"};
     }
     std::set<std::string> parents;
     nlohmann::json parent_ids = nlohmann::json::array();

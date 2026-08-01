@@ -4521,18 +4521,29 @@ void test_worker_control_service_boundary() {
 
     trainvm::v1::ArtifactManifest artifact;
     artifact.set_worker_sequence(3);
-    artifact.set_artifact_id("eval-gallery-step-11");
-    artifact.set_logical_name("eval/gallery");
-    artifact.set_kind(trainvm::v1::ARTIFACT_KIND_IMAGE_GALLERY);
-    artifact.set_schema("trainvm.eval-gallery/v1");
-    artifact.set_uri("file:///sealed/eval-gallery-step-11");
+    artifact.set_artifact_id("checkpoint-step-11");
+    artifact.set_logical_name("checkpoint");
+    artifact.set_kind(trainvm::v1::ARTIFACT_KIND_CHECKPOINT);
+    artifact.set_schema("rwkv-lab.mageflow-checkpoint.v1");
+    artifact.set_uri("file:///sealed/checkpoint-step-11");
     artifact.set_size_bytes(4096);
-    artifact.set_fingerprint_algorithm("sha256");
+    artifact.set_fingerprint_algorithm("manifest_sha256");
     artifact.set_fingerprint(std::string(64U, 'a'));
     artifact.set_complete(true);
     artifact.set_producer_node_id(connection.identity.node_id);
     artifact.set_producer_attempt_id(connection.identity.attempt_id);
     artifact.mutable_published_at()->set_seconds(3);
+    auto undeclared_artifact = artifact;
+    undeclared_artifact.set_logical_name("rogue-output");
+    std::uint64_t rejected_artifact_acknowledgement = 0;
+    const grpc::Status undeclared_artifact_status =
+        service.record_worker_artifact(undeclared_artifact, connection,
+                                       rejected_artifact_acknowledgement);
+    auto mismatched_artifact = artifact;
+    mismatched_artifact.set_kind(trainvm::v1::ARTIFACT_KIND_IMAGE_GALLERY);
+    const grpc::Status mismatched_artifact_status =
+        service.record_worker_artifact(mismatched_artifact, connection,
+                                       rejected_artifact_acknowledgement);
     std::uint64_t artifact_acknowledgement = 0;
     const grpc::Status artifact_status = service.record_worker_artifact(
         artifact, connection, artifact_acknowledgement);
@@ -4594,6 +4605,10 @@ void test_worker_control_service_boundary() {
                 heartbeat_replay.ok() && replayed_acknowledgement == 1U &&
                 after_heartbeat == 14U && observer.event_count() == 22U &&
                 metric_status.ok() && metric_acknowledgement == 2U &&
+                undeclared_artifact_status.error_code() ==
+                    grpc::StatusCode::PERMISSION_DENIED &&
+                mismatched_artifact_status.error_code() ==
+                    grpc::StatusCode::INVALID_ARGUMENT &&
                 artifact_status.ok() && artifact_acknowledgement == 3U &&
                 control_request.command && control_status.ok() &&
                 control_acknowledgement == 4U && control_replay.ok() &&
@@ -5130,13 +5145,13 @@ void test_worker_control_grpc_stream() {
     trainvm::v1::WorkerToController artifact_message;
     auto* artifact = artifact_message.mutable_artifact();
     artifact->set_worker_sequence(4);
-    artifact->set_artifact_id("grpc-eval-gallery");
-    artifact->set_logical_name("eval/gallery");
-    artifact->set_kind(trainvm::v1::ARTIFACT_KIND_IMAGE_GALLERY);
-    artifact->set_schema("trainvm.eval-gallery/v1");
-    artifact->set_uri("file:///sealed/grpc-eval-gallery");
+    artifact->set_artifact_id("grpc-checkpoint");
+    artifact->set_logical_name("checkpoint");
+    artifact->set_kind(trainvm::v1::ARTIFACT_KIND_CHECKPOINT);
+    artifact->set_schema("rwkv-lab.mageflow-checkpoint.v1");
+    artifact->set_uri("file:///sealed/grpc-checkpoint");
     artifact->set_size_bytes(8192);
-    artifact->set_fingerprint_algorithm("sha256");
+    artifact->set_fingerprint_algorithm("manifest_sha256");
     artifact->set_fingerprint(std::string(64U, 'b'));
     artifact->set_complete(true);
     artifact->set_producer_node_id(welcome_message.welcome().node_id());

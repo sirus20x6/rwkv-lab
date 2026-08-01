@@ -113,7 +113,7 @@ def test_eval_gallery_publisher_freezes_and_atomically_publishes_side_by_side(
             "schema": EVAL_GALLERY_SCHEMA,
             "uri": result.manifest_path.resolve().as_uri(),
             "size_bytes": result.size_bytes,
-            "fingerprint_algorithm": "sha256",
+            "fingerprint_algorithm": "manifest_sha256",
             "fingerprint": result.manifest_sha256,
             "parent_artifact_ids": ("checkpoint-125",),
             "wait": True,

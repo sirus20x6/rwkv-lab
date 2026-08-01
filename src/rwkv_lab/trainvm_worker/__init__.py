@@ -7,6 +7,14 @@ from .bootstrap import (
     load_worker_bootstrap,
     read_worker_bootstrap_fd,
 )
+from .checkpoint import (
+    CHECKPOINT_SNAPSHOT_SCHEMA,
+    CheckpointPublicationError,
+    CheckpointPublicationRequest,
+    CheckpointPublisher,
+    PublishedCheckpoint,
+    publish_checkpoint_requests,
+)
 from .eval_gallery import (
     EVAL_GALLERY_SCHEMA,
     EvalGalleryError,
@@ -68,6 +76,7 @@ from .training import (
 )
 
 __all__ = [
+    "CHECKPOINT_SNAPSHOT_SCHEMA",
     "EVAL_GALLERY_SCHEMA",
     "GPU_TRACE_SCHEMA",
     "MAXIMUM_BOOTSTRAP_BYTES",
@@ -76,6 +85,9 @@ __all__ = [
     "MAXIMUM_METRICS",
     "RESOLVED_TRAINING_API_VERSION",
     "BootstrapError",
+    "CheckpointPublicationError",
+    "CheckpointPublicationRequest",
+    "CheckpointPublisher",
     "CommandKind",
     "ControlAssignment",
     "ControlDisposition",
@@ -91,6 +103,7 @@ __all__ = [
     "MetricDeclaration",
     "NullStepProfiler",
     "ObservabilityDeclaration",
+    "PublishedCheckpoint",
     "PublishedEvalGallery",
     "PublishedGpuTrace",
     "ResolvedTrainingComponent",
@@ -115,6 +128,7 @@ __all__ = [
     "load_worker_invocation",
     "load_worker_runtime_policy",
     "observability_from_invocation",
+    "publish_checkpoint_requests",
     "read_worker_bootstrap_fd",
     "step_profiler_from_invocation",
     "trace_request_from_invocation",

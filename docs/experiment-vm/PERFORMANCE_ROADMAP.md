@@ -218,6 +218,17 @@ packed-row acquisition, so a complete capture publishes measured input-stall tim
 profiler never infers input stall from GPU gaps, which would mislabel CPU, synchronization, or
 communication work as data wait; adapters without an explicit boundary omit the field.
 
+Native checkpoint publication now has the same family-neutral boundary: handlers return typed
+checkpoint publication requests, and the worker freezes completed MageFlow appearance,
+MageFlow terminal/TREAD, or Qwen AO3 state into immutable, per-file-hashed, canonical tree
+revisions before emitting the terminal event. The snapshot is independent of trainer retention,
+binds producer/step/resume-grade/state inventory and parent lineage, and rejects symlink,
+nonregular, outside-workspace, changing-source, or mutated-replay trees. This closes terminal
+artifact visibility and durable handoff for the three native adapters; on-demand safe-point command
+handling and stronger content binding for exact resume remain separate lifecycle work.
+The dashboard verifies the snapshot envelope and renders its optimizer step, resume grade, state
+inventory, file/byte counts, tree digest, and parent lineage in the generic artifact stream.
+
 The guarded GPU launch path is implemented: a root-owned hostd with explicitly non-root worker
 credentials exposes process mutation only after startup recovery/admission, and TrainVM drives the
 prepare -> durable journal receipt -> exec commit saga through the sealed host-process client.

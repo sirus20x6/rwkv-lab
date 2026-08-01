@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import MappingProxyType, SimpleNamespace
 from typing import Self
 
@@ -161,6 +162,61 @@ def test_appearance_handler_passes_only_canonical_authorized_paths(
     assert observed[0][3] is observability
 
 
+def test_appearance_handler_returns_declared_immutable_checkpoint_request(
+    tmp_path, monkeypatch
+) -> None:
+    from rwkv_lab import mage_flow_expert_train
+
+    read_root = tmp_path / "read"
+    run_directory = tmp_path / "write" / "run"
+    read_root.mkdir()
+    run_directory.mkdir(parents=True)
+    manifest = read_root / "train.jsonl"
+    manifest.write_text("{}\n", encoding="utf-8")
+
+    def train(config, **_kwargs):
+        checkpoint = run_directory / "checkpoint-00000023"
+        checkpoint.mkdir()
+        (checkpoint / "state.pt").write_bytes(b"state")
+        (run_directory / "complete.json").write_text(
+            json.dumps(
+                {
+                    "global_step": 23,
+                    "checkpoint": str(checkpoint),
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(mage_flow_expert_train, "train", train)
+    invocation = SimpleNamespace(
+        inputs={
+            "config": {
+                "train_manifest": str(manifest),
+                "output_dir": str(run_directory),
+            }
+        },
+        workspace={
+            "run_directory": str(run_directory),
+            "allowed_read_roots": [str(read_root)],
+            "allowed_write_roots": [str(run_directory.parent)],
+        },
+        publishes={"checkpoint": {}},
+    )
+
+    result = _appearance_expert(
+        invocation, SimpleNamespace(), observability=SimpleNamespace()
+    )
+    assert result.optimizer_step == 23
+    assert result.payload == {"reason": "training_complete"}
+    assert len(result.checkpoint_requests) == 1
+    request = result.checkpoint_requests[0]
+    assert request.source_directory == run_directory / "checkpoint-00000023"
+    assert request.optimizer_step == 23
+    assert request.resume_grade == "compatible"
+    assert request.state_components[0] == "component_composition"
+
+
 def test_dispatch_table_is_closed_and_training_composition_is_required() -> None:
     assert supported_adapter_keys() == {
         (
@@ -234,6 +290,54 @@ def test_runner_reports_success_with_optimizer_step() -> None:
     ]
     assert sessions[0].heartbeats == [(0, "initializing")]
     assert sessions[0].closed
+
+
+def test_runner_publishes_handler_checkpoints_before_terminal_event(
+    monkeypatch, tmp_path
+) -> None:
+    from rwkv_lab.trainvm_worker import CheckpointPublicationRequest
+
+    bootstrap = SimpleNamespace(run_id="run-1")
+    session = FakeSession(bootstrap)
+    request = CheckpointPublicationRequest(
+        tmp_path,
+        optimizer_step=19,
+        resume_grade="compatible",
+        state_components=("model",),
+    )
+    observed = []
+
+    def publish(actual_session, requests, *, progress):
+        assert actual_session is session
+        observed.extend(requests)
+        progress(19)
+        return (SimpleNamespace(artifact_id="checkpoint-artifact-19"),)
+
+    monkeypatch.setattr(
+        "rwkv_lab.trainvm_adapters.entrypoint.publish_checkpoint_requests", publish
+    )
+    status = run_worker(
+        bootstrap_reader=lambda _descriptor: bootstrap,
+        session_factory=lambda _bootstrap: session,
+        executor=lambda _invocation, _profiler, _observability: HandlerResult(
+            "worker.completed",
+            {"reason": "training_complete"},
+            19,
+            (request,),
+        ),
+    )
+    assert status == 0
+    assert observed == [request]
+    assert session.finished == [
+        (
+            "worker.completed",
+            {
+                "reason": "training_complete",
+                "checkpoint_artifact_ids": ["checkpoint-artifact-19"],
+            },
+            19,
+        )
+    ]
 
 
 def test_runner_reports_sanitized_failure_and_skips_completed_replay() -> None:

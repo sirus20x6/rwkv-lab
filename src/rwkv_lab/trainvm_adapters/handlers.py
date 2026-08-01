@@ -2,15 +2,23 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
 from rwkv_lab.trainvm_worker import (
+    CheckpointPublicationRequest,
     NullStepProfiler,
     WorkerInvocation,
     WorkerObservability,
     WorkerStepProfiler,
 )
 
+from .checkpoints import (
+    checkpoint_request,
+    completed_checkpoint_request,
+    completion_reason,
+    declares_checkpoint,
+)
 from .components import WorkerTrainingComponents
 from .io import WorkspacePathAuthority, read_inline_config
 
@@ -24,6 +32,7 @@ class HandlerResult:
     event_type: str
     payload: Mapping[str, Any]
     optimizer_step: int | None = None
+    checkpoint_requests: tuple[CheckpointPublicationRequest, ...] = ()
 
 
 AdapterKey = tuple[str, str, str, str]
@@ -93,7 +102,30 @@ def _appearance_expert(
         worker_step_profiler=step_profiler or NullStepProfiler(),
         worker_observability=observability,
     )
-    return HandlerResult("worker.completed", {"reason": "training_complete"})
+    request, step, status = completed_checkpoint_request(
+        invocation,
+        Path(config.output_dir),
+        document_names=("complete.json", "status.json"),
+        step_fields=("global_step", "step"),
+        state_components=(
+            "component_composition",
+            "data_cursor",
+            "lr_schedule",
+            "model",
+            "optimizer",
+            "parameter_routing",
+            "rng_accelerator",
+            "rng_numpy",
+            "rng_python",
+            "rng_torch",
+        ),
+    )
+    return HandlerResult(
+        "worker.completed",
+        {"reason": completion_reason(status)},
+        optimizer_step=step,
+        checkpoint_requests=((request,) if request is not None else ()),
+    )
 
 
 def _terminal_expert(
@@ -175,7 +207,30 @@ def _terminal_expert(
         worker_step_profiler=step_profiler or NullStepProfiler(),
         worker_observability=observability,
     )
-    return HandlerResult("worker.completed", {"reason": "training_complete"})
+    request, step, status = completed_checkpoint_request(
+        invocation,
+        Path(config.output_dir),
+        document_names=("status.json",),
+        step_fields=("step",),
+        state_components=(
+            "component_composition",
+            "data_cursor",
+            "expert_routing",
+            "lr_schedule",
+            "model",
+            "optimizer",
+            "parameter_routing",
+            "rng_accelerator",
+            "rng_python",
+            "rng_torch",
+        ),
+    )
+    return HandlerResult(
+        "worker.completed",
+        {"reason": completion_reason(status)},
+        optimizer_step=step,
+        checkpoint_requests=((request,) if request is not None else ()),
+    )
 
 
 def _qwen_ao3(
@@ -216,6 +271,30 @@ def _qwen_ao3(
         worker_observability=observability,
     )
     step = result.get("step")
+    checkpoint_requests: tuple[CheckpointPublicationRequest, ...] = ()
+    checkpoint = result.get("checkpoint")
+    if declares_checkpoint(invocation):
+        if not isinstance(checkpoint, str):
+            raise AdapterDispatchError("trainer omitted its declared checkpoint")
+        checkpoint_requests = (
+            checkpoint_request(
+                invocation,
+                Path(config.run_dir),
+                checkpoint,
+                step,
+                state_components=(
+                    "component_composition",
+                    "data_cursor",
+                    "expert_routing",
+                    "model",
+                    "optimizer",
+                    "rng_accelerator",
+                    "rng_numpy",
+                    "rng_python",
+                    "rng_torch",
+                ),
+            ),
+        )
     return HandlerResult(
         "worker.completed",
         {
@@ -223,6 +302,7 @@ def _qwen_ao3(
             "status": str(result.get("status", "complete")),
         },
         optimizer_step=(step if isinstance(step, int) and step >= 0 else None),
+        checkpoint_requests=checkpoint_requests,
     )
 
 
