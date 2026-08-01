@@ -45,6 +45,12 @@ implementation as separate layers.
 - explicit control acknowledgement at adapter-selected safe points;
 - one canonical terminal result and durable receipt.
 
+Before dispatch, `rwkv_lab.trainvm_worker.runtime_policy` independently parses the resource policy
+from the sealed invocation. It owns only non-root runtime controls: narrowing/rechecking process CPU
+affinity, tensor-library/OpenMP thread counts, the preprocessing-worker hint, and effective nice
+verification. Family adapters do not read environment variables or reconstruct this policy.
+CPU/I/O cgroup weights are hostd authority and are never reported effective by this worker layer.
+
 `EvalGalleryPublisher` is the shared qualitative-evaluation publication path. It requires an exact
 `rwkv-lab.eval-gallery.v2` output declaration from the immutable invocation, confines all input
 images to declared read/write roots, fully decodes supported raster formats with Pillow, and copies

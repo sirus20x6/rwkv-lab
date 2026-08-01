@@ -33,6 +33,13 @@ from .profiling import (
     step_profiler_from_invocation,
     trace_request_from_invocation,
 )
+from .runtime_policy import (
+    EffectiveWorkerRuntimePolicy,
+    WorkerRuntimePolicy,
+    WorkerRuntimePolicyError,
+    apply_worker_runtime_policy,
+    load_worker_runtime_policy,
+)
 from .session import (
     CommandKind,
     ControlAssignment,
@@ -62,6 +69,7 @@ __all__ = [
     "CommandKind",
     "ControlAssignment",
     "ControlDisposition",
+    "EffectiveWorkerRuntimePolicy",
     "EvalGalleryError",
     "EvalGalleryItem",
     "EvalGalleryPublisher",
@@ -81,12 +89,16 @@ __all__ = [
     "WorkerCommand",
     "WorkerInvocation",
     "WorkerReceipt",
+    "WorkerRuntimePolicy",
+    "WorkerRuntimePolicyError",
     "WorkerSession",
     "WorkerSessionError",
     "WorkerStepProfiler",
+    "apply_worker_runtime_policy",
     "load_resolved_training_composition",
     "load_worker_bootstrap",
     "load_worker_invocation",
+    "load_worker_runtime_policy",
     "read_worker_bootstrap_fd",
     "step_profiler_from_invocation",
     "trace_request_from_invocation",

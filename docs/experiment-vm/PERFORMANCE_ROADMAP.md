@@ -148,7 +148,11 @@ Single-run speedrun results are hypotheses, not production defaults.
   symlink-safe paths, atomic immutable promotion, and an artifact-tree digest receipt; a claim digest
   alone never authorizes reuse.
 - Add typed CPU/I/O policy: CPU set, CPU weight, I/O weight, worker count, OpenMP thread count, and
-  nice level. Record effective policy and throttling as evidence.
+  nice level. Record effective policy and throttling as evidence. The non-root worker runtime now
+  parses the sealed policy in one category-owned module, narrows and reattests CPU affinity, applies
+  tensor-library thread limits, exports the bounded preprocessing-worker hint, and verifies its
+  effective nice level before importing a family trainer. CPU and I/O weights remain explicitly
+  hostd-owned; lowering and durable recovery attestation of those cgroup controls is still required.
 - Add bounded `torch`, Nsight Systems, and Nsight Compute trace phases with warmup/skip/capture
   limits. Publish trace, summary, kernel table, launch count, GPU-active ratio, input-stall time,
   allocator pressure, and step-range metadata as dashboard artifacts.
@@ -271,9 +275,11 @@ startup orphan recovery are defined in
   authority defaults scattered across the executable. The foreground daemon assembly now proves
   live namespace/service-cgroup/cgroup-root/boot/inventory/journal identities before host-ledger
   initialization, drives bounded startup recovery/audit, and transactionally binds the unified
-  endpoint only after admission. It exposes grant/release and restart reconciliation but keeps new
-  process launch unavailable until a durable cgroup-device BPF receipt exists. Device enforcement
-  and real-host crash qualification remain before training admission can rely on this path.
+  endpoint only after admission. It exposes grant/release, stopped-child process launch, and
+  restart reconciliation. Exact default-deny cgroup-device BPF programs and non-root worker
+  credentials are now bound into durable launch/spawn evidence and reattested on recovery.
+  Real-host crash qualification and CPU/I/O cgroup-policy receipts remain before training admission
+  can rely on the complete path.
   The prerequisite v2 inventory capability model is implemented: exact assigned and shared NVIDIA
   driver nodes are topology-bound, capability drift degrades the resource, and unmapped partitions
   fail launch eligibility rather than borrowing their parent node.
@@ -283,7 +289,8 @@ startup orphan recovery are defined in
 - Extend the implemented wake-driven, restart-scanning service supervisor (admission, launch,
   terminal process/resource release, and exact lease renewal) with typed executors for
   compile/warmup/qualification nodes and dashboard-visible supervisor health.
-- Fingerprinted cache namespaces and typed CPU/I/O policy.
+- Fingerprinted cache namespaces and hostd lowering/attestation for the worker-validated typed
+  CPU/I/O policy.
 - Declarative bounded Torch GPU profiling and dashboard trace artifacts are implemented; qualified
   Nsight launch profiles and richer cross-backend summaries remain.
 

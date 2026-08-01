@@ -8,6 +8,7 @@ from rwkv_lab.trainvm_worker import (
     WorkerInvocation,
     WorkerSession,
     WorkerStepProfiler,
+    apply_worker_runtime_policy,
     read_worker_bootstrap_fd,
     step_profiler_from_invocation,
 )
@@ -49,6 +50,9 @@ def run_worker(
         if session.completed_before_connect:
             return 0
         try:
+            apply_worker_runtime_policy(
+                getattr(session.invocation, "resources", {})
+            )
             with step_profiler_from_invocation(
                 session, session.invocation
             ) as step_profiler:
