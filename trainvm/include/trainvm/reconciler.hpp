@@ -22,6 +22,8 @@ enum class ReconcileDisposition {
   lease_busy,
   host_grant_acquired,
   host_grant_busy,
+  host_process_exited,
+  host_grant_released,
   launch_prepared,
   launch_replayed,
   awaiting_worker,
@@ -57,10 +59,10 @@ class IHostGrantClient {
       const ResourceReleaseRequest& request) = 0;
 };
 
-// This coordinator is intentionally not constructed by TrainVMService yet.
-// Production wiring must give it the same authority mutex used by Reconciler
-// and WorkerControl before a real host RPC client is admitted; otherwise a
-// grant/release can race launch, hello, dispatch, or result authority checks.
+// TrainVMService constructs this only with an explicitly configured typed
+// hostd client and serializes every call with the same authority mutex used by
+// Reconciler and WorkerControl. Grant/release therefore cannot race launch,
+// hello, dispatch, or result authority checks.
 class HostGrantSagaReconciler final {
  public:
   HostGrantSagaReconciler(Journal& journal, IHostGrantClient& host,

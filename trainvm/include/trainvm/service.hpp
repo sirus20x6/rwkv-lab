@@ -117,6 +117,8 @@ class TrainVMService final : public v1::TrainVM::Service,
       const std::string& launch_id);
   [[nodiscard]] std::optional<ReconcileDisposition> reconcile_host_grant(
       const std::string& run_id);
+  [[nodiscard]] std::optional<ReconcileDisposition> reconcile_host_release(
+      const std::string& run_id);
   void configure_hostd(const HostdClientConfiguration& configuration,
                        std::string controller_target);
 

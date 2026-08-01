@@ -154,4 +154,32 @@ HostdProcessCommittedResult HostdProcessClient::commit_process(
   return result;
 }
 
+HostProcessExitResult HostdProcessClient::finalize_process(
+    const HostdProcessExitCommand& request) {
+  (void)hostd_process_exit_canonical_json(request);
+  HostdMutationRequest mutation{
+      .open = open_for(request.launch_id, request.journal_id, request.run_id,
+                       request.logical_lease_id,
+                       request.logical_fencing_token),
+      .mutation = HostdMutationKind::finalize_process,
+      .process_exit = request,
+  };
+  const HostdMutationReply reply = channel_.request(std::move(mutation));
+  if (reply.kind != HostdMutationReplyKind::process_exited ||
+      !reply.process_exit) {
+    throw HostdTransportError(
+        "hostd process finalize returned the wrong reply kind");
+  }
+  const auto& result = *reply.process_exit;
+  (void)host_process_exit_receipt_json(result.receipt);
+  if (result.receipt.request.exit_request_id != request.exit_request_id ||
+      result.receipt.request.launch_id != request.launch_id ||
+      result.receipt.request.spawn_receipt_digest !=
+          request.spawn_receipt_digest) {
+    throw HostdTransportError(
+        "hostd process finalize reply diverges from its request");
+  }
+  return result;
+}
+
 }  // namespace trainvm

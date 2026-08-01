@@ -167,6 +167,8 @@ struct HostProcessSagaSnapshot final {
   HostdProcessPreparedResult prepared;
   std::optional<HostdProcessCommitRequest> commit;
   std::optional<HostdProcessCommittedResult> committed;
+  std::optional<HostdProcessExitCommand> exit_command;
+  std::optional<HostProcessExitResult> exited;
 
   bool operator==(const HostProcessSagaSnapshot&) const = default;
 };
@@ -295,6 +297,10 @@ public:
   [[nodiscard]] HostProcessSagaSnapshot record_host_process_committed(
       const HostdProcessCommitRequest& request,
       const HostdProcessCommittedResult& result,
+      const AuthorityTimeSample& now);
+  [[nodiscard]] HostProcessSagaSnapshot record_host_process_exited(
+      const HostdProcessExitCommand& request,
+      const HostProcessExitResult& result,
       const AuthorityTimeSample& now);
   [[nodiscard]] std::optional<HostProcessSagaSnapshot> host_process_saga(
       const std::string& launch_id) const;

@@ -538,6 +538,7 @@ const ExecutionState& Controller::recover() {
   std::map<std::string, std::string> replayed_control_status;
   std::set<std::string> replayed_process_prepares;
   std::set<std::string> replayed_process_commits;
+  std::set<std::string> replayed_process_exits;
   bool current_dispatch_prepared = false;
   for (const Event& event : events) {
     if (event.plan_revision != kInitialPlanRevision) {
@@ -564,23 +565,32 @@ const ExecutionState& Controller::recover() {
       continue;
     }
     if (event.event_type.starts_with("host.process_")) {
-      const std::string launch_id = run_id_ + ":worker-launch:" +
-                                    recovered.current_node_id + ":" +
-                                    recovered.current_attempt_id;
-      const auto saga = journal_.host_process_saga(launch_id);
       const bool prepared = event.event_type == "host.process_prepared";
       const bool committed = event.event_type == "host.process_committed";
-      if ((!prepared && !committed) || phase != ReplayPhase::launch_bound ||
-          !saga || event.event_version != 1U ||
+      const bool exited = event.event_type == "host.process_exited";
+      std::string launch_id;
+      if (exited && event.payload.contains("exit_command")) {
+        launch_id = hostd_process_exit_from_canonical_json(
+                        event.payload.at("exit_command").dump())
+                        .launch_id;
+      } else {
+        launch_id = run_id_ + ":worker-launch:" +
+                    recovered.current_node_id + ":" +
+                    recovered.current_attempt_id;
+      }
+      const auto saga = journal_.host_process_saga(launch_id);
+      if ((!prepared && !committed && !exited) || !saga ||
+          ((!exited && phase != ReplayPhase::launch_bound)) ||
+          event.event_version != 1U ||
           event.worker_sequence != 0U ||
           event.run_revision != recovered.revision ||
-          event.node_id != recovered.current_node_id ||
-          event.attempt_id != recovered.current_attempt_id ||
           saga->prepare.launch.identity.launch_event_id != launch_id ||
           saga->prepare.launch.identity.run_id != run_id_ ||
-          saga->prepare.launch.identity.node_id != recovered.current_node_id ||
-          saga->prepare.launch.identity.attempt_id !=
-              recovered.current_attempt_id) {
+          event.node_id != saga->prepare.launch.identity.node_id ||
+          event.attempt_id != saga->prepare.launch.identity.attempt_id ||
+          (!exited &&
+           (event.node_id != recovered.current_node_id ||
+            event.attempt_id != recovered.current_attempt_id))) {
         throw std::runtime_error(
             "journal recovery found malformed host process authority evidence");
       }
@@ -590,13 +600,21 @@ const ExecutionState& Controller::recover() {
           throw std::runtime_error(
               "journal recovery found duplicate host process prepare evidence");
         }
-      } else {
+      } else if (committed) {
         if (!saga->committed ||
             !replayed_process_prepares.contains(launch_id) ||
             event.event_id != launch_id + ":host-process-committed" ||
             !replayed_process_commits.insert(launch_id).second) {
           throw std::runtime_error(
               "journal recovery found unordered host process commit evidence");
+        }
+      } else {
+        if (!saga->exited ||
+            !replayed_process_commits.contains(launch_id) ||
+            event.event_id != launch_id + ":host-process-exited" ||
+            !replayed_process_exits.insert(launch_id).second) {
+          throw std::runtime_error(
+              "journal recovery found unordered host process exit evidence");
         }
       }
       continue;

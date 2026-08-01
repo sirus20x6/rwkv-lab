@@ -19,6 +19,9 @@ enum class HostProcessSagaFaultPoint {
   before_commit_host,
   after_commit_host,
   after_commit_journal,
+  before_exit_host,
+  after_exit_host,
+  after_exit_journal,
 };
 
 class IHostProcessSagaFaultInjector {
@@ -38,6 +41,8 @@ class IHostProcessClient {
       const SealedWorkerBootstrap& bootstrap) = 0;
   [[nodiscard]] virtual HostdProcessCommittedResult commit_process(
       const HostdProcessCommitRequest& request) = 0;
+  [[nodiscard]] virtual HostProcessExitResult finalize_process(
+      const HostdProcessExitCommand& request) = 0;
 };
 
 // Executes the stopped-child prepare -> durable journal copy -> exec commit
@@ -52,6 +57,9 @@ class HostProcessSagaReconciler final {
   [[nodiscard]] HostProcessSagaSnapshot reconcile(
       const ResolvedLaunch& resolved, const ResourceBundleGrant& grant,
       std::string controller_target, const AuthorityTimeSample& now);
+  [[nodiscard]] HostProcessSagaSnapshot reconcile_exit(
+      const std::string& launch_id, bool request_termination,
+      const AuthorityTimeSample& now);
 
  private:
   void fault(HostProcessSagaFaultPoint point) const;

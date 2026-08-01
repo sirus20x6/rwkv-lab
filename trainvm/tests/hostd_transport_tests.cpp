@@ -1907,6 +1907,11 @@ void mutation_transport_dispatches_replays_and_disconnects() {
               exit_replay.process_exit && exit_replay.process_exit->replayed &&
               process_supervisor->exit_calls == 2U,
           "process exit is durable, terminal, and replay-safe");
+  const auto typed_exited = typed_exchange(
+      [&] { return process_client.finalize_process(process_exit); });
+  require(typed_exited.replayed && process_supervisor->exit_calls == 3U &&
+              open_calls == 3U,
+          "typed hostd client finalizes through the authenticated mutation transport");
   require(::close(delegated_executable) == 0,
           "close delegated process executable test descriptor");
   require(::close(delegated_bootstrap) == 0,
@@ -2047,8 +2052,8 @@ void mutation_transport_dispatches_replays_and_disconnects() {
           "lost-reply replay remains exactly releasable");
   require(ledger_time->calls == 8U,
           "only dispatched grants and releases sample host ledger time");
-  require(journal->calls == 20U && service->calls >= 26U &&
-              logical->calls >= 24U &&
+  require(journal->calls == 21U && service->calls >= 27U &&
+              logical->calls >= 25U &&
               verifier->outstanding_challenges() == 0U,
           "every connection consumes a journal challenge and reattests peer and fence");
 }

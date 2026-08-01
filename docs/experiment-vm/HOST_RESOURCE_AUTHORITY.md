@@ -683,6 +683,9 @@ packets continue to reject and close delegated descriptors. The TrainVM journal 
 implement the central process crash window as a typed saga: the exact normalized prepare receipt is
 hash-chained before exec commit, controller recovery accepts only ordered prepare/commit evidence
 for the active bound launch, and injected lost replies replay without changing durable identity.
+The same saga now records ordered terminal exit evidence. Service release reconciliation discovers
+every durable process attempt after restart, finalizes committed processes first, then persists and
+executes the physical release saga, and only afterward permits the builtin logical-lease release.
 The concrete bounded process client now sends those prepare/commit operations over the authenticated
 mutation transport with exact descriptor delegation and typed response checks. Journal-backed
 mutation-claim provisioning now derives resource scope from immutable request/release records and

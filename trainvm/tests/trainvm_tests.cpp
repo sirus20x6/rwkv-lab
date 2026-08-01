@@ -1131,6 +1131,8 @@ void test_journal() {
       ("trainvm-test-" + std::to_string(static_cast<long long>(getpid())));
   std::filesystem::remove_all(directory);
   std::filesystem::create_directories(directory);
+  check(::chmod(directory.c_str(), 0700) == 0,
+        "terminal release fixture protects its directory");
   const std::filesystem::path database_path = directory / "journal.db";
 
   trainvm::Journal journal(database_path);
@@ -6843,6 +6845,11 @@ class ServiceNeverProcessClient final : public trainvm::IHostProcessClient {
       const trainvm::HostdProcessCommitRequest&) override {
     throw std::runtime_error("busy service fixture cannot commit a process");
   }
+
+  trainvm::HostProcessExitResult finalize_process(
+      const trainvm::HostdProcessExitCommand&) override {
+    throw std::runtime_error("busy service fixture cannot finalize a process");
+  }
 };
 
 void test_service_host_grant_reconciliation() {
@@ -9188,14 +9195,20 @@ class SagaProcessClient final : public trainvm::IHostProcessClient {
             .replayed = replayed};
   }
 
-  void finalize() {
+  trainvm::HostProcessExitResult finalize_process(
+      const trainvm::HostdProcessExitCommand& command) override {
     if (!spawn_) throw std::runtime_error("process was never prepared");
+    ++exit_calls;
     const auto& request = spawn_->request;
-    (void)ledger_.commit_process_exit(
+    if (command.launch_id != request.launch_id ||
+        command.spawn_receipt_digest != spawn_->receipt_digest) {
+      throw std::runtime_error("process exit command changed its spawn identity");
+    }
+    auto result = ledger_.commit_process_exit(
         trainvm::seal_host_process_exit_request({
             .api_version =
                 std::string(trainvm::kHostProcessExitRequestApiVersion),
-            .exit_request_id = request.launch_id + ":exit",
+            .exit_request_id = command.exit_request_id,
             .launch_id = request.launch_id,
             .spawn_receipt_digest = spawn_->receipt_digest,
             .host_pid = request.host_pid,
@@ -9212,12 +9225,16 @@ class SagaProcessClient final : public trainvm::IHostProcessClient {
             .canonical_request_digest = {},
         }),
         {400, 4'000});
+    if (result.replayed) ++exit_replays;
+    return result;
   }
 
   std::size_t prepare_calls{};
   std::size_t prepare_replays{};
   std::size_t commit_calls{};
   std::size_t commit_replays{};
+  std::size_t exit_calls{};
+  std::size_t exit_replays{};
 
  private:
   trainvm::SQLiteHostLedger& ledger_;
@@ -9670,7 +9687,6 @@ void test_host_grant_saga() {
   }
   check(process_namespace_rejected,
         "untyped callers cannot forge host process authority events");
-  process_host.finalize();
 
   const trainvm::WorkerHelloEvidence hello{
       .run_id = launch.run_id,
@@ -9890,6 +9906,32 @@ void test_host_grant_saga() {
   check(journal.verify_chain(),
         "projection rebuild removes unreachable host saga child rows");
 
+  ProcessSagaOneShotFault lost_exit_reply(
+      trainvm::HostProcessSagaFaultPoint::after_exit_host);
+  bool exit_reply_lost = false;
+  try {
+    trainvm::HostProcessSagaReconciler interrupted_exit(
+        journal, process_host, &lost_exit_reply);
+    (void)interrupted_exit.reconcile_exit(
+        binding.identity.launch_event_id, true, test_time(29));
+  } catch (const std::runtime_error&) {
+    exit_reply_lost = true;
+  }
+  check(exit_reply_lost &&
+            !journal.host_process_saga(binding.identity.launch_event_id)
+                 ->exited,
+        "lost process-exit reply does not fabricate terminal journal evidence");
+  const auto process_exited = process_reconciler.reconcile_exit(
+      binding.identity.launch_event_id, true, test_time(29));
+  const auto process_exit_replay = process_reconciler.reconcile_exit(
+      binding.identity.launch_event_id, true, test_time(29));
+  check(process_exited.exited && process_exit_replay == process_exited &&
+            !process_exited.exited->replayed && process_host.exit_calls == 2U &&
+            process_host.exit_replays == 1U,
+        "process exit converges on one host receipt before grant release");
+  recover_matches(running_state,
+                  "controller restart accepts ordered terminal process evidence");
+
   const auto release = trainvm::seal_resource_release_request({
       .api_version = std::string(trainvm::kHostLedgerReleaseRequestApiVersion),
       .release_request_id = "saga-release",
@@ -10057,6 +10099,180 @@ void test_host_grant_saga() {
   std::filesystem::remove_all(directory);
 }
 
+void test_service_orders_physical_before_logical_release() {
+  auto source = load_fixture();
+  auto& nodes = source["spec"]["workflow"]["nodes"];
+  const auto acquire = nodes.at("acquire_gpu");
+  const auto train = nodes.at("train_to_boundary");
+  const auto release = nodes.at("release_gpu");
+  nodes = {{"acquire_gpu", acquire},
+           {"train_to_boundary", train},
+           {"release_gpu", release}};
+  nodes["train_to_boundary"]["transitions"] = nlohmann::json::array(
+      {train.at("transitions").at(1), train.at("transitions").at(2)});
+  const auto compiled = trainvm::compile_document(source);
+  check(compiled.valid(),
+        "terminal release fixture compiles a builtin-only lifecycle");
+  if (!compiled.plan) return;
+
+  const auto directory = std::filesystem::temp_directory_path() /
+                         ("trainvm-service-terminal-release-" +
+                          std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  check(::chmod(directory.c_str(), 0700) == 0,
+        "terminal release fixture protects its directory");
+  trainvm::ObservedHostResource gpu{
+      .id = {.kind = trainvm::HostResourceKind::accelerator,
+             .vendor = trainvm::HostAcceleratorVendor::nvidia,
+             .stable_id = "GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+             .parent_id = std::nullopt},
+      .disposition =
+          trainvm::ResourceObservationDisposition::audited_eligible,
+      .compute_contexts = trainvm::ResourceContextDisposition::absent,
+      .graphics_contexts = trainvm::ResourceContextDisposition::absent,
+      .pci_bdf = "0000:01:00.0",
+      .device_major = 195U,
+      .device_minor = 0U,
+      .numa_node = 0,
+      .pcie_root_id = "0000:00",
+      .fabric_clique_id = "fabric-0",
+      .total_memory_bytes = 80ULL << 30U,
+      .labels = {},
+  };
+  trainvm::HostKernelSnapshot kernel_snapshot{
+      .api_version = std::string(trainvm::kHostInventoryApiVersion),
+      .host_id = "sha256:" + std::string(64U, 'e'),
+      .boot_id = kTestBootId,
+      .broker_epoch = "broker-service-release",
+      .begin_revision = "revision-service-release",
+      .end_revision = "revision-service-release",
+      .probes = {{.vendor = trainvm::HostAcceleratorVendor::nvidia,
+                  .disposition = trainvm::ProbeDisposition::complete,
+                  .context_details_complete = true,
+                  .detail = "deterministic service-release fixture"}},
+      .resources = {gpu},
+  };
+  trainvm::FakeHostKernel kernel(
+      std::vector<trainvm::FakeHostKernelStep>{{
+          .snapshot = std::move(kernel_snapshot),
+          .failure = std::nullopt,
+      }});
+  const auto inventory = trainvm::capture_host_inventory(kernel);
+  auto ledger_authority =
+      std::make_shared<trainvm::HostLedgerFilesystemAuthority>(
+          trainvm::HostLedgerFilesystemAuthority::acquire({
+              .api_version =
+                  std::string(trainvm::kHostLedgerAuthorityApiVersion),
+              .ledger_path = directory / "host-resource.db",
+              .expected_owner_uid = ::geteuid(),
+              .expected_owner_gid = ::getegid(),
+              .enforcement_grade =
+                  trainvm::HostLedgerEnforcementGrade::cooperative_test,
+          }));
+  trainvm::SQLiteHostLedger ledger(ledger_authority, inventory);
+  auto host = std::make_shared<SagaHostClient>(ledger);
+  auto process = std::make_shared<ServiceNeverProcessClient>();
+  const trainvm::HostIdentity host_identity{.host_id = inventory.host_id,
+                                             .boot_id = inventory.boot_id};
+  const auto profiles = fixture_adapter_profiles();
+  trainvm::TrainVMService service(
+      directory / "journal.db", trainvm::AdapterRegistry(profiles),
+      fixture_disabled_host_launch_registry(), host_identity,
+      [] { return test_time(10); },
+      trainvm::HostGrantEnforcement::required,
+      trainvm::TrainingComponentRegistry({}), host, process,
+      "unix:/tmp/trainvm-terminal-release.sock");
+  const std::string run_id = "service-terminal-release-run";
+  trainvm::Controller controller(*compiled.plan, service.journal_, run_id);
+  controller.create_queued(
+      adapter_locked_submission(*compiled.plan, service.adapter_registry_));
+  const auto acquired = service.reconcile_once(run_id);
+  const auto lease = service.journal_.active_lease(
+      compiled.plan->experiment.spec.workspace.concurrency_key,
+      test_time(10));
+  check(acquired.disposition == trainvm::ReconcileDisposition::lease_acquired &&
+            lease,
+        "service terminal fixture retains its logical lease at release node");
+  if (!lease) {
+    std::filesystem::remove_all(directory);
+    return;
+  }
+  const auto request = trainvm::build_resource_bundle_request({
+      .journal_id = service.journal_.journal_id(),
+      .plan_hash = compiled.plan->plan_hash,
+      .run_id = run_id,
+      .resources = compiled.plan->experiment.spec.resources,
+      .lease = *lease,
+  });
+  const auto granted = service.host_grant_saga_->reconcile_request(
+      request, test_time(10));
+  trainvm::Controller worker(*compiled.plan, service.journal_, run_id);
+  worker.recover();
+  const auto launch = worker.prepare_worker_launch(
+      {.code_fingerprint = "sha256:" + std::string(64U, 'a'),
+       .required_capabilities = {"worker.metrics", "worker.controls"}},
+      test_time(10));
+  (void)bind_test_worker_launch(worker, launch, 10, host_identity);
+  (void)worker.accept_worker_hello(
+      {.run_id = launch.run_id,
+       .node_id = launch.node_id,
+       .attempt_id = launch.attempt_id,
+       .launch_nonce = launch.launch_nonce,
+       .adapter = launch.adapter,
+       .adapter_version = launch.adapter_version,
+       .code_fingerprint = launch.code_fingerprint,
+       .capabilities = launch.required_capabilities,
+       .last_acked_controller_sequence = 0U,
+       .concurrency_key = launch.concurrency_key,
+       .lease_id = launch.lease_id,
+       .fencing_token = launch.fencing_token},
+      test_time(10));
+  const auto dispatch = worker.prepare_dispatch(test_time(10));
+  (void)worker.handle_event(
+      {.event_id = dispatch.dispatch_id + ":result",
+       .run_id = run_id,
+       .run_revision = dispatch.run_revision,
+       .plan_revision = dispatch.plan_revision,
+       .node_id = launch.node_id,
+       .attempt_id = launch.attempt_id,
+       .worker_sequence = 1U,
+       .event_type = "worker.completed",
+       .event_version = 1U,
+       .wall_time_ns = 10,
+       .monotonic_time_ns = 10U,
+       .optimizer_step = 1U,
+       .payload = {{"reason", "training_complete"}}},
+      {.run_id = launch.run_id,
+       .node_id = launch.node_id,
+       .attempt_id = launch.attempt_id,
+       .launch_nonce = launch.launch_nonce,
+       .concurrency_key = launch.concurrency_key,
+       .lease_id = launch.lease_id,
+       .fencing_token = launch.fencing_token},
+      test_time(10));
+  const auto physical = service.reconcile_once(run_id);
+  const auto still_live = service.journal_.active_lease(
+      lease->concurrency_key, test_time(10));
+  const auto physical_saga =
+      service.journal_.host_grant_saga(request.request_id);
+  check(granted.grant &&
+            physical.disposition ==
+                trainvm::ReconcileDisposition::host_grant_released &&
+            physical_saga && physical_saga->release_receipt && still_live &&
+            host->release_calls == 1U,
+        "physical release receipt is durable while logical lease remains live");
+  const auto logical = service.reconcile_once(run_id);
+  const auto projection = service.journal_.projection(run_id);
+  check(logical.disposition == trainvm::ReconcileDisposition::builtin_completed &&
+            !service.journal_.active_lease(lease->concurrency_key,
+                                           test_time(10)) &&
+            projection && projection->observed_state == "completed" &&
+            host->release_calls == 1U,
+        "logical release occurs only after physical release and does not replay host mutation");
+  std::filesystem::remove_all(directory);
+}
+
 }  // namespace
 
 int main() {
@@ -10093,6 +10309,7 @@ int main() {
     test_service_registry_and_reconciliation();
     test_adapter_registry_and_reconciler();
     test_host_grant_saga();
+    test_service_orders_physical_before_logical_release();
     test_legacy_journal_migration_policy();
   } catch (const std::exception& exception) {
     std::cerr << "UNCAUGHT: " << exception.what() << '\n';

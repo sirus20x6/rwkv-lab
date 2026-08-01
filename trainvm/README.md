@@ -310,7 +310,10 @@ cgroup/pidfd launcher, durable process intent/spawn/exit receipts, and guarded d
 prepare/commit/finalize commands. TrainVMService now has an opt-in, serialized process-saga
 coordinator that binds sealed launch bytes and an immutable worker bootstrap, asks hostd to prepare
 a stopped child, copies the exact spawn receipt into the TrainVM hash chain, and only then authorizes
-exec commit. Lost prepare and commit replies converge by exact replay, and transport replay flags
+exec commit. Terminal reconciliation now asks hostd to wait/terminate, reap, prove an empty cgroup
+and accelerator-context set, and copies the exact exit receipt before releasing the physical grant;
+the logical lease is released only on the following reconciliation boundary. Lost prepare, commit,
+exit, and physical-release replies converge by exact replay, and transport replay flags
 are excluded from durable identity. A bounded strict hostd client now delegates the resolved
 executable, optional code, working-directory, and bootstrap descriptors over the authenticated
 mutation transport and revalidates typed replies. The normal CLI remains launch-disabled by

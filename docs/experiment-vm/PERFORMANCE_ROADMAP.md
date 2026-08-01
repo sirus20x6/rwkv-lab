@@ -146,7 +146,7 @@ boot-scoped leases, host resource fencing, orphan checks, sealed launch identity
 receipts are complete. The in-process service coordinator now enforces prepare -> durable journal
 receipt -> exec commit ordering behind an injected host-process client. Strict declarative
 mutation-client startup configuration and service wiring are implemented; production launch remains
-disabled while the unified hostd entry point, orphan adoption, terminal release, and privileged
+disabled while the unified hostd entry point, daemon-restart orphan adoption, and privileged
 qualification are unfinished.
 
 Resource admission lowering is a separate pure module: experiment accelerator requirements become

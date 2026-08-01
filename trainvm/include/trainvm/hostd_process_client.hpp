@@ -29,6 +29,8 @@ class HostdProcessClient final : public IHostProcessClient {
       const SealedWorkerBootstrap& bootstrap) override;
   [[nodiscard]] HostdProcessCommittedResult commit_process(
       const HostdProcessCommitRequest& request) override;
+  [[nodiscard]] HostProcessExitResult finalize_process(
+      const HostdProcessExitCommand& request) override;
 
  private:
   [[nodiscard]] HostdMutationOpen open_for(

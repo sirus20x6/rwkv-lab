@@ -6258,6 +6258,12 @@ HostdProcessCommittedResult durable_committed_result(
   return result;
 }
 
+HostProcessExitResult durable_exit_result(HostProcessExitResult result) {
+  result.replayed = false;
+  (void)host_process_exit_receipt_json(result.receipt);
+  return result;
+}
+
 void require_prepared_process_binding(
     const HostdProcessPrepareRequest& prepare,
     const HostdProcessPreparedResult& prepared) {
@@ -6318,10 +6324,11 @@ std::optional<HostProcessSagaSnapshot> Journal::host_process_saga(
   }
   const auto prepared_event = event(launch_id + ":host-process-prepared");
   const auto committed_event = event(launch_id + ":host-process-committed");
+  const auto exited_event = event(launch_id + ":host-process-exited");
   if (!prepared_event) {
-    if (committed_event) {
+    if (committed_event || exited_event) {
       throw std::runtime_error(
-          "host process commit exists without a durable prepare receipt");
+          "host process terminal evidence exists without a durable prepare receipt");
     }
     return std::nullopt;
   }
@@ -6339,6 +6346,8 @@ std::optional<HostProcessSagaSnapshot> Journal::host_process_saga(
               prepared_event->payload.at("prepared").dump())),
       .commit = std::nullopt,
       .committed = std::nullopt,
+      .exit_command = std::nullopt,
+      .exited = std::nullopt,
   };
   require_prepared_process_binding(result.prepare, result.prepared);
   const auto& identity = result.prepare.launch.identity;
@@ -6349,7 +6358,13 @@ std::optional<HostProcessSagaSnapshot> Journal::host_process_saga(
     throw std::runtime_error(
         "durable host process prepare event identity diverges");
   }
-  if (!committed_event) return result;
+  if (!committed_event) {
+    if (exited_event) {
+      throw std::runtime_error(
+          "host process exit exists without a durable exec commit");
+    }
+    return result;
+  }
   if (committed_event->event_type != "host.process_committed" ||
       committed_event->payload.size() != 2U ||
       !committed_event->payload.contains("commit") ||
@@ -6372,6 +6387,49 @@ std::optional<HostProcessSagaSnapshot> Journal::host_process_saga(
       !result.committed->released_to_exec) {
     throw std::runtime_error(
         "durable host process commit disagrees with its prepare receipt");
+  }
+  if (!exited_event) return result;
+  if (exited_event->event_type != "host.process_exited" ||
+      exited_event->payload.size() != 2U ||
+      !exited_event->payload.contains("exit_command") ||
+      !exited_event->payload.contains("exited") ||
+      exited_event->run_id != identity.run_id ||
+      exited_event->node_id != identity.node_id ||
+      exited_event->attempt_id != identity.attempt_id) {
+    throw std::runtime_error("durable host process exit event is malformed");
+  }
+  result.exit_command = hostd_process_exit_from_canonical_json(
+      exited_event->payload.at("exit_command").dump());
+  result.exited = durable_exit_result(HostProcessExitResult{
+      .receipt = host_process_exit_receipt_from_json(
+          exited_event->payload.at("exited")),
+      .replayed = false,
+  });
+  const auto& command = *result.exit_command;
+  const auto& receipt = result.exited->receipt;
+  const auto& spawn = result.prepared.spawn;
+  const auto& grant = result.prepare.grant;
+  if (command.launch_id != launch_id ||
+      command.allocation_id != grant.allocation_id ||
+      command.grant_digest != grant.receipt_digest ||
+      command.journal_id != grant.journal_id ||
+      command.run_id != grant.run_id ||
+      command.logical_lease_id != grant.logical_lease_id ||
+      command.logical_fencing_token != grant.logical_fencing_token ||
+      command.spawn_receipt_digest != spawn.receipt_digest ||
+      receipt.request.exit_request_id != command.exit_request_id ||
+      receipt.request.launch_id != launch_id ||
+      receipt.request.spawn_receipt_digest != spawn.receipt_digest ||
+      receipt.request.host_pid != spawn.request.host_pid ||
+      receipt.request.process_starttime_ticks !=
+          spawn.request.process_starttime_ticks ||
+      receipt.request.cgroup_path != spawn.request.cgroup_path ||
+      receipt.request.cgroup_device != spawn.request.cgroup_device ||
+      receipt.request.cgroup_inode != spawn.request.cgroup_inode ||
+      receipt.host_id != grant.host_id || receipt.boot_id != grant.boot_id ||
+      receipt.broker_epoch != grant.broker_epoch) {
+    throw std::runtime_error(
+        "durable host process exit disagrees with its launch receipt");
   }
   return result;
 }
@@ -6483,6 +6541,79 @@ HostProcessSagaSnapshot Journal::record_host_process_committed(
   saga = host_process_saga(request.launch_id);
   if (!saga || !saga->committed)
     throw std::runtime_error("host process commit copy vanished");
+  return *saga;
+}
+
+HostProcessSagaSnapshot Journal::record_host_process_exited(
+    const HostdProcessExitCommand& request,
+    const HostProcessExitResult& supplied_result,
+    const AuthorityTimeSample& now) {
+  require_authority_time(now);
+  (void)hostd_process_exit_canonical_json(request);
+  const HostProcessExitResult result = durable_exit_result(supplied_result);
+  auto saga = host_process_saga(request.launch_id);
+  if (!saga || !saga->committed) {
+    throw OperationPreconditionError(
+        "host process exit requires a durable exec commit");
+  }
+  const auto& grant = saga->prepare.grant;
+  const auto& spawn = saga->prepared.spawn;
+  const auto& receipt = result.receipt;
+  if (request.allocation_id != grant.allocation_id ||
+      request.grant_digest != grant.receipt_digest ||
+      request.journal_id != grant.journal_id ||
+      request.run_id != grant.run_id ||
+      request.logical_lease_id != grant.logical_lease_id ||
+      request.logical_fencing_token != grant.logical_fencing_token ||
+      request.spawn_receipt_digest != spawn.receipt_digest ||
+      receipt.request.exit_request_id != request.exit_request_id ||
+      receipt.request.launch_id != request.launch_id ||
+      receipt.request.spawn_receipt_digest != spawn.receipt_digest ||
+      receipt.request.host_pid != spawn.request.host_pid ||
+      receipt.request.process_starttime_ticks !=
+          spawn.request.process_starttime_ticks ||
+      receipt.request.cgroup_path != spawn.request.cgroup_path ||
+      receipt.request.cgroup_device != spawn.request.cgroup_device ||
+      receipt.request.cgroup_inode != spawn.request.cgroup_inode ||
+      receipt.host_id != grant.host_id || receipt.boot_id != grant.boot_id ||
+      receipt.broker_epoch != grant.broker_epoch) {
+    throw OperationPreconditionError(
+        "host process exit result disagrees with its durable process saga");
+  }
+  if (const auto& identity = saga->prepare.launch.identity;
+      !identity.host_grant) {
+    throw OperationPreconditionError(
+        "host process exit has no exact physical grant claim");
+  } else {
+    require_host_launch_eligible(*identity.host_grant, now);
+  }
+  if (saga->exited) {
+    if (*saga->exit_command != request || *saga->exited != result) {
+      throw OperationPreconditionError(
+          "host process exit replay diverges from its durable receipt");
+    }
+    return *saga;
+  }
+  Transaction transaction(database_);
+  std::string reason;
+  if (!verify_chain(&reason)) {
+    throw std::runtime_error("refusing host process exit copy: " + reason);
+  }
+  const auto& identity = saga->prepare.launch.identity;
+  Event durable = host_saga_event(
+      database_, request.launch_id + ":host-process-exited",
+      "host.process_exited", request.run_id, now.wall.nanoseconds,
+      static_cast<std::uint64_t>(now.boot.nanoseconds),
+      {{"exit_command", nlohmann::json::parse(
+                            hostd_process_exit_canonical_json(request))},
+       {"exited", host_process_exit_receipt_json(result.receipt)}});
+  durable.node_id = identity.node_id;
+  durable.attempt_id = identity.attempt_id;
+  (void)append_uncommitted(durable, true);
+  transaction.commit();
+  saga = host_process_saga(request.launch_id);
+  if (!saga || !saga->exited)
+    throw std::runtime_error("host process exit copy vanished");
   return *saga;
 }
 

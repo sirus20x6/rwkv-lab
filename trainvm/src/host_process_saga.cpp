@@ -1,5 +1,7 @@
 #include "trainvm/host_process_saga.hpp"
 
+#include "trainvm/document.hpp"
+
 #include <utility>
 #include <vector>
 
@@ -85,6 +87,39 @@ HostProcessSagaSnapshot HostProcessSagaReconciler::reconcile(
   HostProcessSagaSnapshot complete =
       journal_.record_host_process_committed(commit, committed, now);
   fault(HostProcessSagaFaultPoint::after_commit_journal);
+  return complete;
+}
+
+HostProcessSagaSnapshot HostProcessSagaReconciler::reconcile_exit(
+    const std::string& launch_id, bool request_termination,
+    const AuthorityTimeSample& now) {
+  auto saga = journal_.host_process_saga(launch_id);
+  if (!saga || !saga->committed) {
+    throw OperationPreconditionError(
+        "host process exit requires a durable exec commit");
+  }
+  if (saga->exited) return *saga;
+  const auto& grant = saga->prepare.grant;
+  const HostdProcessExitCommand command{
+      .api_version = std::string(kHostdProcessExitApiVersion),
+      .exit_request_id = "host-exit-" + sha256_hex(launch_id),
+      .launch_id = launch_id,
+      .allocation_id = grant.allocation_id,
+      .grant_digest = grant.receipt_digest,
+      .journal_id = grant.journal_id,
+      .run_id = grant.run_id,
+      .logical_lease_id = grant.logical_lease_id,
+      .logical_fencing_token = grant.logical_fencing_token,
+      .spawn_receipt_digest = saga->prepared.spawn.receipt_digest,
+      .request_termination = request_termination,
+  };
+  (void)hostd_process_exit_canonical_json(command);
+  fault(HostProcessSagaFaultPoint::before_exit_host);
+  const HostProcessExitResult exited = host_.finalize_process(command);
+  fault(HostProcessSagaFaultPoint::after_exit_host);
+  HostProcessSagaSnapshot complete =
+      journal_.record_host_process_exited(command, exited, now);
+  fault(HostProcessSagaFaultPoint::after_exit_journal);
   return complete;
 }
 

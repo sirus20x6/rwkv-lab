@@ -1,6 +1,7 @@
 #include "trainvm/service.hpp"
 
 #include "trainvm/controller.hpp"
+#include "trainvm/document.hpp"
 #include "trainvm/reflection_json.hpp"
 
 #include <fcntl.h>
@@ -1044,6 +1045,11 @@ void TrainVMService::configure_hostd(
 
 ReconcileResult TrainVMService::reconcile_once(const std::string& run_id) {
   if (host_grant_saga_) {
+    if (const auto disposition = reconcile_host_release(run_id)) {
+      return {.disposition = *disposition,
+              .run_id = run_id,
+              .launch = std::nullopt};
+    }
     if (const auto disposition = reconcile_host_grant(run_id)) {
       return {.disposition = *disposition,
               .run_id = run_id,
@@ -1056,6 +1062,111 @@ ReconcileResult TrainVMService::reconcile_once(const std::string& run_id) {
     (void)launch_worker_process(binding.identity.launch_event_id);
   }
   return result;
+}
+
+std::optional<ReconcileDisposition> TrainVMService::reconcile_host_release(
+    const std::string& run_id) {
+  std::scoped_lock lock(command_mutex_);
+  const AuthorityTimeSample now = authority_now();
+  const auto projection = journal_.projection(run_id);
+  if (!projection) {
+    throw std::invalid_argument("cannot reconcile host release for unknown run");
+  }
+  if (projection->desired_state != "running" ||
+      projection->observed_state != "running") {
+    return std::nullopt;
+  }
+  const auto plan = journal_.compiled_plan(projection->plan_hash);
+  if (!plan) {
+    throw std::runtime_error(
+        "cannot reconcile host release without persisted plan");
+  }
+  Controller controller(*plan, journal_, run_id);
+  controller.recover();
+  if (controller.state().status != ExecutionStatus::running ||
+      controller.state().current_node_id.empty()) {
+    return std::nullopt;
+  }
+  const Node& node = plan->experiment.spec.workflow.nodes.at(
+      controller.state().current_node_id);
+  const Component& component =
+      plan->experiment.spec.components.at(node.invoke.component);
+  if (component.runtime != ComponentRuntime::builtin ||
+      component.adapter != "trainvm.core" ||
+      node.invoke.operation != "release_resources") {
+    return std::nullopt;
+  }
+
+  // Every committed process must have terminal host evidence before its
+  // physical bundle can be released. Event order, not retained in-memory
+  // descriptors, discovers all attempts after controller restart.
+  for (const Event& event : journal_.events_for_run(run_id)) {
+    if (event.event_type != "host.process_prepared" ||
+        !event.payload.contains("prepare")) {
+      continue;
+    }
+    const HostdProcessPrepareRequest prepare =
+        hostd_process_prepare_from_canonical_json(
+            event.payload.at("prepare").dump());
+    const std::string& launch_id =
+        prepare.launch.identity.launch_event_id;
+    const auto process = journal_.host_process_saga(launch_id);
+    if (!process || !process->committed) {
+      throw OperationPreconditionError(
+          "release node has a prepared process without durable exec authority");
+    }
+    if (!process->exited) {
+      const auto exited =
+          host_process_saga_->reconcile_exit(launch_id, true, now);
+      if (!exited.exited) {
+        throw std::runtime_error(
+            "host process exit reconciliation returned no receipt");
+      }
+      return ReconcileDisposition::host_process_exited;
+    }
+  }
+
+  const std::string& concurrency_key =
+      plan->experiment.spec.workspace.concurrency_key;
+  const auto lease = journal_.active_lease(concurrency_key, now);
+  if (!lease || lease->owner_run_id != run_id) {
+    throw OperationPreconditionError(
+        "host release reconciliation lost its logical lease");
+  }
+  const ResourceBundleRequest request = build_resource_bundle_request({
+      .journal_id = journal_.journal_id(),
+      .plan_hash = plan->plan_hash,
+      .run_id = run_id,
+      .resources = plan->experiment.spec.resources,
+      .lease = *lease,
+  });
+  const auto saga = journal_.host_grant_saga(request.request_id);
+  if (!saga) return std::nullopt;
+  if (!saga->grant || saga->busy_outcome_digest) {
+    throw OperationPreconditionError(
+        "release node has no exact durable physical grant");
+  }
+  if (saga->release_receipt) return std::nullopt;
+  const ResourceReleaseRequest release = seal_resource_release_request({
+      .api_version = std::string(kHostLedgerReleaseRequestApiVersion),
+      .release_request_id =
+          "host-release-" + sha256_hex(request.request_id + "\n" +
+                                       saga->grant->receipt_digest),
+      .allocation_id = saga->grant->allocation_id,
+      .grant_digest = saga->grant->receipt_digest,
+      .journal_id = saga->grant->journal_id,
+      .run_id = saga->grant->run_id,
+      .logical_lease_id = saga->grant->logical_lease_id,
+      .logical_fencing_token = saga->grant->logical_fencing_token,
+      .canonical_request_digest = {},
+  });
+  const HostGrantSagaSnapshot released = host_grant_saga_->reconcile_release(
+      request.request_id, release, now);
+  if (!released.release_receipt) {
+    throw std::runtime_error(
+        "host release reconciliation returned no receipt");
+  }
+  return ReconcileDisposition::host_grant_released;
 }
 
 std::optional<ReconcileDisposition> TrainVMService::reconcile_host_grant(
