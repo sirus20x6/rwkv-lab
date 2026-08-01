@@ -380,8 +380,13 @@ claim provider and both typed clients after a read-only host/boot/broker status 
 `trainvm.hostd-daemon/v1` startup document rejects unknown or duplicate fields, unsafe authority
 paths/names, trust downgrades, incompatible service roles, and unbounded recovery, then compiles
 every ledger, inventory, cgroup, socket, session, challenge, and startup sub-policy from one source
-of truth. The unified hostd daemon assembly and entry point are still required before this path can
-be qualified for production;
+of truth. The foreground `trainvm-hostd` entry point now constructs the live namespace, inventory,
+journal, ledger, cgroup, recovery, audit, challenge, service-identity, and unified transport graph;
+it binds only after startup admission and can validate its closed document without touching live
+authority (`trainvm-hostd --validate-config FILE`). Resource grant/release and restart process
+reconciliation are wired. New process launch is deliberately not passed to the mutation server
+until durable cgroup-device BPF policy is implemented, so this path is not yet qualified for
+production training;
 pause/resume and durable hostd adoption remain subsequent milestones. A worker launch ticket is a protocol authorization only
 until it is paired with a trusted descriptor digest, resolved launch specification, host identity,
 and durable process receipt.

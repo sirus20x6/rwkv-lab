@@ -1,0 +1,82 @@
+{
+  "api_version": "trainvm.hostd-daemon/v1",
+  "host_id": "sha256:replace-with-live-machine-id",
+  "boot_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+  "broker_epoch": "site-broker-epoch",
+  "broker_instance_id": "hostd-instance-1",
+  "authority_uid": 0,
+  "authority_gid": 0,
+  "ledger_path": "/var/lib/trainvm-hostd/host-ledger.sqlite3",
+  "journal_path": "/var/lib/trainvm/journal.sqlite3",
+  "journal_identity": {
+    "directory_path": "/var/lib/trainvm",
+    "journal_name": "journal.sqlite3",
+    "authority_name": "journal.sqlite3.authority.lock",
+    "directory_device": 11,
+    "directory_inode": 12,
+    "device": 13,
+    "inode": 14,
+    "authority_device": 15,
+    "authority_inode": 16,
+    "owner_uid": 0
+  },
+  "inventory": {
+    "maximum_devices": 16,
+    "maximum_partitions_per_device": 16,
+    "maximum_processes_per_device": 4096,
+    "maximum_capture_duration_ns": 5000000000,
+    "maximum_snapshot_age_ns": 1000000000,
+    "trusted_host_namespace": true,
+    "trusted_nvml_loader": true
+  },
+  "cgroup": {
+    "root_path": "/sys/fs/cgroup/trainvm-workers.slice",
+    "root_unified_path": "/trainvm-workers.slice"
+  },
+  "socket": {
+    "path": "/run/trainvm-hostd/hostd.sock",
+    "parent_mode": 488,
+    "socket_mode": 432,
+    "listen_backlog": 128
+  },
+  "host_namespaces": {
+    "mount_namespace": {"device": 21, "inode": 22},
+    "pid_namespace": {"device": 23, "inode": 24},
+    "cgroup_namespace": {"device": 25, "inode": 26},
+    "time_namespace": {"device": 27, "inode": 28},
+    "time_for_children_namespace": {"device": 29, "inode": 30}
+  },
+  "service_roles": [
+    {
+      "cgroup_path": "/system.slice/trainvm.service",
+      "service_identity": "trainvm-dashboard",
+      "expected_uid": 1000,
+      "expected_gid": 1000,
+      "access": "grant_release"
+    }
+  ],
+  "maximum_cgroup_file_bytes": 4096,
+  "maximum_live_sessions": 1024,
+  "maximum_logical_scopes": 4096,
+  "transport": {
+    "allowed_uid": 1000,
+    "allowed_gid": 1000,
+    "maximum_payload_bytes": 65536,
+    "status_session_timeout_ns": 1000000000,
+    "mutation_session_timeout_ns": 5000000000,
+    "serve_wake_interval_ns": 100000000
+  },
+  "challenge": {
+    "ttl_ns": 5000000000,
+    "maximum_outstanding": 256,
+    "maximum_outstanding_per_peer": 8
+  },
+  "startup": {
+    "require_stable_occupancy": true,
+    "fail_on_blocking_findings": true,
+    "maximum_findings": 128,
+    "exact_live_policy": "terminate_and_reconcile",
+    "reconcile_observed_nonlive": true,
+    "maximum_recovery_steps": 64
+  }
+}

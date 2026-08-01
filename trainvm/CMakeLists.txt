@@ -67,6 +67,7 @@ add_library(trainvm_core
   src/hostd_client_bootstrap.cpp
   src/hostd_client_configuration.cpp
   src/hostd_daemon_configuration.cpp
+  src/hostd_daemon_runtime.cpp
   src/hostd_journal_fence_attestor.cpp
   src/hostd_journal_logical_fence.cpp
   src/hostd_ledger_singleton_token.cpp
@@ -154,7 +155,17 @@ target_link_libraries(trainvm PRIVATE
   trainvm_service trainvm_compatibility_catalog trainvm_experiment_analysis
 )
 
+add_executable(trainvm-hostd src/hostd_main.cpp)
+target_compile_options(trainvm-hostd PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(trainvm-hostd PRIVATE trainvm_core)
+
 enable_testing()
+add_test(NAME trainvm_hostd_validate_configuration
+  COMMAND trainvm-hostd --validate-config
+    "${CMAKE_CURRENT_SOURCE_DIR}/../docs/experiment-vm/examples/hostd-daemon.v1.json"
+)
 add_executable(trainvm_tests tests/trainvm_tests.cpp)
 target_compile_options(trainvm_tests PRIVATE
   -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror

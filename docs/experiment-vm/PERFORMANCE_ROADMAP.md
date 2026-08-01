@@ -256,8 +256,12 @@ startup orphan recovery are defined in
   complete process/release convergence, and the shared socket has one status/mutation listener
   router. One strict reflected daemon document now compiles the ledger, inventory, cgroup, socket,
   transport, service-role, challenge, restart-recovery, and startup-audit policies without
-  authority defaults scattered across the executable. The remaining gate is concrete daemon
-  assembly and real-host crash qualification before admission can rely on this path.
+  authority defaults scattered across the executable. The foreground daemon assembly now proves
+  live namespace/service-cgroup/cgroup-root/boot/inventory/journal identities before host-ledger
+  initialization, drives bounded startup recovery/audit, and transactionally binds the unified
+  endpoint only after admission. It exposes grant/release and restart reconciliation but keeps new
+  process launch unavailable until a durable cgroup-device BPF receipt exists. Device enforcement
+  and real-host crash qualification remain before training admission can rely on this path.
 - Resolve the remaining stock-SQLite auxiliary pathname race in the declared host threat model:
   trusted isolated authority directory, controlled VFS, or host-global lock broker. Do not treat
   the network-namespace-local abstract socket as the host-wide GPU/resource fence.

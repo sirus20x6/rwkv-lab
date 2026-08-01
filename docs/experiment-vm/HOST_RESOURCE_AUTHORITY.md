@@ -97,6 +97,13 @@ transport peer identity, service roles, retained journal identity, recovery boun
 inventory settings. Journal lock and socket leaves must be safe bounded basenames; no experiment or
 adapter may override them.
 
+`trainvm-hostd --validate-config FILE` checks the closed reflected document without opening live
+GPU/cgroup/journal authority. The foreground `--config` mode proves those live identities in a
+single owner thread, runs restart convergence and the one-shot audit, and binds the shared socket
+only after admission. The current assembly intentionally omits the process supervisor from new
+launch dispatch until cgroup-device BPF policy is durable and restart-adoptable; it does not claim
+strict training launch from cgroup membership alone.
+
 Hostd uses a filesystem `AF_UNIX` `SOCK_SEQPACKET` endpoint with peer credentials and preferably
 systemd socket activation. It does not use the abstract Unix namespace. Services in another mount
 namespace must receive the same socket through an explicit bind mount or an inherited descriptor.
