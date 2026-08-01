@@ -69,6 +69,7 @@ add_library(trainvm_core
   src/hostd_daemon_configuration.cpp
   src/hostd_journal_fence_attestor.cpp
   src/hostd_journal_logical_fence.cpp
+  src/hostd_ledger_singleton_token.cpp
   src/hostd_linux_cgroup_authority.cpp
   src/hostd_linux_inventory_context_auditor.cpp
   src/hostd_linux_process_authority.cpp
@@ -385,6 +386,16 @@ target_compile_options(hostd_daemon_configuration_tests PRIVATE
 target_link_libraries(hostd_daemon_configuration_tests PRIVATE trainvm_core)
 add_test(NAME hostd_daemon_configuration_tests
   COMMAND hostd_daemon_configuration_tests
+)
+add_executable(hostd_ledger_singleton_token_tests
+  tests/hostd_ledger_singleton_token_tests.cpp
+)
+target_compile_options(hostd_ledger_singleton_token_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(hostd_ledger_singleton_token_tests PRIVATE trainvm_core)
+add_test(NAME hostd_ledger_singleton_token_tests
+  COMMAND hostd_ledger_singleton_token_tests
 )
 add_executable(hostd_client_bootstrap_tests
   tests/hostd_client_bootstrap_tests.cpp
