@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import itertools
 import json
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -15,6 +16,7 @@ from rwkv_lab.mage_flow_terminal_train import (
     _backward_training_objective,
     _best_evaluation_improved,
     _cache_span_should_stop,
+    _contract_fingerprint,
     _epoch_batches,
     _evaluation_optimization_loss,
     _export_checkpoint_experts,
@@ -29,6 +31,7 @@ from rwkv_lab.mage_flow_terminal_train import (
     plan_cache_span,
     prepare_cache_span,
     prepare_run,
+    resolved_worker_component_contract,
     weighted_domain_windows,
 )
 from rwkv_lab.mage_flow_training_objectives import (
@@ -88,7 +91,6 @@ def test_terminal_config_selects_one_resident_domain(tmp_path):
     assert config.repa_enabled
     assert config.immiscible_enabled
     assert config.flow_loss_weighting == "soft_min_snr"
-
     receipt = prepare_run(config, tmp_path / "plan")
     assert receipt["domain"] == "photo"
     assert receipt["resident_experts"] == 1
@@ -106,6 +108,77 @@ def test_terminal_config_selects_one_resident_domain(tmp_path):
     assert ".venv-mage-flow-fa4" in (
         tmp_path / "fa4-plan/launch.sh"
     ).read_text()
+
+
+def test_terminal_worker_components_are_exact_and_enter_resume_identity(tmp_path):
+    manifest = tmp_path / "train.jsonl"
+    _write_manifest(manifest, [_row(0, "photo")])
+    expert = tmp_path / "photo.safetensors"
+    expert.touch()
+    config = TerminalExpertTrainConfig(
+        domain="photo",
+        train_manifest=str(manifest),
+        expert_checkpoint=str(expert),
+        output_dir=str(tmp_path / "output"),
+        model_path=None,
+        max_steps=20,
+        warmup_steps=2,
+    )
+    configurations = {
+        "optimizer": {
+            "learning_rate": config.learning_rate,
+            "beta1": config.adam_beta1,
+            "beta2": config.adam_beta2,
+            "epsilon": config.adam_epsilon,
+            "weight_decay": config.weight_decay,
+            "foreach": True,
+            "fused": False,
+        },
+        "parameter_router": {
+            "shared_backbone_multiplier": config.backbone_learning_rate_multiplier,
+            "repa_projection_multiplier": config.repa_learning_rate_multiplier,
+        },
+        "learning_rate": {
+            "warmup_steps": config.warmup_steps,
+            "max_steps": config.max_steps,
+            "minimum_ratio": config.min_learning_rate_ratio,
+        },
+    }
+
+    class Components:
+        composition = SimpleNamespace(composition_digest="sha256:" + "b" * 64)
+
+        def configuration(self, slot, *, category):
+            assert category in {
+                "optimizer",
+                "parameter_router",
+                "learning_rate_schedule",
+            }
+            return configurations[slot]
+
+        def evidence(self):
+            return {
+                slot: {"category": slot, "implementation": slot, "descriptor_digest": slot}
+                for slot in configurations
+            }
+
+    components = Components()
+    learning_rate, evidence, composition_digest = resolved_worker_component_contract(
+        config, components
+    )
+    assert learning_rate == config.learning_rate
+    assert set(evidence) == set(configurations)
+    assert composition_digest == components.composition.composition_digest
+    assert _contract_fingerprint(config) != _contract_fingerprint(
+        config, component_composition_digest=composition_digest
+    )
+
+    configurations["parameter_router"] = {
+        **configurations["parameter_router"],
+        "shared_backbone_multiplier": 1.0,
+    }
+    with pytest.raises(ValueError, match="parameter_router composition disagrees"):
+        resolved_worker_component_contract(config, components)
 
 
 def test_terminal_config_rejects_neutral_or_missing_domain(tmp_path):

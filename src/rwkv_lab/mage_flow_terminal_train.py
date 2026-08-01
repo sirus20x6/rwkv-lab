@@ -25,7 +25,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -103,6 +103,9 @@ from rwkv_lab.training_components import (
     build_registered_optimizer,
     build_registered_schedule,
 )
+
+if TYPE_CHECKING:
+    from rwkv_lab.trainvm_adapters import WorkerTrainingComponents
 
 RUN_SCHEMA = "rwkv-lab.mage-flow-terminal-train.v3"
 CACHE_SPAN_SCHEMA = "rwkv-lab.mage-flow-cache-span.v1"
@@ -523,7 +526,11 @@ class TerminalExpertTrainConfig:
                         )
 
 
-def _contract_fingerprint(config: TerminalExpertTrainConfig) -> str:
+def _contract_fingerprint(
+    config: TerminalExpertTrainConfig,
+    *,
+    component_composition_digest: str | None = None,
+) -> str:
     values = asdict(config)
     values.pop("output_dir", None)
     values.pop("resume_from", None)
@@ -540,9 +547,58 @@ def _contract_fingerprint(config: TerminalExpertTrainConfig) -> str:
             else None
         ),
     }
+    if component_composition_digest is not None:
+        payload["component_composition_digest"] = component_composition_digest
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def resolved_worker_component_contract(
+    config: TerminalExpertTrainConfig,
+    worker_components: WorkerTrainingComponents | None,
+) -> tuple[float, Mapping[str, Mapping[str, str]] | None, str | None]:
+    if worker_components is None:
+        return config.learning_rate, None, None
+    expected = {
+        "optimizer": {
+            "learning_rate": config.learning_rate,
+            "beta1": config.adam_beta1,
+            "beta2": config.adam_beta2,
+            "epsilon": config.adam_epsilon,
+            "weight_decay": config.weight_decay,
+            "foreach": True,
+            "fused": False,
+        },
+        "parameter_router": {
+            "shared_backbone_multiplier": config.backbone_learning_rate_multiplier,
+            "repa_projection_multiplier": config.repa_learning_rate_multiplier,
+        },
+        "learning_rate": {
+            "warmup_steps": config.warmup_steps,
+            "max_steps": config.max_steps,
+            "minimum_ratio": config.min_learning_rate_ratio,
+        },
+    }
+    categories = {
+        "optimizer": "optimizer",
+        "parameter_router": "parameter_router",
+        "learning_rate": "learning_rate_schedule",
+    }
+    for slot, configuration in expected.items():
+        actual = dict(
+            worker_components.configuration(slot, category=categories[slot])
+        )
+        if actual != configuration:
+            raise ValueError(
+                f"authority {categories[slot]} composition disagrees with "
+                "terminal MageFlow configuration"
+            )
+    return (
+        float(expected["optimizer"]["learning_rate"]),
+        worker_components.evidence(),
+        worker_components.composition.composition_digest,
+    )
 
 
 def _runtime_only_resume_change(
@@ -2420,7 +2476,11 @@ def _run_alternating_evaluation(
     return combined
 
 
-def train(config: TerminalExpertTrainConfig) -> None:
+def train(
+    config: TerminalExpertTrainConfig,
+    *,
+    worker_components: WorkerTrainingComponents | None = None,
+) -> None:
     config.validate()
     try:
         from huggingface_hub import snapshot_download
@@ -2558,26 +2618,33 @@ def train(config: TerminalExpertTrainConfig) -> None:
         transformer,
         checkpoint_mode,
     )
+    optimizer_learning_rate, component_evidence, component_digest = (
+        resolved_worker_component_contract(config, worker_components)
+    )
     optimizer_routing = terminal_optimizer_parameter_routing(
         transformer,
         controller,
-        expert_learning_rate=config.learning_rate,
+        expert_learning_rate=optimizer_learning_rate,
         backbone_learning_rate_multiplier=config.backbone_learning_rate_multiplier,
         repa_projection=repa,
         repa_learning_rate_multiplier=config.repa_learning_rate_multiplier,
+        worker_components=worker_components,
     )
     groups = list(optimizer_routing.groups)
-    optimizer = build_registered_optimizer(
-        OptimizerImplementation.FP32_MASTER_ADAMW_V1,
-        groups,
-        AdamWConfiguration(
-            learning_rate=config.learning_rate,
-            beta1=config.adam_beta1,
-            beta2=config.adam_beta2,
-            epsilon=config.adam_epsilon,
-            weight_decay=config.weight_decay,
-        ),
-    )
+    if worker_components is not None:
+        optimizer = worker_components.optimizer(groups)
+    else:
+        optimizer = build_registered_optimizer(
+            OptimizerImplementation.FP32_MASTER_ADAMW_V1,
+            groups,
+            AdamWConfiguration(
+                learning_rate=config.learning_rate,
+                beta1=config.adam_beta1,
+                beta2=config.adam_beta2,
+                epsilon=config.adam_epsilon,
+                weight_decay=config.weight_decay,
+            ),
+        )
     domain_schedule = (
         json.loads(
             Path(config.domain_window_schedule).read_text(encoding="utf-8")
@@ -2601,15 +2668,18 @@ def train(config: TerminalExpertTrainConfig) -> None:
             config.expert_checkpoints or {},
             output_dir / "expert_residency",
         )
-    scheduler = build_registered_schedule(
-        ScheduleImplementation.LINEAR_WARMUP_COSINE_V1,
-        optimizer,
-        LinearWarmupCosineConfiguration(
-            warmup_steps=config.warmup_steps,
-            max_steps=config.max_steps,
-            minimum_ratio=config.min_learning_rate_ratio,
-        ),
-    )
+    if worker_components is not None:
+        scheduler = worker_components.learning_rate_schedule(optimizer)
+    else:
+        scheduler = build_registered_schedule(
+            ScheduleImplementation.LINEAR_WARMUP_COSINE_V1,
+            optimizer,
+            LinearWarmupCosineConfiguration(
+                warmup_steps=config.warmup_steps,
+                max_steps=config.max_steps,
+                minimum_ratio=config.min_learning_rate_ratio,
+            ),
+        )
     required_domains = EXPERT_DOMAINS if domain_schedule is not None else (config.domain,)
     train_rows_by_domain = {
         domain: _domain_rows(config.train_manifest, domain)
@@ -2701,7 +2771,9 @@ def train(config: TerminalExpertTrainConfig) -> None:
             model._training_vae_encoder_offloaded = True
     if not all_eval_rows:
         _drop_vae_decoder(model)
-    fingerprint = _contract_fingerprint(config)
+    fingerprint = _contract_fingerprint(
+        config, component_composition_digest=component_digest
+    )
 
     step = epoch = batch_start = 0
     resumed_domain_positions: dict[str, dict[str, int]] | None = None
@@ -2759,6 +2831,7 @@ def train(config: TerminalExpertTrainConfig) -> None:
             "architecture_migration": lightning_block_report,
             "training_scope": scope,
             "parameter_routing": optimizer_routing.report,
+            "training_components": component_evidence,
             "train_examples": len(all_train_rows),
             "eval_examples": len(all_eval_rows),
             "train_examples_by_domain": {

@@ -30,7 +30,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from types import MethodType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn.functional as F
@@ -51,6 +51,9 @@ from rwkv_lab.training_components import (
     build_registered_parameter_routing,
 )
 from rwkv_lab.training_parameter_routing import ParameterRoutingResult
+
+if TYPE_CHECKING:
+    from rwkv_lab.trainvm_adapters import WorkerTrainingComponents
 
 TERMINAL_EXPERT_SCHEMA = "rwkv-lab.mage-flow-terminal-expert.v1"
 TERMINAL_EXPERT_DEPTH = 3
@@ -1780,6 +1783,7 @@ def terminal_optimizer_parameter_routing(
     backbone_learning_rate_multiplier: float = 0.5,
     repa_projection: nn.Module | None = None,
     repa_learning_rate_multiplier: float = 1.0,
+    worker_components: WorkerTrainingComponents | None = None,
 ) -> ParameterRoutingResult:
     """Prove terminal-expert/backbone/REPA ownership before grouping."""
 
@@ -1804,6 +1808,12 @@ def terminal_optimizer_parameter_routing(
             for name, parameter in repa_projection.named_parameters(
                 remove_duplicate=False
             )
+        )
+    if worker_components is not None:
+        return worker_components.parameter_routing(
+            named_parameters,
+            {"expert": frozenset(expert_ids), "repa": repa_ids},
+            base_learning_rate=expert_learning_rate,
         )
     return build_registered_parameter_routing(
         ParameterRouterImplementation.MAGEFLOW_TERMINAL_EXPERT_V1,
