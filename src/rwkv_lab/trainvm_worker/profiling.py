@@ -15,11 +15,13 @@ import math
 import os
 import shutil
 import tempfile
-from collections.abc import Mapping
+import time
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
-from typing import Any, Protocol, Self
+from typing import Any, Protocol, Self, TypeVar
 
 from ._canonical import canonical_dumps, is_bounded_text, sha256_digest
 
@@ -34,6 +36,7 @@ except ImportError as error:  # pragma: no cover - installation contract
 GPU_TRACE_SCHEMA = "trainvm.gpu-trace.v1"
 MAXIMUM_TRACE_BYTES = 2 * 1024 * 1024 * 1024
 MAXIMUM_KERNEL_ROWS = 256
+_InputItem = TypeVar("_InputItem")
 _TRACE_FIELDS = frozenset(
     {
         "enabled",
@@ -388,6 +391,10 @@ class WorkerStepProfiler(Protocol):
 
     def __exit__(self, *exception: object) -> None: ...
 
+    def input_wait(self) -> AbstractContextManager[None]: ...
+
+    def track_input(self, values: Iterable[_InputItem]) -> Iterator[_InputItem]: ...
+
     def step(self, optimizer_step: int) -> None: ...
 
 
@@ -397,6 +404,13 @@ class NullStepProfiler:
 
     def __exit__(self, *exception: object) -> None:
         return None
+
+    @contextmanager
+    def input_wait(self) -> Iterator[None]:
+        yield
+
+    def track_input(self, values: Iterable[_InputItem]) -> Iterator[_InputItem]:
+        return iter(values)
 
     def step(self, optimizer_step: int) -> None:
         if not isinstance(optimizer_step, int) or isinstance(optimizer_step, bool):
@@ -480,6 +494,26 @@ def _profile_activity_summary(profile: object) -> dict[str, object]:
     }
 
 
+def _input_stall_summary(
+    captured: list[float | None], wall_time_us: float
+) -> dict[str, object]:
+    if not captured or all(value is None for value in captured):
+        return {}
+    if any(value is None for value in captured):
+        raise GpuProfileError("input-stall observation is incomplete across capture")
+    measured = [float(value) for value in captured if value is not None]
+    if any(not math.isfinite(value) or value < 0 for value in measured):
+        raise GpuProfileError("input-stall observation is invalid")
+    total = sum(measured)
+    if total > wall_time_us * 1.01:
+        raise GpuProfileError("input-stall time exceeds the captured step window")
+    total = min(total, wall_time_us)
+    return {
+        "input_stall_ratio": total / wall_time_us,
+        "input_stall_time_us": total,
+    }
+
+
 class TorchStepProfiler:
     def __init__(self, session: _ArtifactSession, request: GpuTraceRequest) -> None:
         if request.backend != "torch":
@@ -496,6 +530,36 @@ class TorchStepProfiler:
         self._last_step: int | None = None
         self._torch: Any = None
         self._allocator_baseline: tuple[int, int] | None = None
+        self._pending_input_stall_us = 0.0
+        self._pending_input_observations = 0
+        self._captured_input_stall_us: list[float | None] = []
+
+    @contextmanager
+    def input_wait(self) -> Iterator[None]:
+        started = time.perf_counter_ns()
+        try:
+            yield
+        finally:
+            elapsed = (time.perf_counter_ns() - started) / 1000.0
+            if elapsed < 0 or not math.isfinite(elapsed):
+                raise GpuProfileError("input-stall clock observation is invalid")
+            self._pending_input_stall_us += elapsed
+            self._pending_input_observations += 1
+
+    def track_input(self, values: Iterable[_InputItem]) -> Iterator[_InputItem]:
+        iterator = iter(values)
+        while True:
+            started = time.perf_counter_ns()
+            try:
+                value = next(iterator)
+            except StopIteration:
+                return
+            elapsed = (time.perf_counter_ns() - started) / 1000.0
+            if elapsed < 0 or not math.isfinite(elapsed):
+                raise GpuProfileError("input-stall clock observation is invalid")
+            self._pending_input_stall_us += elapsed
+            self._pending_input_observations += 1
+            yield value
 
     def _reset_allocator_window(self) -> None:
         if self._torch is None:
@@ -571,12 +635,17 @@ class TorchStepProfiler:
                 str(row["name"]),
             )
         )
+        activity_summary = _profile_activity_summary(profile)
         self._summary = {
             "accelerator_time_us": accelerator_total,
             "cpu_time_us": cpu_total,
             "kernel_or_operator_count": len(rows),
             "top_operators": rows[:MAXIMUM_KERNEL_ROWS],
-            **_profile_activity_summary(profile),
+            **activity_summary,
+            **_input_stall_summary(
+                self._captured_input_stall_us,
+                float(activity_summary["captured_step_wall_time_us"]),
+            ),
             **self._allocator_summary(),
         }
         self._trace_path = path
@@ -624,6 +693,13 @@ class TorchStepProfiler:
         capture_start = self._request.skip_steps + self._request.warmup_steps
         if capture_start <= index < self._request.total_steps:
             self._captured_steps.append(optimizer_step)
+            self._captured_input_stall_us.append(
+                self._pending_input_stall_us
+                if self._pending_input_observations > 0
+                else None
+            )
+        self._pending_input_stall_us = 0.0
+        self._pending_input_observations = 0
         self._steps_seen += 1
         assert self._profile is not None
         self._profile.step()

@@ -41,6 +41,8 @@ type trainVMGPUTraceSummaryValues struct {
 	CapturedStepWallTimeUS          *float64                  `json:"captured_step_wall_time_us,omitempty"`
 	GPUActiveRatio                  *float64                  `json:"gpu_active_ratio,omitempty"`
 	GPUActiveTimeUS                 *float64                  `json:"gpu_active_time_us,omitempty"`
+	InputStallRatio                 *float64                  `json:"input_stall_ratio,omitempty"`
+	InputStallTimeUS                *float64                  `json:"input_stall_time_us,omitempty"`
 	AllocatorBaselineAllocatedBytes *uint64                   `json:"allocator_baseline_allocated_bytes,omitempty"`
 	AllocatorBaselineReservedBytes  *uint64                   `json:"allocator_baseline_reserved_bytes,omitempty"`
 	AllocatorPeakAllocatedBytes     *uint64                   `json:"allocator_peak_allocated_bytes,omitempty"`
@@ -181,13 +183,18 @@ func validRichGPUTraceSummary(summary trainVMGPUTraceSummaryValues) bool {
 		}
 	}
 	if count == 0 {
-		return true // Read legacy v1 summaries without inventing unavailable metrics.
+		// Read legacy v1 summaries without inventing unavailable metrics, but do
+		// not accept detached input-stall fields without their wall-time basis.
+		return summary.InputStallRatio == nil && summary.InputStallTimeUS == nil
 	}
 	if count != len(present) {
 		return false
 	}
+	if (summary.InputStallRatio == nil) != (summary.InputStallTimeUS == nil) {
+		return false
+	}
 	expectedActiveRatio := *summary.GPUActiveTimeUS / *summary.CapturedStepWallTimeUS
-	return *summary.AcceleratorLaunchCount <= 1_000_000_000_000 &&
+	valid := *summary.AcceleratorLaunchCount <= 1_000_000_000_000 &&
 		finiteNonnegative(*summary.CapturedStepWallTimeUS) && *summary.CapturedStepWallTimeUS > 0 &&
 		finiteNonnegative(*summary.GPUActiveTimeUS) &&
 		*summary.GPUActiveTimeUS <= *summary.CapturedStepWallTimeUS*1.000001 &&
@@ -197,6 +204,14 @@ func validRichGPUTraceSummary(summary trainVMGPUTraceSummaryValues) bool {
 		*summary.AllocatorPeakAllocatedBytes <= *summary.AllocatorPeakReservedBytes &&
 		*summary.AllocatorBaselineAllocatedBytes <= *summary.AllocatorPeakAllocatedBytes &&
 		*summary.AllocatorBaselineReservedBytes <= *summary.AllocatorPeakReservedBytes
+	if !valid || summary.InputStallRatio == nil {
+		return valid
+	}
+	expectedInputRatio := *summary.InputStallTimeUS / *summary.CapturedStepWallTimeUS
+	return finiteNonnegative(*summary.InputStallTimeUS) &&
+		*summary.InputStallTimeUS <= *summary.CapturedStepWallTimeUS*1.000001 &&
+		finiteNonnegative(*summary.InputStallRatio) && *summary.InputStallRatio <= 1 &&
+		math.Abs(*summary.InputStallRatio-expectedInputRatio) <= 0.000001
 }
 
 func (s *Server) loadGPUTrace(artifact trainvmstore.PublishedArtifact) (trainVMGPUTraceManifest, string, error) {

@@ -68,7 +68,10 @@ non-profiled invocations free of profiler setup overhead. Nsight backends requir
 host launch profiles and fail closed in the in-process Torch adapter path. Torch summaries include
 the captured optimizer-step wall interval, unioned GPU-active time and ratio, accelerator launch
 count, and allocator baseline/peak allocated and reserved bytes; the dashboard exposes these
-without reading the restricted raw trace.
+without reading the restricted raw trace. The same protocol supplies `input_wait()` for direct
+batch acquisition and `track_input()` for prefetch iterators. A trainer marks its real blocking
+boundary; complete captured windows publish input-stall time/ratio, while uninstrumented adapters
+omit those fields instead of estimating them from accelerator inactivity.
 
 The helper is deliberately trainer-family-neutral; MageFlow, RWKV vision, and transformer vision
 adapters must not implement their own gallery-directory conventions.

@@ -1135,7 +1135,11 @@ def train(
         for _ in range(micro_batches):
             row = int(order[cursor])
             cursor += 1
-            tokens = train_rows.tensor(row, device)
+            if worker_step_profiler is None:
+                tokens = train_rows.tensor(row, device)
+            else:
+                with worker_step_profiler.input_wait():
+                    tokens = train_rows.tensor(row, device)
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 loss, lm_loss, aux_loss = _causal_loss(
                     model,

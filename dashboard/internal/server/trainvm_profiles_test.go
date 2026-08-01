@@ -69,6 +69,7 @@ func trainVMGPUTraceFixture(t *testing.T) (*Server, string, string) {
 			"accelerator_time_us": 19.5, "cpu_time_us": 8.25, "kernel_or_operator_count": int64(1),
 			"accelerator_launch_count": uint64(17), "captured_step_wall_time_us": 25.0,
 			"gpu_active_ratio": 0.6, "gpu_active_time_us": 15.0,
+			"input_stall_ratio": 0.2, "input_stall_time_us": 5.0,
 			"allocator_baseline_allocated_bytes": uint64(100),
 			"allocator_baseline_reserved_bytes":  uint64(200),
 			"allocator_peak_allocated_bytes":     uint64(150),
@@ -121,6 +122,7 @@ func TestTrainVMGPUTraceSummaryAndExplicitVerifiedDownload(t *testing.T) {
 		!strings.Contains(response.Body.String(), `"first_optimizer_step":12`) ||
 		!strings.Contains(response.Body.String(), `"accelerator_launch_count":17`) ||
 		!strings.Contains(response.Body.String(), `"gpu_active_ratio":0.6`) ||
+		!strings.Contains(response.Body.String(), `"input_stall_ratio":0.2`) ||
 		!strings.Contains(response.Body.String(), `"sensitivity":"restricted"`) {
 		t.Fatalf("profile list status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -199,6 +201,18 @@ func TestRichGPUTraceSummaryIsAllOrNothingAndInternallyConsistent(t *testing.T) 
 	if !validRichGPUTraceSummary(summary) {
 		t.Fatal("consistent rich summary was rejected")
 	}
+	inputRatio := 0.1
+	summary.InputStallRatio = &inputRatio
+	if validRichGPUTraceSummary(summary) {
+		t.Fatal("partial input-stall summary was accepted")
+	}
+	inputTime := 2.0
+	summary.InputStallTimeUS = &inputTime
+	if !validRichGPUTraceSummary(summary) {
+		t.Fatal("consistent input-stall summary was rejected")
+	}
+	summary.InputStallRatio = nil
+	summary.InputStallTimeUS = nil
 	summary.GPUActiveRatio = nil
 	if validRichGPUTraceSummary(summary) {
 		t.Fatal("partial rich summary was accepted")

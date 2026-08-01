@@ -12,6 +12,7 @@ from rwkv_lab.trainvm_worker.profiling import (
     GpuProfileError,
     GpuTracePublisher,
     NullStepProfiler,
+    _input_stall_summary,
     _interval_union_duration,
     _profile_activity_summary,
     trace_request_from_invocation,
@@ -215,3 +216,23 @@ def test_profile_activity_summary_requires_optimizer_step_window() -> None:
     profile = SimpleNamespace(events=list)
     with pytest.raises(GpuProfileError, match="optimizer-step intervals"):
         _profile_activity_summary(profile)
+
+
+def test_input_stall_summary_requires_complete_explicit_boundaries() -> None:
+    assert _input_stall_summary([10.0, 20.0], 100.0) == {
+        "input_stall_ratio": 0.3,
+        "input_stall_time_us": 30.0,
+    }
+    assert _input_stall_summary([None, None], 100.0) == {}
+    with pytest.raises(GpuProfileError, match="incomplete"):
+        _input_stall_summary([10.0, None], 100.0)
+    with pytest.raises(GpuProfileError, match="exceeds"):
+        _input_stall_summary([101.1], 100.0)
+
+
+def test_null_profiler_input_boundaries_are_transparent() -> None:
+    profiler = NullStepProfiler()
+    with profiler.input_wait():
+        value = 3
+    assert value == 3
+    assert list(profiler.track_input([1, 2])) == [1, 2]

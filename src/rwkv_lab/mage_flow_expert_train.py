@@ -2409,9 +2409,12 @@ def train(
                 image_tensors,
             )
 
-        for batch_index, batch_rows, images in _prefetched(
+        loaded_batches = _prefetched(
             batch_stream, load_batch, depth=config.prefetch_batches
-        ):
+        )
+        if worker_step_profiler is not None:
+            loaded_batches = worker_step_profiler.track_input(loaded_batches)
+        for batch_index, batch_rows, images in loaded_batches:
             accumulation_input_wait += time.perf_counter() - input_wait_started
             encode_start = torch.cuda.Event(enable_timing=True)
             encode_end = torch.cuda.Event(enable_timing=True)

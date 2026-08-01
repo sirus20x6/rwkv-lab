@@ -3095,7 +3095,11 @@ def train(
     while step < config.max_steps:
         switched_domain = False
         if rapid_batch_stream is not None:
-            loaded_batches = (next(rapid_batch_stream),)
+            if worker_step_profiler is None:
+                loaded_batches = (next(rapid_batch_stream),)
+            else:
+                with worker_step_profiler.input_wait():
+                    loaded_batches = (next(rapid_batch_stream),)
         else:
             batches = _epoch_batches(
                 len(train_rows),
@@ -3166,6 +3170,8 @@ def train(
                 depth=config.prefetch_batches,
             )
 
+        if worker_step_profiler is not None and rapid_batch_stream is None:
+            loaded_batches = worker_step_profiler.track_input(loaded_batches)
         for (
             batch_domain,
             batch_epoch,

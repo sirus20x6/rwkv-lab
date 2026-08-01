@@ -212,9 +212,11 @@ When a run has multiple compatible trace windows, the dashboard selects the olde
 the default comparison baseline and lets the operator change it. It shows normalized wall-time and
 launch-count deltas, GPU-active percentage-point change, and peak-allocation change; it refuses to
 compare windows whose node, backend, schedule, activities, or profiler options differ.
-Input-stall attribution remains required after adapters expose a common measured input-boundary;
-the profiler does not infer it from gaps and risk mislabeling CPU, synchronization, or communication
-work as data wait.
+The shared profiler protocol also exposes an explicit input-wait context and iterable wrapper. The
+native MageFlow appearance/terminal and Qwen paths place it around their actual prefetched-batch or
+packed-row acquisition, so a complete capture publishes measured input-stall time and ratio. The
+profiler never infers input stall from GPU gaps, which would mislabel CPU, synchronization, or
+communication work as data wait; adapters without an explicit boundary omit the field.
 
 The guarded GPU launch path is implemented: a root-owned hostd with explicitly non-root worker
 credentials exposes process mutation only after startup recovery/admission, and TrainVM drives the

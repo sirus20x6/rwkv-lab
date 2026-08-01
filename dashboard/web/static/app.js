@@ -784,6 +784,9 @@
           ["peak allocated", vmBytes(summary.allocator_peak_allocated_bytes)],
           ["peak reserved", vmBytes(summary.allocator_peak_reserved_bytes)],
         );
+        if (Number.isFinite(Number(summary.input_stall_ratio)) && Number(summary.input_stall_ratio) >= 0) {
+          facts.splice(3, 0, ["input stall", `${(Number(summary.input_stall_ratio) * 100).toFixed(1)}%`]);
+        }
       }
       let comparison = "";
       if (baseline && profile.artifact_id === baseline.artifact_id) {
@@ -794,7 +797,8 @@
           `<span>wall/step ${vmEscape(vmSignedPercent(Number(summary.captured_step_wall_time_us) / Number(profile.capture_steps), Number(baseSummary.captured_step_wall_time_us) / Number(baseline.capture_steps)))}</span>` +
           `<span>GPU active ${vmEscape(vmSignedPoints(summary.gpu_active_ratio, baseSummary.gpu_active_ratio))}</span>` +
           `<span>launches/step ${vmEscape(vmSignedPercent(Number(summary.accelerator_launch_count) / Number(profile.capture_steps), Number(baseSummary.accelerator_launch_count) / Number(baseline.capture_steps)))}</span>` +
-          `<span>peak allocated ${vmEscape(vmSignedPercent(summary.allocator_peak_allocated_bytes, baseSummary.allocator_peak_allocated_bytes))}</span></div>`;
+          `<span>peak allocated ${vmEscape(vmSignedPercent(summary.allocator_peak_allocated_bytes, baseSummary.allocator_peak_allocated_bytes))}</span>` +
+          `${Number.isFinite(Number(summary.input_stall_ratio)) && Number.isFinite(Number(baseSummary.input_stall_ratio)) ? `<span>input stall ${vmEscape(vmSignedPoints(summary.input_stall_ratio, baseSummary.input_stall_ratio))}</span>` : ""}</div>`;
       } else if (baseline) {
         comparison = '<div class="vm-profile-comparison incompatible"><strong>not comparable</strong><span>node, backend, schedule, activities, or profiler options differ</span></div>';
       }
