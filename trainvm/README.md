@@ -149,7 +149,8 @@ Implemented now:
   have a separate typed request/receipt and immutable projection, remain mutually exclusive with v5
   child exits, and require the same empty cgroup and accelerator-context closure before release; an
   exact terminal-pending-release view and idempotent recovery step resume cgroup removal and bundle
-  release, grouping sibling launches so one closed process cannot hide an unclosed one;
+  release, clean abandoned intent-only cgroups in the same allocation pass, and group sibling
+  launches so one closed process cannot hide an unclosed spawned one;
 - a process-free, single-use journal-fence challenge verifier binding socket peer process instance,
   host/boot/broker, pinned-journal claims, controller generation, logical fence, nonce, and bounded
   boottime lifetime, with per-peer quotas and no bearer-capability interpretation of decoded data;

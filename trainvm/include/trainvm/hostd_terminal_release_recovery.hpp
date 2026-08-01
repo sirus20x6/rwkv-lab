@@ -15,6 +15,8 @@ class IHostdTerminalCgroupCleaner {
   virtual ~IHostdTerminalCgroupCleaner() = default;
   [[nodiscard]] virtual LinuxTerminalCgroupCleanupDisposition cleanup(
       const HostProcessTerminalReleaseRecord& record) = 0;
+  [[nodiscard]] virtual LinuxTerminalCgroupCleanupDisposition cleanup_intent(
+      const HostProcessRecoveryRecord& record) = 0;
 };
 
 class LinuxHostdTerminalCgroupCleaner final
@@ -23,6 +25,8 @@ class LinuxHostdTerminalCgroupCleaner final
   explicit LinuxHostdTerminalCgroupCleaner(LinuxCgroupAuthority& cgroups);
   [[nodiscard]] LinuxTerminalCgroupCleanupDisposition cleanup(
       const HostProcessTerminalReleaseRecord& record) override;
+  [[nodiscard]] LinuxTerminalCgroupCleanupDisposition cleanup_intent(
+      const HostProcessRecoveryRecord& record) override;
 
  private:
   LinuxCgroupAuthority& cgroups_;
@@ -60,6 +64,9 @@ struct HostdTerminalReleaseRecoverySummary final {
   std::size_t terminal_records{};
   std::size_t cgroups_removed{};
   std::size_t cgroups_already_absent{};
+  std::size_t intent_only_records{};
+  std::size_t intent_cgroups_removed{};
+  std::size_t intent_cgroups_already_absent{};
   std::size_t allocations_released{};
   std::size_t release_replays{};
   std::size_t allocations_blocked_by_unclosed_process{};
@@ -67,9 +74,10 @@ struct HostdTerminalReleaseRecoverySummary final {
   bool operator==(const HostdTerminalReleaseRecoverySummary&) const = default;
 };
 
-// Resumes the commit-terminal -> remove-cgroup -> release-bundle saga. It may
-// clean terminal sibling cgroups while another sibling remains live, but it
-// releases an allocation only when no durable unclosed process record remains.
+// Resumes commit-terminal -> remove-cgroup -> release-bundle and also closes
+// intent-only launch attempts that never acquired a spawn receipt. It may clean
+// terminal/intent sibling cgroups while another sibling remains live, but it
+// releases an allocation only when no durable unclosed spawned process remains.
 class HostdTerminalReleaseRecovery final {
  public:
   HostdTerminalReleaseRecovery(IHostdTerminalReleaseAuthority& authority,

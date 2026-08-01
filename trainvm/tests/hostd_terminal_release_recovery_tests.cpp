@@ -31,10 +31,15 @@ HostProcessTerminalReleaseRecord terminal_record(
 }
 
 HostProcessRecoveryRecord unclosed_record(std::string allocation_id,
-                                          std::string launch_id) {
+                                          std::string launch_id,
+                                          bool spawned) {
   HostProcessRecoveryRecord result;
   result.grant.allocation_id = std::move(allocation_id);
+  result.grant.receipt_digest = "sha256:" + std::string(64U, 'a');
+  result.intent.request.allocation_id = result.grant.allocation_id;
+  result.intent.request.grant_digest = result.grant.receipt_digest;
   result.intent.request.launch_id = std::move(launch_id);
+  if (spawned) result.spawn = HostProcessSpawnReceipt{};
   return result;
 }
 
@@ -59,7 +64,9 @@ class FakeAuthority final : public IHostdTerminalReleaseAuthority {
 class FakeCleaner final : public IHostdTerminalCgroupCleaner {
  public:
   std::vector<LinuxTerminalCgroupCleanupDisposition> dispositions;
+  std::vector<LinuxTerminalCgroupCleanupDisposition> intent_dispositions;
   std::vector<std::string> cleaned;
+  std::vector<std::string> cleaned_intents;
 
   LinuxTerminalCgroupCleanupDisposition cleanup(
       const HostProcessTerminalReleaseRecord& record) override {
@@ -69,6 +76,14 @@ class FakeCleaner final : public IHostdTerminalCgroupCleaner {
     }
     return dispositions[cleaned.size() - 1U];
   }
+  LinuxTerminalCgroupCleanupDisposition cleanup_intent(
+      const HostProcessRecoveryRecord& record) override {
+    cleaned_intents.push_back(record.intent.request.launch_id);
+    if (cleaned_intents.size() > intent_dispositions.size()) {
+      throw std::runtime_error("missing fake intent cleanup disposition");
+    }
+    return intent_dispositions[cleaned_intents.size() - 1U];
+  }
 };
 
 void resumes_cleanup_and_releases_only_closed_allocations() {
@@ -76,25 +91,42 @@ void resumes_cleanup_and_releases_only_closed_allocations() {
   authority.terminal.push_back(terminal_record("allocation-a", "launch-a1", false));
   authority.terminal.push_back(terminal_record("allocation-a", "launch-a2", true));
   authority.terminal.push_back(terminal_record("allocation-b", "launch-b1", false));
-  authority.unclosed.push_back(unclosed_record("allocation-b", "launch-b2"));
+  authority.terminal.push_back(terminal_record("allocation-d", "launch-d1", false));
+  authority.unclosed.push_back(
+      unclosed_record("allocation-b", "launch-b2", true));
+  authority.unclosed.push_back(
+      unclosed_record("allocation-c", "launch-c1", false));
+  authority.unclosed.push_back(
+      unclosed_record("allocation-d", "launch-d2", false));
   FakeCleaner cleaner;
   cleaner.dispositions = {
       LinuxTerminalCgroupCleanupDisposition::removed,
+      LinuxTerminalCgroupCleanupDisposition::already_absent,
+      LinuxTerminalCgroupCleanupDisposition::removed,
+      LinuxTerminalCgroupCleanupDisposition::removed,
+  };
+  cleaner.intent_dispositions = {
       LinuxTerminalCgroupCleanupDisposition::already_absent,
       LinuxTerminalCgroupCleanupDisposition::removed,
   };
   HostdTerminalReleaseRecovery recovery(authority, cleaner);
   const auto summary = recovery.recover();
   require(summary == HostdTerminalReleaseRecoverySummary{
-                         .terminal_records = 3U,
-                         .cgroups_removed = 2U,
+                         .terminal_records = 4U,
+                         .cgroups_removed = 3U,
                          .cgroups_already_absent = 1U,
-                         .allocations_released = 1U,
+                         .intent_only_records = 2U,
+                         .intent_cgroups_removed = 1U,
+                         .intent_cgroups_already_absent = 1U,
+                         .allocations_released = 3U,
                          .release_replays = 0U,
                          .allocations_blocked_by_unclosed_process = 1U,
                      } &&
-              authority.released == std::vector<std::string>{"allocation-a"} &&
-              cleaner.cleaned.size() == 3U,
+              authority.released ==
+                  std::vector<std::string>{"allocation-a", "allocation-c",
+                                           "allocation-d"} &&
+              cleaner.cleaned.size() == 4U &&
+              cleaner.cleaned_intents.size() == 2U,
           "terminal cleanup resumes idempotently without releasing live sibling");
 }
 
@@ -106,6 +138,10 @@ void inconsistent_terminal_shape_fails_before_cleanup() {
   malformed.recovery_exit = HostProcessRecoveryExitReceipt{};
   authority.terminal.push_back(std::move(malformed));
   FakeCleaner cleaner;
+  cleaner.dispositions = {
+      LinuxTerminalCgroupCleanupDisposition::removed,
+      LinuxTerminalCgroupCleanupDisposition::removed,
+  };
   HostdTerminalReleaseRecovery recovery(authority, cleaner);
   bool rejected = false;
   try {

@@ -52,6 +52,17 @@ LinuxHostdTerminalCgroupCleaner::cleanup(
        .inode = spawn.cgroup_inode});
 }
 
+LinuxTerminalCgroupCleanupDisposition
+LinuxHostdTerminalCgroupCleaner::cleanup_intent(
+    const HostProcessRecoveryRecord& record) {
+  const auto& request = record.intent.request;
+  return cgroups_.cleanup_terminal_or_confirm_absent(
+      record.grant.allocation_id, request.launch_id,
+      {.unified_path = request.cgroup_path,
+       .device = request.cgroup_device,
+       .inode = request.cgroup_inode});
+}
+
 SQLiteHostdTerminalReleaseAuthority::SQLiteHostdTerminalReleaseAuthority(
     SQLiteHostLedger& ledger, AuthorityClock& clock)
     : ledger_(ledger), clock_(clock) {}
@@ -84,8 +95,13 @@ HostdTerminalReleaseRecovery::recover() {
   const std::vector<HostProcessRecoveryRecord> unclosed =
       authority_.unclosed_records();
   std::set<std::string, std::less<>> blocked_allocations;
+  std::vector<const HostProcessRecoveryRecord*> intent_only;
   for (const HostProcessRecoveryRecord& record : unclosed) {
-    blocked_allocations.insert(record.grant.allocation_id);
+    if (record.spawn) {
+      blocked_allocations.insert(record.grant.allocation_id);
+    } else {
+      intent_only.push_back(&record);
+    }
   }
   std::map<std::string, ResourceBundleGrant, std::less<>> grants;
   HostdTerminalReleaseRecoverySummary summary{
@@ -103,6 +119,17 @@ HostdTerminalReleaseRecovery::recover() {
       reject("terminal siblings disagree on their resource grant");
     }
   }
+  for (const HostProcessRecoveryRecord* record : intent_only) {
+    if (record->intent.request.allocation_id != record->grant.allocation_id ||
+        record->intent.request.grant_digest != record->grant.receipt_digest) {
+      reject("intent-only recovery record is internally inconsistent");
+    }
+    const auto [found, inserted] =
+        grants.emplace(record->grant.allocation_id, record->grant);
+    if (!inserted && found->second != record->grant) {
+      reject("process siblings disagree on their resource grant");
+    }
+  }
   for (const HostProcessTerminalReleaseRecord& record : terminal) {
     switch (cleaner_.cleanup(record)) {
       case LinuxTerminalCgroupCleanupDisposition::removed:
@@ -110,6 +137,17 @@ HostdTerminalReleaseRecovery::recover() {
         break;
       case LinuxTerminalCgroupCleanupDisposition::already_absent:
         ++summary.cgroups_already_absent;
+        break;
+    }
+  }
+  summary.intent_only_records = intent_only.size();
+  for (const HostProcessRecoveryRecord* record : intent_only) {
+    switch (cleaner_.cleanup_intent(*record)) {
+      case LinuxTerminalCgroupCleanupDisposition::removed:
+        ++summary.intent_cgroups_removed;
+        break;
+      case LinuxTerminalCgroupCleanupDisposition::already_absent:
+        ++summary.intent_cgroups_already_absent;
         break;
     }
   }

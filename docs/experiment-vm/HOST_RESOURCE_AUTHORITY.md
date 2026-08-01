@@ -747,8 +747,10 @@ closed for every spawned allocation without either receipt, and the empty
 cgroup is removed only afterward. A separate exact terminal-pending-release
 view survives a crash in that gap; its recovery step treats an already absent
 deterministic cgroup as idempotent, validates all sibling records before
-mutation, cleans each terminal cgroup, and releases the bundle only when no
-unclosed sibling remains. CPU/I/O policy evidence, device BPF,
+mutation, cleans each terminal or abandoned intent-only cgroup, and releases
+the bundle only when no unclosed spawned sibling remains. This combined pass
+avoids a terminal sibling and intent-only sibling blocking one another forever.
+CPU/I/O policy evidence, device BPF,
 privileged end-to-end qualification, and daemon bootstrap/policy wiring remain
 in this gate. A daemon crash is not claimed as ordinary in-memory supervisor
 replay; startup policy must consume the durable recovery records.
