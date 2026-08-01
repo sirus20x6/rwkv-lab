@@ -57,6 +57,13 @@ not own generic optimizer hyperparameter validation or schedule math. A paramete
 produce an exhaustive ownership report; overlapping or unclaimed trainable parameters fail before
 the optimizer is constructed.
 
+Python worker adapters use `rwkv_lab.trainvm_adapters.WorkerTrainingComponents` as the one
+composition bridge. It binds the already-verified worker composition to an expected model family,
+requires a category for every named slot, delegates construction to the category runtime, and emits
+descriptor/implementation evidence. It contains no model topology or training loop. MageFlow,
+RWKV, transformer, vision, and post-training adapters may share this bridge but may not add family
+conditionals to it.
+
 ## Dashboard
 
 `GetDescriptor(trainvm.training-components@1.0.0)` returns the canonical registry bytes and digest.
