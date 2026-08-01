@@ -43,6 +43,8 @@ class LinuxAllocationCgroup final {
 
   [[nodiscard]] const LinuxAllocationCgroupIdentity& identity() const;
   [[nodiscard]] int duplicate_fd() const;
+  [[nodiscard]] bool empty() const;
+  void remove_if_empty();
   // Once a launch intent is durable, the cgroup must survive errors for exact
   // retry/startup audit. Before that point destruction removes a new empty dir.
   void retain_for_durable_intent() noexcept;

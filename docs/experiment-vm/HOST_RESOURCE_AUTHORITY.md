@@ -705,9 +705,13 @@ descriptors, clones directly into that cgroup with a pidfd, blocks on a private
 pre-exec pipe, double-attests proc starttime and unified membership, and kills
 and reaps by pidfd on every failure. The combined process authority commits the
 intent before clone and the spawn identity before returning the closed gate.
-Python code-fd argv binding, terminal exit receipts, CPU/I/O policy evidence,
-device BPF, daemon RPC integration, and privileged end-to-end qualification
-remain in this gate.
+The additive v5 terminal receipt is now implemented as well: pidfd wait status,
+the exact spawn identity, twice-empty cgroup evidence, and a complete trusted
+accelerator-context audit must all agree before commit. Resource release now
+fails closed for every spawned allocation without that receipt, and the empty
+cgroup is removed only afterward. Python code-fd argv binding, CPU/I/O policy
+evidence, device BPF, daemon RPC integration, and privileged end-to-end
+qualification remain in this gate.
 
 Gate:
 

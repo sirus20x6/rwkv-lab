@@ -214,7 +214,8 @@ LinuxStoppedChild::LinuxStoppedChild(LinuxStoppedChild&& other) noexcept
     : identity_(std::move(other.identity_)),
       pidfd_(std::exchange(other.pidfd_, -1)),
       gate_fd_(std::exchange(other.gate_fd_, -1)),
-      released_(other.released_), reaped_(other.reaped_) {
+      released_(other.released_), reaped_(other.reaped_),
+      exit_observation_(other.exit_observation_) {
   other.reaped_ = true;
 }
 
@@ -227,6 +228,7 @@ LinuxStoppedChild& LinuxStoppedChild::operator=(
     gate_fd_ = std::exchange(other.gate_fd_, -1);
     released_ = other.released_;
     reaped_ = other.reaped_;
+    exit_observation_ = other.exit_observation_;
     other.reaped_ = true;
   }
   return *this;
@@ -261,27 +263,55 @@ void LinuxStoppedChild::release_to_exec() {
 }
 
 void LinuxStoppedChild::terminate_and_reap() noexcept {
+  (void)reap(true, false);
+}
+
+LinuxChildExitObservation LinuxStoppedChild::wait_and_reap() {
+  const auto observation = reap(false, true);
+  if (!observation) reject("child wait produced no terminal observation");
+  return *observation;
+}
+
+LinuxChildExitObservation LinuxStoppedChild::terminate_and_observe() {
+  const auto observation = reap(true, true);
+  if (!observation) reject("child termination produced no terminal observation");
+  return *observation;
+}
+
+std::optional<LinuxChildExitObservation> LinuxStoppedChild::reap(
+    bool terminate, bool fail_on_error) {
+  if (exit_observation_) return exit_observation_;
   if (gate_fd_ >= 0) {
     (void)::close(gate_fd_);
     gate_fd_ = -1;
   }
   if (pidfd_ < 0) {
     reaped_ = true;
-    return;
+    if (fail_on_error) reject("child pidfd authority is unavailable");
+    return std::nullopt;
   }
 #ifdef SYS_pidfd_send_signal
-  if (!reaped_ && pidfd_alive(pidfd_)) {
+  if (terminate && !reaped_ && pidfd_alive(pidfd_)) {
     (void)::syscall(SYS_pidfd_send_signal, pidfd_, SIGKILL, nullptr, 0U);
   }
 #endif
   siginfo_t information {};
-  while (!reaped_ &&
-         ::waitid(P_PIDFD, static_cast<id_t>(pidfd_), &information,
-                  WEXITED) != 0 && errno == EINTR) {
+  int status = 0;
+  do {
+    status = ::waitid(P_PIDFD, static_cast<id_t>(pidfd_), &information,
+                      WEXITED);
+  } while (status != 0 && errno == EINTR);
+  if (status != 0) {
+    if (fail_on_error) reject(system_error("pidfd waitid failed"));
+  } else {
+    exit_observation_ = LinuxChildExitObservation{
+        .wait_code = information.si_code,
+        .wait_status = information.si_status};
   }
   (void)::close(pidfd_);
   pidfd_ = -1;
   reaped_ = true;
+  return exit_observation_;
 }
 
 LinuxStoppedChild LinuxStoppedLauncherKernel::spawn_stopped(

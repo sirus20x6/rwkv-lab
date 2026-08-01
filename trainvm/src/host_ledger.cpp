@@ -292,6 +292,25 @@ CREATE TRIGGER process_spawns_no_delete BEFORE DELETE ON process_spawns
 BEGIN SELECT RAISE(ABORT, 'process spawn receipts are immutable'); END;
 )sql";
 
+constexpr std::string_view kProcessExitSchemaV5 = R"sql(
+CREATE TABLE process_exits (
+  launch_id TEXT PRIMARY KEY REFERENCES process_spawns(launch_id),
+  exit_request_id TEXT NOT NULL UNIQUE,
+  request_digest TEXT NOT NULL UNIQUE,
+  spawn_receipt_digest TEXT NOT NULL UNIQUE,
+  receipt_digest TEXT NOT NULL UNIQUE,
+  canonical_request_json TEXT NOT NULL,
+  canonical_receipt_json TEXT NOT NULL,
+  record_sequence INTEGER NOT NULL UNIQUE CHECK(record_sequence > 0),
+  record_receipt_digest TEXT NOT NULL UNIQUE,
+  record_chain_hash TEXT NOT NULL UNIQUE
+) WITHOUT ROWID;
+CREATE TRIGGER process_exits_no_update BEFORE UPDATE ON process_exits
+BEGIN SELECT RAISE(ABORT, 'process exit receipts are immutable'); END;
+CREATE TRIGGER process_exits_no_delete BEFORE DELETE ON process_exits
+BEGIN SELECT RAISE(ABORT, 'process exit receipts are immutable'); END;
+)sql";
+
 class Statement final {
  public:
   Statement(sqlite3* database, std::string_view sql) : database_(database) {
@@ -661,6 +680,37 @@ nlohmann::json process_spawn_receipt_digest_json(
            receipt.previous_process_receipt_digest}};
 }
 
+nlohmann::json process_exit_request_digest_json(
+    const HostProcessExitRequest& request) {
+  return {{"api_version", request.api_version},
+          {"exit_request_id", request.exit_request_id},
+          {"launch_id", request.launch_id},
+          {"spawn_receipt_digest", request.spawn_receipt_digest},
+          {"host_pid", request.host_pid},
+          {"process_starttime_ticks", request.process_starttime_ticks},
+          {"wait_code", request.wait_code},
+          {"wait_status", request.wait_status},
+          {"cgroup_path", request.cgroup_path},
+          {"cgroup_device", request.cgroup_device},
+          {"cgroup_inode", request.cgroup_inode},
+          {"cgroup_empty", request.cgroup_empty},
+          {"accelerator_contexts_empty", request.accelerator_contexts_empty},
+          {"context_audit_digest", request.context_audit_digest}};
+}
+
+nlohmann::json process_exit_receipt_digest_json(
+    const HostProcessExitReceipt& receipt) {
+  return {{"api_version", receipt.api_version},
+          {"request", host_process_exit_request_json(receipt.request)},
+          {"host_id", receipt.host_id},
+          {"boot_id", receipt.boot_id},
+          {"broker_epoch", receipt.broker_epoch},
+          {"observed_boottime_ns", receipt.observed_boottime_ns},
+          {"observed_wall_time_ns", receipt.observed_wall_time_ns},
+          {"previous_process_receipt_digest",
+           receipt.previous_process_receipt_digest}};
+}
+
 template <typename T>
 T strict_decode(const nlohmann::json& source, std::string_view description) {
   T result;
@@ -766,6 +816,33 @@ const SchemaSnapshot& canonical_schema_v4() {
               "canonical admission-epoch schema creation failed");
       execute(database, kProcessAuthoritySchemaV4,
               "canonical process-authority schema creation failed");
+      auto value = schema_snapshot(database);
+      sqlite3_close(database);
+      return value;
+    } catch (...) {
+      sqlite3_close(database);
+      throw;
+    }
+  }();
+  return snapshot;
+}
+
+const SchemaSnapshot& canonical_schema_v5() {
+  static const SchemaSnapshot snapshot = [] {
+    sqlite3* database = nullptr;
+    if (sqlite3_open(":memory:", &database) != SQLITE_OK) {
+      throw HostLedgerError("could not construct canonical ledger schema");
+    }
+    try {
+      execute(database, kSchemaV1, "canonical v1 schema creation failed");
+      execute(database, kStartupAuditSchemaV2,
+              "canonical startup-audit schema creation failed");
+      execute(database, kAdmissionEpochSchemaV3,
+              "canonical admission-epoch schema creation failed");
+      execute(database, kProcessAuthoritySchemaV4,
+              "canonical process-authority schema creation failed");
+      execute(database, kProcessExitSchemaV5,
+              "canonical process-exit schema creation failed");
       auto value = schema_snapshot(database);
       sqlite3_close(database);
       return value;
@@ -1029,7 +1106,7 @@ struct SQLiteHostLedger::Implementation final {
 
   bool verify_unlocked(std::string* reason,
                        bool bind_instance_inventory = true,
-                       unsigned int schema_version = 4U) const {
+                       unsigned int schema_version = 5U) const {
     const auto fail = [&](std::string message) {
       if (reason != nullptr) *reason = std::move(message);
       return false;
@@ -1050,8 +1127,11 @@ struct SQLiteHostLedger::Implementation final {
            schema_snapshot(database) != canonical_schema_v3()) ||
           (schema_version == 4U &&
            schema_snapshot(database) != canonical_schema_v4()) ||
+          (schema_version == 5U &&
+           schema_snapshot(database) != canonical_schema_v5()) ||
           (schema_version != 1U && schema_version != 2U &&
-           schema_version != 3U && schema_version != 4U)) {
+           schema_version != 3U && schema_version != 4U &&
+           schema_version != 5U)) {
         return fail("ledger schema does not exactly match its declared version");
       }
       Statement application(database, "PRAGMA application_id");
@@ -1606,7 +1686,8 @@ struct SQLiteHostLedger::Implementation final {
         if (sqlite3_step(extension_count.get()) != SQLITE_ROW ||
             sqlite3_column_int64(extension_count.get(), 0) !=
                 (schema_version == 2U ? 1 :
-                 schema_version == 3U ? 2 : 3)) {
+                 schema_version == 3U ? 2 :
+                 schema_version == 4U ? 3 : 4)) {
           return fail("unknown ledger schema extension is present");
         }
         Statement audits(database, R"sql(
@@ -1841,6 +1922,20 @@ struct SQLiteHostLedger::Implementation final {
             std::map<std::string,
                      std::pair<HostProcessSpawnReceipt, ProcessEvidence>>
                 spawn_evidence;
+            std::map<std::string,
+                     std::pair<HostProcessExitReceipt, ProcessEvidence>>
+                exit_evidence;
+            if (schema_version >= 5U) {
+              Statement exit_extension(database, R"sql(
+                SELECT schema_version FROM ledger_schema_extensions
+                WHERE feature='process_exit'
+              )sql");
+              if (sqlite3_step(exit_extension.get()) != SQLITE_ROW ||
+                  sqlite3_column_int64(exit_extension.get(), 0) != 5 ||
+                  sqlite3_step(exit_extension.get()) != SQLITE_DONE) {
+                return fail("process-exit schema extension marker is invalid");
+              }
+            }
             std::string process_previous(kGenesisDigest);
             std::string previous_process_receipt(kGenesisDigest);
             std::int64_t process_sequence = 0;
@@ -1934,6 +2029,29 @@ struct SQLiteHostLedger::Implementation final {
                                   std::pair{receipt, evidence})
                          .second) {
                   return fail("process spawn evidence is malformed");
+                }
+              } else if (type == "process.exited" && schema_version >= 5U) {
+                const HostProcessExitReceipt receipt =
+                    host_process_exit_receipt_from_json(record.at("payload"));
+                const auto spawn = spawn_evidence.find(receipt.request.launch_id);
+                if (receipt.previous_process_receipt_digest !=
+                        previous_process_receipt ||
+                    spawn == spawn_evidence.end() ||
+                    receipt.request.spawn_receipt_digest !=
+                        spawn->second.first.receipt_digest ||
+                    record.value("record_id", std::string{}) !=
+                        "process-exit:" + receipt.request.exit_request_id ||
+                    record.value("subject_id", std::string{}) !=
+                        receipt.request.launch_id ||
+                    record.value("host_id", std::string{}) != receipt.host_id ||
+                    record.value("boot_id", std::string{}) != receipt.boot_id ||
+                    record.value("broker_epoch", std::string{}) !=
+                        receipt.broker_epoch ||
+                    !exit_evidence
+                         .emplace(receipt.request.launch_id,
+                                  std::pair{receipt, evidence})
+                         .second) {
+                  return fail("process exit evidence is malformed");
                 }
               } else {
                 return fail("unsupported process authority record type");
@@ -2042,6 +2160,61 @@ struct SQLiteHostLedger::Implementation final {
             if (status != SQLITE_DONE || spawn_count != spawn_evidence.size()) {
               return fail("process spawn evidence is not closed");
             }
+            if (schema_version >= 5U) {
+              Statement exits(database, R"sql(
+                SELECT launch_id, exit_request_id, request_digest,
+                       spawn_receipt_digest, receipt_digest,
+                       canonical_request_json, canonical_receipt_json,
+                       record_sequence, record_receipt_digest, record_chain_hash
+                FROM process_exits ORDER BY launch_id
+              )sql");
+              std::size_t exit_count = 0U;
+              while ((status = sqlite3_step(exits.get())) == SQLITE_ROW) {
+                ++exit_count;
+                const std::string launch_id = column_text(exits.get(), 0);
+                const auto found = exit_evidence.find(launch_id);
+                if (found == exit_evidence.end()) {
+                  return fail("process exit has no authority record");
+                }
+                const auto& [receipt, evidence] = found->second;
+                if (column_text(exits.get(), 1) !=
+                        receipt.request.exit_request_id ||
+                    column_text(exits.get(), 2) !=
+                        receipt.request.canonical_request_digest ||
+                    column_text(exits.get(), 3) !=
+                        receipt.request.spawn_receipt_digest ||
+                    column_text(exits.get(), 4) != receipt.receipt_digest ||
+                    column_text(exits.get(), 5) !=
+                        host_process_exit_request_json(receipt.request).dump() ||
+                    column_text(exits.get(), 6) !=
+                        host_process_exit_receipt_json(receipt).dump() ||
+                    static_cast<std::uint64_t>(
+                        sqlite3_column_int64(exits.get(), 7)) !=
+                        evidence.sequence ||
+                    column_text(exits.get(), 8) != evidence.record_receipt ||
+                    column_text(exits.get(), 9) != evidence.chain_hash) {
+                  return fail("process exit projection is not canonical");
+                }
+              }
+              if (status != SQLITE_DONE || exit_count != exit_evidence.size()) {
+                return fail("process exit evidence is not closed");
+              }
+              Statement unsafe_release(database, R"sql(
+                SELECT 1 FROM process_launch_intents AS intent
+                JOIN process_spawns AS spawn USING(launch_id)
+                JOIN allocations AS allocation
+                  ON allocation.allocation_id=intent.allocation_id
+                LEFT JOIN process_exits AS terminal USING(launch_id)
+                WHERE allocation.status='released'
+                  AND terminal.launch_id IS NULL LIMIT 1
+              )sql");
+              if (sqlite3_step(unsafe_release.get()) == SQLITE_ROW) {
+                return fail(
+                    "released allocation lacks terminal process authority");
+              }
+            } else if (!exit_evidence.empty()) {
+              return fail("v4 process chain contains v5 exit evidence");
+            }
           }
         }
       } else if (!startup_audit_evidence.empty()) {
@@ -2137,8 +2310,10 @@ SQLiteHostLedger::SQLiteHostLedger(
             "could not create admission-epoch schema v3");
     execute(implementation_->database, kProcessAuthoritySchemaV4,
             "could not create process-authority schema v4");
+    execute(implementation_->database, kProcessExitSchemaV5,
+            "could not create process-exit schema v5");
     execute(implementation_->database,
-            "PRAGMA application_id=0x5456484c; PRAGMA user_version=4;",
+            "PRAGMA application_id=0x5456484c; PRAGMA user_version=5;",
             "could not mark host ledger schema");
     Statement identity(implementation_->database, R"sql(
       INSERT INTO ledger_identity(singleton, schema_version, ledger_id, host_id,
@@ -2156,7 +2331,9 @@ SQLiteHostLedger::SQLiteHostLedger(
             "INSERT INTO ledger_schema_extensions(feature, schema_version) "
             "VALUES('admission_epoch', 3);"
             "INSERT INTO ledger_schema_extensions(feature, schema_version) "
-            "VALUES('process_authority', 4);",
+            "VALUES('process_authority', 4);"
+            "INSERT INTO ledger_schema_extensions(feature, schema_version) "
+            "VALUES('process_exit', 5);",
             "host ledger extension marker insert failed");
     Statement head(implementation_->database, R"sql(
       INSERT INTO ledger_chain_head VALUES(1, 0, ?)
@@ -2237,7 +2414,8 @@ SQLiteHostLedger::SQLiteHostLedger(
       migration.commit();
     } else if ((opened_schema != canonical_schema_v2() || user_version != 2) &&
                (opened_schema != canonical_schema_v3() || user_version != 3) &&
-               (opened_schema != canonical_schema_v4() || user_version != 4)) {
+               (opened_schema != canonical_schema_v4() || user_version != 4) &&
+               (opened_schema != canonical_schema_v5() || user_version != 5)) {
       throw HostLedgerError(
           "refusing unknown or partially migrated host ledger schema");
     }
@@ -2303,6 +2481,32 @@ SQLiteHostLedger::SQLiteHostLedger(
         throw HostLedgerError(
             "process-authority migration verification failed: " +
             migration_reason);
+      }
+      migration.commit();
+    }
+    const std::int64_t post_process_schema_version = [&] {
+      Statement current_version(implementation_->database,
+                                "PRAGMA user_version");
+      if (sqlite3_step(current_version.get()) != SQLITE_ROW)
+        throw HostLedgerError("could not reread process schema version");
+      return sqlite3_column_int64(current_version.get(), 0);
+    }();
+    if (post_process_schema_version == 4) {
+      Transaction migration(implementation_->database);
+      std::string migration_reason;
+      if (!implementation_->verify_unlocked(&migration_reason, false, 4U)) {
+        throw HostLedgerError("refusing process-exit migration: " +
+                              migration_reason);
+      }
+      execute(implementation_->database, kProcessExitSchemaV5,
+              "could not create process-exit schema v5");
+      execute(implementation_->database,
+              "INSERT INTO ledger_schema_extensions(feature, schema_version) "
+              "VALUES('process_exit', 5); PRAGMA user_version=5;",
+              "could not mark process-exit schema v5");
+      if (!implementation_->verify_unlocked(&migration_reason, false, 5U)) {
+        throw HostLedgerError("process-exit migration verification failed: " +
+                              migration_reason);
       }
       migration.commit();
     }
@@ -2770,6 +2974,29 @@ BundleReleaseResult SQLiteHostLedger::release_bundle(
       column_text(allocation.get(), 6) != implementation_->inventory.boot_id ||
       column_text(allocation.get(), 7) != "active") {
     throw HostLedgerConflict("release CAS does not match the active grant");
+  }
+  Statement process_terminal(implementation_->database, R"sql(
+    SELECT EXISTS(
+             SELECT 1 FROM process_launch_intents AS intent
+             JOIN process_spawns AS spawn USING(launch_id)
+             WHERE intent.allocation_id=?
+           ),
+           EXISTS(
+             SELECT 1 FROM process_launch_intents AS intent
+             JOIN process_spawns AS spawn USING(launch_id)
+             JOIN process_exits AS terminal USING(launch_id)
+             WHERE intent.allocation_id=?
+           )
+  )sql");
+  bind_text(process_terminal.get(), 1, request.allocation_id);
+  bind_text(process_terminal.get(), 2, request.allocation_id);
+  if (sqlite3_step(process_terminal.get()) != SQLITE_ROW) {
+    throw HostLedgerError("could not inspect allocation process closure");
+  }
+  if (sqlite3_column_int(process_terminal.get(), 0) != 0 &&
+      sqlite3_column_int(process_terminal.get(), 1) == 0) {
+    throw HostLedgerConflict(
+        "allocation has no terminal process exit authority");
   }
   const auto request_record = implementation_->make_record(
       "bundle.release_requested",
@@ -3422,6 +3649,113 @@ HostProcessSpawnResult SQLiteHostLedger::commit_process_spawn(
   return {.receipt = std::move(receipt), .replayed = false};
 }
 
+HostProcessExitResult SQLiteHostLedger::commit_process_exit(
+    const HostProcessExitRequest& supplied_request,
+    const HostLedgerTime& now) {
+  const HostProcessExitRequest request =
+      seal_host_process_exit_request(supplied_request);
+  if (request != supplied_request || !valid_time(now)) {
+    throw HostLedgerError("process exit input is not canonical");
+  }
+  std::scoped_lock lock(implementation_->mutex);
+  Transaction transaction(implementation_->database);
+  std::string reason;
+  if (!implementation_->verify_unlocked(&reason)) {
+    throw HostLedgerError("refusing process exit receipt: " + reason);
+  }
+  Statement replay(implementation_->database, R"sql(
+    SELECT launch_id, request_digest, canonical_receipt_json
+    FROM process_exits
+    WHERE launch_id=? OR exit_request_id=?
+  )sql");
+  bind_text(replay.get(), 1, request.launch_id);
+  bind_text(replay.get(), 2, request.exit_request_id);
+  if (sqlite3_step(replay.get()) == SQLITE_ROW) {
+    if (column_text(replay.get(), 0) != request.launch_id ||
+        column_text(replay.get(), 1) != request.canonical_request_digest) {
+      throw HostLedgerConflict(
+          "process exit identity was reused with different evidence");
+    }
+    auto receipt = host_process_exit_receipt_from_json(
+        nlohmann::json::parse(column_text(replay.get(), 2)));
+    transaction.commit();
+    return {.receipt = std::move(receipt), .replayed = true};
+  }
+  Statement spawn_query(implementation_->database, R"sql(
+    SELECT spawn.canonical_receipt_json, allocation.status
+    FROM process_spawns AS spawn
+    JOIN process_launch_intents AS intent USING(launch_id)
+    JOIN allocations AS allocation ON allocation.allocation_id=intent.allocation_id
+    WHERE spawn.launch_id=?
+  )sql");
+  bind_text(spawn_query.get(), 1, request.launch_id);
+  if (sqlite3_step(spawn_query.get()) != SQLITE_ROW ||
+      column_text(spawn_query.get(), 1) != "active") {
+    throw HostLedgerConflict(
+        "process exit has no spawned child on an active allocation");
+  }
+  const HostProcessSpawnReceipt spawn = host_process_spawn_receipt_from_json(
+      nlohmann::json::parse(column_text(spawn_query.get(), 0)));
+  if (request.spawn_receipt_digest != spawn.receipt_digest ||
+      request.host_pid != spawn.request.host_pid ||
+      request.process_starttime_ticks !=
+          spawn.request.process_starttime_ticks ||
+      request.cgroup_path != spawn.request.cgroup_path ||
+      request.cgroup_device != spawn.request.cgroup_device ||
+      request.cgroup_inode != spawn.request.cgroup_inode ||
+      spawn.request.boot_id != implementation_->inventory.boot_id) {
+    throw HostLedgerConflict(
+        "process exit evidence diverges from its exact spawn receipt");
+  }
+  HostProcessExitReceipt receipt{
+      .api_version = std::string(kHostProcessExitReceiptApiVersion),
+      .request = request,
+      .host_id = implementation_->inventory.host_id,
+      .boot_id = implementation_->inventory.boot_id,
+      .broker_epoch = implementation_->inventory.broker_epoch,
+      .observed_boottime_ns = now.boottime_ns,
+      .observed_wall_time_ns = now.wall_time_ns,
+      .previous_process_receipt_digest =
+          implementation_->previous_process_receipt_unlocked(),
+      .receipt_digest = {}};
+  receipt.receipt_digest = sha256(
+      "trainvm.host-process-exit-receipt/v1",
+      process_exit_receipt_digest_json(receipt).dump());
+  const auto record = implementation_->make_process_record(
+      "process.exited", "process-exit:" + request.exit_request_id,
+      request.launch_id, host_process_exit_receipt_json(receipt));
+  const auto appended = implementation_->append_process_record(record);
+  implementation_->fault(HostLedgerFaultPoint::after_process_exit_record);
+  Statement insert(implementation_->database, R"sql(
+    INSERT INTO process_exits(
+      launch_id, exit_request_id, request_digest, spawn_receipt_digest,
+      receipt_digest, canonical_request_json, canonical_receipt_json,
+      record_sequence, record_receipt_digest, record_chain_hash
+    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  )sql");
+  bind_text(insert.get(), 1, request.launch_id);
+  bind_text(insert.get(), 2, request.exit_request_id);
+  bind_text(insert.get(), 3, request.canonical_request_digest);
+  bind_text(insert.get(), 4, request.spawn_receipt_digest);
+  bind_text(insert.get(), 5, receipt.receipt_digest);
+  bind_text(insert.get(), 6, host_process_exit_request_json(request).dump());
+  bind_text(insert.get(), 7, host_process_exit_receipt_json(receipt).dump());
+  bind_integer(insert.get(), 8, checked_integer(appended.sequence,
+                                                "process record sequence"));
+  bind_text(insert.get(), 9, appended.receipt_digest);
+  bind_text(insert.get(), 10, appended.chain_hash);
+  require_done(implementation_->database, insert.get(),
+               "process exit projection insert failed");
+  implementation_->fault(HostLedgerFaultPoint::after_process_exit_projection);
+  if (!implementation_->verify_unlocked(&reason)) {
+    throw HostLedgerError("new process exit receipt failed verification: " +
+                          reason);
+  }
+  transaction.commit();
+  implementation_->fault(HostLedgerFaultPoint::after_process_exit_commit);
+  return {.receipt = std::move(receipt), .replayed = false};
+}
+
 HostLedgerChainHead SQLiteHostLedger::chain_head() const {
   std::scoped_lock lock(implementation_->mutex);
   Transaction transaction(implementation_->database);
@@ -3806,6 +4140,67 @@ HostProcessSpawnReceipt host_process_spawn_receipt_from_json(
   auto receipt = strict_decode<HostProcessSpawnReceipt>(
       source, "process spawn receipt");
   (void)host_process_spawn_receipt_json(receipt);
+  return receipt;
+}
+
+HostProcessExitRequest seal_host_process_exit_request(
+    HostProcessExitRequest request) {
+  if (request.api_version != kHostProcessExitRequestApiVersion ||
+      request.exit_request_id.empty() || request.launch_id.empty() ||
+      !valid_digest(request.spawn_receipt_digest) || request.host_pid <= 0 ||
+      request.process_starttime_ticks == 0U || request.wait_code <= 0 ||
+      request.wait_status < 0 || request.cgroup_path.empty() ||
+      request.cgroup_path.front() != '/' || request.cgroup_device == 0U ||
+      request.cgroup_inode == 0U || !request.cgroup_empty ||
+      !request.accelerator_contexts_empty ||
+      !valid_digest(request.context_audit_digest)) {
+    throw HostLedgerError(
+        "process exit request lacks complete terminal evidence");
+  }
+  request.canonical_request_digest = sha256(
+      "trainvm.host-process-exit-request/v1",
+      process_exit_request_digest_json(request).dump());
+  return request;
+}
+
+nlohmann::json host_process_exit_request_json(
+    const HostProcessExitRequest& request) {
+  if (seal_host_process_exit_request(request) != request) {
+    throw HostLedgerError("process exit request digest is not canonical");
+  }
+  return encode_json(request);
+}
+
+HostProcessExitRequest host_process_exit_request_from_json(
+    const nlohmann::json& source) {
+  auto request = strict_decode<HostProcessExitRequest>(
+      source, "process exit request");
+  (void)host_process_exit_request_json(request);
+  return request;
+}
+
+nlohmann::json host_process_exit_receipt_json(
+    const HostProcessExitReceipt& receipt) {
+  nlohmann::json value = process_exit_receipt_digest_json(receipt);
+  value["receipt_digest"] = receipt.receipt_digest;
+  if (receipt.api_version != kHostProcessExitReceiptApiVersion ||
+      receipt.host_id.empty() || receipt.boot_id.empty() ||
+      receipt.broker_epoch.empty() || receipt.observed_boottime_ns < 0 ||
+      receipt.observed_wall_time_ns < 0 ||
+      !valid_digest(receipt.previous_process_receipt_digest) ||
+      receipt.receipt_digest !=
+          sha256("trainvm.host-process-exit-receipt/v1",
+                 process_exit_receipt_digest_json(receipt).dump())) {
+    throw HostLedgerError("process exit receipt is invalid");
+  }
+  return value;
+}
+
+HostProcessExitReceipt host_process_exit_receipt_from_json(
+    const nlohmann::json& source) {
+  auto receipt = strict_decode<HostProcessExitReceipt>(
+      source, "process exit receipt");
+  (void)host_process_exit_receipt_json(receipt);
   return receipt;
 }
 

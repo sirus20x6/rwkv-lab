@@ -188,6 +188,29 @@ int LinuxAllocationCgroup::duplicate_fd() const {
   return duplicate;
 }
 
+bool LinuxAllocationCgroup::empty() const {
+  if (descriptor_ < 0) reject("allocation cgroup descriptor is unavailable");
+  return cgroup_is_empty(descriptor_) && cgroup_is_empty(descriptor_);
+}
+
+void LinuxAllocationCgroup::remove_if_empty() {
+  struct stat status {};
+  if (descriptor_ < 0 || parent_descriptor_ < 0 || name_.empty() ||
+      ::fstat(descriptor_, &status) != 0 ||
+      static_cast<std::uint64_t>(status.st_dev) != identity_.device ||
+      static_cast<std::uint64_t>(status.st_ino) != identity_.inode ||
+      !empty()) {
+    reject("allocation cgroup is not identically pinned and empty");
+  }
+  if (::unlinkat(parent_descriptor_, name_.c_str(), AT_REMOVEDIR) != 0) {
+    reject(system_error("could not remove terminal allocation cgroup"));
+  }
+  (void)::close(descriptor_);
+  descriptor_ = -1;
+  name_.clear();
+  remove_on_destroy_ = false;
+}
+
 void LinuxAllocationCgroup::retain_for_durable_intent() noexcept {
   remove_on_destroy_ = false;
 }

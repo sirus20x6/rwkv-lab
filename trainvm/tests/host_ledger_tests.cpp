@@ -153,6 +153,27 @@ HostProcessSpawnRequest spawn_request(const HostProcessLaunchIntent& intent,
   });
 }
 
+HostProcessExitRequest exit_request(const HostProcessSpawnReceipt& spawn,
+                                    std::string exit_request_id) {
+  return seal_host_process_exit_request({
+      .api_version = std::string(kHostProcessExitRequestApiVersion),
+      .exit_request_id = std::move(exit_request_id),
+      .launch_id = spawn.request.launch_id,
+      .spawn_receipt_digest = spawn.receipt_digest,
+      .host_pid = spawn.request.host_pid,
+      .process_starttime_ticks = spawn.request.process_starttime_ticks,
+      .wait_code = 1,
+      .wait_status = 0,
+      .cgroup_path = spawn.request.cgroup_path,
+      .cgroup_device = spawn.request.cgroup_device,
+      .cgroup_inode = spawn.request.cgroup_inode,
+      .cgroup_empty = true,
+      .accelerator_contexts_empty = true,
+      .context_audit_digest = test_digest('4'),
+      .canonical_request_digest = {},
+  });
+}
+
 std::vector<std::filesystem::path>& test_directories() {
   static std::vector<std::filesystem::path> value;
   return value;
@@ -539,6 +560,33 @@ void process_authority_is_durable_and_replay_safe() {
     require_throws<HostLedgerConflict>(
         [&] { (void)ledger.commit_process_spawn(changed_spawn, {51, 61}); },
         "spawn replay with a changed kernel identity conflicts");
+    require_throws<HostLedgerConflict>(
+        [&] {
+          (void)ledger.release_bundle(
+              release_request(*bundle.grant, "release-before-exit"),
+              {65, 66});
+        },
+        "spawned allocation cannot release before terminal process evidence");
+    const auto terminal = exit_request(receipt.receipt, "exit-basic");
+    require(host_process_exit_request_from_json(
+                host_process_exit_request_json(terminal)) == terminal,
+            "terminal exit evidence has a strict canonical codec");
+    const auto exited = ledger.commit_process_exit(terminal, {70, 80});
+    const auto exit_replay = ledger.commit_process_exit(terminal, {700, 800});
+    require(!exited.replayed && exit_replay.replayed &&
+                exit_replay.receipt == exited.receipt && ledger.verify(),
+            "terminal process exit commits once and exactly replays");
+    require(!ledger.release_bundle(
+                        release_request(*bundle.grant, "release-after-exit"),
+                        {90, 100})
+                 .replayed &&
+                ledger.verify(),
+            "terminal process authority permits exact bundle release");
+    auto incomplete = terminal;
+    incomplete.cgroup_empty = false;
+    require_throws<HostLedgerError>(
+        [&] { (void)seal_host_process_exit_request(std::move(incomplete)); },
+        "nonempty cgroup can never produce terminal exit authority");
   }
 
   const auto rollback_path = test_path("process-intent-rollback");
@@ -632,6 +680,48 @@ void process_authority_is_durable_and_replay_safe() {
     require(ledger.verify(), "abandoned launch intent remains valid evidence");
   }
 
+  const auto exit_rollback_path = test_path("process-exit-rollback");
+  OneShotFault exit_projection_fault(
+      HostLedgerFaultPoint::after_process_exit_projection);
+  {
+    SQLiteHostLedger ledger(authority_for(exit_rollback_path), observed,
+                            &exit_projection_fault);
+    const auto bundle =
+        ledger.request_bundle(request("process-exit-rollback-grant"), {10, 20});
+    const auto intent = ledger.commit_process_launch_intent(
+        launch_request(*bundle.grant, "launch-exit-rollback"), {30, 40});
+    const auto spawn = ledger.commit_process_spawn(
+        spawn_request(intent.intent, 4646), {50, 60});
+    const auto terminal = exit_request(spawn.receipt, "exit-rollback");
+    require_throws<HostLedgerError>(
+        [&] { (void)ledger.commit_process_exit(terminal, {70, 80}); },
+        "pre-commit exit fault rolls back record and projection");
+    const auto retry = ledger.commit_process_exit(terminal, {71, 81});
+    require(!retry.replayed && ledger.verify(),
+            "rolled-back exit evidence retries as a fresh mutation");
+  }
+
+  const auto lost_exit_path = test_path("process-exit-lost-reply");
+  OneShotFault exit_commit_fault(
+      HostLedgerFaultPoint::after_process_exit_commit);
+  {
+    SQLiteHostLedger ledger(authority_for(lost_exit_path), observed,
+                            &exit_commit_fault);
+    const auto bundle =
+        ledger.request_bundle(request("process-lost-exit-grant"), {10, 20});
+    const auto intent = ledger.commit_process_launch_intent(
+        launch_request(*bundle.grant, "launch-lost-exit"), {30, 40});
+    const auto spawn = ledger.commit_process_spawn(
+        spawn_request(intent.intent, 4747), {50, 60});
+    const auto terminal = exit_request(spawn.receipt, "exit-lost-reply");
+    require_throws<HostLedgerError>(
+        [&] { (void)ledger.commit_process_exit(terminal, {70, 80}); },
+        "post-commit exit fault simulates a lost reply");
+    const auto retry = ledger.commit_process_exit(terminal, {71, 81});
+    require(retry.replayed && ledger.verify(),
+            "lost exit reply resolves to exact durable replay");
+  }
+
   const auto tamper_path = test_path("process-chain-tamper");
   {
     SQLiteHostLedger ledger(authority_for(tamper_path), observed);
@@ -671,6 +761,23 @@ void process_authority_is_durable_and_replay_safe() {
         SQLiteHostLedger rejected(authority_for(projection_path), observed);
       },
       "process projection tampering fails closed on reopen");
+
+  const auto v4_path = test_path("process-exit-v4-migration");
+  {
+    SQLiteHostLedger ledger(authority_for(v4_path), observed);
+    require(ledger.verify(), "v4 migration fixture begins as valid v5");
+  }
+  raw_execute(v4_path,
+              "DROP TRIGGER process_exits_no_update; "
+              "DROP TRIGGER process_exits_no_delete; "
+              "DROP TABLE process_exits; "
+              "DELETE FROM ledger_schema_extensions "
+              "WHERE feature='process_exit'; PRAGMA user_version=4;");
+  {
+    SQLiteHostLedger migrated(authority_for(v4_path), observed);
+    require(migrated.verify(),
+            "empty v4 process authority migrates additively to v5");
+  }
 }
 
 void tamper_is_fail_closed() {

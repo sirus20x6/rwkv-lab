@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -36,6 +37,13 @@ struct LinuxStoppedChildIdentity final {
   bool operator==(const LinuxStoppedChildIdentity&) const = default;
 };
 
+struct LinuxChildExitObservation final {
+  std::int32_t wait_code{};
+  std::int32_t wait_status{};
+
+  bool operator==(const LinuxChildExitObservation&) const = default;
+};
+
 class LinuxStoppedLauncherError final : public std::runtime_error {
  public:
   using std::runtime_error::runtime_error;
@@ -57,18 +65,23 @@ class LinuxStoppedChild final {
   [[nodiscard]] bool released() const;
   [[nodiscard]] bool exited() const;
   void release_to_exec();
+  [[nodiscard]] LinuxChildExitObservation wait_and_reap();
+  [[nodiscard]] LinuxChildExitObservation terminate_and_observe();
   void terminate_and_reap() noexcept;
 
  private:
   friend class LinuxStoppedLauncherKernel;
   LinuxStoppedChild(LinuxStoppedChildIdentity identity, int pidfd,
                     int gate_fd) noexcept;
+  [[nodiscard]] std::optional<LinuxChildExitObservation> reap(
+      bool terminate, bool fail_on_error);
 
   LinuxStoppedChildIdentity identity_;
   int pidfd_{-1};
   int gate_fd_{-1};
   bool released_{};
   bool reaped_{};
+  std::optional<LinuxChildExitObservation> exit_observation_;
 };
 
 // Linux production primitive. It performs clone3 with CLONE_INTO_CGROUP and

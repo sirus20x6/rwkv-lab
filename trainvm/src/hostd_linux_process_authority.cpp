@@ -76,12 +76,19 @@ const LinuxStoppedChildIdentity& LinuxPreparedLaunch::child_identity() const {
   return child_.identity();
 }
 
+const std::optional<HostProcessExitReceipt>& LinuxPreparedLaunch::exit_receipt()
+    const {
+  return exit_receipt_;
+}
+
 void LinuxPreparedLaunch::release_to_exec() { child_.release_to_exec(); }
 
 LinuxProcessAuthority::LinuxProcessAuthority(
     SQLiteHostLedger& ledger, AuthorityClock& clock,
-    LinuxCgroupAuthority& cgroups, LinuxStoppedLauncherKernel& launcher)
-    : ledger_(ledger), clock_(clock), cgroups_(cgroups), launcher_(launcher) {}
+    LinuxCgroupAuthority& cgroups, LinuxStoppedLauncherKernel& launcher,
+    ILinuxProcessContextAuditor& context_auditor)
+    : ledger_(ledger), clock_(clock), cgroups_(cgroups), launcher_(launcher),
+      context_auditor_(context_auditor) {}
 
 LinuxPreparedLaunch LinuxProcessAuthority::prepare(
     const ResolvedLaunch& resolved, const ResourceBundleGrant& grant) {
@@ -153,6 +160,60 @@ LinuxPreparedLaunch LinuxProcessAuthority::prepare(
       spawn_request, ledger_time(clock_.sample(), inventory.boot_id));
   return LinuxPreparedLaunch(intended.intent, spawned.receipt,
                              std::move(cgroup), std::move(child));
+}
+
+HostProcessExitResult LinuxProcessAuthority::finalize_exit(
+    LinuxPreparedLaunch& launch, const ResourceBundleGrant& grant,
+    std::string exit_request_id, bool request_termination) {
+  if (launch.intent_.request.allocation_id != grant.allocation_id ||
+      launch.intent_.request.grant_digest != grant.receipt_digest ||
+      launch.spawn_receipt_.request.launch_id !=
+          launch.intent_.request.launch_id) {
+    reject("terminal process request does not match the prepared grant");
+  }
+  if (launch.exit_receipt_) {
+    if (!launch.cgroup_removed_) {
+      launch.cgroup_.remove_if_empty();
+      launch.cgroup_removed_ = true;
+    }
+    return {.receipt = *launch.exit_receipt_, .replayed = true};
+  }
+  const LinuxChildExitObservation exited =
+      request_termination ? launch.child_.terminate_and_observe()
+                          : launch.child_.wait_and_reap();
+  if (!launch.cgroup_.empty()) {
+    reject("terminal launcher still has descendants in its allocation cgroup");
+  }
+  const LinuxProcessContextAudit context =
+      context_auditor_.audit(grant, launch.spawn_receipt_);
+  if (!context.complete || !context.accelerator_contexts_empty) {
+    reject("terminal launcher still has accelerator context authority");
+  }
+  const auto& spawn = launch.spawn_receipt_;
+  const auto& cgroup = launch.cgroup_.identity();
+  const HostProcessExitRequest request = seal_host_process_exit_request({
+      .api_version = std::string(kHostProcessExitRequestApiVersion),
+      .exit_request_id = std::move(exit_request_id),
+      .launch_id = spawn.request.launch_id,
+      .spawn_receipt_digest = spawn.receipt_digest,
+      .host_pid = spawn.request.host_pid,
+      .process_starttime_ticks = spawn.request.process_starttime_ticks,
+      .wait_code = exited.wait_code,
+      .wait_status = exited.wait_status,
+      .cgroup_path = cgroup.unified_path,
+      .cgroup_device = cgroup.device,
+      .cgroup_inode = cgroup.inode,
+      .cgroup_empty = true,
+      .accelerator_contexts_empty = true,
+      .context_audit_digest = context.evidence_digest,
+      .canonical_request_digest = {},
+  });
+  const auto terminal = ledger_.commit_process_exit(
+      request, ledger_time(clock_.sample(), spawn.request.boot_id));
+  launch.exit_receipt_ = terminal.receipt;
+  launch.cgroup_.remove_if_empty();
+  launch.cgroup_removed_ = true;
+  return terminal;
 }
 
 }  // namespace trainvm

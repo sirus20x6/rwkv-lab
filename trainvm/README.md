@@ -108,6 +108,10 @@ Implemented now:
   byte-for-byte unchanged, commits an exact active-grant/cgroup/executable launch intent before any
   child may exist, binds a stopped child's boot/PID/starttime/cgroup/executable identity to that
   intent, and provides atomic rollback plus exact post-commit lost-reply replay for both boundaries;
+- an additive host-ledger v5 terminal-process receipt that requires exact pidfd wait identity,
+  twice-empty allocation-cgroup evidence, and a complete host-side accelerator-context audit;
+  spawned allocations are structurally unreleasable until this receipt exists, while v4 histories
+  migrate additively only when they contain no unsafe released/nonterminal process;
 - a process-free, single-use journal-fence challenge verifier binding socket peer process instance,
   host/boot/broker, pinned-journal claims, controller generation, logical fence, nonce, and bounded
   boottime lifetime, with per-peer quotas and no bearer-capability interpretation of decoded data;

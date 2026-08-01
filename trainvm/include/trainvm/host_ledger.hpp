@@ -32,6 +32,10 @@ inline constexpr std::string_view kHostProcessSpawnRequestApiVersion =
     "trainvm.host-process-spawn-request/v1";
 inline constexpr std::string_view kHostProcessSpawnReceiptApiVersion =
     "trainvm.host-process-spawn-receipt/v1";
+inline constexpr std::string_view kHostProcessExitRequestApiVersion =
+    "trainvm.host-process-exit-request/v1";
+inline constexpr std::string_view kHostProcessExitReceiptApiVersion =
+    "trainvm.host-process-exit-receipt/v1";
 
 struct HostLedgerTime final {
   std::int64_t boottime_ns{};
@@ -216,6 +220,47 @@ struct HostProcessSpawnResult final {
   bool operator==(const HostProcessSpawnResult&) const = default;
 };
 
+struct HostProcessExitRequest final {
+  std::string api_version;
+  std::string exit_request_id;
+  std::string launch_id;
+  std::string spawn_receipt_digest;
+  std::int64_t host_pid{};
+  std::uint64_t process_starttime_ticks{};
+  std::int32_t wait_code{};
+  std::int32_t wait_status{};
+  std::string cgroup_path;
+  std::uint64_t cgroup_device{};
+  std::uint64_t cgroup_inode{};
+  bool cgroup_empty{};
+  bool accelerator_contexts_empty{};
+  std::string context_audit_digest;
+  std::string canonical_request_digest;
+
+  bool operator==(const HostProcessExitRequest&) const = default;
+};
+
+struct HostProcessExitReceipt final {
+  std::string api_version;
+  HostProcessExitRequest request;
+  std::string host_id;
+  std::string boot_id;
+  std::string broker_epoch;
+  std::int64_t observed_boottime_ns{};
+  std::int64_t observed_wall_time_ns{};
+  std::string previous_process_receipt_digest;
+  std::string receipt_digest;
+
+  bool operator==(const HostProcessExitReceipt&) const = default;
+};
+
+struct HostProcessExitResult final {
+  HostProcessExitReceipt receipt;
+  bool replayed{};
+
+  bool operator==(const HostProcessExitResult&) const = default;
+};
+
 enum class HostLedgerFaultPoint {
   after_startup_audit_migration_schema,
   after_startup_audit_record,
@@ -233,6 +278,9 @@ enum class HostLedgerFaultPoint {
   after_process_spawn_record,
   after_process_spawn_projection,
   after_process_spawn_commit,
+  after_process_exit_record,
+  after_process_exit_projection,
+  after_process_exit_commit,
 };
 
 class IHostLedgerFaultInjector {
@@ -295,6 +343,8 @@ class SQLiteHostLedger final {
       const HostProcessLaunchRequest& request, const HostLedgerTime& now);
   [[nodiscard]] HostProcessSpawnResult commit_process_spawn(
       const HostProcessSpawnRequest& request, const HostLedgerTime& now);
+  [[nodiscard]] HostProcessExitResult commit_process_exit(
+      const HostProcessExitRequest& request, const HostLedgerTime& now);
   [[nodiscard]] HostLedgerChainHead chain_head() const;
   [[nodiscard]] ResourceOccupancySnapshot occupancy() const;
   [[nodiscard]] std::uint64_t generation(
@@ -352,6 +402,16 @@ class SQLiteHostLedger final {
 [[nodiscard]] nlohmann::json host_process_spawn_receipt_json(
     const HostProcessSpawnReceipt& receipt);
 [[nodiscard]] HostProcessSpawnReceipt host_process_spawn_receipt_from_json(
+    const nlohmann::json& source);
+[[nodiscard]] HostProcessExitRequest seal_host_process_exit_request(
+    HostProcessExitRequest request);
+[[nodiscard]] nlohmann::json host_process_exit_request_json(
+    const HostProcessExitRequest& request);
+[[nodiscard]] HostProcessExitRequest host_process_exit_request_from_json(
+    const nlohmann::json& source);
+[[nodiscard]] nlohmann::json host_process_exit_receipt_json(
+    const HostProcessExitReceipt& receipt);
+[[nodiscard]] HostProcessExitReceipt host_process_exit_receipt_from_json(
     const nlohmann::json& source);
 
 }  // namespace trainvm
