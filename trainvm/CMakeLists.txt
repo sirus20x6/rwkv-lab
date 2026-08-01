@@ -72,6 +72,7 @@ add_library(trainvm_core
   src/hostd_journal_logical_fence.cpp
   src/hostd_ledger_singleton_token.cpp
   src/hostd_linux_cgroup_authority.cpp
+  src/hostd_linux_device_policy.cpp
   src/hostd_linux_inventory_context_auditor.cpp
   src/hostd_linux_process_authority.cpp
   src/hostd_linux_process_recovery.cpp
@@ -479,6 +480,16 @@ target_compile_options(hostd_linux_cgroup_authority_tests PRIVATE
 target_link_libraries(hostd_linux_cgroup_authority_tests PRIVATE trainvm_core)
 add_test(NAME hostd_linux_cgroup_authority_tests
   COMMAND hostd_linux_cgroup_authority_tests
+)
+add_executable(hostd_linux_device_policy_tests
+  tests/hostd_linux_device_policy_tests.cpp
+)
+target_compile_options(hostd_linux_device_policy_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(hostd_linux_device_policy_tests PRIVATE trainvm_core)
+add_test(NAME hostd_linux_device_policy_tests
+  COMMAND hostd_linux_device_policy_tests
 )
 add_executable(linux_nvidia_inventory_tests
   tests/linux_nvidia_inventory_tests.cpp
