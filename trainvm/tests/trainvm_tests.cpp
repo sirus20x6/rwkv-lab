@@ -38,6 +38,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -6203,7 +6204,7 @@ void test_host_launch_resolution_and_binding() {
       directory / "work", std::filesystem::perms::owner_all,
       std::filesystem::perm_options::replace);
   const auto executable = directory / "python";
-  std::filesystem::copy_file("/proc/self/exe", executable);
+  std::filesystem::copy_file("/usr/bin/true", executable);
   std::filesystem::permissions(
       executable,
       std::filesystem::perms::owner_read |
@@ -6516,7 +6517,7 @@ void test_service_host_launch_binding() {
       directory / "unused-root", std::filesystem::perms::owner_all,
       std::filesystem::perm_options::replace);
   const auto executable = directory / "python";
-  std::filesystem::copy_file("/proc/self/exe", executable);
+  std::filesystem::copy_file("/usr/bin/true", executable);
   std::filesystem::permissions(
       executable,
       std::filesystem::perms::owner_read |
@@ -10099,6 +10100,152 @@ void test_host_grant_saga() {
   std::filesystem::remove_all(directory);
 }
 
+void test_service_reconciliation_supervisor() {
+  auto source = load_fixture();
+  source["spec"]["resources"]["lease_timeout_seconds"] = 5;
+  const auto compiled = trainvm::compile_document(source);
+  check(compiled.valid(), "supervisor restart fixture compiles");
+  if (!compiled.plan) return;
+
+  const auto directory = std::filesystem::temp_directory_path() /
+                         ("trainvm-service-supervisor-" +
+                          std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  check(::chmod(directory.c_str(), 0700) == 0,
+        "supervisor fixture protects its authority directory");
+  const auto database = directory / "journal.db";
+  const std::string run_id = "service-supervisor-restart-run";
+  const auto adapters = fixture_adapter_profiles();
+  const trainvm::HostIdentity authority_host{
+      .host_id = "sha256:" + std::string(64U, '7'),
+      .boot_id = kTestBootId,
+  };
+  {
+    trainvm::AdapterRegistry registry(adapters);
+    trainvm::Journal journal(database);
+    trainvm::Controller controller(*compiled.plan, journal, run_id);
+    controller.create_queued(
+        adapter_locked_submission(*compiled.plan, registry));
+    const auto first = journal.reconcilable_projections({}, 1U);
+    const auto exhausted =
+        journal.reconcilable_projections(run_id, 1U);
+    bool zero_limit_rejected = false;
+    try {
+      (void)journal.reconcilable_projections({}, 0U);
+    } catch (const std::invalid_argument&) {
+      zero_limit_rejected = true;
+    }
+    check(first.size() == 1U && first.front().run_id == run_id &&
+              exhausted.empty() && zero_limit_rejected,
+          "journal exposes bounded stable reconciliation pagination");
+  }
+
+  const auto wait_until = [](const std::function<bool()>& predicate) {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(3);
+    while (std::chrono::steady_clock::now() < deadline) {
+      if (predicate()) return true;
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return predicate();
+  };
+  std::atomic<std::int64_t> authority_now_ns{1'000'000'000LL};
+  std::size_t stable_event_count = 0U;
+  {
+    trainvm::TrainVMService service(
+        database, trainvm::AdapterRegistry(adapters),
+        fixture_disabled_host_launch_registry(), authority_host,
+        [&authority_now_ns] {
+          return test_time(authority_now_ns.load(std::memory_order_relaxed));
+        },
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
+    trainvm::Journal observer(database);
+    service.start_reconciliation_supervisor();
+    const bool launched = wait_until([&] {
+      return observer
+                 .event(run_id +
+                        ":worker-launch:train_to_boundary:train_to_boundary@1")
+                 .has_value() &&
+             service.lease_renewals_.tracked_count() == 1U;
+    });
+    const auto initial_lease = observer.active_lease(
+        compiled.plan->experiment.spec.workspace.concurrency_key,
+        test_time(authority_now_ns.load(std::memory_order_relaxed)));
+    check(launched && initial_lease &&
+              service.lease_renewals_.tracked_count() == 1U,
+          "supervisor restart scan advances a queued run and tracks its exact lease");
+    if (!initial_lease) {
+      service.stop_reconciliation_supervisor();
+      std::filesystem::remove_all(directory);
+      return;
+    }
+    authority_now_ns.store(initial_lease->expires_boottime_ns -
+                               1'000'000'000LL,
+                           std::memory_order_relaxed);
+    const bool renewed = wait_until([&] {
+      const auto active = observer.active_lease(
+          initial_lease->concurrency_key,
+          test_time(authority_now_ns.load(std::memory_order_relaxed)));
+      return active && active->expires_boottime_ns >
+                           initial_lease->expires_boottime_ns;
+    });
+    service.stop_reconciliation_supervisor();
+    const auto renewed_lease = observer.active_lease(
+        initial_lease->concurrency_key,
+        test_time(authority_now_ns.load(std::memory_order_relaxed)));
+    std::optional<trainvm::JournalLogicalFenceSnapshot> renewal_snapshot;
+    if (renewed_lease) {
+      renewal_snapshot = service.journal_.journal_logical_fence_snapshot(
+          renewed_lease->concurrency_key, renewed_lease->owner_run_id,
+          renewed_lease->lease_id, renewed_lease->fencing_token,
+          test_time(authority_now_ns.load(std::memory_order_relaxed)));
+    }
+    const bool renewal_evidence =
+        renewal_snapshot && renewal_snapshot->authority_revision >= 1U &&
+        observer.verify_chain();
+    const auto run_failure = service.reconciliation_failure(run_id);
+    const auto scan_failure = service.reconciliation_failure("__scan__");
+    const auto renewal_failure =
+        service.reconciliation_failure("__lease_renewal__");
+    if (!renewed || !renewal_evidence || run_failure || scan_failure ||
+        renewal_failure) {
+      std::cerr << "supervisor diagnostics: run="
+                << run_failure.value_or("none")
+                << " scan=" << scan_failure.value_or("none")
+                << " renewal=" << renewal_failure.value_or("none")
+                << " renewed=" << renewed
+                << " evidence=" << renewal_evidence
+                << " authority_revision="
+                << (renewal_snapshot ? renewal_snapshot->authority_revision
+                                     : 0U)
+                << " chain=" << observer.verify_chain() << '\n';
+    }
+    check(renewed && renewal_evidence && !run_failure && !scan_failure &&
+              !renewal_failure,
+          "supervisor renews the live lease before expiry without poisoning authority");
+    stable_event_count = observer.event_count();
+  }
+
+  {
+    trainvm::TrainVMService restarted(
+        database, trainvm::AdapterRegistry(adapters),
+        fixture_disabled_host_launch_registry(), authority_host,
+        [&authority_now_ns] {
+          return test_time(authority_now_ns.load(std::memory_order_relaxed));
+        },
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
+    restarted.start_reconciliation_supervisor();
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    restarted.stop_reconciliation_supervisor();
+    trainvm::Journal observer(database);
+    check(observer.event_count() == stable_event_count &&
+              !restarted.reconciliation_failure(run_id),
+          "supervisor restart replays an awaiting launch without journal mutation");
+  }
+  std::filesystem::remove_all(directory);
+}
+
 void test_service_orders_physical_before_logical_release() {
   auto source = load_fixture();
   auto& nodes = source["spec"]["workflow"]["nodes"];
@@ -10309,6 +10456,7 @@ int main() {
     test_service_registry_and_reconciliation();
     test_adapter_registry_and_reconciler();
     test_host_grant_saga();
+    test_service_reconciliation_supervisor();
     test_service_orders_physical_before_logical_release();
     test_legacy_journal_migration_policy();
   } catch (const std::exception& exception) {

@@ -228,7 +228,9 @@ startup orphan recovery are defined in
 - Resolve the remaining stock-SQLite auxiliary pathname race in the declared host threat model:
   trusted isolated authority directory, controlled VFS, or host-global lock broker. Do not treat
   the network-namespace-local abstract socket as the host-wide GPU/resource fence.
-- Production reconciliation coordinator for compile/warmup/qualification nodes.
+- Extend the implemented wake-driven, restart-scanning service supervisor (admission, launch,
+  terminal process/resource release, and exact lease renewal) with typed executors for
+  compile/warmup/qualification nodes and dashboard-visible supervisor health.
 - Fingerprinted cache namespaces and typed CPU/I/O policy.
 - Declarative bounded GPU profiling and dashboard trace artifacts.
 

@@ -207,6 +207,11 @@ public:
       const std::string& run_id, const std::string& node_id,
       const std::string& attempt_id) const;
   [[nodiscard]] std::optional<RunProjection> projection(const std::string& run_id) const;
+  // Bounded, stable pagination for the service supervisor. Only runs whose
+  // desired/observed states can still be advanced are returned; completed
+  // history therefore does not make daemon restart scans grow without bound.
+  [[nodiscard]] std::vector<RunProjection> reconcilable_projections(
+      std::string_view after_run_id, std::size_t limit) const;
   [[nodiscard]] std::optional<CompiledPlan> compiled_plan(const std::string& plan_hash) const;
   [[nodiscard]] std::optional<Dispatch> dispatch(const std::string& dispatch_id) const;
   [[nodiscard]] std::optional<ResolvedLaunchSpec> launch_binding(

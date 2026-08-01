@@ -205,15 +205,17 @@ adapter operations. The coverage and optimization inventories live in
 [`WORKFLOW_COVERAGE.md`](../docs/experiment-vm/WORKFLOW_COVERAGE.md) and
 [`PERFORMANCE_ROADMAP.md`](../docs/experiment-vm/PERFORMANCE_ROADMAP.md).
 
-The v7 renewal authority includes a manually tickable coordinator bounded to 256 exact targets that
-samples authority time separately for each target and permanently stops on clock or receipt
-failure. Renewal receipts bind acquisition identity, prior and new expiry, the equal boot/wall
-timeout delta, and a continuous per-fence history; conflicting inserts, replacements, updates, and
-deletes are rejected. It deliberately owns no thread or timer: service scheduling,
-host-wide resource/orphan checks, cgroup cleanup, process-instance credentials, and durable
-spawn/exit receipts remain mandatory startup gates before spawning is enabled. Exact renewal replay
-requires the same expected expiry, authority-time sample, and timeout; after restart a coordinator
-tracks the journal's current active lease instead of retrying stale pre-renewal state.
+The v7 renewal authority includes a tickable coordinator bounded to 256 exact targets that samples
+authority time separately for each target and permanently stops on clock or receipt failure.
+Renewal receipts bind acquisition identity, prior and new expiry, the equal boot/wall timeout delta,
+and a continuous per-fence history; conflicting inserts, replacements, updates, and deletes are
+rejected. The service now owns a wake-driven, 250 ms bounded reconciliation supervisor: it scans
+nonterminal projections through stable pages after restart, advances immediate FSM work to a
+quiescent boundary, wakes on creation and worker completion, and ticks exact lease renewal behind
+the same mutation mutex. Shutdown stops scheduling before gRPC handlers drain. Per-run and global
+scan/renewal failures remain fail-closed supervisor evidence. Exact renewal replay requires the same
+expected expiry, authority-time sample, and timeout; after restart the supervisor tracks the
+journal's current active lease instead of retrying stale pre-renewal state.
 
 The journal namespace guard closes cooperating-process split authority and rejects unsafe SQLite
 side-file aliases at every SQL boundary, but stock SQLite still opens WAL/SHM/rollback files by

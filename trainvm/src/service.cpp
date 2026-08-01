@@ -985,6 +985,7 @@ TrainVMService::TrainVMService(
           authority_clock
               ? std::make_shared<AuthorityClock>(std::move(authority_clock))
               : std::make_shared<AuthorityClock>()),
+      lease_renewals_(journal_, authority_clock_),
       adapter_registry_(std::move(adapter_registry)),
       host_launch_registry_(std::move(host_launch_registry)),
       training_components_(std::move(training_components)),
@@ -1014,7 +1015,7 @@ TrainVMService::TrainVMService(
   }
 }
 
-TrainVMService::~TrainVMService() = default;
+TrainVMService::~TrainVMService() { stop_reconciliation_supervisor(); }
 
 AuthorityTimeSample TrainVMService::authority_now() const {
   return authority_clock_->sample();
@@ -1058,10 +1059,240 @@ ReconcileResult TrainVMService::reconcile_once(const std::string& run_id) {
   }
   ReconcileResult result = reconciler_.step(run_id);
   if (result.launch && host_process_saga_) {
+    const std::string launch_id = run_id + ":worker-launch:" +
+                                  result.launch->node_id + ":" +
+                                  result.launch->attempt_id;
+    {
+      std::scoped_lock lock(command_mutex_);
+      if (const auto process = journal_.host_process_saga(launch_id);
+          process && process->committed) {
+        if (process->exited) {
+          throw OperationPreconditionError(
+              "active worker launch already has terminal host evidence");
+        }
+        result.disposition = ReconcileDisposition::awaiting_worker;
+        result.launch.reset();
+        return result;
+      }
+    }
     const ResolvedLaunchSpec binding = bind_worker_launch(*result.launch);
     (void)launch_worker_process(binding.identity.launch_event_id);
   }
   return result;
+}
+
+void TrainVMService::start_reconciliation_supervisor() {
+  std::scoped_lock lock(reconciliation_mutex_);
+  if (reconciliation_started_ || reconciliation_thread_.joinable()) {
+    throw std::logic_error("TrainVM reconciliation supervisor is already running");
+  }
+  reconciliation_failures_.clear();
+  reconciliation_scan_cursor_.clear();
+  reconciliation_wake_runs_.clear();
+  reconciliation_started_ = true;
+  try {
+    reconciliation_thread_ = std::jthread(
+        [this](std::stop_token stop) { reconciliation_loop(stop); });
+  } catch (...) {
+    reconciliation_started_ = false;
+    throw;
+  }
+}
+
+void TrainVMService::stop_reconciliation_supervisor() noexcept {
+  std::jthread stopping;
+  {
+    std::scoped_lock lock(reconciliation_mutex_);
+    if (!reconciliation_started_ && !reconciliation_thread_.joinable()) return;
+    reconciliation_started_ = false;
+    reconciliation_thread_.request_stop();
+    stopping = std::move(reconciliation_thread_);
+  }
+  reconciliation_condition_.notify_all();
+  // The local jthread joins outside reconciliation_mutex_; the worker may be
+  // leaving its condition wait and must be able to reacquire that mutex.
+}
+
+void TrainVMService::notify_reconciliation(const std::string& run_id) {
+  if (run_id.empty() || run_id.size() > 256U) {
+    throw std::invalid_argument(
+        "reconciliation wake requires a bounded run identity");
+  }
+  {
+    std::scoped_lock lock(reconciliation_mutex_);
+    if (!reconciliation_started_) return;
+    if (reconciliation_wake_runs_.size() < kMaximumSupervisorWakeRuns) {
+      reconciliation_wake_runs_.insert(run_id);
+    }
+  }
+  reconciliation_condition_.notify_one();
+}
+
+void TrainVMService::reconcile_until_quiescent(const std::string& run_id) {
+  for (std::size_t step = 0U; step < kMaximumImmediateReconcileSteps;
+       ++step) {
+    const ReconcileResult result = reconcile_once(run_id);
+    switch (result.disposition) {
+      case ReconcileDisposition::lease_acquired:
+      case ReconcileDisposition::host_grant_acquired:
+      case ReconcileDisposition::host_process_exited:
+      case ReconcileDisposition::host_grant_released:
+      case ReconcileDisposition::builtin_completed:
+        continue;
+      case ReconcileDisposition::no_action:
+      case ReconcileDisposition::lease_busy:
+      case ReconcileDisposition::host_grant_busy:
+      case ReconcileDisposition::launch_prepared:
+      case ReconcileDisposition::launch_replayed:
+      case ReconcileDisposition::awaiting_worker:
+      case ReconcileDisposition::input_required:
+        return;
+    }
+  }
+  // A legal cyclic workflow can consume the per-wake work budget. Requeue it
+  // instead of monopolizing the authority thread or treating bounded work as
+  // a workflow failure.
+  notify_reconciliation(run_id);
+}
+
+void TrainVMService::synchronize_lease_renewal(
+    const std::string& run_id) {
+  std::scoped_lock lock(command_mutex_);
+  const auto projection = journal_.projection(run_id);
+  if (!projection) return;
+  const auto plan = journal_.compiled_plan(projection->plan_hash);
+  if (!plan) {
+    throw std::runtime_error(
+        "cannot synchronize lease renewal without a persisted plan");
+  }
+  const std::string& concurrency_key =
+      plan->experiment.spec.workspace.concurrency_key;
+  const AuthorityTimeSample now = authority_now();
+  const auto active = journal_.active_lease(concurrency_key, now);
+  if (active && active->owner_run_id == run_id) {
+    const std::int64_t timeout_seconds =
+        plan->experiment.spec.resources.lease_timeout_seconds.value_or(30);
+    if (timeout_seconds <= 0 ||
+        timeout_seconds >
+            LeaseRenewalCoordinator::kMaximumTimeoutNs / 1'000'000'000LL) {
+      throw std::runtime_error(
+          "compiled lease timeout exceeds renewal policy");
+    }
+    const std::int64_t timeout_ns = timeout_seconds * 1'000'000'000LL;
+    const std::int64_t renewal_margin_ns = std::min<std::int64_t>(
+        LeaseRenewalCoordinator::kMaximumMarginNs,
+        std::max<std::int64_t>(1'000'000'000LL, timeout_ns / 3LL));
+    (void)lease_renewals_.untrack(concurrency_key);
+    lease_renewals_.track({.lease = *active,
+                           .timeout_ns = timeout_ns,
+                           .renewal_margin_ns = renewal_margin_ns});
+    return;
+  }
+  const bool terminal = projection->observed_state == "completed" ||
+                        projection->observed_state == "failed" ||
+                        projection->observed_state == "cancelled";
+  if (!active && terminal) {
+    (void)lease_renewals_.untrack(concurrency_key);
+  }
+}
+
+std::optional<std::string> TrainVMService::reconciliation_failure(
+    const std::string& run_id) const {
+  std::scoped_lock lock(reconciliation_mutex_);
+  const auto found = reconciliation_failures_.find(run_id);
+  return found == reconciliation_failures_.end()
+             ? std::nullopt
+             : std::optional<std::string>{found->second};
+}
+
+void TrainVMService::record_reconciliation_failure(std::string run_id,
+                                                   std::string message) {
+  if (message.size() > kMaximumSupervisorFailureBytes) {
+    message.resize(kMaximumSupervisorFailureBytes);
+  }
+  std::scoped_lock lock(reconciliation_mutex_);
+  const auto existing = reconciliation_failures_.find(run_id);
+  if (existing != reconciliation_failures_.end()) {
+    existing->second = std::move(message);
+    return;
+  }
+  if (reconciliation_failures_.size() < kMaximumSupervisorFailures) {
+    reconciliation_failures_.emplace(std::move(run_id), std::move(message));
+    return;
+  }
+  if (!reconciliation_failures_.contains("__overflow__")) {
+    reconciliation_failures_.erase(reconciliation_failures_.begin());
+  }
+  reconciliation_failures_.insert_or_assign(
+      "__overflow__",
+      "reconciliation failure retention limit is exhausted");
+}
+
+void TrainVMService::reconciliation_loop(std::stop_token stop) {
+  constexpr auto kSupervisorCadence = std::chrono::milliseconds(250);
+  while (!stop.stop_requested()) {
+    std::set<std::string, std::less<>> run_ids;
+    {
+      std::unique_lock lock(reconciliation_mutex_);
+      (void)reconciliation_condition_.wait_for(
+          lock, kSupervisorCadence,
+          [&] { return stop.stop_requested() ||
+                       !reconciliation_wake_runs_.empty(); });
+      if (stop.stop_requested()) break;
+      run_ids.swap(reconciliation_wake_runs_);
+    }
+
+    try {
+      std::vector<RunProjection> page;
+      {
+        std::scoped_lock lock(command_mutex_);
+        page = journal_.reconcilable_projections(
+            reconciliation_scan_cursor_, kReconciliationPageSize);
+      }
+      {
+        std::scoped_lock lock(reconciliation_mutex_);
+        reconciliation_scan_cursor_ =
+            page.size() == kReconciliationPageSize
+                ? page.back().run_id
+                : std::string{};
+      }
+      for (const RunProjection& projection : page) {
+        run_ids.insert(projection.run_id);
+      }
+    } catch (const std::exception& exception) {
+      record_reconciliation_failure("__scan__", exception.what());
+      return;
+    }
+
+    for (const std::string& run_id : run_ids) {
+      if (stop.stop_requested()) break;
+      try {
+        reconcile_until_quiescent(run_id);
+        synchronize_lease_renewal(run_id);
+        std::scoped_lock lock(reconciliation_mutex_);
+        reconciliation_failures_.erase(run_id);
+      } catch (const std::exception& exception) {
+        record_reconciliation_failure(run_id, exception.what());
+      } catch (...) {
+        record_reconciliation_failure(
+            run_id,
+            "reconciliation failed with a non-standard exception");
+      }
+    }
+    if (stop.stop_requested()) break;
+    try {
+      std::scoped_lock lock(command_mutex_);
+      (void)lease_renewals_.tick();
+    } catch (const std::exception& exception) {
+      record_reconciliation_failure("__lease_renewal__", exception.what());
+      return;
+    } catch (...) {
+      record_reconciliation_failure(
+          "__lease_renewal__",
+          "lease renewal failed with a non-standard exception");
+      return;
+    }
+  }
 }
 
 std::optional<ReconcileDisposition> TrainVMService::reconcile_host_release(
@@ -1768,6 +1999,7 @@ grpc::Status TrainVMService::complete_worker_connection(
                                   connection.identity.node_id + ":" +
                                   connection.identity.attempt_id;
     resolved_launches_.erase(launch_id);
+    notify_reconciliation(connection.identity.run_id);
     return grpc::Status::OK;
   } catch (const std::exception& exception) {
     return worker_failure(exception);
@@ -2361,6 +2593,7 @@ grpc::Status TrainVMService::SubmitExperiment(grpc::ServerContext* context,
       identity->set_run_id(projection->run_id);
       identity->set_revision(projection->run_revision);
       identity->set_plan_hash(projection->plan_hash);
+      notify_reconciliation(projection->run_id);
       return grpc::Status::OK;
     }
 
@@ -2390,6 +2623,7 @@ grpc::Status TrainVMService::SubmitExperiment(grpc::ServerContext* context,
     identity->set_run_id(projection->run_id);
     identity->set_revision(projection->run_revision);
     identity->set_plan_hash(projection->plan_hash);
+    notify_reconciliation(projection->run_id);
     return grpc::Status::OK;
   } catch (const RunCreationConflict& exception) {
     return {grpc::StatusCode::ALREADY_EXISTS, exception.what()};
@@ -2558,6 +2792,7 @@ int serve(const std::filesystem::path& journal_path,
   const auto shutdown_server = [&] {
     socket_cleanup.preserve_replacement();
     server->Shutdown();
+    service.stop_reconciliation_supervisor();
     server->Wait();
     socket_cleanup.restore_replacement();
   };
@@ -2565,6 +2800,12 @@ int serve(const std::filesystem::path& journal_path,
     shutdown_server();
     throw std::runtime_error("could not restrict TrainVM authority socket permissions: " +
                              std::string(std::strerror(errno)));
+  }
+  try {
+    service.start_reconciliation_supervisor();
+  } catch (...) {
+    shutdown_server();
+    throw;
   }
   int received_signal = 0;
   if (::sigwait(signal_mask.signals(), &received_signal) != 0) {

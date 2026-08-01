@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <condition_variable>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -9,6 +10,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <thread>
 
 #include <grpcpp/grpcpp.h>
 
@@ -19,6 +21,7 @@
 #include "trainvm/host_process_saga.hpp"
 #include "trainvm/resource_request_builder.hpp"
 #include "trainvm/reconciler.hpp"
+#include "trainvm/lease_renewal.hpp"
 #include "trainvm/training_component_registry.hpp"
 #include "trainvm/v1/trainvm.grpc.pb.h"
 
@@ -77,6 +80,11 @@ class TrainVMService final : public v1::TrainVM::Service,
       grpc::ServerReaderWriter<v1::ControllerToWorker,
                                v1::WorkerToController>* stream) override;
 
+  // Embedded servers may explicitly bracket the same supervisor lifecycle
+  // that serve() owns. Destruction is an idempotent stop boundary.
+  void start_reconciliation_supervisor();
+  void stop_reconciliation_supervisor() noexcept;
+
  private:
   struct WorkerConnection {
     WorkerSessionIdentity identity;
@@ -109,6 +117,14 @@ class TrainVMService final : public v1::TrainVM::Service,
   void release_worker_attempt(const std::string& key);
   [[nodiscard]] AuthorityTimeSample authority_now() const;
   ReconcileResult reconcile_once(const std::string& run_id);
+  void notify_reconciliation(const std::string& run_id);
+  void reconciliation_loop(std::stop_token stop);
+  void reconcile_until_quiescent(const std::string& run_id);
+  void synchronize_lease_renewal(const std::string& run_id);
+  [[nodiscard]] std::optional<std::string> reconciliation_failure(
+      const std::string& run_id) const;
+  void record_reconciliation_failure(std::string run_id,
+                                     std::string message);
   // Process-free supervisor boundary. The ticket must already be durable.
   // Successful bindings retain their sealed descriptor bundle for a later
   // launcher boundary; this method never forks or executes a process.
@@ -146,6 +162,7 @@ class TrainVMService final : public v1::TrainVM::Service,
   Journal journal_;
   std::mutex command_mutex_;
   std::shared_ptr<AuthorityClock> authority_clock_;
+  LeaseRenewalCoordinator lease_renewals_;
   const AdapterRegistry adapter_registry_;
   const HostLaunchRegistry host_launch_registry_;
   const TrainingComponentRegistry training_components_;
@@ -159,6 +176,18 @@ class TrainVMService final : public v1::TrainVM::Service,
   std::string controller_target_;
   std::unique_ptr<HostProcessSagaReconciler> host_process_saga_;
   Reconciler reconciler_;
+  static constexpr std::size_t kReconciliationPageSize = 128U;
+  static constexpr std::size_t kMaximumImmediateReconcileSteps = 32U;
+  static constexpr std::size_t kMaximumSupervisorWakeRuns = 4'096U;
+  static constexpr std::size_t kMaximumSupervisorFailures = 4'096U;
+  static constexpr std::size_t kMaximumSupervisorFailureBytes = 4'096U;
+  mutable std::mutex reconciliation_mutex_;
+  std::condition_variable reconciliation_condition_;
+  std::set<std::string, std::less<>> reconciliation_wake_runs_;
+  std::map<std::string, std::string, std::less<>> reconciliation_failures_;
+  std::string reconciliation_scan_cursor_;
+  bool reconciliation_started_{};
+  std::jthread reconciliation_thread_;
   std::map<std::string, ResolvedLaunch> resolved_launches_;
   std::mutex worker_sessions_mutex_;
   std::set<std::string> active_worker_attempts_;

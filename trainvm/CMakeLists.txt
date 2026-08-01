@@ -132,7 +132,15 @@ target_compile_options(trainvm_service PRIVATE -Wall -Wextra -Wpedantic -Wconver
 target_link_libraries(trainvm_service PUBLIC trainvm_core trainvm_protocol)
 
 add_executable(trainvm src/main.cpp)
-target_compile_options(trainvm PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror)
+target_compile_options(trainvm PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+  # GCC 16 at -O3 misattributes nlohmann's shared_ptr output-adapter storage to
+  # std::mutex after inlining through the reflection-enabled CLI translation
+  # unit. Keep the diagnostic visible, but do not turn this system-header false
+  # positive into a release-build failure; every library/test TU retains full
+  # -Werror, including -Warray-bounds.
+  $<$<CONFIG:Release>:-Wno-error=array-bounds>
+)
 target_link_libraries(trainvm PRIVATE
   trainvm_service trainvm_compatibility_catalog trainvm_experiment_analysis
 )

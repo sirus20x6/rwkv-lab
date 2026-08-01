@@ -3481,6 +3481,55 @@ std::optional<RunProjection> Journal::projection(const std::string& run_id) cons
   };
 }
 
+std::vector<RunProjection> Journal::reconcilable_projections(
+    std::string_view after_run_id, std::size_t limit) const {
+  constexpr std::size_t kMaximumPageSize = 1'024U;
+  if (limit == 0U || limit > kMaximumPageSize ||
+      after_run_id.size() > 256U) {
+    throw std::invalid_argument(
+        "reconcilable projection page is outside its bounds");
+  }
+  Statement query(database_, R"sql(
+    SELECT run_id, experiment_name, plan_hash, desired_state, observed_state,
+           current_node_id, current_attempt_id, run_revision, optimizer_step,
+           last_heartbeat_ns, last_event_sequence, failure_summary
+    FROM run_projection
+    WHERE run_id > ?
+      AND desired_state IN ('queued', 'running')
+      AND observed_state IN ('queued', 'acquiring', 'running')
+    ORDER BY run_id
+    LIMIT ?
+  )sql");
+  bind_text(query.get(), 1, std::string(after_run_id));
+  bind_integer(query.get(), 2, static_cast<std::int64_t>(limit));
+  std::vector<RunProjection> result;
+  result.reserve(limit);
+  int status = SQLITE_ROW;
+  while ((status = sqlite3_step(query.get())) == SQLITE_ROW) {
+    result.push_back({
+        .run_id = column_text(query.get(), 0),
+        .experiment_name = column_text(query.get(), 1),
+        .plan_hash = column_text(query.get(), 2),
+        .desired_state = column_text(query.get(), 3),
+        .observed_state = column_text(query.get(), 4),
+        .current_node_id = column_text(query.get(), 5),
+        .current_attempt_id = column_text(query.get(), 6),
+        .run_revision = static_cast<std::uint64_t>(
+            sqlite3_column_int64(query.get(), 7)),
+        .optimizer_step = static_cast<std::uint64_t>(
+            sqlite3_column_int64(query.get(), 8)),
+        .last_heartbeat_ns = sqlite3_column_int64(query.get(), 9),
+        .last_event_sequence = static_cast<std::uint64_t>(
+            sqlite3_column_int64(query.get(), 10)),
+        .failure_summary = column_text(query.get(), 11),
+    });
+  }
+  if (status != SQLITE_DONE) {
+    throw std::runtime_error("could not scan reconcilable run projections");
+  }
+  return result;
+}
+
 std::optional<CompiledPlan> Journal::compiled_plan(const std::string& plan_hash) const {
   if (plan_hash.empty()) {
     throw std::invalid_argument("compiled plan hash must not be empty");
