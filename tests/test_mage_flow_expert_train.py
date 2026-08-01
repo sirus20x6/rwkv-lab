@@ -30,6 +30,7 @@ from rwkv_lab.mage_flow_expert_train import (
     latest_compatible_checkpoint,
     load_training_checkpoint,
     optimizer_parameter_groups,
+    optimizer_parameter_routing,
     prepare_fixed_expert_cache,
     prepare_run,
     save_training_checkpoint,
@@ -598,6 +599,16 @@ def test_unfrozen_experts_use_twice_the_shared_tail_learning_rate():
     expert_ids = {id(parameter) for parameter in controller.parameters()}
     assert all(id(parameter) in expert_ids for parameter in groups[0]["params"])
     assert all(id(parameter) not in expert_ids for parameter in groups[1]["params"])
+    routing = optimizer_parameter_routing(
+        model,
+        controller,
+        learning_rate=2.0e-6,
+        shared_learning_rate_multiplier=0.5,
+    )
+    assert routing.report["passed"]
+    assert routing.report["trainable_tensor_count"] == sum(
+        route["trainable_tensor_count"] for route in routing.report["routes"]
+    )
 
 
 def test_fp32_master_experts_run_under_bf16_autocast():

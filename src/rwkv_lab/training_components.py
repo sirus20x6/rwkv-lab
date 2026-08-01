@@ -9,13 +9,19 @@ implementation IDs are closed enums; they are never import strings.
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 import torch
 
 from rwkv_lab.mage_flow_optimizations import FP32MasterAdamW
+from rwkv_lab.training_parameter_routing import (
+    ParameterRoute,
+    ParameterRoutingResult,
+    route_trainable_parameters,
+)
 
 
 class OptimizerImplementation(str, Enum):
@@ -25,6 +31,15 @@ class OptimizerImplementation(str, Enum):
 
 class ScheduleImplementation(str, Enum):
     LINEAR_WARMUP_COSINE_V1 = "rwkv_lab.schedule.linear_warmup_cosine.v1"
+
+
+class ParameterRouterImplementation(str, Enum):
+    MAGEFLOW_APPEARANCE_EXPERT_V1 = (
+        "rwkv_lab.parameter_router.mageflow_appearance_expert.v1"
+    )
+    MAGEFLOW_TERMINAL_EXPERT_V1 = (
+        "rwkv_lab.parameter_router.mageflow_terminal_expert.v1"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,7 +82,7 @@ class AdamWConfiguration:
             raise TypeError("AdamW foreach must be boolean")
 
     @classmethod
-    def from_resolved(cls, configuration: Mapping[str, Any]) -> "AdamWConfiguration":
+    def from_resolved(cls, configuration: Mapping[str, Any]) -> AdamWConfiguration:
         expected = {
             "learning_rate",
             "beta1",
@@ -77,7 +92,9 @@ class AdamWConfiguration:
             "foreach",
         }
         if set(configuration) != expected:
-            raise ValueError("resolved AdamW configuration has missing or unknown fields")
+            raise ValueError(
+                "resolved AdamW configuration has missing or unknown fields"
+            )
         return cls(**configuration)
 
 
@@ -111,10 +128,69 @@ class LinearWarmupCosineConfiguration:
     @classmethod
     def from_resolved(
         cls, configuration: Mapping[str, Any]
-    ) -> "LinearWarmupCosineConfiguration":
+    ) -> LinearWarmupCosineConfiguration:
         if set(configuration) != {"warmup_steps", "max_steps", "minimum_ratio"}:
-            raise ValueError("resolved schedule configuration has missing or unknown fields")
+            raise ValueError(
+                "resolved schedule configuration has missing or unknown fields"
+            )
         return cls(**configuration)
+
+
+@dataclass(frozen=True, slots=True)
+class AppearanceExpertRoutingConfiguration:
+    shared_backbone_multiplier: float = 0.5
+
+    def __post_init__(self) -> None:
+        _validate_positive_multiplier(
+            self.shared_backbone_multiplier, "shared_backbone_multiplier"
+        )
+
+    @classmethod
+    def from_resolved(
+        cls, configuration: Mapping[str, Any]
+    ) -> AppearanceExpertRoutingConfiguration:
+        if set(configuration) != {"shared_backbone_multiplier"}:
+            raise ValueError(
+                "resolved appearance routing configuration has missing or unknown fields"
+            )
+        return cls(**configuration)
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalExpertRoutingConfiguration:
+    shared_backbone_multiplier: float = 0.5
+    repa_projection_multiplier: float = 1.0
+
+    def __post_init__(self) -> None:
+        _validate_positive_multiplier(
+            self.shared_backbone_multiplier, "shared_backbone_multiplier"
+        )
+        _validate_positive_multiplier(
+            self.repa_projection_multiplier, "repa_projection_multiplier"
+        )
+
+    @classmethod
+    def from_resolved(
+        cls, configuration: Mapping[str, Any]
+    ) -> TerminalExpertRoutingConfiguration:
+        if set(configuration) != {
+            "shared_backbone_multiplier",
+            "repa_projection_multiplier",
+        }:
+            raise ValueError(
+                "resolved terminal routing configuration has missing or unknown fields"
+            )
+        return cls(**configuration)
+
+
+def _validate_positive_multiplier(value: Any, name: str) -> None:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        raise ValueError(f"{name} must be positive and finite")
 
 
 def linear_warmup_cosine_multiplier(
@@ -130,9 +206,9 @@ def linear_warmup_cosine_multiplier(
         max(1, configuration.max_steps - configuration.warmup_steps)
     )
     progress = min(1.0, max(0.0, progress))
-    return configuration.minimum_ratio + (
-        1.0 - configuration.minimum_ratio
-    ) * 0.5 * (1.0 + math.cos(math.pi * progress))
+    return configuration.minimum_ratio + (1.0 - configuration.minimum_ratio) * 0.5 * (
+        1.0 + math.cos(math.pi * progress)
+    )
 
 
 def build_registered_optimizer(
@@ -171,6 +247,70 @@ def build_registered_schedule(
     )
 
 
+def build_registered_parameter_routing(
+    implementation: ParameterRouterImplementation,
+    named_parameters: Iterable[tuple[str, torch.nn.Parameter]],
+    role_parameter_ids: Mapping[str, frozenset[int]],
+    *,
+    base_learning_rate: float,
+    configuration: (
+        AppearanceExpertRoutingConfiguration | TerminalExpertRoutingConfiguration
+    ),
+) -> ParameterRoutingResult:
+    """Resolve model-owned roles through one closed routing implementation."""
+
+    named = list(named_parameters)
+    all_parameter_ids = frozenset(id(parameter) for _, parameter in named)
+    if implementation is ParameterRouterImplementation.MAGEFLOW_APPEARANCE_EXPERT_V1:
+        if not isinstance(configuration, AppearanceExpertRoutingConfiguration):
+            raise TypeError(
+                "appearance router requires appearance routing configuration"
+            )
+        if set(role_parameter_ids) != {"expert"}:
+            raise ValueError(
+                "appearance router requires exactly the expert ownership role"
+            )
+        expert_ids = role_parameter_ids["expert"]
+        routes = (
+            ParameterRoute("experts", 1.0, expert_ids),
+            ParameterRoute(
+                "shared_backbone",
+                configuration.shared_backbone_multiplier,
+                all_parameter_ids - expert_ids,
+            ),
+        )
+    elif implementation is ParameterRouterImplementation.MAGEFLOW_TERMINAL_EXPERT_V1:
+        if not isinstance(configuration, TerminalExpertRoutingConfiguration):
+            raise TypeError("terminal router requires terminal routing configuration")
+        if set(role_parameter_ids) != {"expert", "repa"}:
+            raise ValueError(
+                "terminal router requires exactly expert and REPA ownership roles"
+            )
+        expert_ids = role_parameter_ids["expert"]
+        repa_ids = role_parameter_ids["repa"]
+        routes = (
+            ParameterRoute("terminal_expert", 1.0, expert_ids, required=True),
+            ParameterRoute(
+                "shared_backbone",
+                configuration.shared_backbone_multiplier,
+                all_parameter_ids - expert_ids - repa_ids,
+            ),
+            ParameterRoute(
+                "vae_repa_projection",
+                configuration.repa_projection_multiplier,
+                repa_ids,
+                required=bool(repa_ids),
+            ),
+        )
+    else:
+        raise ValueError(
+            f"unsupported parameter-router implementation: {implementation!r}"
+        )
+    return route_trainable_parameters(
+        named, routes, base_learning_rate=base_learning_rate
+    )
+
+
 def _resolved_component_parts(
     component: Mapping[str, Any], expected_category: str
 ) -> tuple[str, Mapping[str, Any]]:
@@ -179,7 +319,9 @@ def _resolved_component_parts(
     descriptor = component["descriptor"]
     configuration = component["configuration"]
     if not isinstance(descriptor, Mapping) or not isinstance(configuration, Mapping):
-        raise TypeError("resolved component descriptor and configuration must be objects")
+        raise TypeError(
+            "resolved component descriptor and configuration must be objects"
+        )
     key = descriptor.get("key")
     implementation = descriptor.get("implementation")
     if (
@@ -199,7 +341,9 @@ def optimizer_from_resolved_component(
     try:
         selected = OptimizerImplementation(implementation)
     except ValueError as error:
-        raise ValueError("resolved optimizer implementation is not allowlisted") from error
+        raise ValueError(
+            "resolved optimizer implementation is not allowlisted"
+        ) from error
     return build_registered_optimizer(
         selected, parameters, AdamWConfiguration.from_resolved(configuration)
     )
@@ -214,7 +358,9 @@ def schedule_from_resolved_component(
     try:
         selected = ScheduleImplementation(implementation)
     except ValueError as error:
-        raise ValueError("resolved schedule implementation is not allowlisted") from error
+        raise ValueError(
+            "resolved schedule implementation is not allowlisted"
+        ) from error
     return build_registered_schedule(
         selected,
         optimizer,
@@ -222,10 +368,50 @@ def schedule_from_resolved_component(
     )
 
 
+def parameter_routing_from_resolved_component(
+    component: Mapping[str, Any],
+    named_parameters: Iterable[tuple[str, torch.nn.Parameter]],
+    role_parameter_ids: Mapping[str, frozenset[int]],
+    *,
+    base_learning_rate: float,
+) -> ParameterRoutingResult:
+    implementation, configuration = _resolved_component_parts(
+        component, "parameter_router"
+    )
+    try:
+        selected = ParameterRouterImplementation(implementation)
+    except ValueError as error:
+        raise ValueError(
+            "resolved parameter-router implementation is not allowlisted"
+        ) from error
+    typed_configuration: (
+        AppearanceExpertRoutingConfiguration | TerminalExpertRoutingConfiguration
+    )
+    if selected is ParameterRouterImplementation.MAGEFLOW_APPEARANCE_EXPERT_V1:
+        typed_configuration = AppearanceExpertRoutingConfiguration.from_resolved(
+            configuration
+        )
+    else:
+        typed_configuration = TerminalExpertRoutingConfiguration.from_resolved(
+            configuration
+        )
+    return build_registered_parameter_routing(
+        selected,
+        named_parameters,
+        role_parameter_ids,
+        base_learning_rate=base_learning_rate,
+        configuration=typed_configuration,
+    )
+
+
 def supported_implementation_ids() -> frozenset[str]:
     return frozenset(
         implementation.value
-        for implementation in (*OptimizerImplementation, *ScheduleImplementation)
+        for implementation in (
+            *OptimizerImplementation,
+            *ScheduleImplementation,
+            *ParameterRouterImplementation,
+        )
     )
 
 
@@ -235,19 +421,26 @@ def supported_worker_capabilities() -> frozenset[str]:
             "optimizer.torch_adamw.v1",
             "optimizer.fp32_master_adamw.v1",
             "schedule.linear_warmup_cosine.v1",
+            "parameter_router.mageflow_appearance_expert.v1",
+            "parameter_router.mageflow_terminal_expert.v1",
         }
     )
 
 
 __all__ = [
     "AdamWConfiguration",
+    "AppearanceExpertRoutingConfiguration",
     "LinearWarmupCosineConfiguration",
     "OptimizerImplementation",
+    "ParameterRouterImplementation",
     "ScheduleImplementation",
+    "TerminalExpertRoutingConfiguration",
     "build_registered_optimizer",
+    "build_registered_parameter_routing",
     "build_registered_schedule",
     "linear_warmup_cosine_multiplier",
     "optimizer_from_resolved_component",
+    "parameter_routing_from_resolved_component",
     "schedule_from_resolved_component",
     "supported_implementation_ids",
     "supported_worker_capabilities",

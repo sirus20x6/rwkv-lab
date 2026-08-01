@@ -3,6 +3,41 @@
   "components": [
     {
       "key": {
+        "category": "parameter_router",
+        "name": "mageflow_appearance_expert",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.parameter_router.mageflow_appearance_expert.v1",
+      "model_families": ["mageflow"],
+      "required_capabilities": ["parameter_router.mageflow_appearance_expert.v1"],
+      "configuration": [
+        {"name": "shared_backbone_multiplier", "type": "number", "required": false, "default": 0.5, "minimum": 1e-12, "maximum": 1000.0, "unit": "ratio"}
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "parameter_router",
+        "name": "mageflow_terminal_expert",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.parameter_router.mageflow_terminal_expert.v1",
+      "model_families": ["mageflow"],
+      "required_capabilities": ["parameter_router.mageflow_terminal_expert.v1"],
+      "configuration": [
+        {"name": "shared_backbone_multiplier", "type": "number", "required": false, "default": 0.5, "minimum": 1e-12, "maximum": 1000.0, "unit": "ratio"},
+        {"name": "repa_projection_multiplier", "type": "number", "required": false, "default": 1.0, "minimum": 1e-12, "maximum": 1000.0, "unit": "ratio"}
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
         "category": "optimizer",
         "name": "torch_adamw",
         "version": "1.0.0"

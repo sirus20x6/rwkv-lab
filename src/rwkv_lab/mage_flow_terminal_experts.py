@@ -45,6 +45,12 @@ from rwkv_lab.mage_flow_tread_looping import (
     extract_tread_route,
     restore_tread_route,
 )
+from rwkv_lab.training_components import (
+    ParameterRouterImplementation,
+    TerminalExpertRoutingConfiguration,
+    build_registered_parameter_routing,
+)
+from rwkv_lab.training_parameter_routing import ParameterRoutingResult
 
 TERMINAL_EXPERT_SCHEMA = "rwkv-lab.mage-flow-terminal-expert.v1"
 TERMINAL_EXPERT_DEPTH = 3
@@ -1750,49 +1756,65 @@ def terminal_optimizer_parameter_groups(
     *,
     expert_learning_rate: float,
     backbone_learning_rate_multiplier: float = 0.5,
+    repa_projection: nn.Module | None = None,
+    repa_learning_rate_multiplier: float = 1.0,
 ) -> list[dict[str, Any]]:
     """Create the required 1.0x expert and 0.5x backbone optimizer groups."""
-    if expert_learning_rate <= 0:
-        raise ValueError("expert_learning_rate must be positive")
-    if backbone_learning_rate_multiplier <= 0:
-        raise ValueError("backbone_learning_rate_multiplier must be positive")
+    return list(
+        terminal_optimizer_parameter_routing(
+            transformer,
+            controller,
+            expert_learning_rate=expert_learning_rate,
+            backbone_learning_rate_multiplier=backbone_learning_rate_multiplier,
+            repa_projection=repa_projection,
+            repa_learning_rate_multiplier=repa_learning_rate_multiplier,
+        ).groups
+    )
+
+
+def terminal_optimizer_parameter_routing(
+    transformer,
+    controller: TerminalExpertController,
+    *,
+    expert_learning_rate: float,
+    backbone_learning_rate_multiplier: float = 0.5,
+    repa_projection: nn.Module | None = None,
+    repa_learning_rate_multiplier: float = 1.0,
+) -> ParameterRoutingResult:
+    """Prove terminal-expert/backbone/REPA ownership before grouping."""
+
     expert_ids = {id(parameter) for parameter in controller.parameters()}
     loop_controller = getattr(transformer, "tread_loop_controller", None)
     if loop_controller is not None:
         expert_ids.update(
             id(parameter) for parameter in loop_controller.expert_parameters()
         )
-    experts = [
-        parameter
-        for parameter in transformer.parameters()
-        if parameter.requires_grad and id(parameter) in expert_ids
+    repa_ids = (
+        frozenset(id(parameter) for parameter in repa_projection.parameters())
+        if repa_projection is not None
+        else frozenset()
+    )
+    named_parameters = [
+        (f"transformer.{name}", parameter)
+        for name, parameter in transformer.named_parameters(remove_duplicate=False)
     ]
-    backbone = [
-        parameter
-        for parameter in transformer.parameters()
-        if parameter.requires_grad and id(parameter) not in expert_ids
-    ]
-    if not experts:
-        raise RuntimeError("the resident terminal expert is not trainable")
-    groups = [
-        {
-            "params": experts,
-            "lr": expert_learning_rate,
-            "initial_lr": expert_learning_rate,
-            "group_name": "terminal_expert",
-        }
-    ]
-    if backbone:
-        backbone_lr = expert_learning_rate * backbone_learning_rate_multiplier
-        groups.append(
-            {
-                "params": backbone,
-                "lr": backbone_lr,
-                "initial_lr": backbone_lr,
-                "group_name": "shared_backbone",
-            }
+    if repa_projection is not None:
+        named_parameters.extend(
+            (f"repa.{name}", parameter)
+            for name, parameter in repa_projection.named_parameters(
+                remove_duplicate=False
+            )
         )
-    return groups
+    return build_registered_parameter_routing(
+        ParameterRouterImplementation.MAGEFLOW_TERMINAL_EXPERT_V1,
+        named_parameters,
+        {"expert": frozenset(expert_ids), "repa": repa_ids},
+        base_learning_rate=expert_learning_rate,
+        configuration=TerminalExpertRoutingConfiguration(
+            shared_backbone_multiplier=backbone_learning_rate_multiplier,
+            repa_projection_multiplier=repa_learning_rate_multiplier,
+        ),
+    )
 
 
 def save_terminal_shared_backbone(

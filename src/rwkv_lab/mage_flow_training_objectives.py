@@ -19,6 +19,10 @@ import torch.nn.functional as F
 from torch import nn
 
 from rwkv_lab.mage_flow_pretrain import rectified_flow_path
+from rwkv_lab.training_parameter_routing import (
+    ParameterRoute,
+    route_trainable_parameters,
+)
 
 FLOW_LOSS_WEIGHTINGS = frozenset({"uniform", "min_snr", "soft_min_snr"})
 
@@ -558,16 +562,10 @@ def repa_optimizer_group(
     *,
     learning_rate: float,
 ) -> dict[str, Any]:
-    if learning_rate <= 0:
-        raise ValueError("REPA learning rate must be positive")
-    parameters = [
-        parameter for parameter in module.parameters() if parameter.requires_grad
-    ]
-    if not parameters:
-        raise RuntimeError("REPA projection contains no trainable parameters")
-    return {
-        "params": parameters,
-        "lr": learning_rate,
-        "initial_lr": learning_rate,
-        "group_name": "vae_repa_projection",
-    }
+    parameter_ids = frozenset(id(parameter) for parameter in module.parameters())
+    routing = route_trainable_parameters(
+        module.named_parameters(remove_duplicate=False),
+        [ParameterRoute("vae_repa_projection", 1.0, parameter_ids, required=True)],
+        base_learning_rate=learning_rate,
+    )
+    return dict(routing.groups[0])

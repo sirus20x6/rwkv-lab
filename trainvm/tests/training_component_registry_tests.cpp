@@ -366,7 +366,7 @@ void checked_in_mageflow_catalog_matches_native_authority_contract() {
   const trainvm::TrainingComponentRegistry registry =
       trainvm::TrainingComponentRegistry::load_file(
           std::filesystem::absolute(path));
-  check(registry.document_json().at("components").size() == 3U &&
+  check(registry.document_json().at("components").size() == 5U &&
             registry.registry_digest().starts_with("sha256:") &&
             registry.registry_digest().size() == 71U,
         "checked-in MageFlow component catalog is a canonical native authority document");
@@ -393,6 +393,20 @@ void checked_in_mageflow_catalog_matches_native_authority_contract() {
           });
         }),
         "MageFlow-only FP32-master optimizer cannot route to a transformer family");
+  const auto router = registry.resolve({
+      .key = {.category = trainvm::TrainingComponentCategory::parameter_router,
+              .name = "mageflow_terminal_expert",
+              .version = "1.0.0"},
+      .model_family = "mageflow",
+      .configuration = nlohmann::json::object(),
+  });
+  check(router.descriptor.implementation ==
+            "rwkv_lab.parameter_router.mageflow_terminal_expert.v1" &&
+            router.descriptor.state_grade ==
+                trainvm::TrainingStateGrade::stateless &&
+            router.configuration.at("shared_backbone_multiplier") == 0.5 &&
+            router.configuration.at("repa_projection_multiplier") == 1.0,
+        "terminal expert ownership and LR multipliers resolve as one stateless component");
 }
 
 }  // namespace

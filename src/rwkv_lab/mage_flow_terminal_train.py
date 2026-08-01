@@ -63,14 +63,6 @@ from rwkv_lab.mage_flow_pretrain import (
     _prefetched,
     rectified_flow_loss,
 )
-from rwkv_lab.training_components import (
-    AdamWConfiguration,
-    LinearWarmupCosineConfiguration,
-    OptimizerImplementation,
-    ScheduleImplementation,
-    build_registered_optimizer,
-    build_registered_schedule,
-)
 from rwkv_lab.mage_flow_terminal_experts import (
     configure_terminal_training_scope,
     convert_terminal_path_to_lightning_blocks,
@@ -80,7 +72,7 @@ from rwkv_lab.mage_flow_terminal_experts import (
     save_terminal_expert,
     save_terminal_shared_backbone,
     terminal_architecture_report,
-    terminal_optimizer_parameter_groups,
+    terminal_optimizer_parameter_routing,
 )
 from rwkv_lab.mage_flow_training_objectives import (
     FLOW_LOSS_WEIGHTINGS,
@@ -90,7 +82,6 @@ from rwkv_lab.mage_flow_training_objectives import (
     flow_min_snr_weights,
     load_repa_projection,
     rectified_flow_loss_per_example,
-    repa_optimizer_group,
     save_repa_projection,
     velocity_direction_loss_per_example,
     weighted_rectified_flow_loss,
@@ -103,6 +94,14 @@ from rwkv_lab.mage_flow_tread_looping import (
     learned_loop_ponder_loss,
     load_tread_loop_controller,
     write_mageflow_loop_telemetry,
+)
+from rwkv_lab.training_components import (
+    AdamWConfiguration,
+    LinearWarmupCosineConfiguration,
+    OptimizerImplementation,
+    ScheduleImplementation,
+    build_registered_optimizer,
+    build_registered_schedule,
 )
 
 RUN_SCHEMA = "rwkv-lab.mage-flow-terminal-train.v3"
@@ -2559,21 +2558,15 @@ def train(config: TerminalExpertTrainConfig) -> None:
         transformer,
         checkpoint_mode,
     )
-    groups = terminal_optimizer_parameter_groups(
+    optimizer_routing = terminal_optimizer_parameter_routing(
         transformer,
         controller,
         expert_learning_rate=config.learning_rate,
         backbone_learning_rate_multiplier=config.backbone_learning_rate_multiplier,
+        repa_projection=repa,
+        repa_learning_rate_multiplier=config.repa_learning_rate_multiplier,
     )
-    if repa is not None:
-        groups.append(
-            repa_optimizer_group(
-                repa,
-                learning_rate=(
-                    config.learning_rate * config.repa_learning_rate_multiplier
-                ),
-            )
-        )
+    groups = list(optimizer_routing.groups)
     optimizer = build_registered_optimizer(
         OptimizerImplementation.FP32_MASTER_ADAMW_V1,
         groups,
@@ -2765,6 +2758,7 @@ def train(config: TerminalExpertTrainConfig) -> None:
             "architecture": architecture,
             "architecture_migration": lightning_block_report,
             "training_scope": scope,
+            "parameter_routing": optimizer_routing.report,
             "train_examples": len(all_train_rows),
             "eval_examples": len(all_eval_rows),
             "train_examples_by_domain": {

@@ -22,6 +22,7 @@ from rwkv_lab.mage_flow_terminal_experts import (
     save_terminal_expert,
     terminal_architecture_report,
     terminal_optimizer_parameter_groups,
+    terminal_optimizer_parameter_routing,
 )
 from rwkv_lab.mage_flow_tread_looping import (
     TreadLoopConfig,
@@ -476,6 +477,37 @@ def test_training_scope_uses_one_expert_and_half_rate_backbone_tail():
     ]
     assert groups[0]["lr"] == pytest.approx(2e-5)
     assert groups[1]["lr"] == pytest.approx(1e-5)
+
+
+def test_terminal_parameter_router_includes_repa_in_exhaustive_audit():
+    model = TinyMageFlow()
+    controller = install_terminal_expert(model, "animation")
+    configure_terminal_training_scope(
+        model,
+        controller,
+        train_backbone_final_fraction=1 / 3,
+    )
+    repa = nn.Linear(4, 2)
+    routing = terminal_optimizer_parameter_routing(
+        model,
+        controller,
+        expert_learning_rate=2.0e-5,
+        backbone_learning_rate_multiplier=0.5,
+        repa_projection=repa,
+        repa_learning_rate_multiplier=1.5,
+    )
+    assert [group["group_name"] for group in routing.groups] == [
+        "terminal_expert",
+        "shared_backbone",
+        "vae_repa_projection",
+    ]
+    assert [group["lr"] for group in routing.groups] == pytest.approx(
+        [2.0e-5, 1.0e-5, 3.0e-5]
+    )
+    assert routing.report["passed"]
+    assert routing.report["trainable_tensor_count"] == sum(
+        route["trainable_tensor_count"] for route in routing.report["routes"]
+    )
 
 
 def test_load_shared_backbone_translates_legacy_shared_ffn_keys(tmp_path):

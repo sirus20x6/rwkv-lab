@@ -29,9 +29,13 @@ The initial concrete catalog contains the implementations already shared by the 
 - Torch AdamW;
 - FP32-master AdamW for lower-precision live model weights;
 - linear warmup followed by a cosine tail over optimizer steps.
+- appearance-expert versus shared-backbone exclusive parameter routing;
+- terminal-expert versus shared-backbone versus VAE-REPA exclusive parameter routing.
 
-The three MageFlow training paths now use those common factories. The catalog does not claim an
-activation, objective, optimizer, or kernel until a real adapter path consumes the same symbolic
+The three MageFlow training paths now use those common factories. Routing aggregates aliased names,
+deduplicates tensor identities, rejects overlap and unclaimed trainable tensors, and records an
+exact group/count/rate audit in the run contract. The catalog does not claim another
+activation, objective, optimizer, router, or kernel until a real adapter path consumes the symbolic
 implementation and has CPU parity plus representative accelerator qualification.
 
 ## Model-family integration

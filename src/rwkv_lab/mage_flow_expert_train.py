@@ -62,12 +62,16 @@ from rwkv_lab.mage_flow_pretrain import (
 )
 from rwkv_lab.training_components import (
     AdamWConfiguration,
+    AppearanceExpertRoutingConfiguration,
     LinearWarmupCosineConfiguration,
     OptimizerImplementation,
+    ParameterRouterImplementation,
     ScheduleImplementation,
     build_registered_optimizer,
+    build_registered_parameter_routing,
     build_registered_schedule,
 )
+from rwkv_lab.training_parameter_routing import ParameterRoutingResult
 
 RUN_SCHEMA = "rwkv-lab.mage-flow-expert-train.v1"
 OFFICIAL_REPOSITORY = "https://github.com/microsoft/Mage"
@@ -915,40 +919,35 @@ def optimizer_parameter_groups(
     shared_learning_rate_multiplier: float,
 ) -> list[dict[str, Any]]:
     """Separate expert and original-backbone parameters for differential LRs."""
-    expert_ids = {id(parameter) for parameter in controller.parameters()}
-    experts = [
-        parameter
-        for parameter in transformer.parameters()
-        if parameter.requires_grad and id(parameter) in expert_ids
-    ]
-    shared = [
-        parameter
-        for parameter in transformer.parameters()
-        if parameter.requires_grad and id(parameter) not in expert_ids
-    ]
-    groups: list[dict[str, Any]] = []
-    if experts:
-        groups.append(
-            {
-                "params": experts,
-                "lr": learning_rate,
-                "initial_lr": learning_rate,
-                "group_name": "experts",
-            }
-        )
-    if shared:
-        shared_learning_rate = learning_rate * shared_learning_rate_multiplier
-        groups.append(
-            {
-                "params": shared,
-                "lr": shared_learning_rate,
-                "initial_lr": shared_learning_rate,
-                "group_name": "shared_backbone",
-            }
-        )
-    if not groups:
-        raise RuntimeError("training scope contains no optimizer parameters")
-    return groups
+    return list(
+        optimizer_parameter_routing(
+            transformer,
+            controller,
+            learning_rate=learning_rate,
+            shared_learning_rate_multiplier=shared_learning_rate_multiplier,
+        ).groups
+    )
+
+
+def optimizer_parameter_routing(
+    transformer,
+    controller: AppearanceExpertController,
+    *,
+    learning_rate: float,
+    shared_learning_rate_multiplier: float,
+) -> ParameterRoutingResult:
+    """Prove exclusive appearance-expert/backbone ownership before grouping."""
+
+    expert_ids = frozenset(id(parameter) for parameter in controller.parameters())
+    return build_registered_parameter_routing(
+        ParameterRouterImplementation.MAGEFLOW_APPEARANCE_EXPERT_V1,
+        transformer.named_parameters(remove_duplicate=False),
+        {"expert": expert_ids},
+        base_learning_rate=learning_rate,
+        configuration=AppearanceExpertRoutingConfiguration(
+            shared_backbone_multiplier=shared_learning_rate_multiplier
+        ),
+    )
 
 
 def training_scope_preflight_report(
@@ -1956,12 +1955,13 @@ def train(config: MageFlowExpertTrainConfig) -> None:
     preflight = training_scope_preflight_report(transformer, controller, scope)
     if not preflight["passed"]:
         raise RuntimeError(f"training-scope preflight failed: {preflight}")
-    optimizer_groups = optimizer_parameter_groups(
+    optimizer_routing = optimizer_parameter_routing(
         transformer,
         controller,
         learning_rate=config.learning_rate,
         shared_learning_rate_multiplier=config.shared_learning_rate_multiplier,
     )
+    optimizer_groups = list(optimizer_routing.groups)
     optimizer = build_registered_optimizer(
         OptimizerImplementation.FP32_MASTER_ADAMW_V1,
         optimizer_groups,
@@ -2199,6 +2199,7 @@ def train(config: MageFlowExpertTrainConfig) -> None:
                 }
                 for group in optimizer_groups
             ],
+            "parameter_routing": optimizer_routing.report,
             "trainable_parameters": sum(parameter.numel() for parameter in trainable),
             "trainable_parameters_per_domain": {
                 domain: (
