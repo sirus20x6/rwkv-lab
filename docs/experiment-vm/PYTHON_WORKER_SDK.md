@@ -60,6 +60,29 @@ journal storage. A trainer polls `poll_commands()` at its own microbatch,
 optimizer-step, eval, or checkpoint boundary, applies an eligible control, and
 then calls `acknowledge_controls()` with the effective values and step.
 
+## Fixed adapter runner
+
+`scripts/trainvm_worker_entrypoint.py` is the sole sealed Python code artifact for the currently
+migrated training adapters. Hostd executes it from fd 3 and appends exactly
+`--trainvm-bootstrap-fd=4`; the runner rejects every other argument. Its dispatch table contains
+exact `(adapter, version, operation, contract)` tuples and fixed imports for the MageFlow appearance
+expert, MageFlow terminal expert, and Qwen AO3 continuation. An experiment cannot select an import
+string, script, argv, environment override, or entry-point path.
+
+Trainer configuration is an inline object in invocation `inputs.config`. Because the invocation is
+canonical and content-addressed, these values cannot change between submission and execution. A
+pathname to a mutable JSON configuration is rejected. The adapter also requires the trainer's run
+directory to equal `workspace.run_directory`. Larger configurations must become immutable artifact
+manifests with authority-verified fingerprints rather than path references.
+
+The fixed runner returns an already-completed replay without executing tensor work, publishes a
+durably receipted terminal result on success, and converts trainer exceptions to a bounded
+`operation.failed` event containing only an error class. It deliberately does not claim live
+pause/checkpoint/control support yet: trainers must first expose safe-point hooks through this
+session before their registry capability can advertise those controls. Nested dataset and model
+paths also remain non-production-qualified until each adapter validates them against invocation
+read roots and immutable artifact identities.
+
 Install the optional runtime dependencies with:
 
 ```sh
@@ -72,9 +95,8 @@ Regenerate checked-in Python protobuf bindings after changing the protocol:
 scripts/generate_trainvm_python_proto.sh
 ```
 
-Hostd descriptor delegation and the stopped launcher now attest the bootstrap,
-install sealed Python code at fd 3 and the bootstrap at fd 4, and bind their
-combined identity into durable launch evidence. Production process launch
-remains disabled until TrainVM drives that guarded hostd transaction, runtime
-closure is enforced, and the Python adapter entry points are qualified end to
-end.
+Hostd descriptor delegation and the stopped launcher now attest the bootstrap, install sealed
+Python code at fd 3 and the bootstrap at fd 4, and bind their combined identity into durable launch
+evidence. The fixed runner closes the entry-point/argv boundary. Production process launch remains
+disabled until TrainVM drives that guarded hostd transaction, runtime closure and nested path
+authority are enforced, and each Python adapter is qualified end to end.

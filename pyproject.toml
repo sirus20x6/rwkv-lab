@@ -77,6 +77,7 @@ mage-flow-expert-train = "rwkv_lab.mage_flow_expert_train:main"
 ao3-cpt-prepare = "rwkv_lab.ao3_cpt_data:main"
 ao3-cpt-tokens = "rwkv_lab.ao3_cpt_tokens:main"
 qwen-ao3-cpt = "rwkv_lab.qwen_ao3_cpt:main"
+trainvm-worker = "rwkv_lab.trainvm_adapters.entrypoint:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }

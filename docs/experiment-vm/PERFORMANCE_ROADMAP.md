@@ -267,9 +267,12 @@ startup orphan recovery are defined in
   appearance/terminal expert parameter routers are implemented. Both MageFlow expert trainers and
   the Qwen AO3 transformer continuation and scratch-RWKV PowerCool paths now consume verified
   worker slots and bind composition identity into resume state. RWKV retains a pure schedule state
-  machine because its optimizer topology can change during training. MLA/Engram transformer
-  variants, additional component families, and removal of the remaining legacy family switches
-  remain.
+  machine because its optimizer topology can change during training. The fixed fd-4 Python runner
+  now dispatches a closed set of typed MageFlow/Qwen contracts, accepts only invocation-frozen
+  inline configuration, enforces the authority run directory, and reports a receipted terminal
+  event. Nested input-path authority, trainer safe-point controls, RWKV's typed config adapter,
+  MLA/Engram transformer variants, additional component families, and removal of the remaining
+  legacy family switches remain.
 - Keep implementation boundaries aligned with component ownership: optimizer algorithms,
   parameter routing, LR schedules, weight-decay schedules, activations, normalization, objectives,
   precision/scaling, gradient policy, and curricula live in separate source/test modules. Shared
