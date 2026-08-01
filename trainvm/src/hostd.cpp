@@ -48,6 +48,7 @@ bool valid_digest(std::string_view value) {
 bool valid_attribution(const HostdSessionAttribution &attribution) {
   return valid_identifier(attribution.journal_id) &&
          valid_identifier(attribution.run_id) &&
+         valid_identifier(attribution.concurrency_key) &&
          valid_identifier(attribution.logical_lease_id) &&
          attribution.logical_fencing_token > 0U;
 }
@@ -75,7 +76,7 @@ bool valid_access(HostdSessionAccess access) {
 
 std::string logical_scope_key(const HostdSessionAttribution &attribution) {
   return attribution.journal_id + "\n" + attribution.run_id + "\n" +
-         attribution.logical_lease_id;
+         attribution.concurrency_key + "\n" + attribution.logical_lease_id;
 }
 
 std::string random_session_id() {

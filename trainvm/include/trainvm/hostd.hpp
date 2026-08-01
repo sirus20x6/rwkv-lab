@@ -55,6 +55,7 @@ struct HostdCoordinatorConfig final {
 struct HostdSessionAttribution final {
   std::string journal_id;
   std::string run_id;
+  std::string concurrency_key;
   std::string logical_lease_id;
   std::uint64_t logical_fencing_token{};
 

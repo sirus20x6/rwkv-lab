@@ -114,9 +114,11 @@ HostInventoryReceipt inventory(std::vector<std::string> resources) {
 HostdSessionAttribution attribution(std::string journal = "journal-001",
                                     std::string run = "run-001",
                                     std::string lease = "lease-001",
-                                    std::uint64_t fence = 7U) {
+                                    std::uint64_t fence = 7U,
+                                    std::string concurrency = "gpu:0") {
   return {.journal_id = std::move(journal),
           .run_id = std::move(run),
+          .concurrency_key = std::move(concurrency),
           .logical_lease_id = std::move(lease),
           .logical_fencing_token = fence};
 }
@@ -232,7 +234,7 @@ public:
 private:
   static std::string key(const HostdSessionAttribution &scope) {
     return scope.journal_id + "\n" + scope.run_id + "\n" +
-           scope.logical_lease_id;
+           scope.concurrency_key + "\n" + scope.logical_lease_id;
   }
 
   static std::string cleanup_key(const HostdSessionAttribution &scope) {
@@ -1111,6 +1113,56 @@ void disconnected_sessions_cannot_replay() {
           "reconnection receives a new server-generated identity");
 }
 
+void concurrency_keys_are_independent_logical_scopes() {
+  Fixture fixture;
+  auto coordinator = fixture.coordinator();
+  admit(*coordinator, *fixture.ledger);
+  const auto left = attribution("journal-shared", "run-shared",
+                                "lease-shared", 7U, "gpu:0");
+  const auto right = attribution("journal-shared", "run-shared",
+                                 "lease-shared", 7U, "gpu:1");
+  const auto left_session =
+      connect_admission(*coordinator, left, *fixture.logical_fences);
+  const auto right_session =
+      connect_admission(*coordinator, right, *fixture.logical_fences);
+  require(left_session.effective_access == HostdSessionAccess::grant_release &&
+              right_session.effective_access ==
+                  HostdSessionAccess::grant_release,
+          "equal journal/run/lease/fence identities remain distinct by concurrency key");
+
+  auto advanced_left = left;
+  ++advanced_left.logical_fencing_token;
+  const auto advanced_left_session = connect_admission(
+      *coordinator, advanced_left, *fixture.logical_fences);
+  require(advanced_left_session.effective_access ==
+              HostdSessionAccess::grant_release,
+          "one concurrency scope advances independently");
+  require_throws<HostdUnauthorized>(
+      [&] {
+        auto peer =
+            std::make_shared<FakePeer>(HostdSessionAccess::grant_release);
+        (void)coordinator->connect({.attribution = left}, peer);
+      },
+      "the prior fence is stale within its exact concurrency scope");
+  auto right_peer =
+      std::make_shared<FakePeer>(HostdSessionAccess::grant_release);
+  const auto right_reconnected =
+      coordinator->connect({.attribution = right}, right_peer);
+  require(right_reconnected.effective_access ==
+              HostdSessionAccess::grant_release,
+          "advancing one concurrency scope does not stale another");
+
+  auto malformed = right;
+  malformed.concurrency_key.clear();
+  require_throws<HostdUnauthorized>(
+      [&] {
+        auto peer =
+            std::make_shared<FakePeer>(HostdSessionAccess::grant_release);
+        (void)coordinator->connect({.attribution = malformed}, peer);
+      },
+      "missing concurrency scope attribution fails closed");
+}
+
 void stale_fences_and_attribution_mismatch_fail() {
   Fixture fixture;
   auto coordinator = fixture.coordinator();
@@ -1692,6 +1744,7 @@ int main() {
     admission_finalize_lost_reply_and_async_poison_recover();
     unauthorized_and_read_only_peers();
     disconnected_sessions_cannot_replay();
+    concurrency_keys_are_independent_logical_scopes();
     stale_fences_and_attribution_mismatch_fail();
     wrong_host_boot_and_broker_poison();
     ledger_request_and_release_replay_are_exact();
