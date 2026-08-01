@@ -67,6 +67,12 @@ func trainVMGPUTraceFixture(t *testing.T) (*Server, string, string) {
 		"run_id":  "vm-run", "sensitivity": "restricted", "skip_steps": uint64(1),
 		"summary": map[string]any{
 			"accelerator_time_us": 19.5, "cpu_time_us": 8.25, "kernel_or_operator_count": int64(1),
+			"accelerator_launch_count": uint64(17), "captured_step_wall_time_us": 25.0,
+			"gpu_active_ratio": 0.6, "gpu_active_time_us": 15.0,
+			"allocator_baseline_allocated_bytes": uint64(100),
+			"allocator_baseline_reserved_bytes":  uint64(200),
+			"allocator_peak_allocated_bytes":     uint64(150),
+			"allocator_peak_reserved_bytes":      uint64(250),
 			"top_operators": []map[string]any{{
 				"accelerator_time_us": 19.5, "calls": int64(3), "cpu_time_us": 8.25, "name": "train_step",
 			}},
@@ -113,6 +119,8 @@ func TestTrainVMGPUTraceSummaryAndExplicitVerifiedDownload(t *testing.T) {
 	srv.Handler().ServeHTTP(response, request)
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"artifact_id":"gpu-trace-1"`) ||
 		!strings.Contains(response.Body.String(), `"first_optimizer_step":12`) ||
+		!strings.Contains(response.Body.String(), `"accelerator_launch_count":17`) ||
+		!strings.Contains(response.Body.String(), `"gpu_active_ratio":0.6`) ||
 		!strings.Contains(response.Body.String(), `"sensitivity":"restricted"`) {
 		t.Fatalf("profile list status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -163,5 +171,41 @@ func TestTrainVMGPUTraceRejectsManifestAndRawTraceMutation(t *testing.T) {
 	srv.Handler().ServeHTTP(response, request)
 	if response.Code != http.StatusBadGateway && response.Code != http.StatusConflict {
 		t.Fatalf("mutated raw trace status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestRichGPUTraceSummaryIsAllOrNothingAndInternallyConsistent(t *testing.T) {
+	if !validRichGPUTraceSummary(trainVMGPUTraceSummaryValues{}) {
+		t.Fatal("legacy summary without rich metrics should remain readable")
+	}
+	launches := uint64(4)
+	wall := 20.0
+	active := 10.0
+	ratio := 0.5
+	baselineAllocated := uint64(100)
+	baselineReserved := uint64(200)
+	peakAllocated := uint64(150)
+	peakReserved := uint64(250)
+	summary := trainVMGPUTraceSummaryValues{
+		AcceleratorLaunchCount:          &launches,
+		CapturedStepWallTimeUS:          &wall,
+		GPUActiveTimeUS:                 &active,
+		GPUActiveRatio:                  &ratio,
+		AllocatorBaselineAllocatedBytes: &baselineAllocated,
+		AllocatorBaselineReservedBytes:  &baselineReserved,
+		AllocatorPeakAllocatedBytes:     &peakAllocated,
+		AllocatorPeakReservedBytes:      &peakReserved,
+	}
+	if !validRichGPUTraceSummary(summary) {
+		t.Fatal("consistent rich summary was rejected")
+	}
+	summary.GPUActiveRatio = nil
+	if validRichGPUTraceSummary(summary) {
+		t.Fatal("partial rich summary was accepted")
+	}
+	summary.GPUActiveRatio = &ratio
+	ratio = 0.4
+	if validRichGPUTraceSummary(summary) {
+		t.Fatal("active ratio inconsistent with active and wall time was accepted")
 	}
 }

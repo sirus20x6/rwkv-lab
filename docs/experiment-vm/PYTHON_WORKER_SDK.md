@@ -65,7 +65,10 @@ update. The service owns the bounded skip/warmup/capture state machine, Torch pr
 immutable trace publication, invocation binding, and restricted-artifact metadata. Trainers do not
 construct profiler schedules or publish raw trace paths themselves. A null implementation keeps
 non-profiled invocations free of profiler setup overhead. Nsight backends require dedicated sealed
-host launch profiles and fail closed in the in-process Torch adapter path.
+host launch profiles and fail closed in the in-process Torch adapter path. Torch summaries include
+the captured optimizer-step wall interval, unioned GPU-active time and ratio, accelerator launch
+count, and allocator baseline/peak allocated and reserved bytes; the dashboard exposes these
+without reading the restricted raw trace.
 
 The helper is deliberately trainer-family-neutral; MageFlow, RWKV vision, and transformer vision
 adapters must not implement their own gallery-directory conventions.

@@ -709,6 +709,19 @@
     return `${numeric.toFixed(1)} μs`;
   }
 
+  function vmBytes(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric < 0) return "—";
+    const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let scaled = numeric;
+    let unit = 0;
+    while (scaled >= 1024 && unit < units.length - 1) {
+      scaled /= 1024;
+      unit += 1;
+    }
+    return `${scaled.toFixed(unit === 0 ? 0 : 2)} ${units[unit]}`;
+  }
+
   function renderVMProfiles(profiles) {
     const state = document.getElementById("vm-profile-state");
     const target = document.getElementById("vm-profile-items");
@@ -720,13 +733,27 @@
       const summary = profile.summary || {};
       const operators = Array.isArray(summary.top_operators) ? summary.top_operators.slice(0, 5) : [];
       const windowLabel = `${Number(profile.first_optimizer_step || 0).toLocaleString()}–${Number(profile.last_optimizer_step || 0).toLocaleString()}`;
+      const richSummary = ["accelerator_launch_count", "captured_step_wall_time_us", "gpu_active_ratio", "gpu_active_time_us", "allocator_peak_allocated_bytes", "allocator_peak_reserved_bytes"]
+        .every((field) => Number.isFinite(Number(summary[field])) && Number(summary[field]) >= 0);
+      const facts = [
+        ["accelerator op time", vmDurationUS(summary.accelerator_time_us)],
+        ["CPU op time", vmDurationUS(summary.cpu_time_us)],
+        ["raw trace", vmBytes(profile.trace_size_bytes)],
+      ];
+      if (richSummary) {
+        facts.splice(0, 0,
+          ["GPU active", `${(Number(summary.gpu_active_ratio) * 100).toFixed(1)}%`],
+          ["captured wall", vmDurationUS(summary.captured_step_wall_time_us)],
+          ["GPU launches", `${(Number(summary.accelerator_launch_count) / Math.max(1, Number(profile.capture_steps))).toFixed(1)}/step`],
+          ["peak allocated", vmBytes(summary.allocator_peak_allocated_bytes)],
+          ["peak reserved", vmBytes(summary.allocator_peak_reserved_bytes)],
+        );
+      }
       return `<article class="vm-profile-card">` +
         `<div class="vm-profile-head"><strong title="${vmEscape(profile.artifact_id)}">${vmEscape(profile.backend)} · steps ${vmEscape(windowLabel)}</strong><span>#${Number(profile.sequence || 0).toLocaleString()}</span></div>` +
-        `<div class="vm-profile-facts">` +
-          `<div class="vm-profile-fact"><span>accelerator time</span><strong>${vmEscape(vmDurationUS(summary.accelerator_time_us))}</strong></div>` +
-          `<div class="vm-profile-fact"><span>CPU time</span><strong>${vmEscape(vmDurationUS(summary.cpu_time_us))}</strong></div>` +
-          `<div class="vm-profile-fact"><span>raw trace</span><strong>${Number(profile.trace_size_bytes || 0).toLocaleString()} B</strong></div>` +
-        `</div>` +
+        `<div class="vm-profile-facts">${facts.map(([label, value]) =>
+          `<div class="vm-profile-fact"><span>${vmEscape(label)}</span><strong>${vmEscape(value)}</strong></div>`
+        ).join("")}</div>` +
         `<div class="vm-profile-operators">${operators.map((operator) =>
           `<div class="vm-profile-operator"><span title="${vmEscape(operator.name)}">${vmEscape(operator.name)}</span><span>${Number(operator.calls || 0).toLocaleString()}×</span><span>${vmEscape(vmDurationUS(operator.accelerator_time_us))}</span></div>`
         ).join("") || '<span class="vm-profile-meta">no operator rows in summary</span>'}</div>` +

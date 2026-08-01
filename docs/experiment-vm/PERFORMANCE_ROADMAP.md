@@ -205,17 +205,20 @@ restricted, and publishes it through the worker artifact protocol. The dashboard
 manifest before rendering summaries and hashes the raw trace only on an explicit download. It does
 not fetch multi-gigabyte or potentially sensitive traces during polling. Nsight Systems and Nsight
 Compute remain separate host-launch profiles: an in-process worker must not pretend that selecting
-their enum has wrapped the process. GPU-active ratio, input-stall attribution, allocator pressure,
-and launch-count normalization remain required summary fields once the corresponding qualified
-backend supplies them.
+their enum has wrapped the process. The Torch summary now unions overlapping CUDA event intervals
+over the captured optimizer-step wall window, reports GPU-active ratio, normalizes accelerator
+launch count per step in the dashboard, and records baseline/peak allocated and reserved memory.
+Input-stall attribution remains required after adapters expose a common measured input-boundary;
+the profiler does not infer it from gaps and risk mislabeling CPU, synchronization, or communication
+work as data wait.
 
-No P0 item authorizes TrainVM to start a GPU process. Launch remains disabled until durable
-boot-scoped leases, host resource fencing, orphan checks, sealed launch identity, and spawn/exit
-receipts are complete. The in-process service coordinator now enforces prepare -> durable journal
-receipt -> exec commit ordering behind an injected host-process client. Strict declarative
-mutation-client startup configuration and service wiring are implemented; production launch remains
-disabled while the unified hostd entry point, daemon-restart orphan adoption, and privileged
-qualification are unfinished.
+The guarded GPU launch path is implemented: a root-owned hostd with explicitly non-root worker
+credentials exposes process mutation only after startup recovery/admission, and TrainVM drives the
+prepare -> durable journal receipt -> exec commit saga through the sealed host-process client.
+Boot-scoped grants, exact GPU-device BPF fences, CPU/I/O controls, stopped-child identity, pidfds,
+spawn/exit receipts, and restart adoption are bound and reattested. This is implementation status,
+not deployment qualification: privileged real-host crash-window and driver-context tests remain a
+release gate, and configurations that cannot prove strict launch capability fail closed.
 
 Resource admission lowering is a separate pure module: experiment accelerator requirements become
 one deterministic host bundle request, independently of adapter and trainer code. CPU-only external

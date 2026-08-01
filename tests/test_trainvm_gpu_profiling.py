@@ -12,6 +12,8 @@ from rwkv_lab.trainvm_worker.profiling import (
     GpuProfileError,
     GpuTracePublisher,
     NullStepProfiler,
+    _interval_union_duration,
+    _profile_activity_summary,
     trace_request_from_invocation,
 )
 
@@ -176,3 +178,40 @@ def test_null_profiler_keeps_nonprofiled_workers_free_of_runtime_dependencies() 
         profiler.step(2)
     with pytest.raises(GpuProfileError, match="integer"):
         profiler.step(True)
+
+
+def test_profile_activity_summary_counts_launches_and_unions_gpu_time() -> None:
+    class Device:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    def event(key: str, device: str, start: float, end: float) -> SimpleNamespace:
+        return SimpleNamespace(
+            key=key,
+            device_type=Device(device),
+            time_range=SimpleNamespace(start=start, end=end),
+        )
+
+    profile = SimpleNamespace(
+        events=lambda: [
+            event("ProfilerStep*", "CPU", 100.0, 200.0),
+            event("ProfilerStep*", "CPU", 210.0, 300.0),
+            event("kernel-a", "CUDA", 90.0, 130.0),
+            event("kernel-b", "CUDA", 120.0, 180.0),
+            event("kernel-c", "CUDA", 250.0, 320.0),
+            event("aten::add", "CPU", 120.0, 140.0),
+        ]
+    )
+    assert _interval_union_duration([(2.0, 4.0), (1.0, 3.0), (8.0, 9.0)]) == 4.0
+    assert _profile_activity_summary(profile) == {
+        "accelerator_launch_count": 3,
+        "captured_step_wall_time_us": 200.0,
+        "gpu_active_ratio": 0.65,
+        "gpu_active_time_us": 130.0,
+    }
+
+
+def test_profile_activity_summary_requires_optimizer_step_window() -> None:
+    profile = SimpleNamespace(events=list)
+    with pytest.raises(GpuProfileError, match="optimizer-step intervals"):
+        _profile_activity_summary(profile)

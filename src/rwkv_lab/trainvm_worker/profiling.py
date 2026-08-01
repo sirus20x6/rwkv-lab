@@ -411,6 +411,75 @@ def _event_value(event: object, *names: str) -> float:
     return 0.0
 
 
+def _event_interval(event: object) -> tuple[float, float] | None:
+    interval = getattr(event, "time_range", None)
+    start = getattr(interval, "start", None)
+    end = getattr(interval, "end", None)
+    if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
+        return None
+    start_value = float(start)
+    end_value = float(end)
+    if (
+        not math.isfinite(start_value)
+        or not math.isfinite(end_value)
+        or end_value < start_value
+    ):
+        return None
+    return start_value, end_value
+
+
+def _interval_union_duration(intervals: list[tuple[float, float]]) -> float:
+    if not intervals:
+        return 0.0
+    ordered = sorted(intervals)
+    total = 0.0
+    left, right = ordered[0]
+    for next_left, next_right in ordered[1:]:
+        if next_left <= right:
+            right = max(right, next_right)
+            continue
+        total += right - left
+        left, right = next_left, next_right
+    return total + right - left
+
+
+def _profile_activity_summary(profile: object) -> dict[str, object]:
+    events_method = getattr(profile, "events", None)
+    if not callable(events_method):
+        raise GpuProfileError("torch profiler does not expose activity events")
+    accelerator_intervals: list[tuple[float, float]] = []
+    step_intervals: list[tuple[float, float]] = []
+    for event in events_method():
+        interval = _event_interval(event)
+        if interval is None:
+            continue
+        device_type = getattr(event, "device_type", None)
+        if getattr(device_type, "name", "") == "CUDA":
+            accelerator_intervals.append(interval)
+        if str(getattr(event, "key", "")) == "ProfilerStep*":
+            step_intervals.append(interval)
+    if not step_intervals:
+        raise GpuProfileError("torch profiler omitted captured optimizer-step intervals")
+    window_start = min(interval[0] for interval in step_intervals)
+    window_end = max(interval[1] for interval in step_intervals)
+    wall_time = window_end - window_start
+    if not math.isfinite(wall_time) or wall_time <= 0:
+        raise GpuProfileError("torch profiler produced an invalid captured-step window")
+    clipped = [
+        (max(start, window_start), min(end, window_end))
+        for start, end in accelerator_intervals
+        if end > window_start and start < window_end
+    ]
+    active_time = _interval_union_duration(clipped)
+    active_ratio = min(1.0, max(0.0, active_time / wall_time))
+    return {
+        "accelerator_launch_count": len(clipped),
+        "captured_step_wall_time_us": wall_time,
+        "gpu_active_ratio": active_ratio,
+        "gpu_active_time_us": active_time,
+    }
+
+
 class TorchStepProfiler:
     def __init__(self, session: _ArtifactSession, request: GpuTraceRequest) -> None:
         if request.backend != "torch":
@@ -425,6 +494,44 @@ class TorchStepProfiler:
         self._steps_seen = 0
         self._captured_steps: list[int] = []
         self._last_step: int | None = None
+        self._torch: Any = None
+        self._allocator_baseline: tuple[int, int] | None = None
+
+    def _reset_allocator_window(self) -> None:
+        if self._torch is None:
+            raise GpuProfileError("torch profiler allocator state is unavailable")
+        self._torch.cuda.reset_peak_memory_stats()
+        self._allocator_baseline = (
+            int(self._torch.cuda.memory_allocated()),
+            int(self._torch.cuda.memory_reserved()),
+        )
+
+    def _allocator_summary(self) -> dict[str, int]:
+        if self._torch is None or self._allocator_baseline is None:
+            raise GpuProfileError("torch profiler allocator window was not initialized")
+        baseline_allocated, baseline_reserved = self._allocator_baseline
+        peak_allocated = int(self._torch.cuda.max_memory_allocated())
+        peak_reserved = int(self._torch.cuda.max_memory_reserved())
+        if (
+            min(
+                baseline_allocated,
+                baseline_reserved,
+                peak_allocated,
+                peak_reserved,
+            )
+            < 0
+            or baseline_allocated > baseline_reserved
+            or peak_allocated > peak_reserved
+            or peak_allocated < baseline_allocated
+            or peak_reserved < baseline_reserved
+        ):
+            raise GpuProfileError("torch allocator metrics are internally inconsistent")
+        return {
+            "allocator_baseline_allocated_bytes": baseline_allocated,
+            "allocator_baseline_reserved_bytes": baseline_reserved,
+            "allocator_peak_allocated_bytes": peak_allocated,
+            "allocator_peak_reserved_bytes": peak_reserved,
+        }
 
     def _trace_ready(self, profile: object) -> None:
         if self._trace_path is not None:
@@ -469,6 +576,8 @@ class TorchStepProfiler:
             "cpu_time_us": cpu_total,
             "kernel_or_operator_count": len(rows),
             "top_operators": rows[:MAXIMUM_KERNEL_ROWS],
+            **_profile_activity_summary(profile),
+            **self._allocator_summary(),
         }
         self._trace_path = path
 
@@ -479,6 +588,7 @@ class TorchStepProfiler:
             raise GpuProfileError("torch profiler backend is unavailable") from error
         if not torch.cuda.is_available():
             raise GpuProfileError("torch GPU profiler requires CUDA")
+        self._torch = torch
         activities = []
         if "cpu" in self._request.activities:
             activities.append(torch.profiler.ProfilerActivity.CPU)
@@ -497,6 +607,8 @@ class TorchStepProfiler:
             with_stack=self._request.with_stack,
         )
         self._profile.__enter__()
+        if self._request.skip_steps + self._request.warmup_steps == 0:
+            self._reset_allocator_window()
         return self
 
     def step(self, optimizer_step: int) -> None:
@@ -515,6 +627,8 @@ class TorchStepProfiler:
         self._steps_seen += 1
         assert self._profile is not None
         self._profile.step()
+        if self._steps_seen == self._request.skip_steps + self._request.warmup_steps:
+            self._reset_allocator_window()
 
     def __exit__(self, *exception: object) -> None:
         if self._profile is None:
@@ -536,6 +650,7 @@ class TorchStepProfiler:
             )
         finally:
             self._profile = None
+            self._torch = None
 
 
 def step_profiler_from_invocation(

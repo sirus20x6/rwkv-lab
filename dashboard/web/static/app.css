@@ -189,7 +189,7 @@ details.panel[open] .d-caret { transform: rotate(90deg); color: var(--accent); }
 .vm-profile-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
 .vm-profile-head strong { color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .vm-profile-head span, .vm-profile-meta { color: var(--muted); }
-.vm-profile-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.vm-profile-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 6px; }
 .vm-profile-fact { padding: 5px 6px; border: 1px solid var(--border); border-radius: var(--r-sm); min-width: 0; }
 .vm-profile-fact span, .vm-profile-fact strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .vm-profile-fact span { color: var(--muted); }

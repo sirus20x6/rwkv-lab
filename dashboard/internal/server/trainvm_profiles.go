@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -32,10 +33,18 @@ type trainVMGPUTraceOperator struct {
 }
 
 type trainVMGPUTraceSummaryValues struct {
-	CPUTimeUS             float64                   `json:"cpu_time_us"`
-	AcceleratorTimeUS     float64                   `json:"accelerator_time_us"`
-	KernelOrOperatorCount int64                     `json:"kernel_or_operator_count"`
-	TopOperators          []trainVMGPUTraceOperator `json:"top_operators"`
+	CPUTimeUS                       float64                   `json:"cpu_time_us"`
+	AcceleratorTimeUS               float64                   `json:"accelerator_time_us"`
+	KernelOrOperatorCount           int64                     `json:"kernel_or_operator_count"`
+	TopOperators                    []trainVMGPUTraceOperator `json:"top_operators"`
+	AcceleratorLaunchCount          *uint64                   `json:"accelerator_launch_count,omitempty"`
+	CapturedStepWallTimeUS          *float64                  `json:"captured_step_wall_time_us,omitempty"`
+	GPUActiveRatio                  *float64                  `json:"gpu_active_ratio,omitempty"`
+	GPUActiveTimeUS                 *float64                  `json:"gpu_active_time_us,omitempty"`
+	AllocatorBaselineAllocatedBytes *uint64                   `json:"allocator_baseline_allocated_bytes,omitempty"`
+	AllocatorBaselineReservedBytes  *uint64                   `json:"allocator_baseline_reserved_bytes,omitempty"`
+	AllocatorPeakAllocatedBytes     *uint64                   `json:"allocator_peak_allocated_bytes,omitempty"`
+	AllocatorPeakReservedBytes      *uint64                   `json:"allocator_peak_reserved_bytes,omitempty"`
 }
 
 type trainVMGPUTraceOptions struct {
@@ -154,6 +163,42 @@ func finiteNonnegative(value float64) bool {
 	return value >= 0 && value < 1.7976931348623157e+308
 }
 
+func validRichGPUTraceSummary(summary trainVMGPUTraceSummaryValues) bool {
+	present := []bool{
+		summary.AcceleratorLaunchCount != nil,
+		summary.CapturedStepWallTimeUS != nil,
+		summary.GPUActiveRatio != nil,
+		summary.GPUActiveTimeUS != nil,
+		summary.AllocatorBaselineAllocatedBytes != nil,
+		summary.AllocatorBaselineReservedBytes != nil,
+		summary.AllocatorPeakAllocatedBytes != nil,
+		summary.AllocatorPeakReservedBytes != nil,
+	}
+	count := 0
+	for _, value := range present {
+		if value {
+			count++
+		}
+	}
+	if count == 0 {
+		return true // Read legacy v1 summaries without inventing unavailable metrics.
+	}
+	if count != len(present) {
+		return false
+	}
+	expectedActiveRatio := *summary.GPUActiveTimeUS / *summary.CapturedStepWallTimeUS
+	return *summary.AcceleratorLaunchCount <= 1_000_000_000_000 &&
+		finiteNonnegative(*summary.CapturedStepWallTimeUS) && *summary.CapturedStepWallTimeUS > 0 &&
+		finiteNonnegative(*summary.GPUActiveTimeUS) &&
+		*summary.GPUActiveTimeUS <= *summary.CapturedStepWallTimeUS*1.000001 &&
+		finiteNonnegative(*summary.GPUActiveRatio) && *summary.GPUActiveRatio <= 1 &&
+		math.Abs(*summary.GPUActiveRatio-expectedActiveRatio) <= 0.000001 &&
+		*summary.AllocatorBaselineAllocatedBytes <= *summary.AllocatorBaselineReservedBytes &&
+		*summary.AllocatorPeakAllocatedBytes <= *summary.AllocatorPeakReservedBytes &&
+		*summary.AllocatorBaselineAllocatedBytes <= *summary.AllocatorPeakAllocatedBytes &&
+		*summary.AllocatorBaselineReservedBytes <= *summary.AllocatorPeakReservedBytes
+}
+
 func (s *Server) loadGPUTrace(artifact trainvmstore.PublishedArtifact) (trainVMGPUTraceManifest, string, error) {
 	var manifest trainVMGPUTraceManifest
 	manifestPath, err := fileURIPath(artifact.URI)
@@ -193,7 +238,8 @@ func (s *Server) loadGPUTrace(artifact trainvmstore.PublishedArtifact) (trainVMG
 		len(manifest.Activities) == 0 || len(manifest.Activities) > 2 ||
 		len(manifest.Summary.TopOperators) > trainVMGPUTraceMaxOperators ||
 		manifest.Summary.KernelOrOperatorCount < int64(len(manifest.Summary.TopOperators)) ||
-		!finiteNonnegative(manifest.Summary.CPUTimeUS) || !finiteNonnegative(manifest.Summary.AcceleratorTimeUS) {
+		!finiteNonnegative(manifest.Summary.CPUTimeUS) || !finiteNonnegative(manifest.Summary.AcceleratorTimeUS) ||
+		!validRichGPUTraceSummary(manifest.Summary) {
 		return trainVMGPUTraceManifest{}, "", fmt.Errorf("GPU trace manifest identity or bounds are invalid")
 	}
 	seenActivities := map[string]struct{}{}
