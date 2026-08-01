@@ -83,6 +83,10 @@ Implemented now:
 - model-family-neutral, operation-scoped declarations for compile, disposable warmup,
   qualification, bounded accelerator tracing, and CPU/I/O placement, with no arbitrary command or
   environment channel;
+- a bounded, versioned filesystem `AF_UNIX` `SOCK_SEQPACKET` status transport with canonical JSON,
+  SHA-256 payload framing, exact correlation, `SO_PEERCRED` plus per-packet `SCM_CREDENTIALS`,
+  deadline-bounded I/O, descriptor-delegation rejection, protected endpoint identity, and truthful
+  sealed/auditing/admitting/poisoned lifecycle reporting;
 - a canonical, explicitly untrusted compiler/JIT namespace-claim format covering
   adapter/code/executable fingerprints, compute compatibility and optional placement, host ABI,
   driver/runtime closure, compiler configuration, and compile inputs. Cache reuse remains disabled
@@ -98,10 +102,13 @@ process-free host coordinator, and the hash-chained journal/host grant-and-relea
 implemented libraries. Production launch preparation requires an exact, live durable host grant and
 binds its request identity, receipt digest, and physical fences into the worker ticket and resolved
 launch identity; process-free unit fixtures can opt into a visibly test-only legacy mode. No service
-RPC can yet mutate host authority. The next boundary is the filesystem `SOCK_SEQPACKET` hostd
-singleton, startup orphan audit wiring, guarded launcher, cgroup cleanup, process-instance
-credentials, and durable spawn/exit receipts. Real trainer process ownership follows only after
-those fault-injection tests pass.
+RPC can yet mutate host authority. The status-only filesystem `SOCK_SEQPACKET` boundary is
+implemented at an explicitly cooperative enforcement grade: it proves framing, endpoint identity,
+and UID/GID credentials, but does not claim hostile same-UID isolation or grant, release, launch, or
+signal authority. The next boundary is durable startup orphan-audit wiring and real accelerator
+inventory, followed by a guarded launcher, cgroup cleanup, process-instance credentials, and
+durable spawn/exit receipts. Real trainer process ownership follows only after those fault-injection
+tests pass.
 
 MageFlow is only the first recovery fixture. The runtime is not a MageFlow-specific launcher: RWKV,
 transformer, vision/multimodal, conversion, distillation, post-training, RLVR, external-trainer, and

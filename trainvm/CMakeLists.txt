@@ -60,6 +60,7 @@ add_library(trainvm_core
   src/host_ledger.cpp
   src/host_ledger_authority.cpp
   src/hostd.cpp
+  src/hostd_transport.cpp
   src/host_launch.cpp
   src/host_launch_registry.cpp
   src/host_resources.cpp
@@ -160,6 +161,12 @@ target_compile_options(hostd_tests PRIVATE
 )
 target_link_libraries(hostd_tests PRIVATE trainvm_core)
 add_test(NAME hostd_tests COMMAND hostd_tests)
+add_executable(hostd_transport_tests tests/hostd_transport_tests.cpp)
+target_compile_options(hostd_transport_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(hostd_transport_tests PRIVATE trainvm_core)
+add_test(NAME hostd_transport_tests COMMAND hostd_transport_tests)
 
 get_target_property(TRAINVM_SERVICE_LINKS trainvm_service LINK_LIBRARIES)
 if("trainvm_compatibility_catalog" IN_LIST TRAINVM_SERVICE_LINKS)
