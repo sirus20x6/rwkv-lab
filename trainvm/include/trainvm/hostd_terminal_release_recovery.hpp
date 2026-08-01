@@ -67,6 +67,7 @@ struct HostdTerminalReleaseRecoverySummary final {
   std::size_t intent_only_records{};
   std::size_t intent_cgroups_removed{};
   std::size_t intent_cgroups_already_absent{};
+  std::size_t intent_terminations_pending{};
   std::size_t allocations_released{};
   std::size_t release_replays{};
   std::size_t allocations_blocked_by_unclosed_process{};

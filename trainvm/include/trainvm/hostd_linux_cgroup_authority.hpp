@@ -30,6 +30,7 @@ struct LinuxAllocationCgroupIdentity final {
 enum class LinuxTerminalCgroupCleanupDisposition {
   removed,
   already_absent,
+  termination_pending,
 };
 
 class LinuxCgroupAuthorityError final : public std::runtime_error {
@@ -90,6 +91,15 @@ class LinuxCgroupAuthority final {
   // and be twice empty before removal.
   [[nodiscard]] LinuxTerminalCgroupCleanupDisposition
   cleanup_terminal_or_confirm_absent(
+      const std::string& allocation_id, const std::string& launch_id,
+      const LinuxAllocationCgroupIdentity& expected) const;
+  // Intent-only recovery has no durable PID identity. The exact private
+  // cgroup is therefore the sole kill boundary: cgroup.kill terminates every
+  // possible pre-receipt descendant, and removal succeeds only after two
+  // empty observations. A pending result is retryable and never authorizes
+  // grant release.
+  [[nodiscard]] LinuxTerminalCgroupCleanupDisposition
+  terminate_intent_or_confirm_absent(
       const std::string& allocation_id, const std::string& launch_id,
       const LinuxAllocationCgroupIdentity& expected) const;
 

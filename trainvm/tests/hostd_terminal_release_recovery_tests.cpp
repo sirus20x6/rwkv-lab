@@ -118,6 +118,7 @@ void resumes_cleanup_and_releases_only_closed_allocations() {
                          .intent_only_records = 2U,
                          .intent_cgroups_removed = 1U,
                          .intent_cgroups_already_absent = 1U,
+                         .intent_terminations_pending = 0U,
                          .allocations_released = 3U,
                          .release_replays = 0U,
                          .allocations_blocked_by_unclosed_process = 1U,
@@ -128,6 +129,33 @@ void resumes_cleanup_and_releases_only_closed_allocations() {
               cleaner.cleaned.size() == 4U &&
               cleaner.cleaned_intents.size() == 2U,
           "terminal cleanup resumes idempotently without releasing live sibling");
+}
+
+void intent_only_kill_is_retried_before_grant_release() {
+  FakeAuthority authority;
+  authority.unclosed.push_back(
+      unclosed_record("allocation-pending", "launch-pending", false));
+  FakeCleaner cleaner;
+  cleaner.intent_dispositions = {
+      LinuxTerminalCgroupCleanupDisposition::termination_pending,
+      LinuxTerminalCgroupCleanupDisposition::removed,
+  };
+  HostdTerminalReleaseRecovery recovery(authority, cleaner);
+  const auto pending = recovery.recover();
+  require(pending.intent_only_records == 1U &&
+              pending.intent_terminations_pending == 1U &&
+              pending.allocations_released == 0U &&
+              pending.allocations_blocked_by_unclosed_process == 1U &&
+              authority.released.empty(),
+          "an intent-only descendant blocks grant release until cgroup.kill "
+          "has drained it");
+  const auto removed = recovery.recover();
+  require(removed.intent_cgroups_removed == 1U &&
+              removed.intent_terminations_pending == 0U &&
+              removed.allocations_released == 1U &&
+              authority.released ==
+                  std::vector<std::string>{"allocation-pending"},
+          "a later empty observation removes the cgroup before grant release");
 }
 
 void inconsistent_terminal_shape_fails_before_cleanup() {
@@ -158,6 +186,7 @@ void inconsistent_terminal_shape_fails_before_cleanup() {
 int main() {
   try {
     resumes_cleanup_and_releases_only_closed_allocations();
+    intent_only_kill_is_retried_before_grant_release();
     inconsistent_terminal_shape_fails_before_cleanup();
     std::cout << "hostd terminal release recovery tests passed\n";
     return 0;

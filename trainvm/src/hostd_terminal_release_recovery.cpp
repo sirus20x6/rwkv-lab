@@ -56,7 +56,7 @@ LinuxTerminalCgroupCleanupDisposition
 LinuxHostdTerminalCgroupCleaner::cleanup_intent(
     const HostProcessRecoveryRecord& record) {
   const auto& request = record.intent.request;
-  return cgroups_.cleanup_terminal_or_confirm_absent(
+  return cgroups_.terminate_intent_or_confirm_absent(
       record.grant.allocation_id, request.launch_id,
       {.unified_path = request.cgroup_path,
        .device = request.cgroup_device,
@@ -138,6 +138,8 @@ HostdTerminalReleaseRecovery::recover() {
       case LinuxTerminalCgroupCleanupDisposition::already_absent:
         ++summary.cgroups_already_absent;
         break;
+      case LinuxTerminalCgroupCleanupDisposition::termination_pending:
+        reject("terminal cgroup unexpectedly requires process termination");
     }
   }
   summary.intent_only_records = intent_only.size();
@@ -148,6 +150,10 @@ HostdTerminalReleaseRecovery::recover() {
         break;
       case LinuxTerminalCgroupCleanupDisposition::already_absent:
         ++summary.intent_cgroups_already_absent;
+        break;
+      case LinuxTerminalCgroupCleanupDisposition::termination_pending:
+        ++summary.intent_terminations_pending;
+        blocked_allocations.insert(record->grant.allocation_id);
         break;
     }
   }

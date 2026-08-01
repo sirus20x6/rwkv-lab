@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <linux/magic.h>
 #include <linux/openat2.h>
+#include <optional>
 #include <string_view>
 #include <sys/stat.h>
 #include <sys/statfs.h>
@@ -88,6 +89,63 @@ bool cgroup_is_empty(int descriptor) {
   errno = saved_errno;
   if (count < 0) reject(system_error("could not read cgroup membership"));
   return count == 0;
+}
+
+bool cgroup_is_populated(int descriptor) {
+  const int file =
+      ::openat(descriptor, "cgroup.events", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  if (file < 0) reject(system_error("could not inspect cgroup events"));
+  std::array<char, 512U> bytes{};
+  std::string value;
+  ssize_t count = 0;
+  while (value.size() < bytes.size()) {
+    do {
+      count = ::read(file, bytes.data(), bytes.size() - value.size());
+    } while (count < 0 && errno == EINTR);
+    if (count <= 0) break;
+    value.append(bytes.data(), static_cast<std::size_t>(count));
+  }
+  const int saved_errno = errno;
+  (void)::close(file);
+  errno = saved_errno;
+  if (count < 0) reject(system_error("could not read cgroup events"));
+  if (value.size() == bytes.size()) {
+    reject("cgroup events exceed their audit bound");
+  }
+  constexpr std::string_view prefix = "populated ";
+  std::optional<bool> populated;
+  std::size_t begin = 0U;
+  while (begin < value.size()) {
+    const std::size_t end = value.find('\n', begin);
+    const std::string_view line(
+        value.data() + begin,
+        (end == std::string::npos ? value.size() : end) - begin);
+    if (line.starts_with(prefix)) {
+      if (populated ||
+          (line != "populated 0" && line != "populated 1")) {
+        reject("cgroup populated event is malformed or duplicate");
+      }
+      populated = line == "populated 1";
+    }
+    if (end == std::string::npos) break;
+    begin = end + 1U;
+  }
+  if (!populated) reject("cgroup events omit populated state");
+  return *populated;
+}
+
+void kill_cgroup(int descriptor) {
+  const int file =
+      ::openat(descriptor, "cgroup.kill", O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+  if (file < 0) reject(system_error("could not open cgroup kill authority"));
+  ssize_t count = 0;
+  do {
+    count = ::write(file, "1", 1U);
+  } while (count < 0 && errno == EINTR);
+  const int saved_errno = errno;
+  (void)::close(file);
+  errno = saved_errno;
+  if (count != 1) reject(system_error("could not terminate intent cgroup"));
 }
 
 std::string cgroup_name(const std::string& allocation_id,
@@ -344,6 +402,55 @@ LinuxCgroupAuthority::cleanup_terminal_or_confirm_absent(
   }
   if (::unlinkat(implementation_->root, name.c_str(), AT_REMOVEDIR) != 0) {
     reject(system_error("could not remove terminal recovery cgroup"));
+  }
+  return LinuxTerminalCgroupCleanupDisposition::removed;
+}
+
+LinuxTerminalCgroupCleanupDisposition
+LinuxCgroupAuthority::terminate_intent_or_confirm_absent(
+    const std::string& allocation_id, const std::string& launch_id,
+    const LinuxAllocationCgroupIdentity& expected) const {
+  implementation_->reattest();
+  const std::string name = cgroup_name(allocation_id, launch_id);
+  struct open_how how {};
+  how.flags = O_PATH | O_DIRECTORY | O_CLOEXEC;
+  how.resolve = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS |
+                RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV;
+  const long opened = ::syscall(SYS_openat2, implementation_->root,
+                                name.c_str(), &how, sizeof(how));
+  if (opened < 0) {
+    if (errno == ENOENT)
+      return LinuxTerminalCgroupCleanupDisposition::already_absent;
+    reject(system_error("could not pin intent recovery cgroup"));
+  }
+  const int descriptor = static_cast<int>(opened);
+  struct Close final {
+    int value;
+    ~Close() {
+      if (value >= 0) (void)::close(value);
+    }
+  } close{descriptor};
+  const std::string unified_path =
+      implementation_->config.root_unified_path == "/"
+          ? "/" + name
+          : implementation_->config.root_unified_path + "/" + name;
+  const LinuxAllocationCgroupIdentity identity = identity_of(
+      descriptor, unified_path, implementation_->config.expected_owner_uid,
+      implementation_->config.expected_owner_gid);
+  if (identity != expected) {
+    reject("intent recovery cgroup differs from durable launch evidence");
+  }
+  // This is deliberately unconditional: cgroup.procs lists only direct
+  // members, while cgroup.kill covers the complete descendant subtree.
+  kill_cgroup(descriptor);
+  if (cgroup_is_populated(descriptor) || cgroup_is_populated(descriptor)) {
+    return LinuxTerminalCgroupCleanupDisposition::termination_pending;
+  }
+  if (::unlinkat(implementation_->root, name.c_str(), AT_REMOVEDIR) != 0) {
+    if (errno == EBUSY || errno == ENOTEMPTY) {
+      return LinuxTerminalCgroupCleanupDisposition::termination_pending;
+    }
+    reject(system_error("could not remove intent recovery cgroup"));
   }
   return LinuxTerminalCgroupCleanupDisposition::removed;
 }
