@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include "trainvm/authority_time.hpp"
 #include "trainvm/host_ledger.hpp"
@@ -37,12 +38,15 @@ class HostdConfiguredStartupAuditor final
   [[nodiscard]] const LinuxProcessRecoverySet& process_recovery() const
       noexcept;
   [[nodiscard]] LinuxProcessRecoverySet& process_recovery() noexcept;
+  [[nodiscard]] const std::vector<HostProcessTerminalReleaseRecord>&
+  terminal_process_releases() const noexcept;
 
  private:
   SQLiteHostLedger& ledger_;
   AuthorityClock& clock_;
   HostdConfiguredStartupAuditorConfig config_;
   LinuxProcessRecoverySet process_recovery_;
+  std::vector<HostProcessTerminalReleaseRecord> terminal_process_releases_;
 };
 
 }  // namespace trainvm

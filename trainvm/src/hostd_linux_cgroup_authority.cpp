@@ -307,6 +307,47 @@ LinuxAllocationCgroup LinuxCgroupAuthority::open_existing_for_recovery(
   }
 }
 
+LinuxTerminalCgroupCleanupDisposition
+LinuxCgroupAuthority::cleanup_terminal_or_confirm_absent(
+    const std::string& allocation_id, const std::string& launch_id,
+    const LinuxAllocationCgroupIdentity& expected) const {
+  implementation_->reattest();
+  const std::string name = cgroup_name(allocation_id, launch_id);
+  struct open_how how {};
+  how.flags = O_PATH | O_DIRECTORY | O_CLOEXEC;
+  how.resolve = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS |
+                RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV;
+  const long opened = ::syscall(SYS_openat2, implementation_->root,
+                                name.c_str(), &how, sizeof(how));
+  if (opened < 0) {
+    if (errno == ENOENT)
+      return LinuxTerminalCgroupCleanupDisposition::already_absent;
+    reject(system_error("could not pin terminal recovery cgroup"));
+  }
+  const int descriptor = static_cast<int>(opened);
+  struct Close final {
+    int value;
+    ~Close() {
+      if (value >= 0) (void)::close(value);
+    }
+  } close{descriptor};
+  const std::string unified_path =
+      implementation_->config.root_unified_path == "/"
+          ? "/" + name
+          : implementation_->config.root_unified_path + "/" + name;
+  const LinuxAllocationCgroupIdentity identity = identity_of(
+      descriptor, unified_path, implementation_->config.expected_owner_uid,
+      implementation_->config.expected_owner_gid);
+  if (identity != expected || !cgroup_is_empty(descriptor) ||
+      !cgroup_is_empty(descriptor)) {
+    reject("terminal recovery cgroup is mismatched or nonempty");
+  }
+  if (::unlinkat(implementation_->root, name.c_str(), AT_REMOVEDIR) != 0) {
+    reject(system_error("could not remove terminal recovery cgroup"));
+  }
+  return LinuxTerminalCgroupCleanupDisposition::removed;
+}
+
 namespace hostd_linux_cgroup_authority_test_seam {
 
 std::string allocation_cgroup_name(const std::string& allocation_id,

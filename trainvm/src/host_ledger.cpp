@@ -4204,6 +4204,90 @@ SQLiteHostLedger::active_process_recovery_records(
   return result;
 }
 
+std::vector<HostProcessTerminalReleaseRecord>
+SQLiteHostLedger::active_terminal_process_release_records(
+    std::size_t maximum_records) const {
+  if (maximum_records == 0U ||
+      maximum_records > HostResourceBounds::maximum_active_fences) {
+    throw HostLedgerError("terminal process release record bound is invalid");
+  }
+  std::scoped_lock lock(implementation_->mutex);
+  std::string reason;
+  if (!implementation_->verify_unlocked(&reason)) {
+    throw HostLedgerError("refusing terminal process release read: " + reason);
+  }
+  Statement records(implementation_->database, R"sql(
+    SELECT outcome.canonical_outcome_json, intent.canonical_intent_json,
+           spawn.canonical_receipt_json, terminal.canonical_receipt_json,
+           recovered.canonical_receipt_json
+    FROM process_launch_intents AS intent
+    JOIN allocations AS allocation
+      ON allocation.allocation_id=intent.allocation_id
+    JOIN request_outcomes AS outcome
+      ON outcome.request_id=allocation.request_id
+    JOIN process_spawns AS spawn USING(launch_id)
+    LEFT JOIN process_exits AS terminal USING(launch_id)
+    LEFT JOIN process_recovery_exits AS recovered USING(launch_id)
+    WHERE allocation.status='active' AND
+          ((terminal.launch_id IS NOT NULL AND recovered.launch_id IS NULL) OR
+           (terminal.launch_id IS NULL AND recovered.launch_id IS NOT NULL))
+    ORDER BY intent.launch_id
+    LIMIT ?
+  )sql");
+  bind_integer(records.get(), 1,
+               checked_integer(maximum_records + 1U,
+                               "terminal process release record limit"));
+  std::vector<HostProcessTerminalReleaseRecord> result;
+  int status = SQLITE_ROW;
+  while ((status = sqlite3_step(records.get())) == SQLITE_ROW) {
+    if (result.size() == maximum_records) {
+      throw HostLedgerError(
+          "terminal process release records exceed their bound");
+    }
+    const ResourceBundleGrant grant = resource_bundle_grant_from_json(
+        nlohmann::json::parse(column_text(records.get(), 0)));
+    const HostProcessLaunchIntent intent =
+        host_process_launch_intent_from_json(
+            nlohmann::json::parse(column_text(records.get(), 1)));
+    const HostProcessSpawnReceipt spawn = host_process_spawn_receipt_from_json(
+        nlohmann::json::parse(column_text(records.get(), 2)));
+    std::optional<HostProcessExitReceipt> child_exit;
+    std::optional<HostProcessRecoveryExitReceipt> recovery_exit;
+    if (sqlite3_column_type(records.get(), 3) != SQLITE_NULL) {
+      child_exit = host_process_exit_receipt_from_json(
+          nlohmann::json::parse(column_text(records.get(), 3)));
+    }
+    if (sqlite3_column_type(records.get(), 4) != SQLITE_NULL) {
+      recovery_exit = host_process_recovery_exit_receipt_from_json(
+          nlohmann::json::parse(column_text(records.get(), 4)));
+    }
+    if (intent.request.allocation_id != grant.allocation_id ||
+        intent.request.grant_digest != grant.receipt_digest ||
+        spawn.request.launch_id != intent.request.launch_id ||
+        spawn.request.launch_intent_digest != intent.receipt_digest ||
+        child_exit.has_value() == recovery_exit.has_value() ||
+        (child_exit &&
+         (child_exit->request.launch_id != spawn.request.launch_id ||
+          child_exit->request.spawn_receipt_digest != spawn.receipt_digest)) ||
+        (recovery_exit &&
+         (recovery_exit->request.launch_id != spawn.request.launch_id ||
+          recovery_exit->request.spawn_receipt_digest !=
+              spawn.receipt_digest))) {
+      throw HostLedgerError(
+          "terminal process release evidence binding is inconsistent");
+    }
+    result.push_back({.grant = grant,
+                      .intent = intent,
+                      .spawn = spawn,
+                      .child_exit = std::move(child_exit),
+                      .recovery_exit = std::move(recovery_exit)});
+  }
+  if (status != SQLITE_DONE) {
+    throw HostLedgerError("terminal process release record query failed");
+  }
+  return result;
+}
+
 HostLedgerChainHead SQLiteHostLedger::chain_head() const {
   std::scoped_lock lock(implementation_->mutex);
   Transaction transaction(implementation_->database);

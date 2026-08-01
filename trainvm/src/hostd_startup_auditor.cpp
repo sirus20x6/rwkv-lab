@@ -44,10 +44,16 @@ HostStartupAuditFinding active_fence_finding(std::size_t count,
                                              std::size_t gone,
                                              std::size_t mismatch,
                                              std::size_t failed,
-                                             std::size_t intent_only) {
+                                             std::size_t intent_only,
+                                             std::size_t terminal_pending) {
+  const bool terminal_cleanup_only = terminal_pending > 0U &&
+                                     exact_live == 0U && gone == 0U &&
+                                     mismatch == 0U && failed == 0U &&
+                                     intent_only == 0U;
   return canonicalize_host_startup_audit_finding({
       .severity = HostStartupAuditFindingSeverity::blocking,
-      .code = "process-adoption-required",
+      .code = terminal_cleanup_only ? "terminal-process-release-required"
+                                    : "process-adoption-required",
       .subject = "host-ledger",
       .detail =
           "startup found " + std::to_string(count) +
@@ -56,7 +62,11 @@ HostStartupAuditFinding active_fence_finding(std::size_t count,
           ", mismatch=" + std::to_string(mismatch) +
           ", observation_failed=" + std::to_string(failed) +
           ", intent_only=" + std::to_string(intent_only) +
-          "; durable process adoption is required",
+          ", terminal_pending_release=" +
+          std::to_string(terminal_pending) +
+          (terminal_cleanup_only
+               ? "; durable cgroup cleanup and bundle release are required"
+               : "; durable process adoption is required"),
       .evidence_digest = {},
   });
 }
@@ -85,6 +95,8 @@ HostStartupAuditReport HostdConfiguredStartupAuditor::audit() {
   const ResourceOccupancySnapshot occupancy_before = ledger_.occupancy();
   std::vector<HostProcessRecoveryRecord> recovery =
       ledger_.active_process_recovery_records();
+  terminal_process_releases_ =
+      ledger_.active_terminal_process_release_records();
 
   std::vector<HostStartupAuditFinding> findings;
   if (!occupancy_before.active_fences.empty()) {
@@ -94,7 +106,8 @@ HostStartupAuditReport HostdConfiguredStartupAuditor::audit() {
     findings.push_back(active_fence_finding(
         occupancy_before.active_fences.size(), summary.exact_live,
         summary.already_gone, summary.identity_mismatch,
-        summary.observation_failed, summary.intent_only));
+        summary.observation_failed, summary.intent_only,
+        terminal_process_releases_.size()));
   } else {
     LinuxProcessRecoveryProbe probe;
     process_recovery_.recover({}, probe);
@@ -147,6 +160,11 @@ HostdConfiguredStartupAuditor::process_recovery() const noexcept {
 LinuxProcessRecoverySet& HostdConfiguredStartupAuditor::process_recovery()
     noexcept {
   return process_recovery_;
+}
+
+const std::vector<HostProcessTerminalReleaseRecord>&
+HostdConfiguredStartupAuditor::terminal_process_releases() const noexcept {
+  return terminal_process_releases_;
 }
 
 }  // namespace trainvm

@@ -27,6 +27,11 @@ struct LinuxAllocationCgroupIdentity final {
   bool operator==(const LinuxAllocationCgroupIdentity&) const = default;
 };
 
+enum class LinuxTerminalCgroupCleanupDisposition {
+  removed,
+  already_absent,
+};
+
 class LinuxCgroupAuthorityError final : public std::runtime_error {
  public:
   using std::runtime_error::runtime_error;
@@ -78,6 +83,13 @@ class LinuxCgroupAuthority final {
   // open_or_create(), a nonempty cgroup is expected while a recovered worker
   // is still live.
   [[nodiscard]] LinuxAllocationCgroup open_existing_for_recovery(
+      const std::string& allocation_id, const std::string& launch_id,
+      const LinuxAllocationCgroupIdentity& expected) const;
+  // Terminal-receipt restart cleanup. An absent deterministic directory is an
+  // idempotent success; an existing directory must match the durable identity
+  // and be twice empty before removal.
+  [[nodiscard]] LinuxTerminalCgroupCleanupDisposition
+  cleanup_terminal_or_confirm_absent(
       const std::string& allocation_id, const std::string& launch_id,
       const LinuxAllocationCgroupIdentity& expected) const;
 

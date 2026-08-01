@@ -326,6 +326,19 @@ struct HostProcessRecoveryRecord final {
   bool operator==(const HostProcessRecoveryRecord&) const = default;
 };
 
+// Exact active-allocation evidence for a process whose terminal receipt is
+// durable but whose cgroup cleanup and bundle release may have been interrupted.
+// Exactly one terminal receipt is present.
+struct HostProcessTerminalReleaseRecord final {
+  ResourceBundleGrant grant;
+  HostProcessLaunchIntent intent;
+  HostProcessSpawnReceipt spawn;
+  std::optional<HostProcessExitReceipt> child_exit;
+  std::optional<HostProcessRecoveryExitReceipt> recovery_exit;
+
+  bool operator==(const HostProcessTerminalReleaseRecord&) const = default;
+};
+
 enum class HostLedgerFaultPoint {
   after_startup_audit_migration_schema,
   after_startup_audit_record,
@@ -418,6 +431,10 @@ class SQLiteHostLedger final {
       const HostLedgerTime& now);
   [[nodiscard]] std::vector<HostProcessRecoveryRecord>
   active_process_recovery_records(
+      std::size_t maximum_records =
+          HostResourceBounds::maximum_active_fences) const;
+  [[nodiscard]] std::vector<HostProcessTerminalReleaseRecord>
+  active_terminal_process_release_records(
       std::size_t maximum_records =
           HostResourceBounds::maximum_active_fences) const;
   [[nodiscard]] HostLedgerChainHead chain_head() const;

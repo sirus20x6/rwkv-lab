@@ -630,11 +630,23 @@ void process_authority_is_durable_and_replay_safe() {
             "terminal process exit commits once and exactly replays");
     require(ledger.active_process_recovery_records().empty(),
             "terminal process disappears from the recovery view");
+    const auto terminal_release =
+        ledger.active_terminal_process_release_records();
+    require(terminal_release.size() == 1U &&
+                terminal_release.front().grant == *bundle.grant &&
+                terminal_release.front().spawn == receipt.receipt &&
+                terminal_release.front().child_exit == exited.receipt &&
+                !terminal_release.front().recovery_exit,
+            "ordinary terminal process remains visible until bundle release");
+    require_throws<HostLedgerError>(
+        [&] { (void)ledger.active_terminal_process_release_records(0U); },
+        "terminal release view rejects an unusable bound");
     require(!ledger.release_bundle(
                         release_request(*bundle.grant, "release-after-exit"),
                         {90, 100})
                  .replayed &&
-                ledger.verify(),
+                ledger.verify() &&
+                ledger.active_terminal_process_release_records().empty(),
             "terminal process authority permits exact bundle release");
     auto incomplete = terminal;
     incomplete.cgroup_empty = false;
@@ -666,6 +678,12 @@ void process_authority_is_durable_and_replay_safe() {
                 exited.receipt == replayed.receipt && ledger.verify() &&
                 ledger.active_process_recovery_records().empty(),
             "recovery terminal receipt commits once and closes recovery view");
+    const auto terminal_release =
+        ledger.active_terminal_process_release_records();
+    require(terminal_release.size() == 1U &&
+                !terminal_release.front().child_exit &&
+                terminal_release.front().recovery_exit == exited.receipt,
+            "recovery terminal process remains visible until bundle release");
     require(host_process_recovery_exit_receipt_from_json(
                 host_process_recovery_exit_receipt_json(exited.receipt)) ==
                 exited.receipt,
@@ -682,7 +700,8 @@ void process_authority_is_durable_and_replay_safe() {
                                         "release-after-recovery-exit"),
                         {90, 100})
                  .replayed &&
-                ledger.verify(),
+                ledger.verify() &&
+                ledger.active_terminal_process_release_records().empty(),
             "recovery terminal authority permits exact bundle release");
     auto incomplete = terminal;
     incomplete.cgroup_empty = false;
@@ -709,6 +728,9 @@ void process_authority_is_durable_and_replay_safe() {
         launch_request(*bundle.grant, "multi-spawn-second"), {81, 82});
     const auto second_spawn = ledger.commit_process_spawn(
         spawn_request(second_intent.intent, 5042), {83, 84});
+    require(ledger.active_terminal_process_release_records().size() == 1U &&
+                ledger.active_process_recovery_records().size() == 1U,
+            "restart views distinguish closed and unclosed sibling launches");
     require_throws<HostLedgerConflict>(
         [&] {
           (void)ledger.release_bundle(
@@ -720,12 +742,16 @@ void process_authority_is_durable_and_replay_safe() {
         recovery_exit_request(second_spawn.receipt,
                               "multi-spawn-second-exit"),
         {92, 93});
+    require(ledger.active_terminal_process_release_records().size() == 2U &&
+                ledger.active_process_recovery_records().empty(),
+            "every closed sibling remains available for cleanup replay");
     require(!ledger.release_bundle(
                         release_request(*bundle.grant,
                                         "multi-spawn-complete-release"),
                         {94, 95})
                  .replayed &&
-                ledger.verify(),
+                ledger.verify() &&
+                ledger.active_terminal_process_release_records().empty(),
             "every spawned launch must close before allocation release");
   }
 
