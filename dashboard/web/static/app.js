@@ -585,6 +585,8 @@
   let vmGallerySignature = "";
   let vmGalleryLoadGeneration = 0;
   let vmProfileSignature = "";
+  let vmProfiles = [];
+  let vmProfileBaseline = "";
   let vmBusy = false;
   let vmSelectedRun = null;
   let vmControlView = null;
@@ -695,6 +697,8 @@
 
   function resetVMProfiles(runID = "") {
     vmProfileSignature = "";
+    vmProfiles = [];
+    vmProfileBaseline = "";
     const state = document.getElementById("vm-profile-state");
     const items = document.getElementById("vm-profile-items");
     if (state) state.textContent = "no published traces";
@@ -722,19 +726,51 @@
     return `${scaled.toFixed(unit === 0 ? 0 : 2)} ${units[unit]}`;
   }
 
+  function vmProfileHasRichSummary(profile) {
+    const summary = profile?.summary || {};
+    return ["accelerator_launch_count", "captured_step_wall_time_us", "gpu_active_ratio", "gpu_active_time_us", "allocator_peak_allocated_bytes", "allocator_peak_reserved_bytes"]
+      .every((field) => Number.isFinite(Number(summary[field])) && Number(summary[field]) >= 0) &&
+      Number(profile?.capture_steps) > 0;
+  }
+
+  function vmProfilesComparable(profile, baseline) {
+    if (!vmProfileHasRichSummary(profile) || !vmProfileHasRichSummary(baseline)) return false;
+    return profile.node_id === baseline.node_id &&
+      profile.backend === baseline.backend &&
+      Number(profile.capture_steps) === Number(baseline.capture_steps) &&
+      Number(profile.skip_steps) === Number(baseline.skip_steps) &&
+      Number(profile.warmup_steps) === Number(baseline.warmup_steps) &&
+      JSON.stringify(profile.activities || []) === JSON.stringify(baseline.activities || []) &&
+      JSON.stringify(profile.options || {}) === JSON.stringify(baseline.options || {});
+  }
+
+  function vmSignedPercent(current, baseline) {
+    current = Number(current);
+    baseline = Number(baseline);
+    if (!Number.isFinite(current) || !Number.isFinite(baseline) || baseline === 0) return "—";
+    const delta = ((current / baseline) - 1) * 100;
+    return `${delta > 0 ? "+" : ""}${delta.toFixed(1)}%`;
+  }
+
+  function vmSignedPoints(current, baseline) {
+    const delta = (Number(current) - Number(baseline)) * 100;
+    if (!Number.isFinite(delta)) return "—";
+    return `${delta > 0 ? "+" : ""}${delta.toFixed(1)} pp`;
+  }
+
   function renderVMProfiles(profiles) {
     const state = document.getElementById("vm-profile-state");
     const target = document.getElementById("vm-profile-items");
+    const baseline = profiles.find((profile) => profile.artifact_id === vmProfileBaseline);
     if (state) state.textContent = profiles.length ?
-      `${profiles.length} restricted trace${profiles.length === 1 ? "" : "s"} · explicit download only` :
+      `${profiles.length} restricted trace${profiles.length === 1 ? "" : "s"} · ${baseline ? "baseline selected" : "choose a baseline"} · explicit download only` :
       "no published traces";
     if (!target) return;
     target.innerHTML = profiles.map((profile) => {
       const summary = profile.summary || {};
       const operators = Array.isArray(summary.top_operators) ? summary.top_operators.slice(0, 5) : [];
       const windowLabel = `${Number(profile.first_optimizer_step || 0).toLocaleString()}–${Number(profile.last_optimizer_step || 0).toLocaleString()}`;
-      const richSummary = ["accelerator_launch_count", "captured_step_wall_time_us", "gpu_active_ratio", "gpu_active_time_us", "allocator_peak_allocated_bytes", "allocator_peak_reserved_bytes"]
-        .every((field) => Number.isFinite(Number(summary[field])) && Number(summary[field]) >= 0);
+      const richSummary = vmProfileHasRichSummary(profile);
       const facts = [
         ["accelerator op time", vmDurationUS(summary.accelerator_time_us)],
         ["CPU op time", vmDurationUS(summary.cpu_time_us)],
@@ -749,7 +785,20 @@
           ["peak reserved", vmBytes(summary.allocator_peak_reserved_bytes)],
         );
       }
-      return `<article class="vm-profile-card">` +
+      let comparison = "";
+      if (baseline && profile.artifact_id === baseline.artifact_id) {
+        comparison = '<div class="vm-profile-comparison"><strong>comparison baseline</strong><span>other compatible windows are normalized against this trace</span></div>';
+      } else if (baseline && vmProfilesComparable(profile, baseline)) {
+        const baseSummary = baseline.summary || {};
+        comparison = `<div class="vm-profile-comparison"><strong>Δ from steps ${Number(baseline.first_optimizer_step).toLocaleString()}–${Number(baseline.last_optimizer_step).toLocaleString()}</strong>` +
+          `<span>wall/step ${vmEscape(vmSignedPercent(Number(summary.captured_step_wall_time_us) / Number(profile.capture_steps), Number(baseSummary.captured_step_wall_time_us) / Number(baseline.capture_steps)))}</span>` +
+          `<span>GPU active ${vmEscape(vmSignedPoints(summary.gpu_active_ratio, baseSummary.gpu_active_ratio))}</span>` +
+          `<span>launches/step ${vmEscape(vmSignedPercent(Number(summary.accelerator_launch_count) / Number(profile.capture_steps), Number(baseSummary.accelerator_launch_count) / Number(baseline.capture_steps)))}</span>` +
+          `<span>peak allocated ${vmEscape(vmSignedPercent(summary.allocator_peak_allocated_bytes, baseSummary.allocator_peak_allocated_bytes))}</span></div>`;
+      } else if (baseline) {
+        comparison = '<div class="vm-profile-comparison incompatible"><strong>not comparable</strong><span>node, backend, schedule, activities, or profiler options differ</span></div>';
+      }
+      return `<article class="vm-profile-card${baseline && profile.artifact_id === baseline.artifact_id ? " baseline" : ""}">` +
         `<div class="vm-profile-head"><strong title="${vmEscape(profile.artifact_id)}">${vmEscape(profile.backend)} · steps ${vmEscape(windowLabel)}</strong><span>#${Number(profile.sequence || 0).toLocaleString()}</span></div>` +
         `<div class="vm-profile-facts">${facts.map(([label, value]) =>
           `<div class="vm-profile-fact"><span>${vmEscape(label)}</span><strong>${vmEscape(value)}</strong></div>`
@@ -757,10 +806,18 @@
         `<div class="vm-profile-operators">${operators.map((operator) =>
           `<div class="vm-profile-operator"><span title="${vmEscape(operator.name)}">${vmEscape(operator.name)}</span><span>${Number(operator.calls || 0).toLocaleString()}×</span><span>${vmEscape(vmDurationUS(operator.accelerator_time_us))}</span></div>`
         ).join("") || '<span class="vm-profile-meta">no operator rows in summary</span>'}</div>` +
+        comparison +
         `<div class="vm-profile-meta">${vmEscape(profile.attempt_id)} · ${Number(profile.capture_steps || 0)} captured · ${Number(profile.skip_steps || 0)} skipped · ${Number(profile.warmup_steps || 0)} warmup</div>` +
+        `<button type="button" class="vm-profile-baseline" data-artifact="${vmEscape(profile.artifact_id)}" aria-pressed="${baseline && profile.artifact_id === baseline.artifact_id ? "true" : "false"}" ${richSummary ? "" : "disabled"}>${baseline && profile.artifact_id === baseline.artifact_id ? "selected baseline" : "use as comparison baseline"}</button>` +
         `<a class="vm-profile-download" href="${vmEscape(profile.trace_download_url)}" download>download restricted Chrome trace</a>` +
       `</article>`;
     }).join("") || '<div class="empty">no bounded GPU traces published yet</div>';
+    target.querySelectorAll(".vm-profile-baseline").forEach((button) => {
+      button.addEventListener("click", () => {
+        vmProfileBaseline = button.dataset.artifact || "";
+        renderVMProfiles(vmProfiles);
+      });
+    });
   }
 
   async function refreshVMProfiles(force = false) {
@@ -776,7 +833,12 @@
       const signature = JSON.stringify(profiles.map((profile) => [profile.sequence, profile.artifact_id, profile.trace_sha256]));
       if (!force && signature === vmProfileSignature) return;
       vmProfileSignature = signature;
-      renderVMProfiles(profiles);
+      vmProfiles = profiles;
+      if (!profiles.some((profile) => profile.artifact_id === vmProfileBaseline)) {
+        vmProfileBaseline = profiles.length > 1 ?
+          (profiles.find(vmProfileHasRichSummary)?.artifact_id || "") : "";
+      }
+      renderVMProfiles(vmProfiles);
     } catch (error) {
       if (selectionGeneration !== vmSelectionGeneration || runID !== vmSelected) return;
       const target = document.getElementById("vm-profile-items");

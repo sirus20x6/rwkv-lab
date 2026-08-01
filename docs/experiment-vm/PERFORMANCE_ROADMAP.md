@@ -208,6 +208,10 @@ Compute remain separate host-launch profiles: an in-process worker must not pret
 their enum has wrapped the process. The Torch summary now unions overlapping CUDA event intervals
 over the captured optimizer-step wall window, reports GPU-active ratio, normalizes accelerator
 launch count per step in the dashboard, and records baseline/peak allocated and reserved memory.
+When a run has multiple compatible trace windows, the dashboard selects the oldest rich summary as
+the default comparison baseline and lets the operator change it. It shows normalized wall-time and
+launch-count deltas, GPU-active percentage-point change, and peak-allocation change; it refuses to
+compare windows whose node, backend, schedule, activities, or profiler options differ.
 Input-stall attribution remains required after adapters expose a common measured input-boundary;
 the profiler does not infer it from gaps and risk mislabeling CPU, synchronization, or communication
 work as data wait.
