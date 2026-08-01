@@ -2811,6 +2811,77 @@ ResourceReleaseRequest seal_resource_release_request(
   return request;
 }
 
+nlohmann::json resource_release_request_json(
+    const ResourceReleaseRequest& request) {
+  if (seal_resource_release_request(request) != request) {
+    throw HostLedgerError("resource release request digest is not canonical");
+  }
+  return encode_json(request);
+}
+
+ResourceReleaseRequest resource_release_request_from_json(
+    const nlohmann::json& source) {
+  ResourceReleaseRequest request =
+      strict_decode<ResourceReleaseRequest>(source, "resource release request");
+  (void)resource_release_request_json(request);
+  return request;
+}
+
+nlohmann::json bundle_request_result_json(const BundleRequestResult& result) {
+  if ((result.status != BundleRequestStatus::granted &&
+       result.status != BundleRequestStatus::busy) ||
+      !valid_digest(result.outcome_digest) ||
+      (result.status == BundleRequestStatus::granted) != result.grant.has_value()) {
+    throw HostLedgerError("bundle request result is invalid");
+  }
+  nlohmann::json grant = nullptr;
+  std::string_view status = "busy";
+  if (result.grant) {
+    grant = resource_bundle_grant_json(*result.grant);
+    status = "granted";
+    if (result.outcome_digest != result.grant->receipt_digest) {
+      throw HostLedgerError("bundle request result digest disagrees with grant");
+    }
+  }
+  return {{"grant", std::move(grant)},
+          {"outcome_digest", result.outcome_digest},
+          {"replayed", result.replayed},
+          {"status", status}};
+}
+
+BundleRequestResult bundle_request_result_from_json(
+    const nlohmann::json& source) {
+  if (!source.is_object() || source.size() != 4U ||
+      !source.contains("grant") || !source.contains("outcome_digest") ||
+      !source.contains("replayed") || !source.contains("status") ||
+      !source.at("status").is_string() ||
+      !source.at("outcome_digest").is_string() ||
+      !source.at("replayed").is_boolean()) {
+    throw HostLedgerError("bundle request result JSON shape is invalid");
+  }
+  const std::string status = source.at("status").get<std::string>();
+  BundleRequestResult result{
+      .status = status == "granted" ? BundleRequestStatus::granted
+                                     : BundleRequestStatus::busy,
+      .grant = std::nullopt,
+      .outcome_digest = source.at("outcome_digest").get<std::string>(),
+      .replayed = source.at("replayed").get<bool>(),
+  };
+  if (status != "granted" && status != "busy") {
+    throw HostLedgerError("bundle request result status is invalid");
+  }
+  if (status == "granted") {
+    if (!source.at("grant").is_object()) {
+      throw HostLedgerError("granted bundle result has no grant");
+    }
+    result.grant = resource_bundle_grant_from_json(source.at("grant"));
+  } else if (!source.at("grant").is_null()) {
+    throw HostLedgerError("busy bundle result unexpectedly has a grant");
+  }
+  (void)bundle_request_result_json(result);
+  return result;
+}
+
 nlohmann::json resource_bundle_grant_json(
     const ResourceBundleGrant& grant) {
   nlohmann::json value = grant_digest_json(grant);
@@ -2886,6 +2957,27 @@ ResourceReleaseReceipt resource_release_receipt_from_json(
       strict_decode<ResourceReleaseReceipt>(source, "resource release receipt");
   (void)resource_release_receipt_json(receipt);
   return receipt;
+}
+
+nlohmann::json bundle_release_result_json(const BundleReleaseResult& result) {
+  return {{"receipt", resource_release_receipt_json(result.receipt)},
+          {"replayed", result.replayed}};
+}
+
+BundleReleaseResult bundle_release_result_from_json(
+    const nlohmann::json& source) {
+  if (!source.is_object() || source.size() != 2U ||
+      !source.contains("receipt") || !source.contains("replayed") ||
+      !source.at("receipt").is_object() ||
+      !source.at("replayed").is_boolean()) {
+    throw HostLedgerError("bundle release result JSON shape is invalid");
+  }
+  BundleReleaseResult result{
+      .receipt = resource_release_receipt_from_json(source.at("receipt")),
+      .replayed = source.at("replayed").get<bool>(),
+  };
+  (void)bundle_release_result_json(result);
+  return result;
 }
 
 }  // namespace trainvm

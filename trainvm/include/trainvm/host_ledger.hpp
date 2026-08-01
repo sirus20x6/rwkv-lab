@@ -214,6 +214,14 @@ class SQLiteHostLedger final {
 
 [[nodiscard]] ResourceReleaseRequest seal_resource_release_request(
     ResourceReleaseRequest request);
+[[nodiscard]] nlohmann::json resource_release_request_json(
+    const ResourceReleaseRequest& request);
+[[nodiscard]] ResourceReleaseRequest resource_release_request_from_json(
+    const nlohmann::json& source);
+[[nodiscard]] nlohmann::json bundle_request_result_json(
+    const BundleRequestResult& result);
+[[nodiscard]] BundleRequestResult bundle_request_result_from_json(
+    const nlohmann::json& source);
 [[nodiscard]] nlohmann::json resource_bundle_grant_json(
     const ResourceBundleGrant& grant);
 [[nodiscard]] ResourceBundleGrant resource_bundle_grant_from_json(
@@ -221,6 +229,10 @@ class SQLiteHostLedger final {
 [[nodiscard]] nlohmann::json resource_release_receipt_json(
     const ResourceReleaseReceipt& receipt);
 [[nodiscard]] ResourceReleaseReceipt resource_release_receipt_from_json(
+    const nlohmann::json& source);
+[[nodiscard]] nlohmann::json bundle_release_result_json(
+    const BundleReleaseResult& result);
+[[nodiscard]] BundleReleaseResult bundle_release_result_from_json(
     const nlohmann::json& source);
 
 }  // namespace trainvm

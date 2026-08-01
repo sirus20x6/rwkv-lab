@@ -1336,52 +1336,6 @@ ResourceLease lease_from_row(sqlite3_stmt* statement) {
   };
 }
 
-nlohmann::json release_request_json(const ResourceReleaseRequest& request) {
-  const ResourceReleaseRequest sealed = seal_resource_release_request(request);
-  if (sealed != request) {
-    throw OperationPreconditionError(
-        "host release request digest is not canonical");
-  }
-  return {{"api_version", request.api_version},
-          {"release_request_id", request.release_request_id},
-          {"allocation_id", request.allocation_id},
-          {"grant_digest", request.grant_digest},
-          {"journal_id", request.journal_id},
-          {"run_id", request.run_id},
-          {"logical_lease_id", request.logical_lease_id},
-          {"logical_fencing_token", request.logical_fencing_token},
-          {"canonical_request_digest", request.canonical_request_digest}};
-}
-
-ResourceReleaseRequest release_request_from_json(const nlohmann::json& source) {
-  static const std::set<std::string> keys{
-      "api_version",          "release_request_id", "allocation_id",
-      "grant_digest",         "journal_id",         "run_id",
-      "logical_lease_id",     "logical_fencing_token",
-      "canonical_request_digest"};
-  if (!source.is_object() || source.size() != keys.size() ||
-      !std::ranges::all_of(source.items(), [&](const auto& item) {
-        return keys.contains(item.key());
-      })) {
-    throw std::runtime_error("host release request JSON shape is invalid");
-  }
-  ResourceReleaseRequest request{
-      .api_version = source.at("api_version").get<std::string>(),
-      .release_request_id = source.at("release_request_id").get<std::string>(),
-      .allocation_id = source.at("allocation_id").get<std::string>(),
-      .grant_digest = source.at("grant_digest").get<std::string>(),
-      .journal_id = source.at("journal_id").get<std::string>(),
-      .run_id = source.at("run_id").get<std::string>(),
-      .logical_lease_id = source.at("logical_lease_id").get<std::string>(),
-      .logical_fencing_token =
-          source.at("logical_fencing_token").get<std::uint64_t>(),
-      .canonical_request_digest =
-          source.at("canonical_request_digest").get<std::string>(),
-  };
-  (void)release_request_json(request);
-  return request;
-}
-
 std::optional<HostGrantSagaSnapshot> load_host_grant_saga(
     sqlite3* database, const std::string& request_id) {
   if (request_id.empty()) {
@@ -1420,7 +1374,7 @@ std::optional<HostGrantSagaSnapshot> load_host_grant_saga(
         nlohmann::json::parse(column_text(query.get(), 1)));
   }
   if (sqlite3_column_type(query.get(), 2) != SQLITE_NULL) {
-    result.release_intent = release_request_from_json(
+    result.release_intent = resource_release_request_from_json(
         nlohmann::json::parse(column_text(query.get(), 2)));
   }
   if (sqlite3_column_type(query.get(), 3) != SQLITE_NULL) {
@@ -1633,14 +1587,15 @@ bool verify_host_saga_projection(sqlite3* database, std::string* reason) {
             column_text(intent.get(), 3) !=
                 saga->release_intent->canonical_request_digest ||
             column_text(intent.get(), 4) !=
-                release_request_json(*saga->release_intent).dump()) {
+                resource_release_request_json(*saga->release_intent).dump()) {
           return fail("host release intent scalar projection diverges");
         }
         require_event("host-resource-release-intent:" + request_id,
                       "host.resource_release_intent_recorded",
                       saga->request.run_id,
                       {{"request_id", request_id},
-                       {"release", release_request_json(*saga->release_intent)}});
+                       {"release", resource_release_request_json(
+                                       *saga->release_intent)}});
       }
       if (saga->release_receipt) {
         ++release_receipts;
@@ -1814,7 +1769,7 @@ void replay_host_saga_projection(sqlite3* database, const Event& event) {
     }
     const std::string request_id = required_request_id();
     const auto release =
-        release_request_from_json(event.payload.at("release"));
+        resource_release_request_from_json(event.payload.at("release"));
     if (release.run_id != event.run_id) {
       throw std::runtime_error("chained host release intent identity diverges");
     }
@@ -1829,7 +1784,7 @@ void replay_host_saga_projection(sqlite3* database, const Event& event) {
     bind_text(insert.get(), 3, release.allocation_id);
     bind_text(insert.get(), 4, release.grant_digest);
     bind_text(insert.get(), 5, release.canonical_request_digest);
-    bind_text(insert.get(), 6, release_request_json(release).dump());
+    bind_text(insert.get(), 6, resource_release_request_json(release).dump());
     require_done(database, insert.get(), "replay host release intent");
     return;
   }
@@ -5749,7 +5704,7 @@ HostGrantSagaSnapshot Journal::record_host_release_intent(
     throw OperationPreconditionError(
         "host release request identity exceeds its bound");
   }
-  const std::string canonical = release_request_json(release).dump();
+  const std::string canonical = resource_release_request_json(release).dump();
   Transaction transaction(database_);
   std::string authority_reason;
   if (!verify_chain(&authority_reason)) {
@@ -5796,7 +5751,8 @@ HostGrantSagaSnapshot Journal::record_host_release_intent(
       database_, "host-resource-release-intent:" + request_id,
       "host.resource_release_intent_recorded", release.run_id,
       now.wall.nanoseconds, static_cast<std::uint64_t>(now.boot.nanoseconds),
-      {{"request_id", request_id}, {"release", release_request_json(release)}}),
+      {{"request_id", request_id},
+       {"release", resource_release_request_json(release)}}),
       true);
   saga = load_host_grant_saga(database_, request_id);
   transaction.commit();

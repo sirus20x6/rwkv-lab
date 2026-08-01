@@ -658,6 +658,12 @@ Gate:
 - receipt divergence, missing journal, and corrupt ledger all block reuse;
 - logical lease expiry with an unreleased host grant remains blocked.
 
+Current implementation note: sealed release requests and grant, busy, and
+release results now have shared strict public codecs used by journal replay and
+available to the transport. The socket remains status-only until the
+socket-bound challenge/session adapter and multi-packet mutation exchange are
+implemented and pass the crash-window gates above.
+
 ### P0.4 — guarded launcher and strict cgroup enforcement
 
 Integrate sealed launch descriptors, allocation cgroups, stopped `clone3`, pidfds, effective CPU/I/O

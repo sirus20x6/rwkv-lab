@@ -219,6 +219,18 @@ void basic_replay_release_and_reopen() {
                 ledger.generation(mutex_id("mutex-a")) == 1U &&
                 ledger.occupancy().active_fences.size() == 1U,
             "first request atomically grants generation one");
+    require(bundle_request_result_from_json(bundle_request_result_json(first)) ==
+                first,
+            "granted result has one strict canonical transport codec");
+    const auto sealed_release = release_request(*first.grant, "release-codec");
+    require(resource_release_request_from_json(
+                resource_release_request_json(sealed_release)) == sealed_release,
+            "release request has one strict canonical transport codec");
+    auto forged_release = resource_release_request_json(sealed_release);
+    forged_release["extra"] = true;
+    require_throws<HostLedgerError>(
+        [&] { (void)resource_release_request_from_json(forged_release); },
+        "release request codec rejects unknown fields");
     const std::uint64_t after_grant = ledger.record_count();
     const auto replay = ledger.request_bundle(request("request-1"), {999, 999});
     require(replay.replayed && replay.grant == first.grant &&
@@ -244,6 +256,19 @@ void basic_replay_release_and_reopen() {
                 busy_replay.outcome_digest == busy.outcome_digest &&
                 ledger.record_count() == after_busy,
             "busy decision is durable and exactly replayable");
+    require(bundle_request_result_from_json(bundle_request_result_json(busy)) ==
+                busy,
+            "busy result has one strict canonical transport codec");
+    auto forged_busy = bundle_request_result_json(busy);
+    forged_busy["grant"] = resource_bundle_grant_json(*first.grant);
+    require_throws<HostLedgerError>(
+        [&] { (void)bundle_request_result_from_json(forged_busy); },
+        "busy result codec rejects a contradictory grant");
+    auto invalid_status = busy;
+    invalid_status.status = static_cast<BundleRequestStatus>(99);
+    require_throws<HostLedgerError>(
+        [&] { (void)bundle_request_result_json(invalid_status); },
+        "result codec rejects an invalid in-memory status enum");
 
     const auto release = ledger.release_bundle(
         release_request(*first.grant, "release-1"), {50, 60});
@@ -256,6 +281,9 @@ void basic_replay_release_and_reopen() {
                 ledger.occupancy().active_fences.empty() &&
                 ledger.generation(mutex_id("mutex-a")) == 1U,
             "release CAS is atomic, terminal, and exactly replayable");
+    require(bundle_release_result_from_json(bundle_release_result_json(release)) ==
+                release,
+            "release result has one strict canonical transport codec");
 
     const auto second = ledger.request_bundle(request("request-3"), {70, 80});
     require(second.grant && second.grant->fences.front().generation == 2U,

@@ -79,6 +79,9 @@ Implemented now:
   and exact replay outcomes, stale-inventory revocation, and prior-boot blocking; its retained
   filesystem authority pins the database/lock inode, protects SQLite auxiliary names, and reports a
   filesystem boundary only—not the broader host enforcement grade;
+- shared strict host-saga codecs for sealed release requests and grant/busy/release results, so
+  journal replay and the future mutating hostd transport consume one canonical shape and reject
+  unknown fields, forged digests, or status/payload contradictions;
 - journal schema v7 boot-scoped lease authority across acquisition, renewal, release, readiness,
   dispatch, control acknowledgement, and host binding; renewal atomically advances mutable expiry
   and appends an immutable exact-input receipt, while v4 wall-clock rows migrate as quarantined
