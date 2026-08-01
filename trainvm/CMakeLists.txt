@@ -347,6 +347,14 @@ add_test(
     "${CMAKE_CURRENT_SOURCE_DIR}/../docs/experiment-vm/compatibility-workflows.v1.json"
     "${CMAKE_CURRENT_SOURCE_DIR}/.."
 )
+add_test(
+  NAME trainvm_cli_inspect_training_components
+  COMMAND trainvm inspect-training-components
+    "${CMAKE_CURRENT_SOURCE_DIR}/../docs/experiment-vm/examples/mageflow-training-components.json"
+)
+set_tests_properties(trainvm_cli_inspect_training_components PROPERTIES
+  PASS_REGULAR_EXPRESSION "rwkv_lab.optimizer.fp32_master_adamw.v1"
+)
 set_tests_properties(trainvm_cli_validate_compatibility_catalog PROPERTIES
   PASS_REGULAR_EXPRESSION "compatibility_evidence_only"
 )

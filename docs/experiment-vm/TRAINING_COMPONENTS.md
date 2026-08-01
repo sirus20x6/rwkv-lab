@@ -1,0 +1,63 @@
+# Training-component boundaries
+
+TrainVM separates algorithm selection, tensor construction, trainer integration, and presentation.
+No layer is allowed to recreate the responsibilities of another layer.
+
+## Control-plane authority (C++)
+
+`TrainingComponentRegistry` owns exact `(category, name, version)` keys, reflected scalar fields,
+model-family compatibility, backend and symbolic implementation identity, required worker
+capabilities, schedule step domains, checkpoint-state schemas, and state grades. It resolves every
+node composition, applies defaults, rejects unknown fields, and freezes the result into the
+submission lock and immutable worker invocation.
+
+The experiment can select an authority entry, but it cannot provide Python imports, argv,
+environment variables, source paths, or implementation code. Selected component capabilities are
+unioned with the adapter's requirements before a launch intent exists. Exact-resume plans reject a
+compatibility-grade component.
+
+## Tensor-runtime implementation (Python/CUDA)
+
+Tensor code stays in the runtime that implements it well. `rwkv_lab.training_components` exposes
+closed enums, typed immutable configuration objects, and small factories. It has no dynamic import
+path. The resolved-worker dispatch functions accept only the canonical envelope from TrainVM and
+fail on extra keys, unknown implementation IDs, wrong categories, missing defaults, nonfinite
+numbers, or incorrect scalar types.
+
+The initial concrete catalog contains the implementations already shared by the MageFlow trainers:
+
+- Torch AdamW;
+- FP32-master AdamW for lower-precision live model weights;
+- linear warmup followed by a cosine tail over optimizer steps.
+
+The three MageFlow training paths now use those common factories. The catalog does not claim an
+activation, objective, optimizer, or kernel until a real adapter path consumes the same symbolic
+implementation and has CPU parity plus representative accelerator qualification.
+
+## Model-family integration
+
+Adapters own topology-specific work only: parameter discovery and exhaustive routing, where an
+activation or normalization is installed, loss inputs, and checkpoint tensor placement. They do
+not own generic optimizer hyperparameter validation or schedule math. A parameter router must
+produce an exhaustive ownership report; overlapping or unclaimed trainable parameters fail before
+the optimizer is constructed.
+
+## Dashboard
+
+`GetDescriptor(trainvm.training-components@1.0.0)` returns the canonical registry bytes and digest.
+The Go bridge recomputes the hash. The browser composer renders fields, defaults, ranges, and enums
+from those descriptors, and writes only a declarative node/family/slot selection. Adding a component
+does not add a Go endpoint or component-specific JavaScript.
+
+## Adding a component
+
+1. Add the exact authority descriptor and state schema.
+2. Add a closed implementation enum and typed configuration/factory in the tensor runtime.
+3. Add cross-runtime tests proving descriptor fields/defaults match the factory.
+4. Add reference output, gradient/update, state round-trip, and resumed-trajectory parity evidence.
+5. Integrate it into an adapter and advertise the exact worker capability.
+6. Qualify representative throughput, memory, and model quality before enabling it in a production
+   registry.
+
+Passing schema tests makes a component selectable; it does not prove mathematical interchangeability
+or production fitness.

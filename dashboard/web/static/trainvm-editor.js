@@ -130,7 +130,7 @@
     const name = escapeHTML(field.name || "field");
     const required = field.required ? " vm-required" : "";
     const description = escapeHTML(field.description || "");
-    const value = field.default_value;
+    const value = field.default;
     let control;
     if (kind === "enumeration") {
       control = `<select data-vm-component-field="${name}" data-vm-kind="string">` +
@@ -224,7 +224,7 @@
         .find((candidate) => candidate.dataset.vmComponentField === field.name);
       if (!input) continue;
       if (input.type !== "checkbox" && input.value === "") {
-        if (field.required && field.default_value === undefined) {
+        if (field.required && field.default === undefined) {
           if (state) state.textContent = `component field ${field.name} is required`;
           return;
         }

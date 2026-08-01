@@ -208,6 +208,7 @@ func TestTrainVMSubmissionFreezesPreviewAndRetriesExactIntent(t *testing.T) {
 		`String(result.training_component_lock_digest || "") !==`,
 		`fetch("/api/trainvm/training-components"`,
 		`descriptor.configuration || []`,
+		`const value = field.default;`,
 		`node.invoke.training.components[composerSlot]`,
 		`sessionStorage.setItem`,
 		`body: intent.body`,

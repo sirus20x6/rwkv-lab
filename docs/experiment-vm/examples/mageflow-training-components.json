@@ -1,0 +1,76 @@
+{
+  "api_version": "trainvm.training-components/v1",
+  "components": [
+    {
+      "key": {
+        "category": "optimizer",
+        "name": "torch_adamw",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.optimizer.torch_adamw.v1",
+      "model_families": ["mageflow", "rwkv", "transformer", "vision"],
+      "required_capabilities": ["optimizer.torch_adamw.v1"],
+      "configuration": [
+        {"name": "learning_rate", "type": "number", "required": true, "minimum": 1e-12, "maximum": 1.0, "unit": "ratio"},
+        {"name": "beta1", "type": "number", "required": false, "default": 0.9, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
+        {"name": "beta2", "type": "number", "required": false, "default": 0.999, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
+        {"name": "epsilon", "type": "number", "required": false, "default": 1e-8, "minimum": 1e-16, "maximum": 1.0, "unit": "ratio"},
+        {"name": "weight_decay", "type": "number", "required": false, "default": 0.01, "minimum": 0.0, "maximum": 10.0, "unit": "ratio"},
+        {"name": "foreach", "type": "boolean", "required": false, "default": true}
+      ],
+      "state": [
+        {"name": "parameter_state_manifest", "type": "string", "required": true}
+      ],
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "optimizer",
+        "name": "fp32_master_adamw",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.optimizer.fp32_master_adamw.v1",
+      "model_families": ["mageflow"],
+      "required_capabilities": ["optimizer.fp32_master_adamw.v1"],
+      "configuration": [
+        {"name": "learning_rate", "type": "number", "required": true, "minimum": 1e-12, "maximum": 1.0, "unit": "ratio"},
+        {"name": "beta1", "type": "number", "required": false, "default": 0.9, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
+        {"name": "beta2", "type": "number", "required": false, "default": 0.999, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
+        {"name": "epsilon", "type": "number", "required": false, "default": 1e-8, "minimum": 1e-16, "maximum": 1.0, "unit": "ratio"},
+        {"name": "weight_decay", "type": "number", "required": false, "default": 0.01, "minimum": 0.0, "maximum": 10.0, "unit": "ratio"},
+        {"name": "foreach", "type": "boolean", "required": false, "default": true}
+      ],
+      "state": [
+        {"name": "parameter_state_manifest", "type": "string", "required": true},
+        {"name": "fp32_master_weights_manifest", "type": "string", "required": true}
+      ],
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "learning_rate_schedule",
+        "name": "linear_warmup_cosine",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.schedule.linear_warmup_cosine.v1",
+      "model_families": ["mageflow", "rwkv", "transformer", "vision"],
+      "required_capabilities": ["schedule.linear_warmup_cosine.v1"],
+      "configuration": [
+        {"name": "warmup_steps", "type": "integer", "required": true, "minimum": 0, "maximum": 1000000000, "unit": "optimizer_step"},
+        {"name": "max_steps", "type": "integer", "required": true, "minimum": 1, "maximum": 1000000000, "unit": "optimizer_step"},
+        {"name": "minimum_ratio", "type": "number", "required": false, "default": 0.1, "minimum": 0.0, "maximum": 1.0, "unit": "ratio"}
+      ],
+      "state": [
+        {"name": "cursor", "type": "integer", "required": true}
+      ],
+      "step_domain": "optimizer_step",
+      "state_grade": "exact",
+      "reference_implementation": true
+    }
+  ]
+}

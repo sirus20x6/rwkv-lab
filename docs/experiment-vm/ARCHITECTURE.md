@@ -236,6 +236,8 @@ The immutable registry is exposed as the exact descriptor provider
 registry SHA-256. The Go bridge recomputes that digest before returning the document to the browser.
 The experiment editor uses the reflected field contracts to compose node/family/slot selections;
 there is no optimizer-, schedule-, or activation-specific dashboard handler.
+The implementation and extension rules are specified in
+[`TRAINING_COMPONENTS.md`](TRAINING_COMPONENTS.md).
 
 ## VM and finite-state semantics
 

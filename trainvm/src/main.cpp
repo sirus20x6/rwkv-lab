@@ -27,6 +27,7 @@ void usage() {
       << "  trainvm plan <experiment.json> [--canonical]\n"
       << "  trainvm compile  # read JSON from stdin; emit canonical preview JSON\n"
       << "  trainvm validate-catalog <compatibility.json> <repository-root>\n"
+      << "  trainvm inspect-training-components <training-components.json>\n"
       << "  trainvm inspect-registry <experiments.db> [--task <task>] "
          "[--metric <metric>] [--baseline <config>] [--limit <count>]\n"
       << "  trainvm serve --journal <journal.db> --socket <trainvm.sock> "
@@ -118,6 +119,23 @@ int validate_catalog_command(const std::filesystem::path& catalog_path,
                    {"source_tree_digest", catalog.source_tree_digest()},
                    {"repository_root_identity",
                     catalog.repository_root_identity_display()},
+               }
+                   .dump(2)
+            << '\n';
+  return 0;
+}
+
+int inspect_training_components_command(
+    const std::filesystem::path& registry_path) {
+  const trainvm::TrainingComponentRegistry registry =
+      trainvm::TrainingComponentRegistry::load_file(
+          std::filesystem::absolute(registry_path).lexically_normal());
+  const nlohmann::json document = registry.document_json();
+  std::cout << nlohmann::json{
+                   {"valid", true},
+                   {"components", document.at("components").size()},
+                   {"registry_digest", registry.registry_digest()},
+                   {"canonical_registry", document},
                }
                    .dump(2)
             << '\n';
@@ -280,6 +298,10 @@ int main(int argc, char** argv) {
     }
     if (argc == 4 && std::string_view(argv[1]) == "validate-catalog") {
       return validate_catalog_command(argv[2], argv[3]);
+    }
+    if (argc == 3 &&
+        std::string_view(argv[1]) == "inspect-training-components") {
+      return inspect_training_components_command(argv[2]);
     }
     if (argc >= 3 && std::string_view(argv[1]) == "inspect-registry") {
       return inspect_registry_command(argc, argv);

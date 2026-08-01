@@ -849,16 +849,6 @@ def rectified_flow_path(clean, noise, token_timesteps):
     return noised, noise - clean
 
 
-def _cosine_multiplier(
-    step: int, *, warmup_steps: int, max_steps: int, min_ratio: float
-) -> float:
-    if warmup_steps and step < warmup_steps:
-        return max(1.0e-8, step / float(warmup_steps))
-    progress = (step - warmup_steps) / float(max(1, max_steps - warmup_steps))
-    progress = min(1.0, max(0.0, progress))
-    return min_ratio + (1.0 - min_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))
-
-
 def _write_rank_state(
     directory: Path, *, rank: int, global_step: int, epoch: int, pack_index: int
 ) -> None:
@@ -1227,6 +1217,14 @@ def train(config: MageFlowTrainConfig) -> None:
         )
         from huggingface_hub import snapshot_download
         from mage_flow import MageFlowPipeline
+        from rwkv_lab.training_components import (
+            AdamWConfiguration,
+            LinearWarmupCosineConfiguration,
+            OptimizerImplementation,
+            ScheduleImplementation,
+            build_registered_optimizer,
+            build_registered_schedule,
+        )
     except ImportError as error:
         raise RuntimeError(
             "Mage-Flow training dependencies are missing. Run the generated "
@@ -1320,13 +1318,16 @@ def train(config: MageFlowTrainConfig) -> None:
             weight_decay=config.weight_decay,
         )
     else:
-        optimizer = torch.optim.AdamW(
+        optimizer = build_registered_optimizer(
+            OptimizerImplementation.TORCH_ADAMW_V1,
             transformer.parameters(),
-            lr=config.learning_rate,
-            betas=(config.adam_beta1, config.adam_beta2),
-            eps=config.adam_epsilon,
-            weight_decay=config.weight_decay,
-            foreach=True,
+            AdamWConfiguration(
+                learning_rate=config.learning_rate,
+                beta1=config.adam_beta1,
+                beta2=config.adam_beta2,
+                epsilon=config.adam_epsilon,
+                weight_decay=config.weight_decay,
+            ),
         )
     if "scheduler" in deepspeed_config:
         scheduler = DummyScheduler(
@@ -1335,13 +1336,13 @@ def train(config: MageFlowTrainConfig) -> None:
             warmup_num_steps=config.warmup_steps,
         )
     else:
-        scheduler = torch.optim.lr_scheduler.LambdaLR(
+        scheduler = build_registered_schedule(
+            ScheduleImplementation.LINEAR_WARMUP_COSINE_V1,
             optimizer,
-            lambda step: _cosine_multiplier(
-                step,
+            LinearWarmupCosineConfiguration(
                 warmup_steps=config.warmup_steps,
                 max_steps=config.max_steps,
-                min_ratio=config.min_learning_rate_ratio,
+                minimum_ratio=config.min_learning_rate_ratio,
             ),
         )
     transformer, optimizer, scheduler = accelerator.prepare(

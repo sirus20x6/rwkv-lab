@@ -46,7 +46,6 @@ from rwkv_lab.mage_flow_optimizations import (
     ACTIVATION_CHECKPOINT_MODES,
     ENCODER_CACHE_MODES,
     FLOAT8_RECIPES,
-    FP32MasterAdamW,
     FrozenEncoderCache,
     cache_coverage,
     compile_transformer_blocks,
@@ -54,13 +53,20 @@ from rwkv_lab.mage_flow_optimizations import (
     convert_trainable_image_ffns_to_float8,
 )
 from rwkv_lab.mage_flow_pretrain import (
-    _cosine_multiplier,
     _lens_to_cu,
     _load_image_tensor,
     _prefetched,
     _sample_timesteps,
     rectified_flow_loss,
     rectified_flow_path,
+)
+from rwkv_lab.training_components import (
+    AdamWConfiguration,
+    LinearWarmupCosineConfiguration,
+    OptimizerImplementation,
+    ScheduleImplementation,
+    build_registered_optimizer,
+    build_registered_schedule,
 )
 
 RUN_SCHEMA = "rwkv-lab.mage-flow-expert-train.v1"
@@ -1956,25 +1962,28 @@ def train(config: MageFlowExpertTrainConfig) -> None:
         learning_rate=config.learning_rate,
         shared_learning_rate_multiplier=config.shared_learning_rate_multiplier,
     )
-    optimizer = FP32MasterAdamW(
+    optimizer = build_registered_optimizer(
+        OptimizerImplementation.FP32_MASTER_ADAMW_V1,
         optimizer_groups,
-        lr=config.learning_rate,
-        betas=(config.adam_beta1, config.adam_beta2),
-        eps=config.adam_epsilon,
-        weight_decay=config.weight_decay,
-        foreach=True,
+        AdamWConfiguration(
+            learning_rate=config.learning_rate,
+            beta1=config.adam_beta1,
+            beta2=config.adam_beta2,
+            epsilon=config.adam_epsilon,
+            weight_decay=config.weight_decay,
+        ),
     )
-    scheduler = torch.optim.lr_scheduler.LambdaLR(
+    scheduler = build_registered_schedule(
+        ScheduleImplementation.LINEAR_WARMUP_COSINE_V1,
         optimizer,
-        lambda step: _cosine_multiplier(
-            step,
+        LinearWarmupCosineConfiguration(
             warmup_steps=config.warmup_steps,
             max_steps=(
                 config.learning_rate_schedule_steps
                 if config.learning_rate_schedule_steps is not None
                 else config.max_steps
             ),
-            min_ratio=config.min_learning_rate_ratio,
+            minimum_ratio=config.min_learning_rate_ratio,
         ),
     )
 

@@ -59,10 +59,17 @@ from rwkv_lab.mage_flow_optimizations import (
     convert_trainable_image_ffns_to_float8,
 )
 from rwkv_lab.mage_flow_pretrain import (
-    _cosine_multiplier,
     _load_image_tensor,
     _prefetched,
     rectified_flow_loss,
+)
+from rwkv_lab.training_components import (
+    AdamWConfiguration,
+    LinearWarmupCosineConfiguration,
+    OptimizerImplementation,
+    ScheduleImplementation,
+    build_registered_optimizer,
+    build_registered_schedule,
 )
 from rwkv_lab.mage_flow_terminal_experts import (
     configure_terminal_training_scope,
@@ -2567,12 +2574,16 @@ def train(config: TerminalExpertTrainConfig) -> None:
                 ),
             )
         )
-    optimizer = FP32MasterAdamW(
+    optimizer = build_registered_optimizer(
+        OptimizerImplementation.FP32_MASTER_ADAMW_V1,
         groups,
-        betas=(config.adam_beta1, config.adam_beta2),
-        eps=config.adam_epsilon,
-        weight_decay=config.weight_decay,
-        foreach=True,
+        AdamWConfiguration(
+            learning_rate=config.learning_rate,
+            beta1=config.adam_beta1,
+            beta2=config.adam_beta2,
+            epsilon=config.adam_epsilon,
+            weight_decay=config.weight_decay,
+        ),
     )
     domain_schedule = (
         json.loads(
@@ -2597,13 +2608,13 @@ def train(config: TerminalExpertTrainConfig) -> None:
             config.expert_checkpoints or {},
             output_dir / "expert_residency",
         )
-    scheduler = torch.optim.lr_scheduler.LambdaLR(
+    scheduler = build_registered_schedule(
+        ScheduleImplementation.LINEAR_WARMUP_COSINE_V1,
         optimizer,
-        lambda step: _cosine_multiplier(
-            step,
+        LinearWarmupCosineConfiguration(
             warmup_steps=config.warmup_steps,
             max_steps=config.max_steps,
-            min_ratio=config.min_learning_rate_ratio,
+            minimum_ratio=config.min_learning_rate_ratio,
         ),
     )
     required_domains = EXPERT_DOMAINS if domain_schedule is not None else (config.domain,)

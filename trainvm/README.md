@@ -256,6 +256,8 @@ trainvm/build/trainvm compile < \
   docs/experiment-vm/examples/mageflow-cache-resume.json
 trainvm/build/trainvm validate-catalog \
   "$PWD/docs/experiment-vm/compatibility-workflows.v1.json" "$PWD"
+trainvm/build/trainvm inspect-training-components \
+  "$PWD/docs/experiment-vm/examples/mageflow-training-components.json"
 trainvm/build/trainvm inspect-registry "$PWD/experiments.db" \
   --task recall:16 --metric acc --baseline baseline --limit 20
 trainvm/build/trainvm serve --journal /tmp/trainvm.db --socket /tmp/trainvm.sock \
@@ -267,6 +269,11 @@ trainvm/build/trainvm simulate \
   docs/experiment-vm/examples/mageflow-cache-resume.json \
   docs/experiment-vm/examples/mageflow-cache-resume.events.jsonl
 ```
+
+The empty training-component registry keeps composition disabled. The checked-in
+`mageflow-training-components.json` catalog contains real runtime-backed descriptors for inspection
+and adapter qualification; a production daemon should enable it only with worker profiles that
+advertise the catalog's exact capabilities.
 
 The reference plan currently has the golden identity
 `d9874d50706cb8b13f3803258bde08f2175bfb4869eae860aa47994d151e901e`. This deliberate canonical

@@ -360,6 +360,41 @@ void experiment_composition_is_reflected_and_bounded() {
         "non-scalar component configuration is rejected during compilation");
 }
 
+void checked_in_mageflow_catalog_matches_native_authority_contract() {
+  const auto path = std::filesystem::path(TRAINVM_SOURCE_ROOT) /
+                    "docs/experiment-vm/examples/mageflow-training-components.json";
+  const trainvm::TrainingComponentRegistry registry =
+      trainvm::TrainingComponentRegistry::load_file(
+          std::filesystem::absolute(path));
+  check(registry.document_json().at("components").size() == 3U &&
+            registry.registry_digest().starts_with("sha256:") &&
+            registry.registry_digest().size() == 71U,
+        "checked-in MageFlow component catalog is a canonical native authority document");
+  const auto optimizer = registry.resolve({
+      .key = {.category = trainvm::TrainingComponentCategory::optimizer,
+              .name = "fp32_master_adamw",
+              .version = "1.0.0"},
+      .model_family = "mageflow",
+      .configuration = {{"learning_rate", 0.00001}},
+  });
+  check(optimizer.descriptor.implementation ==
+            "rwkv_lab.optimizer.fp32_master_adamw.v1" &&
+            optimizer.configuration.at("beta1") == 0.9 &&
+            optimizer.configuration.at("foreach") == true &&
+            optimizer.descriptor.required_capabilities ==
+                std::vector<std::string>{
+                    "optimizer.fp32_master_adamw.v1"},
+        "native resolution and the closed PyTorch implementation share exact identities and defaults");
+  check(rejects([&] {
+          (void)registry.resolve({
+              .key = optimizer.descriptor.key,
+              .model_family = "transformer",
+              .configuration = {{"learning_rate", 0.00001}},
+          });
+        }),
+        "MageFlow-only FP32-master optimizer cannot route to a transformer family");
+}
+
 }  // namespace
 
 int main() {
@@ -368,6 +403,7 @@ int main() {
     invalid_descriptors_and_requests_fail_closed();
     compositions_extend_worker_authority();
     experiment_composition_is_reflected_and_bounded();
+    checked_in_mageflow_catalog_matches_native_authority_contract();
   } catch (const std::exception& exception) {
     std::cerr << "UNCAUGHT: " << exception.what() << '\n';
     return 1;
