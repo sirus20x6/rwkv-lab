@@ -6187,6 +6187,61 @@ std::optional<HostGrantSagaSnapshot> Journal::host_grant_saga(
   return load_host_grant_saga(database_, request_id);
 }
 
+std::optional<JournalResourceMutationIdentity>
+Journal::host_resource_mutation_identity(
+    const std::string& request_or_release_id) const {
+  if (request_or_release_id.empty()) {
+    throw std::invalid_argument(
+        "host resource mutation identity must not be empty");
+  }
+  auto snapshot = read_snapshot();
+  (void)snapshot;
+  Statement query(database_, R"sql(
+    SELECT request.request_id, request.run_id, request.concurrency_key,
+           request.logical_lease_id, request.logical_fencing_token
+    FROM host_resource_requests AS request
+    LEFT JOIN host_resource_release_intents AS release
+      ON release.request_id=request.request_id
+    WHERE request.request_id=? OR release.release_request_id=?
+  )sql");
+  bind_text(query.get(), 1, request_or_release_id);
+  bind_text(query.get(), 2, request_or_release_id);
+  const int status = sqlite3_step(query.get());
+  if (status == SQLITE_DONE) return std::nullopt;
+  if (status != SQLITE_ROW ||
+      sqlite3_column_type(query.get(), 4) != SQLITE_INTEGER ||
+      sqlite3_column_int64(query.get(), 4) <= 0) {
+    throw std::runtime_error(
+        "host resource mutation identity is malformed");
+  }
+  JournalResourceMutationIdentity result{
+      .request_id = column_text(query.get(), 0),
+      .run_id = column_text(query.get(), 1),
+      .concurrency_key = column_text(query.get(), 2),
+      .logical_lease_id = column_text(query.get(), 3),
+      .logical_fencing_token = static_cast<std::uint64_t>(
+          sqlite3_column_int64(query.get(), 4)),
+  };
+  if (sqlite3_step(query.get()) != SQLITE_DONE) {
+    throw std::runtime_error(
+        "host resource mutation identity is ambiguous");
+  }
+  const auto saga = load_host_grant_saga(database_, result.request_id);
+  if (!saga || saga->request.run_id != result.run_id ||
+      saga->request.logical_lease_id != result.logical_lease_id ||
+      saga->request.logical_fencing_token != result.logical_fencing_token) {
+    throw std::runtime_error(
+        "host resource mutation identity disagrees with its durable saga");
+  }
+  if (request_or_release_id != result.request_id &&
+      (!saga->release_intent ||
+       saga->release_intent->release_request_id != request_or_release_id)) {
+    throw std::runtime_error(
+        "host resource release identity disagrees with its durable saga");
+  }
+  return result;
+}
+
 namespace {
 
 HostdProcessPreparedResult durable_prepared_result(
@@ -7309,6 +7364,80 @@ JournalControllerFence Journal::register_hostd_controller_fence(
   transaction.commit();
   require_attested_authority();
   return requested;
+}
+
+std::optional<JournalControllerFence>
+Journal::current_hostd_controller_fence(
+    const std::string& concurrency_key) const {
+  if (concurrency_key.empty()) {
+    throw std::invalid_argument(
+        "hostd controller concurrency_key must not be empty");
+  }
+  require_attested_authority();
+  std::optional<JournalControllerFence> result;
+  {
+    auto read = read_snapshot();
+    (void)read;
+    Statement legacy(database_, "SELECT 1 FROM journal_meta WHERE key=?");
+    bind_text(legacy.get(), 1,
+              std::string(kLegacyControllerAuthorityMetadataKey));
+    const int legacy_status = sqlite3_step(legacy.get());
+    if (legacy_status == SQLITE_ROW) {
+      authority_poisoned_.store(true, std::memory_order_release);
+      throw OperationPreconditionError(
+          "legacy global hostd controller authority cannot be safely scoped");
+    }
+    if (legacy_status != SQLITE_DONE) {
+      throw std::runtime_error(
+          "legacy hostd controller authority is unreadable");
+    }
+    Statement query(database_, "SELECT value FROM journal_meta WHERE key=?");
+    bind_text(query.get(), 1,
+              controller_authority_metadata_key(concurrency_key));
+    const int status = sqlite3_step(query.get());
+    if (status == SQLITE_DONE) return std::nullopt;
+    if (status != SQLITE_ROW) {
+      throw std::runtime_error("could not read hostd controller authority");
+    }
+    const std::string encoded = column_text(query.get(), 0);
+    if (sqlite3_step(query.get()) != SQLITE_DONE) {
+      throw std::runtime_error("hostd controller authority is ambiguous");
+    }
+    try {
+      const nlohmann::json head = nlohmann::json::parse(encoded);
+      if (!head.is_object() || head.size() != 9U || head.dump() != encoded ||
+          !head.at("broker_epoch").is_string() ||
+          !head.at("run_id").is_string() ||
+          !head.at("concurrency_key").is_string() ||
+          !head.at("controller_id").is_string() ||
+          !head.at("controller_generation").is_number_unsigned() ||
+          !head.at("logical_lease_id").is_string() ||
+          !head.at("logical_fencing_token").is_number_unsigned() ||
+          !head.at("event_sequence").is_number_unsigned() ||
+          !head.at("event_hash").is_string() ||
+          head.at("concurrency_key").get<std::string>() != concurrency_key) {
+        throw std::runtime_error("noncanonical controller head");
+      }
+      result = JournalControllerFence{
+          .broker_epoch = head.at("broker_epoch").get<std::string>(),
+          .run_id = head.at("run_id").get<std::string>(),
+          .concurrency_key = concurrency_key,
+          .controller_id = head.at("controller_id").get<std::string>(),
+          .controller_generation =
+              head.at("controller_generation").get<std::uint64_t>(),
+          .logical_lease_id =
+              head.at("logical_lease_id").get<std::string>(),
+          .logical_fencing_token =
+              head.at("logical_fencing_token").get<std::uint64_t>(),
+      };
+    } catch (...) {
+      authority_poisoned_.store(true, std::memory_order_release);
+      throw OperationPreconditionError(
+          "hostd controller authority head is malformed");
+    }
+  }
+  require_current_hostd_controller_fence(*result);
+  return result;
 }
 
 void Journal::require_current_hostd_controller_fence(

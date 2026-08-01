@@ -6,6 +6,7 @@
 #include "trainvm/fsm.hpp"
 #include "trainvm/host_launch.hpp"
 #include "trainvm/host_launch_registry.hpp"
+#include "trainvm/hostd_mutation_claim_provider.hpp"
 #include "trainvm/journal.hpp"
 #include "trainvm/lease_renewal.hpp"
 #include "trainvm/model.hpp"
@@ -6562,7 +6563,7 @@ void test_service_host_launch_binding() {
   };
   const trainvm::HostIdentity host{
       .host_id = "sha256:" + std::string(64U, '3'),
-      .boot_id = "33333333-3333-3333-3333-333333333333",
+      .boot_id = kTestBootId,
   };
   const auto database = directory / "journal.db";
   const std::string run_id = "service-host-binding-run";
@@ -6623,6 +6624,33 @@ void test_service_host_launch_binding() {
                   std::optional<trainvm::ResolvedLaunchSpec>{binding},
           "service binds once and exact replay retains one sealed authority bundle");
     if (retained_fd >= 0) (void)::close(retained_fd);
+
+    trainvm::JournalHostdMutationClaimProvider process_claims(
+        service.journal_,
+        {.api_version = std::string(
+             trainvm::kHostdMutationClaimProviderApiVersion),
+         .broker_epoch = "broker-process-claim",
+         .authority_clock = [&now_ns] { return test_time(now_ns); },
+         .controller_id_source = [] {
+           return std::string("process-claim-controller-001");
+         }});
+    const auto process_open = process_claims.open_for_process(
+        binding.identity.launch_event_id);
+    bool missing_process_claim_rejected = false;
+    try {
+      (void)process_claims.open_for_process("missing-launch");
+    } catch (const trainvm::HostdMutationClaimProviderError&) {
+      missing_process_claim_rejected = true;
+    }
+    check(missing_process_claim_rejected &&
+              process_open.claim.controller.run_id == binding.identity.run_id &&
+              process_open.claim.controller.concurrency_key ==
+                  binding.identity.concurrency_key &&
+              process_open.claim.controller.logical_lease_id ==
+                  binding.identity.lease_id &&
+              process_open.claim.controller.logical_fencing_token ==
+                  binding.identity.fencing_token,
+          "process mutation claims derive only from a durable launch binding");
 
     for (std::size_t index = service.resolved_launches_.size();
          index < trainvm::TrainVMService::kMaximumRetainedLaunches; ++index) {
@@ -9247,7 +9275,7 @@ void test_host_grant_saga() {
   trainvm::HostKernelSnapshot kernel_snapshot{
       .api_version = std::string(trainvm::kHostInventoryApiVersion),
       .host_id = "sha256:" + std::string(64U, 'd'),
-      .boot_id = "dddddddd-dddd-dddd-dddd-dddddddddddd",
+      .boot_id = kTestBootId,
       .broker_epoch = "broker-saga",
       .begin_revision = "revision-saga",
       .end_revision = "revision-saga",
@@ -9270,8 +9298,9 @@ void test_host_grant_saga() {
           }));
   trainvm::SQLiteHostLedger host_ledger(authority, inventory);
   SagaHostClient host(host_ledger);
+  trainvm::AuthorityLock journal_authority(directory / "journal.db");
   trainvm::Journal journal(
-      directory / "journal.db", std::nullopt,
+      journal_authority.journal_path(), journal_authority.journal_identity(),
       trainvm::HostGrantEnforcement::required,
       trainvm::HostIdentity{.host_id = inventory.host_id,
                             .boot_id = inventory.boot_id});
@@ -9361,6 +9390,73 @@ void test_host_grant_saga() {
   const auto pending = journal.host_grant_saga(request.request_id);
   check(grant_interrupted && pending && !pending->grant,
         "host-before-journal fault leaves only the chained request intent");
+
+  const auto make_claim_provider = [&](std::string controller_id) {
+    return std::make_unique<trainvm::JournalHostdMutationClaimProvider>(
+        journal,
+        trainvm::HostdMutationClaimProviderConfig{
+            .api_version = std::string(
+                trainvm::kHostdMutationClaimProviderApiVersion),
+            .broker_epoch = "broker-claim-provider",
+            .authority_clock = [boot_id = inventory.boot_id] {
+              return test_time_on_boot(20, boot_id);
+            },
+            .controller_id_source =
+                [value = std::move(controller_id)] { return value; }});
+  };
+  auto first_claim_provider = make_claim_provider("claim-controller-001");
+  const std::uint64_t before_missing_claim = journal.event_count();
+  bool missing_claim_rejected = false;
+  try {
+    (void)first_claim_provider->open_for_resource("request-missing");
+  } catch (const trainvm::HostdMutationClaimProviderError&) {
+    missing_claim_rejected = true;
+  }
+  const auto first_open =
+      first_claim_provider->open_for_resource(request.request_id);
+  const std::uint64_t after_first_claim = journal.event_count();
+  const auto replayed_open =
+      first_claim_provider->open_for_resource(request.request_id);
+  check(missing_claim_rejected &&
+            before_missing_claim == after_first_claim &&
+            journal.event_count() == after_first_claim,
+        "mutation claim provisioning changes only the reserved authority event stream");
+  check(first_open == replayed_open,
+        "same-process mutation claim replay is byte-exact");
+  check(first_open.claim.journal.journal_id == request.journal_id &&
+            first_open.claim.controller.run_id == request.run_id &&
+            first_open.claim.controller.concurrency_key == saga_key &&
+            first_open.claim.controller.logical_lease_id ==
+                request.logical_lease_id &&
+            first_open.claim.controller.logical_fencing_token ==
+                request.logical_fencing_token &&
+            first_open.claim.controller.controller_generation == 1U &&
+            first_open.claim.controller.controller_id ==
+                "claim-controller-001",
+        "mutation claims derive exact scope from the durable saga");
+  check(trainvm::hostd_mutation_open_from_canonical_json(
+            trainvm::hostd_mutation_open_canonical_json(first_open)) ==
+            first_open,
+        "mutation claims satisfy the canonical wire contract");
+  auto restarted_claim_provider =
+      make_claim_provider("claim-controller-002");
+  const auto restarted_open =
+      restarted_claim_provider->open_for_resource(request.request_id);
+  bool superseded_claim_rejected = false;
+  try {
+    (void)first_claim_provider->open_for_resource(request.request_id);
+  } catch (const trainvm::OperationPreconditionError&) {
+    superseded_claim_rejected = true;
+  }
+  const auto current_controller =
+      journal.current_hostd_controller_fence(saga_key);
+  check(restarted_open.claim.controller.controller_generation == 2U &&
+            restarted_open.claim.controller.controller_id ==
+                "claim-controller-002" &&
+            superseded_claim_rejected && current_controller &&
+            current_controller->controller_generation == 2U &&
+            current_controller->controller_id == "claim-controller-002",
+        "service restart advances durable authority and fences the old provider");
   recover_matches(acquiring_state,
                   "controller restart ignores durable host request intent without changing FSM state");
   bool premature_launch = false;

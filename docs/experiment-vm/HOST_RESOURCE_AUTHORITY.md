@@ -684,8 +684,11 @@ implement the central process crash window as a typed saga: the exact normalized
 hash-chained before exec commit, controller recovery accepts only ordered prepare/commit evidence
 for the active bound launch, and injected lost replies replay without changing durable identity.
 The concrete bounded process client now sends those prepare/commit operations over the authenticated
-mutation transport with exact descriptor delegation and typed response checks. The remaining P0.3
-gate is journal-backed mutation-claim provisioning, daemon bootstrap integration, and the
+mutation transport with exact descriptor delegation and typed response checks. Journal-backed
+mutation-claim provisioning now derives resource scope from immutable request/release records and
+process scope from durable launch bindings. It uses cryptographically random controller identities,
+durable per-concurrency generations, exact replay within a service process, restart generation
+advancement, and fail-closed supersession. The remaining P0.3 gate is daemon bootstrap integration and the
 privileged end-to-end process-crash matrix at strict
 socket-pidfd/host-namespace grade. Deterministic transport checkpoints already prove that interruption at
 each pre-dispatch boundary leaves no ledger outcome, while interruption after

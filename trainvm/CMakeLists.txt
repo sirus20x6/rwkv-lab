@@ -71,6 +71,7 @@ add_library(trainvm_core
   src/hostd_linux_session_authority.cpp
   src/hostd_linux_stopped_launcher.cpp
   src/hostd_mutation_client.cpp
+  src/hostd_mutation_claim_provider.cpp
   src/hostd_mutation_protocol.cpp
   src/hostd_process_client.cpp
   src/hostd_process_protocol.cpp

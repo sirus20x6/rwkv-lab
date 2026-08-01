@@ -310,7 +310,8 @@ exec commit. Lost prepare and commit replies converge by exact replay, and trans
 are excluded from durable identity. A bounded strict hostd client now delegates the resolved
 executable, optional code, working-directory, and bootstrap descriptors over the authenticated
 mutation transport and revalidates typed replies. The normal CLI remains launch-disabled until
-journal-backed mutation-claim provisioning and daemon bootstrap configuration are wired;
+daemon bootstrap configuration wires the implemented journal-backed mutation-claim provider into
+the two typed clients;
 pause/resume and durable hostd adoption remain subsequent milestones. A worker launch ticket is a protocol authorization only
 until it is paired with a trusted descriptor digest, resolved launch specification, host identity,
 and durable process receipt.
@@ -322,6 +323,12 @@ identity). TrainVMService can now run the journal/hostd grant saga before creati
 durable busy results replay without repeated host mutation. CPU-only external workers remain
 explicitly disabled until hostd has a real typed process-slot resource rather than an invented GPU
 or mutex claim.
+
+Mutation claims are now derived from immutable journal resource-request/release IDs or durable
+launch bindings. The provider registers a cryptographically random controller identity at the next
+per-concurrency generation, reuses that exact claim within one service process, advances the
+generation after restart, and permanently rejects a superseded process. Neither a serialized host
+request nor a launch payload can choose its own run, lease, fence, or journal authority identity.
 
 Secret-marked parameters are restricted to versioned opaque references of the form
 `secret://provider/name#version`; raw secret values are rejected before canonical plan persistence.

@@ -243,6 +243,12 @@ startup orphan recovery are defined in
   factories, and exhaustive appearance/terminal expert parameter routers are implemented. RWKV and
   transformer migration, additional component families, and removal of the remaining legacy family
   switches remain.
+- Keep implementation boundaries aligned with component ownership: optimizer algorithms,
+  parameter routing, LR schedules, weight-decay schedules, activations, normalization, objectives,
+  precision/scaling, gradient policy, and curricula live in separate source/test modules. Shared
+  modules may not import family trainers; family adapters compose them through typed registry
+  contracts. Add a component only when a runtime path consumes it, so the registry cannot advertise
+  decorative configuration that training silently ignores.
 - Make component state and schedule domains explicit in checkpoint manifests, with exhaustive
   parameter ownership and exact-resume trajectory tests.
 - Add representative benchmark fixtures for MageFlow/flow, RWKV LM, transformer LM, vision/RWKV,

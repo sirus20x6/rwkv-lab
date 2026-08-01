@@ -136,6 +136,19 @@ struct JournalControllerFence final {
   bool operator==(const JournalControllerFence&) const = default;
 };
 
+// Immutable logical scope behind either a host resource request ID or its
+// release request ID. Mutation clients use this journal-derived identity to
+// construct authority claims; serialized host requests are never authority.
+struct JournalResourceMutationIdentity final {
+  std::string request_id;
+  std::string run_id;
+  std::string concurrency_key;
+  std::string logical_lease_id;
+  std::uint64_t logical_fencing_token{};
+
+  bool operator==(const JournalResourceMutationIdentity&) const = default;
+};
+
 struct HostGrantSagaSnapshot final {
   ResourceBundleRequest request;
   std::optional<std::string> busy_outcome_digest;
@@ -244,6 +257,9 @@ public:
   [[nodiscard]] JournalControllerFence register_hostd_controller_fence(
       const JournalControllerFence& requested,
       const AuthorityTimeSample& now);
+  [[nodiscard]] std::optional<JournalControllerFence>
+  current_hostd_controller_fence(
+      const std::string& concurrency_key) const;
   // Read-only validation that the requested controller is still the exact
   // current durable controller epoch. A newer valid epoch supersedes it;
   // malformed or torn durable authority permanently poisons this Journal.
@@ -267,6 +283,9 @@ public:
       const std::string& request_id, const ResourceReleaseReceipt& receipt);
   [[nodiscard]] std::optional<HostGrantSagaSnapshot> host_grant_saga(
       const std::string& request_id) const;
+  [[nodiscard]] std::optional<JournalResourceMutationIdentity>
+  host_resource_mutation_identity(
+      const std::string& request_or_release_id) const;
   // The prepare receipt must be durable before hostd may release the stopped
   // child to exec. Exact retries return the same normalized snapshot.
   [[nodiscard]] HostProcessSagaSnapshot record_host_process_prepared(
