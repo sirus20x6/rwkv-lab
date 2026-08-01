@@ -346,6 +346,13 @@ Compiled builtins should handle path validation, hashing, manifest joins, file i
 sampling, process supervision, artifact checks, and deterministic graph execution. GPU kernels remain
 in CUDA/Triton/PyTorch unless a measured bottleneck justifies native code.
 
+The first algorithm migration is also native: the bounded experiment-analysis library implements
+paired effect/interval/permutation statistics, Holm and sequential alpha-spending decisions, and
+Pareto selection. Its registry adapter opens existing `experiments.db` files strictly read-only and
+returns one typed SQLite snapshot across normalized campaigns or the legacy latest-result fallback.
+It does not yet own result writes, reproducibility-capsule capture, or campaign mutation; those stay
+in Python until they can publish typed events through TrainVM rather than share a writable database.
+
 ## Dashboard behavior
 
 The Go dashboard consumes descriptors and read models rather than embedding experiment-family logic.

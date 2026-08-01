@@ -95,6 +95,19 @@ target_link_libraries(trainvm_compatibility_catalog
   PRIVATE OpenSSL::Crypto
 )
 
+add_library(trainvm_experiment_analysis
+  src/experiment_analysis.cpp
+  src/experiment_registry.cpp
+)
+target_include_directories(trainvm_experiment_analysis PUBLIC include)
+target_compile_options(trainvm_experiment_analysis PUBLIC -freflection)
+target_compile_options(trainvm_experiment_analysis PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(trainvm_experiment_analysis
+  PRIVATE SQLite3::SQLite3 nlohmann_json::nlohmann_json
+)
+
 add_library(trainvm_service src/service.cpp)
 target_include_directories(trainvm_service PUBLIC include)
 target_compile_options(trainvm_service PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror)
@@ -102,7 +115,9 @@ target_link_libraries(trainvm_service PUBLIC trainvm_core trainvm_protocol)
 
 add_executable(trainvm src/main.cpp)
 target_compile_options(trainvm PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror)
-target_link_libraries(trainvm PRIVATE trainvm_service trainvm_compatibility_catalog)
+target_link_libraries(trainvm PRIVATE
+  trainvm_service trainvm_compatibility_catalog trainvm_experiment_analysis
+)
 
 enable_testing()
 add_executable(trainvm_tests tests/trainvm_tests.cpp)
@@ -151,6 +166,14 @@ target_link_libraries(source_disposition_catalog_tests PRIVATE
 add_test(NAME source_disposition_catalog_tests
   COMMAND source_disposition_catalog_tests
 )
+add_executable(experiment_analysis_tests tests/experiment_analysis_tests.cpp)
+target_compile_options(experiment_analysis_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(experiment_analysis_tests PRIVATE
+  trainvm_experiment_analysis SQLite3::SQLite3
+)
+add_test(NAME experiment_analysis_tests COMMAND experiment_analysis_tests)
 set(TRAINVM_LEGACY_SOURCE_ROOT "" CACHE PATH
   "Optional original moe-mla root for live source-disposition digest checks"
 )

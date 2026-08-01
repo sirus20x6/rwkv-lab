@@ -1,10 +1,12 @@
 #include "trainvm/compatibility_catalog.hpp"
 #include "trainvm/document.hpp"
+#include "trainvm/experiment_analysis.hpp"
 #include "trainvm/fsm.hpp"
 #include "trainvm/journal.hpp"
 #include "trainvm/reflection_json.hpp"
 #include "trainvm/service.hpp"
 
+#include <charconv>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -25,6 +27,8 @@ void usage() {
       << "  trainvm plan <experiment.json> [--canonical]\n"
       << "  trainvm compile  # read JSON from stdin; emit canonical preview JSON\n"
       << "  trainvm validate-catalog <compatibility.json> <repository-root>\n"
+      << "  trainvm inspect-registry <experiments.db> [--task <task>] "
+         "[--metric <metric>] [--baseline <config>] [--limit <count>]\n"
       << "  trainvm serve --journal <journal.db> --socket <trainvm.sock> "
          "--registry <adapters.json> --host-launch-registry "
          "<host-launches.json>\n"
@@ -116,6 +120,40 @@ int validate_catalog_command(const std::filesystem::path& catalog_path,
                }
                    .dump(2)
             << '\n';
+  return 0;
+}
+
+int inspect_registry_command(int argc, char** argv) {
+  trainvm::ExperimentRegistryQuery query;
+  for (int index = 3; index < argc; index += 2) {
+    if (index + 1 >= argc) {
+      usage();
+      return 64;
+    }
+    const std::string_view option(argv[index]);
+    if (option == "--task") {
+      query.task = argv[index + 1];
+    } else if (option == "--metric") {
+      query.metric = argv[index + 1];
+    } else if (option == "--baseline") {
+      query.baseline = argv[index + 1];
+    } else if (option == "--limit") {
+      const std::string_view text(argv[index + 1]);
+      std::size_t value{};
+      const auto [end, error] =
+          std::from_chars(text.data(), text.data() + text.size(), value);
+      if (error != std::errc{} || end != text.data() + text.size()) {
+        usage();
+        return 64;
+      }
+      query.campaign_limit = value;
+    } else {
+      usage();
+      return 64;
+    }
+  }
+  const auto snapshot = trainvm::read_experiment_registry(argv[2], query);
+  std::cout << trainvm::encode_json(snapshot).dump(2) << '\n';
   return 0;
 }
 
@@ -238,6 +276,9 @@ int main(int argc, char** argv) {
     }
     if (argc == 4 && std::string_view(argv[1]) == "validate-catalog") {
       return validate_catalog_command(argv[2], argv[3]);
+    }
+    if (argc >= 3 && std::string_view(argv[1]) == "inspect-registry") {
+      return inspect_registry_command(argc, argv);
     }
     if (argc >= 2 && std::string_view(argv[1]) == "serve") {
       return serve_command(argc, argv);

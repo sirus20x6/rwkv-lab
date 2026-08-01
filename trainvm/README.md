@@ -9,6 +9,9 @@ in [`docs/experiment-vm/ARCHITECTURE.md`](../docs/experiment-vm/ARCHITECTURE.md)
 Implemented now:
 
 - GCC C++26 reflection-based strict JSON decoding and canonical encoding;
+- native bounded experiment analysis: paired bootstrap/sign-flip statistics, Holm and sequential
+  alpha-spending decisions, Pareto selection, and a strictly read-only typed SQLite snapshot of
+  both normalized campaigns and legacy aggregate results;
 - reflected enum parsing and schema-name introspection;
 - semantic graph, reference, artifact-availability, cycle, control, and recovery validation;
 - stable canonical plan hashing with SHA-256;
@@ -209,6 +212,8 @@ trainvm/build/trainvm compile < \
   docs/experiment-vm/examples/mageflow-cache-resume.json
 trainvm/build/trainvm validate-catalog \
   "$PWD/docs/experiment-vm/compatibility-workflows.v1.json" "$PWD"
+trainvm/build/trainvm inspect-registry "$PWD/experiments.db" \
+  --task recall:16 --metric acc --baseline baseline --limit 20
 trainvm/build/trainvm serve --journal /tmp/trainvm.db --socket /tmp/trainvm.sock \
   --registry /etc/trainvm/adapters.json \
   --host-launch-registry /etc/trainvm/host-launches.json
