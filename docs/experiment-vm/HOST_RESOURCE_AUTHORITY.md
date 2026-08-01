@@ -683,7 +683,9 @@ packets continue to reject and close delegated descriptors. The TrainVM journal 
 implement the central process crash window as a typed saga: the exact normalized prepare receipt is
 hash-chained before exec commit, controller recovery accepts only ordered prepare/commit evidence
 for the active bound launch, and injected lost replies replay without changing durable identity.
-The remaining P0.3 gate is the real mutation-client and daemon bootstrap integration plus the
+The concrete bounded process client now sends those prepare/commit operations over the authenticated
+mutation transport with exact descriptor delegation and typed response checks. The remaining P0.3
+gate is journal-backed mutation-claim provisioning, daemon bootstrap integration, and the
 privileged end-to-end process-crash matrix at strict
 socket-pidfd/host-namespace grade. Deterministic transport checkpoints already prove that interruption at
 each pre-dispatch boundary leaves no ledger outcome, while interruption after

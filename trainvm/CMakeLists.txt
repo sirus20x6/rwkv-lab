@@ -71,6 +71,7 @@ add_library(trainvm_core
   src/hostd_linux_session_authority.cpp
   src/hostd_linux_stopped_launcher.cpp
   src/hostd_mutation_protocol.cpp
+  src/hostd_process_client.cpp
   src/hostd_process_protocol.cpp
   src/hostd_session_challenge.cpp
   src/hostd_transport.cpp
@@ -257,6 +258,7 @@ add_test(NAME hostd_tests COMMAND hostd_tests)
 add_executable(hostd_transport_tests tests/hostd_transport_tests.cpp)
 target_compile_options(hostd_transport_tests PRIVATE
   -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+  -fno-access-control
 )
 target_link_libraries(hostd_transport_tests PRIVATE trainvm_core)
 add_test(NAME hostd_transport_tests COMMAND hostd_transport_tests)

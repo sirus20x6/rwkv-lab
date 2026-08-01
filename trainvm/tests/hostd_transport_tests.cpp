@@ -1,5 +1,6 @@
 #include "trainvm/hostd_transport.hpp"
 #include "trainvm/document.hpp"
+#include "trainvm/hostd_process_client.hpp"
 #include "trainvm/worker_bootstrap.hpp"
 
 #include <fcntl.h>
@@ -29,6 +30,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -1765,6 +1767,84 @@ void mutation_transport_dispatches_replays_and_disconnects() {
               commit_replay.process_committed->replayed &&
               process_supervisor->commit_calls == 2U,
           "process pre-exec release is exact and replay-safe");
+
+  const int client_executable =
+      ::fcntl(delegated_executable, F_DUPFD_CLOEXEC, 5);
+  const int client_working_directory =
+      ::fcntl(directory.parent_fd(), F_DUPFD_CLOEXEC, 5);
+  require(client_executable >= 0 && client_working_directory >= 0,
+          "duplicate descriptors for typed hostd client");
+  ResolvedLaunch client_launch(process_launch, client_executable,
+                               std::nullopt, client_working_directory);
+  std::size_t rejected_exchange_calls = 0U;
+  HostdProcessClient misattributed_client({
+      .transport = client,
+      .open_for_launch = [&](std::string_view) {
+        auto wrong = open;
+        wrong.claim.controller.run_id = "wrong-run";
+        return wrong;
+      },
+      .monotonic_now = [] { return hostd_monotonic_now_ns(); },
+      .request_timeout_ns = 2'000'000'000LL,
+      .exchange = [&](const HostdMutationClientConfig&,
+                      const HostdMutationRequest&, std::uint64_t,
+                      std::int64_t) -> HostdMutationReply {
+        ++rejected_exchange_calls;
+        throw std::runtime_error("misattributed request reached transport");
+      },
+  });
+  bool misattributed_rejected = false;
+  try {
+    (void)misattributed_client.prepare_process(
+        process_prepare, client_launch, process_bootstrap);
+  } catch (const OperationPreconditionError&) {
+    misattributed_rejected = true;
+  }
+  require(misattributed_rejected && rejected_exchange_calls == 0U,
+          "typed hostd client rejects a journal/controller claim mismatch before descriptor transfer");
+  std::size_t open_calls = 0U;
+  HostdProcessClient process_client({
+      .transport = client,
+      .open_for_launch = [&](std::string_view launch_id) {
+        ++open_calls;
+        require(launch_id == process_launch.identity.launch_event_id,
+                "typed hostd client requests authority for the exact launch");
+        return open;
+      },
+      .monotonic_now = [] { return hostd_monotonic_now_ns(); },
+      .request_timeout_ns = 2'000'000'000LL,
+      .exchange = {},
+  });
+  const auto typed_exchange = [&](auto&& operation) {
+    using Result = std::invoke_result_t<decltype(operation)>;
+    std::optional<Result> result;
+    std::exception_ptr client_error;
+    std::jthread client_thread([&] {
+      try {
+        result = operation();
+      } catch (...) {
+        client_error = std::current_exception();
+      }
+    });
+    const HostdServeResult served = server.serve_one(deadline());
+    client_thread.join();
+    if (client_error) std::rethrow_exception(client_error);
+    require(served == HostdServeResult::served && result,
+            "typed hostd client receives one authenticated reply");
+    return *result;
+  };
+  const auto typed_prepared = typed_exchange([&] {
+    return process_client.prepare_process(process_prepare, client_launch,
+                                          process_bootstrap);
+  });
+  const auto typed_committed = typed_exchange([&] {
+    return process_client.commit_process(process_commit);
+  });
+  require(typed_prepared.replayed && typed_committed.replayed &&
+              process_supervisor->prepare_calls == 3U &&
+              process_supervisor->commit_calls == 3U && open_calls == 2U,
+          "typed hostd client delegates sealed descriptors and replays prepare/commit over the real mutation transport");
+
   const HostdProcessExitCommand process_exit{
       .api_version = std::string(kHostdProcessExitApiVersion),
       .exit_request_id = "exit-transport",
@@ -1923,8 +2003,8 @@ void mutation_transport_dispatches_replays_and_disconnects() {
           "lost-reply replay remains exactly releasable");
   require(ledger_time->calls == 6U,
           "only dispatched grants and releases sample host ledger time");
-  require(journal->calls == 16U && service->calls >= 22U &&
-              logical->calls >= 20U &&
+  require(journal->calls == 18U && service->calls >= 24U &&
+              logical->calls >= 22U &&
               verifier->outstanding_challenges() == 0U,
           "every connection consumes a journal challenge and reattests peer and fence");
 }
