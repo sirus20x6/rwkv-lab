@@ -56,7 +56,8 @@ class HostProcessSagaReconciler final {
 
   [[nodiscard]] HostProcessSagaSnapshot reconcile(
       const ResolvedLaunch& resolved, const ResourceBundleGrant& grant,
-      std::string controller_target, const AuthorityTimeSample& now);
+      const LinuxProcessPolicy& process_policy, std::string controller_target,
+      const AuthorityTimeSample& now);
   [[nodiscard]] HostProcessSagaSnapshot reconcile_exit(
       const std::string& launch_id, bool request_termination,
       const AuthorityTimeSample& now);

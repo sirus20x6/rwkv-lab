@@ -1875,8 +1875,19 @@ HostProcessSagaSnapshot TrainVMService::launch_worker_process(
     throw OperationPreconditionError(
         "host process launch cannot recover its exact physical grant");
   }
+  const auto projection = journal_.projection(identity.run_id);
+  const auto plan =
+      projection ? journal_.compiled_plan(projection->plan_hash) : std::nullopt;
+  if (!projection || !plan || projection->current_node_id != identity.node_id ||
+      projection->current_attempt_id != identity.attempt_id) {
+    throw OperationPreconditionError(
+        "host process launch cannot recover its exact resource policy");
+  }
+  const LinuxProcessPolicy process_policy = compile_linux_process_policy(
+      plan->experiment.spec.resources.cpu_io_policy);
   return host_process_saga_->reconcile(
-      retained->second, *grant->grant, controller_target_, authority_now());
+      retained->second, *grant->grant, process_policy, controller_target_,
+      authority_now());
 }
 
 bool TrainVMService::claim_worker_attempt(const std::string& key) {

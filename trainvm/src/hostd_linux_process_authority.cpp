@@ -124,7 +124,8 @@ LinuxProcessAuthority::LinuxProcessAuthority(
 
 LinuxPreparedLaunch LinuxProcessAuthority::prepare(
     const ResolvedLaunch& resolved, const ResourceBundleGrant& grant,
-    int worker_bootstrap_fd, std::string_view worker_bootstrap_digest) {
+    int worker_bootstrap_fd, std::string_view worker_bootstrap_digest,
+    const LinuxProcessPolicy& process_policy) {
   const ResolvedLaunchSpec spec = resolved_launch_spec_from_json(
       resolved_launch_spec_json(resolved.spec()));
   const HostInventoryReceipt inventory = ledger_.inventory();
@@ -164,7 +165,7 @@ LinuxPreparedLaunch LinuxProcessAuthority::prepare(
           .logical_lease_id = grant.logical_lease_id,
           .logical_fencing_token = grant.logical_fencing_token,
           .resolved_launch_digest = hostd_bound_process_launch_digest(
-              spec, worker_bootstrap_digest),
+              spec, worker_bootstrap_digest, process_policy),
           .executable_path = spec.identity.executable.source_path,
           .executable_digest = spec.identity.executable.sealed_sha256,
           .cgroup_path = cgroup_identity.unified_path,
@@ -570,7 +571,7 @@ HostdProcessPreparedResult HostdLinuxProcessSupervisor::prepare(
   }
   LinuxPreparedLaunch launch = authority_.prepare(
       resolved, request.grant, worker_bootstrap_fd,
-      request.worker_bootstrap_digest);
+      request.worker_bootstrap_digest, request.process_policy);
   auto entry = std::make_unique<Entry>(Entry{
       .request = request,
       .launch = std::move(launch),

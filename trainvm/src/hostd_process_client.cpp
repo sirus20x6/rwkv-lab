@@ -119,7 +119,8 @@ HostdProcessPreparedResult HostdProcessClient::prepare_process(
       result.intent.request.grant_digest != request.grant.receipt_digest ||
       result.intent.request.resolved_launch_digest !=
           hostd_bound_process_launch_digest(
-              request.launch, request.worker_bootstrap_digest) ||
+              request.launch, request.worker_bootstrap_digest,
+              request.process_policy) ||
       result.spawn.request.launch_id != identity.launch_event_id) {
     throw HostdTransportError(
         "hostd process prepare reply diverges from its request");

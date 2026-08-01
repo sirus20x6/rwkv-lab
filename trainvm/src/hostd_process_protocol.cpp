@@ -93,10 +93,12 @@ Json prepare_json(const HostdProcessPrepareRequest& value) {
   if (!valid_digest(value.worker_bootstrap_digest) ||
       value.descriptor_roles != expected_roles)
     reject("hostd process prepare descriptor roles are inexact");
+  validate_linux_process_policy(value.process_policy);
   return {{"api_version", value.api_version},
           {"descriptor_roles", value.descriptor_roles},
           {"grant", resource_bundle_grant_json(value.grant)},
           {"launch", resolved_launch_spec_json(value.launch)},
+          {"process_policy", linux_process_policy_json(value.process_policy)},
           {"worker_bootstrap_digest", value.worker_bootstrap_digest}};
 }
 
@@ -176,13 +178,15 @@ HostdProcessPrepareRequest hostd_process_prepare_from_canonical_json(
     std::string_view value) {
   const Json parsed = parse_canonical(value);
   exact_fields(parsed, {"api_version", "descriptor_roles", "grant", "launch",
-                        "worker_bootstrap_digest"});
+                        "process_policy", "worker_bootstrap_digest"});
   HostdProcessPrepareRequest result{
       .api_version = parsed.at("api_version").get<std::string>(),
       .launch = resolved_launch_spec_from_json(parsed.at("launch")),
       .grant = resource_bundle_grant_from_json(parsed.at("grant")),
       .worker_bootstrap_digest =
           parsed.at("worker_bootstrap_digest").get<std::string>(),
+      .process_policy =
+          linux_process_policy_from_json(parsed.at("process_policy")),
       .descriptor_roles =
           parsed.at("descriptor_roles").get<std::vector<std::string>>(),
   };
@@ -193,12 +197,15 @@ HostdProcessPrepareRequest hostd_process_prepare_from_canonical_json(
 
 std::string hostd_bound_process_launch_digest(
     const ResolvedLaunchSpec& launch,
-    std::string_view worker_bootstrap_digest) {
+    std::string_view worker_bootstrap_digest,
+    const LinuxProcessPolicy& process_policy) {
   if (!valid_digest(launch.spec_digest) ||
       !valid_digest(worker_bootstrap_digest))
     reject("hostd bound process launch digest input is invalid");
+  validate_linux_process_policy(process_policy);
   return "sha256:" + sha256_hex(Json{
-      {"api_version", "trainvm.hostd-bound-process-launch/v1"},
+      {"api_version", "trainvm.hostd-bound-process-launch/v2"},
+      {"process_policy_digest", process_policy.policy_digest},
       {"resolved_launch_digest", launch.spec_digest},
       {"worker_bootstrap_digest", worker_bootstrap_digest},
   }.dump());

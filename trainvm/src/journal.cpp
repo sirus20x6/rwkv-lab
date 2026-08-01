@@ -6559,7 +6559,8 @@ void require_prepared_process_binding(
       request.logical_lease_id != grant.logical_lease_id ||
       request.logical_fencing_token != grant.logical_fencing_token ||
       request.resolved_launch_digest != hostd_bound_process_launch_digest(
-          prepare.launch, prepare.worker_bootstrap_digest) ||
+          prepare.launch, prepare.worker_bootstrap_digest,
+          prepare.process_policy) ||
       request.executable_path != launch.executable.source_path ||
       request.executable_digest != launch.executable.sealed_sha256 ||
       intent.host_id != grant.host_id || intent.boot_id != grant.boot_id ||

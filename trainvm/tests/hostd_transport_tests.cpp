@@ -517,7 +517,8 @@ class LedgerProcessSupervisor final : public IHostdProcessSupervisor {
             .logical_fencing_token =
                 request.grant.logical_fencing_token,
             .resolved_launch_digest = hostd_bound_process_launch_digest(
-                request.launch, request.worker_bootstrap_digest),
+                request.launch, request.worker_bootstrap_digest,
+                request.process_policy),
             .executable_path = request.launch.identity.executable.source_path,
             .executable_digest =
                 request.launch.identity.executable.sealed_sha256,
@@ -1777,6 +1778,7 @@ void mutation_transport_dispatches_replays_and_disconnects() {
       .launch = process_launch,
       .grant = grant,
       .worker_bootstrap_digest = process_bootstrap.spec().bootstrap_digest,
+      .process_policy = compile_linux_process_policy(std::nullopt),
       .descriptor_roles = {"executable", "working_directory",
                            "worker_bootstrap"},
   };

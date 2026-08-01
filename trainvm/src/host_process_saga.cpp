@@ -19,7 +19,8 @@ void HostProcessSagaReconciler::fault(
 
 HostProcessSagaSnapshot HostProcessSagaReconciler::reconcile(
     const ResolvedLaunch& resolved, const ResourceBundleGrant& grant,
-    std::string controller_target, const AuthorityTimeSample& now) {
+    const LinuxProcessPolicy& process_policy, std::string controller_target,
+    const AuthorityTimeSample& now) {
   const auto& identity = resolved.spec().identity;
   SealedWorkerBootstrap bootstrap = create_sealed_worker_bootstrap({
       .api_version = std::string(kWorkerBootstrapApiVersion),
@@ -43,6 +44,7 @@ HostProcessSagaSnapshot HostProcessSagaReconciler::reconcile(
       .launch = resolved.spec(),
       .grant = grant,
       .worker_bootstrap_digest = bootstrap.spec().bootstrap_digest,
+      .process_policy = process_policy,
       .descriptor_roles =
           identity.code
               ? std::vector<std::string>{"executable", "code",

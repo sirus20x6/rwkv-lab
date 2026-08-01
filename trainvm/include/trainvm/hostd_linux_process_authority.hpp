@@ -115,7 +115,8 @@ class LinuxProcessAuthority final {
   // spawn receipt into its journal and calls release_to_exec().
   [[nodiscard]] LinuxPreparedLaunch prepare(
       const ResolvedLaunch& resolved, const ResourceBundleGrant& grant,
-      int worker_bootstrap_fd, std::string_view worker_bootstrap_digest);
+      int worker_bootstrap_fd, std::string_view worker_bootstrap_digest,
+      const LinuxProcessPolicy& process_policy);
   [[nodiscard]] HostProcessExitResult finalize_exit(
       LinuxPreparedLaunch& launch, const ResourceBundleGrant& grant,
       std::string exit_request_id, bool request_termination);

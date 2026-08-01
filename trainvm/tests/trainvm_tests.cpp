@@ -9340,7 +9340,8 @@ class SagaProcessClient final : public trainvm::IHostProcessClient {
         .logical_lease_id = request.grant.logical_lease_id,
         .logical_fencing_token = request.grant.logical_fencing_token,
         .resolved_launch_digest = trainvm::hostd_bound_process_launch_digest(
-            request.launch, request.worker_bootstrap_digest),
+            request.launch, request.worker_bootstrap_digest,
+            request.process_policy),
         .executable_path = request.launch.identity.executable.source_path,
         .executable_digest =
             request.launch.identity.executable.sealed_sha256,
@@ -9794,6 +9795,8 @@ void test_host_grant_saga() {
   trainvm::ResolvedLaunch process_launch(
       binding, -1,
       binding.identity.code ? std::optional<int>{-1} : std::nullopt, -1);
+  const auto process_policy =
+      trainvm::compile_linux_process_policy(std::nullopt);
   SagaProcessClient process_host(host_ledger);
   ProcessSagaOneShotFault lost_prepare_reply(
       trainvm::HostProcessSagaFaultPoint::after_prepare_host);
@@ -9802,7 +9805,7 @@ void test_host_grant_saga() {
     trainvm::HostProcessSagaReconciler process_reconciler(
         journal, process_host, &lost_prepare_reply);
     (void)process_reconciler.reconcile(
-        process_launch, *granted.grant,
+        process_launch, *granted.grant, process_policy,
         "unix:/tmp/trainvm-process-saga.sock", test_time(23));
   } catch (const std::runtime_error&) {
     prepare_reply_lost = true;
@@ -9818,7 +9821,7 @@ void test_host_grant_saga() {
     trainvm::HostProcessSagaReconciler process_reconciler(
         journal, process_host, &stopped_after_journal);
     (void)process_reconciler.reconcile(
-        process_launch, *granted.grant,
+        process_launch, *granted.grant, process_policy,
         "unix:/tmp/trainvm-process-saga.sock", test_time(23));
   } catch (const std::runtime_error&) {
     stopped_before_commit = true;
@@ -9837,7 +9840,7 @@ void test_host_grant_saga() {
     trainvm::HostProcessSagaReconciler process_reconciler(
         journal, process_host, &lost_commit_reply);
     (void)process_reconciler.reconcile(
-        process_launch, *granted.grant,
+        process_launch, *granted.grant, process_policy,
         "unix:/tmp/trainvm-process-saga.sock", test_time(23));
   } catch (const std::runtime_error&) {
     commit_reply_lost = true;
@@ -9850,11 +9853,11 @@ void test_host_grant_saga() {
   trainvm::HostProcessSagaReconciler process_reconciler(journal,
                                                          process_host);
   const auto process_complete = process_reconciler.reconcile(
-      process_launch, *granted.grant,
+      process_launch, *granted.grant, process_policy,
       "unix:/tmp/trainvm-process-saga.sock", test_time(23));
   const std::uint64_t process_event_count = journal.event_count();
   const auto process_replay = process_reconciler.reconcile(
-      process_launch, *granted.grant,
+      process_launch, *granted.grant, process_policy,
       "unix:/tmp/trainvm-process-saga.sock", test_time(23));
   check(process_complete.committed && process_replay == process_complete &&
             !process_complete.prepared.replayed &&
