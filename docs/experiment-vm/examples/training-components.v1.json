@@ -52,7 +52,8 @@
         {"name": "beta2", "type": "number", "required": false, "default": 0.999, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
         {"name": "epsilon", "type": "number", "required": false, "default": 1e-8, "minimum": 1e-16, "maximum": 1.0, "unit": "ratio"},
         {"name": "weight_decay", "type": "number", "required": false, "default": 0.01, "minimum": 0.0, "maximum": 10.0, "unit": "ratio"},
-        {"name": "foreach", "type": "boolean", "required": false, "default": true}
+        {"name": "foreach", "type": "boolean", "required": false, "default": true},
+        {"name": "fused", "type": "boolean", "required": false, "default": false}
       ],
       "state": [
         {"name": "parameter_state_manifest", "type": "string", "required": true}
@@ -76,7 +77,8 @@
         {"name": "beta2", "type": "number", "required": false, "default": 0.999, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
         {"name": "epsilon", "type": "number", "required": false, "default": 1e-8, "minimum": 1e-16, "maximum": 1.0, "unit": "ratio"},
         {"name": "weight_decay", "type": "number", "required": false, "default": 0.01, "minimum": 0.0, "maximum": 10.0, "unit": "ratio"},
-        {"name": "foreach", "type": "boolean", "required": false, "default": true}
+        {"name": "foreach", "type": "boolean", "required": false, "default": true},
+        {"name": "fused", "type": "boolean", "required": false, "default": false}
       ],
       "state": [
         {"name": "parameter_state_manifest", "type": "string", "required": true},
@@ -99,6 +101,30 @@
         {"name": "warmup_steps", "type": "integer", "required": true, "minimum": 0, "maximum": 1000000000, "unit": "optimizer_step"},
         {"name": "max_steps", "type": "integer", "required": true, "minimum": 1, "maximum": 1000000000, "unit": "optimizer_step"},
         {"name": "minimum_ratio", "type": "number", "required": false, "default": 0.1, "minimum": 0.0, "maximum": 1.0, "unit": "ratio"}
+      ],
+      "state": [
+        {"name": "cursor", "type": "integer", "required": true}
+      ],
+      "step_domain": "optimizer_step",
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "learning_rate_schedule",
+        "name": "powercool",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.schedule.powercool.v1",
+      "model_families": ["rwkv", "transformer"],
+      "required_capabilities": ["schedule.powercool.v1"],
+      "configuration": [
+        {"name": "warmup_steps", "type": "integer", "required": true, "minimum": 0, "maximum": 1000000000, "unit": "optimizer_step"},
+        {"name": "max_steps", "type": "integer", "required": true, "minimum": 1, "maximum": 1000000000, "unit": "optimizer_step"},
+        {"name": "minimum_ratio", "type": "number", "required": false, "default": 0.0, "minimum": 0.0, "maximum": 1.0, "unit": "ratio"},
+        {"name": "cooldown_fraction", "type": "number", "required": false, "default": 0.2, "minimum": 1e-12, "maximum": 1.0, "unit": "ratio"},
+        {"name": "power", "type": "number", "required": false, "default": 2.0, "minimum": 1e-12, "maximum": 1000.0, "unit": "ratio"}
       ],
       "state": [
         {"name": "cursor", "type": "integer", "required": true}

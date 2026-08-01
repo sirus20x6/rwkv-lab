@@ -8,23 +8,28 @@ Standard bitsandbytes QLoRA does not quantize those 3-D parameters.
 from __future__ import annotations
 
 import argparse
-from collections import Counter, defaultdict
-from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
 import math
-from pathlib import Path
 import random
 import shlex
 import signal
 import time
+from collections import Counter, defaultdict
+from dataclasses import asdict, dataclass, replace
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 
-from rwkv_lab.powercool import powercool_lr
-
+from rwkv_lab.training_components import (
+    AdamWConfiguration,
+    OptimizerImplementation,
+    PowerCoolConfiguration,
+    build_registered_optimizer,
+    powercool_multiplier,
+)
 
 SCHEMA = "rwkv-lab.qwen-ao3-cpt.v1"
 ROUTER_TARGET = "mlp.gate.weight"
@@ -686,17 +691,38 @@ def evaluate(model, rows: PackedRows, config: QwenAO3Config) -> dict[str, float]
     return {"loss": mean, "perplexity": math.exp(min(mean, 20.0)), "batches": batches}
 
 
+def _optimizer_configuration(config: QwenAO3Config) -> AdamWConfiguration:
+    return AdamWConfiguration(
+        learning_rate=config.learning_rate,
+        beta1=config.adam_beta1,
+        beta2=config.adam_beta2,
+        epsilon=config.adam_epsilon,
+        weight_decay=config.weight_decay,
+        foreach=False,
+        fused=True,
+    )
+
+
+def _learning_rate_schedule(
+    config: QwenAO3Config, total_steps: int
+) -> PowerCoolConfiguration:
+    return PowerCoolConfiguration(
+        warmup_steps=max(1, round(total_steps * config.warmup_ratio)),
+        max_steps=total_steps,
+        minimum_ratio=config.min_learning_rate / config.learning_rate,
+        cooldown_fraction=config.powercool_cooldown_fraction,
+        power=config.powercool_power,
+    )
+
+
 def _optimizer(model, config: QwenAO3Config):
     parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
     if not parameters:
         raise RuntimeError("model has no trainable adapter parameters")
-    return torch.optim.AdamW(
+    return build_registered_optimizer(
+        OptimizerImplementation.TORCH_ADAMW_V1,
         parameters,
-        lr=config.learning_rate,
-        betas=(config.adam_beta1, config.adam_beta2),
-        eps=config.adam_epsilon,
-        weight_decay=config.weight_decay,
-        fused=True,
+        _optimizer_configuration(config),
     )
 
 
@@ -931,7 +957,7 @@ def train(config: QwenAO3Config) -> dict[str, Any]:
     total_steps = min(config.max_steps or available_steps, available_steps)
     if total_steps < 1:
         raise ValueError("packed train corpus has no complete optimizer step")
-    warmup_steps = max(1, round(total_steps * config.warmup_ratio))
+    learning_rate_schedule = _learning_rate_schedule(config, total_steps)
     random.seed(config.seed)
     np.random.seed(config.seed)
     torch.manual_seed(config.seed)
@@ -964,6 +990,11 @@ def train(config: QwenAO3Config) -> dict[str, Any]:
         "eval_pack_manifest_sha256": eval_rows.manifest_sha256,
         "available_steps": available_steps,
         "total_steps": total_steps,
+        "learning_rate_schedule": {
+            "implementation": "rwkv_lab.schedule.powercool.v1",
+            "configuration": asdict(learning_rate_schedule),
+            "step_domain": "optimizer_step",
+        },
         "dropped_rows": train_rows.rows
         - min(
             train_rows.rows,
@@ -1050,14 +1081,8 @@ def train(config: QwenAO3Config) -> dict[str, Any]:
             config.max_grad_norm,
             error_if_nonfinite=True,
         )
-        lr = powercool_lr(
-            step,
-            peak_lr=config.learning_rate,
-            min_lr=config.min_learning_rate,
-            total_steps=total_steps,
-            warmup_steps=warmup_steps,
-            cooldown_fraction=config.powercool_cooldown_fraction,
-            power=config.powercool_power,
+        lr = config.learning_rate * powercool_multiplier(
+            step, learning_rate_schedule
         )
         for group in optimizer.param_groups:
             group["lr"] = lr

@@ -24,15 +24,17 @@ path. The resolved-worker dispatch functions accept only the canonical envelope 
 fail on extra keys, unknown implementation IDs, wrong categories, missing defaults, nonfinite
 numbers, or incorrect scalar types.
 
-The initial concrete catalog contains the implementations already shared by the MageFlow trainers:
+The initial concrete cross-family catalog contains:
 
 - Torch AdamW;
 - FP32-master AdamW for lower-precision live model weights;
-- linear warmup followed by a cosine tail over optimizer steps.
+- linear warmup followed by a cosine tail over optimizer steps;
+- warmup/plateau/PowerCool over optimizer steps for RWKV and transformers;
 - appearance-expert versus shared-backbone exclusive parameter routing;
 - terminal-expert versus shared-backbone versus VAE-REPA exclusive parameter routing.
 
-The three MageFlow training paths now use those common factories. Routing aggregates aliased names,
+The three MageFlow training paths, RWKV AdamW path, and Qwen transformer AdamW/PowerCool path now
+use the common boundary. Routing aggregates aliased names,
 deduplicates tensor identities, rejects overlap and unclaimed trainable tensors, and records an
 exact group/count/rate audit in the run contract. The catalog does not claim another
 activation, objective, optimizer, router, or kernel until a real adapter path consumes the symbolic

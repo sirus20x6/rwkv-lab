@@ -12,11 +12,13 @@ import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
+from functools import partial
 from typing import Any
 
 import torch
 
-from rwkv_lab.mage_flow_optimizations import FP32MasterAdamW
+from rwkv_lab.powercool import powercool_lr
+from rwkv_lab.training_optimizers import FP32MasterAdamW
 from rwkv_lab.training_parameter_routing import (
     ParameterRoute,
     ParameterRoutingResult,
@@ -31,6 +33,7 @@ class OptimizerImplementation(str, Enum):
 
 class ScheduleImplementation(str, Enum):
     LINEAR_WARMUP_COSINE_V1 = "rwkv_lab.schedule.linear_warmup_cosine.v1"
+    POWERCOOL_V1 = "rwkv_lab.schedule.powercool.v1"
 
 
 class ParameterRouterImplementation(str, Enum):
@@ -50,6 +53,7 @@ class AdamWConfiguration:
     epsilon: float = 1.0e-8
     weight_decay: float = 0.01
     foreach: bool = True
+    fused: bool = False
 
     def __post_init__(self) -> None:
         if any(
@@ -78,8 +82,10 @@ class AdamWConfiguration:
             raise ValueError("AdamW beta values must be in [0, 1)")
         if self.epsilon <= 0 or self.weight_decay < 0:
             raise ValueError("AdamW epsilon must be positive and decay nonnegative")
-        if not isinstance(self.foreach, bool):
-            raise TypeError("AdamW foreach must be boolean")
+        if not isinstance(self.foreach, bool) or not isinstance(self.fused, bool):
+            raise TypeError("AdamW foreach and fused flags must be boolean")
+        if self.foreach and self.fused:
+            raise ValueError("AdamW foreach and fused modes are mutually exclusive")
 
     @classmethod
     def from_resolved(cls, configuration: Mapping[str, Any]) -> AdamWConfiguration:
@@ -90,6 +96,7 @@ class AdamWConfiguration:
             "epsilon",
             "weight_decay",
             "foreach",
+            "fused",
         }
         if set(configuration) != expected:
             raise ValueError(
@@ -132,6 +139,62 @@ class LinearWarmupCosineConfiguration:
         if set(configuration) != {"warmup_steps", "max_steps", "minimum_ratio"}:
             raise ValueError(
                 "resolved schedule configuration has missing or unknown fields"
+            )
+        return cls(**configuration)
+
+
+@dataclass(frozen=True, slots=True)
+class PowerCoolConfiguration:
+    warmup_steps: int
+    max_steps: int
+    minimum_ratio: float = 0.0
+    cooldown_fraction: float = 0.2
+    power: float = 2.0
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.warmup_steps, int)
+            or isinstance(self.warmup_steps, bool)
+            or self.warmup_steps < 0
+        ):
+            raise ValueError("warmup_steps must be a nonnegative integer")
+        if (
+            not isinstance(self.max_steps, int)
+            or isinstance(self.max_steps, bool)
+            or self.max_steps < 1
+        ):
+            raise ValueError("max_steps must be a positive integer")
+        if self.warmup_steps > self.max_steps:
+            raise ValueError("warmup_steps cannot exceed max_steps")
+        for name, value in (
+            ("minimum_ratio", self.minimum_ratio),
+            ("cooldown_fraction", self.cooldown_fraction),
+            ("power", self.power),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+            ):
+                raise ValueError(f"{name} must be finite")
+        if not 0 <= self.minimum_ratio <= 1:
+            raise ValueError("minimum_ratio must be in [0, 1]")
+        if not 0 < self.cooldown_fraction <= 1:
+            raise ValueError("cooldown_fraction must be in (0, 1]")
+        if self.power <= 0:
+            raise ValueError("power must be positive")
+
+    @classmethod
+    def from_resolved(cls, configuration: Mapping[str, Any]) -> PowerCoolConfiguration:
+        if set(configuration) != {
+            "warmup_steps",
+            "max_steps",
+            "minimum_ratio",
+            "cooldown_fraction",
+            "power",
+        }:
+            raise ValueError(
+                "resolved PowerCool configuration has missing or unknown fields"
             )
         return cls(**configuration)
 
@@ -211,6 +274,20 @@ def linear_warmup_cosine_multiplier(
     )
 
 
+def powercool_multiplier(step: int, configuration: PowerCoolConfiguration) -> float:
+    """Pure PowerCool multiplier over the zero-based optimizer-step domain."""
+
+    return powercool_lr(
+        step,
+        peak_lr=1.0,
+        min_lr=configuration.minimum_ratio,
+        total_steps=configuration.max_steps,
+        warmup_steps=configuration.warmup_steps,
+        cooldown_fraction=configuration.cooldown_fraction,
+        power=configuration.power,
+    )
+
+
 def build_registered_optimizer(
     implementation: OptimizerImplementation,
     parameters: Iterable[torch.nn.Parameter] | Iterable[Mapping[str, Any]],
@@ -224,6 +301,7 @@ def build_registered_optimizer(
         "eps": configuration.epsilon,
         "weight_decay": configuration.weight_decay,
         "foreach": configuration.foreach,
+        "fused": configuration.fused,
     }
     if implementation is OptimizerImplementation.TORCH_ADAMW_V1:
         return torch.optim.AdamW(parameters, **kwargs)
@@ -235,15 +313,25 @@ def build_registered_optimizer(
 def build_registered_schedule(
     implementation: ScheduleImplementation,
     optimizer: torch.optim.Optimizer,
-    configuration: LinearWarmupCosineConfiguration,
+    configuration: LinearWarmupCosineConfiguration | PowerCoolConfiguration,
 ) -> torch.optim.lr_scheduler.LRScheduler:
     """Construct one allowlisted schedule over the optimizer-step domain."""
 
-    if implementation is not ScheduleImplementation.LINEAR_WARMUP_COSINE_V1:
+    if implementation is ScheduleImplementation.LINEAR_WARMUP_COSINE_V1:
+        if not isinstance(configuration, LinearWarmupCosineConfiguration):
+            raise TypeError("linear-warmup-cosine requires its typed configuration")
+        multiplier = partial(
+            linear_warmup_cosine_multiplier, configuration=configuration
+        )
+    elif implementation is ScheduleImplementation.POWERCOOL_V1:
+        if not isinstance(configuration, PowerCoolConfiguration):
+            raise TypeError("PowerCool requires its typed configuration")
+        multiplier = partial(powercool_multiplier, configuration=configuration)
+    else:
         raise ValueError(f"unsupported schedule implementation: {implementation!r}")
     return torch.optim.lr_scheduler.LambdaLR(
         optimizer,
-        lambda step: linear_warmup_cosine_multiplier(step, configuration),
+        multiplier,
     )
 
 
@@ -361,11 +449,12 @@ def schedule_from_resolved_component(
         raise ValueError(
             "resolved schedule implementation is not allowlisted"
         ) from error
-    return build_registered_schedule(
-        selected,
-        optimizer,
-        LinearWarmupCosineConfiguration.from_resolved(configuration),
+    typed_configuration = (
+        LinearWarmupCosineConfiguration.from_resolved(configuration)
+        if selected is ScheduleImplementation.LINEAR_WARMUP_COSINE_V1
+        else PowerCoolConfiguration.from_resolved(configuration)
     )
+    return build_registered_schedule(selected, optimizer, typed_configuration)
 
 
 def parameter_routing_from_resolved_component(
@@ -421,6 +510,7 @@ def supported_worker_capabilities() -> frozenset[str]:
             "optimizer.torch_adamw.v1",
             "optimizer.fp32_master_adamw.v1",
             "schedule.linear_warmup_cosine.v1",
+            "schedule.powercool.v1",
             "parameter_router.mageflow_appearance_expert.v1",
             "parameter_router.mageflow_terminal_expert.v1",
         }
@@ -433,6 +523,7 @@ __all__ = [
     "LinearWarmupCosineConfiguration",
     "OptimizerImplementation",
     "ParameterRouterImplementation",
+    "PowerCoolConfiguration",
     "ScheduleImplementation",
     "TerminalExpertRoutingConfiguration",
     "build_registered_optimizer",
@@ -441,6 +532,7 @@ __all__ = [
     "linear_warmup_cosine_multiplier",
     "optimizer_from_resolved_component",
     "parameter_routing_from_resolved_component",
+    "powercool_multiplier",
     "schedule_from_resolved_component",
     "supported_implementation_ids",
     "supported_worker_capabilities",

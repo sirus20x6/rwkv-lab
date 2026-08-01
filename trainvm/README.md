@@ -257,7 +257,7 @@ trainvm/build/trainvm compile < \
 trainvm/build/trainvm validate-catalog \
   "$PWD/docs/experiment-vm/compatibility-workflows.v1.json" "$PWD"
 trainvm/build/trainvm inspect-training-components \
-  "$PWD/docs/experiment-vm/examples/mageflow-training-components.json"
+  "$PWD/docs/experiment-vm/examples/training-components.v1.json"
 trainvm/build/trainvm inspect-registry "$PWD/experiments.db" \
   --task recall:16 --metric acc --baseline baseline --limit 20
 trainvm/build/trainvm serve --journal /tmp/trainvm.db --socket /tmp/trainvm.sock \
@@ -271,7 +271,7 @@ trainvm/build/trainvm simulate \
 ```
 
 The empty training-component registry keeps composition disabled. The checked-in
-`mageflow-training-components.json` catalog contains real runtime-backed descriptors for inspection
+`training-components.v1.json` contains real cross-family runtime-backed descriptors for inspection
 and adapter qualification; a production daemon should enable it only with worker profiles that
 advertise the catalog's exact capabilities.
 

@@ -8,8 +8,10 @@ from rwkv_lab.qwen_ao3_cpt import (
     SCHEMA,
     PackedRows,
     QwenAO3Config,
-    _resume_contract,
+    _learning_rate_schedule,
+    _optimizer_configuration,
     _resolve_auto_resume,
+    _resume_contract,
     _write_status,
 )
 
@@ -122,3 +124,14 @@ def test_status_heartbeat_is_atomic_and_parseable(tmp_path):
     assert status["cursor"] == 27
     assert status["total_steps"] == 100
     assert not (run / ".status.json.tmp").exists()
+
+
+def test_qwen_optimizer_uses_registered_fused_adamw_configuration(tmp_path):
+    optimizer = _optimizer_configuration(config(tmp_path))
+    assert optimizer.fused
+    assert not optimizer.foreach
+    assert optimizer.beta1 == pytest.approx(0.9)
+    assert optimizer.beta2 == pytest.approx(0.95)
+    schedule = _learning_rate_schedule(config(tmp_path), total_steps=100)
+    assert schedule.max_steps == 100
+    assert schedule.minimum_ratio == pytest.approx(0.1)

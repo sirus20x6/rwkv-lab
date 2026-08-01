@@ -11,6 +11,7 @@ from rwkv_lab.training_components import (
     LinearWarmupCosineConfiguration,
     OptimizerImplementation,
     ParameterRouterImplementation,
+    PowerCoolConfiguration,
     ScheduleImplementation,
     TerminalExpertRoutingConfiguration,
     build_registered_optimizer,
@@ -19,6 +20,7 @@ from rwkv_lab.training_components import (
     linear_warmup_cosine_multiplier,
     optimizer_from_resolved_component,
     parameter_routing_from_resolved_component,
+    powercool_multiplier,
     schedule_from_resolved_component,
     supported_implementation_ids,
     supported_worker_capabilities,
@@ -37,6 +39,22 @@ def test_linear_warmup_cosine_has_one_optimizer_step_domain_trajectory():
     assert trajectory[2] == pytest.approx(1.0)
     assert trajectory[4] == pytest.approx(0.55)
     assert trajectory[6:] == pytest.approx([0.1, 0.1])
+
+
+def test_powercool_has_one_shared_optimizer_step_trajectory():
+    configuration = PowerCoolConfiguration(
+        warmup_steps=2,
+        max_steps=10,
+        minimum_ratio=0.1,
+        cooldown_fraction=0.2,
+        power=2.0,
+    )
+    trajectory = [powercool_multiplier(step, configuration) for step in range(11)]
+    assert trajectory[:2] == pytest.approx([0.5, 1.0])
+    assert trajectory[7] == pytest.approx(1.0)
+    assert trajectory[8] == pytest.approx(1.0)
+    assert trajectory[9] < 1.0
+    assert trajectory[10] == pytest.approx(0.1)
 
 
 def test_registered_factories_preserve_group_rates_and_exact_state():
@@ -74,9 +92,9 @@ def test_registered_factories_preserve_group_rates_and_exact_state():
 def test_component_catalog_and_runtime_dispatch_are_exactly_aligned():
     root = Path(__file__).resolve().parents[1]
     document = json.loads(
-        (
-            root / "docs/experiment-vm/examples/mageflow-training-components.json"
-        ).read_text(encoding="utf-8")
+        (root / "docs/experiment-vm/examples/training-components.v1.json").read_text(
+            encoding="utf-8"
+        )
     )
     implementations = {
         component["implementation"] for component in document["components"]
@@ -101,9 +119,9 @@ def test_component_catalog_and_runtime_dispatch_are_exactly_aligned():
 def test_resolved_worker_component_dispatch_is_closed_and_typed():
     root = Path(__file__).resolve().parents[1]
     components = json.loads(
-        (
-            root / "docs/experiment-vm/examples/mageflow-training-components.json"
-        ).read_text(encoding="utf-8")
+        (root / "docs/experiment-vm/examples/training-components.v1.json").read_text(
+            encoding="utf-8"
+        )
     )["components"]
     optimizer_descriptor = next(
         component
@@ -121,6 +139,7 @@ def test_resolved_worker_component_dispatch_is_closed_and_typed():
             "epsilon": 1.0e-8,
             "weight_decay": 0.01,
             "foreach": True,
+            "fused": False,
         },
     }
     optimizer = optimizer_from_resolved_component(optimizer_component, [parameter])
@@ -144,6 +163,25 @@ def test_resolved_worker_component_dispatch_is_closed_and_typed():
         optimizer,
     )
     assert isinstance(schedule, torch.optim.lr_scheduler.LRScheduler)
+
+    powercool_descriptor = next(
+        component for component in components if component["key"]["name"] == "powercool"
+    )
+    powercool = schedule_from_resolved_component(
+        {
+            "descriptor": powercool_descriptor,
+            "descriptor_digest": "sha256:" + "d" * 64,
+            "configuration": {
+                "warmup_steps": 0,
+                "max_steps": 10,
+                "minimum_ratio": 0.1,
+                "cooldown_fraction": 0.2,
+                "power": 2.0,
+            },
+        },
+        optimizer,
+    )
+    assert isinstance(powercool, torch.optim.lr_scheduler.LRScheduler)
 
     forged = dict(optimizer_component)
     forged["runtime_import"] = "malicious.module"
@@ -198,9 +236,9 @@ def test_registered_mageflow_routers_own_expert_backbone_and_repa_once():
 def test_resolved_parameter_router_dispatch_uses_exact_catalog_defaults():
     root = Path(__file__).resolve().parents[1]
     components = json.loads(
-        (
-            root / "docs/experiment-vm/examples/mageflow-training-components.json"
-        ).read_text(encoding="utf-8")
+        (root / "docs/experiment-vm/examples/training-components.v1.json").read_text(
+            encoding="utf-8"
+        )
     )["components"]
     descriptor = next(
         component
@@ -228,6 +266,7 @@ def test_resolved_parameter_router_dispatch_uses_exact_catalog_defaults():
     [
         AdamWConfiguration,
         LinearWarmupCosineConfiguration,
+        PowerCoolConfiguration,
     ],
 )
 def test_invalid_component_configuration_fails_before_tensor_construction(
@@ -236,5 +275,22 @@ def test_invalid_component_configuration_fails_before_tensor_construction(
     with pytest.raises((TypeError, ValueError)):
         if configuration is AdamWConfiguration:
             configuration(learning_rate=float("nan"))
-        else:
+        elif configuration is LinearWarmupCosineConfiguration:
             configuration(warmup_steps=-1, max_steps=10)
+        else:
+            configuration(warmup_steps=11, max_steps=10)
+
+
+def test_adamw_execution_modes_are_explicit_and_exclusive():
+    fused = AdamWConfiguration(
+        learning_rate=1.0e-4,
+        foreach=False,
+        fused=True,
+    )
+    assert fused.fused and not fused.foreach
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        AdamWConfiguration(
+            learning_rate=1.0e-4,
+            foreach=True,
+            fused=True,
+        )

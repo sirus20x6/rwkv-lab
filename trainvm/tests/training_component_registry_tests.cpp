@@ -360,16 +360,16 @@ void experiment_composition_is_reflected_and_bounded() {
         "non-scalar component configuration is rejected during compilation");
 }
 
-void checked_in_mageflow_catalog_matches_native_authority_contract() {
+void checked_in_component_catalog_matches_native_authority_contract() {
   const auto path = std::filesystem::path(TRAINVM_SOURCE_ROOT) /
-                    "docs/experiment-vm/examples/mageflow-training-components.json";
+                    "docs/experiment-vm/examples/training-components.v1.json";
   const trainvm::TrainingComponentRegistry registry =
       trainvm::TrainingComponentRegistry::load_file(
           std::filesystem::absolute(path));
-  check(registry.document_json().at("components").size() == 5U &&
+  check(registry.document_json().at("components").size() == 6U &&
             registry.registry_digest().starts_with("sha256:") &&
             registry.registry_digest().size() == 71U,
-        "checked-in MageFlow component catalog is a canonical native authority document");
+        "checked-in cross-family component catalog is a canonical native authority document");
   const auto optimizer = registry.resolve({
       .key = {.category = trainvm::TrainingComponentCategory::optimizer,
               .name = "fp32_master_adamw",
@@ -381,6 +381,7 @@ void checked_in_mageflow_catalog_matches_native_authority_contract() {
             "rwkv_lab.optimizer.fp32_master_adamw.v1" &&
             optimizer.configuration.at("beta1") == 0.9 &&
             optimizer.configuration.at("foreach") == true &&
+            optimizer.configuration.at("fused") == false &&
             optimizer.descriptor.required_capabilities ==
                 std::vector<std::string>{
                     "optimizer.fp32_master_adamw.v1"},
@@ -407,6 +408,23 @@ void checked_in_mageflow_catalog_matches_native_authority_contract() {
             router.configuration.at("shared_backbone_multiplier") == 0.5 &&
             router.configuration.at("repa_projection_multiplier") == 1.0,
         "terminal expert ownership and LR multipliers resolve as one stateless component");
+  const auto powercool = registry.resolve({
+      .key = {
+          .category =
+              trainvm::TrainingComponentCategory::learning_rate_schedule,
+          .name = "powercool",
+          .version = "1.0.0"},
+      .model_family = "transformer",
+      .configuration = {{"warmup_steps", 100}, {"max_steps", 10'000}},
+  });
+  check(powercool.descriptor.implementation ==
+            "rwkv_lab.schedule.powercool.v1" &&
+            powercool.descriptor.step_domain ==
+                trainvm::StepDomain::optimizer_step &&
+            powercool.configuration.at("minimum_ratio") == 0.0 &&
+            powercool.configuration.at("cooldown_fraction") == 0.2 &&
+            powercool.configuration.at("power") == 2.0,
+        "RWKV and transformer PowerCool schedules share one exact reflected contract");
 }
 
 }  // namespace
@@ -417,7 +435,7 @@ int main() {
     invalid_descriptors_and_requests_fail_closed();
     compositions_extend_worker_authority();
     experiment_composition_is_reflected_and_bounded();
-    checked_in_mageflow_catalog_matches_native_authority_contract();
+    checked_in_component_catalog_matches_native_authority_contract();
   } catch (const std::exception& exception) {
     std::cerr << "UNCAUGHT: " << exception.what() << '\n';
     return 1;

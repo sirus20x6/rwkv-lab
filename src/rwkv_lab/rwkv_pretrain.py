@@ -14,28 +14,39 @@ value and later layers lerp toward it, threaded through the stack. Logs to a tra
         --d-model 512 --n-layers 6 --loop-count 3 --loop-hyper 2 --out runs/loop_c3h2
 """
 from __future__ import annotations
-import argparse, json, math, os, time
+
+import argparse
+import json
+import math
+import os
+import time
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from rwkv_lab.powercool import powercool_lr
-from rwkv_lab.training_speedups import (
-    AsyncCPUBatchPrefetcher,
-    context_batch_for_step,
-    parse_context_curriculum,
-)
+from rwkv_lab.lookahead_module import LookaheadSystem
+from rwkv_lab.looped_rwkv import LoopedRWKV
 from rwkv_lab.optimizer_speedups import (
     TailEMA,
     split_tied_embedding_head,
     tail_linear_multiplier,
     tie_embedding_head,
 )
-
-from rwkv_lab.rwkv8_deltanet import RWKV8TimeMixDeltaNet, RWKV8ChannelMixDeltaNet
-from rwkv_lab.looped_rwkv import LoopedRWKV
-from rwkv_lab.lookahead_module import LookaheadSystem
+from rwkv_lab.rwkv8_deltanet import RWKV8ChannelMixDeltaNet, RWKV8TimeMixDeltaNet
+from rwkv_lab.training_components import (
+    AdamWConfiguration,
+    OptimizerImplementation,
+    PowerCoolConfiguration,
+    build_registered_optimizer,
+    powercool_multiplier,
+)
+from rwkv_lab.training_speedups import (
+    AsyncCPUBatchPrefetcher,
+    context_batch_for_step,
+    parse_context_curriculum,
+)
 
 
 def _unwrap(o):
@@ -503,10 +514,20 @@ def build_optimizer(named_params, name, lr, wd, adam_lr=0.0, muon_opts=None,
                   if replicated else ordinary)
     if name in ("adamw8bit", "paged-adamw8bit"):
         return _adamw8bit(params, lr, wd, paged=(name == "paged-adamw8bit"))
-    import torch as _t
     first = params[0]["params"][0] if params and isinstance(params[0], dict) else (params[0] if params else None)
     fused = first is not None and first.is_cuda     # fused AdamW = one fused CUDA kernel (CUDA-only)
-    return _t.optim.AdamW(params, lr=lr, betas=(0.9, 0.95), weight_decay=wd, fused=fused)
+    return build_registered_optimizer(
+        OptimizerImplementation.TORCH_ADAMW_V1,
+        params,
+        AdamWConfiguration(
+            learning_rate=lr,
+            beta1=0.9,
+            beta2=0.95,
+            weight_decay=wd,
+            foreach=False,
+            fused=fused,
+        ),
+    )
 
 
 def apply_fp8(module, *, include_head=False, skip_channelmix=False):
@@ -852,16 +873,23 @@ def main():
         or args.sm_cautious_wd
     ):
         ap.error("Muon postconditioning and Adam cadence flags require --optimizer muon")
+    if args.lr <= 0:
+        ap.error("--lr must be positive")
+    powercool_schedule = None
     if args.lr_schedule == "powercool":
-        # powercool_lr validates these strictly and raises. Catching it here
-        # fails in argparse instead of on the first optimizer step of a job that
-        # has already loaded the model and corpus.
         powercool_horizon = args.decay_steps or args.steps
         if powercool_horizon <= 0:
             ap.error("--lr-schedule powercool requires --steps or --decay-steps")
-        if args.warmup > powercool_horizon:
-            ap.error("--warmup must not exceed the powercool horizon "
-                     f"({powercool_horizon} steps)")
+        try:
+            powercool_schedule = PowerCoolConfiguration(
+                warmup_steps=args.warmup,
+                max_steps=powercool_horizon,
+                minimum_ratio=args.powercool_min_lr / args.lr,
+                cooldown_fraction=args.powercool_cooldown_fraction,
+                power=args.powercool_power,
+            )
+        except (TypeError, ValueError) as error:
+            ap.error(f"invalid PowerCool schedule: {error}")
     if not args.data and not args.ctx_buckets:
         ap.error("one of --data or --ctx-buckets is required")
     if args.ctx_buckets:                       # mixed-context mode: fixed-width features rejected
@@ -1615,10 +1643,9 @@ def main():
         lr = args.lr * min(1.0, (step + 1) / max(args.warmup, 1))       # linear warmup
         horizon = args.decay_steps or args.steps
         if args.lr_schedule == "powercool" and horizon:
-            lr = powercool_lr(step, peak_lr=args.lr, min_lr=args.powercool_min_lr,
-                              total_steps=horizon, warmup_steps=args.warmup,
-                              cooldown_fraction=args.powercool_cooldown_fraction,
-                              power=args.powercool_power)
+            if powercool_schedule is None:
+                raise RuntimeError("PowerCool schedule was not initialized")
+            lr = args.lr * powercool_multiplier(step, powercool_schedule)
         elif args.lr_schedule == "cosine" and horizon:                 # then cosine decay to 0.1x
             lr *= 0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * min(step, horizon) / horizon))
         for g in opt.param_groups:

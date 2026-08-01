@@ -350,7 +350,7 @@ add_test(
 add_test(
   NAME trainvm_cli_inspect_training_components
   COMMAND trainvm inspect-training-components
-    "${CMAKE_CURRENT_SOURCE_DIR}/../docs/experiment-vm/examples/mageflow-training-components.json"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../docs/experiment-vm/examples/training-components.v1.json"
 )
 set_tests_properties(trainvm_cli_inspect_training_components PROPERTIES
   PASS_REGULAR_EXPRESSION "rwkv_lab.optimizer.fp32_master_adamw.v1"
