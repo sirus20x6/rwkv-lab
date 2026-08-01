@@ -772,6 +772,20 @@ HostdSessionChallengeEvidence HostdSessionChallengeVerifier::verify(
   }
 }
 
+bool HostdSessionChallengeVerifier::discard(
+    std::string_view challenge_id,
+    const HostdSocketPeerInstance &observed_peer) {
+  std::scoped_lock lock(implementation_->mutex);
+  implementation_->reject_callback_reentry();
+  const auto found = implementation_->outstanding.find(std::string(challenge_id));
+  if (found == implementation_->outstanding.end())
+    return false;
+  if (!valid_peer(observed_peer) || found->second.peer != observed_peer)
+    reject("cannot discard a challenge from a different socket peer");
+  implementation_->outstanding.erase(found);
+  return true;
+}
+
 std::size_t HostdSessionChallengeVerifier::outstanding_challenges() const {
   std::scoped_lock lock(implementation_->mutex);
   return implementation_->outstanding.size();

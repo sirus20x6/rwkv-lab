@@ -109,7 +109,8 @@ Implemented now:
   boottime lifetime, with per-peer quotas and no bearer-capability interpretation of decoded data;
 - a canonical hostd mutation-envelope contract that binds one open journal/controller claim to the
   issued single-use challenge, echoed response, exactly attributed grant/reconcile/release payload,
-  sealed command digest, and operation-compatible reply before any socket opcode is enabled;
+  sealed command digest, and operation-compatible reply, now dispatched over a bounded one-command
+  `SOCK_SEQPACKET` session with exact correlation and per-packet credentials;
 - per-concurrency-scope durable hostd controller heads, generations, event identities, and retained
   controller IDs, so takeover invalidates only the affected logical resource scope while aliased,
   rolled-back, or legacy-global controller metadata fails closed;
@@ -136,16 +137,18 @@ process-free host coordinator, and the hash-chained journal/host grant-and-relea
 implemented libraries. Production launch preparation requires an exact, live durable host grant and
 binds its request identity, receipt digest, and physical fences into the worker ticket and resolved
 launch identity; process-free unit fixtures can opt into a visibly test-only legacy mode. No service
-RPC can yet mutate host authority. The status-only filesystem `SOCK_SEQPACKET` boundary is
-implemented at an explicitly cooperative enforcement grade: it proves framing, endpoint identity,
-and UID/GID credentials, but does not claim hostile same-UID isolation or grant, release, launch, or
-signal authority. Durable startup-audit evidence, the fail-closed NVIDIA collector, strict Linux
-session primitives, pinned-journal attestation, startup lifecycle transitions, and atomic ledger
-admission finalization are implemented. The journal challenge is not yet exchanged by a mutating
-transport endpoint, and the service does not yet route all admission/release work through the hostd
-gate. Those process-free integration steps are next, followed by a guarded launcher, cgroup cleanup,
-process-instance credentials, and durable spawn/exit receipts. Real trainer process ownership
-follows only after those fault-injection tests pass.
+The filesystem `SOCK_SEQPACKET` boundary has separate status and mutation servers. The mutation
+exchange now binds the accepted socket process instance to a single-use journal challenge, obtains
+service access only from an injected host-owned identity authority, samples grant/release time only
+on the server, dispatches request/reconcile/release through `HostGrantCoordinator`, and disconnects
+the scoped coordinator session on every exit path. Duplicate requests and read-only recovery return
+the exact persisted result; stale fences and cross-scope payloads fail before ledger mutation.
+Current end-to-end transport tests use the visibly cooperative enforcement grade. Production
+mutation admission remains disabled until the service-cgroup authority is implemented and the
+strict namespace plus socket-pidfd grade is configured; the dashboard/service also does not yet
+route all admission/release work through this endpoint. Guarded launch, cgroup cleanup,
+process-instance credentials, durable spawn/exit receipts, and exhaustive crash-window qualification
+remain next. Real trainer process ownership follows only after those gates pass.
 MIG evidence is collected and attributed per instance, but grants remain disabled: the generic
 conflict selector intentionally blocks a child while its full-device parent is nonselectable, until
 a partition-aware enforcement policy proves that scheduling relationship end to end.

@@ -33,6 +33,10 @@ constexpr std::array<std::byte, 4U> kWireMagic{
 constexpr std::uint16_t kStatusRequestOpcode = 1U;
 constexpr std::uint16_t kStatusResponseOpcode = 2U;
 constexpr std::uint16_t kErrorResponseOpcode = 3U;
+constexpr std::uint16_t kMutationOpenOpcode = 4U;
+constexpr std::uint16_t kMutationChallengeOpcode = 5U;
+constexpr std::uint16_t kMutationCommandOpcode = 6U;
+constexpr std::uint16_t kMutationReplyOpcode = 7U;
 constexpr std::size_t kMaximumSocketPathBytes = 107U;
 constexpr std::size_t kMaximumSocketBasenameBytes = 96U;
 constexpr std::size_t kMaximumControlFds = 8U;
@@ -177,8 +181,8 @@ void validate_socket_path(const struct stat &status,
   }
 }
 
-HostdSocketIdentity
-inspect_client_endpoint(const HostdStatusClientConfig &config) {
+template <typename ClientConfig>
+HostdSocketIdentity inspect_client_endpoint(const ClientConfig &config) {
   if (!config.socket_path.is_absolute() || config.socket_path.empty() ||
       config.socket_path.lexically_normal() != config.socket_path ||
       !safe_basename(config.socket_path.filename().string()))
@@ -344,6 +348,21 @@ std::vector<std::byte> encode_packet(std::uint16_t opcode,
   std::memcpy(result.data() + kHostdStatusWireHeaderBytes, canonical.data(),
               canonical.size());
   return result;
+}
+
+std::vector<std::byte> encode_canonical_packet(std::uint16_t opcode,
+                                               std::uint64_t correlation_id,
+                                               std::string_view payload) {
+  try {
+    const auto parsed = nlohmann::json::parse(payload);
+    if (parsed.dump() != payload)
+      throw HostdTransportError("hostd packet payload is not canonical JSON");
+    return encode_packet(opcode, correlation_id, parsed);
+  } catch (const HostdTransportError &) {
+    throw;
+  } catch (...) {
+    throw HostdTransportError("hostd canonical packet encoding failed");
+  }
 }
 
 WirePacket decode_packet(const std::vector<std::byte> &bytes,
@@ -937,9 +956,11 @@ void enable_passcred(int descriptor) {
 
 std::vector<std::byte> error_packet(std::uint64_t correlation,
                                     std::string code,
-                                    std::string message) {
+                                    std::string message,
+                                    std::string_view api_version =
+                                        kHostdStatusTransportApiVersion) {
   return encode_packet(kErrorResponseOpcode, correlation,
-                       {{"api_version", kHostdStatusTransportApiVersion},
+                       {{"api_version", api_version},
                         {"code", std::move(code)},
                         {"message", std::move(message)}});
 }
@@ -958,6 +979,133 @@ std::uint64_t tentative_correlation(const std::vector<std::byte> &bytes) {
   } catch (...) {
     return 0U;
   }
+}
+
+class SocketBoundMutationPeerSource final : public IHostdPeerEvidenceSource {
+public:
+  SocketBoundMutationPeerSource(
+      HostdLinuxBoundSocketPeer peer, HostdSessionChallengeEvidence evidence,
+      std::shared_ptr<IHostdMutationServiceIdentityAuthority> authority,
+      HostdMutationTransportEnforcementGrade transport_grade)
+      : peer_(std::move(peer)), evidence_(std::move(evidence)),
+        authority_(std::move(authority)), transport_grade_(transport_grade) {}
+
+  HostdPeerEvidence observe() override {
+    const HostdSocketPeerInstance observed = peer_.reobserve();
+    if (observed != evidence_.peer)
+      throw HostdUnauthorized(
+          "socket peer changed after mutation challenge verification");
+    if (transport_grade_ ==
+            HostdMutationTransportEnforcementGrade::strict_service_identity &&
+        peer_.enforcement_grade() !=
+            HostdLinuxSessionEnforcementGrade::
+                strict_host_namespaces_and_socket_pidfd) {
+      throw HostdUnauthorized(
+          "strict mutation transport lacks strict socket peer evidence");
+    }
+    HostdMutationServiceAuthorization authorization =
+        authority_->authorize(observed);
+    if (!authorization.service_identity_enforced ||
+        authorization.access == HostdSessionAccess::denied ||
+        authorization.access == HostdSessionAccess::read_only ||
+        !valid_identifier(authorization.service_identity)) {
+      throw HostdUnauthorized(
+          "host service identity does not authorize mutation access");
+    }
+    if (baseline_set_ && baseline_ != authorization)
+      throw HostdUnauthorized(
+          "host service authorization changed during mutation session");
+    baseline_ = authorization;
+    baseline_set_ = true;
+    return {
+        .api_version = std::string(kHostdPeerEvidenceApiVersion),
+        .peer_uid = observed.uid,
+        .peer_gid = observed.gid,
+        .peer_pid = observed.pid,
+        .service_identity = authorization.service_identity,
+        .enforcement_grade =
+            HostdPeerEnforcementGrade::service_identity_enforced,
+        .access = authorization.access,
+        .evidence_digest = evidence_.evidence_digest,
+    };
+  }
+
+private:
+  HostdLinuxBoundSocketPeer peer_;
+  HostdSessionChallengeEvidence evidence_;
+  std::shared_ptr<IHostdMutationServiceIdentityAuthority> authority_;
+  HostdMutationTransportEnforcementGrade transport_grade_;
+  HostdMutationServiceAuthorization baseline_;
+  bool baseline_set_{};
+};
+
+[[gnu::noinline]] std::shared_ptr<IHostdPeerEvidenceSource>
+make_socket_bound_mutation_peer_source(
+    HostdLinuxBoundSocketPeer peer, HostdSessionChallengeEvidence evidence,
+    std::shared_ptr<IHostdMutationServiceIdentityAuthority> authority,
+    HostdMutationTransportEnforcementGrade transport_grade) {
+  return std::shared_ptr<IHostdPeerEvidenceSource>(
+      new SocketBoundMutationPeerSource(
+          std::move(peer), std::move(evidence), std::move(authority),
+          transport_grade));
+}
+
+class CoordinatorSessionGuard final {
+public:
+  CoordinatorSessionGuard(std::shared_ptr<HostGrantCoordinator> coordinator,
+                          std::string session_id)
+      : coordinator_(std::move(coordinator)), session_id_(std::move(session_id)) {}
+  ~CoordinatorSessionGuard() {
+    if (!coordinator_ || session_id_.empty())
+      return;
+    try {
+      coordinator_->disconnect(session_id_);
+    } catch (...) {
+      // The transport must close the socket even if an already-failed
+      // coordinator cannot complete best-effort in-memory session cleanup.
+    }
+  }
+  CoordinatorSessionGuard(const CoordinatorSessionGuard &) = delete;
+  CoordinatorSessionGuard &operator=(const CoordinatorSessionGuard &) = delete;
+
+private:
+  std::shared_ptr<HostGrantCoordinator> coordinator_;
+  std::string session_id_;
+};
+
+class ChallengeDiscardGuard final {
+public:
+  explicit ChallengeDiscardGuard(
+      std::shared_ptr<HostdSessionChallengeVerifier> verifier)
+      : verifier_(std::move(verifier)) {}
+  ~ChallengeDiscardGuard() {
+    if (!challenge_)
+      return;
+    try {
+      (void)verifier_->discard(challenge_->challenge_id, challenge_->peer);
+    } catch (...) {
+    }
+  }
+  void arm(const HostdSessionChallenge &challenge) { challenge_ = challenge; }
+  void consumed() noexcept { challenge_.reset(); }
+  ChallengeDiscardGuard(const ChallengeDiscardGuard &) = delete;
+  ChallengeDiscardGuard &operator=(const ChallengeDiscardGuard &) = delete;
+
+private:
+  std::shared_ptr<HostdSessionChallengeVerifier> verifier_;
+  std::optional<HostdSessionChallenge> challenge_;
+};
+
+std::int64_t checked_clock_ns(clockid_t clock, std::string_view name) {
+  timespec value{};
+  if (::clock_gettime(clock, &value) != 0)
+    throw_errno(std::string("could not read hostd ") + std::string(name));
+  if (value.tv_sec < 0 || value.tv_nsec < 0 || value.tv_nsec >= 1'000'000'000L ||
+      value.tv_sec >
+          std::numeric_limits<std::int64_t>::max() / 1'000'000'000LL)
+    throw HostdTransportError(std::string("hostd ") + std::string(name) +
+                              " clock is out of range");
+  return value.tv_sec * 1'000'000'000LL + value.tv_nsec;
 }
 
 } // namespace
@@ -1476,6 +1624,228 @@ HostdStatusServer::serve_one(std::int64_t absolute_monotonic_deadline_ns) {
   }
 }
 
+HostdMutationServer::HostdMutationServer(
+    std::shared_ptr<HostdSocketAuthority> authority,
+    std::shared_ptr<HostGrantCoordinator> coordinator,
+    std::shared_ptr<HostdSessionChallengeVerifier> challenge_verifier,
+    std::shared_ptr<IHostdLinuxSessionKernel> session_kernel,
+    std::shared_ptr<IHostdMutationServiceIdentityAuthority>
+        service_identity_authority,
+    std::shared_ptr<IHostdLedgerTimeSource> ledger_time_source,
+    HostdMutationTransportConfig config)
+    : authority_(std::move(authority)), coordinator_(std::move(coordinator)),
+      challenge_verifier_(std::move(challenge_verifier)),
+      session_kernel_(std::move(session_kernel)),
+      service_identity_authority_(std::move(service_identity_authority)),
+      ledger_time_source_(std::move(ledger_time_source)),
+      config_(std::move(config)) {
+  const bool strict =
+      config_.enforcement_grade ==
+      HostdMutationTransportEnforcementGrade::strict_service_identity;
+  if (!authority_ || !coordinator_ || !challenge_verifier_ ||
+      !session_kernel_ || !service_identity_authority_ ||
+      !ledger_time_source_ ||
+      config_.api_version != kHostdMutationTransportApiVersion ||
+      config_.maximum_payload_bytes == 0U ||
+      config_.maximum_payload_bytes > kHostdStatusMaximumPayloadBytes ||
+      config_.per_session_timeout_ns < 1'000'000LL ||
+      config_.per_session_timeout_ns > 3'600'000'000'000LL ||
+      (strict && config_.socket_peer_grade !=
+                     HostdLinuxSessionEnforcementGrade::
+                         strict_host_namespaces_and_socket_pidfd) ||
+      (strict && session_kernel_->enforcement_grade() !=
+                     HostdLinuxSessionEnforcementGrade::
+                         strict_host_namespaces_and_socket_pidfd)) {
+    throw HostdTransportError("hostd mutation transport config is invalid");
+  }
+}
+
+HostdServeResult HostdMutationServer::serve_one(
+    std::int64_t absolute_monotonic_deadline_ns) {
+  try {
+    try {
+      (void)authority_->reattest();
+    } catch (...) {
+      return HostdServeResult::rejected;
+    }
+    if (!wait_ready(authority_->listener_fd(), POLLIN,
+                    absolute_monotonic_deadline_ns))
+      return HostdServeResult::timed_out;
+
+    FileDescriptor connection;
+    for (;;) {
+      const int accepted =
+          ::accept4(authority_->listener_fd(), nullptr, nullptr,
+                    SOCK_CLOEXEC | SOCK_NONBLOCK);
+      if (accepted >= 0) {
+        connection = FileDescriptor(accepted);
+        break;
+      }
+      if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)
+        throw_errno("hostd mutation accept4 failed");
+      if (!wait_ready(authority_->listener_fd(), POLLIN,
+                      absolute_monotonic_deadline_ns))
+        return HostdServeResult::timed_out;
+    }
+
+    (void)authority_->reattest();
+    enable_passcred(connection.get());
+    const ucred credentials = peer_credentials(connection.get());
+    if (credentials.uid != config_.allowed_uid ||
+        credentials.gid != config_.allowed_gid)
+      return HostdServeResult::rejected;
+    const std::int64_t accepted_at = hostd_monotonic_now_ns();
+    const std::int64_t relative_deadline =
+        config_.per_session_timeout_ns >
+                std::numeric_limits<std::int64_t>::max() - accepted_at
+            ? std::numeric_limits<std::int64_t>::max()
+            : accepted_at + config_.per_session_timeout_ns;
+    const std::int64_t session_deadline =
+        std::min(absolute_monotonic_deadline_ns, relative_deadline);
+
+    HostdLinuxBoundSocketPeer bound_peer = make_hostd_linux_bound_socket_peer(
+        connection.get(), session_kernel_, config_.socket_peer_grade);
+    const ReceivedPacket open_packet = receive_packet(
+        connection.get(), credentials, config_.maximum_payload_bytes,
+        session_deadline);
+    const std::uint64_t tentative = tentative_correlation(open_packet.bytes);
+    std::uint64_t correlation = tentative;
+    const auto send_error = [&](std::string code, std::string message) {
+      if (correlation == 0U)
+        return;
+      try {
+        const auto packet = error_packet(
+            correlation, std::move(code), std::move(message),
+            kHostdMutationTransportApiVersion);
+        if (payload_fits(packet, config_.maximum_payload_bytes))
+          send_packet(connection.get(), packet, session_deadline);
+      } catch (...) {
+      }
+    };
+    ChallengeDiscardGuard challenge_guard(challenge_verifier_);
+
+    try {
+      const WirePacket decoded_open =
+          decode_packet(open_packet.bytes, config_.maximum_payload_bytes);
+      correlation = decoded_open.correlation_id;
+      if (decoded_open.opcode != kMutationOpenOpcode)
+        throw HostdTransportError("hostd mutation open opcode is unsupported");
+      const HostdMutationOpen open =
+          hostd_mutation_open_from_canonical_json(decoded_open.payload);
+      const HostdSessionChallenge challenge = challenge_verifier_->issue(
+          bound_peer.instance(), open.claim);
+      challenge_guard.arm(challenge);
+      send_packet(connection.get(),
+                  encode_canonical_packet(
+                      kMutationChallengeOpcode, correlation,
+                      hostd_session_challenge_canonical_json(challenge)),
+                  session_deadline);
+
+      const ReceivedPacket command_packet = receive_packet(
+          connection.get(), credentials, config_.maximum_payload_bytes,
+          session_deadline);
+      const WirePacket decoded_command =
+          decode_packet(command_packet.bytes, config_.maximum_payload_bytes);
+      if (decoded_command.correlation_id != correlation ||
+          decoded_command.opcode != kMutationCommandOpcode)
+        throw HostdTransportError(
+            "hostd mutation command framing is inexact");
+      const HostdMutationCommand command =
+          hostd_mutation_command_from_canonical_json(decoded_command.payload);
+      validate_hostd_mutation_exchange(open, challenge, command);
+
+      const HostdSocketPeerInstance observed_peer = bound_peer.reobserve();
+      // verify() consumes a matching challenge before any callback or failure.
+      challenge_guard.consumed();
+      HostdSessionChallengeEvidence challenge_evidence =
+          challenge_verifier_->verify(command.challenge_response,
+                                      observed_peer);
+      auto peer_source = make_socket_bound_mutation_peer_source(
+          std::move(bound_peer), std::move(challenge_evidence),
+          service_identity_authority_, config_.enforcement_grade);
+      const auto &journal = command.challenge_response.claim.journal;
+      const auto &controller = command.challenge_response.claim.controller;
+      HostdConnectRequest connect{
+          .attribution = HostdSessionAttribution{
+              .journal_id = journal.journal_id,
+              .run_id = controller.run_id,
+              .concurrency_key = controller.concurrency_key,
+              .logical_lease_id = controller.logical_lease_id,
+              .logical_fencing_token = controller.logical_fencing_token,
+          }};
+      const HostdConnectedSession session =
+          coordinator_->connect(std::move(connect), std::move(peer_source));
+      CoordinatorSessionGuard session_guard(coordinator_, session.session_id);
+
+      HostdMutationReply reply{
+          .api_version = std::string(kHostdMutationProtocolApiVersion),
+          .kind = HostdMutationReplyKind::reconciliation_missing,
+          .challenge_id = command.challenge_response.challenge_id,
+          .command_digest = command.command_digest,
+          .bundle_result = std::nullopt,
+          .release_result = std::nullopt,
+      };
+      switch (command.mutation) {
+      case HostdMutationKind::request_bundle: {
+        const HostLedgerTime now = ledger_time_source_->now();
+        if (now.boottime_ns < 0 || now.wall_time_ns < 0)
+          throw HostdTransportError("hostd ledger time is invalid");
+        reply.kind = HostdMutationReplyKind::bundle_outcome;
+        reply.bundle_result = coordinator_->request_bundle(
+            session.session_id, *command.bundle_request, now);
+        break;
+      }
+      case HostdMutationKind::reconcile_bundle_outcome: {
+        reply.bundle_result = coordinator_->reconcile_bundle_outcome(
+            session.session_id, *command.bundle_request);
+        if (reply.bundle_result)
+          reply.kind = HostdMutationReplyKind::bundle_outcome;
+        break;
+      }
+      case HostdMutationKind::release_bundle: {
+        const HostLedgerTime now = ledger_time_source_->now();
+        if (now.boottime_ns < 0 || now.wall_time_ns < 0)
+          throw HostdTransportError("hostd ledger time is invalid");
+        reply.kind = HostdMutationReplyKind::release_outcome;
+        reply.release_result = coordinator_->release_bundle(
+            session.session_id, *command.release_request, now);
+        break;
+      }
+      }
+      validate_hostd_mutation_reply(command, reply);
+      const auto reply_packet = encode_canonical_packet(
+          kMutationReplyOpcode, correlation,
+          hostd_mutation_reply_canonical_json(reply));
+      if (!payload_fits(reply_packet, config_.maximum_payload_bytes))
+        throw HostdTransportError("hostd mutation reply exceeds payload bound");
+      send_packet(connection.get(), reply_packet, session_deadline);
+      (void)::shutdown(connection.get(), SHUT_RDWR);
+      return HostdServeResult::served;
+    } catch (const HostdSessionChallengeRejected &) {
+      send_error("challenge_rejected",
+                 "mutation challenge verification failed");
+      return HostdServeResult::rejected;
+    } catch (const HostdUnauthorized &) {
+      send_error("unauthorized", "mutation authorization failed");
+      return HostdServeResult::rejected;
+    } catch (const HostdStateError &) {
+      send_error("state_rejected", "hostd state rejected the mutation");
+      return HostdServeResult::rejected;
+    } catch (const std::exception &) {
+      send_error("mutation_rejected",
+                 "mutation failed strict transport validation");
+      return HostdServeResult::rejected;
+    } catch (...) {
+      send_error("mutation_rejected", "mutation failed closed");
+      return HostdServeResult::rejected;
+    }
+  } catch (const std::exception &) {
+    return HostdServeResult::rejected;
+  } catch (...) {
+    return HostdServeResult::rejected;
+  }
+}
+
 std::int64_t hostd_monotonic_now_ns() {
   timespec now{};
   if (::clock_gettime(CLOCK_MONOTONIC, &now) != 0)
@@ -1484,6 +1854,14 @@ std::int64_t hostd_monotonic_now_ns() {
       std::numeric_limits<std::int64_t>::max() / 1'000'000'000LL)
     throw HostdTransportError("hostd monotonic clock overflowed");
   return now.tv_sec * 1'000'000'000LL + now.tv_nsec;
+}
+
+HostLedgerTime HostdLinuxLedgerTimeSource::now() {
+  // Sample boottime after realtime so the durable operation is never stamped
+  // earlier than the beginning of the host-side time observation.
+  const std::int64_t wall = checked_clock_ns(CLOCK_REALTIME, "wall");
+  const std::int64_t boot = checked_clock_ns(CLOCK_BOOTTIME, "boottime");
+  return {.boottime_ns = boot, .wall_time_ns = wall};
 }
 
 std::vector<std::byte>
@@ -1613,6 +1991,98 @@ request_status_impl(const HostdStatusClientConfig &config,
   throw HostdTransportError("hostd response opcode is unsupported");
 }
 
+[[noreturn]] void reject_mutation_error(const WirePacket &packet) {
+  const nlohmann::json payload = parse_canonical_json(packet.payload);
+  require_fields(payload, {"api_version", "code", "message"});
+  if (payload.at("api_version").get<std::string>() !=
+      kHostdMutationTransportApiVersion)
+    throw HostdTransportError("hostd mutation error API is unsupported");
+  const std::string code = payload.at("code").get<std::string>();
+  const std::string message = payload.at("message").get<std::string>();
+  if (!valid_identifier(code) ||
+      !valid_bounded_text(message, kMaximumPoisonReasonBytes, false))
+    throw HostdTransportError("hostd mutation error semantics are invalid");
+  throw HostdTransportError("hostd mutation rejected: " + code + ": " +
+                            message);
+}
+
+HostdMutationReply request_mutation_impl(
+    const HostdMutationClientConfig &config,
+    const HostdMutationRequest &request, std::uint64_t correlation_id,
+    std::int64_t absolute_monotonic_deadline_ns) {
+  if (config.maximum_payload_bytes == 0U ||
+      config.maximum_payload_bytes > kHostdStatusMaximumPayloadBytes)
+    throw HostdTransportError("hostd mutation client payload limit is invalid");
+  if (inspect_client_endpoint(config) != config.expected_endpoint)
+    throw HostdTransportError(
+        "hostd mutation client endpoint identity is inexact");
+  FileDescriptor connection(
+      ::socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0));
+  if (connection.get() < 0)
+    throw_errno("could not create hostd mutation client socket");
+  enable_passcred(connection.get());
+  socklen_t address_length = 0U;
+  const sockaddr_un address = socket_address(config.socket_path, address_length);
+  connect_until(connection.get(), address, address_length,
+                absolute_monotonic_deadline_ns);
+  const ucred peer = peer_credentials(connection.get());
+  if (peer.uid != config.expected_server_uid ||
+      peer.gid != config.expected_server_gid)
+    throw HostdTransportError("hostd mutation server credentials are inexact");
+  if (inspect_client_endpoint(config) != config.expected_endpoint)
+    throw HostdTransportError(
+        "hostd mutation endpoint changed during connection");
+
+  send_packet(connection.get(),
+              encode_canonical_packet(
+                  kMutationOpenOpcode, correlation_id,
+                  hostd_mutation_open_canonical_json(request.open)),
+              absolute_monotonic_deadline_ns);
+  const ReceivedPacket challenge_packet = receive_packet(
+      connection.get(), peer, config.maximum_payload_bytes,
+      absolute_monotonic_deadline_ns);
+  const WirePacket decoded_challenge =
+      decode_packet(challenge_packet.bytes, config.maximum_payload_bytes);
+  if (decoded_challenge.correlation_id != correlation_id)
+    throw HostdTransportError("hostd mutation challenge correlation is inexact");
+  if (decoded_challenge.opcode == kErrorResponseOpcode)
+    reject_mutation_error(decoded_challenge);
+  if (decoded_challenge.opcode != kMutationChallengeOpcode)
+    throw HostdTransportError("hostd mutation challenge opcode is unsupported");
+  const HostdSessionChallenge challenge =
+      hostd_session_challenge_from_canonical_json(decoded_challenge.payload);
+  HostdMutationCommand command = seal_hostd_mutation_command({
+      .api_version = std::string(kHostdMutationProtocolApiVersion),
+      .challenge_response = hostd_session_challenge_response(challenge),
+      .mutation = request.mutation,
+      .bundle_request = request.bundle_request,
+      .release_request = request.release_request,
+      .command_digest = {},
+  });
+  validate_hostd_mutation_exchange(request.open, challenge, command);
+  send_packet(connection.get(),
+              encode_canonical_packet(
+                  kMutationCommandOpcode, correlation_id,
+                  hostd_mutation_command_canonical_json(command)),
+              absolute_monotonic_deadline_ns);
+
+  const ReceivedPacket reply_packet = receive_packet(
+      connection.get(), peer, config.maximum_payload_bytes,
+      absolute_monotonic_deadline_ns);
+  const WirePacket decoded_reply =
+      decode_packet(reply_packet.bytes, config.maximum_payload_bytes);
+  if (decoded_reply.correlation_id != correlation_id)
+    throw HostdTransportError("hostd mutation reply correlation is inexact");
+  if (decoded_reply.opcode == kErrorResponseOpcode)
+    reject_mutation_error(decoded_reply);
+  if (decoded_reply.opcode != kMutationReplyOpcode)
+    throw HostdTransportError("hostd mutation reply opcode is unsupported");
+  HostdMutationReply reply =
+      hostd_mutation_reply_from_canonical_json(decoded_reply.payload);
+  validate_hostd_mutation_reply(command, reply);
+  return reply;
+}
+
 } // namespace
 
 HostdStatusReply
@@ -1628,6 +2098,24 @@ hostd_request_status(const HostdStatusClientConfig &config,
     throw HostdTransportError("hostd client rejected an internal exception");
   } catch (...) {
     throw HostdTransportError("hostd client rejected an unknown exception");
+  }
+}
+
+HostdMutationReply hostd_request_mutation(
+    const HostdMutationClientConfig &config,
+    const HostdMutationRequest &request, std::uint64_t correlation_id,
+    std::int64_t absolute_monotonic_deadline_ns) {
+  try {
+    return request_mutation_impl(config, request, correlation_id,
+                                 absolute_monotonic_deadline_ns);
+  } catch (const HostdTransportError &) {
+    throw;
+  } catch (const std::exception &) {
+    throw HostdTransportError(
+        "hostd mutation client rejected an internal exception");
+  } catch (...) {
+    throw HostdTransportError(
+        "hostd mutation client rejected an unknown exception");
   }
 }
 

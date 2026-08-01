@@ -13,11 +13,15 @@
 #include <sys/types.h>
 
 #include "trainvm/hostd.hpp"
+#include "trainvm/hostd_linux_session_authority.hpp"
+#include "trainvm/hostd_mutation_protocol.hpp"
 
 namespace trainvm {
 
 inline constexpr std::string_view kHostdStatusTransportApiVersion =
     "trainvm.hostd-status-transport/v2";
+inline constexpr std::string_view kHostdMutationTransportApiVersion =
+    "trainvm.hostd-mutation-transport/v1";
 inline constexpr std::uint16_t kHostdStatusWireVersion = 2U;
 inline constexpr std::size_t kHostdStatusWireHeaderBytes = 56U;
 inline constexpr std::size_t kHostdStatusMaximumPayloadBytes = 64U * 1024U;
@@ -184,5 +188,110 @@ hostd_encode_status_request(std::uint64_t correlation_id);
 hostd_request_status(const HostdStatusClientConfig &config,
                      std::uint64_t correlation_id,
                      std::int64_t absolute_monotonic_deadline_ns);
+
+// Authorization returned by a host-owned service identity authority after it
+// has inspected the socket-bound process instance. The request payload never
+// names its own service identity or access. Production implementations must
+// prove service/cgroup membership outside the caller's namespace; tests may
+// use a cooperative implementation only when the transport config says so.
+struct HostdMutationServiceAuthorization final {
+  std::string service_identity;
+  HostdSessionAccess access{};
+  bool service_identity_enforced{};
+
+  bool operator==(const HostdMutationServiceAuthorization &) const = default;
+};
+
+class IHostdMutationServiceIdentityAuthority {
+public:
+  virtual ~IHostdMutationServiceIdentityAuthority() = default;
+  [[nodiscard]] virtual HostdMutationServiceAuthorization
+  authorize(const HostdSocketPeerInstance &peer) = 0;
+};
+
+class IHostdLedgerTimeSource {
+public:
+  virtual ~IHostdLedgerTimeSource() = default;
+  // Must return host-observed CLOCK_BOOTTIME and wall clock values. No client
+  // timestamp participates in a grant or release.
+  [[nodiscard]] virtual HostLedgerTime now() = 0;
+};
+
+class HostdLinuxLedgerTimeSource final : public IHostdLedgerTimeSource {
+public:
+  [[nodiscard]] HostLedgerTime now() override;
+};
+
+enum class HostdMutationTransportEnforcementGrade {
+  cooperative_test,
+  strict_service_identity,
+};
+
+struct HostdMutationTransportConfig final {
+  std::string api_version{std::string(kHostdMutationTransportApiVersion)};
+  uid_t allowed_uid{};
+  gid_t allowed_gid{};
+  HostdLinuxSessionEnforcementGrade socket_peer_grade{
+      HostdLinuxSessionEnforcementGrade::cooperative_namespace_observation};
+  HostdMutationTransportEnforcementGrade enforcement_grade{
+      HostdMutationTransportEnforcementGrade::cooperative_test};
+  std::size_t maximum_payload_bytes{kHostdStatusMaximumPayloadBytes};
+  std::int64_t per_session_timeout_ns{5'000'000'000LL};
+
+  bool operator==(const HostdMutationTransportConfig &) const = default;
+};
+
+// Multi-packet, one-command connection:
+//   mutation-open -> challenge -> sealed-command -> bound reply.
+// A command is dispatched only after the accepted socket peer is reobserved,
+// its challenge is consumed successfully, and an external service authority
+// authorizes that same process instance. Every coordinator session is scoped
+// to the connection and disconnected on every exit path.
+class HostdMutationServer final {
+public:
+  HostdMutationServer(
+      std::shared_ptr<HostdSocketAuthority> authority,
+      std::shared_ptr<HostGrantCoordinator> coordinator,
+      std::shared_ptr<HostdSessionChallengeVerifier> challenge_verifier,
+      std::shared_ptr<IHostdLinuxSessionKernel> session_kernel,
+      std::shared_ptr<IHostdMutationServiceIdentityAuthority>
+          service_identity_authority,
+      std::shared_ptr<IHostdLedgerTimeSource> ledger_time_source,
+      HostdMutationTransportConfig config);
+  [[nodiscard]] HostdServeResult
+  serve_one(std::int64_t absolute_monotonic_deadline_ns);
+
+private:
+  std::shared_ptr<HostdSocketAuthority> authority_;
+  std::shared_ptr<HostGrantCoordinator> coordinator_;
+  std::shared_ptr<HostdSessionChallengeVerifier> challenge_verifier_;
+  std::shared_ptr<IHostdLinuxSessionKernel> session_kernel_;
+  std::shared_ptr<IHostdMutationServiceIdentityAuthority>
+      service_identity_authority_;
+  std::shared_ptr<IHostdLedgerTimeSource> ledger_time_source_;
+  HostdMutationTransportConfig config_;
+};
+
+struct HostdMutationClientConfig final {
+  std::filesystem::path socket_path;
+  HostdSocketIdentity expected_endpoint;
+  uid_t expected_server_uid{};
+  gid_t expected_server_gid{};
+  std::size_t maximum_payload_bytes{kHostdStatusMaximumPayloadBytes};
+};
+
+struct HostdMutationRequest final {
+  HostdMutationOpen open;
+  HostdMutationKind mutation{};
+  std::optional<ResourceBundleRequest> bundle_request;
+  std::optional<ResourceReleaseRequest> release_request;
+
+  bool operator==(const HostdMutationRequest &) const = default;
+};
+
+[[nodiscard]] HostdMutationReply hostd_request_mutation(
+    const HostdMutationClientConfig &config,
+    const HostdMutationRequest &request, std::uint64_t correlation_id,
+    std::int64_t absolute_monotonic_deadline_ns);
 
 } // namespace trainvm

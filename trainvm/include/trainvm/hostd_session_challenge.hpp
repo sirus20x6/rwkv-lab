@@ -257,6 +257,13 @@ public:
   verify(const HostdSessionChallengeResponse &response,
          const HostdSocketPeerInstance &observed_peer);
 
+  // Removes one server-issued challenge without invoking time or journal
+  // callbacks. This is transport cleanup for a connection that closed or sent
+  // an undecodable command. It succeeds only for the exact peer instance that
+  // the challenge was issued to and never affects an unrelated challenge.
+  [[nodiscard]] bool discard(std::string_view challenge_id,
+                             const HostdSocketPeerInstance &observed_peer);
+
   [[nodiscard]] std::size_t outstanding_challenges() const;
 
 private:

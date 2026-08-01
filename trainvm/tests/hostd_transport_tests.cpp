@@ -268,7 +268,9 @@ public:
 };
 
 struct CoordinatorFixture final {
-  explicit CoordinatorFixture(const TemporaryDirectory &directory)
+  explicit CoordinatorFixture(
+      const TemporaryDirectory &directory,
+      std::shared_ptr<IHostdLogicalFenceEvidenceSource> logical = nullptr)
       : observed(inventory()),
         authority(std::make_shared<HostLedgerFilesystemAuthority>(
             HostLedgerFilesystemAuthority::acquire(
@@ -288,7 +290,7 @@ struct CoordinatorFixture final {
                 .broker_epoch = observed.broker_epoch,
                 .maximum_live_sessions = 8U,
                 .maximum_logical_scopes = 8U},
-            ledger)) {}
+            ledger, std::move(logical))) {}
 
   void admit() {
     Auditor auditor(audit_report(*ledger));
@@ -299,6 +301,165 @@ struct CoordinatorFixture final {
   std::shared_ptr<HostLedgerFilesystemAuthority> authority;
   std::shared_ptr<SQLiteHostLedger> ledger;
   std::shared_ptr<HostGrantCoordinator> coordinator;
+};
+
+constexpr std::string_view kMutationEvidenceDigest =
+    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+HostdSessionChallengeClaim mutation_claim() {
+  return {
+      .journal = {.directory_path = "/var/lib/trainvm/journals",
+                  .journal_name = "transport.db",
+                  .authority_name = "transport.lock",
+                  .journal_id = "journal-transport",
+                  .directory_device = 11U,
+                  .directory_inode = 12U,
+                  .journal_device = 11U,
+                  .journal_inode = 13U,
+                  .authority_device = 11U,
+                  .authority_inode = 14U,
+                  .owner_uid = static_cast<std::uint64_t>(::geteuid())},
+      .controller = {.run_id = "run-transport",
+                     .concurrency_key = "gpu:transport",
+                     .controller_id = "controller-transport",
+                     .controller_generation = 1U,
+                     .logical_lease_id = "lease-transport",
+                     .logical_fencing_token = 1U},
+  };
+}
+
+HostdSessionAttribution mutation_attribution() {
+  const auto value = mutation_claim();
+  return {.journal_id = value.journal.journal_id,
+          .run_id = value.controller.run_id,
+          .concurrency_key = value.controller.concurrency_key,
+          .logical_lease_id = value.controller.logical_lease_id,
+          .logical_fencing_token = value.controller.logical_fencing_token};
+}
+
+class MutationLogicalFence final : public IHostdLogicalFenceEvidenceSource {
+public:
+  HostdLogicalFenceEvidence
+  attest(const HostdSessionAttribution &attribution) override {
+    ++calls;
+    return {.api_version = std::string(kHostdLogicalFenceEvidenceApiVersion),
+            .attribution = attribution,
+            .live = attribution == mutation_attribution() && live,
+            .cleanup_authorized = false,
+            .cleanup_allocation_id = {},
+            .cleanup_grant_digest = {},
+            .cleanup_release_request_digest = {},
+            .evidence_digest = std::string(kMutationEvidenceDigest)};
+  }
+
+  bool live{true};
+  std::size_t calls{};
+};
+
+class MutationNonce final : public IHostdSessionChallengeNonceSource {
+public:
+  std::string next_hex_256(std::string_view) override {
+    constexpr std::string_view digits = "0123456789abcdef";
+    ++counter;
+    return std::string(64U, digits.at(counter % digits.size()));
+  }
+  std::size_t counter{};
+};
+
+class MutationChallengeTime final : public IHostdSessionChallengeTimeSource {
+public:
+  HostdSessionChallengeTime now() override {
+    return {.boot_id = "boot-transport", .boottime_ns = now_ns};
+  }
+  std::int64_t now_ns{1'000'000'000LL};
+};
+
+class MutationJournalAttestor final : public IHostdJournalFenceAttestor {
+public:
+  HostdJournalFenceEvidence
+  attest(const HostdJournalFenceQuery &query) override {
+    ++calls;
+    return hostd_seal_journal_fence_evidence({
+        .api_version = std::string(kHostdJournalFenceEvidenceApiVersion),
+        .challenge_id = query.challenge_id,
+        .session_nonce = query.session_nonce,
+        .host_id = query.host_id,
+        .boot_id = query.boot_id,
+        .broker_epoch = query.broker_epoch,
+        .observed_boottime_ns = 1'000'000'000LL,
+        .journal = query.claim.journal,
+        .controller = query.claim.controller,
+        .live = true,
+        .evidence_digest = {},
+    });
+  }
+  std::size_t calls{};
+};
+
+class MutationLinuxKernel final : public IHostdLinuxSessionKernel {
+public:
+  HostdLinuxSessionEnforcementGrade enforcement_grade() const override {
+    return HostdLinuxSessionEnforcementGrade::
+        cooperative_namespace_observation;
+  }
+  HostdLinuxRandomRead getrandom_bytes(void *, std::size_t) override {
+    return {.count = -1, .error_number = ENOSYS};
+  }
+  HostdLinuxClockRead clock_boottime() override {
+    return {.success = true,
+            .value = {.tv_sec = 1, .tv_nsec = 0},
+            .error_number = 0};
+  }
+  HostdLinuxBootIdRead read_boot_id() override {
+    return {.success = true, .value = "boot-transport", .error_number = 0};
+  }
+  HostdLinuxPeerKernelObservation observe_process(pid_t pid) override {
+    ++observations;
+    return {.pid = pid,
+            .effective_uid_before = ::geteuid(),
+            .effective_gid_before = ::getegid(),
+            .effective_uid_after = ::geteuid(),
+            .effective_gid_after = ::getegid(),
+            .process_starttime_ticks_before = 12345U,
+            .process_starttime_ticks_after = 12345U,
+            .process_directory_device_before = 21U,
+            .process_directory_inode_before = 22U,
+            .process_directory_device_after = 21U,
+            .process_directory_inode_after = 22U,
+            .pidfd_available = false,
+            .pidfd_alive_before = true,
+            .pidfd_alive_after = true,
+            .complete = true,
+            .error_number = 0};
+  }
+  std::size_t observations{};
+};
+
+class MutationServiceAuthority final
+    : public IHostdMutationServiceIdentityAuthority {
+public:
+  HostdMutationServiceAuthorization
+  authorize(const HostdSocketPeerInstance &peer) override {
+    ++calls;
+    last_peer = peer;
+    return {.service_identity = "trainvm.transport.test.service",
+            .access = access,
+            .service_identity_enforced = enforced};
+  }
+  HostdSessionAccess access{HostdSessionAccess::grant_release};
+  bool enforced{true};
+  std::size_t calls{};
+  HostdSocketPeerInstance last_peer;
+};
+
+class MutationLedgerTime final : public IHostdLedgerTimeSource {
+public:
+  HostLedgerTime now() override {
+    ++calls;
+    return {.boottime_ns = 100 + static_cast<std::int64_t>(calls) * 10,
+            .wall_time_ns = 200 + static_cast<std::int64_t>(calls) * 10};
+  }
+  std::size_t calls{};
 };
 
 HostdStatusClientConfig client_config(HostdSocketAuthority &authority) {
@@ -1209,6 +1370,189 @@ void client_rejects_corruption_delegation_and_no_children_exist() {
           "status transport creates no child process");
 }
 
+ResourceBundleRequest mutation_request(std::string id) {
+  const auto scope = mutation_attribution();
+  return seal_resource_request({
+      .api_version = std::string(kHostResourceRequestApiVersion),
+      .request_id = std::move(id),
+      .journal_id = scope.journal_id,
+      .run_id = scope.run_id,
+      .logical_lease_id = scope.logical_lease_id,
+      .logical_fencing_token = scope.logical_fencing_token,
+      .count = 1U,
+      .access_mode = ResourceAccessMode::mutex_exclusive,
+      .topology = TopologyPolicy::any,
+      .selector = {},
+      .canonical_request_digest = {},
+  });
+}
+
+void mutation_transport_dispatches_replays_and_disconnects() {
+  TemporaryDirectory directory;
+  auto logical = std::make_shared<MutationLogicalFence>();
+  CoordinatorFixture fixture(directory, logical);
+  fixture.admit();
+  auto held = std::make_shared<HeldToken>();
+  auto authority = std::make_shared<HostdSocketAuthority>(
+      HostdSocketAuthority::self_bind(socket_config(directory),
+                                      directory.parent_fd(), held));
+  auto nonce = std::make_shared<MutationNonce>();
+  auto challenge_time = std::make_shared<MutationChallengeTime>();
+  auto journal = std::make_shared<MutationJournalAttestor>();
+  auto verifier = std::make_shared<HostdSessionChallengeVerifier>(
+      HostdSessionChallengeVerifierConfig{
+          .api_version = std::string(kHostdSessionChallengeApiVersion),
+          .host_id = fixture.observed.host_id,
+          .boot_id = fixture.observed.boot_id,
+          .broker_epoch = fixture.observed.broker_epoch,
+          .challenge_ttl_ns = 2'000'000'000LL,
+          .maximum_outstanding_challenges = 16U,
+          .maximum_outstanding_challenges_per_peer = 4U},
+      nonce, challenge_time, journal);
+  auto kernel = std::make_shared<MutationLinuxKernel>();
+  auto service = std::make_shared<MutationServiceAuthority>();
+  auto ledger_time = std::make_shared<MutationLedgerTime>();
+  HostdMutationServer server(
+      authority, fixture.coordinator, verifier, kernel, service, ledger_time,
+      {.api_version = std::string(kHostdMutationTransportApiVersion),
+       .allowed_uid = ::geteuid(),
+       .allowed_gid = ::getegid(),
+       .socket_peer_grade = HostdLinuxSessionEnforcementGrade::
+           cooperative_namespace_observation,
+       .enforcement_grade =
+           HostdMutationTransportEnforcementGrade::cooperative_test,
+       .maximum_payload_bytes = kHostdStatusMaximumPayloadBytes,
+       .per_session_timeout_ns = 2'000'000'000LL});
+  const HostdMutationClientConfig client{
+      .socket_path = authority->socket_path(),
+      .expected_endpoint = authority->reattest(),
+      .expected_server_uid = ::geteuid(),
+      .expected_server_gid = ::getegid(),
+      .maximum_payload_bytes = kHostdStatusMaximumPayloadBytes};
+  const HostdMutationOpen open{
+      .api_version = std::string(kHostdMutationProtocolApiVersion),
+      .claim = mutation_claim()};
+
+  const auto exchange = [&](HostdMutationRequest request,
+                            std::uint64_t correlation) {
+    std::optional<HostdMutationReply> reply;
+    std::exception_ptr client_error;
+    std::jthread client_thread([&] {
+      try {
+        reply = hostd_request_mutation(client, request, correlation, deadline());
+      } catch (...) {
+        client_error = std::current_exception();
+      }
+    });
+    const HostdServeResult served = server.serve_one(deadline());
+    client_thread.join();
+    if (client_error)
+      std::rethrow_exception(client_error);
+    require(served == HostdServeResult::served && reply.has_value(),
+            "mutation request is served with one bound reply");
+    require(fixture.coordinator->status().live_sessions == 0U,
+            "mutation connection always disconnects coordinator session");
+    return *reply;
+  };
+
+  const ResourceBundleRequest request = mutation_request("request-transport");
+  const HostdMutationRequest grant_request{
+      .open = open,
+      .mutation = HostdMutationKind::request_bundle,
+      .bundle_request = request,
+      .release_request = std::nullopt};
+  const auto granted = exchange(grant_request, 101U);
+  require(granted.kind == HostdMutationReplyKind::bundle_outcome &&
+              granted.bundle_result && granted.bundle_result->grant &&
+              !granted.bundle_result->replayed,
+          "first socket mutation returns a newly committed grant");
+  const auto replayed = exchange(grant_request, 102U);
+  require(replayed.bundle_result && replayed.bundle_result->replayed &&
+              replayed.bundle_result->outcome_digest ==
+                  granted.bundle_result->outcome_digest,
+          "duplicate socket request returns the exact durable replay");
+
+  const HostdMutationRequest reconcile_request{
+      .open = open,
+      .mutation = HostdMutationKind::reconcile_bundle_outcome,
+      .bundle_request = request,
+      .release_request = std::nullopt};
+  const auto reconciled = exchange(reconcile_request, 103U);
+  require(reconciled.kind == HostdMutationReplyKind::bundle_outcome &&
+              reconciled.bundle_result && reconciled.bundle_result->replayed &&
+              reconciled.bundle_result->outcome_digest ==
+                  granted.bundle_result->outcome_digest,
+          "read-only reconciliation recovers the exact durable outcome");
+
+  const auto &grant = *granted.bundle_result->grant;
+  const ResourceReleaseRequest release = seal_resource_release_request({
+      .api_version = std::string(kHostLedgerReleaseRequestApiVersion),
+      .release_request_id = "release-transport",
+      .allocation_id = grant.allocation_id,
+      .grant_digest = grant.receipt_digest,
+      .journal_id = grant.journal_id,
+      .run_id = grant.run_id,
+      .logical_lease_id = grant.logical_lease_id,
+      .logical_fencing_token = grant.logical_fencing_token,
+      .canonical_request_digest = {},
+  });
+  const auto released = exchange(
+      {.open = open,
+       .mutation = HostdMutationKind::release_bundle,
+       .bundle_request = std::nullopt,
+       .release_request = release},
+      104U);
+  require(released.kind == HostdMutationReplyKind::release_outcome &&
+              released.release_result && !released.release_result->replayed &&
+              released.release_result->receipt.allocation_id ==
+                  grant.allocation_id,
+          "socket release returns the exact committed release receipt");
+
+  const auto rejected_exchange = [&](HostdMutationRequest mutation,
+                                     std::uint64_t correlation) {
+    std::exception_ptr client_error;
+    std::jthread client_thread([&] {
+      try {
+        (void)hostd_request_mutation(client, mutation, correlation, deadline());
+      } catch (...) {
+        client_error = std::current_exception();
+      }
+    });
+    const HostdServeResult served = server.serve_one(deadline());
+    client_thread.join();
+    require(served == HostdServeResult::rejected && client_error != nullptr &&
+                fixture.coordinator->status().live_sessions == 0U,
+            "rejected mutation closes transport and coordinator session");
+  };
+
+  auto cross_scope = mutation_request("request-cross-scope");
+  cross_scope.run_id = "run-other";
+  cross_scope = seal_resource_request(std::move(cross_scope));
+  rejected_exchange(
+      {.open = open,
+       .mutation = HostdMutationKind::request_bundle,
+       .bundle_request = cross_scope,
+       .release_request = std::nullopt},
+      105U);
+  require(verifier->outstanding_challenges() == 0U,
+          "client-side cross-scope rejection discards its issued challenge");
+
+  logical->live = false;
+  rejected_exchange(
+      {.open = open,
+       .mutation = HostdMutationKind::request_bundle,
+       .bundle_request = mutation_request("request-stale-fence"),
+       .release_request = std::nullopt},
+      106U);
+  require(ledger_time->calls == 3U,
+          "stale logical fence is rejected before host time or ledger mutation");
+  require(ledger_time->calls == 3U,
+          "only grant, duplicate grant, and release sample host ledger time");
+  require(journal->calls == 5U && service->calls >= 9U &&
+              logical->calls >= 8U && verifier->outstanding_challenges() == 0U,
+          "every connection consumes a journal challenge and reattests peer and fence");
+}
+
 } // namespace
 
 int main() {
@@ -1220,6 +1564,8 @@ int main() {
       {"framing", malformed_packets_rights_and_deadlines_are_bounded},
       {"client-hardening",
        client_rejects_corruption_delegation_and_no_children_exist},
+      {"mutation-dispatch",
+       mutation_transport_dispatches_replays_and_disconnects},
   };
   try {
     for (const auto &[name, test] : tests) {

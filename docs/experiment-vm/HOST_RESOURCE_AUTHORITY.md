@@ -665,9 +665,16 @@ exchange: an open claim receives a server challenge, then one sealed command
 echoes the exact challenge response and carries exactly one attributed bundle
 or release request. Cross-message validators bind the open, challenge,
 command digest, and typed reply; reconciliation may explicitly return missing
-but can never disguise a new outcome as replayed. The socket remains
-status-only until this envelope is dispatched through the socket-bound
-challenge/session adapter and passes the crash-window gates above.
+but can never disguise a new outcome as replayed. A separate mutation server
+now dispatches that exchange through the accepted `SOCK_SEQPACKET` peer into
+the coordinator. It reobserves the Linux process instance, consumes the
+journal challenge once, obtains service access from a host-side authority
+rather than request data, uses host-sampled ledger time, and always disconnects
+the scoped coordinator session. Duplicate grant, exact reconciliation,
+release, stale-fence, cross-scope, malformed-command, and abandoned-challenge
+paths are covered at the cooperative test grade. The remaining P0.3 gate is
+exhaustive crash-window qualification plus the production service-cgroup
+identity implementation at strict socket-pidfd/host-namespace grade.
 
 ### P0.4 — guarded launcher and strict cgroup enforcement
 

@@ -956,6 +956,27 @@ void concurrent_issue_and_verify_serialize_collaborators() {
           "nonce, time, and journal collaborators are globally serialized");
 }
 
+void transport_discard_is_exact_and_callback_free() {
+  Fixture fixture;
+  const auto challenge = fixture.issue();
+  auto wrong_peer = peer();
+  ++wrong_peer.process_starttime_ticks;
+  require_throws<HostdSessionChallengeRejected>(
+      [&] {
+        (void)fixture.verifier->discard(challenge.challenge_id, wrong_peer);
+      },
+      "transport cannot discard another peer's outstanding challenge");
+  require(fixture.verifier->outstanding_challenges() == 1U &&
+              fixture.journal->calls == 0U,
+          "wrong-peer discard preserves the challenge without callbacks");
+  require(fixture.verifier->discard(challenge.challenge_id, peer()) &&
+              fixture.verifier->outstanding_challenges() == 0U &&
+              fixture.journal->calls == 0U,
+          "exact-peer discard consumes the challenge without attestation");
+  require(!fixture.verifier->discard(challenge.challenge_id, peer()),
+          "discard of an already-consumed challenge is an isolated no-op");
+}
+
 } // namespace
 
 int main() {
@@ -971,6 +992,7 @@ int main() {
       {"quota-time", per_peer_quota_and_boottime_high_water_fail_closed},
       {"reentry", collaborator_reentry_is_rejected_without_deadlock},
       {"concurrency", concurrent_issue_and_verify_serialize_collaborators},
+      {"transport-discard", transport_discard_is_exact_and_callback_free},
   };
   try {
     for (const auto &[name, test] : tests) {
