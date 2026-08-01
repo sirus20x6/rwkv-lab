@@ -227,6 +227,22 @@ enum class HostdMutationTransportEnforcementGrade {
   strict_service_identity,
 };
 
+enum class HostdMutationTransportCheckpoint {
+  after_challenge_sent,
+  after_command_received,
+  after_challenge_verified,
+  after_coordinator_connected,
+  after_dispatch_committed,
+  before_reply_send,
+  after_reply_send,
+};
+
+class IHostdMutationTransportFaultInjector {
+public:
+  virtual ~IHostdMutationTransportFaultInjector() = default;
+  virtual void checkpoint(HostdMutationTransportCheckpoint checkpoint) = 0;
+};
+
 struct HostdMutationTransportConfig final {
   std::string api_version{std::string(kHostdMutationTransportApiVersion)};
   uid_t allowed_uid{};
@@ -237,6 +253,8 @@ struct HostdMutationTransportConfig final {
       HostdMutationTransportEnforcementGrade::cooperative_test};
   std::size_t maximum_payload_bytes{kHostdStatusMaximumPayloadBytes};
   std::int64_t per_session_timeout_ns{5'000'000'000LL};
+  // Test-only deterministic crash-window seam. Production leaves this null.
+  std::shared_ptr<IHostdMutationTransportFaultInjector> fault_injector;
 
   bool operator==(const HostdMutationTransportConfig &) const = default;
 };

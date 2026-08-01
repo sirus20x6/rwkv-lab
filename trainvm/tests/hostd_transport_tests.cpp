@@ -462,6 +462,20 @@ public:
   std::size_t calls{};
 };
 
+class MutationFaultInjector final
+    : public IHostdMutationTransportFaultInjector {
+public:
+  void checkpoint(HostdMutationTransportCheckpoint checkpoint) override {
+    ++visits;
+    if (selected && *selected == checkpoint) {
+      selected.reset();
+      throw std::runtime_error("injected mutation transport interruption");
+    }
+  }
+  std::optional<HostdMutationTransportCheckpoint> selected;
+  std::size_t visits{};
+};
+
 HostdStatusClientConfig client_config(HostdSocketAuthority &authority) {
   return {.socket_path = authority.socket_path(),
           .expected_endpoint = authority.reattest(),
@@ -1412,6 +1426,7 @@ void mutation_transport_dispatches_replays_and_disconnects() {
   auto kernel = std::make_shared<MutationLinuxKernel>();
   auto service = std::make_shared<MutationServiceAuthority>();
   auto ledger_time = std::make_shared<MutationLedgerTime>();
+  auto fault = std::make_shared<MutationFaultInjector>();
   HostdMutationServer server(
       authority, fixture.coordinator, verifier, kernel, service, ledger_time,
       {.api_version = std::string(kHostdMutationTransportApiVersion),
@@ -1422,7 +1437,8 @@ void mutation_transport_dispatches_replays_and_disconnects() {
        .enforcement_grade =
            HostdMutationTransportEnforcementGrade::cooperative_test,
        .maximum_payload_bytes = kHostdStatusMaximumPayloadBytes,
-       .per_session_timeout_ns = 2'000'000'000LL});
+       .per_session_timeout_ns = 2'000'000'000LL,
+       .fault_injector = fault});
   const HostdMutationClientConfig client{
       .socket_path = authority->socket_path(),
       .expected_endpoint = authority->reattest(),
@@ -1546,10 +1562,78 @@ void mutation_transport_dispatches_replays_and_disconnects() {
       106U);
   require(ledger_time->calls == 3U,
           "stale logical fence is rejected before host time or ledger mutation");
-  require(ledger_time->calls == 3U,
-          "only grant, duplicate grant, and release sample host ledger time");
-  require(journal->calls == 5U && service->calls >= 9U &&
-              logical->calls >= 8U && verifier->outstanding_challenges() == 0U,
+
+  logical->live = true;
+  const std::array precommit_checkpoints{
+      HostdMutationTransportCheckpoint::after_challenge_sent,
+      HostdMutationTransportCheckpoint::after_command_received,
+      HostdMutationTransportCheckpoint::after_challenge_verified,
+      HostdMutationTransportCheckpoint::after_coordinator_connected,
+  };
+  for (std::size_t index = 0U; index < precommit_checkpoints.size(); ++index) {
+    const auto interrupted =
+        mutation_request("request-precommit-" + std::to_string(index));
+    fault->selected = precommit_checkpoints[index];
+    rejected_exchange(
+        {.open = open,
+         .mutation = HostdMutationKind::request_bundle,
+         .bundle_request = interrupted,
+         .release_request = std::nullopt},
+        110U + index);
+    require(!fault->selected &&
+                !fixture.ledger->reconcile_bundle_outcome(interrupted) &&
+                ledger_time->calls == 3U &&
+                verifier->outstanding_challenges() == 0U,
+            "every pre-dispatch interruption leaves no durable outcome or challenge");
+  }
+
+  const auto lost_reply_request = mutation_request("request-lost-reply");
+  fault->selected =
+      HostdMutationTransportCheckpoint::after_dispatch_committed;
+  rejected_exchange(
+      {.open = open,
+       .mutation = HostdMutationKind::request_bundle,
+       .bundle_request = lost_reply_request,
+       .release_request = std::nullopt},
+      107U);
+  require(!fault->selected && fixture.coordinator->status().live_sessions == 0U,
+          "post-commit interruption still tears down the scoped session");
+  const auto recovered = exchange(
+      {.open = open,
+       .mutation = HostdMutationKind::request_bundle,
+       .bundle_request = lost_reply_request,
+       .release_request = std::nullopt},
+      108U);
+  require(recovered.bundle_result && recovered.bundle_result->replayed &&
+              recovered.bundle_result->grant,
+          "retry after post-commit lost reply returns the durable replay");
+  const auto &recovered_grant = *recovered.bundle_result->grant;
+  const auto recovered_release = seal_resource_release_request({
+      .api_version = std::string(kHostLedgerReleaseRequestApiVersion),
+      .release_request_id = "release-lost-reply",
+      .allocation_id = recovered_grant.allocation_id,
+      .grant_digest = recovered_grant.receipt_digest,
+      .journal_id = recovered_grant.journal_id,
+      .run_id = recovered_grant.run_id,
+      .logical_lease_id = recovered_grant.logical_lease_id,
+      .logical_fencing_token = recovered_grant.logical_fencing_token,
+      .canonical_request_digest = {},
+  });
+  const auto recovered_released = exchange(
+      {.open = open,
+       .mutation = HostdMutationKind::release_bundle,
+       .bundle_request = std::nullopt,
+       .release_request = recovered_release},
+      109U);
+  require(recovered_released.release_result &&
+              recovered_released.release_result->receipt.allocation_id ==
+                  recovered_grant.allocation_id,
+          "lost-reply replay remains exactly releasable");
+  require(ledger_time->calls == 6U,
+          "only dispatched grants and releases sample host ledger time");
+  require(journal->calls == 10U && service->calls >= 16U &&
+              logical->calls >= 14U &&
+              verifier->outstanding_challenges() == 0U,
           "every connection consumes a journal challenge and reattests peer and fence");
 }
 

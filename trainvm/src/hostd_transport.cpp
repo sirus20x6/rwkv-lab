@@ -1108,6 +1108,20 @@ std::int64_t checked_clock_ns(clockid_t clock, std::string_view name) {
   return value.tv_sec * 1'000'000'000LL + value.tv_nsec;
 }
 
+void mutation_checkpoint(
+    const std::shared_ptr<IHostdMutationTransportFaultInjector> &injector,
+    HostdMutationTransportCheckpoint checkpoint) {
+  if (!injector)
+    return;
+  try {
+    injector->checkpoint(checkpoint);
+  } catch (const HostdTransportError &) {
+    throw;
+  } catch (...) {
+    throw HostdTransportError("hostd mutation fault checkpoint interrupted");
+  }
+}
+
 } // namespace
 
 struct HostdSocketAuthority::Implementation final {
@@ -1740,6 +1754,9 @@ HostdServeResult HostdMutationServer::serve_one(
                       kMutationChallengeOpcode, correlation,
                       hostd_session_challenge_canonical_json(challenge)),
                   session_deadline);
+      mutation_checkpoint(config_.fault_injector,
+                          HostdMutationTransportCheckpoint::
+                              after_challenge_sent);
 
       const ReceivedPacket command_packet = receive_packet(
           connection.get(), credentials, config_.maximum_payload_bytes,
@@ -1753,6 +1770,9 @@ HostdServeResult HostdMutationServer::serve_one(
       const HostdMutationCommand command =
           hostd_mutation_command_from_canonical_json(decoded_command.payload);
       validate_hostd_mutation_exchange(open, challenge, command);
+      mutation_checkpoint(config_.fault_injector,
+                          HostdMutationTransportCheckpoint::
+                              after_command_received);
 
       const HostdSocketPeerInstance observed_peer = bound_peer.reobserve();
       // verify() consumes a matching challenge before any callback or failure.
@@ -1760,6 +1780,9 @@ HostdServeResult HostdMutationServer::serve_one(
       HostdSessionChallengeEvidence challenge_evidence =
           challenge_verifier_->verify(command.challenge_response,
                                       observed_peer);
+      mutation_checkpoint(config_.fault_injector,
+                          HostdMutationTransportCheckpoint::
+                              after_challenge_verified);
       auto peer_source = make_socket_bound_mutation_peer_source(
           std::move(bound_peer), std::move(challenge_evidence),
           service_identity_authority_, config_.enforcement_grade);
@@ -1776,6 +1799,9 @@ HostdServeResult HostdMutationServer::serve_one(
       const HostdConnectedSession session =
           coordinator_->connect(std::move(connect), std::move(peer_source));
       CoordinatorSessionGuard session_guard(coordinator_, session.session_id);
+      mutation_checkpoint(config_.fault_injector,
+                          HostdMutationTransportCheckpoint::
+                              after_coordinator_connected);
 
       HostdMutationReply reply{
           .api_version = std::string(kHostdMutationProtocolApiVersion),
@@ -1812,13 +1838,20 @@ HostdServeResult HostdMutationServer::serve_one(
         break;
       }
       }
+      mutation_checkpoint(config_.fault_injector,
+                          HostdMutationTransportCheckpoint::
+                              after_dispatch_committed);
       validate_hostd_mutation_reply(command, reply);
       const auto reply_packet = encode_canonical_packet(
           kMutationReplyOpcode, correlation,
           hostd_mutation_reply_canonical_json(reply));
       if (!payload_fits(reply_packet, config_.maximum_payload_bytes))
         throw HostdTransportError("hostd mutation reply exceeds payload bound");
+      mutation_checkpoint(config_.fault_injector,
+                          HostdMutationTransportCheckpoint::before_reply_send);
       send_packet(connection.get(), reply_packet, session_deadline);
+      mutation_checkpoint(config_.fault_injector,
+                          HostdMutationTransportCheckpoint::after_reply_send);
       (void)::shutdown(connection.get(), SHUT_RDWR);
       return HostdServeResult::served;
     } catch (const HostdSessionChallengeRejected &) {

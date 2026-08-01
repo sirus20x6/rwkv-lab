@@ -143,6 +143,9 @@ service access only from an injected host-owned identity authority, samples gran
 on the server, dispatches request/reconcile/release through `HostGrantCoordinator`, and disconnects
 the scoped coordinator session on every exit path. Duplicate requests and read-only recovery return
 the exact persisted result; stale fences and cross-scope payloads fail before ledger mutation.
+Deterministic transport checkpoints cover challenge delivery, command receipt, verification,
+coordinator connection, durable dispatch, and reply delivery; pre-dispatch interruption leaves no
+outcome, while a post-commit lost reply converges to the exact replay and remains releasable.
 Current end-to-end transport tests use the visibly cooperative enforcement grade. Production
 mutation admission remains disabled until the service-cgroup authority is implemented and the
 strict namespace plus socket-pidfd grade is configured; the dashboard/service also does not yet
