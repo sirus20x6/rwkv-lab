@@ -9327,6 +9327,7 @@ class SagaProcessClient final : public trainvm::IHostProcessClient {
         .cgroup_path = "/trainvm/process-saga",
         .cgroup_device = 41U,
         .cgroup_inode = 42U,
+        .worker_credentials = std::nullopt,
         .device_policy = std::nullopt,
         .canonical_request_digest = {},
     });
@@ -9344,6 +9345,7 @@ class SagaProcessClient final : public trainvm::IHostProcessClient {
         .cgroup_device = launch.cgroup_device,
         .cgroup_inode = launch.cgroup_inode,
         .executable_digest = launch.executable_digest,
+        .worker_credentials = std::nullopt,
         .device_policy = std::nullopt,
         .canonical_request_digest = {},
     });

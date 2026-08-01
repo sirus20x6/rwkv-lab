@@ -133,6 +133,7 @@ HostProcessLaunchRequest launch_request(const ResourceBundleGrant& grant,
       .cgroup_path = "/sys/fs/cgroup/trainvm/test-launch",
       .cgroup_device = 31,
       .cgroup_inode = 41,
+      .worker_credentials = std::nullopt,
       .device_policy = std::nullopt,
       .canonical_request_digest = {},
   });
@@ -151,6 +152,7 @@ HostProcessSpawnRequest spawn_request(const HostProcessLaunchIntent& intent,
       .cgroup_device = intent.request.cgroup_device,
       .cgroup_inode = intent.request.cgroup_inode,
       .executable_digest = intent.request.executable_digest,
+      .worker_credentials = std::nullopt,
       .device_policy = std::nullopt,
       .canonical_request_digest = {},
   });
@@ -160,6 +162,8 @@ HostProcessLaunchRequest device_bound_launch_request(
     const ResourceBundleGrant& grant, std::string launch_id) {
   auto value = launch_request(grant, std::move(launch_id));
   value.api_version = std::string(kHostProcessLaunchRequestApiVersionV2);
+  value.worker_credentials = HostWorkerCredentialBinding{
+      .uid = 1000U, .gid = 1000U, .no_new_privileges = true};
   value.device_policy = HostDevicePolicyIntentBinding{
       .policy_digest = test_digest('5'),
       .image_digest = test_digest('6'),
@@ -173,6 +177,7 @@ HostProcessSpawnRequest device_bound_spawn_request(
     const HostProcessLaunchIntent& intent, std::int64_t pid = 4343) {
   auto value = spawn_request(intent, pid);
   value.api_version = std::string(kHostProcessSpawnRequestApiVersionV2);
+  value.worker_credentials = intent.request.worker_credentials;
   HostDevicePolicyInstallationBinding installed{
       .policy_digest = intent.request.device_policy->policy_digest,
       .image_digest = intent.request.device_policy->image_digest,
@@ -1105,6 +1110,16 @@ void device_policy_authority_is_bound_into_process_history() {
             "durable v2 launch intent commits the exact policy compiler output");
 
     const auto spawn = device_bound_spawn_request(intended.intent);
+    auto wrong_credentials = spawn;
+    ++wrong_credentials.worker_credentials->uid;
+    wrong_credentials.canonical_request_digest.clear();
+    wrong_credentials =
+        seal_host_process_spawn_request(std::move(wrong_credentials));
+    require_throws<HostLedgerConflict>(
+        [&] {
+          (void)ledger.commit_process_spawn(wrong_credentials, {49, 59});
+        },
+        "stopped-child credentials cannot diverge from durable launch intent");
     const auto spawned = ledger.commit_process_spawn(spawn, {50, 60});
     require(!spawned.replayed &&
                 spawned.receipt.api_version ==

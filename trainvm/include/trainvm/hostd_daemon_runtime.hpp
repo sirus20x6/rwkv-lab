@@ -19,10 +19,11 @@ public:
 // bounded recovery/audit transition and binds the shared endpoint only after
 // the controller reaches admitting. The same owner thread must serve it.
 //
-// New process launch remains intentionally unavailable until cgroup-device
-// BPF policy has a durable, restart-adoptable authority implementation.
-// Restart reconciliation still owns the process supervisor so old exact
-// process records can be terminated and closed safely.
+// Process launch is exposed only for a root host authority with a distinct,
+// non-root no-new-privileges worker identity. Every launch carries a durable
+// cgroup-device policy intent, exact kernel installation receipt, and stopped
+// credential observation. Restart reconciliation owns the same process and
+// cgroup authority before the socket is admitted.
 class HostdDaemonRuntime final {
 public:
   explicit HostdDaemonRuntime(HostdDaemonConfiguration configuration);

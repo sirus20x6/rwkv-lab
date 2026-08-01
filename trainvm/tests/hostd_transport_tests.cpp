@@ -524,6 +524,7 @@ class LedgerProcessSupervisor final : public IHostdProcessSupervisor {
             .cgroup_path = "/trainvm/test-allocation",
             .cgroup_device = 91U,
             .cgroup_inode = 92U,
+            .worker_credentials = std::nullopt,
             .device_policy = std::nullopt,
             .canonical_request_digest = {},
         }),
@@ -542,6 +543,7 @@ class LedgerProcessSupervisor final : public IHostdProcessSupervisor {
             .cgroup_inode = 92U,
             .executable_digest =
                 request.launch.identity.executable.sealed_sha256,
+            .worker_credentials = std::nullopt,
             .device_policy = std::nullopt,
             .canonical_request_digest = {},
         }),

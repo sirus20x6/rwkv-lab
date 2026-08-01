@@ -43,6 +43,9 @@ HostdDaemonConfigurationDocument document() {
       .broker_instance_id = "hostd-instance-daemon",
       .authority_uid = uid,
       .authority_gid = gid,
+      .worker_identity = {.uid = uid == 1000U ? 1001U : 1000U,
+                          .gid = gid == 1000U ? 1001U : 1000U,
+                          .no_new_privileges = true},
       .ledger_path = "/var/lib/trainvm-hostd/host-ledger.sqlite3",
       .journal_path = "/var/lib/trainvm/journal.sqlite3",
       .journal_identity = {.directory_path = "/var/lib/trainvm",
@@ -139,6 +142,11 @@ void valid_document_compiles_every_authority_policy() {
           config.inventory().trusted_host_namespace &&
           config.inventory().trusted_nvml_loader &&
           config.cgroup().root_unified_path == "/trainvm-workers.slice" &&
+          config.worker_credentials().uid ==
+              config.document().worker_identity.uid &&
+          config.worker_credentials().gid ==
+              config.document().worker_identity.gid &&
+          config.worker_credentials().no_new_privileges &&
           config.coordinator().host_id == "host-daemon" &&
           config.startup_auditor().policy.policy_digest.starts_with(
               "sha256:") &&
@@ -193,6 +201,18 @@ void unsafe_paths_trust_roles_and_bounds_are_rejected() {
   require_throws<HostdDaemonConfigurationError>(
       [&] { HostdDaemonConfiguration invalid(std::move(authority_name)); },
       "journal authority names must be safe basenames");
+
+  auto root_worker = document();
+  root_worker.worker_identity.uid = 0U;
+  require_throws<HostdDaemonConfigurationError>(
+      [&] { HostdDaemonConfiguration invalid(std::move(root_worker)); },
+      "training workers can never inherit root identity");
+
+  auto same_worker = document();
+  same_worker.worker_identity.uid = same_worker.authority_uid;
+  require_throws<HostdDaemonConfigurationError>(
+      [&] { HostdDaemonConfiguration invalid(std::move(same_worker)); },
+      "training workers must differ from the host authority identity");
 
   auto socket_name = document();
   socket_name.socket.path =

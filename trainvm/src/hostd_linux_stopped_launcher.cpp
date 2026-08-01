@@ -6,12 +6,15 @@
 #include <charconv>
 #include <cstring>
 #include <fcntl.h>
+#include <grp.h>
+#include <linux/capability.h>
 #include <linux/sched.h>
 #include <poll.h>
 #include <ranges>
 #include <signal.h>
 #include <string>
 #include <sys/stat.h>
+#include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -166,6 +169,102 @@ bool install_inherited_worker_descriptors(std::optional<int> code_fd,
   return ::dup3(worker_bootstrap_fd, kLinuxWorkerBootstrapDescriptor, 0) >= 0;
 }
 
+bool install_worker_credentials(
+    const LinuxWorkerCredentialSpec& credentials) noexcept {
+  if (credentials.uid == 0U || credentials.gid == 0U ||
+      !credentials.no_new_privileges ||
+      ::prctl(PR_SET_NO_NEW_PRIVS, 1UL, 0UL, 0UL, 0UL) != 0 ||
+      ::prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0UL, 0UL, 0UL) != 0 ||
+      ::setgroups(0U, nullptr) != 0 ||
+      ::setresgid(credentials.gid, credentials.gid, credentials.gid) != 0 ||
+      ::setresuid(credentials.uid, credentials.uid, credentials.uid) != 0) {
+    return false;
+  }
+  struct __user_cap_header_struct header {
+    .version = _LINUX_CAPABILITY_VERSION_3, .pid = 0
+  };
+  std::array<struct __user_cap_data_struct, 2U> capabilities{};
+  if (::syscall(SYS_capset, &header, capabilities.data()) != 0 ||
+      ::prctl(PR_SET_DUMPABLE, 0UL, 0UL, 0UL, 0UL) != 0 ||
+      ::geteuid() != credentials.uid || ::getuid() != credentials.uid ||
+      ::getegid() != credentials.gid || ::getgid() != credentials.gid ||
+      ::getgroups(0, nullptr) != 0 ||
+      ::prctl(PR_GET_NO_NEW_PRIVS, 0UL, 0UL, 0UL, 0UL) != 1) {
+    return false;
+  }
+  (void)::umask(0077);
+  return true;
+}
+
+std::optional<std::string_view> status_field(std::string_view status,
+                                             std::string_view name) {
+  const std::string prefix = std::string(name) + ":";
+  std::size_t begin = 0U;
+  std::optional<std::string_view> result;
+  while (begin < status.size()) {
+    const std::size_t end = status.find('\n', begin);
+    std::string_view line = status.substr(
+        begin, (end == std::string_view::npos ? status.size() : end) - begin);
+    if (line.starts_with(prefix)) {
+      if (result) return std::nullopt;
+      line.remove_prefix(prefix.size());
+      while (!line.empty() && (line.front() == ' ' || line.front() == '\t'))
+        line.remove_prefix(1U);
+      result = line;
+    }
+    if (end == std::string_view::npos) break;
+    begin = end + 1U;
+  }
+  return result;
+}
+
+bool four_ids_equal(std::string_view field, std::uint64_t expected) {
+  for (std::size_t index = 0U; index < 4U; ++index) {
+    while (!field.empty() && (field.front() == ' ' || field.front() == '\t'))
+      field.remove_prefix(1U);
+    const std::size_t end = field.find_first_of(" \t");
+    const std::string_view token = field.substr(0U, end);
+    std::uint64_t value = 0U;
+    const auto parsed =
+        std::from_chars(token.data(), token.data() + token.size(), value);
+    if (parsed.ec != std::errc{} || parsed.ptr != token.data() + token.size() ||
+        value != expected) {
+      return false;
+    }
+    field = end == std::string_view::npos ? std::string_view{}
+                                          : field.substr(end);
+  }
+  while (!field.empty() && (field.front() == ' ' || field.front() == '\t'))
+    field.remove_prefix(1U);
+  return field.empty();
+}
+
+bool zero_hex(std::string_view value) {
+  return !value.empty() &&
+         std::ranges::all_of(value, [](char character) {
+           return character == '0';
+         });
+}
+
+bool worker_status_has_credentials(
+    std::string_view status, const LinuxWorkerCredentialSpec& expected) {
+  const auto uid = status_field(status, "Uid");
+  const auto gid = status_field(status, "Gid");
+  const auto groups = status_field(status, "Groups");
+  const auto no_new_privileges = status_field(status, "NoNewPrivs");
+  const auto effective = status_field(status, "CapEff");
+  const auto permitted = status_field(status, "CapPrm");
+  const auto inheritable = status_field(status, "CapInh");
+  const auto ambient = status_field(status, "CapAmb");
+  return expected.uid > 0U && expected.gid > 0U &&
+         expected.no_new_privileges && uid && gid && groups &&
+         no_new_privileges && effective && permitted && inheritable && ambient &&
+         four_ids_equal(*uid, expected.uid) &&
+         four_ids_equal(*gid, expected.gid) && groups->empty() &&
+         *no_new_privileges == "1" && zero_hex(*effective) &&
+         zero_hex(*permitted) && zero_hex(*inheritable) && zero_hex(*ambient);
+}
+
 void require_descriptor_identity(const LinuxStoppedLaunchSpec& spec) {
   struct stat cgroup {};
   struct stat executable {};
@@ -211,6 +310,8 @@ void validate_spec(const LinuxStoppedLaunchSpec& spec) {
         return (value >= '0' && value <= '9') ||
                (value >= 'a' && value <= 'f');
       }) ||
+      ::geteuid() != 0U || spec.credentials.uid == 0U ||
+      spec.credentials.gid == 0U || !spec.credentials.no_new_privileges ||
       spec.arguments.size() > 256U) {
     reject("stopped launch specification is malformed or unbounded");
   }
@@ -364,11 +465,21 @@ LinuxStoppedChild LinuxStoppedLauncherKernel::spawn_stopped(
   }
   arguments.push_back(nullptr);
   std::array<int, 2U> gate{-1, -1};
+  std::array<int, 2U> ready{-1, -1};
   if (::pipe2(gate.data(), O_CLOEXEC) != 0) {
     reject(system_error("could not create stopped-child gate"));
   }
+  if (::pipe2(ready.data(), O_CLOEXEC) != 0) {
+    const int saved_errno = errno;
+    (void)::close(gate[0]);
+    (void)::close(gate[1]);
+    errno = saved_errno;
+    reject(system_error("could not create stopped-child readiness pipe"));
+  }
   Descriptor gate_read(gate[0]);
   Descriptor gate_write(gate[1]);
+  Descriptor ready_read(ready[0]);
+  Descriptor ready_write(ready[1]);
   int pidfd = -1;
   struct clone_args clone {};
   clone.flags = CLONE_INTO_CGROUP | CLONE_PIDFD;
@@ -379,17 +490,29 @@ LinuxStoppedChild LinuxStoppedLauncherKernel::spawn_stopped(
   if (result < 0) reject(system_error("clone3 stopped launch failed"));
   if (result == 0) {
     (void)::close(gate_write.release());
+    (void)::close(ready_read.release());
+    const bool prepared =
+        ::fchdir(spec.working_directory_fd) == 0 &&
+        install_inherited_worker_descriptors(
+            spec.code_fd ? std::optional<int>{inherited_code.get()}
+                         : std::nullopt,
+            inherited_bootstrap.get()) &&
+        install_worker_credentials(spec.credentials);
+    const char ready_command = 'R';
+    ssize_t ready_count = 0;
+    if (prepared) {
+      do {
+        ready_count = ::write(ready_write.get(), &ready_command, 1U);
+      } while (ready_count < 0 && errno == EINTR);
+    }
+    ready_write.reset();
+    if (!prepared || ready_count != 1) ::_exit(124);
     char command = 0;
     ssize_t count = 0;
     do {
       count = ::read(gate_read.get(), &command, 1U);
     } while (count < 0 && errno == EINTR);
-    if (count != 1 || command != 'G' ||
-        ::fchdir(spec.working_directory_fd) != 0 ||
-        !install_inherited_worker_descriptors(
-            spec.code_fd ? std::optional<int>{inherited_code.get()}
-                         : std::nullopt,
-            inherited_bootstrap.get())) {
+    if (count != 1 || command != 'G') {
       ::_exit(125);
     }
     char* const environment[] = {nullptr};
@@ -398,7 +521,24 @@ LinuxStoppedChild LinuxStoppedLauncherKernel::spawn_stopped(
     ::_exit(126);
   }
   gate_read.reset();
+  ready_write.reset();
   LinuxStoppedChild child({}, pidfd, gate_write.release());
+  pollfd ready_poll{.fd = ready_read.get(), .events = POLLIN, .revents = 0};
+  int ready_status = 0;
+  do {
+    ready_status = ::poll(&ready_poll, 1U, 5'000);
+  } while (ready_status < 0 && errno == EINTR);
+  char ready_command = 0;
+  ssize_t ready_count = 0;
+  if (ready_status == 1 && (ready_poll.revents & POLLIN) != 0) {
+    do {
+      ready_count = ::read(ready_read.get(), &ready_command, 1U);
+    } while (ready_count < 0 && errno == EINTR);
+  }
+  ready_read.reset();
+  if (ready_count != 1 || ready_command != 'R' || !pidfd_alive(pidfd)) {
+    reject("child failed its bounded pre-exec credential transition");
+  }
   const pid_t pid = static_cast<pid_t>(result);
   const std::string proc_name = std::to_string(pid);
   Descriptor process(::openat(AT_FDCWD, ("/proc/" + proc_name).c_str(),
@@ -409,14 +549,21 @@ LinuxStoppedChild LinuxStoppedLauncherKernel::spawn_stopped(
   const std::string stat_before = read_bounded_file(process.get(), "stat", 4096U);
   const std::string cgroup_before =
       read_bounded_file(process.get(), "cgroup", 4096U);
+  const std::string status_before =
+      read_bounded_file(process.get(), "status", 16U << 10U);
   const std::string stat_after = read_bounded_file(process.get(), "stat", 4096U);
   const std::string cgroup_after =
       read_bounded_file(process.get(), "cgroup", 4096U);
+  const std::string status_after =
+      read_bounded_file(process.get(), "status", 16U << 10U);
   const std::uint64_t starttime = parse_starttime(stat_before);
   const std::string cgroup_path = parse_cgroup(cgroup_before);
   if (starttime != parse_starttime(stat_after) ||
       cgroup_path != parse_cgroup(cgroup_after) ||
-      cgroup_path != spec.expected_cgroup_path || !pidfd_alive(pidfd)) {
+      cgroup_path != spec.expected_cgroup_path ||
+      !worker_status_has_credentials(status_before, spec.credentials) ||
+      !worker_status_has_credentials(status_after, spec.credentials) ||
+      !pidfd_alive(pidfd)) {
     reject("stopped child identity changed or missed its protected cgroup");
   }
   child.identity_ = LinuxStoppedChildIdentity{
@@ -426,6 +573,9 @@ LinuxStoppedChild LinuxStoppedLauncherKernel::spawn_stopped(
       .cgroup_device = spec.expected_cgroup_device,
       .cgroup_inode = spec.expected_cgroup_inode,
       .executable_digest = spec.executable_digest,
+      .uid = spec.credentials.uid,
+      .gid = spec.credentials.gid,
+      .no_new_privileges = true,
   };
   return child;
 }
@@ -444,6 +594,11 @@ bool install_inherited_worker_descriptors(
     std::optional<int> code_fd, int worker_bootstrap_fd) noexcept {
   return trainvm::install_inherited_worker_descriptors(code_fd,
                                                         worker_bootstrap_fd);
+}
+
+bool worker_status_has_credentials(
+    std::string_view status, const LinuxWorkerCredentialSpec& expected) {
+  return trainvm::worker_status_has_credentials(status, expected);
 }
 
 }  // namespace hostd_linux_stopped_launcher_test_seam

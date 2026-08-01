@@ -14,6 +14,14 @@ namespace trainvm {
 inline constexpr int kLinuxWorkerCodeDescriptor = 3;
 inline constexpr int kLinuxWorkerBootstrapDescriptor = 4;
 
+struct LinuxWorkerCredentialSpec final {
+  uid_t uid{};
+  gid_t gid{};
+  bool no_new_privileges{};
+
+  bool operator==(const LinuxWorkerCredentialSpec&) const = default;
+};
+
 struct LinuxStoppedLaunchSpec final {
   std::string launch_id;
   int cgroup_fd{-1};
@@ -26,6 +34,7 @@ struct LinuxStoppedLaunchSpec final {
   std::string executable_name;
   std::string executable_digest;
   int working_directory_fd{-1};
+  LinuxWorkerCredentialSpec credentials;
   std::vector<std::string> arguments;
 
   bool operator==(const LinuxStoppedLaunchSpec&) const = default;
@@ -38,6 +47,9 @@ struct LinuxStoppedChildIdentity final {
   std::uint64_t cgroup_device{};
   std::uint64_t cgroup_inode{};
   std::string executable_digest;
+  uid_t uid{};
+  gid_t gid{};
+  bool no_new_privileges{};
 
   bool operator==(const LinuxStoppedChildIdentity&) const = default;
 };
@@ -104,6 +116,8 @@ namespace hostd_linux_stopped_launcher_test_seam {
 [[nodiscard]] std::string parse_unified_cgroup(std::string_view cgroup);
 [[nodiscard]] bool install_inherited_worker_descriptors(
     std::optional<int> code_fd, int worker_bootstrap_fd) noexcept;
+[[nodiscard]] bool worker_status_has_credentials(
+    std::string_view status, const LinuxWorkerCredentialSpec& expected);
 
 }  // namespace hostd_linux_stopped_launcher_test_seam
 

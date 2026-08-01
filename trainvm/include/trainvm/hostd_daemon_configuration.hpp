@@ -12,6 +12,7 @@
 #include "trainvm/hostd_journal_fence_attestor.hpp"
 #include "trainvm/hostd_linux_cgroup_authority.hpp"
 #include "trainvm/hostd_linux_service_identity.hpp"
+#include "trainvm/hostd_linux_stopped_launcher.hpp"
 #include "trainvm/hostd_restart_process_recovery.hpp"
 #include "trainvm/hostd_startup_auditor.hpp"
 #include "trainvm/hostd_startup_controller.hpp"
@@ -44,6 +45,14 @@ struct HostdDaemonCgroupDocument final {
   std::string root_unified_path;
 
   bool operator==(const HostdDaemonCgroupDocument &) const = default;
+};
+
+struct HostdDaemonWorkerIdentityDocument final {
+  std::uint32_t uid{};
+  std::uint32_t gid{};
+  bool no_new_privileges{};
+
+  bool operator==(const HostdDaemonWorkerIdentityDocument &) const = default;
 };
 
 struct HostdDaemonSocketDocument final {
@@ -103,6 +112,7 @@ struct HostdDaemonConfigurationDocument final {
   std::string broker_instance_id;
   std::uint32_t authority_uid{};
   std::uint32_t authority_gid{};
+  HostdDaemonWorkerIdentityDocument worker_identity;
   std::string ledger_path;
   std::string journal_path;
   JournalFileIdentity journal_identity;
@@ -131,6 +141,7 @@ public:
   [[nodiscard]] HostLedgerAuthorityConfig ledger_authority() const;
   [[nodiscard]] LinuxNvidiaInventoryConfig inventory() const;
   [[nodiscard]] LinuxCgroupAuthorityConfig cgroup() const;
+  [[nodiscard]] LinuxWorkerCredentialSpec worker_credentials() const;
   [[nodiscard]] HostdCoordinatorConfig coordinator() const;
   [[nodiscard]] HostdConfiguredStartupAuditorConfig startup_auditor() const;
   [[nodiscard]] HostdRestartProcessRecoveryConfig restart_recovery() const;

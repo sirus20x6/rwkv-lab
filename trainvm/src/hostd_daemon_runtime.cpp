@@ -84,7 +84,12 @@ private:
 struct HostdDaemonRuntime::Implementation final {
   explicit Implementation(HostdDaemonConfiguration input)
       : configuration(std::move(input)), owner_pid(::getpid()),
-        owner_tid(current_tid()) {
+        owner_tid(current_tid()),
+        launch_capable(configuration.document().authority_uid == 0U &&
+                       ::geteuid() == 0U &&
+                       configuration.worker_credentials().uid != 0U &&
+                       configuration.worker_credentials().gid != 0U &&
+                       configuration.worker_credentials().no_new_privileges) {
     if (owner_tid <= 0)
       throw HostdDaemonRuntimeError("could not bind hostd owner thread");
 
@@ -127,7 +132,7 @@ struct HostdDaemonRuntime::Implementation final {
         *inventory_kernel);
     process_authority = std::make_unique<LinuxProcessAuthority>(
         *ledger, *clock, *cgroups, *device_installer, *launcher,
-        *context_auditor);
+        configuration.worker_credentials(), *context_auditor);
     process_supervisor =
         std::make_shared<HostdLinuxProcessSupervisor>(*process_authority);
     release_authority =
@@ -178,12 +183,10 @@ struct HostdDaemonRuntime::Implementation final {
     auto candidate_status = std::make_unique<HostdStatusServer>(
         candidate_socket, coordinator, configuration.status_peer(),
         configuration.status_transport());
-    // Deliberately omit process_supervisor until durable cgroup-device BPF
-    // policy is part of every launch receipt and restart path.
     auto candidate_mutation = std::make_unique<HostdMutationServer>(
         candidate_socket, coordinator, challenge_verifier, session_kernel,
         service_identity, ledger_time, configuration.mutation_transport(),
-        nullptr);
+        launch_capable ? process_supervisor : nullptr);
     auto candidate_unified = std::make_unique<HostdUnifiedServer>(
         candidate_socket, *candidate_status, *candidate_mutation);
     socket = std::move(candidate_socket);
@@ -195,6 +198,7 @@ struct HostdDaemonRuntime::Implementation final {
   HostdDaemonConfiguration configuration;
   pid_t owner_pid{};
   pid_t owner_tid{};
+  bool launch_capable{};
   std::unique_ptr<AuthorityClock> clock;
   std::unique_ptr<LinuxNvidiaInventoryCollector> inventory_kernel;
   HostInventoryReceipt inventory;
@@ -258,7 +262,7 @@ bool HostdDaemonRuntime::ready() const {
 }
 
 bool HostdDaemonRuntime::process_launch_enabled() const noexcept {
-  return false;
+  return implementation_->launch_capable;
 }
 
 HostdCoordinatorStatus HostdDaemonRuntime::coordinator_status() const {

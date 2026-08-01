@@ -111,10 +111,16 @@ LinuxProcessAuthority::LinuxProcessAuthority(
     LinuxCgroupAuthority& cgroups,
     LinuxDevicePolicyInstaller& device_policies,
     LinuxStoppedLauncherKernel& launcher,
+    LinuxWorkerCredentialSpec worker_credentials,
     ILinuxProcessContextAuditor& context_auditor)
     : ledger_(ledger), clock_(clock), cgroups_(cgroups),
       device_policies_(device_policies), launcher_(launcher),
-      context_auditor_(context_auditor) {}
+      worker_credentials_(worker_credentials), context_auditor_(context_auditor) {
+  if (worker_credentials_.uid == 0U || worker_credentials_.gid == 0U ||
+      !worker_credentials_.no_new_privileges) {
+    reject("process authority requires a non-root worker credential boundary");
+  }
+}
 
 LinuxPreparedLaunch LinuxProcessAuthority::prepare(
     const ResolvedLaunch& resolved, const ResourceBundleGrant& grant,
@@ -164,6 +170,10 @@ LinuxPreparedLaunch LinuxProcessAuthority::prepare(
           .cgroup_path = cgroup_identity.unified_path,
           .cgroup_device = cgroup_identity.device,
           .cgroup_inode = cgroup_identity.inode,
+          .worker_credentials = HostWorkerCredentialBinding{
+              .uid = static_cast<std::uint32_t>(worker_credentials_.uid),
+              .gid = static_cast<std::uint32_t>(worker_credentials_.gid),
+              .no_new_privileges = true},
           .device_policy =
               host_device_policy_intent_binding(device_policy,
                                                 device_program),
@@ -201,9 +211,15 @@ LinuxPreparedLaunch LinuxProcessAuthority::prepare(
       .executable_name = spec.identity.executable.source_path,
       .executable_digest = spec.identity.executable.sealed_sha256,
       .working_directory_fd = working_directory_fd.get(),
+      .credentials = worker_credentials_,
       .arguments = std::move(arguments),
   });
   const LinuxStoppedChildIdentity& observed = child.identity();
+  if (observed.uid != worker_credentials_.uid ||
+      observed.gid != worker_credentials_.gid ||
+      !observed.no_new_privileges) {
+    reject("stopped child did not retain its sealed worker credentials");
+  }
   const HostProcessSpawnRequest spawn_request =
       seal_host_process_spawn_request({
           .api_version =
@@ -217,6 +233,7 @@ LinuxPreparedLaunch LinuxProcessAuthority::prepare(
           .cgroup_device = observed.cgroup_device,
           .cgroup_inode = observed.cgroup_inode,
           .executable_digest = observed.executable_digest,
+          .worker_credentials = request.worker_credentials,
           .device_policy = host_device_policy_installation_binding(
               installed_device_policy),
           .canonical_request_digest = {},

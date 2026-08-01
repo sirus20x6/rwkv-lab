@@ -181,6 +181,14 @@ struct HostDevicePolicyInstallationBinding final {
   bool operator==(const HostDevicePolicyInstallationBinding&) const = default;
 };
 
+struct HostWorkerCredentialBinding final {
+  std::uint32_t uid{};
+  std::uint32_t gid{};
+  bool no_new_privileges{};
+
+  bool operator==(const HostWorkerCredentialBinding&) const = default;
+};
+
 struct HostProcessLaunchRequest final {
   std::string api_version;
   std::string launch_id;
@@ -196,6 +204,7 @@ struct HostProcessLaunchRequest final {
   std::string cgroup_path;
   std::uint64_t cgroup_device{};
   std::uint64_t cgroup_inode{};
+  std::optional<HostWorkerCredentialBinding> worker_credentials;
   std::optional<HostDevicePolicyIntentBinding> device_policy;
   std::string canonical_request_digest;
 
@@ -234,6 +243,7 @@ struct HostProcessSpawnRequest final {
   std::uint64_t cgroup_device{};
   std::uint64_t cgroup_inode{};
   std::string executable_digest;
+  std::optional<HostWorkerCredentialBinding> worker_credentials;
   std::optional<HostDevicePolicyInstallationBinding> device_policy;
   std::string canonical_request_digest;
 

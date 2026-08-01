@@ -528,6 +528,11 @@ bool valid_device_policy_installation_binding(
          binding.attach_flags == 0U;
 }
 
+bool valid_worker_credentials(const HostWorkerCredentialBinding& binding) {
+  return binding.uid > 0U && binding.gid > 0U &&
+         binding.no_new_privileges;
+}
+
 std::string process_launch_request_domain(std::string_view api_version) {
   return api_version == kHostProcessLaunchRequestApiVersionV2
              ? "trainvm.host-process-launch-request/v2"
@@ -723,6 +728,9 @@ nlohmann::json process_launch_request_digest_json(
   if (request.device_policy) {
     value["device_policy"] = encode_json(*request.device_policy);
   }
+  if (request.worker_credentials) {
+    value["worker_credentials"] = encode_json(*request.worker_credentials);
+  }
   return value;
 }
 
@@ -753,6 +761,9 @@ nlohmann::json process_spawn_request_digest_json(
                        {"executable_digest", request.executable_digest}};
   if (request.device_policy) {
     value["device_policy"] = encode_json(*request.device_policy);
+  }
+  if (request.worker_credentials) {
+    value["worker_credentials"] = encode_json(*request.worker_credentials);
   }
   return value;
 }
@@ -3911,10 +3922,12 @@ HostProcessSpawnResult SQLiteHostLedger::commit_process_spawn(
   const bool legacy_device_binding =
       intent.request.api_version == kHostProcessLaunchRequestApiVersion &&
       request.api_version == kHostProcessSpawnRequestApiVersion &&
+      !intent.request.worker_credentials && !request.worker_credentials &&
       !intent.request.device_policy && !request.device_policy;
   bool exact_device_binding = false;
   if (intent.request.api_version == kHostProcessLaunchRequestApiVersionV2 &&
       request.api_version == kHostProcessSpawnRequestApiVersionV2 &&
+      intent.request.worker_credentials && request.worker_credentials &&
       intent.request.device_policy && request.device_policy) {
     const auto& intended_policy = *intent.request.device_policy;
     const auto& installed_policy = *request.device_policy;
@@ -3922,6 +3935,7 @@ HostProcessSpawnResult SQLiteHostLedger::commit_process_spawn(
         installed_policy.policy_digest == intended_policy.policy_digest &&
         installed_policy.image_digest == intended_policy.image_digest &&
         installed_policy.program_name == intended_policy.program_name &&
+        request.worker_credentials == intent.request.worker_credentials &&
         installed_policy.installation_digest ==
             host_device_policy_installation_digest(
                 intent.request.allocation_id, request.launch_id,
@@ -4685,9 +4699,11 @@ HostProcessLaunchRequest seal_host_process_launch_request(
     HostProcessLaunchRequest request) {
   const bool legacy =
       request.api_version == kHostProcessLaunchRequestApiVersion &&
-      !request.device_policy;
+      !request.worker_credentials && !request.device_policy;
   const bool device_bound =
       request.api_version == kHostProcessLaunchRequestApiVersionV2 &&
+      request.worker_credentials &&
+      valid_worker_credentials(*request.worker_credentials) &&
       request.device_policy &&
       valid_device_policy_intent_binding(*request.device_policy);
   if ((!legacy && !device_bound) ||
@@ -4759,9 +4775,11 @@ HostProcessSpawnRequest seal_host_process_spawn_request(
     HostProcessSpawnRequest request) {
   const bool legacy =
       request.api_version == kHostProcessSpawnRequestApiVersion &&
-      !request.device_policy;
+      !request.worker_credentials && !request.device_policy;
   const bool device_bound =
       request.api_version == kHostProcessSpawnRequestApiVersionV2 &&
+      request.worker_credentials &&
+      valid_worker_credentials(*request.worker_credentials) &&
       request.device_policy &&
       valid_device_policy_installation_binding(*request.device_policy) &&
       valid_digest(request.device_policy->installation_digest);

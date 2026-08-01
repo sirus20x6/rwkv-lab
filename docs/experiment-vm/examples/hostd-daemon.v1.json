@@ -6,6 +6,11 @@
   "broker_instance_id": "hostd-instance-1",
   "authority_uid": 0,
   "authority_gid": 0,
+  "worker_identity": {
+    "uid": 1000,
+    "gid": 1000,
+    "no_new_privileges": true
+  },
   "ledger_path": "/var/lib/trainvm-hostd/host-ledger.sqlite3",
   "journal_path": "/var/lib/trainvm/journal.sqlite3",
   "journal_identity": {

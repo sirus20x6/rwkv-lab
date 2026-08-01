@@ -70,6 +70,9 @@ void malformed_launch_fails_before_clone() {
       .executable_name = "worker",
       .executable_digest = "sha256:" + std::string(64U, 'g'),
       .working_directory_fd = -1,
+      .credentials = {.uid = 1000U,
+                      .gid = 1000U,
+                      .no_new_privileges = true},
       .arguments = {},
   };
   require_rejected(
@@ -143,6 +146,39 @@ void inherited_descriptor_abi_is_exact_and_exec_surviving() {
   (void)::close(code_high);
 }
 
+void worker_credential_status_is_strict_and_capability_free() {
+  using hostd_linux_stopped_launcher_test_seam::
+      worker_status_has_credentials;
+  const LinuxWorkerCredentialSpec expected{
+      .uid = 1000U, .gid = 1000U, .no_new_privileges = true};
+  const std::string valid =
+      "Name:\tworker\n"
+      "Uid:\t1000\t1000\t1000\t1000\n"
+      "Gid:\t1000\t1000\t1000\t1000\n"
+      "Groups:\t\n"
+      "CapInh:\t0000000000000000\n"
+      "CapPrm:\t0000000000000000\n"
+      "CapEff:\t0000000000000000\n"
+      "CapAmb:\t0000000000000000\n"
+      "NoNewPrivs:\t1\n";
+  require(worker_status_has_credentials(valid, expected),
+          "parent attestation accepts one exact non-root capability-free status");
+  for (const std::string& invalid : {
+           valid + "Uid:\t1000\t1000\t1000\t1000\n",
+           std::string(valid).replace(valid.find("Groups:\t\n"), 9U,
+                                      "Groups:\t19\n"),
+           std::string(valid).replace(valid.find("CapEff:\t0000000000000000"),
+                                      24U, "CapEff:\t0000000000000001"),
+           std::string(valid).replace(valid.find("NoNewPrivs:\t1"), 13U,
+                                      "NoNewPrivs:\t0"),
+           std::string(valid).replace(valid.find("Uid:\t1000"), 9U,
+                                      "Uid:\t0"),
+       }) {
+    require(!worker_status_has_credentials(invalid, expected),
+            "root, groups, capabilities, escalation, or duplicate status fails");
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -150,6 +186,7 @@ int main() {
     proc_parsers_are_strict_and_comm_safe();
     malformed_launch_fails_before_clone();
     inherited_descriptor_abi_is_exact_and_exec_surviving();
+    worker_credential_status_is_strict_and_capability_free();
     std::cout << "Linux stopped launcher tests passed\n";
     return 0;
   } catch (const std::exception& error) {

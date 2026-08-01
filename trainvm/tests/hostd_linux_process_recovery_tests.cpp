@@ -100,6 +100,7 @@ HostProcessSpawnRequest current_identity(pid_t pid = ::getpid()) {
       .cgroup_device = static_cast<std::uint64_t>(status.st_dev),
       .cgroup_inode = static_cast<std::uint64_t>(status.st_ino),
       .executable_digest = executable_digest(),
+      .worker_credentials = std::nullopt,
       .device_policy = std::nullopt,
       .canonical_request_digest = {},
   });

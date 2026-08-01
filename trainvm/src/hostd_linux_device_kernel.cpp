@@ -468,6 +468,8 @@ LinuxDevicePolicyInstallation linux_device_policy_installation_from_process(
       intent.request.api_version != kHostProcessLaunchRequestApiVersionV2 ||
       spawn.api_version != kHostProcessSpawnReceiptApiVersionV2 ||
       spawn.request.api_version != kHostProcessSpawnRequestApiVersionV2 ||
+      !intent.request.worker_credentials ||
+      intent.request.worker_credentials != spawn.request.worker_credentials ||
       !intent.request.device_policy || !spawn.request.device_policy ||
       intent.request.launch_id != spawn.request.launch_id ||
       intent.receipt_digest != spawn.request.launch_intent_digest ||

@@ -107,6 +107,7 @@ class LinuxProcessAuthority final {
                         LinuxCgroupAuthority& cgroups,
                         LinuxDevicePolicyInstaller& device_policies,
                         LinuxStoppedLauncherKernel& launcher,
+                        LinuxWorkerCredentialSpec worker_credentials,
                         ILinuxProcessContextAuditor& context_auditor);
 
   // Returns only after both intent and stopped-child identity are durable.
@@ -139,6 +140,7 @@ class LinuxProcessAuthority final {
   LinuxCgroupAuthority& cgroups_;
   LinuxDevicePolicyInstaller& device_policies_;
   LinuxStoppedLauncherKernel& launcher_;
+  LinuxWorkerCredentialSpec worker_credentials_;
   ILinuxProcessContextAuditor& context_auditor_;
 };
 

@@ -120,6 +120,15 @@ HostdDaemonConfiguration::HostdDaemonConfiguration(
           static_cast<std::uint64_t>(std::numeric_limits<uid_t>::max()) ||
       document_.authority_gid >
           static_cast<std::uint64_t>(std::numeric_limits<gid_t>::max()) ||
+      document_.worker_identity.uid == 0U ||
+      document_.worker_identity.gid == 0U ||
+      document_.worker_identity.uid == document_.authority_uid ||
+      document_.worker_identity.gid == document_.authority_gid ||
+      document_.worker_identity.uid >
+          static_cast<std::uint64_t>(std::numeric_limits<uid_t>::max()) ||
+      document_.worker_identity.gid >
+          static_cast<std::uint64_t>(std::numeric_limits<gid_t>::max()) ||
+      !document_.worker_identity.no_new_privileges ||
       !canonical_absolute(document_.ledger_path) ||
       !canonical_absolute(document_.journal_path) ||
       document_.ledger_path == document_.journal_path ||
@@ -302,6 +311,14 @@ LinuxCgroupAuthorityConfig HostdDaemonConfiguration::cgroup() const {
           .root_unified_path = document_.cgroup.root_unified_path,
           .expected_owner_uid = static_cast<uid_t>(document_.authority_uid),
           .expected_owner_gid = static_cast<gid_t>(document_.authority_gid)};
+}
+
+LinuxWorkerCredentialSpec HostdDaemonConfiguration::worker_credentials() const {
+  return {
+      .uid = static_cast<uid_t>(document_.worker_identity.uid),
+      .gid = static_cast<gid_t>(document_.worker_identity.gid),
+      .no_new_privileges = true,
+  };
 }
 
 HostdCoordinatorConfig HostdDaemonConfiguration::coordinator() const {
