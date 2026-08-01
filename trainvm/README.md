@@ -125,6 +125,10 @@ Implemented now:
   bounded recovery view joining active grants to intent-only or unclosed spawn receipts, and blocks
   startup on any retained resource fence until durable process adoption can account for it rather
   than treating an old allocation as free;
+- a read-only Linux process-recovery probe that opens the durable spawn PID with `pidfd_open`,
+  double-samples proc starttime and unified cgroup membership around executable hashing, pins the
+  recorded cgroup-v2 inode, and returns separate exact-live, already-gone, identity-mismatch, or
+  observation-failed dispositions without signalling the process;
 - an additive host-ledger v3 admission epoch that atomically finalizes an exact current audit and
   occupancy, keeps policy-enabled grants sealed beforehand, binds every later request to the active
   epoch, preserves release-only cleanup while startup is blocked, and exposes a read-only exact
