@@ -35,6 +35,7 @@ struct LinuxStoppedLaunchSpec final {
   std::string executable_digest;
   int working_directory_fd{-1};
   LinuxWorkerCredentialSpec credentials;
+  std::optional<std::int32_t> nice;
   std::vector<std::string> arguments;
 
   bool operator==(const LinuxStoppedLaunchSpec&) const = default;
@@ -50,6 +51,7 @@ struct LinuxStoppedChildIdentity final {
   uid_t uid{};
   gid_t gid{};
   bool no_new_privileges{};
+  std::int32_t nice{};
 
   bool operator==(const LinuxStoppedChildIdentity&) const = default;
 };
@@ -113,6 +115,7 @@ class LinuxStoppedLauncherKernel final {
 namespace hostd_linux_stopped_launcher_test_seam {
 
 [[nodiscard]] std::uint64_t parse_proc_starttime(std::string_view stat);
+[[nodiscard]] std::int32_t parse_proc_nice(std::string_view stat);
 [[nodiscard]] std::string parse_unified_cgroup(std::string_view cgroup);
 [[nodiscard]] bool install_inherited_worker_descriptors(
     std::optional<int> code_fd, int worker_bootstrap_fd) noexcept;

@@ -15,6 +15,7 @@
 #include <string>
 #include <sys/stat.h>
 #include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -104,7 +105,14 @@ std::string read_bounded_file(int directory, const char* name,
   return result;
 }
 
-std::uint64_t parse_starttime(std::string_view value) {
+struct ProcStatIdentity final {
+  std::uint64_t starttime{};
+  std::int32_t nice{};
+
+  bool operator==(const ProcStatIdentity&) const = default;
+};
+
+ProcStatIdentity parse_stat_identity(std::string_view value) {
   const std::size_t close = value.rfind(") ");
   if (value.empty() || value.front() < '1' || close == std::string_view::npos) {
     reject("child proc stat has no canonical comm boundary");
@@ -133,7 +141,19 @@ std::uint64_t parse_starttime(std::string_view value) {
       starttime == 0U) {
     reject("child proc starttime is malformed");
   }
-  return starttime;
+  std::int32_t nice = 0;
+  const auto nice_parsed = std::from_chars(
+      fields[16U].data(), fields[16U].data() + fields[16U].size(), nice);
+  if (nice_parsed.ec != std::errc{} ||
+      nice_parsed.ptr != fields[16U].data() + fields[16U].size() ||
+      nice < -20 || nice > 19) {
+    reject("child proc nice level is malformed");
+  }
+  return {.starttime = starttime, .nice = nice};
+}
+
+std::uint64_t parse_starttime(std::string_view value) {
+  return parse_stat_identity(value).starttime;
 }
 
 std::string parse_cgroup(std::string_view value) {
@@ -194,6 +214,17 @@ bool install_worker_credentials(
   }
   (void)::umask(0077);
   return true;
+}
+
+bool install_process_priority(std::optional<std::int32_t> nice) noexcept {
+  if (!nice) return true;
+  if (*nice < -20 || *nice > 19 ||
+      ::setpriority(PRIO_PROCESS, 0, *nice) != 0) {
+    return false;
+  }
+  errno = 0;
+  const int observed = ::getpriority(PRIO_PROCESS, 0);
+  return errno == 0 && observed == *nice;
 }
 
 std::optional<std::string_view> status_field(std::string_view status,
@@ -312,6 +343,7 @@ void validate_spec(const LinuxStoppedLaunchSpec& spec) {
       }) ||
       ::geteuid() != 0U || spec.credentials.uid == 0U ||
       spec.credentials.gid == 0U || !spec.credentials.no_new_privileges ||
+      (spec.nice && (*spec.nice < -20 || *spec.nice > 19)) ||
       spec.arguments.size() > 256U) {
     reject("stopped launch specification is malformed or unbounded");
   }
@@ -497,6 +529,7 @@ LinuxStoppedChild LinuxStoppedLauncherKernel::spawn_stopped(
             spec.code_fd ? std::optional<int>{inherited_code.get()}
                          : std::nullopt,
             inherited_bootstrap.get()) &&
+        install_process_priority(spec.nice) &&
         install_worker_credentials(spec.credentials);
     const char ready_command = 'R';
     ssize_t ready_count = 0;
@@ -556,9 +589,13 @@ LinuxStoppedChild LinuxStoppedLauncherKernel::spawn_stopped(
       read_bounded_file(process.get(), "cgroup", 4096U);
   const std::string status_after =
       read_bounded_file(process.get(), "status", 16U << 10U);
-  const std::uint64_t starttime = parse_starttime(stat_before);
+  const ProcStatIdentity stat_identity_before =
+      parse_stat_identity(stat_before);
+  const ProcStatIdentity stat_identity_after =
+      parse_stat_identity(stat_after);
   const std::string cgroup_path = parse_cgroup(cgroup_before);
-  if (starttime != parse_starttime(stat_after) ||
+  if (stat_identity_before != stat_identity_after ||
+      (spec.nice && stat_identity_before.nice != *spec.nice) ||
       cgroup_path != parse_cgroup(cgroup_after) ||
       cgroup_path != spec.expected_cgroup_path ||
       !worker_status_has_credentials(status_before, spec.credentials) ||
@@ -568,7 +605,7 @@ LinuxStoppedChild LinuxStoppedLauncherKernel::spawn_stopped(
   }
   child.identity_ = LinuxStoppedChildIdentity{
       .host_pid = pid,
-      .process_starttime_ticks = starttime,
+      .process_starttime_ticks = stat_identity_before.starttime,
       .cgroup_path = cgroup_path,
       .cgroup_device = spec.expected_cgroup_device,
       .cgroup_inode = spec.expected_cgroup_inode,
@@ -576,6 +613,7 @@ LinuxStoppedChild LinuxStoppedLauncherKernel::spawn_stopped(
       .uid = spec.credentials.uid,
       .gid = spec.credentials.gid,
       .no_new_privileges = true,
+      .nice = stat_identity_before.nice,
   };
   return child;
 }
@@ -584,6 +622,10 @@ namespace hostd_linux_stopped_launcher_test_seam {
 
 std::uint64_t parse_proc_starttime(std::string_view stat) {
   return parse_starttime(stat);
+}
+
+std::int32_t parse_proc_nice(std::string_view stat) {
+  return parse_stat_identity(stat).nice;
 }
 
 std::string parse_unified_cgroup(std::string_view cgroup) {

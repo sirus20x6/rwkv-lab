@@ -22,6 +22,7 @@
 #include "trainvm/hostd_linux_device_kernel.hpp"
 #include "trainvm/hostd_linux_inventory_context_auditor.hpp"
 #include "trainvm/hostd_linux_process_authority.hpp"
+#include "trainvm/hostd_linux_process_policy_kernel.hpp"
 #include "trainvm/hostd_linux_service_identity.hpp"
 #include "trainvm/hostd_linux_session_authority.hpp"
 #include "trainvm/hostd_linux_stopped_launcher.hpp"
@@ -128,10 +129,15 @@ struct HostdDaemonRuntime::Implementation final {
     device_kernel = std::make_unique<LinuxCgroupDeviceKernel>();
     device_installer =
         std::make_unique<LinuxDevicePolicyInstaller>(*device_kernel);
+    process_policy_kernel =
+        std::make_unique<LinuxCgroupProcessPolicyKernel>();
+    process_policy_installer =
+        std::make_unique<LinuxProcessPolicyInstaller>(*process_policy_kernel);
     context_auditor = std::make_unique<LinuxInventoryProcessContextAuditor>(
         *inventory_kernel);
     process_authority = std::make_unique<LinuxProcessAuthority>(
-        *ledger, *clock, *cgroups, *device_installer, *launcher,
+        *ledger, *clock, *cgroups, *device_installer,
+        *process_policy_installer, *launcher,
         configuration.worker_credentials(), *context_auditor);
     process_supervisor =
         std::make_shared<HostdLinuxProcessSupervisor>(*process_authority);
@@ -212,6 +218,8 @@ struct HostdDaemonRuntime::Implementation final {
   std::unique_ptr<LinuxStoppedLauncherKernel> launcher;
   std::unique_ptr<LinuxCgroupDeviceKernel> device_kernel;
   std::unique_ptr<LinuxDevicePolicyInstaller> device_installer;
+  std::unique_ptr<LinuxCgroupProcessPolicyKernel> process_policy_kernel;
+  std::unique_ptr<LinuxProcessPolicyInstaller> process_policy_installer;
   std::unique_ptr<LinuxInventoryProcessContextAuditor> context_auditor;
   std::unique_ptr<LinuxProcessAuthority> process_authority;
   std::shared_ptr<HostdLinuxProcessSupervisor> process_supervisor;

@@ -54,21 +54,25 @@ int main() {
     source.omp_threads = 4;
     source.nice = 2;
     const auto policy = trainvm::compile_linux_process_policy(source);
-    const auto installed = installer.install(policy, cgroup);
+    const auto cgroup_installed =
+        installer.install(policy, "allocation-1", "launch-1", cgroup);
+    const auto installed =
+        installer.bind_process_identity(policy, cgroup_installed, 2);
     require(installed.cpuset == "2-5" && installed.cpuset_mems == "0-1" &&
                 installed.cpu_weight == 300 && installed.io_weight == 70 &&
+                installed.nice == 2 &&
                 installed.installation_digest.starts_with("sha256:") &&
                 kernel.controls["cpuset.mems"] == "0-1" &&
                 kernel.controls["cpuset.cpus"] == "2-5" &&
                 kernel.controls["cpu.weight"] == "300" &&
                 kernel.controls["io.weight"] == "default 70",
             "installer must lower and re-read every declared cgroup control");
-    installer.verify(policy, installed, cgroup);
+    installer.verify(policy, installed, cgroup, 2);
 
     kernel.controls["cpu.weight"] = "301";
     bool drift_rejected = false;
     try {
-      installer.verify(policy, installed, cgroup);
+      installer.verify(policy, installed, cgroup, 2);
     } catch (const trainvm::LinuxProcessPolicyKernelError&) {
       drift_rejected = true;
     }

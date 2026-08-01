@@ -464,10 +464,17 @@ LinuxDevicePolicyInstallation linux_device_policy_installation_from_process(
     const HostProcessSpawnReceipt &spawn) {
   (void)host_process_launch_intent_json(intent);
   (void)host_process_spawn_receipt_json(spawn);
-  if (intent.api_version != kHostProcessLaunchIntentApiVersionV2 ||
-      intent.request.api_version != kHostProcessLaunchRequestApiVersionV2 ||
-      spawn.api_version != kHostProcessSpawnReceiptApiVersionV2 ||
-      spawn.request.api_version != kHostProcessSpawnRequestApiVersionV2 ||
+  const bool version_two =
+      intent.api_version == kHostProcessLaunchIntentApiVersionV2 &&
+      intent.request.api_version == kHostProcessLaunchRequestApiVersionV2 &&
+      spawn.api_version == kHostProcessSpawnReceiptApiVersionV2 &&
+      spawn.request.api_version == kHostProcessSpawnRequestApiVersionV2;
+  const bool version_three =
+      intent.api_version == kHostProcessLaunchIntentApiVersionV3 &&
+      intent.request.api_version == kHostProcessLaunchRequestApiVersionV3 &&
+      spawn.api_version == kHostProcessSpawnReceiptApiVersionV3 &&
+      spawn.request.api_version == kHostProcessSpawnRequestApiVersionV3;
+  if ((!version_two && !version_three) ||
       !intent.request.worker_credentials ||
       intent.request.worker_credentials != spawn.request.worker_credentials ||
       !intent.request.device_policy || !spawn.request.device_policy ||

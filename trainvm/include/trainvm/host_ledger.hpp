@@ -28,18 +28,26 @@ inline constexpr std::string_view kHostProcessLaunchRequestApiVersion =
     "trainvm.host-process-launch-request/v1";
 inline constexpr std::string_view kHostProcessLaunchRequestApiVersionV2 =
     "trainvm.host-process-launch-request/v2";
+inline constexpr std::string_view kHostProcessLaunchRequestApiVersionV3 =
+    "trainvm.host-process-launch-request/v3";
 inline constexpr std::string_view kHostProcessLaunchIntentApiVersion =
     "trainvm.host-process-launch-intent/v1";
 inline constexpr std::string_view kHostProcessLaunchIntentApiVersionV2 =
     "trainvm.host-process-launch-intent/v2";
+inline constexpr std::string_view kHostProcessLaunchIntentApiVersionV3 =
+    "trainvm.host-process-launch-intent/v3";
 inline constexpr std::string_view kHostProcessSpawnRequestApiVersion =
     "trainvm.host-process-spawn-request/v1";
 inline constexpr std::string_view kHostProcessSpawnRequestApiVersionV2 =
     "trainvm.host-process-spawn-request/v2";
+inline constexpr std::string_view kHostProcessSpawnRequestApiVersionV3 =
+    "trainvm.host-process-spawn-request/v3";
 inline constexpr std::string_view kHostProcessSpawnReceiptApiVersion =
     "trainvm.host-process-spawn-receipt/v1";
 inline constexpr std::string_view kHostProcessSpawnReceiptApiVersionV2 =
     "trainvm.host-process-spawn-receipt/v2";
+inline constexpr std::string_view kHostProcessSpawnReceiptApiVersionV3 =
+    "trainvm.host-process-spawn-receipt/v3";
 inline constexpr std::string_view kHostProcessExitRequestApiVersion =
     "trainvm.host-process-exit-request/v1";
 inline constexpr std::string_view kHostProcessExitReceiptApiVersion =
@@ -189,6 +197,34 @@ struct HostWorkerCredentialBinding final {
   bool operator==(const HostWorkerCredentialBinding&) const = default;
 };
 
+// Plain durable forms keep the ledger independent of Linux syscall headers
+// while preserving enough compiled intent to reattest controls after restart.
+struct HostProcessPolicyIntentBinding final {
+  std::string api_version;
+  std::optional<std::string> cpuset;
+  std::optional<std::int64_t> cpu_weight;
+  std::optional<std::int64_t> io_weight;
+  std::optional<std::int64_t> omp_threads;
+  std::optional<std::int64_t> preprocessing_workers;
+  std::optional<std::int64_t> nice;
+  std::string policy_digest;
+
+  bool operator==(const HostProcessPolicyIntentBinding&) const = default;
+};
+
+struct HostProcessPolicyInstallationBinding final {
+  std::string api_version;
+  std::string policy_digest;
+  std::optional<std::string> cpuset;
+  std::optional<std::string> cpuset_mems;
+  std::optional<std::int64_t> cpu_weight;
+  std::optional<std::int64_t> io_weight;
+  std::optional<std::int64_t> nice;
+  std::string installation_digest;
+
+  bool operator==(const HostProcessPolicyInstallationBinding&) const = default;
+};
+
 struct HostProcessLaunchRequest final {
   std::string api_version;
   std::string launch_id;
@@ -206,6 +242,7 @@ struct HostProcessLaunchRequest final {
   std::uint64_t cgroup_inode{};
   std::optional<HostWorkerCredentialBinding> worker_credentials;
   std::optional<HostDevicePolicyIntentBinding> device_policy;
+  std::optional<HostProcessPolicyIntentBinding> process_policy;
   std::string canonical_request_digest;
 
   bool operator==(const HostProcessLaunchRequest&) const = default;
@@ -245,6 +282,7 @@ struct HostProcessSpawnRequest final {
   std::string executable_digest;
   std::optional<HostWorkerCredentialBinding> worker_credentials;
   std::optional<HostDevicePolicyInstallationBinding> device_policy;
+  std::optional<HostProcessPolicyInstallationBinding> process_policy;
   std::string canonical_request_digest;
 
   bool operator==(const HostProcessSpawnRequest&) const = default;
@@ -545,6 +583,11 @@ class SQLiteHostLedger final {
     std::string_view cgroup_path, std::uint64_t cgroup_device,
     std::uint64_t cgroup_inode,
     const HostDevicePolicyInstallationBinding& installation);
+[[nodiscard]] std::string host_process_policy_installation_digest(
+    std::string_view allocation_id, std::string_view launch_id,
+    std::string_view cgroup_path, std::uint64_t cgroup_device,
+    std::uint64_t cgroup_inode,
+    const HostProcessPolicyInstallationBinding& installation);
 [[nodiscard]] HostProcessExitRequest seal_host_process_exit_request(
     HostProcessExitRequest request);
 [[nodiscard]] nlohmann::json host_process_exit_request_json(

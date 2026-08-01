@@ -69,6 +69,7 @@ nlohmann::json installation_body(
     const LinuxProcessPolicyInstallation& value) {
   return {
       {"api_version", value.api_version},
+      {"allocation_id", value.allocation_id},
       {"cgroup",
        {{"device", value.cgroup.device},
         {"inode", value.cgroup.inode},
@@ -81,6 +82,9 @@ nlohmann::json installation_body(
                                       : nlohmann::json(nullptr)},
       {"io_weight", value.io_weight ? nlohmann::json(*value.io_weight)
                                     : nlohmann::json(nullptr)},
+      {"launch_id", value.launch_id},
+      {"nice", value.nice ? nlohmann::json(*value.nice)
+                          : nlohmann::json(nullptr)},
       {"policy_digest", value.policy_digest},
   };
 }
@@ -169,9 +173,12 @@ LinuxProcessPolicyInstaller::LinuxProcessPolicyInstaller(
     : kernel_(kernel) {}
 
 LinuxProcessPolicyInstallation LinuxProcessPolicyInstaller::install(
-    const LinuxProcessPolicy& policy,
+    const LinuxProcessPolicy& policy, std::string allocation_id,
+    std::string launch_id,
     const LinuxAllocationCgroup& cgroup) {
   validate_linux_process_policy(policy);
+  if (allocation_id.empty() || launch_id.empty())
+    reject("process policy installation identity is empty");
   const int raw = cgroup.duplicate_fd();
   struct Close final {
     int descriptor;
@@ -203,12 +210,15 @@ LinuxProcessPolicyInstallation LinuxProcessPolicyInstaller::install(
   }
   LinuxProcessPolicyInstallation result{
       .api_version = std::string(kLinuxProcessPolicyInstallationApiVersion),
+      .allocation_id = std::move(allocation_id),
+      .launch_id = std::move(launch_id),
       .policy_digest = policy.policy_digest,
       .cgroup = cgroup.identity(),
       .cpuset = policy.cpuset,
       .cpuset_mems = std::move(mems),
       .cpu_weight = policy.cpu_weight,
       .io_weight = policy.io_weight,
+      .nice = std::nullopt,
       .installation_digest = {},
   };
   result.installation_digest = installation_digest(result);
@@ -216,10 +226,30 @@ LinuxProcessPolicyInstallation LinuxProcessPolicyInstaller::install(
   return result;
 }
 
+LinuxProcessPolicyInstallation
+LinuxProcessPolicyInstaller::bind_process_identity(
+    const LinuxProcessPolicy& policy,
+    LinuxProcessPolicyInstallation installation,
+    std::int32_t observed_nice) {
+  validate_linux_process_policy(policy);
+  validate_linux_process_policy_installation(installation);
+  if (installation.policy_digest != policy.policy_digest ||
+      (policy.nice && observed_nice != *policy.nice)) {
+    reject("stopped child nice level diverges from process-policy intent");
+  }
+  installation.nice = policy.nice
+                          ? std::optional<std::int64_t>{observed_nice}
+                          : std::nullopt;
+  installation.installation_digest = installation_digest(installation);
+  validate_linux_process_policy_installation(installation);
+  return installation;
+}
+
 void LinuxProcessPolicyInstaller::verify(
     const LinuxProcessPolicy& policy,
     const LinuxProcessPolicyInstallation& installation,
-    const LinuxAllocationCgroup& cgroup) {
+    const LinuxAllocationCgroup& cgroup,
+    std::int32_t observed_nice) {
   validate_linux_process_policy(policy);
   validate_linux_process_policy_installation(installation);
   require_identity(installation, cgroup);
@@ -227,6 +257,8 @@ void LinuxProcessPolicyInstaller::verify(
       installation.cpuset != policy.cpuset ||
       installation.cpu_weight != policy.cpu_weight ||
       installation.io_weight != policy.io_weight ||
+      installation.nice != policy.nice ||
+      (policy.nice && observed_nice != *policy.nice) ||
       installation.cpuset_mems.has_value() != policy.cpuset.has_value()) {
     reject("process policy installation disagrees with compiled intent");
   }
@@ -254,16 +286,104 @@ void LinuxProcessPolicyInstaller::verify(
 void validate_linux_process_policy_installation(
     const LinuxProcessPolicyInstallation& value) {
   if (value.api_version != kLinuxProcessPolicyInstallationApiVersion ||
+      value.allocation_id.empty() || value.launch_id.empty() ||
       !valid_digest(value.policy_digest) ||
       value.cgroup.unified_path.empty() ||
       value.cgroup.unified_path.front() != '/' || value.cgroup.device == 0U ||
       value.cgroup.inode == 0U ||
       value.cpuset.has_value() != value.cpuset_mems.has_value() ||
       (value.cpuset && (value.cpuset->empty() || value.cpuset_mems->empty())) ||
+      (value.nice && (*value.nice < -20 || *value.nice > 19)) ||
       !valid_digest(value.installation_digest) ||
       value.installation_digest != installation_digest(value)) {
     reject("process policy installation evidence is malformed");
   }
+}
+
+HostProcessPolicyIntentBinding host_process_policy_intent_binding(
+    const LinuxProcessPolicy& policy) {
+  validate_linux_process_policy(policy);
+  return {
+      .api_version = policy.api_version,
+      .cpuset = policy.cpuset,
+      .cpu_weight = policy.cpu_weight,
+      .io_weight = policy.io_weight,
+      .omp_threads = policy.omp_threads,
+      .preprocessing_workers = policy.preprocessing_workers,
+      .nice = policy.nice,
+      .policy_digest = policy.policy_digest,
+  };
+}
+
+HostProcessPolicyInstallationBinding host_process_policy_installation_binding(
+    const LinuxProcessPolicyInstallation& installation) {
+  validate_linux_process_policy_installation(installation);
+  return {
+      .api_version = installation.api_version,
+      .policy_digest = installation.policy_digest,
+      .cpuset = installation.cpuset,
+      .cpuset_mems = installation.cpuset_mems,
+      .cpu_weight = installation.cpu_weight,
+      .io_weight = installation.io_weight,
+      .nice = installation.nice,
+      .installation_digest = installation.installation_digest,
+  };
+}
+
+LinuxProcessPolicy linux_process_policy_from_process(
+    const HostProcessLaunchIntent& intent,
+    const HostProcessSpawnReceipt& spawn) {
+  if (intent.api_version != kHostProcessLaunchIntentApiVersionV3 ||
+      intent.request.api_version != kHostProcessLaunchRequestApiVersionV3 ||
+      spawn.api_version != kHostProcessSpawnReceiptApiVersionV3 ||
+      spawn.request.api_version != kHostProcessSpawnRequestApiVersionV3 ||
+      !intent.request.process_policy || !spawn.request.process_policy) {
+    reject("durable process has no v3 process-policy evidence");
+  }
+  const auto& binding = *intent.request.process_policy;
+  LinuxProcessPolicy result{
+      .api_version = binding.api_version,
+      .cpuset = binding.cpuset,
+      .cpu_weight = binding.cpu_weight,
+      .io_weight = binding.io_weight,
+      .omp_threads = binding.omp_threads,
+      .preprocessing_workers = binding.preprocessing_workers,
+      .nice = binding.nice,
+      .policy_digest = binding.policy_digest,
+  };
+  validate_linux_process_policy(result);
+  return result;
+}
+
+LinuxProcessPolicyInstallation linux_process_policy_installation_from_process(
+    const HostProcessLaunchIntent& intent,
+    const HostProcessSpawnReceipt& spawn) {
+  const LinuxProcessPolicy policy =
+      linux_process_policy_from_process(intent, spawn);
+  const auto& binding = *spawn.request.process_policy;
+  LinuxProcessPolicyInstallation result{
+      .api_version = binding.api_version,
+      .allocation_id = intent.request.allocation_id,
+      .launch_id = spawn.request.launch_id,
+      .policy_digest = binding.policy_digest,
+      .cgroup = {.unified_path = spawn.request.cgroup_path,
+                 .device = spawn.request.cgroup_device,
+                 .inode = spawn.request.cgroup_inode},
+      .cpuset = binding.cpuset,
+      .cpuset_mems = binding.cpuset_mems,
+      .cpu_weight = binding.cpu_weight,
+      .io_weight = binding.io_weight,
+      .nice = binding.nice,
+      .installation_digest = binding.installation_digest,
+  };
+  validate_linux_process_policy_installation(result);
+  if (result.policy_digest != policy.policy_digest ||
+      result.cpuset != policy.cpuset ||
+      result.cpu_weight != policy.cpu_weight ||
+      result.io_weight != policy.io_weight || result.nice != policy.nice) {
+    reject("durable process-policy installation diverges from intent");
+  }
+  return result;
 }
 
 }  // namespace trainvm

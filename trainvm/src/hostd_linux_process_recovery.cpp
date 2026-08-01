@@ -107,6 +107,25 @@ std::uint64_t parse_starttime(std::string_view value) {
   return *result;
 }
 
+std::int32_t parse_nice(std::string_view value) {
+  const std::size_t open = value.find(" (");
+  const std::size_t close = value.rfind(") ");
+  if (open == std::string_view::npos || close == std::string_view::npos ||
+      close <= open + 1U)
+    throw HostLedgerError("process recovery proc stat is malformed");
+  const auto fields = tokens(value.substr(close + 2U));
+  if (fields.size() < 20U || fields.front().size() != 1U)
+    throw HostLedgerError("process recovery proc stat is incomplete");
+  std::int32_t result = 0;
+  const auto parsed = std::from_chars(
+      fields[16U].data(), fields[16U].data() + fields[16U].size(), result);
+  if (parsed.ec != std::errc{} ||
+      parsed.ptr != fields[16U].data() + fields[16U].size() || result < -20 ||
+      result > 19)
+    throw HostLedgerError("process recovery nice level is invalid");
+  return result;
+}
+
 std::string parse_cgroup(std::string_view value) {
   while (!value.empty() && (value.back() == '\n' || value.back() == '\r'))
     value.remove_suffix(1U);
@@ -370,11 +389,15 @@ LinuxProcessRecoveryResult LinuxProcessRecoveryProbe::observe(
     return result(expected, LinuxProcessRecoveryDisposition::observation_failed,
                   "recorded process directory is unavailable");
   try {
-    const std::uint64_t start_before = parse_starttime(read_file(process.get(), "stat"));
+    const std::string stat_before = read_file(process.get(), "stat");
+    const std::uint64_t start_before = parse_starttime(stat_before);
+    const std::int32_t nice_before = parse_nice(stat_before);
     const std::string cgroup_before = parse_cgroup(read_file(process.get(), "cgroup"));
     const std::string digest = executable_digest(process.get());
     const bool cgroup_identity = cgroup_identity_matches(expected);
-    const std::uint64_t start_after = parse_starttime(read_file(process.get(), "stat"));
+    const std::string stat_after = read_file(process.get(), "stat");
+    const std::uint64_t start_after = parse_starttime(stat_after);
+    const std::int32_t nice_after = parse_nice(stat_after);
     const std::string cgroup_after = parse_cgroup(read_file(process.get(), "cgroup"));
     const LinuxPidfdState final_state = pidfd_state(pidfd.get());
     if (final_state == LinuxPidfdState::terminal)
@@ -383,8 +406,12 @@ LinuxProcessRecoveryResult LinuxProcessRecoveryProbe::observe(
     if (final_state == LinuxPidfdState::observation_failed)
       return result(expected, LinuxProcessRecoveryDisposition::observation_failed,
                     "recorded pidfd state failed during observation");
+    const std::optional<std::int64_t> expected_nice =
+        expected.process_policy ? expected.process_policy->nice : std::nullopt;
     if (start_before != expected.process_starttime_ticks ||
         start_after != expected.process_starttime_ticks ||
+        nice_before != nice_after ||
+        (expected_nice && nice_before != *expected_nice) ||
         cgroup_before != expected.cgroup_path ||
         cgroup_after != expected.cgroup_path || !cgroup_identity ||
         digest != expected.executable_digest) {
@@ -531,6 +558,10 @@ namespace hostd_linux_process_recovery_test_seam {
 
 std::uint64_t parse_proc_starttime(std::string_view value) {
   return parse_starttime(value);
+}
+
+std::int32_t parse_proc_nice(std::string_view value) {
+  return parse_nice(value);
 }
 
 std::string parse_unified_cgroup(std::string_view value) {

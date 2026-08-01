@@ -4,6 +4,7 @@
 #include <openssl/evp.h>
 #include <signal.h>
 #include <sys/stat.h>
+#include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -102,6 +103,7 @@ HostProcessSpawnRequest current_identity(pid_t pid = ::getpid()) {
       .executable_digest = executable_digest(),
       .worker_credentials = std::nullopt,
       .device_policy = std::nullopt,
+      .process_policy = std::nullopt,
       .canonical_request_digest = {},
   });
 }
@@ -170,6 +172,13 @@ void exited_pid_is_classified_without_signalling() {
 }
 
 void parser_seams_reject_ambiguous_proc_values() {
+  const std::string current_stat = read_text("/proc/self/stat");
+  errno = 0;
+  const int current_nice = ::getpriority(PRIO_PROCESS, 0);
+  require(errno == 0 &&
+              hostd_linux_process_recovery_test_seam::parse_proc_nice(
+                  current_stat) == current_nice,
+          "recovery stat parser observes the live effective nice level");
   bool rejected = false;
   try {
     (void)hostd_linux_process_recovery_test_seam::parse_unified_cgroup(

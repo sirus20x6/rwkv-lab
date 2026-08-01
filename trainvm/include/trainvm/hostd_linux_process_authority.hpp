@@ -13,6 +13,7 @@
 #include "trainvm/hostd_linux_cgroup_authority.hpp"
 #include "trainvm/hostd_linux_device_kernel.hpp"
 #include "trainvm/hostd_linux_process_recovery.hpp"
+#include "trainvm/hostd_linux_process_policy_kernel.hpp"
 #include "trainvm/hostd_linux_stopped_launcher.hpp"
 #include "trainvm/hostd_process_protocol.hpp"
 
@@ -57,12 +58,16 @@ class LinuxPreparedLaunch final {
   LinuxPreparedLaunch(HostProcessLaunchIntent intent,
                       HostProcessSpawnReceipt spawn_receipt,
                       LinuxDevicePolicyInstallation device_policy,
+                      LinuxProcessPolicy process_policy,
+                      LinuxProcessPolicyInstallation process_policy_installation,
                       LinuxAllocationCgroup cgroup,
                       LinuxStoppedChild child) noexcept;
 
   HostProcessLaunchIntent intent_;
   HostProcessSpawnReceipt spawn_receipt_;
   LinuxDevicePolicyInstallation device_policy_;
+  LinuxProcessPolicy process_policy_;
+  LinuxProcessPolicyInstallation process_policy_installation_;
   // Destruction is reverse declaration order: child is killed/reaped before
   // the retained cgroup descriptor is closed.
   LinuxAllocationCgroup cgroup_;
@@ -90,12 +95,18 @@ class LinuxRecoveredLaunch final {
                        LinuxRecoveredProcess process,
                        LinuxAllocationCgroup cgroup,
                        std::optional<LinuxDevicePolicyInstallation>
-                           device_policy) noexcept;
+                           device_policy,
+                       std::optional<LinuxProcessPolicy> process_policy,
+                       std::optional<LinuxProcessPolicyInstallation>
+                           process_policy_installation) noexcept;
 
   HostProcessRecoveryRecord record_;
   LinuxRecoveredProcess process_;
   LinuxAllocationCgroup cgroup_;
   std::optional<LinuxDevicePolicyInstallation> device_policy_;
+  std::optional<LinuxProcessPolicy> process_policy_;
+  std::optional<LinuxProcessPolicyInstallation>
+      process_policy_installation_;
   bool termination_requested_{};
   std::optional<HostProcessRecoveryExitReceipt> exit_receipt_;
   bool cgroup_removed_{};
@@ -106,6 +117,7 @@ class LinuxProcessAuthority final {
   LinuxProcessAuthority(SQLiteHostLedger& ledger, AuthorityClock& clock,
                         LinuxCgroupAuthority& cgroups,
                         LinuxDevicePolicyInstaller& device_policies,
+                        LinuxProcessPolicyInstaller& process_policies,
                         LinuxStoppedLauncherKernel& launcher,
                         LinuxWorkerCredentialSpec worker_credentials,
                         ILinuxProcessContextAuditor& context_auditor);
@@ -140,6 +152,7 @@ class LinuxProcessAuthority final {
   AuthorityClock& clock_;
   LinuxCgroupAuthority& cgroups_;
   LinuxDevicePolicyInstaller& device_policies_;
+  LinuxProcessPolicyInstaller& process_policies_;
   LinuxStoppedLauncherKernel& launcher_;
   LinuxWorkerCredentialSpec worker_credentials_;
   ILinuxProcessContextAuditor& context_auditor_;

@@ -161,6 +161,7 @@ class LinuxProcessRecoverySet final {
 namespace hostd_linux_process_recovery_test_seam {
 
 [[nodiscard]] std::uint64_t parse_proc_starttime(std::string_view value);
+[[nodiscard]] std::int32_t parse_proc_nice(std::string_view value);
 [[nodiscard]] std::string parse_unified_cgroup(std::string_view value);
 
 }  // namespace hostd_linux_process_recovery_test_seam

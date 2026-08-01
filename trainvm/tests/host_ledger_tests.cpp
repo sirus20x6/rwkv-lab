@@ -1,4 +1,5 @@
 #include "trainvm/host_ledger.hpp"
+#include "trainvm/hostd_linux_process_policy_kernel.hpp"
 
 #include <sqlite3.h>
 
@@ -135,6 +136,7 @@ HostProcessLaunchRequest launch_request(const ResourceBundleGrant& grant,
       .cgroup_inode = 41,
       .worker_credentials = std::nullopt,
       .device_policy = std::nullopt,
+      .process_policy = std::nullopt,
       .canonical_request_digest = {},
   });
 }
@@ -154,6 +156,7 @@ HostProcessSpawnRequest spawn_request(const HostProcessLaunchIntent& intent,
       .executable_digest = intent.request.executable_digest,
       .worker_credentials = std::nullopt,
       .device_policy = std::nullopt,
+      .process_policy = std::nullopt,
       .canonical_request_digest = {},
   });
 }
@@ -192,6 +195,56 @@ HostProcessSpawnRequest device_bound_spawn_request(
       intent.request.allocation_id, value.launch_id, value.cgroup_path,
       value.cgroup_device, value.cgroup_inode, installed);
   value.device_policy = std::move(installed);
+  value.canonical_request_digest.clear();
+  return seal_host_process_spawn_request(std::move(value));
+}
+
+HostProcessLaunchRequest process_policy_bound_launch_request(
+    const ResourceBundleGrant& grant, std::string launch_id) {
+  auto value = device_bound_launch_request(grant, std::move(launch_id));
+  value.api_version = std::string(kHostProcessLaunchRequestApiVersionV3);
+  CpuIoPolicy source;
+  source.cpuset = "2-5";
+  source.cpu_weight = 240;
+  source.io_weight = 80;
+  source.omp_threads = 4;
+  source.preprocessing_workers = 2;
+  source.nice = 3;
+  const auto policy = compile_linux_process_policy(source);
+  value.process_policy = HostProcessPolicyIntentBinding{
+      .api_version = policy.api_version,
+      .cpuset = policy.cpuset,
+      .cpu_weight = policy.cpu_weight,
+      .io_weight = policy.io_weight,
+      .omp_threads = policy.omp_threads,
+      .preprocessing_workers = policy.preprocessing_workers,
+      .nice = policy.nice,
+      .policy_digest = policy.policy_digest,
+  };
+  value.canonical_request_digest.clear();
+  return seal_host_process_launch_request(std::move(value));
+}
+
+HostProcessSpawnRequest process_policy_bound_spawn_request(
+    const HostProcessLaunchIntent& intent, std::int64_t pid = 4444) {
+  auto value = device_bound_spawn_request(intent, pid);
+  value.api_version = std::string(kHostProcessSpawnRequestApiVersionV3);
+  const auto& policy = *intent.request.process_policy;
+  HostProcessPolicyInstallationBinding installed{
+      .api_version = "trainvm.linux-process-policy-installation/v1",
+      .policy_digest = policy.policy_digest,
+      .cpuset = policy.cpuset,
+      .cpuset_mems = policy.cpuset ? std::optional<std::string>{"0-1"}
+                                   : std::nullopt,
+      .cpu_weight = policy.cpu_weight,
+      .io_weight = policy.io_weight,
+      .nice = policy.nice,
+      .installation_digest = {},
+  };
+  installed.installation_digest = host_process_policy_installation_digest(
+      intent.request.allocation_id, value.launch_id, value.cgroup_path,
+      value.cgroup_device, value.cgroup_inode, installed);
+  value.process_policy = std::move(installed);
   value.canonical_request_digest.clear();
   return seal_host_process_spawn_request(std::move(value));
 }
@@ -1154,6 +1207,71 @@ void device_policy_authority_is_bound_into_process_history() {
   remove_database(path);
 }
 
+void process_policy_authority_is_bound_into_process_history() {
+  const auto observed = inventory({"mutex-process-policy"});
+  const auto path = test_path("process-policy");
+  {
+    SQLiteHostLedger ledger(authority_for(path), observed);
+    const auto bundle =
+        ledger.request_bundle(request("process-policy-grant"), {10, 20});
+    require(bundle.grant.has_value(),
+            "process-policy fixture obtains an active grant");
+    const auto launch = process_policy_bound_launch_request(
+        *bundle.grant, "launch-process-policy");
+    const auto intended = ledger.commit_process_launch_intent(launch, {30, 40});
+    require(intended.intent.api_version ==
+                kHostProcessLaunchIntentApiVersionV3 &&
+                intended.intent.request.process_policy == launch.process_policy &&
+                host_process_launch_intent_from_json(
+                    host_process_launch_intent_json(intended.intent)) ==
+                    intended.intent,
+            "v3 launch intent persists the complete compiled CPU/I/O policy");
+
+    const auto spawn = process_policy_bound_spawn_request(intended.intent);
+    auto changed = spawn;
+    changed.process_policy->cpu_weight = 241;
+    changed.process_policy->installation_digest =
+        host_process_policy_installation_digest(
+            intended.intent.request.allocation_id, changed.launch_id,
+            changed.cgroup_path, changed.cgroup_device, changed.cgroup_inode,
+            *changed.process_policy);
+    changed.canonical_request_digest.clear();
+    changed = seal_host_process_spawn_request(std::move(changed));
+    require_throws<HostLedgerConflict>(
+        [&] { (void)ledger.commit_process_spawn(changed, {49, 59}); },
+        "installed CPU/I/O controls cannot diverge from durable intent");
+
+    const auto spawned = ledger.commit_process_spawn(spawn, {50, 60});
+    const auto recovered_policy = linux_process_policy_from_process(
+        intended.intent, spawned.receipt);
+    const auto recovered_installation =
+        linux_process_policy_installation_from_process(intended.intent,
+                                                       spawned.receipt);
+    require(spawned.receipt.api_version ==
+                kHostProcessSpawnReceiptApiVersionV3 &&
+                spawned.receipt.request.process_policy == spawn.process_policy &&
+                recovered_policy.policy_digest ==
+                    intended.intent.request.process_policy->policy_digest &&
+                recovered_installation.installation_digest ==
+                    spawned.receipt.request.process_policy
+                        ->installation_digest &&
+                host_process_spawn_receipt_from_json(
+                    host_process_spawn_receipt_json(spawned.receipt)) ==
+                    spawned.receipt &&
+                ledger.verify(),
+            "v3 spawn receipt persists exact installed cgroup controls");
+    (void)ledger.commit_process_exit(
+        exit_request(spawned.receipt, "exit-process-policy"), {70, 80});
+    (void)ledger.release_bundle(
+        release_request(*bundle.grant, "release-process-policy"), {90, 100});
+  }
+  {
+    SQLiteHostLedger reopened(authority_for(path), observed);
+    require(reopened.verify(),
+            "process-policy-bound history survives ledger reopen");
+  }
+}
+
 void tamper_is_fail_closed() {
   const auto path = test_path("tamper");
   const auto observed = inventory({"mutex-tamper"});
@@ -1415,6 +1533,7 @@ int main() {
     request_and_release_rollback();
     process_authority_is_durable_and_replay_safe();
     device_policy_authority_is_bound_into_process_history();
+    process_policy_authority_is_bound_into_process_history();
     tamper_is_fail_closed();
     degraded_inventory_publication_rolls_back();
     filesystem_authority_remains_bound();

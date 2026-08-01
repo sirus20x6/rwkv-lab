@@ -24,6 +24,7 @@
 #include <utility>
 
 #include "trainvm/reflection_json.hpp"
+#include "trainvm/hostd_linux_process_policy.hpp"
 
 namespace trainvm {
 namespace {
@@ -533,28 +534,70 @@ bool valid_worker_credentials(const HostWorkerCredentialBinding& binding) {
          binding.no_new_privileges;
 }
 
+bool valid_process_policy_intent_binding(
+    const HostProcessPolicyIntentBinding& binding) {
+  try {
+    validate_linux_process_policy({
+        .api_version = binding.api_version,
+        .cpuset = binding.cpuset,
+        .cpu_weight = binding.cpu_weight,
+        .io_weight = binding.io_weight,
+        .omp_threads = binding.omp_threads,
+        .preprocessing_workers = binding.preprocessing_workers,
+        .nice = binding.nice,
+        .policy_digest = binding.policy_digest,
+    });
+    return true;
+  } catch (const LinuxProcessPolicyError&) {
+    return false;
+  }
+}
+
+bool valid_process_policy_installation_binding(
+    const HostProcessPolicyInstallationBinding& binding) {
+  return binding.api_version ==
+         "trainvm.linux-process-policy-installation/v1" &&
+         valid_digest(binding.policy_digest) &&
+         binding.cpuset.has_value() == binding.cpuset_mems.has_value() &&
+         (!binding.cpuset ||
+          (!binding.cpuset->empty() && !binding.cpuset_mems->empty())) &&
+         (!binding.cpu_weight ||
+          (*binding.cpu_weight >= 1 && *binding.cpu_weight <= 10'000)) &&
+         (!binding.io_weight ||
+          (*binding.io_weight >= 1 && *binding.io_weight <= 10'000)) &&
+         (!binding.nice || (*binding.nice >= -20 && *binding.nice <= 19));
+}
+
 std::string process_launch_request_domain(std::string_view api_version) {
-  return api_version == kHostProcessLaunchRequestApiVersionV2
-             ? "trainvm.host-process-launch-request/v2"
-             : "trainvm.host-process-launch-request/v1";
+  if (api_version == kHostProcessLaunchRequestApiVersionV3)
+    return "trainvm.host-process-launch-request/v3";
+  if (api_version == kHostProcessLaunchRequestApiVersionV2)
+    return "trainvm.host-process-launch-request/v2";
+  return "trainvm.host-process-launch-request/v1";
 }
 
 std::string process_launch_intent_domain(std::string_view api_version) {
-  return api_version == kHostProcessLaunchIntentApiVersionV2
-             ? "trainvm.host-process-launch-intent/v2"
-             : "trainvm.host-process-launch-intent/v1";
+  if (api_version == kHostProcessLaunchIntentApiVersionV3)
+    return "trainvm.host-process-launch-intent/v3";
+  if (api_version == kHostProcessLaunchIntentApiVersionV2)
+    return "trainvm.host-process-launch-intent/v2";
+  return "trainvm.host-process-launch-intent/v1";
 }
 
 std::string process_spawn_request_domain(std::string_view api_version) {
-  return api_version == kHostProcessSpawnRequestApiVersionV2
-             ? "trainvm.host-process-spawn-request/v2"
-             : "trainvm.host-process-spawn-request/v1";
+  if (api_version == kHostProcessSpawnRequestApiVersionV3)
+    return "trainvm.host-process-spawn-request/v3";
+  if (api_version == kHostProcessSpawnRequestApiVersionV2)
+    return "trainvm.host-process-spawn-request/v2";
+  return "trainvm.host-process-spawn-request/v1";
 }
 
 std::string process_spawn_receipt_domain(std::string_view api_version) {
-  return api_version == kHostProcessSpawnReceiptApiVersionV2
-             ? "trainvm.host-process-spawn-receipt/v2"
-             : "trainvm.host-process-spawn-receipt/v1";
+  if (api_version == kHostProcessSpawnReceiptApiVersionV3)
+    return "trainvm.host-process-spawn-receipt/v3";
+  if (api_version == kHostProcessSpawnReceiptApiVersionV2)
+    return "trainvm.host-process-spawn-receipt/v2";
+  return "trainvm.host-process-spawn-receipt/v1";
 }
 
 struct DirectoryDeleter final {
@@ -728,6 +771,9 @@ nlohmann::json process_launch_request_digest_json(
   if (request.device_policy) {
     value["device_policy"] = encode_json(*request.device_policy);
   }
+  if (request.process_policy) {
+    value["process_policy"] = encode_json(*request.process_policy);
+  }
   if (request.worker_credentials) {
     value["worker_credentials"] = encode_json(*request.worker_credentials);
   }
@@ -761,6 +807,9 @@ nlohmann::json process_spawn_request_digest_json(
                        {"executable_digest", request.executable_digest}};
   if (request.device_policy) {
     value["device_policy"] = encode_json(*request.device_policy);
+  }
+  if (request.process_policy) {
+    value["process_policy"] = encode_json(*request.process_policy);
   }
   if (request.worker_credentials) {
     value["worker_credentials"] = encode_json(*request.worker_credentials);
@@ -3825,7 +3874,9 @@ HostProcessLaunchResult SQLiteHostLedger::commit_process_launch_intent(
   }
   HostProcessLaunchIntent intent{
       .api_version = std::string(
-          request.api_version == kHostProcessLaunchRequestApiVersionV2
+          request.api_version == kHostProcessLaunchRequestApiVersionV3
+              ? kHostProcessLaunchIntentApiVersionV3
+          : request.api_version == kHostProcessLaunchRequestApiVersionV2
               ? kHostProcessLaunchIntentApiVersionV2
               : kHostProcessLaunchIntentApiVersion),
       .request = request,
@@ -3923,12 +3974,14 @@ HostProcessSpawnResult SQLiteHostLedger::commit_process_spawn(
       intent.request.api_version == kHostProcessLaunchRequestApiVersion &&
       request.api_version == kHostProcessSpawnRequestApiVersion &&
       !intent.request.worker_credentials && !request.worker_credentials &&
-      !intent.request.device_policy && !request.device_policy;
+      !intent.request.device_policy && !request.device_policy &&
+      !intent.request.process_policy && !request.process_policy;
   bool exact_device_binding = false;
   if (intent.request.api_version == kHostProcessLaunchRequestApiVersionV2 &&
       request.api_version == kHostProcessSpawnRequestApiVersionV2 &&
       intent.request.worker_credentials && request.worker_credentials &&
-      intent.request.device_policy && request.device_policy) {
+      intent.request.device_policy && request.device_policy &&
+      !intent.request.process_policy && !request.process_policy) {
     const auto& intended_policy = *intent.request.device_policy;
     const auto& installed_policy = *request.device_policy;
     exact_device_binding =
@@ -3942,6 +3995,37 @@ HostProcessSpawnResult SQLiteHostLedger::commit_process_spawn(
                 request.cgroup_path, request.cgroup_device,
                 request.cgroup_inode, installed_policy);
   }
+  bool exact_process_policy_binding = false;
+  if (intent.request.api_version == kHostProcessLaunchRequestApiVersionV3 &&
+      request.api_version == kHostProcessSpawnRequestApiVersionV3 &&
+      intent.request.worker_credentials && request.worker_credentials &&
+      intent.request.device_policy && request.device_policy &&
+      intent.request.process_policy && request.process_policy) {
+    const auto& intended_device = *intent.request.device_policy;
+    const auto& installed_device = *request.device_policy;
+    const auto& intended_process = *intent.request.process_policy;
+    const auto& installed_process = *request.process_policy;
+    exact_process_policy_binding =
+        installed_device.policy_digest == intended_device.policy_digest &&
+        installed_device.image_digest == intended_device.image_digest &&
+        installed_device.program_name == intended_device.program_name &&
+        request.worker_credentials == intent.request.worker_credentials &&
+        installed_device.installation_digest ==
+            host_device_policy_installation_digest(
+                intent.request.allocation_id, request.launch_id,
+                request.cgroup_path, request.cgroup_device,
+                request.cgroup_inode, installed_device) &&
+        installed_process.policy_digest == intended_process.policy_digest &&
+        installed_process.cpuset == intended_process.cpuset &&
+        installed_process.cpu_weight == intended_process.cpu_weight &&
+        installed_process.io_weight == intended_process.io_weight &&
+        installed_process.nice == intended_process.nice &&
+        installed_process.installation_digest ==
+            host_process_policy_installation_digest(
+                intent.request.allocation_id, request.launch_id,
+                request.cgroup_path, request.cgroup_device,
+                request.cgroup_inode, installed_process);
+  }
   if (request.launch_intent_digest != intent.receipt_digest ||
       request.boot_id != intent.boot_id ||
       intent.host_id != implementation_->inventory.host_id ||
@@ -3951,7 +4035,8 @@ HostProcessSpawnResult SQLiteHostLedger::commit_process_spawn(
       request.cgroup_device != intent.request.cgroup_device ||
       request.cgroup_inode != intent.request.cgroup_inode ||
       request.executable_digest != intent.request.executable_digest ||
-      (!legacy_device_binding && !exact_device_binding) ||
+      (!legacy_device_binding && !exact_device_binding &&
+       !exact_process_policy_binding) ||
       sqlite3_step(active_grant.get()) != SQLITE_ROW ||
       column_text(active_grant.get(), 0) != "active") {
     throw HostLedgerConflict(
@@ -3959,7 +4044,9 @@ HostProcessSpawnResult SQLiteHostLedger::commit_process_spawn(
   }
   HostProcessSpawnReceipt receipt{
       .api_version = std::string(
-          request.api_version == kHostProcessSpawnRequestApiVersionV2
+          request.api_version == kHostProcessSpawnRequestApiVersionV3
+              ? kHostProcessSpawnReceiptApiVersionV3
+          : request.api_version == kHostProcessSpawnRequestApiVersionV2
               ? kHostProcessSpawnReceiptApiVersionV2
               : kHostProcessSpawnReceiptApiVersion),
       .request = request,
@@ -4695,18 +4782,69 @@ std::string host_device_policy_installation_digest(
           .dump());
 }
 
+std::string host_process_policy_installation_digest(
+    std::string_view allocation_id, std::string_view launch_id,
+    std::string_view cgroup_path, std::uint64_t cgroup_device,
+    std::uint64_t cgroup_inode,
+    const HostProcessPolicyInstallationBinding& installation) {
+  if (allocation_id.empty() || launch_id.empty() || cgroup_path.empty() ||
+      cgroup_path.front() != '/' || cgroup_device == 0U ||
+      cgroup_inode == 0U ||
+      !valid_process_policy_installation_binding(installation)) {
+    throw HostLedgerError(
+        "process policy installation digest input is malformed");
+  }
+  return sha256(
+      "trainvm.linux-process-policy-installation/v1",
+      nlohmann::json{
+          {"allocation_id", allocation_id},
+          {"api_version", "trainvm.linux-process-policy-installation/v1"},
+          {"cgroup",
+           {{"device", cgroup_device},
+            {"inode", cgroup_inode},
+            {"unified_path", cgroup_path}}},
+          {"cpuset", installation.cpuset
+                         ? nlohmann::json(*installation.cpuset)
+                         : nlohmann::json(nullptr)},
+          {"cpuset_mems", installation.cpuset_mems
+                              ? nlohmann::json(*installation.cpuset_mems)
+                              : nlohmann::json(nullptr)},
+          {"cpu_weight", installation.cpu_weight
+                             ? nlohmann::json(*installation.cpu_weight)
+                             : nlohmann::json(nullptr)},
+          {"io_weight", installation.io_weight
+                            ? nlohmann::json(*installation.io_weight)
+                            : nlohmann::json(nullptr)},
+          {"launch_id", launch_id},
+          {"nice", installation.nice
+                       ? nlohmann::json(*installation.nice)
+                       : nlohmann::json(nullptr)},
+          {"policy_digest", installation.policy_digest}}
+          .dump());
+}
+
 HostProcessLaunchRequest seal_host_process_launch_request(
     HostProcessLaunchRequest request) {
   const bool legacy =
       request.api_version == kHostProcessLaunchRequestApiVersion &&
-      !request.worker_credentials && !request.device_policy;
+      !request.worker_credentials && !request.device_policy &&
+      !request.process_policy;
   const bool device_bound =
       request.api_version == kHostProcessLaunchRequestApiVersionV2 &&
       request.worker_credentials &&
       valid_worker_credentials(*request.worker_credentials) &&
       request.device_policy &&
-      valid_device_policy_intent_binding(*request.device_policy);
-  if ((!legacy && !device_bound) ||
+      valid_device_policy_intent_binding(*request.device_policy) &&
+      !request.process_policy;
+  const bool process_policy_bound =
+      request.api_version == kHostProcessLaunchRequestApiVersionV3 &&
+      request.worker_credentials &&
+      valid_worker_credentials(*request.worker_credentials) &&
+      request.device_policy &&
+      valid_device_policy_intent_binding(*request.device_policy) &&
+      request.process_policy &&
+      valid_process_policy_intent_binding(*request.process_policy);
+  if ((!legacy && !device_bound && !process_policy_bound) ||
       request.launch_id.empty() || request.allocation_id.empty() ||
       !valid_digest(request.grant_digest) || request.journal_id.empty() ||
       request.run_id.empty() || request.logical_lease_id.empty() ||
@@ -4750,7 +4888,10 @@ nlohmann::json host_process_launch_intent_json(
   const bool device_bound =
       intent.api_version == kHostProcessLaunchIntentApiVersionV2 &&
       intent.request.api_version == kHostProcessLaunchRequestApiVersionV2;
-  if ((!legacy && !device_bound) ||
+  const bool process_policy_bound =
+      intent.api_version == kHostProcessLaunchIntentApiVersionV3 &&
+      intent.request.api_version == kHostProcessLaunchRequestApiVersionV3;
+  if ((!legacy && !device_bound && !process_policy_bound) ||
       intent.host_id.empty() || intent.boot_id.empty() ||
       intent.broker_epoch.empty() || intent.intended_boottime_ns < 0 ||
       intent.intended_wall_time_ns < 0 ||
@@ -4775,15 +4916,27 @@ HostProcessSpawnRequest seal_host_process_spawn_request(
     HostProcessSpawnRequest request) {
   const bool legacy =
       request.api_version == kHostProcessSpawnRequestApiVersion &&
-      !request.worker_credentials && !request.device_policy;
+      !request.worker_credentials && !request.device_policy &&
+      !request.process_policy;
   const bool device_bound =
       request.api_version == kHostProcessSpawnRequestApiVersionV2 &&
       request.worker_credentials &&
       valid_worker_credentials(*request.worker_credentials) &&
       request.device_policy &&
       valid_device_policy_installation_binding(*request.device_policy) &&
-      valid_digest(request.device_policy->installation_digest);
-  if ((!legacy && !device_bound) ||
+      valid_digest(request.device_policy->installation_digest) &&
+      !request.process_policy;
+  const bool process_policy_bound =
+      request.api_version == kHostProcessSpawnRequestApiVersionV3 &&
+      request.worker_credentials &&
+      valid_worker_credentials(*request.worker_credentials) &&
+      request.device_policy &&
+      valid_device_policy_installation_binding(*request.device_policy) &&
+      valid_digest(request.device_policy->installation_digest) &&
+      request.process_policy &&
+      valid_process_policy_installation_binding(*request.process_policy) &&
+      valid_digest(request.process_policy->installation_digest);
+  if ((!legacy && !device_bound && !process_policy_bound) ||
       request.launch_id.empty() ||
       !valid_digest(request.launch_intent_digest) || request.host_pid <= 0 ||
       request.process_starttime_ticks == 0U || request.boot_id.empty() ||
@@ -4824,7 +4977,10 @@ nlohmann::json host_process_spawn_receipt_json(
   const bool device_bound =
       receipt.api_version == kHostProcessSpawnReceiptApiVersionV2 &&
       receipt.request.api_version == kHostProcessSpawnRequestApiVersionV2;
-  if ((!legacy && !device_bound) ||
+  const bool process_policy_bound =
+      receipt.api_version == kHostProcessSpawnReceiptApiVersionV3 &&
+      receipt.request.api_version == kHostProcessSpawnRequestApiVersionV3;
+  if ((!legacy && !device_bound && !process_policy_bound) ||
       receipt.host_id.empty() || receipt.broker_epoch.empty() ||
       receipt.observed_boottime_ns < 0 || receipt.observed_wall_time_ns < 0 ||
       !valid_digest(receipt.previous_process_receipt_digest) ||

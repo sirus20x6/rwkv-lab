@@ -9350,6 +9350,7 @@ class SagaProcessClient final : public trainvm::IHostProcessClient {
         .cgroup_inode = 42U,
         .worker_credentials = std::nullopt,
         .device_policy = std::nullopt,
+        .process_policy = std::nullopt,
         .canonical_request_digest = {},
     });
     const auto intended = ledger_.commit_process_launch_intent(
@@ -9368,6 +9369,7 @@ class SagaProcessClient final : public trainvm::IHostProcessClient {
         .executable_digest = launch.executable_digest,
         .worker_credentials = std::nullopt,
         .device_policy = std::nullopt,
+        .process_policy = std::nullopt,
         .canonical_request_digest = {},
     });
     const auto spawned = ledger_.commit_process_spawn(

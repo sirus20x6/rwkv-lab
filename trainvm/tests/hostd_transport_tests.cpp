@@ -527,6 +527,7 @@ class LedgerProcessSupervisor final : public IHostdProcessSupervisor {
             .cgroup_inode = 92U,
             .worker_credentials = std::nullopt,
             .device_policy = std::nullopt,
+            .process_policy = std::nullopt,
             .canonical_request_digest = {},
         }),
         {500, 600});
@@ -546,6 +547,7 @@ class LedgerProcessSupervisor final : public IHostdProcessSupervisor {
                 request.launch.identity.executable.sealed_sha256,
             .worker_credentials = std::nullopt,
             .device_policy = std::nullopt,
+            .process_policy = std::nullopt,
             .canonical_request_digest = {},
         }),
         {510, 610});

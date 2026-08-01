@@ -151,8 +151,11 @@ Single-run speedrun results are hypotheses, not production defaults.
   nice level. Record effective policy and throttling as evidence. The non-root worker runtime now
   parses the sealed policy in one category-owned module, narrows and reattests CPU affinity, applies
   tensor-library thread limits, exports the bounded preprocessing-worker hint, and verifies its
-  effective nice level before importing a family trainer. CPU and I/O weights remain explicitly
-  hostd-owned; lowering and durable recovery attestation of those cgroup controls is still required.
+  effective nice level before importing a family trainer. Hostd now owns the complementary kernel
+  layer: it canonicalizes the same policy once, writes and re-reads cpuset/CPU/I/O controls through
+  pinned cgroup descriptors, sets and double-attests process nice before dropping credentials, and
+  binds compiled intent plus effective installation into v3 launch/spawn receipts. Restart adoption
+  rechecks those controls and the live proc nice value before recovering authority.
 - Add bounded `torch`, Nsight Systems, and Nsight Compute trace phases with warmup/skip/capture
   limits. Publish trace, summary, kernel table, launch count, GPU-active ratio, input-stall time,
   allocator pressure, and step-range metadata as dashboard artifacts.
@@ -278,8 +281,7 @@ startup orphan recovery are defined in
   endpoint only after admission. It exposes grant/release, stopped-child process launch, and
   restart reconciliation. Exact default-deny cgroup-device BPF programs and non-root worker
   credentials are now bound into durable launch/spawn evidence and reattested on recovery.
-  Real-host crash qualification and CPU/I/O cgroup-policy receipts remain before training admission
-  can rely on the complete path.
+  Real-host crash qualification remains before training admission can rely on the complete path.
   The prerequisite v2 inventory capability model is implemented: exact assigned and shared NVIDIA
   driver nodes are topology-bound, capability drift degrades the resource, and unmapped partitions
   fail launch eligibility rather than borrowing their parent node.
@@ -289,8 +291,8 @@ startup orphan recovery are defined in
 - Extend the implemented wake-driven, restart-scanning service supervisor (admission, launch,
   terminal process/resource release, and exact lease renewal) with typed executors for
   compile/warmup/qualification nodes and dashboard-visible supervisor health.
-- Fingerprinted cache namespaces and hostd lowering/attestation for the worker-validated typed
-  CPU/I/O policy.
+- Fingerprinted cache namespaces; typed CPU/I/O policy lowering and recovery attestation are
+  implemented, with privileged real-host qualification remaining.
 - Declarative bounded Torch GPU profiling and dashboard trace artifacts are implemented; qualified
   Nsight launch profiles and richer cross-backend summaries remain.
 

@@ -30,11 +30,16 @@ void require_rejected(Callable&& callable, const std::string& message) {
 
 void proc_parsers_are_strict_and_comm_safe() {
   using hostd_linux_stopped_launcher_test_seam::parse_proc_starttime;
+  using hostd_linux_stopped_launcher_test_seam::parse_proc_nice;
   using hostd_linux_stopped_launcher_test_seam::parse_unified_cgroup;
   require(parse_proc_starttime(
               "123 (worker ) with spaces) S 1 2 3 4 5 6 7 8 9 10 11 "
               "12 13 14 15 16 17 18 987654 20\n") == 987654U,
           "proc stat parser finds field 22 after the final comm boundary");
+  require(parse_proc_nice(
+              "123 (worker ) with spaces) S 1 2 3 4 5 6 7 8 9 10 11 "
+              "12 13 14 15 -7 17 18 987654 20\n") == -7,
+          "proc stat parser binds the effective nice value at field 19");
   require(parse_unified_cgroup("0::/trainvm/launch-abc\n") ==
               "/trainvm/launch-abc" &&
               parse_unified_cgroup("0::/\n") == "/",
@@ -73,6 +78,7 @@ void malformed_launch_fails_before_clone() {
       .credentials = {.uid = 1000U,
                       .gid = 1000U,
                       .no_new_privileges = true},
+      .nice = std::nullopt,
       .arguments = {},
   };
   require_rejected(

@@ -100,9 +100,9 @@ adapter may override them.
 `trainvm-hostd --validate-config FILE` checks the closed reflected document without opening live
 GPU/cgroup/journal authority. The foreground `--config` mode proves those live identities in a
 single owner thread, runs restart convergence and the one-shot audit, and binds the shared socket
-only after admission. The current assembly intentionally omits the process supervisor from new
-launch dispatch until cgroup-device BPF policy is durable and restart-adoptable; it does not claim
-strict training launch from cgroup membership alone.
+only after admission. The process supervisor now admits stopped-child launch only with a durable,
+restart-adoptable cgroup-device BPF program, non-root credentials, and CPU/I/O process-policy
+receipt. Privileged real-host crash qualification remains a deployment gate.
 
 Hostd uses a filesystem `AF_UNIX` `SOCK_SEQPACKET` endpoint with peer credentials and preferably
 systemd socket activation. It does not use the abstract Unix namespace. Services in another mount
@@ -793,15 +793,17 @@ idempotent cleanup pass. A separate conclusive-nonlive switch can close a
 PID-absent or identity-superseded durable spawn, but only after the exact
 recorded cgroup is empty or absent and the trusted accelerator-context audit is
 complete and empty. It never signals the current PID. Incomplete observation
-remains blocked and is never converted into process authority.
+remains blocked and is never converted into process authority. Process protocol v3 additionally
+persists the canonical CPU/I/O intent and the effective cpuset, memory-node, CPU-weight, I/O-weight,
+and nice installation. Hostd writes controls only through the pinned cgroup descriptor, reads them
+back before spawn publication, double-samples nice from proc stat, and reattests the durable values
+when adopting a restarted process.
 The surrounding startup controller is wake-driven: each call performs at most
 one reconciliation step, so a daemon can wait on pidfds or timers rather than
 spin. It admits only after both unclosed-process and terminal-release views are
 empty, consumes the startup audit exactly once, and latches configured-bound,
 recovery, or admission failure.
-CPU/I/O policy evidence, device BPF,
-privileged end-to-end qualification, and daemon bootstrap/policy wiring remain
-in this gate. A daemon crash is not claimed as ordinary in-memory supervisor
+Privileged end-to-end qualification remains in this gate. A daemon crash is not claimed as ordinary in-memory supervisor
 replay; startup policy must consume the durable recovery records.
 
 Gate:
