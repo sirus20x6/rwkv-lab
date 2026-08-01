@@ -120,6 +120,10 @@ Implemented now:
 - additive host-ledger v2 startup-audit evidence with exact v1 migration, canonical bounded reports,
   configured-policy admission, historical inventory/occupancy reconstruction, predecessor-chain
   proof, atomic report/projection/receipt commit, strict replay closure, and post-commit re-read;
+- a concrete configured hostd startup auditor that samples the authority clock around exact pinned
+  ledger head/occupancy evidence, binds host/boot/broker/process identity, and blocks startup on any
+  retained resource fence until durable process adoption can account for it rather than treating
+  an old allocation as free;
 - an additive host-ledger v3 admission epoch that atomically finalizes an exact current audit and
   occupancy, keeps policy-enabled grants sealed beforehand, binds every later request to the active
   epoch, preserves release-only cleanup while startup is blocked, and exposes a read-only exact
@@ -197,8 +201,9 @@ Current end-to-end transport tests use the visibly cooperative enforcement grade
 service-cgroup authority and strict namespace/socket-pidfd primitives are implemented, but
 production mutation admission remains disabled until the unified daemon bootstrap wires their externally
 guarded policies together; the service-side optional connection and admission path are now present,
-but terminal process/release reconciliation is not complete. The remaining process-ownership work
-is the guarded daemon entry point, completing daemon-restart recovery of retained launches, and qualifying the end-to-end
+but terminal process/release reconciliation is not complete. The configured startup auditor now
+fails closed on retained fences. The remaining process-ownership work is the guarded daemon entry
+point, completing daemon-restart recovery/adoption of retained launches, and qualifying the end-to-end
 crash windows before real trainer ownership is enabled. The transport and stopped-launcher layers
 now carry and attest sealed Python code and per-attempt bootstrap descriptors, install them at the
 fixed exec-surviving fd 3/fd 4 ABI, and bind both into durable launch evidence without exposing

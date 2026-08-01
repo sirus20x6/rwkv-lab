@@ -245,6 +245,9 @@ startup orphan recovery are defined in
 - Centralized active-lease validation, renewal receipts, fencing-token checks, and host-wide resource
   locks.
 - Startup orphan/resource audit before any process authority can be granted.
+  The production configured auditor now constructs exact clock/head/occupancy evidence and blocks
+  retained fences; durable pidfd/cgroup process adoption must convert that conservative block into
+  a proved recovered launch before admission can resume.
 - Resolve the remaining stock-SQLite auxiliary pathname race in the declared host threat model:
   trusted isolated authority directory, controlled VFS, or host-global lock broker. Do not treat
   the network-namespace-local abstract socket as the host-wide GPU/resource fence.
