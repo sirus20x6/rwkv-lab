@@ -62,6 +62,7 @@ add_library(trainvm_core
   src/host_startup_audit.cpp
   src/hostd.cpp
   src/hostd_journal_fence_attestor.cpp
+  src/hostd_linux_service_identity.cpp
   src/hostd_linux_session_authority.cpp
   src/hostd_mutation_protocol.cpp
   src/hostd_session_challenge.cpp
@@ -255,6 +256,16 @@ target_compile_options(hostd_linux_session_authority_tests PRIVATE
 target_link_libraries(hostd_linux_session_authority_tests PRIVATE trainvm_core)
 add_test(NAME hostd_linux_session_authority_tests
   COMMAND hostd_linux_session_authority_tests
+)
+add_executable(hostd_linux_service_identity_tests
+  tests/hostd_linux_service_identity_tests.cpp
+)
+target_compile_options(hostd_linux_service_identity_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(hostd_linux_service_identity_tests PRIVATE trainvm_core)
+add_test(NAME hostd_linux_service_identity_tests
+  COMMAND hostd_linux_service_identity_tests
 )
 add_executable(linux_nvidia_inventory_tests
   tests/linux_nvidia_inventory_tests.cpp

@@ -676,9 +676,9 @@ rather than request data, uses host-sampled ledger time, and always disconnects
 the scoped coordinator session. Duplicate grant, exact reconciliation,
 release, stale-fence, cross-scope, malformed-command, and abandoned-challenge
 paths are covered at the cooperative test grade. The remaining P0.3 gate is
-the broader journal/service/hostd process-crash matrix plus the production
-service-cgroup identity implementation at strict socket-pidfd/host-namespace
-grade. Deterministic transport checkpoints already prove that interruption at
+the broader journal/service/hostd process-crash matrix plus daemon bootstrap
+integration of the implemented service-cgroup authority at strict
+socket-pidfd/host-namespace grade. Deterministic transport checkpoints already prove that interruption at
 each pre-dispatch boundary leaves no ledger outcome, while interruption after
 the durable dispatch recovers the exact replay and remains releasable.
 

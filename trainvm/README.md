@@ -118,6 +118,9 @@ Implemented now:
   mount/PID/cgroup/time namespace identity, `SO_PEERCRED` plus `SO_PEERPIDFD`, and pinned-proc process
   identity, together with a read-only pinned-Journal attestor rooted in hash-chained controller,
   acquisition, renewal, release, and current-fence authority events;
+- a strict Linux service-role authority that pins procfs, cgroup-v2, and every configured service
+  cgroup, then double-samples unified membership and proc starttime while binding exact UID/GID,
+  service identity, and grant/release role without accepting any request-provided role;
 - a read-only Linux NVIDIA inventory collector that pins procfs/sysfs/devfs roots, dynamically loads
   and grades NVML evidence, double-samples bounded device/MIG/display/context state, retains process
   instance observations, proves device-node mappings, and makes incomplete, torn, stale, or
@@ -146,9 +149,10 @@ the exact persisted result; stale fences and cross-scope payloads fail before le
 Deterministic transport checkpoints cover challenge delivery, command receipt, verification,
 coordinator connection, durable dispatch, and reply delivery; pre-dispatch interruption leaves no
 outcome, while a post-commit lost reply converges to the exact replay and remains releasable.
-Current end-to-end transport tests use the visibly cooperative enforcement grade. Production
-mutation admission remains disabled until the service-cgroup authority is implemented and the
-strict namespace plus socket-pidfd grade is configured; the dashboard/service also does not yet
+Current end-to-end transport tests use the visibly cooperative enforcement grade. The strict
+service-cgroup authority and strict namespace/socket-pidfd primitives are implemented, but
+production mutation admission remains disabled until daemon bootstrap wires their externally
+guarded policies together; the dashboard/service also does not yet
 route all admission/release work through this endpoint. Guarded launch, cgroup cleanup,
 process-instance credentials, durable spawn/exit receipts, and exhaustive crash-window qualification
 remain next. Real trainer process ownership follows only after those gates pass.
