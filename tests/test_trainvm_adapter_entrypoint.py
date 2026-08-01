@@ -30,8 +30,16 @@ class FakeSession:
     def __init__(self, bootstrap: object, *, completed: bool = False) -> None:
         self.bootstrap = bootstrap
         self.completed_before_connect = completed
-        self.invocation = SimpleNamespace(run_id="run-1")
+        self.invocation = SimpleNamespace(
+            run_id="run-1",
+            observability={
+                "heartbeat_seconds": 5,
+                "metrics": [],
+                "retain_raw_metrics_days": 1,
+            },
+        )
         self.finished: list[tuple[str, object, int | None]] = []
+        self.heartbeats: list[tuple[int, str]] = []
         self.closed = False
 
     def __enter__(self) -> Self:
@@ -44,6 +52,11 @@ class FakeSession:
         self, event_type: str, payload: object, *, optimizer_step: int | None = None
     ) -> None:
         self.finished.append((event_type, payload, optimizer_step))
+
+    def heartbeat(self, optimizer_step: int, phase: str, *, wait: bool = False) -> int:
+        assert wait is False
+        self.heartbeats.append((optimizer_step, phase))
+        return len(self.heartbeats)
 
 
 def test_inline_config_is_frozen_content_not_a_mutable_path(tmp_path) -> None:
@@ -117,8 +130,8 @@ def test_appearance_handler_passes_only_canonical_authorized_paths(
     monkeypatch.setattr(
         mage_flow_expert_train,
         "train",
-        lambda config, *, worker_components, worker_step_profiler: observed.append(
-            (config, worker_components, worker_step_profiler)
+        lambda config, *, worker_components, worker_step_profiler, worker_observability: observed.append(
+            (config, worker_components, worker_step_profiler, worker_observability)
         ),
     )
     invocation = SimpleNamespace(
@@ -135,13 +148,17 @@ def test_appearance_handler_passes_only_canonical_authorized_paths(
         },
     )
     components = SimpleNamespace()
+    observability = SimpleNamespace()
 
-    assert _appearance_expert(invocation, components) == HandlerResult(
+    assert _appearance_expert(
+        invocation, components, observability=observability
+    ) == HandlerResult(
         "worker.completed", {"reason": "training_complete"}
     )
     assert observed[0][0].train_manifest == str(manifest.resolve())
     assert observed[0][0].output_dir == str(run_directory.resolve())
     assert observed[0][1] is components
+    assert observed[0][3] is observability
 
 
 def test_dispatch_table_is_closed_and_training_composition_is_required() -> None:
@@ -207,7 +224,7 @@ def test_runner_reports_success_with_optimizer_step() -> None:
             else pytest.fail("wrong descriptor")
         ),
         session_factory=factory,
-        executor=lambda invocation, _profiler: HandlerResult(
+        executor=lambda invocation, _profiler, _observability: HandlerResult(
             "worker.completed", {"reason": "training_complete"}, 41
         ),
     )
@@ -215,6 +232,7 @@ def test_runner_reports_success_with_optimizer_step() -> None:
     assert sessions[0].finished == [
         ("worker.completed", {"reason": "training_complete"}, 41)
     ]
+    assert sessions[0].heartbeats == [(0, "initializing")]
     assert sessions[0].closed
 
 
@@ -222,7 +240,9 @@ def test_runner_reports_sanitized_failure_and_skips_completed_replay() -> None:
     bootstrap = SimpleNamespace(run_id="run-1")
     failed = FakeSession(bootstrap)
 
-    def raise_secret(_invocation: object, _profiler: object) -> HandlerResult:
+    def raise_secret(
+        _invocation: object, _profiler: object, _observability: object
+    ) -> HandlerResult:
         raise RuntimeError("secret dataset path")
 
     assert (
@@ -247,7 +267,7 @@ def test_runner_reports_sanitized_failure_and_skips_completed_replay() -> None:
         run_worker(
             bootstrap_reader=lambda _descriptor: bootstrap,
             session_factory=lambda _bootstrap: completed,
-            executor=lambda _invocation, _profiler: pytest.fail(
+            executor=lambda _invocation, _profiler, _observability: pytest.fail(
                 "replayed completed work"
             ),
         )

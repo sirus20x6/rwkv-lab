@@ -6,9 +6,11 @@ from collections.abc import Callable, Sequence
 from rwkv_lab.trainvm_worker import (
     WorkerBootstrap,
     WorkerInvocation,
+    WorkerObservability,
     WorkerSession,
     WorkerStepProfiler,
     apply_worker_runtime_policy,
+    observability_from_invocation,
     read_worker_bootstrap_fd,
     step_profiler_from_invocation,
 )
@@ -23,7 +25,9 @@ class WorkerEntrypointError(RuntimeError):
 
 
 BootstrapReader = Callable[[int], WorkerBootstrap]
-InvocationExecutor = Callable[[WorkerInvocation, WorkerStepProfiler], HandlerResult]
+InvocationExecutor = Callable[
+    [WorkerInvocation, WorkerStepProfiler, WorkerObservability], HandlerResult
+]
 SessionFactory = Callable[[WorkerBootstrap], WorkerSession]
 
 
@@ -56,7 +60,15 @@ def run_worker(
             with step_profiler_from_invocation(
                 session, session.invocation
             ) as step_profiler:
-                result = executor(session.invocation, step_profiler)
+                observability = observability_from_invocation(
+                    session, session.invocation
+                )
+                observability.optimizer_step(0, "initializing")
+                result = executor(
+                    session.invocation,
+                    step_profiler,
+                    observability,
+                )
         except Exception as error:  # noqa: BLE001 - trainer failures are terminal events
             # The durable event is intentionally bounded and contains neither the
             # exception message nor invocation values, which may disclose paths.

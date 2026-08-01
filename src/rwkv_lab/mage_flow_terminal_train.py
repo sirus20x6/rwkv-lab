@@ -106,7 +106,7 @@ from rwkv_lab.training_components import (
 
 if TYPE_CHECKING:
     from rwkv_lab.trainvm_adapters import WorkerTrainingComponents
-    from rwkv_lab.trainvm_worker import WorkerStepProfiler
+    from rwkv_lab.trainvm_worker import WorkerObservability, WorkerStepProfiler
 
 RUN_SCHEMA = "rwkv-lab.mage-flow-terminal-train.v3"
 CACHE_SPAN_SCHEMA = "rwkv-lab.mage-flow-cache-span.v1"
@@ -2482,6 +2482,7 @@ def train(
     *,
     worker_components: WorkerTrainingComponents | None = None,
     worker_step_profiler: WorkerStepProfiler | None = None,
+    worker_observability: WorkerObservability | None = None,
 ) -> None:
     config.validate()
     try:
@@ -3499,6 +3500,27 @@ def train(
                         f"immiscible/{key}": value
                         for key, value in immiscible_metrics.items()
                     }
+                )
+            if worker_observability is not None:
+                worker_observability.optimizer_step(step)
+                worker_observability.publish_if_declared(
+                    "train.loss",
+                    loss_sum / accumulation,
+                    step=step,
+                    sample_weight=sample_sum,
+                    labels={"route": config.domain},
+                )
+                worker_observability.publish_if_declared(
+                    "train.images_per_second",
+                    metrics["examples_per_second"],
+                    step=step,
+                    labels={"route": config.domain},
+                )
+                worker_observability.publish_if_declared(
+                    "system.gpu_memory_used",
+                    metrics["peak_allocated_vram_bytes"],
+                    step=step,
+                    labels={"route": config.domain},
                 )
             if config.rapid_expert_alternation:
                 domain_positions[config.domain] = {

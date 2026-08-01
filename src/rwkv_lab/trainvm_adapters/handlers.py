@@ -7,6 +7,7 @@ from typing import Any
 from rwkv_lab.trainvm_worker import (
     NullStepProfiler,
     WorkerInvocation,
+    WorkerObservability,
     WorkerStepProfiler,
 )
 
@@ -27,7 +28,13 @@ class HandlerResult:
 
 AdapterKey = tuple[str, str, str, str]
 Handler = Callable[
-    [WorkerInvocation, WorkerTrainingComponents, WorkerStepProfiler], HandlerResult
+    [
+        WorkerInvocation,
+        WorkerTrainingComponents,
+        WorkerStepProfiler,
+        WorkerObservability,
+    ],
+    HandlerResult,
 ]
 
 
@@ -35,6 +42,7 @@ def _appearance_expert(
     invocation: WorkerInvocation,
     components: WorkerTrainingComponents,
     step_profiler: WorkerStepProfiler | None = None,
+    observability: WorkerObservability | None = None,
 ) -> HandlerResult:
     from rwkv_lab.mage_flow_expert_train import MageFlowExpertTrainConfig, train
 
@@ -83,6 +91,7 @@ def _appearance_expert(
         config,
         worker_components=components,
         worker_step_profiler=step_profiler or NullStepProfiler(),
+        worker_observability=observability,
     )
     return HandlerResult("worker.completed", {"reason": "training_complete"})
 
@@ -91,6 +100,7 @@ def _terminal_expert(
     invocation: WorkerInvocation,
     components: WorkerTrainingComponents,
     step_profiler: WorkerStepProfiler | None = None,
+    observability: WorkerObservability | None = None,
 ) -> HandlerResult:
     from rwkv_lab.mage_flow_terminal_train import TerminalExpertTrainConfig, train
 
@@ -163,6 +173,7 @@ def _terminal_expert(
         config,
         worker_components=components,
         worker_step_profiler=step_profiler or NullStepProfiler(),
+        worker_observability=observability,
     )
     return HandlerResult("worker.completed", {"reason": "training_complete"})
 
@@ -171,6 +182,7 @@ def _qwen_ao3(
     invocation: WorkerInvocation,
     components: WorkerTrainingComponents,
     step_profiler: WorkerStepProfiler | None = None,
+    observability: WorkerObservability | None = None,
 ) -> HandlerResult:
     from rwkv_lab.qwen_ao3_cpt import QwenAO3Config, train
 
@@ -201,6 +213,7 @@ def _qwen_ao3(
         config,
         worker_components=components,
         worker_step_profiler=step_profiler or NullStepProfiler(),
+        worker_observability=observability,
     )
     step = result.get("step")
     return HandlerResult(
@@ -266,6 +279,7 @@ def supported_adapter_keys() -> frozenset[AdapterKey]:
 def execute_invocation(
     invocation: WorkerInvocation,
     step_profiler: WorkerStepProfiler | None = None,
+    observability: WorkerObservability | None = None,
 ) -> HandlerResult:
     adapter = invocation.adapter
     key = (
@@ -285,4 +299,11 @@ def execute_invocation(
     components = WorkerTrainingComponents(
         invocation.training, invocation.training.model_family
     )
-    return handler(invocation, components, step_profiler or NullStepProfiler())
+    if observability is None:
+        raise AdapterDispatchError("training adapter has no worker observability authority")
+    return handler(
+        invocation,
+        components,
+        step_profiler or NullStepProfiler(),
+        observability,
+    )

@@ -33,7 +33,7 @@ from rwkv_lab.training_components import (
 
 if TYPE_CHECKING:
     from rwkv_lab.trainvm_adapters import WorkerTrainingComponents
-    from rwkv_lab.trainvm_worker import WorkerStepProfiler
+    from rwkv_lab.trainvm_worker import WorkerObservability, WorkerStepProfiler
 
 SCHEMA = "rwkv-lab.qwen-ao3-cpt.v1"
 ROUTER_TARGET = "mlp.gate.weight"
@@ -988,6 +988,7 @@ def train(
     *,
     worker_components: WorkerTrainingComponents | None = None,
     worker_step_profiler: WorkerStepProfiler | None = None,
+    worker_observability: WorkerObservability | None = None,
 ) -> dict[str, Any]:
     run_dir = Path(config.run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -1178,6 +1179,8 @@ def train(
         step += 1
         if worker_step_profiler is not None:
             worker_step_profiler.step(step)
+        if worker_observability is not None:
+            worker_observability.optimizer_step(step)
         should_log = step % config.log_every == 0
         should_save = bool(config.save_every and step % config.save_every == 0)
         # Converting CUDA scalars to Python values synchronizes the device.
@@ -1200,6 +1203,23 @@ def train(
             last_metrics["tok_per_sec"] = last_metrics["tokens_per_second"]
             last_metrics["cuda_allocated_gib"] = torch.cuda.memory_allocated() / 2**30
             last_metrics["cuda_reserved_gib"] = torch.cuda.memory_reserved() / 2**30
+            if worker_observability is not None:
+                worker_observability.publish_if_declared(
+                    "train.loss",
+                    last_metrics["loss"],
+                    step=step,
+                    sample_weight=micro_batches * config.context_length,
+                )
+                worker_observability.publish_if_declared(
+                    "train.tokens_per_second",
+                    last_metrics["tokens_per_second"],
+                    step=step,
+                )
+                worker_observability.publish_if_declared(
+                    "system.gpu_memory_used",
+                    int(torch.cuda.memory_allocated(device)),
+                    step=step,
+                )
             log.write(json.dumps(last_metrics) + "\n")
             log.flush()
             print(json.dumps(last_metrics), flush=True)

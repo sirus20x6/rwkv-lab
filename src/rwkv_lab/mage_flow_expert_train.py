@@ -75,7 +75,7 @@ from rwkv_lab.training_parameter_routing import ParameterRoutingResult
 
 if TYPE_CHECKING:
     from rwkv_lab.trainvm_adapters import WorkerTrainingComponents
-    from rwkv_lab.trainvm_worker import WorkerStepProfiler
+    from rwkv_lab.trainvm_worker import WorkerObservability, WorkerStepProfiler
 
 RUN_SCHEMA = "rwkv-lab.mage-flow-expert-train.v1"
 OFFICIAL_REPOSITORY = "https://github.com/microsoft/Mage"
@@ -1941,6 +1941,7 @@ def train(
     *,
     worker_components: WorkerTrainingComponents | None = None,
     worker_step_profiler: WorkerStepProfiler | None = None,
+    worker_observability: WorkerObservability | None = None,
 ) -> None:
     """Run single-GPU routed expert/shared-backbone optimization."""
     config.validate()
@@ -2519,6 +2520,24 @@ def train(
                 "cfg_dropout_samples": accumulation_cfg_dropout,
                 "epoch": epoch,
             }
+            if worker_observability is not None:
+                worker_observability.optimizer_step(global_step)
+                worker_observability.publish_if_declared(
+                    "train.loss",
+                    loss_value,
+                    step=global_step,
+                    sample_weight=accumulation_samples,
+                )
+                worker_observability.publish_if_declared(
+                    "train.images_per_second",
+                    metrics["samples_per_second"],
+                    step=global_step,
+                )
+                worker_observability.publish_if_declared(
+                    "system.gpu_memory_used",
+                    int(torch.cuda.memory_allocated(device)),
+                    step=global_step,
+                )
             accumulation_loss = None
             accumulation_domains.clear()
             accumulation_samples = 0

@@ -51,6 +51,15 @@ affinity, tensor-library/OpenMP thread counts, the preprocessing-worker hint, an
 verification. Family adapters do not read environment variables or reconstruct this policy.
 CPU/I/O cgroup weights are hostd authority and are never reported effective by this worker layer.
 
+`rwkv_lab.trainvm_worker.observability` independently owns the sealed observability declaration.
+It strictly decodes heartbeat cadence and the selected metric catalog, freezes metric units and
+step domains, bounds labels/scalars, and publishes only names selected by the experiment. The three
+native training handlers pass one family-neutral observer beside the independent component and
+profiler services. Their optimizer safe points emit cadence-limited heartbeats and offer common
+loss, throughput, and GPU-memory measurements; undeclared measurements remain local rather than
+silently changing run telemetry. The fixed entry point emits an immediate `initializing` heartbeat
+before importing trainer work. No trainer reconstructs metric units or aggregation policy.
+
 `EvalGalleryPublisher` is the shared qualitative-evaluation publication path. It requires an exact
 `rwkv-lab.eval-gallery.v2` output declaration from the immutable invocation, confines all input
 images to declared read/write roots, fully decodes supported raster formats with Pillow, and copies
