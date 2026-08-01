@@ -269,6 +269,10 @@ hostd_session_challenge_response(const HostdSessionChallenge &challenge);
 [[nodiscard]] HostdJournalFenceEvidence
 hostd_seal_journal_fence_evidence(HostdJournalFenceEvidence evidence);
 
+[[nodiscard]] std::string hostd_session_challenge_claim_canonical_json(
+    const HostdSessionChallengeClaim &value);
+[[nodiscard]] HostdSessionChallengeClaim
+hostd_session_challenge_claim_from_canonical_json(std::string_view value);
 [[nodiscard]] std::string
 hostd_session_challenge_canonical_json(const HostdSessionChallenge &value);
 [[nodiscard]] HostdSessionChallenge

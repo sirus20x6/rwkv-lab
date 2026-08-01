@@ -1,4 +1,5 @@
 #include "trainvm/hostd_session_challenge.hpp"
+#include "trainvm/hostd_mutation_protocol.hpp"
 
 #include <sys/wait.h>
 #include <unistd.h>
@@ -239,7 +240,176 @@ struct Fixture final {
   std::unique_ptr<HostdSessionChallengeVerifier> verifier;
 };
 
+ResourceBundleRequest mutation_bundle_request(std::string request_id =
+                                                   "request-001") {
+  return seal_resource_request({
+      .api_version = std::string(kHostResourceRequestApiVersion),
+      .request_id = std::move(request_id),
+      .journal_id = "journal-001",
+      .run_id = "run-001",
+      .logical_lease_id = "lease-001",
+      .logical_fencing_token = 19U,
+      .count = 1U,
+      .access_mode = ResourceAccessMode::mutex_exclusive,
+      .topology = TopologyPolicy::any,
+      .selector = {},
+      .canonical_request_digest = {},
+  });
+}
+
+ResourceReleaseRequest mutation_release_request() {
+  return seal_resource_release_request({
+      .api_version = std::string(kHostLedgerReleaseRequestApiVersion),
+      .release_request_id = "release-001",
+      .allocation_id = "allocation-001",
+      .grant_digest = "sha256:" + std::string(64U, 'c'),
+      .journal_id = "journal-001",
+      .run_id = "run-001",
+      .logical_lease_id = "lease-001",
+      .logical_fencing_token = 19U,
+      .canonical_request_digest = {},
+  });
+}
+
+void mutation_envelopes_bind_challenge_payload_and_reply() {
+  const HostdMutationOpen open{
+      .api_version = std::string(kHostdMutationProtocolApiVersion),
+      .claim = claim(),
+  };
+  const auto open_bytes = hostd_mutation_open_canonical_json(open);
+  require(hostd_mutation_open_from_canonical_json(open_bytes) == open,
+          "mutation open round trips one exact journal/controller claim");
+  require_throws<HostdMutationProtocolError>(
+      [&] {
+        (void)hostd_mutation_open_from_canonical_json(" " + open_bytes);
+      },
+      "mutation open rejects noncanonical framing");
+
+  Fixture fixture;
+  const auto challenge = fixture.issue();
+  const auto response = hostd_session_challenge_response(challenge);
+  const auto command = seal_hostd_mutation_command({
+      .api_version = std::string(kHostdMutationProtocolApiVersion),
+      .challenge_response = response,
+      .mutation = HostdMutationKind::request_bundle,
+      .bundle_request = mutation_bundle_request(),
+      .release_request = std::nullopt,
+      .command_digest = {},
+  });
+  const auto command_bytes = hostd_mutation_command_canonical_json(command);
+  require(hostd_mutation_command_from_canonical_json(command_bytes) == command,
+          "sealed mutation command round trips challenge and bundle exactly");
+  validate_hostd_mutation_exchange(open, challenge, command);
+  auto wrong_open = open;
+  wrong_open.claim.controller.concurrency_key = "gpu:1";
+  require_throws<HostdMutationProtocolError>(
+      [&] { validate_hostd_mutation_exchange(wrong_open, challenge, command); },
+      "mutation exchange rejects an open claim changed before command");
+
+  auto changed_attribution = command;
+  changed_attribution.bundle_request->run_id = "run-other";
+  changed_attribution.bundle_request =
+      seal_resource_request(std::move(*changed_attribution.bundle_request));
+  require_throws<HostdMutationProtocolError>(
+      [&] {
+        (void)seal_hostd_mutation_command(std::move(changed_attribution));
+      },
+      "mutation command cannot cross the challenged run attribution");
+  auto tampered = nlohmann::json::parse(command_bytes);
+  tampered["mutation"] = "reconcile_bundle_outcome";
+  require_throws<HostdMutationProtocolError>(
+      [&] {
+        (void)hostd_mutation_command_from_canonical_json(tampered.dump());
+      },
+      "mutation kind tampering invalidates the sealed command digest");
+  tampered = nlohmann::json::parse(command_bytes);
+  tampered["extra"] = true;
+  require_throws<HostdMutationProtocolError>(
+      [&] {
+        (void)hostd_mutation_command_from_canonical_json(tampered.dump());
+      },
+      "mutation command rejects unknown fields");
+
+  const auto release_command = seal_hostd_mutation_command({
+      .api_version = std::string(kHostdMutationProtocolApiVersion),
+      .challenge_response = response,
+      .mutation = HostdMutationKind::release_bundle,
+      .bundle_request = std::nullopt,
+      .release_request = mutation_release_request(),
+      .command_digest = {},
+  });
+  require(hostd_mutation_command_from_canonical_json(
+              hostd_mutation_command_canonical_json(release_command)) ==
+              release_command &&
+              release_command.command_digest != command.command_digest,
+          "release command is distinct and carries only its sealed release CAS");
+  auto contradictory_command = release_command;
+  contradictory_command.bundle_request = mutation_bundle_request("extra");
+  require_throws<HostdMutationProtocolError>(
+      [&] {
+        (void)seal_hostd_mutation_command(std::move(contradictory_command));
+      },
+      "one mutation command cannot carry both grant and release payloads");
+
+  const BundleRequestResult busy{
+      .status = BundleRequestStatus::busy,
+      .grant = std::nullopt,
+      .outcome_digest = "sha256:" + std::string(64U, 'a'),
+      .replayed = false,
+  };
+  const HostdMutationReply reply{
+      .api_version = std::string(kHostdMutationProtocolApiVersion),
+      .kind = HostdMutationReplyKind::bundle_outcome,
+      .challenge_id = challenge.challenge_id,
+      .command_digest = command.command_digest,
+      .bundle_result = busy,
+      .release_result = std::nullopt,
+  };
+  const auto reply_bytes = hostd_mutation_reply_canonical_json(reply);
+  require(hostd_mutation_reply_from_canonical_json(reply_bytes) == reply,
+          "mutation reply echoes challenge/command identities and exact outcome");
+  validate_hostd_mutation_reply(command, reply);
+  auto wrong_binding = reply;
+  wrong_binding.command_digest = "sha256:" + std::string(64U, 'b');
+  require_throws<HostdMutationProtocolError>(
+      [&] { validate_hostd_mutation_reply(command, wrong_binding); },
+      "client rejects a reply for a different sealed command");
+  auto contradictory_reply = reply;
+  contradictory_reply.kind = HostdMutationReplyKind::reconciliation_missing;
+  require_throws<HostdMutationProtocolError>(
+      [&] { (void)hostd_mutation_reply_canonical_json(contradictory_reply); },
+      "missing-reconciliation reply cannot carry an outcome");
+  const auto reconcile = seal_hostd_mutation_command({
+      .api_version = std::string(kHostdMutationProtocolApiVersion),
+      .challenge_response = response,
+      .mutation = HostdMutationKind::reconcile_bundle_outcome,
+      .bundle_request = mutation_bundle_request("request-reconcile"),
+      .release_request = std::nullopt,
+      .command_digest = {},
+  });
+  const HostdMutationReply missing{
+      .api_version = std::string(kHostdMutationProtocolApiVersion),
+      .kind = HostdMutationReplyKind::reconciliation_missing,
+      .challenge_id = challenge.challenge_id,
+      .command_digest = reconcile.command_digest,
+      .bundle_result = std::nullopt,
+      .release_result = std::nullopt,
+  };
+  validate_hostd_mutation_reply(reconcile, missing);
+}
+
 void canonical_success_binds_every_authority_field() {
+  const auto claim_bytes = hostd_session_challenge_claim_canonical_json(claim());
+  require(hostd_session_challenge_claim_from_canonical_json(claim_bytes) ==
+              claim(),
+          "challenge claim canonical codec round trips exactly");
+  require_throws<HostdSessionChallengeRejected>(
+      [&] {
+        auto altered = nlohmann::json::parse(claim_bytes);
+        altered["extra"] = true;
+        (void)hostd_session_challenge_claim_from_canonical_json(altered.dump());
+      },
+      "challenge claim codec rejects unknown fields");
   Fixture fixture;
   const HostdSessionChallenge challenge = fixture.issue();
   require(challenge.peer == peer() && challenge.claim == claim() &&
@@ -791,6 +961,7 @@ void concurrent_issue_and_verify_serialize_collaborators() {
 int main() {
   const std::vector<std::pair<std::string_view, void (*)()>> tests{
       {"canonical-success", canonical_success_binds_every_authority_field},
+      {"mutation-envelopes", mutation_envelopes_bind_challenge_payload_and_reply},
       {"replay-tamper", replay_and_tampering_are_single_use},
       {"time-peer", expiry_boot_change_and_pid_reuse_fail_closed},
       {"attestation-time-window", attestation_callback_time_window_is_exact},

@@ -660,9 +660,14 @@ Gate:
 
 Current implementation note: sealed release requests and grant, busy, and
 release results now have shared strict public codecs used by journal replay and
-available to the transport. The socket remains status-only until the
-socket-bound challenge/session adapter and multi-packet mutation exchange are
-implemented and pass the crash-window gates above.
+available to the transport. A v1 mutation envelope now defines the two-message
+exchange: an open claim receives a server challenge, then one sealed command
+echoes the exact challenge response and carries exactly one attributed bundle
+or release request. Cross-message validators bind the open, challenge,
+command digest, and typed reply; reconciliation may explicitly return missing
+but can never disguise a new outcome as replayed. The socket remains
+status-only until this envelope is dispatched through the socket-bound
+challenge/session adapter and passes the crash-window gates above.
 
 ### P0.4 — guarded launcher and strict cgroup enforcement
 

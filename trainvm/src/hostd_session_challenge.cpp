@@ -818,6 +818,28 @@ hostd_seal_journal_fence_evidence(HostdJournalFenceEvidence evidence) {
 }
 
 std::string
+hostd_session_challenge_claim_canonical_json(
+    const HostdSessionChallengeClaim &value) {
+  if (!valid_claim(value))
+    reject("challenge claim is malformed");
+  return claim_json(value).dump();
+}
+
+HostdSessionChallengeClaim
+hostd_session_challenge_claim_from_canonical_json(std::string_view value) {
+  try {
+    HostdSessionChallengeClaim parsed = parse_claim(parse_canonical(value));
+    if (!valid_claim(parsed))
+      reject("challenge claim canonical semantics are invalid");
+    return parsed;
+  } catch (const HostdSessionChallengeError &) {
+    throw;
+  } catch (...) {
+    reject("challenge claim canonical decoding failed");
+  }
+}
+
+std::string
 hostd_session_challenge_canonical_json(const HostdSessionChallenge &value) {
   if (!valid_challenge(value))
     reject("challenge is not exactly sealed");

@@ -107,6 +107,9 @@ Implemented now:
 - a process-free, single-use journal-fence challenge verifier binding socket peer process instance,
   host/boot/broker, pinned-journal claims, controller generation, logical fence, nonce, and bounded
   boottime lifetime, with per-peer quotas and no bearer-capability interpretation of decoded data;
+- a canonical hostd mutation-envelope contract that binds one open journal/controller claim to the
+  issued single-use challenge, echoed response, exactly attributed grant/reconcile/release payload,
+  sealed command digest, and operation-compatible reply before any socket opcode is enabled;
 - per-concurrency-scope durable hostd controller heads, generations, event identities, and retained
   controller IDs, so takeover invalidates only the affected logical resource scope while aliased,
   rolled-back, or legacy-global controller metadata fails closed;
