@@ -47,6 +47,16 @@ func TestSubmissionRequiresConfiguredAuthority(t *testing.T) {
 	}
 }
 
+func TestDescriptorRequiresConfiguredAuthority(t *testing.T) {
+	commander := &GRPCCommander{client: nil}
+	_, err := commander.GetDescriptor(context.Background(), DescriptorRequest{
+		Provider: "trainvm.training-components", Version: "1.0.0",
+	})
+	if err == nil {
+		t.Fatal("descriptor request without an authority unexpectedly accepted")
+	}
+}
+
 func TestSubmissionRPCRequestFencesAuthorityAndPreview(t *testing.T) {
 	request, err := submissionRPCRequest(SubmissionRequest{
 		SourceDocument: `{"kind":"Experiment"}`, SourceFormat: " JSON ", CreateRun: true,

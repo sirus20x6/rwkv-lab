@@ -22,6 +22,17 @@ import (
 type Commander interface {
 	SubmitExperiment(context.Context, SubmissionRequest) (SubmissionResult, error)
 	RequestControls(context.Context, ControlRequest) (ControlResult, error)
+	GetDescriptor(context.Context, DescriptorRequest) (DescriptorResult, error)
+}
+
+type DescriptorRequest struct {
+	Provider string
+	Version  string
+}
+
+type DescriptorResult struct {
+	SchemaJSON string `json:"schema_json"`
+	SchemaHash string `json:"schema_hash"`
 }
 
 type SubmissionRequest struct {
@@ -198,6 +209,28 @@ func (c *GRPCCommander) SubmitExperiment(ctx context.Context, request Submission
 		})
 	}
 	return result, nil
+}
+
+func (c *GRPCCommander) GetDescriptor(ctx context.Context, request DescriptorRequest) (DescriptorResult, error) {
+	if c == nil || c.client == nil {
+		return DescriptorResult{}, fmt.Errorf("TrainVM authority client is not configured")
+	}
+	request.Provider = strings.TrimSpace(request.Provider)
+	request.Version = strings.TrimSpace(request.Version)
+	if request.Provider == "" || request.Version == "" || len(request.Provider) > 256 || len(request.Version) > 256 {
+		return DescriptorResult{}, &ValidationError{Message: "bounded descriptor provider and version are required"}
+	}
+	response, err := c.client.GetDescriptor(ctx, &trainvmv1.DescriptorRequest{
+		Adapter: request.Provider,
+		Version: request.Version,
+	})
+	if err != nil {
+		return DescriptorResult{}, err
+	}
+	return DescriptorResult{
+		SchemaJSON: response.GetSchemaJson(),
+		SchemaHash: response.GetSchemaHash(),
+	}, nil
 }
 
 func submissionRPCRequest(request SubmissionRequest) (*trainvmv1.SubmitExperimentRequest, error) {

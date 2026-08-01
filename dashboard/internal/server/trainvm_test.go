@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,7 +24,15 @@ type fakeTrainVMCommander struct {
 	result           trainvmstore.ControlResult
 	submission       trainvmstore.SubmissionRequest
 	submissionResult trainvmstore.SubmissionResult
+	descriptor       trainvmstore.DescriptorRequest
+	descriptorResult trainvmstore.DescriptorResult
 	err              error
+}
+
+func (f *fakeTrainVMCommander) GetDescriptor(_ context.Context,
+	request trainvmstore.DescriptorRequest) (trainvmstore.DescriptorResult, error) {
+	f.descriptor = request
+	return f.descriptorResult, f.err
 }
 
 func (f *fakeTrainVMCommander) SubmitExperiment(_ context.Context,
@@ -208,6 +218,35 @@ func TestTrainVMAuthoringEndpoints(t *testing.T) {
 	srv.Handler().ServeHTTP(response, request)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("invalid compile status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestTrainVMTrainingComponentsComeFromNativeAuthority(t *testing.T) {
+	document := `{"api_version":"trainvm.training-components/v1","components":[]}`
+	digest := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(document)))
+	commander := &fakeTrainVMCommander{descriptorResult: trainvmstore.DescriptorResult{
+		SchemaJSON: document,
+		SchemaHash: digest,
+	}}
+	srv := New(Config{Commander: commander})
+	request := httptest.NewRequest(http.MethodGet, "/api/trainvm/training-components", nil)
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK ||
+		commander.descriptor.Provider != "trainvm.training-components" ||
+		commander.descriptor.Version != "1.0.0" ||
+		!strings.Contains(response.Body.String(), `"schema_hash":"`+digest+`"`) ||
+		!strings.Contains(response.Body.String(), `"api_version":"trainvm.training-components/v1"`) {
+		t.Fatalf("training-component descriptor status=%d request=%#v body=%s",
+			response.Code, commander.descriptor, response.Body.String())
+	}
+
+	commander.descriptorResult.SchemaHash = "sha256:" + strings.Repeat("0", 64)
+	response = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("mismatched descriptor identity accepted: status=%d body=%s",
+			response.Code, response.Body.String())
 	}
 }
 

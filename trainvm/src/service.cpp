@@ -2221,6 +2221,35 @@ grpc::Status TrainVMService::CommandRun(grpc::ServerContext* context,
   }
 }
 
+grpc::Status TrainVMService::GetDescriptor(
+    grpc::ServerContext* context, const v1::DescriptorRequest* request,
+    v1::DescriptorResponse* response) {
+  if (request == nullptr || response == nullptr) {
+    return {grpc::StatusCode::INVALID_ARGUMENT,
+            "descriptor request and response are required"};
+  }
+  if (request->ByteSizeLong() > 4096U || request->adapter().size() > 256U ||
+      request->version().size() > 256U) {
+    return {grpc::StatusCode::RESOURCE_EXHAUSTED,
+            "descriptor selector exceeds its bound"};
+  }
+  if (cancelled(context)) return cancellation_status();
+  if (request->adapter() != "trainvm.training-components" ||
+      request->version() != "1.0.0") {
+    return {grpc::StatusCode::NOT_FOUND,
+            "no descriptor matches the exact requested provider and version"};
+  }
+  try {
+    const std::string canonical =
+        training_components_.document_json().dump();
+    response->set_schema_json(canonical);
+    response->set_schema_hash(training_components_.registry_digest());
+    return grpc::Status::OK;
+  } catch (const std::exception& exception) {
+    return {grpc::StatusCode::DATA_LOSS, exception.what()};
+  }
+}
+
 int serve(const std::filesystem::path& journal_path,
           const std::filesystem::path& socket_path,
           AdapterRegistry adapter_registry,

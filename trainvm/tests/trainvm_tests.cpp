@@ -7216,6 +7216,19 @@ void test_service_registry_and_reconciliation() {
       const grpc::Status preview_status = service.SubmitExperiment(
           nullptr, &preview_request, &preview);
 
+      trainvm::v1::DescriptorRequest descriptor_request;
+      descriptor_request.set_adapter("trainvm.training-components");
+      descriptor_request.set_version("1.0.0");
+      trainvm::v1::DescriptorResponse descriptor_response;
+      const grpc::Status descriptor_status = service.GetDescriptor(
+          nullptr, &descriptor_request, &descriptor_response);
+      trainvm::v1::DescriptorRequest unknown_descriptor;
+      unknown_descriptor.set_adapter("trainvm.training-components");
+      unknown_descriptor.set_version("2.0.0");
+      trainvm::v1::DescriptorResponse unknown_descriptor_response;
+      const grpc::Status unknown_descriptor_status = service.GetDescriptor(
+          nullptr, &unknown_descriptor, &unknown_descriptor_response);
+
       trainvm::v1::SubmitExperimentRequest stale = preview_request;
       stale.set_create_run(true);
       stale.set_idempotency_key("training-components");
@@ -7245,6 +7258,13 @@ void test_service_registry_and_reconciliation() {
                                               ":created")
                              : std::nullopt;
       check(preview_status.ok() &&
+                descriptor_status.ok() &&
+                descriptor_response.schema_hash() ==
+                    fixture_training_component_registry().registry_digest() &&
+                nlohmann::json::parse(descriptor_response.schema_json()) ==
+                    fixture_training_component_registry().document_json() &&
+                unknown_descriptor_status.error_code() ==
+                    grpc::StatusCode::NOT_FOUND &&
                 preview.training_component_lock_digest().starts_with(
                     "sha256:") &&
                 preview.training_component_lock_digest().size() == 71U &&

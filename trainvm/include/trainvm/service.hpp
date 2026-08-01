@@ -61,6 +61,11 @@ class TrainVMService final : public v1::TrainVM::Service,
                           const v1::RunCommandRequest* request,
                           v1::RunCommandResponse* response) override;
 
+  grpc::Status GetDescriptor(
+      grpc::ServerContext* context,
+      const v1::DescriptorRequest* request,
+      v1::DescriptorResponse* response) override;
+
   grpc::Status Connect(
       grpc::ServerContext* context,
       grpc::ServerReaderWriter<v1::ControllerToWorker,

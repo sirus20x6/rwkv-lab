@@ -137,6 +137,7 @@ class TrainingComponentRegistry final {
   [[nodiscard]] const std::string& registry_digest() const noexcept;
   [[nodiscard]] std::string descriptor_digest(
       const TrainingComponentKey& key) const;
+  [[nodiscard]] nlohmann::json document_json() const;
   [[nodiscard]] nlohmann::json descriptors_json() const;
 
  private:

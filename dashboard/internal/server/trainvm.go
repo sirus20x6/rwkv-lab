@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"net"
@@ -19,6 +21,38 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+func (s *Server) handleTrainVMTrainingComponents(w http.ResponseWriter, r *http.Request) {
+	if s.commander == nil {
+		http.Error(w, "TrainVM authority is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	result, err := s.commander.GetDescriptor(r.Context(), trainvmstore.DescriptorRequest{
+		Provider: "trainvm.training-components",
+		Version:  "1.0.0",
+	})
+	if err != nil {
+		writeTrainVMAuthorityError(w, err)
+		return
+	}
+	var document any
+	if result.SchemaJSON == "" || len(result.SchemaJSON) > 1<<20 ||
+		json.Unmarshal([]byte(result.SchemaJSON), &document) != nil {
+		http.Error(w, "native authority returned an invalid descriptor document", http.StatusBadGateway)
+		return
+	}
+	digest := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(result.SchemaJSON)))
+	if result.SchemaHash != digest {
+		http.Error(w, "native authority returned a mismatched descriptor identity", http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"schema_hash": result.SchemaHash,
+		"schema":      document,
+	})
+}
 
 const trainVMDraftLimit = 2 << 20
 const trainVMCommandLimit = 64 << 10

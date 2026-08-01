@@ -473,4 +473,12 @@ Json TrainingComponentRegistry::descriptors_json() const {
   return components;
 }
 
+Json TrainingComponentRegistry::document_json() const {
+  Json document{{"api_version", "trainvm.training-components/v1"},
+                {"components", descriptors_json()}};
+  if ("sha256:" + sha256_hex(document.dump()) != registry_digest_)
+    reject("training component registry document identity is not canonical");
+  return document;
+}
+
 }  // namespace trainvm

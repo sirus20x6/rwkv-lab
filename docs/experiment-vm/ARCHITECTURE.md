@@ -231,6 +231,12 @@ merely compatible. Optimizer state, schedule/curriculum cursors, parameter-routi
 precision/scaler state become part of the later checkpoint manifest contract rather than ad hoc
 trainer files.
 
+The immutable registry is exposed as the exact descriptor provider
+`trainvm.training-components@1.0.0`. `GetDescriptor` returns the canonical registry document and its
+registry SHA-256. The Go bridge recomputes that digest before returning the document to the browser.
+The experiment editor uses the reflected field contracts to compose node/family/slot selections;
+there is no optimizer-, schedule-, or activation-specific dashboard handler.
+
 ## VM and finite-state semantics
 
 The plan graph is a durable hierarchical state machine. The top-level run states are:

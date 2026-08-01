@@ -164,6 +164,11 @@ void registry_is_canonical_and_resolves_typed_configuration() {
       trainvm::TrainingComponentRegistry::from_json(document.dump());
   check(decoded.registry_digest() == registry.registry_digest(),
         "reflected registry JSON round trips to the same authority identity");
+  check(registry.document_json() == document &&
+            "sha256:" + trainvm::sha256_hex(
+                            registry.document_json().dump()) ==
+                registry.registry_digest(),
+        "descriptor document bytes carry the exact registry identity");
 
   const trainvm::TrainingComposition composition{
       .model_family = "mageflow",

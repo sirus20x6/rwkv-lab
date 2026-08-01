@@ -213,6 +213,23 @@ details.panel[open] .d-caret { transform: rotate(90deg); color: var(--accent); }
 .vm-editor-toolbar input { min-width: 180px; flex: 1 1 260px; padding: 5px 7px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--bg-elev); color: var(--text); font: var(--fs-xs)/1.25 var(--mono); }
 .vm-editor-toolbar input:focus { outline: none; border-color: var(--accent); }
 .vm-editor-toolbar .btn[disabled] { opacity: .45; cursor: default; }
+.vm-component-library { margin: 0 0 12px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg); }
+.vm-component-library > summary { cursor: pointer; padding: 8px 10px; color: var(--text-dim); font: 600 var(--fs-xs)/1.3 var(--mono); text-transform: uppercase; letter-spacing: .05em; }
+.vm-component-library > summary span { margin-left: 7px; color: var(--muted); font-weight: 400; text-transform: none; letter-spacing: 0; }
+.vm-component-compose { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(150px, 1fr) minmax(120px, .7fr) minmax(190px, 1.3fr) auto; gap: 7px; align-items: end; padding: 9px; border-top: 1px solid var(--divider); }
+.vm-component-input { min-width: 0; }
+.vm-component-input label { display: block; margin-bottom: 3px; color: var(--muted); font: var(--fs-xs)/1.2 var(--mono); }
+.vm-component-input input, .vm-component-input select { width: 100%; min-width: 0; padding: 5px 7px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--bg-elev); color: var(--text); font: var(--fs-xs)/1.25 var(--mono); }
+.vm-component-input input:focus, .vm-component-input select:focus { outline: none; border-color: var(--accent); }
+.vm-component-detail { display: grid; grid-template-columns: minmax(230px, .8fr) minmax(300px, 1.2fr); gap: 10px; padding: 9px; border-top: 1px solid var(--divider); }
+.vm-component-meta { min-width: 0; font: var(--fs-xs)/1.4 var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+.vm-component-meta strong { display: block; color: var(--text); font-size: var(--fs-sm); }
+.vm-component-fields { display: grid; grid-template-columns: repeat(2, minmax(150px, 1fr)); gap: 6px; }
+.vm-component-fields .vm-schema-field { margin: 0; }
+.vm-component-bound { grid-column: 1 / -1; padding-top: 7px; color: var(--muted); font: var(--fs-xs)/1.3 var(--mono); }
+.vm-component-bound button { margin-left: 7px; }
+.vm-component-existing { padding: 0 9px 9px; }
+.vm-component-existing-row { display: grid; grid-template-columns: minmax(130px, .8fr) minmax(160px, 1fr) auto; gap: 7px; align-items: center; padding: 5px 7px; border-top: 1px solid var(--divider); color: var(--text-dim); font: var(--fs-xs)/1.25 var(--mono); }
 .vm-editor-grid { display: grid; grid-template-columns: minmax(340px, 1fr) minmax(340px, 1fr); gap: 14px; }
 .vm-editor-heading { margin-bottom: 7px; color: var(--muted); font: 600 var(--fs-xs)/1.2 var(--mono); text-transform: uppercase; letter-spacing: .06em; }
 .vm-schema-form { height: 560px; overflow: auto; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg); padding: 8px; scrollbar-width: thin; }
@@ -239,7 +256,7 @@ details.panel[open] .d-caret { transform: rotate(90deg); color: var(--accent); }
 .vm-canonical pre { max-height: 360px; overflow: auto; padding: 8px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-sm); color: var(--text-dim); font: var(--fs-xs)/1.35 var(--mono); }
 .vm-raw-editor { margin-top: 10px; }
 .vm-raw-editor textarea { display: block; width: 100%; height: 300px; resize: vertical; margin: 7px 0; padding: 8px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--bg); color: var(--text); font: var(--fs-xs)/1.35 var(--mono); tab-size: 2; }
-@media (max-width: 1050px) { .vm-editor-grid { grid-template-columns: 1fr; } }
+@media (max-width: 1050px) { .vm-editor-grid { grid-template-columns: 1fr; } .vm-component-compose { grid-template-columns: 1fr 1fr; } .vm-component-detail { grid-template-columns: 1fr; } }
 
 /* ---- qualitative eval drill-down ---- */
 .eval-inline { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--divider); }
