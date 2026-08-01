@@ -61,6 +61,7 @@ add_library(trainvm_core
   src/fsm.cpp
   src/host_ledger.cpp
   src/host_ledger_authority.cpp
+  src/host_process_saga.cpp
   src/host_startup_audit.cpp
   src/hostd.cpp
   src/hostd_journal_fence_attestor.cpp

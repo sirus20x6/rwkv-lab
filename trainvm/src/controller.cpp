@@ -43,6 +43,7 @@ bool is_controller_event(std::string_view event_type) {
          event_type == "worker.invocation_bound" ||
          event_type == "node.dispatch_completed" ||
          event_type.starts_with("host.resource_") ||
+         event_type.starts_with("host.process_") ||
          event_type.starts_with("control.");
 }
 
@@ -535,6 +536,8 @@ const ExecutionState& Controller::recover() {
   std::optional<std::pair<std::string, std::string>> expected_completion;
   std::optional<std::string> expected_reacquisition_cause_id;
   std::map<std::string, std::string> replayed_control_status;
+  std::set<std::string> replayed_process_prepares;
+  std::set<std::string> replayed_process_commits;
   bool current_dispatch_prepared = false;
   for (const Event& event : events) {
     if (event.plan_revision != kInitialPlanRevision) {
@@ -557,6 +560,44 @@ const ExecutionState& Controller::recover() {
           event.run_revision != recovered.revision) {
         throw std::runtime_error(
             "journal recovery found malformed host saga authority evidence");
+      }
+      continue;
+    }
+    if (event.event_type.starts_with("host.process_")) {
+      const std::string launch_id = run_id_ + ":worker-launch:" +
+                                    recovered.current_node_id + ":" +
+                                    recovered.current_attempt_id;
+      const auto saga = journal_.host_process_saga(launch_id);
+      const bool prepared = event.event_type == "host.process_prepared";
+      const bool committed = event.event_type == "host.process_committed";
+      if ((!prepared && !committed) || phase != ReplayPhase::launch_bound ||
+          !saga || event.event_version != 1U ||
+          event.worker_sequence != 0U ||
+          event.run_revision != recovered.revision ||
+          event.node_id != recovered.current_node_id ||
+          event.attempt_id != recovered.current_attempt_id ||
+          saga->prepare.launch.identity.launch_event_id != launch_id ||
+          saga->prepare.launch.identity.run_id != run_id_ ||
+          saga->prepare.launch.identity.node_id != recovered.current_node_id ||
+          saga->prepare.launch.identity.attempt_id !=
+              recovered.current_attempt_id) {
+        throw std::runtime_error(
+            "journal recovery found malformed host process authority evidence");
+      }
+      if (prepared) {
+        if (event.event_id != launch_id + ":host-process-prepared" ||
+            !replayed_process_prepares.insert(launch_id).second) {
+          throw std::runtime_error(
+              "journal recovery found duplicate host process prepare evidence");
+        }
+      } else {
+        if (!saga->committed ||
+            !replayed_process_prepares.contains(launch_id) ||
+            event.event_id != launch_id + ":host-process-committed" ||
+            !replayed_process_commits.insert(launch_id).second) {
+          throw std::runtime_error(
+              "journal recovery found unordered host process commit evidence");
+        }
       }
       continue;
     }

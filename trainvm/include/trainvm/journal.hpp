@@ -18,6 +18,7 @@
 #include "trainvm/dispatch.hpp"
 #include "trainvm/host_launch.hpp"
 #include "trainvm/host_ledger.hpp"
+#include "trainvm/hostd_process_protocol.hpp"
 #include "trainvm/command.hpp"
 #include "trainvm/lease.hpp"
 #include "trainvm/worker.hpp"
@@ -145,6 +146,18 @@ struct HostGrantSagaSnapshot final {
   bool operator==(const HostGrantSagaSnapshot&) const = default;
 };
 
+// Journal-owned copy of the host process prepare/commit transaction. The
+// replay flags carried by transport replies are deliberately normalized out:
+// they describe delivery, not the immutable process identity.
+struct HostProcessSagaSnapshot final {
+  HostdProcessPrepareRequest prepare;
+  HostdProcessPreparedResult prepared;
+  std::optional<HostdProcessCommitRequest> commit;
+  std::optional<HostdProcessCommittedResult> committed;
+
+  bool operator==(const HostProcessSagaSnapshot&) const = default;
+};
+
 struct EffectiveControlSnapshot final {
   std::uint64_t revision{};
   nlohmann::json values = nlohmann::json::object();
@@ -254,6 +267,18 @@ public:
       const std::string& request_id, const ResourceReleaseReceipt& receipt);
   [[nodiscard]] std::optional<HostGrantSagaSnapshot> host_grant_saga(
       const std::string& request_id) const;
+  // The prepare receipt must be durable before hostd may release the stopped
+  // child to exec. Exact retries return the same normalized snapshot.
+  [[nodiscard]] HostProcessSagaSnapshot record_host_process_prepared(
+      const HostdProcessPrepareRequest& request,
+      const HostdProcessPreparedResult& result,
+      const AuthorityTimeSample& now);
+  [[nodiscard]] HostProcessSagaSnapshot record_host_process_committed(
+      const HostdProcessCommitRequest& request,
+      const HostdProcessCommittedResult& result,
+      const AuthorityTimeSample& now);
+  [[nodiscard]] std::optional<HostProcessSagaSnapshot> host_process_saga(
+      const std::string& launch_id) const;
   [[nodiscard]] std::optional<HostLaunchGrantClaim> host_launch_grant_claim(
       const std::string& run_id, const std::string& concurrency_key,
       const std::string& lease_id, std::uint64_t fencing_token,

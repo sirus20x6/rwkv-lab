@@ -303,10 +303,15 @@ freezes a canonical, content-addressed operation invocation containing resolved 
 effective controls, authorized artifact manifests, output declarations, execution policy, and exact
 adapter identity; reconnects receive those same bytes. The Linux host authority has a stopped-child
 cgroup/pidfd launcher, durable process intent/spawn/exit receipts, and guarded daemon
-prepare/commit/finalize commands. Service-to-daemon launch integration and pause/resume remain
-subsequent milestones. A worker launch ticket is a protocol authorization only until it is paired
-with a trusted descriptor digest, resolved launch specification, host identity, and durable process
-receipt.
+prepare/commit/finalize commands. TrainVMService now has an opt-in, serialized process-saga
+coordinator that binds sealed launch bytes and an immutable worker bootstrap, asks hostd to prepare
+a stopped child, copies the exact spawn receipt into the TrainVM hash chain, and only then authorizes
+exec commit. Lost prepare and commit replies converge by exact replay, and transport replay flags
+are excluded from durable identity. The normal CLI remains launch-disabled until the strict hostd
+mutation client and daemon bootstrap configuration are installed; pause/resume and durable hostd
+adoption remain subsequent milestones. A worker launch ticket is a protocol authorization only
+until it is paired with a trusted descriptor digest, resolved launch specification, host identity,
+and durable process receipt.
 
 Secret-marked parameters are restricted to versioned opaque references of the form
 `secret://provider/name#version`; raw secret values are rejected before canonical plan persistence.

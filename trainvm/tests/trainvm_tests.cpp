@@ -310,7 +310,8 @@ void prime_test_service_launch(trainvm::TrainVMService& service,
 // identity before presenting WorkerHello evidence.
 trainvm::ResolvedLaunchSpec bind_test_worker_launch(
     trainvm::Controller& controller,
-    const trainvm::WorkerLaunchTicket& launch, std::int64_t now_ns) {
+    const trainvm::WorkerLaunchTicket& launch, std::int64_t now_ns,
+    std::optional<trainvm::HostIdentity> selected_host = std::nullopt) {
   controller.recover();
   const auto& plan = controller.plan();
   const auto& state = controller.state();
@@ -341,7 +342,8 @@ trainvm::ResolvedLaunchSpec bind_test_worker_launch(
   };
   const trainvm::HostLaunchRegistry registry =
       fixture_test_host_launch_registry(plan, launch);
-  const trainvm::HostIdentity host = fixture_test_host_identity();
+  const trainvm::HostIdentity host =
+      selected_host.value_or(fixture_test_host_identity());
   const trainvm::VerifiedLaunchArtifact executable{
       .source_path = profile.executable_path,
       .source_device = 1,
@@ -8978,6 +8980,145 @@ class SagaStaticResultClient final : public trainvm::IHostGrantClient {
   trainvm::BundleRequestResult result_;
 };
 
+class SagaProcessClient final : public trainvm::IHostProcessClient {
+ public:
+  explicit SagaProcessClient(trainvm::SQLiteHostLedger& ledger)
+      : ledger_(ledger) {}
+
+  trainvm::HostdProcessPreparedResult prepare_process(
+      const trainvm::HostdProcessPrepareRequest& request,
+      const trainvm::ResolvedLaunch&,
+      const trainvm::SealedWorkerBootstrap& bootstrap) override {
+    ++prepare_calls;
+    const int bootstrap_fd = bootstrap.duplicate_fd();
+    trainvm::WorkerBootstrapSpec inspected;
+    try {
+      inspected = trainvm::worker_bootstrap_from_sealed_fd(
+          bootstrap_fd, request.worker_bootstrap_digest);
+    } catch (...) {
+      (void)::close(bootstrap_fd);
+      throw;
+    }
+    (void)::close(bootstrap_fd);
+    if (inspected.run_id != request.launch.identity.run_id ||
+        inspected.node_id != request.launch.identity.node_id ||
+        inspected.controller_target != "unix:/tmp/trainvm-process-saga.sock") {
+      throw std::runtime_error("process client received the wrong bootstrap");
+    }
+    const auto launch = trainvm::seal_host_process_launch_request({
+        .api_version =
+            std::string(trainvm::kHostProcessLaunchRequestApiVersion),
+        .launch_id = request.launch.identity.launch_event_id,
+        .allocation_id = request.grant.allocation_id,
+        .grant_digest = request.grant.receipt_digest,
+        .journal_id = request.grant.journal_id,
+        .run_id = request.grant.run_id,
+        .logical_lease_id = request.grant.logical_lease_id,
+        .logical_fencing_token = request.grant.logical_fencing_token,
+        .resolved_launch_digest = trainvm::hostd_bound_process_launch_digest(
+            request.launch, request.worker_bootstrap_digest),
+        .executable_path = request.launch.identity.executable.source_path,
+        .executable_digest =
+            request.launch.identity.executable.sealed_sha256,
+        .cgroup_path = "/trainvm/process-saga",
+        .cgroup_device = 41U,
+        .cgroup_inode = 42U,
+        .canonical_request_digest = {},
+    });
+    const auto intended = ledger_.commit_process_launch_intent(
+        launch, {300, 3'000});
+    const auto spawn_request = trainvm::seal_host_process_spawn_request({
+        .api_version =
+            std::string(trainvm::kHostProcessSpawnRequestApiVersion),
+        .launch_id = launch.launch_id,
+        .launch_intent_digest = intended.intent.receipt_digest,
+        .host_pid = 12345,
+        .process_starttime_ticks = 67890U,
+        .boot_id = request.grant.boot_id,
+        .cgroup_path = launch.cgroup_path,
+        .cgroup_device = launch.cgroup_device,
+        .cgroup_inode = launch.cgroup_inode,
+        .executable_digest = launch.executable_digest,
+        .canonical_request_digest = {},
+    });
+    const auto spawned = ledger_.commit_process_spawn(
+        spawn_request, {301, 3'001});
+    if (intended.replayed || spawned.replayed) ++prepare_replays;
+    spawn_ = spawned.receipt;
+    return {.api_version =
+                std::string(trainvm::kHostdProcessPreparedApiVersion),
+            .intent = intended.intent,
+            .spawn = spawned.receipt,
+            .replayed = intended.replayed || spawned.replayed};
+  }
+
+  trainvm::HostdProcessCommittedResult commit_process(
+      const trainvm::HostdProcessCommitRequest& request) override {
+    ++commit_calls;
+    const bool replayed = commit_calls > 1U;
+    if (replayed) ++commit_replays;
+    return {.api_version =
+                std::string(trainvm::kHostdProcessCommittedApiVersion),
+            .launch_id = request.launch_id,
+            .spawn_receipt_digest = request.spawn_receipt_digest,
+            .released_to_exec = true,
+            .replayed = replayed};
+  }
+
+  void finalize() {
+    if (!spawn_) throw std::runtime_error("process was never prepared");
+    const auto& request = spawn_->request;
+    (void)ledger_.commit_process_exit(
+        trainvm::seal_host_process_exit_request({
+            .api_version =
+                std::string(trainvm::kHostProcessExitRequestApiVersion),
+            .exit_request_id = request.launch_id + ":exit",
+            .launch_id = request.launch_id,
+            .spawn_receipt_digest = spawn_->receipt_digest,
+            .host_pid = request.host_pid,
+            .process_starttime_ticks = request.process_starttime_ticks,
+            .wait_code = 1,
+            .wait_status = 0,
+            .cgroup_path = request.cgroup_path,
+            .cgroup_device = request.cgroup_device,
+            .cgroup_inode = request.cgroup_inode,
+            .cgroup_empty = true,
+            .accelerator_contexts_empty = true,
+            .context_audit_digest =
+                "sha256:" + std::string(64U, 'c'),
+            .canonical_request_digest = {},
+        }),
+        {400, 4'000});
+  }
+
+  std::size_t prepare_calls{};
+  std::size_t prepare_replays{};
+  std::size_t commit_calls{};
+  std::size_t commit_replays{};
+
+ private:
+  trainvm::SQLiteHostLedger& ledger_;
+  std::optional<trainvm::HostProcessSpawnReceipt> spawn_;
+};
+
+class ProcessSagaOneShotFault final
+    : public trainvm::IHostProcessSagaFaultInjector {
+ public:
+  explicit ProcessSagaOneShotFault(trainvm::HostProcessSagaFaultPoint point)
+      : point_(point) {}
+
+  void hit(trainvm::HostProcessSagaFaultPoint point) override {
+    if (armed_ && point == point_) {
+      armed_ = false;
+      throw std::runtime_error("injected host process saga fault");
+    }
+  }
+
+ private:
+  trainvm::HostProcessSagaFaultPoint point_;
+  bool armed_{true};
+};
+
 trainvm::ObservedHostResource saga_mutex_resource() {
   return {
       .id = {.kind = trainvm::HostResourceKind::host_mutex,
@@ -9010,8 +9151,8 @@ void test_host_grant_saga() {
 
   trainvm::HostKernelSnapshot kernel_snapshot{
       .api_version = std::string(trainvm::kHostInventoryApiVersion),
-      .host_id = "host-saga",
-      .boot_id = "boot-saga",
+      .host_id = "sha256:" + std::string(64U, 'd'),
+      .boot_id = "dddddddd-dddd-dddd-dddd-dddddddddddd",
       .broker_epoch = "broker-saga",
       .begin_revision = "revision-saga",
       .end_revision = "revision-saga",
@@ -9229,7 +9370,10 @@ void test_host_grant_saga() {
       {.code_fingerprint = "sha256:" + std::string(64U, 'a'),
        .required_capabilities = {"worker.controls", "worker.metrics"}},
       test_time(23));
-  const auto binding = bind_test_worker_launch(controller, launch, 23);
+  const auto binding = bind_test_worker_launch(
+      controller, launch, 23,
+      trainvm::HostIdentity{.host_id = inventory.host_id,
+                            .boot_id = inventory.boot_id});
   const auto durable_launch = journal.event(
       launch.run_id + ":worker-launch:" + launch.node_id + ":" +
       launch.attempt_id);
@@ -9239,6 +9383,104 @@ void test_host_grant_saga() {
             journal.launch_binding(durable_launch->event_id)
                     ->identity.host_grant == selected_claim,
         "worker ticket, launch intent, and resolved binding seal the same exact host grant claim");
+
+  trainvm::ResolvedLaunch process_launch(
+      binding, -1,
+      binding.identity.code ? std::optional<int>{-1} : std::nullopt, -1);
+  SagaProcessClient process_host(host_ledger);
+  ProcessSagaOneShotFault lost_prepare_reply(
+      trainvm::HostProcessSagaFaultPoint::after_prepare_host);
+  bool prepare_reply_lost = false;
+  try {
+    trainvm::HostProcessSagaReconciler process_reconciler(
+        journal, process_host, &lost_prepare_reply);
+    (void)process_reconciler.reconcile(
+        process_launch, *granted.grant,
+        "unix:/tmp/trainvm-process-saga.sock", test_time(23));
+  } catch (const std::runtime_error&) {
+    prepare_reply_lost = true;
+  }
+  check(prepare_reply_lost &&
+            !journal.host_process_saga(binding.identity.launch_event_id),
+        "lost prepare reply leaves no fabricated journal process receipt");
+
+  ProcessSagaOneShotFault stopped_after_journal(
+      trainvm::HostProcessSagaFaultPoint::after_prepare_journal);
+  bool stopped_before_commit = false;
+  try {
+    trainvm::HostProcessSagaReconciler process_reconciler(
+        journal, process_host, &stopped_after_journal);
+    (void)process_reconciler.reconcile(
+        process_launch, *granted.grant,
+        "unix:/tmp/trainvm-process-saga.sock", test_time(23));
+  } catch (const std::runtime_error&) {
+    stopped_before_commit = true;
+  }
+  const auto durably_stopped =
+      journal.host_process_saga(binding.identity.launch_event_id);
+  check(stopped_before_commit && durably_stopped &&
+            !durably_stopped->committed && process_host.prepare_calls == 2U &&
+            process_host.prepare_replays == 1U,
+        "prepare retry converges on one stopped child and journals it before exec");
+
+  ProcessSagaOneShotFault lost_commit_reply(
+      trainvm::HostProcessSagaFaultPoint::after_commit_host);
+  bool commit_reply_lost = false;
+  try {
+    trainvm::HostProcessSagaReconciler process_reconciler(
+        journal, process_host, &lost_commit_reply);
+    (void)process_reconciler.reconcile(
+        process_launch, *granted.grant,
+        "unix:/tmp/trainvm-process-saga.sock", test_time(23));
+  } catch (const std::runtime_error&) {
+    commit_reply_lost = true;
+  }
+  check(commit_reply_lost &&
+            !journal.host_process_saga(binding.identity.launch_event_id)
+                 ->committed,
+        "lost exec-commit reply preserves the durable stopped-child receipt");
+
+  trainvm::HostProcessSagaReconciler process_reconciler(journal,
+                                                         process_host);
+  const auto process_complete = process_reconciler.reconcile(
+      process_launch, *granted.grant,
+      "unix:/tmp/trainvm-process-saga.sock", test_time(23));
+  const std::uint64_t process_event_count = journal.event_count();
+  const auto process_replay = process_reconciler.reconcile(
+      process_launch, *granted.grant,
+      "unix:/tmp/trainvm-process-saga.sock", test_time(23));
+  check(process_complete.committed && process_replay == process_complete &&
+            !process_complete.prepared.replayed &&
+            !process_complete.committed->replayed &&
+            process_host.commit_calls == 2U &&
+            process_host.commit_replays == 1U &&
+            journal.event_count() == process_event_count,
+        "lost commit reply replays exactly and delivery flags never alter durable process identity");
+
+  bool process_namespace_rejected = false;
+  try {
+    (void)trainvm::JournalTestAccess::append(
+        journal,
+        {.event_id = "forged-host-process-event",
+         .run_id = launch.run_id,
+         .run_revision = controller.state().revision,
+         .plan_revision = 1,
+         .node_id = launch.node_id,
+         .attempt_id = launch.attempt_id,
+         .worker_sequence = 0,
+         .event_type = "host.process_prepared",
+         .event_version = 1,
+         .wall_time_ns = 23,
+         .monotonic_time_ns = 23,
+         .optimizer_step = std::nullopt,
+         .payload = {}});
+  } catch (const std::invalid_argument&) {
+    process_namespace_rejected = true;
+  }
+  check(process_namespace_rejected,
+        "untyped callers cannot forge host process authority events");
+  process_host.finalize();
+
   const trainvm::WorkerHelloEvidence hello{
       .run_id = launch.run_id,
       .node_id = launch.node_id,

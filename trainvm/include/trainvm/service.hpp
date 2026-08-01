@@ -15,6 +15,7 @@
 #include "trainvm/journal.hpp"
 #include "trainvm/authority_time.hpp"
 #include "trainvm/host_launch.hpp"
+#include "trainvm/host_process_saga.hpp"
 #include "trainvm/reconciler.hpp"
 #include "trainvm/training_component_registry.hpp"
 #include "trainvm/v1/trainvm.grpc.pb.h"
@@ -107,6 +108,8 @@ class TrainVMService final : public v1::TrainVM::Service,
   // Successful bindings retain their sealed descriptor bundle for a later
   // launcher boundary; this method never forks or executes a process.
   ResolvedLaunchSpec bind_worker_launch(const WorkerLaunchTicket& launch);
+  HostProcessSagaSnapshot launch_worker_process(
+      const std::string& launch_id);
 
   // Deterministic host-identity injection is restricted to focused authority
   // tests. Production construction always captures the local Linux identity.
@@ -118,7 +121,9 @@ class TrainVMService final : public v1::TrainVM::Service,
                  HostGrantEnforcement host_grant_enforcement =
                      HostGrantEnforcement::required,
                  TrainingComponentRegistry training_components =
-                     TrainingComponentRegistry({}));
+                     TrainingComponentRegistry({}),
+                 std::shared_ptr<IHostProcessClient> host_process_client = {},
+                 std::string controller_target = {});
 
   static constexpr std::size_t kMaximumRetainedLaunches = 32U;
   static constexpr std::uint64_t kMaximumRetainedLaunchBytes = 2ULL << 30U;
@@ -134,6 +139,9 @@ class TrainVMService final : public v1::TrainVM::Service,
   const TrainingComponentRegistry training_components_;
   const HostIdentity authority_host_;
   HostLaunchResolver host_launch_resolver_;
+  std::shared_ptr<IHostProcessClient> host_process_client_;
+  std::string controller_target_;
+  std::unique_ptr<HostProcessSagaReconciler> host_process_saga_;
   Reconciler reconciler_;
   std::map<std::string, ResolvedLaunch> resolved_launches_;
   std::mutex worker_sessions_mutex_;

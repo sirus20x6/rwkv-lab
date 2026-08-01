@@ -679,9 +679,12 @@ release, stale-fence, cross-scope, malformed-command, and abandoned-challenge
 paths are covered at the cooperative test grade. Process prepare is the sole
 command allowed to carry `SCM_RIGHTS`; descriptor roles and counts are exact,
 the daemon reattests sealed bytes and working-directory identity, and other
-packets continue to reject and close delegated descriptors. The remaining P0.3 gate is
-the broader journal/service/hostd process-crash matrix plus daemon bootstrap
-integration of the implemented service-cgroup authority at strict
+packets continue to reject and close delegated descriptors. The TrainVM journal and service now
+implement the central process crash window as a typed saga: the exact normalized prepare receipt is
+hash-chained before exec commit, controller recovery accepts only ordered prepare/commit evidence
+for the active bound launch, and injected lost replies replay without changing durable identity.
+The remaining P0.3 gate is the real mutation-client and daemon bootstrap integration plus the
+privileged end-to-end process-crash matrix at strict
 socket-pidfd/host-namespace grade. Deterministic transport checkpoints already prove that interruption at
 each pre-dispatch boundary leaves no ledger outcome, while interruption after
 the durable dispatch recovers the exact replay and remains releasable.

@@ -3039,9 +3039,11 @@ std::uint64_t Journal::append_uncommitted(const Event& event,
   if (!event.payload.is_object()) {
     throw std::invalid_argument("event payload must be an object");
   }
-  if (event.event_type.starts_with("host.resource_") && !allow_host_saga) {
+  if ((event.event_type.starts_with("host.resource_") ||
+       event.event_type.starts_with("host.process_")) &&
+      !allow_host_saga) {
     throw std::invalid_argument(
-        "host.resource_* is reserved for typed host saga authority");
+        "host resource/process events are reserved for typed saga authority");
   }
   if (event.worker_sequence > 0 && (event.node_id.empty() || event.attempt_id.empty())) {
     throw std::invalid_argument("sequenced worker events require node_id and attempt_id");
@@ -6183,6 +6185,250 @@ std::optional<HostGrantSagaSnapshot> Journal::host_grant_saga(
   auto snapshot = read_snapshot();
   (void)snapshot;
   return load_host_grant_saga(database_, request_id);
+}
+
+namespace {
+
+HostdProcessPreparedResult durable_prepared_result(
+    HostdProcessPreparedResult result) {
+  result.replayed = false;
+  (void)hostd_process_prepared_canonical_json(result);
+  return result;
+}
+
+HostdProcessCommittedResult durable_committed_result(
+    HostdProcessCommittedResult result) {
+  result.replayed = false;
+  (void)hostd_process_committed_canonical_json(result);
+  return result;
+}
+
+void require_prepared_process_binding(
+    const HostdProcessPrepareRequest& prepare,
+    const HostdProcessPreparedResult& prepared) {
+  (void)hostd_process_prepare_canonical_json(prepare);
+  (void)hostd_process_prepared_canonical_json(prepared);
+  const auto& launch = prepare.launch.identity;
+  const auto& grant = prepare.grant;
+  const auto& intent = prepared.intent;
+  const auto& request = intent.request;
+  const auto& spawn = prepared.spawn;
+  if (request.launch_id != launch.launch_event_id ||
+      request.allocation_id != grant.allocation_id ||
+      request.grant_digest != grant.receipt_digest ||
+      request.journal_id != grant.journal_id ||
+      request.run_id != grant.run_id ||
+      request.logical_lease_id != grant.logical_lease_id ||
+      request.logical_fencing_token != grant.logical_fencing_token ||
+      request.resolved_launch_digest != hostd_bound_process_launch_digest(
+          prepare.launch, prepare.worker_bootstrap_digest) ||
+      request.executable_path != launch.executable.source_path ||
+      request.executable_digest != launch.executable.sealed_sha256 ||
+      intent.host_id != grant.host_id || intent.boot_id != grant.boot_id ||
+      intent.broker_epoch != grant.broker_epoch ||
+      spawn.request.launch_id != request.launch_id ||
+      spawn.request.launch_intent_digest != intent.receipt_digest ||
+      spawn.request.boot_id != grant.boot_id ||
+      spawn.request.cgroup_path != request.cgroup_path ||
+      spawn.request.cgroup_device != request.cgroup_device ||
+      spawn.request.cgroup_inode != request.cgroup_inode ||
+      spawn.request.executable_digest != request.executable_digest ||
+      spawn.host_id != grant.host_id ||
+      spawn.broker_epoch != grant.broker_epoch) {
+    throw OperationPreconditionError(
+        "host process prepare receipt disagrees with its exact launch grant");
+  }
+}
+
+HostdProcessCommitRequest expected_process_commit(
+    const HostProcessSagaSnapshot& saga) {
+  const auto& grant = saga.prepare.grant;
+  return {.api_version = std::string(kHostdProcessCommitApiVersion),
+          .launch_id = saga.prepare.launch.identity.launch_event_id,
+          .allocation_id = grant.allocation_id,
+          .grant_digest = grant.receipt_digest,
+          .journal_id = grant.journal_id,
+          .run_id = grant.run_id,
+          .logical_lease_id = grant.logical_lease_id,
+          .logical_fencing_token = grant.logical_fencing_token,
+          .spawn_receipt_digest = saga.prepared.spawn.receipt_digest};
+}
+
+}  // namespace
+
+std::optional<HostProcessSagaSnapshot> Journal::host_process_saga(
+    const std::string& launch_id) const {
+  if (launch_id.empty()) {
+    throw std::invalid_argument("host process launch_id must not be empty");
+  }
+  const auto prepared_event = event(launch_id + ":host-process-prepared");
+  const auto committed_event = event(launch_id + ":host-process-committed");
+  if (!prepared_event) {
+    if (committed_event) {
+      throw std::runtime_error(
+          "host process commit exists without a durable prepare receipt");
+    }
+    return std::nullopt;
+  }
+  if (prepared_event->event_type != "host.process_prepared" ||
+      prepared_event->payload.size() != 2U ||
+      !prepared_event->payload.contains("prepare") ||
+      !prepared_event->payload.contains("prepared")) {
+    throw std::runtime_error("durable host process prepare event is malformed");
+  }
+  HostProcessSagaSnapshot result{
+      .prepare = hostd_process_prepare_from_canonical_json(
+          prepared_event->payload.at("prepare").dump()),
+      .prepared = durable_prepared_result(
+          hostd_process_prepared_from_canonical_json(
+              prepared_event->payload.at("prepared").dump())),
+      .commit = std::nullopt,
+      .committed = std::nullopt,
+  };
+  require_prepared_process_binding(result.prepare, result.prepared);
+  const auto& identity = result.prepare.launch.identity;
+  if (identity.launch_event_id != launch_id ||
+      prepared_event->run_id != identity.run_id ||
+      prepared_event->node_id != identity.node_id ||
+      prepared_event->attempt_id != identity.attempt_id) {
+    throw std::runtime_error(
+        "durable host process prepare event identity diverges");
+  }
+  if (!committed_event) return result;
+  if (committed_event->event_type != "host.process_committed" ||
+      committed_event->payload.size() != 2U ||
+      !committed_event->payload.contains("commit") ||
+      !committed_event->payload.contains("committed") ||
+      committed_event->run_id != identity.run_id ||
+      committed_event->node_id != identity.node_id ||
+      committed_event->attempt_id != identity.attempt_id) {
+    throw std::runtime_error("durable host process commit event is malformed");
+  }
+  result.commit = hostd_process_commit_from_canonical_json(
+      committed_event->payload.at("commit").dump());
+  result.committed = durable_committed_result(
+      hostd_process_committed_from_canonical_json(
+          committed_event->payload.at("committed").dump()));
+  const HostdProcessCommitRequest expected = expected_process_commit(result);
+  if (*result.commit != expected ||
+      result.committed->launch_id != expected.launch_id ||
+      result.committed->spawn_receipt_digest !=
+          expected.spawn_receipt_digest ||
+      !result.committed->released_to_exec) {
+    throw std::runtime_error(
+        "durable host process commit disagrees with its prepare receipt");
+  }
+  return result;
+}
+
+HostProcessSagaSnapshot Journal::record_host_process_prepared(
+    const HostdProcessPrepareRequest& request,
+    const HostdProcessPreparedResult& supplied_result,
+    const AuthorityTimeSample& now) {
+  require_authority_time(now);
+  const HostdProcessPreparedResult result =
+      durable_prepared_result(supplied_result);
+  require_prepared_process_binding(request, result);
+  const auto& identity = request.launch.identity;
+  if (!identity.host_grant ||
+      request.grant.journal_id != journal_id() ||
+      request.grant.run_id != identity.run_id ||
+      request.grant.logical_lease_id != identity.lease_id ||
+      request.grant.logical_fencing_token != identity.fencing_token) {
+    throw OperationPreconditionError(
+        "host process prepare does not target this journal launch authority");
+  }
+  require_host_launch_eligible(*identity.host_grant, now);
+  const auto binding = launch_binding(identity.launch_event_id);
+  const auto grant_saga = host_grant_saga(identity.host_grant->request_id);
+  if (!binding || *binding != request.launch || !grant_saga ||
+      !grant_saga->grant || *grant_saga->grant != request.grant) {
+    throw OperationPreconditionError(
+        "host process prepare has no exact durable launch and grant binding");
+  }
+  if (const auto existing = host_process_saga(identity.launch_event_id)) {
+    if (existing->prepare != request || existing->prepared != result) {
+      throw OperationPreconditionError(
+          "host process prepare replay diverges from its durable receipt");
+    }
+    return *existing;
+  }
+  Transaction transaction(database_);
+  std::string reason;
+  if (!verify_chain(&reason)) {
+    throw std::runtime_error("refusing host process prepare copy: " + reason);
+  }
+  Event durable = host_saga_event(
+      database_, identity.launch_event_id + ":host-process-prepared",
+      "host.process_prepared", identity.run_id, now.wall.nanoseconds,
+      static_cast<std::uint64_t>(now.boot.nanoseconds),
+      {{"prepare", nlohmann::json::parse(
+                       hostd_process_prepare_canonical_json(request))},
+       {"prepared", nlohmann::json::parse(
+                        hostd_process_prepared_canonical_json(result))}});
+  durable.node_id = identity.node_id;
+  durable.attempt_id = identity.attempt_id;
+  (void)append_uncommitted(durable, true);
+  transaction.commit();
+  auto stored = host_process_saga(identity.launch_event_id);
+  if (!stored) throw std::runtime_error("host process prepare copy vanished");
+  return *stored;
+}
+
+HostProcessSagaSnapshot Journal::record_host_process_committed(
+    const HostdProcessCommitRequest& request,
+    const HostdProcessCommittedResult& supplied_result,
+    const AuthorityTimeSample& now) {
+  require_authority_time(now);
+  (void)hostd_process_commit_canonical_json(request);
+  const HostdProcessCommittedResult result =
+      durable_committed_result(supplied_result);
+  auto saga = host_process_saga(request.launch_id);
+  if (!saga) {
+    throw OperationPreconditionError(
+        "host process commit requires a durable prepare receipt");
+  }
+  const HostdProcessCommitRequest expected = expected_process_commit(*saga);
+  if (request != expected || result.launch_id != request.launch_id ||
+      result.spawn_receipt_digest != request.spawn_receipt_digest ||
+      !result.released_to_exec) {
+    throw OperationPreconditionError(
+        "host process commit disagrees with its durable prepare receipt");
+  }
+  const auto& identity = saga->prepare.launch.identity;
+  if (!identity.host_grant) {
+    throw OperationPreconditionError(
+        "host process commit has no exact physical grant claim");
+  }
+  require_host_launch_eligible(*identity.host_grant, now);
+  if (saga->committed) {
+    if (*saga->commit != request || *saga->committed != result) {
+      throw OperationPreconditionError(
+          "host process commit replay diverges from its durable receipt");
+    }
+    return *saga;
+  }
+  Transaction transaction(database_);
+  std::string reason;
+  if (!verify_chain(&reason)) {
+    throw std::runtime_error("refusing host process commit copy: " + reason);
+  }
+  Event durable = host_saga_event(
+      database_, request.launch_id + ":host-process-committed",
+      "host.process_committed", request.run_id, now.wall.nanoseconds,
+      static_cast<std::uint64_t>(now.boot.nanoseconds),
+      {{"commit", nlohmann::json::parse(
+                      hostd_process_commit_canonical_json(request))},
+       {"committed", nlohmann::json::parse(
+                         hostd_process_committed_canonical_json(result))}});
+  durable.node_id = identity.node_id;
+  durable.attempt_id = identity.attempt_id;
+  (void)append_uncommitted(durable, true);
+  transaction.commit();
+  saga = host_process_saga(request.launch_id);
+  if (!saga || !saga->committed)
+    throw std::runtime_error("host process commit copy vanished");
+  return *saga;
 }
 
 std::optional<HostLaunchGrantClaim> Journal::host_launch_grant_claim(

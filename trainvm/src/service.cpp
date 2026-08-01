@@ -963,7 +963,9 @@ TrainVMService::TrainVMService(
     HostIdentity authority_host,
     std::function<AuthorityTimeSample()> authority_clock,
     HostGrantEnforcement host_grant_enforcement,
-    TrainingComponentRegistry training_components)
+    TrainingComponentRegistry training_components,
+    std::shared_ptr<IHostProcessClient> host_process_client,
+    std::string controller_target)
     : authority_lock_(std::make_unique<AuthorityLock>(journal_path)),
       journal_(authority_lock_->journal_path(),
                authority_lock_->journal_identity(),
@@ -977,9 +979,21 @@ TrainVMService::TrainVMService(
       training_components_(std::move(training_components)),
       authority_host_(std::move(authority_host)),
       host_launch_resolver_(host_launch_registry_, authority_host_),
+      host_process_client_(std::move(host_process_client)),
+      controller_target_(std::move(controller_target)),
+      host_process_saga_(
+          host_process_client_
+              ? std::make_unique<HostProcessSagaReconciler>(
+                    journal_, *host_process_client_)
+              : nullptr),
       reconciler_(journal_, adapter_registry_, training_components_,
                   command_mutex_,
-                  [this] { return authority_now(); }) {}
+                  [this] { return authority_now(); }) {
+  if (static_cast<bool>(host_process_client_) != !controller_target_.empty()) {
+    throw std::invalid_argument(
+        "host process client and controller target must be configured together");
+  }
+}
 
 TrainVMService::~TrainVMService() = default;
 
@@ -988,7 +1002,12 @@ AuthorityTimeSample TrainVMService::authority_now() const {
 }
 
 ReconcileResult TrainVMService::reconcile_once(const std::string& run_id) {
-  return reconciler_.step(run_id);
+  ReconcileResult result = reconciler_.step(run_id);
+  if (result.launch && host_process_saga_) {
+    const ResolvedLaunchSpec binding = bind_worker_launch(*result.launch);
+    (void)launch_worker_process(binding.identity.launch_event_id);
+  }
+  return result;
 }
 
 void TrainVMService::prune_retained_launches(
@@ -1187,6 +1206,35 @@ ResolvedLaunchSpec TrainVMService::bind_worker_launch(
         "host launch bundle cache rejected an exact committed binding");
   }
   return durable;
+}
+
+HostProcessSagaSnapshot TrainVMService::launch_worker_process(
+    const std::string& launch_id) {
+  if (!host_process_saga_) {
+    throw OperationPreconditionError(
+        "host process authority is disabled for this service");
+  }
+  std::scoped_lock lock(command_mutex_);
+  const auto retained = resolved_launches_.find(launch_id);
+  if (retained == resolved_launches_.end()) {
+    throw OperationPreconditionError(
+        "host process launch has no retained sealed descriptor authority");
+  }
+  const auto& identity = retained->second.spec().identity;
+  if (!identity.host_grant) {
+    throw OperationPreconditionError(
+        "host process launch has no durable physical grant claim");
+  }
+  const auto grant = journal_.host_grant_saga(
+      identity.host_grant->request_id);
+  if (!grant || !grant->grant ||
+      grant->grant->receipt_digest != identity.host_grant->grant_digest ||
+      grant->grant->fences != identity.host_grant->fences) {
+    throw OperationPreconditionError(
+        "host process launch cannot recover its exact physical grant");
+  }
+  return host_process_saga_->reconcile(
+      retained->second, *grant->grant, controller_target_, authority_now());
 }
 
 bool TrainVMService::claim_worker_attempt(const std::string& key) {

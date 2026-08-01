@@ -143,7 +143,10 @@ Single-run speedrun results are hypotheses, not production defaults.
 
 No P0 item authorizes TrainVM to start a GPU process. Launch remains disabled until durable
 boot-scoped leases, host resource fencing, orphan checks, sealed launch identity, and spawn/exit
-receipts are complete.
+receipts are complete. The in-process service coordinator now enforces prepare -> durable journal
+receipt -> exec commit ordering behind an injected host-process client; production launch remains
+disabled while strict mutation-client startup configuration, orphan adoption, and privileged
+qualification are unfinished.
 
 ## Modded NanoGPT adaptation matrix
 
