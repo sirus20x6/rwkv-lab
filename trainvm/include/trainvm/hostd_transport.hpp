@@ -17,8 +17,8 @@
 namespace trainvm {
 
 inline constexpr std::string_view kHostdStatusTransportApiVersion =
-    "trainvm.hostd-status-transport/v1";
-inline constexpr std::uint16_t kHostdStatusWireVersion = 1U;
+    "trainvm.hostd-status-transport/v2";
+inline constexpr std::uint16_t kHostdStatusWireVersion = 2U;
 inline constexpr std::size_t kHostdStatusWireHeaderBytes = 56U;
 inline constexpr std::size_t kHostdStatusMaximumPayloadBytes = 64U * 1024U;
 

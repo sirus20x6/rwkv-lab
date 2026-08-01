@@ -18,14 +18,13 @@ inline constexpr std::string_view kHostdCoordinatorApiVersion =
     "trainvm.hostd-coordinator/v1";
 inline constexpr std::string_view kHostdPeerEvidenceApiVersion =
     "trainvm.hostd-peer-evidence/v1";
-inline constexpr std::string_view kHostdStartupAuditApiVersion =
-    "trainvm.hostd-startup-audit/v1";
 inline constexpr std::string_view kHostdLogicalFenceEvidenceApiVersion =
     "trainvm.hostd-logical-fence-evidence/v1";
 
 enum class HostdLifecycle {
   sealed,
   startup_auditing,
+  startup_blocked,
   admitting,
   poisoned,
 };
@@ -40,12 +39,6 @@ enum class HostdSessionAccess {
 enum class HostdPeerEnforcementGrade {
   observed_only,
   service_identity_enforced,
-};
-
-enum class HostdStartupAuditDisposition {
-  passed,
-  failed,
-  unknown,
 };
 
 struct HostdCoordinatorConfig final {
@@ -126,28 +119,6 @@ struct HostdConnectedSession final {
   bool operator==(const HostdConnectedSession &) const = default;
 };
 
-struct HostdStartupAuditReceipt final {
-  std::string api_version;
-  std::string audit_id;
-  std::string host_id;
-  std::string boot_id;
-  std::string broker_epoch;
-  std::string inventory_digest;
-  HostdStartupAuditDisposition disposition{};
-  std::uint64_t observed_orphans{};
-  std::uint64_t unresolved_orphans{};
-  std::string evidence_digest;
-
-  bool operator==(const HostdStartupAuditReceipt &) const = default;
-};
-
-class IHostdStartupAuditor {
-public:
-  virtual ~IHostdStartupAuditor() = default;
-  [[nodiscard]] virtual HostdStartupAuditReceipt
-  audit(const HostInventoryReceipt &inventory) = 0;
-};
-
 struct HostdCoordinatorStatus final {
   std::string api_version;
   HostdLifecycle lifecycle{};
@@ -164,7 +135,8 @@ struct HostdCoordinatorStatus final {
   // not synchronously call external authorities while holding the status
   // mutex. Every actual grant performs a fresh attestation.
   bool admission_counts_are_cached_evidence{true};
-  std::optional<HostdStartupAuditReceipt> startup_audit;
+  // Inspection-only ledger receipt; never a bearer admission capability.
+  std::optional<HostStartupAuditReceipt> startup_audit;
   std::string poison_reason;
 
   bool operator==(const HostdCoordinatorStatus &) const = default;
@@ -193,9 +165,19 @@ public:
   virtual ~IHostdLedgerBoundary() = default;
   [[nodiscard]] virtual bool verify() const = 0;
   [[nodiscard]] virtual HostInventoryReceipt inventory() const = 0;
+  [[nodiscard]] virtual HostLedgerChainHead chain_head() const = 0;
+  [[nodiscard]] virtual ResourceOccupancySnapshot occupancy() const = 0;
+  [[nodiscard]] virtual HostStartupAuditLedgerCommitResult
+  commit_startup_audit(const HostStartupAuditReport &report,
+                       const HostLedgerTime &now) = 0;
+  [[nodiscard]] virtual HostLedgerAdmissionFinalizeResult
+  finalize_startup_admission(const HostStartupAuditReport &report,
+                             const HostStartupAuditReceipt &receipt,
+                             const HostLedgerTime &now) = 0;
   [[nodiscard]] virtual BundleRequestResult
   request_bundle(const ResourceBundleRequest &request,
-                 const HostLedgerTime &now) = 0;
+                 const HostLedgerTime &now,
+                 const HostLedgerAdmissionEpoch &admission_epoch) = 0;
   [[nodiscard]] virtual BundleReleaseResult
   release_bundle(const ResourceReleaseRequest &request,
                  const HostLedgerTime &now) = 0;
@@ -225,8 +207,9 @@ public:
   HostGrantCoordinator(HostGrantCoordinator &&) = delete;
   HostGrantCoordinator &operator=(HostGrantCoordinator &&) = delete;
 
-  [[nodiscard]] HostdStartupAuditReceipt
-  run_startup_audit(IHostdStartupAuditor &auditor);
+  [[nodiscard]] HostStartupAuditReceipt
+  run_startup_audit(IConfiguredHostStartupAuditorV2 &auditor,
+                    const HostLedgerTime &now);
 
   [[nodiscard]] HostdConnectedSession
   connect(HostdConnectRequest request,

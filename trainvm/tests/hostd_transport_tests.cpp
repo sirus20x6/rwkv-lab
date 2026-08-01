@@ -36,9 +36,6 @@ namespace {
 
 using namespace trainvm;
 
-constexpr std::string_view kDigest =
-    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-
 void require(bool condition, std::string_view message) {
   if (!condition)
     throw std::runtime_error(std::string(message));
@@ -172,37 +169,76 @@ HostInventoryReceipt inventory() {
   return capture_host_inventory(kernel);
 }
 
-class Auditor final : public IHostdStartupAuditor {
-public:
-  explicit Auditor(const HostInventoryReceipt &observed)
-      : receipt{.api_version = std::string(kHostdStartupAuditApiVersion),
-                .audit_id = "transport-audit",
-                .host_id = observed.host_id,
-                .boot_id = observed.boot_id,
-                .broker_epoch = observed.broker_epoch,
-                .inventory_digest = observed.inventory_digest,
-                .disposition = HostdStartupAuditDisposition::passed,
-                .observed_orphans = 0U,
-                .unresolved_orphans = 0U,
-                .evidence_digest = std::string(kDigest)} {}
+HostStartupAuditPolicy startup_audit_policy() {
+  return canonicalize_host_startup_audit_policy({
+      .api_version = std::string(kHostStartupAuditPolicyApiVersion),
+      .require_stable_occupancy = true,
+      .fail_on_blocking_findings = true,
+      .maximum_findings = 16U,
+      .policy_digest = {},
+  });
+}
 
-  HostdStartupAuditReceipt audit(const HostInventoryReceipt &) override {
-    return receipt;
+HostStartupAuditReport audit_report(
+    SQLiteHostLedger &ledger,
+    HostStartupAuditDisposition disposition =
+        HostStartupAuditDisposition::passed) {
+  static std::atomic<std::uint64_t> next_audit_id{1U};
+  const auto observed = ledger.inventory();
+  const auto head = ledger.chain_head();
+  const auto occupancy = ledger.occupancy();
+  std::vector<HostStartupAuditFinding> findings;
+  if (disposition == HostStartupAuditDisposition::failed) {
+    findings.push_back(canonicalize_host_startup_audit_finding({
+        .severity = HostStartupAuditFindingSeverity::blocking,
+        .code = "transport.test.blocking",
+        .subject = "startup",
+        .detail = "deterministic blocking transport evidence",
+        .evidence_digest = {},
+    }));
   }
-  HostdStartupAuditReceipt receipt;
+  return canonicalize_host_startup_audit_report({
+      .api_version = std::string(kHostStartupAuditReportApiVersion),
+      .audit_id =
+          "transport-audit-" + std::to_string(next_audit_id.fetch_add(1U)),
+      .host_id = observed.host_id,
+      .boot_id = observed.boot_id,
+      .broker_epoch = observed.broker_epoch,
+      .broker_instance_id = "transport-test-instance",
+      .inventory = observed,
+      .pre_audit_occupancy = occupancy,
+      .post_audit_occupancy = occupancy,
+      .ledger_head_before = head,
+      .ledger_head_after_observation = head,
+      .policy = startup_audit_policy(),
+      .findings = std::move(findings),
+      .disposition = disposition,
+      .observed_begin_boottime_ns = 10,
+      .observed_end_boottime_ns = 20,
+      .findings_digest = {},
+      .report_digest = {},
+  });
+}
+
+class Auditor final : public IConfiguredHostStartupAuditorV2 {
+public:
+  explicit Auditor(HostStartupAuditReport value) : report(std::move(value)) {}
+
+  HostStartupAuditReport audit() override { return report; }
+  HostStartupAuditReport report;
 };
 
-class BlockingAuditor final : public IHostdStartupAuditor {
+class BlockingAuditor final : public IConfiguredHostStartupAuditorV2 {
 public:
-  explicit BlockingAuditor(const HostInventoryReceipt &observed)
-      : receipt_(Auditor(observed).receipt) {}
+  explicit BlockingAuditor(HostStartupAuditReport report)
+      : report_(std::move(report)) {}
 
-  HostdStartupAuditReceipt audit(const HostInventoryReceipt &) override {
+  HostStartupAuditReport audit() override {
     std::unique_lock lock(mutex_);
     entered_ = true;
     changed_.notify_all();
     changed_.wait(lock, [&] { return released_; });
-    return receipt_;
+    return report_;
   }
 
   void wait_until_entered() {
@@ -217,16 +253,16 @@ public:
   }
 
 private:
-  HostdStartupAuditReceipt receipt_;
+  HostStartupAuditReport report_;
   std::mutex mutex_;
   std::condition_variable changed_;
   bool entered_{};
   bool released_{};
 };
 
-class InvalidTextAuditor final : public IHostdStartupAuditor {
+class InvalidTextAuditor final : public IConfiguredHostStartupAuditorV2 {
 public:
-  HostdStartupAuditReceipt audit(const HostInventoryReceipt &) override {
+  HostStartupAuditReport audit() override {
     throw std::runtime_error(std::string("invalid-") + char(0x01));
   }
 };
@@ -242,7 +278,8 @@ struct CoordinatorFixture final {
                  .expected_owner_gid = ::getegid(),
                  .enforcement_grade =
                      HostLedgerEnforcementGrade::cooperative_test}))),
-        ledger(std::make_shared<SQLiteHostLedger>(authority, observed)),
+        ledger(std::make_shared<SQLiteHostLedger>(
+            authority, observed, nullptr, startup_audit_policy())),
         coordinator(std::make_shared<HostGrantCoordinator>(
             HostdCoordinatorConfig{
                 .api_version = std::string(kHostdCoordinatorApiVersion),
@@ -254,8 +291,8 @@ struct CoordinatorFixture final {
             ledger)) {}
 
   void admit() {
-    Auditor auditor(observed);
-    (void)coordinator->run_startup_audit(auditor);
+    Auditor auditor(audit_report(*ledger));
+    (void)coordinator->run_startup_audit(auditor, {30, 40});
   }
 
   HostInventoryReceipt observed;
@@ -354,16 +391,34 @@ nlohmann::json status_payload(const HostdCoordinatorStatus &status) {
   nlohmann::json audit = nullptr;
   if (status.startup_audit) {
     const auto &value = *status.startup_audit;
+    const auto head = [](const HostLedgerChainHead &ledger_head) {
+      return nlohmann::json{{"chain_hash", ledger_head.chain_hash},
+                            {"ledger_sequence",
+                             ledger_head.ledger_sequence}};
+    };
     audit = {{"api_version", value.api_version},
              {"audit_id", value.audit_id},
              {"boot_id", value.boot_id},
              {"broker_epoch", value.broker_epoch},
-             {"disposition", static_cast<unsigned int>(value.disposition)},
-             {"evidence_digest", value.evidence_digest},
+             {"broker_instance_id", value.broker_instance_id},
+             {"commit_record_digest", value.commit_record_digest},
+             {"committed_boottime_ns", value.committed_boottime_ns},
+             {"committed_ledger_head", head(value.committed_ledger_head)},
+             {"committed_wall_time_ns", value.committed_wall_time_ns},
+             {"disposition",
+              value.disposition == HostStartupAuditDisposition::passed
+                  ? "passed"
+                  : "failed"},
+             {"findings_digest", value.findings_digest},
              {"host_id", value.host_id},
              {"inventory_digest", value.inventory_digest},
-             {"observed_orphans", value.observed_orphans},
-             {"unresolved_orphans", value.unresolved_orphans}};
+             {"ledger_head_before", head(value.ledger_head_before)},
+             {"policy_digest", value.policy_digest},
+             {"post_occupancy_digest", value.post_occupancy_digest},
+             {"pre_occupancy_digest", value.pre_occupancy_digest},
+             {"receipt_digest", value.receipt_digest},
+             {"report_digest", value.report_digest},
+             {"topology_digest", value.topology_digest}};
   }
   const auto lifecycle = [&] {
     switch (status.lifecycle) {
@@ -371,6 +426,8 @@ nlohmann::json status_payload(const HostdCoordinatorStatus &status) {
       return "sealed";
     case HostdLifecycle::startup_auditing:
       return "startup_auditing";
+    case HostdLifecycle::startup_blocked:
+      return "startup_blocked";
     case HostdLifecycle::admitting:
       return "admitting";
     case HostdLifecycle::poisoned:
@@ -761,9 +818,9 @@ void status_only_lifecycle_and_endpoint_identity() {
               sealed.status->lifecycle == HostdLifecycle::sealed,
           "status transport truthfully exposes the sealed lifecycle");
 
-  BlockingAuditor auditor(fixture.observed);
+  BlockingAuditor auditor(audit_report(*fixture.ledger));
   std::jthread auditing(
-      [&] { (void)fixture.coordinator->run_startup_audit(auditor); });
+      [&] { (void)fixture.coordinator->run_startup_audit(auditor, {30, 40}); });
   auditor.wait_until_entered();
   HostdServeResult auditing_result = HostdServeResult::timed_out;
   std::jthread auditing_server(
@@ -777,6 +834,8 @@ void status_only_lifecycle_and_endpoint_identity() {
           "status transport truthfully exposes startup auditing");
   auditor.release();
   auditing.join();
+  const auto committed_status = fixture.coordinator->status();
+  const auto ledger_records_before_status = fixture.ledger->record_count();
   HostdServeResult admitted_result = HostdServeResult::timed_out;
   std::jthread admitted_server(
       [&] { admitted_result = server.serve_one(deadline()); });
@@ -786,8 +845,12 @@ void status_only_lifecycle_and_endpoint_identity() {
               admitted.kind == HostdStatusReplyKind::status &&
               admitted.status &&
               admitted.status->lifecycle == HostdLifecycle::admitting &&
+              admitted.status->startup_audit ==
+                  committed_status.startup_audit &&
               admitted.correlation_id == 13U,
-          "admitting coordinator returns an exact typed status response");
+          "admitting coordinator returns the exact committed inspection receipt");
+  require(fixture.ledger->record_count() == ledger_records_before_status,
+          "status inspection does not mutate the durable ledger");
 
   HostdStatusServer unauthorized_server(
       authority, fixture.coordinator,
@@ -816,15 +879,14 @@ void status_only_lifecycle_and_endpoint_identity() {
       HostdSocketAuthority::self_bind(socket_config(poisoned_directory),
                                       poisoned_directory.parent_fd(),
                                       std::make_shared<HeldToken>()));
-  Auditor failed_auditor(poisoned_fixture.observed);
-  failed_auditor.receipt.disposition = HostdStartupAuditDisposition::failed;
-  failed_auditor.receipt.observed_orphans = 1U;
-  failed_auditor.receipt.unresolved_orphans = 1U;
+  Auditor failed_auditor(audit_report(
+      *poisoned_fixture.ledger, HostStartupAuditDisposition::failed));
   require_throws<HostdStateError>(
       [&] {
-        (void)poisoned_fixture.coordinator->run_startup_audit(failed_auditor);
+        (void)poisoned_fixture.coordinator->run_startup_audit(failed_auditor,
+                                                              {30, 40});
       },
-      "failed startup audit poisons coordinator");
+      "failed startup audit blocks coordinator");
   HostdStatusServer poisoned_server(poisoned_authority,
                                     poisoned_fixture.coordinator,
                                     peer_policy());
@@ -835,9 +897,12 @@ void status_only_lifecycle_and_endpoint_identity() {
       client_config(*poisoned_authority), 16U, deadline());
   poisoned_thread.join();
   require(poisoned_result == HostdServeResult::served && poisoned.status &&
-              poisoned.status->lifecycle == HostdLifecycle::poisoned &&
+              poisoned.status->lifecycle == HostdLifecycle::startup_blocked &&
+              poisoned.status->startup_audit.has_value() &&
+              poisoned.status->startup_audit->report_digest ==
+                  failed_auditor.report.report_digest &&
               !poisoned.status->poison_reason.empty(),
-          "status transport truthfully exposes poisoned lifecycle evidence");
+          "status transport truthfully exposes committed blocked evidence");
 
   TemporaryDirectory invalid_text_directory;
   CoordinatorFixture invalid_text_fixture(invalid_text_directory);
@@ -849,7 +914,7 @@ void status_only_lifecycle_and_endpoint_identity() {
   require_throws<HostdStateError>(
       [&] {
         (void)invalid_text_fixture.coordinator->run_startup_audit(
-            invalid_text_auditor);
+            invalid_text_auditor, {30, 40});
       },
       "invalid-text auditor poisons coordinator");
   HostdStatusServer invalid_text_server(invalid_text_authority,
@@ -1044,6 +1109,59 @@ void client_rejects_corruption_delegation_and_no_children_exist() {
       [&] { (void)hostd_request_status(client, 32U, deadline()); },
       "client rejects semantically contradictory status and audit evidence");
   semantic_server.join();
+
+  auto corrupted_receipt = status_payload(fixture.coordinator->status());
+  corrupted_receipt["startup_audit"]["receipt_digest"] =
+      "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  const auto corrupted_receipt_response = packet_with_payload(
+      2U, 36U,
+      {{"api_version", kHostdStatusTransportApiVersion},
+       {"status", std::move(corrupted_receipt)}});
+  std::jthread corrupted_receipt_server(
+      [&] { serve_fake_response(*authority, corrupted_receipt_response); });
+  require_throws<HostdTransportError>(
+      [&] { (void)hostd_request_status(client, 36U, deadline()); },
+      "client rejects self-inconsistent startup receipt inspection data");
+  corrupted_receipt_server.join();
+
+  std::vector<nlohmann::json> malicious_numbers;
+  auto fractional_count = status_payload(fixture.coordinator->status());
+  fractional_count["live_sessions"] = 1.5;
+  malicious_numbers.push_back(std::move(fractional_count));
+  auto negative_count = status_payload(fixture.coordinator->status());
+  negative_count["live_sessions"] = -1;
+  malicious_numbers.push_back(std::move(negative_count));
+  auto negative_sequence = status_payload(fixture.coordinator->status());
+  negative_sequence["startup_audit"]["ledger_head_before"]
+                   ["ledger_sequence"] = -1;
+  malicious_numbers.push_back(std::move(negative_sequence));
+  auto fractional_time = status_payload(fixture.coordinator->status());
+  fractional_time["startup_audit"]["committed_boottime_ns"] = 30.5;
+  malicious_numbers.push_back(std::move(fractional_time));
+  auto negative_time = status_payload(fixture.coordinator->status());
+  negative_time["startup_audit"]["committed_wall_time_ns"] = -1;
+  malicious_numbers.push_back(std::move(negative_time));
+  auto huge_signed_time = status_payload(fixture.coordinator->status());
+  huge_signed_time["startup_audit"]["committed_wall_time_ns"] =
+      std::numeric_limits<std::uint64_t>::max();
+  malicious_numbers.push_back(std::move(huge_signed_time));
+  auto huge_count = status_payload(fixture.coordinator->status());
+  huge_count["live_sessions"] = nlohmann::json::parse(
+      "184467440737095516160000000000000000000");
+  malicious_numbers.push_back(std::move(huge_count));
+  for (std::size_t index = 0U; index < malicious_numbers.size(); ++index) {
+    const std::uint64_t correlation = 40U + index;
+    const auto response = packet_with_payload(
+        2U, correlation,
+        {{"api_version", kHostdStatusTransportApiVersion},
+         {"status", malicious_numbers[index]}});
+    std::jthread malicious_server(
+        [&] { serve_fake_response(*authority, response); });
+    require_throws<HostdTransportError>(
+        [&] { (void)hostd_request_status(client, correlation, deadline()); },
+        "client rejects fractional, negative, or out-of-range status numbers");
+    malicious_server.join();
+  }
 
   const auto wrong_type_response = packet_with_payload(
       2U, 34U,

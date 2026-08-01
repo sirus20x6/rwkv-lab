@@ -39,7 +39,6 @@ constexpr std::size_t kMaximumControlFds = 8U;
 constexpr std::size_t kMaximumIdentifierBytes = 192U;
 constexpr std::size_t kMaximumPoisonReasonBytes = 512U;
 constexpr std::size_t kMaximumReportedSessions = 65536U;
-constexpr std::uint64_t kMaximumReportedOrphans = 4'294'967'295ULL;
 
 class FileDescriptor final {
 public:
@@ -439,6 +438,8 @@ std::string lifecycle_name(HostdLifecycle lifecycle) {
     return "sealed";
   case HostdLifecycle::startup_auditing:
     return "startup_auditing";
+  case HostdLifecycle::startup_blocked:
+    return "startup_blocked";
   case HostdLifecycle::admitting:
     return "admitting";
   case HostdLifecycle::poisoned:
@@ -452,6 +453,8 @@ HostdLifecycle parse_lifecycle(const std::string &value) {
     return HostdLifecycle::sealed;
   if (value == "startup_auditing")
     return HostdLifecycle::startup_auditing;
+  if (value == "startup_blocked")
+    return HostdLifecycle::startup_blocked;
   if (value == "admitting")
     return HostdLifecycle::admitting;
   if (value == "poisoned")
@@ -459,17 +462,39 @@ HostdLifecycle parse_lifecycle(const std::string &value) {
   throw HostdTransportError("hostd lifecycle value is invalid");
 }
 
-nlohmann::json audit_json(const HostdStartupAuditReceipt &audit) {
+nlohmann::json chain_head_json(const HostLedgerChainHead &head) {
+  return {{"chain_hash", head.chain_hash},
+          {"ledger_sequence", head.ledger_sequence}};
+}
+
+nlohmann::json audit_json(const HostStartupAuditReceipt &audit) {
   return {{"api_version", audit.api_version},
           {"audit_id", audit.audit_id},
           {"boot_id", audit.boot_id},
           {"broker_epoch", audit.broker_epoch},
-          {"disposition", static_cast<unsigned int>(audit.disposition)},
-          {"evidence_digest", audit.evidence_digest},
+          {"broker_instance_id", audit.broker_instance_id},
+          {"commit_record_digest", audit.commit_record_digest},
+          {"committed_boottime_ns", audit.committed_boottime_ns},
+          {"committed_ledger_head",
+           chain_head_json(audit.committed_ledger_head)},
+          {"committed_wall_time_ns", audit.committed_wall_time_ns},
+          {"disposition",
+           audit.disposition == HostStartupAuditDisposition::passed
+               ? "passed"
+               : audit.disposition == HostStartupAuditDisposition::failed
+                     ? "failed"
+                     : throw HostdTransportError(
+                           "startup audit disposition is invalid")},
+          {"findings_digest", audit.findings_digest},
           {"host_id", audit.host_id},
           {"inventory_digest", audit.inventory_digest},
-          {"observed_orphans", audit.observed_orphans},
-          {"unresolved_orphans", audit.unresolved_orphans}};
+          {"ledger_head_before", chain_head_json(audit.ledger_head_before)},
+          {"policy_digest", audit.policy_digest},
+          {"post_occupancy_digest", audit.post_occupancy_digest},
+          {"pre_occupancy_digest", audit.pre_occupancy_digest},
+          {"receipt_digest", audit.receipt_digest},
+          {"report_digest", audit.report_digest},
+          {"topology_digest", audit.topology_digest}};
 }
 
 nlohmann::json status_json(const HostdCoordinatorStatus &status) {
@@ -491,30 +516,103 @@ nlohmann::json status_json(const HostdCoordinatorStatus &status) {
                                 : nlohmann::json(nullptr)}};
 }
 
-HostdStartupAuditReceipt parse_audit(const nlohmann::json &value) {
-  require_fields(value, {"api_version", "audit_id", "boot_id",
-                         "broker_epoch", "disposition", "evidence_digest",
-                         "host_id", "inventory_digest", "observed_orphans",
-                         "unresolved_orphans"});
-  const auto disposition = value.at("disposition").get<unsigned int>();
-  if (disposition >
-      static_cast<unsigned int>(HostdStartupAuditDisposition::unknown))
-    throw HostdTransportError("startup audit disposition is invalid");
+HostLedgerChainHead parse_chain_head(const nlohmann::json &value) {
+  require_fields(value, {"chain_hash", "ledger_sequence"});
+  const auto &sequence = value.at("ledger_sequence");
+  if (!sequence.is_number_unsigned())
+    throw HostdTransportError("startup audit ledger sequence is not unsigned");
+  return {.ledger_sequence = sequence.get<std::uint64_t>(),
+          .chain_hash = value.at("chain_hash").get<std::string>()};
+}
+
+std::int64_t parse_signed_integer(const nlohmann::json &value,
+                                  std::string_view description) {
+  if (!value.is_number_integer())
+    throw HostdTransportError(std::string(description) +
+                              " is not an exact integer");
+  try {
+    if (value.is_number_unsigned() &&
+        value.get<std::uint64_t>() >
+            static_cast<std::uint64_t>(
+                std::numeric_limits<std::int64_t>::max()))
+      throw HostdTransportError(std::string(description) +
+                                " is outside the signed integer range");
+    return value.get<std::int64_t>();
+  } catch (const HostdTransportError &) {
+    throw;
+  } catch (const nlohmann::json::exception &) {
+    throw HostdTransportError(std::string(description) +
+                              " is outside the signed integer range");
+  }
+}
+
+std::size_t parse_size(const nlohmann::json &value,
+                       std::string_view description) {
+  if (!value.is_number_unsigned())
+    throw HostdTransportError(std::string(description) +
+                              " is not an exact unsigned integer");
+  try {
+    const std::uint64_t parsed = value.get<std::uint64_t>();
+    if (parsed > static_cast<std::uint64_t>(
+                     std::numeric_limits<std::size_t>::max()))
+      throw HostdTransportError(std::string(description) +
+                                " is outside the platform size range");
+    return static_cast<std::size_t>(parsed);
+  } catch (const HostdTransportError &) {
+    throw;
+  } catch (const nlohmann::json::exception &) {
+    throw HostdTransportError(std::string(description) +
+                              " is outside the platform size range");
+  }
+}
+
+HostStartupAuditDisposition parse_audit_disposition(const std::string &value) {
+  if (value == "passed")
+    return HostStartupAuditDisposition::passed;
+  if (value == "failed")
+    return HostStartupAuditDisposition::failed;
+  throw HostdTransportError("startup audit disposition is invalid");
+}
+
+HostStartupAuditReceipt parse_audit(const nlohmann::json &value) {
+  require_fields(value,
+                 {"api_version", "audit_id", "boot_id", "broker_epoch",
+                  "broker_instance_id", "commit_record_digest",
+                  "committed_boottime_ns", "committed_ledger_head",
+                  "committed_wall_time_ns", "disposition", "findings_digest",
+                  "host_id", "inventory_digest", "ledger_head_before",
+                  "policy_digest", "post_occupancy_digest",
+                  "pre_occupancy_digest", "receipt_digest", "report_digest",
+                  "topology_digest"});
   return {.api_version = value.at("api_version").get<std::string>(),
           .audit_id = value.at("audit_id").get<std::string>(),
+          .report_digest = value.at("report_digest").get<std::string>(),
           .host_id = value.at("host_id").get<std::string>(),
           .boot_id = value.at("boot_id").get<std::string>(),
           .broker_epoch = value.at("broker_epoch").get<std::string>(),
+          .broker_instance_id =
+              value.at("broker_instance_id").get<std::string>(),
           .inventory_digest =
               value.at("inventory_digest").get<std::string>(),
-          .disposition =
-              static_cast<HostdStartupAuditDisposition>(disposition),
-          .observed_orphans =
-              value.at("observed_orphans").get<std::uint64_t>(),
-          .unresolved_orphans =
-              value.at("unresolved_orphans").get<std::uint64_t>(),
-          .evidence_digest =
-              value.at("evidence_digest").get<std::string>()};
+          .topology_digest = value.at("topology_digest").get<std::string>(),
+          .pre_occupancy_digest =
+              value.at("pre_occupancy_digest").get<std::string>(),
+          .post_occupancy_digest =
+              value.at("post_occupancy_digest").get<std::string>(),
+          .policy_digest = value.at("policy_digest").get<std::string>(),
+          .findings_digest = value.at("findings_digest").get<std::string>(),
+          .disposition = parse_audit_disposition(
+              value.at("disposition").get<std::string>()),
+          .ledger_head_before = parse_chain_head(value.at("ledger_head_before")),
+          .committed_ledger_head =
+              parse_chain_head(value.at("committed_ledger_head")),
+          .commit_record_digest =
+              value.at("commit_record_digest").get<std::string>(),
+          .committed_boottime_ns = parse_signed_integer(
+              value.at("committed_boottime_ns"), "committed_boottime_ns"),
+          .committed_wall_time_ns = parse_signed_integer(
+              value.at("committed_wall_time_ns"), "committed_wall_time_ns"),
+          .receipt_digest = value.at("receipt_digest").get<std::string>()};
 }
 
 HostdCoordinatorStatus parse_status(const nlohmann::json &value) {
@@ -525,7 +623,7 @@ HostdCoordinatorStatus parse_status(const nlohmann::json &value) {
                   "lifecycle", "live_sessions", "poison_reason",
                   "release_only_sessions", "stale_admission_sessions",
                   "startup_audit"});
-  std::optional<HostdStartupAuditReceipt> audit;
+  std::optional<HostStartupAuditReceipt> audit;
   if (!value.at("startup_audit").is_null())
     audit = parse_audit(value.at("startup_audit"));
   return {
@@ -536,32 +634,85 @@ HostdCoordinatorStatus parse_status(const nlohmann::json &value) {
       .boot_id = value.at("boot_id").get<std::string>(),
       .broker_epoch = value.at("broker_epoch").get<std::string>(),
       .inventory_digest = value.at("inventory_digest").get<std::string>(),
-      .live_sessions = value.at("live_sessions").get<std::size_t>(),
+      .live_sessions = parse_size(value.at("live_sessions"), "live_sessions"),
       .admission_sessions =
-          value.at("admission_sessions").get<std::size_t>(),
-      .stale_admission_sessions =
-          value.at("stale_admission_sessions").get<std::size_t>(),
-      .release_only_sessions =
-          value.at("release_only_sessions").get<std::size_t>(),
+          parse_size(value.at("admission_sessions"), "admission_sessions"),
+      .stale_admission_sessions = parse_size(
+          value.at("stale_admission_sessions"), "stale_admission_sessions"),
+      .release_only_sessions = parse_size(value.at("release_only_sessions"),
+                                          "release_only_sessions"),
       .admission_counts_are_cached_evidence =
           value.at("admission_counts_are_cached_evidence").get<bool>(),
       .startup_audit = std::move(audit),
       .poison_reason = value.at("poison_reason").get<std::string>()};
 }
 
-void validate_audit_semantics(const HostdStartupAuditReceipt &audit,
+bool valid_audit_identifier(std::string_view value) {
+  return !value.empty() &&
+         value.size() <= HostStartupAuditBounds::maximum_identifier_bytes &&
+         std::ranges::all_of(value, [](unsigned char character) {
+           return character >= 0x20U && character <= 0x7eU;
+         });
+}
+
+void validate_chain_head(const HostLedgerChainHead &head) {
+  if (head.ledger_sequence >
+          static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) ||
+      !valid_digest(head.chain_hash))
+    throw HostdTransportError("startup audit ledger head is invalid");
+}
+
+std::string startup_audit_receipt_digest(
+    const HostStartupAuditReceipt &audit) {
+  nlohmann::json value = audit_json(audit);
+  value.erase("receipt_digest");
+  std::string bytes = "trainvm.host-startup-audit-receipt/v2";
+  bytes.push_back('\0');
+  bytes.append(value.dump());
+  std::array<unsigned char, SHA256_DIGEST_LENGTH> digest{};
+  (void)::SHA256(reinterpret_cast<const unsigned char *>(bytes.data()),
+                 bytes.size(), digest.data());
+  static constexpr char digits[] = "0123456789abcdef";
+  std::string result = "sha256:";
+  result.reserve(7U + digest.size() * 2U);
+  for (const unsigned char byte : digest) {
+    result.push_back(digits[byte >> 4U]);
+    result.push_back(digits[byte & 0x0fU]);
+  }
+  return result;
+}
+
+void validate_audit_semantics(const HostStartupAuditReceipt &audit,
                               const HostdCoordinatorStatus &status) {
-  if (audit.api_version != kHostdStartupAuditApiVersion ||
-      !valid_identifier(audit.audit_id) ||
-      !valid_identifier(audit.host_id) || !valid_identifier(audit.boot_id) ||
-      !valid_identifier(audit.broker_epoch) ||
+  validate_chain_head(audit.ledger_head_before);
+  validate_chain_head(audit.committed_ledger_head);
+  const bool valid_disposition =
+      audit.disposition == HostStartupAuditDisposition::passed ||
+      audit.disposition == HostStartupAuditDisposition::failed;
+  if (audit.api_version != kHostStartupAuditReceiptApiVersion ||
+      !valid_audit_identifier(audit.audit_id) ||
+      !valid_audit_identifier(audit.host_id) ||
+      !valid_audit_identifier(audit.boot_id) ||
+      !valid_audit_identifier(audit.broker_epoch) ||
+      !valid_audit_identifier(audit.broker_instance_id) ||
+      !valid_digest(audit.report_digest) ||
       !valid_digest(audit.inventory_digest) ||
-      !valid_digest(audit.evidence_digest) ||
+      !valid_digest(audit.topology_digest) ||
+      !valid_digest(audit.pre_occupancy_digest) ||
+      !valid_digest(audit.post_occupancy_digest) ||
+      !valid_digest(audit.policy_digest) ||
+      !valid_digest(audit.findings_digest) ||
+      !valid_digest(audit.commit_record_digest) ||
+      !valid_digest(audit.receipt_digest) || !valid_disposition ||
       audit.host_id != status.host_id || audit.boot_id != status.boot_id ||
       audit.broker_epoch != status.broker_epoch ||
       audit.inventory_digest != status.inventory_digest ||
-      audit.observed_orphans > kMaximumReportedOrphans ||
-      audit.unresolved_orphans > audit.observed_orphans)
+      audit.ledger_head_before.ledger_sequence ==
+          static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) ||
+      audit.committed_ledger_head.ledger_sequence !=
+          audit.ledger_head_before.ledger_sequence + 1U ||
+      audit.committed_boottime_ns < 0 || audit.committed_wall_time_ns < 0 ||
+      audit.receipt_digest != startup_audit_receipt_digest(audit))
     throw HostdTransportError("hostd startup audit semantics are invalid");
 }
 
@@ -594,9 +745,13 @@ void validate_status_semantics(const HostdCoordinatorStatus &status) {
   case HostdLifecycle::admitting:
     if (!status.startup_audit || !status.poison_reason.empty() ||
         status.startup_audit->disposition !=
-            HostdStartupAuditDisposition::passed ||
-        status.startup_audit->unresolved_orphans != 0U)
+            HostStartupAuditDisposition::passed)
       throw HostdTransportError("hostd admitting lifecycle is contradictory");
+    return;
+  case HostdLifecycle::startup_blocked:
+    if (!status.startup_audit || status.poison_reason.empty())
+      throw HostdTransportError(
+          "hostd startup-blocked lifecycle is contradictory");
     return;
   case HostdLifecycle::poisoned:
     if (status.poison_reason.empty())

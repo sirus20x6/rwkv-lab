@@ -840,6 +840,110 @@ std::string content_hash(const Event& event) {
   return sha256_hex(event_json(event).dump());
 }
 
+constexpr std::string_view kLeaseAuthorityMetadataPrefix =
+    "lease_authority_head:";
+constexpr std::string_view kControllerAuthorityMetadataKey =
+    "hostd_controller_head";
+constexpr std::string_view kControllerIdentityMetadataPrefix =
+    "hostd_controller_id:";
+
+bool valid_hash_hex(std::string_view value) {
+  return value.size() == 64U &&
+         std::ranges::all_of(value, [](char character) {
+           return (character >= '0' && character <= '9') ||
+                  (character >= 'a' && character <= 'f');
+         });
+}
+
+std::string lease_authority_identity(std::string_view concurrency_key,
+                                     std::uint64_t fencing_token) {
+  std::string framed("trainvm.lease-authority-identity/v1");
+  framed.push_back('\0');
+  framed.append(concurrency_key);
+  framed.push_back('\0');
+  framed.append(std::to_string(fencing_token));
+  return sha256_hex(framed);
+}
+
+std::string lease_authority_metadata_key(std::string_view concurrency_key,
+                                         std::uint64_t fencing_token) {
+  return std::string(kLeaseAuthorityMetadataPrefix) +
+         lease_authority_identity(concurrency_key, fencing_token);
+}
+
+std::string lease_authority_event_id(std::string_view concurrency_key,
+                                     std::uint64_t fencing_token,
+                                     std::uint64_t revision) {
+  return "journal-lease-authority-" +
+         lease_authority_identity(concurrency_key, fencing_token) + "-" +
+         std::to_string(revision);
+}
+
+struct LeaseAuthorityHead final {
+  std::string concurrency_key;
+  std::string owner_run_id;
+  std::string lease_id;
+  std::uint64_t fencing_token{};
+  std::uint64_t authority_revision{};
+  std::uint64_t head_event_sequence{};
+  std::string head_event_hash;
+  bool released{};
+};
+
+nlohmann::json lease_authority_head_json(const LeaseAuthorityHead& head) {
+  return {{"authority_revision", head.authority_revision},
+          {"concurrency_key", head.concurrency_key},
+          {"fencing_token", head.fencing_token},
+          {"head_event_sequence", head.head_event_sequence},
+          {"head_event_hash", head.head_event_hash},
+          {"lease_id", head.lease_id},
+          {"owner_run_id", head.owner_run_id},
+          {"released", head.released}};
+}
+
+LeaseAuthorityHead parse_lease_authority_head(std::string_view encoded) {
+  try {
+    const nlohmann::json value = nlohmann::json::parse(encoded);
+    if (!value.is_object() || value.size() != 8U ||
+        !value.contains("authority_revision") ||
+        !value.contains("concurrency_key") || !value.contains("fencing_token") ||
+        !value.contains("head_event_hash") ||
+        !value.contains("head_event_sequence") ||
+        !value.contains("lease_id") ||
+        !value.contains("owner_run_id") || !value.contains("released") ||
+        !value.at("authority_revision").is_number_unsigned() ||
+        !value.at("concurrency_key").is_string() ||
+        !value.at("fencing_token").is_number_unsigned() ||
+        !value.at("head_event_sequence").is_number_unsigned() ||
+        !value.at("head_event_hash").is_string() ||
+        !value.at("lease_id").is_string() ||
+        !value.at("owner_run_id").is_string() ||
+        !value.at("released").is_boolean() || value.dump() != encoded) {
+      throw std::runtime_error("lease authority head is noncanonical");
+    }
+    LeaseAuthorityHead head{
+        .concurrency_key = value.at("concurrency_key").get<std::string>(),
+        .owner_run_id = value.at("owner_run_id").get<std::string>(),
+        .lease_id = value.at("lease_id").get<std::string>(),
+        .fencing_token = value.at("fencing_token").get<std::uint64_t>(),
+        .authority_revision =
+            value.at("authority_revision").get<std::uint64_t>(),
+        .head_event_sequence =
+            value.at("head_event_sequence").get<std::uint64_t>(),
+        .head_event_hash = value.at("head_event_hash").get<std::string>(),
+        .released = value.at("released").get<bool>()};
+    if (head.concurrency_key.empty() || head.owner_run_id.empty() ||
+        head.lease_id.empty() || head.fencing_token == 0U ||
+        head.head_event_sequence == 0U ||
+        !valid_hash_hex(head.head_event_hash)) {
+      throw std::runtime_error("lease authority head fields are invalid");
+    }
+    return head;
+  } catch (const nlohmann::json::exception&) {
+    throw std::runtime_error("lease authority head is malformed");
+  }
+}
+
 void create_projection(sqlite3* database, const Event& event, std::uint64_t journal_sequence) {
   if (!event.payload.is_object()) {
     throw std::invalid_argument("run.created payload must be an object");
@@ -1979,6 +2083,22 @@ bool Journal::validate_authority_boundary() const noexcept {
   }
 }
 
+void Journal::require_attested_authority() const {
+  if (!expected_file_ || !expected_host_grant_authority_) {
+    throw OperationPreconditionError(
+        "journal fence inspection requires retained filesystem and host authority");
+  }
+  if (!validate_authority_boundary()) {
+    throw OperationPreconditionError("journal filesystem authority is poisoned");
+  }
+  try {
+    require_file_identity(*expected_file_);
+  } catch (...) {
+    authority_poisoned_.store(true, std::memory_order_release);
+    throw OperationPreconditionError("journal filesystem authority moved");
+  }
+}
+
 int Journal::authorize_database_operation(void* context, int action,
                                           const char*, const char*,
                                           const char*, const char*) noexcept {
@@ -2182,8 +2302,24 @@ void Journal::initialize() {
                       (character >= 'a' && character <= 'f');
              });
     };
-    if (metadata.size() != 3U || chain == metadata.end() ||
-        identity == metadata.end() || schema_version == metadata.end() ||
+    const bool extension_metadata_valid = std::ranges::all_of(
+        metadata, [&](const auto& entry) {
+          const auto& [key, value] = entry;
+          if (key == "chain_head" || key == "journal_id" ||
+              key == "schema_version")
+            return true;
+          const auto valid_hashed_extension = [&](std::string_view prefix) {
+            return key.starts_with(prefix) &&
+                   valid_hash_hex(std::string_view(key).substr(prefix.size())) &&
+                   !value.empty() && value.size() <= 4096U;
+          };
+          return (key == kControllerAuthorityMetadataKey && !value.empty() &&
+                  value.size() <= 4096U) ||
+                 valid_hashed_extension(kLeaseAuthorityMetadataPrefix) ||
+                 valid_hashed_extension(kControllerIdentityMetadataPrefix);
+        });
+    if (chain == metadata.end() || identity == metadata.end() ||
+        schema_version == metadata.end() || !extension_metadata_valid ||
         schema_version->second != version || !valid_hash(chain->second) ||
         !valid_journal_id(identity->second)) {
       throw std::runtime_error(
@@ -2965,6 +3101,245 @@ std::uint64_t Journal::append_uncommitted(const Event& event,
   return journal_sequence;
 }
 
+std::pair<std::string, std::uint64_t>
+Journal::append_authority_event_uncommitted(const Event& event) {
+  if (event.event_id.empty() || event.run_id.empty() ||
+      !event.event_type.starts_with("authority.") ||
+      event.run_revision != 0U || event.plan_revision != 0U ||
+      !event.node_id.empty() || !event.attempt_id.empty() ||
+      event.worker_sequence != 0U || event.event_version != 1U ||
+      event.wall_time_ns < 0 || !event.payload.is_object()) {
+    throw std::invalid_argument("journal authority event is noncanonical");
+  }
+  const std::string event_content_hash = content_hash(event);
+  {
+    Statement duplicate(
+        database_,
+        "SELECT content_hash, journal_sequence FROM events WHERE event_id=?");
+    bind_text(duplicate.get(), 1, event.event_id);
+    if (sqlite3_step(duplicate.get()) == SQLITE_ROW) {
+      if (column_text(duplicate.get(), 0) != event_content_hash)
+        throw std::runtime_error(
+            "journal authority event identity has conflicting content");
+      return {event_content_hash, static_cast<std::uint64_t>(
+                                      sqlite3_column_int64(duplicate.get(), 1))};
+    }
+  }
+  std::string previous_hash(64U, '0');
+  {
+    Statement latest(
+        database_,
+        "SELECT chain_hash FROM events ORDER BY journal_sequence DESC LIMIT 1");
+    if (sqlite3_step(latest.get()) == SQLITE_ROW)
+      previous_hash = column_text(latest.get(), 0);
+  }
+  const std::string chain_hash =
+      sha256_hex(previous_hash + ":" + event_content_hash);
+  Statement insert(database_, R"sql(
+    INSERT INTO events(
+      event_id, run_id, run_revision, plan_revision, node_id, attempt_id,
+      worker_sequence, event_type, event_version, wall_time_ns,
+      monotonic_time_ns, optimizer_step, payload_json, previous_hash,
+      content_hash, chain_hash
+    ) VALUES(?, ?, 0, 0, '', '', 0, ?, 1, ?, ?, NULL, ?, ?, ?, ?)
+  )sql");
+  bind_text(insert.get(), 1, event.event_id);
+  bind_text(insert.get(), 2, event.run_id);
+  bind_text(insert.get(), 3, event.event_type);
+  bind_integer(insert.get(), 4, event.wall_time_ns);
+  bind_integer(insert.get(), 5,
+               checked_integer(event.monotonic_time_ns, "monotonic_time_ns"));
+  bind_text(insert.get(), 6, event.payload.dump());
+  bind_text(insert.get(), 7, previous_hash);
+  bind_text(insert.get(), 8, event_content_hash);
+  bind_text(insert.get(), 9, chain_hash);
+  require_done(database_, insert.get(), "append journal authority event");
+  const std::uint64_t journal_sequence = static_cast<std::uint64_t>(
+      sqlite3_last_insert_rowid(database_));
+  Statement update_head(database_,
+                        "UPDATE journal_meta SET value=? WHERE key='chain_head'");
+  bind_text(update_head.get(), 1, chain_hash);
+  require_done(database_, update_head.get(), "update journal authority chain head");
+  if (sqlite3_changes(database_) != 1)
+    throw std::runtime_error("journal authority chain head is missing");
+  return {event_content_hash, journal_sequence};
+}
+
+void Journal::record_lease_authority_acquisition_uncommitted(
+    const ResourceLease& lease) {
+  const LeaseAuthorityHead initial{
+      .concurrency_key = lease.concurrency_key,
+      .owner_run_id = lease.owner_run_id,
+      .lease_id = lease.lease_id,
+      .fencing_token = lease.fencing_token,
+      .authority_revision = 0U,
+      .head_event_sequence = 0U,
+      .head_event_hash = {},
+      .released = false};
+  Event event{.event_id = lease_authority_event_id(
+                  lease.concurrency_key, lease.fencing_token, 0U),
+              .run_id = lease.owner_run_id,
+              .run_revision = 0U,
+              .plan_revision = 0U,
+              .node_id = {},
+              .attempt_id = {},
+              .worker_sequence = 0U,
+              .event_type = "authority.resource_lease_acquired",
+              .event_version = 1U,
+              .wall_time_ns = lease.acquired_wall_time_ns,
+              .monotonic_time_ns = static_cast<std::uint64_t>(
+                  lease.acquired_boottime_ns),
+              .optimizer_step = std::nullopt,
+              .payload = {{"acquired_boottime_ns",
+                           lease.acquired_boottime_ns},
+                          {"acquired_wall_time_ns", lease.acquired_wall_time_ns},
+                          {"authority_revision", 0U},
+                          {"boot_id", lease.boot_id},
+                          {"clock_domain", lease.clock_domain},
+                          {"concurrency_key", lease.concurrency_key},
+                          {"expires_boottime_ns", lease.expires_boottime_ns},
+                          {"expires_wall_time_ns", lease.expires_wall_time_ns},
+                          {"fencing_token", lease.fencing_token},
+                          {"lease_id", lease.lease_id},
+                          {"operation", "acquired"},
+                          {"owner_run_id", lease.owner_run_id},
+                          {"previous_authority_hash", std::string(64U, '0')}}};
+  LeaseAuthorityHead stored = initial;
+  std::tie(stored.head_event_hash, stored.head_event_sequence) =
+      append_authority_event_uncommitted(event);
+  Statement insert(database_,
+                   "INSERT INTO journal_meta(key, value) VALUES(?, ?)");
+  bind_text(insert.get(), 1, lease_authority_metadata_key(
+                                 lease.concurrency_key, lease.fencing_token));
+  bind_text(insert.get(), 2, lease_authority_head_json(stored).dump());
+  require_done(database_, insert.get(), "record lease acquisition authority head");
+}
+
+void Journal::record_lease_authority_renewal_uncommitted(
+    const LeaseRenewalReceipt& renewal) {
+  const std::string key = lease_authority_metadata_key(
+      renewal.concurrency_key, renewal.fencing_token);
+  Statement query(database_, "SELECT value FROM journal_meta WHERE key=?");
+  bind_text(query.get(), 1, key);
+  if (sqlite3_step(query.get()) != SQLITE_ROW)
+    throw std::runtime_error("lease renewal has no acquisition authority root");
+  const std::string prior_encoded = column_text(query.get(), 0);
+  LeaseAuthorityHead head = parse_lease_authority_head(prior_encoded);
+  if (head.concurrency_key != renewal.concurrency_key ||
+      head.owner_run_id != renewal.owner_run_id ||
+      head.lease_id != renewal.lease_id ||
+      head.fencing_token != renewal.fencing_token || head.released ||
+      head.authority_revision ==
+          static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+    throw std::runtime_error("lease renewal authority head is inexact");
+  }
+  ++head.authority_revision;
+  Event event{.event_id = lease_authority_event_id(
+                  renewal.concurrency_key, renewal.fencing_token,
+                  head.authority_revision),
+              .run_id = renewal.owner_run_id,
+              .run_revision = 0U,
+              .plan_revision = 0U,
+              .node_id = {},
+              .attempt_id = {},
+              .worker_sequence = 0U,
+              .event_type = "authority.resource_lease_renewed",
+              .event_version = 1U,
+              .wall_time_ns = renewal.renewed_wall_time_ns,
+              .monotonic_time_ns = static_cast<std::uint64_t>(
+                  renewal.renewed_boottime_ns),
+              .optimizer_step = std::nullopt,
+              .payload = {{"acquired_boottime_ns",
+                           renewal.acquired_boottime_ns},
+                          {"acquired_wall_time_ns", renewal.acquired_wall_time_ns},
+                          {"authority_revision", head.authority_revision},
+                          {"boot_id", renewal.boot_id},
+                          {"clock_domain", renewal.clock_domain},
+                          {"concurrency_key", renewal.concurrency_key},
+                          {"fencing_token", renewal.fencing_token},
+                          {"lease_id", renewal.lease_id},
+                          {"new_expires_boottime_ns",
+                           renewal.new_expires_boottime_ns},
+                          {"new_expires_wall_time_ns",
+                           renewal.new_expires_wall_time_ns},
+                          {"operation", "renewed"},
+                          {"owner_run_id", renewal.owner_run_id},
+                          {"previous_authority_hash", head.head_event_hash},
+                          {"prior_expires_boottime_ns",
+                           renewal.prior_expires_boottime_ns},
+                          {"prior_expires_wall_time_ns",
+                           renewal.prior_expires_wall_time_ns},
+                          {"renewed_boottime_ns", renewal.renewed_boottime_ns},
+                          {"renewed_wall_time_ns", renewal.renewed_wall_time_ns}}};
+  std::tie(head.head_event_hash, head.head_event_sequence) =
+      append_authority_event_uncommitted(event);
+  const std::string next_encoded = lease_authority_head_json(head).dump();
+  Statement update(database_,
+                   "UPDATE journal_meta SET value=? WHERE key=? AND value=?");
+  bind_text(update.get(), 1, next_encoded);
+  bind_text(update.get(), 2, key);
+  bind_text(update.get(), 3, prior_encoded);
+  require_done(database_, update.get(), "advance lease renewal authority head");
+  if (sqlite3_changes(database_) != 1)
+    throw std::runtime_error("lease renewal authority head changed concurrently");
+}
+
+void Journal::record_lease_authority_release_uncommitted(
+    const ResourceLease& lease, std::int64_t released_wall_time_ns) {
+  const std::string key = lease_authority_metadata_key(
+      lease.concurrency_key, lease.fencing_token);
+  Statement query(database_, "SELECT value FROM journal_meta WHERE key=?");
+  bind_text(query.get(), 1, key);
+  if (sqlite3_step(query.get()) != SQLITE_ROW)
+    throw std::runtime_error("lease release has no acquisition authority root");
+  const std::string prior_encoded = column_text(query.get(), 0);
+  LeaseAuthorityHead head = parse_lease_authority_head(prior_encoded);
+  if (head.concurrency_key != lease.concurrency_key ||
+      head.owner_run_id != lease.owner_run_id ||
+      head.lease_id != lease.lease_id ||
+      head.fencing_token != lease.fencing_token || head.released ||
+      head.authority_revision ==
+          static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+    throw std::runtime_error("lease release authority head is inexact");
+  }
+  ++head.authority_revision;
+  Event event{.event_id = lease_authority_event_id(
+                  lease.concurrency_key, lease.fencing_token,
+                  head.authority_revision),
+              .run_id = lease.owner_run_id,
+              .run_revision = 0U,
+              .plan_revision = 0U,
+              .node_id = {},
+              .attempt_id = {},
+              .worker_sequence = 0U,
+              .event_type = "authority.resource_lease_released",
+              .event_version = 1U,
+              .wall_time_ns = released_wall_time_ns,
+              .monotonic_time_ns = 0U,
+              .optimizer_step = std::nullopt,
+              .payload = {{"authority_revision", head.authority_revision},
+                          {"boot_id", lease.boot_id},
+                          {"clock_domain", lease.clock_domain},
+                          {"concurrency_key", lease.concurrency_key},
+                          {"fencing_token", lease.fencing_token},
+                          {"lease_id", lease.lease_id},
+                          {"operation", "released"},
+                          {"owner_run_id", lease.owner_run_id},
+                          {"previous_authority_hash", head.head_event_hash},
+                          {"released_wall_time_ns", released_wall_time_ns}}};
+  std::tie(head.head_event_hash, head.head_event_sequence) =
+      append_authority_event_uncommitted(event);
+  head.released = true;
+  Statement update(database_,
+                   "UPDATE journal_meta SET value=? WHERE key=? AND value=?");
+  bind_text(update.get(), 1, lease_authority_head_json(head).dump());
+  bind_text(update.get(), 2, key);
+  bind_text(update.get(), 3, prior_encoded);
+  require_done(database_, update.get(), "advance lease release authority head");
+  if (sqlite3_changes(database_) != 1)
+    throw std::runtime_error("lease release authority head changed concurrently");
+}
+
 std::optional<Event> Journal::event(const std::string& event_id) const {
   Statement query(database_, R"sql(
     SELECT journal_sequence, event_id, run_id, run_revision, plan_revision, node_id,
@@ -2988,7 +3363,9 @@ std::vector<Event> Journal::events_for_run(const std::string& run_id) const {
     SELECT journal_sequence, event_id, run_id, run_revision, plan_revision, node_id,
            attempt_id, worker_sequence, event_type, event_version, wall_time_ns,
            monotonic_time_ns, optimizer_step, payload_json
-    FROM events WHERE run_id=? ORDER BY journal_sequence
+    FROM events
+    WHERE run_id=? AND event_type NOT LIKE 'authority.%'
+    ORDER BY journal_sequence
   )sql");
   bind_text(query.get(), 1, run_id);
   std::vector<Event> events;
@@ -3572,6 +3949,8 @@ void Journal::complete_managed_builtin_dispatch(
     bind_integer(release_receipt.get(), 7, now.wall.nanoseconds);
     require_done(database_, release_receipt.get(),
                  "record managed builtin lease release");
+    record_lease_authority_release_uncommitted(lease,
+                                                now.wall.nanoseconds);
   }
   for (const Event& event : events) {
     append_uncommitted(event);
@@ -4183,6 +4562,7 @@ LeaseAcquireResult Journal::acquire_lease_with_events(
     bind_integer(insert.get(), 9, lease.acquired_wall_time_ns);
     bind_integer(insert.get(), 10, lease.expires_wall_time_ns);
     require_done(database_, insert.get(), "insert resource lease");
+    record_lease_authority_acquisition_uncommitted(lease);
     append_events(lease);
     transaction.commit();
     return {.status = LeaseAcquireStatus::acquired, .lease = std::move(lease)};
@@ -4239,6 +4619,7 @@ LeaseAcquireResult Journal::acquire_lease_with_events(
   if (sqlite3_changes(database_) != 1) {
     throw std::runtime_error("resource lease replacement affected an unexpected number of rows");
   }
+  record_lease_authority_acquisition_uncommitted(lease);
   append_events(lease);
   transaction.commit();
   return {.status = LeaseAcquireStatus::acquired, .lease = std::move(lease)};
@@ -4938,6 +5319,7 @@ LeaseRenewalResult Journal::renew_lease_exact(
   bind_integer(receipt.get(), 13, requested.renewed_boottime_ns);
   bind_integer(receipt.get(), 14, requested.renewed_wall_time_ns);
   require_done(database_, receipt.get(), "record resource lease renewal");
+  record_lease_authority_renewal_uncommitted(requested);
   transaction.commit();
   return {.status = LeaseRenewalStatus::renewed, .receipt = requested};
 }
@@ -4984,6 +5366,18 @@ bool Journal::release_lease(const std::string& concurrency_key, const std::strin
     bind_text(receipt.get(), 5, now.boot_id);
     bind_integer(receipt.get(), 6, now.wall.nanoseconds);
     require_done(database_, receipt.get(), "record resource lease release");
+    Statement released_lease(database_, R"sql(
+      SELECT concurrency_key, owner_run_id, lease_id, fencing_token,
+             clock_domain, boot_id, acquired_boottime_ns,
+             expires_boottime_ns, acquired_wall_time_ns,
+             expires_wall_time_ns, released_wall_time_ns
+      FROM resource_leases WHERE concurrency_key=?
+    )sql");
+    bind_text(released_lease.get(), 1, concurrency_key);
+    if (sqlite3_step(released_lease.get()) != SQLITE_ROW)
+      throw std::runtime_error("released lease projection disappeared");
+    record_lease_authority_release_uncommitted(
+        lease_from_row(released_lease.get()), now.wall.nanoseconds);
   }
   transaction.commit();
   return released;
@@ -5577,7 +5971,9 @@ bool Journal::has_lease_release_receipt(
 }
 
 std::uint64_t Journal::event_count() const {
-  Statement query(database_, "SELECT COUNT(*) FROM events");
+  Statement query(
+      database_,
+      "SELECT COUNT(*) FROM events WHERE event_type NOT LIKE 'authority.%'");
   if (sqlite3_step(query.get()) != SQLITE_ROW) {
     throw std::runtime_error("could not count journal events");
   }
@@ -5594,6 +5990,772 @@ std::string Journal::journal_id() const {
     throw std::runtime_error("journal identity is malformed");
   }
   return identity;
+}
+
+JournalAuthoritySnapshot Journal::journal_authority_snapshot() const {
+  require_attested_authority();
+  auto read = read_snapshot();
+  (void)read;
+  Statement query(database_,
+                  "SELECT value FROM journal_meta WHERE key='journal_id'");
+  if (sqlite3_step(query.get()) != SQLITE_ROW) {
+    throw OperationPreconditionError("journal identity is missing");
+  }
+  const std::string identity = column_text(query.get(), 0);
+  if (!valid_journal_id(identity) || sqlite3_step(query.get()) != SQLITE_DONE) {
+    throw OperationPreconditionError("journal identity is malformed or ambiguous");
+  }
+  require_attested_authority();
+  return {.file = *expected_file_,
+          .host = *expected_host_grant_authority_,
+          .journal_id = identity};
+}
+
+JournalLogicalFenceSnapshot Journal::journal_logical_fence_snapshot(
+    const std::string& concurrency_key, const std::string& owner_run_id,
+    const std::string& lease_id, std::uint64_t fencing_token,
+    const AuthorityTimeSample& now) const {
+  require_lease_identity(concurrency_key, owner_run_id, lease_id);
+  require_authority_time(now);
+  if (fencing_token == 0U ||
+      fencing_token >
+          static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+    throw std::invalid_argument("journal fence token is outside its bound");
+  }
+  require_attested_authority();
+  if (now.boot_id != expected_host_grant_authority_->boot_id) {
+    throw OperationPreconditionError(
+        "journal fence time disagrees with retained host boot authority");
+  }
+
+  auto read = read_snapshot();
+  (void)read;
+  const auto corrupt = [&](std::string_view message) -> void {
+    authority_poisoned_.store(true, std::memory_order_release);
+    throw OperationPreconditionError(std::string(message));
+  };
+  std::string chain_reason;
+  if (!verify_event_chain(&chain_reason))
+    corrupt("journal logical fence event authority is corrupt");
+  Statement metadata(database_,
+                     "SELECT value FROM journal_meta WHERE key='journal_id'");
+  if (sqlite3_step(metadata.get()) != SQLITE_ROW) {
+    throw OperationPreconditionError("journal fence identity is missing");
+  }
+  const std::string identity = column_text(metadata.get(), 0);
+  if (!valid_journal_id(identity) ||
+      sqlite3_step(metadata.get()) != SQLITE_DONE) {
+    throw OperationPreconditionError(
+        "journal fence identity is malformed or ambiguous");
+  }
+
+  Statement lease(database_, R"sql(
+    SELECT concurrency_key, owner_run_id, lease_id, fencing_token,
+           clock_domain, boot_id, acquired_boottime_ns, expires_boottime_ns,
+           acquired_wall_time_ns, expires_wall_time_ns, released_wall_time_ns
+    FROM resource_leases
+    WHERE concurrency_key=?
+  )sql");
+  bind_text(lease.get(), 1, concurrency_key);
+  if (sqlite3_step(lease.get()) != SQLITE_ROW) {
+    throw OperationPreconditionError(
+        "journal logical fence is missing or superseded");
+  }
+  const bool scalar_types_exact =
+      sqlite3_column_type(lease.get(), 0) == SQLITE_TEXT &&
+      sqlite3_column_type(lease.get(), 1) == SQLITE_TEXT &&
+      sqlite3_column_type(lease.get(), 2) == SQLITE_TEXT &&
+      sqlite3_column_type(lease.get(), 3) == SQLITE_INTEGER &&
+      sqlite3_column_type(lease.get(), 4) == SQLITE_TEXT &&
+      sqlite3_column_type(lease.get(), 5) == SQLITE_TEXT &&
+      sqlite3_column_type(lease.get(), 6) == SQLITE_INTEGER &&
+      sqlite3_column_type(lease.get(), 7) == SQLITE_INTEGER &&
+      sqlite3_column_type(lease.get(), 8) == SQLITE_INTEGER &&
+      sqlite3_column_type(lease.get(), 9) == SQLITE_INTEGER &&
+      (sqlite3_column_type(lease.get(), 10) == SQLITE_NULL ||
+       sqlite3_column_type(lease.get(), 10) == SQLITE_INTEGER);
+  const ResourceLease retained = lease_from_row(lease.get());
+  const bool row_released = sqlite3_column_type(lease.get(), 10) != SQLITE_NULL;
+  const std::int64_t row_released_wall_time_ns =
+      row_released ? sqlite3_column_int64(lease.get(), 10) : 0;
+  if (retained.owner_run_id != owner_run_id || retained.lease_id != lease_id ||
+      retained.fencing_token != fencing_token)
+    throw OperationPreconditionError(
+        "journal logical fence is missing or superseded");
+  if (!scalar_types_exact || retained.concurrency_key != concurrency_key ||
+      retained.clock_domain != ResourceLease::kBootTimeDomain ||
+      retained.boot_id != now.boot_id || retained.acquired_boottime_ns < 0 ||
+      retained.expires_boottime_ns <= retained.acquired_boottime_ns ||
+      retained.acquired_wall_time_ns < 0 ||
+      retained.expires_wall_time_ns < 0 ||
+      (row_released && row_released_wall_time_ns < 0) ||
+      sqlite3_step(lease.get()) != SQLITE_DONE)
+    corrupt("journal logical fence projection is malformed");
+
+  const std::string authority_key =
+      lease_authority_metadata_key(concurrency_key, fencing_token);
+  Statement authority_head(database_,
+                           "SELECT value FROM journal_meta WHERE key=?");
+  bind_text(authority_head.get(), 1, authority_key);
+  if (sqlite3_step(authority_head.get()) != SQLITE_ROW)
+    corrupt("journal logical fence has no acquisition authority root");
+  LeaseAuthorityHead head;
+  try {
+    head = parse_lease_authority_head(column_text(authority_head.get(), 0));
+  } catch (...) {
+    corrupt("journal logical fence authority head is corrupt");
+  }
+  if (head.concurrency_key != concurrency_key ||
+      head.owner_run_id != owner_run_id || head.lease_id != lease_id ||
+      head.fencing_token != fencing_token ||
+      sqlite3_step(authority_head.get()) != SQLITE_DONE)
+    corrupt("journal logical fence authority head is inexact");
+
+  const auto exact_authority_event = [&](std::uint64_t revision)
+      -> std::optional<Event> {
+    return event(lease_authority_event_id(concurrency_key, fencing_token,
+                                          revision));
+  };
+  const auto root = exact_authority_event(0U);
+  if (!root || root->run_id != owner_run_id || root->run_revision != 0U ||
+      root->plan_revision != 0U || !root->node_id.empty() ||
+      !root->attempt_id.empty() || root->worker_sequence != 0U ||
+      root->event_type != "authority.resource_lease_acquired" ||
+      root->event_version != 1U ||
+      root->wall_time_ns != retained.acquired_wall_time_ns ||
+      root->monotonic_time_ns !=
+          static_cast<std::uint64_t>(retained.acquired_boottime_ns) ||
+      root->optimizer_step || !root->payload.is_object())
+    corrupt("journal logical fence acquisition authority is missing or torn");
+  std::int64_t initial_expires_boot = 0;
+  std::int64_t initial_expires_wall = 0;
+  try {
+    if (!root->payload.at("expires_boottime_ns").is_number_integer() ||
+        !root->payload.at("expires_wall_time_ns").is_number_integer())
+      corrupt("journal logical fence acquisition expiry is malformed");
+    initial_expires_boot =
+        root->payload.at("expires_boottime_ns").get<std::int64_t>();
+    initial_expires_wall =
+        root->payload.at("expires_wall_time_ns").get<std::int64_t>();
+  } catch (const nlohmann::json::exception&) {
+    corrupt("journal logical fence acquisition expiry is missing");
+  }
+  const nlohmann::json expected_root{
+      {"acquired_boottime_ns", retained.acquired_boottime_ns},
+      {"acquired_wall_time_ns", retained.acquired_wall_time_ns},
+      {"authority_revision", 0U},
+      {"boot_id", retained.boot_id},
+      {"clock_domain", retained.clock_domain},
+      {"concurrency_key", retained.concurrency_key},
+      {"expires_boottime_ns", initial_expires_boot},
+      {"expires_wall_time_ns", initial_expires_wall},
+      {"fencing_token", retained.fencing_token},
+      {"lease_id", retained.lease_id},
+      {"operation", "acquired"},
+      {"owner_run_id", retained.owner_run_id},
+      {"previous_authority_hash", std::string(64U, '0')}};
+  if (root->payload != expected_root ||
+      initial_expires_boot <= retained.acquired_boottime_ns ||
+      initial_expires_wall < 0)
+    corrupt("journal logical fence acquisition root disagrees with projection");
+
+  const auto latest = exact_authority_event(head.authority_revision);
+  if (!latest || latest->run_id != owner_run_id ||
+      latest->run_revision != 0U || latest->plan_revision != 0U ||
+      !latest->node_id.empty() || !latest->attempt_id.empty() ||
+      latest->worker_sequence != 0U || latest->event_version != 1U ||
+      latest->optimizer_step || content_hash(*latest) != head.head_event_hash)
+    corrupt("journal logical fence authority head event is missing or torn");
+  Statement latest_sequence(
+      database_, "SELECT journal_sequence FROM events WHERE event_id=?");
+  bind_text(latest_sequence.get(), 1, latest->event_id);
+  if (sqlite3_step(latest_sequence.get()) != SQLITE_ROW ||
+      sqlite3_column_type(latest_sequence.get(), 0) != SQLITE_INTEGER ||
+      sqlite3_column_int64(latest_sequence.get(), 0) <= 0 ||
+      static_cast<std::uint64_t>(
+          sqlite3_column_int64(latest_sequence.get(), 0)) !=
+          head.head_event_sequence ||
+      sqlite3_step(latest_sequence.get()) != SQLITE_DONE)
+    corrupt("journal logical fence authority sequence is torn");
+  if (head.authority_revision ==
+      std::numeric_limits<std::uint64_t>::max())
+    corrupt("journal logical fence authority revision is exhausted");
+  Statement later_authority(database_,
+                            "SELECT 1 FROM events WHERE event_id=?");
+  bind_text(later_authority.get(), 1,
+            lease_authority_event_id(concurrency_key, fencing_token,
+                                     head.authority_revision + 1U));
+  const int later_status = sqlite3_step(later_authority.get());
+  if (later_status == SQLITE_ROW)
+    corrupt("journal logical fence authority head was rolled back");
+  if (later_status != SQLITE_DONE)
+    corrupt("journal logical fence later authority is unreadable");
+  if (head.authority_revision > 0U) {
+    const auto previous = exact_authority_event(head.authority_revision - 1U);
+    if (!previous || !latest->payload.is_object() ||
+        latest->payload.value("previous_authority_hash", std::string{}) !=
+            content_hash(*previous))
+      corrupt("journal logical fence authority revision chain is torn");
+  } else if (content_hash(*root) != head.head_event_hash) {
+    corrupt("journal logical fence acquisition head is inexact");
+  }
+
+  Statement release(database_, R"sql(
+    SELECT clock_domain, boot_id, released_wall_time_ns
+    FROM resource_lease_releases
+    WHERE concurrency_key=? AND owner_run_id=? AND lease_id=?
+      AND fencing_token=?
+  )sql");
+  bind_text(release.get(), 1, retained.concurrency_key);
+  bind_text(release.get(), 2, retained.owner_run_id);
+  bind_text(release.get(), 3, retained.lease_id);
+  bind_integer(release.get(), 4,
+               static_cast<std::int64_t>(retained.fencing_token));
+  const int release_status = sqlite3_step(release.get());
+  const bool release_receipt = release_status == SQLITE_ROW;
+  if (release_status != SQLITE_ROW && release_status != SQLITE_DONE)
+    corrupt("journal logical fence release authority is unreadable");
+  if (release_receipt) {
+    if (sqlite3_column_type(release.get(), 0) != SQLITE_TEXT ||
+        sqlite3_column_type(release.get(), 1) != SQLITE_TEXT ||
+        sqlite3_column_type(release.get(), 2) != SQLITE_INTEGER ||
+        column_text(release.get(), 0) != retained.clock_domain ||
+        column_text(release.get(), 1) != retained.boot_id ||
+        sqlite3_column_int64(release.get(), 2) !=
+            row_released_wall_time_ns ||
+        sqlite3_step(release.get()) != SQLITE_DONE)
+      corrupt("journal logical fence release projection is torn");
+  }
+  if (head.released) {
+    const nlohmann::json expected_release{
+        {"authority_revision", head.authority_revision},
+        {"boot_id", retained.boot_id},
+        {"clock_domain", retained.clock_domain},
+        {"concurrency_key", retained.concurrency_key},
+        {"fencing_token", retained.fencing_token},
+        {"lease_id", retained.lease_id},
+        {"operation", "released"},
+        {"owner_run_id", retained.owner_run_id},
+        {"previous_authority_hash",
+         latest->payload.value("previous_authority_hash", std::string{})},
+        {"released_wall_time_ns", row_released_wall_time_ns}};
+    if (!row_released || !release_receipt ||
+        latest->event_type != "authority.resource_lease_released" ||
+        latest->wall_time_ns != row_released_wall_time_ns ||
+        latest->monotonic_time_ns != 0U ||
+        latest->payload != expected_release)
+      corrupt("journal logical fence release closure is torn");
+    throw OperationPreconditionError(
+        "journal logical fence is durably released");
+  }
+  if (row_released || release_receipt)
+    corrupt("journal logical fence release evidence lacks authority closure");
+
+  if (head.authority_revision == 0U) {
+    if (latest->event_type != "authority.resource_lease_acquired" ||
+        retained.expires_boottime_ns != initial_expires_boot ||
+        retained.expires_wall_time_ns != initial_expires_wall)
+      corrupt("journal logical fence acquisition projection was extended");
+  } else {
+    Statement renewal(database_, R"sql(
+      SELECT concurrency_key, owner_run_id, lease_id, fencing_token,
+             clock_domain, boot_id, acquired_boottime_ns,
+             acquired_wall_time_ns, prior_expires_boottime_ns,
+             new_expires_boottime_ns, prior_expires_wall_time_ns,
+             new_expires_wall_time_ns, renewed_boottime_ns,
+             renewed_wall_time_ns
+      FROM resource_lease_renewals
+      WHERE concurrency_key=? AND owner_run_id=? AND lease_id=?
+        AND fencing_token=? AND prior_expires_boottime_ns=?
+    )sql");
+    bind_text(renewal.get(), 1, retained.concurrency_key);
+    bind_text(renewal.get(), 2, retained.owner_run_id);
+    bind_text(renewal.get(), 3, retained.lease_id);
+    bind_integer(renewal.get(), 4,
+                 static_cast<std::int64_t>(retained.fencing_token));
+    const std::int64_t prior_expiry = latest->payload.value(
+        "prior_expires_boottime_ns", std::int64_t{-1});
+    bind_integer(renewal.get(), 5, prior_expiry);
+    if (sqlite3_step(renewal.get()) != SQLITE_ROW)
+      corrupt("journal logical fence renewal receipt is missing");
+    const LeaseRenewalReceipt receipt = renewal_receipt_from_row(renewal.get());
+    if (sqlite3_step(renewal.get()) != SQLITE_DONE)
+      corrupt("journal logical fence renewal receipt is ambiguous");
+    const nlohmann::json expected_renewal{
+        {"acquired_boottime_ns", receipt.acquired_boottime_ns},
+        {"acquired_wall_time_ns", receipt.acquired_wall_time_ns},
+        {"authority_revision", head.authority_revision},
+        {"boot_id", receipt.boot_id},
+        {"clock_domain", receipt.clock_domain},
+        {"concurrency_key", receipt.concurrency_key},
+        {"fencing_token", receipt.fencing_token},
+        {"lease_id", receipt.lease_id},
+        {"new_expires_boottime_ns", receipt.new_expires_boottime_ns},
+        {"new_expires_wall_time_ns", receipt.new_expires_wall_time_ns},
+        {"operation", "renewed"},
+        {"owner_run_id", receipt.owner_run_id},
+        {"previous_authority_hash",
+         latest->payload.value("previous_authority_hash", std::string{})},
+        {"prior_expires_boottime_ns", receipt.prior_expires_boottime_ns},
+        {"prior_expires_wall_time_ns", receipt.prior_expires_wall_time_ns},
+        {"renewed_boottime_ns", receipt.renewed_boottime_ns},
+        {"renewed_wall_time_ns", receipt.renewed_wall_time_ns}};
+    if (latest->event_type != "authority.resource_lease_renewed" ||
+        latest->payload != expected_renewal ||
+        receipt.concurrency_key != retained.concurrency_key ||
+        receipt.owner_run_id != retained.owner_run_id ||
+        receipt.lease_id != retained.lease_id ||
+        receipt.fencing_token != retained.fencing_token ||
+        receipt.clock_domain != retained.clock_domain ||
+        receipt.boot_id != retained.boot_id ||
+        receipt.acquired_boottime_ns != retained.acquired_boottime_ns ||
+        receipt.acquired_wall_time_ns != retained.acquired_wall_time_ns ||
+        receipt.new_expires_boottime_ns != retained.expires_boottime_ns ||
+        receipt.new_expires_wall_time_ns != retained.expires_wall_time_ns)
+      corrupt("journal logical fence renewal authority is torn");
+  }
+  if (retained.expires_boottime_ns <= now.boot.nanoseconds)
+    throw OperationPreconditionError("journal logical fence is expired");
+
+  require_attested_authority();
+  return {.authority = {.file = *expected_file_,
+                        .host = *expected_host_grant_authority_,
+                        .journal_id = identity},
+          .lease = retained,
+          .authority_revision = head.authority_revision,
+          .authority_event_sequence = head.head_event_sequence,
+          .authority_event_hash = head.head_event_hash};
+}
+
+JournalControllerFence Journal::register_hostd_controller_fence(
+    const JournalControllerFence& requested,
+    const AuthorityTimeSample& now) {
+  require_lease_identity(requested.concurrency_key, requested.run_id,
+                         requested.logical_lease_id);
+  require_authority_time(now);
+  const auto bounded_identifier = [](std::string_view value) {
+    return !value.empty() && value.size() <= 192U &&
+           std::ranges::all_of(value, [](unsigned char character) {
+             return (character >= 'a' && character <= 'z') ||
+                    (character >= 'A' && character <= 'Z') ||
+                    (character >= '0' && character <= '9') ||
+                    character == '.' || character == '_' || character == '-' ||
+                    character == ':' || character == '/' || character == '@';
+           });
+  };
+  if (!bounded_identifier(requested.broker_epoch) ||
+      !bounded_identifier(requested.controller_id) ||
+      requested.controller_generation == 0U ||
+      requested.controller_generation >
+          static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) ||
+      requested.logical_fencing_token == 0U ||
+      requested.logical_fencing_token >
+          static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+    throw std::invalid_argument("hostd controller fence is noncanonical");
+  }
+  const JournalLogicalFenceSnapshot live = journal_logical_fence_snapshot(
+      requested.concurrency_key, requested.run_id,
+      requested.logical_lease_id, requested.logical_fencing_token, now);
+
+  require_attested_authority();
+  Transaction transaction(database_);
+  std::string chain_reason;
+  if (!verify_event_chain(&chain_reason)) {
+    authority_poisoned_.store(true, std::memory_order_release);
+    throw OperationPreconditionError(
+        "hostd controller registration found corrupt journal authority");
+  }
+
+  std::optional<nlohmann::json> prior;
+  std::string prior_encoded;
+  {
+    Statement query(database_, "SELECT value FROM journal_meta WHERE key=?");
+    bind_text(query.get(), 1, std::string(kControllerAuthorityMetadataKey));
+    const int status = sqlite3_step(query.get());
+    if (status == SQLITE_ROW) {
+      prior_encoded = column_text(query.get(), 0);
+      try {
+        prior = nlohmann::json::parse(prior_encoded);
+      } catch (...) {
+        authority_poisoned_.store(true, std::memory_order_release);
+        throw OperationPreconditionError(
+            "hostd controller authority head is malformed");
+      }
+      const bool exact_shape =
+          prior->is_object() && prior->size() == 9U &&
+          prior->contains("broker_epoch") &&
+          prior->contains("concurrency_key") &&
+          prior->contains("controller_generation") &&
+          prior->contains("controller_id") &&
+          prior->contains("event_sequence") &&
+          prior->contains("event_hash") &&
+          prior->contains("logical_fencing_token") &&
+          prior->contains("logical_lease_id") && prior->contains("run_id");
+      if (!exact_shape || prior->dump() != prior_encoded ||
+          !prior->at("broker_epoch").is_string() ||
+          !prior->at("concurrency_key").is_string() ||
+          !prior->at("controller_generation").is_number_unsigned() ||
+          !prior->at("controller_id").is_string() ||
+          !prior->at("event_sequence").is_number_unsigned() ||
+          !prior->at("event_hash").is_string() ||
+          !prior->at("logical_fencing_token").is_number_unsigned() ||
+          !prior->at("logical_lease_id").is_string() ||
+          !prior->at("run_id").is_string() ||
+          !valid_hash_hex(prior->at("event_hash").get<std::string>())) {
+        authority_poisoned_.store(true, std::memory_order_release);
+        throw OperationPreconditionError(
+            "hostd controller authority head is noncanonical");
+      }
+    } else if (status != SQLITE_DONE) {
+      throw std::runtime_error("could not read hostd controller authority head");
+    }
+  }
+  if (!prior) {
+    Statement history(database_, R"sql(
+      SELECT 1 FROM events
+      WHERE event_type='authority.hostd_controller_registered' LIMIT 1
+    )sql");
+    if (sqlite3_step(history.get()) == SQLITE_ROW) {
+      authority_poisoned_.store(true, std::memory_order_release);
+      throw OperationPreconditionError(
+          "hostd controller authority head was deleted");
+    }
+  } else {
+    const std::uint64_t prior_generation =
+        prior->at("controller_generation").get<std::uint64_t>();
+    const auto prior_event =
+        event("journal-hostd-controller-" + std::to_string(prior_generation));
+    Statement prior_sequence(
+        database_, "SELECT journal_sequence FROM events WHERE event_id=?");
+    bind_text(prior_sequence.get(), 1,
+              "journal-hostd-controller-" +
+                  std::to_string(prior_generation));
+    const nlohmann::json expected_payload{
+        {"broker_epoch", prior->at("broker_epoch")},
+        {"concurrency_key", prior->at("concurrency_key")},
+        {"controller_generation", prior->at("controller_generation")},
+        {"controller_id", prior->at("controller_id")},
+        {"logical_fencing_token", prior->at("logical_fencing_token")},
+        {"logical_lease_id", prior->at("logical_lease_id")},
+        {"operation", "hostd_controller_registered"},
+        {"previous_controller_hash",
+         prior_event && prior_event->payload.is_object()
+             ? prior_event->payload.value("previous_controller_hash",
+                                          std::string{})
+             : std::string{}},
+        {"run_id", prior->at("run_id")}};
+    if (!prior_event ||
+        prior_event->run_id != prior->at("run_id").get<std::string>() ||
+        prior_event->run_revision != 0U || prior_event->plan_revision != 0U ||
+        !prior_event->node_id.empty() || !prior_event->attempt_id.empty() ||
+        prior_event->worker_sequence != 0U ||
+        prior_event->event_type != "authority.hostd_controller_registered" ||
+        prior_event->event_version != 1U || prior_event->optimizer_step ||
+        !prior_event->payload.is_object() ||
+        !valid_hash_hex(expected_payload.at("previous_controller_hash")
+                            .get<std::string>()) ||
+        prior_event->payload != expected_payload ||
+        content_hash(*prior_event) !=
+            prior->at("event_hash").get<std::string>() ||
+        sqlite3_step(prior_sequence.get()) != SQLITE_ROW ||
+        sqlite3_column_type(prior_sequence.get(), 0) != SQLITE_INTEGER ||
+        sqlite3_column_int64(prior_sequence.get(), 0) <= 0 ||
+        static_cast<std::uint64_t>(
+            sqlite3_column_int64(prior_sequence.get(), 0)) !=
+            prior->at("event_sequence").get<std::uint64_t>() ||
+        sqlite3_step(prior_sequence.get()) != SQLITE_DONE) {
+      authority_poisoned_.store(true, std::memory_order_release);
+      throw OperationPreconditionError(
+          "hostd controller authority event is missing or torn");
+    }
+    if (prior_generation ==
+        std::numeric_limits<std::uint64_t>::max()) {
+      authority_poisoned_.store(true, std::memory_order_release);
+      throw OperationPreconditionError(
+          "hostd controller generation authority is exhausted");
+    }
+    Statement later_controller(database_,
+                               "SELECT 1 FROM events WHERE event_id=?");
+    bind_text(later_controller.get(), 1,
+              "journal-hostd-controller-" +
+                  std::to_string(prior_generation + 1U));
+    const int later_status = sqlite3_step(later_controller.get());
+    if (later_status == SQLITE_ROW) {
+      authority_poisoned_.store(true, std::memory_order_release);
+      throw OperationPreconditionError(
+          "hostd controller authority head was rolled back");
+    }
+    if (later_status != SQLITE_DONE)
+      throw std::runtime_error("could not read later controller authority");
+    if (prior_generation ==
+            static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) ||
+        requested.controller_generation != prior_generation + 1U ||
+        requested.controller_id ==
+            prior->at("controller_id").get<std::string>()) {
+      throw OperationPreconditionError(
+          "hostd controller generation is reused, stale, or noncontiguous");
+    }
+  }
+  const std::string controller_identity_key =
+      std::string(kControllerIdentityMetadataPrefix) +
+      sha256_hex(requested.controller_id);
+  {
+    Statement reused(database_, "SELECT 1 FROM journal_meta WHERE key=?");
+    bind_text(reused.get(), 1, controller_identity_key);
+    if (sqlite3_step(reused.get()) == SQLITE_ROW)
+      throw OperationPreconditionError("hostd controller identity was reused");
+  }
+
+  Statement lease(database_, R"sql(
+    SELECT expires_boottime_ns, released_wall_time_ns
+    FROM resource_leases
+    WHERE concurrency_key=? AND owner_run_id=? AND lease_id=?
+      AND fencing_token=? AND clock_domain='boottime/v1' AND boot_id=?
+      AND NOT EXISTS(
+        SELECT 1 FROM resource_lease_releases AS release
+        WHERE release.concurrency_key=resource_leases.concurrency_key
+          AND release.owner_run_id=resource_leases.owner_run_id
+          AND release.lease_id=resource_leases.lease_id
+          AND release.fencing_token=resource_leases.fencing_token)
+  )sql");
+  bind_text(lease.get(), 1, requested.concurrency_key);
+  bind_text(lease.get(), 2, requested.run_id);
+  bind_text(lease.get(), 3, requested.logical_lease_id);
+  bind_integer(lease.get(), 4,
+               static_cast<std::int64_t>(requested.logical_fencing_token));
+  bind_text(lease.get(), 5, now.boot_id);
+  if (sqlite3_step(lease.get()) != SQLITE_ROW ||
+      sqlite3_column_type(lease.get(), 0) != SQLITE_INTEGER ||
+      sqlite3_column_int64(lease.get(), 0) <= now.boot.nanoseconds ||
+      sqlite3_column_type(lease.get(), 1) != SQLITE_NULL ||
+      sqlite3_step(lease.get()) != SQLITE_DONE)
+    throw OperationPreconditionError(
+        "hostd controller registration lost its live logical fence");
+  Statement lease_head(database_, "SELECT value FROM journal_meta WHERE key=?");
+  bind_text(lease_head.get(), 1,
+            lease_authority_metadata_key(requested.concurrency_key,
+                                         requested.logical_fencing_token));
+  if (sqlite3_step(lease_head.get()) != SQLITE_ROW) {
+    authority_poisoned_.store(true, std::memory_order_release);
+    throw OperationPreconditionError(
+        "hostd controller lease authority head disappeared");
+  }
+  LeaseAuthorityHead current_head;
+  try {
+    current_head = parse_lease_authority_head(column_text(lease_head.get(), 0));
+  } catch (...) {
+    authority_poisoned_.store(true, std::memory_order_release);
+    throw OperationPreconditionError(
+        "hostd controller lease authority head is corrupt");
+  }
+  if (current_head.authority_revision != live.authority_revision ||
+      current_head.head_event_sequence != live.authority_event_sequence ||
+      current_head.head_event_hash != live.authority_event_hash ||
+      current_head.released) {
+    throw OperationPreconditionError(
+        "hostd controller lease authority advanced during registration");
+  }
+
+  const std::string previous_controller_hash =
+      prior ? prior->at("event_hash").get<std::string>()
+            : std::string(64U, '0');
+  Event event{
+      .event_id = "journal-hostd-controller-" +
+                  std::to_string(requested.controller_generation),
+      .run_id = requested.run_id,
+      .run_revision = 0U,
+      .plan_revision = 0U,
+      .node_id = {},
+      .attempt_id = {},
+      .worker_sequence = 0U,
+      .event_type = "authority.hostd_controller_registered",
+      .event_version = 1U,
+      .wall_time_ns = now.wall.nanoseconds,
+      .monotonic_time_ns =
+          static_cast<std::uint64_t>(now.boot.nanoseconds),
+      .optimizer_step = std::nullopt,
+      .payload = {{"broker_epoch", requested.broker_epoch},
+                  {"concurrency_key", requested.concurrency_key},
+                  {"controller_generation", requested.controller_generation},
+                  {"controller_id", requested.controller_id},
+                  {"logical_fencing_token",
+                   requested.logical_fencing_token},
+                  {"logical_lease_id", requested.logical_lease_id},
+                  {"operation", "hostd_controller_registered"},
+                  {"previous_controller_hash", previous_controller_hash},
+                  {"run_id", requested.run_id}}};
+  const auto [event_hash, event_sequence] =
+      append_authority_event_uncommitted(event);
+  const nlohmann::json next{{"broker_epoch", requested.broker_epoch},
+                            {"concurrency_key", requested.concurrency_key},
+                            {"controller_generation",
+                             requested.controller_generation},
+                            {"controller_id", requested.controller_id},
+                            {"event_sequence", event_sequence},
+                            {"event_hash", event_hash},
+                            {"logical_fencing_token",
+                             requested.logical_fencing_token},
+                            {"logical_lease_id", requested.logical_lease_id},
+                            {"run_id", requested.run_id}};
+  if (prior) {
+    Statement update(database_,
+                     "UPDATE journal_meta SET value=? WHERE key=? AND value=?");
+    bind_text(update.get(), 1, next.dump());
+    bind_text(update.get(), 2, std::string(kControllerAuthorityMetadataKey));
+    bind_text(update.get(), 3, prior_encoded);
+    require_done(database_, update.get(), "advance hostd controller authority");
+    if (sqlite3_changes(database_) != 1)
+      throw std::runtime_error("hostd controller authority changed concurrently");
+  } else {
+    Statement insert(database_,
+                     "INSERT INTO journal_meta(key, value) VALUES(?, ?)");
+    bind_text(insert.get(), 1, std::string(kControllerAuthorityMetadataKey));
+    bind_text(insert.get(), 2, next.dump());
+    require_done(database_, insert.get(), "create hostd controller authority");
+  }
+  Statement identity(database_,
+                     "INSERT INTO journal_meta(key, value) VALUES(?, ?)");
+  bind_text(identity.get(), 1, controller_identity_key);
+  bind_text(identity.get(), 2, requested.controller_id);
+  require_done(database_, identity.get(), "retain hostd controller identity");
+  transaction.commit();
+  require_attested_authority();
+  return requested;
+}
+
+void Journal::require_current_hostd_controller_fence(
+    const JournalControllerFence& requested) const {
+  require_attested_authority();
+  auto read = read_snapshot();
+  (void)read;
+  const auto corrupt = [&](std::string_view message) -> void {
+    authority_poisoned_.store(true, std::memory_order_release);
+    throw OperationPreconditionError(std::string(message));
+  };
+  std::string chain_reason;
+  if (!verify_event_chain(&chain_reason))
+    corrupt("hostd controller event authority is corrupt");
+
+  Statement query(database_, "SELECT value FROM journal_meta WHERE key=?");
+  bind_text(query.get(), 1, std::string(kControllerAuthorityMetadataKey));
+  if (sqlite3_step(query.get()) != SQLITE_ROW)
+    corrupt("hostd controller authority head is missing");
+  const std::string encoded = column_text(query.get(), 0);
+  if (sqlite3_step(query.get()) != SQLITE_DONE)
+    corrupt("hostd controller authority head is ambiguous");
+
+  nlohmann::json head;
+  try {
+    head = nlohmann::json::parse(encoded);
+    const bool exact_shape =
+        head.is_object() && head.size() == 9U &&
+        head.contains("broker_epoch") && head.contains("concurrency_key") &&
+        head.contains("controller_generation") &&
+        head.contains("controller_id") && head.contains("event_sequence") &&
+        head.contains("event_hash") &&
+        head.contains("logical_fencing_token") &&
+        head.contains("logical_lease_id") && head.contains("run_id");
+    if (!exact_shape || head.dump() != encoded ||
+        !head.at("broker_epoch").is_string() ||
+        !head.at("concurrency_key").is_string() ||
+        !head.at("controller_generation").is_number_unsigned() ||
+        !head.at("controller_id").is_string() ||
+        !head.at("event_sequence").is_number_unsigned() ||
+        !head.at("event_hash").is_string() ||
+        !head.at("logical_fencing_token").is_number_unsigned() ||
+        !head.at("logical_lease_id").is_string() ||
+        !head.at("run_id").is_string() ||
+        !valid_hash_hex(head.at("event_hash").get<std::string>()))
+      corrupt("hostd controller authority head is noncanonical");
+  } catch (const OperationPreconditionError&) {
+    throw;
+  } catch (...) {
+    corrupt("hostd controller authority head is malformed");
+  }
+
+  const std::uint64_t generation =
+      head.at("controller_generation").get<std::uint64_t>();
+  const auto authority_event =
+      event("journal-hostd-controller-" + std::to_string(generation));
+  Statement authority_sequence(
+      database_, "SELECT journal_sequence FROM events WHERE event_id=?");
+  bind_text(authority_sequence.get(), 1,
+            "journal-hostd-controller-" + std::to_string(generation));
+  const std::string previous_hash =
+      authority_event && authority_event->payload.is_object()
+          ? authority_event->payload.value("previous_controller_hash",
+                                           std::string{})
+          : std::string{};
+  const nlohmann::json expected_payload{
+      {"broker_epoch", head.at("broker_epoch")},
+      {"concurrency_key", head.at("concurrency_key")},
+      {"controller_generation", head.at("controller_generation")},
+      {"controller_id", head.at("controller_id")},
+      {"logical_fencing_token", head.at("logical_fencing_token")},
+      {"logical_lease_id", head.at("logical_lease_id")},
+      {"operation", "hostd_controller_registered"},
+      {"previous_controller_hash", previous_hash},
+      {"run_id", head.at("run_id")}};
+  if (!authority_event ||
+      authority_event->run_id != head.at("run_id").get<std::string>() ||
+      authority_event->run_revision != 0U ||
+      authority_event->plan_revision != 0U ||
+      !authority_event->node_id.empty() ||
+      !authority_event->attempt_id.empty() ||
+      authority_event->worker_sequence != 0U ||
+      authority_event->event_type !=
+          "authority.hostd_controller_registered" ||
+      authority_event->event_version != 1U || authority_event->optimizer_step ||
+      !valid_hash_hex(previous_hash) ||
+      authority_event->payload != expected_payload ||
+      content_hash(*authority_event) !=
+          head.at("event_hash").get<std::string>() ||
+      sqlite3_step(authority_sequence.get()) != SQLITE_ROW ||
+      sqlite3_column_type(authority_sequence.get(), 0) != SQLITE_INTEGER ||
+      sqlite3_column_int64(authority_sequence.get(), 0) <= 0 ||
+      static_cast<std::uint64_t>(
+          sqlite3_column_int64(authority_sequence.get(), 0)) !=
+          head.at("event_sequence").get<std::uint64_t>() ||
+      sqlite3_step(authority_sequence.get()) != SQLITE_DONE)
+    corrupt("hostd controller authority event is missing or torn");
+  if (generation == std::numeric_limits<std::uint64_t>::max())
+    corrupt("hostd controller generation authority is exhausted");
+  Statement later_controller(database_,
+                             "SELECT 1 FROM events WHERE event_id=?");
+  bind_text(later_controller.get(), 1,
+            "journal-hostd-controller-" +
+                std::to_string(generation + 1U));
+  const int later_status = sqlite3_step(later_controller.get());
+  if (later_status == SQLITE_ROW)
+    corrupt("hostd controller authority head was rolled back");
+  if (later_status != SQLITE_DONE)
+    corrupt("hostd controller later authority is unreadable");
+
+  const std::string identity_key =
+      std::string(kControllerIdentityMetadataPrefix) +
+      sha256_hex(head.at("controller_id").get<std::string>());
+  Statement identity(database_, "SELECT value FROM journal_meta WHERE key=?");
+  bind_text(identity.get(), 1, identity_key);
+  if (sqlite3_step(identity.get()) != SQLITE_ROW ||
+      sqlite3_column_type(identity.get(), 0) != SQLITE_TEXT ||
+      column_text(identity.get(), 0) !=
+          head.at("controller_id").get<std::string>() ||
+      sqlite3_step(identity.get()) != SQLITE_DONE)
+    corrupt("hostd controller identity retention is torn");
+
+  if (head.at("broker_epoch").get<std::string>() != requested.broker_epoch ||
+      head.at("run_id").get<std::string>() != requested.run_id ||
+      head.at("concurrency_key").get<std::string>() !=
+          requested.concurrency_key ||
+      head.at("controller_id").get<std::string>() != requested.controller_id ||
+      generation != requested.controller_generation ||
+      head.at("logical_lease_id").get<std::string>() !=
+          requested.logical_lease_id ||
+      head.at("logical_fencing_token").get<std::uint64_t>() !=
+          requested.logical_fencing_token)
+    throw OperationPreconditionError(
+        "hostd controller fence is no longer current");
+  require_attested_authority();
 }
 
 bool Journal::verify_event_chain(std::string* reason) const {
@@ -5710,10 +6872,12 @@ std::uint64_t Journal::rebuild_projections() {
   while ((status = sqlite3_step(query.get())) == SQLITE_ROW) {
     const auto sequence = static_cast<std::uint64_t>(sqlite3_column_int64(query.get(), 0));
     const Event event = event_from_row(query.get());
-    update_projection(database_, event, sequence);
-    update_control_projection(database_, event);
-    replay_host_saga_projection(database_, event);
-    ++replayed;
+    if (!event.event_type.starts_with("authority.")) {
+      update_projection(database_, event, sequence);
+      update_control_projection(database_, event);
+      replay_host_saga_projection(database_, event);
+      ++replayed;
+    }
   }
   if (status != SQLITE_DONE) {
     throw std::runtime_error("could not scan events while rebuilding projections: " +

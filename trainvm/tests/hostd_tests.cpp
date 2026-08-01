@@ -287,15 +287,46 @@ public:
     return ledger_->inventory();
   }
 
+  HostLedgerChainHead chain_head() const override {
+    return ledger_->chain_head();
+  }
+
+  ResourceOccupancySnapshot occupancy() const override {
+    return ledger_->occupancy();
+  }
+
+  HostStartupAuditLedgerCommitResult
+  commit_startup_audit(const HostStartupAuditReport &report,
+                       const HostLedgerTime &now) override {
+    if (during_audit_commit)
+      during_audit_commit();
+    return ledger_->commit_startup_audit(report, now);
+  }
+
+  HostLedgerAdmissionFinalizeResult
+  finalize_startup_admission(const HostStartupAuditReport &report,
+                             const HostStartupAuditReceipt &receipt,
+                             const HostLedgerTime &now) override {
+    if (before_admission_finalize)
+      before_admission_finalize();
+    auto result = ledger_->finalize_startup_admission(report, receipt, now);
+    if (after_admission_finalize)
+      after_admission_finalize(result);
+    return result;
+  }
+
   BundleRequestResult request_bundle(const ResourceBundleRequest &request,
-                                     const HostLedgerTime &now) override {
+                                     const HostLedgerTime &now,
+                                     const HostLedgerAdmissionEpoch
+                                         &admission_epoch) override {
     {
       std::unique_lock lock(block_mutex);
       request_entered = true;
       block_condition.notify_all();
       block_condition.wait(lock, [&] { return !block_request; });
     }
-    BundleRequestResult result = ledger_->request_bundle(request, now);
+    BundleRequestResult result =
+        ledger_->request_bundle(request, now, admission_epoch);
     if (!result.grant)
       return result;
     switch (grant_fault) {
@@ -369,6 +400,10 @@ public:
 
   mutable std::function<void()> during_verify;
   mutable std::function<void()> during_inventory;
+  std::function<void()> during_audit_commit;
+  std::function<void()> before_admission_finalize;
+  std::function<void(const HostLedgerAdmissionFinalizeResult &)>
+      after_admission_finalize;
   GrantFault grant_fault{GrantFault::none};
   ReleaseFault release_fault{ReleaseFault::none};
   bool block_request{};
@@ -380,40 +415,88 @@ private:
   bool request_entered{};
 };
 
-HostdStartupAuditReceipt
-audit_receipt(const HostInventoryReceipt &observed,
-              HostdStartupAuditDisposition disposition =
-                  HostdStartupAuditDisposition::passed) {
-  return {.api_version = std::string(kHostdStartupAuditApiVersion),
-          .audit_id = "startup-audit-001",
-          .host_id = observed.host_id,
-          .boot_id = observed.boot_id,
-          .broker_epoch = observed.broker_epoch,
-          .inventory_digest = observed.inventory_digest,
-          .disposition = disposition,
-          .observed_orphans = 0U,
-          .unresolved_orphans = 0U,
-          .evidence_digest = std::string(kDigest)};
+HostStartupAuditPolicy startup_audit_policy() {
+  return canonicalize_host_startup_audit_policy({
+      .api_version = std::string(kHostStartupAuditPolicyApiVersion),
+      .require_stable_occupancy = true,
+      .fail_on_blocking_findings = true,
+      .maximum_findings = 16U,
+      .policy_digest = {},
+  });
 }
 
-class FakeAuditor final : public IHostdStartupAuditor {
-public:
-  explicit FakeAuditor(HostdStartupAuditReceipt receipt)
-      : receipt_(std::move(receipt)) {}
+HostStartupAuditReport audit_report(
+    SQLiteHostLedger &ledger,
+    HostStartupAuditDisposition disposition =
+        HostStartupAuditDisposition::passed) {
+  static std::atomic<std::uint64_t> next_audit_id{1U};
+  const auto observed = ledger.inventory();
+  const auto head = ledger.chain_head();
+  const auto occupancy = ledger.occupancy();
+  std::vector<HostStartupAuditFinding> findings;
+  if (disposition == HostStartupAuditDisposition::failed) {
+    findings.push_back(canonicalize_host_startup_audit_finding({
+        .severity = HostStartupAuditFindingSeverity::blocking,
+        .code = "hostd.test.blocking",
+        .subject = "startup",
+        .detail = "deterministic blocking startup evidence",
+        .evidence_digest = {},
+    }));
+  }
+  return canonicalize_host_startup_audit_report({
+      .api_version = std::string(kHostStartupAuditReportApiVersion),
+      .audit_id =
+          "hostd-audit-" + std::to_string(next_audit_id.fetch_add(1U)),
+      .host_id = observed.host_id,
+      .boot_id = observed.boot_id,
+      .broker_epoch = observed.broker_epoch,
+      .broker_instance_id = "hostd-test-instance",
+      .inventory = observed,
+      .pre_audit_occupancy = occupancy,
+      .post_audit_occupancy = occupancy,
+      .ledger_head_before = head,
+      .ledger_head_after_observation = head,
+      .policy = startup_audit_policy(),
+      .findings = std::move(findings),
+      .disposition = disposition,
+      .observed_begin_boottime_ns = 10,
+      .observed_end_boottime_ns = 20,
+      .findings_digest = {},
+      .report_digest = {},
+  });
+}
 
-  HostdStartupAuditReceipt
-  audit(const HostInventoryReceipt &observed) override {
+class FakeAuditor final : public IConfiguredHostStartupAuditorV2 {
+public:
+  explicit FakeAuditor(HostStartupAuditReport report)
+      : report_(std::move(report)) {}
+
+  HostStartupAuditReport audit() override {
     ++calls;
-    inventory_seen = observed;
     if (during_audit)
       during_audit();
-    return receipt_;
+    return report_;
   }
 
-  HostdStartupAuditReceipt receipt_;
+  HostStartupAuditReport report_;
   std::function<void()> during_audit;
-  std::optional<HostInventoryReceipt> inventory_seen;
   std::size_t calls{};
+};
+
+class OneShotFault final : public IHostLedgerFaultInjector {
+public:
+  explicit OneShotFault(HostLedgerFaultPoint target) : target_(target) {}
+
+  void hit(HostLedgerFaultPoint point) override {
+    if (armed_ && point == target_) {
+      armed_ = false;
+      throw HostLedgerError("injected hostd ledger fault");
+    }
+  }
+
+private:
+  HostLedgerFaultPoint target_;
+  bool armed_{true};
 };
 
 struct Fixture final {
@@ -429,7 +512,8 @@ struct Fixture final {
                 .enforcement_grade =
                     HostLedgerEnforcementGrade::cooperative_test,
             }))),
-        ledger(std::make_shared<SQLiteHostLedger>(authority, observed)) {}
+        ledger(std::make_shared<SQLiteHostLedger>(
+            authority, observed, nullptr, startup_audit_policy())) {}
 
   [[nodiscard]] HostdCoordinatorConfig config() const {
     return {.api_version = std::string(kHostdCoordinatorApiVersion),
@@ -479,13 +563,12 @@ HostdConnectedSession connect_admission(HostGrantCoordinator &coordinator,
   return coordinator.connect({.attribution = scope}, std::move(peer));
 }
 
-void admit(HostGrantCoordinator &coordinator,
-           const HostInventoryReceipt &observed) {
-  FakeAuditor auditor(audit_receipt(observed));
-  const auto receipt = coordinator.run_startup_audit(auditor);
-  require(receipt == auditor.receipt_ && auditor.calls == 1U &&
-              auditor.inventory_seen == observed,
-          "startup audit consumes and returns exact inventory evidence");
+void admit(HostGrantCoordinator &coordinator, SQLiteHostLedger &ledger) {
+  FakeAuditor auditor(audit_report(ledger));
+  const auto receipt = coordinator.run_startup_audit(auditor, {30, 40});
+  require(receipt.report_digest == auditor.report_.report_digest &&
+              auditor.calls == 1U,
+          "startup audit commits and returns exact report evidence");
 }
 
 void lifecycle_and_pre_audit_gate() {
@@ -520,12 +603,12 @@ void lifecycle_and_pre_audit_gate() {
   require(fixture.ledger->occupancy().active_fences.empty(),
           "pre-audit attempt leaves the physical ledger unallocated");
 
-  FakeAuditor auditor(audit_receipt(fixture.observed));
+  FakeAuditor auditor(audit_report(*fixture.ledger));
   auditor.during_audit = [&] {
     require(coordinator->status().lifecycle == HostdLifecycle::startup_auditing,
             "audit callback observes explicit startup_auditing state");
   };
-  (void)coordinator->run_startup_audit(auditor);
+  (void)coordinator->run_startup_audit(auditor, {30, 40});
   require(coordinator->status().lifecycle == HostdLifecycle::admitting,
           "exact passed audit enables admission");
   const auto scope = attribution();
@@ -537,65 +620,363 @@ void lifecycle_and_pre_audit_gate() {
           "audited mutation-capable session can grant");
 }
 
-void failed_unknown_and_malformed_audits_poison() {
-  for (const auto disposition : {HostdStartupAuditDisposition::failed,
-                                 HostdStartupAuditDisposition::unknown}) {
+void failed_policy_mismatch_and_malformed_audits_fail_closed() {
+  {
     Fixture fixture;
     auto coordinator = fixture.coordinator();
-    FakeAuditor auditor(audit_receipt(fixture.observed, disposition));
+    FakeAuditor auditor(
+        audit_report(*fixture.ledger, HostStartupAuditDisposition::failed));
     require_throws<HostdStateError>(
-        [&] { (void)coordinator->run_startup_audit(auditor); },
-        "non-passing audit must fail");
-    require(coordinator->status().lifecycle == HostdLifecycle::poisoned &&
-                coordinator->status().startup_audit.has_value(),
-            "bounded failed/unknown receipt poisons and remains diagnostic");
-    auto admission_peer =
-        std::make_shared<FakePeer>(HostdSessionAccess::grant_release);
-    require_throws<HostdStateError>(
-        [&] {
-          (void)coordinator->connect({.attribution = attribution()},
-                                     admission_peer);
-        },
-        "poisoned coordinator cannot acquire mutation-capable session");
+        [&] { (void)coordinator->run_startup_audit(auditor, {30, 40}); },
+        "committed failed audit must block admission");
+    const auto status = coordinator->status();
+    require(status.lifecycle == HostdLifecycle::startup_blocked &&
+                status.startup_audit.has_value() &&
+                status.startup_audit->report_digest ==
+                    auditor.report_.report_digest,
+            "failed evidence remains inspectable in an explicit blocked state");
     auto observer = std::make_shared<FakePeer>(
         HostdSessionAccess::read_only,
         HostdPeerEnforcementGrade::observed_only);
     const auto diagnostic = coordinator->connect({}, observer);
     require(coordinator->status(diagnostic.session_id).lifecycle ==
-                HostdLifecycle::poisoned,
-            "read-only diagnostics remain available after poison");
+                HostdLifecycle::startup_blocked,
+            "read-only diagnostics remain available while startup is blocked");
   }
 
-  Fixture orphan_fixture;
-  auto orphaned = orphan_fixture.coordinator();
-  auto orphan_receipt = audit_receipt(orphan_fixture.observed);
-  orphan_receipt.observed_orphans = 2U;
-  orphan_receipt.unresolved_orphans = 1U;
-  FakeAuditor unresolved(std::move(orphan_receipt));
-  require_throws<HostdStateError>(
-      [&] { (void)orphaned->run_startup_audit(unresolved); },
-      "passed label cannot override unresolved startup orphans");
-  require(orphaned->status().lifecycle == HostdLifecycle::poisoned,
-          "unresolved orphan evidence poisons admission");
+  {
+    Fixture fixture;
+    auto coordinator = fixture.coordinator();
+    auto mismatched = audit_report(*fixture.ledger);
+    mismatched.policy = canonicalize_host_startup_audit_policy({
+        .api_version = std::string(kHostStartupAuditPolicyApiVersion),
+        .require_stable_occupancy = true,
+        .fail_on_blocking_findings = false,
+        .maximum_findings = 16U,
+        .policy_digest = {},
+    });
+    mismatched = canonicalize_host_startup_audit_report(std::move(mismatched));
+    FakeAuditor auditor(std::move(mismatched));
+    require_throws<HostdStateError>(
+        [&] { (void)coordinator->run_startup_audit(auditor, {30, 40}); },
+        "auditor cannot substitute its own startup policy");
+    require(coordinator->status().lifecycle == HostdLifecycle::poisoned &&
+                !coordinator->status().startup_audit,
+            "trusted-policy mismatch poisons without retaining a receipt");
+  }
 
-  Fixture malformed_fixture;
-  auto malformed = malformed_fixture.coordinator();
-  auto unbounded_receipt = audit_receipt(malformed_fixture.observed);
-  unbounded_receipt.audit_id.assign(1024U * 1024U, 'x');
-  FakeAuditor unbounded(std::move(unbounded_receipt));
+  {
+    Fixture fixture;
+    auto coordinator = fixture.coordinator();
+    auto malformed_report = audit_report(*fixture.ledger);
+    malformed_report.audit_id.assign(1024U * 1024U, 'x');
+    FakeAuditor auditor(std::move(malformed_report));
+    require_throws<HostdStateError>(
+        [&] { (void)coordinator->run_startup_audit(auditor, {30, 40}); },
+        "unbounded auditor report must fail");
+    const auto status = coordinator->status();
+    require(status.lifecycle == HostdLifecycle::poisoned &&
+                !status.startup_audit && status.poison_reason.size() <= 512U,
+            "malformed auditor output is never retained in status");
+  }
+}
+
+void concurrent_startup_audits_are_single_flight() {
+  Fixture fixture;
+  auto coordinator = fixture.coordinator();
+  FakeAuditor first(audit_report(*fixture.ledger));
+  FakeAuditor second(audit_report(*fixture.ledger));
+  std::mutex gate_mutex;
+  std::condition_variable gate_condition;
+  bool entered = false;
+  bool release = false;
+  first.during_audit = [&] {
+    require(coordinator->status().lifecycle == HostdLifecycle::startup_auditing,
+            "auditor callback can reenter status outside the mutex");
+    std::unique_lock lock(gate_mutex);
+    entered = true;
+    gate_condition.notify_all();
+    gate_condition.wait(lock, [&] { return release; });
+  };
+
+  std::atomic<bool> first_passed{false};
+  std::thread first_thread([&] {
+    try {
+      (void)coordinator->run_startup_audit(first, {30, 40});
+      first_passed = true;
+    } catch (...) {
+    }
+  });
+  {
+    std::unique_lock lock(gate_mutex);
+    gate_condition.wait(lock, [&] { return entered; });
+  }
   require_throws<HostdStateError>(
-      [&] { (void)malformed->run_startup_audit(unbounded); },
-      "unbounded auditor receipt must fail");
-  const auto status = malformed->status();
+      [&] { (void)coordinator->run_startup_audit(second, {30, 40}); },
+      "a concurrent startup audit cannot overtake the single flight");
+  require(coordinator->status().lifecycle == HostdLifecycle::startup_auditing &&
+              second.calls == 0U,
+          "rejected concurrent audit neither runs nor poisons the active one");
+  {
+    std::scoped_lock lock(gate_mutex);
+    release = true;
+    gate_condition.notify_all();
+  }
+  first_thread.join();
+  require(first_passed &&
+              coordinator->status().lifecycle == HostdLifecycle::admitting,
+          "the original exact audit remains able to admit");
+}
+
+void stale_startup_report_is_rejected_by_ledger_cas() {
+  Fixture fixture;
+  auto coordinator = fixture.coordinator();
+  FakeAuditor stale(audit_report(*fixture.ledger));
+  auto intervening = audit_report(*fixture.ledger);
+  intervening.audit_id = "intervening-startup-audit";
+  intervening = canonicalize_host_startup_audit_report(std::move(intervening));
+  (void)fixture.ledger->commit_startup_audit(intervening, {30, 40});
+  require_throws<HostdStateError>(
+      [&] { (void)coordinator->run_startup_audit(stale, {50, 60}); },
+      "stale head evidence cannot be committed");
+  const auto status = coordinator->status();
   require(status.lifecycle == HostdLifecycle::poisoned &&
-              !status.startup_audit && status.poison_reason.size() <= 512U,
-          "malformed auditor output is never retained in status");
+              !status.startup_audit,
+          "stale report leaves no inspectable committed receipt");
+}
+
+void crash_after_commit_retries_by_exact_ledger_replay() {
+  TemporaryDirectory directory;
+  const auto path = directory.path() / "host-ledger.db";
+  const auto observed = inventory({"mutex-a"});
+  auto authority = std::make_shared<HostLedgerFilesystemAuthority>(
+      HostLedgerFilesystemAuthority::acquire({
+          .api_version = std::string(kHostLedgerAuthorityApiVersion),
+          .ledger_path = path,
+          .expected_owner_uid = ::geteuid(),
+          .expected_owner_gid = ::getegid(),
+          .enforcement_grade =
+              HostLedgerEnforcementGrade::cooperative_test,
+      }));
+  const HostdCoordinatorConfig config{
+      .api_version = std::string(kHostdCoordinatorApiVersion),
+      .host_id = observed.host_id,
+      .boot_id = observed.boot_id,
+      .broker_epoch = observed.broker_epoch,
+      .maximum_live_sessions = 8U,
+      .maximum_logical_scopes = 8U,
+  };
+  HostStartupAuditReport report;
+  {
+    OneShotFault fault(HostLedgerFaultPoint::after_startup_audit_commit);
+    auto ledger = std::make_shared<SQLiteHostLedger>(
+        authority, observed, &fault, startup_audit_policy());
+    report = audit_report(*ledger);
+    HostGrantCoordinator coordinator(config, ledger);
+    FakeAuditor auditor(report);
+    require_throws<HostdStateError>(
+        [&] { (void)coordinator.run_startup_audit(auditor, {30, 40}); },
+        "lost reply after durable commit fails the first coordinator");
+    require(coordinator.status().lifecycle == HostdLifecycle::poisoned &&
+                !coordinator.status().startup_audit,
+            "first coordinator does not fabricate a receipt after lost reply");
+  }
+
+  auto reopened = std::make_shared<SQLiteHostLedger>(
+      authority, observed, nullptr, startup_audit_policy());
+  HostGrantCoordinator restarted(config, reopened);
+  FakeAuditor retry(report);
+  const auto receipt = restarted.run_startup_audit(retry, {50, 60});
+  require(receipt.report_digest == report.report_digest &&
+              restarted.status().startup_audit == receipt &&
+              restarted.status().lifecycle == HostdLifecycle::admitting,
+          "exact retry rereads the durable receipt and admits after restart");
+
+  HostGrantCoordinator stale_restart(config, reopened);
+  FakeAuditor stale_retry(report);
+  const auto replayed = stale_restart.run_startup_audit(stale_retry, {90, 100});
+  require(replayed == receipt &&
+              stale_restart.status().lifecycle == HostdLifecycle::admitting,
+          "exact audit/finalize replay recovers the same opaque admission epoch");
+}
+
+void blocked_startup_allows_only_exact_release_cleanup() {
+  TemporaryDirectory directory;
+  const auto path = directory.path() / "host-ledger.db";
+  const auto observed = inventory({"mutex-a"});
+  auto authority = std::make_shared<HostLedgerFilesystemAuthority>(
+      HostLedgerFilesystemAuthority::acquire({
+          .api_version = std::string(kHostLedgerAuthorityApiVersion),
+          .ledger_path = path,
+          .expected_owner_uid = ::geteuid(),
+          .expected_owner_gid = ::getegid(),
+          .enforcement_grade = HostLedgerEnforcementGrade::cooperative_test,
+      }));
+  const auto scope = attribution("journal-cleanup", "run-cleanup",
+                                 "lease-cleanup", 1U);
+  ResourceBundleGrant legacy_grant;
+  {
+    SQLiteHostLedger legacy(authority, observed);
+    const auto granted = legacy.request_bundle(
+        request_for(scope, "legacy-cleanup-grant"), {10, 20});
+    require(granted.grant.has_value(),
+            "cleanup fixture has a pre-policy active allocation");
+    legacy_grant = *granted.grant;
+  }
+  auto ledger = std::make_shared<SQLiteHostLedger>(
+      authority, observed, nullptr, startup_audit_policy());
+  auto logical = std::make_shared<FakeLogicalFenceAuthority>();
+  HostGrantCoordinator coordinator(
+      {.api_version = std::string(kHostdCoordinatorApiVersion),
+       .host_id = observed.host_id,
+       .boot_id = observed.boot_id,
+       .broker_epoch = observed.broker_epoch,
+       .maximum_live_sessions = 8U,
+       .maximum_logical_scopes = 8U},
+      ledger, logical);
+  FakeAuditor failed(
+      audit_report(*ledger, HostStartupAuditDisposition::failed));
+  require_throws<HostdStateError>(
+      [&] { (void)coordinator.run_startup_audit(failed, {30, 40}); },
+      "failed audit blocks new admission while retaining cleanup state");
+  const auto release = release_for(legacy_grant, "blocked-cleanup-release");
+  logical->authorize_cleanup(scope, legacy_grant, release);
+  auto peer = std::make_shared<FakePeer>(HostdSessionAccess::release_only);
+  const auto session =
+      coordinator.connect({.attribution = scope}, std::move(peer));
+  const auto cleaned =
+      coordinator.release_bundle(session.session_id, release, {50, 60});
+  require(cleaned.receipt.allocation_id == legacy_grant.allocation_id &&
+              ledger->occupancy().active_fences.empty() &&
+              coordinator.status().lifecycle == HostdLifecycle::startup_blocked,
+          "blocked hostd permits exact release-only occupancy reduction");
+  require_throws<HostdStateError>(
+      [&] {
+        (void)coordinator.request_bundle(
+            session.session_id, request_for(scope, "blocked-grant"),
+            {70, 80});
+      },
+      "blocked release-only cleanup capability cannot request grants");
+}
+
+void admission_finalize_boundary_is_atomic_and_recoverable() {
+  {
+    Fixture fixture;
+    auto boundary =
+        std::make_shared<AdversarialLedgerBoundary>(fixture.ledger);
+    auto coordinator = fixture.coordinator(boundary);
+    boundary->before_admission_finalize = [&] {
+      auto intervening = audit_report(*fixture.ledger);
+      intervening.audit_id = "finalize-boundary-intervening-audit";
+      intervening =
+          canonicalize_host_startup_audit_report(std::move(intervening));
+      (void)fixture.ledger->commit_startup_audit(intervening, {31, 41});
+    };
+    FakeAuditor auditor(audit_report(*fixture.ledger));
+    require_throws<HostdStateError>(
+        [&] { (void)coordinator->run_startup_audit(auditor, {30, 40}); },
+        "mutation between audit commit and finalize loses the ledger CAS");
+    require(coordinator->status().lifecycle == HostdLifecycle::poisoned,
+            "pre-finalize mutation cannot be admitted by a local latch");
+  }
+
+  {
+    Fixture fixture;
+    auto boundary =
+        std::make_shared<AdversarialLedgerBoundary>(fixture.ledger);
+    auto coordinator = fixture.coordinator(boundary);
+    std::optional<BundleRequestResult> boundary_request;
+    boundary->after_admission_finalize = [&](const auto &finalized) {
+      require(coordinator->status().lifecycle ==
+                  HostdLifecycle::startup_auditing,
+              "finalize runs outside the coordinator mutex before local latch");
+      boundary_request = fixture.ledger->request_bundle(
+          request_for(attribution(), "authorized-finalize-boundary-request"),
+          {31, 41}, finalized.epoch);
+    };
+    FakeAuditor auditor(audit_report(*fixture.ledger));
+    (void)coordinator->run_startup_audit(auditor, {30, 40});
+    require(boundary_request && boundary_request->grant &&
+                coordinator->status().lifecycle == HostdLifecycle::admitting,
+            "epoch-authorized mutation after finalize survives local latch lag");
+  }
+}
+
+void admission_finalize_lost_reply_and_async_poison_recover() {
+  {
+    TemporaryDirectory directory;
+    const auto path = directory.path() / "host-ledger.db";
+    const auto observed = inventory({"mutex-a"});
+    auto authority = std::make_shared<HostLedgerFilesystemAuthority>(
+        HostLedgerFilesystemAuthority::acquire({
+            .api_version = std::string(kHostLedgerAuthorityApiVersion),
+            .ledger_path = path,
+            .expected_owner_uid = ::geteuid(),
+            .expected_owner_gid = ::getegid(),
+            .enforcement_grade =
+                HostLedgerEnforcementGrade::cooperative_test,
+        }));
+    const HostdCoordinatorConfig config{
+        .api_version = std::string(kHostdCoordinatorApiVersion),
+        .host_id = observed.host_id,
+        .boot_id = observed.boot_id,
+        .broker_epoch = observed.broker_epoch,
+        .maximum_live_sessions = 8U,
+        .maximum_logical_scopes = 8U,
+    };
+    HostStartupAuditReport report;
+    {
+      OneShotFault fault(HostLedgerFaultPoint::after_admission_finalize_commit);
+      auto ledger = std::make_shared<SQLiteHostLedger>(
+          authority, observed, &fault, startup_audit_policy());
+      report = audit_report(*ledger);
+      HostGrantCoordinator coordinator(config, ledger);
+      FakeAuditor auditor(report);
+      require_throws<HostdStateError>(
+          [&] { (void)coordinator.run_startup_audit(auditor, {30, 40}); },
+          "lost finalize reply fails the first local coordinator");
+      require(coordinator.status().lifecycle == HostdLifecycle::poisoned,
+              "lost finalize reply never fabricates a local admission latch");
+    }
+    auto reopened = std::make_shared<SQLiteHostLedger>(
+        authority, observed, nullptr, startup_audit_policy());
+    HostGrantCoordinator restarted(config, reopened);
+    FakeAuditor retry(report);
+    (void)restarted.run_startup_audit(retry, {50, 60});
+    require(restarted.status().lifecycle == HostdLifecycle::admitting,
+            "exact finalize replay recovers after a lost durable reply");
+  }
+
+  {
+    Fixture fixture;
+    auto boundary =
+        std::make_shared<AdversarialLedgerBoundary>(fixture.ledger);
+    auto coordinator = fixture.coordinator(boundary);
+    const auto report = audit_report(*fixture.ledger);
+    boundary->after_admission_finalize = [&](const auto &) {
+      require(::chmod(fixture.path.c_str(), 0666) == 0,
+              "test makes authority unsafe after durable finalize");
+      require(coordinator->status().lifecycle == HostdLifecycle::poisoned,
+              "asynchronous observation poisons before local admission latch");
+      require(::chmod(fixture.path.c_str(), 0600) == 0,
+              "test restores authority after finalize poison");
+    };
+    FakeAuditor auditor(report);
+    require_throws<HostdStateError>(
+        [&] { (void)coordinator->run_startup_audit(auditor, {30, 40}); },
+        "asynchronous poison wins over finalized local latch");
+    auto restarted = fixture.coordinator();
+    FakeAuditor retry(report);
+    (void)restarted->run_startup_audit(retry, {50, 60});
+    require(restarted->status().lifecycle == HostdLifecycle::admitting,
+            "new coordinator recovers exact durable epoch after async poison");
+  }
 }
 
 void unauthorized_and_read_only_peers() {
   Fixture fixture;
   auto coordinator = fixture.coordinator();
-  admit(*coordinator, fixture.observed);
+  admit(*coordinator, *fixture.ledger);
 
   auto denied = std::make_shared<FakePeer>(HostdSessionAccess::denied);
   require_throws<HostdUnauthorized>(
@@ -632,7 +1013,7 @@ void unauthorized_and_read_only_peers() {
 void disconnected_sessions_cannot_replay() {
   Fixture fixture;
   auto coordinator = fixture.coordinator();
-  admit(*coordinator, fixture.observed);
+  admit(*coordinator, *fixture.ledger);
   const auto scope = attribution();
   const auto first =
       connect_admission(*coordinator, scope, *fixture.logical_fences);
@@ -660,7 +1041,7 @@ void disconnected_sessions_cannot_replay() {
 void stale_fences_and_attribution_mismatch_fail() {
   Fixture fixture;
   auto coordinator = fixture.coordinator();
-  admit(*coordinator, fixture.observed);
+  admit(*coordinator, *fixture.ledger);
   const auto old_scope =
       attribution("journal-scope", "run-scope", "lease-scope", 7U);
   const auto old_session =
@@ -723,13 +1104,9 @@ void wrong_host_boot_and_broker_poison() {
     if (field == "broker")
       config.broker_epoch = "broker-wrong";
     auto coordinator = fixture.coordinator(config);
-    auto receipt = audit_receipt(fixture.observed);
-    receipt.host_id = config.host_id;
-    receipt.boot_id = config.boot_id;
-    receipt.broker_epoch = config.broker_epoch;
-    FakeAuditor auditor(std::move(receipt));
+    FakeAuditor auditor(audit_report(*fixture.ledger));
     require_throws<HostdStateError>(
-        [&] { (void)coordinator->run_startup_audit(auditor); },
+        [&] { (void)coordinator->run_startup_audit(auditor, {30, 40}); },
         "coordinator identity must match host ledger identity");
     require(coordinator->status().lifecycle == HostdLifecycle::poisoned,
             "wrong host/boot/broker identity poisons coordinator");
@@ -739,7 +1116,7 @@ void wrong_host_boot_and_broker_poison() {
 void ledger_request_and_release_replay_are_exact() {
   Fixture fixture;
   auto coordinator = fixture.coordinator();
-  admit(*coordinator, fixture.observed);
+  admit(*coordinator, *fixture.ledger);
   const auto scope = attribution();
   const auto session =
       connect_admission(*coordinator, scope, *fixture.logical_fences);
@@ -775,7 +1152,7 @@ void ledger_request_and_release_replay_are_exact() {
 void concurrent_sessions_and_journals_share_one_ledger() {
   Fixture fixture;
   auto coordinator = fixture.coordinator();
-  admit(*coordinator, fixture.observed);
+  admit(*coordinator, *fixture.ledger);
   const auto left_scope =
       attribution("journal-left", "run-left", "lease-left", 1U);
   const auto right_scope =
@@ -809,7 +1186,7 @@ void concurrent_sessions_and_journals_share_one_ledger() {
 void durable_fence_authority_and_cleanup_reconnect() {
   Fixture missing;
   auto fail_closed = missing.coordinator_without_logical_authority();
-  admit(*fail_closed, missing.observed);
+  admit(*fail_closed, *missing.ledger);
   auto peer =
       std::make_shared<FakePeer>(HostdSessionAccess::grant_release);
   require_throws<HostdStateError>(
@@ -820,7 +1197,7 @@ void durable_fence_authority_and_cleanup_reconnect() {
 
   Fixture fixture;
   auto coordinator = fixture.coordinator();
-  admit(*coordinator, fixture.observed);
+  admit(*coordinator, *fixture.ledger);
   const auto scope7 =
       attribution("journal-cleanup", "run-cleanup", "lease-cleanup", 7U);
   const auto session7 =
@@ -879,7 +1256,7 @@ void durable_fence_authority_and_cleanup_reconnect() {
 void advancing_fence_preserves_exact_connected_cleanup() {
   Fixture fixture;
   auto coordinator = fixture.coordinator();
-  admit(*coordinator, fixture.observed);
+  admit(*coordinator, *fixture.ledger);
   const auto scope7 =
       attribution("journal-live-cleanup", "run-live-cleanup",
                   "lease-live-cleanup", 7U);
@@ -924,9 +1301,11 @@ void restart_peer_liveness_capacity_and_status_poison() {
   const auto old_scope =
       attribution("journal-restart", "run-restart", "lease-restart", 3U);
   fixture.logical_fences->set_live(old_scope);
+  const auto startup_report = audit_report(*fixture.ledger);
   {
     auto first = fixture.coordinator();
-    admit(*first, fixture.observed);
+    FakeAuditor auditor(startup_report);
+    (void)first->run_startup_audit(auditor, {30, 40});
     auto first_peer =
         std::make_shared<FakePeer>(HostdSessionAccess::grant_release);
     (void)first->connect({.attribution = old_scope}, first_peer);
@@ -935,7 +1314,8 @@ void restart_peer_liveness_capacity_and_status_poison() {
   current_scope.logical_fencing_token = 4U;
   fixture.logical_fences->set_live(current_scope);
   auto restarted = fixture.coordinator();
-  admit(*restarted, fixture.observed);
+  FakeAuditor retry(startup_report);
+  (void)restarted->run_startup_audit(retry, {50, 60});
   auto stale_peer =
       std::make_shared<FakePeer>(HostdSessionAccess::grant_release);
   require_throws<HostdUnauthorized>(
@@ -965,7 +1345,7 @@ void restart_peer_liveness_capacity_and_status_poison() {
   config.maximum_live_sessions = 2U;
   config.maximum_logical_scopes = 1U;
   auto bounded = capacity_fixture.coordinator(config);
-  admit(*bounded, capacity_fixture.observed);
+  admit(*bounded, *capacity_fixture.ledger);
   auto observer1 = std::make_shared<FakePeer>(HostdSessionAccess::read_only);
   auto observer2 = std::make_shared<FakePeer>(HostdSessionAccess::read_only);
   const auto retained_observer = bounded->connect({}, observer1);
@@ -987,7 +1367,7 @@ void restart_peer_liveness_capacity_and_status_poison() {
 
   Fixture poisoned_fixture;
   auto poison_visible = poisoned_fixture.coordinator();
-  admit(*poison_visible, poisoned_fixture.observed);
+  admit(*poison_visible, *poisoned_fixture.ledger);
   require(::chmod(poisoned_fixture.path.c_str(), 0666) == 0,
           "test makes ledger authority permissions unsafe");
   const auto poisoned_status = poison_visible->status();
@@ -1001,7 +1381,7 @@ void restart_peer_liveness_capacity_and_status_poison() {
 void asynchronous_startup_poison_is_never_overwritten() {
   Fixture fixture;
   auto coordinator = fixture.coordinator();
-  FakeAuditor auditor(audit_receipt(fixture.observed));
+  FakeAuditor auditor(audit_report(*fixture.ledger));
   std::mutex gate_mutex;
   std::condition_variable gate_condition;
   bool audit_entered = false;
@@ -1015,7 +1395,7 @@ void asynchronous_startup_poison_is_never_overwritten() {
   std::atomic<bool> audit_rejected{false};
   std::thread audit_thread([&] {
     try {
-      (void)coordinator->run_startup_audit(auditor);
+      (void)coordinator->run_startup_audit(auditor, {30, 40});
     } catch (const HostdStateError &) {
       audit_rejected = true;
     }
@@ -1050,7 +1430,12 @@ void callbacks_reenter_without_coordinator_mutex() {
   auto boundary =
       std::make_shared<AdversarialLedgerBoundary>(fixture.ledger);
   auto coordinator = fixture.coordinator(boundary);
-  admit(*coordinator, fixture.observed);
+  boundary->during_audit_commit = [&] {
+    require(coordinator->status().lifecycle == HostdLifecycle::startup_auditing,
+            "ledger audit commit callback reenters without coordinator mutex");
+  };
+  admit(*coordinator, *fixture.ledger);
+  boundary->during_audit_commit = {};
   const auto scope = attribution("journal-reentrant", "run-reentrant",
                                  "lease-reentrant", 1U);
   fixture.logical_fences->set_live(scope);
@@ -1087,7 +1472,7 @@ void dead_session_reaping_and_inflight_fence_reservation() {
   capacity_config.maximum_live_sessions = 2U;
   capacity_config.maximum_logical_scopes = 1U;
   auto capacity = capacity_fixture.coordinator(capacity_config);
-  admit(*capacity, capacity_fixture.observed);
+  admit(*capacity, *capacity_fixture.ledger);
   auto dead_observer = std::make_shared<FakePeer>(HostdSessionAccess::read_only);
   const auto dead_session = capacity->connect({}, dead_observer);
   dead_observer->alive = false;
@@ -1121,7 +1506,7 @@ void dead_session_reaping_and_inflight_fence_reservation() {
       std::make_shared<AdversarialLedgerBoundary>(fixture.ledger);
   boundary->block_request = true;
   auto coordinator = fixture.coordinator(boundary);
-  admit(*coordinator, fixture.observed);
+  admit(*coordinator, *fixture.ledger);
   const auto scope7 = attribution("journal-inflight", "run-inflight",
                                   "lease-inflight", 7U);
   fixture.logical_fences->set_live(scope7);
@@ -1169,7 +1554,7 @@ void malformed_ledger_outputs_poison_exactly() {
     auto boundary =
         std::make_shared<AdversarialLedgerBoundary>(fixture.ledger);
     auto coordinator = fixture.coordinator(boundary);
-    admit(*coordinator, fixture.observed);
+    admit(*coordinator, *fixture.ledger);
     const auto scope = attribution("journal-bad-grant", "run-bad-grant",
                                    "lease-bad-grant", 1U);
     const auto session =
@@ -1198,7 +1583,7 @@ void malformed_ledger_outputs_poison_exactly() {
     auto boundary =
         std::make_shared<AdversarialLedgerBoundary>(fixture.ledger);
     auto coordinator = fixture.coordinator(boundary);
-    admit(*coordinator, fixture.observed);
+    admit(*coordinator, *fixture.ledger);
     const auto scope = attribution("journal-bad-release", "run-bad-release",
                                    "lease-bad-release", 1U);
     const auto session =
@@ -1224,7 +1609,13 @@ void malformed_ledger_outputs_poison_exactly() {
 int main() {
   try {
     lifecycle_and_pre_audit_gate();
-    failed_unknown_and_malformed_audits_poison();
+    failed_policy_mismatch_and_malformed_audits_fail_closed();
+    concurrent_startup_audits_are_single_flight();
+    stale_startup_report_is_rejected_by_ledger_cas();
+    crash_after_commit_retries_by_exact_ledger_replay();
+    blocked_startup_allows_only_exact_release_cleanup();
+    admission_finalize_boundary_is_atomic_and_recoverable();
+    admission_finalize_lost_reply_and_async_poison_recover();
     unauthorized_and_read_only_peers();
     disconnected_sessions_cannot_replay();
     stale_fences_and_attribution_mismatch_fail();

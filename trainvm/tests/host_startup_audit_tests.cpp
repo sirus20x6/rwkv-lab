@@ -254,6 +254,16 @@ std::string raw_scalar(const std::filesystem::path& path,
 
 void downgrade_empty_v2_to_v1(const std::filesystem::path& path) {
   raw_execute(path, R"sql(
+    DROP TRIGGER request_admission_epochs_no_update;
+    DROP TRIGGER request_admission_epochs_no_delete;
+    DROP TRIGGER request_admission_exemptions_no_update;
+    DROP TRIGGER request_admission_exemptions_no_delete;
+    DROP TRIGGER admission_epochs_no_update;
+    DROP TRIGGER admission_epochs_no_delete;
+    DROP TABLE request_admission_epochs;
+    DROP TABLE active_admission_epoch;
+    DROP TABLE admission_epochs;
+    DROP TABLE request_admission_exemptions;
     DROP TRIGGER startup_audit_outcomes_no_update;
     DROP TRIGGER startup_audit_outcomes_no_delete;
     DROP TABLE startup_audit_outcomes;
@@ -543,6 +553,91 @@ void transactional_faults_and_lost_reply() {
           "retry after a lost reply returns the one durable receipt");
 }
 
+void admission_epoch_seals_grants_and_replays_exactly() {
+  const auto path = test_path("admission-epoch");
+  auto authority = authority_for(path);
+  SQLiteHostLedger ledger(authority, inventory(), nullptr, trusted_policy());
+  require_throws<HostLedgerConflict>(
+      [&] { (void)ledger.request_bundle(request("sealed-before-audit"),
+                                        {10, 20}); },
+      "policy ledger rejects grants before startup admission finalize");
+  const auto report = report_for(ledger);
+  const auto committed = ledger.commit_startup_audit(report, {30, 40});
+  const auto finalized = ledger.finalize_startup_admission(
+      report, committed.receipt, {31, 41});
+  require(!finalized.replayed && ledger.verify(),
+          "exact committed audit mints one opaque admission epoch");
+  const auto granted = ledger.request_bundle(
+      request("epoch-grant"), {50, 60}, finalized.epoch);
+  require(granted.grant.has_value(),
+          "active admission epoch authorizes an atomic grant");
+  const auto grant_replay = ledger.request_bundle(
+      request("epoch-grant"), {500, 600}, finalized.epoch);
+  const auto finalize_replay = ledger.finalize_startup_admission(
+      report, committed.receipt, {700, 800});
+  require(grant_replay.replayed && grant_replay.grant == granted.grant &&
+              finalize_replay.replayed && finalize_replay.epoch == finalized.epoch,
+          "request and finalize lost replies replay their exact persisted epoch");
+
+  const auto lost_path = test_path("admission-epoch-lost-reply");
+  auto lost_authority = authority_for(lost_path);
+  OneShotFault lost_fault(
+      HostLedgerFaultPoint::after_admission_finalize_commit);
+  SQLiteHostLedger lost(lost_authority, inventory(), &lost_fault,
+                        trusted_policy());
+  const auto lost_report = report_for(lost);
+  const auto lost_commit = lost.commit_startup_audit(lost_report, {30, 40});
+  require_throws<HostLedgerError>(
+      [&] {
+        (void)lost.finalize_startup_admission(lost_report,
+                                              lost_commit.receipt, {31, 41});
+      },
+      "fault after admission finalize commit models a lost reply");
+  const auto recovered = lost.finalize_startup_admission(
+      lost_report, lost_commit.receipt, {50, 60});
+  require(recovered.replayed && lost.verify(),
+          "lost finalize reply recovers the exact durable epoch");
+}
+
+void deleted_admission_authorization_fails_verify_and_reopen() {
+  const auto path = test_path("deleted-admission-authorization");
+  auto authority = authority_for(path);
+  {
+    SQLiteHostLedger ledger(authority, inventory(), nullptr, trusted_policy());
+    const auto report = report_for(ledger, "audit-before-auth-deletion");
+    const auto committed = ledger.commit_startup_audit(report, {30, 40});
+    const auto finalized = ledger.finalize_startup_admission(
+        report, committed.receipt, {31, 41});
+    require(ledger
+                .request_bundle(request("post-v3-authorized-request"),
+                                {50, 60}, finalized.epoch)
+                .grant.has_value() &&
+                ledger.verify(),
+            "post-v3 request begins with one valid epoch authorization");
+    const std::string delete_trigger = raw_scalar(
+        path,
+        "SELECT sql FROM sqlite_master WHERE type='trigger' "
+        "AND name='request_admission_epochs_no_delete'");
+    raw_execute(path,
+                "DROP TRIGGER request_admission_epochs_no_delete;"
+                "DELETE FROM request_admission_epochs "
+                "WHERE request_id='post-v3-authorized-request';" +
+                    delete_trigger + ";");
+    std::string reason;
+    require(!ledger.verify(&reason) &&
+                reason.find(
+                    "missing admission authorization or durable exemption") !=
+                    std::string::npos,
+            "deleted post-v3 authorization is not reclassified as legacy");
+  }
+  require_throws<HostLedgerError>(
+      [&] {
+        SQLiteHostLedger reopened(authority, inventory(), nullptr,
+                                  trusted_policy());
+      },
+      "ledger with omitted post-v3 authorization fails closed on reopen");
+}
+
 void additive_migration_preserves_v1_evidence() {
   const auto path = test_path("migration");
   auto authority = authority_for(path);
@@ -575,12 +670,35 @@ void additive_migration_preserves_v1_evidence() {
     const auto occupancy = migrated.occupancy();
     require(migrated.verify() && migrated.record_count() == v1_record_count &&
                 occupancy.active_fences == active_grant.fences &&
-                migrated.request_bundle(released_request, {100, 200}).replayed &&
-                migrated.release_bundle(released_release, {300, 400}).replayed &&
-                migrated.request_bundle(active_request, {500, 600}).replayed,
+                migrated.release_bundle(released_release, {300, 400}).replayed,
             "v1 migration preserves active and released grant authority history");
+    require_throws<HostLedgerConflict>(
+        [&] { (void)migrated.request_bundle(active_request, {500, 600}); },
+        "migrated policy ledger seals legacy request replay before finalize");
     const auto audit = report_for(migrated, "audit-after-v1-migration");
-    (void)migrated.commit_startup_audit(audit, {700, 800});
+    const auto committed =
+        migrated.commit_startup_audit(audit, {700, 800});
+    const auto finalized = migrated.finalize_startup_admission(
+        audit, committed.receipt, {701, 801});
+    require_throws<HostLedgerConflict>(
+        [&] {
+          (void)migrated.request_bundle(active_request, {900, 1000},
+                                        finalized.epoch);
+        },
+        "pre-migration request IDs cannot be rebound to a new epoch");
+    require(raw_scalar(path, "SELECT COUNT(*) FROM request_admission_exemptions") ==
+                "2" &&
+                raw_scalar(
+                    path,
+                    "SELECT COUNT(*) FROM request_admission_exemptions AS exemption "
+                    "JOIN request_outcomes AS outcome USING(request_id) "
+                    "WHERE exemption.request_digest=outcome.request_digest "
+                    "AND exemption.reason='pre_v3'") ==
+                    "2",
+            "v3 migration freezes the exact two pre-v3 outcomes as legacy");
+    (void)migrated.release_bundle(
+        release_request(active_grant, "migration-active-release"),
+        {1100, 1200});
     require(migrated.verify(),
             "audit replay reconstructs the migrated sequence-1 occupancy evidence");
   }
@@ -589,8 +707,8 @@ void additive_migration_preserves_v1_evidence() {
             "ledger_records WHERE ledger_sequence<=" +
                 std::to_string(v1_record_count) + " ORDER BY ledger_sequence");
   require(evidence_after == evidence_before &&
-              raw_scalar(path, "PRAGMA user_version") == "2",
-          "migration preserves every v1 evidence byte and marks v2");
+              raw_scalar(path, "PRAGMA user_version") == "3",
+          "migration preserves every v1 evidence byte and marks v3");
 
   const auto rollback_path = test_path("migration-rollback");
   auto rollback_authority = authority_for(rollback_path);
@@ -665,6 +783,8 @@ int main() {
     near_limit_inventory_report_is_commit_readable();
     commit_replay_cas_and_reopen();
     transactional_faults_and_lost_reply();
+    admission_epoch_seals_grants_and_replays_exactly();
+    deleted_admission_authorization_fails_verify_and_reopen();
     additive_migration_preserves_v1_evidence();
     projection_corruption_fails_closed();
     predecessor_projection_corruption_fails_closed();

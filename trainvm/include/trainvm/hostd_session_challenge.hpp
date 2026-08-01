@@ -70,6 +70,7 @@ struct HostdJournalAuthorityIdentity final {
 // Both generation and fencing token are monotonic, nonzero fences.
 struct HostdJournalControllerFence final {
   std::string run_id;
+  std::string concurrency_key;
   std::string controller_id;
   std::uint64_t controller_generation{};
   std::string logical_lease_id;

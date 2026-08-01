@@ -73,12 +73,6 @@ bool valid_access(HostdSessionAccess access) {
          access == HostdSessionAccess::grant_release;
 }
 
-bool valid_audit_disposition(HostdStartupAuditDisposition disposition) {
-  return disposition == HostdStartupAuditDisposition::passed ||
-         disposition == HostdStartupAuditDisposition::failed ||
-         disposition == HostdStartupAuditDisposition::unknown;
-}
-
 std::string logical_scope_key(const HostdSessionAttribution &attribution) {
   return attribution.journal_id + "\n" + attribution.run_id + "\n" +
          attribution.logical_lease_id;
@@ -108,10 +102,28 @@ public:
   [[nodiscard]] HostInventoryReceipt inventory() const override {
     return ledger_->inventory();
   }
+  [[nodiscard]] HostLedgerChainHead chain_head() const override {
+    return ledger_->chain_head();
+  }
+  [[nodiscard]] ResourceOccupancySnapshot occupancy() const override {
+    return ledger_->occupancy();
+  }
+  [[nodiscard]] HostStartupAuditLedgerCommitResult
+  commit_startup_audit(const HostStartupAuditReport &report,
+                       const HostLedgerTime &now) override {
+    return ledger_->commit_startup_audit(report, now);
+  }
+  [[nodiscard]] HostLedgerAdmissionFinalizeResult
+  finalize_startup_admission(const HostStartupAuditReport &report,
+                             const HostStartupAuditReceipt &receipt,
+                             const HostLedgerTime &now) override {
+    return ledger_->finalize_startup_admission(report, receipt, now);
+  }
   [[nodiscard]] BundleRequestResult
   request_bundle(const ResourceBundleRequest &request,
-                 const HostLedgerTime &now) override {
-    return ledger_->request_bundle(request, now);
+                 const HostLedgerTime &now,
+                 const HostLedgerAdmissionEpoch &admission_epoch) override {
+    return ledger_->request_bundle(request, now, admission_epoch);
   }
   [[nodiscard]] BundleReleaseResult
   release_bundle(const ResourceReleaseRequest &request,
@@ -159,7 +171,8 @@ struct HostGrantCoordinator::Implementation final {
   std::shared_ptr<IHostdLogicalFenceEvidenceSource> logical_fence_evidence;
   HostInventoryReceipt startup_inventory;
   HostdLifecycle lifecycle{HostdLifecycle::sealed};
-  std::optional<HostdStartupAuditReceipt> startup_audit;
+  std::optional<HostStartupAuditReceipt> startup_audit;
+  std::optional<HostLedgerAdmissionEpoch> admission_epoch;
   std::string poison_reason;
   std::map<std::string, SessionRecord> sessions;
   std::map<std::string, std::uint64_t> highest_logical_fences;
@@ -300,7 +313,12 @@ struct HostGrantCoordinator::Implementation final {
         !session.attribution) {
       throw HostdUnauthorized("hostd session is read-only");
     }
-    if (lifecycle != HostdLifecycle::admitting) {
+    const bool release_cleanup_while_blocked =
+        mutation == MutationKind::release &&
+        session.effective_access == HostdSessionAccess::release_only &&
+        lifecycle == HostdLifecycle::startup_blocked;
+    if (lifecycle != HostdLifecycle::admitting &&
+        !release_cleanup_while_blocked) {
       throw HostdStateError("hostd is not admitting resource mutations");
     }
     if (mutation == MutationKind::grant) {
@@ -522,8 +540,8 @@ HostGrantCoordinator::HostGrantCoordinator(
 
 HostGrantCoordinator::~HostGrantCoordinator() = default;
 
-HostdStartupAuditReceipt
-HostGrantCoordinator::run_startup_audit(IHostdStartupAuditor &auditor) {
+HostStartupAuditReceipt HostGrantCoordinator::run_startup_audit(
+    IConfiguredHostStartupAuditorV2 &auditor, const HostLedgerTime &now) {
   {
     std::scoped_lock lock(implementation_->mutex);
     if (implementation_->lifecycle != HostdLifecycle::sealed) {
@@ -532,9 +550,11 @@ HostGrantCoordinator::run_startup_audit(IHostdStartupAuditor &auditor) {
     implementation_->lifecycle = HostdLifecycle::startup_auditing;
   }
 
-  HostdStartupAuditReceipt receipt;
+  HostStartupAuditReport report;
   try {
-    receipt = auditor.audit(implementation_->startup_inventory);
+    // Auditor implementations are configured authority and may perform slow
+    // observations. They never execute under the coordinator mutex.
+    report = auditor.audit();
   } catch (const std::exception &error) {
     std::scoped_lock lock(implementation_->mutex);
     implementation_->poison(std::string("startup audit failed: ") +
@@ -546,45 +566,137 @@ HostGrantCoordinator::run_startup_audit(IHostdStartupAuditor &auditor) {
     throw HostdStateError(implementation_->poison_reason);
   }
 
-  const Implementation::RuntimeIdentityEvidence runtime =
-      implementation_->observe_runtime_identity();
+  Implementation::RuntimeIdentityEvidence runtime;
+  HostLedgerChainHead observed_head;
+  ResourceOccupancySnapshot observed_occupancy;
+  bool report_shape_valid = false;
+  try {
+    validate_host_startup_audit_report(report);
+    report_shape_valid =
+        decode_untrusted_host_startup_audit_report(
+            host_startup_audit_report_json(report)) == report;
+    runtime = implementation_->observe_runtime_identity();
+    observed_head = implementation_->ledger->chain_head();
+    observed_occupancy = implementation_->ledger->occupancy();
+    if (!valid_digest(observed_head.chain_hash))
+      throw HostdError("startup ledger returned a malformed chain head");
+    validate_resource_occupancy(implementation_->startup_inventory,
+                                observed_occupancy);
+  } catch (...) {
+    std::scoped_lock lock(implementation_->mutex);
+    implementation_->poison("startup auditor returned malformed evidence");
+    throw HostdStateError(implementation_->poison_reason);
+  }
+
+  const bool exact_identity =
+      report_shape_valid && runtime.verified && runtime.inventory &&
+      report.host_id == implementation_->config.host_id &&
+      report.boot_id == implementation_->config.boot_id &&
+      report.broker_epoch == implementation_->config.broker_epoch &&
+      report.inventory == implementation_->startup_inventory &&
+      report.inventory == *runtime.inventory;
+  const bool exact_current_observation =
+      exact_identity && report.ledger_head_before == observed_head &&
+      report.ledger_head_after_observation == observed_head &&
+      report.pre_audit_occupancy == observed_occupancy &&
+      report.post_audit_occupancy == observed_occupancy;
+  if (!exact_identity) {
+    std::scoped_lock lock(implementation_->mutex);
+    implementation_->poison(
+        "startup audit identity/inventory evidence is stale or inexact");
+    throw HostdStateError(implementation_->poison_reason);
+  }
+  {
+    std::scoped_lock lock(implementation_->mutex);
+    if (implementation_->lifecycle != HostdLifecycle::startup_auditing) {
+      if (implementation_->lifecycle != HostdLifecycle::poisoned)
+        implementation_->poison(
+            "startup audit lifecycle changed asynchronously");
+      throw HostdStateError(implementation_->poison_reason);
+    }
+  }
+
+  HostStartupAuditLedgerCommitResult committed;
+  try {
+    // A head/occupancy mismatch is allowed to reach the ledger only so an
+    // exact lost-reply retry can replay its already committed audit ID. A new
+    // commit still requires exact_current_observation below and in the ledger.
+    committed = implementation_->ledger->commit_startup_audit(report, now);
+  } catch (const std::exception &error) {
+    std::scoped_lock lock(implementation_->mutex);
+    implementation_->poison(std::string("startup audit commit failed: ") +
+                            error.what());
+    throw HostdStateError(implementation_->poison_reason);
+  } catch (...) {
+    std::scoped_lock lock(implementation_->mutex);
+    implementation_->poison("startup audit commit failed");
+    throw HostdStateError(implementation_->poison_reason);
+  }
+
+  bool receipt_exact = false;
+  try {
+    validate_host_startup_audit_receipt(committed.receipt, report);
+    receipt_exact =
+        decode_untrusted_host_startup_audit_receipt(
+            host_startup_audit_receipt_json(committed.receipt, report),
+            report) == committed.receipt;
+  } catch (...) {
+    receipt_exact = false;
+  }
+  const bool blocking = std::ranges::any_of(
+      report.findings, [](const HostStartupAuditFinding &finding) {
+        return finding.severity == HostStartupAuditFindingSeverity::blocking;
+      });
+  if (!receipt_exact || (!committed.replayed && !exact_current_observation)) {
+    std::scoped_lock lock(implementation_->mutex);
+    implementation_->poison(
+        "startup ledger returned inexact audit commit inspection data");
+    throw HostdStateError(implementation_->poison_reason);
+  }
+  if (report.disposition != HostStartupAuditDisposition::passed || blocking) {
+    std::scoped_lock lock(implementation_->mutex);
+    if (implementation_->lifecycle != HostdLifecycle::startup_auditing) {
+      if (implementation_->lifecycle != HostdLifecycle::poisoned)
+        implementation_->poison(
+            "startup audit lifecycle changed after commit");
+      throw HostdStateError(implementation_->poison_reason);
+    }
+    implementation_->startup_audit = committed.receipt;
+    implementation_->lifecycle = HostdLifecycle::startup_blocked;
+    implementation_->poison_reason =
+        "startup audit committed blocking or failed evidence";
+    throw HostdStateError(implementation_->poison_reason);
+  }
+
+  std::optional<HostLedgerAdmissionFinalizeResult> finalized;
+  try {
+    // The ledger owns the atomic audit-head/occupancy CAS. No inspection read
+    // occurs after this call: its opaque epoch is the grant authority even if
+    // a request lands before hostd acquires its local latch.
+    finalized = implementation_->ledger->finalize_startup_admission(
+        report, committed.receipt, now);
+  } catch (const std::exception &error) {
+    std::scoped_lock lock(implementation_->mutex);
+    implementation_->poison(std::string("startup admission finalize failed: ") +
+                            error.what());
+    throw HostdStateError(implementation_->poison_reason);
+  } catch (...) {
+    std::scoped_lock lock(implementation_->mutex);
+    implementation_->poison("startup admission finalize failed");
+    throw HostdStateError(implementation_->poison_reason);
+  }
+
   std::scoped_lock lock(implementation_->mutex);
   if (implementation_->lifecycle != HostdLifecycle::startup_auditing) {
     if (implementation_->lifecycle != HostdLifecycle::poisoned)
       implementation_->poison(
-          "startup audit lifecycle changed asynchronously");
+          "startup audit lifecycle changed after admission finalize");
     throw HostdStateError(implementation_->poison_reason);
   }
-  const bool receipt_shape_valid =
-      receipt.api_version == kHostdStartupAuditApiVersion &&
-      valid_identifier(receipt.audit_id) && valid_identifier(receipt.host_id) &&
-      valid_identifier(receipt.boot_id) &&
-      valid_identifier(receipt.broker_epoch) &&
-      valid_digest(receipt.inventory_digest) &&
-      valid_digest(receipt.evidence_digest) &&
-      valid_audit_disposition(receipt.disposition) &&
-      receipt.unresolved_orphans <= receipt.observed_orphans;
-  if (!receipt_shape_valid) {
-    implementation_->poison("startup auditor returned a malformed receipt");
-    throw HostdStateError(implementation_->poison_reason);
-  }
-  implementation_->startup_audit = receipt;
-  if (receipt.disposition != HostdStartupAuditDisposition::passed ||
-      receipt.unresolved_orphans != 0U ||
-      receipt.host_id != implementation_->config.host_id ||
-      receipt.boot_id != implementation_->config.boot_id ||
-      receipt.broker_epoch != implementation_->config.broker_epoch ||
-      receipt.inventory_digest !=
-          implementation_->startup_inventory.inventory_digest) {
-    implementation_->poison(
-        "startup inventory/orphan audit did not pass exactly");
-    throw HostdStateError(implementation_->poison_reason);
-  }
-  implementation_->apply_runtime_identity(runtime, true);
-  if (implementation_->lifecycle != HostdLifecycle::startup_auditing)
-    throw HostdStateError(implementation_->poison_reason);
+  implementation_->startup_audit = committed.receipt;
+  implementation_->admission_epoch = finalized->epoch;
   implementation_->lifecycle = HostdLifecycle::admitting;
-  return receipt;
+  return committed.receipt;
 }
 
 HostdConnectedSession
@@ -649,7 +761,11 @@ HostGrantCoordinator::connect(HostdConnectRequest request,
   }
   HostdSessionAccess effective_access = peer.access;
   if (mutation_requested) {
-    if (implementation_->lifecycle != HostdLifecycle::admitting) {
+    const bool cleanup_while_blocked =
+        peer.access == HostdSessionAccess::release_only &&
+        implementation_->lifecycle == HostdLifecycle::startup_blocked;
+    if (implementation_->lifecycle != HostdLifecycle::admitting &&
+        !cleanup_while_blocked) {
       throw HostdStateError(
           "grant/release sessions require a passed startup audit");
     }
@@ -824,10 +940,15 @@ HostGrantCoordinator::request_bundle(std::string_view session_id,
   if (!Implementation::request_is_exactly_sealed(request))
     throw HostdUnauthorized("bundle request is not exactly sealed");
   Implementation::SessionSnapshot snapshot;
+  std::optional<HostLedgerAdmissionEpoch> admission_epoch;
   {
     std::scoped_lock lock(implementation_->mutex);
     snapshot = implementation_->snapshot_session(
         session_id, Implementation::MutationKind::grant);
+    if (!implementation_->admission_epoch)
+      implementation_->poison_and_throw(
+          "admitting hostd has no ledger admission epoch");
+    admission_epoch = implementation_->admission_epoch;
   }
   const HostdSessionAttribution attribution = *snapshot.session.attribution;
   if (request.journal_id != attribution.journal_id ||
@@ -857,7 +978,8 @@ HostGrantCoordinator::request_bundle(std::string_view session_id,
 
   BundleRequestResult result;
   try {
-    result = implementation_->ledger->request_bundle(request, now);
+    result = implementation_->ledger->request_bundle(request, now,
+                                                       *admission_epoch);
   } catch (...) {
     std::scoped_lock lock(implementation_->mutex);
     auto &record = implementation_->exact_session(snapshot);
@@ -937,7 +1059,11 @@ HostGrantCoordinator::release_bundle(std::string_view session_id,
   if (!implementation_->valid_release_result(result, request))
     implementation_->poison_and_throw(
         "host ledger returned an unsealed or inexact release receipt");
-  if (implementation_->lifecycle != HostdLifecycle::admitting)
+  const bool cleanup_while_blocked =
+      snapshot.session.effective_access == HostdSessionAccess::release_only &&
+      implementation_->lifecycle == HostdLifecycle::startup_blocked;
+  if (implementation_->lifecycle != HostdLifecycle::admitting &&
+      !cleanup_while_blocked)
     throw HostdStateError(implementation_->poison_reason);
   return result;
 }

@@ -8342,8 +8342,9 @@ void test_legacy_journal_migration_policy() {
     check(version == "7" && released_history == "legacy-wall/v1|NULL|NULL|NULL|10|20|30" &&
               release_receipt == "legacy-wall/v1|NULL|30",
           "v4 lease and release history migrates into explicit legacy-wall quarantine");
-    check(event_after == event_before && head_after == head_before,
-          "v4 migration preserves event records and chain head byte-for-byte");
+    check(event_after == event_before && head_after != head_before &&
+              head_after.size() == 64U,
+          "v4 migration preserves event bytes while a later authenticated lease acquisition advances the authority chain");
     sqlite3_close(database);
     database = nullptr;
   }

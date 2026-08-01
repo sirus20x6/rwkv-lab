@@ -5,6 +5,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -21,6 +22,8 @@ inline constexpr std::string_view kHostLedgerReleaseRequestApiVersion =
     "trainvm.host-resource-release-request/v1";
 inline constexpr std::string_view kHostLedgerReleaseApiVersion =
     "trainvm.host-resource-release/v1";
+inline constexpr std::string_view kHostLedgerAdmissionEpochApiVersion =
+    "trainvm.host-ledger-admission-epoch/v1";
 
 struct HostLedgerTime final {
   std::int64_t boottime_ns{};
@@ -99,11 +102,37 @@ struct BundleReleaseResult final {
   bool operator==(const BundleReleaseResult&) const = default;
 };
 
+// Opaque in-process authority returned only by an exact ledger finalize or its
+// exact lost-reply replay. It is intentionally not serializable and is never
+// exposed through hostd status. Its digest names persisted inspection state;
+// constructing equivalent bytes outside SQLiteHostLedger does not mint this
+// C++ capability.
+class HostLedgerAdmissionEpoch final {
+ public:
+  HostLedgerAdmissionEpoch(const HostLedgerAdmissionEpoch&) = default;
+  HostLedgerAdmissionEpoch& operator=(const HostLedgerAdmissionEpoch&) = default;
+  bool operator==(const HostLedgerAdmissionEpoch&) const = default;
+
+ private:
+  friend class SQLiteHostLedger;
+  explicit HostLedgerAdmissionEpoch(std::string epoch_digest)
+      : epoch_digest_(std::move(epoch_digest)) {}
+  std::string epoch_digest_;
+};
+
+struct HostLedgerAdmissionFinalizeResult final {
+  HostLedgerAdmissionEpoch epoch;
+  bool replayed{};
+
+  bool operator==(const HostLedgerAdmissionFinalizeResult&) const = default;
+};
+
 enum class HostLedgerFaultPoint {
   after_startup_audit_migration_schema,
   after_startup_audit_record,
   after_startup_audit_projection,
   after_startup_audit_commit,
+  after_admission_finalize_commit,
   after_request_record,
   after_generation_update,
   after_grant_projection,
@@ -149,6 +178,9 @@ class SQLiteHostLedger final {
 
   [[nodiscard]] BundleRequestResult request_bundle(
       const ResourceBundleRequest& request, const HostLedgerTime& now);
+  [[nodiscard]] BundleRequestResult request_bundle(
+      const ResourceBundleRequest& request, const HostLedgerTime& now,
+      const HostLedgerAdmissionEpoch& admission_epoch);
   [[nodiscard]] BundleReleaseResult release_bundle(
       const ResourceReleaseRequest& request, const HostLedgerTime& now);
   // This operation exists only when construction retained a trusted policy.
@@ -156,6 +188,9 @@ class SQLiteHostLedger final {
   // this API does not mint an admission capability.
   [[nodiscard]] HostStartupAuditLedgerCommitResult commit_startup_audit(
       const HostStartupAuditReport& report, const HostLedgerTime& now);
+  [[nodiscard]] HostLedgerAdmissionFinalizeResult finalize_startup_admission(
+      const HostStartupAuditReport& report,
+      const HostStartupAuditReceipt& receipt, const HostLedgerTime& now);
   [[nodiscard]] HostLedgerChainHead chain_head() const;
   [[nodiscard]] ResourceOccupancySnapshot occupancy() const;
   [[nodiscard]] std::uint64_t generation(
@@ -165,6 +200,9 @@ class SQLiteHostLedger final {
   [[nodiscard]] HostInventoryReceipt inventory() const;
 
  private:
+  [[nodiscard]] BundleRequestResult request_bundle_authorized(
+      const ResourceBundleRequest& request, const HostLedgerTime& now,
+      const HostLedgerAdmissionEpoch* admission_epoch);
   struct Implementation;
   std::unique_ptr<Implementation> implementation_;
 };

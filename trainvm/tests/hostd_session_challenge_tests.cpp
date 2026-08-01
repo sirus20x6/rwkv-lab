@@ -134,6 +134,7 @@ HostdSessionChallengeClaim claim() {
                       .authority_inode = 14U,
                       .owner_uid = 1001U},
           .controller = {.run_id = "run-001",
+                         .concurrency_key = "gpu:0",
                          .controller_id = "controller-001",
                          .controller_generation = 7U,
                          .logical_lease_id = "lease-001",
@@ -564,6 +565,14 @@ void bounds_and_injected_authorities_fail_closed() {
     require_throws<HostdSessionChallengeRejected>(
         [&] { (void)fixture.verifier->issue(peer(), malformed); },
         "zero controller generation is rejected");
+  }
+  {
+    Fixture fixture;
+    HostdSessionChallengeClaim malformed = claim();
+    malformed.controller.concurrency_key.clear();
+    require_throws<HostdSessionChallengeRejected>(
+        [&] { (void)fixture.verifier->issue(peer(), malformed); },
+        "empty controller concurrency key is rejected");
   }
   {
     Fixture fixture;

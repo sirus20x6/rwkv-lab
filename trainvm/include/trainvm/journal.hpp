@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -92,6 +93,45 @@ struct JournalFileIdentity final {
   std::uint64_t authority_device{};
   std::uint64_t authority_inode{};
   std::uint64_t owner_uid{};
+
+  bool operator==(const JournalFileIdentity&) const = default;
+};
+
+// Exact read-only authority facts retained by an already pinned Journal. This
+// is inspection data, not a lease or admission capability.
+struct JournalAuthoritySnapshot final {
+  JournalFileIdentity file;
+  HostIdentity host;
+  std::string journal_id;
+
+  bool operator==(const JournalAuthoritySnapshot&) const = default;
+};
+
+// One consistent SQLite read snapshot of the retained authority and one live
+// boot-scoped logical fence. It cannot be constructed from an arbitrary path.
+struct JournalLogicalFenceSnapshot final {
+  JournalAuthoritySnapshot authority;
+  ResourceLease lease;
+  std::uint64_t authority_revision{};
+  std::uint64_t authority_event_sequence{};
+  std::string authority_event_hash;
+
+  bool operator==(const JournalLogicalFenceSnapshot&) const = default;
+};
+
+// Durable controller epoch registered into the journal event authority. The
+// concurrency key is part of the fence identity; lease IDs are not assumed to
+// be globally unique across logical resource scopes.
+struct JournalControllerFence final {
+  std::string broker_epoch;
+  std::string run_id;
+  std::string concurrency_key;
+  std::string controller_id;
+  std::uint64_t controller_generation{};
+  std::string logical_lease_id;
+  std::uint64_t logical_fencing_token{};
+
+  bool operator==(const JournalControllerFence&) const = default;
 };
 
 struct HostGrantSagaSnapshot final {
@@ -161,6 +201,22 @@ public:
       const AuthorityTimeSample& now) const;
   [[nodiscard]] std::uint64_t event_count() const;
   [[nodiscard]] std::string journal_id() const;
+  [[nodiscard]] JournalAuthoritySnapshot journal_authority_snapshot() const;
+  [[nodiscard]] JournalLogicalFenceSnapshot journal_logical_fence_snapshot(
+      const std::string& concurrency_key, const std::string& owner_run_id,
+      const std::string& lease_id, std::uint64_t fencing_token,
+      const AuthorityTimeSample& now) const;
+  // Explicit authority mutation. Registration appends a hash-chained durable
+  // controller epoch and accepts only a fresh, monotonically increasing
+  // generation bound to the exact currently live logical fence.
+  [[nodiscard]] JournalControllerFence register_hostd_controller_fence(
+      const JournalControllerFence& requested,
+      const AuthorityTimeSample& now);
+  // Read-only validation that the requested controller is still the exact
+  // current durable controller epoch. A newer valid epoch supersedes it;
+  // malformed or torn durable authority permanently poisons this Journal.
+  void require_current_hostd_controller_fence(
+      const JournalControllerFence& requested) const;
   [[nodiscard]] bool verify_chain(std::string* reason = nullptr) const;
   std::uint64_t rebuild_projections();
   // Journal-side half of the host-grant saga. These methods copy exact host
@@ -228,12 +284,22 @@ public:
   void initialize();
   void require_file_identity(const JournalFileIdentity& expected) const;
   void require_namespace_identity(const JournalFileIdentity& expected) const;
+  void require_attested_authority() const;
   [[nodiscard]] bool validate_authority_boundary() const noexcept;
   [[nodiscard]] bool verify_event_chain(std::string* reason = nullptr) const;
   static int authorize_database_operation(void* context, int action,
                                           const char*, const char*,
                                           const char*, const char*) noexcept;
   static int authorize_commit(void* context) noexcept;
+  [[nodiscard]] std::pair<std::string, std::uint64_t>
+  append_authority_event_uncommitted(
+      const Event& event);
+  void record_lease_authority_acquisition_uncommitted(
+      const ResourceLease& lease);
+  void record_lease_authority_renewal_uncommitted(
+      const LeaseRenewalReceipt& renewal);
+  void record_lease_authority_release_uncommitted(
+      const ResourceLease& lease, std::int64_t released_wall_time_ns);
   std::uint64_t append_uncommitted(const Event& event,
                                    bool allow_host_saga = false);
   RunCreationResult create_run(const CompiledPlan& plan, const std::vector<Event>& events);

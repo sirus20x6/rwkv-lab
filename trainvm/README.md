@@ -90,9 +90,17 @@ Implemented now:
 - additive host-ledger v2 startup-audit evidence with exact v1 migration, canonical bounded reports,
   configured-policy admission, historical inventory/occupancy reconstruction, predecessor-chain
   proof, atomic report/projection/receipt commit, strict replay closure, and post-commit re-read;
+- an additive host-ledger v3 admission epoch that atomically finalizes an exact current audit and
+  occupancy, keeps policy-enabled grants sealed beforehand, binds every later request to the active
+  epoch, supports exact lost-reply replay, and preserves release-only cleanup while startup is
+  blocked;
 - a process-free, single-use journal-fence challenge verifier binding socket peer process instance,
   host/boot/broker, pinned-journal claims, controller generation, logical fence, nonce, and bounded
   boottime lifetime, with per-peer quotas and no bearer-capability interpretation of decoded data;
+- Linux production challenge primitives using `getrandom`, boot-bound `CLOCK_BOOTTIME`, strict
+  mount/PID/time namespace identity, `SO_PEERCRED` plus `SO_PEERPIDFD`, and pinned-proc process
+  identity, together with a read-only pinned-Journal attestor rooted in hash-chained controller,
+  acquisition, renewal, release, and current-fence authority events;
 - a read-only Linux NVIDIA inventory collector that pins procfs/sysfs/devfs roots, dynamically loads
   and grades NVML evidence, double-samples bounded device/MIG/display/context state, retains process
   instance observations, proves device-node mappings, and makes incomplete, torn, stale, or
@@ -115,12 +123,13 @@ launch identity; process-free unit fixtures can opt into a visibly test-only leg
 RPC can yet mutate host authority. The status-only filesystem `SOCK_SEQPACKET` boundary is
 implemented at an explicitly cooperative enforcement grade: it proves framing, endpoint identity,
 and UID/GID credentials, but does not claim hostile same-UID isolation or grant, release, launch, or
-signal authority. Durable startup-audit evidence, a fail-closed NVIDIA inventory collector, and the
-session journal-fence challenge are implemented libraries, but production CSPRNG/time/process and
-pinned-journal attestors plus hostd lifecycle/transport integration remain mandatory before they can
-authorize admission. The next boundary is that integration and process-free service reconciliation,
-followed by a guarded launcher, cgroup cleanup, process-instance credentials, and durable spawn/exit
-receipts. Real trainer process ownership follows only after those fault-injection tests pass.
+signal authority. Durable startup-audit evidence, the fail-closed NVIDIA collector, strict Linux
+session primitives, pinned-journal attestation, startup lifecycle transitions, and atomic ledger
+admission finalization are implemented. The journal challenge is not yet exchanged by a mutating
+transport endpoint, and the service does not yet route all admission/release work through the hostd
+gate. Those process-free integration steps are next, followed by a guarded launcher, cgroup cleanup,
+process-instance credentials, and durable spawn/exit receipts. Real trainer process ownership
+follows only after those fault-injection tests pass.
 MIG evidence is collected and attributed per instance, but grants remain disabled: the generic
 conflict selector intentionally blocks a child while its full-device parent is nonselectable, until
 a partition-aware enforcement policy proves that scheduling relationship end to end.

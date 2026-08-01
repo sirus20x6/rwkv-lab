@@ -165,6 +165,67 @@ BEFORE DELETE ON startup_audit_outcomes
 BEGIN SELECT RAISE(ABORT, 'startup audit outcomes are immutable'); END;
 )sql";
 
+// Version 3 adds a ledger-owned grant-admission fence. Finalization itself does
+// not append to the v1 hash chain: it atomically binds the exact committed
+// audit head and occupancy, while every subsequent request records which
+// active epoch authorized it. Outcomes already present at migration are frozen
+// into an immutable legacy closure; policy-unconfigured ledgers explicitly
+// mark their direct-request compatibility mode. Every other request outcome
+// must have an epoch authorization, so deleting an authorization cannot turn
+// it into apparently valid legacy history. Releases remain exact grant-bound
+// cleanup and do not require an epoch, so recovery can always reduce occupancy.
+constexpr std::string_view kAdmissionEpochSchemaV3 = R"sql(
+CREATE TABLE admission_epochs (
+  epoch_digest TEXT PRIMARY KEY,
+  api_version TEXT NOT NULL,
+  audit_id TEXT NOT NULL UNIQUE
+    REFERENCES startup_audit_outcomes(audit_id),
+  report_digest TEXT NOT NULL UNIQUE,
+  audit_receipt_digest TEXT NOT NULL UNIQUE,
+  host_id TEXT NOT NULL,
+  boot_id TEXT NOT NULL,
+  broker_epoch TEXT NOT NULL,
+  inventory_digest TEXT NOT NULL,
+  audit_record_sequence INTEGER NOT NULL CHECK(audit_record_sequence > 0),
+  audit_record_chain_hash TEXT NOT NULL,
+  finalized_occupancy_digest TEXT NOT NULL,
+  finalized_boottime_ns INTEGER NOT NULL CHECK(finalized_boottime_ns >= 0),
+  finalized_wall_time_ns INTEGER NOT NULL CHECK(finalized_wall_time_ns >= 0),
+  canonical_json TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE active_admission_epoch (
+  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+  epoch_digest TEXT NOT NULL UNIQUE
+    REFERENCES admission_epochs(epoch_digest)
+) WITHOUT ROWID;
+CREATE TABLE request_admission_epochs (
+  request_id TEXT PRIMARY KEY,
+  request_digest TEXT NOT NULL,
+  epoch_digest TEXT NOT NULL REFERENCES admission_epochs(epoch_digest)
+) WITHOUT ROWID;
+CREATE TABLE request_admission_exemptions (
+  request_id TEXT PRIMARY KEY,
+  request_digest TEXT NOT NULL,
+  reason TEXT NOT NULL CHECK(reason IN ('pre_v3', 'policy_unconfigured'))
+) WITHOUT ROWID;
+CREATE TRIGGER admission_epochs_no_update BEFORE UPDATE ON admission_epochs
+BEGIN SELECT RAISE(ABORT, 'admission epochs are immutable'); END;
+CREATE TRIGGER admission_epochs_no_delete BEFORE DELETE ON admission_epochs
+BEGIN SELECT RAISE(ABORT, 'admission epochs are immutable'); END;
+CREATE TRIGGER request_admission_epochs_no_update
+BEFORE UPDATE ON request_admission_epochs
+BEGIN SELECT RAISE(ABORT, 'request admission epochs are immutable'); END;
+CREATE TRIGGER request_admission_epochs_no_delete
+BEFORE DELETE ON request_admission_epochs
+BEGIN SELECT RAISE(ABORT, 'request admission epochs are immutable'); END;
+CREATE TRIGGER request_admission_exemptions_no_update
+BEFORE UPDATE ON request_admission_exemptions
+BEGIN SELECT RAISE(ABORT, 'request admission exemptions are immutable'); END;
+CREATE TRIGGER request_admission_exemptions_no_delete
+BEFORE DELETE ON request_admission_exemptions
+BEGIN SELECT RAISE(ABORT, 'request admission exemptions are immutable'); END;
+)sql";
+
 class Statement final {
  public:
   Statement(sqlite3* database, std::string_view sql) : database_(database) {
@@ -372,6 +433,39 @@ bool valid_time(const HostLedgerTime& now) {
   return now.boottime_ns >= 0 && now.wall_time_ns >= 0;
 }
 
+bool same_occupied_resources(const ResourceOccupancySnapshot& left,
+                             const ResourceOccupancySnapshot& right) {
+  return left.api_version == right.api_version &&
+         left.host_id == right.host_id && left.boot_id == right.boot_id &&
+         left.inventory_digest == right.inventory_digest &&
+         left.active_fences == right.active_fences;
+}
+
+nlohmann::json admission_epoch_json(
+    const HostStartupAuditReport& report,
+    const HostStartupAuditReceipt& receipt,
+    const ResourceOccupancySnapshot& finalized_occupancy,
+    const HostLedgerTime& now) {
+  nlohmann::json value{
+      {"api_version", kHostLedgerAdmissionEpochApiVersion},
+      {"audit_id", report.audit_id},
+      {"report_digest", report.report_digest},
+      {"audit_receipt_digest", receipt.receipt_digest},
+      {"host_id", report.host_id},
+      {"boot_id", report.boot_id},
+      {"broker_epoch", report.broker_epoch},
+      {"inventory_digest", report.inventory.inventory_digest},
+      {"audit_record_sequence", receipt.committed_ledger_head.ledger_sequence},
+      {"audit_record_chain_hash", receipt.committed_ledger_head.chain_hash},
+      {"finalized_occupancy_digest", finalized_occupancy.occupancy_digest},
+      {"finalized_boottime_ns", now.boottime_ns},
+      {"finalized_wall_time_ns", now.wall_time_ns},
+  };
+  value["epoch_digest"] = sha256("trainvm.host-ledger-admission-epoch/v1",
+                                  value.dump());
+  return value;
+}
+
 nlohmann::json grant_digest_json(const ResourceBundleGrant& grant) {
   return {{"api_version", grant.api_version},
           {"allocation_id", grant.allocation_id},
@@ -473,6 +567,29 @@ const SchemaSnapshot& canonical_schema_v2() {
       execute(database, kSchemaV1, "canonical v1 schema creation failed");
       execute(database, kStartupAuditSchemaV2,
               "canonical startup-audit schema creation failed");
+      auto value = schema_snapshot(database);
+      sqlite3_close(database);
+      return value;
+    } catch (...) {
+      sqlite3_close(database);
+      throw;
+    }
+  }();
+  return snapshot;
+}
+
+const SchemaSnapshot& canonical_schema_v3() {
+  static const SchemaSnapshot snapshot = [] {
+    sqlite3* database = nullptr;
+    if (sqlite3_open(":memory:", &database) != SQLITE_OK) {
+      throw HostLedgerError("could not construct canonical ledger schema");
+    }
+    try {
+      execute(database, kSchemaV1, "canonical v1 schema creation failed");
+      execute(database, kStartupAuditSchemaV2,
+              "canonical startup-audit schema creation failed");
+      execute(database, kAdmissionEpochSchemaV3,
+              "canonical admission-epoch schema creation failed");
       auto value = schema_snapshot(database);
       sqlite3_close(database);
       return value;
@@ -653,7 +770,7 @@ struct SQLiteHostLedger::Implementation final {
 
   bool verify_unlocked(std::string* reason,
                        bool bind_instance_inventory = true,
-                       unsigned int schema_version = 2U) const {
+                       unsigned int schema_version = 3U) const {
     const auto fail = [&](std::string message) {
       if (reason != nullptr) *reason = std::move(message);
       return false;
@@ -670,7 +787,10 @@ struct SQLiteHostLedger::Implementation final {
            schema_snapshot(database) != canonical_schema_v1()) ||
           (schema_version == 2U &&
            schema_snapshot(database) != canonical_schema_v2()) ||
-          (schema_version != 1U && schema_version != 2U)) {
+          (schema_version == 3U &&
+           schema_snapshot(database) != canonical_schema_v3()) ||
+          (schema_version != 1U && schema_version != 2U &&
+           schema_version != 3U)) {
         return fail("ledger schema does not exactly match its declared version");
       }
       Statement application(database, "PRAGMA application_id");
@@ -768,7 +888,7 @@ struct SQLiteHostLedger::Implementation final {
           }
           replay_inventory = observed;
         } else if (record_type == "startup.audit_committed") {
-          if (schema_version != 2U) {
+          if (schema_version < 2U) {
             return fail("v1 ledger contains v2 startup-audit evidence");
           }
           const HostStartupAuditReport report =
@@ -1211,7 +1331,7 @@ struct SQLiteHostLedger::Implementation final {
           release_request_evidence.size() != release_evidence.size()) {
         return fail("grant/release authority evidence has missing projections");
       }
-      if (schema_version == 2U) {
+      if (schema_version >= 2U) {
         Statement extension(database, R"sql(
           SELECT schema_version FROM ledger_schema_extensions
           WHERE feature='startup_audit'
@@ -1223,7 +1343,8 @@ struct SQLiteHostLedger::Implementation final {
         Statement extension_count(database,
                                   "SELECT COUNT(*) FROM ledger_schema_extensions");
         if (sqlite3_step(extension_count.get()) != SQLITE_ROW ||
-            sqlite3_column_int64(extension_count.get(), 0) != 1) {
+            sqlite3_column_int64(extension_count.get(), 0) !=
+                (schema_version == 2U ? 1 : 2)) {
           return fail("unknown ledger schema extension is present");
         }
         Statement audits(database, R"sql(
@@ -1284,6 +1405,158 @@ struct SQLiteHostLedger::Implementation final {
         if (status != SQLITE_DONE ||
             audit_projection_count != startup_audit_evidence.size()) {
           return fail("startup-audit evidence and projections are not closed");
+        }
+        if (schema_version == 3U) {
+          Statement admission_extension(database, R"sql(
+            SELECT schema_version FROM ledger_schema_extensions
+            WHERE feature='admission_epoch'
+          )sql");
+          if (sqlite3_step(admission_extension.get()) != SQLITE_ROW ||
+              sqlite3_column_int64(admission_extension.get(), 0) != 3 ||
+              sqlite3_step(admission_extension.get()) != SQLITE_DONE) {
+            return fail("admission-epoch schema extension marker is invalid");
+          }
+          Statement epochs(database, R"sql(
+            SELECT epoch.epoch_digest, epoch.api_version, epoch.audit_id,
+                   epoch.report_digest, epoch.audit_receipt_digest,
+                   epoch.host_id, epoch.boot_id, epoch.broker_epoch,
+                   epoch.inventory_digest, epoch.audit_record_sequence,
+                   epoch.audit_record_chain_hash,
+                   epoch.finalized_occupancy_digest,
+                   epoch.finalized_boottime_ns, epoch.finalized_wall_time_ns,
+                   epoch.canonical_json, audit.canonical_report_json,
+                   audit.canonical_receipt_json
+            FROM admission_epochs AS epoch
+            JOIN startup_audit_outcomes AS audit
+              ON audit.audit_id=epoch.audit_id
+            ORDER BY epoch.epoch_digest
+          )sql");
+          std::set<std::string> epoch_digests;
+          while ((status = sqlite3_step(epochs.get())) == SQLITE_ROW) {
+            const HostStartupAuditReport report =
+                decode_untrusted_host_startup_audit_report(
+                    nlohmann::json::parse(column_text(epochs.get(), 15)));
+            const HostStartupAuditReceipt receipt =
+                decode_untrusted_host_startup_audit_receipt(
+                    nlohmann::json::parse(column_text(epochs.get(), 16)),
+                    report);
+            ResourceOccupancySnapshot finalized = report.post_audit_occupancy;
+            finalized.ledger_sequence =
+                receipt.committed_ledger_head.ledger_sequence;
+            finalized.occupancy_digest.clear();
+            finalized = seal_resource_occupancy(report.inventory,
+                                                std::move(finalized));
+            const HostLedgerTime finalized_at{
+                .boottime_ns = sqlite3_column_int64(epochs.get(), 12),
+                .wall_time_ns = sqlite3_column_int64(epochs.get(), 13)};
+            const nlohmann::json canonical = admission_epoch_json(
+                report, receipt, finalized, finalized_at);
+            const std::string epoch_digest = column_text(epochs.get(), 0);
+            const bool blocking = std::ranges::any_of(
+                report.findings, [](const HostStartupAuditFinding& finding) {
+                  return finding.severity ==
+                         HostStartupAuditFindingSeverity::blocking;
+                });
+            if (!epoch_digests.insert(epoch_digest).second ||
+                report.disposition != HostStartupAuditDisposition::passed ||
+                blocking ||
+                column_text(epochs.get(), 1) !=
+                    kHostLedgerAdmissionEpochApiVersion ||
+                column_text(epochs.get(), 2) != report.audit_id ||
+                column_text(epochs.get(), 3) != report.report_digest ||
+                column_text(epochs.get(), 4) != receipt.receipt_digest ||
+                column_text(epochs.get(), 5) != report.host_id ||
+                column_text(epochs.get(), 6) != report.boot_id ||
+                column_text(epochs.get(), 7) != report.broker_epoch ||
+                column_text(epochs.get(), 8) !=
+                    report.inventory.inventory_digest ||
+                static_cast<std::uint64_t>(
+                    sqlite3_column_int64(epochs.get(), 9)) !=
+                    receipt.committed_ledger_head.ledger_sequence ||
+                column_text(epochs.get(), 10) !=
+                    receipt.committed_ledger_head.chain_hash ||
+                column_text(epochs.get(), 11) !=
+                    finalized.occupancy_digest ||
+                !valid_time(finalized_at) ||
+                column_text(epochs.get(), 14) != canonical.dump() ||
+                epoch_digest != canonical.at("epoch_digest").get<std::string>()) {
+              return fail("admission epoch projection is not canonical");
+            }
+          }
+          if (status != SQLITE_DONE) return fail("admission epoch scan failed");
+          Statement active_epoch(database, R"sql(
+            SELECT active.epoch_digest FROM active_admission_epoch AS active
+            JOIN admission_epochs AS epoch
+              ON epoch.epoch_digest=active.epoch_digest
+            WHERE active.singleton=1
+          )sql");
+          const int active_status = sqlite3_step(active_epoch.get());
+          if ((active_status != SQLITE_DONE && active_status != SQLITE_ROW) ||
+              (active_status == SQLITE_ROW &&
+               (!epoch_digests.contains(column_text(active_epoch.get(), 0)) ||
+                sqlite3_step(active_epoch.get()) != SQLITE_DONE))) {
+            return fail("active admission epoch projection is invalid");
+          }
+          Statement authorizations(database, R"sql(
+            SELECT authorization.request_id, authorization.request_digest,
+                   authorization.epoch_digest, outcome.request_digest
+            FROM request_admission_epochs AS authorization
+            LEFT JOIN request_outcomes AS outcome
+              ON outcome.request_id=authorization.request_id
+            ORDER BY authorization.request_id
+          )sql");
+          std::set<std::string> covered_requests;
+          while ((status = sqlite3_step(authorizations.get())) == SQLITE_ROW) {
+            const std::string request_id =
+                column_text(authorizations.get(), 0);
+            const auto evidence = request_evidence.find(request_id);
+            if (!covered_requests.insert(request_id).second ||
+                evidence == request_evidence.end() ||
+                evidence->second.canonical_request_digest !=
+                    column_text(authorizations.get(), 1) ||
+                !epoch_digests.contains(column_text(authorizations.get(), 2)) ||
+                sqlite3_column_type(authorizations.get(), 3) == SQLITE_NULL ||
+                column_text(authorizations.get(), 3) !=
+                    column_text(authorizations.get(), 1)) {
+              return fail("request admission authorization is not closed");
+            }
+          }
+          if (status != SQLITE_DONE)
+            return fail("request admission authorization scan failed");
+          Statement exemptions(database, R"sql(
+            SELECT exemption.request_id, exemption.request_digest,
+                   exemption.reason, outcome.request_digest,
+                   authorization.request_id
+            FROM request_admission_exemptions AS exemption
+            LEFT JOIN request_outcomes AS outcome
+              ON outcome.request_id=exemption.request_id
+            LEFT JOIN request_admission_epochs AS authorization
+              ON authorization.request_id=exemption.request_id
+            ORDER BY exemption.request_id
+          )sql");
+          while ((status = sqlite3_step(exemptions.get())) == SQLITE_ROW) {
+            const std::string request_id = column_text(exemptions.get(), 0);
+            const auto evidence = request_evidence.find(request_id);
+            const std::string exemption_reason = column_text(exemptions.get(), 2);
+            if (!covered_requests.insert(request_id).second ||
+                evidence == request_evidence.end() ||
+                evidence->second.canonical_request_digest !=
+                    column_text(exemptions.get(), 1) ||
+                (exemption_reason != "pre_v3" &&
+                 exemption_reason != "policy_unconfigured") ||
+                sqlite3_column_type(exemptions.get(), 3) == SQLITE_NULL ||
+                column_text(exemptions.get(), 3) !=
+                    column_text(exemptions.get(), 1) ||
+                sqlite3_column_type(exemptions.get(), 4) != SQLITE_NULL) {
+              return fail("request admission exemption is not canonical");
+            }
+          }
+          if (status != SQLITE_DONE)
+            return fail("request admission exemption scan failed");
+          if (covered_requests.size() != request_evidence.size()) {
+            return fail(
+                "request outcome is missing admission authorization or durable exemption");
+          }
         }
       } else if (!startup_audit_evidence.empty()) {
         return fail("v1 ledger contains startup-audit evidence");
@@ -1374,8 +1647,10 @@ SQLiteHostLedger::SQLiteHostLedger(
             "could not create host ledger core v1");
     execute(implementation_->database, kStartupAuditSchemaV2,
             "could not create startup-audit schema v2");
+    execute(implementation_->database, kAdmissionEpochSchemaV3,
+            "could not create admission-epoch schema v3");
     execute(implementation_->database,
-            "PRAGMA application_id=0x5456484c; PRAGMA user_version=2;",
+            "PRAGMA application_id=0x5456484c; PRAGMA user_version=3;",
             "could not mark host ledger schema");
     Statement identity(implementation_->database, R"sql(
       INSERT INTO ledger_identity(singleton, schema_version, ledger_id, host_id,
@@ -1389,8 +1664,10 @@ SQLiteHostLedger::SQLiteHostLedger(
                  "host ledger identity insert failed");
     execute(implementation_->database,
             "INSERT INTO ledger_schema_extensions(feature, schema_version) "
-            "VALUES('startup_audit', 2);",
-            "startup-audit extension marker insert failed");
+            "VALUES('startup_audit', 2);"
+            "INSERT INTO ledger_schema_extensions(feature, schema_version) "
+            "VALUES('admission_epoch', 3);",
+            "host ledger extension marker insert failed");
     Statement head(implementation_->database, R"sql(
       INSERT INTO ledger_chain_head VALUES(1, 0, ?)
     )sql");
@@ -1462,9 +1739,42 @@ SQLiteHostLedger::SQLiteHostLedger(
                               migration_reason);
       }
       migration.commit();
-    } else if (opened_schema != canonical_schema_v2() || user_version != 2) {
+    } else if ((opened_schema != canonical_schema_v2() || user_version != 2) &&
+               (opened_schema != canonical_schema_v3() || user_version != 3)) {
       throw HostLedgerError(
           "refusing unknown or partially migrated host ledger schema");
+    }
+    const std::int64_t current_schema_version = [&] {
+      Statement current_version(implementation_->database,
+                                "PRAGMA user_version");
+      if (sqlite3_step(current_version.get()) != SQLITE_ROW)
+        throw HostLedgerError("could not reread host ledger schema version");
+      return sqlite3_column_int64(current_version.get(), 0);
+    }();
+    if (current_schema_version == 2) {
+      Transaction migration(implementation_->database);
+      std::string migration_reason;
+      if (!implementation_->verify_unlocked(&migration_reason, false, 2U)) {
+        throw HostLedgerError("refusing admission-epoch migration: " +
+                              migration_reason);
+      }
+      execute(implementation_->database, kAdmissionEpochSchemaV3,
+              "could not create admission-epoch schema v3");
+      execute(implementation_->database,
+              "INSERT INTO request_admission_exemptions("
+              "request_id, request_digest, reason) "
+              "SELECT request_id, request_digest, 'pre_v3' "
+              "FROM request_outcomes;",
+              "could not freeze pre-admission request outcome closure");
+      execute(implementation_->database,
+              "INSERT INTO ledger_schema_extensions(feature, schema_version) "
+              "VALUES('admission_epoch', 3); PRAGMA user_version=3;",
+              "could not mark admission-epoch schema v3");
+      if (!implementation_->verify_unlocked(&migration_reason, false, 3U)) {
+        throw HostLedgerError("admission-epoch migration verification failed: " +
+                              migration_reason);
+      }
+      migration.commit();
     }
     Transaction transaction(implementation_->database);
     std::string reason;
@@ -1519,6 +1829,26 @@ SQLiteHostLedger::~SQLiteHostLedger() = default;
 
 BundleRequestResult SQLiteHostLedger::request_bundle(
     const ResourceBundleRequest& request, const HostLedgerTime& now) {
+  if (implementation_->trusted_startup_audit_policy) {
+    throw HostLedgerConflict(
+        "bundle admission is sealed until an exact startup audit is finalized");
+  }
+  return request_bundle_authorized(request, now, nullptr);
+}
+
+BundleRequestResult SQLiteHostLedger::request_bundle(
+    const ResourceBundleRequest& request, const HostLedgerTime& now,
+    const HostLedgerAdmissionEpoch& admission_epoch) {
+  if (!implementation_->trusted_startup_audit_policy) {
+    throw HostLedgerConflict(
+        "an admission epoch is invalid for a ledger without startup policy");
+  }
+  return request_bundle_authorized(request, now, &admission_epoch);
+}
+
+BundleRequestResult SQLiteHostLedger::request_bundle_authorized(
+    const ResourceBundleRequest& request, const HostLedgerTime& now,
+    const HostLedgerAdmissionEpoch* admission_epoch) {
   validate_resource_request(request);
   if (!valid_time(now)) throw HostLedgerError("ledger time is invalid");
   std::scoped_lock lock(implementation_->mutex);
@@ -1526,6 +1856,26 @@ BundleRequestResult SQLiteHostLedger::request_bundle(
   std::string reason;
   if (!implementation_->verify_unlocked(&reason)) {
     throw HostLedgerError("refusing bundle request: " + reason);
+  }
+  if (admission_epoch != nullptr) {
+    Statement active(implementation_->database, R"sql(
+      SELECT epoch.host_id, epoch.boot_id, epoch.broker_epoch,
+             epoch.inventory_digest
+      FROM active_admission_epoch AS active
+      JOIN admission_epochs AS epoch
+        ON epoch.epoch_digest=active.epoch_digest
+      WHERE active.singleton=1 AND active.epoch_digest=?
+    )sql");
+    bind_text(active.get(), 1, admission_epoch->epoch_digest_);
+    if (sqlite3_step(active.get()) != SQLITE_ROW ||
+        column_text(active.get(), 0) != implementation_->inventory.host_id ||
+        column_text(active.get(), 1) != implementation_->inventory.boot_id ||
+        column_text(active.get(), 2) != implementation_->inventory.broker_epoch ||
+        column_text(active.get(), 3) !=
+            implementation_->inventory.inventory_digest ||
+        sqlite3_step(active.get()) != SQLITE_DONE) {
+      throw HostLedgerConflict("admission epoch is absent, stale, or inexact");
+    }
   }
   Statement replay(implementation_->database, R"sql(
     SELECT request_digest, status, canonical_outcome_json, outcome_digest
@@ -1536,6 +1886,22 @@ BundleRequestResult SQLiteHostLedger::request_bundle(
   if (replay_status == SQLITE_ROW) {
     if (column_text(replay.get(), 0) != request.canonical_request_digest) {
       throw HostLedgerConflict("request_id already has different content");
+    }
+    if (admission_epoch != nullptr) {
+      Statement authorization(implementation_->database, R"sql(
+        SELECT request_digest, epoch_digest
+        FROM request_admission_epochs WHERE request_id=?
+      )sql");
+      bind_text(authorization.get(), 1, request.request_id);
+      if (sqlite3_step(authorization.get()) != SQLITE_ROW ||
+          column_text(authorization.get(), 0) !=
+              request.canonical_request_digest ||
+          column_text(authorization.get(), 1) !=
+              admission_epoch->epoch_digest_ ||
+          sqlite3_step(authorization.get()) != SQLITE_DONE) {
+        throw HostLedgerConflict(
+            "request replay is not bound to the active admission epoch");
+      }
     }
     const std::string status = column_text(replay.get(), 1);
     BundleRequestResult result{.status = status == "granted"
@@ -1553,6 +1919,29 @@ BundleRequestResult SQLiteHostLedger::request_bundle(
   }
   if (replay_status != SQLITE_DONE) {
     throw HostLedgerError("request replay query failed");
+  }
+
+  if (admission_epoch != nullptr) {
+    Statement authorization(implementation_->database, R"sql(
+      INSERT INTO request_admission_epochs(
+        request_id, request_digest, epoch_digest
+      ) VALUES(?, ?, ?)
+    )sql");
+    bind_text(authorization.get(), 1, request.request_id);
+    bind_text(authorization.get(), 2, request.canonical_request_digest);
+    bind_text(authorization.get(), 3, admission_epoch->epoch_digest_);
+    require_done(implementation_->database, authorization.get(),
+                 "request admission authorization insert failed");
+  } else {
+    Statement exemption(implementation_->database, R"sql(
+      INSERT INTO request_admission_exemptions(
+        request_id, request_digest, reason
+      ) VALUES(?, ?, 'policy_unconfigured')
+    )sql");
+    bind_text(exemption.get(), 1, request.request_id);
+    bind_text(exemption.get(), 2, request.canonical_request_digest);
+    require_done(implementation_->database, exemption.get(),
+                 "request admission exemption insert failed");
   }
 
   const auto request_record = implementation_->make_record(
@@ -2019,6 +2408,220 @@ HostStartupAuditLedgerCommitResult SQLiteHostLedger::commit_startup_audit(
   transaction.commit();
   implementation_->fault(HostLedgerFaultPoint::after_startup_audit_commit);
   return reread(false);
+}
+
+HostLedgerAdmissionFinalizeResult
+SQLiteHostLedger::finalize_startup_admission(
+    const HostStartupAuditReport& report,
+    const HostStartupAuditReceipt& receipt, const HostLedgerTime& now) {
+  if (!implementation_->trusted_startup_audit_policy) {
+    throw HostLedgerError(
+        "startup-admission authority was not configured for this ledger");
+  }
+  validate_host_startup_audit_report(report);
+  validate_host_startup_audit_receipt(receipt, report);
+  if (report.policy != *implementation_->trusted_startup_audit_policy) {
+    throw HostLedgerConflict(
+        "startup-admission report policy differs from trusted policy");
+  }
+  const bool blocking = std::ranges::any_of(
+      report.findings, [](const HostStartupAuditFinding& finding) {
+        return finding.severity == HostStartupAuditFindingSeverity::blocking;
+      });
+  if (report.disposition != HostStartupAuditDisposition::passed || blocking) {
+    throw HostLedgerConflict(
+        "failed or blocking startup audit cannot authorize admission");
+  }
+  if (!valid_time(now) || now.boottime_ns < receipt.committed_boottime_ns ||
+      now.wall_time_ns < receipt.committed_wall_time_ns) {
+    throw HostLedgerError("startup-admission finalize time is invalid");
+  }
+
+  std::scoped_lock lock(implementation_->mutex);
+  const auto reread = [&](std::string_view epoch_digest, bool replayed) {
+    Transaction reread_transaction(implementation_->database);
+    std::string reread_reason;
+    if (!implementation_->verify_unlocked(&reread_reason)) {
+      throw HostLedgerError("finalized admission epoch failed re-read: " +
+                            reread_reason);
+    }
+    Statement query(implementation_->database, R"sql(
+      SELECT epoch.canonical_json, active.epoch_digest
+      FROM admission_epochs AS epoch
+      JOIN active_admission_epoch AS active
+        ON active.epoch_digest=epoch.epoch_digest AND active.singleton=1
+      WHERE epoch.epoch_digest=? AND epoch.audit_id=?
+        AND epoch.report_digest=? AND epoch.audit_receipt_digest=?
+    )sql");
+    bind_text(query.get(), 1, std::string(epoch_digest));
+    bind_text(query.get(), 2, report.audit_id);
+    bind_text(query.get(), 3, report.report_digest);
+    bind_text(query.get(), 4, receipt.receipt_digest);
+    if (sqlite3_step(query.get()) != SQLITE_ROW ||
+        column_text(query.get(), 1) != epoch_digest ||
+        nlohmann::json::parse(column_text(query.get(), 0))
+                .at("epoch_digest")
+                .get<std::string>() != epoch_digest ||
+        sqlite3_step(query.get()) != SQLITE_DONE) {
+      throw HostLedgerError(
+          "finalized admission epoch cannot be re-read exactly");
+    }
+    reread_transaction.commit();
+    return HostLedgerAdmissionFinalizeResult{
+        .epoch = HostLedgerAdmissionEpoch(std::string(epoch_digest)),
+        .replayed = replayed};
+  };
+
+  Transaction transaction(implementation_->database);
+  std::string reason;
+  if (!implementation_->verify_unlocked(&reason)) {
+    throw HostLedgerError("refusing startup-admission finalize: " + reason);
+  }
+  if (report.host_id != implementation_->inventory.host_id ||
+      report.boot_id != implementation_->inventory.boot_id ||
+      report.broker_epoch != implementation_->inventory.broker_epoch ||
+      report.inventory != implementation_->inventory) {
+    throw HostLedgerConflict(
+        "startup-admission report does not name the current ledger identity");
+  }
+
+  Statement persisted(implementation_->database, R"sql(
+    SELECT report_digest, receipt_digest, canonical_report_json,
+           canonical_receipt_json
+    FROM startup_audit_outcomes WHERE audit_id=?
+  )sql");
+  bind_text(persisted.get(), 1, report.audit_id);
+  if (sqlite3_step(persisted.get()) != SQLITE_ROW ||
+      column_text(persisted.get(), 0) != report.report_digest ||
+      column_text(persisted.get(), 1) != receipt.receipt_digest ||
+      column_text(persisted.get(), 2) !=
+          host_startup_audit_report_json(report).dump() ||
+      column_text(persisted.get(), 3) !=
+          host_startup_audit_receipt_json(receipt, report).dump() ||
+      sqlite3_step(persisted.get()) != SQLITE_DONE) {
+    throw HostLedgerConflict(
+        "startup-admission audit receipt is not exactly persisted");
+  }
+
+  std::optional<std::string> prior_active_digest;
+  Statement active(implementation_->database, R"sql(
+    SELECT epoch.epoch_digest, epoch.audit_id, epoch.report_digest,
+           epoch.audit_receipt_digest, epoch.host_id, epoch.boot_id,
+           epoch.broker_epoch
+    FROM active_admission_epoch AS active
+    JOIN admission_epochs AS epoch ON epoch.epoch_digest=active.epoch_digest
+    WHERE active.singleton=1
+  )sql");
+  const int active_status = sqlite3_step(active.get());
+  if (active_status == SQLITE_ROW) {
+    prior_active_digest = column_text(active.get(), 0);
+    const bool exact_replay =
+        column_text(active.get(), 1) == report.audit_id &&
+        column_text(active.get(), 2) == report.report_digest &&
+        column_text(active.get(), 3) == receipt.receipt_digest;
+    const bool same_runtime_epoch =
+        column_text(active.get(), 4) == report.host_id &&
+        column_text(active.get(), 5) == report.boot_id &&
+        column_text(active.get(), 6) == report.broker_epoch;
+    if (sqlite3_step(active.get()) != SQLITE_DONE) {
+      throw HostLedgerError("active admission epoch is not singular");
+    }
+    if (exact_replay) {
+      const std::string epoch_digest = *prior_active_digest;
+      transaction.commit();
+      return reread(epoch_digest, true);
+    }
+    if (same_runtime_epoch) {
+      throw HostLedgerConflict(
+          "this host boot and broker already have another admission epoch");
+    }
+  } else if (active_status != SQLITE_DONE) {
+    throw HostLedgerError("active admission epoch query failed");
+  }
+
+  const HostLedgerChainHead current_head =
+      implementation_->chain_head_unlocked();
+  const ResourceOccupancySnapshot current_occupancy =
+      implementation_->occupancy_unlocked();
+  if (report.host_id != implementation_->inventory.host_id ||
+      report.boot_id != implementation_->inventory.boot_id ||
+      report.broker_epoch != implementation_->inventory.broker_epoch ||
+      report.inventory != implementation_->inventory ||
+      current_head != receipt.committed_ledger_head ||
+      current_occupancy.ledger_sequence != current_head.ledger_sequence ||
+      !same_occupied_resources(current_occupancy,
+                               report.post_audit_occupancy)) {
+    throw HostLedgerConflict(
+        "startup-admission finalize lost its exact ledger/occupancy CAS");
+  }
+  ResourceOccupancySnapshot finalized_occupancy =
+      report.post_audit_occupancy;
+  finalized_occupancy.ledger_sequence = current_head.ledger_sequence;
+  finalized_occupancy.occupancy_digest.clear();
+  finalized_occupancy = seal_resource_occupancy(
+      implementation_->inventory, std::move(finalized_occupancy));
+  if (finalized_occupancy != current_occupancy) {
+    throw HostLedgerConflict(
+        "startup-admission occupancy cannot be sealed at committed head");
+  }
+  const nlohmann::json canonical =
+      admission_epoch_json(report, receipt, finalized_occupancy, now);
+  const std::string epoch_digest =
+      canonical.at("epoch_digest").get<std::string>();
+  Statement insert(implementation_->database, R"sql(
+    INSERT INTO admission_epochs(
+      epoch_digest, api_version, audit_id, report_digest,
+      audit_receipt_digest, host_id, boot_id, broker_epoch, inventory_digest,
+      audit_record_sequence, audit_record_chain_hash,
+      finalized_occupancy_digest, finalized_boottime_ns,
+      finalized_wall_time_ns, canonical_json
+    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  )sql");
+  bind_text(insert.get(), 1, epoch_digest);
+  bind_text(insert.get(), 2,
+            std::string(kHostLedgerAdmissionEpochApiVersion));
+  bind_text(insert.get(), 3, report.audit_id);
+  bind_text(insert.get(), 4, report.report_digest);
+  bind_text(insert.get(), 5, receipt.receipt_digest);
+  bind_text(insert.get(), 6, report.host_id);
+  bind_text(insert.get(), 7, report.boot_id);
+  bind_text(insert.get(), 8, report.broker_epoch);
+  bind_text(insert.get(), 9, report.inventory.inventory_digest);
+  bind_integer(insert.get(), 10,
+               checked_integer(current_head.ledger_sequence,
+                               "audit record sequence"));
+  bind_text(insert.get(), 11, current_head.chain_hash);
+  bind_text(insert.get(), 12, finalized_occupancy.occupancy_digest);
+  bind_integer(insert.get(), 13, now.boottime_ns);
+  bind_integer(insert.get(), 14, now.wall_time_ns);
+  bind_text(insert.get(), 15, canonical.dump());
+  require_done(implementation_->database, insert.get(),
+               "admission epoch insert failed");
+  if (prior_active_digest) {
+    Statement activate(implementation_->database, R"sql(
+      UPDATE active_admission_epoch SET epoch_digest=?
+      WHERE singleton=1 AND epoch_digest=?
+    )sql");
+    bind_text(activate.get(), 1, epoch_digest);
+    bind_text(activate.get(), 2, *prior_active_digest);
+    require_done(implementation_->database, activate.get(),
+                 "active admission epoch update failed");
+    if (sqlite3_changes(implementation_->database) != 1) {
+      throw HostLedgerConflict("active admission epoch CAS lost");
+    }
+  } else {
+    Statement activate(implementation_->database,
+                       "INSERT INTO active_admission_epoch VALUES(1, ?)");
+    bind_text(activate.get(), 1, epoch_digest);
+    require_done(implementation_->database, activate.get(),
+                 "active admission epoch insert failed");
+  }
+  if (!implementation_->verify_unlocked(&reason)) {
+    throw HostLedgerError("new admission epoch failed verification: " + reason);
+  }
+  transaction.commit();
+  implementation_->fault(HostLedgerFaultPoint::after_admission_finalize_commit);
+  return reread(epoch_digest, false);
 }
 
 HostLedgerChainHead SQLiteHostLedger::chain_head() const {

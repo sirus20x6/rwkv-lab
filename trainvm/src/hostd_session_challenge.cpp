@@ -215,7 +215,8 @@ bool valid_journal(const HostdJournalAuthorityIdentity &journal) {
 }
 
 Json controller_json(const HostdJournalControllerFence &controller) {
-  return {{"controller_generation", controller.controller_generation},
+  return {{"concurrency_key", controller.concurrency_key},
+          {"controller_generation", controller.controller_generation},
           {"controller_id", controller.controller_id},
           {"logical_fencing_token", controller.logical_fencing_token},
           {"logical_lease_id", controller.logical_lease_id},
@@ -224,9 +225,10 @@ Json controller_json(const HostdJournalControllerFence &controller) {
 
 HostdJournalControllerFence parse_controller(const Json &value) {
   require_fields(value,
-                 {"controller_generation", "controller_id",
+                 {"concurrency_key", "controller_generation", "controller_id",
                   "logical_fencing_token", "logical_lease_id", "run_id"});
   return {.run_id = value.at("run_id").get<std::string>(),
+          .concurrency_key = value.at("concurrency_key").get<std::string>(),
           .controller_id = value.at("controller_id").get<std::string>(),
           .controller_generation =
               value.at("controller_generation").get<std::uint64_t>(),
@@ -237,6 +239,7 @@ HostdJournalControllerFence parse_controller(const Json &value) {
 
 bool valid_controller(const HostdJournalControllerFence &controller) {
   return valid_identifier(controller.run_id) &&
+         valid_identifier(controller.concurrency_key) &&
          valid_identifier(controller.controller_id) &&
          valid_identifier(controller.logical_lease_id) &&
          controller.controller_generation > 0U &&
