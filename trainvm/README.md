@@ -238,15 +238,13 @@ the exact persisted result; stale fences and cross-scope payloads fail before le
 Deterministic transport checkpoints cover challenge delivery, command receipt, verification,
 coordinator connection, durable dispatch, and reply delivery; pre-dispatch interruption leaves no
 outcome, while a post-commit lost reply converges to the exact replay and remains releasable.
-Current end-to-end transport tests use the visibly cooperative enforcement grade. The strict
-service-cgroup authority and strict namespace/socket-pidfd primitives are implemented, but
-production mutation admission remains disabled until the unified daemon bootstrap wires their externally
-guarded policies together; the service-side optional connection and admission path are now present,
-but automatic terminal process/release reconciliation is not complete. The configured startup
-auditor now fails closed on retained fences, retains exact recovery authority, and the ledger can
-truthfully close a restarted process through v6 evidence. The remaining process-ownership work is
-the guarded daemon entry point, wiring daemon-restart recovery policy to those primitives, and qualifying the end-to-end
-crash windows before real trainer ownership is enabled. The transport and stopped-launcher layers
+The strict service-cgroup authority and namespace/socket-pidfd primitives are assembled by the
+foreground daemon. Startup recovery and audit complete before it exposes mutation transport;
+automatic terminal process/resource reconciliation and exact restart adoption use durable ledger
+evidence. A launch-capable daemon additionally requires root authority, explicitly non-root worker
+credentials, default-deny device BPF, and attested CPU/I/O controls. Privileged real-host crash
+qualification remains a deployment gate; unit and cooperative transport evidence is not presented
+as that qualification. The transport and stopped-launcher layers
 now carry and attest sealed Python code and per-attempt bootstrap descriptors, install them at the
 fixed exec-surviving fd 3/fd 4 ABI, and bind both into durable launch evidence without exposing
 dynamic values through argv or the environment.
@@ -277,13 +275,13 @@ The journal namespace guard closes cooperating-process split authority and rejec
 side-file aliases at every SQL boundary, but stock SQLite still opens WAL/SHM/rollback files by
 pathname. A hostile same-UID process can race that open unless the authority directory is part of
 the trusted host boundary or a controlled VFS is used. The abstract-socket namespace fence is also
-network-namespace-local. These residuals are explicit host-isolation/lock-broker design inputs, not
-authorization to enable worker spawning.
+network-namespace-local. Deployments must satisfy the declared trusted-directory/namespace threat
+model; these residuals are not covered by the process-launch implementation.
 
 The sealed payload hashes cover only the copied executable/interpreter, adapter artifact, and worker
 bootstrap. They do not yet claim a reproducible dynamic-library, Python standard-library, or import
-closure; real Python launch remains disabled until TrainVM is wired to hostd and an isolated
-runtime-closure policy is enforced.
+closure. Guarded Python launch is implemented, but runtime/cache reproducibility and production
+qualification remain incomplete until an isolated runtime-closure policy is enforced.
 
 ## Toolchain
 
@@ -383,11 +381,11 @@ every ledger, inventory, cgroup, socket, session, challenge, and startup sub-pol
 of truth. The foreground `trainvm-hostd` entry point now constructs the live namespace, inventory,
 journal, ledger, cgroup, recovery, audit, challenge, service-identity, and unified transport graph;
 it binds only after startup admission and can validate its closed document without touching live
-authority (`trainvm-hostd --validate-config FILE`). Resource grant/release and restart process
-reconciliation are wired. New process launch is deliberately not passed to the mutation server
-until durable cgroup-device BPF policy is implemented, so this path is not yet qualified for
-production training;
-pause/resume and durable hostd adoption remain subsequent milestones. A worker launch ticket is a protocol authorization only
+authority (`trainvm-hostd --validate-config FILE`). Resource grant/release, stopped-child launch,
+terminal reconciliation, and durable hostd adoption are wired. The mutation server receives process
+authority only when strict root/non-root credentials and durable device/CPU/I/O enforcement make
+the daemon launch-capable. Privileged crash qualification and trainer safe-point pause/resume remain
+subsequent milestones. A worker launch ticket is a protocol authorization only
 until it is paired with a trusted descriptor digest, resolved launch specification, host identity,
 and durable process receipt.
 

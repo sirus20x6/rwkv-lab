@@ -133,5 +133,6 @@ scripts/generate_trainvm_python_proto.sh
 Hostd descriptor delegation and the stopped launcher now attest the bootstrap, install sealed
 Python code at fd 3 and the bootstrap at fd 4, and bind their combined identity into durable launch
 evidence. The fixed runner closes the entry-point/argv boundary. Production process launch remains
-disabled until TrainVM drives that guarded hostd transaction, runtime closure and nested path
-authority are enforced, and each Python adapter is qualified end to end.
+deployment-gated: TrainVM now drives the guarded hostd transaction, while complete runtime closure,
+nested path authority, privileged crash-window evidence, and per-adapter end-to-end qualification
+remain outstanding.
