@@ -375,6 +375,8 @@ message WorkerWelcome {
   string component = 14;
   string operation = 15;
   uint64 acknowledged_worker_sequence = 16;
+  bytes canonical_invocation_json = 17;
+  string invocation_digest = 18;
 }
 
 message WorkerReceipt {

@@ -152,14 +152,16 @@ Implemented now:
   prevents poisoning;
 - `validate`, `plan`, `simulate`, and journal inspection/replay CLI commands.
 
-This code does not yet launch or control a trainer. The launch-authorization reconciler first
-persists a fenced `worker.launch_requested` protocol intent; the host resolver can then persist a
-deterministic, non-secret binding while retaining sealed file descriptors, but neither is sufficient
-to spawn or signal an OS process. Typed host-resource selection, the durable grant ledger, the
-process-free host coordinator, and the hash-chained journal/host grant-and-release saga are
-implemented libraries. Production launch preparation requires an exact, live durable host grant and
-binds its request identity, receipt digest, and physical fences into the worker ticket and resolved
-launch identity; process-free unit fixtures can opt into a visibly test-only legacy mode. No service
+The launch-authorization reconciler first persists a fenced `worker.launch_requested` protocol
+intent; the host resolver then persists a deterministic, non-secret descriptor binding while
+retaining the sealed files. The guarded host daemon exposes exact-replay prepare, commit, and
+finalize process commands backed by the stopped-child cgroup/pidfd supervisor. The TrainVM service
+does not yet drive that daemon process surface end to end, so production trainer launch remains
+disabled at the orchestration boundary. Production launch preparation requires an exact, live
+durable host grant and binds its request identity, receipt digest, and physical fences into the
+worker ticket and resolved launch identity; process-free unit fixtures can opt into a visibly
+test-only legacy mode.
+
 The filesystem `SOCK_SEQPACKET` boundary has separate status and mutation servers. The mutation
 exchange now binds the accepted socket process instance to a single-use journal challenge, obtains
 service access only from an injected host-owned identity authority, samples grant/release time only
@@ -172,10 +174,11 @@ outcome, while a post-commit lost reply converges to the exact replay and remain
 Current end-to-end transport tests use the visibly cooperative enforcement grade. The strict
 service-cgroup authority and strict namespace/socket-pidfd primitives are implemented, but
 production mutation admission remains disabled until daemon bootstrap wires their externally
-guarded policies together; the dashboard/service also does not yet
-route all admission/release work through this endpoint. Guarded launch, cgroup cleanup,
-process-instance credentials, durable spawn/exit receipts, and exhaustive crash-window qualification
-remain next. Real trainer process ownership follows only after those gates pass.
+guarded policies together; the dashboard/service also does not yet route all admission/release work
+through this endpoint. The remaining process-ownership work is wiring TrainVM to the guarded daemon
+surface, completing daemon-restart recovery of retained launches, enabling sealed Python
+code-descriptor invocation, and qualifying the end-to-end crash windows before real trainer
+ownership is enabled.
 MIG evidence is collected and attributed per instance, but grants remain disabled: the generic
 conflict selector intentionally blocks a child while its full-device parent is nonselectable, until
 a partition-aware enforcement policy proves that scheduling relationship end to end.
@@ -274,12 +277,15 @@ validates every exact adapter profile before validation succeeds or a run is cre
 idempotent queued
 creation; the live-control `CommandRun` variant is also implemented. The dashboard freezes ambiguous
 submissions and retries their exact body and key. The worker stream now carries durable telemetry,
-artifacts, live-control delivery/acknowledgement, and a terminal result. The Linux host authority
-has a stopped-child cgroup/pidfd launcher and durable process intent, spawn, and exit receipts;
-exposing that process supervisor through the daemon command surface and implementing pause/resume
-remain subsequent milestones. A worker launch ticket is a protocol authorization only until it is
-paired with a trusted descriptor digest, resolved launch specification, host identity, and durable
-process receipt.
+artifacts, live-control delivery/acknowledgement, and a terminal result. Before Welcome, TrainVM
+freezes a canonical, content-addressed operation invocation containing resolved public inputs,
+effective controls, authorized artifact manifests, output declarations, execution policy, and exact
+adapter identity; reconnects receive those same bytes. The Linux host authority has a stopped-child
+cgroup/pidfd launcher, durable process intent/spawn/exit receipts, and guarded daemon
+prepare/commit/finalize commands. Service-to-daemon launch integration and pause/resume remain
+subsequent milestones. A worker launch ticket is a protocol authorization only until it is paired
+with a trusted descriptor digest, resolved launch specification, host identity, and durable process
+receipt.
 
 Secret-marked parameters are restricted to versioned opaque references of the form
 `secret://provider/name#version`; raw secret values are rejected before canonical plan persistence.

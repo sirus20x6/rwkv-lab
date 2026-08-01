@@ -38,6 +38,43 @@ commands, environment variables, Python, or compiler flags. Existing environment
 runtimes, and credentials migrate to typed host-profile, artifact, and secret references whose
 resolved public identities are hashed and recorded while secret values remain non-persistent.
 
+## Composable training-component architecture
+
+Keep training algorithms separated by semantic responsibility so a new experiment selects and
+composes registered components instead of adding another trainer-wide conditional. The shared
+contract covers optimizers, parameter-group routing, learning-rate and weight-decay schedules,
+activation functions, normalization, losses/objectives, precision/scaling policy, gradient clipping
+and accumulation, data curricula, checkpoint state, and metric reducers. Model-family adapters own
+only the topology-specific integration that cannot be expressed by those common contracts.
+
+Each component has an exact versioned key, reflected configuration schema, compatibility predicate,
+state schema, lifecycle hooks, and qualification requirements. Construction is registry-driven;
+string switches spread across MageFlow, RWKV, transformer, vision, and post-training loops are not
+an extension mechanism. Optimizer state and every schedule phase/cursor are part of checkpoint and
+resume identity. Parameter routing is explicit and exhaustive, with overlap and unclaimed-parameter
+checks. A schedule consumes a declared step domain (microbatch, optimizer step, token, image, or
+wall-time) and cannot infer one from a trainer's local counter.
+
+Implementation boundaries:
+
+- Small control/configuration interfaces and registries live in strongly typed C++ where that
+  improves validation, composition, reflection-driven descriptors, and static checking.
+- Tensor implementations remain in the runtime best suited to them—normally PyTorch/Triton/CUDA,
+  with qualified native extensions where measurement justifies one—behind the same typed contract.
+- Activations, losses, and optimizer kernels expose a reference implementation and parity fixtures;
+  fused or compiled variants are interchangeable qualified backends, not different experiment
+  semantics.
+- Learning-rate, decay, accumulation, and curriculum schedules are pure, deterministic state
+  machines with golden trajectories and checkpoint round-trip tests.
+- Dashboard editors and comparison views are generated from component descriptors, so adding a
+  registered optimizer or activation does not require a new Go handler or bespoke form.
+
+Roadmap deliverables are a common component schema/registry, family compatibility predicates,
+parameter-routing audits, state serialization contracts, cross-runtime golden tests, and migration
+of existing duplicated trainer switches. Promotion requires representative end-to-end quality and
+throughput evidence; tidy separation alone does not imply that two families share a mathematically
+valid implementation.
+
 ## Qualification contract
 
 Every optimization is admitted through a baseline-versus-candidate qualification node. A receipt
@@ -180,6 +217,11 @@ startup orphan recovery are defined in
 
 - Build a reusable adapter capability manifest covering compile, CUDA graphs, FP8, attention/kernel
   backend, fused optimizer/loss, input pipeline, distributed execution, and an honest resume grade.
+- Introduce the composable training-component registry for optimizers, parameter routing, learning
+  rates/decay, activations, normalization, objectives, precision, clipping/accumulation, and
+  curricula; migrate MageFlow, RWKV, and transformer workers away from duplicated string switches.
+- Make component state and schedule domains explicit in checkpoint manifests, with exhaustive
+  parameter ownership and exact-resume trajectory tests.
 - Add representative benchmark fixtures for MageFlow/flow, RWKV LM, transformer LM, vision/RWKV,
   fine-tuning, distillation, and post-training rather than one synthetic GEMM.
 - Audit existing optimizations against the qualification contract and publish portable versus

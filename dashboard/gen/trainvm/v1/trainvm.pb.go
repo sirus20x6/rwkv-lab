@@ -3100,6 +3100,8 @@ type WorkerWelcome struct {
 	Component                  string                    `protobuf:"bytes,14,opt,name=component,proto3" json:"component,omitempty"`
 	Operation                  string                    `protobuf:"bytes,15,opt,name=operation,proto3" json:"operation,omitempty"`
 	AcknowledgedWorkerSequence uint64                    `protobuf:"varint,16,opt,name=acknowledged_worker_sequence,json=acknowledgedWorkerSequence,proto3" json:"acknowledged_worker_sequence,omitempty"`
+	CanonicalInvocationJson    []byte                    `protobuf:"bytes,17,opt,name=canonical_invocation_json,json=canonicalInvocationJson,proto3" json:"canonical_invocation_json,omitempty"`
+	InvocationDigest           string                    `protobuf:"bytes,18,opt,name=invocation_digest,json=invocationDigest,proto3" json:"invocation_digest,omitempty"`
 	unknownFields              protoimpl.UnknownFields
 	sizeCache                  protoimpl.SizeCache
 }
@@ -3244,6 +3246,20 @@ func (x *WorkerWelcome) GetAcknowledgedWorkerSequence() uint64 {
 		return x.AcknowledgedWorkerSequence
 	}
 	return 0
+}
+
+func (x *WorkerWelcome) GetCanonicalInvocationJson() []byte {
+	if x != nil {
+		return x.CanonicalInvocationJson
+	}
+	return nil
+}
+
+func (x *WorkerWelcome) GetInvocationDigest() string {
+	if x != nil {
+		return x.InvocationDigest
+	}
+	return ""
 }
 
 type WorkerReceipt struct {
@@ -4044,7 +4060,7 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"checkpoint\x123\n" +
 	"\x06cancel\x18\r \x01(\v2\x19.trainvm.v1.CancelCommandH\x00R\x06cancel\x12=\n" +
 	"\bcontrols\x18\x0e \x01(\v2\x1f.trainvm.v1.ControlPatchCommandH\x00R\bcontrolsB\t\n" +
-	"\acommand\"\xda\x05\n" +
+	"\acommand\"\xc3\x06\n" +
 	"\rWorkerWelcome\x12G\n" +
 	"\vdisposition\x18\x01 \x01(\x0e2%.trainvm.v1.WorkerWelcome.DispositionR\vdisposition\x12\x1d\n" +
 	"\n" +
@@ -4065,7 +4081,9 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"dispatchId\x12\x1c\n" +
 	"\tcomponent\x18\x0e \x01(\tR\tcomponent\x12\x1c\n" +
 	"\toperation\x18\x0f \x01(\tR\toperation\x12@\n" +
-	"\x1cacknowledged_worker_sequence\x18\x10 \x01(\x04R\x1aacknowledgedWorkerSequence\"\x81\x01\n" +
+	"\x1cacknowledged_worker_sequence\x18\x10 \x01(\x04R\x1aacknowledgedWorkerSequence\x12:\n" +
+	"\x19canonical_invocation_json\x18\x11 \x01(\fR\x17canonicalInvocationJson\x12+\n" +
+	"\x11invocation_digest\x18\x12 \x01(\tR\x10invocationDigest\"\x81\x01\n" +
 	"\vDisposition\x12\x1b\n" +
 	"\x17DISPOSITION_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14DISPOSITION_ACCEPTED\x10\x01\x12\x18\n" +

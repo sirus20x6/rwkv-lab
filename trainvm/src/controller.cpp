@@ -39,7 +39,9 @@ bool is_controller_event(std::string_view event_type) {
          event_type == "resource.lease_acquired" ||
          event_type == "worker.launch_requested" ||
          event_type == "worker.launch_bound" || event_type == "worker.ready" ||
-         event_type == "node.dispatch_prepared" || event_type == "node.dispatch_completed" ||
+         event_type == "node.dispatch_prepared" ||
+         event_type == "worker.invocation_bound" ||
+         event_type == "node.dispatch_completed" ||
          event_type.starts_with("host.resource_") ||
          event_type.starts_with("control.");
 }
@@ -533,6 +535,7 @@ const ExecutionState& Controller::recover() {
   std::optional<std::pair<std::string, std::string>> expected_completion;
   std::optional<std::string> expected_reacquisition_cause_id;
   std::map<std::string, std::string> replayed_control_status;
+  bool current_dispatch_prepared = false;
   for (const Event& event : events) {
     if (event.plan_revision != kInitialPlanRevision) {
       throw std::runtime_error("journal recovery encountered an unsupported plan revision");
@@ -575,6 +578,7 @@ const ExecutionState& Controller::recover() {
       }
       expected_worker_entry_id.reset();
       phase = ReplayPhase::ready;
+      current_dispatch_prepared = false;
       continue;
     }
     if (event.event_type == "node.dispatch_prepared") {
@@ -594,6 +598,27 @@ const ExecutionState& Controller::recover() {
       }
       require_payload_string(event, "component", node.invoke.component);
       require_payload_string(event, "operation", node.invoke.operation);
+      current_dispatch_prepared = true;
+      continue;
+    }
+    if (event.event_type == "worker.invocation_bound") {
+      const auto invocation = journal_.worker_invocation(
+          dispatch_id_for(recovered));
+      if (phase != ReplayPhase::ready || expected_completion ||
+          !current_dispatch_prepared || !invocation ||
+          event.event_id != dispatch_id_for(recovered) + ":invocation" ||
+          event.run_revision != recovered.revision ||
+          event.node_id != recovered.current_node_id ||
+          event.attempt_id != recovered.current_attempt_id ||
+          invocation->run_id != run_id_ ||
+          invocation->plan_hash != plan_.plan_hash ||
+          invocation->plan_revision != event.plan_revision ||
+          invocation->node_id != recovered.current_node_id ||
+          invocation->attempt_id != recovered.current_attempt_id ||
+          invocation->dispatch_id != dispatch_id_for(recovered)) {
+        throw std::runtime_error(
+            "journal worker invocation disagrees with its active dispatch");
+      }
       continue;
     }
     if (event.event_type == "run.desired_state_changed") {
@@ -1705,6 +1730,51 @@ Dispatch Controller::prepare_dispatch(const AuthorityTimeSample& now) {
   };
   return journal_.prepare_fenced_dispatch(
       dispatch, dispatch_prepared_event(dispatch), launch, now);
+}
+
+WorkerInvocationSpec Controller::bind_worker_invocation(
+    const WorkerInvocationSpec& invocation,
+    const WorkerSessionIdentity& identity, const AuthorityTimeSample& now) {
+  recover();
+  const std::string dispatch_id = dispatch_id_for(state_);
+  const auto dispatch = journal_.dispatch(dispatch_id);
+  if (state_.status != ExecutionStatus::running || paused_ || !dispatch ||
+      dispatch->status != DispatchStatus::prepared ||
+      invocation.run_id != run_id_ || invocation.plan_hash != plan_.plan_hash ||
+      invocation.plan_revision != kInitialPlanRevision ||
+      invocation.node_id != state_.current_node_id ||
+      invocation.attempt_id != state_.current_attempt_id ||
+      invocation.dispatch_id != dispatch_id) {
+    throw std::logic_error(
+        "worker invocation does not describe the active prepared dispatch");
+  }
+  const Event event{
+      .event_id = dispatch_id + ":invocation",
+      .run_id = run_id_,
+      .run_revision = state_.revision,
+      .plan_revision = kInitialPlanRevision,
+      .node_id = state_.current_node_id,
+      .attempt_id = state_.current_attempt_id,
+      .worker_sequence = 0U,
+      .event_type = "worker.invocation_bound",
+      .event_version = 1U,
+      .wall_time_ns = now.wall.nanoseconds,
+      .monotonic_time_ns = 0U,
+      .optimizer_step = std::nullopt,
+      .payload = {
+          {"canonical_invocation_json",
+           worker_invocation_canonical_json(invocation)},
+          {"dispatch_id", dispatch_id},
+          {"invocation_digest", invocation.invocation_digest},
+      },
+  };
+  (void)journal_.bind_worker_invocation(invocation, identity, now, event);
+  recover();
+  const auto durable = journal_.worker_invocation(dispatch_id);
+  if (!durable)
+    throw std::runtime_error(
+        "durable worker invocation disappeared after commit");
+  return *durable;
 }
 
 const ExecutionState& Controller::handle_event(const Event& input) {

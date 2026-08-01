@@ -14,6 +14,7 @@
 #include <sqlite3.h>
 
 #include "trainvm/document.hpp"
+#include "trainvm/adapter_invocation.hpp"
 #include "trainvm/dispatch.hpp"
 #include "trainvm/host_launch.hpp"
 #include "trainvm/host_ledger.hpp"
@@ -144,6 +145,13 @@ struct HostGrantSagaSnapshot final {
   bool operator==(const HostGrantSagaSnapshot&) const = default;
 };
 
+struct EffectiveControlSnapshot final {
+  std::uint64_t revision{};
+  nlohmann::json values = nlohmann::json::object();
+
+  bool operator==(const EffectiveControlSnapshot&) const = default;
+};
+
 enum class HostGrantEnforcement {
   required,
   legacy_process_free_test,
@@ -183,6 +191,10 @@ public:
   [[nodiscard]] std::uint64_t latest_control_revision(const std::string& run_id) const;
   [[nodiscard]] std::uint64_t latest_effective_control_revision(
       const std::string& run_id) const;
+  [[nodiscard]] EffectiveControlSnapshot effective_controls(
+      const std::string& run_id) const;
+  [[nodiscard]] std::optional<WorkerInvocationSpec> worker_invocation(
+      const std::string& dispatch_id) const;
   LeaseAcquireResult acquire_lease(const std::string& concurrency_key,
                                    const std::string& owner_run_id,
                                    const std::string& lease_id,
@@ -323,6 +335,10 @@ public:
                              const Event& event);
   bool bind_worker_launch(const ResolvedLaunchSpec& binding,
                           const AuthorityTimeSample& now, const Event& event);
+  bool bind_worker_invocation(const WorkerInvocationSpec& invocation,
+                              const WorkerSessionIdentity& identity,
+                              const AuthorityTimeSample& now,
+                              const Event& event);
   WorkerReadinessDisposition accept_worker_ready(
       const WorkerLaunchTicket& launch, const WorkerHelloEvidence& hello,
       const AuthorityTimeSample& now, const std::vector<Event>& events);

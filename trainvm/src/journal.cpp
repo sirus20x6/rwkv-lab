@@ -4559,6 +4559,44 @@ std::uint64_t Journal::latest_effective_control_revision(const std::string& run_
   return static_cast<std::uint64_t>(sqlite3_column_int64(query.get(), 0));
 }
 
+EffectiveControlSnapshot Journal::effective_controls(
+    const std::string& run_id) const {
+  if (run_id.empty())
+    throw std::invalid_argument(
+        "effective control snapshot requires a run identity");
+  EffectiveControlSnapshot result;
+  Statement query(database_, R"sql(
+    SELECT control_revision, effective_values_json
+    FROM control_commands
+    WHERE run_id=? AND status='applied'
+    ORDER BY control_revision
+  )sql");
+  bind_text(query.get(), 1, run_id);
+  int status = SQLITE_ROW;
+  while ((status = sqlite3_step(query.get())) == SQLITE_ROW) {
+    const auto revision =
+        static_cast<std::uint64_t>(sqlite3_column_int64(query.get(), 0));
+    nlohmann::json values;
+    try {
+      values = nlohmann::json::parse(column_text(query.get(), 1));
+    } catch (const nlohmann::json::exception&) {
+      throw std::runtime_error(
+          "effective control projection contains malformed JSON");
+    }
+    if (revision == 0U || revision <= result.revision ||
+        !values.is_object() || values.empty()) {
+      throw std::runtime_error(
+          "effective control projection is not canonical");
+    }
+    for (const auto& [name, value] : values.items())
+      result.values[name] = value;
+    result.revision = revision;
+  }
+  if (status != SQLITE_DONE)
+    throw std::runtime_error("could not read effective control snapshot");
+  return result;
+}
+
 LeaseAcquireResult Journal::acquire_lease(const std::string& concurrency_key,
                                           const std::string& owner_run_id,
                                           const std::string& lease_id,
@@ -5205,6 +5243,163 @@ std::optional<ResolvedLaunchSpec> Journal::launch_binding(
         "durable host launch binding disagrees with its event envelope");
   }
   return spec;
+}
+
+bool Journal::bind_worker_invocation(
+    const WorkerInvocationSpec& invocation,
+    const WorkerSessionIdentity& identity, const AuthorityTimeSample& now,
+    const Event& event) {
+  const std::string canonical_json =
+      worker_invocation_canonical_json(invocation);
+  const nlohmann::json expected_payload{
+      {"canonical_invocation_json", canonical_json},
+      {"dispatch_id", invocation.dispatch_id},
+      {"invocation_digest", invocation.invocation_digest},
+  };
+  require_authority_time(now);
+  if (invocation.run_id != identity.run_id ||
+      invocation.node_id != identity.node_id ||
+      invocation.attempt_id != identity.attempt_id ||
+      event.event_id != invocation.dispatch_id + ":invocation" ||
+      event.run_id != invocation.run_id ||
+      event.node_id != invocation.node_id ||
+      event.attempt_id != invocation.attempt_id ||
+      event.run_revision == 0U ||
+      event.plan_revision != invocation.plan_revision ||
+      event.worker_sequence != 0U ||
+      event.event_type != "worker.invocation_bound" ||
+      event.event_version != 1U || event.monotonic_time_ns != 0U ||
+      event.optimizer_step || event.payload != expected_payload) {
+    throw std::invalid_argument(
+        "worker invocation binding or event is malformed");
+  }
+  Transaction transaction(database_);
+  std::string chain_reason;
+  if (!verify_chain(&chain_reason))
+    throw std::runtime_error("refusing worker invocation binding: " +
+                             chain_reason);
+  const auto stored = this->event(event.event_id);
+  if (stored) {
+    Event replay = event;
+    replay.wall_time_ns = stored->wall_time_ns;
+    replay.monotonic_time_ns = stored->monotonic_time_ns;
+    if (event_json(*stored) != event_json(replay))
+      throw std::invalid_argument(
+          "worker invocation retry differs from durable evidence");
+    transaction.commit();
+    return false;
+  }
+
+  Statement projection(database_, R"sql(
+    SELECT observed_state, run_revision, current_node_id, current_attempt_id
+    FROM run_projection WHERE run_id=?
+  )sql");
+  bind_text(projection.get(), 1, identity.run_id);
+  if (sqlite3_step(projection.get()) != SQLITE_ROW ||
+      column_text(projection.get(), 0) != "running" ||
+      static_cast<std::uint64_t>(sqlite3_column_int64(projection.get(), 1)) !=
+          event.run_revision ||
+      column_text(projection.get(), 2) != identity.node_id ||
+      column_text(projection.get(), 3) != identity.attempt_id) {
+    throw OperationPreconditionError(
+        "worker invocation is stale for the active run projection");
+  }
+  Statement dispatch(database_, R"sql(
+    SELECT run_revision, plan_revision, component, operation, status
+    FROM node_dispatches WHERE dispatch_id=?
+  )sql");
+  bind_text(dispatch.get(), 1, invocation.dispatch_id);
+  if (sqlite3_step(dispatch.get()) != SQLITE_ROW ||
+      static_cast<std::uint64_t>(sqlite3_column_int64(dispatch.get(), 0)) !=
+          event.run_revision ||
+      static_cast<std::uint64_t>(sqlite3_column_int64(dispatch.get(), 1)) !=
+          invocation.plan_revision ||
+      column_text(dispatch.get(), 2).empty() ||
+      column_text(dispatch.get(), 3) != invocation.adapter.operation ||
+      column_text(dispatch.get(), 4) != "prepared") {
+    throw OperationPreconditionError(
+        "worker invocation has no exact prepared dispatch");
+  }
+  const std::string launch_id = identity.run_id + ":worker-launch:" +
+                                identity.node_id + ":" + identity.attempt_id;
+  const auto binding = launch_binding(launch_id);
+  if (!binding || binding->identity.launch_nonce != identity.launch_nonce ||
+      binding->identity.concurrency_key != identity.concurrency_key ||
+      binding->identity.lease_id != identity.lease_id ||
+      binding->identity.fencing_token != identity.fencing_token ||
+      invocation.host_id != binding->identity.host.host_id ||
+      binding->identity.adapter_key != invocation.adapter) {
+    throw OperationPreconditionError(
+        "worker invocation has no exact durable launch binding");
+  }
+  require_live_host_grant_claim(
+      binding->identity.host_grant, identity.run_id,
+      identity.concurrency_key, identity.lease_id, identity.fencing_token);
+  Statement lease(database_, R"sql(
+    SELECT boot_id, expires_boottime_ns, released_wall_time_ns
+    FROM resource_leases WHERE concurrency_key=? AND owner_run_id=?
+      AND lease_id=? AND fencing_token=? AND clock_domain='boottime/v1'
+  )sql");
+  bind_text(lease.get(), 1, identity.concurrency_key);
+  bind_text(lease.get(), 2, identity.run_id);
+  bind_text(lease.get(), 3, identity.lease_id);
+  bind_integer(lease.get(), 4,
+               checked_integer(identity.fencing_token, "fencing_token"));
+  if (sqlite3_step(lease.get()) != SQLITE_ROW ||
+      column_text(lease.get(), 0) != now.boot_id ||
+      sqlite3_column_int64(lease.get(), 1) <= now.boot.nanoseconds ||
+      sqlite3_column_type(lease.get(), 2) != SQLITE_NULL) {
+    throw OperationPreconditionError(
+        "worker invocation lost its active lease fence");
+  }
+  Statement sequenced(database_, R"sql(
+    SELECT 1 FROM events WHERE run_id=? AND node_id=? AND attempt_id=?
+      AND worker_sequence>0 LIMIT 1
+  )sql");
+  bind_text(sequenced.get(), 1, identity.run_id);
+  bind_text(sequenced.get(), 2, identity.node_id);
+  bind_text(sequenced.get(), 3, identity.attempt_id);
+  if (sqlite3_step(sequenced.get()) == SQLITE_ROW)
+    throw OperationPreconditionError(
+        "worker invocation cannot be changed after worker observations");
+  append_uncommitted(event);
+  transaction.commit();
+  return true;
+}
+
+std::optional<WorkerInvocationSpec> Journal::worker_invocation(
+    const std::string& dispatch_id) const {
+  if (dispatch_id.empty())
+    throw std::invalid_argument(
+        "worker invocation lookup requires a dispatch identity");
+  const auto bound = event(dispatch_id + ":invocation");
+  if (!bound) return std::nullopt;
+  if (bound->event_type != "worker.invocation_bound" ||
+      bound->event_version != 1U || bound->worker_sequence != 0U ||
+      bound->event_id != dispatch_id + ":invocation" ||
+      bound->payload.size() != 3U ||
+      bound->payload.value("dispatch_id", std::string{}) != dispatch_id ||
+      !bound->payload.contains("canonical_invocation_json") ||
+      !bound->payload.at("canonical_invocation_json").is_string() ||
+      !bound->payload.contains("invocation_digest") ||
+      !bound->payload.at("invocation_digest").is_string()) {
+    throw std::runtime_error("durable worker invocation is malformed");
+  }
+  const WorkerInvocationSpec invocation =
+      worker_invocation_from_canonical_json(
+          bound->payload.at("canonical_invocation_json").get_ref<
+              const std::string&>());
+  if (invocation.dispatch_id != dispatch_id ||
+      invocation.run_id != bound->run_id ||
+      invocation.node_id != bound->node_id ||
+      invocation.attempt_id != bound->attempt_id ||
+      invocation.plan_revision != bound->plan_revision ||
+      invocation.invocation_digest !=
+          bound->payload.at("invocation_digest").get<std::string>()) {
+    throw std::runtime_error(
+        "durable worker invocation disagrees with its event envelope");
+  }
+  return invocation;
 }
 
 WorkerReadinessDisposition Journal::accept_worker_ready(

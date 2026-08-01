@@ -48,6 +48,10 @@ stream; migration receipts must record the analysis implementation/version.
 4. Profile before moving tensor work. Only measured bottlenecks graduate to
    C++/CUDA extensions: fused softcapped cross entropy, RWKV recurrence/channel
    mix, optimizer kernels such as Muon, and qualified FP4/FP8 paths.
+5. Add a reflected native registry for composable optimizer, parameter-routing,
+   schedule, activation, normalization, loss, precision, clipping, accumulation,
+   and curriculum contracts. Keep tensor kernels in their qualified runtime;
+   native code owns configuration/state validation and composition where useful.
 
 ## Boundaries
 

@@ -4270,7 +4270,10 @@ void test_worker_control_service_boundary() {
                 projection->run_revision == 5U &&
                 projection->current_node_id == launch.node_id && dispatch &&
                 dispatch->status == trainvm::DispatchStatus::prepared &&
-                observer.event_count() == 12U,
+                !connection.welcome.canonical_invocation_json().empty() &&
+                connection.welcome.invocation_digest().starts_with(
+                    "sha256:") &&
+                observer.event_count() == 13U,
             "WorkerControl returns Welcome only after readiness and dispatch are durable");
     }
     if (!open.ok()) {
@@ -4358,7 +4361,7 @@ void test_worker_control_service_boundary() {
                 dispatch->status == trainvm::DispatchStatus::completed &&
                 dispatch->result_event_id ==
                     std::optional<std::string>{canonical.event_id()} &&
-                observer.event_count() == 16U &&
+                observer.event_count() == 17U &&
                 service.resolved_launches_.empty(),
             "WorkerControl accepts the maximum int64 timestamp, commits the canonical result, "
             "returns its durable Receipt, and releases the retained launch bundle");
@@ -4379,7 +4382,7 @@ void test_worker_control_service_boundary() {
                 reconnected.completed_receipt &&
                 reconnected.completed_receipt->SerializeAsString() ==
                     first_receipt &&
-                observer.event_count() == 16U,
+                observer.event_count() == 17U,
             "lost WorkerControl receipts replay exactly without duplicate commits");
     }
   }
@@ -4506,19 +4509,27 @@ void test_worker_control_service_boundary() {
       const auto events = observer.events_for_run(run_id);
       const auto durable_heartbeat = observer.event(
           connection.dispatch.dispatch_id + ":heartbeat:1");
+      const auto effective_controls = observer.effective_controls(run_id);
       check(open.ok() && heartbeat_status.ok() && acknowledged == 1U &&
                 heartbeat_replay.ok() && replayed_acknowledgement == 1U &&
-                after_heartbeat == 13U && observer.event_count() == 21U &&
+                after_heartbeat == 14U && observer.event_count() == 22U &&
                 metric_status.ok() && metric_acknowledgement == 2U &&
                 artifact_status.ok() && artifact_acknowledgement == 3U &&
                 control_request.command && control_status.ok() &&
                 control_acknowledgement == 4U && control_replay.ok() &&
                 replayed_control_acknowledgement == 4U &&
-                after_control == 17U &&
+                after_control == 18U &&
+                effective_controls.revision == 1U &&
+                effective_controls.values ==
+                    nlohmann::json{{"caption_dropout", 0.2}} &&
                 gap_status.error_code() == grpc::StatusCode::FAILED_PRECONDITION &&
                 reconnect.ok() &&
                 reconnected.welcome.disposition() ==
                     trainvm::v1::WorkerWelcome::DISPOSITION_REPLAYED &&
+                reconnected.welcome.canonical_invocation_json() ==
+                    connection.welcome.canonical_invocation_json() &&
+                reconnected.welcome.invocation_digest() ==
+                    connection.welcome.invocation_digest() &&
                 reconnected.welcome.acknowledged_worker_sequence() == 4U &&
                 complete.ok() &&
                 receipt.acknowledged_worker_sequence() == 5U && projection &&
@@ -4861,7 +4872,9 @@ void test_worker_control_grpc_stream() {
               !dispatch->result_event_id && projection &&
               projection->observed_state == "running" &&
               projection->run_revision == 5U &&
-              observer.events_for_run(eof_run_id).size() == 12U,
+              !welcome.welcome().canonical_invocation_json().empty() &&
+              welcome.welcome().invocation_digest().starts_with("sha256:") &&
+              observer.events_for_run(eof_run_id).size() == 13U,
           "WorkerControl gRPC treats clean EOF after Welcome as incomplete and "
           "leaves its dispatch prepared without a Receipt");
   }
@@ -4894,7 +4907,7 @@ void test_worker_control_grpc_stream() {
               dispatch->status == trainvm::DispatchStatus::completed &&
               projection && projection->observed_state == "acquiring" &&
               projection->run_revision == 7U &&
-              observer.events_for_run(eof_run_id).size() == 16U,
+              observer.events_for_run(eof_run_id).size() == 17U,
           "WorkerControl gRPC releases the EOF stream claim and completes the "
           "same durable dispatch after reconnect");
   }
@@ -4909,7 +4922,10 @@ void test_worker_control_grpc_stream() {
             welcome_message.message_case() ==
                 trainvm::v1::ControllerToWorker::kWelcome &&
             welcome_message.welcome().disposition() ==
-                trainvm::v1::WorkerWelcome::DISPOSITION_ACCEPTED,
+                trainvm::v1::WorkerWelcome::DISPOSITION_ACCEPTED &&
+            !welcome_message.welcome().canonical_invocation_json().empty() &&
+            welcome_message.welcome().invocation_digest().starts_with(
+                "sha256:"),
         "WorkerControl gRPC emits Welcome first for an accepted Hello");
 
   {
@@ -5073,7 +5089,7 @@ void test_worker_control_grpc_stream() {
                       receipt_message.receipt().event_id()} &&
               projection && projection->observed_state == "acquiring" &&
               projection->run_revision == 7U &&
-              observer.events_for_run(run_id).size() == 21U,
+              observer.events_for_run(run_id).size() == 22U,
           "WorkerControl gRPC orders Hello, durable telemetry acknowledgements, Event, and durable Receipt");
   }
 

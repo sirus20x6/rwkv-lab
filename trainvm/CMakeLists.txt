@@ -49,6 +49,7 @@ target_include_directories(trainvm_protocol SYSTEM PUBLIC "${TRAINVM_GENERATED_D
 target_link_libraries(trainvm_protocol PUBLIC protobuf::libprotobuf gRPC::grpc++)
 
 add_library(trainvm_core
+  src/adapter_invocation.cpp
   src/adapter_registry.cpp
   src/authority_time.cpp
   src/cache_namespace.cpp
@@ -136,6 +137,15 @@ target_compile_definitions(trainvm_tests PRIVATE
 )
 target_link_libraries(trainvm_tests PRIVATE trainvm_service)
 add_test(NAME trainvm_tests COMMAND trainvm_tests)
+add_executable(adapter_invocation_tests tests/adapter_invocation_tests.cpp)
+target_compile_options(adapter_invocation_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_compile_definitions(adapter_invocation_tests PRIVATE
+  TRAINVM_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/.."
+)
+target_link_libraries(adapter_invocation_tests PRIVATE trainvm_core)
+add_test(NAME adapter_invocation_tests COMMAND adapter_invocation_tests)
 add_executable(authority_time_tests tests/authority_time_tests.cpp)
 target_compile_options(authority_time_tests PRIVATE
   -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror

@@ -332,6 +332,7 @@ source and adapter-lock manifest.
 The Python package should shrink to a small worker SDK around existing trainers. It provides:
 
 - registration and handshake with capability and code fingerprints;
+- strict decoding of the immutable, content-addressed operation invocation supplied in Welcome;
 - a command thread or safe-point poll that never touches the dashboard DB;
 - typed event, metric, and artifact publication;
 - atomic control-patch delivery and acknowledgement;

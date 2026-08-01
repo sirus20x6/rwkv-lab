@@ -30,6 +30,9 @@ class Controller {
   WorkerReadinessResult accept_worker_hello(WorkerHelloEvidence hello,
                                              const AuthorityTimeSample& now);
   Dispatch prepare_dispatch(const AuthorityTimeSample& now);
+  WorkerInvocationSpec bind_worker_invocation(
+      const WorkerInvocationSpec& invocation,
+      const WorkerSessionIdentity& identity, const AuthorityTimeSample& now);
   const ExecutionState& handle_event(const Event& event,
                                      const WorkerSessionIdentity& identity,
                                      const AuthorityTimeSample& now);

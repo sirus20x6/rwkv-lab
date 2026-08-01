@@ -21,7 +21,9 @@
 #include <filesystem>
 #include <memory>
 #include <limits>
+#include <map>
 #include <ranges>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -887,6 +889,58 @@ grpc::Status worker_failure(const std::exception& exception) {
   return {grpc::StatusCode::DATA_LOSS, exception.what()};
 }
 
+std::set<std::string, std::less<>> referenced_artifact_names(
+    const CompiledPlan& plan, const std::string& node_id) {
+  const Spec& spec = plan.experiment.spec;
+  const Node& node = spec.workflow.nodes.at(node_id);
+  std::set<std::string, std::less<>> names;
+  for (const auto& [input_name, binding] : node.invoke.inputs) {
+    (void)input_name;
+    if (binding.artifact) {
+      names.insert(*binding.artifact);
+    } else if (binding.node_output) {
+      const Node& producer =
+          spec.workflow.nodes.at(binding.node_output->node);
+      names.insert(producer.publishes->at(binding.node_output->name));
+    }
+  }
+  return names;
+}
+
+std::map<std::string, nlohmann::json, std::less<>> invocation_artifacts(
+    const Journal& journal, const CompiledPlan& plan,
+    const std::string& run_id, const std::string& node_id) {
+  const auto required = referenced_artifact_names(plan, node_id);
+  std::map<std::string, nlohmann::json, std::less<>> result;
+  if (required.empty()) return result;
+  for (const Event& event : journal.events_for_run(run_id)) {
+    if (event.event_type != "artifact.published" ||
+        !event.payload.is_object() ||
+        !event.payload.value("complete", false))
+      continue;
+    const std::string logical_name =
+        event.payload.value("logical_name", std::string{});
+    if (!required.contains(logical_name)) continue;
+    if (event.payload.value("producer_node_id", std::string{}) !=
+            event.node_id ||
+        event.payload.value("producer_attempt_id", std::string{}) !=
+            event.attempt_id) {
+      throw std::runtime_error(
+          "artifact publication disagrees with its event envelope");
+    }
+    result[logical_name] = event.payload;
+  }
+  return result;
+}
+
+void populate_invocation(v1::WorkerWelcome& welcome,
+                         const WorkerInvocationSpec& invocation) {
+  const std::string canonical =
+      worker_invocation_canonical_json(invocation);
+  welcome.set_canonical_invocation_json(canonical);
+  welcome.set_invocation_digest(invocation.invocation_digest);
+}
+
 }  // namespace
 
 TrainVMService::TrainVMService(
@@ -1205,6 +1259,12 @@ grpc::Status TrainVMService::open_worker_connection(
       }
       connection.identity = worker_session(hello);
       connection.dispatch = *historical_dispatch;
+      const auto invocation =
+          journal_.worker_invocation(historical_dispatch->dispatch_id);
+      if (!invocation) {
+        return {grpc::StatusCode::DATA_LOSS,
+                "completed worker attempt has no immutable invocation"};
+      }
       auto& welcome = connection.welcome;
       welcome.set_disposition(
           v1::WorkerWelcome::DISPOSITION_ALREADY_COMPLETED);
@@ -1223,6 +1283,7 @@ grpc::Status TrainVMService::open_worker_connection(
       welcome.set_component(historical_dispatch->component);
       welcome.set_operation(historical_dispatch->operation);
       welcome.set_acknowledged_worker_sequence(result->worker_sequence);
+      populate_invocation(welcome, *invocation);
       v1::WorkerReceipt receipt;
       receipt.set_event_id(result->event_id);
       receipt.set_acknowledged_worker_sequence(result->worker_sequence);
@@ -1282,6 +1343,27 @@ grpc::Status TrainVMService::open_worker_connection(
     }
     connection.identity = worker_session(hello);
     connection.dispatch = dispatch;
+    auto invocation = journal_.worker_invocation(dispatch.dispatch_id);
+    if (!invocation) {
+      const EffectiveControlSnapshot controls =
+          journal_.effective_controls(hello.run_id);
+      WorkerInvocationContext context{
+          .run_id = hello.run_id,
+          .node_id = hello.node_id,
+          .attempt_id = hello.attempt_id,
+          .dispatch_id = dispatch.dispatch_id,
+          .plan_revision = dispatch.plan_revision,
+          .host_id = authority_host_.host_id,
+          .artifacts = invocation_artifacts(
+              journal_, *plan, hello.run_id, hello.node_id),
+          .effective_controls = controls.values,
+          .effective_control_revision = controls.revision,
+      };
+      const WorkerInvocationSpec candidate =
+          build_worker_invocation(*plan, context);
+      invocation = controller.bind_worker_invocation(
+          candidate, connection.identity, authority_now());
+    }
     auto& welcome = connection.welcome;
     welcome.set_disposition(
         readiness.disposition == WorkerReadinessDisposition::accepted
@@ -1303,6 +1385,7 @@ grpc::Status TrainVMService::open_worker_connection(
     welcome.set_operation(dispatch.operation);
     welcome.set_acknowledged_worker_sequence(journal_.latest_worker_sequence(
         hello.run_id, hello.node_id, hello.attempt_id));
+    populate_invocation(welcome, *invocation);
     return grpc::Status::OK;
   } catch (const nlohmann::json::exception& exception) {
     return {grpc::StatusCode::DATA_LOSS, exception.what()};
