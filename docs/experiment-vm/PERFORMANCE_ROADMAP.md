@@ -269,8 +269,9 @@ startup orphan recovery are defined in
   worker slots and bind composition identity into resume state. RWKV retains a pure schedule state
   machine because its optimizer topology can change during training. The fixed fd-4 Python runner
   now dispatches a closed set of typed MageFlow/Qwen contracts, accepts only invocation-frozen
-  inline configuration, enforces the authority run directory, and reports a receipted terminal
-  event. Nested input-path authority, trainer safe-point controls, RWKV's typed config adapter,
+  inline configuration, confines every top-level model/data/checkpoint/cache/output path to
+  authority workspace roots, and reports a receipted terminal event. Recursive immutable identity
+  for paths referenced inside data/model manifests, trainer safe-point controls, RWKV's typed config adapter,
   MLA/Engram transformer variants, additional component families, and removal of the remaining
   legacy family switches remain.
 - Keep implementation boundaries aligned with component ownership: optimizer algorithms,

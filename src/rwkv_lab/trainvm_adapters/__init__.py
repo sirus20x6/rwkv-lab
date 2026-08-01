@@ -12,7 +12,12 @@ from .handlers import (
     execute_invocation,
     supported_adapter_keys,
 )
-from .io import AdapterInputError, read_inline_config, require_run_directory
+from .io import (
+    AdapterInputError,
+    WorkspacePathAuthority,
+    read_inline_config,
+    require_run_directory,
+)
 
 __all__ = [
     "WORKER_BOOTSTRAP_DESCRIPTOR",
@@ -22,6 +27,7 @@ __all__ = [
     "HandlerResult",
     "WorkerEntrypointError",
     "WorkerTrainingComponents",
+    "WorkspacePathAuthority",
     "execute_invocation",
     "read_inline_config",
     "require_run_directory",

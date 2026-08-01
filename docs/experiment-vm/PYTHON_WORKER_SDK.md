@@ -72,16 +72,21 @@ string, script, argv, environment override, or entry-point path.
 Trainer configuration is an inline object in invocation `inputs.config`. Because the invocation is
 canonical and content-addressed, these values cannot change between submission and execution. A
 pathname to a mutable JSON configuration is rejected. The adapter also requires the trainer's run
-directory to equal `workspace.run_directory`. Larger configurations must become immutable artifact
-manifests with authority-verified fingerprints rather than path references.
+directory to equal `workspace.run_directory`. `WorkspacePathAuthority` canonicalizes every
+top-level model, dataset/pack, manifest, checkpoint/resume, and encoder-cache pathname used by the
+three fixed adapters. Existing reads must resolve beneath a declared read or write root; prospective
+writes must have a resolved directory ancestor beneath a declared write root; symlink escapes and
+relative or non-normalized paths fail before trainer code runs. Larger configurations must become
+immutable artifact manifests with authority-verified fingerprints rather than path references.
 
 The fixed runner returns an already-completed replay without executing tensor work, publishes a
 durably receipted terminal result on success, and converts trainer exceptions to a bounded
 `operation.failed` event containing only an error class. It deliberately does not claim live
 pause/checkpoint/control support yet: trainers must first expose safe-point hooks through this
-session before their registry capability can advertise those controls. Nested dataset and model
-paths also remain non-production-qualified until each adapter validates them against invocation
-read roots and immutable artifact identities.
+session before their registry capability can advertise those controls. Top-level paths are now
+confined, but nested references inside image JSONL and packed-corpus/model manifests remain
+non-production-qualified until the authority binds their immutable artifact identities and the
+adapter recursively validates every referenced object.
 
 Install the optional runtime dependencies with:
 

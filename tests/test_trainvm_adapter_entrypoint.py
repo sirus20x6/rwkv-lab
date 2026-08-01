@@ -14,11 +14,13 @@ from rwkv_lab.trainvm_adapters.entrypoint import (
 from rwkv_lab.trainvm_adapters.handlers import (
     AdapterDispatchError,
     HandlerResult,
+    _appearance_expert,
     execute_invocation,
     supported_adapter_keys,
 )
 from rwkv_lab.trainvm_adapters.io import (
     AdapterInputError,
+    WorkspacePathAuthority,
     read_inline_config,
     require_run_directory,
 )
@@ -57,15 +59,92 @@ def test_inline_config_is_frozen_content_not_a_mutable_path(tmp_path) -> None:
 
 def test_run_directory_must_equal_the_authority_workspace(tmp_path) -> None:
     run_directory = tmp_path / "run"
+    run_directory.mkdir()
+    workspace = {
+        "run_directory": str(run_directory),
+        "allowed_read_roots": [str(tmp_path)],
+        "allowed_write_roots": [str(tmp_path)],
+    }
     assert require_run_directory(
-        str(run_directory), {"run_directory": str(run_directory)}
+        str(run_directory), workspace
     ) == run_directory
     with pytest.raises(AdapterInputError, match="workspace authority"):
-        require_run_directory(
-            str(tmp_path / "other"), {"run_directory": str(run_directory)}
+        require_run_directory(str(tmp_path / "other"), workspace)
+    with pytest.raises(AdapterInputError, match="absolute normalized"):
+        require_run_directory("relative/run", workspace)
+
+
+def test_workspace_path_authority_confines_reads_writes_and_symlinks(tmp_path) -> None:
+    read_root = tmp_path / "read"
+    write_root = tmp_path / "write"
+    outside = tmp_path / "outside"
+    for directory in (read_root, write_root, outside):
+        directory.mkdir()
+    source = read_root / "manifest.jsonl"
+    source.write_text("{}\n", encoding="utf-8")
+    (read_root / "escape").symlink_to(outside, target_is_directory=True)
+    authority = WorkspacePathAuthority.from_workspace(
+        {
+            "run_directory": str(write_root / "run"),
+            "allowed_read_roots": [str(read_root)],
+            "allowed_write_roots": [str(write_root)],
+        }
+    )
+
+    assert authority.read_path(
+        str(source), label="manifest", kind="file"
+    ) == source
+    assert authority.write_directory(
+        str(write_root / "cache" / "new"), label="cache"
+    ) == write_root / "cache" / "new"
+    with pytest.raises(AdapterInputError, match="outside declared read roots"):
+        authority.read_path(
+            str(read_root / "escape"), label="dataset", kind="directory"
         )
-    with pytest.raises(AdapterInputError, match="workspace authority"):
-        require_run_directory("relative/run", {"run_directory": "relative/run"})
+    with pytest.raises(AdapterInputError, match="outside declared write roots"):
+        authority.write_directory(str(outside / "cache"), label="cache")
+
+
+def test_appearance_handler_passes_only_canonical_authorized_paths(
+    tmp_path, monkeypatch
+) -> None:
+    from rwkv_lab import mage_flow_expert_train
+
+    read_root = tmp_path / "read"
+    run_directory = tmp_path / "write" / "run"
+    read_root.mkdir()
+    run_directory.mkdir(parents=True)
+    manifest = read_root / "train.jsonl"
+    manifest.write_text("{}\n", encoding="utf-8")
+    observed = []
+    monkeypatch.setattr(
+        mage_flow_expert_train,
+        "train",
+        lambda config, *, worker_components: observed.append(
+            (config, worker_components)
+        ),
+    )
+    invocation = SimpleNamespace(
+        inputs={
+            "config": {
+                "train_manifest": str(manifest),
+                "output_dir": str(run_directory),
+            }
+        },
+        workspace={
+            "run_directory": str(run_directory),
+            "allowed_read_roots": [str(read_root)],
+            "allowed_write_roots": [str(run_directory.parent)],
+        },
+    )
+    components = SimpleNamespace()
+
+    assert _appearance_expert(invocation, components) == HandlerResult(
+        "worker.completed", {"reason": "training_complete"}
+    )
+    assert observed[0][0].train_manifest == str(manifest.resolve())
+    assert observed[0][0].output_dir == str(run_directory.resolve())
+    assert observed[0][1] is components
 
 
 def test_dispatch_table_is_closed_and_training_composition_is_required() -> None:
