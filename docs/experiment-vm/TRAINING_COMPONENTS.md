@@ -33,6 +33,13 @@ configuration. The resolved-worker dispatch functions accept only the canonical 
 TrainVM and fail on extra keys, unknown implementation IDs, wrong categories, missing defaults,
 nonfinite numbers, or incorrect scalar types.
 
+Every category keeps its configuration, validation, construction, checkpoint codec, and tests
+together. Shared files contain protocols and resolved-envelope plumbing only; they are not a home
+for optimizer math, learning-rate policy, activation kernels, or family exceptions. CI checks the
+one-way dependency graph and rejects direct component construction in supported trainer loops. This
+keeps new choices local: adding an optimizer, schedule, activation, or precision policy changes its
+category, descriptor, and contract fixtures without requiring unrelated trainer or dashboard code.
+
 The initial concrete cross-family catalog contains:
 
 - Torch AdamW;

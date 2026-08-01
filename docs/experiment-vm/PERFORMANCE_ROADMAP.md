@@ -105,6 +105,35 @@ without a consuming runtime factory. Migration is not done while legacy switches
 for a supported workflow: they must either be removed or isolated behind an explicitly versioned
 compatibility adapter with deprecation evidence.
 
+### Code-organization acceptance gate
+
+Component separation is a release requirement, not optional refactoring. Each semantic category
+owns its configuration type, validation, factory/runtime implementation, checkpoint-state codec,
+and contract tests in a category-specific module. In particular, optimizer algorithms, parameter
+groups and relative learning-rate routing, learning-rate schedules, weight-decay schedules,
+activation functions, normalization, objectives, precision/scaling, gradient policy, and curricula
+must remain independently selectable and independently testable. A category may expose a small
+shared protocol, but it may not become a miscellaneous training-utilities module.
+
+CI must enforce the following rules as the remaining categories migrate:
+
+- common component modules never import MageFlow, RWKV, transformer, vision, or post-training
+  adapters;
+- family adapters contain installation points and topology mapping only, not optimizer or schedule
+  math, generic activation implementations, or duplicated scalar validation;
+- every registered descriptor resolves to exactly one consumed runtime factory, checkpoint schema,
+  and contract-test suite; unused or presentation-only registry entries fail validation;
+- adding or replacing an optimizer, LR schedule, activation, or precision policy requires no new
+  dashboard endpoint, family-wide switch statement, or unrelated component edit;
+- source and tests mirror the same category layout, with dependency-graph, state round-trip,
+  reference-parity, and exact-resume checks run in the normal test target;
+- resolved experiment compositions record exact component/version/config identities, so a tidy
+  source layout is also preserved in run lineage and reproducibility evidence.
+
+The gate is complete when the architecture test scans every supported worker path, legacy direct
+construction is unreachable, and a representative component can be swapped declaratively without
+editing its trainer loop.
+
 ## Qualification contract
 
 Every optimization is admitted through a baseline-versus-candidate qualification node. A receipt
