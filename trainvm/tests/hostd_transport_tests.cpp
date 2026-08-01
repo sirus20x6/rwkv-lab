@@ -1,4 +1,5 @@
 #include "trainvm/hostd_transport.hpp"
+#include "trainvm/document.hpp"
 
 #include <fcntl.h>
 #include <openssl/sha.h>
@@ -144,8 +145,8 @@ HostResourceId mutex_id() {
 HostInventoryReceipt inventory() {
   HostKernelSnapshot snapshot{
       .api_version = std::string(kHostInventoryApiVersion),
-      .host_id = "host-transport",
-      .boot_id = "boot-transport",
+      .host_id = "sha256:" + std::string(64U, 'a'),
+      .boot_id = "11111111-2222-4333-8444-555555555555",
       .broker_epoch = "broker-transport",
       .begin_revision = "revision-transport",
       .end_revision = "revision-transport",
@@ -369,7 +370,8 @@ public:
 class MutationChallengeTime final : public IHostdSessionChallengeTimeSource {
 public:
   HostdSessionChallengeTime now() override {
-    return {.boot_id = "boot-transport", .boottime_ns = now_ns};
+    return {.boot_id = "11111111-2222-4333-8444-555555555555",
+            .boottime_ns = now_ns};
   }
   std::int64_t now_ns{1'000'000'000LL};
 };
@@ -411,7 +413,9 @@ public:
             .error_number = 0};
   }
   HostdLinuxBootIdRead read_boot_id() override {
-    return {.success = true, .value = "boot-transport", .error_number = 0};
+    return {.success = true,
+            .value = "11111111-2222-4333-8444-555555555555",
+            .error_number = 0};
   }
   HostdLinuxPeerKernelObservation observe_process(pid_t pid) override {
     ++observations;
@@ -475,6 +479,177 @@ public:
   std::optional<HostdMutationTransportCheckpoint> selected;
   std::size_t visits{};
 };
+
+class LedgerProcessSupervisor final : public IHostdProcessSupervisor {
+ public:
+  explicit LedgerProcessSupervisor(SQLiteHostLedger& ledger)
+      : ledger_(ledger) {}
+
+  HostdProcessPreparedResult prepare(
+      const HostdProcessPrepareRequest& request, int executable_fd,
+      std::optional<int> code_fd, int working_directory_fd) override {
+    require(executable_fd >= 0 && !code_fd && working_directory_fd >= 0 &&
+                ::fcntl(executable_fd, F_GETFD) >= 0 &&
+                ::fcntl(working_directory_fd, F_GETFD) >= 0,
+            "process supervisor receives two live role-ordered descriptors");
+    ++prepare_calls;
+    const auto intended = ledger_.commit_process_launch_intent(
+        seal_host_process_launch_request({
+            .api_version =
+                std::string(kHostProcessLaunchRequestApiVersion),
+            .launch_id = request.launch.identity.launch_event_id,
+            .allocation_id = request.grant.allocation_id,
+            .grant_digest = request.grant.receipt_digest,
+            .journal_id = request.grant.journal_id,
+            .run_id = request.grant.run_id,
+            .logical_lease_id = request.grant.logical_lease_id,
+            .logical_fencing_token =
+                request.grant.logical_fencing_token,
+            .resolved_launch_digest = request.launch.spec_digest,
+            .executable_path = request.launch.identity.executable.source_path,
+            .executable_digest =
+                request.launch.identity.executable.sealed_sha256,
+            .cgroup_path = "/trainvm/test-allocation",
+            .cgroup_device = 91U,
+            .cgroup_inode = 92U,
+            .canonical_request_digest = {},
+        }),
+        {500, 600});
+    const auto spawned = ledger_.commit_process_spawn(
+        seal_host_process_spawn_request({
+            .api_version =
+                std::string(kHostProcessSpawnRequestApiVersion),
+            .launch_id = request.launch.identity.launch_event_id,
+            .launch_intent_digest = intended.intent.receipt_digest,
+            .host_pid = ::getpid(),
+            .process_starttime_ticks = 12345U,
+            .boot_id = request.grant.boot_id,
+            .cgroup_path = "/trainvm/test-allocation",
+            .cgroup_device = 91U,
+            .cgroup_inode = 92U,
+            .executable_digest =
+                request.launch.identity.executable.sealed_sha256,
+            .canonical_request_digest = {},
+        }),
+        {510, 610});
+    prepared = HostdProcessPreparedResult{
+        .api_version = std::string(kHostdProcessPreparedApiVersion),
+        .intent = intended.intent,
+        .spawn = spawned.receipt,
+        .replayed = intended.replayed || spawned.replayed,
+    };
+    return *prepared;
+  }
+
+  HostdProcessCommittedResult commit(
+      const HostdProcessCommitRequest& request) override {
+    require(prepared &&
+                request.launch_id == prepared->spawn.request.launch_id &&
+                request.spawn_receipt_digest == prepared->spawn.receipt_digest,
+            "process commit binds the prepared spawn receipt");
+    ++commit_calls;
+    const bool replayed = committed;
+    committed = true;
+    return {.api_version =
+                std::string(kHostdProcessCommittedApiVersion),
+            .launch_id = request.launch_id,
+            .spawn_receipt_digest = request.spawn_receipt_digest,
+            .released_to_exec = true,
+            .replayed = replayed};
+  }
+
+  HostProcessExitResult finalize(
+      const HostdProcessExitCommand& command) override {
+    require(prepared && committed &&
+                command.launch_id == prepared->spawn.request.launch_id &&
+                command.spawn_receipt_digest == prepared->spawn.receipt_digest,
+            "process exit binds the committed spawn receipt");
+    ++exit_calls;
+    return ledger_.commit_process_exit(
+        seal_host_process_exit_request({
+            .api_version = std::string(kHostProcessExitRequestApiVersion),
+            .exit_request_id = command.exit_request_id,
+            .launch_id = command.launch_id,
+            .spawn_receipt_digest = command.spawn_receipt_digest,
+            .host_pid = prepared->spawn.request.host_pid,
+            .process_starttime_ticks =
+                prepared->spawn.request.process_starttime_ticks,
+            .wait_code = CLD_EXITED,
+            .wait_status = 0,
+            .cgroup_path = prepared->spawn.request.cgroup_path,
+            .cgroup_device = prepared->spawn.request.cgroup_device,
+            .cgroup_inode = prepared->spawn.request.cgroup_inode,
+            .cgroup_empty = true,
+            .accelerator_contexts_empty = true,
+            .context_audit_digest = std::string(kMutationEvidenceDigest),
+            .canonical_request_digest = {},
+        }),
+        {520, 620});
+  }
+
+  SQLiteHostLedger& ledger_;
+  std::optional<HostdProcessPreparedResult> prepared;
+  bool committed{};
+  std::size_t prepare_calls{};
+  std::size_t commit_calls{};
+  std::size_t exit_calls{};
+};
+
+ResolvedLaunchSpec process_launch_for(const ResourceBundleGrant& grant) {
+  const std::string executable_digest =
+      "sha256:" + std::string(64U, 'e');
+  ResolvedLaunchSpec spec{
+      .identity = {
+          .api_version = "trainvm.resolved-launch/v1",
+          .launch_event_id = grant.run_id + ":worker-launch:node:attempt",
+          .run_id = grant.run_id,
+          .node_id = "node",
+          .attempt_id = "attempt",
+          .launch_nonce = "nonce",
+          .adapter_key = {.adapter = "transport-native",
+                          .version = "1",
+                          .runtime = ComponentRuntime::native_worker,
+                          .operation = "train",
+                          .contract = "trainvm.worker/v1"},
+          .code_fingerprint = executable_digest,
+          .required_capabilities = {},
+          .host_registry_digest =
+              "sha256:" + std::string(64U, 'b'),
+          .host_profile_digest =
+              "sha256:" + std::string(64U, 'c'),
+          .concurrency_key = mutation_claim().controller.concurrency_key,
+          .lease_id = grant.logical_lease_id,
+          .fencing_token = grant.logical_fencing_token,
+          .host_grant = HostLaunchGrantClaim{
+              .request_id = grant.request_id,
+              .grant_digest = grant.receipt_digest,
+              .fences = grant.fences},
+          .host = {.host_id = grant.host_id, .boot_id = grant.boot_id},
+          .executable = {.source_path = "/sealed/trainvm-worker",
+                         .source_device = 1U,
+                         .source_inode = 2U,
+                         .source_size = 1U,
+                         .source_mode =
+                             static_cast<std::uint32_t>(S_IFREG | 0500),
+                         .source_uid = 0U,
+                         .source_gid = 0U,
+                         .sealed_sha256 = executable_digest},
+          .code = std::nullopt,
+          .public_arguments = {"--transport-test"},
+          .working_directory = {
+              .source_path = "/var/lib/trainvm",
+              .device = 3U,
+              .inode = 4U,
+              .mode = static_cast<std::uint32_t>(S_IFDIR | 0700),
+              .uid = 0U,
+              .gid = 0U}},
+      .spec_digest = {},
+  };
+  spec.spec_digest = "sha256:" +
+                     sha256_hex(
+                         resolved_launch_identity_json(spec.identity).dump());
+  return resolved_launch_spec_from_json(resolved_launch_spec_json(spec));
+}
 
 HostdStatusClientConfig client_config(HostdSocketAuthority &authority) {
   return {.socket_path = authority.socket_path(),
@@ -1427,6 +1602,8 @@ void mutation_transport_dispatches_replays_and_disconnects() {
   auto service = std::make_shared<MutationServiceAuthority>();
   auto ledger_time = std::make_shared<MutationLedgerTime>();
   auto fault = std::make_shared<MutationFaultInjector>();
+  auto process_supervisor =
+      std::make_shared<LedgerProcessSupervisor>(*fixture.ledger);
   HostdMutationServer server(
       authority, fixture.coordinator, verifier, kernel, service, ledger_time,
       {.api_version = std::string(kHostdMutationTransportApiVersion),
@@ -1438,7 +1615,8 @@ void mutation_transport_dispatches_replays_and_disconnects() {
            HostdMutationTransportEnforcementGrade::cooperative_test,
        .maximum_payload_bytes = kHostdStatusMaximumPayloadBytes,
        .per_session_timeout_ns = 2'000'000'000LL,
-       .fault_injector = fault});
+       .fault_injector = fault},
+      process_supervisor);
   const HostdMutationClientConfig client{
       .socket_path = authority->socket_path(),
       .expected_endpoint = authority->reattest(),
@@ -1501,6 +1679,89 @@ void mutation_transport_dispatches_replays_and_disconnects() {
           "read-only reconciliation recovers the exact durable outcome");
 
   const auto &grant = *granted.bundle_result->grant;
+  const ResolvedLaunchSpec process_launch = process_launch_for(grant);
+  const HostdProcessPrepareRequest process_prepare{
+      .api_version = std::string(kHostdProcessPrepareApiVersion),
+      .launch = process_launch,
+      .grant = grant,
+      .descriptor_roles = {"executable", "working_directory"},
+  };
+  const int delegated_executable =
+      ::open("/dev/null", O_RDONLY | O_CLOEXEC);
+  require(delegated_executable >= 0,
+          "open delegated process executable test descriptor");
+  const HostdMutationRequest prepare_request{
+      .open = open,
+      .mutation = HostdMutationKind::prepare_process,
+      .process_prepare = process_prepare,
+      .delegated_launch =
+          HostdMutationRequest::DelegatedLaunchDescriptors{
+              .executable_fd = delegated_executable,
+              .code_fd = std::nullopt,
+              .working_directory_fd = directory.parent_fd()},
+  };
+  const auto prepared = exchange(prepare_request, 120U);
+  require(prepared.kind == HostdMutationReplyKind::process_prepared &&
+              prepared.process_prepared &&
+              !prepared.process_prepared->replayed &&
+              process_supervisor->prepare_calls == 1U,
+          "process prepare transfers exact descriptors and durable receipts");
+  const auto prepare_replay = exchange(prepare_request, 121U);
+  require(prepare_replay.process_prepared &&
+              prepare_replay.process_prepared->replayed &&
+              process_supervisor->prepare_calls == 2U,
+          "lost process-prepare reply has an exact durable replay");
+  const auto& spawn = prepare_replay.process_prepared->spawn;
+  const HostdProcessCommitRequest process_commit{
+      .api_version = std::string(kHostdProcessCommitApiVersion),
+      .launch_id = process_launch.identity.launch_event_id,
+      .allocation_id = grant.allocation_id,
+      .grant_digest = grant.receipt_digest,
+      .journal_id = grant.journal_id,
+      .run_id = grant.run_id,
+      .logical_lease_id = grant.logical_lease_id,
+      .logical_fencing_token = grant.logical_fencing_token,
+      .spawn_receipt_digest = spawn.receipt_digest,
+  };
+  const HostdMutationRequest commit_request{
+      .open = open,
+      .mutation = HostdMutationKind::commit_process,
+      .process_commit = process_commit,
+  };
+  const auto committed = exchange(commit_request, 122U);
+  const auto commit_replay = exchange(commit_request, 123U);
+  require(committed.process_committed &&
+              !committed.process_committed->replayed &&
+              commit_replay.process_committed &&
+              commit_replay.process_committed->replayed &&
+              process_supervisor->commit_calls == 2U,
+          "process pre-exec release is exact and replay-safe");
+  const HostdProcessExitCommand process_exit{
+      .api_version = std::string(kHostdProcessExitApiVersion),
+      .exit_request_id = "exit-transport",
+      .launch_id = process_launch.identity.launch_event_id,
+      .allocation_id = grant.allocation_id,
+      .grant_digest = grant.receipt_digest,
+      .journal_id = grant.journal_id,
+      .run_id = grant.run_id,
+      .logical_lease_id = grant.logical_lease_id,
+      .logical_fencing_token = grant.logical_fencing_token,
+      .spawn_receipt_digest = spawn.receipt_digest,
+      .request_termination = false,
+  };
+  const HostdMutationRequest exit_request{
+      .open = open,
+      .mutation = HostdMutationKind::finalize_process,
+      .process_exit = process_exit,
+  };
+  const auto exited = exchange(exit_request, 124U);
+  const auto exit_replay = exchange(exit_request, 125U);
+  require(exited.process_exit && !exited.process_exit->replayed &&
+              exit_replay.process_exit && exit_replay.process_exit->replayed &&
+              process_supervisor->exit_calls == 2U,
+          "process exit is durable, terminal, and replay-safe");
+  require(::close(delegated_executable) == 0,
+          "close delegated process executable test descriptor");
   const ResourceReleaseRequest release = seal_resource_release_request({
       .api_version = std::string(kHostLedgerReleaseRequestApiVersion),
       .release_request_id = "release-transport",
@@ -1631,8 +1892,8 @@ void mutation_transport_dispatches_replays_and_disconnects() {
           "lost-reply replay remains exactly releasable");
   require(ledger_time->calls == 6U,
           "only dispatched grants and releases sample host ledger time");
-  require(journal->calls == 10U && service->calls >= 16U &&
-              logical->calls >= 14U &&
+  require(journal->calls == 16U && service->calls >= 22U &&
+              logical->calls >= 20U &&
               verifier->outstanding_challenges() == 0U,
           "every connection consumes a journal challenge and reattests peer and fence");
 }

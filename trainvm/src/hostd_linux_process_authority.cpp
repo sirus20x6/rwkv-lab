@@ -216,4 +216,136 @@ HostProcessExitResult LinuxProcessAuthority::finalize_exit(
   return terminal;
 }
 
+struct HostdLinuxProcessSupervisor::Entry final {
+  HostdProcessPrepareRequest request;
+  LinuxPreparedLaunch launch;
+  bool released_to_exec{};
+  std::optional<HostdProcessExitCommand> exit_command;
+  std::optional<HostProcessExitResult> exit_result;
+};
+
+void HostdLinuxProcessSupervisor::require_process_binding(
+    const HostdProcessCommitRequest& request, const Entry& entry) {
+  const auto& grant = entry.request.grant;
+  const auto& spawn = entry.launch.spawn_receipt();
+  if (request.launch_id != entry.request.launch.identity.launch_event_id ||
+      request.allocation_id != grant.allocation_id ||
+      request.grant_digest != grant.receipt_digest ||
+      request.journal_id != grant.journal_id ||
+      request.run_id != grant.run_id ||
+      request.logical_lease_id != grant.logical_lease_id ||
+      request.logical_fencing_token != grant.logical_fencing_token ||
+      request.spawn_receipt_digest != spawn.receipt_digest) {
+    reject("process command does not match the retained prepared launch");
+  }
+}
+
+namespace {
+HostdProcessCommitRequest commit_identity(
+    const HostdProcessExitCommand& request) {
+  return {
+      .api_version = std::string(kHostdProcessCommitApiVersion),
+      .launch_id = request.launch_id,
+      .allocation_id = request.allocation_id,
+      .grant_digest = request.grant_digest,
+      .journal_id = request.journal_id,
+      .run_id = request.run_id,
+      .logical_lease_id = request.logical_lease_id,
+      .logical_fencing_token = request.logical_fencing_token,
+      .spawn_receipt_digest = request.spawn_receipt_digest,
+  };
+}
+
+}  // namespace
+
+HostdLinuxProcessSupervisor::HostdLinuxProcessSupervisor(
+    LinuxProcessAuthority& authority)
+    : authority_(authority) {}
+
+HostdLinuxProcessSupervisor::~HostdLinuxProcessSupervisor() = default;
+
+HostdProcessPreparedResult HostdLinuxProcessSupervisor::prepare(
+    const HostdProcessPrepareRequest& request, int executable_fd,
+    std::optional<int> code_fd, int working_directory_fd) {
+  // Reattestation happens on retries too, so a successful replay never turns
+  // descriptor role/count validation into a confused-deputy bypass.
+  ResolvedLaunch resolved = ResolvedLaunch::adopt_delegated(
+      request.launch, executable_fd, code_fd, working_directory_fd);
+  std::scoped_lock lock(mutex_);
+  const auto existing = entries_.find(request.launch.identity.launch_event_id);
+  if (existing != entries_.end()) {
+    if (existing->second->request != request)
+      reject("process prepare replay changed its canonical request");
+    return {
+        .api_version = std::string(kHostdProcessPreparedApiVersion),
+        .intent = existing->second->launch.intent(),
+        .spawn = existing->second->launch.spawn_receipt(),
+        .replayed = true,
+    };
+  }
+  LinuxPreparedLaunch launch = authority_.prepare(resolved, request.grant);
+  auto entry = std::make_unique<Entry>(Entry{
+      .request = request,
+      .launch = std::move(launch),
+      .released_to_exec = false,
+      .exit_command = std::nullopt,
+      .exit_result = std::nullopt,
+  });
+  HostdProcessPreparedResult result{
+      .api_version = std::string(kHostdProcessPreparedApiVersion),
+      .intent = entry->launch.intent(),
+      .spawn = entry->launch.spawn_receipt(),
+      .replayed = false,
+  };
+  entries_.emplace(request.launch.identity.launch_event_id, std::move(entry));
+  return result;
+}
+
+HostdProcessCommittedResult HostdLinuxProcessSupervisor::commit(
+    const HostdProcessCommitRequest& request) {
+  std::scoped_lock lock(mutex_);
+  const auto found = entries_.find(request.launch_id);
+  if (found == entries_.end())
+    reject("process commit has no retained prepared launch");
+  Entry& entry = *found->second;
+  require_process_binding(request, entry);
+  if (entry.exit_result)
+    reject("terminal process cannot be released to exec");
+  const bool replayed = entry.released_to_exec;
+  if (!entry.released_to_exec) {
+    entry.launch.release_to_exec();
+    entry.released_to_exec = true;
+  }
+  return {
+      .api_version = std::string(kHostdProcessCommittedApiVersion),
+      .launch_id = request.launch_id,
+      .spawn_receipt_digest = request.spawn_receipt_digest,
+      .released_to_exec = true,
+      .replayed = replayed,
+  };
+}
+
+HostProcessExitResult HostdLinuxProcessSupervisor::finalize(
+    const HostdProcessExitCommand& request) {
+  std::scoped_lock lock(mutex_);
+  const auto found = entries_.find(request.launch_id);
+  if (found == entries_.end())
+    reject("process exit has no retained prepared launch");
+  Entry& entry = *found->second;
+  require_process_binding(commit_identity(request), entry);
+  if (entry.exit_command) {
+    if (*entry.exit_command != request || !entry.exit_result)
+      reject("process exit replay changed its canonical request");
+    HostProcessExitResult replay = *entry.exit_result;
+    replay.replayed = true;
+    return replay;
+  }
+  HostProcessExitResult result = authority_.finalize_exit(
+      entry.launch, entry.request.grant, request.exit_request_id,
+      request.request_termination);
+  entry.exit_command = request;
+  entry.exit_result = result;
+  return result;
+}
+
 }  // namespace trainvm

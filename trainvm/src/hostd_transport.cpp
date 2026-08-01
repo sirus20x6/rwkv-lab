@@ -21,6 +21,7 @@
 #include <mutex>
 #include <ranges>
 #include <set>
+#include <span>
 #include <utility>
 
 #include <nlohmann/json.hpp>
@@ -822,6 +823,7 @@ bool wait_ready(int descriptor, short events,
 struct ReceivedPacket final {
   std::vector<std::byte> bytes;
   ucred credentials{};
+  std::vector<FileDescriptor> descriptors;
 };
 
 struct alignas(cmsghdr) ReceiveControlBuffer final {
@@ -831,12 +833,15 @@ struct alignas(cmsghdr) ReceiveControlBuffer final {
 };
 
 struct alignas(cmsghdr) SendControlBuffer final {
-  std::array<std::byte, CMSG_SPACE(sizeof(ucred))> bytes{};
+  std::array<std::byte, CMSG_SPACE(sizeof(ucred)) +
+                            CMSG_SPACE(sizeof(int) * kMaximumControlFds)>
+      bytes{};
 };
 
 ReceivedPacket receive_packet(int descriptor, const ucred &expected,
                               std::size_t maximum_payload,
-                              std::int64_t deadline) {
+                              std::int64_t deadline,
+                              std::size_t maximum_rights = 0U) {
   for (;;) {
     if (!wait_ready(descriptor, POLLIN, deadline))
       throw HostdTransportError("hostd receive deadline expired");
@@ -861,6 +866,7 @@ ReceivedPacket receive_packet(int descriptor, const ucred &expected,
   bool credentials_seen = false;
   ucred credentials{};
   bool ancillary_rejected = false;
+  std::vector<FileDescriptor> delegated;
   for (cmsghdr *header = CMSG_FIRSTHDR(&message); header != nullptr;
        header = CMSG_NXTHDR(&message, header)) {
     if (header->cmsg_len < CMSG_LEN(0U)) {
@@ -878,12 +884,21 @@ ReceivedPacket receive_packet(int descriptor, const ucred &expected,
         header->cmsg_type == SCM_RIGHTS &&
         header->cmsg_len >= CMSG_LEN(0U)) {
       const std::size_t payload = header->cmsg_len - CMSG_LEN(0U);
+      if (payload % sizeof(int) != 0U) ancillary_rejected = true;
       const std::size_t count = payload / sizeof(int);
       const int *descriptors =
           reinterpret_cast<const int *>(CMSG_DATA(header));
-      for (std::size_t index = 0U; index < count; ++index)
-        if (descriptors[index] >= 0)
+      for (std::size_t index = 0U; index < count; ++index) {
+        if (descriptors[index] < 0) {
+          ancillary_rejected = true;
+        } else if (delegated.size() < maximum_rights) {
+          delegated.emplace_back(descriptors[index]);
+        } else {
           (void)::close(descriptors[index]);
+          ancillary_rejected = true;
+        }
+      }
+      continue;
     }
     ancillary_rejected = true;
   }
@@ -896,12 +911,18 @@ ReceivedPacket receive_packet(int descriptor, const ucred &expected,
       credentials.uid != expected.uid || credentials.gid != expected.gid)
     throw HostdTransportError("hostd per-packet credentials are inexact");
   bytes.resize(static_cast<std::size_t>(received));
-  return {.bytes = std::move(bytes), .credentials = credentials};
+  return {.bytes = std::move(bytes),
+          .credentials = credentials,
+          .descriptors = std::move(delegated)};
   }
 }
 
 void send_packet(int descriptor, const std::vector<std::byte> &packet,
-                 std::int64_t deadline) {
+                 std::int64_t deadline,
+                 std::span<const int> delegated = {}) {
+  if (delegated.size() > kMaximumControlFds ||
+      std::ranges::any_of(delegated, [](int value) { return value < 0; }))
+    throw HostdTransportError("hostd delegated descriptor set is invalid");
   for (;;) {
     if (!wait_ready(descriptor, POLLOUT, deadline))
       throw HostdTransportError("hostd send deadline expired");
@@ -912,7 +933,10 @@ void send_packet(int descriptor, const std::vector<std::byte> &packet,
     message.msg_iov = &vector;
     message.msg_iovlen = 1U;
     message.msg_control = control.bytes.data();
-    message.msg_controllen = control.bytes.size();
+    message.msg_controllen = CMSG_SPACE(sizeof(ucred)) +
+                             (delegated.empty()
+                                  ? 0U
+                                  : CMSG_SPACE(sizeof(int) * delegated.size()));
     cmsghdr *header = CMSG_FIRSTHDR(&message);
     if (header == nullptr)
       throw HostdTransportError(
@@ -924,6 +948,17 @@ void send_packet(int descriptor, const std::vector<std::byte> &packet,
                             .uid = ::geteuid(),
                             .gid = ::getegid()};
     std::memcpy(CMSG_DATA(header), &credentials, sizeof(credentials));
+    if (!delegated.empty()) {
+      cmsghdr *rights = CMSG_NXTHDR(&message, header);
+      if (rights == nullptr)
+        throw HostdTransportError(
+            "could not construct hostd descriptor message");
+      rights->cmsg_level = SOL_SOCKET;
+      rights->cmsg_type = SCM_RIGHTS;
+      rights->cmsg_len = CMSG_LEN(sizeof(int) * delegated.size());
+      std::memcpy(CMSG_DATA(rights), delegated.data(),
+                  sizeof(int) * delegated.size());
+    }
     const ssize_t sent =
         ::sendmsg(descriptor, &message, MSG_DONTWAIT | MSG_NOSIGNAL);
     if (sent < 0) {
@@ -1646,12 +1681,14 @@ HostdMutationServer::HostdMutationServer(
     std::shared_ptr<IHostdMutationServiceIdentityAuthority>
         service_identity_authority,
     std::shared_ptr<IHostdLedgerTimeSource> ledger_time_source,
-    HostdMutationTransportConfig config)
+    HostdMutationTransportConfig config,
+    std::shared_ptr<IHostdProcessSupervisor> process_supervisor)
     : authority_(std::move(authority)), coordinator_(std::move(coordinator)),
       challenge_verifier_(std::move(challenge_verifier)),
       session_kernel_(std::move(session_kernel)),
       service_identity_authority_(std::move(service_identity_authority)),
       ledger_time_source_(std::move(ledger_time_source)),
+      process_supervisor_(std::move(process_supervisor)),
       config_(std::move(config)) {
   const bool strict =
       config_.enforcement_grade ==
@@ -1760,7 +1797,7 @@ HostdServeResult HostdMutationServer::serve_one(
 
       const ReceivedPacket command_packet = receive_packet(
           connection.get(), credentials, config_.maximum_payload_bytes,
-          session_deadline);
+          session_deadline, 3U);
       const WirePacket decoded_command =
           decode_packet(command_packet.bytes, config_.maximum_payload_bytes);
       if (decoded_command.correlation_id != correlation ||
@@ -1769,6 +1806,13 @@ HostdServeResult HostdMutationServer::serve_one(
             "hostd mutation command framing is inexact");
       const HostdMutationCommand command =
           hostd_mutation_command_from_canonical_json(decoded_command.payload);
+      const std::size_t expected_descriptors =
+          command.process_prepare
+              ? command.process_prepare->descriptor_roles.size()
+              : 0U;
+      if (command_packet.descriptors.size() != expected_descriptors)
+        throw HostdTransportError(
+            "hostd process descriptor count is inexact");
       validate_hostd_mutation_exchange(open, challenge, command);
       mutation_checkpoint(config_.fault_injector,
                           HostdMutationTransportCheckpoint::
@@ -1810,6 +1854,9 @@ HostdServeResult HostdMutationServer::serve_one(
           .command_digest = command.command_digest,
           .bundle_result = std::nullopt,
           .release_result = std::nullopt,
+          .process_prepared = std::nullopt,
+          .process_committed = std::nullopt,
+          .process_exit = std::nullopt,
       };
       switch (command.mutation) {
       case HostdMutationKind::request_bundle: {
@@ -1835,6 +1882,40 @@ HostdServeResult HostdMutationServer::serve_one(
         reply.kind = HostdMutationReplyKind::release_outcome;
         reply.release_result = coordinator_->release_bundle(
             session.session_id, *command.release_request, now);
+        break;
+      }
+      case HostdMutationKind::prepare_process: {
+        if (session.effective_access != HostdSessionAccess::grant_release ||
+            !process_supervisor_ || command_packet.descriptors.size() < 2U)
+          throw HostdTransportError(
+              "hostd process prepare authority is unavailable");
+        const auto& descriptors = command_packet.descriptors;
+        const bool has_code = descriptors.size() == 3U;
+        reply.kind = HostdMutationReplyKind::process_prepared;
+        reply.process_prepared = process_supervisor_->prepare(
+            *command.process_prepare, descriptors[0].get(),
+            has_code ? std::optional<int>(descriptors[1].get()) : std::nullopt,
+            descriptors[has_code ? 2U : 1U].get());
+        break;
+      }
+      case HostdMutationKind::commit_process: {
+        if (session.effective_access != HostdSessionAccess::grant_release ||
+            !process_supervisor_)
+          throw HostdTransportError(
+              "hostd process commit authority is unavailable");
+        reply.kind = HostdMutationReplyKind::process_committed;
+        reply.process_committed =
+            process_supervisor_->commit(*command.process_commit);
+        break;
+      }
+      case HostdMutationKind::finalize_process: {
+        if (session.effective_access != HostdSessionAccess::grant_release ||
+            !process_supervisor_)
+          throw HostdTransportError(
+              "hostd process exit authority is unavailable");
+        reply.kind = HostdMutationReplyKind::process_exited;
+        reply.process_exit =
+            process_supervisor_->finalize(*command.process_exit);
         break;
       }
       }
@@ -2090,14 +2171,38 @@ HostdMutationReply request_mutation_impl(
       .mutation = request.mutation,
       .bundle_request = request.bundle_request,
       .release_request = request.release_request,
+      .process_prepare = request.process_prepare,
+      .process_commit = request.process_commit,
+      .process_exit = request.process_exit,
       .command_digest = {},
   });
   validate_hostd_mutation_exchange(request.open, challenge, command);
+  std::array<int, 3U> descriptor_storage{};
+  std::span<const int> descriptors;
+  if (request.mutation == HostdMutationKind::prepare_process) {
+    if (!request.process_prepare || !request.delegated_launch)
+      throw HostdTransportError(
+          "hostd process prepare descriptors are missing");
+    const auto& delegated = *request.delegated_launch;
+    const bool has_code = delegated.code_fd.has_value();
+    const std::size_t count = has_code ? 3U : 2U;
+    descriptor_storage[0] = delegated.executable_fd;
+    descriptor_storage[has_code ? 2U : 1U] =
+        delegated.working_directory_fd;
+    if (has_code) descriptor_storage[1] = *delegated.code_fd;
+    descriptors = std::span<const int>(descriptor_storage.data(), count);
+    if (request.process_prepare->descriptor_roles.size() != count)
+      throw HostdTransportError(
+          "hostd process prepare descriptor roles are inexact");
+  } else if (request.delegated_launch) {
+    throw HostdTransportError(
+        "hostd non-prepare mutation carried delegated descriptors");
+  }
   send_packet(connection.get(),
               encode_canonical_packet(
                   kMutationCommandOpcode, correlation_id,
                   hostd_mutation_command_canonical_json(command)),
-              absolute_monotonic_deadline_ns);
+              absolute_monotonic_deadline_ns, descriptors);
 
   const ReceivedPacket reply_packet = receive_packet(
       connection.get(), peer, config.maximum_payload_bytes,

@@ -6248,6 +6248,27 @@ void test_host_launch_resolution_and_binding() {
                 (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) &&
             write_rejected && chmod_rejected,
         "resolved payloads are immutable sealed descriptors with executable mode sealed");
+  auto delegated = trainvm::ResolvedLaunch::adopt_delegated(
+      first.spec(), executable_fd, code_fd, work_fd);
+  const int delegated_copy = delegated.duplicate_executable_fd();
+  auto mismatched_delegation = first.spec();
+  mismatched_delegation.identity.executable.sealed_sha256 =
+      "sha256:" + std::string(64U, 'f');
+  mismatched_delegation.spec_digest =
+      "sha256:" + trainvm::sha256_hex(
+                       trainvm::resolved_launch_identity_json(
+                           mismatched_delegation.identity)
+                           .dump());
+  bool mismatched_delegation_rejected = false;
+  try {
+    (void)trainvm::ResolvedLaunch::adopt_delegated(
+        mismatched_delegation, executable_fd, code_fd, work_fd);
+  } catch (const trainvm::HostLaunchResolutionError&) {
+    mismatched_delegation_rejected = true;
+  }
+  check(delegated_copy >= 0 && mismatched_delegation_rejected,
+        "delegated launch descriptors are independently retained and reattested against exact sealed bytes");
+  if (delegated_copy >= 0) (void)::close(delegated_copy);
   (void)::close(executable_fd);
   if (code_fd) (void)::close(*code_fd);
   (void)::close(work_fd);

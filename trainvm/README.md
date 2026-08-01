@@ -119,9 +119,11 @@ Implemented now:
   host/boot/broker, pinned-journal claims, controller generation, logical fence, nonce, and bounded
   boottime lifetime, with per-peer quotas and no bearer-capability interpretation of decoded data;
 - a canonical hostd mutation-envelope contract that binds one open journal/controller claim to the
-  issued single-use challenge, echoed response, exactly attributed grant/reconcile/release payload,
-  sealed command digest, and operation-compatible reply, now dispatched over a bounded one-command
-  `SOCK_SEQPACKET` session with exact correlation and per-packet credentials;
+  issued single-use challenge, echoed response, exactly attributed grant/reconcile/release/process
+  payload, sealed command digest, and operation-compatible reply, now dispatched over a bounded
+  one-command `SOCK_SEQPACKET` session with exact correlation and per-packet credentials; process
+  prepare alone may carry an exact role-ordered sealed executable, optional code, and opened working
+  directory through `SCM_RIGHTS`, while every other packet still rejects descriptor delegation;
 - per-concurrency-scope durable hostd controller heads, generations, event identities, and retained
   controller IDs, so takeover invalidates only the affected logical resource scope while aliased,
   rolled-back, or legacy-global controller metadata fails closed;
@@ -136,7 +138,9 @@ Implemented now:
   create or reopen one empty allocation cgroup, validate immutable launch descriptors, and use
   `clone3(CLONE_INTO_CGROUP|CLONE_PIDFD)` with a private pre-exec gate; PID starttime and unified
   membership are double-attested before the v4 spawn receipt, while every error closes the gate and
-  kills/reaps only through the pidfd;
+  kills/reaps only through the pidfd; a hostd-owned supervisor retains that stopped identity across
+  request connections, replays exact prepare/commit/finalize commands, releases the pre-exec gate
+  once, and keeps the launch until terminal v5 evidence is durable;
 - a read-only Linux NVIDIA inventory collector that pins procfs/sysfs/devfs roots, dynamically loads
   and grades NVML evidence, double-samples bounded device/MIG/display/context state, retains process
   instance observations, proves device-node mappings, and makes incomplete, torn, stale, or

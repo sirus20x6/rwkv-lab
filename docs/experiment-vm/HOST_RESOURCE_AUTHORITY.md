@@ -663,10 +663,11 @@ Gate:
 
 Current implementation note: sealed release requests and grant, busy, and
 release results now have shared strict public codecs used by journal replay and
-available to the transport. A v1 mutation envelope now defines the two-message
+available to the transport. A v2 mutation envelope now defines the two-message
 exchange: an open claim receives a server challenge, then one sealed command
-echoes the exact challenge response and carries exactly one attributed bundle
-or release request. Cross-message validators bind the open, challenge,
+echoes the exact challenge response and carries exactly one attributed bundle,
+release, process-prepare, process-commit, or process-exit request.
+Cross-message validators bind the open, challenge,
 command digest, and typed reply; reconciliation may explicitly return missing
 but can never disguise a new outcome as replayed. A separate mutation server
 now dispatches that exchange through the accepted `SOCK_SEQPACKET` peer into
@@ -675,7 +676,10 @@ journal challenge once, obtains service access from a host-side authority
 rather than request data, uses host-sampled ledger time, and always disconnects
 the scoped coordinator session. Duplicate grant, exact reconciliation,
 release, stale-fence, cross-scope, malformed-command, and abandoned-challenge
-paths are covered at the cooperative test grade. The remaining P0.3 gate is
+paths are covered at the cooperative test grade. Process prepare is the sole
+command allowed to carry `SCM_RIGHTS`; descriptor roles and counts are exact,
+the daemon reattests sealed bytes and working-directory identity, and other
+packets continue to reject and close delegated descriptors. The remaining P0.3 gate is
 the broader journal/service/hostd process-crash matrix plus daemon bootstrap
 integration of the implemented service-cgroup authority at strict
 socket-pidfd/host-namespace grade. Deterministic transport checkpoints already prove that interruption at
@@ -688,8 +692,7 @@ receipts. Intents require the exact active allocation attribution and persist
 the resolved-launch, executable, and cgroup identities; spawn receipts require
 the same still-active grant and bind boot ID, PID starttime, cgroup inode, and
 executable digest. Pre-commit fault points roll back both chain and projection,
-while post-commit lost replies resolve only to the exact canonical replay. No
-child creation is enabled by this ledger milestone.
+while post-commit lost replies resolve only to the exact canonical replay.
 
 ### P0.4 — guarded launcher and strict cgroup enforcement
 
@@ -697,21 +700,26 @@ Integrate sealed launch descriptors, allocation cgroups, stopped `clone3`, pidfd
 policy receipts, and device-BPF allowlists.
 
 Current implementation note: the native stopped-child boundary and its v4
-ledger join are implemented but are not yet exposed by the daemon command
-surface. The cgroup authority pins and reattests cgroup-v2, uses deterministic
+ledger join are exposed through the authenticated daemon mutation surface. The
+cgroup authority pins and reattests cgroup-v2, uses deterministic
 allocation directory names, reopens only empty retry directories, and retains
 the directory after a durable intent. The launcher validates sealed
 descriptors, clones directly into that cgroup with a pidfd, blocks on a private
 pre-exec pipe, double-attests proc starttime and unified membership, and kills
 and reaps by pidfd on every failure. The combined process authority commits the
 intent before clone and the spawn identity before returning the closed gate.
-The additive v5 terminal receipt is now implemented as well: pidfd wait status,
+The daemon-owned supervisor retains the stopped launch across separate request
+connections, makes prepare/commit/finalize exact-replay safe within one daemon
+lifetime, and releases the private pre-exec gate only after the caller has the
+durable spawn receipt. The additive v5 terminal receipt is implemented as well: pidfd wait status,
 the exact spawn identity, twice-empty cgroup evidence, and a complete trusted
 accelerator-context audit must all agree before commit. Resource release now
 fails closed for every spawned allocation without that receipt, and the empty
 cgroup is removed only afterward. Python code-fd argv binding, CPU/I/O policy
-evidence, device BPF, daemon RPC integration, and privileged end-to-end
-qualification remain in this gate.
+evidence, device BPF, privileged end-to-end qualification, and durable adoption
+after a hostd restart remain in this gate. A daemon crash is therefore not
+claimed as an in-memory supervisor replay boundary; startup audit must
+reconcile its durable intent/spawn records.
 
 Gate:
 

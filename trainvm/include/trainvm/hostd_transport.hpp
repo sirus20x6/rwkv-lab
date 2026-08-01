@@ -14,6 +14,7 @@
 
 #include "trainvm/hostd.hpp"
 #include "trainvm/hostd_linux_session_authority.hpp"
+#include "trainvm/hostd_linux_process_authority.hpp"
 #include "trainvm/hostd_mutation_protocol.hpp"
 
 namespace trainvm {
@@ -275,7 +276,8 @@ public:
       std::shared_ptr<IHostdMutationServiceIdentityAuthority>
           service_identity_authority,
       std::shared_ptr<IHostdLedgerTimeSource> ledger_time_source,
-      HostdMutationTransportConfig config);
+      HostdMutationTransportConfig config,
+      std::shared_ptr<IHostdProcessSupervisor> process_supervisor = nullptr);
   [[nodiscard]] HostdServeResult
   serve_one(std::int64_t absolute_monotonic_deadline_ns);
 
@@ -287,6 +289,7 @@ private:
   std::shared_ptr<IHostdMutationServiceIdentityAuthority>
       service_identity_authority_;
   std::shared_ptr<IHostdLedgerTimeSource> ledger_time_source_;
+  std::shared_ptr<IHostdProcessSupervisor> process_supervisor_;
   HostdMutationTransportConfig config_;
 };
 
@@ -299,10 +302,23 @@ struct HostdMutationClientConfig final {
 };
 
 struct HostdMutationRequest final {
+  struct DelegatedLaunchDescriptors final {
+    int executable_fd{-1};
+    std::optional<int> code_fd;
+    int working_directory_fd{-1};
+
+    bool operator==(const DelegatedLaunchDescriptors &) const = default;
+  };
+
   HostdMutationOpen open;
   HostdMutationKind mutation{};
-  std::optional<ResourceBundleRequest> bundle_request;
-  std::optional<ResourceReleaseRequest> release_request;
+  std::optional<ResourceBundleRequest> bundle_request{};
+  std::optional<ResourceReleaseRequest> release_request{};
+  std::optional<HostdProcessPrepareRequest> process_prepare{};
+  std::optional<HostdProcessCommitRequest> process_commit{};
+  std::optional<HostdProcessExitCommand> process_exit{};
+  // Borrowed only until hostd_request_mutation() returns.
+  std::optional<DelegatedLaunchDescriptors> delegated_launch{};
 
   bool operator==(const HostdMutationRequest &) const = default;
 };

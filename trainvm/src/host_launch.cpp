@@ -231,6 +231,69 @@ std::string digest_and_copy(int source, int destination,
   return "sha256:" + output;
 }
 
+std::string digest_descriptor(int source, std::uint64_t expected_size) {
+  Descriptor sink(::open("/dev/null", O_WRONLY | O_CLOEXEC));
+  if (sink.get() < 0)
+    throw HostLaunchResolutionError("could not open delegated digest sink");
+  const off_t original = ::lseek(source, 0, SEEK_CUR);
+  if (original < 0 || ::lseek(source, 0, SEEK_SET) != 0)
+    throw HostLaunchResolutionError(
+        "delegated launch artifact is not seekable");
+  try {
+    const std::string digest =
+        digest_and_copy(source, sink.get(), expected_size);
+    if (::lseek(source, original, SEEK_SET) != original)
+      throw HostLaunchResolutionError(
+          "could not restore delegated launch artifact offset");
+    return digest;
+  } catch (...) {
+    if (original >= 0) (void)::lseek(source, original, SEEK_SET);
+    throw;
+  }
+}
+
+void validate_delegated_artifact(int descriptor,
+                                 const VerifiedLaunchArtifact& identity,
+                                 bool executable) {
+  struct stat metadata {};
+  const int seals = ::fcntl(descriptor, F_GET_SEALS);
+  constexpr int required_seals =
+      F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+  if (::fstat(descriptor, &metadata) != 0 || !S_ISREG(metadata.st_mode) ||
+      metadata.st_size < 0 ||
+      static_cast<std::uint64_t>(metadata.st_size) != identity.source_size ||
+      seals < 0 || (seals & required_seals) != required_seals ||
+      (metadata.st_mode & 0777) != (executable ? 0500 : 0400) ||
+      digest_descriptor(descriptor, identity.source_size) !=
+          identity.sealed_sha256) {
+    throw HostLaunchResolutionError(
+        "delegated launch artifact does not match its sealed identity");
+  }
+}
+
+void validate_delegated_directory(int descriptor,
+                                  const OpenedDirectoryIdentity& identity) {
+  struct stat metadata {};
+  if (::fstat(descriptor, &metadata) != 0 || !S_ISDIR(metadata.st_mode) ||
+      static_cast<std::uint64_t>(metadata.st_dev) != identity.device ||
+      static_cast<std::uint64_t>(metadata.st_ino) != identity.inode ||
+      static_cast<std::uint32_t>(metadata.st_mode) != identity.mode ||
+      static_cast<std::uint32_t>(metadata.st_uid) != identity.uid ||
+      static_cast<std::uint32_t>(metadata.st_gid) != identity.gid) {
+    throw HostLaunchResolutionError(
+        "delegated working directory does not match its opened identity");
+  }
+}
+
+int duplicate_delegated(int descriptor, std::string_view role) {
+  const int duplicate = ::fcntl(descriptor, F_DUPFD_CLOEXEC, 3);
+  if (duplicate < 0) {
+    throw HostLaunchResolutionError("could not duplicate delegated " +
+                                    std::string(role) + " descriptor");
+  }
+  return duplicate;
+}
+
 struct SealedArtifact {
   Descriptor descriptor;
   VerifiedLaunchArtifact identity;
@@ -587,6 +650,30 @@ ResolvedLaunch::ResolvedLaunch(ResolvedLaunchSpec spec, int executable_fd,
                                int working_directory_fd) noexcept
     : spec_(std::move(spec)), executable_fd_(executable_fd),
       code_fd_(code_fd), working_directory_fd_(working_directory_fd) {}
+
+ResolvedLaunch ResolvedLaunch::adopt_delegated(
+    ResolvedLaunchSpec spec, int executable_fd, std::optional<int> code_fd,
+    int working_directory_fd) {
+  spec = resolved_launch_spec_from_json(resolved_launch_spec_json(spec));
+  if ((spec.identity.code.has_value()) != code_fd.has_value()) {
+    throw HostLaunchResolutionError(
+        "delegated code descriptor presence is inexact");
+  }
+  validate_delegated_artifact(executable_fd, spec.identity.executable, true);
+  if (code_fd)
+    validate_delegated_artifact(*code_fd, *spec.identity.code, false);
+  validate_delegated_directory(working_directory_fd,
+                               spec.identity.working_directory);
+  Descriptor executable(duplicate_delegated(executable_fd, "executable"));
+  std::optional<Descriptor> code;
+  if (code_fd) code.emplace(duplicate_delegated(*code_fd, "code"));
+  Descriptor working_directory(
+      duplicate_delegated(working_directory_fd, "working-directory"));
+  return ResolvedLaunch(
+      std::move(spec), executable.release(),
+      code ? std::optional<int>(code->release()) : std::nullopt,
+      working_directory.release());
+}
 
 ResolvedLaunch::ResolvedLaunch(ResolvedLaunch&& other) noexcept
     : spec_(std::move(other.spec_)),

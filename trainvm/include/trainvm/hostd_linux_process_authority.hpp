@@ -1,10 +1,16 @@
 #pragma once
 
+#include <map>
+#include <memory>
+#include <mutex>
+#include <optional>
+
 #include "trainvm/authority_time.hpp"
 #include "trainvm/host_launch.hpp"
 #include "trainvm/host_ledger.hpp"
 #include "trainvm/hostd_linux_cgroup_authority.hpp"
 #include "trainvm/hostd_linux_stopped_launcher.hpp"
+#include "trainvm/hostd_process_protocol.hpp"
 
 namespace trainvm {
 
@@ -77,6 +83,45 @@ class LinuxProcessAuthority final {
   LinuxCgroupAuthority& cgroups_;
   LinuxStoppedLauncherKernel& launcher_;
   ILinuxProcessContextAuditor& context_auditor_;
+};
+
+class IHostdProcessSupervisor {
+ public:
+  virtual ~IHostdProcessSupervisor() = default;
+  // Descriptor arguments are borrowed for the duration of prepare().
+  [[nodiscard]] virtual HostdProcessPreparedResult prepare(
+      const HostdProcessPrepareRequest& request, int executable_fd,
+      std::optional<int> code_fd, int working_directory_fd) = 0;
+  [[nodiscard]] virtual HostdProcessCommittedResult commit(
+      const HostdProcessCommitRequest& request) = 0;
+  [[nodiscard]] virtual HostProcessExitResult finalize(
+      const HostdProcessExitCommand& request) = 0;
+};
+
+// Retains the stopped child, pidfd, cgroup descriptor, and grant until a
+// terminal exit is durably recorded. Exact retries are replay-safe for the
+// lifetime of one hostd process. Durable daemon-restart adoption remains a
+// separate recovery boundary and is not claimed by this class.
+class HostdLinuxProcessSupervisor final : public IHostdProcessSupervisor {
+ public:
+  explicit HostdLinuxProcessSupervisor(LinuxProcessAuthority& authority);
+  ~HostdLinuxProcessSupervisor() override;
+
+  [[nodiscard]] HostdProcessPreparedResult prepare(
+      const HostdProcessPrepareRequest& request, int executable_fd,
+      std::optional<int> code_fd, int working_directory_fd) override;
+  [[nodiscard]] HostdProcessCommittedResult commit(
+      const HostdProcessCommitRequest& request) override;
+  [[nodiscard]] HostProcessExitResult finalize(
+      const HostdProcessExitCommand& request) override;
+
+ private:
+  struct Entry;
+  static void require_process_binding(
+      const HostdProcessCommitRequest& request, const Entry& entry);
+  LinuxProcessAuthority& authority_;
+  std::mutex mutex_;
+  std::map<std::string, std::unique_ptr<Entry>, std::less<>> entries_;
 };
 
 }  // namespace trainvm

@@ -90,6 +90,14 @@ ResolvedLaunchSpec resolved_launch_spec_from_json(
 // working-directory evidence. It is an authorization bundle, not a process.
 class ResolvedLaunch final {
  public:
+  // Adopts descriptor authority delegated over the hostd transport only after
+  // reattesting the exact sealed bytes and opened-directory identity recorded
+  // by the canonical specification. The supplied descriptors remain owned by
+  // the caller; independent close-on-exec duplicates are retained here.
+  [[nodiscard]] static ResolvedLaunch adopt_delegated(
+      ResolvedLaunchSpec spec, int executable_fd,
+      std::optional<int> code_fd, int working_directory_fd);
+
   ResolvedLaunch(ResolvedLaunch&& other) noexcept;
   ResolvedLaunch& operator=(ResolvedLaunch&& other) noexcept;
   ~ResolvedLaunch();
