@@ -696,6 +696,19 @@ child creation is enabled by this ledger milestone.
 Integrate sealed launch descriptors, allocation cgroups, stopped `clone3`, pidfds, effective CPU/I/O
 policy receipts, and device-BPF allowlists.
 
+Current implementation note: the native stopped-child boundary and its v4
+ledger join are implemented but are not yet exposed by the daemon command
+surface. The cgroup authority pins and reattests cgroup-v2, uses deterministic
+allocation directory names, reopens only empty retry directories, and retains
+the directory after a durable intent. The launcher validates sealed
+descriptors, clones directly into that cgroup with a pidfd, blocks on a private
+pre-exec pipe, double-attests proc starttime and unified membership, and kills
+and reaps by pidfd on every failure. The combined process authority commits the
+intent before clone and the spawn identity before returning the closed gate.
+Python code-fd argv binding, terminal exit receipts, CPU/I/O policy evidence,
+device BPF, daemon RPC integration, and privileged end-to-end qualification
+remain in this gate.
+
 Gate:
 
 - no child executes before its spawn receipt is durable;

@@ -125,6 +125,11 @@ Implemented now:
 - a strict Linux service-role authority that pins procfs, cgroup-v2, and every configured service
   cgroup, then double-samples unified membership and proc starttime while binding exact UID/GID,
   service identity, and grant/release role without accepting any request-provided role;
+- strict Linux process-launch primitives that pin a protected cgroup-v2 root, deterministically
+  create or reopen one empty allocation cgroup, validate immutable launch descriptors, and use
+  `clone3(CLONE_INTO_CGROUP|CLONE_PIDFD)` with a private pre-exec gate; PID starttime and unified
+  membership are double-attested before the v4 spawn receipt, while every error closes the gate and
+  kills/reaps only through the pidfd;
 - a read-only Linux NVIDIA inventory collector that pins procfs/sysfs/devfs roots, dynamically loads
   and grades NVML evidence, double-samples bounded device/MIG/display/context state, retains process
   instance observations, proves device-node mappings, and makes incomplete, torn, stale, or
