@@ -62,6 +62,11 @@ Implemented now:
 - an authority-owned exact adapter registry that binds adapter/version/runtime/operation/contract,
   effect, idempotency, trusted code fingerprint, required worker capabilities, and a reflected
   operation lifecycle/resume grade before mutation;
+- an independent, authority-owned training-component registry for optimizers, parameter routing,
+  learning-rate and weight-decay schedules, activations, normalization, objectives, precision,
+  clipping, accumulation, curricula, and metric reducers; exact keys, reflected scalar contracts,
+  model-family compatibility, checkpoint-state grades, explicit schedule step domains, and worker
+  capabilities are resolved into a content-addressed per-node composition and submission lock;
 - a reflected compatibility-workflow catalog and executable validation gate spanning RWKV,
   transformer/MLA, vision, MageFlow/diffusion, conversion/distillation, post-training, RLVR,
   external trainers, data/cache, and evaluation/profile/export, bound to the exact reviewed source
@@ -255,7 +260,9 @@ trainvm/build/trainvm inspect-registry "$PWD/experiments.db" \
   --task recall:16 --metric acc --baseline baseline --limit 20
 trainvm/build/trainvm serve --journal /tmp/trainvm.db --socket /tmp/trainvm.sock \
   --registry /etc/trainvm/adapters.json \
-  --host-launch-registry /etc/trainvm/host-launches.json
+  --host-launch-registry /etc/trainvm/host-launches.json \
+  --training-component-registry \
+  "$PWD/docs/experiment-vm/examples/empty-training-components.json"
 trainvm/build/trainvm simulate \
   docs/experiment-vm/examples/mageflow-cache-resume.json \
   docs/experiment-vm/examples/mageflow-cache-resume.events.jsonl

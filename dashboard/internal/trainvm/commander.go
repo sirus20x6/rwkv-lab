@@ -25,25 +25,28 @@ type Commander interface {
 }
 
 type SubmissionRequest struct {
-	SourceDocument            string
-	SourceFormat              string
-	CreateRun                 bool
-	IdempotencyKey            string
-	ExpectedJournalID         string
-	ExpectedPlanHash          string
-	ExpectedAdapterLockDigest string
-	Author                    string
-	Reason                    string
+	SourceDocument                      string
+	SourceFormat                        string
+	CreateRun                           bool
+	IdempotencyKey                      string
+	ExpectedJournalID                   string
+	ExpectedPlanHash                    string
+	ExpectedAdapterLockDigest           string
+	ExpectedTrainingComponentLockDigest string
+	Author                              string
+	Reason                              string
 }
 
 type SubmissionResult struct {
-	CanonicalDocument    string              `json:"canonical_document,omitempty"`
-	CanonicalPlan        string              `json:"canonical_plan,omitempty"`
-	PlanHash             string              `json:"plan_hash,omitempty"`
-	AdapterLockDigest    string              `json:"adapter_lock_digest,omitempty"`
-	CanonicalAdapterLock string              `json:"canonical_adapter_lock,omitempty"`
-	Run                  *RunIdentity        `json:"run,omitempty"`
-	Diagnostics          []ControlDiagnostic `json:"diagnostics,omitempty"`
+	CanonicalDocument              string              `json:"canonical_document,omitempty"`
+	CanonicalPlan                  string              `json:"canonical_plan,omitempty"`
+	PlanHash                       string              `json:"plan_hash,omitempty"`
+	AdapterLockDigest              string              `json:"adapter_lock_digest,omitempty"`
+	CanonicalAdapterLock           string              `json:"canonical_adapter_lock,omitempty"`
+	TrainingComponentLockDigest    string              `json:"training_component_lock_digest,omitempty"`
+	CanonicalTrainingComponentLock string              `json:"canonical_training_component_lock,omitempty"`
+	Run                            *RunIdentity        `json:"run,omitempty"`
+	Diagnostics                    []ControlDiagnostic `json:"diagnostics,omitempty"`
 }
 
 type RunIdentity struct {
@@ -178,9 +181,11 @@ func (c *GRPCCommander) SubmitExperiment(ctx context.Context, request Submission
 	}
 	result := SubmissionResult{
 		CanonicalDocument: response.GetCanonicalDocument(), CanonicalPlan: response.GetCanonicalPlan(),
-		PlanHash:             response.GetPlanHash(),
-		AdapterLockDigest:    response.GetAdapterLockDigest(),
-		CanonicalAdapterLock: response.GetCanonicalAdapterLock(),
+		PlanHash:                       response.GetPlanHash(),
+		AdapterLockDigest:              response.GetAdapterLockDigest(),
+		CanonicalAdapterLock:           response.GetCanonicalAdapterLock(),
+		TrainingComponentLockDigest:    response.GetTrainingComponentLockDigest(),
+		CanonicalTrainingComponentLock: response.GetCanonicalTrainingComponentLock(),
 	}
 	if run := response.GetRun(); run != nil {
 		result.Run = &RunIdentity{RunID: run.GetRunId(), Revision: run.GetRevision(), PlanHash: run.GetPlanHash()}
@@ -201,6 +206,7 @@ func submissionRPCRequest(request SubmissionRequest) (*trainvmv1.SubmitExperimen
 	request.ExpectedJournalID = strings.TrimSpace(request.ExpectedJournalID)
 	request.ExpectedPlanHash = strings.TrimSpace(request.ExpectedPlanHash)
 	request.ExpectedAdapterLockDigest = strings.TrimSpace(request.ExpectedAdapterLockDigest)
+	request.ExpectedTrainingComponentLockDigest = strings.TrimSpace(request.ExpectedTrainingComponentLockDigest)
 	request.Author = strings.TrimSpace(request.Author)
 	request.Reason = strings.TrimSpace(request.Reason)
 	if request.SourceDocument == "" || request.ExpectedJournalID == "" ||
@@ -215,8 +221,9 @@ func submissionRPCRequest(request SubmissionRequest) (*trainvmv1.SubmitExperimen
 		SourceDocument: request.SourceDocument, SourceFormat: request.SourceFormat,
 		CreateRun: request.CreateRun, IdempotencyKey: request.IdempotencyKey,
 		ExpectedJournalId: request.ExpectedJournalID, Author: request.Author, Reason: request.Reason,
-		ExpectedPlanHash:          request.ExpectedPlanHash,
-		ExpectedAdapterLockDigest: request.ExpectedAdapterLockDigest,
+		ExpectedPlanHash:                    request.ExpectedPlanHash,
+		ExpectedAdapterLockDigest:           request.ExpectedAdapterLockDigest,
+		ExpectedTrainingComponentLockDigest: request.ExpectedTrainingComponentLockDigest,
 	}, nil
 }
 

@@ -418,6 +418,56 @@
         "direction": {"enum": ["increasing", "decreasing"]}
       }
     },
+    "training_component_key": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["category", "name", "version"],
+      "properties": {
+        "category": {
+          "enum": [
+            "optimizer", "parameter_router", "learning_rate_schedule",
+            "weight_decay_schedule", "activation", "normalization",
+            "objective", "precision", "gradient_clipping",
+            "gradient_accumulation", "curriculum", "metric_reducer"
+          ]
+        },
+        "name": {"$ref": "#/$defs/identifier"},
+        "version": {"type": "string", "minLength": 1, "maxLength": 128}
+      }
+    },
+    "training_component_selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "configuration"],
+      "properties": {
+        "key": {"$ref": "#/$defs/training_component_key"},
+        "configuration": {
+          "type": "object",
+          "maxProperties": 128,
+          "propertyNames": {"$ref": "#/$defs/identifier"},
+          "additionalProperties": {
+            "type": ["boolean", "integer", "number", "string"]
+          }
+        }
+      }
+    },
+    "training_composition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model_family", "components"],
+      "properties": {
+        "model_family": {"$ref": "#/$defs/identifier"},
+        "components": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 64,
+          "propertyNames": {"$ref": "#/$defs/identifier"},
+          "additionalProperties": {
+            "$ref": "#/$defs/training_component_selection"
+          }
+        }
+      }
+    },
     "node": {
       "type": "object",
       "additionalProperties": false,
@@ -435,7 +485,8 @@
               "type": "object",
               "propertyNames": {"$ref": "#/$defs/identifier"},
               "additionalProperties": {"$ref": "#/$defs/binding"}
-            }
+            },
+            "training": {"$ref": "#/$defs/training_composition"}
           }
         },
         "publishes": {

@@ -12,6 +12,7 @@
 #include "trainvm/reflection_json.hpp"
 #include "trainvm/reconciler.hpp"
 #include "trainvm/service.hpp"
+#include "trainvm/training_component_registry.hpp"
 #include "trainvm/v1/trainvm.pb.h"
 
 #include <sqlite3.h>
@@ -230,6 +231,23 @@ trainvm::HostIdentity fixture_test_host_identity() {
       .host_id = "sha256:" + std::string(64U, '7'),
       .boot_id = "77777777-7777-7777-7777-777777777777",
   };
+}
+
+trainvm::TrainingComponentRegistry fixture_training_component_registry() {
+  return trainvm::TrainingComponentRegistry({{
+      .key = {.category = trainvm::TrainingComponentCategory::activation,
+              .name = "silu",
+              .version = "1.0.0"},
+      .backend = trainvm::TrainingComponentBackend::runtime_builtin,
+      .implementation = "runtime.activation.silu",
+      .model_families = {"mageflow"},
+      .required_capabilities = {"activation.silu"},
+      .configuration = {},
+      .state = {},
+      .step_domain = std::nullopt,
+      .state_grade = trainvm::TrainingStateGrade::stateless,
+      .reference_implementation = true,
+  }});
 }
 
 trainvm::HostLaunchRegistry fixture_test_host_launch_registry(
@@ -3389,17 +3407,26 @@ void test_submission_and_queue_boundary() {
         unresolved_registry_service.SubmitExperiment(
             nullptr, &unresolved_registry_conflict,
             &unresolved_registry_conflict_response);
+    const auto has_adapter_registry_error = [](const auto& response) {
+      return std::ranges::any_of(
+          response.diagnostics(),
+          [](const trainvm::v1::Diagnostic& diagnostic) {
+            return diagnostic.severity() ==
+                       trainvm::v1::Diagnostic::SEVERITY_ERROR &&
+                   diagnostic.code() == "adapter.registry" &&
+                   diagnostic.document_path() == "/spec/components";
+          });
+    };
     trainvm::Journal journal(database_path);
     check(unresolved_registry_replay_status.ok() &&
-              unresolved_registry_replay.has_run() &&
-              unresolved_registry_replay.run().run_id() == run_id &&
-              unresolved_registry_replay.run().revision() == 1U &&
-              unresolved_registry_replay.adapter_lock_digest() ==
-                  adapter_lock_digest &&
-              unresolved_registry_conflict_status.error_code() ==
-                  grpc::StatusCode::ALREADY_EXISTS &&
+              !unresolved_registry_replay.has_run() &&
+              has_adapter_registry_error(unresolved_registry_replay) &&
+              unresolved_registry_conflict_status.ok() &&
+              !unresolved_registry_conflict_response.has_run() &&
+              has_adapter_registry_error(
+                  unresolved_registry_conflict_response) &&
               journal.event_count() == 1U,
-          "durable submission identity replays before current registry resolution and still rejects changed retries");
+          "idempotent submission replay fails closed when current authority no longer resolves its adapter registry");
   }
   service = std::make_unique<trainvm::TrainVMService>(
       database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
@@ -7147,6 +7174,110 @@ void test_service_registry_and_reconciliation() {
               launch_event != events.end() &&
               launch_event->wall_time_ns == 5'100,
           "service-owned reconcile path uses its registry, mutation gate, and authority clock for acquisition then launch");
+  }
+
+  {
+    nlohmann::json training_fixture = fixture;
+    training_fixture["spec"]["workflow"]["nodes"]["train_to_boundary"]
+                    ["invoke"]["training"] = {
+        {"model_family", "mageflow"},
+        {"components",
+         {{"backbone_activation",
+           {{"key",
+             {{"category", "activation"},
+              {"name", "silu"},
+              {"version", "1.0.0"}}},
+            {"configuration", nlohmann::json::object()}}}}},
+    };
+    const auto training_plan = trainvm::compile_document(training_fixture);
+    check(training_plan.valid(),
+          "training-component service fixture compiles");
+    if (training_plan.valid()) {
+      const auto database_path = directory / "training-components.db";
+      std::string journal_id;
+      {
+        trainvm::Journal journal(database_path);
+        journal_id = journal.journal_id();
+      }
+      std::int64_t authority_now_ns = 8'000;
+      trainvm::TrainVMService service(
+          database_path,
+          trainvm::AdapterRegistry(fixture_adapter_profiles()),
+          fixture_disabled_host_launch_registry(),
+          fixture_test_host_identity(),
+          [&authority_now_ns] { return test_time(authority_now_ns); },
+          trainvm::HostGrantEnforcement::legacy_process_free_test,
+          fixture_training_component_registry());
+      trainvm::v1::SubmitExperimentRequest preview_request;
+      preview_request.set_source_document(training_fixture.dump());
+      preview_request.set_source_format("json");
+      preview_request.set_expected_journal_id(journal_id);
+      trainvm::v1::SubmitExperimentResponse preview;
+      const grpc::Status preview_status = service.SubmitExperiment(
+          nullptr, &preview_request, &preview);
+
+      trainvm::v1::SubmitExperimentRequest stale = preview_request;
+      stale.set_create_run(true);
+      stale.set_idempotency_key("training-components");
+      stale.set_author("scheduler");
+      stale.set_reason("lock the reflected training composition");
+      stale.set_expected_plan_hash(training_plan.plan->plan_hash);
+      stale.set_expected_adapter_lock_digest(
+          preview.adapter_lock_digest());
+      stale.set_expected_training_component_lock_digest(
+          "sha256:" + std::string(64U, '0'));
+      trainvm::v1::SubmitExperimentResponse stale_response;
+      const grpc::Status stale_status = service.SubmitExperiment(
+          nullptr, &stale, &stale_response);
+
+      auto create_request = stale;
+      create_request.set_expected_training_component_lock_digest(
+          preview.training_component_lock_digest());
+      trainvm::v1::SubmitExperimentResponse created;
+      const grpc::Status create_status = service.SubmitExperiment(
+          nullptr, &create_request, &created);
+      trainvm::v1::SubmitExperimentResponse replayed;
+      const grpc::Status replay_status = service.SubmitExperiment(
+          nullptr, &create_request, &replayed);
+      trainvm::Journal observer(database_path);
+      const auto event = created.has_run()
+                             ? observer.event(created.run().run_id() +
+                                              ":created")
+                             : std::nullopt;
+      check(preview_status.ok() &&
+                preview.training_component_lock_digest().starts_with(
+                    "sha256:") &&
+                preview.training_component_lock_digest().size() == 71U &&
+                !preview.canonical_training_component_lock().empty() &&
+                stale_status.error_code() ==
+                    grpc::StatusCode::FAILED_PRECONDITION &&
+                observer.event_count() == 1U && create_status.ok() &&
+                replay_status.ok() && created.has_run() &&
+                replayed.has_run() &&
+                created.run().run_id() == replayed.run().run_id() && event &&
+                event->payload.at("submission")
+                        .at("training_component_lock_digest") ==
+                    preview.training_component_lock_digest() &&
+                event->payload.at("submission")
+                        .at("training_component_lock") ==
+                    nlohmann::json::parse(
+                        preview.canonical_training_component_lock()),
+            "service previews, fences, persists, and exactly replays the reflected training-component lock");
+
+      const auto acquired = service.reconcile_once(created.run().run_id());
+      authority_now_ns = 8'100;
+      const auto launched = service.reconcile_once(created.run().run_id());
+      check(acquired.disposition ==
+                trainvm::ReconcileDisposition::lease_acquired &&
+                launched.disposition ==
+                    trainvm::ReconcileDisposition::launch_prepared &&
+                launched.launch &&
+                launched.launch->required_capabilities ==
+                    std::vector<std::string>{"activation.silu",
+                                             "worker.controls",
+                                             "worker.metrics"},
+            "service launch authority unions adapter and resolved training-component capabilities");
+    }
   }
 
   std::filesystem::remove_all(directory);

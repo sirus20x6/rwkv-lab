@@ -1,5 +1,6 @@
 #pragma once
 
+#include <compare>
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -34,6 +35,20 @@ enum class ApplyPoint {
 enum class MetricType { counter, gauge, histogram };
 enum class StepDomain { microbatch, optimizer_step, sample, token, epoch, wall_time };
 enum class Aggregation { last, sum, mean, weighted_mean, min, max, histogram };
+enum class TrainingComponentCategory {
+  optimizer,
+  parameter_router,
+  learning_rate_schedule,
+  weight_decay_schedule,
+  activation,
+  normalization,
+  objective,
+  precision,
+  gradient_clipping,
+  gradient_accumulation,
+  curriculum,
+  metric_reducer,
+};
 enum class ReconcilePolicy { fail_closed, adopt_if_fingerprint_matches, restart_from_checkpoint };
 enum class OrphanPolicy { leave_and_block, adopt_if_identity_matches, terminate_and_recover };
 enum class ProfilerBackend { torch, nsys, ncu };
@@ -148,6 +163,24 @@ struct NodeOutputReference {
   std::string name;
 };
 
+struct TrainingComponentKey {
+  TrainingComponentCategory category{};
+  std::string name;
+  std::string version;
+
+  auto operator<=>(const TrainingComponentKey&) const = default;
+};
+
+struct TrainingComponentSelection {
+  TrainingComponentKey key;
+  Json configuration = Json::object();
+};
+
+struct TrainingComposition {
+  std::string model_family;
+  std::map<std::string, TrainingComponentSelection> components;
+};
+
 struct Binding {
   std::optional<Json> literal;
   std::optional<std::string> parameter;
@@ -161,6 +194,7 @@ struct Invocation {
   std::string component;
   std::string operation;
   std::map<std::string, Binding> inputs;
+  std::optional<TrainingComposition> training;
 };
 
 struct Transition {

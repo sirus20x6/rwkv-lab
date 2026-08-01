@@ -833,6 +833,55 @@ void validate_experiment(const Experiment& experiment, std::vector<Diagnostic>& 
       validate_identifier(input_name, child_path(child_path(node_path, "invoke/inputs"), input_name), diagnostics);
       validate_binding(binding, child_path(child_path(node_path, "invoke/inputs"), input_name), spec, diagnostics);
     }
+    if (node.invoke.training) {
+      const TrainingComposition& training = *node.invoke.training;
+      const std::string training_path = child_path(node_path, "invoke/training");
+      validate_identifier(training.model_family,
+                          child_path(training_path, "model_family"),
+                          diagnostics);
+      if (training.components.empty() || training.components.size() > 64U) {
+        error(diagnostics, "training.components",
+              child_path(training_path, "components"),
+              "training composition requires between 1 and 64 component slots");
+      }
+      for (const auto& [slot, selection] : training.components) {
+        const std::string selection_path = child_path(
+            child_path(training_path, "components"), slot);
+        validate_identifier(slot, selection_path, diagnostics);
+        validate_identifier(selection.key.name,
+                            child_path(selection_path, "key/name"),
+                            diagnostics);
+        if (selection.key.version.empty() ||
+            selection.key.version.size() > 128U) {
+          error(diagnostics, "training.version",
+                child_path(selection_path, "key/version"),
+                "training component version must contain 1 to 128 bytes");
+        }
+        if (!selection.configuration.is_object() ||
+            selection.configuration.size() > 128U) {
+          error(diagnostics, "training.configuration",
+                child_path(selection_path, "configuration"),
+                "training component configuration must be an object with at most 128 fields");
+          continue;
+        }
+        for (const auto& [field, value] :
+             selection.configuration.items()) {
+          const std::string field_path = child_path(
+              child_path(selection_path, "configuration"), field);
+          validate_identifier(field, field_path, diagnostics);
+          const bool scalar = value.is_boolean() || value.is_number_integer() ||
+                              value.is_number_float() || value.is_string();
+          if (!scalar ||
+              (value.is_number_float() &&
+               !std::isfinite(value.get<double>())) ||
+              (value.is_string() &&
+               value.get_ref<const std::string&>().size() > 4096U)) {
+            error(diagnostics, "training.configuration_value", field_path,
+                  "training component configuration values must be bounded finite scalars");
+          }
+        }
+      }
+    }
     if (node.publishes) {
       for (const auto& [output_name, artifact_name] : *node.publishes) {
         validate_identifier(output_name, child_path(child_path(node_path, "publishes"), output_name), diagnostics);

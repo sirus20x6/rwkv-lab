@@ -10,6 +10,7 @@
 #include "trainvm/adapter_registry.hpp"
 #include "trainvm/authority_time.hpp"
 #include "trainvm/journal.hpp"
+#include "trainvm/training_component_registry.hpp"
 #include "trainvm/worker.hpp"
 
 namespace trainvm {
@@ -95,9 +96,14 @@ class Reconciler {
   Reconciler(Journal& journal, const AdapterRegistry& registry,
              std::mutex& authority_mutex,
              std::function<AuthorityTimeSample()> authority_clock);
+  Reconciler(Journal& journal, const AdapterRegistry& registry,
+             const TrainingComponentRegistry& training_components,
+             std::mutex& authority_mutex,
+             std::function<AuthorityTimeSample()> authority_clock);
 
   Journal& journal_;
   const AdapterRegistry& registry_;
+  const TrainingComponentRegistry& training_components_;
   std::mutex& authority_mutex_;
   std::shared_ptr<AuthorityClock> authority_clock_;
 };

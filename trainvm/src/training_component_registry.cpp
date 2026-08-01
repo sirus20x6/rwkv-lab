@@ -1,0 +1,476 @@
+#include "trainvm/training_component_registry.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <ranges>
+#include <set>
+#include <stdexcept>
+#include <tuple>
+#include <utility>
+
+#include "trainvm/document.hpp"
+#include "trainvm/authority_document.hpp"
+#include "trainvm/reflection_json.hpp"
+
+namespace trainvm {
+namespace {
+
+using Json = nlohmann::json;
+
+constexpr std::size_t kMaximumRegistryBytes = 1U << 20U;
+constexpr std::size_t kMaximumComponents = 2048U;
+constexpr std::size_t kMaximumFields = 128U;
+constexpr std::size_t kMaximumValues = 256U;
+constexpr std::size_t kMaximumIdentityBytes = 192U;
+constexpr std::size_t kMaximumConfigurationBytes = 64U << 10U;
+constexpr std::size_t kMaximumCompositionBytes = 512U << 10U;
+constexpr std::size_t kMaximumStringValueBytes = 4096U;
+
+[[noreturn]] void reject(std::string message) {
+  throw TrainingComponentResolutionError(std::move(message));
+}
+
+bool symbolic_identity(std::string_view value, bool allow_wildcard = false,
+                       bool allow_leading_digit = false) {
+  if (value.empty() || value.size() > kMaximumIdentityBytes ||
+      (!allow_wildcard && value == "*"))
+    return false;
+  if (allow_wildcard && value == "*") return true;
+  if (!((value.front() >= 'a' && value.front() <= 'z') ||
+        (value.front() >= 'A' && value.front() <= 'Z') ||
+        (allow_leading_digit && value.front() >= '0' &&
+         value.front() <= '9')))
+    return false;
+  return std::ranges::all_of(value, [](char character) {
+    return (character >= 'a' && character <= 'z') ||
+           (character >= 'A' && character <= 'Z') ||
+           (character >= '0' && character <= '9') || character == '_' ||
+           character == '-' || character == '.' || character == ':';
+  });
+}
+
+bool value_has_type(TrainingValueType type, const Json& value) {
+  switch (type) {
+    case TrainingValueType::boolean:
+      return value.is_boolean();
+    case TrainingValueType::integer:
+      return value.is_number_integer();
+    case TrainingValueType::number:
+      return value.is_number() &&
+             (!value.is_number_float() ||
+              std::isfinite(value.get<double>()));
+    case TrainingValueType::string:
+    case TrainingValueType::enumeration:
+      return value.is_string();
+  }
+  return false;
+}
+
+bool bounded_scalar(const Json& value) {
+  return !value.is_string() ||
+         value.get_ref<const std::string&>().size() <=
+             kMaximumStringValueBytes;
+}
+
+bool scheduled(TrainingComponentCategory category) {
+  return category == TrainingComponentCategory::learning_rate_schedule ||
+         category == TrainingComponentCategory::weight_decay_schedule ||
+         category == TrainingComponentCategory::gradient_accumulation ||
+         category == TrainingComponentCategory::curriculum;
+}
+
+std::vector<std::string> canonical_strings(
+    std::vector<std::string> values, std::string_view field,
+    bool allow_wildcard = false) {
+  if (values.empty() || values.size() > kMaximumValues ||
+      std::ranges::any_of(values, [&](const std::string& value) {
+        return !symbolic_identity(value, allow_wildcard);
+      }))
+    reject("training component " + std::string(field) +
+           " must be a bounded list of symbolic identities");
+  std::ranges::sort(values);
+  if (std::ranges::adjacent_find(values) != values.end())
+    reject("training component " + std::string(field) +
+           " must be unique");
+  return values;
+}
+
+void validate_field(TrainingComponentField& field, bool state_field) {
+  if (!symbolic_identity(field.name) ||
+      (field.unit && !symbolic_identity(*field.unit)) ||
+      (field.description && field.description->size() > 2048U))
+    reject("training component field identity is malformed");
+  if (field.minimum && (!std::isfinite(*field.minimum) ||
+                        (field.maximum && *field.minimum > *field.maximum)))
+    reject("training component field numeric bounds are invalid");
+  if (field.maximum && !std::isfinite(*field.maximum))
+    reject("training component field numeric bounds are invalid");
+  if ((field.minimum || field.maximum) &&
+      field.type != TrainingValueType::integer &&
+      field.type != TrainingValueType::number)
+    reject("only numeric training component fields may have bounds");
+  if (field.values) {
+    if (field.type != TrainingValueType::enumeration ||
+        field.values->empty() || field.values->size() > kMaximumValues ||
+        std::ranges::any_of(*field.values, [&](const Json& value) {
+          return !value_has_type(field.type, value) ||
+                 !bounded_scalar(value);
+        }))
+      reject("training component enum field values are invalid");
+    std::ranges::sort(*field.values);
+    if (std::ranges::adjacent_find(*field.values) != field.values->end())
+      reject("training component enum field values must be unique");
+  } else if (field.type == TrainingValueType::enumeration) {
+    reject("training component enum field requires declared values");
+  }
+  if (state_field && (field.default_value || field.minimum || field.maximum ||
+                      field.values || field.unit))
+    reject("training component state fields describe shape, not configuration");
+  if (field.default_value) {
+    if (!value_has_type(field.type, *field.default_value) ||
+        !bounded_scalar(*field.default_value))
+      reject("training component field default has the wrong type");
+    const double numeric = field.default_value->is_number()
+                               ? field.default_value->get<double>()
+                               : 0.0;
+    if ((field.minimum && numeric < *field.minimum) ||
+        (field.maximum && numeric > *field.maximum) ||
+        (field.values &&
+         std::ranges::find(*field.values, *field.default_value) ==
+             field.values->end()))
+      reject("training component field default violates its contract");
+  }
+}
+
+void canonical_fields(std::vector<TrainingComponentField>& fields,
+                      bool state_fields) {
+  if (fields.size() > kMaximumFields)
+    reject("training component field list exceeds its bound");
+  for (TrainingComponentField& field : fields)
+    validate_field(field, state_fields);
+  std::ranges::sort(fields, {}, &TrainingComponentField::name);
+  if (std::ranges::adjacent_find(
+          fields, {}, &TrainingComponentField::name) != fields.end())
+    reject("training component field names must be unique");
+}
+
+void validate_descriptor(TrainingComponentDescriptor& descriptor) {
+  if (!symbolic_identity(descriptor.key.name) ||
+      !symbolic_identity(descriptor.key.version, false, true) ||
+      !symbolic_identity(descriptor.implementation))
+    reject("training component key or implementation is malformed");
+  descriptor.model_families = canonical_strings(
+      std::move(descriptor.model_families), "model_families", true);
+  if (std::ranges::contains(descriptor.model_families, std::string{"*"}) &&
+      descriptor.model_families.size() != 1U)
+    reject("wildcard model-family compatibility must be declared alone");
+  if (!descriptor.required_capabilities.empty()) {
+    descriptor.required_capabilities = canonical_strings(
+        std::move(descriptor.required_capabilities),
+        "required_capabilities");
+  }
+  canonical_fields(descriptor.configuration, false);
+  canonical_fields(descriptor.state, true);
+  if (scheduled(descriptor.key.category) != descriptor.step_domain.has_value())
+    reject("schedule-like training components require exactly one step domain");
+  if ((descriptor.state_grade == TrainingStateGrade::stateless) !=
+      descriptor.state.empty())
+    reject("training component state grade disagrees with its state schema");
+  if (descriptor.reference_implementation &&
+      descriptor.backend == TrainingComponentBackend::cuda_extension)
+    reject("a CUDA extension cannot be the portable reference implementation");
+}
+
+Json resolve_configuration(const TrainingComponentDescriptor& descriptor,
+                           const Json& requested) {
+  if (!requested.is_object() ||
+      requested.dump().size() > kMaximumConfigurationBytes)
+    reject("training component configuration must be an object");
+  Json resolved = Json::object();
+  std::map<std::string, const TrainingComponentField*, std::less<>> fields;
+  for (const TrainingComponentField& field : descriptor.configuration) {
+    fields.emplace(field.name, &field);
+    if (field.default_value) resolved[field.name] = *field.default_value;
+  }
+  for (const auto& [name, value] : requested.items()) {
+    const auto field = fields.find(name);
+    if (field == fields.end())
+      reject("training component configuration contains an unknown field");
+    const TrainingComponentField& contract = *field->second;
+    if (!value_has_type(contract.type, value) || !bounded_scalar(value))
+      reject("training component configuration field has the wrong type");
+    if (value.is_number()) {
+      const double numeric = value.get<double>();
+      if ((contract.minimum && numeric < *contract.minimum) ||
+          (contract.maximum && numeric > *contract.maximum))
+        reject("training component configuration violates a numeric bound");
+    }
+    if (contract.values &&
+        std::ranges::find(*contract.values, value) == contract.values->end())
+      reject("training component configuration violates an enum contract");
+    resolved[name] = value;
+  }
+  for (const TrainingComponentField& field : descriptor.configuration) {
+    if (field.required && !resolved.contains(field.name))
+      reject("training component configuration is missing a required field");
+  }
+  return resolved;
+}
+
+Json canonical_descriptor(const TrainingComponentDescriptor& descriptor) {
+  return encode_json(descriptor);
+}
+
+Json composition_body(const ResolvedTrainingComposition& composition) {
+  Json components = Json::object();
+  for (const auto& [slot, component] : composition.components) {
+    components[slot] = {
+        {"configuration", component.configuration},
+        {"descriptor", canonical_descriptor(component.descriptor)},
+        {"descriptor_digest", component.descriptor_digest},
+    };
+  }
+  return {{"api_version", "trainvm.resolved-training-composition/v1"},
+          {"components", std::move(components)},
+          {"model_family", composition.model_family},
+          {"registry_digest", composition.registry_digest}};
+}
+
+}  // namespace
+
+TrainingComponentRegistry::TrainingComponentRegistry(
+    std::vector<TrainingComponentDescriptor> descriptors) {
+  if (descriptors.size() > kMaximumComponents)
+    reject("training component registry exceeds its component bound");
+  for (TrainingComponentDescriptor& descriptor : descriptors) {
+    validate_descriptor(descriptor);
+    const TrainingComponentKey key = descriptor.key;
+    if (!descriptors_.emplace(key, std::move(descriptor)).second)
+      reject("training component registry contains a duplicate exact key");
+  }
+  const std::string canonical_registry =
+      Json{{"api_version", "trainvm.training-components/v1"},
+           {"components", descriptors_json()}}
+          .dump();
+  if (canonical_registry.size() > kMaximumRegistryBytes)
+    reject("training component registry exceeds its canonical byte bound");
+  registry_digest_ = "sha256:" + sha256_hex(canonical_registry);
+}
+
+TrainingComponentRegistry TrainingComponentRegistry::from_json(
+    std::string_view document) {
+  if (document.empty() || document.size() > kMaximumRegistryBytes)
+    reject("training component registry document size is invalid");
+  Json source;
+  bool duplicate_key = false;
+  std::vector<std::set<std::string>> object_keys;
+  try {
+    const Json::parser_callback_t reject_duplicates =
+        [&](int depth, Json::parse_event_t event, Json& parsed) {
+          const auto index = static_cast<std::size_t>(depth);
+          if (event == Json::parse_event_t::object_start) {
+            if (object_keys.size() <= index + 1U)
+              object_keys.resize(index + 2U);
+            object_keys[index + 1U].clear();
+          } else if (event == Json::parse_event_t::key) {
+            if (object_keys.size() <= index) object_keys.resize(index + 1U);
+            if (!object_keys[index].insert(parsed.get<std::string>()).second)
+              duplicate_key = true;
+          } else if (event == Json::parse_event_t::object_end &&
+                     object_keys.size() > index + 1U) {
+            object_keys[index + 1U].clear();
+          }
+          return true;
+        };
+    source = Json::parse(document, reject_duplicates);
+  } catch (const Json::exception& exception) {
+    reject("training component registry is not valid JSON: " +
+           std::string(exception.what()));
+  }
+  if (duplicate_key)
+    reject("training component registry contains a duplicate object key");
+  TrainingComponentRegistryDocument decoded;
+  std::vector<Diagnostic> diagnostics;
+  if (!decode_json(source, decoded, "", diagnostics))
+    reject("training component registry schema validation failed: " +
+           diagnostics_json(diagnostics).dump());
+  if (decoded.api_version != "trainvm.training-components/v1")
+    reject("training component registry api_version is unsupported");
+  return TrainingComponentRegistry(std::move(decoded.components));
+}
+
+TrainingComponentRegistry TrainingComponentRegistry::load_file(
+    const std::filesystem::path& path) {
+  return from_json(read_authority_document(
+      path, "training component registry", kMaximumRegistryBytes));
+}
+
+const TrainingComponentDescriptor& TrainingComponentRegistry::descriptor(
+    const TrainingComponentKey& key) const {
+  const auto found = descriptors_.find(key);
+  if (found == descriptors_.end())
+    reject("no training component matches the exact requested key");
+  return found->second;
+}
+
+ResolvedTrainingComponent TrainingComponentRegistry::resolve(
+    const TrainingComponentRequest& request) const {
+  if (!symbolic_identity(request.model_family))
+    reject("training component request has an invalid model family");
+  const TrainingComponentDescriptor& selected = descriptor(request.key);
+  if (!std::ranges::contains(selected.model_families, std::string{"*"}) &&
+      !std::ranges::contains(selected.model_families, request.model_family))
+    reject("training component is incompatible with the requested model family");
+  return {
+      .descriptor = selected,
+      .configuration =
+          resolve_configuration(selected, request.configuration),
+      .descriptor_digest = descriptor_digest(request.key),
+  };
+}
+
+ResolvedTrainingComposition TrainingComponentRegistry::resolve_composition(
+    const TrainingComposition& composition) const {
+  if (!symbolic_identity(composition.model_family) ||
+      composition.components.empty() ||
+      composition.components.size() > 64U)
+    reject("training composition identity or component count is invalid");
+  ResolvedTrainingComposition resolved{
+      .model_family = composition.model_family,
+      .components = {},
+      .registry_digest = registry_digest_,
+      .composition_digest = {},
+  };
+  for (const auto& [slot, selection] : composition.components) {
+    if (!symbolic_identity(slot))
+      reject("training composition slot identity is invalid");
+    resolved.components.emplace(
+        slot, resolve({.key = selection.key,
+                       .model_family = composition.model_family,
+                       .configuration = selection.configuration}));
+  }
+  const std::string canonical_composition = composition_body(resolved).dump();
+  if (canonical_composition.size() > kMaximumCompositionBytes)
+    reject("resolved training composition exceeds its canonical byte bound");
+  resolved.composition_digest =
+      "sha256:" + sha256_hex(canonical_composition);
+  return resolved;
+}
+
+WorkerLaunchRequest TrainingComponentRegistry::augment_worker_launch_request(
+    WorkerLaunchRequest request,
+    const std::optional<TrainingComposition>& composition) const {
+  if (!composition) return request;
+  const ResolvedTrainingComposition resolved =
+      resolve_composition(*composition);
+  for (const auto& [slot, component] : resolved.components) {
+    (void)slot;
+    request.required_capabilities.insert(
+        request.required_capabilities.end(),
+        component.descriptor.required_capabilities.begin(),
+        component.descriptor.required_capabilities.end());
+  }
+  std::ranges::sort(request.required_capabilities);
+  request.required_capabilities.erase(
+      std::ranges::unique(request.required_capabilities).begin(),
+      request.required_capabilities.end());
+  if (request.required_capabilities.size() > kMaximumValues)
+    reject("composed worker capabilities exceed their bound");
+  return request;
+}
+
+Json resolved_training_composition_json(
+    const ResolvedTrainingComposition& composition) {
+  if (composition.composition_digest !=
+      "sha256:" + sha256_hex(composition_body(composition).dump()))
+    reject("resolved training composition digest is not canonical");
+  Json result = composition_body(composition);
+  result["composition_digest"] = composition.composition_digest;
+  return result;
+}
+
+bool TrainingComponentRegistry::plan_uses_components(
+    const CompiledPlan& plan) const {
+  return std::ranges::any_of(
+      plan.experiment.spec.workflow.nodes, [](const auto& item) {
+        return item.second.invoke.training.has_value();
+      });
+}
+
+void TrainingComponentRegistry::validate_plan(const CompiledPlan& plan) const {
+  for (const auto& [node_name, node] :
+       plan.experiment.spec.workflow.nodes) {
+    if (!node.invoke.training) continue;
+    const Component& component =
+        plan.experiment.spec.components.at(node.invoke.component);
+    if (component.runtime == ComponentRuntime::builtin ||
+        node.effect != Effect::process)
+      reject("workflow node " + node_name +
+             " attaches training components to a non-worker process operation");
+    const ResolvedTrainingComposition resolved =
+        resolve_composition(*node.invoke.training);
+    if (plan.experiment.spec.recovery.exact_resume &&
+        std::ranges::any_of(
+            resolved.components, [](const auto& item) {
+              return item.second.descriptor.state_grade ==
+                     TrainingStateGrade::compatible;
+            }))
+      reject("workflow node " + node_name +
+             " requests exact resume with a compatibility-grade training component");
+  }
+}
+
+std::string TrainingComponentRegistry::plan_lock_manifest(
+    const CompiledPlan& plan) const {
+  validate_plan(plan);
+  Json nodes = Json::object();
+  for (const auto& [node_name, node] :
+       plan.experiment.spec.workflow.nodes) {
+    if (node.invoke.training) {
+      nodes[node_name] = resolved_training_composition_json(
+          resolve_composition(*node.invoke.training));
+    }
+  }
+  return Json{{"api_version", "trainvm.training-component-lock/v1"},
+              {"nodes", std::move(nodes)},
+              {"registry_digest", registry_digest_}}
+      .dump();
+}
+
+std::string TrainingComponentRegistry::plan_lock_digest(
+    const CompiledPlan& plan) const {
+  return "sha256:" + sha256_hex(plan_lock_manifest(plan));
+}
+
+void TrainingComponentRegistry::validate_submission_lock(
+    const CompiledPlan& plan, const Json& submission) const {
+  if (!plan_uses_components(plan)) return;
+  const std::string manifest = plan_lock_manifest(plan);
+  const std::string digest = "sha256:" + sha256_hex(manifest);
+  if (!submission.is_object() ||
+      submission.value("training_component_lock_digest", std::string{}) !=
+          digest ||
+      !submission.contains("training_component_lock") ||
+      submission.at("training_component_lock") != Json::parse(manifest))
+    reject("run training-component lock differs from the authority registry");
+}
+
+const std::string& TrainingComponentRegistry::registry_digest() const noexcept {
+  return registry_digest_;
+}
+
+std::string TrainingComponentRegistry::descriptor_digest(
+    const TrainingComponentKey& key) const {
+  return "sha256:" + sha256_hex(canonical_descriptor(descriptor(key)).dump());
+}
+
+Json TrainingComponentRegistry::descriptors_json() const {
+  Json components = Json::array();
+  for (const auto& [key, descriptor] : descriptors_) {
+    (void)key;
+    components.push_back(canonical_descriptor(descriptor));
+  }
+  return components;
+}
+
+}  // namespace trainvm

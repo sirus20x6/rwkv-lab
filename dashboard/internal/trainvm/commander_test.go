@@ -52,7 +52,8 @@ func TestSubmissionRPCRequestFencesAuthorityAndPreview(t *testing.T) {
 		SourceDocument: `{"kind":"Experiment"}`, SourceFormat: " JSON ", CreateRun: true,
 		IdempotencyKey: " submission-1 ", ExpectedJournalID: " journal-1 ",
 		ExpectedPlanHash: " plan-1 ", ExpectedAdapterLockDigest: " lock-1 ",
-		Author: " operator ", Reason: " launch ",
+		ExpectedTrainingComponentLockDigest: " training-lock-1 ",
+		Author:                              " operator ", Reason: " launch ",
 	})
 	if err != nil {
 		t.Fatalf("map submission request: %v", err)
@@ -61,7 +62,9 @@ func TestSubmissionRPCRequestFencesAuthorityAndPreview(t *testing.T) {
 		request.GetIdempotencyKey() != "submission-1" ||
 		request.GetExpectedJournalId() != "journal-1" ||
 		request.GetExpectedPlanHash() != "plan-1" ||
-		request.GetExpectedAdapterLockDigest() != "lock-1" || request.GetAuthor() != "operator" ||
+		request.GetExpectedAdapterLockDigest() != "lock-1" ||
+		request.GetExpectedTrainingComponentLockDigest() != "training-lock-1" ||
+		request.GetAuthor() != "operator" ||
 		request.GetReason() != "launch" {
 		t.Fatalf("submission fence was not preserved: %#v", request)
 	}

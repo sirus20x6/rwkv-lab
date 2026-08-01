@@ -16,6 +16,7 @@
 #include "trainvm/authority_time.hpp"
 #include "trainvm/host_launch.hpp"
 #include "trainvm/reconciler.hpp"
+#include "trainvm/training_component_registry.hpp"
 #include "trainvm/v1/trainvm.grpc.pb.h"
 
 namespace trainvm {
@@ -47,7 +48,9 @@ class TrainVMService final : public v1::TrainVM::Service,
       const std::filesystem::path& journal_path,
       AdapterRegistry adapter_registry,
       HostLaunchRegistry host_launch_registry,
-      std::function<AuthorityTimeSample()> authority_clock = {});
+      std::function<AuthorityTimeSample()> authority_clock = {},
+      TrainingComponentRegistry training_components =
+          TrainingComponentRegistry({}));
   ~TrainVMService() override;
 
   grpc::Status SubmitExperiment(grpc::ServerContext* context,
@@ -108,7 +111,9 @@ class TrainVMService final : public v1::TrainVM::Service,
                  HostIdentity authority_host,
                  std::function<AuthorityTimeSample()> authority_clock,
                  HostGrantEnforcement host_grant_enforcement =
-                     HostGrantEnforcement::required);
+                     HostGrantEnforcement::required,
+                 TrainingComponentRegistry training_components =
+                     TrainingComponentRegistry({}));
 
   static constexpr std::size_t kMaximumRetainedLaunches = 32U;
   static constexpr std::uint64_t kMaximumRetainedLaunchBytes = 2ULL << 30U;
@@ -121,6 +126,7 @@ class TrainVMService final : public v1::TrainVM::Service,
   std::shared_ptr<AuthorityClock> authority_clock_;
   const AdapterRegistry adapter_registry_;
   const HostLaunchRegistry host_launch_registry_;
+  const TrainingComponentRegistry training_components_;
   const HostIdentity authority_host_;
   HostLaunchResolver host_launch_resolver_;
   Reconciler reconciler_;
@@ -134,6 +140,8 @@ class TrainVMService final : public v1::TrainVM::Service,
 int serve(const std::filesystem::path& journal_path,
           const std::filesystem::path& socket_path,
           AdapterRegistry adapter_registry,
-          HostLaunchRegistry host_launch_registry);
+          HostLaunchRegistry host_launch_registry,
+          TrainingComponentRegistry training_components =
+              TrainingComponentRegistry({}));
 
 }  // namespace trainvm

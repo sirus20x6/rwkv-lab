@@ -151,6 +151,8 @@
       submissionIntent.journalID ||= payload.expected_journal_id;
       submissionIntent.planHash ||= payload.expected_plan_hash;
       submissionIntent.adapterLockDigest ||= payload.expected_adapter_lock_digest;
+      submissionIntent.trainingComponentLockDigest ||=
+        payload.expected_training_component_lock_digest || "";
       const reason = byID("vm-submit-reason");
       if (reason) reason.value = payload.reason || "";
     } catch (_) {
@@ -246,6 +248,7 @@
       validatedDraft = result.valid && result.plan_hash && result.adapter_lock_digest ? {
         generation, source, planHash: String(result.plan_hash),
         adapterLockDigest: String(result.adapter_lock_digest),
+        trainingComponentLockDigest: String(result.training_component_lock_digest || ""),
       } : null;
       updateSubmitState();
       if (state) state.textContent = result.valid ? `valid · ${String(result.plan_hash || "").slice(0, 12)}` : "native compiler rejected draft";
@@ -272,12 +275,16 @@
           expected_journal_id: authorityJournalID,
           expected_plan_hash: validatedDraft.planHash,
           expected_adapter_lock_digest: validatedDraft.adapterLockDigest,
+          expected_training_component_lock_digest:
+            validatedDraft.trainingComponentLockDigest,
           reason: reason.value.trim(),
         }),
         source: validatedDraft.source,
         journalID: authorityJournalID,
         planHash: validatedDraft.planHash,
         adapterLockDigest: validatedDraft.adapterLockDigest,
+        trainingComponentLockDigest:
+          validatedDraft.trainingComponentLockDigest,
       };
       persistSubmissionIntent();
     }
@@ -315,7 +322,9 @@
       const runID = result?.run?.run_id || "";
       if (!runID || result.plan_hash !== intent.planHash ||
           result.run?.plan_hash !== intent.planHash ||
-          result.adapter_lock_digest !== intent.adapterLockDigest) {
+          result.adapter_lock_digest !== intent.adapterLockDigest ||
+          String(result.training_component_lock_digest || "") !==
+            intent.trainingComponentLockDigest) {
         finalMessage = "authority returned an inconsistent result · retry exact submission";
         return;
       }

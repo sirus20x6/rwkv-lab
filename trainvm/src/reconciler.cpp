@@ -6,6 +6,14 @@
 #include "trainvm/controller.hpp"
 
 namespace trainvm {
+namespace {
+
+const TrainingComponentRegistry& empty_training_component_registry() {
+  static const TrainingComponentRegistry registry({});
+  return registry;
+}
+
+}  // namespace
 
 HostGrantSagaReconciler::HostGrantSagaReconciler(
     Journal& journal, IHostGrantClient& host,
@@ -72,7 +80,15 @@ HostGrantSagaSnapshot HostGrantSagaReconciler::reconcile_release(
 Reconciler::Reconciler(Journal& journal, const AdapterRegistry& registry,
                        std::mutex& authority_mutex,
                        std::function<AuthorityTimeSample()> authority_clock)
+    : Reconciler(journal, registry, empty_training_component_registry(),
+                 authority_mutex, std::move(authority_clock)) {}
+
+Reconciler::Reconciler(Journal& journal, const AdapterRegistry& registry,
+                       const TrainingComponentRegistry& training_components,
+                       std::mutex& authority_mutex,
+                       std::function<AuthorityTimeSample()> authority_clock)
     : journal_(journal), registry_(registry),
+      training_components_(training_components),
       authority_mutex_(authority_mutex),
       authority_clock_(
           std::make_shared<AuthorityClock>(std::move(authority_clock))) {
@@ -99,12 +115,15 @@ ReconcileResult Reconciler::step(const std::string& run_id) {
   }
   // Registry authority is checked before any state or lease mutation.
   registry_.validate_plan(*plan);
+  training_components_.validate_plan(*plan);
   const auto created = journal_.event(run_id + ":created");
   if (!created || created->event_type != "run.created" ||
       !created->payload.contains("submission")) {
     throw std::runtime_error("run has no durable adapter lock identity");
   }
   registry_.validate_submission_lock(
+      *plan, created->payload.at("submission"));
+  training_components_.validate_submission_lock(
       *plan, created->payload.at("submission"));
 
   Controller controller(*plan, journal_, run_id);
@@ -161,7 +180,10 @@ ReconcileResult Reconciler::step(const std::string& run_id) {
         controller.state().current_attempt_id;
     const bool replay = journal_.event(launch_id).has_value();
     const WorkerLaunchRequest request =
-        registry_.worker_launch_request(component, node.invoke.operation);
+        training_components_.augment_worker_launch_request(
+            registry_.worker_launch_request(component,
+                                            node.invoke.operation),
+            node.invoke.training);
     result.launch = controller.prepare_worker_launch(request, now);
     result.disposition = replay ? ReconcileDisposition::launch_replayed
                                 : ReconcileDisposition::launch_prepared;

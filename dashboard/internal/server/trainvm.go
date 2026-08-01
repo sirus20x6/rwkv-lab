@@ -187,6 +187,8 @@ func (s *Server) handleTrainVMCompile(w http.ResponseWriter, r *http.Request) {
 		}
 		merged["adapter_lock_digest"] = preview.AdapterLockDigest
 		merged["canonical_adapter_lock"] = preview.CanonicalAdapterLock
+		merged["training_component_lock_digest"] = preview.TrainingComponentLockDigest
+		merged["canonical_training_component_lock"] = preview.CanonicalTrainingComponentLock
 		if len(preview.Diagnostics) != 0 {
 			existing, _ := merged["diagnostics"].([]any)
 			for _, diagnostic := range preview.Diagnostics {
@@ -219,14 +221,15 @@ type trainVMControlRequest struct {
 }
 
 type trainVMSubmissionRequest struct {
-	SourceDocument            string `json:"source_document"`
-	SourceFormat              string `json:"source_format"`
-	CreateRun                 bool   `json:"create_run"`
-	IdempotencyKey            string `json:"idempotency_key"`
-	ExpectedJournalID         string `json:"expected_journal_id"`
-	ExpectedPlanHash          string `json:"expected_plan_hash"`
-	ExpectedAdapterLockDigest string `json:"expected_adapter_lock_digest"`
-	Reason                    string `json:"reason"`
+	SourceDocument                      string `json:"source_document"`
+	SourceFormat                        string `json:"source_format"`
+	CreateRun                           bool   `json:"create_run"`
+	IdempotencyKey                      string `json:"idempotency_key"`
+	ExpectedJournalID                   string `json:"expected_journal_id"`
+	ExpectedPlanHash                    string `json:"expected_plan_hash"`
+	ExpectedAdapterLockDigest           string `json:"expected_adapter_lock_digest"`
+	ExpectedTrainingComponentLockDigest string `json:"expected_training_component_lock_digest"`
+	Reason                              string `json:"reason"`
 }
 
 func (s *Server) handleTrainVMSubmit(w http.ResponseWriter, r *http.Request) {
@@ -251,6 +254,7 @@ func (s *Server) handleTrainVMSubmit(w http.ResponseWriter, r *http.Request) {
 	input.ExpectedJournalID = strings.TrimSpace(input.ExpectedJournalID)
 	input.ExpectedPlanHash = strings.TrimSpace(input.ExpectedPlanHash)
 	input.ExpectedAdapterLockDigest = strings.TrimSpace(input.ExpectedAdapterLockDigest)
+	input.ExpectedTrainingComponentLockDigest = strings.TrimSpace(input.ExpectedTrainingComponentLockDigest)
 	if input.ExpectedJournalID == "" || (input.CreateRun && (input.ExpectedPlanHash == "" || input.ExpectedAdapterLockDigest == "")) {
 		http.Error(w, "submission requires expected journal, plan, and adapter-lock identities", http.StatusBadRequest)
 		return
@@ -263,8 +267,9 @@ func (s *Server) handleTrainVMSubmit(w http.ResponseWriter, r *http.Request) {
 		SourceDocument: input.SourceDocument, SourceFormat: input.SourceFormat,
 		CreateRun: input.CreateRun, IdempotencyKey: input.IdempotencyKey,
 		ExpectedJournalID: input.ExpectedJournalID, ExpectedPlanHash: input.ExpectedPlanHash,
-		ExpectedAdapterLockDigest: input.ExpectedAdapterLockDigest,
-		Author:                    "dashboard", Reason: input.Reason,
+		ExpectedAdapterLockDigest:           input.ExpectedAdapterLockDigest,
+		ExpectedTrainingComponentLockDigest: input.ExpectedTrainingComponentLockDigest,
+		Author:                              "dashboard", Reason: input.Reason,
 	})
 	if err != nil {
 		writeTrainVMAuthorityError(w, err)
@@ -281,6 +286,7 @@ func (s *Server) handleTrainVMSubmit(w http.ResponseWriter, r *http.Request) {
 		}
 		if result.PlanHash != input.ExpectedPlanHash || result.Run.PlanHash != input.ExpectedPlanHash ||
 			result.AdapterLockDigest != input.ExpectedAdapterLockDigest ||
+			result.TrainingComponentLockDigest != input.ExpectedTrainingComponentLockDigest ||
 			strings.TrimSpace(result.Run.RunID) == "" {
 			http.Error(w, "native authority returned a mismatched submission identity", http.StatusBadGateway)
 			return

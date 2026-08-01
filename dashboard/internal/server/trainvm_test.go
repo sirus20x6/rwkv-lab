@@ -213,10 +213,12 @@ func TestTrainVMAuthoringEndpoints(t *testing.T) {
 
 func TestTrainVMCompileMergesAuthorityAdapterPreview(t *testing.T) {
 	commander := &fakeTrainVMCommander{submissionResult: trainvmstore.SubmissionResult{
-		PlanHash:             "native-hash",
-		CanonicalPlan:        `{"kind":"Experiment"}`,
-		AdapterLockDigest:    "sha256:adapter-lock",
-		CanonicalAdapterLock: `{"api_version":"trainvm.adapter-lock/v1","profiles":[]}`,
+		PlanHash:                       "native-hash",
+		CanonicalPlan:                  `{"kind":"Experiment"}`,
+		AdapterLockDigest:              "sha256:adapter-lock",
+		CanonicalAdapterLock:           `{"api_version":"trainvm.adapter-lock/v1","profiles":[]}`,
+		TrainingComponentLockDigest:    "sha256:training-lock",
+		CanonicalTrainingComponentLock: `{"api_version":"trainvm.training-component-lock/v1","nodes":{}}`,
 		Diagnostics: []trainvmstore.ControlDiagnostic{{
 			Severity: "ERROR", Code: "adapter.registry", Path: "/spec/components",
 			Message: "profile is not authorized",
@@ -236,6 +238,8 @@ func TestTrainVMCompileMergesAuthorityAdapterPreview(t *testing.T) {
 		commander.submission.ExpectedJournalID != "0123456789abcdef0123456789abcdef" ||
 		!strings.Contains(response.Body.String(), `"adapter_lock_digest":"sha256:adapter-lock"`) ||
 		!strings.Contains(response.Body.String(), `"canonical_adapter_lock":"{\"api_version\":`) ||
+		!strings.Contains(response.Body.String(), `"training_component_lock_digest":"sha256:training-lock"`) ||
+		!strings.Contains(response.Body.String(), `"canonical_training_component_lock":"{\"api_version\":`) ||
 		!strings.Contains(response.Body.String(), `"valid":false`) ||
 		!strings.Contains(response.Body.String(), `"code":"adapter.registry"`) {
 		t.Fatalf("authority adapter preview was not merged: status=%d request=%#v body=%s",
@@ -303,13 +307,14 @@ func TestTrainVMControlEndpointUsesNativeCommander(t *testing.T) {
 
 func TestTrainVMSubmissionEndpointUsesNativeCommander(t *testing.T) {
 	commander := &fakeTrainVMCommander{submissionResult: trainvmstore.SubmissionResult{
-		PlanHash: "native-plan", AdapterLockDigest: "native-lock", Run: &trainvmstore.RunIdentity{
+		PlanHash: "native-plan", AdapterLockDigest: "native-lock",
+		TrainingComponentLockDigest: "training-lock", Run: &trainvmstore.RunIdentity{
 			RunID: "run-new", Revision: 1, PlanHash: "native-plan",
 		},
 	}}
 	srv := New(Config{Commander: commander, TrainVM: trainVMFixture(t)})
 	request := httptest.NewRequest(http.MethodPost, "/api/trainvm/experiments",
-		strings.NewReader(`{"source_document":"{\"kind\":\"Experiment\"}","source_format":"json","create_run":true,"idempotency_key":"submit-1","expected_journal_id":"0123456789abcdef0123456789abcdef","expected_plan_hash":"native-plan","expected_adapter_lock_digest":"native-lock","reason":"launch test"}`))
+		strings.NewReader(`{"source_document":"{\"kind\":\"Experiment\"}","source_format":"json","create_run":true,"idempotency_key":"submit-1","expected_journal_id":"0123456789abcdef0123456789abcdef","expected_plan_hash":"native-plan","expected_adapter_lock_digest":"native-lock","expected_training_component_lock_digest":"training-lock","reason":"launch test"}`))
 	request.Host = "127.0.0.1:9124"
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
@@ -321,6 +326,7 @@ func TestTrainVMSubmissionEndpointUsesNativeCommander(t *testing.T) {
 		commander.submission.ExpectedJournalID != "0123456789abcdef0123456789abcdef" ||
 		commander.submission.ExpectedPlanHash != "native-plan" ||
 		commander.submission.ExpectedAdapterLockDigest != "native-lock" ||
+		commander.submission.ExpectedTrainingComponentLockDigest != "training-lock" ||
 		!strings.Contains(response.Body.String(), `"run_id":"run-new"`) {
 		t.Fatalf("unexpected submission forwarding: status=%d request=%#v body=%s",
 			response.Code, commander.submission, response.Body.String())

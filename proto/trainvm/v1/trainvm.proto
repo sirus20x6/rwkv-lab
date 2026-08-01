@@ -118,6 +118,7 @@ message SubmitExperimentRequest {
   string reason = 7;
   string expected_plan_hash = 8; // required for create_run; fences preview/compiler skew
   string expected_adapter_lock_digest = 9; // required for create_run; fences registry skew
+  string expected_training_component_lock_digest = 10; // required only when preview selects training components
 }
 
 message SubmitExperimentResponse {
@@ -128,6 +129,8 @@ message SubmitExperimentResponse {
   RunIdentity run = 5; // absent when create_run is false or validation fails
   string adapter_lock_digest = 6;
   string canonical_adapter_lock = 7;
+  string training_component_lock_digest = 8;
+  string canonical_training_component_lock = 9;
 }
 
 message PlanDiffRequest {

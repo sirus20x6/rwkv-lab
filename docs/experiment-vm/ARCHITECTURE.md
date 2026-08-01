@@ -205,6 +205,32 @@ Adding a trainer family requires one adapter and its tests. Creating another exp
 registered operations requires no new Go handler, HTML form, subprocess code, or Python supervisor.
 The dashboard generates its editor and live controls from descriptors.
 
+### Training-component registry
+
+Trainer families do not own private copies of common algorithm switches. A workflow process node
+may select a bounded `training` composition whose slots point to exact versioned entries in the
+independent `trainvm.training-components/v1` authority registry. Categories cover optimizer,
+parameter router, learning-rate and weight-decay schedule, activation, normalization, objective,
+precision/scaling, gradient clipping and accumulation, curriculum, and metric reducer. Slot names
+remain explicit so a topology can use several optimizers or schedules without hiding ownership in
+positional conventions.
+
+Each entry declares a reflected flat configuration contract, compatible model families, backend
+kind, authority-owned symbolic implementation identity, required worker capabilities, checkpoint
+state shape and grade, and—only for schedule-like components—an exact step domain. Resolution
+rejects unknown or ill-typed fields, applies declared defaults, and canonicalizes both descriptors
+and values. It then freezes the resolved per-node compositions in a content-addressed submission
+lock. The same resolved object is included in the immutable worker invocation; experiments never
+supply import paths, argv, environment variables, or implementation code.
+
+Required capabilities from all selected components are unioned with the adapter operation's
+capabilities before the launch intent is committed. A worker therefore cannot accept an optimizer
+or fused kernel it did not explicitly advertise. Components may only attach to external process
+operations, and an exact-resume plan rejects any selected stateful component whose state grade is
+merely compatible. Optimizer state, schedule/curriculum cursors, parameter-routing identity, and
+precision/scaler state become part of the later checkpoint manifest contract rather than ad hoc
+trainer files.
+
 ## VM and finite-state semantics
 
 The plan graph is a durable hierarchical state machine. The top-level run states are:

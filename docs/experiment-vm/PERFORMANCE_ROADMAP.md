@@ -52,7 +52,7 @@ state schema, lifecycle hooks, and qualification requirements. Construction is r
 string switches spread across MageFlow, RWKV, transformer, vision, and post-training loops are not
 an extension mechanism. Optimizer state and every schedule phase/cursor are part of checkpoint and
 resume identity. Parameter routing is explicit and exhaustive, with overlap and unclaimed-parameter
-checks. A schedule consumes a declared step domain (microbatch, optimizer step, token, image, or
+checks. A schedule consumes a declared step domain (microbatch, optimizer step, token, sample, or
 wall-time) and cannot infer one from a trainer's local counter.
 
 Implementation boundaries:

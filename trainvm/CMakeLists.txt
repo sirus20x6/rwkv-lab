@@ -52,6 +52,7 @@ add_library(trainvm_core
   src/adapter_invocation.cpp
   src/adapter_registry.cpp
   src/authority_time.cpp
+  src/authority_document.cpp
   src/cache_namespace.cpp
   src/control.cpp
   src/controller.cpp
@@ -79,6 +80,7 @@ add_library(trainvm_core
   src/lease_renewal.cpp
   src/linux_nvidia_inventory.cpp
   src/reconciler.cpp
+  src/training_component_registry.cpp
 )
 target_include_directories(trainvm_core PUBLIC include)
 target_compile_options(trainvm_core PUBLIC -freflection)
@@ -146,6 +148,19 @@ target_compile_definitions(adapter_invocation_tests PRIVATE
 )
 target_link_libraries(adapter_invocation_tests PRIVATE trainvm_core)
 add_test(NAME adapter_invocation_tests COMMAND adapter_invocation_tests)
+add_executable(training_component_registry_tests
+  tests/training_component_registry_tests.cpp
+)
+target_compile_options(training_component_registry_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_compile_definitions(training_component_registry_tests PRIVATE
+  TRAINVM_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/.."
+)
+target_link_libraries(training_component_registry_tests PRIVATE trainvm_core)
+add_test(NAME training_component_registry_tests
+  COMMAND training_component_registry_tests
+)
 add_executable(authority_time_tests tests/authority_time_tests.cpp)
 target_compile_options(authority_time_tests PRIVATE
   -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror

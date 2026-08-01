@@ -55,7 +55,8 @@ Json invocation_body(const WorkerInvocationSpec& value) {
       !value.workspace.is_object() || !value.resources.is_object() ||
       !value.inputs.is_object() || !value.controls.is_object() ||
       !value.publishes.is_object() || !value.observability.is_object() ||
-      (!value.execution.is_null() && !value.execution.is_object())) {
+      (!value.execution.is_null() && !value.execution.is_object()) ||
+      (!value.training.is_null() && !value.training.is_object())) {
     reject("worker invocation semantics are invalid");
   }
   return {{"adapter", encode_json(value.adapter)},
@@ -75,6 +76,7 @@ Json invocation_body(const WorkerInvocationSpec& value) {
           {"publishes", value.publishes},
           {"resources", value.resources},
           {"run_id", value.run_id},
+          {"training", value.training},
           {"workspace", value.workspace}};
 }
 
@@ -203,6 +205,12 @@ WorkerInvocationSpec build_worker_invocation(
     reject("worker invocation host identity is missing");
   if (!context.effective_controls.is_object())
     reject("worker invocation effective controls are not an object");
+  if (selected->second.invoke.training) {
+    if (!context.resolved_training.is_object())
+      reject("worker invocation has no authority-resolved training composition");
+  } else if (!context.resolved_training.is_null()) {
+    reject("worker invocation supplied training components to an undeclared node");
+  }
   const Node& node = selected->second;
   const Component& component = spec.components.at(node.invoke.component);
   const Operation& operation = component.operations.at(node.invoke.operation);
@@ -257,6 +265,7 @@ WorkerInvocationSpec build_worker_invocation(
       .publishes = std::move(publishes),
       .observability = encode_json(spec.observability),
       .execution = std::move(execution),
+      .training = context.resolved_training,
       .invocation_digest = {},
   };
   seal(result);
@@ -290,7 +299,7 @@ WorkerInvocationSpec worker_invocation_from_canonical_json(
                   "dispatch_id", "effective_control_revision", "execution",
                   "host_id", "inputs", "invocation_digest", "node_id", "observability",
                   "plan_hash", "plan_revision", "publishes", "resources",
-                  "run_id", "workspace"});
+                  "run_id", "training", "workspace"});
     AdapterKey adapter;
     std::vector<Diagnostic> diagnostics;
     if (!decode_json(parsed.at("adapter"), adapter, "/adapter", diagnostics))
@@ -314,6 +323,7 @@ WorkerInvocationSpec worker_invocation_from_canonical_json(
         .publishes = parsed.at("publishes"),
         .observability = parsed.at("observability"),
         .execution = parsed.at("execution"),
+        .training = parsed.at("training"),
         .invocation_digest =
             parsed.at("invocation_digest").get<std::string>(),
     };

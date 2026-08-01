@@ -28,6 +28,9 @@ struct WorkerInvocationContext final {
   // Applied control overrides only; defaults come from the immutable plan.
   nlohmann::json effective_controls = nlohmann::json::object();
   std::uint64_t effective_control_revision{};
+  // Authority-resolved, content-addressed training composition for this node,
+  // or null when the invocation declares none.
+  nlohmann::json resolved_training = nullptr;
 };
 
 // Immutable, content-addressed operation context delivered in WorkerWelcome.
@@ -51,6 +54,7 @@ struct WorkerInvocationSpec final {
   nlohmann::json publishes;
   nlohmann::json observability;
   nlohmann::json execution;
+  nlohmann::json training;
   std::string invocation_digest;
 
   bool operator==(const WorkerInvocationSpec&) const = default;
