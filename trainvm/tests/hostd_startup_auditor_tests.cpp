@@ -178,7 +178,8 @@ void retained_fence_blocks_until_process_adoption_exists() {
   require(report.findings.size() == 1U &&
               report.findings.front().code == "process-adoption-required" &&
               report.findings.front().severity ==
-                  HostStartupAuditFindingSeverity::blocking,
+                  HostStartupAuditFindingSeverity::blocking &&
+              report.findings.front().detail.contains("intent_only=0"),
           "blocking finding identifies adoption gap");
 }
 

@@ -128,7 +128,9 @@ Implemented now:
 - a read-only Linux process-recovery probe that opens the durable spawn PID with `pidfd_open`,
   double-samples proc starttime and unified cgroup membership around executable hashing, pins the
   recorded cgroup-v2 inode, and returns separate exact-live, already-gone, identity-mismatch, or
-  observation-failed dispositions without signalling the process;
+  observation-failed dispositions without signalling the process; the startup auditor runs this
+  probe for every unclosed spawn, retains exact pidfds through its final ledger observation, and
+  records bounded disposition counts in its blocking evidence;
 - an additive host-ledger v3 admission epoch that atomically finalizes an exact current audit and
   occupancy, keeps policy-enabled grants sealed beforehand, binds every later request to the active
   epoch, preserves release-only cleanup while startup is blocked, and exposes a read-only exact

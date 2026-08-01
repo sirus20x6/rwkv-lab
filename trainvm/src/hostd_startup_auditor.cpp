@@ -1,5 +1,7 @@
 #include "trainvm/hostd_startup_auditor.hpp"
 
+#include "trainvm/hostd_linux_process_recovery.hpp"
+
 #include <openssl/rand.h>
 
 #include <array>
@@ -40,16 +42,23 @@ std::string audit_id() {
 }
 
 HostStartupAuditFinding active_fence_finding(std::size_t count,
-                                             std::size_t spawned,
+                                             std::size_t exact_live,
+                                             std::size_t gone,
+                                             std::size_t mismatch,
+                                             std::size_t failed,
                                              std::size_t intent_only) {
   return canonicalize_host_startup_audit_finding({
       .severity = HostStartupAuditFindingSeverity::blocking,
       .code = "process-adoption-required",
       .subject = "host-ledger",
-      .detail = "startup found " + std::to_string(count) +
-                " active resource fences (" + std::to_string(spawned) +
-                " unclosed spawns, " + std::to_string(intent_only) +
-                " intent-only launches); durable process adoption is required",
+      .detail =
+          "startup found " + std::to_string(count) +
+          " active resource fences; process recovery classified exact_live=" +
+          std::to_string(exact_live) + ", gone=" + std::to_string(gone) +
+          ", mismatch=" + std::to_string(mismatch) +
+          ", observation_failed=" + std::to_string(failed) +
+          ", intent_only=" + std::to_string(intent_only) +
+          "; durable process adoption is required",
       .evidence_digest = {},
   });
 }
@@ -80,14 +89,43 @@ HostStartupAuditReport HostdConfiguredStartupAuditor::audit() {
       ledger_.active_process_recovery_records();
 
   std::vector<HostStartupAuditFinding> findings;
+  std::vector<LinuxRecoveredProcess> retained_processes;
   if (!occupancy_before.active_fences.empty()) {
-    const std::size_t spawned = static_cast<std::size_t>(std::ranges::count_if(
-        recovery, [](const HostProcessRecoveryRecord& record) {
-          return record.spawn.has_value();
-        }));
+    std::size_t exact_live = 0U;
+    std::size_t gone = 0U;
+    std::size_t mismatch = 0U;
+    std::size_t failed = 0U;
+    std::size_t intent_only = 0U;
+    retained_processes.reserve(recovery.size());
+    LinuxProcessRecoveryProbe probe;
+    for (const HostProcessRecoveryRecord& record : recovery) {
+      if (!record.spawn) {
+        ++intent_only;
+        continue;
+      }
+      LinuxProcessRecoveryResult observed = probe.observe(record.spawn->request);
+      switch (observed.disposition) {
+        case LinuxProcessRecoveryDisposition::exact_live_process:
+          if (!observed.process)
+            throw HostStartupAuditError(
+                "exact process recovery has no retained pidfd");
+          ++exact_live;
+          retained_processes.push_back(std::move(*observed.process));
+          break;
+        case LinuxProcessRecoveryDisposition::already_gone:
+          ++gone;
+          break;
+        case LinuxProcessRecoveryDisposition::identity_mismatch:
+          ++mismatch;
+          break;
+        case LinuxProcessRecoveryDisposition::observation_failed:
+          ++failed;
+          break;
+      }
+    }
     findings.push_back(active_fence_finding(
-        occupancy_before.active_fences.size(), spawned,
-        recovery.size() - spawned));
+        occupancy_before.active_fences.size(), exact_live, gone, mismatch,
+        failed, intent_only));
   }
 
   const HostLedgerChainHead head_after = ledger_.chain_head();
