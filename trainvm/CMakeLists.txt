@@ -67,6 +67,7 @@ add_library(trainvm_core
   src/hostd_client_bootstrap.cpp
   src/hostd_client_configuration.cpp
   src/hostd_journal_fence_attestor.cpp
+  src/hostd_journal_logical_fence.cpp
   src/hostd_linux_cgroup_authority.cpp
   src/hostd_linux_inventory_context_auditor.cpp
   src/hostd_linux_process_authority.cpp
@@ -353,6 +354,16 @@ target_compile_options(hostd_journal_fence_attestor_tests PRIVATE
 target_link_libraries(hostd_journal_fence_attestor_tests PRIVATE trainvm_core)
 add_test(NAME hostd_journal_fence_attestor_tests
   COMMAND hostd_journal_fence_attestor_tests
+)
+add_executable(hostd_journal_logical_fence_tests
+  tests/hostd_journal_logical_fence_tests.cpp
+)
+target_compile_options(hostd_journal_logical_fence_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(hostd_journal_logical_fence_tests PRIVATE trainvm_core)
+add_test(NAME hostd_journal_logical_fence_tests
+  COMMAND hostd_journal_logical_fence_tests
 )
 add_executable(hostd_client_configuration_tests
   tests/hostd_client_configuration_tests.cpp

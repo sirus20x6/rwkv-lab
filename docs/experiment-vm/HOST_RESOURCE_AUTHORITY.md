@@ -697,6 +697,10 @@ durable per-concurrency generations, exact replay within a service process, rest
 advancement, and fail-closed supersession. TrainVM now accepts an optional strict hostd client
 document that pins the socket inode and owner credentials, bounds request time, obtains the broker
 epoch from read-only status, and rejects host/boot mismatch before constructing both typed clients.
+On the daemon side, a production logical-fence evidence source performs a fresh read through the
+already retained Journal boundary for every grant, binds the exact journal/run/concurrency/lease/token,
+host/boot and authority inodes, and rejects expired or mismatched authority. Request claims remain
+selectors for that read, never bearer capabilities.
 The remaining P0.3 gate is the unified privileged daemon entry point and the
 privileged end-to-end process-crash matrix at strict
 socket-pidfd/host-namespace grade. Deterministic transport checkpoints already prove that interruption at

@@ -169,6 +169,10 @@ Implemented now:
 - a process-free, single-use journal-fence challenge verifier binding socket peer process instance,
   host/boot/broker, pinned-journal claims, controller generation, logical fence, nonce, and bounded
   boottime lifetime, with per-peer quotas and no bearer-capability interpretation of decoded data;
+- a fresh journal-backed logical-fence evidence source for host grants; it resolves the exact
+  attributed run/concurrency/lease/token only through an already retained journal boundary, binds
+  host/boot and journal inode authority into its evidence, and rejects expired, released, stale, or
+  mismatched leases instead of trusting the mutation claim;
 - a canonical hostd mutation-envelope contract that binds one open journal/controller claim to the
   issued single-use challenge, echoed response, exactly attributed grant/reconcile/release/process
   payload, sealed command digest, and operation-compatible reply, now dispatched over a bounded
