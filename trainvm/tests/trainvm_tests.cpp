@@ -9327,6 +9327,7 @@ class SagaProcessClient final : public trainvm::IHostProcessClient {
         .cgroup_path = "/trainvm/process-saga",
         .cgroup_device = 41U,
         .cgroup_inode = 42U,
+        .device_policy = std::nullopt,
         .canonical_request_digest = {},
     });
     const auto intended = ledger_.commit_process_launch_intent(
@@ -9343,6 +9344,7 @@ class SagaProcessClient final : public trainvm::IHostProcessClient {
         .cgroup_device = launch.cgroup_device,
         .cgroup_inode = launch.cgroup_inode,
         .executable_digest = launch.executable_digest,
+        .device_policy = std::nullopt,
         .canonical_request_digest = {},
     });
     const auto spawned = ledger_.commit_process_spawn(

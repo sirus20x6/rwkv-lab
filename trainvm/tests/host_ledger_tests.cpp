@@ -133,6 +133,7 @@ HostProcessLaunchRequest launch_request(const ResourceBundleGrant& grant,
       .cgroup_path = "/sys/fs/cgroup/trainvm/test-launch",
       .cgroup_device = 31,
       .cgroup_inode = 41,
+      .device_policy = std::nullopt,
       .canonical_request_digest = {},
   });
 }
@@ -150,8 +151,44 @@ HostProcessSpawnRequest spawn_request(const HostProcessLaunchIntent& intent,
       .cgroup_device = intent.request.cgroup_device,
       .cgroup_inode = intent.request.cgroup_inode,
       .executable_digest = intent.request.executable_digest,
+      .device_policy = std::nullopt,
       .canonical_request_digest = {},
   });
+}
+
+HostProcessLaunchRequest device_bound_launch_request(
+    const ResourceBundleGrant& grant, std::string launch_id) {
+  auto value = launch_request(grant, std::move(launch_id));
+  value.api_version = std::string(kHostProcessLaunchRequestApiVersionV2);
+  value.device_policy = HostDevicePolicyIntentBinding{
+      .policy_digest = test_digest('5'),
+      .image_digest = test_digest('6'),
+      .program_name = "tvmdev_66666666",
+  };
+  value.canonical_request_digest.clear();
+  return seal_host_process_launch_request(std::move(value));
+}
+
+HostProcessSpawnRequest device_bound_spawn_request(
+    const HostProcessLaunchIntent& intent, std::int64_t pid = 4343) {
+  auto value = spawn_request(intent, pid);
+  value.api_version = std::string(kHostProcessSpawnRequestApiVersionV2);
+  HostDevicePolicyInstallationBinding installed{
+      .policy_digest = intent.request.device_policy->policy_digest,
+      .image_digest = intent.request.device_policy->image_digest,
+      .program_id = 73U,
+      .program_type = 15U,
+      .program_tag = "0011223344556677",
+      .program_name = intent.request.device_policy->program_name,
+      .attach_flags = 0U,
+      .installation_digest = {},
+  };
+  installed.installation_digest = host_device_policy_installation_digest(
+      intent.request.allocation_id, value.launch_id, value.cgroup_path,
+      value.cgroup_device, value.cgroup_inode, installed);
+  value.device_policy = std::move(installed);
+  value.canonical_request_digest.clear();
+  return seal_host_process_spawn_request(std::move(value));
 }
 
 HostProcessExitRequest exit_request(const HostProcessSpawnReceipt& spawn,
@@ -1045,6 +1082,63 @@ void process_authority_is_durable_and_replay_safe() {
   }
 }
 
+void device_policy_authority_is_bound_into_process_history() {
+  const auto observed = inventory({"mutex-device-policy"});
+  const auto path = test_path("process-device-policy");
+  {
+    SQLiteHostLedger ledger(authority_for(path), observed);
+    const auto bundle =
+        ledger.request_bundle(request("device-policy-grant"), {10, 20});
+    require(bundle.grant.has_value(),
+            "device-policy fixture obtains an active grant");
+    const auto launch =
+        device_bound_launch_request(*bundle.grant, "launch-device-policy");
+    const auto intended = ledger.commit_process_launch_intent(launch, {30, 40});
+    require(!intended.replayed &&
+                intended.intent.api_version ==
+                    kHostProcessLaunchIntentApiVersionV2 &&
+                intended.intent.request.device_policy == launch.device_policy &&
+                host_process_launch_intent_from_json(
+                    host_process_launch_intent_json(intended.intent)) ==
+                    intended.intent &&
+                ledger.verify(),
+            "durable v2 launch intent commits the exact policy compiler output");
+
+    const auto spawn = device_bound_spawn_request(intended.intent);
+    const auto spawned = ledger.commit_process_spawn(spawn, {50, 60});
+    require(!spawned.replayed &&
+                spawned.receipt.api_version ==
+                    kHostProcessSpawnReceiptApiVersionV2 &&
+                spawned.receipt.request.device_policy == spawn.device_policy &&
+                host_process_spawn_receipt_from_json(
+                    host_process_spawn_receipt_json(spawned.receipt)) ==
+                    spawned.receipt &&
+                ledger.verify(),
+            "stopped-child receipt commits the exact attached kernel identity");
+
+    auto changed = spawn;
+    changed.device_policy->installation_digest = test_digest('9');
+    changed.canonical_request_digest.clear();
+    changed = seal_host_process_spawn_request(std::move(changed));
+    require_throws<HostLedgerConflict>(
+        [&] { (void)ledger.commit_process_spawn(changed, {51, 61}); },
+        "a different installation receipt cannot replay the process spawn");
+
+    const auto terminal = exit_request(spawned.receipt, "exit-device-policy");
+    (void)ledger.commit_process_exit(terminal, {70, 80});
+    (void)ledger.release_bundle(
+        release_request(*bundle.grant, "release-device-policy"), {90, 100});
+    require(ledger.verify(),
+            "device-bound process history remains closed after release");
+  }
+  {
+    SQLiteHostLedger reopened(authority_for(path), observed);
+    require(reopened.verify(),
+            "device-bound process history survives exact ledger reopen");
+  }
+  remove_database(path);
+}
+
 void tamper_is_fail_closed() {
   const auto path = test_path("tamper");
   const auto observed = inventory({"mutex-tamper"});
@@ -1305,6 +1399,7 @@ int main() {
     stale_inventory_instances_fail_closed();
     request_and_release_rollback();
     process_authority_is_durable_and_replay_safe();
+    device_policy_authority_is_bound_into_process_history();
     tamper_is_fail_closed();
     degraded_inventory_publication_rolls_back();
     filesystem_authority_remains_bound();

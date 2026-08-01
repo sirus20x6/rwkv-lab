@@ -121,6 +121,16 @@ void validate_linux_device_policy_installation(
     const LinuxDevicePolicyInstallation &installation);
 [[nodiscard]] nlohmann::json linux_device_policy_installation_json(
     const LinuxDevicePolicyInstallation &installation);
+[[nodiscard]] HostDevicePolicyIntentBinding
+host_device_policy_intent_binding(const LinuxDevicePolicySpec &policy,
+                                  const LinuxDeviceProgramImage &image);
+[[nodiscard]] HostDevicePolicyInstallationBinding
+host_device_policy_installation_binding(
+    const LinuxDevicePolicyInstallation &installation);
+[[nodiscard]] LinuxDevicePolicyInstallation
+linux_device_policy_installation_from_process(
+    const HostProcessLaunchIntent &intent,
+    const HostProcessSpawnReceipt &spawn);
 
 namespace hostd_linux_device_kernel_test_seam {
 

@@ -19,6 +19,7 @@
 #include "trainvm/hostd_journal_logical_fence.hpp"
 #include "trainvm/hostd_ledger_singleton_token.hpp"
 #include "trainvm/hostd_linux_cgroup_authority.hpp"
+#include "trainvm/hostd_linux_device_kernel.hpp"
 #include "trainvm/hostd_linux_inventory_context_auditor.hpp"
 #include "trainvm/hostd_linux_process_authority.hpp"
 #include "trainvm/hostd_linux_service_identity.hpp"
@@ -119,10 +120,14 @@ struct HostdDaemonRuntime::Implementation final {
         configuration.coordinator(), ledger, logical_fence);
 
     launcher = std::make_unique<LinuxStoppedLauncherKernel>();
+    device_kernel = std::make_unique<LinuxCgroupDeviceKernel>();
+    device_installer =
+        std::make_unique<LinuxDevicePolicyInstaller>(*device_kernel);
     context_auditor = std::make_unique<LinuxInventoryProcessContextAuditor>(
         *inventory_kernel);
     process_authority = std::make_unique<LinuxProcessAuthority>(
-        *ledger, *clock, *cgroups, *launcher, *context_auditor);
+        *ledger, *clock, *cgroups, *device_installer, *launcher,
+        *context_auditor);
     process_supervisor =
         std::make_shared<HostdLinuxProcessSupervisor>(*process_authority);
     release_authority =
@@ -201,6 +206,8 @@ struct HostdDaemonRuntime::Implementation final {
   std::shared_ptr<HostGrantCoordinator> coordinator;
   std::unique_ptr<LinuxCgroupAuthority> cgroups;
   std::unique_ptr<LinuxStoppedLauncherKernel> launcher;
+  std::unique_ptr<LinuxCgroupDeviceKernel> device_kernel;
+  std::unique_ptr<LinuxDevicePolicyInstaller> device_installer;
   std::unique_ptr<LinuxInventoryProcessContextAuditor> context_auditor;
   std::unique_ptr<LinuxProcessAuthority> process_authority;
   std::shared_ptr<HostdLinuxProcessSupervisor> process_supervisor;

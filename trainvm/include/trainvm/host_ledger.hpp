@@ -26,12 +26,20 @@ inline constexpr std::string_view kHostLedgerAdmissionEpochApiVersion =
     "trainvm.host-ledger-admission-epoch/v1";
 inline constexpr std::string_view kHostProcessLaunchRequestApiVersion =
     "trainvm.host-process-launch-request/v1";
+inline constexpr std::string_view kHostProcessLaunchRequestApiVersionV2 =
+    "trainvm.host-process-launch-request/v2";
 inline constexpr std::string_view kHostProcessLaunchIntentApiVersion =
     "trainvm.host-process-launch-intent/v1";
+inline constexpr std::string_view kHostProcessLaunchIntentApiVersionV2 =
+    "trainvm.host-process-launch-intent/v2";
 inline constexpr std::string_view kHostProcessSpawnRequestApiVersion =
     "trainvm.host-process-spawn-request/v1";
+inline constexpr std::string_view kHostProcessSpawnRequestApiVersionV2 =
+    "trainvm.host-process-spawn-request/v2";
 inline constexpr std::string_view kHostProcessSpawnReceiptApiVersion =
     "trainvm.host-process-spawn-receipt/v1";
+inline constexpr std::string_view kHostProcessSpawnReceiptApiVersionV2 =
+    "trainvm.host-process-spawn-receipt/v2";
 inline constexpr std::string_view kHostProcessExitRequestApiVersion =
     "trainvm.host-process-exit-request/v1";
 inline constexpr std::string_view kHostProcessExitReceiptApiVersion =
@@ -148,6 +156,31 @@ struct HostLedgerAdmissionFinalizeResult final {
 // The ledger
 // separately persists the security-sensitive executable and cgroup identity so
 // a later spawn receipt cannot be attached to a different launch boundary.
+struct HostDevicePolicyIntentBinding final {
+  std::string policy_digest;
+  std::string image_digest;
+  std::string program_name;
+
+  bool operator==(const HostDevicePolicyIntentBinding&) const = default;
+};
+
+// Exact kernel observation copied into the stopped-child receipt. The
+// installation digest uses the same canonical bytes as the Linux device-policy
+// installer and binds allocation, launch, cgroup, compiler output, and kernel
+// program identity without making the host ledger depend on Linux headers.
+struct HostDevicePolicyInstallationBinding final {
+  std::string policy_digest;
+  std::string image_digest;
+  std::uint32_t program_id{};
+  std::uint32_t program_type{};
+  std::string program_tag;
+  std::string program_name;
+  std::uint32_t attach_flags{};
+  std::string installation_digest;
+
+  bool operator==(const HostDevicePolicyInstallationBinding&) const = default;
+};
+
 struct HostProcessLaunchRequest final {
   std::string api_version;
   std::string launch_id;
@@ -163,6 +196,7 @@ struct HostProcessLaunchRequest final {
   std::string cgroup_path;
   std::uint64_t cgroup_device{};
   std::uint64_t cgroup_inode{};
+  std::optional<HostDevicePolicyIntentBinding> device_policy;
   std::string canonical_request_digest;
 
   bool operator==(const HostProcessLaunchRequest&) const = default;
@@ -200,6 +234,7 @@ struct HostProcessSpawnRequest final {
   std::uint64_t cgroup_device{};
   std::uint64_t cgroup_inode{};
   std::string executable_digest;
+  std::optional<HostDevicePolicyInstallationBinding> device_policy;
   std::string canonical_request_digest;
 
   bool operator==(const HostProcessSpawnRequest&) const = default;
@@ -495,6 +530,11 @@ class SQLiteHostLedger final {
     const HostProcessSpawnReceipt& receipt);
 [[nodiscard]] HostProcessSpawnReceipt host_process_spawn_receipt_from_json(
     const nlohmann::json& source);
+[[nodiscard]] std::string host_device_policy_installation_digest(
+    std::string_view allocation_id, std::string_view launch_id,
+    std::string_view cgroup_path, std::uint64_t cgroup_device,
+    std::uint64_t cgroup_inode,
+    const HostDevicePolicyInstallationBinding& installation);
 [[nodiscard]] HostProcessExitRequest seal_host_process_exit_request(
     HostProcessExitRequest request);
 [[nodiscard]] nlohmann::json host_process_exit_request_json(

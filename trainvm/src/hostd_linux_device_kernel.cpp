@@ -423,6 +423,91 @@ nlohmann::json linux_device_policy_installation_json(
   return value;
 }
 
+HostDevicePolicyIntentBinding
+host_device_policy_intent_binding(const LinuxDevicePolicySpec &policy,
+                                  const LinuxDeviceProgramImage &image) {
+  validate_linux_device_policy(policy);
+  require_exact_image(policy, image);
+  return {
+      .policy_digest = policy.policy_digest,
+      .image_digest = image.image_digest,
+      .program_name =
+          hostd_linux_device_kernel_test_seam::program_name_for_image(image),
+  };
+}
+
+HostDevicePolicyInstallationBinding host_device_policy_installation_binding(
+    const LinuxDevicePolicyInstallation &installation) {
+  validate_linux_device_policy_installation(installation);
+  HostDevicePolicyInstallationBinding binding{
+      .policy_digest = installation.policy_digest,
+      .image_digest = installation.image_digest,
+      .program_id = installation.program.program_id,
+      .program_type = installation.program.program_type,
+      .program_tag = installation.program.program_tag,
+      .program_name = installation.program.program_name,
+      .attach_flags = installation.attach_flags,
+      .installation_digest = installation.installation_digest,
+  };
+  if (host_device_policy_installation_digest(
+          installation.allocation_id, installation.launch_id,
+          installation.cgroup.unified_path, installation.cgroup.device,
+          installation.cgroup.inode,
+          binding) != installation.installation_digest) {
+    reject("kernel installation and host-ledger binding digests disagree");
+  }
+  return binding;
+}
+
+LinuxDevicePolicyInstallation linux_device_policy_installation_from_process(
+    const HostProcessLaunchIntent &intent,
+    const HostProcessSpawnReceipt &spawn) {
+  (void)host_process_launch_intent_json(intent);
+  (void)host_process_spawn_receipt_json(spawn);
+  if (intent.api_version != kHostProcessLaunchIntentApiVersionV2 ||
+      intent.request.api_version != kHostProcessLaunchRequestApiVersionV2 ||
+      spawn.api_version != kHostProcessSpawnReceiptApiVersionV2 ||
+      spawn.request.api_version != kHostProcessSpawnRequestApiVersionV2 ||
+      !intent.request.device_policy || !spawn.request.device_policy ||
+      intent.request.launch_id != spawn.request.launch_id ||
+      intent.receipt_digest != spawn.request.launch_intent_digest ||
+      intent.request.cgroup_path != spawn.request.cgroup_path ||
+      intent.request.cgroup_device != spawn.request.cgroup_device ||
+      intent.request.cgroup_inode != spawn.request.cgroup_inode) {
+    reject("process history does not contain one device-policy generation");
+  }
+  const auto &intended = *intent.request.device_policy;
+  const auto &installed = *spawn.request.device_policy;
+  if (installed.policy_digest != intended.policy_digest ||
+      installed.image_digest != intended.image_digest ||
+      installed.program_name != intended.program_name ||
+      host_device_policy_installation_digest(
+          intent.request.allocation_id, intent.request.launch_id,
+          intent.request.cgroup_path, intent.request.cgroup_device,
+          intent.request.cgroup_inode, installed) !=
+          installed.installation_digest) {
+    reject("process device-policy installation diverges from its intent");
+  }
+  LinuxDevicePolicyInstallation installation{
+      .api_version = std::string(kLinuxDevicePolicyInstallationApiVersion),
+      .allocation_id = intent.request.allocation_id,
+      .launch_id = intent.request.launch_id,
+      .policy_digest = installed.policy_digest,
+      .image_digest = installed.image_digest,
+      .cgroup = {.unified_path = intent.request.cgroup_path,
+                 .device = intent.request.cgroup_device,
+                 .inode = intent.request.cgroup_inode},
+      .program = {.program_id = installed.program_id,
+                  .program_type = installed.program_type,
+                  .program_tag = installed.program_tag,
+                  .program_name = installed.program_name},
+      .attach_flags = installed.attach_flags,
+      .installation_digest = installed.installation_digest,
+  };
+  validate_linux_device_policy_installation(installation);
+  return installation;
+}
+
 namespace hostd_linux_device_kernel_test_seam {
 
 std::string program_name_for_image(const LinuxDeviceProgramImage &image) {

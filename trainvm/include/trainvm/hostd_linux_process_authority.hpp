@@ -11,6 +11,7 @@
 #include "trainvm/host_launch.hpp"
 #include "trainvm/host_ledger.hpp"
 #include "trainvm/hostd_linux_cgroup_authority.hpp"
+#include "trainvm/hostd_linux_device_kernel.hpp"
 #include "trainvm/hostd_linux_process_recovery.hpp"
 #include "trainvm/hostd_linux_stopped_launcher.hpp"
 #include "trainvm/hostd_process_protocol.hpp"
@@ -50,17 +51,18 @@ class LinuxPreparedLaunch final {
   [[nodiscard]] const HostProcessSpawnReceipt& spawn_receipt() const;
   [[nodiscard]] const LinuxStoppedChildIdentity& child_identity() const;
   [[nodiscard]] const std::optional<HostProcessExitReceipt>& exit_receipt() const;
-  void release_to_exec();
 
  private:
   friend class LinuxProcessAuthority;
   LinuxPreparedLaunch(HostProcessLaunchIntent intent,
                       HostProcessSpawnReceipt spawn_receipt,
+                      LinuxDevicePolicyInstallation device_policy,
                       LinuxAllocationCgroup cgroup,
                       LinuxStoppedChild child) noexcept;
 
   HostProcessLaunchIntent intent_;
   HostProcessSpawnReceipt spawn_receipt_;
+  LinuxDevicePolicyInstallation device_policy_;
   // Destruction is reverse declaration order: child is killed/reaped before
   // the retained cgroup descriptor is closed.
   LinuxAllocationCgroup cgroup_;
@@ -86,11 +88,14 @@ class LinuxRecoveredLaunch final {
   friend class LinuxProcessAuthority;
   LinuxRecoveredLaunch(HostProcessRecoveryRecord record,
                        LinuxRecoveredProcess process,
-                       LinuxAllocationCgroup cgroup) noexcept;
+                       LinuxAllocationCgroup cgroup,
+                       std::optional<LinuxDevicePolicyInstallation>
+                           device_policy) noexcept;
 
   HostProcessRecoveryRecord record_;
   LinuxRecoveredProcess process_;
   LinuxAllocationCgroup cgroup_;
+  std::optional<LinuxDevicePolicyInstallation> device_policy_;
   bool termination_requested_{};
   std::optional<HostProcessRecoveryExitReceipt> exit_receipt_;
   bool cgroup_removed_{};
@@ -100,6 +105,7 @@ class LinuxProcessAuthority final {
  public:
   LinuxProcessAuthority(SQLiteHostLedger& ledger, AuthorityClock& clock,
                         LinuxCgroupAuthority& cgroups,
+                        LinuxDevicePolicyInstaller& device_policies,
                         LinuxStoppedLauncherKernel& launcher,
                         ILinuxProcessContextAuditor& context_auditor);
 
@@ -112,6 +118,7 @@ class LinuxProcessAuthority final {
   [[nodiscard]] HostProcessExitResult finalize_exit(
       LinuxPreparedLaunch& launch, const ResourceBundleGrant& grant,
       std::string exit_request_id, bool request_termination);
+  void release_to_exec(LinuxPreparedLaunch& launch);
   [[nodiscard]] LinuxRecoveredLaunch adopt_recovered(
       HostProcessRecoveryRecord record, LinuxRecoveredProcess process);
   // If SIGKILL was just delivered and the pidfd remains live, this fails
@@ -130,6 +137,7 @@ class LinuxProcessAuthority final {
   SQLiteHostLedger& ledger_;
   AuthorityClock& clock_;
   LinuxCgroupAuthority& cgroups_;
+  LinuxDevicePolicyInstaller& device_policies_;
   LinuxStoppedLauncherKernel& launcher_;
   ILinuxProcessContextAuditor& context_auditor_;
 };

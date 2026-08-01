@@ -195,12 +195,20 @@ void exact_installation_is_sealed_and_restart_verifiable() {
   FakeDeviceKernel kernel;
   LinuxDevicePolicyInstaller installer(kernel);
   const auto installed = installer.install(policy, image, cgroup);
+  const auto intent_binding = host_device_policy_intent_binding(policy, image);
+  const auto installation_binding =
+      host_device_policy_installation_binding(installed);
   require(kernel.load_calls == 1U && kernel.attach_calls == 1U &&
               kernel.query_calls == 2U &&
               kernel.loaded_image_digest == image.image_digest &&
               installed.program == kernel.loaded_identity &&
               installed.policy_digest == policy.policy_digest &&
               installed.image_digest == image.image_digest &&
+              intent_binding.policy_digest == policy.policy_digest &&
+              intent_binding.image_digest == image.image_digest &&
+              intent_binding.program_name == installed.program.program_name &&
+              installation_binding.installation_digest ==
+                  installed.installation_digest &&
               linux_device_policy_installation_json(installed).at(
                   "installation_digest") == installed.installation_digest,
           "installation binds compiler output and exact kernel identity");
