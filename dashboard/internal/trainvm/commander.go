@@ -245,24 +245,25 @@ func (c *GRPCCommander) Run(ctx context.Context, runID string) (Run, bool, error
 }
 
 func (c *GRPCCommander) Timeline(ctx context.Context, runID string, after uint64, limit int) ([]Event, error) {
+	return c.Events(ctx, EventQuery{RunID: runID, After: after, Limit: limit})
+}
+
+func (c *GRPCCommander) Events(ctx context.Context, input EventQuery) ([]Event, error) {
 	if c == nil || c.client == nil {
 		return nil, fmt.Errorf("TrainVM authority client is not configured")
 	}
-	runID = strings.TrimSpace(runID)
-	if runID == "" || len(runID) > 256 {
-		return nil, &ValidationError{Message: "bounded run ID is required"}
-	}
-	if limit <= 0 || limit > 1_000 {
-		limit = 250
+	query, err := normalizeEventQuery(input)
+	if err != nil {
+		return nil, err
 	}
 	stream, err := c.client.WatchEvents(ctx, &trainvmv1.WatchEventsRequest{
-		RunIds: []string{runID}, AfterJournalSequence: after,
-		ReplayLimit: uint32(limit),
+		RunIds: []string{query.RunID}, AfterJournalSequence: query.After,
+		EventTypes: query.EventTypes, ReplayLimit: uint32(query.Limit),
 	})
 	if err != nil {
 		return nil, err
 	}
-	result := make([]Event, 0, limit)
+	result := make([]Event, 0, query.Limit)
 	for {
 		envelope, recvErr := stream.Recv()
 		if recvErr == io.EOF {

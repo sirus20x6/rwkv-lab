@@ -161,6 +161,15 @@ details.panel[open] .d-caret { transform: rotate(90deg); color: var(--accent); }
 .vm-fact { border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--bg); padding: 7px 9px; min-width: 0; }
 .vm-fact span { display: block; color: var(--muted); font: var(--fs-xs)/1.2 var(--mono); text-transform: uppercase; letter-spacing: .05em; }
 .vm-fact strong { display: block; margin-top: 3px; color: var(--text); font: 600 var(--fs-sm)/1.25 var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vm-telemetry { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
+.vm-telemetry > section { min-width: 0; border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden; background: var(--bg); }
+.vm-telemetry-list { min-height: 54px; max-height: 170px; overflow: auto; font-family: var(--mono); }
+.vm-telemetry-row { display: grid; grid-template-columns: minmax(90px, .8fr) minmax(75px, .45fr) minmax(100px, 1fr); gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--divider); align-items: baseline; }
+.vm-telemetry-row:last-child { border-bottom: 0; }
+.vm-telemetry-row:hover { background: var(--bg-elev); }
+.vm-telemetry-name { color: var(--accent); font: 600 var(--fs-xs)/1.25 var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vm-telemetry-value { color: var(--text); font: var(--fs-xs)/1.25 var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vm-telemetry-meta { color: var(--muted); font: var(--fs-xs)/1.25 var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .vm-live-controls { margin-bottom: 12px; border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden; background: var(--bg); }
 .vm-control-catalog { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; background: var(--divider); }
 .vm-control-row { display: grid; grid-template-columns: minmax(130px, 1fr) minmax(125px, .8fr); gap: 8px; align-items: center; padding: 8px 9px; background: var(--bg); min-width: 0; }
@@ -200,6 +209,7 @@ details.panel[open] .d-caret { transform: rotate(90deg); color: var(--accent); }
   .vm-layout { grid-template-columns: 1fr; }
   .vm-runs { border-right: 0; border-bottom: 1px solid var(--divider); padding: 0 0 10px; }
   .vm-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .vm-telemetry { grid-template-columns: 1fr; }
   .vm-control-catalog { grid-template-columns: 1fr; }
   .vm-control-history { grid-template-columns: 1fr; }
   .vm-control-submit { grid-template-columns: 1fr; }

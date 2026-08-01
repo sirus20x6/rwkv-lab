@@ -119,6 +119,16 @@
           </nav>
           <section class="vm-detail" aria-live="polite">
             <div id="trainvm-summary" class="vm-summary"><div class="empty">select a native run</div></div>
+            <div class="vm-telemetry">
+              <section>
+                <div class="vm-timeline-head"><span>native metrics</span><span id="trainvm-metric-cursor">sequence —</span></div>
+                <div id="trainvm-metrics" class="vm-telemetry-list"><div class="empty">no metric samples loaded</div></div>
+              </section>
+              <section>
+                <div class="vm-timeline-head"><span>published artifacts</span><span id="trainvm-artifact-cursor">sequence —</span></div>
+                <div id="trainvm-artifacts" class="vm-telemetry-list"><div class="empty">no artifacts loaded</div></div>
+              </section>
+            </div>
             <section class="vm-live-controls" aria-labelledby="vm-live-controls-title">
               <div class="vm-timeline-head"><span id="vm-live-controls-title">live controls</span><span id="vm-control-revision">revision —</span></div>
               <div id="vm-control-catalog" class="vm-control-catalog"><div class="empty">select a native run</div></div>

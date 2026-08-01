@@ -46,6 +46,10 @@ Implemented now:
   resumable filtered event streaming or bounded replay from durable journal sequence numbers; page
   tokens are bound to the exact journal and query rather than trusted as client-provided SQL
   cursors, and the production Go dashboard now consumes these RPCs instead of opening the journal;
+- separate typed Go telemetry projections for `metric.sampled` and `artifact.published` events,
+  backed by event-type-filtered durable cursors and a composite journal index; the native dashboard
+  panel renders these incrementally without folding metric or artifact semantics into the generic
+  commander transport;
 - a process-free queue reconciliation boundary that atomically acquires a fenced workspace lease,
   completes the declarative builtin resource-admission node, and advances to the real worker node
   while remaining unassigned and observed-acquiring;

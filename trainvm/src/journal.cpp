@@ -76,6 +76,8 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_run_sequence ON events(run_id, journal_sequence);
+CREATE INDEX IF NOT EXISTS idx_events_run_type_sequence
+  ON events(run_id, event_type, journal_sequence);
 CREATE INDEX IF NOT EXISTS idx_events_attempt_worker_sequence
   ON events(run_id, node_id, attempt_id, worker_sequence)
   WHERE worker_sequence > 0;
@@ -439,6 +441,8 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_run_sequence ON events(run_id, journal_sequence);
+CREATE INDEX IF NOT EXISTS idx_events_run_type_sequence
+  ON events(run_id, event_type, journal_sequence);
 CREATE INDEX IF NOT EXISTS idx_events_attempt_worker_sequence
   ON events(run_id, node_id, attempt_id, worker_sequence)
   WHERE worker_sequence > 0;

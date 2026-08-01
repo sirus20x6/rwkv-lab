@@ -90,9 +90,11 @@ func trainVMFixture(t *testing.T) *trainvmstore.Reader {
 		  diagnostics_json TEXT
 		);
 		INSERT INTO run_projection VALUES
-		  ('vm-run','mageflow','baa59aa47fcce31100a77393fcaeb04265bbfc3af2235c62a65ba2006225811a','running','running','train','train@1',2,50,0,3,'');
+		  ('vm-run','mageflow','baa59aa47fcce31100a77393fcaeb04265bbfc3af2235c62a65ba2006225811a','running','running','train','train@1',2,50,0,5,'');
 		INSERT INTO events VALUES
-		  (3,'result','vm-run',2,1,'train','train@1',1,'worker.heartbeat',1,1,1,50,'{"loss":2.0}');
+		  (3,'result','vm-run',2,1,'train','train@1',1,'worker.heartbeat',1,1,1,50,'{"loss":2.0}'),
+		  (4,'metric','vm-run',2,1,'train','train@1',2,'metric.sampled',1,2,2,51,'{"name":"loss","value":1.5,"unit":"loss","step_domain":"optimizer_step","step":51,"sample_weight":1,"labels":{"route":"animation"}}'),
+		  (5,'artifact','vm-run',2,1,'train','train@1',3,'artifact.published',1,3,3,NULL,'{"artifact_id":"gallery-51","logical_name":"eval/gallery","kind":"image_gallery","schema":"trainvm.eval-gallery/v1","uri":"file:///sealed/gallery-51","size_bytes":4096,"fingerprint_algorithm":"sha256","fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","complete":true,"producer_node_id":"train","producer_attempt_id":"train@1","parent_artifact_ids":[],"published_at_ns":3}');
 		INSERT INTO compiled_plans VALUES
 		  ('baa59aa47fcce31100a77393fcaeb04265bbfc3af2235c62a65ba2006225811a','mageflow','{"spec":{"controls":{"catalog":{"learning_rate":{"type":"number","default":0.001,"apply":"next_optimizer_step","mutable_after_start":true}}}}}');
 		INSERT INTO journal_meta VALUES ('journal_id','0123456789abcdef0123456789abcdef');`)
@@ -154,7 +156,7 @@ func TestTrainVMReadModelEndpoints(t *testing.T) {
 		t.Fatalf("run status=%d body=%s", response.Code, response.Body.String())
 	}
 
-	request = httptest.NewRequest(http.MethodGet, "/api/trainvm/runs/vm-run/timeline?after=2&limit=10", nil)
+	request = httptest.NewRequest(http.MethodGet, "/api/trainvm/runs/vm-run/timeline?after=2&limit=1", nil)
 	response = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(response, request)
 	var events []trainvmstore.Event
@@ -167,6 +169,24 @@ func TestTrainVMReadModelEndpoints(t *testing.T) {
 	srv.Handler().ServeHTTP(response, request)
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"learning_rate"`) {
 		t.Fatalf("controls status=%d body=%s", response.Code, response.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodGet, "/api/trainvm/runs/vm-run/metrics?after=3&limit=10", nil)
+	response = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	var metrics []trainvmstore.MetricPoint
+	if err := json.Unmarshal(response.Body.Bytes(), &metrics); err != nil ||
+		response.Code != http.StatusOK || len(metrics) != 1 ||
+		metrics[0].Name != "loss" || metrics[0].Step != 51 {
+		t.Fatalf("unexpected metrics: %#v err=%v body=%s", metrics, err, response.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodGet, "/api/trainvm/runs/vm-run/artifacts?after=3&limit=10", nil)
+	response = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	var artifacts []trainvmstore.PublishedArtifact
+	if err := json.Unmarshal(response.Body.Bytes(), &artifacts); err != nil ||
+		response.Code != http.StatusOK || len(artifacts) != 1 ||
+		artifacts[0].ArtifactID != "gallery-51" || artifacts[0].Kind != "image_gallery" {
+		t.Fatalf("unexpected artifacts: %#v err=%v body=%s", artifacts, err, response.Body.String())
 	}
 }
 

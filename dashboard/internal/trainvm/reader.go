@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/url"
 	"path/filepath"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -26,6 +27,7 @@ type ReadModel interface {
 	JournalID(context.Context) (string, error)
 	Runs(context.Context) ([]Run, error)
 	Run(context.Context, string) (Run, bool, error)
+	Events(context.Context, EventQuery) ([]Event, error)
 	Timeline(context.Context, string, uint64, int) ([]Event, error)
 	Controls(context.Context, string) (ControlView, bool, error)
 }
@@ -179,16 +181,30 @@ func scanRun(row rowScanner, run *Run) error {
 }
 
 func (r *Reader) Timeline(ctx context.Context, runID string, after uint64, limit int) ([]Event, error) {
-	if limit <= 0 || limit > 1000 {
-		limit = 250
+	return r.Events(ctx, EventQuery{RunID: runID, After: after, Limit: limit})
+}
+
+func (r *Reader) Events(ctx context.Context, input EventQuery) ([]Event, error) {
+	query, err := normalizeEventQuery(input)
+	if err != nil {
+		return nil, err
 	}
-	rows, err := r.db.QueryContext(ctx, `
+	statement := `
 		SELECT journal_sequence, event_id, run_id, run_revision, plan_revision,
 		       node_id, attempt_id, worker_sequence, event_type, event_version,
 		       wall_time_ns, monotonic_time_ns, optimizer_step, payload_json
 		FROM events
-		WHERE run_id=? AND journal_sequence>?
-		ORDER BY journal_sequence LIMIT ?`, runID, after, limit)
+		WHERE run_id=? AND journal_sequence>?`
+	arguments := []any{query.RunID, query.After}
+	if len(query.EventTypes) != 0 {
+		statement += " AND event_type IN (" + strings.TrimRight(strings.Repeat("?,", len(query.EventTypes)), ",") + ")"
+		for _, eventType := range query.EventTypes {
+			arguments = append(arguments, eventType)
+		}
+	}
+	statement += " ORDER BY journal_sequence LIMIT ?"
+	arguments = append(arguments, query.Limit)
+	rows, err := r.db.QueryContext(ctx, statement, arguments...)
 	if err != nil {
 		return nil, fmt.Errorf("read TrainVM timeline: %w", err)
 	}

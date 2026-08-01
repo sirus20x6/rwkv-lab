@@ -576,6 +576,8 @@
   // projections; lifecycle mutations remain on the native command boundary.
   let vmSelected = "";
   let vmAfter = 0;
+  let vmMetricAfter = 0;
+  let vmArtifactAfter = 0;
   let vmBusy = false;
   let vmSelectedRun = null;
   let vmControlView = null;
@@ -945,6 +947,78 @@
     target.scrollTop = target.scrollHeight;
   }
 
+  function resetVMTelemetry() {
+    vmMetricAfter = 0;
+    vmArtifactAfter = 0;
+    const metrics = document.getElementById("trainvm-metrics");
+    const artifacts = document.getElementById("trainvm-artifacts");
+    if (metrics) metrics.innerHTML = '<div class="empty">no metric samples loaded</div>';
+    if (artifacts) artifacts.innerHTML = '<div class="empty">no artifacts loaded</div>';
+    const metricCursor = document.getElementById("trainvm-metric-cursor");
+    const artifactCursor = document.getElementById("trainvm-artifact-cursor");
+    if (metricCursor) metricCursor.textContent = "sequence —";
+    if (artifactCursor) artifactCursor.textContent = "sequence —";
+  }
+
+  async function appendVMTelemetry() {
+    if (!vmSelected) return;
+    const selected = vmSelected;
+    const [metricResponse, artifactResponse] = await Promise.all([
+      fetch(`/api/trainvm/runs/${encodeURIComponent(selected)}/metrics?after=${vmMetricAfter}&limit=250`,
+        { cache: "no-store" }),
+      fetch(`/api/trainvm/runs/${encodeURIComponent(selected)}/artifacts?after=${vmArtifactAfter}&limit=250`,
+        { cache: "no-store" }),
+    ]);
+    if (selected !== vmSelected) return;
+    if (metricResponse.ok) {
+      const metrics = await metricResponse.json();
+      if (selected !== vmSelected) return;
+      const target = document.getElementById("trainvm-metrics");
+      if (target && Array.isArray(metrics) && metrics.length) {
+        if (vmMetricAfter === 0) target.textContent = "";
+        const fragment = document.createDocumentFragment();
+        for (const metric of metrics) {
+          if (metric.run_id !== vmSelected) continue;
+          const row = document.createElement("div");
+          row.className = "vm-telemetry-row";
+          const labels = JSON.stringify(metric.labels || {});
+          row.innerHTML = `<span class="vm-telemetry-name" title="${vmEscape(metric.name)}">${vmEscape(metric.name)}</span>` +
+            `<span class="vm-telemetry-value" title="${vmEscape(JSON.stringify(metric.value))}">${vmEscape(metric.value)} ${vmEscape(metric.unit)}</span>` +
+            `<span class="vm-telemetry-meta" title="${vmEscape(labels)}">${vmEscape(metric.step_domain)} ${Number(metric.step || 0).toLocaleString()} · #${Number(metric.sequence || 0).toLocaleString()}</span>`;
+          fragment.appendChild(row);
+          vmMetricAfter = Math.max(vmMetricAfter, Number(metric.sequence) || 0);
+        }
+        target.appendChild(fragment);
+        while (target.children.length > 100) target.firstElementChild.remove();
+      }
+      const cursor = document.getElementById("trainvm-metric-cursor");
+      if (cursor) cursor.textContent = `sequence ${vmMetricAfter.toLocaleString()}`;
+    }
+    if (artifactResponse.ok) {
+      const artifacts = await artifactResponse.json();
+      if (selected !== vmSelected) return;
+      const target = document.getElementById("trainvm-artifacts");
+      if (target && Array.isArray(artifacts) && artifacts.length) {
+        if (vmArtifactAfter === 0) target.textContent = "";
+        const fragment = document.createDocumentFragment();
+        for (const artifact of artifacts) {
+          if (artifact.run_id !== vmSelected) continue;
+          const row = document.createElement("div");
+          row.className = "vm-telemetry-row";
+          row.innerHTML = `<span class="vm-telemetry-name" title="${vmEscape(artifact.logical_name)}">${vmEscape(artifact.logical_name)}</span>` +
+            `<span class="vm-telemetry-value" title="${vmEscape(artifact.kind)}">${vmEscape(artifact.kind)}</span>` +
+            `<span class="vm-telemetry-meta" title="${vmEscape(artifact.uri)}">${Number(artifact.size_bytes || 0).toLocaleString()} B · #${Number(artifact.sequence || 0).toLocaleString()}</span>`;
+          fragment.appendChild(row);
+          vmArtifactAfter = Math.max(vmArtifactAfter, Number(artifact.sequence) || 0);
+        }
+        target.appendChild(fragment);
+        while (target.children.length > 100) target.firstElementChild.remove();
+      }
+      const cursor = document.getElementById("trainvm-artifact-cursor");
+      if (cursor) cursor.textContent = `sequence ${vmArtifactAfter.toLocaleString()}`;
+    }
+  }
+
   async function refreshTrainVM(force = false) {
     const panel = document.getElementById("trainvm-panel");
     if (!panel || !panel.open || vmBusy || (document.hidden && !force)) return;
@@ -969,6 +1043,7 @@
       if (!runs.some((run) => run.run_id === vmSelected)) {
         selectVMRun(runs[0]?.run_id || "");
         vmAfter = 0;
+        resetVMTelemetry();
         const timeline = document.getElementById("trainvm-timeline");
         if (timeline) timeline.innerHTML = '<div class="empty">no events loaded</div>';
       }
@@ -978,6 +1053,8 @@
         const timeline = document.getElementById("trainvm-timeline");
         if (timeline) timeline.textContent = "";
       }
+      if (selected && Number(selected.last_event_sequence || 0) <
+          Math.max(vmMetricAfter, vmArtifactAfter)) resetVMTelemetry();
       renderVMRunList(runs);
       const previousObservedState = vmSelectedRun?.run_id === selected?.run_id ?
         vmSelectedRun?.observed_state : "";
@@ -989,8 +1066,9 @@
             vmSelectedRun && vmControlView) renderVMControls();
       }
       await appendVMTimeline();
+      await appendVMTelemetry();
     } catch (_) {
-      // A WAL checkpoint or daemon restart is transient; the next tick retries.
+      // An authority or dashboard restart is transient; the next tick retries.
     } finally {
       vmBusy = false;
     }
@@ -1003,6 +1081,7 @@
     if (runID) {
       selectVMRun(runID);
       vmAfter = 0;
+      resetVMTelemetry();
       const timeline = document.getElementById("trainvm-timeline");
       if (timeline) timeline.innerHTML = '<div class="empty">loading timeline…</div>';
     }
@@ -1046,6 +1125,7 @@
     if (!button) return;
     selectVMRun(button.dataset.vmRun || "");
     vmAfter = 0;
+    resetVMTelemetry();
     const timeline = document.getElementById("trainvm-timeline");
     if (timeline) timeline.innerHTML = '<div class="empty">loading timeline…</div>';
     refreshTrainVM(true);

@@ -132,6 +132,42 @@ func (s *Server) handleTrainVMTimeline(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(events)
 }
 
+func (s *Server) handleTrainVMMetrics(w http.ResponseWriter, r *http.Request) {
+	if s.trainvm == nil {
+		http.Error(w, "TrainVM authority is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	after, _ := strconv.ParseUint(r.URL.Query().Get("after"), 10, 64)
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	metrics, err := trainvmstore.Metrics(
+		r.Context(), s.trainvm, r.PathValue("run"), after, limit)
+	if err != nil {
+		writeTrainVMAuthorityError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(metrics)
+}
+
+func (s *Server) handleTrainVMArtifacts(w http.ResponseWriter, r *http.Request) {
+	if s.trainvm == nil {
+		http.Error(w, "TrainVM authority is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	after, _ := strconv.ParseUint(r.URL.Query().Get("after"), 10, 64)
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	artifacts, err := trainvmstore.Artifacts(
+		r.Context(), s.trainvm, r.PathValue("run"), after, limit)
+	if err != nil {
+		writeTrainVMAuthorityError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(artifacts)
+}
+
 func (s *Server) handleTrainVMSchema(w http.ResponseWriter, _ *http.Request) {
 	s.handleTrainVMDocument(w, "schema")
 }
