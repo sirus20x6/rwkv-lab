@@ -104,11 +104,11 @@ int main() {
   check(catalog.authority() ==
             trainvm::CompatibilityAuthority::compatibility_evidence_only,
         "catalog is explicitly compatibility evidence only");
-  check(catalog.entries().size() == 64U,
+  check(catalog.entries().size() == 140U,
         "checked-in catalog matches the compiled reviewed v1 inventory");
-  check(catalog.catalog_digest().starts_with("sha256:") &&
-            catalog.catalog_digest().size() == 71U,
-        "catalog has a canonical SHA-256 digest");
+  check(catalog.catalog_digest() ==
+            trainvm::CompatibilityCatalog::reviewed_catalog_digest(),
+        "catalog has the exact compiled reviewed canonical digest");
   check(catalog.source_tree_digest().starts_with("sha256:") &&
             catalog.source_tree_digest().size() == 71U,
         "catalog binds the referenced source tree");
@@ -119,6 +119,7 @@ int main() {
   std::set<trainvm::WorkflowFamily> families;
   std::set<trainvm::ObservedInvocationKind> invocation_kinds;
   std::set<std::string> identifiers;
+  std::set<std::string> reviewed_sources;
   std::set<std::string> required_additions = {
       "conversion.drive-isolation",
       "conversion.gdn-sweep-supervisor",
@@ -130,6 +131,57 @@ int main() {
       "posttraining.adapter-recursive",
       "acquisition.kimi-teacher",
       "export.legacy-mutable-bundle",
+      "rwkv.legacy-sweep-campaigns",
+      "rwkv.config-campaign",
+      "transformer.engram-staged-supervisor",
+      "transformer.qwen-ao3-audit",
+      "transformer.qwen-ao3-plan",
+      "data.ao3-tokenize",
+      "data.ao3-pack",
+      "data.ao3-rewrite-eos",
+      "data.engram-frequency",
+      "vision.representation-ab",
+      "vision.teacher-student-supervisor",
+      "vision.continuation-watchdog",
+      "vision.radio1d-launch-profiles",
+      "vision.v4h-launch-profiles",
+      "vision.moonvit-continuation-launch-profiles",
+      "vision.native-head-launch-profile",
+      "vision.raw-pixel-student-launch-profile",
+      "vision.teacher-compressor-launch-profile",
+      "mageflow.full-backbone-plan",
+      "mageflow.expert-encoder-cache",
+      "mageflow.terminal-cache-span-prepare",
+      "mageflow.terminal-expert-migration",
+      "mageflow.tread-loop-conversion",
+      "mageflow.adaptation-benchmark-spec",
+      "mageflow.adaptation-domain-prepare",
+      "mageflow.adaptation-domain-audit",
+      "acquisition.civitai-balanced",
+      "data.gelbooru-trainer-snapshot",
+      "data.reddit-trainer-snapshot",
+      "scoring.i1-deepghs-classification",
+      "data.midjourney-v6-caption-routing",
+      "data.midjourney-v6-expert-stage",
+      "data.midjourney-v6-continuation",
+      "oracle.engram-lmb",
+      "oracle.mla-training-components",
+      "oracle.rosa-sam",
+      "oracle.rosa-soft-layer",
+      "evaluation.rwkv-generation",
+      "evaluation.loop-probe",
+      "export.megakernel-aot",
+      "export.production-kernels-aot",
+      "oracle.lossless-gdn-map",
+      "qualification.posttraining-kernels",
+      "qualification.production-kernels",
+      "qualification.lossless-gdn-map",
+      "external.ltx23-plan",
+      "external.ltx23-prepare",
+      "external.ltx23-run",
+      "control.manual-training-launch",
+      "control.gpu-launch-queue",
+      "control.sample-launch",
   };
   std::set<std::string> exact_candidates = {
       "vision.frozen-adapter-train",
@@ -138,10 +190,27 @@ int main() {
   bool saw_restart_only_review = false;
   bool saw_mutable_legacy_export = false;
   bool saw_mutable_frozen_export = false;
+  bool saw_lossless_qualification = false;
+  bool saw_split_production_qualification = false;
+  bool saw_ltx_training_only = false;
+  bool saw_lossless_library_oracle = false;
+  bool saw_production_aot_export = false;
+  bool saw_http_control_handler = false;
+  const std::set<std::string> smoke_only_library_sources = {
+      "src/rwkv_lab/engram_lmb.py",
+      "src/rwkv_lab/layer_swap.py",
+      "src/rwkv_lab/mla_module.py",
+      "src/rwkv_lab/rosa_sam.py",
+      "src/rwkv_lab/rosa_soft_layer.py",
+      "src/rwkv_lab/svd_init.py",
+  };
+  auto unseen_smoke_only_library_sources = smoke_only_library_sources;
+  bool smoke_only_source_claimed_invocable = false;
   for (const auto& entry : catalog.entries()) {
     families.insert(entry.family);
     invocation_kinds.insert(entry.observed_invocation);
     identifiers.insert(entry.stable_id);
+    reviewed_sources.insert(entry.source_paths.begin(), entry.source_paths.end());
     required_additions.erase(entry.stable_id);
     if (exact_candidates.contains(entry.stable_id) && entry.stateful &&
         entry.resume_evidence ==
@@ -160,16 +229,75 @@ int main() {
         (entry.stable_id == "export.frozen-vision-compressor" &&
          entry.notes.contains("overwriteable") &&
          entry.notes.contains("no self-bound content hash"));
+    saw_lossless_qualification = saw_lossless_qualification ||
+        (entry.stable_id == "qualification.lossless-gdn-map" &&
+         entry.operation_role ==
+             trainvm::CompatibilityOperationRole::qualification &&
+         entry.notes.contains("publishes no converted model"));
+    saw_split_production_qualification =
+        saw_split_production_qualification ||
+        (entry.stable_id == "qualification.production-kernels" &&
+         entry.operation_role ==
+             trainvm::CompatibilityOperationRole::qualification &&
+         entry.source_paths.size() == 1U &&
+         entry.source_paths.front() ==
+             "src/rwkv_lab/production_kernels.py");
+    saw_ltx_training_only = saw_ltx_training_only ||
+        (entry.stable_id == "external.ltx23-lora" &&
+         entry.operation_role ==
+             trainvm::CompatibilityOperationRole::training &&
+         entry.legacy_invocation_display &&
+         entry.legacy_invocation_display->contains(" train "));
+    saw_lossless_library_oracle = saw_lossless_library_oracle ||
+        (entry.stable_id == "oracle.lossless-gdn-map" &&
+         entry.observed_invocation ==
+             trainvm::ObservedInvocationKind::library_only &&
+         entry.operation_role ==
+             trainvm::CompatibilityOperationRole::library_oracle);
+    saw_production_aot_export = saw_production_aot_export ||
+        (entry.stable_id == "export.production-kernels-aot" &&
+         entry.operation_role ==
+             trainvm::CompatibilityOperationRole::export_artifact &&
+         entry.source_paths.size() == 1U &&
+         entry.source_paths.front() ==
+             "src/rwkv_lab/production_kernels.py");
+    saw_http_control_handler = saw_http_control_handler ||
+        (entry.family == trainvm::WorkflowFamily::control_plane &&
+         entry.observed_invocation ==
+             trainvm::ObservedInvocationKind::http_control_handler);
+    for (const auto& source : entry.source_paths) {
+      if (smoke_only_library_sources.contains(source)) {
+        smoke_only_source_claimed_invocable =
+            smoke_only_source_claimed_invocable ||
+            entry.observed_invocation !=
+                trainvm::ObservedInvocationKind::library_only;
+        if (entry.observed_invocation ==
+            trainvm::ObservedInvocationKind::library_only) {
+          unseen_smoke_only_library_sources.erase(source);
+        }
+      }
+    }
   }
-  check(families.size() == 10U && invocation_kinds.size() == 5U &&
+  check(families.size() == 11U && invocation_kinds.size() == 6U &&
             identifiers.size() == catalog.entries().size(),
         "catalog contains every family and observed invocation kind");
   check(required_additions.empty(),
         "catalog retains the expanded audited workflow inventory");
+  check(reviewed_sources.size() == 141U,
+        "catalog binds the complete reviewed source inventory");
   check(exact_candidates.empty() && saw_restart_only_review,
         "legacy exact candidates and restart-only review are classified narrowly");
   check(saw_mutable_legacy_export && saw_mutable_frozen_export,
         "export notes disclose overwrite and verification limitations");
+  check(saw_lossless_qualification && saw_split_production_qualification &&
+            saw_ltx_training_only && saw_lossless_library_oracle &&
+            saw_production_aot_export,
+        "effectfully distinct qualification, export, and external phases stay split");
+  check(saw_http_control_handler,
+        "dashboard HTTP controls are not mislabeled as host scripts");
+  check(unseen_smoke_only_library_sources.empty() &&
+            !smoke_only_source_claimed_invocable,
+        "essential smoke-only modules remain explicit nonlaunchable libraries");
   check(!trainvm::enum_from_string<trainvm::CompatibilityResumeEvidence>(
              "exact") &&
             !trainvm::enum_from_string<trainvm::ObservedInvocationKind>(
@@ -285,8 +413,8 @@ int main() {
   check(rejects(library_resume) && rejects(design_resume) &&
             rejects(role_contradiction),
         "library and design evidence cannot claim state or command roles");
-  check(!rejects(missing_display) && rejects(library_display),
-        "legacy invocation displays are optional and informational only");
+  check(rejects(missing_display) && rejects(library_display),
+        "the exact reviewed mapping is pinned even for optional display metadata");
   check(rejects(unknown_invocation) && rejects(adapter_exact),
         "unknown invocation and AdapterRegistry exact vocabularies are rejected");
   check(rejects(authority_escalation) && rejects(unknown_field),

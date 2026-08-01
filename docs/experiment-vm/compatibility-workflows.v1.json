@@ -1,21 +1,20 @@
 {
   "api_version": "trainvm.compatibility-workflows/v1",
   "authority": "compatibility_evidence_only",
-  "source_tree_digest": "sha256:54b7d9290c18c8ddf63b7474bdb9085d4dd492110230a8cca44e0bec9fa8236c",
+  "source_tree_digest": "sha256:940c8f7a2165a257c2416a9d07e08181b63b3b7f60d2dc646e7a43b94581b501",
   "entries": [
     {
       "stable_id": "rwkv.synthetic-campaign",
       "family": "rwkv",
       "source_paths": [
-        "src/rwkv_lab/experiment.py",
-        "src/rwkv_lab/config.py"
+        "src/rwkv_lab/experiment.py"
       ],
       "stateful": true,
       "operation_role": "campaign",
-      "notes": "Synthetic paired, factorial, halving, and confirmation campaigns. This records a discovered Python module mechanism, not launch permission.",
+      "notes": "Synthetic paired, factorial, halving, and confirmation campaign executable. Config-file and real-corpus dispatch are reviewed separately.",
       "observed_invocation": "python_module",
       "resume_evidence": "compatible",
-      "legacy_invocation_display": "python -m rwkv_lab.experiment; python -m rwkv_lab.config run <config>"
+      "legacy_invocation_display": "python -m rwkv_lab.experiment <arguments>"
     },
     {
       "stable_id": "rwkv.scratch-pretrain",
@@ -45,7 +44,7 @@
     },
     {
       "stable_id": "transformer.mla-train",
-      "family": "transformer_mla",
+      "family": "transformer",
       "source_paths": [
         "src/rwkv_lab/train_mla.py"
       ],
@@ -58,7 +57,7 @@
     },
     {
       "stable_id": "transformer.mla-engram-train",
-      "family": "transformer_mla",
+      "family": "transformer",
       "source_paths": [
         "src/rwkv_lab/train_mla_engram.py"
       ],
@@ -71,7 +70,7 @@
     },
     {
       "stable_id": "transformer.engram-prefill",
-      "family": "transformer_mla",
+      "family": "transformer",
       "source_paths": [
         "src/rwkv_lab/gpu_engram_prefill.py"
       ],
@@ -84,7 +83,7 @@
     },
     {
       "stable_id": "transformer.qwen-ao3-cpt",
-      "family": "transformer_mla",
+      "family": "transformer",
       "source_paths": [
         "src/rwkv_lab/qwen_ao3_cpt.py"
       ],
@@ -252,17 +251,17 @@
       "legacy_invocation_display": "python -m rwkv_lab.distill_consolidate --model-dir <model> --data <tokens> --rwkv-ckpt <checkpoint>"
     },
     {
-      "stable_id": "conversion.lossless-gdn-map",
+      "stable_id": "qualification.lossless-gdn-map",
       "family": "conversion_distillation",
       "source_paths": [
         "src/rwkv_lab/convert_gdn_lossless.py"
       ],
       "stateful": false,
-      "operation_role": "conversion",
-      "notes": "Exact in-memory GDN mapping and self-test helper. The existing command does not itself publish an authority-trusted model artifact.",
+      "operation_role": "qualification",
+      "notes": "Executable PPL self-test for an in-memory exact GDN-to-RWKV kernel mapping. It publishes no converted model; the install function remains library evidence.",
       "observed_invocation": "python_module",
       "resume_evidence": "none",
-      "legacy_invocation_display": "python -m rwkv_lab.convert_gdn_lossless <arguments>"
+      "legacy_invocation_display": "python -m rwkv_lab.convert_gdn_lossless"
     },
     {
       "stable_id": "posttraining.rwkv-adapter",
@@ -323,11 +322,24 @@
         "src/rwkv_lab/ltx23_lora.py"
       ],
       "stateful": true,
-      "operation_role": "supervisor",
-      "notes": "Wrapper around the external LTX-2.3 video and optional audio LoRA trainer. An observed console mechanism is not an approved external revision or host launch.",
+      "operation_role": "training",
+      "notes": "External LTX-2.3 LoRA train subcommand. Planning, preprocessing, and composite run effects are reviewed separately.",
       "observed_invocation": "console_script",
       "resume_evidence": "compatible",
-      "legacy_invocation_display": "ltx23-lora train --ltx-root <checkout> --model-path <model> --work-dir <directory>"
+      "legacy_invocation_display": "ltx23-lora train <arguments>"
+    },
+    {
+      "stable_id": "data.engram-frequency",
+      "family": "data_cache",
+      "source_paths": [
+        "src/rwkv_lab/engram_lmb_build.py"
+      ],
+      "observed_invocation": "python_module",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "preprocess",
+      "notes": "Scans the configured token corpus and publishes the lexical-frequency array consumed by allocation. It is a distinct stateless artifact build, not Engram training.",
+      "legacy_invocation_display": "python -m rwkv_lab.engram_lmb_build freq <arguments>"
     },
     {
       "stable_id": "data.engram-allocation",
@@ -335,12 +347,12 @@
       "source_paths": [
         "src/rwkv_lab/engram_lmb_build.py"
       ],
-      "stateful": false,
-      "operation_role": "preprocess",
-      "notes": "Offline lexical frequency and allocation builder. It is preprocessing, not Engram model training.",
       "observed_invocation": "python_module",
+      "stateful": false,
       "resume_evidence": "none",
-      "legacy_invocation_display": "python -m rwkv_lab.engram_lmb_build freq|alloc <arguments>"
+      "operation_role": "preprocess",
+      "notes": "Consumes a lexical-frequency array and publishes the hashed bucket allocation artifact. It does not scan the corpus or train Engram weights.",
+      "legacy_invocation_display": "python -m rwkv_lab.engram_lmb_build alloc <arguments>"
     },
     {
       "stable_id": "cache.vision-features",
@@ -350,7 +362,7 @@
       ],
       "stateful": false,
       "operation_role": "cache_build",
-      "notes": "Deterministic frozen vision feature-cache construction; this entry records an artifact-building workflow only.",
+      "notes": "MoonViT frozen-feature cache construction. Fusion, dense-SAM, RADIO1D, and RADIO-V4H producers are reviewed separately.",
       "observed_invocation": "python_module",
       "resume_evidence": "none",
       "legacy_invocation_display": "python -m rwkv_lab.vision_cache <arguments>"
@@ -382,18 +394,17 @@
       "legacy_invocation_display": "python -m rwkv_lab.vision_caption <arguments>"
     },
     {
-      "stable_id": "profiling.production-kernels",
+      "stable_id": "qualification.production-kernels",
       "family": "evaluation_profile_export",
       "source_paths": [
-        "src/rwkv_lab/production_kernels.py",
-        "src/rwkv_lab/posttrain_kernels.py"
+        "src/rwkv_lab/production_kernels.py"
       ],
       "stateful": false,
-      "operation_role": "profiling",
-      "notes": "Kernel parity, determinism, gradient, state, and performance qualification. Internal backward passes are tests, not model-training authority.",
+      "operation_role": "qualification",
+      "notes": "Production training and serving kernel parity, determinism, performance, and regression qualification with optional post-adoption AOT publication.",
       "observed_invocation": "python_module",
       "resume_evidence": "none",
-      "legacy_invocation_display": "python -m rwkv_lab.production_kernels <arguments>; python -m rwkv_lab.posttrain_kernels <arguments>"
+      "legacy_invocation_display": "python -m rwkv_lab.production_kernels <arguments>"
     },
     {
       "stable_id": "export.legacy-mutable-bundle",
@@ -826,6 +837,1000 @@
       "operation_role": "acquisition",
       "notes": "External teacher acquisition queue with atomic per-request receipts and budget accounting, providing a durable compatible restart boundary.",
       "legacy_invocation_display": "python -m rwkv_lab.kimi_teacher <arguments>"
+    },
+    {
+      "stable_id": "rwkv.legacy-sweep-campaigns",
+      "family": "rwkv",
+      "source_paths": [
+        "scripts/factored_loop_sweep.sh",
+        "scripts/g1g_sweep.sh",
+        "scripts/latent_steps_sweep.sh",
+        "scripts/latent_sweep.sh",
+        "scripts/loop_sweep.sh"
+      ],
+      "observed_invocation": "host_script",
+      "stateful": true,
+      "resume_evidence": "restart_only",
+      "operation_role": "campaign",
+      "notes": "Sequential loop, latent-objective, and optimizer sweeps with no durable campaign cursor.",
+      "legacy_invocation_display": "reviewed RWKV sweep scripts"
+    },
+    {
+      "stable_id": "rwkv.config-campaign",
+      "family": "rwkv",
+      "source_paths": [
+        "src/rwkv_lab/config.py"
+      ],
+      "observed_invocation": "python_module",
+      "stateful": true,
+      "resume_evidence": "compatible",
+      "operation_role": "campaign",
+      "notes": "Declarative config and real-corpus run-lm campaigns with resumable children but no exact campaign safe point.",
+      "legacy_invocation_display": "python -m rwkv_lab.config run|run-lm <arguments>"
+    },
+    {
+      "stable_id": "transformer.engram-staged-supervisor",
+      "family": "transformer",
+      "source_paths": [
+        "scripts/supervisor_night.sh"
+      ],
+      "observed_invocation": "host_script",
+      "stateful": true,
+      "resume_evidence": "compatible",
+      "operation_role": "supervisor",
+      "notes": "Staged MLA/Engram continuation with checkpoint discovery, bounded relaunch, and thrash detection.",
+      "legacy_invocation_display": "scripts/supervisor_night.sh"
+    },
+    {
+      "stable_id": "data.rwkv-corpus-preparation",
+      "family": "data_cache",
+      "source_paths": [
+        "src/rwkv_lab/build_corpus.py"
+      ],
+      "observed_invocation": "python_module",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "preprocess",
+      "notes": "Document-boundary-aware RWKV token corpus and offset materializer.",
+      "legacy_invocation_display": "python -m rwkv_lab.build_corpus <arguments>"
+    },
+    {
+      "stable_id": "data.qwen35-conversion-corpus",
+      "family": "data_cache",
+      "source_paths": [
+        "src/rwkv_lab/build_qwen35_data.py"
+      ],
+      "observed_invocation": "python_module",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "preprocess",
+      "notes": "Qwen3.5 conversion corpus materializer with offsets and split manifests.",
+      "legacy_invocation_display": "python -m rwkv_lab.build_qwen35_data <arguments>"
+    },
+    {
+      "stable_id": "conversion.engram-patch",
+      "family": "conversion_distillation",
+      "source_paths": [
+        "src/rwkv_lab/build_engram_patch.py"
+      ],
+      "observed_invocation": "python_module",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "conversion",
+      "notes": "One-shot initialized Engram patch and manifest publisher.",
+      "legacy_invocation_display": "python -m rwkv_lab.build_engram_patch <arguments>"
+    },
+    {
+      "stable_id": "data.posttraining-validation",
+      "family": "data_cache",
+      "source_paths": [
+        "src/rwkv_lab/posttrain_data.py"
+      ],
+      "observed_invocation": "python_module",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "qualification",
+      "notes": "Typed SFT, preference, feedback, PRM, and RLVR dataset validation and preview.",
+      "legacy_invocation_display": "python -m rwkv_lab.posttrain_data <dataset>"
+    },
+    {
+      "stable_id": "data.ao3-source-preparation",
+      "family": "data_cache",
+      "source_paths": [
+        "scripts/prepare_ao3_cpt.py",
+        "src/rwkv_lab/ao3_cpt_data.py"
+      ],
+      "observed_invocation": "console_script",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "preprocess",
+      "notes": "Immutable AO3 filtering, split, and source-shard preparation including its reviewed wrapper.",
+      "legacy_invocation_display": "ao3-cpt-prepare <arguments>"
+    },
+    {
+      "stable_id": "data.ao3-tokenize",
+      "family": "data_cache",
+      "source_paths": [
+        "scripts/prepare_ao3_cpt_tokens.py",
+        "src/rwkv_lab/ao3_cpt_tokens.py"
+      ],
+      "observed_invocation": "console_script",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "preprocess",
+      "notes": "Tokenizes the prepared AO3 corpus into a new token cache and refuses to overwrite an existing output. Packing and separator rewriting are separate effects.",
+      "legacy_invocation_display": "ao3-cpt-tokens tokenize <arguments>"
+    },
+    {
+      "stable_id": "data.ao3-pack",
+      "family": "data_cache",
+      "source_paths": [
+        "scripts/prepare_ao3_cpt_tokens.py",
+        "src/rwkv_lab/ao3_cpt_tokens.py"
+      ],
+      "observed_invocation": "console_script",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "preprocess",
+      "notes": "Packs a token stream into a new exactly-once training cache and refuses to overwrite an existing output. Tokenization and in-place separator rewriting are separate effects.",
+      "legacy_invocation_display": "ao3-cpt-tokens pack <arguments>"
+    },
+    {
+      "stable_id": "data.ao3-rewrite-eos",
+      "family": "data_cache",
+      "source_paths": [
+        "scripts/prepare_ao3_cpt_tokens.py",
+        "src/rwkv_lab/ao3_cpt_tokens.py"
+      ],
+      "observed_invocation": "console_script",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "preprocess",
+      "notes": "Rewrites document-tail separator IDs in an existing token cache through a writable memmap and atomically replaces its manifest. This mutates the cache in place and has no transactional rollback or resume state.",
+      "legacy_invocation_display": "ao3-cpt-tokens rewrite-eos <arguments>"
+    },
+    {
+      "stable_id": "transformer.qwen-ao3-audit",
+      "family": "transformer",
+      "source_paths": [
+        "src/rwkv_lab/qwen_ao3_cpt.py"
+      ],
+      "observed_invocation": "console_script",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "qualification",
+      "notes": "Read-only Qwen checkpoint-fit and adapter-rank audit.",
+      "legacy_invocation_display": "qwen-ao3-cpt audit <arguments>"
+    },
+    {
+      "stable_id": "transformer.qwen-ao3-plan",
+      "family": "transformer",
+      "source_paths": [
+        "scripts/prepare_qwen_ao3_cpt.sh",
+        "scripts/prepare_qwen_ao3_cpt_run.py",
+        "src/rwkv_lab/qwen_ao3_cpt.py"
+      ],
+      "observed_invocation": "console_script",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "preprocess",
+      "notes": "Validated AO3 run preparation and checked-in orchestration wrappers.",
+      "legacy_invocation_display": "qwen-ao3-cpt prepare-run <arguments>"
+    },
+    {
+      "stable_id": "conversion.gate-ab2-campaign",
+      "family": "conversion_distillation",
+      "source_paths": [
+        "scripts/gate_ab2.sh"
+      ],
+      "observed_invocation": "host_script",
+      "stateful": true,
+      "resume_evidence": "restart_only",
+      "operation_role": "campaign",
+      "notes": "Corrected fixed-step control, scalar, and factored gate campaign without a durable cursor.",
+      "legacy_invocation_display": "scripts/gate_ab2.sh"
+    },
+    {
+      "stable_id": "evaluation.conversion-baseline",
+      "family": "evaluation_profile_export",
+      "source_paths": [
+        "src/rwkv_lab/eval_baseline.py"
+      ],
+      "observed_invocation": "python_module",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "evaluation",
+      "notes": "Untouched-Qwen baseline PPL evaluation.",
+      "legacy_invocation_display": "python -m rwkv_lab.eval_baseline <arguments>"
+    },
+    {
+      "stable_id": "evaluation.loop-probe",
+      "family": "evaluation_profile_export",
+      "source_paths": [
+        "src/rwkv_lab/loop_probe.py"
+      ],
+      "observed_invocation": "python_module",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "evaluation",
+      "notes": "Recurrent trajectory and depth-usefulness evaluation.",
+      "legacy_invocation_display": "python -m rwkv_lab.loop_probe <arguments>"
+    },
+    {
+      "stable_id": "evaluation.rwkv-generation",
+      "family": "evaluation_profile_export",
+      "source_paths": [
+        "src/rwkv_lab/generate.py"
+      ],
+      "observed_invocation": "python_module",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "evaluation",
+      "notes": "Checkpoint-bound RWKV generation used by dashboard sampling.",
+      "legacy_invocation_display": "python -m rwkv_lab.generate <arguments>"
+    },
+    {
+      "stable_id": "qualification.converted-forward",
+      "family": "evaluation_profile_export",
+      "source_paths": [
+        "src/rwkv_lab/load_converted.py"
+      ],
+      "observed_invocation": "python_module",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "qualification",
+      "notes": "Legacy converted-model load and forward qualification; no model is published.",
+      "legacy_invocation_display": "python -m rwkv_lab.load_converted"
+    },
+    {
+      "stable_id": "qualification.engram-integration",
+      "family": "evaluation_profile_export",
+      "source_paths": [
+        "src/rwkv_lab/verify_engram.py"
+      ],
+      "observed_invocation": "python_module",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "qualification",
+      "notes": "MLA+Engram load, forward, backward, and gradient qualification.",
+      "legacy_invocation_display": "python -m rwkv_lab.verify_engram <arguments>"
+    },
+    {
+      "stable_id": "qualification.posttraining-kernels",
+      "family": "evaluation_profile_export",
+      "source_paths": [
+        "src/rwkv_lab/posttrain_kernels.py"
+      ],
+      "observed_invocation": "python_module",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "qualification",
+      "notes": "Post-training compile, gradient-parity, speed, and offload qualification.",
+      "legacy_invocation_display": "python -m rwkv_lab.posttrain_kernels <arguments>"
+    },
+    {
+      "stable_id": "export.megakernel-aot",
+      "family": "evaluation_profile_export",
+      "source_paths": [
+        "src/rwkv_lab/megakernel.py"
+      ],
+      "observed_invocation": "python_module",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "export_artifact",
+      "notes": "Checkpoint-bound compiled RWKV megakernel AOT exporter without serving authority.",
+      "legacy_invocation_display": "python -m rwkv_lab.megakernel <arguments>"
+    },
+    {
+      "stable_id": "profiling.qwen-prompt-hints",
+      "family": "evaluation_profile_export",
+      "source_paths": [
+        "scripts/benchmark_qwen_prompt_hints.py"
+      ],
+      "observed_invocation": "host_script",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "profiling",
+      "notes": "Paired caption quality and disjoint concurrency, GPU, memory, and power profiling.",
+      "legacy_invocation_display": "python scripts/benchmark_qwen_prompt_hints.py <arguments>"
+    },
+    {
+      "stable_id": "profiling.vision-loop-telemetry",
+      "family": "evaluation_profile_export",
+      "source_paths": [
+        "scripts/write_vision_loop_telemetry.py"
+      ],
+      "observed_invocation": "host_script",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "profiling",
+      "notes": "Checkpoint-derived vision loop telemetry materializer.",
+      "legacy_invocation_display": "python scripts/write_vision_loop_telemetry.py <checkpoint>"
+    },
+    {
+      "stable_id": "evaluation.radio1d-batch-caption",
+      "family": "evaluation_profile_export",
+      "source_paths": [
+        "scripts/caption_radio1d_directory.py"
+      ],
+      "observed_invocation": "host_script",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "evaluation",
+      "notes": "Resumable RADIO1D batch-caption generation for side-by-side review.",
+      "legacy_invocation_display": "python scripts/caption_radio1d_directory.py <arguments>"
+    },
+    {
+      "stable_id": "conversion.v4h-dino-compactor",
+      "family": "conversion_distillation",
+      "source_paths": [
+        "scripts/build_v4h_dino_compactor.py"
+      ],
+      "observed_invocation": "host_script",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "conversion",
+      "notes": "Verified DINOv3 adaptor compactor and reconstruction receipt publisher.",
+      "legacy_invocation_display": "python scripts/build_v4h_dino_compactor.py <arguments>"
+    },
+    {
+      "stable_id": "cache.vision-fusion-features",
+      "family": "data_cache",
+      "source_paths": [
+        "src/rwkv_lab/vision_fusion_cache.py"
+      ],
+      "observed_invocation": "python_module",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "cache_build",
+      "notes": "Aligned SigLIP2, DINOv2, and SAM feature-cache producer.",
+      "legacy_invocation_display": "python -m rwkv_lab.vision_fusion_cache <arguments>"
+    },
+    {
+      "stable_id": "cache.vision-sam-dense",
+      "family": "data_cache",
+      "source_paths": [
+        "src/rwkv_lab/vision_sam_dense_cache.py"
+      ],
+      "observed_invocation": "python_module",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "cache_build",
+      "notes": "SAM native dense-feature cache producer.",
+      "legacy_invocation_display": "python -m rwkv_lab.vision_sam_dense_cache <arguments>"
+    },
+    {
+      "stable_id": "cache.vision-radio1d",
+      "family": "data_cache",
+      "source_paths": [
+        "scripts/cache_radio1d_features.py"
+      ],
+      "observed_invocation": "host_script",
+      "stateful": true,
+      "resume_evidence": "compatible",
+      "operation_role": "cache_build",
+      "notes": "Resumable tiled RADIO1D-H cache producer.",
+      "legacy_invocation_display": "python scripts/cache_radio1d_features.py <arguments>"
+    },
+    {
+      "stable_id": "cache.vision-v4h",
+      "family": "data_cache",
+      "source_paths": [
+        "scripts/cache_v4h_all_adaptors.py",
+        "scripts/cache_v4h_features.py",
+        "scripts/cache_v4h_native.py"
+      ],
+      "observed_invocation": "host_script",
+      "stateful": true,
+      "resume_evidence": "compatible",
+      "operation_role": "cache_build",
+      "notes": "Reviewed RADIO-V4H raw, native, and fused cache modes.",
+      "legacy_invocation_display": "reviewed cache_v4h scripts"
+    },
+    {
+      "stable_id": "vision.representation-ab",
+      "family": "vision_multimodal",
+      "source_paths": [
+        "scripts/run_vision_representation_ab.py",
+        "scripts/run_vision_representation_ab_arm.sh"
+      ],
+      "observed_invocation": "host_script",
+      "stateful": true,
+      "resume_evidence": "restart_only",
+      "operation_role": "campaign",
+      "notes": "Sequential MoonViT-only versus frozen-compressor representation A/B.",
+      "legacy_invocation_display": "python scripts/run_vision_representation_ab.py"
+    },
+    {
+      "stable_id": "vision.teacher-student-supervisor",
+      "family": "vision_multimodal",
+      "source_paths": [
+        "scripts/overnight_teacher_student_supervisor.py"
+      ],
+      "observed_invocation": "host_script",
+      "stateful": true,
+      "resume_evidence": "compatible",
+      "operation_role": "supervisor",
+      "notes": "Multi-stage cache, deduplication, compressor, and shard-handoff supervisor.",
+      "legacy_invocation_display": "python scripts/overnight_teacher_student_supervisor.py"
+    },
+    {
+      "stable_id": "vision.continuation-watchdog",
+      "family": "vision_multimodal",
+      "source_paths": [
+        "scripts/overnight_vision_watchdog.py"
+      ],
+      "observed_invocation": "host_script",
+      "stateful": true,
+      "resume_evidence": "compatible",
+      "operation_role": "supervisor",
+      "notes": "Vision continuation, acquisition, stall recovery, and caption-smoke supervisor.",
+      "legacy_invocation_display": "python scripts/overnight_vision_watchdog.py"
+    },
+    {
+      "stable_id": "vision.radio1d-launch-profiles",
+      "family": "vision_multimodal",
+      "source_paths": [
+        "scripts/run_radio1d_captioning_first.sh",
+        "scripts/run_radio1d_civitai_joy_continuation.sh",
+        "scripts/run_radio1d_eight_hour_grounded.sh"
+      ],
+      "observed_invocation": "host_script",
+      "stateful": true,
+      "resume_evidence": "compatible",
+      "operation_role": "supervisor",
+      "notes": "RADIO1D vision_train launch profiles encode cache, warm-start, evaluation, and continuation policy. Wrapper and handoff closure remain compatibility-grade.",
+      "legacy_invocation_display": "scripts/run_radio1d_<profile>.sh"
+    },
+    {
+      "stable_id": "vision.v4h-launch-profiles",
+      "family": "vision_multimodal",
+      "source_paths": [
+        "scripts/run_v4h_all_adaptors_7b.sh",
+        "scripts/run_v4h_captioning_first.sh",
+        "scripts/run_v4h_captioning_ocr_fixed.sh"
+      ],
+      "observed_invocation": "host_script",
+      "stateful": true,
+      "resume_evidence": "compatible",
+      "operation_role": "supervisor",
+      "notes": "RADIO-V4H vision_train profiles select adaptor topology, captioning order, OCR handling, cache inputs, and auto-resume. Profile-level identity closure remains compatibility-grade.",
+      "legacy_invocation_display": "scripts/run_v4h_<profile>.sh"
+    },
+    {
+      "stable_id": "vision.moonvit-continuation-launch-profiles",
+      "family": "vision_multimodal",
+      "source_paths": [
+        "scripts/run_vision_eight_hour.sh",
+        "scripts/run_vision_eight_hour_grounded.sh",
+        "scripts/run_vision_finish_grounded.sh",
+        "scripts/run_vision_i1_next.sh",
+        "scripts/run_vision_next_levers.sh",
+        "scripts/run_vision_next_levers_256.sh"
+      ],
+      "observed_invocation": "host_script",
+      "stateful": true,
+      "resume_evidence": "compatible",
+      "operation_role": "supervisor",
+      "notes": "MoonViT vision_train continuation profiles encode checkpoints, datasets, cache/eval boundaries, and auto-resume. Their launcher and external-input closure are not exact.",
+      "legacy_invocation_display": "scripts/run_vision_<continuation-profile>.sh"
+    },
+    {
+      "stable_id": "vision.native-head-launch-profile",
+      "family": "vision_multimodal",
+      "source_paths": [
+        "scripts/run_vision_native_arm2.sh"
+      ],
+      "observed_invocation": "host_script",
+      "stateful": true,
+      "resume_evidence": "compatible",
+      "operation_role": "supervisor",
+      "notes": "Native-head training launch profile with its distinct trainer, projection inputs, topology, and compatible-only resume behavior.",
+      "legacy_invocation_display": "scripts/run_vision_native_arm2.sh"
+    },
+    {
+      "stable_id": "vision.raw-pixel-student-launch-profile",
+      "family": "vision_multimodal",
+      "source_paths": [
+        "scripts/run_vision_rwkv_student.sh"
+      ],
+      "observed_invocation": "host_script",
+      "stateful": true,
+      "resume_evidence": "compatible",
+      "operation_role": "supervisor",
+      "notes": "Raw-pixel RWKV student launch profile with its distinct trainer, teacher inputs, cache lineage, and compatible-only resume behavior.",
+      "legacy_invocation_display": "scripts/run_vision_rwkv_student.sh"
+    },
+    {
+      "stable_id": "vision.teacher-compressor-launch-profile",
+      "family": "vision_multimodal",
+      "source_paths": [
+        "scripts/run_vision_teacher_compressor.sh"
+      ],
+      "observed_invocation": "host_script",
+      "stateful": true,
+      "resume_evidence": "exact_candidate",
+      "operation_role": "supervisor",
+      "notes": "Teacher-compressor launch profile invokes the manifest-bound compressor with auto-resume. It remains only an exact candidate pending the same identity and recovery gate as the underlying trainer.",
+      "legacy_invocation_display": "scripts/run_vision_teacher_compressor.sh"
+    },
+    {
+      "stable_id": "mageflow.full-backbone-plan",
+      "family": "mageflow_diffusion",
+      "source_paths": [
+        "src/rwkv_lab/mage_flow_pretrain.py"
+      ],
+      "observed_invocation": "console_script",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "preprocess",
+      "notes": "Pinned full-backbone run planner.",
+      "legacy_invocation_display": "mage-flow-pretrain plan"
+    },
+    {
+      "stable_id": "mageflow.expert-plan",
+      "family": "mageflow_diffusion",
+      "source_paths": [
+        "src/rwkv_lab/mage_flow_expert_train.py"
+      ],
+      "observed_invocation": "console_script",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "preprocess",
+      "notes": "Routed-expert config planner.",
+      "legacy_invocation_display": "mage-flow-expert-train plan"
+    },
+    {
+      "stable_id": "mageflow.expert-encoder-cache",
+      "family": "mageflow_diffusion",
+      "source_paths": [
+        "src/rwkv_lab/mage_flow_expert_train.py"
+      ],
+      "observed_invocation": "console_script",
+      "stateful": true,
+      "resume_evidence": "compatible",
+      "operation_role": "cache_build",
+      "notes": "Routed-expert frozen encoder cache build.",
+      "legacy_invocation_display": "mage-flow-expert-train cache-encoders"
+    },
+    {
+      "stable_id": "mageflow.terminal-preparation",
+      "family": "mageflow_diffusion",
+      "source_paths": [
+        "src/rwkv_lab/mage_flow_terminal_train.py"
+      ],
+      "observed_invocation": "python_module",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "preprocess",
+      "notes": "Terminal run preparation.",
+      "legacy_invocation_display": "mage_flow_terminal_train prepare"
+    },
+    {
+      "stable_id": "mageflow.terminal-encoder-cache",
+      "family": "mageflow_diffusion",
+      "source_paths": [
+        "src/rwkv_lab/mage_flow_terminal_train.py"
+      ],
+      "observed_invocation": "python_module",
+      "stateful": true,
+      "resume_evidence": "compatible",
+      "operation_role": "cache_build",
+      "notes": "Terminal frozen encoder cache build.",
+      "legacy_invocation_display": "mage_flow_terminal_train cache-encoders"
+    },
+    {
+      "stable_id": "mageflow.terminal-cache-span-plan",
+      "family": "mageflow_diffusion",
+      "source_paths": [
+        "src/rwkv_lab/mage_flow_terminal_train.py"
+      ],
+      "observed_invocation": "python_module",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "preprocess",
+      "notes": "Checkpoint-bound cache-span planning.",
+      "legacy_invocation_display": "mage_flow_terminal_train plan-cache-span"
+    },
+    {
+      "stable_id": "mageflow.terminal-cache-span-prepare",
+      "family": "mageflow_diffusion",
+      "source_paths": [
+        "src/rwkv_lab/mage_flow_terminal_train.py"
+      ],
+      "observed_invocation": "python_module",
+      "stateful": true,
+      "resume_evidence": "compatible",
+      "operation_role": "cache_build",
+      "notes": "Checkpoint-bound cache-span materialization.",
+      "legacy_invocation_display": "mage_flow_terminal_train prepare-cache-span"
+    },
+    {
+      "stable_id": "mageflow.terminal-domain-window-plan",
+      "family": "mageflow_diffusion",
+      "source_paths": [
+        "src/rwkv_lab/mage_flow_terminal_train.py"
+      ],
+      "observed_invocation": "python_module",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "preprocess",
+      "notes": "Deterministic domain-window planning.",
+      "legacy_invocation_display": "mage_flow_terminal_train plan-domain-windows"
+    },
+    {
+      "stable_id": "mageflow.terminal-expert-migration",
+      "family": "mageflow_diffusion",
+      "source_paths": [
+        "scripts/migrate_mage_flow_terminal_experts.py"
+      ],
+      "observed_invocation": "host_script",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "conversion",
+      "notes": "CPU residual-to-terminal photo and animation expert migration.",
+      "legacy_invocation_display": "python scripts/migrate_mage_flow_terminal_experts.py"
+    },
+    {
+      "stable_id": "mageflow.tread-loop-conversion",
+      "family": "mageflow_diffusion",
+      "source_paths": [
+        "scripts/convert_terminal_mageflow_to_tread_looped.py"
+      ],
+      "observed_invocation": "host_script",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "conversion",
+      "notes": "GPU TREAD loop-controller conversion with equivalence report.",
+      "legacy_invocation_display": "python scripts/convert_terminal_mageflow_to_tread_looped.py"
+    },
+    {
+      "stable_id": "mageflow.cache-finish-resume",
+      "family": "mageflow_diffusion",
+      "source_paths": [
+        "scripts/mageflow_finish_cache_and_resume.sh"
+      ],
+      "observed_invocation": "host_script",
+      "stateful": true,
+      "resume_evidence": "compatible",
+      "operation_role": "supervisor",
+      "notes": "Locked cache validation followed by terminal training continuation.",
+      "legacy_invocation_display": "scripts/mageflow_finish_cache_and_resume.sh"
+    },
+    {
+      "stable_id": "external.ltx23-plan",
+      "family": "external_trainer",
+      "source_paths": [
+        "src/rwkv_lab/ltx23_lora.py"
+      ],
+      "observed_invocation": "console_script",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "preprocess",
+      "notes": "LTX config and receipt planning without execution.",
+      "legacy_invocation_display": "ltx23-lora plan <arguments>"
+    },
+    {
+      "stable_id": "external.ltx23-prepare",
+      "family": "external_trainer",
+      "source_paths": [
+        "src/rwkv_lab/ltx23_lora.py"
+      ],
+      "observed_invocation": "console_script",
+      "stateful": true,
+      "resume_evidence": "compatible",
+      "operation_role": "cache_build",
+      "notes": "Official external LTX preprocessing invocation.",
+      "legacy_invocation_display": "ltx23-lora prepare <arguments>"
+    },
+    {
+      "stable_id": "external.ltx23-run",
+      "family": "external_trainer",
+      "source_paths": [
+        "src/rwkv_lab/ltx23_lora.py"
+      ],
+      "observed_invocation": "console_script",
+      "stateful": true,
+      "resume_evidence": "compatible",
+      "operation_role": "supervisor",
+      "notes": "Composite external LTX preprocess-then-train runner.",
+      "legacy_invocation_display": "ltx23-lora run <arguments>"
+    },
+    {
+      "stable_id": "control.manual-training-launch",
+      "family": "control_plane",
+      "source_paths": [
+        "dashboard/internal/server/control.go"
+      ],
+      "observed_invocation": "http_control_handler",
+      "stateful": true,
+      "resume_evidence": "restart_only",
+      "operation_role": "supervisor",
+      "notes": "Legacy allowlisted manual launcher.",
+      "legacy_invocation_display": "POST /api/launch"
+    },
+    {
+      "stable_id": "control.gpu-launch-queue",
+      "family": "control_plane",
+      "source_paths": [
+        "dashboard/internal/server/queue.go"
+      ],
+      "observed_invocation": "http_control_handler",
+      "stateful": true,
+      "resume_evidence": "compatible",
+      "operation_role": "supervisor",
+      "notes": "Legacy persisted priority launch queue.",
+      "legacy_invocation_display": "POST /api/queue/start-next"
+    },
+    {
+      "stable_id": "control.experiment-launch",
+      "family": "control_plane",
+      "source_paths": [
+        "dashboard/internal/server/experiments.go"
+      ],
+      "observed_invocation": "http_control_handler",
+      "stateful": true,
+      "resume_evidence": "restart_only",
+      "operation_role": "supervisor",
+      "notes": "Legacy experiment campaign launcher.",
+      "legacy_invocation_display": "POST /api/experiments/launch"
+    },
+    {
+      "stable_id": "control.posttraining-launch",
+      "family": "control_plane",
+      "source_paths": [
+        "dashboard/internal/server/posttraining.go"
+      ],
+      "observed_invocation": "http_control_handler",
+      "stateful": true,
+      "resume_evidence": "restart_only",
+      "operation_role": "supervisor",
+      "notes": "Legacy post-training campaign and generation launcher.",
+      "legacy_invocation_display": "POST /api/posttraining/campaign"
+    },
+    {
+      "stable_id": "control.rlvr-launch",
+      "family": "control_plane",
+      "source_paths": [
+        "dashboard/internal/server/rlvr.go"
+      ],
+      "observed_invocation": "http_control_handler",
+      "stateful": true,
+      "resume_evidence": "restart_only",
+      "operation_role": "supervisor",
+      "notes": "Legacy RLVR campaign launcher.",
+      "legacy_invocation_display": "POST /api/rlvr/launch"
+    },
+    {
+      "stable_id": "control.qualification-launch",
+      "family": "control_plane",
+      "source_paths": [
+        "dashboard/internal/server/qualification.go"
+      ],
+      "observed_invocation": "http_control_handler",
+      "stateful": true,
+      "resume_evidence": "restart_only",
+      "operation_role": "supervisor",
+      "notes": "Legacy production qualification launcher.",
+      "legacy_invocation_display": "POST /api/qualification/run"
+    },
+    {
+      "stable_id": "control.sample-launch",
+      "family": "control_plane",
+      "source_paths": [
+        "dashboard/internal/server/sample.go"
+      ],
+      "observed_invocation": "http_control_handler",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "evaluation",
+      "notes": "Legacy synchronous checkpoint generation endpoint.",
+      "legacy_invocation_display": "POST /api/sample"
+    },
+    {
+      "stable_id": "oracle.lossless-gdn-map",
+      "family": "conversion_distillation",
+      "source_paths": [
+        "src/rwkv_lab/convert_gdn_lossless.py"
+      ],
+      "observed_invocation": "library_only",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "library_oracle",
+      "notes": "Importable in-memory GDN-to-RWKV kernel mapping. It mutates a caller-owned model and has no artifact publication contract or launch authority."
+    },
+    {
+      "stable_id": "export.production-kernels-aot",
+      "family": "evaluation_profile_export",
+      "source_paths": [
+        "src/rwkv_lab/production_kernels.py"
+      ],
+      "observed_invocation": "python_module",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "export_artifact",
+      "notes": "Optional checkpoint-bound decode and prefill .pt2 publication performed only after production-kernel qualification adopts the candidate. Evidence does not authorize serving adoption.",
+      "legacy_invocation_display": "python -m rwkv_lab.production_kernels --checkpoint <path> --megakernel-artifact <path>"
+    },
+    {
+      "stable_id": "acquisition.civitai-balanced",
+      "family": "data_cache",
+      "source_paths": [
+        "scripts/download_civitai_anima_balanced.py"
+      ],
+      "observed_invocation": "host_script",
+      "stateful": true,
+      "resume_evidence": "compatible",
+      "operation_role": "acquisition",
+      "notes": "Reaction-ranked balanced SFW/NSFW Civitai inventory, freeze, download, repair, validation, and status campaign. SQLite and partial downloads support continuation, but the remote gallery is mutable.",
+      "legacy_invocation_display": "python scripts/download_civitai_anima_balanced.py <subcommand> <arguments>"
+    },
+    {
+      "stable_id": "data.gelbooru-trainer-snapshot",
+      "family": "data_cache",
+      "source_paths": [
+        "scripts/build_gelbooru_trainer_dataset.py"
+      ],
+      "observed_invocation": "host_script",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "preprocess",
+      "notes": "Deterministically selects downloaded Gelbooru rows, hardlinks or copies images, writes tag sidecars and metadata, and validates a frozen trainer snapshot.",
+      "legacy_invocation_display": "python scripts/build_gelbooru_trainer_dataset.py <arguments>"
+    },
+    {
+      "stable_id": "data.reddit-trainer-snapshot",
+      "family": "data_cache",
+      "source_paths": [
+        "scripts/build_reddit_trainer_snapshot.py"
+      ],
+      "observed_invocation": "host_script",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "preprocess",
+      "notes": "Freezes eligible complete multistage Reddit caption records in manifest order, materializes image/sidecar pairs, and validates the snapshot without modifying active checkpoints.",
+      "legacy_invocation_display": "python scripts/build_reddit_trainer_snapshot.py <arguments>"
+    },
+    {
+      "stable_id": "scoring.i1-deepghs-classification",
+      "family": "data_cache",
+      "source_paths": [
+        "scripts/classify_i1_deepghs.py"
+      ],
+      "observed_invocation": "host_script",
+      "stateful": true,
+      "resume_evidence": "compatible",
+      "operation_role": "scoring",
+      "notes": "Runs pinned DeepGHS image-type and anime-versus-real classifiers into an append-only cache, then atomically augments completed I1 manifests without changing original caption fields.",
+      "legacy_invocation_display": "python scripts/classify_i1_deepghs.py <arguments>"
+    },
+    {
+      "stable_id": "data.midjourney-v6-caption-routing",
+      "family": "data_cache",
+      "source_paths": [
+        "scripts/scan_midjourney_v6_caption_routes.py"
+      ],
+      "observed_invocation": "host_script",
+      "stateful": true,
+      "resume_evidence": "compatible",
+      "operation_role": "inventory",
+      "notes": "Scans pinned Midjourney v6 caption shards into photo, animation, and ambiguous routing records with durable local progress. External shard retrieval and local checkpoint identity remain compatibility-grade.",
+      "legacy_invocation_display": "python scripts/scan_midjourney_v6_caption_routes.py <arguments>"
+    },
+    {
+      "stable_id": "data.midjourney-v6-expert-stage",
+      "family": "data_cache",
+      "source_paths": [
+        "scripts/materialize_midjourney_v6_expert_stage.py"
+      ],
+      "observed_invocation": "host_script",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "preprocess",
+      "notes": "Materializes a balanced caption-routed Midjourney expert stage with frozen source revision, deterministic selection, image verification, and held-out evaluation artifacts.",
+      "legacy_invocation_display": "python scripts/materialize_midjourney_v6_expert_stage.py <arguments>"
+    },
+    {
+      "stable_id": "data.midjourney-v6-continuation",
+      "family": "data_cache",
+      "source_paths": [
+        "scripts/materialize_midjourney_v6_continuation.py"
+      ],
+      "observed_invocation": "host_script",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "preprocess",
+      "notes": "Materializes a family-safe mixed-resolution Midjourney continuation tranche from frozen routing and source-revision inputs.",
+      "legacy_invocation_display": "python scripts/materialize_midjourney_v6_continuation.py <arguments>"
+    },
+    {
+      "stable_id": "mageflow.adaptation-benchmark-spec",
+      "family": "mageflow_diffusion",
+      "source_paths": [
+        "src/rwkv_lab/mage_flow_adaptation.py"
+      ],
+      "observed_invocation": "python_module",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "preprocess",
+      "notes": "Publishes the reviewed MageFlow adaptation benchmark suite. Domain preparation and audit are separate effects.",
+      "legacy_invocation_display": "python -m rwkv_lab.mage_flow_adaptation write-benchmark --output <path>"
+    },
+    {
+      "stable_id": "mageflow.adaptation-domain-prepare",
+      "family": "mageflow_diffusion",
+      "source_paths": [
+        "src/rwkv_lab/mage_flow_adaptation.py"
+      ],
+      "observed_invocation": "python_module",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "preprocess",
+      "notes": "Canonicalizes one routed domain manifest, applies pixel/aspect bounds, verifies images, and publishes the prepared domain artifact.",
+      "legacy_invocation_display": "python -m rwkv_lab.mage_flow_adaptation prepare-domain <arguments>"
+    },
+    {
+      "stable_id": "mageflow.adaptation-domain-audit",
+      "family": "mageflow_diffusion",
+      "source_paths": [
+        "src/rwkv_lab/mage_flow_adaptation.py"
+      ],
+      "observed_invocation": "python_module",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "qualification",
+      "notes": "Audits a prepared MageFlow domain manifest for schema, routing, conditioning, and uncaptioned-rate requirements and may publish a report.",
+      "legacy_invocation_display": "python -m rwkv_lab.mage_flow_adaptation audit-domain <arguments>"
+    },
+    {
+      "stable_id": "oracle.engram-lmb",
+      "family": "transformer",
+      "source_paths": [
+        "src/rwkv_lab/engram_lmb.py"
+      ],
+      "observed_invocation": "library_only",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "library_oracle",
+      "notes": "Essential lexical-memory graph component imported by supported RWKV, transformer, and vision trainers. Its __main__ block is only a synthetic smoke test and is not an executable workflow."
+    },
+    {
+      "stable_id": "oracle.mla-training-components",
+      "family": "transformer",
+      "source_paths": [
+        "src/rwkv_lab/layer_swap.py",
+        "src/rwkv_lab/mla_module.py",
+        "src/rwkv_lab/svd_init.py"
+      ],
+      "observed_invocation": "library_only",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "library_oracle",
+      "notes": "Essential layer-swap, MLA, and SVD-initialization graph components used by supported conversion and transformer trainers. Their __main__ blocks are smoke tests only and confer no launchability."
+    },
+    {
+      "stable_id": "oracle.rosa-sam",
+      "family": "conversion_distillation",
+      "source_paths": [
+        "src/rwkv_lab/rosa_sam.py"
+      ],
+      "observed_invocation": "library_only",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "library_oracle",
+      "notes": "Importable ROSA-SAM optimizer component used by production and research training kernels. Its synthetic __main__ smoke test is not a launch contract."
+    },
+    {
+      "stable_id": "oracle.rosa-soft-layer",
+      "family": "conversion_distillation",
+      "source_paths": [
+        "src/rwkv_lab/rosa_soft_layer.py"
+      ],
+      "observed_invocation": "library_only",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "library_oracle",
+      "notes": "Importable soft-layer ROSA component used by conversion training. Its synthetic __main__ smoke test is not a launch contract."
     }
   ]
 }

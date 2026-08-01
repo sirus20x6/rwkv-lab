@@ -14,9 +14,14 @@ set and referenced source bytes are native test gates; it cannot supply an adapt
 host launch profile.
 
 The original package exposes only six console commands; many legitimate workflows are module- or
-script-only. Executability is therefore an explicit registry property with a sealed entrypoint and
-effect contract, not something inferred from packaging, importability, filenames, or the old
-dashboard process list.
+script-only. All six console surfaces, their effectfully distinct subcommands, the reviewed
+supported module/script entrypoints and essential graph libraries, concrete trainer-specific vision
+profiles, and legacy dashboard launch/control paths are now in the evidence catalog. The inclusion
+rule is intentionally narrower than “has `__main__`”: a synthetic smoke block is not executable
+workflow evidence, while an essential component used by a supported graph is recorded only as
+`library_only`. Executability is still an explicit authority-registry property with a sealed
+entrypoint and effect contract, not something inferred from this inventory, packaging,
+importability, filenames, or the old dashboard process list.
 
 ## Lifecycle authority and current resume grades
 
@@ -61,7 +66,7 @@ stateful process operation is graded `compatible`, `terminal_checkpoint`,
 
 | Existing workflow | Current mechanism | Declarative representation | Required adapter capability |
 |---|---|---|---|
-| Synthetic and architecture/objective A/B campaigns | `rwkv_lab.experiment`, `rwkv_lab.config`, experiment registry, paired/factorial arms and confirmation seeds | parameterized arm graph with successive-halving rungs, paired tapes, confirm nodes, and statistical decision artifact | deterministic arm, rung checkpoint, paired evaluation, campaign aggregation |
+| Synthetic and architecture/objective A/B campaigns | distinct `rwkv_lab.experiment` and `rwkv_lab.config` campaigns, plus checked-in loop, factored-loop, latent, fixed-step-latent, and G1G sweeps | parameterized arm graph with successive-halving rungs, paired tapes, confirm nodes, and statistical decision artifact | deterministic arm, rung checkpoint, paired evaluation, campaign aggregation |
 | Scratch recurrent LM pretraining | `rwkv_lab.rwkv_pretrain`, `config run-lm`, loop/latent sweep supervisors | current trainer is terminal-checkpoint resumable, not a full safe-point lifecycle: it restores model/optimizer/RNG but does not bind config, data, or parent identity and rewrites `train.jsonl`; a hardened adapter must close those gaps before claiming exact resume | terminal checkpoint grade today; future exact model/optimizer/RNG/data/control resume, distributed checkpoint, token-weighted metrics |
 | Distributed recurrent LM handoff | `rwkv_pretrain` FSDP2/DCP supports topology changes but deliberately gives new ranks fresh RNG | explicit reshard/topology handoff node, never labeled exact resume when world size changes | source DCP manifest, old/new topology, reshard receipt, new-rank RNG policy |
 | Pretrained recurrent continuation | G1G continuation through `rwkv_pretrain`/`config run-lm` and native-load qualification | immutable parent checkpoint feeds a resumable continuation and native-parity graph | parent/checkpoint identity, exact state resume when configured, PPL/parity report |
@@ -77,13 +82,13 @@ stateful process operation is graded `compatible`, `terminal_checkpoint`,
 | Frozen-vision-to-LM adapter training | canonical `vision_train` has strong atomic model/optimizer/sampler/RNG resume plus input/cache fingerprints | exact-resume train/eval loop with cache artifacts, clean-process eval boundary, best/last checkpoints | sampler/RNG resume, feature-cache identity, caption/grounding metrics, eval gallery |
 | Native vision head and raw-pixel student training | `vision_native_train` lacks batch/sampler cursor; `vision_rwkv_student_train` restores sampler/RNG but does not bind all manifest/cache/baseline/compressor/native-head inputs | separate operations with non-exact and conditional-compatible grades; identical-length changed inputs must be rejected before resume | explicit input closure, sampler/cursor state where present, honest resume grade, transfer metrics |
 | MageFlow cache boundary and resume | shell polls `status.json`, `pgrep`, `jq`; rewrites configs; launches cache and trainer | train node transitions on typed boundary event; plan/build/validate cache nodes; exact resume node | checkpoint manifest, cache-plan and cache-build operations, structured terminal reason |
-| MageFlow full-backbone continued pretraining | `mage_flow_pretrain prepare-data|prepare-reddit|plan|train`; Accelerate state and epoch/pack position resume usefully, but checkpoint loading does not enforce config/data/source fingerprints | data preparation and immutable plan feed a compatibility-resume train/eval graph until a hardened adapter seals every input identity | optimizer/RNG/data cursor, enforced preparation/config/source receipts, generated-image evaluation |
-| MageFlow routed/terminal/TREAD expert training | `mage_flow_expert_train`, `mage_flow_terminal_train`, migrations and TREAD conversion | route/domain-window graph with cache-span handoffs, component freeze map, migration and joint-eval nodes | route state, domain cursor, cache coverage, expert/base checkpoints, unified gallery |
+| MageFlow full-backbone continued pretraining | separately reviewed `mage_flow_pretrain prepare-data|prepare-reddit`, `plan`, and `train` effects; Accelerate state and epoch/pack position resume usefully, but checkpoint loading does not enforce config/data/source fingerprints | data preparation and immutable plan feed a compatibility-resume train/eval graph until a hardened adapter seals every input identity | optimizer/RNG/data cursor, enforced preparation/config/source receipts, generated-image evaluation |
+| MageFlow routed/terminal/TREAD expert training | separately reviewed expert plan/cache/train and terminal prepare/cache/cache-span/domain-window/train effects, plus the terminal-expert migration, TREAD conversion, and cache-resume supervisors | route/domain-window graph with cache-span handoffs, component freeze map, migration and joint-eval nodes | route state, domain cursor, cache coverage, expert/base checkpoints, unified gallery |
 | MageFlow high-resolution joint refinement | architecture/config document is `design_only_not_launchable` | validation-only document remains rejected by launch authority until an implemented, registered operation exists | design artifact only; never inferred launch authority |
 | RADIO/V4H eval restarts | shell loops treat exit 42 inconsistently; some bound rapid restarts and others accept it indefinitely, with no optimizer-step progress check | cyclic train/eval node with `worker.restart_requested`, visit/time bounds, and monotonic optimizer-step guard | clean-process eval safe point, checkpoint ack, no-progress rejection |
 | vision representation A/B | Python supervisor launches two arms sequentially and scans JSONL for completion, but publishes no versioned comparison or decision | two arm nodes or a parameterized map template; result artifacts feed a deterministic compare/decision node | run-arm operation, versioned metric/result contract, decision receipt |
 | Multi-teacher vision representation distillation | teacher caches, canonical compressor, native projection and raw-pixel student supervisors | staged cache, compressor, native-head, student, and transfer graph with manifest-bound handoffs | multi-teacher cache lineage, representation checkpoint, reconstruction/relational/caption eval |
-| External video/audio LoRA orchestration | `ltx23_lora plan|prepare|train|run` records an upstream revision but may accept unknown/dirty HEAD, overwrite receipts/config, and resume from path existence alone | new wrapper must require an expected clean revision and immutable config/input/cache/checkpoint receipts before preprocess, train, validation, or resume | exact clean external revision, structured config/input hashes, upstream resume contract, cache/checkpoint/video receipts |
+| External video/audio LoRA orchestration | separately reviewed `ltx23_lora plan`, `prepare`, `train`, and composite `run` effects record an upstream revision but may accept unknown/dirty HEAD, overwrite receipts/config, and resume from path existence alone | new wrapper must require an expected clean revision and immutable config/input/cache/checkpoint receipts before preprocess, train, validation, or resume | exact clean external revision, structured config/input hashes, upstream resume contract, cache/checkpoint/video receipts |
 | GPU launch queue | Go table plus PID liveness and optional start-next | queued desired state plus exclusive resource lease | no trainer-specific capability |
 | Multi-GPU and campaign device-slot scheduling | FSDP2/DCP workers and campaign-local device allocators | topology-aware resource leases, per-device child attempts, bounded replica/slot allocation | distributed rendezvous identity, reshardable checkpoint, device-slot release receipt |
 | dashboard live tuning | Go and Python share SQLite numeric rows | versioned typed control patch, safe-point application, effective-value ack | operation control descriptor and worker safe-point SDK |
@@ -112,11 +117,11 @@ stateful process operation is graded `compatible`, `terminal_checkpoint`,
 | legacy runs | JSONL ingestion, PID discovery, and an incomplete dashboard process-name allowlist that misses legitimate RWKV, MageFlow, vision, and experiment processes | compatibility observer emits canonical events in shadow mode; new ownership comes only from the audited operation registry, never the legacy allowlist | legacy translator only; cannot claim exact ownership, GPU idleness, or launch safety |
 | CLI supervisors versus library-only research oracles | shell/Python watchdogs may rewrite configs, call host services, inspect/kill processes, or use local locks; capability-panel functions have ambiguous launch status | effect-audit and decompose safe supervisor behavior into typed operations; library/design-only entries require a registered operation wrapper | explicit launchability/effect class and host authority; no shell wrapping or inferred executable |
 
-`diffusion_rwkv`, `native_g1g`, the ROSA/SMT smoke modules, and `verify_engram` remain
-library or diagnostic surfaces in the compatibility baseline. Importability or a self-test does not
-turn them into launchable trainers. Module-only trainers such as `attn_L3_poc`, `convert_train`, and
-`gpu_engram_prefill` must be registered with sealed `python -m` entrypoints; they cannot be inferred
-from the package's six installed console scripts.
+`diffusion_rwkv`, `native_g1g`, Engram LMB, the MLA/layer-swap/SVD components, the ROSA/SMT modules,
+and `verify_engram` remain library or diagnostic surfaces in the compatibility baseline.
+Importability or a self-test does not turn them into launchable trainers. Module-only trainers such
+as `attn_L3_poc`, `convert_train`, and `gpu_engram_prefill` must be registered with sealed
+`python -m` entrypoints; they cannot be inferred from the package's six installed console scripts.
 
 ## Golden fixture set
 

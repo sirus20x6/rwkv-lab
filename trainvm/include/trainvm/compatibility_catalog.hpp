@@ -18,7 +18,7 @@ enum class CompatibilityAuthority {
 
 enum class WorkflowFamily {
   rwkv,
-  transformer_mla,
+  transformer,
   vision_multimodal,
   mageflow_diffusion,
   conversion_distillation,
@@ -27,12 +27,14 @@ enum class WorkflowFamily {
   external_trainer,
   data_cache,
   evaluation_profile_export,
+  control_plane,
 };
 
 enum class ObservedInvocationKind {
   python_module,
   console_script,
   host_script,
+  http_control_handler,
   library_only,
   design_only,
 };
@@ -100,6 +102,7 @@ class CompatibilityCatalog {
   [[nodiscard]] const std::string& source_tree_digest() const;
   [[nodiscard]] const std::string& repository_root_identity_display() const;
   [[nodiscard]] CompatibilityAuthority authority() const;
+  [[nodiscard]] static std::string_view reviewed_catalog_digest();
 
  private:
   explicit CompatibilityCatalog(CompatibilityCatalogDocument document,

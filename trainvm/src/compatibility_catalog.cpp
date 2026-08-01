@@ -37,72 +37,150 @@ constexpr std::size_t kMaximumIdentifierBytes = 96U;
 constexpr std::size_t kMaximumPathBytes = 512U;
 constexpr std::size_t kMaximumLegacyDisplayBytes = 1024U;
 constexpr std::size_t kMaximumNotesBytes = 2048U;
+constexpr std::string_view kReviewedCatalogDigest =
+    "sha256:e0cd744b2ef4bd8aa71be79a970cb037d7b7f09e4faffb782109be656f8c5f4d";
 
-constexpr std::array<std::string_view, 64> kReviewedWorkflowIds = {
+constexpr std::array<std::string_view, 140> kReviewedWorkflowIds = {
     "acquisition.civitai-anima",
+    "acquisition.civitai-balanced",
     "acquisition.i1-direct-archives",
     "acquisition.kimi-teacher",
     "cache.vision-features",
     "cache.vision-finalization",
+    "cache.vision-fusion-features",
     "cache.vision-overlay-assembly",
+    "cache.vision-radio1d",
+    "cache.vision-sam-dense",
     "cache.vision-ten-percent-handoff",
+    "cache.vision-v4h",
+    "control.experiment-launch",
+    "control.gpu-launch-queue",
+    "control.manual-training-launch",
+    "control.posttraining-launch",
+    "control.qualification-launch",
+    "control.rlvr-launch",
+    "control.sample-launch",
     "conversion.assemble-looped",
     "conversion.attention-l3-poc",
     "conversion.drive-isolation",
+    "conversion.engram-patch",
     "conversion.gate-ab-campaign",
+    "conversion.gate-ab2-campaign",
     "conversion.gdn-sweep-supervisor",
-    "conversion.lossless-gdn-map",
     "conversion.memory-target-cache",
     "conversion.per-layer-rwkv-train",
     "conversion.rel-sweep-supervisor",
     "conversion.stack-consolidation",
+    "conversion.v4h-dino-compactor",
+    "data.ao3-pack",
+    "data.ao3-rewrite-eos",
+    "data.ao3-source-preparation",
+    "data.ao3-tokenize",
     "data.engram-allocation",
+    "data.engram-frequency",
+    "data.gelbooru-trainer-snapshot",
     "data.mageflow-manifest-preparation",
+    "data.midjourney-v6-caption-routing",
+    "data.midjourney-v6-continuation",
+    "data.midjourney-v6-expert-stage",
+    "data.posttraining-validation",
+    "data.qwen35-conversion-corpus",
+    "data.reddit-trainer-snapshot",
+    "data.rwkv-corpus-preparation",
     "dedup.materialize-exact-links",
+    "evaluation.conversion-baseline",
+    "evaluation.loop-probe",
+    "evaluation.radio1d-batch-caption",
+    "evaluation.rwkv-generation",
     "evaluation.vision-caption",
     "export.frozen-vision-compressor",
     "export.legacy-mutable-bundle",
+    "export.megakernel-aot",
+    "export.production-kernels-aot",
     "external.ltx23-lora",
+    "external.ltx23-plan",
+    "external.ltx23-prepare",
+    "external.ltx23-run",
     "inventory.unlabeled-images",
+    "mageflow.adaptation-benchmark-spec",
+    "mageflow.adaptation-domain-audit",
+    "mageflow.adaptation-domain-prepare",
+    "mageflow.cache-finish-resume",
     "mageflow.cache-resume-supervisor",
+    "mageflow.expert-encoder-cache",
+    "mageflow.expert-plan",
+    "mageflow.full-backbone-plan",
     "mageflow.full-backbone-pretrain",
     "mageflow.high-resolution-design",
     "mageflow.routed-expert-train",
+    "mageflow.terminal-cache-span-plan",
+    "mageflow.terminal-cache-span-prepare",
+    "mageflow.terminal-domain-window-plan",
+    "mageflow.terminal-encoder-cache",
+    "mageflow.terminal-expert-migration",
+    "mageflow.terminal-preparation",
     "mageflow.terminal-tread-train",
+    "mageflow.tread-loop-conversion",
     "oracle.adapter-consolidation",
     "oracle.decoding-evaluation",
     "oracle.diffusion-rwkv-head",
     "oracle.distillation-merge",
+    "oracle.engram-lmb",
     "oracle.looped-rwkv-integrated",
+    "oracle.lossless-gdn-map",
+    "oracle.mla-training-components",
     "oracle.reasoning-cache",
     "oracle.recurrent-serving",
     "oracle.rosa-retrieval",
+    "oracle.rosa-sam",
+    "oracle.rosa-soft-layer",
     "oracle.smt-dmt-losses",
     "oracle.test-time-training",
     "posttraining.adapter-recursive",
     "posttraining.rwkv-adapter",
     "posttraining.rwkv-campaign",
     "profiling.mageflow-runtime",
-    "profiling.production-kernels",
+    "profiling.qwen-prompt-hints",
+    "profiling.vision-loop-telemetry",
+    "qualification.converted-forward",
+    "qualification.engram-integration",
+    "qualification.lossless-gdn-map",
     "qualification.native-g1g",
+    "qualification.posttraining-kernels",
+    "qualification.production-kernels",
     "qualification.vision-run-evidence",
     "review.dedupe-cutoff",
     "review.i1-quality-viewer",
     "rlvr.recursive-improve",
     "rlvr.rwkv-campaign",
     "rlvr.rwkv-train",
+    "rwkv.config-campaign",
+    "rwkv.legacy-sweep-campaigns",
     "rwkv.optimizer-finetune",
     "rwkv.scratch-pretrain",
     "rwkv.synthetic-campaign",
     "scoring.i1-anime-aesthetic",
+    "scoring.i1-deepghs-classification",
     "transformer.engram-prefill",
+    "transformer.engram-staged-supervisor",
     "transformer.mla-engram-train",
     "transformer.mla-train",
+    "transformer.qwen-ao3-audit",
     "transformer.qwen-ao3-cpt",
+    "transformer.qwen-ao3-plan",
+    "vision.continuation-watchdog",
     "vision.frozen-adapter-train",
+    "vision.moonvit-continuation-launch-profiles",
+    "vision.native-head-launch-profile",
     "vision.native-head-train",
+    "vision.radio1d-launch-profiles",
     "vision.raw-pixel-student",
+    "vision.raw-pixel-student-launch-profile",
+    "vision.representation-ab",
     "vision.teacher-compressor",
+    "vision.teacher-compressor-launch-profile",
+    "vision.teacher-student-supervisor",
+    "vision.v4h-launch-profiles",
 };
 
 class FileDescriptor {
@@ -506,7 +584,7 @@ CompatibilityCatalog::CompatibilityCatalog(
 
   static constexpr WorkflowFamily required_families[] = {
       WorkflowFamily::rwkv,
-      WorkflowFamily::transformer_mla,
+      WorkflowFamily::transformer,
       WorkflowFamily::vision_multimodal,
       WorkflowFamily::mageflow_diffusion,
       WorkflowFamily::conversion_distillation,
@@ -515,6 +593,7 @@ CompatibilityCatalog::CompatibilityCatalog(
       WorkflowFamily::external_trainer,
       WorkflowFamily::data_cache,
       WorkflowFamily::evaluation_profile_export,
+      WorkflowFamily::control_plane,
   };
   for (const auto family : required_families) {
     if (!families.contains(family)) {
@@ -542,6 +621,10 @@ CompatibilityCatalog::CompatibilityCatalog(
       {"entries", encode_json(entries_)},
   };
   catalog_digest_ = "sha256:" + sha256_bytes(canonical.dump());
+  if (catalog_digest_ != kReviewedCatalogDigest) {
+    throw std::invalid_argument(
+        "compatibility catalog digest differs from compiled reviewed v1 mapping");
+  }
 }
 
 CompatibilityCatalog CompatibilityCatalog::load_file(
@@ -578,6 +661,10 @@ const std::string& CompatibilityCatalog::repository_root_identity_display()
 
 CompatibilityAuthority CompatibilityCatalog::authority() const {
   return authority_;
+}
+
+std::string_view CompatibilityCatalog::reviewed_catalog_digest() {
+  return kReviewedCatalogDigest;
 }
 
 }  // namespace trainvm
