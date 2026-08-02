@@ -12,6 +12,7 @@ from rwkv_lab.trainvm_worker import (
     WorkerInvocation,
     WorkerObservability,
     WorkerStepProfiler,
+    resolve_resume_checkpoint,
 )
 
 from .checkpoints import (
@@ -52,6 +53,27 @@ Handler = Callable[
 ]
 
 
+def _resume_payload(
+    invocation: WorkerInvocation,
+    paths: WorkspacePathAuthority,
+    *,
+    required_state: frozenset[str],
+) -> Path | None:
+    resolved = resolve_resume_checkpoint(invocation)
+    if resolved is None:
+        return None
+    missing = required_state.difference(resolved.state_components)
+    if missing:
+        raise AdapterDispatchError(
+            "resume checkpoint omits required state: " + ", ".join(sorted(missing))
+        )
+    return paths.read_path(
+        str(resolved.payload_directory),
+        label="controller resume checkpoint payload",
+        kind="directory",
+    )
+
+
 def _appearance_expert(
     invocation: WorkerInvocation,
     components: WorkerTrainingComponents,
@@ -65,6 +87,13 @@ def _appearance_expert(
     if controls is not None:
         lower_initial_mageflow_controls(config, controls)
     paths = WorkspacePathAuthority.from_workspace(invocation.workspace)
+    resume_payload = _resume_payload(
+        invocation,
+        paths,
+        required_state=frozenset(
+            {"data_cursor", "model", "optimizer", "rng_torch"}
+        ),
+    )
     config = replace(
         config,
         train_manifest=str(
@@ -81,7 +110,9 @@ def _appearance_expert(
             else None
         ),
         resume_from=(
-            str(
+            str(resume_payload)
+            if resume_payload is not None
+            else str(
                 paths.read_path(
                     config.resume_from, label="resume_from", kind="directory"
                 )
@@ -151,6 +182,13 @@ def _terminal_expert(
     if controls is not None:
         lower_initial_mageflow_controls(config, controls)
     paths = WorkspacePathAuthority.from_workspace(invocation.workspace)
+    resume_payload = _resume_payload(
+        invocation,
+        paths,
+        required_state=frozenset(
+            {"data_cursor", "expert_routing", "model", "optimizer", "rng_torch"}
+        ),
+    )
     expert_checkpoints = (
         {
             domain: str(
@@ -186,7 +224,10 @@ def _terminal_expert(
             kind="file",
         ),
         resume_from=_optional_read_path(
-            paths, config.resume_from, label="resume_from", kind="directory"
+            paths,
+            str(resume_payload) if resume_payload is not None else config.resume_from,
+            label="resume_from",
+            kind="directory",
         ),
         model_path=_optional_read_path(
             paths, config.model_path, label="model_path", kind="directory"
@@ -261,6 +302,13 @@ def _qwen_ao3(
     if controls is not None:
         config = lower_initial_qwen_controls(config, controls)
     paths = WorkspacePathAuthority.from_workspace(invocation.workspace)
+    resume_payload = _resume_payload(
+        invocation,
+        paths,
+        required_state=frozenset(
+            {"data_cursor", "model", "optimizer", "rng_torch"}
+        ),
+    )
     config = replace(
         config,
         model_dir=str(
@@ -278,7 +326,10 @@ def _qwen_ao3(
         ),
         run_dir=str(paths.exact_run_directory(config.run_dir)),
         resume=_optional_read_path(
-            paths, config.resume, label="resume", kind="directory"
+            paths,
+            str(resume_payload) if resume_payload is not None else config.resume,
+            label="resume",
+            kind="directory",
         )
         or "",
     )
@@ -337,13 +388,22 @@ def _rwkv_scratch(
 
     config = RWKVScratchTrainConfig(**read_inline_config(invocation.inputs))
     paths = WorkspacePathAuthority.from_workspace(invocation.workspace)
+    resume_payload = _resume_payload(
+        invocation,
+        paths,
+        required_state=frozenset({"model", "optimizer", "rng_torch"}),
+    )
     data = paths.read_path(config.data, label="data", kind="file")
     run_directory = paths.exact_run_directory(config.output_dir)
-    resume = (
-        paths.read_path(config.resume, label="resume", kind="file")
-        if config.resume
-        else None
-    )
+    resume = None
+    if resume_payload is not None:
+        resume = paths.read_path(
+            str(resume_payload / "state.pt"),
+            label="controller resume checkpoint state",
+            kind="file",
+        )
+    elif config.resume:
+        resume = paths.read_path(config.resume, label="resume", kind="file")
     checkpoint_directory = run_directory / "checkpoint-final"
     try:
         checkpoint_directory.mkdir(mode=0o750, parents=True, exist_ok=False)

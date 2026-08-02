@@ -240,6 +240,8 @@ public:
 
   [[nodiscard]] std::optional<Event> event(const std::string& event_id) const;
   [[nodiscard]] std::vector<Event> events_for_run(const std::string& run_id) const;
+  [[nodiscard]] std::optional<Event> lease_acquisition_event(
+      const std::string& run_id, const std::string& lease_id) const;
   [[nodiscard]] std::uint64_t latest_worker_sequence(
       const std::string& run_id, const std::string& node_id,
       const std::string& attempt_id) const;
@@ -515,6 +517,10 @@ public:
   void complete_resource_releasing_pause(const std::string& run_id,
                                          const std::string& command_id,
                                          const AuthorityTimeSample& now);
+  LifecycleCommand apply_released_resource_resume(
+      const std::string& run_id, const std::string& command_id,
+      const std::string& pause_command_id, const ResourceLease& lease,
+      const std::string& next_attempt_id, const AuthorityTimeSample& now);
 };
 
 nlohmann::json event_json(const Event& event);

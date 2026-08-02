@@ -148,6 +148,30 @@ ReconcileResult Reconciler::step(const std::string& run_id) {
     return result;
   }
 
+  if (current->desired_state == "paused" &&
+      current->observed_state == "paused") {
+    std::optional<LifecycleCommand> resume;
+    for (const LifecycleCommand& command :
+         journal_.pending_lifecycle_commands(run_id, 0U)) {
+      if (command.kind != LifecycleCommandKind::resume) continue;
+      if (resume) {
+        throw OperationPreconditionError(
+            "paused run has more than one pending resume command");
+      }
+      resume = command;
+    }
+    if (resume) {
+      const LeaseAcquireResult acquisition =
+          controller.begin_released_resource_resume(
+              resume->command_id, now);
+      result.disposition =
+          acquisition.status == LeaseAcquireStatus::busy
+              ? ReconcileDisposition::lease_busy
+              : ReconcileDisposition::lease_acquired;
+      return result;
+    }
+  }
+
   if (controller.state().status != ExecutionStatus::running) {
     return result;
   }

@@ -37,6 +37,7 @@ struct TransitionResult {
 };
 
 ExecutionState start_execution(const CompiledPlan& plan, std::string run_id);
+ExecutionState restart_execution_attempt(const ExecutionState& state);
 TransitionResult advance_execution(const CompiledPlan& plan, const ExecutionState& state,
                                    const Event& event);
 ExecutionState replay_execution(const CompiledPlan& plan, std::string run_id,

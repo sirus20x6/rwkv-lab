@@ -34,6 +34,7 @@ bool same_worker_event(const Event& stored, const Event& input) {
 
 bool is_controller_event(std::string_view event_type) {
   return event_type == "run.created" || event_type == "node.entered" ||
+         event_type == "node.attempt_restarted" ||
          event_type == "fsm.transitioned" || event_type == "run.desired_state_changed" ||
          event_type == "run.observed_state_changed" ||
          event_type == "resource.lease_acquired" ||
@@ -576,10 +577,13 @@ const ExecutionState& Controller::recover() {
   std::map<std::string, std::string> replayed_control_status;
   std::map<std::string, std::string> replayed_checkpoint_status;
   std::map<std::string, std::string> replayed_lifecycle_status;
+  std::optional<std::string> released_resume_command_id;
+  std::optional<std::string> released_resume_pause_command_id;
   std::set<std::string> replayed_process_prepares;
   std::set<std::string> replayed_process_commits;
   std::set<std::string> replayed_process_exits;
   bool current_dispatch_prepared = false;
+  std::optional<Event> current_lease_acquisition;
   for (const Event& event : events) {
     if (event.plan_revision != kInitialPlanRevision) {
       throw std::runtime_error("journal recovery encountered an unsupported plan revision");
@@ -680,6 +684,46 @@ const ExecutionState& Controller::recover() {
       current_dispatch_prepared = false;
       continue;
     }
+    if (event.event_type == "node.attempt_restarted") {
+      if (phase != ReplayPhase::ready || expected_completion ||
+          !released_resume_command_id ||
+          !released_resume_pause_command_id ||
+          runtime_desired_state != "running" ||
+          runtime_observed_state != "paused" ||
+          recovered.status != ExecutionStatus::running ||
+          event.run_revision != recovered.revision + 1U ||
+          event.node_id != recovered.current_node_id ||
+          event.worker_sequence != 0U) {
+        throw std::runtime_error(
+            "journal attempt restart is outside released-resource resume");
+      }
+      const auto resume =
+          journal_.lifecycle_command(*released_resume_command_id);
+      if (!resume || !resume->optimizer_step || resume->artifact_id.empty()) {
+        throw std::runtime_error(
+            "journal attempt restart has no applied resume checkpoint");
+      }
+      const ExecutionState restarted = restart_execution_attempt(recovered);
+      const nlohmann::json expected_payload{
+          {"previous_attempt_id", recovered.current_attempt_id},
+          {"next_attempt_id", restarted.current_attempt_id},
+          {"cause_command_id", *released_resume_command_id},
+          {"pause_command_id", *released_resume_pause_command_id},
+          {"checkpoint_artifact_id", resume->artifact_id},
+      };
+      if (event.event_id != *released_resume_command_id +
+                                ":attempt-restarted" ||
+          event.attempt_id != restarted.current_attempt_id ||
+          event.optimizer_step != resume->optimizer_step ||
+          event.payload != expected_payload) {
+        throw std::runtime_error(
+            "journal attempt restart is not canonical");
+      }
+      recovered = restarted;
+      phase = ReplayPhase::acquisition_requested;
+      current_dispatch_prepared = false;
+      continue;
+    }
     if (event.event_type == "node.dispatch_prepared") {
       if (phase != ReplayPhase::ready || expected_completion ||
           event.run_revision != recovered.revision) {
@@ -728,6 +772,14 @@ const ExecutionState& Controller::recover() {
       const std::string desired_value = desired->get<std::string>();
       const bool starting = desired_value == "running" && runtime_desired_state == "queued" &&
                             runtime_observed_state == "queued" && phase == ReplayPhase::queued;
+      const bool released_resume =
+          desired_value == "running" &&
+          runtime_desired_state == "paused" &&
+          runtime_observed_state == "paused" &&
+          phase == ReplayPhase::ready &&
+          released_resume_command_id &&
+          event.payload.value("cause_command_id", std::string{}) ==
+              *released_resume_command_id;
       const bool cancelling =
           desired_value == "cancelled" &&
           ((runtime_desired_state == "running" &&
@@ -741,7 +793,11 @@ const ExecutionState& Controller::recover() {
                                  runtime_observed_state == "paused");
       if (!valid_desire || (!starting && phase != ReplayPhase::ready) || expected_completion ||
           recovered.status != ExecutionStatus::running ||
-          event.run_revision != recovered.revision + 1U) {
+          event.run_revision != recovered.revision + 1U ||
+          (released_resume &&
+           event.payload != nlohmann::json{{"state", "running"},
+                                           {"cause_command_id",
+                                            *released_resume_command_id}})) {
         throw std::runtime_error("journal contains an invalid lifecycle desire");
       }
       runtime_desired_state = desired_value;
@@ -752,11 +808,16 @@ const ExecutionState& Controller::recover() {
       continue;
     }
     if (event.event_type == "resource.lease_acquired") {
+      const bool resumed_acquisition =
+          released_resume_command_id &&
+          runtime_observed_state == "paused";
       if (phase != ReplayPhase::acquisition_requested ||
-          runtime_desired_state != "running" || runtime_observed_state != "queued" ||
+          runtime_desired_state != "running" ||
+          (runtime_observed_state != "queued" && !resumed_acquisition) ||
           event.run_revision != recovered.revision || !event.node_id.empty() ||
           !event.attempt_id.empty()) {
-        throw std::runtime_error("journal contains lease acquisition outside a queued start");
+        throw std::runtime_error(
+            "journal contains lease acquisition outside a start or resume");
       }
       require_payload_string(event, "concurrency_key",
                              plan_.experiment.spec.workspace.concurrency_key);
@@ -780,6 +841,7 @@ const ExecutionState& Controller::recover() {
           expires_at->get<std::int64_t>() <= acquired_at->get<std::int64_t>()) {
         throw std::runtime_error("lease acquisition event has an invalid fenced identity");
       }
+      current_lease_acquisition = event;
       phase = ReplayPhase::lease_acquired;
       continue;
     }
@@ -793,10 +855,13 @@ const ExecutionState& Controller::recover() {
           observed_value == "paused" || observed_value == "resuming" ||
           observed_value == "running" || observed_value == "cancelling" ||
           observed_value == "cancelled") {
-        const bool acquiring = observed_value == "acquiring" &&
-                               runtime_desired_state == "running" &&
-                               runtime_observed_state == "queued" &&
-                               phase == ReplayPhase::lease_acquired;
+        const bool acquiring =
+            observed_value == "acquiring" &&
+            runtime_desired_state == "running" &&
+            (runtime_observed_state == "queued" ||
+             (runtime_observed_state == "paused" &&
+              released_resume_command_id.has_value())) &&
+            phase == ReplayPhase::lease_acquired;
         const bool worker_reacquiring =
             observed_value == "acquiring" &&
             runtime_desired_state == "running" &&
@@ -932,7 +997,7 @@ const ExecutionState& Controller::recover() {
       }
       const WorkerLaunchTicket launch = launch_from_event(event);
       const nlohmann::json expected_payload = worker_launch_payload(launch);
-      const auto acquisition = journal_.event(run_id_ + ":lease-acquired");
+      const auto& acquisition = current_lease_acquisition;
       if (launch.run_id != run_id_ || launch.adapter != component.adapter ||
           launch.adapter_version != component.version ||
           launch.code_fingerprint.empty() || launch.launch_nonce.empty() ||
@@ -1094,7 +1159,7 @@ const ExecutionState& Controller::recover() {
       }
       require_payload_string(event, "concurrency_key",
                              plan_.experiment.spec.workspace.concurrency_key);
-      const auto acquisition = journal_.event(run_id_ + ":lease-acquired");
+      const auto& acquisition = current_lease_acquisition;
       if (!acquisition ||
           event.payload.value("lease_id", std::string{}) !=
               acquisition->payload.value("lease_id", std::string{}) ||
@@ -1378,7 +1443,7 @@ const ExecutionState& Controller::recover() {
         }
         const auto& identity = *command->acknowledgement;
         const std::string status(lifecycle_status_name(command->status));
-        const nlohmann::json expected_payload{
+        nlohmann::json expected_payload{
             {"command_id", command->command_id},
             {"kind", lifecycle_kind_name(command->kind)},
             {"status", status},
@@ -1388,6 +1453,30 @@ const ExecutionState& Controller::recover() {
             {"lease_id", identity.lease_id},
             {"fencing_token", identity.fencing_token},
         };
+        const bool controller_resume =
+            command->kind == LifecycleCommandKind::resume &&
+            identity.worker_sequence == 0U;
+        if (controller_resume) {
+          const std::string pause_command_id =
+              event.payload.value("pause_command_id", std::string{});
+          const auto pause =
+              journal_.lifecycle_command(pause_command_id);
+          if (pause_command_id.empty() || !pause ||
+              pause->kind != LifecycleCommandKind::pause ||
+              !pause->checkpoint_first || !pause->release_resources ||
+              pause->status != LifecycleCommandStatus::applied ||
+              pause->node_id != command->node_id ||
+              pause->attempt_id != command->attempt_id ||
+              pause->optimizer_step != command->optimizer_step ||
+              pause->artifact_id != command->artifact_id) {
+            throw std::runtime_error(
+                "controller resume acknowledgement has no pause checkpoint lineage");
+          }
+          expected_payload["authority"] = "controller";
+          expected_payload["pause_command_id"] = pause_command_id;
+          released_resume_command_id = command_id;
+          released_resume_pause_command_id = pause_command_id;
+        }
         if (event.payload != expected_payload ||
             event.optimizer_step != command->optimizer_step ||
             event.worker_sequence != identity.worker_sequence ||
@@ -1433,7 +1522,7 @@ const ExecutionState& Controller::recover() {
       const bool validation = node.invoke.operation == "validate_artifact";
       const bool releasing = node.invoke.operation == "release_resources";
       const auto dispatch = journal_.dispatch(dispatch_id_for(recovered));
-      const auto acquisition = journal_.event(run_id_ + ":lease-acquired");
+      const auto& acquisition = current_lease_acquisition;
       nlohmann::json expected_payload = nlohmann::json::object();
       if (releasing && acquisition) {
         expected_payload = {
@@ -1756,14 +1845,13 @@ WorkerLaunchTicket Controller::prepare_worker_launch(WorkerLaunchRequest request
   if (component.runtime == ComponentRuntime::builtin) {
     throw std::logic_error("builtin node must complete before external worker launch");
   }
-  const auto acquisition = journal_.event(run_id_ + ":lease-acquired");
-  if (!acquisition) {
-    throw std::runtime_error("worker launch has no durable lease evidence");
-  }
   const std::string& concurrency_key =
       plan_.experiment.spec.workspace.concurrency_key;
   const auto active = journal_.active_lease(concurrency_key, now);
-  if (!active || active->owner_run_id != run_id_ ||
+  const auto acquisition =
+      active ? journal_.lease_acquisition_event(run_id_, active->lease_id)
+             : std::nullopt;
+  if (!active || !acquisition || active->owner_run_id != run_id_ ||
       active->lease_id !=
           acquisition->payload.value("lease_id", std::string{}) ||
       active->fencing_token !=
@@ -2145,14 +2233,13 @@ const ExecutionState& Controller::complete_managed_builtin(
     throw std::logic_error(
         "managed builtin call does not match the active trainvm.core operation");
   }
-  const auto acquisition = journal_.event(run_id_ + ":lease-acquired");
-  if (!acquisition || acquisition->event_type != "resource.lease_acquired") {
-    throw std::logic_error("managed builtin requires durable acquisition evidence");
-  }
   const std::string& concurrency_key =
       plan_.experiment.spec.workspace.concurrency_key;
   const auto active = journal_.active_lease(concurrency_key, now);
-  if (!active || active->owner_run_id != run_id_ ||
+  const auto acquisition =
+      active ? journal_.lease_acquisition_event(run_id_, active->lease_id)
+             : std::nullopt;
+  if (!active || !acquisition || active->owner_run_id != run_id_ ||
       active->lease_id !=
           acquisition->payload.value("lease_id", std::string{}) ||
       active->fencing_token !=
@@ -2667,6 +2754,86 @@ const ExecutionState& Controller::complete_resource_releasing_pause(
   }
   journal_.complete_resource_releasing_pause(run_id_, command_id, now);
   return recover();
+}
+
+LeaseAcquireResult Controller::begin_released_resource_resume(
+    const std::string& command_id, const AuthorityTimeSample& now) {
+  if (!initialized_) {
+    throw std::logic_error(
+        "controller must create or recover before resuming released resources");
+  }
+  recover();
+  const auto projection = journal_.projection(run_id_);
+  const auto command = journal_.lifecycle_command(command_id);
+  if (!projection || !command || command->run_id != run_id_ ||
+      command->kind != LifecycleCommandKind::resume ||
+      command->status != LifecycleCommandStatus::requested ||
+      projection->desired_state != "paused" ||
+      projection->observed_state != "paused" ||
+      projection->run_revision != command->expected_run_revision ||
+      projection->current_node_id != command->node_id ||
+      projection->current_attempt_id != command->attempt_id ||
+      state_.status != ExecutionStatus::running || !paused_) {
+    throw OperationPreconditionError(
+        "released-resource resume is stale for the paused run");
+  }
+
+  std::string pause_command_id;
+  const std::vector<Event> history = journal_.events_for_run(run_id_);
+  for (auto event = history.rbegin(); event != history.rend(); ++event) {
+    if (event->event_type != "run.observed_state_changed" ||
+        event->run_revision != projection->run_revision ||
+        event->payload.value("state", std::string{}) != "paused") {
+      continue;
+    }
+    const std::string candidate =
+        event->payload.value("cause_command_id", std::string{});
+    const auto pause = journal_.lifecycle_command(candidate);
+    if (pause && pause->kind == LifecycleCommandKind::pause &&
+        pause->checkpoint_first && pause->release_resources &&
+        pause->status == LifecycleCommandStatus::applied &&
+        pause->node_id == command->node_id &&
+        pause->attempt_id == command->attempt_id &&
+        pause->optimizer_step && !pause->artifact_id.empty()) {
+      pause_command_id = candidate;
+      break;
+    }
+  }
+  if (pause_command_id.empty()) {
+    throw OperationPreconditionError(
+        "released-resource resume has no completed checkpoint-first pause");
+  }
+
+  const std::string& concurrency_key =
+      plan_.experiment.spec.workspace.concurrency_key;
+  const std::string lease_id =
+      "lease-" +
+      sha256_hex(nlohmann::json({{"run_id", run_id_},
+                                 {"plan_hash", plan_.plan_hash},
+                                 {"concurrency_key", concurrency_key},
+                                 {"resume_command_id", command_id}})
+                     .dump());
+  const std::int64_t timeout_seconds =
+      plan_.experiment.spec.resources.lease_timeout_seconds.value_or(30);
+  if (timeout_seconds <= 0 ||
+      timeout_seconds >
+          std::numeric_limits<std::int64_t>::max() / 1'000'000'000LL) {
+    throw std::runtime_error(
+        "compiled plan has an invalid resource lease timeout");
+  }
+  LeaseAcquireResult result = journal_.acquire_lease(
+      concurrency_key, run_id_, lease_id, now,
+      timeout_seconds * 1'000'000'000LL);
+  if (result.status == LeaseAcquireStatus::busy) return result;
+
+  ExecutionState restart_base = state_;
+  ++restart_base.revision;  // desired running precedes the attempt restart.
+  const ExecutionState restarted = restart_execution_attempt(restart_base);
+  (void)journal_.apply_released_resource_resume(
+      run_id_, command_id, pause_command_id, result.lease,
+      restarted.current_attempt_id, now);
+  recover();
+  return result;
 }
 
 const ExecutionState& Controller::state() const {

@@ -13,7 +13,9 @@ from .checkpoint import (
     CheckpointPublicationRequest,
     CheckpointPublisher,
     PublishedCheckpoint,
+    ResolvedResumeCheckpoint,
     publish_checkpoint_requests,
+    resolve_resume_checkpoint,
 )
 from .controls import (
     AppliedControlPatch,
@@ -121,6 +123,7 @@ __all__ = [
     "NullStepProfiler",
     "ObservabilityDeclaration",
     "PublishedCheckpoint",
+    "ResolvedResumeCheckpoint",
     "PublishedEvalGallery",
     "PublishedGpuTrace",
     "ResolvedTrainingComponent",
@@ -153,6 +156,7 @@ __all__ = [
     "load_worker_runtime_policy",
     "observability_from_invocation",
     "publish_checkpoint_requests",
+    "resolve_resume_checkpoint",
     "read_worker_bootstrap_fd",
     "step_profiler_from_invocation",
     "trace_request_from_invocation",

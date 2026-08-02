@@ -88,6 +88,8 @@ class Controller {
       const std::string& command_id, const AuthorityTimeSample& now);
   const ExecutionState& complete_resource_releasing_pause(
       const std::string& command_id, const AuthorityTimeSample& now);
+  LeaseAcquireResult begin_released_resource_resume(
+      const std::string& command_id, const AuthorityTimeSample& now);
 
   [[nodiscard]] const ExecutionState& state() const;
   [[nodiscard]] const CompiledPlan& plan() const;

@@ -224,6 +224,45 @@ void resolved_training_composition_is_frozen_into_invocation() {
         "declared training composition cannot dispatch without authority resolution");
 }
 
+void replacement_invocation_carries_exact_resume_authority() {
+  const trainvm::CompiledPlan plan = compiled_fixture();
+  nlohmann::json checkpoint = artifact_manifest(
+      "checkpoint", "checkpoint", "rwkv-lab.mageflow-checkpoint.v1",
+      "manifest_sha256");
+  trainvm::WorkerInvocationContext context{
+      .run_id = "run-resume",
+      .node_id = "train_to_boundary",
+      .attempt_id = "attempt-2",
+      .dispatch_id = "run-resume:dispatch:train_to_boundary:attempt-2",
+      .plan_revision = 1U,
+      .host_id = "sha256:" + std::string(64U, 'e'),
+      .artifacts = {},
+      .effective_controls = nlohmann::json::object(),
+      .effective_control_revision = 0U,
+      .resolved_training = nullptr,
+      .resume = {{"api_version", "trainvm.resume-checkpoint/v1"},
+                 {"checkpoint", checkpoint},
+                 {"optimizer_step", 12U},
+                 {"pause_command_id", "pause-1"},
+                 {"resume_command_id", "resume-1"}},
+  };
+  const auto invocation = trainvm::build_worker_invocation(plan, context);
+  const auto decoded = trainvm::worker_invocation_from_canonical_json(
+      trainvm::worker_invocation_canonical_json(invocation));
+  check(decoded.resume == context.resume,
+        "replacement invocation carries controller-selected checkpoint authority");
+
+  context.resume["checkpoint"]["producer_attempt_id"] = "attempt-2";
+  bool rejected = false;
+  try {
+    (void)trainvm::build_worker_invocation(plan, context);
+  } catch (const trainvm::AdapterResolutionError&) {
+    rejected = true;
+  }
+  check(rejected,
+        "replacement invocation rejects a checkpoint from its own attempt");
+}
+
 void python_worker_invocation_has_cross_runtime_golden_digest() {
   trainvm::WorkerInvocationSpec invocation;
   invocation.api_version = trainvm::kWorkerInvocationApiVersion;
@@ -248,8 +287,9 @@ void python_worker_invocation_has_cross_runtime_golden_digest() {
   invocation.observability = nlohmann::json::object();
   invocation.execution = nullptr;
   invocation.training = nullptr;
+  invocation.resume = nullptr;
   invocation.invocation_digest =
-      "sha256:b0b5333370726a775514778a019a88e08c6d445cc8758e4c60aa26c399686781";
+      "sha256:c5871f676ccc1e24335e8b8445b195e361c4ba9360b4b5ab8d84feefcce89e89";
   check(trainvm::worker_invocation_from_canonical_json(
             trainvm::worker_invocation_canonical_json(invocation)) == invocation,
         "C++ and Python invocation canonicalization share one golden digest");
@@ -262,6 +302,7 @@ int main() {
     round_trip_and_resolve_public_inputs();
     artifact_and_control_validation_fail_closed();
     resolved_training_composition_is_frozen_into_invocation();
+    replacement_invocation_carries_exact_resume_authority();
     python_worker_invocation_has_cross_runtime_golden_digest();
   } catch (const std::exception& exception) {
     std::cerr << "UNCAUGHT: " << exception.what() << '\n';

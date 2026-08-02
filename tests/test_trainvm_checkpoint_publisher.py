@@ -14,7 +14,9 @@ from rwkv_lab.trainvm_worker import (
     CheckpointPublicationError,
     CheckpointPublicationRequest,
     CheckpointPublisher,
+    PublishedCheckpoint,
     publish_checkpoint_requests,
+    resolve_resume_checkpoint,
 )
 
 
@@ -221,3 +223,94 @@ def test_checkpoint_declaration_must_be_immutable_manifest_fingerprinted(
     )
     with pytest.raises(CheckpointPublicationError, match="incompatible"):
         CheckpointPublisher(session)
+
+
+def resume_invocation(
+    session: FakeCheckpointSession,
+    result: PublishedCheckpoint,
+    *,
+    attempt_id: str = "train@3",
+) -> SimpleNamespace:
+    manifest_path = result.manifest_path
+    manifest_bytes = manifest_path.read_bytes()
+    checkpoint = {
+        "artifact_id": result.artifact_id,
+        "logical_name": "checkpoint",
+        "kind": "checkpoint",
+        "schema": "rwkv-lab.test-checkpoint.v1",
+        "uri": manifest_path.resolve().as_uri(),
+        "size_bytes": result.payload_size_bytes + len(manifest_bytes),
+        "fingerprint_algorithm": "manifest_sha256",
+        "fingerprint": result.manifest_sha256,
+        "complete": True,
+        "producer_node_id": "train",
+        "producer_attempt_id": "train@2",
+        "parent_artifact_ids": ["base-model-1"],
+        "published_at_ns": 1,
+    }
+    return SimpleNamespace(
+        run_id="run-1",
+        node_id="train",
+        attempt_id=attempt_id,
+        workspace=session.invocation.workspace,
+        resume={
+            "api_version": "trainvm.resume-checkpoint/v1",
+            "checkpoint": checkpoint,
+            "optimizer_step": 12,
+            "pause_command_id": "pause-1",
+            "resume_command_id": "resume-1",
+        },
+    )
+
+
+def test_controller_selected_resume_checkpoint_is_rehashed_before_use(
+    tmp_path: Path,
+) -> None:
+    checkpoint = make_checkpoint(tmp_path)
+    session = FakeCheckpointSession(tmp_path)
+    result = CheckpointPublisher(session).publish(
+        checkpoint,
+        optimizer_step=12,
+        resume_grade="exact",
+        state_components=("data_cursor", "model", "optimizer", "rng_torch"),
+        parent_artifact_ids=("base-model-1",),
+    )
+    invocation = resume_invocation(session, result)
+
+    resolved = resolve_resume_checkpoint(invocation)
+
+    assert resolved is not None
+    assert resolved.artifact_id == result.artifact_id
+    assert resolved.optimizer_step == 12
+    assert resolved.payload_directory.name == "payload"
+    assert resolved.state_components == (
+        "data_cursor",
+        "model",
+        "optimizer",
+        "rng_torch",
+    )
+
+    payload = resolved.payload_directory / "trainer-state.pt"
+    payload.chmod(0o640)
+    payload.write_bytes(b"tampered")
+    with pytest.raises(CheckpointPublicationError, match="mutated"):
+        resolve_resume_checkpoint(invocation)
+
+
+def test_resume_checkpoint_rejects_authority_manifest_lineage_mismatch(
+    tmp_path: Path,
+) -> None:
+    checkpoint = make_checkpoint(tmp_path)
+    session = FakeCheckpointSession(tmp_path)
+    result = CheckpointPublisher(session).publish(
+        checkpoint,
+        optimizer_step=12,
+        resume_grade="compatible",
+        state_components=("model", "optimizer", "rng_torch"),
+        parent_artifact_ids=("base-model-1",),
+    )
+    invocation = resume_invocation(session, result)
+    invocation.resume["checkpoint"]["parent_artifact_ids"] = ["forged-parent"]
+
+    with pytest.raises(CheckpointPublicationError, match="semantics"):
+        resolve_resume_checkpoint(invocation)

@@ -158,6 +158,22 @@ an optimizer:
 Algorithmic changes additionally require paired seeds and a quality/non-regression decision.
 Single-run speedrun results are hypotheses, not production defaults.
 
+### Consumer-Blackwell attention candidate
+
+Track [SecondNatureComputing/flash-attn-4-sm120](https://huggingface.co/SecondNatureComputing/flash-attn-4-sm120)
+at revision `60117041e10fcc6f19882afd274318c755a5ef6e` as an optional SM120/SM121
+attention capability, not a replacement default. It requires CUDA 12.8 or newer, dispatches
+consumer Blackwell without the SM100 `tcgen05`/TMEM path, and supports training backward,
+dropout, block-sparse attention, and paged KV. Its SM120 contract must reject head dimensions over
+128 and must not claim split-KV support.
+
+Qualify it in an isolated dependency closure through `kernels.get_kernel`, with the repository
+revision in the runtime fingerprint. Cover BF16 and FP16 forward/backward, MHA and GQA, causal and
+non-causal execution, every exact MageFlow/transformer shape bucket, checkpoint resume, cold JIT
+latency, peak memory, and steady-state update throughput. Compare against the current FA2 winner;
+the package's own dense-GQA measurements report FA4 roughly 4–10 percent slower than FA2 at
+512–4096 tokens on SM121a, so feature availability alone cannot authorize promotion.
+
 ## Declarative execution and profiling (P0)
 
 - Make `compile`, `warmup`, `qualify`, `train`, `eval`, and `profile` explicit graph phases. Warm a

@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -203,6 +204,24 @@ ExecutionState start_execution(const CompiledPlan& plan, std::string run_id) {
   };
   state.visits[entrypoint] = 1;
   return state;
+}
+
+ExecutionState restart_execution_attempt(const ExecutionState& state) {
+  if (state.status != ExecutionStatus::running ||
+      state.current_node_id.empty() || state.current_attempt_id.empty()) {
+    throw std::logic_error("cannot restart an inactive execution attempt");
+  }
+  ExecutionState restarted = state;
+  auto visit = restarted.visits.find(restarted.current_node_id);
+  if (visit == restarted.visits.end() || visit->second == 0U ||
+      visit->second == std::numeric_limits<std::uint64_t>::max()) {
+    throw std::logic_error("execution attempt counter is invalid or exhausted");
+  }
+  ++visit->second;
+  restarted.current_attempt_id =
+      attempt_id(restarted.current_node_id, visit->second);
+  ++restarted.revision;
+  return restarted;
 }
 
 TransitionResult advance_execution(const CompiledPlan& plan, const ExecutionState& state,

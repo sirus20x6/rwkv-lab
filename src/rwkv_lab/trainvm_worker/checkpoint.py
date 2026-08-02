@@ -19,8 +19,18 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import unquote, urlsplit
 
-from ._canonical import canonical_dumps, is_bounded_text, sha256_digest
+from ._canonical import (
+    CanonicalJsonError,
+    canonical_dumps,
+    canonical_loads,
+    exact_fields,
+    is_bounded_text,
+    is_digest,
+    is_uint64,
+    sha256_digest,
+)
 
 try:
     from trainvm.v1 import trainvm_pb2 as wire
@@ -34,6 +44,7 @@ CHECKPOINT_SNAPSHOT_SCHEMA = "trainvm.checkpoint-snapshot.v1"
 MAXIMUM_CHECKPOINT_FILES = 131_072
 MAXIMUM_CHECKPOINT_BYTES = 16 * 1024 * 1024 * 1024 * 1024
 MAXIMUM_RELATIVE_PATH_BYTES = 4096
+MAXIMUM_CHECKPOINT_MANIFEST_BYTES = 128 * 1024 * 1024
 _RESUME_GRADES = frozenset({"terminal_checkpoint", "compatible", "exact"})
 _STATE_COMPONENTS = frozenset(
     {
@@ -87,6 +98,17 @@ class PublishedCheckpoint:
     payload_size_bytes: int
     file_count: int
     worker_sequence: int
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedResumeCheckpoint:
+    artifact_id: str
+    manifest_path: Path
+    payload_directory: Path
+    optimizer_step: int
+    resume_grade: str
+    state_components: tuple[str, ...]
+    canonical_tree_digest: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -353,6 +375,251 @@ def _verify_existing_revision(
                 digest.update(chunk)
         if "sha256:" + digest.hexdigest() != expected_digest:
             raise CheckpointPublicationError("checkpoint revision payload was mutated")
+
+
+def _read_stable_regular_file(path: Path, maximum_bytes: int) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise CheckpointPublicationError(
+            "resume checkpoint manifest could not be opened safely"
+        ) from error
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_size <= 0
+            or before.st_size > maximum_bytes
+        ):
+            raise CheckpointPublicationError(
+                "resume checkpoint manifest size or type is invalid"
+            )
+        chunks: list[bytes] = []
+        total = 0
+        while chunk := os.read(descriptor, min(4 * 1024 * 1024, maximum_bytes + 1)):
+            total += len(chunk)
+            if total > maximum_bytes:
+                raise CheckpointPublicationError(
+                    "resume checkpoint manifest exceeds its byte bound"
+                )
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            raise CheckpointPublicationError(
+                "resume checkpoint manifest changed while read"
+            )
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def resolve_resume_checkpoint(invocation: object) -> ResolvedResumeCheckpoint | None:
+    """Verify and resolve the controller-selected immutable resume snapshot."""
+
+    resume = getattr(invocation, "resume", None)
+    if resume is None:
+        return None
+    workspace = getattr(invocation, "workspace", None)
+    node_id = getattr(invocation, "node_id", None)
+    attempt_id = getattr(invocation, "attempt_id", None)
+    if (
+        not isinstance(resume, Mapping)
+        or not isinstance(workspace, Mapping)
+        or not is_bounded_text(node_id, 1024)
+        or not is_bounded_text(attempt_id, 1024)
+    ):
+        raise CheckpointPublicationError(
+            "resume checkpoint invocation authority is invalid"
+        )
+    checkpoint = resume.get("checkpoint")
+    if not isinstance(checkpoint, Mapping):
+        raise CheckpointPublicationError(
+            "resume checkpoint artifact authority is invalid"
+        )
+    uri = checkpoint.get("uri")
+    if not isinstance(uri, str):
+        raise CheckpointPublicationError("resume checkpoint URI is invalid")
+    parsed = urlsplit(uri)
+    if (
+        parsed.scheme != "file"
+        or parsed.netloc
+        or parsed.query
+        or parsed.fragment
+        or not parsed.path.startswith("/")
+    ):
+        raise CheckpointPublicationError(
+            "resume checkpoint must use a local absolute file URI"
+        )
+    decoded_path = unquote(parsed.path, errors="strict")
+    manifest_path = Path(decoded_path)
+    if (
+        not manifest_path.is_absolute()
+        or manifest_path != Path(os.path.normpath(manifest_path))
+    ):
+        raise CheckpointPublicationError(
+            "resume checkpoint manifest path is noncanonical"
+        )
+    if manifest_path.is_symlink():
+        raise CheckpointPublicationError(
+            "resume checkpoint manifest cannot be a symlink"
+        )
+    read_roots = workspace.get("allowed_read_roots")
+    write_roots = workspace.get("allowed_write_roots")
+    if not isinstance(read_roots, (tuple, list)) or not isinstance(
+        write_roots, (tuple, list)
+    ):
+        raise CheckpointPublicationError(
+            "resume checkpoint workspace roots are invalid"
+        )
+    roots = _roots(tuple(read_roots) + tuple(write_roots), "resume roots")
+    try:
+        manifest_path = manifest_path.resolve(strict=True)
+    except OSError as error:
+        raise CheckpointPublicationError(
+            "resume checkpoint manifest is unavailable"
+        ) from error
+    if not _within(manifest_path, roots):
+        raise CheckpointPublicationError(
+            "resume checkpoint manifest escaped workspace authority"
+        )
+    raw = _read_stable_regular_file(
+        manifest_path, MAXIMUM_CHECKPOINT_MANIFEST_BYTES
+    )
+    fingerprint = checkpoint.get("fingerprint")
+    if (
+        checkpoint.get("fingerprint_algorithm") != "manifest_sha256"
+        or not is_digest(fingerprint)
+        or sha256_digest(raw) != fingerprint
+    ):
+        raise CheckpointPublicationError(
+            "resume checkpoint manifest fingerprint disagrees with authority"
+        )
+    try:
+        manifest = canonical_loads(
+            raw, maximum_bytes=MAXIMUM_CHECKPOINT_MANIFEST_BYTES
+        )
+        exact_fields(
+            manifest,
+            frozenset(
+                {
+                    "schema", "checkpoint_schema", "producer", "optimizer_step",
+                    "resume_grade", "state_components", "payload_directory",
+                    "file_count", "payload_size_bytes", "objects",
+                    "parent_artifact_ids", "canonical_tree_digest",
+                }
+            ),
+        )
+    except CanonicalJsonError as error:
+        raise CheckpointPublicationError(
+            "resume checkpoint manifest is not canonical"
+        ) from error
+    tree_digest = manifest.get("canonical_tree_digest")
+    body = dict(manifest)
+    del body["canonical_tree_digest"]
+    producer = manifest.get("producer")
+    components = manifest.get("state_components")
+    objects = manifest.get("objects")
+    parents = manifest.get("parent_artifact_ids")
+    authority_parents = checkpoint.get("parent_artifact_ids")
+    optimizer_step = manifest.get("optimizer_step")
+    resume_grade = manifest.get("resume_grade")
+    valid_components = (
+        isinstance(components, list)
+        and bool(components)
+        and all(isinstance(component, str) for component in components)
+        and components == sorted(set(components))
+        and all(component in _STATE_COMPONENTS for component in components)
+    )
+    valid_parents = (
+        isinstance(parents, list)
+        and all(is_bounded_text(parent, 1024) for parent in parents)
+        and len(parents) == len(set(parents))
+        and parents == authority_parents
+    )
+    if (
+        manifest.get("schema") != CHECKPOINT_SNAPSHOT_SCHEMA
+        or manifest.get("checkpoint_schema") != checkpoint.get("schema")
+        or not isinstance(producer, dict)
+        or set(producer) != {"run_id", "node_id", "attempt_id"}
+        or producer.get("run_id") != getattr(invocation, "run_id", None)
+        or producer.get("node_id") != node_id
+        or producer.get("attempt_id") != checkpoint.get("producer_attempt_id")
+        or producer.get("attempt_id") == attempt_id
+        or optimizer_step != resume.get("optimizer_step")
+        or not is_uint64(optimizer_step)
+        or resume_grade not in {"compatible", "exact"}
+        or not valid_components
+        or manifest.get("payload_directory") != "payload"
+        or not is_uint64(manifest.get("file_count"))
+        or not is_uint64(manifest.get("payload_size_bytes"))
+        or not isinstance(objects, list)
+        or len(objects) != manifest.get("file_count")
+        or len(objects) > MAXIMUM_CHECKPOINT_FILES
+        or not valid_parents
+        or not is_digest(tree_digest)
+        or sha256_digest(canonical_dumps(body)) != tree_digest
+    ):
+        raise CheckpointPublicationError(
+            "resume checkpoint manifest semantics are invalid"
+        )
+    total_size = 0
+    seen_paths: set[str] = set()
+    for item in objects:
+        if not isinstance(item, dict) or set(item) != {
+            "relative_path", "sha256", "size_bytes"
+        }:
+            raise CheckpointPublicationError(
+                "resume checkpoint object record is invalid"
+            )
+        relative = item.get("relative_path")
+        size = item.get("size_bytes")
+        if (
+            not isinstance(relative, str)
+            or _relative_text(Path(relative)) != relative
+            or relative in seen_paths
+            or not is_uint64(size)
+            or not is_digest(item.get("sha256"))
+        ):
+            raise CheckpointPublicationError(
+                "resume checkpoint object identity is invalid"
+            )
+        seen_paths.add(relative)
+        total_size += size
+        if total_size > MAXIMUM_CHECKPOINT_BYTES:
+            raise CheckpointPublicationError(
+                "resume checkpoint payload exceeds its byte bound"
+            )
+    if total_size != manifest.get("payload_size_bytes"):
+        raise CheckpointPublicationError(
+            "resume checkpoint payload size is inconsistent"
+        )
+    if checkpoint.get("size_bytes") != total_size + len(raw):
+        raise CheckpointPublicationError(
+            "resume checkpoint artifact size disagrees with its manifest"
+        )
+    revision = manifest_path.parent
+    _verify_existing_revision(revision, raw, objects)
+    payload = (revision / "payload").resolve(strict=True)
+    return ResolvedResumeCheckpoint(
+        artifact_id=str(checkpoint.get("artifact_id")),
+        manifest_path=manifest_path,
+        payload_directory=payload,
+        optimizer_step=optimizer_step,
+        resume_grade=resume_grade,
+        state_components=tuple(components),
+        canonical_tree_digest=tree_digest,
+    )
 
 
 class CheckpointPublisher:
@@ -635,5 +902,7 @@ __all__ = [
     "CheckpointPublicationRequest",
     "CheckpointPublisher",
     "PublishedCheckpoint",
+    "ResolvedResumeCheckpoint",
     "publish_checkpoint_requests",
+    "resolve_resume_checkpoint",
 ]

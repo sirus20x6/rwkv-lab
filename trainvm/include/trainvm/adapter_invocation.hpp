@@ -12,6 +12,8 @@
 namespace trainvm {
 
 inline constexpr std::string_view kWorkerInvocationApiVersion =
+    "trainvm.worker-invocation/v2";
+inline constexpr std::string_view kWorkerInvocationApiVersionV1 =
     "trainvm.worker-invocation/v1";
 inline constexpr std::size_t kMaximumWorkerInvocationBytes = 48U * 1024U;
 
@@ -31,6 +33,9 @@ struct WorkerInvocationContext final {
   // Authority-resolved, content-addressed training composition for this node,
   // or null when the invocation declares none.
   nlohmann::json resolved_training = nullptr;
+  // Authority-selected immutable checkpoint lineage for a replacement
+  // attempt, or null for an initial/retained worker invocation.
+  nlohmann::json resume = nullptr;
 };
 
 // Immutable, content-addressed operation context delivered in WorkerWelcome.
@@ -55,6 +60,7 @@ struct WorkerInvocationSpec final {
   nlohmann::json observability;
   nlohmann::json execution;
   nlohmann::json training;
+  nlohmann::json resume;
   std::string invocation_digest;
 
   bool operator==(const WorkerInvocationSpec&) const = default;

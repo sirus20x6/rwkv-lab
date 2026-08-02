@@ -91,7 +91,7 @@ def training_composition() -> dict[str, object]:
     return {**body, "composition_digest": digest(canonical(body))}
 
 
-def invocation_document(*, training: object = None) -> bytes:
+def invocation_document(*, training: object = None, resume: object = None) -> bytes:
     body = {
         "adapter": {
             "adapter": "rwkv-lab.mageflow",
@@ -100,7 +100,11 @@ def invocation_document(*, training: object = None) -> bytes:
             "runtime": "python_worker",
             "version": "1.0.0",
         },
-        "api_version": "trainvm.worker-invocation/v1",
+        "api_version": (
+            "trainvm.worker-invocation/v2"
+            if resume is not None
+            else "trainvm.worker-invocation/v1"
+        ),
         "attempt_id": "attempt-1",
         "controls": {"learning_rate": 2e-6},
         "dispatch_id": "dispatch-1",
@@ -114,6 +118,7 @@ def invocation_document(*, training: object = None) -> bytes:
         "plan_revision": 3,
         "publishes": {},
         "resources": {},
+        **({"resume": resume} if resume is not None else {}),
         "run_id": "run-1",
         "training": training,
         "workspace": {},
@@ -223,3 +228,36 @@ def test_invocation_rejects_forged_nested_training_digests() -> None:
     forged["composition_digest"] = digest(canonical(body))
     with pytest.raises(InvocationError):
         load_worker_invocation(invocation_document(training=forged))
+
+
+def test_v2_invocation_binds_resume_to_prior_attempt() -> None:
+    checkpoint = {
+        "artifact_id": "checkpoint-1",
+        "logical_name": "checkpoint",
+        "kind": "checkpoint",
+        "schema": "rwkv-lab.mageflow-checkpoint.v1",
+        "uri": "file:///run/checkpoint/manifest.json",
+        "size_bytes": 4096,
+        "fingerprint_algorithm": "manifest_sha256",
+        "fingerprint": "sha256:" + "d" * 64,
+        "complete": True,
+        "producer_node_id": "train",
+        "producer_attempt_id": "attempt-0",
+        "parent_artifact_ids": ["base-1"],
+        "published_at_ns": 1234,
+    }
+    resume = {
+        "api_version": "trainvm.resume-checkpoint/v1",
+        "checkpoint": checkpoint,
+        "optimizer_step": 12,
+        "pause_command_id": "pause-1",
+        "resume_command_id": "resume-1",
+    }
+
+    invocation = load_worker_invocation(invocation_document(resume=resume))
+
+    assert invocation.resume is not None
+    assert invocation.resume["checkpoint"]["producer_attempt_id"] == "attempt-0"
+    resume["checkpoint"]["producer_attempt_id"] = "attempt-1"
+    with pytest.raises(InvocationError, match="lineage"):
+        load_worker_invocation(invocation_document(resume=resume))

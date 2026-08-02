@@ -34,6 +34,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -5587,6 +5588,10 @@ void test_resource_releasing_pause_lifecycle() {
               pausing->observed_state == "pausing" &&
               pausing->run_revision == before->run_revision + 2U,
           "resource-releasing pause remains nonfinal until cleanup");
+    check(journal.release_lease(
+              launch.concurrency_key, run_id, launch.lease_id,
+              launch.fencing_token, test_time(1'240)),
+          "resource-releasing pause drops its original logical fence before completion");
     (void)controller.complete_resource_releasing_pause(
         submitted.command.command_id, test_time(1'250));
     const auto paused = journal.projection(run_id);
@@ -5600,6 +5605,81 @@ void test_resource_releasing_pause_lifecycle() {
     replay.recover();
     check(replay.state() == controller.state(),
           "resource-releasing pause replays deterministically after restart");
+
+    const auto resume = replay.request_lifecycle(
+        trainvm::LifecycleCommandKind::resume, "released-resume-once",
+        paused->run_revision, false, false, "operator",
+        "reacquire accelerator from immutable checkpoint");
+    const std::string resume_lease_id =
+        "lease-" + trainvm::sha256_hex(
+                       nlohmann::json(
+                           {{"run_id", run_id},
+                            {"plan_hash", compiled.plan->plan_hash},
+                            {"concurrency_key", launch.concurrency_key},
+                            {"resume_command_id", resume.command.command_id}})
+                           .dump());
+    const auto interrupted_acquisition = journal.acquire_lease(
+        launch.concurrency_key, run_id, resume_lease_id,
+        test_time(1'290), 30'000'000'000LL);
+    const auto resumed = replay.begin_released_resource_resume(
+        resume.command.command_id, test_time(1'300));
+    const auto acquiring = journal.projection(run_id);
+    const auto durable_resume =
+        journal.lifecycle_command(resume.command.command_id);
+    const auto old_acquisition =
+        journal.lease_acquisition_event(run_id, launch.lease_id);
+    const auto new_acquisition =
+        journal.lease_acquisition_event(run_id, resumed.lease.lease_id);
+    check(interrupted_acquisition.status ==
+                trainvm::LeaseAcquireStatus::acquired &&
+              resumed.status == trainvm::LeaseAcquireStatus::already_owned &&
+              resumed.lease.lease_id != launch.lease_id &&
+              resumed.lease.fencing_token > launch.fencing_token &&
+              acquiring && acquiring->desired_state == "running" &&
+              acquiring->observed_state == "acquiring" &&
+              acquiring->run_revision == paused->run_revision + 3U &&
+              acquiring->current_node_id.empty() &&
+              acquiring->current_attempt_id.empty() &&
+              replay.state().current_node_id == launch.node_id &&
+              replay.state().current_attempt_id == launch.node_id + "@2" &&
+              durable_resume &&
+              durable_resume->status ==
+                  trainvm::LifecycleCommandStatus::applied &&
+              durable_resume->optimizer_step == std::optional<std::uint64_t>{9} &&
+              durable_resume->artifact_id == artifact_id &&
+              durable_resume->acknowledgement &&
+              durable_resume->acknowledgement->worker_sequence == 0U &&
+              old_acquisition && new_acquisition &&
+              old_acquisition->event_id != new_acquisition->event_id,
+          "released-resource resume recovers an interrupted lease acquisition and creates a fenced @2 attempt bound to the pause checkpoint");
+
+    const auto replayed_resume = journal.apply_released_resource_resume(
+        run_id, resume.command.command_id, submitted.command.command_id,
+        resumed.lease, replay.state().current_attempt_id, test_time(1'305));
+    bool changed_resume_retry_rejected = false;
+    try {
+      (void)journal.apply_released_resource_resume(
+          run_id, resume.command.command_id, submitted.command.command_id,
+          resumed.lease, launch.node_id + "@3", test_time(1'306));
+    } catch (const std::invalid_argument&) {
+      changed_resume_retry_rejected = true;
+    }
+    check(replayed_resume == *durable_resume && changed_resume_retry_rejected,
+          "released-resource resume is exactly idempotent and rejects a changed replacement attempt");
+
+    const auto replacement = replay.prepare_worker_launch(
+        {.code_fingerprint = "sha256:" + std::string(64U, '9'),
+         .required_capabilities = {"worker.controls"}},
+        test_time(1'310));
+    check(replacement.attempt_id == launch.node_id + "@2" &&
+              replacement.lease_id == resumed.lease.lease_id &&
+              replacement.fencing_token == resumed.lease.fencing_token &&
+              replacement.launch_nonce != launch.launch_nonce &&
+              replacement.lease_id != launch.lease_id,
+          "replacement worker launch cannot reuse the released attempt or fence");
+    trainvm::Controller resumed_replay(*compiled.plan, journal, run_id);
+    check(resumed_replay.recover() == replay.state(),
+          "released-resource acquisition and replacement launch replay after restart");
   }
   std::filesystem::remove_all(directory);
 }
@@ -9730,6 +9810,15 @@ class SagaProcessClient final : public trainvm::IHostProcessClient {
         inspected.controller_target != "unix:/tmp/trainvm-process-saga.sock") {
       throw std::runtime_error("process client received the wrong bootstrap");
     }
+    const auto process_identity =
+        process_identities_
+            .try_emplace(
+                request.launch.identity.launch_event_id,
+                std::pair<std::int64_t, std::uint64_t>{
+                    12'345 + static_cast<std::int64_t>(
+                                 process_identities_.size()),
+                    67'890U + process_identities_.size()})
+            .first;
     const auto launch = trainvm::seal_host_process_launch_request({
         .api_version =
             std::string(trainvm::kHostProcessLaunchRequestApiVersion),
@@ -9761,8 +9850,8 @@ class SagaProcessClient final : public trainvm::IHostProcessClient {
             std::string(trainvm::kHostProcessSpawnRequestApiVersion),
         .launch_id = launch.launch_id,
         .launch_intent_digest = intended.intent.receipt_digest,
-        .host_pid = 12345,
-        .process_starttime_ticks = 67890U,
+        .host_pid = process_identity->second.first,
+        .process_starttime_ticks = process_identity->second.second,
         .boot_id = request.grant.boot_id,
         .cgroup_path = launch.cgroup_path,
         .cgroup_device = launch.cgroup_device,
@@ -9840,6 +9929,8 @@ class SagaProcessClient final : public trainvm::IHostProcessClient {
 
  private:
   trainvm::SQLiteHostLedger& ledger_;
+  std::map<std::string, std::pair<std::int64_t, std::uint64_t>, std::less<>>
+      process_identities_;
   std::optional<trainvm::HostProcessSpawnReceipt> spawn_;
 };
 
@@ -10928,10 +11019,16 @@ void test_service_orders_physical_before_logical_release() {
   const trainvm::HostIdentity host_identity{.host_id = inventory.host_id,
                                              .boot_id = inventory.boot_id};
   const auto profiles = fixture_adapter_profiles();
+  std::int64_t service_now_ns = 10;
+  trainvm::WorkerLaunchTicket registry_ticket;
+  registry_ticket.node_id = "train_to_boundary";
+  registry_ticket.code_fingerprint =
+      "sha256:" + std::string(64U, 'a');
   trainvm::TrainVMService service(
       directory / "journal.db", trainvm::AdapterRegistry(profiles),
-      fixture_disabled_host_launch_registry(), host_identity,
-      [] { return test_time(10); },
+      fixture_test_host_launch_registry(*compiled.plan, registry_ticket),
+      host_identity,
+      [&service_now_ns] { return test_time(service_now_ns); },
       trainvm::HostGrantEnforcement::required,
       trainvm::TrainingComponentRegistry({}), host, process,
       "unix:/tmp/trainvm-process-saga.sock");
@@ -11125,6 +11222,215 @@ void test_service_orders_physical_before_logical_release() {
             cancelled_projection->observed_state == "cancelled" &&
             process->exit_calls == 1U,
         "cancel becomes terminal only after process, grant, and lease cleanup");
+
+  const auto wire_hello = [](const trainvm::WorkerLaunchTicket& ticket) {
+    trainvm::v1::WorkerHello hello;
+    hello.set_run_id(ticket.run_id);
+    hello.set_node_id(ticket.node_id);
+    hello.set_attempt_id(ticket.attempt_id);
+    hello.set_launch_nonce(ticket.launch_nonce);
+    hello.set_adapter(ticket.adapter);
+    hello.set_adapter_version(ticket.adapter_version);
+    hello.set_code_fingerprint(ticket.code_fingerprint);
+    for (const auto& capability : ticket.required_capabilities) {
+      hello.add_capabilities(capability);
+    }
+    hello.set_last_acked_controller_sequence(0U);
+    hello.set_concurrency_key(ticket.concurrency_key);
+    hello.set_lease_id(ticket.lease_id);
+    hello.set_fencing_token(ticket.fencing_token);
+    return hello;
+  };
+  const std::string pause_run_id = "service-resource-pause-resume-run";
+  trainvm::Controller pause_controller(
+      *compiled.plan, service.journal_, pause_run_id);
+  pause_controller.create_queued(
+      adapter_locked_submission(*compiled.plan, service.adapter_registry_));
+  const auto pause_acquired = service.reconcile_once(pause_run_id);
+  const auto pause_lease = service.journal_.active_lease(
+      compiled.plan->experiment.spec.workspace.concurrency_key,
+      test_time(10));
+  check(pause_acquired.disposition ==
+                trainvm::ReconcileDisposition::lease_acquired &&
+            pause_lease && pause_lease->owner_run_id == pause_run_id,
+        "resource-releasing pause fixture acquires its initial logical fence");
+  if (!pause_lease) {
+    std::filesystem::remove_all(directory);
+    return;
+  }
+  const auto pause_request = trainvm::build_resource_bundle_request({
+      .journal_id = service.journal_.journal_id(),
+      .plan_hash = compiled.plan->plan_hash,
+      .run_id = pause_run_id,
+      .resources = compiled.plan->experiment.spec.resources,
+      .lease = *pause_lease,
+  });
+  const auto pause_granted = service.host_grant_saga_->reconcile_request(
+      pause_request, test_time(10));
+  trainvm::Controller pause_worker(
+      *compiled.plan, service.journal_, pause_run_id);
+  pause_worker.recover();
+  const auto pause_launch = pause_worker.prepare_worker_launch(
+      {.code_fingerprint = "sha256:" + std::string(64U, 'a'),
+       .required_capabilities = {"worker.metrics", "worker.controls"}},
+      test_time(10));
+  const auto pause_binding = bind_test_worker_launch(
+      pause_worker, pause_launch, 10, host_identity);
+  (void)service.host_process_saga_->reconcile(
+      trainvm::ResolvedLaunch(
+          pause_binding, -1,
+          pause_binding.identity.code ? std::optional<int>{-1}
+                                      : std::nullopt,
+          -1),
+      *pause_granted.grant,
+      trainvm::compile_linux_process_policy(std::nullopt),
+      "unix:/tmp/trainvm-process-saga.sock", test_time(10));
+  prime_test_service_launch(service, pause_launch);
+  trainvm::TrainVMService::WorkerConnection pause_connection;
+  const auto pause_open = service.open_worker_connection(
+      wire_hello(pause_launch), pause_connection);
+  const std::string checkpoint_id = "service-pause-checkpoint";
+  (void)pause_worker.record_worker_observation(
+      {.event_id = pause_connection.dispatch.dispatch_id + ":artifact:" +
+                   trainvm::sha256_hex(checkpoint_id),
+       .run_id = pause_run_id,
+       .run_revision = pause_connection.dispatch.run_revision,
+       .plan_revision = pause_connection.dispatch.plan_revision,
+       .node_id = pause_launch.node_id,
+       .attempt_id = pause_launch.attempt_id,
+       .worker_sequence = 1U,
+       .event_type = "artifact.published",
+       .event_version = 1U,
+       .wall_time_ns = 10,
+       .monotonic_time_ns = 10U,
+       .optimizer_step = std::nullopt,
+       .payload = {{"artifact_id", checkpoint_id},
+                   {"logical_name", "checkpoint"},
+                   {"kind", "checkpoint"},
+                   {"schema", "rwkv-lab.mageflow-checkpoint.v1"},
+                   {"uri", "file:///sealed/service-pause/manifest.json"},
+                   {"size_bytes", std::uint64_t{4096}},
+                   {"fingerprint_algorithm", "manifest_sha256"},
+                   {"fingerprint",
+                    "sha256:" + std::string(64U, 'd')},
+                   {"complete", true},
+                   {"producer_node_id", pause_launch.node_id},
+                   {"producer_attempt_id", pause_launch.attempt_id},
+                   {"parent_artifact_ids", nlohmann::json::array()},
+                   {"published_at_ns", std::int64_t{10}}}},
+      pause_connection.identity, test_time(10));
+  const auto before_pause = service.journal_.projection(pause_run_id);
+  const auto pause_command = pause_worker.request_lifecycle(
+      trainvm::LifecycleCommandKind::pause, "service-release-pause-once",
+      before_pause->run_revision, true, true, "operator",
+      "release the physical accelerator");
+  (void)pause_worker.acknowledge_lifecycle(
+      pause_command.command.command_id,
+      {.concurrency_key = pause_launch.concurrency_key,
+       .lease_id = pause_launch.lease_id,
+       .fencing_token = pause_launch.fencing_token,
+       .node_id = pause_launch.node_id,
+       .attempt_id = pause_launch.attempt_id,
+       .worker_sequence = 2U},
+      trainvm::LifecycleCommandStatus::applied, std::uint64_t{9},
+      checkpoint_id, nlohmann::json::array(), test_time(10));
+  check(service.journal_.renew_lease(
+            pause_lease->concurrency_key, pause_run_id,
+            pause_lease->lease_id, pause_lease->fencing_token,
+            test_time(10), 600'000'000'000LL),
+        "resource pause fixture keeps its fence live through graceful shutdown");
+  service_now_ns = 300'000'000'010LL;
+  const std::size_t releases_before_pause = host->release_calls;
+  const auto pause_exit = service.reconcile_once(pause_run_id);
+  const auto pause_release = service.reconcile_once(pause_run_id);
+  const auto pause_complete = service.reconcile_once(pause_run_id);
+  const auto paused_projection = service.journal_.projection(pause_run_id);
+  check(pause_open.ok() &&
+            pause_exit.disposition ==
+                trainvm::ReconcileDisposition::host_process_exited &&
+            pause_release.disposition ==
+                trainvm::ReconcileDisposition::host_grant_released &&
+            pause_complete.disposition ==
+                trainvm::ReconcileDisposition::builtin_completed &&
+            host->release_calls == releases_before_pause + 1U &&
+            !service.journal_.active_lease(pause_lease->concurrency_key,
+                                           test_time(10)) &&
+            paused_projection &&
+            paused_projection->desired_state == "paused" &&
+            paused_projection->observed_state == "paused",
+        "resource pause orders process exit, physical release, logical release, and paused state");
+
+  trainvm::Controller resume_controller(
+      *compiled.plan, service.journal_, pause_run_id);
+  resume_controller.recover();
+  const auto resume_command = resume_controller.request_lifecycle(
+      trainvm::LifecycleCommandKind::resume, "service-resume-once",
+      paused_projection->run_revision, false, false, "operator",
+      "reacquire from the exact immutable checkpoint");
+  const auto resume_acquired = service.reconcile_once(pause_run_id);
+  const auto replacement_lease = service.journal_.active_lease(
+      pause_lease->concurrency_key, test_time(service_now_ns));
+  const auto replacement_granted = service.reconcile_once(pause_run_id);
+  check(resume_acquired.disposition ==
+                trainvm::ReconcileDisposition::lease_acquired &&
+            replacement_granted.disposition ==
+                trainvm::ReconcileDisposition::host_grant_acquired &&
+            replacement_lease &&
+            replacement_lease->lease_id != pause_lease->lease_id &&
+            replacement_lease->fencing_token > pause_lease->fencing_token,
+        "released pause resume reacquires a fresh logical and physical fence");
+  if (!replacement_lease) {
+    std::filesystem::remove_all(directory);
+    return;
+  }
+  const auto replacement_request = trainvm::build_resource_bundle_request({
+      .journal_id = service.journal_.journal_id(),
+      .plan_hash = compiled.plan->plan_hash,
+      .run_id = pause_run_id,
+      .resources = compiled.plan->experiment.spec.resources,
+      .lease = *replacement_lease,
+  });
+  const auto replacement_saga =
+      service.journal_.host_grant_saga(replacement_request.request_id);
+  trainvm::Controller replacement_worker(
+      *compiled.plan, service.journal_, pause_run_id);
+  replacement_worker.recover();
+  const auto replacement_launch = replacement_worker.prepare_worker_launch(
+      {.code_fingerprint = "sha256:" + std::string(64U, 'a'),
+       .required_capabilities = {"worker.metrics", "worker.controls"}},
+      test_time(service_now_ns));
+  const auto replacement_binding = bind_test_worker_launch(
+      replacement_worker, replacement_launch, service_now_ns, host_identity);
+  (void)service.host_process_saga_->reconcile(
+      trainvm::ResolvedLaunch(
+          replacement_binding, -1,
+          replacement_binding.identity.code ? std::optional<int>{-1}
+                                            : std::nullopt,
+          -1),
+      *replacement_saga->grant,
+      trainvm::compile_linux_process_policy(std::nullopt),
+      "unix:/tmp/trainvm-process-saga.sock", test_time(service_now_ns));
+  prime_test_service_launch(service, replacement_launch);
+  trainvm::TrainVMService::WorkerConnection replacement_connection;
+  const auto replacement_open = service.open_worker_connection(
+      wire_hello(replacement_launch), replacement_connection);
+  const auto invocation = nlohmann::json::parse(
+      replacement_connection.welcome.canonical_invocation_json());
+  check(replacement_open.ok() &&
+            replacement_launch.attempt_id == "train_to_boundary@2" &&
+            invocation.at("api_version") ==
+                trainvm::kWorkerInvocationApiVersion &&
+            invocation.at("attempt_id") == replacement_launch.attempt_id &&
+            invocation.at("resume").at("checkpoint").at("artifact_id") ==
+                checkpoint_id &&
+            invocation.at("resume").at("checkpoint")
+                    .at("producer_attempt_id") == pause_launch.attempt_id &&
+            invocation.at("resume").at("optimizer_step") == 9U &&
+            invocation.at("resume").at("pause_command_id") ==
+                pause_command.command.command_id &&
+            invocation.at("resume").at("resume_command_id") ==
+                resume_command.command.command_id,
+        "replacement worker welcome is bound to the exact pause checkpoint and command lineage");
   std::filesystem::remove_all(directory);
 }
 

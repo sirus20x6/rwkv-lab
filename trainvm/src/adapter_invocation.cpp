@@ -43,7 +43,8 @@ void exact_fields(const Json& value,
 }
 
 Json invocation_body(const WorkerInvocationSpec& value) {
-  if (value.api_version != kWorkerInvocationApiVersion ||
+  const bool legacy_v1 = value.api_version == kWorkerInvocationApiVersionV1;
+  if ((!legacy_v1 && value.api_version != kWorkerInvocationApiVersion) ||
       value.run_id.empty() || !valid_digest(value.host_id) ||
       !valid_plan_hash(value.plan_hash) ||
       value.plan_revision == 0U || value.node_id.empty() ||
@@ -56,28 +57,32 @@ Json invocation_body(const WorkerInvocationSpec& value) {
       !value.inputs.is_object() || !value.controls.is_object() ||
       !value.publishes.is_object() || !value.observability.is_object() ||
       (!value.execution.is_null() && !value.execution.is_object()) ||
-      (!value.training.is_null() && !value.training.is_object())) {
+      (!value.training.is_null() && !value.training.is_object()) ||
+      (!value.resume.is_null() && !value.resume.is_object()) ||
+      (legacy_v1 && !value.resume.is_null())) {
     reject("worker invocation semantics are invalid");
   }
-  return {{"adapter", encode_json(value.adapter)},
-          {"api_version", value.api_version},
-          {"attempt_id", value.attempt_id},
-          {"controls", value.controls},
-          {"dispatch_id", value.dispatch_id},
-          {"effective_control_revision",
-           value.effective_control_revision},
-          {"execution", value.execution},
-          {"host_id", value.host_id},
-          {"inputs", value.inputs},
-          {"node_id", value.node_id},
-          {"observability", value.observability},
-          {"plan_hash", value.plan_hash},
-          {"plan_revision", value.plan_revision},
-          {"publishes", value.publishes},
-          {"resources", value.resources},
-          {"run_id", value.run_id},
-          {"training", value.training},
-          {"workspace", value.workspace}};
+  Json body{{"adapter", encode_json(value.adapter)},
+            {"api_version", value.api_version},
+            {"attempt_id", value.attempt_id},
+            {"controls", value.controls},
+            {"dispatch_id", value.dispatch_id},
+            {"effective_control_revision",
+             value.effective_control_revision},
+            {"execution", value.execution},
+            {"host_id", value.host_id},
+            {"inputs", value.inputs},
+            {"node_id", value.node_id},
+            {"observability", value.observability},
+            {"plan_hash", value.plan_hash},
+            {"plan_revision", value.plan_revision},
+            {"publishes", value.publishes},
+            {"resources", value.resources},
+            {"run_id", value.run_id},
+            {"training", value.training},
+            {"workspace", value.workspace}};
+  if (!legacy_v1) body["resume"] = value.resume;
+  return body;
 }
 
 Json require_artifact_manifest(std::string_view input_name,
@@ -117,6 +122,35 @@ Json require_artifact_manifest(std::string_view input_name,
     reject("worker invocation artifact manifest disagrees with declaration");
   }
   return manifest;
+}
+
+Json require_resume_checkpoint(const Json& resume, const Spec& spec,
+                               const WorkerInvocationContext& context) {
+  exact_fields(resume, {"api_version", "checkpoint", "optimizer_step",
+                        "pause_command_id", "resume_command_id"});
+  if (resume.value("api_version", std::string{}) !=
+          "trainvm.resume-checkpoint/v1" ||
+      !resume.at("optimizer_step").is_number_unsigned() ||
+      resume.value("pause_command_id", std::string{}).empty() ||
+      resume.value("resume_command_id", std::string{}).empty()) {
+    reject("worker invocation resume authority is malformed");
+  }
+  const Json& checkpoint = resume.at("checkpoint");
+  const std::string logical_name =
+      checkpoint.value("logical_name", std::string{});
+  const Json validated = require_artifact_manifest(
+      "resume", logical_name, checkpoint, spec);
+  if (validated.value("kind", std::string{}) != "checkpoint" ||
+      validated.value("producer_node_id", std::string{}) != context.node_id ||
+      validated.value("producer_attempt_id", std::string{}).empty() ||
+      validated.value("producer_attempt_id", std::string{}) ==
+          context.attempt_id ||
+      validated.value("fingerprint_algorithm", std::string{}) !=
+          "manifest_sha256" ||
+      !valid_digest(validated.value("fingerprint", std::string{}))) {
+    reject("worker invocation resume checkpoint lineage is invalid");
+  }
+  return resume;
 }
 
 void seal(WorkerInvocationSpec& value) {
@@ -211,6 +245,12 @@ WorkerInvocationSpec build_worker_invocation(
   } else if (!context.resolved_training.is_null()) {
     reject("worker invocation supplied training components to an undeclared node");
   }
+  Json resume = nullptr;
+  if (!context.resume.is_null()) {
+    if (!context.resume.is_object())
+      reject("worker invocation resume authority is not an object");
+    resume = require_resume_checkpoint(context.resume, spec, context);
+  }
   const Node& node = selected->second;
   const Component& component = spec.components.at(node.invoke.component);
   const Operation& operation = component.operations.at(node.invoke.operation);
@@ -266,6 +306,7 @@ WorkerInvocationSpec build_worker_invocation(
       .observability = encode_json(spec.observability),
       .execution = std::move(execution),
       .training = context.resolved_training,
+      .resume = std::move(resume),
       .invocation_digest = {},
   };
   seal(result);
@@ -294,18 +335,30 @@ WorkerInvocationSpec worker_invocation_from_canonical_json(
     const Json parsed = Json::parse(value);
     if (parsed.dump() != value)
       reject("worker invocation JSON is not canonical");
-    exact_fields(parsed,
-                 {"adapter", "api_version", "attempt_id", "controls",
-                  "dispatch_id", "effective_control_revision", "execution",
-                  "host_id", "inputs", "invocation_digest", "node_id", "observability",
-                  "plan_hash", "plan_revision", "publishes", "resources",
-                  "run_id", "training", "workspace"});
+    const std::string api_version =
+        parsed.value("api_version", std::string{});
+    const bool legacy_v1 = api_version == kWorkerInvocationApiVersionV1;
+    if (legacy_v1) {
+      exact_fields(parsed,
+                   {"adapter", "api_version", "attempt_id", "controls",
+                    "dispatch_id", "effective_control_revision", "execution",
+                    "host_id", "inputs", "invocation_digest", "node_id",
+                    "observability", "plan_hash", "plan_revision", "publishes",
+                    "resources", "run_id", "training", "workspace"});
+    } else {
+      exact_fields(parsed,
+                   {"adapter", "api_version", "attempt_id", "controls",
+                    "dispatch_id", "effective_control_revision", "execution",
+                    "host_id", "inputs", "invocation_digest", "node_id",
+                    "observability", "plan_hash", "plan_revision", "publishes",
+                    "resources", "resume", "run_id", "training", "workspace"});
+    }
     AdapterKey adapter;
     std::vector<Diagnostic> diagnostics;
     if (!decode_json(parsed.at("adapter"), adapter, "/adapter", diagnostics))
       reject("worker invocation adapter key is malformed");
     WorkerInvocationSpec result{
-        .api_version = parsed.at("api_version").get<std::string>(),
+        .api_version = api_version,
         .run_id = parsed.at("run_id").get<std::string>(),
         .host_id = parsed.at("host_id").get<std::string>(),
         .plan_hash = parsed.at("plan_hash").get<std::string>(),
@@ -324,6 +377,7 @@ WorkerInvocationSpec worker_invocation_from_canonical_json(
         .observability = parsed.at("observability"),
         .execution = parsed.at("execution"),
         .training = parsed.at("training"),
+        .resume = legacy_v1 ? Json(nullptr) : parsed.at("resume"),
         .invocation_digest =
             parsed.at("invocation_digest").get<std::string>(),
     };

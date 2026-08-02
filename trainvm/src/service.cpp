@@ -1280,6 +1280,77 @@ std::map<std::string, nlohmann::json, std::less<>> invocation_artifacts(
   return result;
 }
 
+nlohmann::json invocation_resume_checkpoint(
+    const Journal& journal, const std::string& run_id,
+    const std::string& node_id, const std::string& attempt_id) {
+  std::optional<Event> restart;
+  std::optional<Event> checkpoint;
+  const std::vector<Event> events = journal.events_for_run(run_id);
+  for (const Event& event : events) {
+    if (event.event_type == "node.attempt_restarted" &&
+        event.node_id == node_id && event.attempt_id == attempt_id) {
+      if (restart) {
+        throw std::runtime_error(
+            "worker attempt has ambiguous restart authority");
+      }
+      restart = event;
+    }
+  }
+  if (!restart) return nullptr;
+  const std::string resume_command_id =
+      restart->payload.value("cause_command_id", std::string{});
+  const std::string pause_command_id =
+      restart->payload.value("pause_command_id", std::string{});
+  const std::string artifact_id =
+      restart->payload.value("checkpoint_artifact_id", std::string{});
+  const auto resume = journal.lifecycle_command(resume_command_id);
+  const auto pause = journal.lifecycle_command(pause_command_id);
+  if (resume_command_id.empty() || pause_command_id.empty() ||
+      artifact_id.empty() || !resume || !pause ||
+      resume->kind != LifecycleCommandKind::resume ||
+      resume->status != LifecycleCommandStatus::applied ||
+      !resume->acknowledgement ||
+      resume->acknowledgement->worker_sequence != 0U ||
+      pause->kind != LifecycleCommandKind::pause ||
+      !pause->checkpoint_first || !pause->release_resources ||
+      pause->status != LifecycleCommandStatus::applied ||
+      !pause->optimizer_step || pause->artifact_id != artifact_id ||
+      resume->optimizer_step != pause->optimizer_step ||
+      resume->artifact_id != artifact_id ||
+      resume->node_id != node_id || pause->node_id != node_id ||
+      resume->attempt_id != pause->attempt_id ||
+      resume->attempt_id == attempt_id) {
+    throw std::runtime_error(
+        "worker attempt has invalid resume checkpoint lineage");
+  }
+  for (const Event& event : events) {
+    if (event.event_type != "artifact.published" ||
+        event.payload.value("artifact_id", std::string{}) != artifact_id) {
+      continue;
+    }
+    if (checkpoint) {
+      throw std::runtime_error(
+          "worker resume checkpoint identity is ambiguous");
+    }
+    checkpoint = event;
+  }
+  if (!checkpoint || checkpoint->node_id != node_id ||
+      checkpoint->attempt_id != resume->attempt_id ||
+      checkpoint->payload.value("kind", std::string{}) != "checkpoint" ||
+      !checkpoint->payload.value("complete", false) ||
+      checkpoint->payload.value("producer_node_id", std::string{}) != node_id ||
+      checkpoint->payload.value("producer_attempt_id", std::string{}) !=
+          resume->attempt_id) {
+    throw std::runtime_error(
+        "worker resume checkpoint artifact is missing or invalid");
+  }
+  return {{"api_version", "trainvm.resume-checkpoint/v1"},
+          {"checkpoint", checkpoint->payload},
+          {"optimizer_step", *pause->optimizer_step},
+          {"pause_command_id", pause_command_id},
+          {"resume_command_id", resume_command_id}};
+}
+
 void populate_invocation(v1::WorkerWelcome& welcome,
                          const WorkerInvocationSpec& invocation) {
   const std::string canonical =
@@ -2454,6 +2525,8 @@ grpc::Status TrainVMService::open_worker_connection(
           .effective_controls = controls.values,
           .effective_control_revision = controls.revision,
           .resolved_training = std::move(resolved_training),
+          .resume = invocation_resume_checkpoint(
+              journal_, hello.run_id, hello.node_id, hello.attempt_id),
       };
       const WorkerInvocationSpec candidate =
           build_worker_invocation(*plan, context);
@@ -3659,20 +3732,6 @@ grpc::Status TrainVMService::CommandRun(grpc::ServerContext* context,
       if (release && !request->pause().checkpoint_first()) {
         return {grpc::StatusCode::INVALID_ARGUMENT,
                 "resource-releasing pause requires checkpoint_first"};
-      }
-      if (!pause &&
-          !journal_.active_lease(
-              plan->experiment.spec.workspace.concurrency_key,
-              authority_now())) {
-        response->set_disposition(
-            v1::RunCommandResponse::DISPOSITION_REJECTED);
-        auto* diagnostic = response->add_diagnostics();
-        diagnostic->set_severity(v1::Diagnostic::SEVERITY_ERROR);
-        diagnostic->set_code("resume.reacquisition_not_implemented");
-        diagnostic->set_message(
-            "released-resource resume requires the reacquisition protocol");
-        fill_run_summary(*projection, journal_, *response);
-        return grpc::Status::OK;
       }
       const bool supported =
           release ? profile.lifecycle.pause_release_resources

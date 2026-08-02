@@ -1095,7 +1095,8 @@ void update_projection(sqlite3* database, const Event& event, std::uint64_t jour
       current_attempt_id=CASE WHEN ? IN ('acquiring','completed','failed','cancelled') THEN '' ELSE current_attempt_id END
     )sql";
     extra = Extra::observed;
-  } else if (event.event_type == "node.entered") {
+  } else if (event.event_type == "node.entered" ||
+             event.event_type == "node.attempt_restarted") {
     sql += ", current_node_id=?, current_attempt_id=?";
     extra = Extra::node;
   } else if (event.event_type == "worker.heartbeat") {
@@ -2159,13 +2160,17 @@ LifecycleCommand lifecycle_command_from_events(
   }
   if (!acknowledgement) return command;
   const Event& acknowledged = *acknowledgement;
+  const bool controller_acknowledgement = acknowledged.worker_sequence == 0U;
   if (acknowledged.event_id != command.command_id + ":ack" ||
       acknowledged.event_type != "lifecycle.acknowledged" ||
       acknowledged.run_id != command.run_id ||
       acknowledged.plan_revision != command.plan_revision ||
       acknowledged.node_id != command.node_id ||
       acknowledged.attempt_id != command.attempt_id ||
-      acknowledged.worker_sequence == 0U ||
+      (controller_acknowledgement &&
+       (command.kind != LifecycleCommandKind::resume ||
+        acknowledged.payload.value("authority", std::string{}) !=
+            "controller")) ||
       acknowledged.payload.value("command_id", std::string{}) !=
           command.command_id ||
       acknowledged.payload.value("kind", std::string{}) != kind_name) {
@@ -2201,13 +2206,21 @@ LifecycleCommand lifecycle_command_from_events(
   command.acknowledged_at_ns = acknowledged.wall_time_ns;
   const bool pause_checkpoint =
       command.kind == LifecycleCommandKind::pause && command.checkpoint_first;
+  const bool released_resume =
+      command.kind == LifecycleCommandKind::resume &&
+      controller_acknowledgement;
   if (command.acknowledgement->concurrency_key.empty() ||
       command.acknowledgement->lease_id.empty() ||
       command.acknowledgement->fencing_token == 0U ||
       (command.status == LifecycleCommandStatus::applied && pause_checkpoint &&
        (!command.optimizer_step || command.artifact_id.empty())) ||
+      (command.status == LifecycleCommandStatus::applied && released_resume &&
+       (!command.optimizer_step || command.artifact_id.empty())) ||
       (command.status == LifecycleCommandStatus::applied && !pause_checkpoint &&
+       !released_resume &&
        (command.optimizer_step || !command.artifact_id.empty())) ||
+      (controller_acknowledgement &&
+       command.status != LifecycleCommandStatus::applied) ||
       (command.status == LifecycleCommandStatus::rejected &&
        (command.optimizer_step || !command.artifact_id.empty()))) {
     throw std::runtime_error("stored lifecycle acknowledgement result is malformed");
@@ -3709,6 +3722,33 @@ std::vector<Event> Journal::events_for_run(const std::string& run_id) const {
     throw std::runtime_error("could not scan run events: " + std::string(sqlite3_errmsg(database_)));
   }
   return events;
+}
+
+std::optional<Event> Journal::lease_acquisition_event(
+    const std::string& run_id, const std::string& lease_id) const {
+  if (run_id.empty() || lease_id.empty()) {
+    throw std::invalid_argument(
+        "lease acquisition lookup requires run and lease identities");
+  }
+  Statement query(database_, R"sql(
+    SELECT journal_sequence, event_id, run_id, run_revision, plan_revision,
+           node_id, attempt_id, worker_sequence, event_type, event_version,
+           wall_time_ns, monotonic_time_ns, optimizer_step, payload_json
+    FROM events
+    WHERE run_id=? AND event_type='resource.lease_acquired'
+      AND json_extract(payload_json, '$.lease_id')=?
+    ORDER BY journal_sequence
+    LIMIT 2
+  )sql");
+  bind_text(query.get(), 1, run_id);
+  bind_text(query.get(), 2, lease_id);
+  if (sqlite3_step(query.get()) == SQLITE_DONE) return std::nullopt;
+  Event result = event_from_row(query.get());
+  if (sqlite3_step(query.get()) == SQLITE_ROW) {
+    throw std::runtime_error(
+        "run contains duplicate lease acquisition identities");
+  }
+  return result;
 }
 
 std::uint64_t Journal::latest_worker_sequence(
@@ -5676,6 +5716,290 @@ void Journal::complete_resource_releasing_pause(
                   {"cause_command_id", command_id}},
   });
   transaction.commit();
+}
+
+LifecycleCommand Journal::apply_released_resource_resume(
+    const std::string& run_id, const std::string& command_id,
+    const std::string& pause_command_id, const ResourceLease& lease,
+    const std::string& next_attempt_id, const AuthorityTimeSample& now) {
+  if (run_id.empty() || command_id.empty() || pause_command_id.empty() ||
+      next_attempt_id.empty()) {
+    throw std::invalid_argument(
+        "released-resource resume requires complete identities");
+  }
+  require_lease_identity(lease.concurrency_key, run_id, lease.lease_id);
+  require_authority_time(now);
+  if (lease.owner_run_id != run_id || lease.fencing_token == 0U ||
+      lease.clock_domain != ResourceLease::kBootTimeDomain ||
+      lease.boot_id != now.boot_id ||
+      lease.acquired_boottime_ns > now.boot.nanoseconds ||
+      lease.expires_boottime_ns <= now.boot.nanoseconds) {
+    throw std::invalid_argument(
+        "released-resource resume lease is not an active boot fence");
+  }
+
+  Transaction transaction(database_);
+  const auto resume = lifecycle_command(command_id);
+  const auto pause = lifecycle_command(pause_command_id);
+  if (!resume || resume->run_id != run_id ||
+      resume->kind != LifecycleCommandKind::resume ||
+      !pause || pause->run_id != run_id ||
+      pause->kind != LifecycleCommandKind::pause ||
+      !pause->checkpoint_first || !pause->release_resources ||
+      pause->status != LifecycleCommandStatus::applied ||
+      !pause->acknowledgement || !pause->optimizer_step ||
+      pause->artifact_id.empty() ||
+      resume->node_id != pause->node_id ||
+      resume->attempt_id != pause->attempt_id) {
+    throw std::invalid_argument(
+        "released-resource resume has no exact pause checkpoint lineage");
+  }
+  if (resume->status != LifecycleCommandStatus::requested) {
+    if (resume->status == LifecycleCommandStatus::applied &&
+        resume->acknowledgement &&
+        resume->acknowledgement->worker_sequence == 0U &&
+        resume->acknowledgement->concurrency_key == lease.concurrency_key &&
+        resume->acknowledgement->lease_id == lease.lease_id &&
+        resume->acknowledgement->fencing_token == lease.fencing_token &&
+        resume->optimizer_step == pause->optimizer_step &&
+        resume->artifact_id == pause->artifact_id) {
+      const auto restarted = event(command_id + ":attempt-restarted");
+      const auto acquired = lease_acquisition_event(run_id, lease.lease_id);
+      if (!restarted || !acquired ||
+          restarted->event_type != "node.attempt_restarted" ||
+          restarted->node_id != resume->node_id ||
+          restarted->attempt_id != next_attempt_id ||
+          restarted->payload.value("previous_attempt_id", std::string{}) !=
+              resume->attempt_id ||
+          restarted->payload.value("next_attempt_id", std::string{}) !=
+              next_attempt_id ||
+          restarted->payload.value("cause_command_id", std::string{}) !=
+              command_id ||
+          restarted->payload.value("pause_command_id", std::string{}) !=
+              pause_command_id ||
+          restarted->payload.value("checkpoint_artifact_id", std::string{}) !=
+              pause->artifact_id ||
+          acquired->payload.value("concurrency_key", std::string{}) !=
+              lease.concurrency_key ||
+          acquired->payload.value("owner_run_id", std::string{}) != run_id ||
+          acquired->payload.value("lease_id", std::string{}) !=
+              lease.lease_id ||
+          acquired->payload.value("fencing_token", std::uint64_t{}) !=
+              lease.fencing_token) {
+        throw std::invalid_argument(
+            "released-resource resume retry differs from durable result");
+      }
+      transaction.commit();
+      return *resume;
+    }
+    throw std::invalid_argument(
+        "released-resource resume already has a different result");
+  }
+
+  Statement projection(database_, R"sql(
+    SELECT run_revision, desired_state, observed_state,
+           current_node_id, current_attempt_id
+    FROM run_projection WHERE run_id=?
+  )sql");
+  bind_text(projection.get(), 1, run_id);
+  if (sqlite3_step(projection.get()) != SQLITE_ROW) {
+    throw std::invalid_argument("released-resource resume run does not exist");
+  }
+  const auto revision = static_cast<std::uint64_t>(
+      sqlite3_column_int64(projection.get(), 0));
+  if (column_text(projection.get(), 1) != "paused" ||
+      column_text(projection.get(), 2) != "paused" ||
+      column_text(projection.get(), 3) != resume->node_id ||
+      column_text(projection.get(), 4) != resume->attempt_id ||
+      revision != resume->expected_run_revision ||
+      next_attempt_id == resume->attempt_id) {
+    throw OperationPreconditionError(
+        "released-resource resume is stale for the paused attempt");
+  }
+  const std::string expected_attempt_prefix = resume->node_id + "@";
+  if (!next_attempt_id.starts_with(expected_attempt_prefix)) {
+    throw std::invalid_argument(
+        "released-resource resume next attempt is noncanonical");
+  }
+
+  const auto paused = event(pause_command_id + ":observed-final");
+  if (!paused || paused->run_id != run_id ||
+      paused->event_type != "run.observed_state_changed" ||
+      paused->run_revision != revision ||
+      paused->node_id != resume->node_id ||
+      paused->attempt_id != resume->attempt_id ||
+      paused->payload != nlohmann::json{{"state", "paused"},
+                                        {"cause_command_id", pause_command_id}}) {
+    throw std::runtime_error(
+        "released-resource resume pause completion is not canonical");
+  }
+
+  Statement checkpoint(database_, R"sql(
+    SELECT payload_json FROM events
+    WHERE run_id=? AND node_id=? AND attempt_id=?
+      AND event_type='artifact.published'
+      AND json_extract(payload_json, '$.artifact_id')=?
+    ORDER BY journal_sequence DESC LIMIT 2
+  )sql");
+  bind_text(checkpoint.get(), 1, run_id);
+  bind_text(checkpoint.get(), 2, resume->node_id);
+  bind_text(checkpoint.get(), 3, resume->attempt_id);
+  bind_text(checkpoint.get(), 4, pause->artifact_id);
+  if (sqlite3_step(checkpoint.get()) != SQLITE_ROW) {
+    throw std::runtime_error(
+        "released-resource resume checkpoint artifact is missing");
+  }
+  const nlohmann::json checkpoint_manifest =
+      nlohmann::json::parse(column_text(checkpoint.get(), 0));
+  if (sqlite3_step(checkpoint.get()) == SQLITE_ROW ||
+      checkpoint_manifest.value("kind", std::string{}) != "checkpoint" ||
+      !checkpoint_manifest.value("complete", false) ||
+      checkpoint_manifest.value("producer_node_id", std::string{}) !=
+          resume->node_id ||
+      checkpoint_manifest.value("producer_attempt_id", std::string{}) !=
+          resume->attempt_id) {
+    throw std::runtime_error(
+        "released-resource resume checkpoint artifact is ambiguous or invalid");
+  }
+
+  Statement active(database_, R"sql(
+    SELECT 1 FROM resource_leases
+    WHERE concurrency_key=? AND owner_run_id=? AND lease_id=?
+      AND fencing_token=? AND clock_domain='boottime/v1' AND boot_id=?
+      AND acquired_boottime_ns=? AND expires_boottime_ns>?
+      AND released_wall_time_ns IS NULL
+      AND NOT EXISTS(
+        SELECT 1 FROM resource_lease_releases AS release
+        WHERE release.concurrency_key=resource_leases.concurrency_key
+          AND release.owner_run_id=resource_leases.owner_run_id
+          AND release.lease_id=resource_leases.lease_id
+          AND release.fencing_token=resource_leases.fencing_token
+      )
+  )sql");
+  bind_text(active.get(), 1, lease.concurrency_key);
+  bind_text(active.get(), 2, run_id);
+  bind_text(active.get(), 3, lease.lease_id);
+  bind_integer(active.get(), 4,
+               checked_integer(lease.fencing_token, "fencing_token"));
+  bind_text(active.get(), 5, lease.boot_id);
+  bind_integer(active.get(), 6, lease.acquired_boottime_ns);
+  bind_integer(active.get(), 7, now.boot.nanoseconds);
+  if (sqlite3_step(active.get()) != SQLITE_ROW) {
+    throw OperationPreconditionError(
+        "released-resource resume lost its newly acquired lease");
+  }
+  if (lease_acquisition_event(run_id, lease.lease_id)) {
+    throw std::runtime_error(
+        "released-resource resume lease already has acquisition evidence");
+  }
+
+  const Event acknowledged{
+      .event_id = command_id + ":ack",
+      .run_id = run_id,
+      .run_revision = revision,
+      .plan_revision = resume->plan_revision,
+      .node_id = resume->node_id,
+      .attempt_id = resume->attempt_id,
+      .worker_sequence = 0U,
+      .event_type = "lifecycle.acknowledged",
+      .event_version = 1U,
+      .wall_time_ns = now.wall.nanoseconds,
+      .monotonic_time_ns = 0U,
+      .optimizer_step = pause->optimizer_step,
+      .payload = {{"command_id", command_id},
+                  {"kind", "resume"},
+                  {"status", "applied"},
+                  {"artifact_id", pause->artifact_id},
+                  {"diagnostics", nlohmann::json::array()},
+                  {"concurrency_key", lease.concurrency_key},
+                  {"lease_id", lease.lease_id},
+                  {"fencing_token", lease.fencing_token},
+                  {"authority", "controller"},
+                  {"pause_command_id", pause_command_id}},
+  };
+  const Event desired{
+      .event_id = command_id + ":desired",
+      .run_id = run_id,
+      .run_revision = revision + 1U,
+      .plan_revision = resume->plan_revision,
+      .node_id = resume->node_id,
+      .attempt_id = resume->attempt_id,
+      .worker_sequence = 0U,
+      .event_type = "run.desired_state_changed",
+      .event_version = 1U,
+      .wall_time_ns = now.wall.nanoseconds,
+      .monotonic_time_ns = 0U,
+      .optimizer_step = std::nullopt,
+      .payload = {{"state", "running"},
+                  {"cause_command_id", command_id}},
+  };
+  const Event restarted{
+      .event_id = command_id + ":attempt-restarted",
+      .run_id = run_id,
+      .run_revision = revision + 2U,
+      .plan_revision = resume->plan_revision,
+      .node_id = resume->node_id,
+      .attempt_id = next_attempt_id,
+      .worker_sequence = 0U,
+      .event_type = "node.attempt_restarted",
+      .event_version = 1U,
+      .wall_time_ns = now.wall.nanoseconds,
+      .monotonic_time_ns = 0U,
+      .optimizer_step = pause->optimizer_step,
+      .payload = {{"previous_attempt_id", resume->attempt_id},
+                  {"next_attempt_id", next_attempt_id},
+                  {"cause_command_id", command_id},
+                  {"pause_command_id", pause_command_id},
+                  {"checkpoint_artifact_id", pause->artifact_id}},
+  };
+  const std::string lease_event_id = command_id + ":lease-acquired";
+  const Event acquired{
+      .event_id = lease_event_id,
+      .run_id = run_id,
+      .run_revision = revision + 2U,
+      .plan_revision = resume->plan_revision,
+      .node_id = "",
+      .attempt_id = "",
+      .worker_sequence = 0U,
+      .event_type = "resource.lease_acquired",
+      .event_version = 1U,
+      .wall_time_ns = lease.acquired_wall_time_ns,
+      .monotonic_time_ns = 0U,
+      .optimizer_step = std::nullopt,
+      .payload = {{"concurrency_key", lease.concurrency_key},
+                  {"owner_run_id", run_id},
+                  {"lease_id", lease.lease_id},
+                  {"fencing_token", lease.fencing_token},
+                  {"clock_domain", lease.clock_domain},
+                  {"boot_id", lease.boot_id},
+                  {"acquired_boottime_ns", lease.acquired_boottime_ns},
+                  {"expires_boottime_ns", lease.expires_boottime_ns}},
+  };
+  const Event acquiring{
+      .event_id = command_id + ":observed-acquiring",
+      .run_id = run_id,
+      .run_revision = revision + 3U,
+      .plan_revision = resume->plan_revision,
+      .node_id = "",
+      .attempt_id = "",
+      .worker_sequence = 0U,
+      .event_type = "run.observed_state_changed",
+      .event_version = 1U,
+      .wall_time_ns = now.wall.nanoseconds,
+      .monotonic_time_ns = 0U,
+      .optimizer_step = std::nullopt,
+      .payload = {{"state", "acquiring"},
+                  {"cause_event_id", lease_event_id},
+                  {"concurrency_key", lease.concurrency_key},
+                  {"lease_id", lease.lease_id},
+                  {"fencing_token", lease.fencing_token}},
+  };
+  for (const Event& event :
+       {acknowledged, desired, restarted, acquired, acquiring}) {
+    append_uncommitted(event);
+  }
+  transaction.commit();
+  return *lifecycle_command(command_id);
 }
 
 std::optional<ControlCommand> Journal::control_command(const std::string& command_id) const {
