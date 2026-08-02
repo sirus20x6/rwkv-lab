@@ -101,6 +101,13 @@ func TestReadOnlyRunProjectionAndTimeline(t *testing.T) {
 		*events[0].OptimizerStep != 125 || string(events[0].Payload) != `{"reason":"done"}` {
 		t.Fatalf("unexpected timeline: %#v", events)
 	}
+	tail, err := reader.Events(ctx, EventQuery{
+		RunID: "run-a", After: 0, Through: 8, Limit: 2, NewestFirst: true,
+	})
+	if err != nil || len(tail) != 2 || tail[0].EventID != "a-8" ||
+		tail[1].EventID != "a-7" {
+		t.Fatalf("unexpected upper-fenced newest-first event tail: %#v err=%v", tail, err)
+	}
 	if _, err := reader.db.Exec(`DELETE FROM events`); err == nil {
 		t.Fatal("read-only TrainVM connection unexpectedly accepted a write")
 	}

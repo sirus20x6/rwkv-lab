@@ -4686,7 +4686,13 @@ type WatchEventsRequest struct {
 	EventTypes           []string               `protobuf:"bytes,3,rep,name=event_types,json=eventTypes,proto3" json:"event_types,omitempty"`
 	// A bounded replay closes successfully after this many events, or after the
 	// current durable prefix is exhausted. Zero keeps the live stream open.
-	ReplayLimit   uint32 `protobuf:"varint,4,opt,name=replay_limit,json=replayLimit,proto3" json:"replay_limit,omitempty"`
+	ReplayLimit uint32 `protobuf:"varint,4,opt,name=replay_limit,json=replayLimit,proto3" json:"replay_limit,omitempty"`
+	// Optional inclusive upper fence for a stable historical snapshot. It is
+	// valid only for bounded replay and must be greater than the after cursor.
+	ThroughJournalSequence uint64 `protobuf:"varint,5,opt,name=through_journal_sequence,json=throughJournalSequence,proto3" json:"through_journal_sequence,omitempty"`
+	// Return the newest matching events first. This is valid only for a bounded,
+	// upper-fenced replay and lets observers cold-load a fixed-size tail window.
+	NewestFirst   bool `protobuf:"varint,6,opt,name=newest_first,json=newestFirst,proto3" json:"newest_first,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4747,6 +4753,20 @@ func (x *WatchEventsRequest) GetReplayLimit() uint32 {
 		return x.ReplayLimit
 	}
 	return 0
+}
+
+func (x *WatchEventsRequest) GetThroughJournalSequence() uint64 {
+	if x != nil {
+		return x.ThroughJournalSequence
+	}
+	return 0
+}
+
+func (x *WatchEventsRequest) GetNewestFirst() bool {
+	if x != nil {
+		return x.NewestFirst
+	}
+	return false
 }
 
 type GetControlViewRequest struct {
@@ -5634,13 +5654,15 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\x04runs\x18\x01 \x03(\v2\x16.trainvm.v1.RunSummaryR\x04runs\x12&\n" +
 	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\x12\x1d\n" +
 	"\n" +
-	"journal_id\x18\x03 \x01(\tR\tjournalId\"\xa7\x01\n" +
+	"journal_id\x18\x03 \x01(\tR\tjournalId\"\x84\x02\n" +
 	"\x12WatchEventsRequest\x12\x17\n" +
 	"\arun_ids\x18\x01 \x03(\tR\x06runIds\x124\n" +
 	"\x16after_journal_sequence\x18\x02 \x01(\x04R\x14afterJournalSequence\x12\x1f\n" +
 	"\vevent_types\x18\x03 \x03(\tR\n" +
 	"eventTypes\x12!\n" +
-	"\freplay_limit\x18\x04 \x01(\rR\vreplayLimit\".\n" +
+	"\freplay_limit\x18\x04 \x01(\rR\vreplayLimit\x128\n" +
+	"\x18through_journal_sequence\x18\x05 \x01(\x04R\x16throughJournalSequence\x12!\n" +
+	"\fnewest_first\x18\x06 \x01(\bR\vnewestFirst\".\n" +
 	"\x15GetControlViewRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\"\xcb\x03\n" +
 	"\x11ControlDescriptor\x12+\n" +

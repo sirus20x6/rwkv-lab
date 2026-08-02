@@ -178,8 +178,11 @@ func TestTrainVMPanelUsesIncrementalReadOnlyTimeline(t *testing.T) {
 	for _, required := range []string{
 		`id="vm-control-catalog"`, `id="vm-control-apply"`,
 		`id="trainvm-metrics"`, `id="trainvm-artifacts"`,
-		`/metrics?after=${vmMetricAfter}&limit=250`,
-		`/artifacts?after=${vmArtifactAfter}&limit=250`,
+		`id="trainvm-observability-state"`,
+		`/observability?after=${vmTelemetryAfter}&limit=250`,
+		`vmMetricSeries`, `vmArtifacts`, `renderVMMetricCharts`, `renderVMArtifacts`,
+		`data-vm-open-artifact`, `/artifacts/${encodeURIComponent(artifact.artifact_id)}/content?v=`,
+		`&s=${encodeURIComponent(Number(artifact.sequence || 0))}`,
 		`expected_control_revision`, `vmPendingControls`, `randomUUID`,
 		`request atomic patch`, `id="vm-control-history"`, `vmSelectionGeneration`,
 		`vmControlLoadAbort`, `vmControlRetries`, `outcome unknown · retry exact request`,

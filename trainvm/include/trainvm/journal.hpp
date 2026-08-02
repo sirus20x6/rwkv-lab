@@ -96,9 +96,11 @@ struct SequencedEvent final {
 
 struct EventScanQuery final {
   std::uint64_t after_journal_sequence{};
+  std::uint64_t through_journal_sequence{};
   std::set<std::string, std::less<>> run_ids;
   std::set<std::string, std::less<>> event_types;
   std::size_t limit{};
+  bool newest_first{};
 };
 
 struct RunWallTimeBounds final {

@@ -2549,6 +2549,28 @@ grpc::Status TrainVMService::commit_worker_observation(
       return {grpc::StatusCode::DATA_LOSS,
               "worker run has no persisted compiled plan"};
     }
+    if (event.event_type == "metric.sampled") {
+      const std::string name =
+          event.payload.value("name", std::string{});
+      const auto& declared = plan->canonical_plan.at("spec")
+                                 .at("observability")
+                                 .at("metrics");
+      const auto match = std::ranges::find_if(
+          declared, [&](const nlohmann::json& metric) {
+            return metric.value("name", std::string{}) == name;
+          });
+      if (match == declared.end()) {
+        throw std::invalid_argument(
+            "worker metric is not present in the sealed observability declaration");
+      }
+      if (match->value("unit", std::string{}) !=
+              event.payload.value("unit", std::string{}) ||
+          match->value("step_domain", std::string{}) !=
+              event.payload.value("step_domain", std::string{})) {
+        throw std::invalid_argument(
+            "worker metric unit or step domain disagrees with the sealed observability declaration");
+      }
+    }
     const std::uint64_t latest = journal_.latest_worker_sequence(
         connection.identity.run_id, connection.identity.node_id,
         connection.identity.attempt_id);
@@ -2651,7 +2673,9 @@ grpc::Status TrainVMService::record_worker_metric(
         .event_version = 1,
         .wall_time_ns = timestamp_ns(metric.observed_at()),
         .monotonic_time_ns = 0,
-        .optimizer_step = metric.step(),
+        .optimizer_step = metric.step_domain() == "optimizer_step"
+                              ? std::optional<std::uint64_t>{metric.step()}
+                              : std::nullopt,
         .payload = {{"name", metric.name()},
                     {"value", assignment_value(metric.value())},
                     {"unit", metric.unit()},
@@ -3929,7 +3953,14 @@ grpc::Status TrainVMService::WatchEvents(
   if (context == nullptr || request == nullptr || writer == nullptr ||
       request->ByteSizeLong() > kMaximumCommandBytes ||
       request->run_ids_size() > 64 || request->event_types_size() > 64 ||
-      request->replay_limit() > kMaximumReplayEvents) {
+      request->replay_limit() > kMaximumReplayEvents ||
+      ((request->through_journal_sequence() != 0U || request->newest_first()) &&
+       request->replay_limit() == 0U) ||
+      (request->through_journal_sequence() != 0U &&
+       request->after_journal_sequence() >=
+           request->through_journal_sequence()) ||
+      (request->newest_first() &&
+       request->through_journal_sequence() == 0U)) {
     return {grpc::StatusCode::INVALID_ARGUMENT,
             "watch-events request exceeds its bounds"};
   }
@@ -3945,6 +3976,7 @@ grpc::Status TrainVMService::WatchEvents(
               "watch-events filters must be unique"};
     }
     std::uint64_t cursor = request->after_journal_sequence();
+    std::uint64_t through = request->through_journal_sequence();
     std::size_t replayed = 0U;
     while (!cancelled(context)) {
       const std::size_t query_limit =
@@ -3959,9 +3991,11 @@ grpc::Status TrainVMService::WatchEvents(
         std::scoped_lock lock(command_mutex_);
         events = journal_.sequenced_events({
             .after_journal_sequence = cursor,
+            .through_journal_sequence = through,
             .run_ids = run_ids,
             .event_types = event_types,
             .limit = query_limit,
+            .newest_first = request->newest_first(),
         });
       }
       for (const SequencedEvent& event : events) {
@@ -3970,8 +4004,15 @@ grpc::Status TrainVMService::WatchEvents(
           return {grpc::StatusCode::CANCELLED,
                   "event stream closed by its reader"};
         }
-        cursor = event.journal_sequence;
+        if (request->newest_first()) {
+          through = event.journal_sequence - 1U;
+        } else {
+          cursor = event.journal_sequence;
+        }
         ++replayed;
+      }
+      if (request->newest_first() && through <= cursor) {
+        return grpc::Status::OK;
       }
       if (request->replay_limit() != 0U &&
           (replayed == static_cast<std::size_t>(request->replay_limit()) ||

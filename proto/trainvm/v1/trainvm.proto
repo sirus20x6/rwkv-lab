@@ -545,6 +545,12 @@ message WatchEventsRequest {
   // A bounded replay closes successfully after this many events, or after the
   // current durable prefix is exhausted. Zero keeps the live stream open.
   uint32 replay_limit = 4;
+  // Optional inclusive upper fence for a stable historical snapshot. It is
+  // valid only for bounded replay and must be greater than the after cursor.
+  uint64 through_journal_sequence = 5;
+  // Return the newest matching events first. This is valid only for a bounded,
+  // upper-fenced replay and lets observers cold-load a fixed-size tail window.
+  bool newest_first = 6;
 }
 
 message GetControlViewRequest {

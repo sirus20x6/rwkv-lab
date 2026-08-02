@@ -232,6 +232,12 @@ func TestTrainVMLiveStackE2E(t *testing.T) {
 	if plan["journal_id"] != journalID || plan["plan_hash"] != planHash {
 		t.Fatalf("immutable plan readback lost identity: %#v", plan)
 	}
+	observability := liveE2ERequest(t, handler, http.MethodGet,
+		"/api/trainvm/runs/"+rootID+"/observability?after=0&limit=32", nil, http.StatusOK)
+	if observability["journal_id"] != journalID || observability["caught_up"] != true ||
+		observability["replay_pending"] != false {
+		t.Fatalf("bounded native observability snapshot lost its durable cursor: %#v", observability)
+	}
 
 	var proposed map[string]any
 	if err := json.Unmarshal(source, &proposed); err != nil {

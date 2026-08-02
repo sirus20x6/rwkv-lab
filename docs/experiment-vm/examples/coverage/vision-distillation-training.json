@@ -137,7 +137,7 @@
       "heartbeat_seconds": 5,
       "metrics": [
         {"name": "train.distillation_loss", "type": "gauge", "unit": "dimensionless", "step_domain": "optimizer_step", "aggregation": "weighted_mean"},
-        {"name": "train.images_per_second", "type": "gauge", "unit": "image/second", "step_domain": "wall_time", "aggregation": "mean"}
+        {"name": "train.images_per_second", "type": "gauge", "unit": "image/second", "step_domain": "optimizer_step", "aggregation": "mean"}
       ],
       "retain_raw_metrics_days": 30,
       "eval_gallery_artifact": "eval_gallery"

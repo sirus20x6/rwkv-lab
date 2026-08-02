@@ -113,13 +113,13 @@ func trainVMFixture(t *testing.T) *trainvmstore.Reader {
 		  diagnostics_json TEXT
 		);
 		INSERT INTO run_projection VALUES
-		  ('vm-run','mageflow','baa59aa47fcce31100a77393fcaeb04265bbfc3af2235c62a65ba2006225811a','running','running','train','train@1',2,50,0,5,'');
+		  ('vm-run','mageflow','3ca70ff811ace5137501dfe841bf8d1914ecd9083e9e6f68c521aaedf90d5b0d','running','running','train','train@1',2,50,1,5,'');
 		INSERT INTO events VALUES
-		  (3,'result','vm-run',2,1,'train','train@1',1,'worker.heartbeat',1,1,1,50,'{"loss":2.0}'),
+		  (3,'result','vm-run',2,1,'train','train@1',1,'worker.heartbeat',1,1,1,50,'{"phase":"train","observed_at_ns":1}'),
 		  (4,'metric','vm-run',2,1,'train','train@1',2,'metric.sampled',1,2,2,51,'{"name":"loss","value":1.5,"unit":"loss","step_domain":"optimizer_step","step":51,"sample_weight":1,"labels":{"route":"animation"}}'),
 		  (5,'artifact','vm-run',2,1,'train','train@1',3,'artifact.published',1,3,3,NULL,'{"artifact_id":"gallery-51","logical_name":"eval/gallery","kind":"image_gallery","schema":"trainvm.eval-gallery/v1","uri":"file:///sealed/gallery-51","size_bytes":4096,"fingerprint_algorithm":"sha256","fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","complete":true,"producer_node_id":"train","producer_attempt_id":"train@1","parent_artifact_ids":[],"published_at_ns":3}');
 		INSERT INTO compiled_plans VALUES
-		  ('baa59aa47fcce31100a77393fcaeb04265bbfc3af2235c62a65ba2006225811a','mageflow','{"spec":{"controls":{"catalog":{"learning_rate":{"type":"number","default":0.001,"apply":"next_optimizer_step","mutable_after_start":true}}}}}');
+		  ('3ca70ff811ace5137501dfe841bf8d1914ecd9083e9e6f68c521aaedf90d5b0d','mageflow','{"spec":{"controls":{"catalog":{"learning_rate":{"type":"number","default":0.001,"apply":"next_optimizer_step","mutable_after_start":true}}},"observability":{"heartbeat_seconds":5,"metrics":[{"name":"loss","type":"gauge","unit":"loss","step_domain":"optimizer_step","aggregation":"mean"}],"retain_raw_metrics_days":30}}}');
 		INSERT INTO journal_meta VALUES ('journal_id','0123456789abcdef0123456789abcdef');`)
 	if err != nil {
 		t.Fatalf("create TrainVM server fixture: %v", err)
@@ -185,7 +185,7 @@ func TestTrainVMReadModelEndpoints(t *testing.T) {
 	var plan trainvmstore.CompiledPlanView
 	if err := json.Unmarshal(response.Body.Bytes(), &plan); err != nil ||
 		response.Code != http.StatusOK || plan.RunID != "vm-run" || plan.RunRevision != 2 ||
-		plan.PlanHash != "baa59aa47fcce31100a77393fcaeb04265bbfc3af2235c62a65ba2006225811a" ||
+		plan.PlanHash != "3ca70ff811ace5137501dfe841bf8d1914ecd9083e9e6f68c521aaedf90d5b0d" ||
 		!json.Valid(plan.CanonicalPlan) {
 		t.Fatalf("unexpected compiled plan: %#v err=%v body=%s", plan, err, response.Body.String())
 	}
@@ -221,6 +221,21 @@ func TestTrainVMReadModelEndpoints(t *testing.T) {
 		response.Code != http.StatusOK || len(artifacts) != 1 ||
 		artifacts[0].ArtifactID != "gallery-51" || artifacts[0].Kind != "image_gallery" {
 		t.Fatalf("unexpected artifacts: %#v err=%v body=%s", artifacts, err, response.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodGet,
+		"/api/trainvm/runs/vm-run/observability?after=0&limit=10", nil)
+	response = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	var snapshot trainvmstore.TelemetrySnapshot
+	if err := json.Unmarshal(response.Body.Bytes(), &snapshot); err != nil ||
+		response.Code != http.StatusOK || !snapshot.CaughtUp || snapshot.ReplayPending ||
+		snapshot.TargetSequence != 5 || snapshot.NextSequence != 5 ||
+		len(snapshot.Heartbeats) != 1 || snapshot.Heartbeats[0].Phase != "train" ||
+		len(snapshot.Metrics) != 1 || snapshot.Metrics[0].Type != "gauge" ||
+		len(snapshot.Artifacts) != 1 || snapshot.Artifacts[0].ArtifactID != "gallery-51" ||
+		strings.Contains(response.Body.String(), "file:///") {
+		t.Fatalf("unexpected observability snapshot: %#v err=%v body=%s",
+			snapshot, err, response.Body.String())
 	}
 }
 
@@ -386,7 +401,7 @@ func TestTrainVMControlEndpointUsesNativeCommander(t *testing.T) {
 	srv.Handler().ServeHTTP(response, request)
 	if response.Code != http.StatusAccepted || commander.request.RunID != "vm-run" ||
 		commander.request.ExpectedJournalID != "0123456789abcdef0123456789abcdef" ||
-		commander.request.ExpectedPlanHash != "baa59aa47fcce31100a77393fcaeb04265bbfc3af2235c62a65ba2006225811a" ||
+		commander.request.ExpectedPlanHash != "3ca70ff811ace5137501dfe841bf8d1914ecd9083e9e6f68c521aaedf90d5b0d" ||
 		commander.request.ExpectedRunRevision != 7 ||
 		commander.request.ExpectedControlRevision != 2 ||
 		commander.request.Author != "dashboard" || commander.request.IdempotencyKey != "tab-intent" {
@@ -420,7 +435,7 @@ func TestTrainVMLifecycleEndpointUsesNativeCommander(t *testing.T) {
 	got := commander.actionRequest
 	if response.Code != http.StatusAccepted || got.RunID != "vm-run" ||
 		got.ExpectedJournalID != "0123456789abcdef0123456789abcdef" ||
-		got.ExpectedPlanHash != "baa59aa47fcce31100a77393fcaeb04265bbfc3af2235c62a65ba2006225811a" ||
+		got.ExpectedPlanHash != "3ca70ff811ace5137501dfe841bf8d1914ecd9083e9e6f68c521aaedf90d5b0d" ||
 		got.ExpectedRunRevision != 7 || got.IdempotencyKey != "tab-action-intent" ||
 		got.Author != "dashboard" || got.Action != "pause" || !got.CheckpointFirst || !got.ReleaseResources ||
 		!strings.Contains(response.Body.String(), `"command_id":"pause-1"`) {
@@ -501,7 +516,7 @@ func TestTrainVMSubmissionEndpointUsesNativeCommander(t *testing.T) {
 	}}
 	srv := New(Config{Commander: commander, TrainVM: trainVMFixture(t)})
 	request := httptest.NewRequest(http.MethodPost, "/api/trainvm/experiments",
-		strings.NewReader(`{"source_document":"{\"kind\":\"Experiment\"}","source_format":"json","create_run":true,"idempotency_key":"submit-1","expected_journal_id":"0123456789abcdef0123456789abcdef","expected_plan_hash":"native-plan","expected_adapter_lock_digest":"native-lock","expected_training_component_lock_digest":"training-lock","reason":"launch test","forked_from_run_id":"vm-run","expected_parent_run_revision":2,"expected_parent_plan_hash":"baa59aa47fcce31100a77393fcaeb04265bbfc3af2235c62a65ba2006225811a"}`))
+		strings.NewReader(`{"source_document":"{\"kind\":\"Experiment\"}","source_format":"json","create_run":true,"idempotency_key":"submit-1","expected_journal_id":"0123456789abcdef0123456789abcdef","expected_plan_hash":"native-plan","expected_adapter_lock_digest":"native-lock","expected_training_component_lock_digest":"training-lock","reason":"launch test","forked_from_run_id":"vm-run","expected_parent_run_revision":2,"expected_parent_plan_hash":"3ca70ff811ace5137501dfe841bf8d1914ecd9083e9e6f68c521aaedf90d5b0d"}`))
 	request.Host = "127.0.0.1:9124"
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
@@ -516,7 +531,7 @@ func TestTrainVMSubmissionEndpointUsesNativeCommander(t *testing.T) {
 		commander.submission.ExpectedTrainingComponentLockDigest != "training-lock" ||
 		commander.submission.ForkedFromRunID != "vm-run" ||
 		commander.submission.ExpectedParentRunRevision != 2 ||
-		commander.submission.ExpectedParentPlanHash != "baa59aa47fcce31100a77393fcaeb04265bbfc3af2235c62a65ba2006225811a" ||
+		commander.submission.ExpectedParentPlanHash != "3ca70ff811ace5137501dfe841bf8d1914ecd9083e9e6f68c521aaedf90d5b0d" ||
 		!strings.Contains(response.Body.String(), `"run_id":"run-new"`) {
 		t.Fatalf("unexpected submission forwarding: status=%d request=%#v body=%s",
 			response.Code, commander.submission, response.Body.String())
@@ -530,7 +545,7 @@ func TestTrainVMPlanDiffEndpointFencesSelectedRunAndProposedPlan(t *testing.T) {
 	}}
 	srv := New(Config{Commander: commander, TrainVM: trainVMFixture(t)})
 	request := httptest.NewRequest(http.MethodPost, "/api/trainvm/runs/vm-run/diff",
-		strings.NewReader(`{"expected_run_revision":2,"proposed_source_document":"{\"kind\":\"Experiment\"}","source_format":"json","expected_journal_id":"0123456789abcdef0123456789abcdef","expected_current_plan_hash":"baa59aa47fcce31100a77393fcaeb04265bbfc3af2235c62a65ba2006225811a","expected_proposed_plan_hash":"proposed-plan"}`))
+		strings.NewReader(`{"expected_run_revision":2,"proposed_source_document":"{\"kind\":\"Experiment\"}","source_format":"json","expected_journal_id":"0123456789abcdef0123456789abcdef","expected_current_plan_hash":"3ca70ff811ace5137501dfe841bf8d1914ecd9083e9e6f68c521aaedf90d5b0d","expected_proposed_plan_hash":"proposed-plan"}`))
 	request.Host = "127.0.0.1:9124"
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
@@ -538,7 +553,7 @@ func TestTrainVMPlanDiffEndpointFencesSelectedRunAndProposedPlan(t *testing.T) {
 	if response.Code != http.StatusOK || commander.planDiff.RunID != "vm-run" ||
 		commander.planDiff.ExpectedRunRevision != 2 ||
 		commander.planDiff.ExpectedJournalID != "0123456789abcdef0123456789abcdef" ||
-		commander.planDiff.ExpectedCurrentPlanHash != "baa59aa47fcce31100a77393fcaeb04265bbfc3af2235c62a65ba2006225811a" ||
+		commander.planDiff.ExpectedCurrentPlanHash != "3ca70ff811ace5137501dfe841bf8d1914ecd9083e9e6f68c521aaedf90d5b0d" ||
 		commander.planDiff.ExpectedProposedPlanHash != "proposed-plan" ||
 		!strings.Contains(response.Body.String(), `"semantic_diff":[{"op":"replace"`) {
 		t.Fatalf("unexpected plan diff forwarding: status=%d request=%#v body=%s",
@@ -550,7 +565,7 @@ func TestTrainVMPlanDiffEndpointRejectsStaleSelectedRun(t *testing.T) {
 	commander := &fakeTrainVMCommander{}
 	srv := New(Config{Commander: commander, TrainVM: trainVMFixture(t)})
 	request := httptest.NewRequest(http.MethodPost, "/api/trainvm/runs/vm-run/diff",
-		strings.NewReader(`{"expected_run_revision":1,"proposed_source_document":"{}","source_format":"json","expected_journal_id":"0123456789abcdef0123456789abcdef","expected_current_plan_hash":"baa59aa47fcce31100a77393fcaeb04265bbfc3af2235c62a65ba2006225811a","expected_proposed_plan_hash":"proposed-plan"}`))
+		strings.NewReader(`{"expected_run_revision":1,"proposed_source_document":"{}","source_format":"json","expected_journal_id":"0123456789abcdef0123456789abcdef","expected_current_plan_hash":"3ca70ff811ace5137501dfe841bf8d1914ecd9083e9e6f68c521aaedf90d5b0d","expected_proposed_plan_hash":"proposed-plan"}`))
 	request.Host = "127.0.0.1:9124"
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()

@@ -82,7 +82,12 @@ void require_worker_observation_shape(const Event& event) {
     const auto& labels = event.payload.contains("labels")
                              ? event.payload.at("labels")
                              : nlohmann::json{};
-    if (!event.optimizer_step || event.payload.size() != fields.size() ||
+    const bool optimizer_domain =
+        event.payload.contains("step_domain") &&
+        event.payload.at("step_domain").is_string() &&
+        event.payload.at("step_domain").get_ref<const std::string&>() ==
+            "optimizer_step";
+    if (event.payload.size() != fields.size() ||
         !std::ranges::all_of(fields, [&](std::string_view field) {
           return event.payload.contains(std::string(field));
         }) ||
@@ -92,7 +97,11 @@ void require_worker_observation_shape(const Event& event) {
         !event.payload.at("step_domain").is_string() ||
         event.payload.at("step_domain").get_ref<const std::string&>().empty() ||
         !event.payload.at("step").is_number_unsigned() ||
-        event.payload.at("step").get<std::uint64_t>() != *event.optimizer_step ||
+        (optimizer_domain &&
+         (!event.optimizer_step ||
+          event.payload.at("step").get<std::uint64_t>() !=
+              *event.optimizer_step)) ||
+        (!optimizer_domain && event.optimizer_step.has_value()) ||
         !event.payload.at("sample_weight").is_number() ||
         !std::isfinite(event.payload.at("sample_weight").get<double>()) ||
         event.payload.at("sample_weight").get<double>() <= 0.0 ||

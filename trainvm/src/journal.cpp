@@ -4039,7 +4039,10 @@ std::vector<SequencedEvent> Journal::sequenced_events(
   constexpr std::size_t kMaximumFilters = 64U;
   if (input.limit == 0U || input.limit > kMaximumPageSize ||
       input.run_ids.size() > kMaximumFilters ||
-      input.event_types.size() > kMaximumFilters) {
+      input.event_types.size() > kMaximumFilters ||
+      (input.through_journal_sequence != 0U &&
+       input.after_journal_sequence >= input.through_journal_sequence) ||
+      (input.newest_first && input.through_journal_sequence == 0U)) {
     throw std::invalid_argument("event scan query exceeds its bounds");
   }
   const auto invalid = [](const std::string& value) {
@@ -4055,6 +4058,9 @@ std::vector<SequencedEvent> Journal::sequenced_events(
            wall_time_ns, monotonic_time_ns, optimizer_step, payload_json
     FROM events WHERE journal_sequence>?
   )sql";
+  if (input.through_journal_sequence != 0U) {
+    sql += " AND journal_sequence<=?";
+  }
   const auto append_filter = [&sql](std::string_view column,
                                     std::size_t count) {
     if (count == 0U) return;
@@ -4069,12 +4075,19 @@ std::vector<SequencedEvent> Journal::sequenced_events(
   };
   append_filter("run_id", input.run_ids.size());
   append_filter("event_type", input.event_types.size());
-  sql += " ORDER BY journal_sequence LIMIT ?";
+  sql += input.newest_first
+             ? " ORDER BY journal_sequence DESC LIMIT ?"
+             : " ORDER BY journal_sequence LIMIT ?";
   Statement query(database_, sql);
   int parameter = 1;
   bind_integer(query.get(), parameter++,
                checked_integer(input.after_journal_sequence,
                                "event scan sequence"));
+  if (input.through_journal_sequence != 0U) {
+    bind_integer(query.get(), parameter++,
+                 checked_integer(input.through_journal_sequence,
+                                 "event scan upper sequence"));
+  }
   for (const std::string& run_id : input.run_ids) {
     bind_text(query.get(), parameter++, run_id);
   }

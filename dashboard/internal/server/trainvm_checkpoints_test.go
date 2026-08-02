@@ -98,7 +98,7 @@ func TestTrainVMCheckpointHistoryShowsVerifiedStateSummary(t *testing.T) {
 	}
 }
 
-func TestTrainVMCheckpointRejectsManifestMutation(t *testing.T) {
+func TestTrainVMCheckpointQuarantinesManifestMutationWithoutPoisoningHistory(t *testing.T) {
 	srv, manifestPath := trainVMCheckpointFixture(t)
 	if err := os.Chmod(manifestPath, 0o600); err != nil {
 		t.Fatal(err)
@@ -109,7 +109,10 @@ func TestTrainVMCheckpointRejectsManifestMutation(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/api/trainvm/runs/vm-run/checkpoints", nil)
 	response := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(response, request)
-	if response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), "mismatch") {
+	if response.Code != http.StatusOK ||
+		!strings.Contains(response.Body.String(), `"valid":false`) ||
+		!strings.Contains(response.Body.String(), `"validation_error":"manifest unavailable or failed immutable verification"`) ||
+		!strings.Contains(response.Body.String(), `"artifact_id":"checkpoint-artifact-42"`) {
 		t.Fatalf("mutated checkpoint status=%d body=%s", response.Code, response.Body.String())
 	}
 }

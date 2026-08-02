@@ -117,8 +117,9 @@
           <nav id="trainvm-runs" class="vm-runs" aria-label="TrainVM runs">
             <div class="empty">expand to load native runs</div>
           </nav>
-          <section class="vm-detail" aria-live="polite">
+          <section class="vm-detail">
             <div id="trainvm-summary" class="vm-summary"><div class="empty">select a native run</div></div>
+            <div id="trainvm-observability-state" class="vm-observability-state waiting" aria-live="polite" aria-atomic="true">no telemetry snapshot</div>
             <section class="vm-lifecycle" aria-labelledby="vm-lifecycle-title">
               <div class="vm-timeline-head"><span id="vm-lifecycle-title">run lifecycle</span><span>native authority · durable commands</span></div>
               <div class="vm-lifecycle-actions">
@@ -141,11 +142,11 @@
             <div class="vm-telemetry">
               <section>
                 <div class="vm-timeline-head"><span>native metrics</span><span id="trainvm-metric-cursor">sequence —</span></div>
-                <div id="trainvm-metrics" class="vm-telemetry-list"><div class="empty">no metric samples loaded</div></div>
+                <div id="trainvm-metrics" class="vm-metric-grid"><div class="empty">no metric samples loaded</div></div>
               </section>
               <section>
                 <div class="vm-timeline-head"><span>published artifacts</span><span id="trainvm-artifact-cursor">sequence —</span></div>
-                <div id="trainvm-artifacts" class="vm-telemetry-list"><div class="empty">no artifacts loaded</div></div>
+                <div id="trainvm-artifacts" class="vm-artifact-tree"><div class="empty">no artifacts loaded</div></div>
               </section>
             </div>
             <section class="vm-gallery" aria-labelledby="vm-gallery-title">

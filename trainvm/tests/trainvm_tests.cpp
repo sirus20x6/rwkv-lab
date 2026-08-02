@@ -491,7 +491,7 @@ void test_reflection_and_compiler() {
             result.plan->experiment.spec.resources.cpu_io_policy->cpuset ==
                 std::optional<std::string>{"0-15"},
         "compiler retains model-family-neutral lifecycle and host resource declarations");
-  check(result.plan->plan_hash == "d9874d50706cb8b13f3803258bde08f2175bfb4869eae860aa47994d151e901e",
+  check(result.plan->plan_hash == "ac64a8117668f19c4f4f1d131b07388122207043894d85e60ead25270f28085e",
         "MageFlow canonical plan matches its golden SHA-256 identity");
   check(result.plan->canonical_plan["spec"]["controls"]["catalog"]["learning_rate"].contains("default"),
         "canonical plan uses schema field aliases");
@@ -4348,7 +4348,7 @@ void test_worker_control_service_boundary() {
             first_message.message_case() ==
                 trainvm::v1::WorkerToController::kHeartbeat,
         "a heartbeat is distinguishable from the required first WorkerHello");
-  first_message.mutable_metric()->set_name("loss");
+  first_message.mutable_metric()->set_name("train.loss");
   check(first_message.message_case() == trainvm::v1::WorkerToController::kMetric &&
             !first_message.has_heartbeat() && !first_message.has_event(),
         "WorkerControl telemetry variants cannot alias the result event case");
@@ -4568,14 +4568,23 @@ void test_worker_control_service_boundary() {
 
     trainvm::v1::MetricSample metric;
     metric.set_worker_sequence(2);
-    metric.set_name("loss");
+    metric.set_name("train.loss");
     metric.mutable_value()->set_number_value(1.25);
-    metric.set_unit("loss");
+    metric.set_unit("dimensionless");
     metric.set_step_domain("optimizer_step");
     metric.set_step(11);
     metric.set_sample_weight(1.0);
     (*metric.mutable_labels())["route"] = "animation";
     metric.mutable_observed_at()->set_seconds(2);
+    auto undeclared_metric = metric;
+    undeclared_metric.set_name("rogue.loss");
+    std::uint64_t rejected_metric_acknowledgement = 0;
+    const grpc::Status undeclared_metric_status = service.record_worker_metric(
+        undeclared_metric, connection, rejected_metric_acknowledgement);
+    auto mismatched_metric = metric;
+    mismatched_metric.set_step_domain("token");
+    const grpc::Status mismatched_metric_status = service.record_worker_metric(
+        mismatched_metric, connection, rejected_metric_acknowledgement);
     std::uint64_t metric_acknowledgement = 0;
     const grpc::Status metric_status = service.record_worker_metric(
         metric, connection, metric_acknowledgement);
@@ -4665,6 +4674,11 @@ void test_worker_control_service_boundary() {
       check(open.ok() && heartbeat_status.ok() && acknowledged == 1U &&
                 heartbeat_replay.ok() && replayed_acknowledgement == 1U &&
                 after_heartbeat == 14U && observer.event_count() == 22U &&
+                undeclared_metric_status.error_code() ==
+                    grpc::StatusCode::INVALID_ARGUMENT &&
+                mismatched_metric_status.error_code() ==
+                    grpc::StatusCode::INVALID_ARGUMENT &&
+                rejected_metric_acknowledgement == 0U &&
                 metric_status.ok() && metric_acknowledgement == 2U &&
                 undeclared_artifact_status.error_code() ==
                     grpc::StatusCode::PERMISSION_DENIED &&
@@ -4707,6 +4721,62 @@ void test_worker_control_service_boundary() {
                 }) == 1,
             "WorkerControl durably acknowledges replay-safe heartbeat, metric, and artifact observations without advancing the FSM");
     }
+  }
+
+  {
+    auto domain_fixture = load_fixture();
+    for (auto& metric : domain_fixture["spec"]["observability"]["metrics"]) {
+      if (metric.value("name", std::string{}) ==
+          "train.images_per_second") {
+        metric["step_domain"] = "wall_time";
+      }
+    }
+    const auto domain_compiled = trainvm::compile_document(domain_fixture);
+    const auto database_path = directory / "non-optimizer-metric.db";
+    const std::string run_id = "worker-control-non-optimizer-metric-run";
+    trainvm::WorkerLaunchTicket launch;
+    if (domain_compiled.valid()) {
+      trainvm::Journal journal(
+          database_path, std::nullopt,
+          trainvm::HostGrantEnforcement::legacy_process_free_test);
+      trainvm::Controller controller(*domain_compiled.plan, journal, run_id);
+      controller.create_queued(submission_identity);
+      (void)controller.begin_acquisition(test_time(2'300));
+      launch = controller.prepare_worker_launch(launch_request,
+                                                test_time(2'400));
+      (void)bind_test_worker_launch(controller, launch, 2'450);
+    }
+    trainvm::TrainVMService service(
+        database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
+        fixture_test_host_launch_registry(*domain_compiled.plan, launch),
+        fixture_test_host_identity(), [] { return test_time(2'500); },
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
+    prime_test_service_launch(service, launch);
+    trainvm::TrainVMService::WorkerConnection connection;
+    const grpc::Status open =
+        service.open_worker_connection(wire_hello(launch), connection);
+    trainvm::v1::MetricSample metric;
+    metric.set_worker_sequence(1);
+    metric.set_name("train.images_per_second");
+    metric.mutable_value()->set_number_value(4.5);
+    metric.set_unit("image/second");
+    metric.set_step_domain("wall_time");
+    metric.set_step(1'700'000'000U);
+    metric.set_sample_weight(1.0);
+    metric.mutable_observed_at()->set_seconds(2);
+    std::uint64_t acknowledgement = 0;
+    const grpc::Status status =
+        service.record_worker_metric(metric, connection, acknowledgement);
+    const auto stored = trainvm::Journal(database_path).event(
+        connection.dispatch.dispatch_id + ":metric:1");
+    const auto projection =
+        trainvm::Journal(database_path).projection(run_id);
+    check(domain_compiled.valid() && open.ok() && status.ok() &&
+              acknowledgement == 1U && stored && !stored->optimizer_step &&
+              stored->payload.value("step", std::uint64_t{}) ==
+                  1'700'000'000U &&
+              projection && projection->optimizer_step == 0U,
+          "non-optimizer metric domains preserve their own coordinate without corrupting run optimizer progress");
   }
 
   {
@@ -5012,6 +5082,28 @@ void test_worker_control_grpc_stream() {
   }
 
   {
+    const auto projection = trainvm::Journal(database_path).projection(run_id);
+    grpc::ClientContext context;
+    trainvm::v1::WatchEventsRequest request;
+    request.add_run_ids(run_id);
+    request.set_replay_limit(3U);
+    request.set_through_journal_sequence(
+        projection ? projection->last_event_sequence : 0U);
+    request.set_newest_first(true);
+    auto stream = read_stub->WatchEvents(&context, request);
+    std::vector<std::uint64_t> sequences;
+    trainvm::v1::EventEnvelope envelope;
+    while (stream->Read(&envelope)) {
+      sequences.push_back(envelope.journal_sequence());
+    }
+    const grpc::Status status = stream->Finish();
+    check(status.ok() && sequences.size() == 3U &&
+              sequences[0] > sequences[1] && sequences[1] > sequences[2] &&
+              projection && sequences[0] <= projection->last_event_sequence,
+          "TrainVM gRPC event stream exposes a bounded upper-fenced newest-first tail");
+  }
+
+  {
     grpc::ClientContext context;
     auto stream = stub->Connect(&context);
     trainvm::v1::WorkerToController heartbeat;
@@ -5209,9 +5301,9 @@ void test_worker_control_grpc_stream() {
     trainvm::v1::WorkerToController metric_message;
     auto* metric = metric_message.mutable_metric();
     metric->set_worker_sequence(3);
-    metric->set_name("loss");
+    metric->set_name("train.loss");
     metric->mutable_value()->set_number_value(0.75);
-    metric->set_unit("loss");
+    metric->set_unit("dimensionless");
     metric->set_step_domain("optimizer_step");
     metric->set_step(21);
     metric->set_sample_weight(1.0);
@@ -5375,9 +5467,9 @@ void test_worker_control_grpc_stream() {
     trainvm::v1::WorkerToController resumed_metric_message;
     auto* resumed_metric = resumed_metric_message.mutable_metric();
     resumed_metric->set_worker_sequence(10);
-    resumed_metric->set_name("loss");
+    resumed_metric->set_name("train.loss");
     resumed_metric->mutable_value()->set_number_value(0.5);
-    resumed_metric->set_unit("loss");
+    resumed_metric->set_unit("dimensionless");
     resumed_metric->set_step_domain("optimizer_step");
     resumed_metric->set_step(22);
     resumed_metric->set_sample_weight(1.0);
@@ -8315,6 +8407,16 @@ void test_service_registry_and_reconciliation() {
         .event_types = {"worker.launch_requested"},
         .limit = 8U,
     });
+    const auto newest_events = observer.sequenced_events({
+        .after_journal_sequence = 0U,
+        .through_journal_sequence = projection
+                                        ? projection->last_event_sequence
+                                        : 0U,
+        .run_ids = {run_id},
+        .event_types = {},
+        .limit = 3U,
+        .newest_first = true,
+    });
     check(acquired.disposition ==
               trainvm::ReconcileDisposition::lease_acquired &&
               launched.disposition ==
@@ -8329,6 +8431,11 @@ void test_service_registry_and_reconciliation() {
                   std::vector<std::string>({"worker.controls",
                                             "worker.metrics"}) &&
               projection && projection->observed_state == "acquiring" &&
+              newest_events.size() == 3U &&
+              newest_events[0].journal_sequence >
+                  newest_events[1].journal_sequence &&
+              newest_events[1].journal_sequence >
+                  newest_events[2].journal_sequence &&
               projection->run_revision == 4U && events.size() == 7U &&
               launch_event != events.end() &&
               launch_event->wall_time_ns == 5'100 &&

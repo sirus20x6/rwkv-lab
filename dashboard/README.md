@@ -1,6 +1,7 @@
-# trainboard — RWKV-Lab training dashboard v2.0
+# trainboard — declarative TrainVM dashboard
 
-GPU-accelerated, real-time training dashboard for the RWKV-Lab conversion project.
+Real-time, model-family-neutral training control and observability for MageFlow, RWKV,
+transformer, vision/multimodal, distillation, and post-training experiments.
 **Stack:** Go + SQLite + Datastar + Pixi.js. Successor to `../dashboard/` (FastAPI + Chart.js).
 
 The proposed next control-plane architecture is documented in
@@ -28,8 +29,13 @@ reported as unavailable instead of serving an unsynchronized database snapshot. 
 is retained only as an explicit read-only compatibility fallback for offline legacy journals and is
 never selected automatically. The HTTP surface remains `/api/trainvm/runs`,
 `/api/trainvm/runs/{run}`, and
-`/api/trainvm/runs/{run}/timeline?after=SEQUENCE&limit=COUNT`, with typed incremental
-`/metrics` and `/artifacts` siblings rendered in the native run panel. The `/plan` sibling returns
+`/api/trainvm/runs/{run}/timeline?after=SEQUENCE&limit=COUNT`. The generic
+`/observability?after=SEQUENCE&limit=COUNT` sibling captures one immutable run prefix, cold-loads a
+bounded newest-first telemetry tail, and then advances heartbeats, declared metric series, artifacts,
+and checkpoint lineage through one cursor with explicit caught-up/replay state. Verified local
+artifact files are downloadable only through content-fingerprinted, publication-sequence-anchored,
+allowed-root URLs, so lookup remains bounded even after millions of journal events; malformed
+checkpoint manifests are quarantined in the tree instead of hiding later valid history. The `/plan` sibling returns
 the authority-verified immutable compiled plan; the browser derives its layered workflow graph,
 cycles, terminal transitions, visited nodes, and current attempt from that document without
 experiment-family switches.

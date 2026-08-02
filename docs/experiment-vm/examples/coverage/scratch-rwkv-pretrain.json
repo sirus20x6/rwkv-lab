@@ -119,8 +119,8 @@
     "observability": {
       "heartbeat_seconds": 10,
       "metrics": [
-        {"name": "train.loss", "type": "gauge", "unit": "dimensionless", "step_domain": "token", "aggregation": "weighted_mean"},
-        {"name": "train.tokens_per_second", "type": "gauge", "unit": "token/second", "step_domain": "wall_time", "aggregation": "mean"}
+        {"name": "train.loss", "type": "gauge", "unit": "dimensionless", "step_domain": "optimizer_step", "aggregation": "weighted_mean"},
+        {"name": "train.tokens_per_second", "type": "gauge", "unit": "token/second", "step_domain": "optimizer_step", "aggregation": "mean"}
       ],
       "retain_raw_metrics_days": 14,
       "log_artifact": "trainer_log"

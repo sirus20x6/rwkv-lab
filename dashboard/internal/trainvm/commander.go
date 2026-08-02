@@ -359,6 +359,7 @@ func (c *GRPCCommander) Events(ctx context.Context, input EventQuery) ([]Event, 
 	stream, err := c.client.WatchEvents(ctx, &trainvmv1.WatchEventsRequest{
 		RunIds: []string{query.RunID}, AfterJournalSequence: query.After,
 		EventTypes: query.EventTypes, ReplayLimit: uint32(query.Limit),
+		ThroughJournalSequence: query.Through, NewestFirst: query.NewestFirst,
 	})
 	if err != nil {
 		return nil, err

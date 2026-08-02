@@ -50,6 +50,8 @@ type trainVMCheckpointManifest struct {
 }
 
 type trainVMCheckpointSummary struct {
+	Valid               bool     `json:"valid"`
+	ValidationError     string   `json:"validation_error,omitempty"`
 	Sequence            uint64   `json:"sequence"`
 	ArtifactID          string   `json:"artifact_id"`
 	LogicalName         string   `json:"logical_name"`
@@ -223,6 +225,7 @@ func (s *Server) loadCheckpoint(artifact trainvmstore.PublishedArtifact) (trainV
 
 func checkpointSummary(artifact trainvmstore.PublishedArtifact, manifest trainVMCheckpointManifest) trainVMCheckpointSummary {
 	return trainVMCheckpointSummary{
+		Valid:    true,
 		Sequence: artifact.Sequence, ArtifactID: artifact.ArtifactID, LogicalName: artifact.LogicalName,
 		CheckpointSchema: manifest.CheckpointSchema, NodeID: manifest.Producer.NodeID,
 		AttemptID: manifest.Producer.AttemptID, OptimizerStep: manifest.OptimizerStep,
@@ -247,8 +250,15 @@ func (s *Server) handleTrainVMCheckpoints(w http.ResponseWriter, r *http.Request
 	for _, artifact := range artifacts {
 		manifest, err := s.loadCheckpoint(artifact)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
-			return
+			result = append(result, trainVMCheckpointSummary{
+				Valid: false, ValidationError: "manifest unavailable or failed immutable verification",
+				Sequence: artifact.Sequence, ArtifactID: artifact.ArtifactID,
+				LogicalName: artifact.LogicalName, CheckpointSchema: artifact.Schema,
+				NodeID: artifact.ProducerNodeID, AttemptID: artifact.ProducerAttemptID,
+				ParentArtifactIDs: append([]string(nil), artifact.ParentArtifactIDs...),
+				PublishedAtNS:     artifact.PublishedAtNS,
+			})
+			continue
 		}
 		result = append(result, checkpointSummary(artifact, manifest))
 	}

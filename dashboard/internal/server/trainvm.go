@@ -187,6 +187,38 @@ func (s *Server) handleTrainVMArtifacts(w http.ResponseWriter, r *http.Request) 
 	_ = json.NewEncoder(w).Encode(artifacts)
 }
 
+func (s *Server) handleTrainVMObservability(w http.ResponseWriter, r *http.Request) {
+	if s.trainvm == nil {
+		http.Error(w, "TrainVM authority is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	after, parseErr := strconv.ParseUint(r.URL.Query().Get("after"), 10, 64)
+	if r.URL.Query().Get("after") == "" {
+		after, parseErr = 0, nil
+	}
+	limit, limitErr := strconv.Atoi(r.URL.Query().Get("limit"))
+	if r.URL.Query().Get("limit") == "" {
+		limit, limitErr = 250, nil
+	}
+	if parseErr != nil || limitErr != nil || limit < 1 || limit > 1_000 {
+		http.Error(w, "observability query requires a uint64 cursor and limit from 1 through 1000", http.StatusBadRequest)
+		return
+	}
+	snapshot, found, err := trainvmstore.ProjectTelemetrySnapshot(
+		r.Context(), s.trainvm, r.PathValue("run"), after, limit)
+	if err != nil {
+		writeTrainVMAuthorityError(w, err)
+		return
+	}
+	if !found {
+		http.Error(w, "no such TrainVM run or persisted plan", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(snapshot)
+}
+
 func (s *Server) handleTrainVMSchema(w http.ResponseWriter, _ *http.Request) {
 	s.handleTrainVMDocument(w, "schema")
 }

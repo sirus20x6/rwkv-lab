@@ -249,13 +249,21 @@ func (r *Reader) Events(ctx context.Context, input EventQuery) ([]Event, error) 
 		FROM events
 		WHERE run_id=? AND journal_sequence>?`
 	arguments := []any{query.RunID, query.After}
+	if query.Through != 0 {
+		statement += " AND journal_sequence<=?"
+		arguments = append(arguments, query.Through)
+	}
 	if len(query.EventTypes) != 0 {
 		statement += " AND event_type IN (" + strings.TrimRight(strings.Repeat("?,", len(query.EventTypes)), ",") + ")"
 		for _, eventType := range query.EventTypes {
 			arguments = append(arguments, eventType)
 		}
 	}
-	statement += " ORDER BY journal_sequence LIMIT ?"
+	if query.NewestFirst {
+		statement += " ORDER BY journal_sequence DESC LIMIT ?"
+	} else {
+		statement += " ORDER BY journal_sequence LIMIT ?"
+	}
 	arguments = append(arguments, query.Limit)
 	rows, err := r.db.QueryContext(ctx, statement, arguments...)
 	if err != nil {
