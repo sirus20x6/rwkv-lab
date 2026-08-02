@@ -4,12 +4,25 @@
   "title": "TrainVM declarative experiment",
   "type": "object",
   "additionalProperties": false,
-  "required": ["api_version", "kind", "metadata", "spec"],
+  "required": [
+    "api_version",
+    "kind",
+    "metadata",
+    "spec"
+  ],
   "properties": {
-    "api_version": {"const": "trainvm.rwkv-lab/v1alpha1"},
-    "kind": {"const": "Experiment"},
-    "metadata": {"$ref": "#/$defs/metadata"},
-    "spec": {"$ref": "#/$defs/spec"}
+    "api_version": {
+      "const": "trainvm.rwkv-lab/v1alpha1"
+    },
+    "kind": {
+      "const": "Experiment"
+    },
+    "metadata": {
+      "$ref": "#/$defs/metadata"
+    },
+    "spec": {
+      "$ref": "#/$defs/spec"
+    }
   },
   "$defs": {
     "identifier": {
@@ -20,14 +33,26 @@
     "metadata": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name"],
+      "required": [
+        "name"
+      ],
       "properties": {
-        "name": {"$ref": "#/$defs/identifier"},
-        "description": {"type": "string", "maxLength": 4096},
+        "name": {
+          "$ref": "#/$defs/identifier"
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 4096
+        },
         "labels": {
           "type": "object",
-          "propertyNames": {"$ref": "#/$defs/identifier"},
-          "additionalProperties": {"type": "string", "maxLength": 256}
+          "propertyNames": {
+            "$ref": "#/$defs/identifier"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 256
+          }
         }
       }
     },
@@ -35,56 +60,115 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "workspace", "resources", "parameters", "artifacts", "components",
-        "workflow", "controls", "observability", "recovery"
+        "workspace",
+        "resources",
+        "parameters",
+        "artifacts",
+        "components",
+        "workflow",
+        "controls",
+        "observability",
+        "recovery"
       ],
       "properties": {
-        "workspace": {"$ref": "#/$defs/workspace"},
-        "resources": {"$ref": "#/$defs/resources"},
-        "execution": {"$ref": "#/$defs/execution_phases"},
+        "workspace": {
+          "$ref": "#/$defs/workspace"
+        },
+        "resources": {
+          "$ref": "#/$defs/resources"
+        },
+        "execution": {
+          "$ref": "#/$defs/execution_phases"
+        },
         "parameters": {
           "type": "object",
-          "propertyNames": {"$ref": "#/$defs/identifier"},
-          "additionalProperties": {"$ref": "#/$defs/parameter"}
+          "propertyNames": {
+            "$ref": "#/$defs/identifier"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/parameter"
+          }
         },
         "artifacts": {
           "type": "object",
-          "propertyNames": {"$ref": "#/$defs/identifier"},
-          "additionalProperties": {"$ref": "#/$defs/artifact"}
+          "propertyNames": {
+            "$ref": "#/$defs/identifier"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/artifact"
+          }
         },
         "components": {
           "type": "object",
           "minProperties": 1,
-          "propertyNames": {"$ref": "#/$defs/identifier"},
-          "additionalProperties": {"$ref": "#/$defs/component"}
+          "propertyNames": {
+            "$ref": "#/$defs/identifier"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/component"
+          }
         },
-        "workflow": {"$ref": "#/$defs/workflow"},
-        "controls": {"$ref": "#/$defs/controls"},
-        "observability": {"$ref": "#/$defs/observability"},
-        "recovery": {"$ref": "#/$defs/recovery"}
+        "workflow": {
+          "$ref": "#/$defs/workflow"
+        },
+        "controls": {
+          "$ref": "#/$defs/controls"
+        },
+        "observability": {
+          "$ref": "#/$defs/observability"
+        },
+        "recovery": {
+          "$ref": "#/$defs/recovery"
+        }
       }
     },
     "workspace": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["root", "run_directory", "concurrency_key"],
+      "required": [
+        "root",
+        "run_directory",
+        "concurrency_key"
+      ],
       "properties": {
-        "root": {"type": "string", "minLength": 1},
-        "run_directory": {"type": "string", "minLength": 1},
-        "concurrency_key": {"$ref": "#/$defs/identifier"},
+        "root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "run_directory": {
+          "type": "string",
+          "minLength": 1
+        },
+        "concurrency_key": {
+          "$ref": "#/$defs/identifier"
+        },
         "allowed_read_roots": {
-          "type": "array", "maxItems": 256, "uniqueItems": true,
-          "items": {"type": "string", "minLength": 1, "maxLength": 4096}
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
         },
         "input_content_roots": {
           "type": "array",
           "minItems": 1,
           "maxItems": 256,
-          "items": {"$ref": "#/$defs/input_content_root"}
+          "items": {
+            "$ref": "#/$defs/input_content_root"
+          }
         },
         "allowed_write_roots": {
-          "type": "array", "maxItems": 256, "uniqueItems": true,
-          "items": {"type": "string", "minLength": 1, "maxLength": 4096}
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
         }
       }
     },
@@ -92,14 +176,38 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "api_version", "path", "kind", "file_count", "total_bytes", "tree_sha256"
+        "api_version",
+        "path",
+        "kind",
+        "file_count",
+        "total_bytes",
+        "tree_sha256"
       ],
       "properties": {
-        "api_version": {"const": "trainvm.input-content-root/v1"},
-        "path": {"type": "string", "minLength": 1, "maxLength": 4096},
-        "kind": {"enum": ["file", "directory"]},
-        "file_count": {"type": "integer", "minimum": 1, "maximum": 10000000},
-        "total_bytes": {"type": "integer", "minimum": 0, "maximum": 18014398509481984},
+        "api_version": {
+          "const": "trainvm.input-content-root/v1"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "kind": {
+          "enum": [
+            "file",
+            "directory"
+          ]
+        },
+        "file_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000000
+        },
+        "total_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18014398509481984
+        },
         "tree_sha256": {
           "type": "string",
           "pattern": "^sha256:[0-9a-f]{64}$"
@@ -109,24 +217,63 @@
     "resources": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["accelerators"],
+      "required": [
+        "accelerators"
+      ],
       "properties": {
         "accelerators": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["vendor", "count", "exclusive"],
+          "required": [
+            "vendor",
+            "count",
+            "exclusive"
+          ],
           "properties": {
-            "vendor": {"enum": ["nvidia", "amd", "intel", "none"]},
-            "count": {"type": "integer", "minimum": 0, "maximum": 256},
-            "minimum_memory_gib": {"type": "number", "minimum": 0},
-            "exclusive": {"type": "boolean"},
-            "selector": {"type": "object", "additionalProperties": {"type": "string"}}
+            "vendor": {
+              "enum": [
+                "nvidia",
+                "amd",
+                "intel",
+                "none"
+              ]
+            },
+            "count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 256
+            },
+            "minimum_memory_gib": {
+              "type": "number",
+              "minimum": 0
+            },
+            "exclusive": {
+              "type": "boolean"
+            },
+            "selector": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
           }
         },
-        "minimum_host_memory_gib": {"type": "number", "minimum": 0},
-        "cpu_threads": {"type": "integer", "minimum": 1},
-        "lease_timeout_seconds": {"type": "integer", "minimum": 5, "default": 30},
-        "cpu_io_policy": {"$ref": "#/$defs/cpu_io_policy"}
+        "minimum_host_memory_gib": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cpu_threads": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "lease_timeout_seconds": {
+          "type": "integer",
+          "minimum": 5,
+          "default": 30
+        },
+        "cpu_io_policy": {
+          "$ref": "#/$defs/cpu_io_policy"
+        }
       }
     },
     "cpu_io_policy": {
@@ -145,135 +292,349 @@
           "minItems": 1,
           "maxItems": 1024,
           "uniqueItems": true,
-          "items": {"type": "integer", "minimum": 0, "maximum": 1048575}
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1048575
+          }
         },
-        "cpu_weight": {"type": "integer", "minimum": 1, "maximum": 10000},
-        "io_weight": {"type": "integer", "minimum": 1, "maximum": 10000},
-        "omp_threads": {"type": "integer", "minimum": 1, "maximum": 65536},
-        "preprocessing_workers": {"type": "integer", "minimum": 0, "maximum": 65536},
-        "nice": {"type": "integer", "minimum": -20, "maximum": 19}
+        "cpu_weight": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "io_weight": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "omp_threads": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "preprocessing_workers": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65536
+        },
+        "nice": {
+          "type": "integer",
+          "minimum": -20,
+          "maximum": 19
+        }
       },
-      "not": {"required": ["cpuset", "cpus"]}
+      "not": {
+        "required": [
+          "cpuset",
+          "cpus"
+        ]
+      }
     },
     "execution_phases": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["component", "operation"],
+      "required": [
+        "component",
+        "operation"
+      ],
       "properties": {
-        "component": {"$ref": "#/$defs/identifier"},
-        "operation": {"$ref": "#/$defs/identifier"},
-        "compile": {"$ref": "#/$defs/compile_phase"},
-        "warmup": {"$ref": "#/$defs/step_phase"},
-        "qualify": {"$ref": "#/$defs/step_phase"},
-        "gpu_trace": {"$ref": "#/$defs/gpu_trace_capture"}
+        "component": {
+          "$ref": "#/$defs/identifier"
+        },
+        "operation": {
+          "$ref": "#/$defs/identifier"
+        },
+        "compile": {
+          "$ref": "#/$defs/compile_phase"
+        },
+        "warmup": {
+          "$ref": "#/$defs/step_phase"
+        },
+        "qualify": {
+          "$ref": "#/$defs/step_phase"
+        },
+        "gpu_trace": {
+          "$ref": "#/$defs/gpu_trace_capture"
+        }
       },
       "anyOf": [
-        {"required": ["compile"]},
-        {"required": ["warmup"]},
-        {"required": ["qualify"]},
-        {"required": ["gpu_trace"]}
+        {
+          "required": [
+            "compile"
+          ]
+        },
+        {
+          "required": [
+            "warmup"
+          ]
+        },
+        {
+          "required": [
+            "qualify"
+          ]
+        },
+        {
+          "required": [
+            "gpu_trace"
+          ]
+        }
       ]
     },
     "compile_phase": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled"],
-      "properties": {"enabled": {"type": "boolean"}}
+      "required": [
+        "enabled"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      }
     },
     "step_phase": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled"],
+      "required": [
+        "enabled"
+      ],
       "properties": {
-        "enabled": {"type": "boolean"},
-        "steps": {"type": "integer", "minimum": 1, "maximum": 10000}
+        "enabled": {
+          "type": "boolean"
+        },
+        "steps": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        }
       },
       "allOf": [
         {
-          "if": {"properties": {"enabled": {"const": true}}},
-          "then": {"required": ["steps"]}
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "steps"
+            ]
+          }
         },
         {
-          "if": {"properties": {"enabled": {"const": false}}},
-          "then": {"not": {"required": ["steps"]}}
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": false
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "required": [
+                "steps"
+              ]
+            }
+          }
         }
       ]
     },
     "gpu_trace_capture": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled"],
+      "required": [
+        "enabled"
+      ],
       "properties": {
-        "enabled": {"type": "boolean"},
-        "backend": {"enum": ["torch", "nsys", "ncu"]},
-        "warmup_steps": {"type": "integer", "minimum": 0, "maximum": 256},
-        "skip_steps": {"type": "integer", "minimum": 0, "maximum": 256},
-        "capture_steps": {"type": "integer", "minimum": 1, "maximum": 128},
-        "output_artifact": {"$ref": "#/$defs/identifier"},
+        "enabled": {
+          "type": "boolean"
+        },
+        "backend": {
+          "enum": [
+            "torch",
+            "nsys",
+            "ncu"
+          ]
+        },
+        "warmup_steps": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 256
+        },
+        "skip_steps": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 256
+        },
+        "capture_steps": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128
+        },
+        "output_artifact": {
+          "$ref": "#/$defs/identifier"
+        },
         "activities": {
           "type": "array",
           "minItems": 1,
           "maxItems": 2,
           "uniqueItems": true,
-          "contains": {"const": "accelerator"},
-          "items": {"enum": ["cpu", "accelerator"]}
+          "contains": {
+            "const": "accelerator"
+          },
+          "items": {
+            "enum": [
+              "cpu",
+              "accelerator"
+            ]
+          }
         },
-        "record_shapes": {"type": "boolean"},
-        "profile_memory": {"type": "boolean"},
-        "with_stack": {"type": "boolean"}
+        "record_shapes": {
+          "type": "boolean"
+        },
+        "profile_memory": {
+          "type": "boolean"
+        },
+        "with_stack": {
+          "type": "boolean"
+        }
       },
       "allOf": [
         {
-          "if": {"properties": {"enabled": {"const": true}}},
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            }
+          },
           "then": {
             "required": [
-              "backend", "warmup_steps", "skip_steps", "capture_steps",
-              "output_artifact", "activities"
+              "backend",
+              "warmup_steps",
+              "skip_steps",
+              "capture_steps",
+              "output_artifact",
+              "activities"
             ]
           }
         },
         {
-          "if": {"properties": {"enabled": {"const": false}}},
-          "then": {
-            "not": {
-              "anyOf": [
-                {"required": ["backend"]},
-                {"required": ["warmup_steps"]},
-                {"required": ["skip_steps"]},
-                {"required": ["capture_steps"]},
-                {"required": ["output_artifact"]},
-                {"required": ["activities"]},
-                {"required": ["record_shapes"]},
-                {"required": ["profile_memory"]},
-                {"required": ["with_stack"]}
-              ]
-            }
-          }
-        },
-        {
           "if": {
-            "required": ["backend"],
-            "properties": {"backend": {"enum": ["nsys", "ncu"]}}
+            "properties": {
+              "enabled": {
+                "const": false
+              }
+            }
           },
           "then": {
             "not": {
               "anyOf": [
-                {"required": ["record_shapes"]},
-                {"required": ["profile_memory"]},
-                {"required": ["with_stack"]}
+                {
+                  "required": [
+                    "backend"
+                  ]
+                },
+                {
+                  "required": [
+                    "warmup_steps"
+                  ]
+                },
+                {
+                  "required": [
+                    "skip_steps"
+                  ]
+                },
+                {
+                  "required": [
+                    "capture_steps"
+                  ]
+                },
+                {
+                  "required": [
+                    "output_artifact"
+                  ]
+                },
+                {
+                  "required": [
+                    "activities"
+                  ]
+                },
+                {
+                  "required": [
+                    "record_shapes"
+                  ]
+                },
+                {
+                  "required": [
+                    "profile_memory"
+                  ]
+                },
+                {
+                  "required": [
+                    "with_stack"
+                  ]
+                }
               ]
             }
           }
         },
         {
           "if": {
-            "required": ["backend"],
-            "properties": {"backend": {"const": "ncu"}}
+            "required": [
+              "backend"
+            ],
+            "properties": {
+              "backend": {
+                "enum": [
+                  "nsys",
+                  "ncu"
+                ]
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "record_shapes"
+                  ]
+                },
+                {
+                  "required": [
+                    "profile_memory"
+                  ]
+                },
+                {
+                  "required": [
+                    "with_stack"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "backend"
+            ],
+            "properties": {
+              "backend": {
+                "const": "ncu"
+              }
+            }
           },
           "then": {
             "properties": {
               "activities": {
-                "const": ["accelerator"]
+                "const": [
+                  "accelerator"
+                ]
               }
             }
           }
@@ -283,64 +644,150 @@
     "parameter": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "value"],
+      "required": [
+        "type",
+        "value"
+      ],
       "properties": {
-        "type": {"enum": ["string", "integer", "number", "boolean", "path", "duration"]},
-        "value": true,
-        "description": {"type": "string"},
-        "secret_reference": {"type": "boolean", "default": false}
-      },
-      "allOf": [{
-        "if": {
-          "required": ["secret_reference"],
-          "properties": {"secret_reference": {"const": true}}
+        "type": {
+          "enum": [
+            "string",
+            "integer",
+            "number",
+            "boolean",
+            "path",
+            "duration"
+          ]
         },
-        "then": {
-          "properties": {
-            "type": {"const": "string"},
-            "value": {
-              "type": "string",
-              "maxLength": 512,
-              "pattern": "^secret://[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}/[a-zA-Z0-9][a-zA-Z0-9._/-]{0,255}#[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$"
+        "value": true,
+        "description": {
+          "type": "string"
+        },
+        "secret_reference": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "secret_reference"
+            ],
+            "properties": {
+              "secret_reference": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "type": {
+                "const": "string"
+              },
+              "value": {
+                "type": "string",
+                "maxLength": 512,
+                "pattern": "^secret://[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}/[a-zA-Z0-9][a-zA-Z0-9._/-]{0,255}#[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$"
+              }
             }
           }
         }
-      }]
+      ]
     },
     "artifact": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "immutability", "fingerprint"],
+      "required": [
+        "type",
+        "immutability",
+        "fingerprint"
+      ],
       "properties": {
-        "type": {"enum": ["path", "checkpoint", "dataset", "image_gallery", "metrics", "report", "opaque"]},
-        "schema": {"type": "string"},
-        "immutability": {"enum": ["immutable", "append_only", "mutable_until_publish"]},
-        "fingerprint": {"enum": ["sha256", "manifest_sha256", "adapter", "none"]},
-        "required": {"type": "boolean", "default": true},
-        "description": {"type": "string"}
+        "type": {
+          "enum": [
+            "path",
+            "checkpoint",
+            "dataset",
+            "image_gallery",
+            "metrics",
+            "report",
+            "opaque"
+          ]
+        },
+        "schema": {
+          "type": "string"
+        },
+        "immutability": {
+          "enum": [
+            "immutable",
+            "append_only",
+            "mutable_until_publish"
+          ]
+        },
+        "fingerprint": {
+          "enum": [
+            "sha256",
+            "manifest_sha256",
+            "adapter",
+            "none"
+          ]
+        },
+        "required": {
+          "type": "boolean",
+          "default": true
+        },
+        "description": {
+          "type": "string"
+        }
       }
     },
     "component": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["adapter", "version", "runtime", "operations"],
+      "required": [
+        "adapter",
+        "version",
+        "runtime",
+        "operations"
+      ],
       "properties": {
-        "adapter": {"type": "string", "minLength": 1},
-        "version": {"type": "string", "minLength": 1},
+        "adapter": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
         "runtime": {
-          "enum": ["builtin", "python_worker", "native_worker", "external_worker"]
+          "enum": [
+            "builtin",
+            "python_worker",
+            "native_worker",
+            "external_worker"
+          ]
         },
         "operations": {
           "type": "object",
           "minProperties": 1,
-          "propertyNames": {"$ref": "#/$defs/identifier"},
+          "propertyNames": {
+            "$ref": "#/$defs/identifier"
+          },
           "additionalProperties": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["contract"],
+            "required": [
+              "contract"
+            ],
             "properties": {
-              "contract": {"type": "string", "minLength": 1},
-              "description": {"type": "string"}
+              "contract": {
+                "type": "string",
+                "minLength": 1
+              },
+              "description": {
+                "type": "string"
+              }
             }
           }
         }
@@ -349,36 +796,90 @@
     "binding": {
       "oneOf": [
         {
-          "type": "object", "additionalProperties": false,
-          "required": ["literal"], "properties": {"literal": true}
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "literal"
+          ],
+          "properties": {
+            "literal": true
+          }
         },
         {
-          "type": "object", "additionalProperties": false,
-          "required": ["parameter"], "properties": {"parameter": {"$ref": "#/$defs/identifier"}}
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "parameter"
+          ],
+          "properties": {
+            "parameter": {
+              "$ref": "#/$defs/identifier"
+            }
+          }
         },
         {
-          "type": "object", "additionalProperties": false,
-          "required": ["artifact"], "properties": {"artifact": {"$ref": "#/$defs/identifier"}}
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "artifact"
+          ],
+          "properties": {
+            "artifact": {
+              "$ref": "#/$defs/identifier"
+            }
+          }
         },
         {
-          "type": "object", "additionalProperties": false,
-          "required": ["control"], "properties": {"control": {"$ref": "#/$defs/identifier"}}
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "control"
+          ],
+          "properties": {
+            "control": {
+              "$ref": "#/$defs/identifier"
+            }
+          }
         },
         {
-          "type": "object", "additionalProperties": false,
-          "required": ["context"],
-          "properties": {"context": {"enum": ["run_id", "run_directory", "plan_revision", "attempt_id", "host_id"]}}
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "context"
+          ],
+          "properties": {
+            "context": {
+              "enum": [
+                "run_id",
+                "run_directory",
+                "plan_revision",
+                "attempt_id",
+                "host_id"
+              ]
+            }
+          }
         },
         {
-          "type": "object", "additionalProperties": false,
-          "required": ["node_output"],
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "node_output"
+          ],
           "properties": {
             "node_output": {
-              "type": "object", "additionalProperties": false,
-              "required": ["node", "name"],
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "node",
+                "name"
+              ],
               "properties": {
-                "node": {"$ref": "#/$defs/identifier"},
-                "name": {"$ref": "#/$defs/identifier"}
+                "node": {
+                  "$ref": "#/$defs/identifier"
+                },
+                "name": {
+                  "$ref": "#/$defs/identifier"
+                }
               }
             }
           }
@@ -388,95 +889,229 @@
     "comparison": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["field", "operator", "value"],
+      "required": [
+        "field",
+        "operator",
+        "value"
+      ],
       "properties": {
-        "field": {"type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9_.]*$"},
-        "operator": {"enum": ["eq", "ne", "lt", "le", "gt", "ge", "in", "not_in", "exists"]},
+        "field": {
+          "type": "string",
+          "pattern": "^[a-zA-Z][a-zA-Z0-9_.]*$"
+        },
+        "operator": {
+          "enum": [
+            "eq",
+            "ne",
+            "lt",
+            "le",
+            "gt",
+            "ge",
+            "in",
+            "not_in",
+            "exists"
+          ]
+        },
         "value": true
       }
     },
     "predicate": {
       "oneOf": [
-        {"$ref": "#/$defs/comparison"},
         {
-          "type": "object", "additionalProperties": false,
-          "required": ["all"],
-          "properties": {"all": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/predicate"}}}
+          "$ref": "#/$defs/comparison"
         },
         {
-          "type": "object", "additionalProperties": false,
-          "required": ["any"],
-          "properties": {"any": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/predicate"}}}
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "all"
+          ],
+          "properties": {
+            "all": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/predicate"
+              }
+            }
+          }
         },
         {
-          "type": "object", "additionalProperties": false,
-          "required": ["not"],
-          "properties": {"not": {"$ref": "#/$defs/predicate"}}
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "any"
+          ],
+          "properties": {
+            "any": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/predicate"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "not"
+          ],
+          "properties": {
+            "not": {
+              "$ref": "#/$defs/predicate"
+            }
+          }
         }
       ]
     },
     "transition": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["on", "target"],
+      "required": [
+        "on",
+        "target"
+      ],
       "properties": {
-        "on": {"type": "string", "minLength": 1},
-        "where": {"$ref": "#/$defs/predicate"},
-        "target": {"type": "string", "minLength": 1},
-        "description": {"type": "string"}
+        "on": {
+          "type": "string",
+          "minLength": 1
+        },
+        "where": {
+          "$ref": "#/$defs/predicate"
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string"
+        }
       }
     },
     "retry": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["maximum_attempts", "backoff"],
+      "required": [
+        "maximum_attempts",
+        "backoff"
+      ],
       "properties": {
-        "maximum_attempts": {"type": "integer", "minimum": 1, "maximum": 1000},
-        "backoff": {"enum": ["none", "fixed", "exponential"]},
-        "initial_delay_seconds": {"type": "number", "minimum": 0},
-        "maximum_delay_seconds": {"type": "number", "minimum": 0},
-        "retryable_events": {"type": "array", "items": {"type": "string", "minLength": 1}}
+        "maximum_attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "backoff": {
+          "enum": [
+            "none",
+            "fixed",
+            "exponential"
+          ]
+        },
+        "initial_delay_seconds": {
+          "type": "number",
+          "minimum": 0
+        },
+        "maximum_delay_seconds": {
+          "type": "number",
+          "minimum": 0
+        },
+        "retryable_events": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
       }
     },
     "loop_guard": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["max_visits", "progress_field", "direction"],
+      "required": [
+        "max_visits",
+        "progress_field",
+        "direction"
+      ],
       "properties": {
-        "max_visits": {"type": "integer", "minimum": 2, "maximum": 1000000},
-        "progress_field": {"type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9_.]*$"},
-        "direction": {"enum": ["increasing", "decreasing"]}
+        "max_visits": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 1000000
+        },
+        "progress_field": {
+          "type": "string",
+          "pattern": "^[a-zA-Z][a-zA-Z0-9_.]*$"
+        },
+        "direction": {
+          "enum": [
+            "increasing",
+            "decreasing"
+          ]
+        }
       }
     },
     "training_component_key": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["category", "name", "version"],
+      "required": [
+        "category",
+        "name",
+        "version"
+      ],
       "properties": {
         "category": {
           "enum": [
-            "optimizer", "parameter_router", "learning_rate_schedule",
-            "weight_decay_schedule", "activation", "normalization",
-            "objective", "precision", "gradient_clipping",
-            "gradient_accumulation", "curriculum", "metric_reducer"
+            "optimizer",
+            "parameter_router",
+            "learning_rate_schedule",
+            "weight_decay_schedule",
+            "activation",
+            "normalization",
+            "objective",
+            "precision",
+            "gradient_clipping",
+            "gradient_accumulation",
+            "curriculum",
+            "metric_reducer"
           ]
         },
-        "name": {"$ref": "#/$defs/identifier"},
-        "version": {"type": "string", "minLength": 1, "maxLength": 128}
+        "name": {
+          "$ref": "#/$defs/identifier"
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
       }
     },
     "training_component_selection": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["key", "configuration"],
+      "required": [
+        "key",
+        "configuration"
+      ],
       "properties": {
-        "key": {"$ref": "#/$defs/training_component_key"},
+        "key": {
+          "$ref": "#/$defs/training_component_key"
+        },
         "configuration": {
           "type": "object",
           "maxProperties": 128,
-          "propertyNames": {"$ref": "#/$defs/identifier"},
+          "propertyNames": {
+            "$ref": "#/$defs/identifier"
+          },
           "additionalProperties": {
-            "type": ["boolean", "integer", "number", "string"]
+            "type": [
+              "boolean",
+              "integer",
+              "number",
+              "string"
+            ]
           }
         }
       }
@@ -484,16 +1119,31 @@
     "training_composition": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["model_family", "components"],
+      "required": [
+        "model_family",
+        "components"
+      ],
       "properties": {
-        "model_family": {"$ref": "#/$defs/identifier"},
+        "model_family": {
+          "$ref": "#/$defs/identifier"
+        },
         "components": {
           "type": "object",
           "minProperties": 1,
           "maxProperties": 64,
-          "propertyNames": {"$ref": "#/$defs/identifier"},
+          "propertyNames": {
+            "$ref": "#/$defs/identifier"
+          },
           "additionalProperties": {
             "$ref": "#/$defs/training_component_selection"
+          }
+        },
+        "topologies": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/training_topology_selection"
           }
         }
       }
@@ -501,120 +1151,344 @@
     "node": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["invoke", "idempotency", "effect", "transitions"],
+      "required": [
+        "invoke",
+        "idempotency",
+        "effect",
+        "transitions"
+      ],
       "properties": {
-        "description": {"type": "string"},
+        "description": {
+          "type": "string"
+        },
         "invoke": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["component", "operation", "inputs"],
+          "required": [
+            "component",
+            "operation",
+            "inputs"
+          ],
           "properties": {
-            "component": {"$ref": "#/$defs/identifier"},
-            "operation": {"$ref": "#/$defs/identifier"},
+            "component": {
+              "$ref": "#/$defs/identifier"
+            },
+            "operation": {
+              "$ref": "#/$defs/identifier"
+            },
             "inputs": {
               "type": "object",
-              "propertyNames": {"$ref": "#/$defs/identifier"},
-              "additionalProperties": {"$ref": "#/$defs/binding"}
+              "propertyNames": {
+                "$ref": "#/$defs/identifier"
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/binding"
+              }
             },
-            "training": {"$ref": "#/$defs/training_composition"}
+            "training": {
+              "$ref": "#/$defs/training_composition"
+            }
           }
         },
         "publishes": {
           "type": "object",
-          "propertyNames": {"$ref": "#/$defs/identifier"},
-          "additionalProperties": {"$ref": "#/$defs/identifier"}
+          "propertyNames": {
+            "$ref": "#/$defs/identifier"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/identifier"
+          }
         },
-        "idempotency": {"enum": ["replay_safe", "receipt_required", "at_most_once"]},
-        "effect": {"enum": ["read_only", "workspace_write", "process", "resource", "external"]},
-        "timeout_seconds": {"type": "integer", "minimum": 1},
-        "retry": {"$ref": "#/$defs/retry"},
-        "loop_guard": {"$ref": "#/$defs/loop_guard"},
+        "idempotency": {
+          "enum": [
+            "replay_safe",
+            "receipt_required",
+            "at_most_once"
+          ]
+        },
+        "effect": {
+          "enum": [
+            "read_only",
+            "workspace_write",
+            "process",
+            "resource",
+            "external"
+          ]
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "retry": {
+          "$ref": "#/$defs/retry"
+        },
+        "loop_guard": {
+          "$ref": "#/$defs/loop_guard"
+        },
         "transitions": {
-          "type": "array", "minItems": 1,
-          "items": {"$ref": "#/$defs/transition"}
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/transition"
+          }
         }
       }
     },
     "workflow": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["entrypoint", "nodes"],
+      "required": [
+        "entrypoint",
+        "nodes"
+      ],
       "properties": {
-        "entrypoint": {"$ref": "#/$defs/identifier"},
+        "entrypoint": {
+          "$ref": "#/$defs/identifier"
+        },
         "nodes": {
           "type": "object",
           "minProperties": 1,
-          "propertyNames": {"$ref": "#/$defs/identifier"},
-          "additionalProperties": {"$ref": "#/$defs/node"}
+          "propertyNames": {
+            "$ref": "#/$defs/identifier"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/node"
+          }
         }
       }
     },
     "control": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "default", "apply", "mutable_after_start", "targets"],
+      "required": [
+        "type",
+        "default",
+        "apply",
+        "mutable_after_start",
+        "targets"
+      ],
       "properties": {
-        "type": {"enum": ["number", "integer", "boolean", "string", "enum"]},
+        "type": {
+          "enum": [
+            "number",
+            "integer",
+            "boolean",
+            "string",
+            "enum"
+          ]
+        },
         "default": true,
-        "minimum": {"type": "number"},
-        "maximum": {"type": "number"},
-        "values": {"type": "array", "minItems": 1, "items": true},
-        "apply": {"enum": ["immediate", "next_microbatch", "next_optimizer_step", "next_eval", "next_checkpoint", "restart"]},
-        "mutable_after_start": {"type": "boolean"},
-        "requires_pause": {"type": "boolean", "default": false},
-        "targets": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
-        "description": {"type": "string"},
-        "unit": {"type": "string"}
+        "minimum": {
+          "type": "number"
+        },
+        "maximum": {
+          "type": "number"
+        },
+        "values": {
+          "type": "array",
+          "minItems": 1,
+          "items": true
+        },
+        "apply": {
+          "enum": [
+            "immediate",
+            "next_microbatch",
+            "next_optimizer_step",
+            "next_eval",
+            "next_checkpoint",
+            "restart"
+          ]
+        },
+        "mutable_after_start": {
+          "type": "boolean"
+        },
+        "requires_pause": {
+          "type": "boolean",
+          "default": false
+        },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "description": {
+          "type": "string"
+        },
+        "unit": {
+          "type": "string"
+        }
       }
     },
     "controls": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["catalog"],
+      "required": [
+        "catalog"
+      ],
       "properties": {
         "catalog": {
           "type": "object",
-          "propertyNames": {"$ref": "#/$defs/identifier"},
-          "additionalProperties": {"$ref": "#/$defs/control"}
+          "propertyNames": {
+            "$ref": "#/$defs/identifier"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/control"
+          }
         }
       }
     },
     "metric": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "type", "unit", "step_domain", "aggregation"],
+      "required": [
+        "name",
+        "type",
+        "unit",
+        "step_domain",
+        "aggregation"
+      ],
       "properties": {
-        "name": {"type": "string", "minLength": 1},
-        "type": {"enum": ["counter", "gauge", "histogram"]},
-        "unit": {"type": "string"},
-        "step_domain": {"enum": ["microbatch", "optimizer_step", "sample", "token", "epoch", "wall_time"]},
-        "aggregation": {"enum": ["last", "sum", "mean", "weighted_mean", "min", "max", "histogram"]},
-        "description": {"type": "string"}
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "enum": [
+            "counter",
+            "gauge",
+            "histogram"
+          ]
+        },
+        "unit": {
+          "type": "string"
+        },
+        "step_domain": {
+          "enum": [
+            "microbatch",
+            "optimizer_step",
+            "sample",
+            "token",
+            "epoch",
+            "wall_time"
+          ]
+        },
+        "aggregation": {
+          "enum": [
+            "last",
+            "sum",
+            "mean",
+            "weighted_mean",
+            "min",
+            "max",
+            "histogram"
+          ]
+        },
+        "description": {
+          "type": "string"
+        }
       }
     },
     "observability": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["heartbeat_seconds", "metrics", "retain_raw_metrics_days"],
+      "required": [
+        "heartbeat_seconds",
+        "metrics",
+        "retain_raw_metrics_days"
+      ],
       "properties": {
-        "heartbeat_seconds": {"type": "integer", "minimum": 1, "maximum": 300},
-        "metrics": {"type": "array", "items": {"$ref": "#/$defs/metric"}},
-        "retain_raw_metrics_days": {"type": "integer", "minimum": 1},
-        "eval_gallery_artifact": {"$ref": "#/$defs/identifier"},
-        "log_artifact": {"$ref": "#/$defs/identifier"}
+        "heartbeat_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 300
+        },
+        "metrics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/metric"
+          }
+        },
+        "retain_raw_metrics_days": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "eval_gallery_artifact": {
+          "$ref": "#/$defs/identifier"
+        },
+        "log_artifact": {
+          "$ref": "#/$defs/identifier"
+        }
       }
     },
     "recovery": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["exact_resume", "reconcile", "orphan_policy", "graceful_stop_seconds"],
+      "required": [
+        "exact_resume",
+        "reconcile",
+        "orphan_policy",
+        "graceful_stop_seconds"
+      ],
       "properties": {
-        "exact_resume": {"type": "boolean"},
-        "checkpoint_artifact": {"$ref": "#/$defs/identifier"},
-        "reconcile": {"enum": ["fail_closed", "adopt_if_fingerprint_matches", "restart_from_checkpoint"]},
-        "orphan_policy": {"enum": ["leave_and_block", "adopt_if_identity_matches", "terminate_and_recover"]},
-        "graceful_stop_seconds": {"type": "integer", "minimum": 1, "maximum": 86400},
-        "release_accelerators_when_paused": {"type": "boolean", "default": true}
+        "exact_resume": {
+          "type": "boolean"
+        },
+        "checkpoint_artifact": {
+          "$ref": "#/$defs/identifier"
+        },
+        "reconcile": {
+          "enum": [
+            "fail_closed",
+            "adopt_if_fingerprint_matches",
+            "restart_from_checkpoint"
+          ]
+        },
+        "orphan_policy": {
+          "enum": [
+            "leave_and_block",
+            "adopt_if_identity_matches",
+            "terminate_and_recover"
+          ]
+        },
+        "graceful_stop_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400
+        },
+        "release_accelerators_when_paused": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "training_topology_selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "topology"
+      ],
+      "properties": {
+        "topology": {
+          "$ref": "#/$defs/identifier"
+        },
+        "parameters": {
+          "type": "object",
+          "maxProperties": 32,
+          "propertyNames": {
+            "$ref": "#/$defs/identifier"
+          },
+          "additionalProperties": {
+            "type": [
+              "boolean",
+              "integer",
+              "number",
+              "string"
+            ]
+          }
+        }
       }
     }
   }
