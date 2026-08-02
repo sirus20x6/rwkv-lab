@@ -9,12 +9,13 @@
 namespace trainvm {
 namespace {
 
-AdapterKey key(std::string adapter, std::string contract) {
+AdapterKey key(std::string adapter, std::string contract,
+               std::string operation = "train") {
   return {
       .adapter = std::move(adapter),
       .version = "1.0.0",
       .runtime = ComponentRuntime::python_worker,
-      .operation = "train",
+      .operation = std::move(operation),
       .contract = std::move(contract),
   };
 }
@@ -112,7 +113,53 @@ OperationAuthoringDeclaration vision_frozen_adapter_authoring() {
       "rwkv-lab.vision-frozen-adapter-checkpoint.v1";
   checkpoint.description =
       "Required compatible cached MoonViT/compressor caption checkpoint.";
+  authoring.outputs.emplace(
+      "result",
+      OperationPortDescriptor{
+          .type = OperationPortType::artifact,
+          .required = true,
+          .artifact_type = ArtifactType::report,
+          .artifact_schema = "rwkv-lab.scalar-metric-result.v1",
+          .description =
+              "Required immutable best-evaluation scalar metric result.",
+      });
   return authoring;
+}
+
+OperationAuthoringDeclaration scalar_metric_decision_authoring() {
+  const OperationPortDescriptor result{
+      .type = OperationPortType::artifact,
+      .required = true,
+      .artifact_type = ArtifactType::report,
+      .artifact_schema = "rwkv-lab.scalar-metric-result.v1",
+      .description = "Immutable scalar metric candidate result.",
+  };
+  return {
+      .inputs = {
+          {"config",
+           OperationPortDescriptor{
+               .type = OperationPortType::object,
+               .required = true,
+               .artifact_type = std::nullopt,
+               .artifact_schema = std::nullopt,
+               .description =
+                   "Typed metric, direction, subject, and tolerance policy.",
+           }},
+          {"left", result},
+          {"right", result},
+      },
+      .outputs = {
+          {"decision",
+           OperationPortDescriptor{
+               .type = OperationPortType::artifact,
+               .required = true,
+               .artifact_type = ArtifactType::report,
+               .artifact_schema = "rwkv-lab.scalar-metric-decision.v1",
+               .description =
+                   "Immutable lineage-bound scalar comparison decision.",
+           }},
+      },
+  };
 }
 
 OperationAuthoringDeclaration vision_native_head_authoring() {
@@ -378,6 +425,28 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
                   "torch_adamw_no_decay", "2.0.0"}}},
            }},
       restart_only_training_lifecycle(), posttraining_authoring()));
+  profiles.push_back({
+      .key = key("rwkv-lab.scalar-metric-decision",
+                 "rwkv_lab.scalar_metric_decision.v1.Decide", "decide"),
+      .effect = Effect::process,
+      .idempotency = Idempotency::receipt_required,
+      .code_fingerprint = code_fingerprint,
+      .required_capabilities = {"worker.controls", "worker.metrics"},
+      .lifecycle = {
+          .stateful = false,
+          .graceful_stop = false,
+          .checkpoint_now = false,
+          .pause_keep_resources = false,
+          .pause_release_resources = false,
+          .compile = false,
+          .warmup = false,
+          .qualify = false,
+          .profile = false,
+          .resume_grade = ResumeGrade::none,
+      },
+      .training_composition = std::nullopt,
+      .authoring = scalar_metric_decision_authoring(),
+  });
   profiles.push_back(profile(
       key("rwkv-lab.qwen-ao3", "rwkv_lab.qwen_ao3.v1.Train"),
       code_fingerprint,
@@ -579,6 +648,8 @@ rwkv_lab_worker_runtime_requirements() {
       {"rwkv-lab.rwkv-rlvr",
        canonical_distributions(
            {"einops", "grpcio", "numpy", "pillow", "protobuf", "torch"})},
+      {"rwkv-lab.scalar-metric-decision",
+       canonical_distributions({"grpcio", "pillow", "protobuf", "torch"})},
       {"rwkv-lab.vision-teacher-compressor",
        canonical_distributions(
            {"grpcio", "numpy", "pillow", "protobuf", "safetensors",

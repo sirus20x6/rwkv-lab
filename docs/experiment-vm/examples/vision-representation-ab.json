@@ -53,6 +53,24 @@
         "schema": "rwkv-lab.vision-frozen-adapter-checkpoint.v1",
         "immutability": "immutable",
         "fingerprint": "manifest_sha256"
+      },
+      "moonvit_result": {
+        "type": "report",
+        "schema": "rwkv-lab.scalar-metric-result.v1",
+        "immutability": "immutable",
+        "fingerprint": "manifest_sha256"
+      },
+      "compressor_result": {
+        "type": "report",
+        "schema": "rwkv-lab.scalar-metric-result.v1",
+        "immutability": "immutable",
+        "fingerprint": "manifest_sha256"
+      },
+      "representation_decision": {
+        "type": "report",
+        "schema": "rwkv-lab.scalar-metric-decision.v1",
+        "immutability": "immutable",
+        "fingerprint": "manifest_sha256"
       }
     },
     "components": {
@@ -76,6 +94,16 @@
         "operations": {
           "train": {
             "contract": "rwkv_lab.vision_frozen_adapter.v1.Train"
+          }
+        }
+      },
+      "decision": {
+        "adapter": "rwkv-lab.scalar-metric-decision",
+        "version": "1.0.0",
+        "runtime": "python_worker",
+        "operations": {
+          "decide": {
+            "contract": "rwkv_lab.scalar_metric_decision.v1.Decide"
           }
         }
       }
@@ -177,7 +205,8 @@
             }
           },
           "publishes": {
-            "checkpoint": "moonvit_checkpoint"
+            "checkpoint": "moonvit_checkpoint",
+            "result": "moonvit_result"
           },
           "idempotency": "receipt_required",
           "effect": "process",
@@ -268,7 +297,8 @@
             }
           },
           "publishes": {
-            "checkpoint": "compressor_checkpoint"
+            "checkpoint": "compressor_checkpoint",
+            "result": "compressor_result"
           },
           "idempotency": "receipt_required",
           "effect": "process",
@@ -276,6 +306,45 @@
           "transitions": [
             {
               "on": "worker.completed",
+              "target": "compare_arms"
+            },
+            {
+              "on": "operation.failed",
+              "target": "$failed"
+            }
+          ]
+        },
+        "compare_arms": {
+          "description": "Compare the two immutable best-evaluation results under an explicit minimize policy.",
+          "invoke": {
+            "component": "decision",
+            "operation": "decide",
+            "inputs": {
+              "config": {
+                "literal": {
+                  "metric": "eval.loss",
+                  "direction": "minimize",
+                  "left_subject": "moonvit",
+                  "right_subject": "compressor",
+                  "absolute_tolerance": 0.0
+                }
+              },
+              "left": {
+                "artifact": "moonvit_result"
+              },
+              "right": {
+                "artifact": "compressor_result"
+              }
+            }
+          },
+          "publishes": {
+            "decision": "representation_decision"
+          },
+          "idempotency": "receipt_required",
+          "effect": "process",
+          "transitions": [
+            {
+              "on": "operation.completed",
               "target": "release_gpu"
             },
             {

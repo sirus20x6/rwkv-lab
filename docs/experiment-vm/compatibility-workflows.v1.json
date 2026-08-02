@@ -1,7 +1,7 @@
 {
   "api_version": "trainvm.compatibility-workflows/v1",
   "authority": "compatibility_evidence_only",
-  "source_tree_digest": "sha256:b0ac6788e6fc8c67bd399917383cecaef6d3e1a079f0360ca9f8241869a7041c",
+  "source_tree_digest": "sha256:d2767aef475f3c29993c2534e4ef8a4c30eea24d2dfa73cdbf13ec72e70133cd",
   "entries": [
     {
       "stable_id": "rwkv.synthetic-campaign",
@@ -101,11 +101,12 @@
         "src/rwkv_lab/trainvm_adapters/handlers.py",
         "src/rwkv_lab/trainvm_adapters/io.py",
         "src/rwkv_lab/trainvm_adapters/vision_frozen.py",
+        "src/rwkv_lab/trainvm_worker/artifact.py",
         "src/rwkv_lab/vision_train.py"
       ],
       "stateful": true,
       "operation_role": "training",
-      "notes": "Canonical frozen-vision-to-RWKV trainer. The sealed rwkv-lab.vision-frozen-adapter@1.0.0 TrainVM profile exposes the established cached MoonViT and frozen-compressor arms as closed typed configuration; content-binds checkpoints, vocabulary, manifests, image references, caches, and compressor model trees; consumes authority-selected AdamW, clipping, and FP32-parameter/BF16-compute components; restores sampler plus Python/Torch/CUDA RNG and control state; emits live train/eval telemetry and bounded traces; and publishes a required compatible checkpoint. Exact trajectory equivalence remains unproven.",
+      "notes": "Canonical frozen-vision-to-RWKV trainer. The sealed rwkv-lab.vision-frozen-adapter@1.0.0 TrainVM profile exposes the established cached MoonViT and frozen-compressor arms as closed typed configuration; content-binds checkpoints, vocabulary, manifests, image references, caches, and compressor model trees; consumes authority-selected AdamW, clipping, and FP32-parameter/BF16-compute components; restores sampler plus Python/Torch/CUDA RNG and control state; emits live train/eval telemetry and bounded traces; and publishes both a required compatible checkpoint and immutable best-eval scalar result. Exact trajectory equivalence remains unproven.",
       "observed_invocation": "python_module",
       "resume_evidence": "compatible",
       "legacy_invocation_display": "python -m rwkv_lab.vision_train --data <manifest> --eval-data <manifest>"
@@ -1239,14 +1240,16 @@
         "scripts/run_vision_representation_ab_arm.sh",
         "src/rwkv_lab/trainvm_adapters/handlers.py",
         "src/rwkv_lab/trainvm_adapters/io.py",
+        "src/rwkv_lab/trainvm_adapters/metric_decision.py",
         "src/rwkv_lab/trainvm_adapters/vision_frozen.py",
+        "src/rwkv_lab/trainvm_worker/artifact.py",
         "src/rwkv_lab/vision_train.py"
       ],
       "observed_invocation": "host_script",
       "stateful": true,
       "resume_evidence": "compatible",
       "operation_role": "campaign",
-      "notes": "The legacy sequential MoonViT-only versus frozen-compressor supervisor is replaced by one compiler- and production-registry-validated TrainVM graph. Both arms share an exclusive authority-owned lease, use the sealed compatible frozen-vision adapter, publish separate immutable checkpoints, and derive retry-stable node-isolated run directories. Static input identities must be frozen into input_content_roots before submission; a versioned cross-arm promotion decision is a separate campaign enhancement rather than behavior provided by the legacy launcher.",
+      "notes": "The legacy sequential MoonViT-only versus frozen-compressor supervisor is replaced by one compiler- and production-registry-validated TrainVM graph. Both arms share an exclusive authority-owned lease, use the sealed compatible frozen-vision adapter, publish separate immutable checkpoints and scalar result artifacts, and derive retry-stable node-isolated run directories. A stateless sealed decision node independently re-verifies both immutable artifact trees, applies an explicit metric/direction/tolerance policy, and publishes a lineage-bound result. Static input identities must still be frozen into input_content_roots before submission.",
       "legacy_invocation_display": "python scripts/run_vision_representation_ab.py"
     },
     {

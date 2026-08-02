@@ -209,6 +209,16 @@ declared content-root trees are recursively bound. A manifest that references pa
 declared root set remains invalid; remote/object-store references still require a typed immutable
 artifact provider rather than pathname authority.
 
+Downstream Python operations consume controller-selected non-checkpoint artifacts through
+`resolve_input_artifact()`, never by opening the descriptor URI directly. The resolver requires the
+exact artifact descriptor shape, local canonical manifest URI, declared kind and schema, workspace
+confinement, manifest fingerprint, producer and parent lineage, canonical tree digest, and every
+payload object hash. `read_input_artifact_file()` rechecks a selected object's stable file identity
+and digest at the point of use, while `load_input_artifact_json()` additionally requires canonical,
+finite JSON. The scalar-metric decision adapter is the first production consumer of this boundary:
+it compares two independently verified result artifacts and publishes a new immutable receipt whose
+parents are exactly those candidate artifact IDs.
+
 Install the optional runtime dependencies with:
 
 ```sh

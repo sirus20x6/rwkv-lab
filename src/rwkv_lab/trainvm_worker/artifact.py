@@ -18,8 +18,18 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import unquote, urlsplit
 
-from ._canonical import canonical_dumps, is_bounded_text, is_digest, sha256_digest
+from ._canonical import (
+    CanonicalJsonError,
+    canonical_dumps,
+    canonical_loads,
+    exact_fields,
+    is_bounded_text,
+    is_digest,
+    is_uint64,
+    sha256_digest,
+)
 
 try:
     from trainvm.v1 import trainvm_pb2 as wire
@@ -41,6 +51,38 @@ _KINDS = {
     "report": wire.ARTIFACT_KIND_REPORT,
     "opaque": wire.ARTIFACT_KIND_OPAQUE,
 }
+_ARTIFACT_FIELDS = frozenset(
+    {
+        "artifact_id",
+        "logical_name",
+        "kind",
+        "schema",
+        "uri",
+        "size_bytes",
+        "fingerprint_algorithm",
+        "fingerprint",
+        "complete",
+        "producer_node_id",
+        "producer_attempt_id",
+        "parent_artifact_ids",
+        "published_at_ns",
+    }
+)
+_MANIFEST_FIELDS = frozenset(
+    {
+        "schema",
+        "artifact_schema",
+        "artifact_kind",
+        "invocation_digest",
+        "producer",
+        "payload_directory",
+        "file_count",
+        "payload_size_bytes",
+        "objects",
+        "parent_artifact_ids",
+        "canonical_tree_digest",
+    }
+)
 
 
 class ArtifactPublicationError(RuntimeError):
@@ -69,6 +111,29 @@ class PublishedArtifact:
     payload_size_bytes: int
     file_count: int
     worker_sequence: int
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedArtifactObject:
+    relative_path: str
+    sha256: str
+    size_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedInputArtifact:
+    artifact_id: str
+    logical_name: str
+    kind: str
+    schema: str
+    manifest_path: Path
+    payload_directory: Path
+    manifest_sha256: str
+    payload_size_bytes: int
+    file_count: int
+    parent_artifact_ids: tuple[str, ...]
+    canonical_tree_digest: str
+    objects: tuple[ResolvedArtifactObject, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,17 +380,292 @@ def _verify_revision(
             or source.size != expected.get("size_bytes")
         ):
             raise ArtifactPublicationError("artifact revision payload was mutated")
-        digest = hashlib.sha256()
-        descriptor = os.open(
-            source.source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-        )
-        try:
-            while chunk := os.read(descriptor, 4 * 1024 * 1024):
-                digest.update(chunk)
-        finally:
-            os.close(descriptor)
-        if "sha256:" + digest.hexdigest() != expected.get("sha256"):
+        raw = _read_regular_file_stably(source.source, source.size)
+        if sha256_digest(raw) != expected.get("sha256"):
             raise ArtifactPublicationError("artifact revision payload was mutated")
+
+
+def _read_regular_file_stably(path: Path, maximum_bytes: int) -> bytes:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as error:
+        raise ArtifactPublicationError("artifact manifest is unavailable") from error
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > maximum_bytes:
+            raise ArtifactPublicationError("artifact manifest is invalid")
+        chunks: list[bytes] = []
+        observed = 0
+        while chunk := os.read(descriptor, min(1024 * 1024, maximum_bytes + 1)):
+            observed += len(chunk)
+            if observed > maximum_bytes:
+                raise ArtifactPublicationError("artifact manifest exceeds its bound")
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            raise ArtifactPublicationError("artifact manifest changed while read")
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def _manifest_path_from_uri(uri: object) -> Path:
+    if not is_bounded_text(uri, 4096):
+        raise ArtifactPublicationError("artifact URI is invalid")
+    assert isinstance(uri, str)
+    parsed = urlsplit(uri)
+    if (
+        parsed.scheme != "file"
+        or parsed.netloc
+        or parsed.query
+        or parsed.fragment
+        or not parsed.path.startswith("/")
+    ):
+        raise ArtifactPublicationError("artifact URI is not a local file URI")
+    try:
+        decoded = unquote(parsed.path, errors="strict")
+    except UnicodeDecodeError as error:
+        raise ArtifactPublicationError("artifact URI is not UTF-8") from error
+    path = Path(decoded)
+    if (
+        not path.is_absolute()
+        or path != Path(os.path.normpath(path))
+        or path.as_uri() != uri
+        or path.name != "manifest.json"
+    ):
+        raise ArtifactPublicationError("artifact manifest URI is noncanonical")
+    return path
+
+
+def resolve_input_artifact(
+    invocation: object,
+    input_name: str,
+    *,
+    required_kind: str,
+    required_schema: str,
+) -> ResolvedInputArtifact:
+    """Resolve and fully verify one controller-selected immutable input artifact."""
+
+    inputs = getattr(invocation, "inputs", None)
+    workspace = getattr(invocation, "workspace", None)
+    if not isinstance(inputs, Mapping) or not isinstance(workspace, Mapping):
+        raise ArtifactPublicationError("artifact input authority is invalid")
+    artifact = inputs.get(input_name)
+    if not isinstance(artifact, Mapping):
+        raise ArtifactPublicationError("artifact input descriptor is missing")
+    try:
+        exact_fields(artifact, _ARTIFACT_FIELDS)
+    except CanonicalJsonError as error:
+        raise ArtifactPublicationError(
+            "artifact input descriptor fields are inexact"
+        ) from error
+    parents = artifact.get("parent_artifact_ids")
+    valid_parents = (
+        isinstance(parents, (tuple, list))
+        and len(parents) == len(set(parents))
+        and all(is_bounded_text(parent, 1024) for parent in parents)
+    )
+    if (
+        not is_bounded_text(artifact.get("artifact_id"), 1024)
+        or not is_bounded_text(artifact.get("logical_name"), 1024)
+        or artifact.get("kind") != required_kind
+        or artifact.get("schema") != required_schema
+        or required_kind not in _KINDS
+        or not is_uint64(artifact.get("size_bytes"))
+        or artifact.get("fingerprint_algorithm") != "manifest_sha256"
+        or not is_digest(artifact.get("fingerprint"))
+        or artifact.get("complete") is not True
+        or not is_bounded_text(artifact.get("producer_node_id"), 1024)
+        or not is_bounded_text(artifact.get("producer_attempt_id"), 1024)
+        or not valid_parents
+        or not is_uint64(artifact.get("published_at_ns"))
+    ):
+        raise ArtifactPublicationError("artifact input descriptor is invalid")
+
+    manifest_path = _manifest_path_from_uri(artifact.get("uri"))
+    if manifest_path.is_symlink():
+        raise ArtifactPublicationError("artifact manifest cannot be a symlink")
+    raw_roots = tuple(workspace.get("allowed_read_roots") or ()) + tuple(
+        workspace.get("allowed_write_roots") or ()
+    )
+    roots = _roots(raw_roots, "artifact input roots")
+    try:
+        manifest_path = manifest_path.resolve(strict=True)
+    except OSError as error:
+        raise ArtifactPublicationError("artifact manifest is unavailable") from error
+    if not _within(manifest_path, roots):
+        raise ArtifactPublicationError("artifact manifest escaped workspace authority")
+    raw = _read_regular_file_stably(
+        manifest_path, MAXIMUM_ARTIFACT_MANIFEST_BYTES
+    )
+    if sha256_digest(raw) != artifact.get("fingerprint"):
+        raise ArtifactPublicationError("artifact manifest fingerprint disagrees")
+    try:
+        manifest = canonical_loads(
+            raw, maximum_bytes=MAXIMUM_ARTIFACT_MANIFEST_BYTES
+        )
+        exact_fields(manifest, _MANIFEST_FIELDS)
+    except CanonicalJsonError as error:
+        raise ArtifactPublicationError("artifact manifest is not canonical") from error
+
+    producer = manifest.get("producer")
+    objects = manifest.get("objects")
+    manifest_parents = manifest.get("parent_artifact_ids")
+    tree_digest = manifest.get("canonical_tree_digest")
+    body = dict(manifest)
+    del body["canonical_tree_digest"]
+    if (
+        manifest.get("schema") != IMMUTABLE_TREE_SCHEMA
+        or manifest.get("artifact_schema") != required_schema
+        or manifest.get("artifact_kind") != required_kind
+        or not is_digest(manifest.get("invocation_digest"))
+        or not isinstance(producer, dict)
+        or set(producer) != {"run_id", "node_id", "attempt_id"}
+        or not is_bounded_text(producer.get("run_id"), 1024)
+        or producer.get("node_id") != artifact.get("producer_node_id")
+        or producer.get("attempt_id") != artifact.get("producer_attempt_id")
+        or manifest.get("payload_directory") != "payload"
+        or not is_uint64(manifest.get("file_count"), positive=True)
+        or not is_uint64(manifest.get("payload_size_bytes"))
+        or not isinstance(objects, list)
+        or len(objects) != manifest.get("file_count")
+        or len(objects) > MAXIMUM_ARTIFACT_FILES
+        or manifest_parents != list(parents)
+        or not is_digest(tree_digest)
+        or sha256_digest(canonical_dumps(body)) != tree_digest
+    ):
+        raise ArtifactPublicationError("artifact manifest semantics are invalid")
+    total_size = 0
+    seen: set[str] = set()
+    resolved_objects: list[ResolvedArtifactObject] = []
+    for item in objects:
+        if not isinstance(item, dict) or set(item) != {
+            "relative_path",
+            "sha256",
+            "size_bytes",
+        }:
+            raise ArtifactPublicationError("artifact object record is invalid")
+        relative = item.get("relative_path")
+        size = item.get("size_bytes")
+        try:
+            valid_relative = (
+                isinstance(relative, str)
+                and _relative_text(Path(relative)) == relative
+            )
+        except ArtifactPublicationError:
+            valid_relative = False
+        if (
+            not valid_relative
+            or relative in seen
+            or not is_digest(item.get("sha256"))
+            or not is_uint64(size)
+        ):
+            raise ArtifactPublicationError("artifact object identity is invalid")
+        assert isinstance(relative, str) and isinstance(size, int)
+        seen.add(relative)
+        total_size += size
+        resolved_objects.append(
+            ResolvedArtifactObject(
+                relative_path=relative,
+                sha256=str(item["sha256"]),
+                size_bytes=size,
+            )
+        )
+        if total_size > MAXIMUM_ARTIFACT_BYTES:
+            raise ArtifactPublicationError("artifact payload exceeds its byte bound")
+    if (
+        total_size != manifest.get("payload_size_bytes")
+        or artifact.get("size_bytes") != total_size + len(raw)
+    ):
+        raise ArtifactPublicationError("artifact size authority is inconsistent")
+    revision = manifest_path.parent
+    _verify_revision(revision, raw, tuple(objects))
+    payload = (revision / "payload").resolve(strict=True)
+    return ResolvedInputArtifact(
+        artifact_id=str(artifact["artifact_id"]),
+        logical_name=str(artifact["logical_name"]),
+        kind=required_kind,
+        schema=required_schema,
+        manifest_path=manifest_path,
+        payload_directory=payload,
+        manifest_sha256=str(artifact["fingerprint"]),
+        payload_size_bytes=total_size,
+        file_count=len(objects),
+        parent_artifact_ids=tuple(parents),
+        canonical_tree_digest=str(tree_digest),
+        objects=tuple(resolved_objects),
+    )
+
+
+def read_input_artifact_file(
+    artifact: ResolvedInputArtifact,
+    relative_path: str,
+    *,
+    maximum_bytes: int,
+) -> bytes:
+    """Read one declared artifact object and recheck its immutable identity."""
+
+    try:
+        normalized = _relative_text(Path(relative_path))
+    except ArtifactPublicationError as error:
+        raise ArtifactPublicationError("artifact object request is invalid") from error
+    expected = next(
+        (item for item in artifact.objects if item.relative_path == normalized),
+        None,
+    )
+    if expected is None:
+        raise ArtifactPublicationError("artifact object is not in its manifest")
+    if maximum_bytes < 0 or expected.size_bytes > maximum_bytes:
+        raise ArtifactPublicationError("artifact object exceeds its read bound")
+    candidate = artifact.payload_directory / normalized
+    if candidate.is_symlink():
+        raise ArtifactPublicationError("artifact object cannot be a symlink")
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as error:
+        raise ArtifactPublicationError("artifact object is unavailable") from error
+    if (
+        resolved != candidate
+        or artifact.payload_directory not in resolved.parents
+        or not resolved.is_file()
+    ):
+        raise ArtifactPublicationError("artifact object escaped its payload")
+    raw = _read_regular_file_stably(resolved, maximum_bytes)
+    if (
+        len(raw) != expected.size_bytes
+        or sha256_digest(raw) != expected.sha256
+    ):
+        raise ArtifactPublicationError("artifact object identity disagrees")
+    return raw
+
+
+def load_input_artifact_json(
+    artifact: ResolvedInputArtifact,
+    relative_path: str,
+    *,
+    maximum_bytes: int,
+) -> Mapping[str, object]:
+    """Load one canonical JSON object from a verified immutable artifact."""
+
+    raw = read_input_artifact_file(
+        artifact, relative_path, maximum_bytes=maximum_bytes
+    )
+    try:
+        return canonical_loads(raw, maximum_bytes=maximum_bytes)
+    except CanonicalJsonError as error:
+        raise ArtifactPublicationError(
+            "artifact JSON object is not canonical"
+        ) from error
 
 
 class ImmutableArtifactPublisher:

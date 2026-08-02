@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import math
 import os
 import shutil
 from argparse import Namespace
@@ -18,6 +20,8 @@ from rwkv_lab.trainvm_worker import (
     WorkerInvocation,
     WorkerObservability,
     WorkerStepProfiler,
+    load_input_artifact_json,
+    resolve_input_artifact,
     resolve_resume_checkpoint,
 )
 
@@ -30,6 +34,7 @@ from .checkpoints import (
 from .components import WorkerTrainingComponents
 from .io import WorkspacePathAuthority, read_inline_config
 from .mageflow_controls import lower_initial_mageflow_controls
+from .metric_decision import ScalarMetricDecisionConfig
 from .posttraining import RWKVPostTrainConfig
 from .qwen_controls import lower_initial_qwen_controls
 from .rlvr import RLVRTrainConfig
@@ -54,11 +59,68 @@ class HandlerResult:
     artifact_requests: tuple[ArtifactPublicationRequest, ...] = ()
 
 
+def _declares_artifact_output(invocation: object, name: str) -> bool:
+    publishes = getattr(invocation, "publishes", None)
+    return isinstance(publishes, Mapping) and name in publishes
+
+
+def _stage_canonical_json_artifact(
+    run_directory: Path,
+    *,
+    attempt_id: object,
+    stem: str,
+    filename: str,
+    document: Mapping[str, object],
+) -> Path:
+    suffix = hashlib.sha256(str(attempt_id).encode("utf-8")).hexdigest()[:16]
+    staging = run_directory / f"{stem}-{suffix}"
+    try:
+        encoded = json.dumps(
+            document,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise AdapterDispatchError("artifact result is not finite JSON") from error
+    if not encoded or len(encoded) > 64 * 1024:
+        raise AdapterDispatchError("artifact result exceeds its byte bound")
+    try:
+        staging.mkdir(mode=0o750, parents=True, exist_ok=False)
+        descriptor = os.open(
+            staging / filename,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o440,
+        )
+        try:
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(encoded)
+                output.flush()
+                os.fsync(output.fileno())
+        except BaseException:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            raise
+        directory_descriptor = os.open(staging, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    except BaseException:
+        if staging.exists() and staging.is_dir() and not staging.is_symlink():
+            shutil.rmtree(staging)
+        raise
+    return staging
+
+
 AdapterKey = tuple[str, str, str, str]
 Handler = Callable[
     [
         WorkerInvocation,
-        WorkerTrainingComponents,
+        WorkerTrainingComponents | None,
         WorkerStepProfiler,
         WorkerObservability,
         WorkerControlRuntime,
@@ -1081,6 +1143,10 @@ def _vision_frozen_adapter(
         raise AdapterDispatchError(
             "frozen vision invocation omits its required checkpoint artifact"
         )
+    if not _declares_artifact_output(invocation, "result"):
+        raise AdapterDispatchError(
+            "frozen vision invocation omits its required scalar result artifact"
+        )
     effective_controls = (
         getattr(controls, "effective_values", {}) if controls is not None else {}
     )
@@ -1335,6 +1401,18 @@ def _vision_frozen_adapter(
     status = result.get("status")
     if status not in {"complete", "interrupted"}:
         raise AdapterDispatchError("frozen vision returned an invalid status")
+    best_eval_loss = result.get("best_eval_loss")
+    if (
+        status == "complete"
+        and (
+            isinstance(best_eval_loss, bool)
+            or not isinstance(best_eval_loss, (int, float))
+            or not math.isfinite(float(best_eval_loss))
+        )
+    ):
+        raise AdapterDispatchError(
+            "frozen vision completed without a finite best evaluation loss"
+        )
     request = checkpoint_request(
         invocation,
         run_directory,
@@ -1352,11 +1430,34 @@ def _vision_frozen_adapter(
             "rng_torch",
         ),
     )
+    result_requests: tuple[ArtifactPublicationRequest, ...] = ()
+    if status == "complete":
+        result_directory = _stage_canonical_json_artifact(
+            run_directory,
+            attempt_id=getattr(invocation, "attempt_id", "attempt"),
+            stem="scalar-result",
+            filename="result.json",
+            document={
+                "api_version": "rwkv-lab.scalar-metric-result/v1",
+                "direction": "minimize",
+                "metric": "eval.loss",
+                "optimizer_step": request.optimizer_step,
+                "subject": config.arm,
+                "value": float(best_eval_loss),
+            },
+        )
+        result_requests = (
+            ArtifactPublicationRequest(
+                source_directory=result_directory,
+                output_name="result",
+            ),
+        )
     return HandlerResult(
         "operation.failed" if status == "interrupted" else "worker.completed",
         {"reason": completion_reason(status), "arm": config.arm},
         optimizer_step=request.optimizer_step,
         checkpoint_requests=(request,),
+        artifact_requests=result_requests,
     )
 
 
@@ -1520,6 +1621,147 @@ def _vision_native_head(
         {"reason": completion_reason(status)},
         optimizer_step=request.optimizer_step,
         checkpoint_requests=(request,),
+    )
+
+
+def _scalar_metric_decision(
+    invocation: WorkerInvocation,
+    _components: WorkerTrainingComponents | None,
+    _step_profiler: WorkerStepProfiler | None = None,
+    observability: WorkerObservability | None = None,
+    controls: WorkerControlRuntime | None = None,
+) -> HandlerResult:
+    """Compare two immutable scalar results and publish one lineage-bound receipt."""
+
+    if getattr(invocation, "resume", None) is not None:
+        raise AdapterDispatchError("scalar metric decision is stateless")
+    if not _declares_artifact_output(invocation, "decision"):
+        raise AdapterDispatchError(
+            "scalar metric decision omits its required decision artifact"
+        )
+    effective_controls = (
+        getattr(controls, "effective_values", {}) if controls is not None else {}
+    )
+    if not isinstance(effective_controls, Mapping) or effective_controls:
+        raise AdapterDispatchError("scalar metric decision rejects controls")
+    inputs = getattr(invocation, "inputs", None)
+    if not isinstance(inputs, Mapping) or set(inputs) != {"config", "left", "right"}:
+        raise AdapterDispatchError(
+            "scalar metric decision requires exactly config, left, and right inputs"
+        )
+    verification = (
+        observability.keepalive(0, "verifying_inputs")
+        if observability is not None
+        else nullcontext()
+    )
+    with verification:
+        config = ScalarMetricDecisionConfig(
+            **read_inline_config({"config": inputs["config"]})
+        )
+        left = resolve_input_artifact(
+            invocation,
+            "left",
+            required_kind="report",
+            required_schema="rwkv-lab.scalar-metric-result.v1",
+        )
+        right = resolve_input_artifact(
+            invocation,
+            "right",
+            required_kind="report",
+            required_schema="rwkv-lab.scalar-metric-result.v1",
+        )
+        paths = WorkspacePathAuthority.from_workspace(
+            invocation.workspace, require_content=False
+        )
+        run_directory = paths.node_run_directory(invocation.node_id)
+
+    def load_result(artifact, expected_subject: str) -> tuple[float, int]:
+        document = load_input_artifact_json(
+            artifact, "result.json", maximum_bytes=64 * 1024
+        )
+        if set(document) != {
+            "api_version",
+            "direction",
+            "metric",
+            "optimizer_step",
+            "subject",
+            "value",
+        }:
+            raise AdapterDispatchError("scalar metric result fields are inexact")
+        value = document.get("value")
+        step = document.get("optimizer_step")
+        if (
+            document.get("api_version")
+            != "rwkv-lab.scalar-metric-result/v1"
+            or document.get("metric") != config.metric
+            or document.get("direction") != config.direction
+            or document.get("subject") != expected_subject
+            or isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or isinstance(step, bool)
+            or not isinstance(step, int)
+            or step < 0
+        ):
+            raise AdapterDispatchError("scalar metric result semantics are invalid")
+        return float(value), step
+
+    left_value, left_step = load_result(left, config.left_subject)
+    right_value, right_step = load_result(right, config.right_subject)
+    signed_delta = right_value - left_value
+    if abs(signed_delta) <= config.absolute_tolerance:
+        outcome = "tie"
+        selected_subject = None
+        selected_artifact_id = None
+    else:
+        left_wins = (
+            left_value < right_value
+            if config.direction == "minimize"
+            else left_value > right_value
+        )
+        outcome = "selected"
+        selected_subject = config.left_subject if left_wins else config.right_subject
+        selected_artifact_id = left.artifact_id if left_wins else right.artifact_id
+    decision_directory = _stage_canonical_json_artifact(
+        run_directory,
+        attempt_id=getattr(invocation, "attempt_id", "attempt"),
+        stem="scalar-decision",
+        filename="decision.json",
+        document={
+            "absolute_tolerance": config.absolute_tolerance,
+            "api_version": "rwkv-lab.scalar-metric-decision/v1",
+            "candidates": [
+                {
+                    "artifact_id": left.artifact_id,
+                    "optimizer_step": left_step,
+                    "subject": config.left_subject,
+                    "value": left_value,
+                },
+                {
+                    "artifact_id": right.artifact_id,
+                    "optimizer_step": right_step,
+                    "subject": config.right_subject,
+                    "value": right_value,
+                },
+            ],
+            "direction": config.direction,
+            "metric": config.metric,
+            "outcome": outcome,
+            "selected_artifact_id": selected_artifact_id,
+            "selected_subject": selected_subject,
+            "signed_right_minus_left": signed_delta,
+        },
+    )
+    return HandlerResult(
+        "operation.completed",
+        {"outcome": outcome, "selected_subject": selected_subject},
+        artifact_requests=(
+            ArtifactPublicationRequest(
+                source_directory=decision_directory,
+                output_name="decision",
+                parent_artifact_ids=(left.artifact_id, right.artifact_id),
+            ),
+        ),
     )
 
 
@@ -1908,6 +2150,12 @@ _HANDLERS: Mapping[AdapterKey, Handler] = {
         "rwkv_lab.qwen_ao3.v1.Train",
     ): _qwen_ao3,
     (
+        "rwkv-lab.scalar-metric-decision",
+        "1.0.0",
+        "decide",
+        "rwkv_lab.scalar_metric_decision.v1.Decide",
+    ): _scalar_metric_decision,
+    (
         "rwkv-lab.rwkv-posttraining",
         "1.0.0",
         "train",
@@ -1994,10 +2242,13 @@ def execute_invocation(
             "worker invocation has no closed adapter handler"
         ) from error
     if invocation.training is None:
-        raise AdapterDispatchError("training adapter has no resolved composition")
-    components = WorkerTrainingComponents(
-        invocation.training, invocation.training.model_family
-    )
+        if handler is not _scalar_metric_decision:
+            raise AdapterDispatchError("training adapter has no resolved composition")
+        components = None
+    else:
+        components = WorkerTrainingComponents(
+            invocation.training, invocation.training.model_family
+        )
     if observability is None:
         raise AdapterDispatchError(
             "training adapter has no worker observability authority"
