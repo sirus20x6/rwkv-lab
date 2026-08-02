@@ -1,0 +1,22 @@
+{
+  "api_version": "trainvm.input-content-root-set/v1",
+  "paths": [
+    "/home/sirus/.cache/moe-mla/i1_eight_hour_images",
+    "/thearray/downloads/cache/moe-mla/fusion_so400m_next_128_shard_001_ocr10",
+    "/thearray/downloads/cache/moe-mla/moonvit_next_128_shard_001_ocr10",
+    "/thearray/git/moe-mla/curated_vision/vision_next_shard_000_ocr10_eval.jsonl",
+    "/thearray/git/moe-mla/curated_vision/vision_next_shard_001_ocr10_train.jsonl",
+    "/thearray/git/moe-mla/datasets/doclingmatix_ocr_images",
+    "/thearray/git/moe-mla/datasets/i1_eight_hour_images",
+    "/thearray/git/moe-mla/datasets/i1_matched_images",
+    "/thearray/git/moe-mla/joy-captioning-20250408a/images_direct",
+    "/thearray/git/moe-mla/models/kimi-k2.6-moonvit/model-00064-of-000064.safetensors",
+    "/thearray/git/moe-mla/models/rwkv7-g1h-2.9b-20260710-ctx10240.pth",
+    "/thearray/git/moe-mla/models/vision/dinov2-base",
+    "/thearray/git/moe-mla/models/vision/sam-vit-base",
+    "/thearray/git/moe-mla/models/vision/siglip2-so400m-patch16-512",
+    "/thearray/git/moe-mla/models/vision/teacher-compressor-so400m-dinov2-sam-128x1024-v1.pt",
+    "/thearray/git/moe-mla/nsfw-video-still-caption-grid-only/extracted",
+    "/thearray/git/moe-mla/src/rwkv_lab/assets/rwkv_vocab_v20230424.txt"
+  ]
+}

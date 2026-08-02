@@ -452,6 +452,18 @@ std::string digest_hex(const Digest& digest) {
   return result;
 }
 
+bool path_within(const std::filesystem::path& child,
+                 const std::filesystem::path& parent) {
+  auto child_component = child.begin();
+  for (auto parent_component = parent.begin();
+       parent_component != parent.end();
+       ++parent_component, ++child_component) {
+    if (child_component == child.end() || *child_component != *parent_component)
+      return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 InputContentRootIdentity measure_input_content_root(
@@ -478,6 +490,39 @@ InputContentRootIdentity measure_input_content_root(
           .file_count = root.file_count,
           .total_bytes = root.total_bytes,
           .tree_sha256 = "sha256:" + digest_hex(root.digest)};
+}
+
+std::vector<InputContentRootIdentity> measure_input_content_root_set(
+    const InputContentRootSet& root_set) {
+  if (root_set.api_version != kInputContentRootSetApiVersion)
+    throw std::invalid_argument("input content root set API version is unsupported");
+  if (root_set.paths.empty() || root_set.paths.size() > 256U)
+    throw std::invalid_argument(
+        "input content root set must contain between 1 and 256 paths");
+  std::vector<std::filesystem::path> paths;
+  paths.reserve(root_set.paths.size());
+  for (const std::string& value : root_set.paths) {
+    const std::filesystem::path path(value);
+    if (!path.is_absolute() || path.empty() || path.lexically_normal() != path)
+      throw std::invalid_argument(
+          "input content root set contains a noncanonical path");
+    paths.push_back(path);
+  }
+  std::ranges::sort(paths, {}, [](const std::filesystem::path& path) {
+    return path.native();
+  });
+  for (std::size_t index = 0U; index < paths.size(); ++index) {
+    if (index > 0U &&
+        (paths[index] == paths[index - 1U] ||
+         path_within(paths[index], paths[index - 1U])))
+      throw std::invalid_argument(
+          "input content root set paths must be unique and nonoverlapping");
+  }
+  std::vector<InputContentRootIdentity> identities;
+  identities.reserve(paths.size());
+  for (const auto& path : paths)
+    identities.push_back(measure_input_content_root(path));
+  return identities;
 }
 
 }  // namespace trainvm

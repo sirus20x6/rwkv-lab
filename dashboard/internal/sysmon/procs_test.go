@@ -9,17 +9,19 @@ import (
 
 func TestMageFlowExpertTrainerIsRecognized(t *testing.T) {
 	const script = "mage_flow_expert_train.py"
-	if !AllowedScript(script) {
-		t.Fatal("Mage-Flow expert trainer is not allowlisted")
-	}
-	module, ok := ModuleForScript(script)
-	if !ok || module != "rwkv_lab.mage_flow_expert_train" {
-		t.Fatalf("unexpected module mapping: module=%q ok=%v", module, ok)
-	}
 	if got := matchedScript(
 		[]string{"python", "-m", "rwkv_lab.mage_flow_expert_train", "train"},
 	); got != script {
 		t.Fatalf("module process was not recognized: %q", got)
+	}
+}
+
+func TestMLATrainersRemainObservable(t *testing.T) {
+	for _, script := range []string{"train_mla.py", "train_mla_engram.py"} {
+		module := trainingModules[script]
+		if got := matchedScript([]string{"python", "-m", module}); got != script {
+			t.Fatalf("legacy MLA process is no longer observable: script=%q got=%q", script, got)
+		}
 	}
 }
 

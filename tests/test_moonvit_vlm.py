@@ -1575,6 +1575,35 @@ def test_incompatible_pooled_feature_cache_is_regenerated(tmp_path: Path):
     assert torch.load(key, weights_only=True).shape == (5, 4, 1152)
 
 
+def test_cache_only_pooled_features_refuse_and_preserve_invalid_archive(
+        tmp_path: Path):
+    class Vision:
+        max_input_patches = 1024
+        cache_fingerprint = "sealed-cache-test"
+        cache_only = True
+        patch_embed = type(
+            "Patch", (), {"proj": type("Proj", (), {"weight": torch.empty(1)})()})()
+
+        def encode_many(self, _images):
+            raise AssertionError("cache-only training must not run MoonViT")
+
+    image = tmp_path / "x.jpg"
+    Image.new("RGB", (4, 4)).save(image)
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    projector = MoonViTPrefixProjector(32, 5)
+    key = cache / feature_cache_key(
+        image, max_input_patches=1024, prefix_tokens=5,
+        vision_fingerprint="sealed-cache-test")
+    original = b"sealed input is not a torch archive"
+    key.write_bytes(original)
+
+    with pytest.raises(FileNotFoundError, match="sealed MoonViT cache"):
+        cached_features([{"image": image}], Vision(), projector, cache)
+
+    assert key.read_bytes() == original
+
+
 def test_nonfinite_pooled_feature_cache_is_regenerated(tmp_path: Path):
     class Vision:
         max_input_patches = 1024

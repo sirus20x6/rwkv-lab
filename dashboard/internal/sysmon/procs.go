@@ -11,9 +11,9 @@ import (
 	"github.com/shirou/gopsutil/v4/process"
 )
 
-// Training entrypoints we recognize. Any python process whose cmdline names one
-// of these is treated as a training job (mirrors v1, broadened to the current
-// set of entrypoints).
+// Training entrypoints recognized strictly for compatibility observation.
+// Sysmon identifies live process families but does not authorize or describe
+// how the dashboard could launch them.
 var trainingScripts = []string{
 	"convert_train.py", "distill_consolidate.py", "drive_isolation.py",
 	"train_mla.py", "train_mla_engram.py", "rlvr_train.py", "rlvr_campaign.py",
@@ -39,24 +39,6 @@ var trainingModules = map[string]string{
 	"qwen_ao3_cpt.py":           "rwkv_lab.qwen_ao3_cpt",
 	"mage_flow_pretrain.py":     "rwkv_lab.mage_flow_pretrain",
 	"mage_flow_expert_train.py": "rwkv_lab.mage_flow_expert_train",
-}
-
-// AllowedScript reports whether basename(path) is a recognized training
-// entrypoint (the launch allowlist).
-func AllowedScript(path string) bool {
-	base := filepath.Base(path)
-	for _, s := range trainingScripts {
-		if base == s {
-			return true
-		}
-	}
-	return false
-}
-
-// ModuleForScript returns the Python module launched for an allowlisted script.
-func ModuleForScript(path string) (string, bool) {
-	mod, ok := trainingModules[filepath.Base(path)]
-	return mod, ok
 }
 
 func matchedScript(cmdline []string) string {

@@ -254,6 +254,12 @@ roots. Symlinks and special nodes are forbidden. Controller-published checkpoint
 their separate canonical object-manifest verifier because replacement checkpoints are selected by
 durable runtime lineage rather than the original static plan.
 
+Templates keep the operator-readable path list in a closed reflected
+`trainvm.input-content-root-set/v1` document. `trainvm lock-input-content` is the native authoring
+boundary: it measures those paths, canonicalizes and injects the identities, and recompiles the
+whole experiment before emitting a runnable snapshot. Measurement remains outside the pure compiler,
+and neither the template nor the root-set file is mutated.
+
 Required capabilities from all selected components are unioned with the adapter operation's
 capabilities before the launch intent is committed. The immutable `trainvm.host-launches/v4`
 profile for the exact sealed code bytes independently declares its provided capabilities; host

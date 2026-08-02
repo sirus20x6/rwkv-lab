@@ -13,12 +13,15 @@ from rwkv_lab.training_components import (
     AppearanceExpertRoutingConfiguration,
     BFloat16PrecisionConfiguration,
     BFloat16PrecisionPolicy,
+    ConstantLearningRateConfiguration,
     ConstantWeightDecayConfiguration,
     ContextLengthCurriculum,
     ContextLengthCurriculumConfiguration,
     CurriculumImplementation,
     FixedGradientAccumulation,
     FixedGradientAccumulationConfiguration,
+    FP32ParametersBFloat16ComputeConfiguration,
+    FP32ParametersBFloat16ComputePolicy,
     GlobalNormClippingConfiguration,
     GradientAccumulationImplementation,
     GradientClippingImplementation,
@@ -26,6 +29,7 @@ from rwkv_lab.training_components import (
     LayerNormFactory,
     LinearHeadCrossEntropyConfiguration,
     LinearHeadCrossEntropyObjective,
+    LinearWarmupConstantConfiguration,
     LinearWarmupCosineConfiguration,
     NormalizationImplementation,
     ObjectiveImplementation,
@@ -48,6 +52,8 @@ from rwkv_lab.training_components import (
     build_registered_precision_policy,
     build_registered_schedule,
     build_registered_weight_decay_schedule,
+    constant_learning_rate_multiplier,
+    linear_warmup_constant_multiplier,
     linear_warmup_cosine_multiplier,
     optimizer_from_resolved_component,
     parameter_routing_from_resolved_component,
@@ -128,6 +134,25 @@ def test_linear_warmup_cosine_has_one_optimizer_step_domain_trajectory():
     assert trajectory[2] == pytest.approx(1.0)
     assert trajectory[4] == pytest.approx(0.55)
     assert trajectory[6:] == pytest.approx([0.1, 0.1])
+
+
+def test_constant_learning_rate_has_one_stateless_trajectory():
+    configuration = ConstantLearningRateConfiguration()
+    assert [
+        constant_learning_rate_multiplier(step, configuration) for step in range(8)
+    ] == [1.0] * 8
+    with pytest.raises(ValueError, match="nonnegative"):
+        constant_learning_rate_multiplier(-1, configuration)
+
+
+def test_linear_warmup_constant_matches_rlvr_optimizer_step_trajectory():
+    configuration = LinearWarmupConstantConfiguration(warmup_steps=4)
+    assert [
+        linear_warmup_constant_multiplier(step, configuration) for step in range(6)
+    ] == pytest.approx([0.25, 0.5, 0.75, 1.0, 1.0, 1.0])
+    assert linear_warmup_constant_multiplier(
+        0, LinearWarmupConstantConfiguration(warmup_steps=0)
+    ) == pytest.approx(1.0)
 
 
 def test_powercool_has_one_shared_optimizer_step_trajectory():
@@ -372,6 +397,19 @@ def test_bfloat16_precision_policy_owns_module_and_reduction_dtypes():
     assert policy.state_dict() == {}
 
 
+def test_fp32_parameter_bfloat16_compute_policy_is_truthful_and_stateless():
+    policy = build_registered_precision_policy(
+        PrecisionImplementation.FP32_PARAMETERS_BF16_COMPUTE_V1,
+        FP32ParametersBFloat16ComputeConfiguration(),
+    )
+    assert isinstance(policy, FP32ParametersBFloat16ComputePolicy)
+    module = policy.convert_module(torch.nn.Linear(3, 4), "cpu")
+    assert module.weight.dtype is torch.float32
+    assert policy.compute_dtype is torch.bfloat16
+    assert policy.reduce(torch.ones(2, dtype=torch.bfloat16)).dtype is torch.float32
+    assert policy.state_dict() == {}
+
+
 def test_registered_activations_are_independent_forward_and_installation_policies():
     squared_relu = build_registered_activation(
         ActivationImplementation.SQUARED_RELU_V1
@@ -451,10 +489,31 @@ def test_resolved_worker_component_dispatch_is_closed_and_typed():
     optimizer = optimizer_from_resolved_component(optimizer_component, [parameter])
     assert isinstance(optimizer, torch.optim.AdamW)
 
+    sparse_descriptor = next(
+        component
+        for component in components
+        if component["key"]["name"] == "torch_sparse_adam"
+    )
+    embedding = torch.nn.Embedding(8, 2, sparse=True)
+    sparse_optimizer = optimizer_from_resolved_component(
+        {
+            "descriptor": sparse_descriptor,
+            "descriptor_digest": "sha256:" + "b" * 64,
+            "configuration": {
+                "learning_rate": 5.0e-4,
+                "beta1": 0.9,
+                "beta2": 0.95,
+                "epsilon": 1.0e-8,
+            },
+        },
+        embedding.parameters(),
+    )
+    assert isinstance(sparse_optimizer, torch.optim.SparseAdam)
+
     schedule_descriptor = next(
         component
         for component in components
-        if component["key"]["category"] == "learning_rate_schedule"
+        if component["key"]["name"] == "linear_warmup_cosine"
     )
     schedule = schedule_from_resolved_component(
         {
@@ -587,6 +646,8 @@ def test_resolved_parameter_router_dispatch_uses_exact_catalog_defaults():
     "configuration",
     [
         AdamWConfiguration,
+        ConstantLearningRateConfiguration,
+        LinearWarmupConstantConfiguration,
         LinearWarmupCosineConfiguration,
         PowerCoolConfiguration,
     ],
@@ -597,6 +658,10 @@ def test_invalid_component_configuration_fails_before_tensor_construction(
     with pytest.raises((TypeError, ValueError)):
         if configuration is AdamWConfiguration:
             configuration(learning_rate=float("nan"))
+        elif configuration is ConstantLearningRateConfiguration:
+            configuration.from_resolved({"unexpected": True})
+        elif configuration is LinearWarmupConstantConfiguration:
+            configuration(warmup_steps=-1)
         elif configuration is LinearWarmupCosineConfiguration:
             configuration(warmup_steps=-1, max_steps=10)
         else:

@@ -211,9 +211,8 @@ int main() {
       "control.gpu-launch-queue",
       "control.sample-launch",
   };
-  std::set<std::string> exact_candidates = {
+  std::set<std::string> sealed_compatible = {
       "vision.frozen-adapter-train",
-      "vision.teacher-compressor",
   };
   bool saw_restart_only_review = false;
   bool saw_mutable_legacy_export = false;
@@ -224,6 +223,7 @@ int main() {
   bool saw_lossless_library_oracle = false;
   bool saw_production_aot_export = false;
   bool saw_http_control_handler = false;
+  bool saw_retired_legacy = false;
   const std::set<std::string> smoke_only_library_sources = {
       "src/rwkv_lab/engram_lmb.py",
       "src/rwkv_lab/layer_swap.py",
@@ -240,10 +240,10 @@ int main() {
     identifiers.insert(entry.stable_id);
     reviewed_sources.insert(entry.source_paths.begin(), entry.source_paths.end());
     required_additions.erase(entry.stable_id);
-    if (exact_candidates.contains(entry.stable_id) && entry.stateful &&
+    if (sealed_compatible.contains(entry.stable_id) && entry.stateful &&
         entry.resume_evidence ==
-            trainvm::CompatibilityResumeEvidence::exact_candidate) {
-      exact_candidates.erase(entry.stable_id);
+            trainvm::CompatibilityResumeEvidence::compatible) {
+      sealed_compatible.erase(entry.stable_id);
     }
     saw_restart_only_review = saw_restart_only_review ||
         (entry.stable_id == "review.dedupe-cutoff" && entry.stateful &&
@@ -293,6 +293,10 @@ int main() {
         (entry.family == trainvm::WorkflowFamily::control_plane &&
          entry.observed_invocation ==
              trainvm::ObservedInvocationKind::http_control_handler);
+    saw_retired_legacy = saw_retired_legacy ||
+        (entry.family == trainvm::WorkflowFamily::control_plane &&
+         entry.observed_invocation ==
+             trainvm::ObservedInvocationKind::retired_legacy);
     for (const auto& source : entry.source_paths) {
       if (smoke_only_library_sources.contains(source)) {
         smoke_only_source_claimed_invocable =
@@ -306,15 +310,15 @@ int main() {
       }
     }
   }
-  check(families.size() == 11U && invocation_kinds.size() == 6U &&
+  check(families.size() == 11U && invocation_kinds.size() == 7U &&
             identifiers.size() == catalog.entries().size(),
         "catalog contains every family and observed invocation kind");
   check(required_additions.empty(),
         "catalog retains the expanded audited workflow inventory");
-  check(reviewed_sources.size() == 145U,
+  check(reviewed_sources.size() == 155U,
         "catalog binds the complete reviewed source inventory");
-  check(exact_candidates.empty() && saw_restart_only_review,
-        "legacy exact candidates and restart-only review are classified narrowly");
+  check(sealed_compatible.empty() && saw_restart_only_review,
+        "sealed compatible operations and restart-only review are classified narrowly");
   check(saw_mutable_legacy_export && saw_mutable_frozen_export,
         "export notes disclose overwrite and verification limitations");
   check(saw_lossless_qualification && saw_split_production_qualification &&
@@ -323,6 +327,8 @@ int main() {
         "effectfully distinct qualification, export, and external phases stay split");
   check(saw_http_control_handler,
         "dashboard HTTP controls are not mislabeled as host scripts");
+  check(saw_retired_legacy,
+        "retired dashboard mutations remain explicit migration evidence");
 
   // Scope gate: every legacy dashboard mutation route must be classified, and
   // every classified route must still be served. TrainVM's own namespace is
@@ -341,9 +347,19 @@ int main() {
   check(!legacy_routes.empty() && !declarative_routes.empty(),
         "router source exposes both legacy and declarative mutation routes");
   std::set<std::string> classified_routes;
+  std::set<std::string> retired_legacy_routes;
   bool router_bound_by_every_control_record = true;
   bool duplicate_route_classification = false;
   for (const auto& entry : catalog.entries()) {
+    if (entry.observed_invocation ==
+        trainvm::ObservedInvocationKind::retired_legacy) {
+      check(entry.legacy_invocation_display.has_value(),
+            "every retired legacy record displays its historical route");
+      if (entry.legacy_invocation_display) {
+        retired_legacy_routes.insert(*entry.legacy_invocation_display);
+      }
+      continue;
+    }
     if (entry.observed_invocation !=
         trainvm::ObservedInvocationKind::http_control_handler) {
       continue;
@@ -372,19 +388,26 @@ int main() {
   }
   check(unclassified_routes.empty(),
         "every legacy dashboard mutation route is classified in the catalog");
-  std::set<std::string> retired_routes;
+  std::set<std::string> stale_active_routes;
   std::ranges::set_difference(
       classified_routes, legacy_routes,
-      std::inserter(retired_routes, retired_routes.end()));
-  for (const auto& route : retired_routes) {
-    std::cerr << "catalog classifies an unserved route: " << route << '\n';
+      std::inserter(stale_active_routes, stale_active_routes.end()));
+  for (const auto& route : stale_active_routes) {
+    std::cerr << "catalog actively classifies an unserved route: " << route << '\n';
   }
-  check(retired_routes.empty(),
-        "the catalog does not retain routes the dashboard no longer serves");
-  check(classified_routes.contains("POST /api/runs/{name}/control") &&
-            classified_routes.contains("POST /api/autostop") &&
-            classified_routes.contains("POST /api/queue/auto"),
-        "live-tuning and background arming paths are explicit control records");
+  check(stale_active_routes.empty(),
+        "active control records name only routes the dashboard still serves");
+  std::set<std::string> accidentally_resurrected_routes;
+  std::ranges::set_intersection(
+      retired_legacy_routes, legacy_routes,
+      std::inserter(accidentally_resurrected_routes,
+                    accidentally_resurrected_routes.end()));
+  check(accidentally_resurrected_routes.empty(),
+        "retired legacy routes cannot silently regain dashboard authority");
+  check(retired_legacy_routes.contains("POST /api/runs/{name}/control") &&
+            retired_legacy_routes.contains("POST /api/autostop") &&
+            retired_legacy_routes.contains("POST /api/queue/auto"),
+        "retired live-tuning and background arming paths remain explicit evidence");
 
   // The route scan must never degrade into an empty set, which would make the
   // classification gate silently vacuous.

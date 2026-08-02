@@ -96,9 +96,12 @@ struct SequencedEvent final {
 
 struct EventScanQuery final {
   std::uint64_t after_journal_sequence{};
+  std::uint64_t through_journal_sequence{};
   std::set<std::string, std::less<>> run_ids;
   std::set<std::string, std::less<>> event_types;
   std::size_t limit{};
+  bool newest_first{};
+  bool newest_per_metric_series{};
 };
 
 struct RunWallTimeBounds final {
@@ -292,6 +295,10 @@ public:
       std::uint64_t after_controller_sequence) const;
   [[nodiscard]] std::optional<WorkerInvocationSpec> worker_invocation(
       const std::string& dispatch_id) const;
+  // Records the immutable report produced by a host-authorized external
+  // profiler after its wrapped worker has exited. This is controller-authored
+  // (worker_sequence zero) and deliberately narrower than generic append.
+  bool publish_external_profiler_artifact(const Event& event);
   LeaseAcquireResult acquire_lease(const std::string& concurrency_key,
                                    const std::string& owner_run_id,
                                    const std::string& lease_id,

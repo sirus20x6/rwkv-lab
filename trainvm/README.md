@@ -69,7 +69,9 @@ Implemented now:
   artifact manifests, and ordered control acknowledgements without advancing the FSM, delivers
   pending live-control patches by controller sequence, and persists the terminal transition and
   receipt before acknowledging it; duplicate live streams are rejected and lost acknowledgements
-  or receipts replay exactly;
+  or receipts replay exactly; metric names, units, and step domains must match the sealed
+  observability declaration, non-optimizer domains cannot mutate optimizer progress, and bounded
+  event replay supports an upper-fenced newest-first tail for scale-independent observers;
 - a matching Python worker SDK with sealed bootstrap and immutable invocation decoders, checked-in
   protobuf bindings, strict bidirectional stream sequencing, typed telemetry/artifact/control APIs,
   adapter-owned safe-point polling, and cross-runtime canonical JSON golden digests; see
@@ -425,7 +427,7 @@ trainers are compatibility-resumable, while scratch RWKV exposes only its
 terminal checkpoint and cannot claim a mid-run or resource-releasing pause.
 
 The reference plan currently has the golden identity
-`d9874d50706cb8b13f3803258bde08f2175bfb4869eae860aa47994d151e901e`. This deliberate canonical
+`ac64a8117668f19c4f4f1d131b07388122207043894d85e60ead25270f28085e`. This deliberate canonical
 plan-schema migration adds typed cross-family lifecycle/profiling and CPU/I/O policy declarations
 to the reference fixture. Any further deliberate canonical
 format change must update the golden test and supply a plan-schema migration rationale.

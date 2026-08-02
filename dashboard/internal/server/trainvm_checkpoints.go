@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	trainvmstore "trainboard/internal/trainvm"
@@ -19,7 +20,8 @@ const (
 	trainVMCheckpointEnvelopeSchema = "trainvm.checkpoint-snapshot.v1"
 	trainVMCheckpointManifestMax    = 64 << 20
 	trainVMCheckpointMaxFiles       = 131_072
-	trainVMCheckpointMaxEvents      = 10_000
+	trainVMCheckpointDefaultTail    = 250
+	trainVMCheckpointMaximumTail    = 1_000
 )
 
 type trainVMCheckpointProducer struct {
@@ -50,6 +52,8 @@ type trainVMCheckpointManifest struct {
 }
 
 type trainVMCheckpointSummary struct {
+	Valid               bool     `json:"valid"`
+	ValidationError     string   `json:"validation_error,omitempty"`
 	Sequence            uint64   `json:"sequence"`
 	ArtifactID          string   `json:"artifact_id"`
 	LogicalName         string   `json:"logical_name"`
@@ -66,38 +70,26 @@ type trainVMCheckpointSummary struct {
 	PublishedAtNS       int64    `json:"published_at_ns"`
 }
 
-func (s *Server) publishedCheckpoints(ctx context.Context, runID string) ([]trainvmstore.PublishedArtifact, error) {
+func (s *Server) publishedCheckpoints(
+	ctx context.Context, runID string, limit int,
+) ([]trainvmstore.PublishedArtifact, bool, error) {
 	var result []trainvmstore.PublishedArtifact
-	var after uint64
-	scanned := 0
 	seen := map[string]struct{}{}
-	for scanned < trainVMCheckpointMaxEvents {
-		page, err := trainvmstore.Artifacts(ctx, s.trainvm, runID, after, 1000)
-		if err != nil {
-			return nil, err
-		}
-		if len(page) == 0 {
-			break
-		}
-		for _, artifact := range page {
-			scanned++
-			if artifact.Kind == "checkpoint" {
-				if _, duplicate := seen[artifact.ArtifactID]; duplicate {
-					return nil, fmt.Errorf("duplicate published checkpoint artifact ID %q", artifact.ArtifactID)
-				}
-				seen[artifact.ArtifactID] = struct{}{}
-				result = append(result, artifact)
-			}
-			after = artifact.Sequence
-		}
-		if len(page) < 1000 {
-			break
-		}
+	page, found, err := trainvmstore.RecentArtifacts(ctx, s.trainvm, runID, limit)
+	if err != nil || !found {
+		return nil, found, err
 	}
-	if scanned >= trainVMCheckpointMaxEvents {
-		return nil, fmt.Errorf("artifact history exceeds %d events", trainVMCheckpointMaxEvents)
+	for _, artifact := range page {
+		if artifact.Kind != "checkpoint" {
+			continue
+		}
+		if _, duplicate := seen[artifact.ArtifactID]; duplicate {
+			return nil, true, fmt.Errorf("duplicate published checkpoint artifact ID %q", artifact.ArtifactID)
+		}
+		seen[artifact.ArtifactID] = struct{}{}
+		result = append(result, artifact)
 	}
-	return result, nil
+	return result, true, nil
 }
 
 func validCheckpointRelativePath(value string) bool {
@@ -112,6 +104,7 @@ func validCheckpointStateComponent(value string) bool {
 	switch value {
 	case "component_composition", "control_revision", "curriculum", "data_cursor",
 		"expert_routing", "gradient_scaler", "lr_schedule", "model", "optimizer",
+		"optimizer_groups", "plateau_state",
 		"parameter_routing", "rng_accelerator", "rng_numpy", "rng_python", "rng_torch",
 		"topology", "weight_decay_schedule":
 		return true
@@ -223,6 +216,7 @@ func (s *Server) loadCheckpoint(artifact trainvmstore.PublishedArtifact) (trainV
 
 func checkpointSummary(artifact trainvmstore.PublishedArtifact, manifest trainVMCheckpointManifest) trainVMCheckpointSummary {
 	return trainVMCheckpointSummary{
+		Valid:    true,
 		Sequence: artifact.Sequence, ArtifactID: artifact.ArtifactID, LogicalName: artifact.LogicalName,
 		CheckpointSchema: manifest.CheckpointSchema, NodeID: manifest.Producer.NodeID,
 		AttemptID: manifest.Producer.AttemptID, OptimizerStep: manifest.OptimizerStep,
@@ -238,17 +232,37 @@ func (s *Server) handleTrainVMCheckpoints(w http.ResponseWriter, r *http.Request
 		http.Error(w, "TrainVM authority is not configured", http.StatusServiceUnavailable)
 		return
 	}
-	artifacts, err := s.publishedCheckpoints(r.Context(), r.PathValue("run"))
+	limit := trainVMCheckpointDefaultTail
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || parsed < 1 || parsed > trainVMCheckpointMaximumTail {
+			http.Error(w, "checkpoint tail limit must be from 1 through 1000", http.StatusBadRequest)
+			return
+		}
+		limit = parsed
+	}
+	artifacts, found, err := s.publishedCheckpoints(r.Context(), r.PathValue("run"), limit)
 	if err != nil {
 		writeTrainVMAuthorityError(w, err)
+		return
+	}
+	if !found {
+		http.Error(w, "no such TrainVM run", http.StatusNotFound)
 		return
 	}
 	result := make([]trainVMCheckpointSummary, 0, len(artifacts))
 	for _, artifact := range artifacts {
 		manifest, err := s.loadCheckpoint(artifact)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
-			return
+			result = append(result, trainVMCheckpointSummary{
+				Valid: false, ValidationError: "manifest unavailable or failed immutable verification",
+				Sequence: artifact.Sequence, ArtifactID: artifact.ArtifactID,
+				LogicalName: artifact.LogicalName, CheckpointSchema: artifact.Schema,
+				NodeID: artifact.ProducerNodeID, AttemptID: artifact.ProducerAttemptID,
+				ParentArtifactIDs: append([]string(nil), artifact.ParentArtifactIDs...),
+				PublishedAtNS:     artifact.PublishedAtNS,
+			})
+			continue
 		}
 		result = append(result, checkpointSummary(artifact, manifest))
 	}

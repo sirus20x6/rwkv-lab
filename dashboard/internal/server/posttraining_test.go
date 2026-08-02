@@ -79,8 +79,15 @@ func TestPosttrainingCampaignAndAdapterLineageDiscovery(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	s.handlePosttraining(recorder, httptest.NewRequest("GET", "/api/posttraining", nil))
 	body := recorder.Body.String()
-	if !strings.Contains(body, "ptCampaignRank") || !strings.Contains(body, "ptCampaignOffload") ||
-		!strings.Contains(body, "ptCampaignBootstrap") {
-		t.Fatalf("advanced post-training controls missing: %s", body)
+	if !strings.Contains(body, "legacy post-training campaigns · read-only") ||
+		!strings.Contains(body, "rwkv-lab.rwkv-posttraining@1.0.0") ||
+		!strings.Contains(body, "TrainVM composer") ||
+		!strings.Contains(body, "posttrain") || !strings.Contains(body, "eligible") ||
+		strings.Contains(body, "/api/posttraining/campaign") ||
+		strings.Contains(body, "/api/posttraining/version") ||
+		strings.Contains(body, "/api/posttraining/compare") ||
+		strings.Contains(body, "/api/posttraining/feedback") ||
+		strings.Contains(body, "ptCampaignRank") {
+		t.Fatalf("post-training panel did not remain read-only: %s", body)
 	}
 }

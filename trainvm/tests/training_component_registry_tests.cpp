@@ -368,7 +368,7 @@ void checked_in_component_catalog_matches_native_authority_contract() {
   const trainvm::TrainingComponentRegistry registry =
       trainvm::TrainingComponentRegistry::load_file(
           std::filesystem::absolute(path));
-  check(registry.document_json().at("components").size() == 17U &&
+  check(registry.document_json().at("components").size() == 21U &&
             registry.registry_digest().starts_with("sha256:") &&
             registry.registry_digest().size() == 71U,
         "checked-in cross-family component catalog is a canonical native authority document");
@@ -475,6 +475,20 @@ void checked_in_component_catalog_matches_native_authority_contract() {
             precision.configuration.at("reduction_dtype") == "float32" &&
             precision.configuration.at("gradient_scaling") == false,
         "BF16 parameter/compute and FP32 reduction policy resolves independently of optimizer state");
+  const auto vision_precision = registry.resolve({
+      .key = {.category = trainvm::TrainingComponentCategory::precision,
+              .name = "fp32_parameters_bf16_compute",
+              .version = "1.0.0"},
+      .model_family = "vision",
+      .configuration = nlohmann::json::object(),
+  });
+  check(vision_precision.descriptor.implementation ==
+            "rwkv_lab.precision.fp32_parameters_bf16_compute.v1" &&
+            vision_precision.configuration.at("parameter_dtype") == "float32" &&
+            vision_precision.configuration.at("compute_dtype") == "bfloat16" &&
+            vision_precision.configuration.at("reduction_dtype") == "float32" &&
+            vision_precision.configuration.at("gradient_scaling") == false,
+        "vision FP32 parameters and BF16 compute resolve as a truthful independent precision policy");
   const auto activation = registry.resolve({
       .key = {.category = trainvm::TrainingComponentCategory::activation,
               .name = "silu",
@@ -557,6 +571,39 @@ void checked_in_component_catalog_matches_native_authority_contract() {
             powercool.configuration.at("cooldown_fraction") == 0.2 &&
             powercool.configuration.at("power") == 2.0,
         "RWKV and transformer PowerCool schedules share one exact reflected contract");
+  const auto constant_schedule = registry.resolve({
+      .key = {
+          .category =
+              trainvm::TrainingComponentCategory::learning_rate_schedule,
+          .name = "constant",
+          .version = "1.0.0"},
+      .model_family = "vision",
+      .configuration = nlohmann::json::object(),
+  });
+  check(constant_schedule.descriptor.implementation ==
+            "rwkv_lab.schedule.constant.v1" &&
+            constant_schedule.descriptor.state_grade ==
+                trainvm::TrainingStateGrade::stateless &&
+            constant_schedule.descriptor.step_domain ==
+                trainvm::StepDomain::optimizer_step &&
+            constant_schedule.configuration.empty(),
+        "constant learning rate is an independent stateless vision-compatible schedule");
+  const auto warmup_constant = registry.resolve({
+      .key = {
+          .category =
+              trainvm::TrainingComponentCategory::learning_rate_schedule,
+          .name = "linear_warmup_constant",
+          .version = "1.0.0",
+      },
+      .model_family = "rwkv",
+      .configuration = {{"warmup_steps", 10}},
+  });
+  check(warmup_constant.descriptor.implementation ==
+                "rwkv_lab.schedule.linear_warmup_constant.v1" &&
+            warmup_constant.descriptor.state_grade ==
+                trainvm::TrainingStateGrade::exact &&
+            warmup_constant.configuration.at("warmup_steps") == 10,
+        "linear warmup to a constant rate is an exact independent RLVR schedule");
 }
 
 }  // namespace

@@ -455,19 +455,12 @@ func urlName(s string) string {
 // nz returns true for a finite, present pointer.
 func nz(p *float64) bool { return p != nil && !math.IsNaN(*p) && !math.IsInf(*p, 0) }
 
-// renderAlerts paints the global alerts banner (critical + warn) with an
-// auto-stop toggle and a dismiss-all. Empty when there's nothing active.
-func renderAlerts(active []db.Alert, autoStop bool) string {
+// renderAlerts paints the detector's read-only findings. Acknowledgement only
+// edits dashboard metadata; trainer lifecycle remains on the TrainVM boundary.
+func renderAlerts(active []db.Alert) string {
 	var b strings.Builder
 	b.WriteString(`<div id="alerts-banner" class="alerts-banner">`)
-	autoCls, autoLabel, autoTo := "", "auto-stop: off", "1"
-	if autoStop {
-		autoCls, autoLabel, autoTo = "on", "auto-stop: ON", "0"
-	}
-	// Toggle is always present so the user can arm auto-stop proactively.
-	fmt.Fprintf(&b,
-		`<div class="alerts-bar"><button class="autostop %s" data-on:click="@post('/api/autostop?on=%s')">%s</button>`,
-		autoCls, autoTo, autoLabel)
+	b.WriteString(`<div class="alerts-bar"><span class="muted">health findings · read only</span>`)
 	if len(active) > 0 {
 		b.WriteString(`<button class="btn dismiss" data-on:click="@post('/api/alerts/ack')">dismiss all</button>`)
 	}

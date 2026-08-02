@@ -212,6 +212,28 @@
     {
       "key": {
         "category": "optimizer",
+        "name": "torch_sparse_adam",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.optimizer.torch_sparse_adam.v1",
+      "model_families": ["transformer"],
+      "required_capabilities": ["optimizer.torch_sparse_adam.v1"],
+      "configuration": [
+        {"name": "learning_rate", "type": "number", "required": true, "minimum": 1e-12, "maximum": 1.0, "unit": "ratio"},
+        {"name": "beta1", "type": "number", "required": false, "default": 0.9, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
+        {"name": "beta2", "type": "number", "required": false, "default": 0.999, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
+        {"name": "epsilon", "type": "number", "required": false, "default": 1e-8, "minimum": 1e-16, "maximum": 1.0, "unit": "ratio"}
+      ],
+      "state": [
+        {"name": "sparse_parameter_state_manifest", "type": "string", "required": true}
+      ],
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "optimizer",
         "name": "fp32_master_adamw_no_decay",
         "version": "2.0.0"
       },
@@ -256,6 +278,42 @@
         {"name": "parameter_state_manifest", "type": "string", "required": true}
       ],
       "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "learning_rate_schedule",
+        "name": "linear_warmup_constant",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.schedule.linear_warmup_constant.v1",
+      "model_families": ["rwkv", "transformer"],
+      "required_capabilities": ["schedule.linear_warmup_constant.v1"],
+      "configuration": [
+        {"name": "warmup_steps", "type": "integer", "required": true, "minimum": 0, "maximum": 1000000000, "unit": "optimizer_step"}
+      ],
+      "state": [
+        {"name": "cursor", "type": "integer", "required": true}
+      ],
+      "step_domain": "optimizer_step",
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "learning_rate_schedule",
+        "name": "constant",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.schedule.constant.v1",
+      "model_families": ["mageflow", "rwkv", "transformer", "vision"],
+      "required_capabilities": ["schedule.constant.v1"],
+      "configuration": [],
+      "state": [],
+      "step_domain": "optimizer_step",
+      "state_grade": "stateless",
       "reference_implementation": true
     },
     {
@@ -316,6 +374,26 @@
       "required_capabilities": ["precision.bf16_parameters_fp32_reductions.v1"],
       "configuration": [
         {"name": "parameter_dtype", "type": "enumeration", "required": false, "default": "bfloat16", "values": ["bfloat16"]},
+        {"name": "compute_dtype", "type": "enumeration", "required": false, "default": "bfloat16", "values": ["bfloat16"]},
+        {"name": "reduction_dtype", "type": "enumeration", "required": false, "default": "float32", "values": ["float32"]},
+        {"name": "gradient_scaling", "type": "boolean", "required": false, "default": false}
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "precision",
+        "name": "fp32_parameters_bf16_compute",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.precision.fp32_parameters_bf16_compute.v1",
+      "model_families": ["vision"],
+      "required_capabilities": ["precision.fp32_parameters_bf16_compute.v1"],
+      "configuration": [
+        {"name": "parameter_dtype", "type": "enumeration", "required": false, "default": "float32", "values": ["float32"]},
         {"name": "compute_dtype", "type": "enumeration", "required": false, "default": "bfloat16", "values": ["bfloat16"]},
         {"name": "reduction_dtype", "type": "enumeration", "required": false, "default": "float32", "values": ["float32"]},
         {"name": "gradient_scaling", "type": "boolean", "required": false, "default": false}

@@ -148,8 +148,11 @@ fixed; the normal native test target builds it twice and requires byte equality.
 sealed interpreter with `-I`, installs the zipapp at fd 3 through its separately bound code-argument
 slot, clears the environment, and appends exactly `--trainvm-bootstrap-fd=4`; the runner rejects
 every other argument. Its dispatch table contains exact `(adapter, version, operation, contract)`
-tuples for the MageFlow appearance expert, MageFlow terminal expert, Qwen AO3 continuation, and
-scratch RWKV pretraining. An experiment cannot select an import string, script, argv, environment
+tuples for the MageFlow appearance and terminal experts, Qwen AO3 continuation, eight canonical
+MLA-family variants, scratch RWKV pretraining, and restart-only RWKV post-training. The latter
+publishes adapter, reward-head, terminal result, and metric files through the generic immutable-tree
+artifact boundary rather than presenting them as a resumable checkpoint. An experiment cannot
+select an import string, script, argv, environment
 override, or entry-point path.
 
 `trainvm inspect-rwkv-lab-deployment` lowers each adapter's exact zipapp,
@@ -195,6 +198,20 @@ but does not turn a mutable filesystem path into immutable storage. Immutable
 controller-published resume checkpoints use their existing per-object manifest verifier and are not
 double-classified as static workspace inputs.
 
+For experiment templates with several roots, keep the unhashed path list in a closed
+`trainvm.input-content-root-set/v1` document and produce the runnable snapshot without hand-editing:
+
+```sh
+trainvm lock-input-content experiment.json input-roots.json > experiment.locked.json
+trainvm validate experiment.locked.json
+```
+
+The native command decodes the root-set through the reflected schema, rejects unknown fields,
+duplicates and overlaps, measures every root with the same Merkle implementation, sorts the
+identities, replaces `workspace.input_content_roots`, and recompiles the complete experiment before
+emitting JSON. It never launches a worker or writes either source document. A later worker still
+remeasures every identity, so drift between authoring and dispatch fails closed.
+
 The fixed runner returns an already-completed replay without executing tensor work, publishes a
 durably receipted terminal result on success, freezes any declared checkpoint before that terminal
 result, and converts trainer exceptions to a bounded
@@ -205,6 +222,16 @@ per-adapter claims rather than inferences from the shared runtime. Top-level pat
 declared content-root trees are recursively bound. A manifest that references payloads outside its
 declared root set remains invalid; remote/object-store references still require a typed immutable
 artifact provider rather than pathname authority.
+
+Downstream Python operations consume controller-selected non-checkpoint artifacts through
+`resolve_input_artifact()`, never by opening the descriptor URI directly. The resolver requires the
+exact artifact descriptor shape, local canonical manifest URI, declared kind and schema, workspace
+confinement, manifest fingerprint, producer and parent lineage, canonical tree digest, and every
+payload object hash. `read_input_artifact_file()` rechecks a selected object's stable file identity
+and digest at the point of use, while `load_input_artifact_json()` additionally requires canonical,
+finite JSON. The scalar-metric decision adapter is the first production consumer of this boundary:
+it compares two independently verified result artifacts and publishes a new immutable receipt whose
+parents are exactly those candidate artifact IDs.
 
 Install the optional runtime dependencies with:
 

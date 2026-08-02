@@ -69,6 +69,24 @@ void validate_training_contract(
         "adapter training composition contract must declare a bounded model "
         "family and between 1 and 64 symbolic slots");
   }
+  for (const auto& [slot, allowed] :
+       contract.allowed_components.value_or(
+           std::map<std::string, std::vector<TrainingComponentKey>>{})) {
+    const auto declared = contract.slots.find(slot);
+    if (declared == contract.slots.end() || allowed.empty() ||
+        allowed.size() > 64U ||
+        !std::ranges::is_sorted(allowed) ||
+        std::ranges::adjacent_find(allowed) != allowed.end() ||
+        std::ranges::any_of(allowed, [&](const TrainingComponentKey& key) {
+          return key.category != declared->second || key.name.empty() ||
+                 key.name.size() > 192U || key.version.empty() ||
+                 key.version.size() > 192U;
+        })) {
+      throw std::invalid_argument(
+          "adapter training component allowlists must refine declared slots "
+          "with sorted unique bounded keys of the same category");
+    }
+  }
 }
 
 OperationPortDescriptor port(OperationPortType type, bool required,
@@ -749,6 +767,15 @@ void AdapterRegistry::validate_plan(const CompiledPlan& plan) const {
           throw AdapterResolutionError(
               "workflow node " + name + " training component slot " + slot +
               " disagrees with its authority-owned category contract");
+        }
+        if (contract.allowed_components) {
+          const auto allowed = contract.allowed_components->find(slot);
+          if (allowed != contract.allowed_components->end() &&
+              !std::ranges::contains(allowed->second, selected->second.key)) {
+            throw AdapterResolutionError(
+                "workflow node " + name + " training component slot " + slot +
+                " selects a component outside its authority-owned allowlist");
+          }
         }
       }
     } else if (node.invoke.training) {

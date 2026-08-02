@@ -20,6 +20,7 @@ class OptimizerImplementation(str, Enum):
     FP32_MASTER_ADAMW_NO_DECAY_V2 = (
         "rwkv_lab.optimizer.fp32_master_adamw_no_decay.v2"
     )
+    TORCH_SPARSE_ADAM_V1 = "rwkv_lab.optimizer.torch_sparse_adam.v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,13 +127,51 @@ class AdamWNoDecayConfiguration:
         return cls(**configuration)
 
 
+@dataclass(frozen=True, slots=True)
+class SparseAdamConfiguration:
+    learning_rate: float
+    beta1: float = 0.9
+    beta2: float = 0.999
+    epsilon: float = 1.0e-8
+
+    def __post_init__(self) -> None:
+        AdamWConfiguration(
+            learning_rate=self.learning_rate,
+            beta1=self.beta1,
+            beta2=self.beta2,
+            epsilon=self.epsilon,
+            weight_decay=0.0,
+            foreach=False,
+            fused=False,
+        )
+
+    @classmethod
+    def from_resolved(cls, configuration: Mapping[str, Any]) -> SparseAdamConfiguration:
+        if set(configuration) != {"learning_rate", "beta1", "beta2", "epsilon"}:
+            raise ValueError(
+                "resolved SparseAdam configuration has missing or unknown fields"
+            )
+        return cls(**configuration)
+
+
 def build_registered_optimizer(
     implementation: OptimizerImplementation,
     parameters: Iterable[torch.nn.Parameter] | Iterable[Mapping[str, Any]],
-    configuration: AdamWConfiguration | AdamWNoDecayConfiguration,
+    configuration: (
+        AdamWConfiguration | AdamWNoDecayConfiguration | SparseAdamConfiguration
+    ),
 ) -> torch.optim.Optimizer:
     """Construct one allowlisted optimizer implementation from typed values."""
 
+    if implementation is OptimizerImplementation.TORCH_SPARSE_ADAM_V1:
+        if not isinstance(configuration, SparseAdamConfiguration):
+            raise TypeError("Torch SparseAdam v1 requires its sparse configuration")
+        return torch.optim.SparseAdam(
+            parameters,
+            lr=configuration.learning_rate,
+            betas=(configuration.beta1, configuration.beta2),
+            eps=configuration.epsilon,
+        )
     kwargs = {
         "lr": configuration.learning_rate,
         "betas": (configuration.beta1, configuration.beta2),
@@ -175,13 +214,13 @@ def optimizer_from_resolved_component(
         raise ValueError(
             "resolved optimizer implementation is not allowlisted"
         ) from error
-    typed_configuration = (
-        AdamWNoDecayConfiguration.from_resolved(configuration)
-        if selected
-        in {
+    if selected is OptimizerImplementation.TORCH_SPARSE_ADAM_V1:
+        typed_configuration = SparseAdamConfiguration.from_resolved(configuration)
+    elif selected in {
             OptimizerImplementation.TORCH_ADAMW_NO_DECAY_V2,
             OptimizerImplementation.FP32_MASTER_ADAMW_NO_DECAY_V2,
-        }
-        else AdamWConfiguration.from_resolved(configuration)
-    )
+    }:
+        typed_configuration = AdamWNoDecayConfiguration.from_resolved(configuration)
+    else:
+        typed_configuration = AdamWConfiguration.from_resolved(configuration)
     return build_registered_optimizer(selected, parameters, typed_configuration)

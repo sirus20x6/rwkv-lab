@@ -8,11 +8,14 @@ import torch
 
 from rwkv_lab.training_components import (
     BFloat16PrecisionPolicy,
+    ConstantLearningRateConfiguration,
     ConstantWeightDecaySchedule,
     ContextLengthCurriculum,
     FixedGradientAccumulation,
+    FP32ParametersBFloat16ComputePolicy,
     LayerNormFactory,
     LinearHeadCrossEntropyObjective,
+    LinearWarmupConstantConfiguration,
     LinearWarmupCosineConfiguration,
     PowerCoolConfiguration,
     RegisteredActivation,
@@ -67,6 +70,29 @@ class WorkerTrainingComponents:
             component.runtime_envelope(), parameters
         )
 
+    def require_implementation(
+        self,
+        slot: str,
+        *,
+        category: str,
+        allowed: frozenset[str],
+    ) -> str:
+        """Fail before tensor construction when an adapter narrows a slot.
+
+        The native adapter contract applies the same key allowlist at compile
+        time. This worker-side check is deliberate defense in depth for a
+        sealed invocation and protects direct contract tests from reaching an
+        optimizer step with incompatible dense/sparse gradient mechanics.
+        """
+
+        component = self.composition.require(slot, category=category)
+        if not allowed or component.implementation not in allowed:
+            raise AdapterComponentError(
+                f"resolved training slot {slot!r} selects an implementation "
+                "outside the adapter allowlist"
+            )
+        return component.implementation
+
     def activation(
         self,
         *,
@@ -103,7 +129,7 @@ class WorkerTrainingComponents:
         self,
         *,
         slot: str = "precision",
-    ) -> BFloat16PrecisionPolicy:
+    ) -> BFloat16PrecisionPolicy | FP32ParametersBFloat16ComputePolicy:
         component = self.composition.require(slot, category="precision")
         return precision_policy_from_resolved_component(
             component.runtime_envelope()
@@ -127,7 +153,10 @@ class WorkerTrainingComponents:
         self, *, slot: str = "learning_rate"
     ) -> tuple[
         ScheduleImplementation,
-        LinearWarmupCosineConfiguration | PowerCoolConfiguration,
+        ConstantLearningRateConfiguration
+        | LinearWarmupConstantConfiguration
+        | LinearWarmupCosineConfiguration
+        | PowerCoolConfiguration,
     ]:
         component = self.composition.require(slot, category="learning_rate_schedule")
         return schedule_configuration_from_resolved_component(

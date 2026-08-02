@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 try:
+    from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import sync_playwright
 except ImportError:
     raise SystemExit(77)
@@ -231,7 +232,14 @@ def main() -> None:
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
             page = browser.new_page()
-            page.goto(f"http://127.0.0.1:{server.server_port}/")
+            address = f"http://127.0.0.1:{server.server_port}/"
+            for attempt in range(3):
+                try:
+                    page.goto(address)
+                    break
+                except PlaywrightError as error:
+                    if "ERR_NETWORK_CHANGED" not in str(error) or attempt == 2:
+                        raise
             page.evaluate(
                 """const editor=document.querySelector('#trainvm-authoring');
                 editor.open=true; editor.dispatchEvent(new Event('toggle'));"""

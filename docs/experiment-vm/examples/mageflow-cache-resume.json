@@ -356,14 +356,14 @@
           "name": "train.images_per_second",
           "type": "gauge",
           "unit": "image/second",
-          "step_domain": "wall_time",
+          "step_domain": "optimizer_step",
           "aggregation": "mean"
         },
         {
           "name": "system.gpu_memory_used",
           "type": "gauge",
           "unit": "byte",
-          "step_domain": "wall_time",
+          "step_domain": "optimizer_step",
           "aggregation": "max"
         }
       ],

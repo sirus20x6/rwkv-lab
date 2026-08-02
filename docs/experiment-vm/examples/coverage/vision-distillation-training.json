@@ -30,7 +30,7 @@
       "teacher_cache": {"type": "dataset", "schema": "coverage.vision-teacher-cache.v1", "immutability": "mutable_until_publish", "fingerprint": "manifest_sha256"},
       "cache_validation": {"type": "report", "schema": "coverage.vision-cache-validation.v1", "immutability": "immutable", "fingerprint": "sha256"},
       "compressor_checkpoint": {"type": "checkpoint", "schema": "coverage.vision-compressor-compatible.v1", "immutability": "immutable", "fingerprint": "manifest_sha256"},
-      "eval_gallery": {"type": "image_gallery", "schema": "coverage.vision-eval-gallery.v1", "immutability": "mutable_until_publish", "fingerprint": "manifest_sha256", "required": false},
+      "eval_gallery": {"type": "image_gallery", "schema": "rwkv-lab.eval-gallery.v2", "immutability": "mutable_until_publish", "fingerprint": "manifest_sha256", "required": false},
       "training_metrics": {"type": "metrics", "schema": "coverage.vision-training-metrics.v1", "immutability": "append_only", "fingerprint": "sha256"}
     },
     "components": {
@@ -137,7 +137,7 @@
       "heartbeat_seconds": 5,
       "metrics": [
         {"name": "train.distillation_loss", "type": "gauge", "unit": "dimensionless", "step_domain": "optimizer_step", "aggregation": "weighted_mean"},
-        {"name": "train.images_per_second", "type": "gauge", "unit": "image/second", "step_domain": "wall_time", "aggregation": "mean"}
+        {"name": "train.images_per_second", "type": "gauge", "unit": "image/second", "step_domain": "optimizer_step", "aggregation": "mean"}
       ],
       "retain_raw_metrics_days": 30,
       "eval_gallery_artifact": "eval_gallery"

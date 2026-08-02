@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <iostream>
 #include <map>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -75,8 +76,8 @@ bool declared(const OperationLifecycleCapabilities& lifecycle,
 // admitted. There is no third answer.
 void every_adapter_admits_exactly_what_it_declares() {
   const auto& profiles = registered_profiles();
-  require(profiles.size() == 4U,
-          "the contract still registers exactly four adapters");
+  require(profiles.size() == 19U,
+          "the contract registers the complete nineteen-adapter catalog");
   std::size_t admitted = 0U;
   std::size_t refused = 0U;
   for (const AdapterProfile& profile : profiles) {
@@ -104,39 +105,44 @@ void every_adapter_admits_exactly_what_it_declares() {
           "the matrix must exercise both admission and refusal");
 }
 
-// The one adapter that declares no pause and no checkpoint-now must refuse
-// every control except graceful cancellation, in every form.
+// Terminal-checkpoint adapters never overclaim resumability. Graceful stop is
+// admitted only when that individual trainer has an implemented signal path.
 void terminal_checkpoint_adapter_never_overclaims() {
   const auto& profiles = registered_profiles();
-  const auto found = std::ranges::find_if(
-      profiles, [](const AdapterProfile& profile) {
-        return profile.lifecycle.resume_grade ==
-               ResumeGrade::terminal_checkpoint;
-      });
-  require(found != profiles.end(),
-          "a terminal-checkpoint adapter is still registered");
-  require(found->key.adapter == "rwkv-lab.rwkv-scratch",
-          "the terminal-checkpoint adapter is the scratch RWKV trainer");
-  require(!resume_preserves_trajectory(found->lifecycle.resume_grade) &&
-              !resume_from_checkpoint_supported(found->lifecycle.resume_grade),
-          "a terminal-checkpoint operation may not claim a resumable "
-          "checkpoint or a preserved trajectory");
-  for (const bool checkpoint_first : {false, true}) {
-    require(!admit_lifecycle_control(found->lifecycle,
-                                     LifecycleControlVerb::cancel,
-                                     checkpoint_first),
-            "graceful cancellation stays available");
-    for (const LifecycleControlVerb verb :
-         {LifecycleControlVerb::pause_keep_resources,
-          LifecycleControlVerb::pause_release_resources,
-          LifecycleControlVerb::resume,
-          LifecycleControlVerb::checkpoint_now}) {
-      require(admit_lifecycle_control(found->lifecycle, verb, checkpoint_first)
-                  .has_value(),
-              "a terminal-checkpoint operation refuses pause, resume, and "
-              "checkpoint-now");
+  std::set<std::string> terminal_adapters;
+  for (const AdapterProfile& profile : profiles) {
+    if (profile.lifecycle.resume_grade != ResumeGrade::terminal_checkpoint) {
+      continue;
+    }
+    terminal_adapters.insert(profile.key.adapter);
+    require(!resume_preserves_trajectory(profile.lifecycle.resume_grade) &&
+                !resume_from_checkpoint_supported(profile.lifecycle.resume_grade),
+            "a terminal-checkpoint operation may not claim a resumable "
+            "checkpoint or a preserved trajectory");
+    for (const bool checkpoint_first : {false, true}) {
+      require(
+          admit_lifecycle_control(profile.lifecycle,
+                                  LifecycleControlVerb::cancel,
+                                  checkpoint_first)
+                  .has_value() != profile.lifecycle.graceful_stop,
+          "terminal checkpoint cancellation must match its declaration");
+      for (const LifecycleControlVerb verb :
+           {LifecycleControlVerb::pause_keep_resources,
+            LifecycleControlVerb::pause_release_resources,
+            LifecycleControlVerb::resume,
+            LifecycleControlVerb::checkpoint_now}) {
+        require(
+            admit_lifecycle_control(profile.lifecycle, verb, checkpoint_first)
+                .has_value(),
+            "a terminal-checkpoint operation refuses pause, resume, and "
+            "checkpoint-now");
+      }
     }
   }
+  require(terminal_adapters ==
+              std::set<std::string>{"rwkv-lab.rwkv-rlvr",
+                                    "rwkv-lab.rwkv-scratch"},
+          "only the two honest terminal-checkpoint trainers use this grade");
 }
 
 // The resumable adapters declare compatible, not exact. They may pause,
@@ -161,8 +167,8 @@ void compatible_adapters_do_not_claim_exact_resume() {
               "checkpoint-first pause");
     }
   }
-  require(compatible == 3U,
-          "three registered adapters resume from a compatible checkpoint");
+  require(compatible == 15U,
+          "fifteen registered adapters resume from a compatible checkpoint");
 }
 
 // A resource-releasing pause hands the accelerator to someone else, so the

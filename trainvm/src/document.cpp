@@ -36,6 +36,7 @@ namespace {
 
 constexpr std::string_view kApiVersion = "trainvm.rwkv-lab/v1alpha1";
 constexpr std::string_view kKind = "Experiment";
+constexpr std::string_view kEvalGallerySchema = "rwkv-lab.eval-gallery.v2";
 const std::set<std::string> kTerminals{"$completed", "$failed", "$cancelled"};
 const std::regex kIdentifier("^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$");
 const std::regex kEventField("^[a-zA-Z][a-zA-Z0-9_.]*$");
@@ -872,13 +873,13 @@ void validate_experiment(const Experiment& experiment, std::vector<Diagnostic>& 
         error(diagnostics, "execution.trace_accelerator", std::string(path),
               "nsys and ncu profiling require an NVIDIA accelerator");
       }
-      if (trace.backend && *trace.backend == ProfilerBackend::ncu &&
+      if (trace.backend && *trace.backend != ProfilerBackend::torch &&
           trace.activities &&
           *trace.activities != std::vector<ProfilerActivity>{
                                    ProfilerActivity::accelerator}) {
         error(diagnostics, "execution.trace_activities",
               child_path(std::string(path), "activities"),
-              "ncu capture supports only the accelerator activity");
+              "nsys and ncu capture support only the accelerator activity");
       }
       if (trace.backend && *trace.backend != ProfilerBackend::torch &&
           (trace.record_shapes || trace.profile_memory || trace.with_stack)) {
@@ -1333,6 +1334,19 @@ void validate_experiment(const Experiment& experiment, std::vector<Diagnostic>& 
            {"/spec/recovery/checkpoint_artifact", spec.recovery.checkpoint_artifact}}) {
     if (artifact_name && !spec.artifacts.contains(*artifact_name)) {
       error(diagnostics, "reference.artifact", path, "unknown artifact: " + *artifact_name);
+    }
+  }
+  if (spec.observability.eval_gallery_artifact) {
+    const auto artifact = spec.artifacts.find(
+        *spec.observability.eval_gallery_artifact);
+    if (artifact != spec.artifacts.end() &&
+        (artifact->second.type != ArtifactType::image_gallery ||
+         artifact->second.schema !=
+             std::optional<std::string>{kEvalGallerySchema})) {
+      error(diagnostics, "observability.eval_gallery_artifact",
+            "/spec/observability/eval_gallery_artifact",
+            "eval gallery observability must reference an image_gallery "
+            "artifact with schema rwkv-lab.eval-gallery.v2");
     }
   }
   if (spec.recovery.exact_resume && !spec.recovery.checkpoint_artifact) {

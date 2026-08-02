@@ -16,11 +16,14 @@
 #include "trainvm/hostd_linux_session_authority.hpp"
 #include "trainvm/hostd_linux_process_authority.hpp"
 #include "trainvm/hostd_mutation_protocol.hpp"
+#include "trainvm/hostd_startup_controller.hpp"
 
 namespace trainvm {
 
 inline constexpr std::string_view kHostdStatusTransportApiVersion =
-    "trainvm.hostd-status-transport/v2";
+    "trainvm.hostd-status-transport/v3";
+inline constexpr std::string_view kHostdAuthorityStatusApiVersion =
+    "trainvm.hostd-authority-status/v1";
 inline constexpr std::string_view kHostdMutationTransportApiVersion =
     "trainvm.hostd-mutation-transport/v1";
 inline constexpr std::uint16_t kHostdStatusWireVersion = 2U;
@@ -128,6 +131,86 @@ private:
 
 enum class HostdStatusReplyKind { status, error };
 
+// Bounded inspection views copied from hostd's durable ledger and startup
+// controller. They intentionally contain no session identifier, bearer
+// capability, pidfd, or mutation token. Counts and digests always describe the
+// complete authority state; rows are a deterministic bounded prefix and say
+// explicitly when they were truncated.
+enum class HostdProcessAuthorityPhase {
+  launch_intent,
+  spawned,
+  terminal_pending_release,
+};
+
+struct HostdProcessAuthorityStatus final {
+  std::string allocation_id;
+  std::string journal_id;
+  std::string run_id;
+  std::string logical_lease_id;
+  std::uint64_t logical_fencing_token{};
+  std::string launch_id;
+  HostdProcessAuthorityPhase phase{};
+  std::string cgroup_path;
+  std::optional<std::int64_t> host_pid;
+  std::optional<std::uint64_t> process_starttime_ticks;
+  bool device_policy_intended{};
+  bool device_policy_installed{};
+  std::string device_policy_digest;
+  std::string device_policy_installation_digest;
+  bool process_policy_intended{};
+  bool process_policy_installed{};
+  std::string process_policy_digest;
+  std::string process_policy_installation_digest;
+  std::optional<bool> cgroup_empty;
+  std::optional<bool> accelerator_contexts_empty;
+  std::string context_audit_digest;
+  std::string terminal_receipt_digest;
+
+  bool operator==(const HostdProcessAuthorityStatus &) const = default;
+};
+
+struct HostdAuthorityStatus final {
+  // Eight worst-case rows (4 KiB cgroup paths plus bounded identifiers and
+  // digests) still fit the 64 KiB status packet. Complete counts and state
+  // digests remain present when the human-readable prefix is truncated.
+  static constexpr std::size_t maximum_reported_rows = 8U;
+
+  std::string api_version;
+  HostdStartupPhase startup_phase{};
+  std::size_t startup_recovery_steps{};
+  std::size_t remaining_unclosed_process_records{};
+  std::size_t remaining_terminal_release_records{};
+  bool ledger_verified{};
+  std::string ledger_verification_reason;
+  HostLedgerChainHead ledger_chain_head;
+  std::uint64_t ledger_record_count{};
+  std::uint64_t occupancy_ledger_sequence{};
+  std::string occupancy_digest;
+  bool resource_inventory_observed{};
+  std::uint64_t resource_inventory_observation_age_ns{};
+  std::string current_inventory_digest;
+  std::string current_inventory_receipt_digest;
+  std::size_t degraded_resource_count{};
+  std::string resource_degradation_reason;
+  std::size_t active_fence_count{};
+  std::vector<ResourceFence> active_fences;
+  bool active_fences_truncated{};
+  std::size_t active_process_count{};
+  std::vector<HostdProcessAuthorityStatus> active_processes;
+  bool active_processes_truncated{};
+  bool process_launch_enabled{};
+  bool mutation_enabled{};
+  std::string mutation_disabled_reason;
+
+  bool operator==(const HostdAuthorityStatus &) const = default;
+};
+
+class IHostdAuthorityStatusSource {
+public:
+  virtual ~IHostdAuthorityStatusSource() = default;
+  [[nodiscard]] virtual HostdAuthorityStatus snapshot() const = 0;
+};
+
 struct HostdTypedError final {
   std::string code;
   std::string message;
@@ -138,6 +221,7 @@ struct HostdStatusReply final {
   HostdStatusReplyKind kind{};
   std::uint64_t correlation_id{};
   std::optional<HostdCoordinatorStatus> status;
+  std::optional<HostdAuthorityStatus> authority_status;
   std::optional<HostdTypedError> error;
   bool operator==(const HostdStatusReply &) const = default;
 };
@@ -163,7 +247,9 @@ public:
   HostdStatusServer(std::shared_ptr<HostdSocketAuthority> authority,
                     std::shared_ptr<HostGrantCoordinator> coordinator,
                     HostdStatusPeerPolicy peer_policy,
-                    HostdStatusTransportLimits limits = {});
+                    HostdStatusTransportLimits limits = {},
+                    std::shared_ptr<IHostdAuthorityStatusSource>
+                        authority_status_source = nullptr);
   [[nodiscard]] HostdServeResult
   serve_one(std::int64_t absolute_monotonic_deadline_ns);
   // Takes ownership of one accepted SOCK_SEQPACKET descriptor. This exists so
@@ -176,6 +262,7 @@ public:
 private:
   std::shared_ptr<HostdSocketAuthority> authority_;
   std::shared_ptr<HostGrantCoordinator> coordinator_;
+  std::shared_ptr<IHostdAuthorityStatusSource> authority_status_source_;
   HostdStatusPeerPolicy peer_policy_;
   HostdStatusTransportLimits limits_;
 };
@@ -337,6 +424,8 @@ struct HostdMutationRequest final {
     std::optional<int> code_fd;
     int working_directory_fd{-1};
     int worker_bootstrap_fd{-1};
+    std::optional<int> profiler_executable_fd = std::nullopt;
+    std::optional<int> profiler_authority_fd = std::nullopt;
 
     bool operator==(const DelegatedLaunchDescriptors &) const = default;
   };

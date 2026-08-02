@@ -45,13 +45,21 @@ HostProcessSagaSnapshot HostProcessSagaReconciler::reconcile(
       .grant = grant,
       .worker_bootstrap_digest = bootstrap.spec().bootstrap_digest,
       .process_policy = process_policy,
-      .descriptor_roles =
-          identity.code
-              ? std::vector<std::string>{"executable", "code",
-                                         "working_directory",
-                                         "worker_bootstrap"}
-              : std::vector<std::string>{"executable", "working_directory",
-                                         "worker_bootstrap"},
+      .descriptor_roles = [&] {
+        std::vector<std::string> roles =
+            identity.code
+                ? std::vector<std::string>{"executable", "code",
+                                           "working_directory",
+                                           "worker_bootstrap"}
+                : std::vector<std::string>{"executable",
+                                           "working_directory",
+                                           "worker_bootstrap"};
+        if (identity.profiler) {
+          roles.push_back("profiler_executable");
+          roles.push_back("profiler_authority");
+        }
+        return roles;
+      }(),
   };
   (void)hostd_process_prepare_canonical_json(prepare);
 

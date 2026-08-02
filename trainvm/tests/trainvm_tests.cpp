@@ -10,6 +10,7 @@
 #include "trainvm/journal.hpp"
 #include "trainvm/lease_renewal.hpp"
 #include "trainvm/model.hpp"
+#include "trainvm/profiler_launch_profiles.hpp"
 #include "trainvm/reflection_json.hpp"
 #include "trainvm/reconciler.hpp"
 #include "trainvm/service.hpp"
@@ -618,7 +619,8 @@ void test_reflection_and_compiler() {
                     "resume_grade"}) &&
             trainvm::reflected_field_names<
                 trainvm::TrainingCompositionContract>() ==
-                std::vector<std::string>({"model_family", "slots"}) &&
+                std::vector<std::string>(
+                    {"model_family", "slots", "allowed_components"}) &&
             trainvm::enum_from_string<trainvm::ResumeGrade>("exact") ==
                 trainvm::ResumeGrade::exact &&
             trainvm::enum_to_string(
@@ -643,7 +645,7 @@ void test_reflection_and_compiler() {
             result.plan->experiment.spec.resources.cpu_io_policy->cpuset ==
                 std::optional<std::string>{"0-15"},
         "compiler retains model-family-neutral lifecycle and host resource declarations");
-  check(result.plan->plan_hash == "d9874d50706cb8b13f3803258bde08f2175bfb4869eae860aa47994d151e901e",
+  check(result.plan->plan_hash == "ac64a8117668f19c4f4f1d131b07388122207043894d85e60ead25270f28085e",
         "MageFlow canonical plan matches its golden SHA-256 identity");
   check(result.plan->canonical_plan["spec"]["controls"]["catalog"]["learning_rate"].contains("default"),
         "canonical plan uses schema field aliases");
@@ -963,6 +965,26 @@ void test_reflection_and_compiler() {
                            "execution.trace_artifact"),
         "GPU trace output requires adapter-owned tree fingerprinting");
 
+  auto wrong_eval_gallery_type = fixture;
+  wrong_eval_gallery_type["spec"]["artifacts"]["eval_gallery"]["type"] =
+      "dataset";
+  const auto wrong_eval_gallery_type_result =
+      trainvm::compile_document(wrong_eval_gallery_type);
+  check(!wrong_eval_gallery_type_result.valid() &&
+            has_diagnostic(wrong_eval_gallery_type_result,
+                           "observability.eval_gallery_artifact"),
+        "eval gallery observability requires an image-gallery artifact");
+
+  auto wrong_eval_gallery_schema = fixture;
+  wrong_eval_gallery_schema["spec"]["artifacts"]["eval_gallery"]["schema"] =
+      "coverage.custom-eval-gallery.v1";
+  const auto wrong_eval_gallery_schema_result =
+      trainvm::compile_document(wrong_eval_gallery_schema);
+  check(!wrong_eval_gallery_schema_result.valid() &&
+            has_diagnostic(wrong_eval_gallery_schema_result,
+                           "observability.eval_gallery_artifact"),
+        "eval gallery observability requires the common v2 gallery schema");
+
   auto cpuset_conflict = fixture;
   cpuset_conflict["spec"]["resources"]["cpu_io_policy"]["cpus"] =
       {0, 1, 2, 3};
@@ -1030,6 +1052,11 @@ void test_reflection_and_compiler() {
   const auto valid_ncu_result = trainvm::compile_document(valid_ncu);
   check(valid_ncu_result.valid(),
         "ncu is a typed backend with its bounded accelerator-only option surface");
+  auto valid_nsys = valid_ncu;
+  valid_nsys["spec"]["execution"]["gpu_trace"]["backend"] = "nsys";
+  const auto valid_nsys_result = trainvm::compile_document(valid_nsys);
+  check(valid_nsys_result.valid(),
+        "nsys is a typed backend with an honest accelerator-only summary surface");
 
   auto bad_binding = fixture;
   bad_binding["spec"]["workflow"]["nodes"]["prepare_cache"]["invoke"]["inputs"]["final_step"] =
@@ -1475,6 +1502,73 @@ void test_journal() {
     revision_rejected = true;
   }
   check(revision_rejected, "run revision regression is rejected");
+
+  trainvm::Event metric{
+      .event_id = "metric-loss-1",
+      .run_id = "run-1",
+      .run_revision = 6,
+      .plan_revision = 1,
+      .node_id = "train",
+      .attempt_id = "train@1",
+      .worker_sequence = 1,
+      .event_type = "metric.sampled",
+      .event_version = 1,
+      .wall_time_ns = 500,
+      .monotonic_time_ns = 50,
+      .optimizer_step = 1,
+      .payload = {{"name", "train.loss"},
+                  {"value", 2.0},
+                  {"unit", "loss"},
+                  {"step_domain", "optimizer_step"},
+                  {"step", 1},
+                  {"sample_weight", 1},
+                  {"labels", {{"route", "animation"}}}},
+  };
+  auto sparse_metric = metric;
+  sparse_metric.event_id = "metric-eval-1";
+  sparse_metric.worker_sequence = 2;
+  sparse_metric.wall_time_ns = 510;
+  sparse_metric.monotonic_time_ns = 51;
+  sparse_metric.payload["name"] = "eval.quality";
+  auto latest_metric = metric;
+  latest_metric.event_id = "metric-loss-2";
+  latest_metric.worker_sequence = 3;
+  latest_metric.wall_time_ns = 520;
+  latest_metric.monotonic_time_ns = 52;
+  latest_metric.optimizer_step = 2;
+  latest_metric.payload["value"] = 1.5;
+  latest_metric.payload["step"] = 2;
+  const auto metric_sequences = trainvm::JournalTestAccess::append_batch(
+      journal, {metric, sparse_metric, latest_metric});
+  const auto latest_series = journal.sequenced_events({
+      .after_journal_sequence = 0U,
+      .through_journal_sequence = metric_sequences.back(),
+      .run_ids = {"run-1"},
+      .event_types = {"metric.sampled"},
+      .limit = 8U,
+      .newest_per_metric_series = true,
+  });
+  check(latest_series.size() == 2U &&
+            latest_series[0].event.payload.at("name") == "eval.quality" &&
+            latest_series[1].event.payload.at("name") == "train.loss" &&
+            latest_series[1].journal_sequence == metric_sequences.back(),
+        "latest-per-metric-series scan preserves sparse series and selects each newest sample");
+  bool incoherent_metric_scan_rejected = false;
+  try {
+    (void)journal.sequenced_events({
+        .after_journal_sequence = 0U,
+        .through_journal_sequence = metric_sequences.back(),
+        .run_ids = {"run-1"},
+        .event_types = {"metric.sampled"},
+        .limit = 8U,
+        .newest_first = true,
+        .newest_per_metric_series = true,
+    });
+  } catch (const std::invalid_argument&) {
+    incoherent_metric_scan_rejected = true;
+  }
+  check(incoherent_metric_scan_rejected,
+        "latest-per-metric-series scan rejects incompatible newest-first semantics");
 
   sqlite3* tamper_database = nullptr;
   check(sqlite3_open(database_path.c_str(), &tamper_database) == SQLITE_OK,
@@ -2233,6 +2327,7 @@ void test_lease_renewal_authority() {
     const auto early = coordinator.tick();
     const auto due = coordinator.tick();
     const auto duplicate = coordinator.tick();
+    const auto status = coordinator.snapshot();
     check(early.size() == 1U &&
               early.front().status ==
                   trainvm::LeaseRenewalTickStatus::not_due &&
@@ -2245,7 +2340,9 @@ void test_lease_renewal_authority() {
               duplicate.size() == 1U &&
               duplicate.front().status ==
                   trainvm::LeaseRenewalTickStatus::not_due &&
-              coordinator.tracked_count() == 1U,
+              coordinator.tracked_count() == 1U &&
+              status.tracked_count == 1U && !status.poisoned &&
+              status.poison_reason.empty(),
           "manual coordinator renews only inside its margin and duplicate ticks do not extend twice");
   }
 
@@ -2402,11 +2499,14 @@ void test_lease_renewal_authority() {
     } catch (const trainvm::LeaseRenewalCoordinatorError&) {
       poison_sticky = true;
     }
+    const auto status = coordinator.snapshot();
     check(first.size() == 1U &&
               first.front().status ==
                   trainvm::LeaseRenewalTickStatus::not_due &&
               regression_poisoned && poison_sticky && coordinator.poisoned() &&
-              coordinator.tracked_count() == 0U && source_calls == 2U,
+              coordinator.tracked_count() == 0U && source_calls == 2U &&
+              status.poisoned && status.tracked_count == 0U &&
+              !status.poison_reason.empty(),
           "clock regression permanently poisons and stops the manual coordinator");
   }
 
@@ -3280,6 +3380,13 @@ void test_command_service() {
   trainvm::TrainVMService service(
       database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
       fixture_disabled_host_launch_registry());
+  trainvm::v1::GetHostAuthorityStatusRequest host_status_request;
+  trainvm::v1::GetHostAuthorityStatusResponse host_status_response;
+  const grpc::Status host_status = service.GetHostAuthorityStatus(
+      nullptr, &host_status_request, &host_status_response);
+  check(host_status.error_code() == grpc::StatusCode::FAILED_PRECONDITION &&
+            host_status_response.ByteSizeLong() == 0U,
+        "service fails closed instead of synthesizing host health when hostd is not configured");
   auto request = [&] (std::string idempotency_key, std::uint64_t expected_control_revision,
                      double value) {
     trainvm::v1::RunCommandRequest output;
@@ -4500,7 +4607,7 @@ void test_worker_control_service_boundary() {
             first_message.message_case() ==
                 trainvm::v1::WorkerToController::kHeartbeat,
         "a heartbeat is distinguishable from the required first WorkerHello");
-  first_message.mutable_metric()->set_name("loss");
+  first_message.mutable_metric()->set_name("train.loss");
   check(first_message.message_case() == trainvm::v1::WorkerToController::kMetric &&
             !first_message.has_heartbeat() && !first_message.has_event(),
         "WorkerControl telemetry variants cannot alias the result event case");
@@ -4720,14 +4827,23 @@ void test_worker_control_service_boundary() {
 
     trainvm::v1::MetricSample metric;
     metric.set_worker_sequence(2);
-    metric.set_name("loss");
+    metric.set_name("train.loss");
     metric.mutable_value()->set_number_value(1.25);
-    metric.set_unit("loss");
+    metric.set_unit("dimensionless");
     metric.set_step_domain("optimizer_step");
     metric.set_step(11);
     metric.set_sample_weight(1.0);
     (*metric.mutable_labels())["route"] = "animation";
     metric.mutable_observed_at()->set_seconds(2);
+    auto undeclared_metric = metric;
+    undeclared_metric.set_name("rogue.loss");
+    std::uint64_t rejected_metric_acknowledgement = 0;
+    const grpc::Status undeclared_metric_status = service.record_worker_metric(
+        undeclared_metric, connection, rejected_metric_acknowledgement);
+    auto mismatched_metric = metric;
+    mismatched_metric.set_step_domain("token");
+    const grpc::Status mismatched_metric_status = service.record_worker_metric(
+        mismatched_metric, connection, rejected_metric_acknowledgement);
     std::uint64_t metric_acknowledgement = 0;
     const grpc::Status metric_status = service.record_worker_metric(
         metric, connection, metric_acknowledgement);
@@ -4817,6 +4933,11 @@ void test_worker_control_service_boundary() {
       check(open.ok() && heartbeat_status.ok() && acknowledged == 1U &&
                 heartbeat_replay.ok() && replayed_acknowledgement == 1U &&
                 after_heartbeat == 14U && observer.event_count() == 22U &&
+                undeclared_metric_status.error_code() ==
+                    grpc::StatusCode::INVALID_ARGUMENT &&
+                mismatched_metric_status.error_code() ==
+                    grpc::StatusCode::INVALID_ARGUMENT &&
+                rejected_metric_acknowledgement == 0U &&
                 metric_status.ok() && metric_acknowledgement == 2U &&
                 undeclared_artifact_status.error_code() ==
                     grpc::StatusCode::PERMISSION_DENIED &&
@@ -4859,6 +4980,62 @@ void test_worker_control_service_boundary() {
                 }) == 1,
             "WorkerControl durably acknowledges replay-safe heartbeat, metric, and artifact observations without advancing the FSM");
     }
+  }
+
+  {
+    auto domain_fixture = load_fixture();
+    for (auto& metric : domain_fixture["spec"]["observability"]["metrics"]) {
+      if (metric.value("name", std::string{}) ==
+          "train.images_per_second") {
+        metric["step_domain"] = "wall_time";
+      }
+    }
+    const auto domain_compiled = trainvm::compile_document(domain_fixture);
+    const auto database_path = directory / "non-optimizer-metric.db";
+    const std::string run_id = "worker-control-non-optimizer-metric-run";
+    trainvm::WorkerLaunchTicket launch;
+    if (domain_compiled.valid()) {
+      trainvm::Journal journal(
+          database_path, std::nullopt,
+          trainvm::HostGrantEnforcement::legacy_process_free_test);
+      trainvm::Controller controller(*domain_compiled.plan, journal, run_id);
+      controller.create_queued(submission_identity);
+      (void)controller.begin_acquisition(test_time(2'300));
+      launch = controller.prepare_worker_launch(launch_request,
+                                                test_time(2'400));
+      (void)bind_test_worker_launch(controller, launch, 2'450);
+    }
+    trainvm::TrainVMService service(
+        database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
+        fixture_test_host_launch_registry(*domain_compiled.plan, launch),
+        fixture_test_host_identity(), [] { return test_time(2'500); },
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
+    prime_test_service_launch(service, launch);
+    trainvm::TrainVMService::WorkerConnection connection;
+    const grpc::Status open =
+        service.open_worker_connection(wire_hello(launch), connection);
+    trainvm::v1::MetricSample metric;
+    metric.set_worker_sequence(1);
+    metric.set_name("train.images_per_second");
+    metric.mutable_value()->set_number_value(4.5);
+    metric.set_unit("image/second");
+    metric.set_step_domain("wall_time");
+    metric.set_step(1'700'000'000U);
+    metric.set_sample_weight(1.0);
+    metric.mutable_observed_at()->set_seconds(2);
+    std::uint64_t acknowledgement = 0;
+    const grpc::Status status =
+        service.record_worker_metric(metric, connection, acknowledgement);
+    const auto stored = trainvm::Journal(database_path).event(
+        connection.dispatch.dispatch_id + ":metric:1");
+    const auto projection =
+        trainvm::Journal(database_path).projection(run_id);
+    check(domain_compiled.valid() && open.ok() && status.ok() &&
+              acknowledgement == 1U && stored && !stored->optimizer_step &&
+              stored->payload.value("step", std::uint64_t{}) ==
+                  1'700'000'000U &&
+              projection && projection->optimizer_step == 0U,
+          "non-optimizer metric domains preserve their own coordinate without corrupting run optimizer progress");
   }
 
   {
@@ -5164,6 +5341,28 @@ void test_worker_control_grpc_stream() {
   }
 
   {
+    const auto projection = trainvm::Journal(database_path).projection(run_id);
+    grpc::ClientContext context;
+    trainvm::v1::WatchEventsRequest request;
+    request.add_run_ids(run_id);
+    request.set_replay_limit(3U);
+    request.set_through_journal_sequence(
+        projection ? projection->last_event_sequence : 0U);
+    request.set_newest_first(true);
+    auto stream = read_stub->WatchEvents(&context, request);
+    std::vector<std::uint64_t> sequences;
+    trainvm::v1::EventEnvelope envelope;
+    while (stream->Read(&envelope)) {
+      sequences.push_back(envelope.journal_sequence());
+    }
+    const grpc::Status status = stream->Finish();
+    check(status.ok() && sequences.size() == 3U &&
+              sequences[0] > sequences[1] && sequences[1] > sequences[2] &&
+              projection && sequences[0] <= projection->last_event_sequence,
+          "TrainVM gRPC event stream exposes a bounded upper-fenced newest-first tail");
+  }
+
+  {
     grpc::ClientContext context;
     auto stream = stub->Connect(&context);
     trainvm::v1::WorkerToController heartbeat;
@@ -5361,9 +5560,9 @@ void test_worker_control_grpc_stream() {
     trainvm::v1::WorkerToController metric_message;
     auto* metric = metric_message.mutable_metric();
     metric->set_worker_sequence(3);
-    metric->set_name("loss");
+    metric->set_name("train.loss");
     metric->mutable_value()->set_number_value(0.75);
-    metric->set_unit("loss");
+    metric->set_unit("dimensionless");
     metric->set_step_domain("optimizer_step");
     metric->set_step(21);
     metric->set_sample_weight(1.0);
@@ -5527,9 +5726,9 @@ void test_worker_control_grpc_stream() {
     trainvm::v1::WorkerToController resumed_metric_message;
     auto* resumed_metric = resumed_metric_message.mutable_metric();
     resumed_metric->set_worker_sequence(10);
-    resumed_metric->set_name("loss");
+    resumed_metric->set_name("train.loss");
     resumed_metric->mutable_value()->set_number_value(0.5);
-    resumed_metric->set_unit("loss");
+    resumed_metric->set_unit("dimensionless");
     resumed_metric->set_step_domain("optimizer_step");
     resumed_metric->set_step(22);
     resumed_metric->set_sample_weight(1.0);
@@ -5578,6 +5777,33 @@ void test_worker_control_grpc_stream() {
   } else {
     primary_context.TryCancel();
     primary_status = primary->Finish();
+  }
+
+  {
+    const auto projection = trainvm::Journal(database_path).projection(run_id);
+    grpc::ClientContext context;
+    trainvm::v1::WatchEventsRequest request;
+    request.add_run_ids(run_id);
+    request.add_event_types("metric.sampled");
+    request.set_replay_limit(8U);
+    request.set_through_journal_sequence(
+        projection ? projection->last_event_sequence : 0U);
+    request.set_newest_per_metric_series(true);
+    auto stream = read_stub->WatchEvents(&context, request);
+    trainvm::v1::EventEnvelope envelope;
+    std::vector<trainvm::v1::EventEnvelope> metrics;
+    while (stream->Read(&envelope)) metrics.push_back(envelope);
+    const grpc::Status status = stream->Finish();
+    const auto payload = metrics.size() == 1U
+                             ? nlohmann::json::parse(
+                                   metrics.front().canonical_json_payload())
+                             : nlohmann::json{};
+    check(status.ok() && metrics.size() == 1U &&
+              metrics.front().event_type() == "metric.sampled" &&
+              payload.value("name", std::string{}) == "train.loss" &&
+              payload.value("value", 0.0) == 0.5 &&
+              payload.value("step", std::uint64_t{}) == 22U,
+          "TrainVM gRPC exposes the bounded latest-per-metric-series projection");
   }
 
   {
@@ -5712,6 +5938,35 @@ void test_graceful_cancel_lifecycle() {
 // A research topology is selected in the document and refused at compile time
 // when it is invalid, so an operator sees a diagnostic instead of a launch
 // failure on a GPU.
+// The checked-in example must compile through the real authority, not merely
+// satisfy the JSON schema. A schema-valid document that the compiler rejects
+// would be a worse lie than no example at all.
+void test_checked_in_topology_example_compiles() {
+  const std::filesystem::path path =
+      std::filesystem::path(TRAINVM_SOURCE_ROOT) /
+      "docs/experiment-vm/examples/rwkv-scratch-topologies.json";
+  std::ifstream input(path);
+  check(input.good(), "the topology example document is readable");
+  if (!input) return;
+  nlohmann::json document;
+  input >> document;
+
+  const auto compiled = trainvm::compile_document(document);
+  if (!compiled.valid()) {
+    for (const auto& value : compiled.diagnostics)
+      std::cerr << "example diagnostic " << value.code << " @" << value.path
+                << ": " << value.message << '\n';
+  }
+  check(compiled.valid(), "the checked-in topology example compiles");
+  if (!compiled.valid()) return;
+
+  const auto& node =
+      compiled.plan->experiment.spec.workflow.nodes.at("train_to_boundary");
+  check(node.invoke.training && node.invoke.training->topologies &&
+            node.invoke.training->topologies->size() == 2U,
+        "the example carries both selected topologies into the plan");
+}
+
 void test_topology_selection_compiles_and_refuses_invalid_combinations() {
   const auto with_topologies = [](nlohmann::json topologies) {
     nlohmann::json document = load_fixture();
@@ -7045,7 +7300,13 @@ void test_host_launch_registry_contract() {
             trainvm::reflected_field_names<
                 trainvm::HostLaunchRegistryDocument>() ==
                 std::vector<std::string>({"api_version", "trusted_roots",
-                                          "profiles"}),
+                                          "profiles",
+                                          "profiler_executables"}) &&
+            trainvm::reflected_field_names<
+                trainvm::HostProfilerExecutableProfile>() ==
+                std::vector<std::string>({
+                    "backend", "version", "executable_path",
+                    "executable_fingerprint"}),
         "host launch registry types expose their complete reflected schema");
 
   const auto key = [](std::string adapter, std::string version,
@@ -7091,11 +7352,21 @@ void test_host_launch_registry_contract() {
       .public_arguments = {"--worker"},
       .working_directory = "/srv/trainvm/runs/run-1",
   };
+  const trainvm::HostProfilerExecutableProfile nsys_profile{
+      .backend = trainvm::ProfilerBackend::nsys,
+      .version = trainvm::profiler_launch_profile(
+                     trainvm::ProfilerBackend::nsys)
+                     .version,
+      .executable_path = "/opt/trainvm/profilers/nsys",
+      .executable_fingerprint = "sha256:" + std::string(64U, 'f'),
+  };
   const trainvm::HostLaunchRegistryDocument document{
       .api_version = "trainvm.host-launches/v4",
       .trusted_roots = {"/usr/libexec/trainvm", "/srv/trainvm",
                         "/opt/trainvm"},
       .profiles = {native_profile, python_profile},
+      .profiler_executables =
+          std::vector<trainvm::HostProfilerExecutableProfile>{nsys_profile},
   };
 
   const std::filesystem::path directory =
@@ -7133,6 +7404,8 @@ void test_host_launch_registry_contract() {
       loaded.resolve(python_profile.key, python_code);
   const auto& resolved_native =
       loaded.resolve(native_profile.key, native_code);
+  const auto& resolved_nsys =
+      loaded.resolve_profiler(trainvm::ProfilerBackend::nsys);
   auto canonical_document = document;
   std::ranges::sort(canonical_document.trusted_roots);
   std::ranges::sort(
@@ -7158,12 +7431,17 @@ void test_host_launch_registry_contract() {
                                           "/usr/libexec/trainvm"}) &&
             loaded.registry_digest() == expected_registry_digest &&
             loaded.profile_digest(python_profile.key, python_code) ==
-                expected_python_digest,
+                expected_python_digest &&
+            resolved_nsys == nsys_profile &&
+            !loaded.profiler_profile_digest(trainvm::ProfilerBackend::nsys)
+                 .empty(),
         "host launch loader reflection-decodes both runtimes and canonicalizes trusted-root and profile order");
 
   auto reordered = document;
   std::ranges::reverse(reordered.trusted_roots);
   std::ranges::reverse(reordered.profiles);
+  if (reordered.profiler_executables)
+    std::ranges::reverse(*reordered.profiler_executables);
   const auto reordered_path = directory / "host-launches-reordered.json";
   write_document(reordered_path, trainvm::encode_json(reordered));
   const trainvm::HostLaunchRegistry reordered_registry =
@@ -7177,7 +7455,9 @@ void test_host_launch_registry_contract() {
             reordered_registry.resolve(python_profile.key, python_code) ==
                 resolved_python &&
             reordered_registry.resolve(native_profile.key, native_code) ==
-                resolved_native,
+                resolved_native &&
+            reordered_registry.resolve_profiler(
+                trainvm::ProfilerBackend::nsys) == resolved_nsys,
         "host launch registry semantics are invariant to document collection order");
   auto changed_document = document;
   changed_document.profiles.at(1).public_arguments.push_back("--changed");
@@ -7257,6 +7537,16 @@ void test_host_launch_registry_contract() {
   legacy["api_version"] = "trainvm.host-launches/v1";
   auto duplicate_profile = encoded;
   duplicate_profile["profiles"].push_back(duplicate_profile["profiles"].at(0));
+  auto duplicate_profiler = encoded;
+  duplicate_profiler["profiler_executables"].push_back(
+      duplicate_profiler["profiler_executables"].at(0));
+  auto torch_profiler = encoded;
+  torch_profiler["profiler_executables"].at(0)["backend"] = "torch";
+  auto profiler_version_skew = encoded;
+  profiler_version_skew["profiler_executables"].at(0)["version"] = "2.0.0";
+  auto profiler_escape = encoded;
+  profiler_escape["profiler_executables"].at(0)["executable_path"] =
+      "/usr/bin/nsys";
   auto relative_root = encoded;
   relative_root["trusted_roots"].at(0) = "usr/libexec/trainvm";
   auto noncanonical_root = encoded;
@@ -7317,7 +7607,9 @@ void test_host_launch_registry_contract() {
   auto empty_roots = encoded;
   empty_roots["trusted_roots"] = nlohmann::json::array();
   check(rejects(unknown) && rejects(future) && rejects(legacy) &&
-            rejects(duplicate_profile) &&
+            rejects(duplicate_profile) && rejects(duplicate_profiler) &&
+            rejects(torch_profiler) && rejects(profiler_version_skew) &&
+            rejects(profiler_escape) &&
             rejects(relative_root) && rejects(noncanonical_root) &&
             rejects(overlapping_roots) && rejects(executable_escape) &&
             rejects(code_escape) && rejects(working_directory_escape) &&
@@ -7452,6 +7744,13 @@ void test_host_launch_resolution_and_binding() {
       std::filesystem::perms::owner_read |
           std::filesystem::perms::owner_exec,
       std::filesystem::perm_options::replace);
+  const auto profiler_executable = directory / "nsys";
+  std::filesystem::copy_file("/usr/bin/true", profiler_executable);
+  std::filesystem::permissions(
+      profiler_executable,
+      std::filesystem::perms::owner_read |
+          std::filesystem::perms::owner_exec,
+      std::filesystem::perm_options::replace);
   const auto code = directory / "worker.pyz";
   {
     std::ofstream output(code, std::ios::binary);
@@ -7467,6 +7766,8 @@ void test_host_launch_resolution_and_binding() {
     return "sha256:" + trainvm::sha256_hex(bytes);
   };
   const std::string executable_digest = file_digest(executable);
+  const std::string profiler_executable_digest =
+      file_digest(profiler_executable);
   const std::string code_digest = file_digest(code);
   const trainvm::AdapterKey key{
       .adapter = "rwkv-lab.mageflow",
@@ -7492,6 +7793,24 @@ void test_host_launch_resolution_and_binding() {
       .api_version = "trainvm.host-launches/v4",
       .trusted_roots = {directory.string()},
       .profiles = {profile},
+      .profiler_executables =
+          std::vector<trainvm::HostProfilerExecutableProfile>{
+              {
+                  .backend = trainvm::ProfilerBackend::nsys,
+                  .version = trainvm::profiler_launch_profile(
+                                 trainvm::ProfilerBackend::nsys)
+                                 .version,
+                  .executable_path = profiler_executable.string(),
+                  .executable_fingerprint = profiler_executable_digest,
+              },
+              {
+                  .backend = trainvm::ProfilerBackend::ncu,
+                  .version = trainvm::profiler_launch_profile(
+                                 trainvm::ProfilerBackend::ncu)
+                                 .version,
+                  .executable_path = profiler_executable.string(),
+                  .executable_fingerprint = profiler_executable_digest,
+              }},
   });
   const trainvm::HostIdentity host{
       .host_id = "sha256:" + std::string(64U, '1'),
@@ -7513,6 +7832,33 @@ void test_host_launch_resolution_and_binding() {
   trainvm::HostLaunchResolver resolver(registry, host);
   auto first = resolver.resolve(ticket, key);
   auto second = resolver.resolve(ticket, key);
+  trainvm::GpuTraceCapture external_capture{
+      .enabled = true,
+      .backend = trainvm::ProfilerBackend::nsys,
+      .warmup_steps = 2,
+      .skip_steps = 3,
+      .capture_steps = 4,
+      .output_artifact = "gpu_trace",
+      .activities = std::vector<trainvm::ProfilerActivity>{
+          trainvm::ProfilerActivity::cpu,
+          trainvm::ProfilerActivity::accelerator},
+      .record_shapes = false,
+      .profile_memory = false,
+      .with_stack = false,
+  };
+  const std::string external_output =
+      (directory / "work" / "trainvm_artifacts" / "gpu_traces" /
+       ".external" / trainvm::sha256_hex(ticket.launch_nonce))
+          .string();
+  auto external =
+      resolver.resolve(ticket, key, external_capture, external_output);
+  auto expected_profiler_arguments =
+      trainvm::profiler_capture_argv(external_capture, external_output);
+  expected_profiler_arguments.erase(expected_profiler_arguments.begin());
+  auto ncu_capture = external_capture;
+  ncu_capture.backend = trainvm::ProfilerBackend::ncu;
+  auto ncu_external = resolver.resolve(
+      ticket, key, ncu_capture, external_output + "-ncu");
   auto unsupported_ticket = ticket;
   unsupported_ticket.required_capabilities.push_back("worker.unimplemented");
   std::ranges::sort(unsupported_ticket.required_capabilities);
@@ -7534,8 +7880,63 @@ void test_host_launch_resolution_and_binding() {
             first.spec().identity.code_argument_index == 1U &&
             first.spec().identity.public_arguments ==
                 std::vector<std::string>({"-I", "worker.pyz"}) &&
+            external.spec().identity.profiler &&
+            external.spec().identity.profiler->backend ==
+                trainvm::ProfilerBackend::nsys &&
+            external.spec().identity.profiler->execute_from_source &&
+            external.spec().identity.profiler->capture == external_capture &&
+            external.spec().identity.profiler->raw_output_path ==
+                external_output &&
+            external.spec().identity.profiler->executable.sealed_sha256 ==
+                profiler_executable_digest &&
+            external.spec().identity.profiler->public_arguments ==
+                expected_profiler_arguments &&
+            ncu_external.spec().identity.profiler &&
+            !ncu_external.spec().identity.profiler->execute_from_source &&
             unsupported_capability_rejected,
         "repeated host resolution produces one deterministic versioned binding and rejects requirements absent from sealed worker capability authority");
+
+  const auto external_profiler_fd =
+      external.duplicate_profiler_executable_fd();
+  const auto external_authority_fd =
+      external.duplicate_profiler_authority_fd();
+  const auto ncu_profiler_fd =
+      ncu_external.duplicate_profiler_executable_fd();
+  struct stat pinned_profiler_metadata {};
+  const bool pinned_profiler_matches =
+      external_profiler_fd &&
+      ::fstat(*external_profiler_fd, &pinned_profiler_metadata) == 0 &&
+      static_cast<std::uint64_t>(pinned_profiler_metadata.st_dev) ==
+          external.spec().identity.profiler->executable.source_device &&
+      static_cast<std::uint64_t>(pinned_profiler_metadata.st_ino) ==
+          external.spec().identity.profiler->executable.source_inode;
+  constexpr int required_profiler_seals =
+      F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+  check(external_profiler_fd && external_authority_fd &&
+            pinned_profiler_matches && ncu_profiler_fd &&
+            (::fcntl(*ncu_profiler_fd, F_GET_SEALS) &
+             required_profiler_seals) == required_profiler_seals &&
+            trainvm::external_profiler_authority_from_sealed_fd(
+                *external_authority_fd,
+                external.spec().identity.profiler->authority.authority_digest) ==
+                external.spec().identity.profiler->authority,
+        "external resolution retains backend-compatible profiler bytes and exact worker authority");
+  if (ncu_profiler_fd) (void)::close(*ncu_profiler_fd);
+  if (external_profiler_fd && external_authority_fd) {
+    const int external_worker_fd = external.duplicate_executable_fd();
+    const auto external_code_fd = external.duplicate_code_fd();
+    const int external_work_fd = external.duplicate_working_directory_fd();
+    auto adopted_external = trainvm::ResolvedLaunch::adopt_delegated(
+        external.spec(), external_worker_fd, external_code_fd,
+        external_work_fd, external_profiler_fd, external_authority_fd);
+    check(adopted_external.spec() == external.spec(),
+          "delegated external profiler authority is reattested exactly");
+    (void)::close(external_worker_fd);
+    if (external_code_fd) (void)::close(*external_code_fd);
+    (void)::close(external_work_fd);
+    (void)::close(*external_profiler_fd);
+    (void)::close(*external_authority_fd);
+  }
 
   const int executable_fd = first.duplicate_executable_fd();
   const auto code_fd = first.duplicate_code_fd();
@@ -7587,8 +7988,10 @@ void test_host_launch_resolution_and_binding() {
   const nlohmann::json public_manifest =
       trainvm::resolved_launch_spec_json(first.spec());
   const auto decoded = trainvm::resolved_launch_spec_from_json(public_manifest);
+  const auto decoded_external = trainvm::resolved_launch_spec_from_json(
+      trainvm::resolved_launch_spec_json(external.spec()));
   const std::string manifest_text = public_manifest.dump();
-  check(decoded == first.spec() &&
+  check(decoded == first.spec() && decoded_external == external.spec() &&
             manifest_text.find("authorization_token") == std::string::npos &&
             manifest_text.find("process_instance") == std::string::npos &&
             manifest_text.find("secret://") == std::string::npos,
@@ -7607,11 +8010,25 @@ void test_host_launch_resolution_and_binding() {
   } catch (const std::invalid_argument&) {
     forged_rejected = true;
   }
+  auto forged_external = external.spec();
+  forged_external.identity.profiler->execute_from_source = false;
+  forged_external.spec_digest =
+      "sha256:" + trainvm::sha256_hex(
+                       trainvm::resolved_launch_identity_json(
+                           forged_external.identity)
+                           .dump());
+  bool forged_external_rejected = false;
+  try {
+    (void)trainvm::resolved_launch_spec_from_json(
+        trainvm::resolved_launch_spec_json(forged_external));
+  } catch (const std::invalid_argument&) {
+    forged_external_rejected = true;
+  }
   auto moved = std::move(second);
   auto move_assigned = resolver.resolve(ticket, key);
   move_assigned = std::move(moved);
   const int moved_fd = move_assigned.duplicate_executable_fd();
-  check(forged_rejected && moved_fd >= 0,
+  check(forged_rejected && forged_external_rejected && moved_fd >= 0,
         "self-hashed malformed bindings fail semantics and move-only FD ownership remains valid");
   if (moved_fd >= 0) (void)::close(moved_fd);
 
@@ -8751,6 +9168,16 @@ void test_service_registry_and_reconciliation() {
         .event_types = {"worker.launch_requested"},
         .limit = 8U,
     });
+    const auto newest_events = observer.sequenced_events({
+        .after_journal_sequence = 0U,
+        .through_journal_sequence = projection
+                                        ? projection->last_event_sequence
+                                        : 0U,
+        .run_ids = {run_id},
+        .event_types = {},
+        .limit = 3U,
+        .newest_first = true,
+    });
     check(acquired.disposition ==
               trainvm::ReconcileDisposition::lease_acquired &&
               launched.disposition ==
@@ -8765,6 +9192,11 @@ void test_service_registry_and_reconciliation() {
                   std::vector<std::string>({"worker.controls",
                                             "worker.metrics"}) &&
               projection && projection->observed_state == "acquiring" &&
+              newest_events.size() == 3U &&
+              newest_events[0].journal_sequence >
+                  newest_events[1].journal_sequence &&
+              newest_events[1].journal_sequence >
+                  newest_events[2].journal_sequence &&
               projection->run_revision == 4U && events.size() == 7U &&
               launch_event != events.end() &&
               launch_event->wall_time_ns == 5'100 &&
@@ -9118,6 +9550,11 @@ void test_adapter_registry_and_reconciler() {
             .model_family = "mageflow",
             .slots = {{"backbone_activation",
                        trainvm::TrainingComponentCategory::activation}},
+            .allowed_components = std::map<
+                std::string, std::vector<trainvm::TrainingComponentKey>>{
+                {"backbone_activation",
+                 {{trainvm::TrainingComponentCategory::activation,
+                   "silu", "1.0.0"}}}},
         };
   }
   const auto rejects_composition_plan = [](
@@ -9146,6 +9583,7 @@ void test_adapter_registry_and_reconciler() {
   bool wrong_family_rejected = false;
   bool wrong_slot_rejected = false;
   bool wrong_category_rejected = false;
+  bool disallowed_component_rejected = false;
   if (composed.valid()) {
     auto wrong_family = *composed.plan;
     wrong_family.experiment.spec.workflow.nodes.at("train_to_boundary")
@@ -9165,11 +9603,19 @@ void test_adapter_registry_and_reconciler() {
         .key.category = trainvm::TrainingComponentCategory::optimizer;
     wrong_category_rejected =
         rejects_composition_plan(composed_profiles, wrong_category);
+    auto disallowed_component = *composed.plan;
+    disallowed_component.experiment.spec.workflow.nodes
+        .at("train_to_boundary")
+        .invoke.training->components.at("backbone_activation")
+        .key.name = "gelu";
+    disallowed_component_rejected =
+        rejects_composition_plan(composed_profiles, disallowed_component);
   }
   check(exact_composition_accepted && missing_composition_rejected &&
             undeclared_composition_rejected && wrong_family_rejected &&
-            wrong_slot_rejected && wrong_category_rejected,
-        "adapter profiles close the exact training model family, slot names, and categories before worker launch");
+            wrong_slot_rejected && wrong_category_rejected &&
+            disallowed_component_rejected,
+        "adapter profiles close the exact training model family, slot names, categories, and component allowlists before worker launch");
 
   const auto rejects_lifecycle = [](trainvm::OperationLifecycleCapabilities lifecycle) {
     auto profiles = fixture_adapter_profiles();
@@ -12437,6 +12883,7 @@ int main() {
     test_resource_releasing_pause_lifecycle();
     test_adversarial_control_idempotency_and_replay();
     test_topology_selection_compiles_and_refuses_invalid_combinations();
+    test_checked_in_topology_example_compiles();
     test_typed_managed_resource_release();
     test_typed_cache_qualification_executor();
     test_concurrent_worker_launch_and_readiness_replay();

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,10 +21,16 @@ import (
 )
 
 const (
-	trainVMGallerySchema    = "rwkv-lab.eval-gallery.v2"
-	trainVMGalleryMaxBytes  = 8 << 20
-	trainVMGalleryMaxItems  = 512
-	trainVMGalleryMaxEvents = 10_000
+	trainVMGallerySchema         = "rwkv-lab.eval-gallery.v2"
+	trainVMGalleryMaxBytes       = 8 << 20
+	trainVMGalleryMaxItems       = 512
+	trainVMGalleryMaxEvents      = 1_000
+	trainVMGalleryMaxRevisions   = 256
+	trainVMGalleryManifestBudget = 64 << 20
+)
+
+var (
+	errTrainVMGalleryHistoryBound = errors.New("TrainVM gallery history exceeds its projection bound")
 )
 
 type trainVMGalleryItem struct {
@@ -67,6 +74,11 @@ type trainVMGallerySummary struct {
 	CheckpointManifestDigest string `json:"checkpoint_manifest_digest"`
 	EvaluatorProfileDigest   string `json:"evaluator_profile_digest"`
 	PublishedAtNS            int64  `json:"published_at_ns"`
+}
+
+type trainVMGalleryHistoryResponse struct {
+	Galleries        []trainVMGallerySummary `json:"galleries"`
+	HistoryTruncated bool                    `json:"history_truncated"`
 }
 
 type trainVMGalleryResponseItem struct {
@@ -124,38 +136,55 @@ func readBoundedFile(path string, limit int64) ([]byte, error) {
 	return data, nil
 }
 
-func (s *Server) publishedGalleries(ctx context.Context, runID string) ([]trainvmstore.PublishedArtifact, error) {
-	var result []trainvmstore.PublishedArtifact
-	var after uint64
-	scanned := 0
+func (s *Server) publishedGalleries(
+	ctx context.Context, runID string,
+) ([]trainvmstore.PublishedArtifact, bool, error) {
+	journalID, run, plan, found, err := trainvmstore.CaptureRunPlanPrefix(
+		ctx, s.trainvm, runID,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	if !found {
+		return nil, false, os.ErrNotExist
+	}
+	declaration, err := trainvmstore.ObservabilityFromCompiledPlan(plan)
+	if err != nil {
+		return nil, false, err
+	}
+	if declaration.EvalGalleryArtifact == "" {
+		return []trainvmstore.PublishedArtifact{}, false, nil
+	}
+	artifacts, truncated, err := trainvmstore.RecentArtifactsThrough(
+		ctx, s.trainvm, runID, run.LastEventSeq, trainVMGalleryMaxEvents,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	confirmedJournalID, err := s.trainvm.JournalID(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	if confirmedJournalID != journalID {
+		return nil, false, fmt.Errorf("TrainVM journal changed while gallery history was being captured")
+	}
+	result := make([]trainvmstore.PublishedArtifact, 0)
 	seen := map[string]struct{}{}
-	for scanned < trainVMGalleryMaxEvents {
-		page, err := trainvmstore.Artifacts(ctx, s.trainvm, runID, after, 1000)
-		if err != nil {
-			return nil, err
-		}
-		if len(page) == 0 {
-			break
-		}
-		for _, artifact := range page {
-			scanned++
-			if artifact.Kind == "image_gallery" && artifact.Schema == trainVMGallerySchema {
-				if _, duplicate := seen[artifact.ArtifactID]; duplicate {
-					return nil, fmt.Errorf("duplicate published gallery artifact ID %q", artifact.ArtifactID)
-				}
-				seen[artifact.ArtifactID] = struct{}{}
-				result = append(result, artifact)
+	for _, artifact := range artifacts {
+		if artifact.Kind == "image_gallery" && artifact.Schema == trainVMGallerySchema &&
+			artifact.LogicalName == declaration.EvalGalleryArtifact {
+			if _, duplicate := seen[artifact.ArtifactID]; duplicate {
+				return nil, false, fmt.Errorf("duplicate published gallery artifact ID %q", artifact.ArtifactID)
 			}
-			after = artifact.Sequence
-		}
-		if len(page) < 1000 {
-			break
+			seen[artifact.ArtifactID] = struct{}{}
+			if len(result) < trainVMGalleryMaxRevisions {
+				result = append(result, artifact)
+			} else {
+				truncated = true
+			}
 		}
 	}
-	if scanned >= trainVMGalleryMaxEvents {
-		return nil, fmt.Errorf("artifact history exceeds %d events", trainVMGalleryMaxEvents)
-	}
-	return result, nil
+	return result, truncated, nil
 }
 
 func findGalleryArtifact(artifacts []trainvmstore.PublishedArtifact, artifactID string) (trainvmstore.PublishedArtifact, bool) {
@@ -176,6 +205,15 @@ func validGalleryDigest(value string) bool {
 	return ok
 }
 
+func validGalleryStepDomain(value string) bool {
+	switch value {
+	case "microbatch", "optimizer_step", "sample", "token", "epoch", "wall_time":
+		return true
+	default:
+		return false
+	}
+}
+
 func validGalleryArtifactID(value string) bool {
 	return validGalleryText(value) && !strings.ContainsAny(value, "/\\")
 }
@@ -186,13 +224,17 @@ func (s *Server) loadGallery(artifact trainvmstore.PublishedArtifact) (trainVMGa
 	if err != nil {
 		return manifest, err
 	}
-	resolved, ok := s.resolveEvalImage(manifestPath)
-	if !ok {
-		return manifest, fmt.Errorf("gallery manifest is outside allowed data roots")
+	file, err := s.openGalleryFile(manifestPath)
+	if err != nil {
+		return manifest, fmt.Errorf("open gallery manifest: %w", err)
 	}
-	data, err := readBoundedFile(resolved, trainVMGalleryMaxBytes)
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, trainVMGalleryMaxBytes+1))
 	if err != nil {
 		return manifest, fmt.Errorf("read gallery manifest: %w", err)
+	}
+	if len(data) > trainVMGalleryMaxBytes {
+		return manifest, fmt.Errorf("gallery manifest exceeds %d-byte limit", trainVMGalleryMaxBytes)
 	}
 	if uint64(len(data)) != artifact.SizeBytes {
 		return manifest, fmt.Errorf("published gallery manifest size mismatch")
@@ -205,12 +247,14 @@ func (s *Server) loadGallery(artifact trainvmstore.PublishedArtifact) (trainVMGa
 	if err := strictJSONDocument(data, &manifest); err != nil {
 		return manifest, fmt.Errorf("decode gallery manifest: %w", err)
 	}
+	canonical, canonicalErr := canonicalDigestWithoutField(data, "canonical_manifest_digest")
+	declaredCanonical, canonicalOK := normalizedSHA256(manifest.CanonicalManifestDigest)
 	if !validGalleryArtifactID(artifact.ArtifactID) || manifest.APIVersion != trainVMGallerySchema ||
 		manifest.RunID != artifact.RunID ||
 		manifest.NodeID != artifact.ProducerNodeID || manifest.AttemptID != artifact.ProducerAttemptID ||
-		!validGalleryText(manifest.StepDomain) || !validGalleryDigest(manifest.CheckpointManifestDigest) ||
+		!validGalleryStepDomain(manifest.StepDomain) || !validGalleryDigest(manifest.CheckpointManifestDigest) ||
 		!validGalleryDigest(manifest.EvaluatorProfileDigest) || !validGalleryDigest(manifest.UsePolicyDigest) ||
-		!validGalleryDigest(manifest.CanonicalManifestDigest) || len(manifest.Items) == 0 ||
+		canonicalErr != nil || !canonicalOK || canonical != declaredCanonical || len(manifest.Items) == 0 ||
 		len(manifest.Items) > trainVMGalleryMaxItems {
 		return trainVMGalleryManifest{}, fmt.Errorf("gallery manifest identity or cardinality is invalid")
 	}
@@ -277,16 +321,59 @@ func gallerySummary(artifact trainvmstore.PublishedArtifact, manifest trainVMGal
 	}
 }
 
+func boundGalleryProjection(
+	artifacts []trainvmstore.PublishedArtifact,
+) ([]trainvmstore.PublishedArtifact, bool, error) {
+	var manifestBytes uint64
+	for index, artifact := range artifacts {
+		if artifact.SizeBytes > trainVMGalleryMaxBytes {
+			return nil, false, fmt.Errorf("%w: manifest exceeds %d bytes",
+				errTrainVMGalleryHistoryBound, trainVMGalleryMaxBytes)
+		}
+		if manifestBytes > uint64(trainVMGalleryManifestBudget)-artifact.SizeBytes {
+			return artifacts[:index], true, nil
+		}
+		manifestBytes += artifact.SizeBytes
+	}
+	return artifacts, false, nil
+}
+
+func sortGallerySummaries(result []trainVMGallerySummary) {
+	sort.SliceStable(result, func(i, j int) bool {
+		if result[i].StepDomain != result[j].StepDomain {
+			return result[i].StepDomain < result[j].StepDomain
+		}
+		if result[i].Step != result[j].Step {
+			return result[i].Step < result[j].Step
+		}
+		return result[i].Sequence < result[j].Sequence
+	})
+}
+
 func (s *Server) handleTrainVMGalleries(w http.ResponseWriter, r *http.Request) {
 	if s.trainvm == nil {
 		http.Error(w, "TrainVM authority is not configured", http.StatusServiceUnavailable)
 		return
 	}
-	artifacts, err := s.publishedGalleries(r.Context(), r.PathValue("run"))
+	artifacts, historyTruncated, err := s.publishedGalleries(r.Context(), r.PathValue("run"))
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			http.Error(w, "no such TrainVM run or persisted plan", http.StatusNotFound)
+			return
+		}
+		if errors.Is(err, errTrainVMGalleryHistoryBound) {
+			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
 		writeTrainVMAuthorityError(w, err)
 		return
 	}
+	artifacts, budgetTruncated, err := boundGalleryProjection(artifacts)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+	historyTruncated = historyTruncated || budgetTruncated
 	result := make([]trainVMGallerySummary, 0, len(artifacts))
 	for _, artifact := range artifacts {
 		manifest, err := s.loadGallery(artifact)
@@ -296,19 +383,16 @@ func (s *Server) handleTrainVMGalleries(w http.ResponseWriter, r *http.Request) 
 		}
 		result = append(result, gallerySummary(artifact, manifest))
 	}
-	sort.SliceStable(result, func(i, j int) bool {
-		if result[i].Step != result[j].Step {
-			return result[i].Step < result[j].Step
-		}
-		return result[i].Sequence < result[j].Sequence
-	})
+	sortGallerySummaries(result)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(result)
+	_ = json.NewEncoder(w).Encode(trainVMGalleryHistoryResponse{
+		Galleries: result, HistoryTruncated: historyTruncated,
+	})
 }
 
 func (s *Server) galleryForRequest(r *http.Request) (trainvmstore.PublishedArtifact, trainVMGalleryManifest, int, error) {
-	artifacts, err := s.publishedGalleries(r.Context(), r.PathValue("run"))
+	artifacts, _, err := s.publishedGalleries(r.Context(), r.PathValue("run"))
 	if err != nil {
 		return trainvmstore.PublishedArtifact{}, trainVMGalleryManifest{}, 0, err
 	}
@@ -335,6 +419,8 @@ func (s *Server) handleTrainVMGallery(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			http.Error(w, "published gallery not found", http.StatusNotFound)
+		} else if errors.Is(err, errTrainVMGalleryHistoryBound) {
+			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 		} else {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 		}
@@ -374,6 +460,10 @@ func (s *Server) handleTrainVMGallery(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleTrainVMGalleryImage(w http.ResponseWriter, r *http.Request) {
 	_, manifest, index, err := s.galleryForRequest(r)
 	if err != nil {
+		if errors.Is(err, errTrainVMGalleryHistoryBound) {
+			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
 		http.Error(w, "published gallery image not found", http.StatusNotFound)
 		return
 	}
@@ -400,12 +490,15 @@ func (s *Server) handleTrainVMGalleryImage(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "gallery image URI is invalid", http.StatusBadGateway)
 		return
 	}
-	resolved, ok := s.resolveEvalImage(path)
-	if !ok {
+	file, err := s.openGalleryFile(path)
+	if errors.Is(err, errGalleryPathOutsideRoots) {
 		http.Error(w, "gallery image is outside allowed data roots", http.StatusForbidden)
 		return
 	}
-	file, err := os.Open(resolved)
+	if errors.Is(err, errGalleryPathUnsupported) {
+		http.Error(w, "secure gallery image access is unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	if err != nil {
 		http.Error(w, "gallery image is unavailable", http.StatusNotFound)
 		return
@@ -445,5 +538,5 @@ func (s *Server) handleTrainVMGalleryImage(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "private, immutable, max-age=31536000")
-	http.ServeContent(w, r, filepath.Base(resolved), info.ModTime(), file)
+	http.ServeContent(w, r, filepath.Base(path), info.ModTime(), file)
 }

@@ -18,7 +18,15 @@ from rwkv_lab.trainvm_adapters.handlers import (
     AdapterDispatchError,
     HandlerResult,
     _appearance_expert,
+    _rlvr,
+    _rwkv_posttraining,
     _rwkv_scratch,
+    _scalar_metric_decision,
+    _transformer_mla,
+    _vision_frozen_adapter,
+    _vision_native_head,
+    _vision_rwkv_student,
+    _vision_teacher_compressor,
     execute_invocation,
     supported_adapter_keys,
 )
@@ -126,6 +134,13 @@ def test_workspace_path_authority_confines_reads_writes_and_symlinks(tmp_path) -
         authority.write_directory(str(write_root / "cache" / "new"), label="cache")
         == write_root / "cache" / "new"
     )
+    assert authority.node_run_directory("moonvit_arm") == (
+        write_root / "run" / "nodes" / "moonvit_arm"
+    )
+    with pytest.raises(AdapterInputError, match="node ID"):
+        authority.node_run_directory("../escape")
+    with pytest.raises(AdapterInputError, match="node ID"):
+        authority.node_run_directory("мoonvit_arm")
     with pytest.raises(AdapterInputError, match="outside declared read roots"):
         authority.read_path(
             str(read_root / "escape"), label="dataset", kind="directory"
@@ -251,7 +266,9 @@ def test_appearance_handler_passes_only_canonical_authorized_paths(
         workspace=_sealed_workspace(read_root, run_directory),
     )
     components = SimpleNamespace()
-    observability = SimpleNamespace()
+    observability = SimpleNamespace(
+        keepalive=lambda *_args: __import__("contextlib").nullcontext()
+    )
     controls = SimpleNamespace(
         effective_values={
             "learning_rate": 2.0e-5,
@@ -464,8 +481,859 @@ def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoin
     assert request.resume_grade == "terminal_checkpoint"
 
 
+def test_rwkv_posttraining_handler_seals_inputs_and_publishes_adapter_bundle(
+    tmp_path, monkeypatch
+) -> None:
+    from pathlib import Path
+
+    from rwkv_lab import posttrain_train
+
+    read_root = tmp_path / "read"
+    run_directory = tmp_path / "write" / "run"
+    read_root.mkdir()
+    run_directory.mkdir(parents=True)
+    checkpoint = read_root / "base.pt"
+    dataset = read_root / "sft.jsonl"
+    checkpoint.write_bytes(b"checkpoint")
+    dataset.write_text('{"schema":"fixture"}\n', encoding="utf-8")
+    observed = []
+
+    def train(**values):
+        observed.append(values)
+        output = Path(values["output"])
+        adapter = output / "adapter"
+        adapter.mkdir()
+        (adapter / "weights.safetensors").write_bytes(b"weights")
+        (output / "posttrain-result.json").write_text(
+            '{"steps":3}\n', encoding="utf-8"
+        )
+        return {"steps": 3}
+
+    monkeypatch.setattr(posttrain_train, "train", train)
+    invocation = SimpleNamespace(
+        inputs={
+            "config": {
+                "checkpoint": str(checkpoint),
+                "data": str(dataset),
+                "output_dir": str(run_directory),
+                "steps": 3,
+                "log_every": 1,
+            }
+        },
+        workspace=_sealed_workspace(read_root, run_directory),
+        publishes={"adapter": {}},
+        resume=None,
+    )
+    components = SimpleNamespace()
+    observability = SimpleNamespace(
+        keepalive=lambda *_args: __import__("contextlib").nullcontext()
+    )
+    controls = SimpleNamespace(effective_values={})
+
+    result = _rwkv_posttraining(
+        invocation,
+        components,
+        observability=observability,
+        controls=controls,
+    )
+
+    assert result.event_type == "worker.completed"
+    assert result.optimizer_step == 3
+    assert result.payload == {"reason": "training_complete", "objective": "sft"}
+    assert len(result.artifact_requests) == 1
+    assert result.artifact_requests[0].output_name == "adapter"
+    assert result.artifact_requests[0].source_directory.parent == run_directory
+    assert result.artifact_requests[0].source_directory.name.startswith(
+        "posttraining-output-"
+    )
+    assert observed[0]["checkpoint"] == str(checkpoint.resolve())
+    assert observed[0]["data"] == str(dataset.resolve())
+    assert observed[0]["worker_components"] is components
+
+
+def test_rlvr_handler_seals_verifier_and_publishes_terminal_checkpoint(
+    tmp_path, monkeypatch
+) -> None:
+    from pathlib import Path
+
+    from rwkv_lab import rlvr_train
+
+    read_root = tmp_path / "read"
+    run_directory = tmp_path / "write" / "run"
+    read_root.mkdir()
+    run_directory.mkdir(parents=True)
+    checkpoint = read_root / "base.pt"
+    vocab = read_root / "vocab.txt"
+    tasks = read_root / "tasks.jsonl"
+    verifier = read_root / "verifier"
+    checkpoint.write_bytes(b"checkpoint")
+    vocab.write_text("vocab\n", encoding="utf-8")
+    tasks.write_text(
+        '{"id":"one","split":"train","prompt":"1+1",'
+        '"verifier":{"kind":"numeric","expected":2}}\n',
+        encoding="utf-8",
+    )
+    verifier.write_bytes(b"verifier")
+    observed = []
+
+    def fake_run(arguments, **hooks):
+        observed.append((arguments, hooks))
+        candidate = Path(arguments.out) / "rlvr.pt"
+        candidate.write_bytes(b"candidate")
+        return {
+            "status": "complete",
+            "steps_completed": 4,
+            "training_status": "complete",
+            "checkpoint": str(candidate.resolve()),
+            "promotion": {"eligible": True},
+        }
+
+    monkeypatch.setattr(rlvr_train, "run", fake_run)
+    invocation = SimpleNamespace(
+        inputs={
+            "config": {
+                "checkpoint": str(checkpoint),
+                "output_dir": str(run_directory),
+                "vocab": str(vocab),
+                "tasks": str(tasks),
+                "steps": 4,
+                "verifier_executable": str(verifier),
+                "verifier_arguments": ("--profile", "math"),
+            }
+        },
+        workspace=_sealed_workspace(read_root, run_directory),
+        publishes={"checkpoint": {}},
+        resume=None,
+    )
+    components = SimpleNamespace()
+    profiler = SimpleNamespace()
+    observability = SimpleNamespace(
+        keepalive=lambda *_args: __import__("contextlib").nullcontext()
+    )
+    controls = SimpleNamespace(effective_values={})
+
+    result = _rlvr(
+        invocation,
+        components,
+        step_profiler=profiler,
+        observability=observability,
+        controls=controls,
+    )
+
+    arguments, hooks = observed[0]
+    assert arguments.ckpt == str(checkpoint.resolve())
+    assert arguments.tasks == str(tasks.resolve())
+    assert arguments.verifier_command == (
+        str(verifier.resolve()),
+        "--profile",
+        "math",
+    )
+    assert hooks["worker_components"] is components
+    assert hooks["worker_step_profiler"] is profiler
+    assert result.event_type == "worker.completed"
+    assert result.optimizer_step == 4
+    assert result.payload["promotion_eligible"] is True
+    request = result.checkpoint_requests[0]
+    assert request.resume_grade == "terminal_checkpoint"
+    assert request.source_directory == run_directory / "checkpoint-final"
+    assert (request.source_directory / "state.pt").read_bytes() == b"candidate"
+
+
+def test_vision_compressor_handler_seals_inputs_and_publishes_checkpoint(
+    tmp_path, monkeypatch
+) -> None:
+    from rwkv_lab import vision_teacher_compressor
+
+    read_root = tmp_path / "read"
+    run_directory = tmp_path / "write" / "run"
+    image = read_root / "image.png"
+    moon_cache = read_root / "moon-cache"
+    fusion_cache = read_root / "fusion-cache"
+    model_directories = [read_root / name for name in ("siglip", "dino", "sam")]
+    read_root.mkdir()
+    run_directory.mkdir(parents=True)
+    moon_cache.mkdir()
+    fusion_cache.mkdir()
+    for directory in model_directories:
+        directory.mkdir()
+    image.write_bytes(b"image")
+    manifest_row = json.dumps({"image": str(image)}) + "\n"
+    train_manifest = read_root / "train.jsonl"
+    eval_manifest = read_root / "eval.jsonl"
+    train_manifest.write_text(manifest_row, encoding="utf-8")
+    eval_manifest.write_text(manifest_row, encoding="utf-8")
+    moonvit = read_root / "moonvit.safetensors"
+    moonvit.write_bytes(b"weights")
+    observed = []
+
+    def fake_train(arguments, **hooks):
+        observed.append((arguments, hooks))
+        checkpoint = arguments.out / "checkpoint-current"
+        checkpoint.mkdir()
+        (checkpoint / "state.pt").write_bytes(b"checkpoint")
+        return {
+            "status": "complete",
+            "step": 7,
+            "checkpoint": str(checkpoint.resolve()),
+            "best_eval": 0.5,
+        }
+
+    monkeypatch.setattr(vision_teacher_compressor, "train", fake_train)
+    invocation = SimpleNamespace(
+        inputs={
+            "config": {
+                "train_manifest": str(train_manifest),
+                "eval_manifest": str(eval_manifest),
+                "moon_cache": str(moon_cache),
+                "fusion_cache": str(fusion_cache),
+                "output_dir": str(run_directory),
+                "moonvit_checkpoint": str(moonvit),
+                "siglip2_model": str(model_directories[0]),
+                "dinov2_model": str(model_directories[1]),
+                "sam_model": str(model_directories[2]),
+                "steps": 7,
+                "eval_every": 7,
+                "checkpoint_every": 7,
+                "log_every": 1,
+            }
+        },
+        workspace=_sealed_workspace(read_root, run_directory),
+        publishes={"checkpoint": {}},
+        resume=None,
+    )
+    components = SimpleNamespace()
+    profiler = SimpleNamespace()
+    observability = SimpleNamespace(
+        keepalive=lambda *_args: __import__("contextlib").nullcontext()
+    )
+    controls = SimpleNamespace(effective_values={})
+
+    result = _vision_teacher_compressor(
+        invocation,
+        components,
+        step_profiler=profiler,
+        observability=observability,
+        controls=controls,
+    )
+
+    arguments, hooks = observed[0]
+    assert arguments.data == train_manifest.resolve()
+    assert arguments.eval_data == eval_manifest.resolve()
+    assert arguments.resume == "none"
+    assert arguments.resume_from is None
+    assert arguments.preflight_only is False
+    assert hooks["worker_components"] is components
+    assert hooks["worker_step_profiler"] is profiler
+    assert result.event_type == "worker.completed"
+    assert result.optimizer_step == 7
+    assert len(result.checkpoint_requests) == 1
+    request = result.checkpoint_requests[0]
+    assert request.source_directory == run_directory / "checkpoint-current"
+    assert request.resume_grade == "compatible"
+    assert "data_cursor" in request.state_components
+
+
+def test_frozen_vision_handler_lowers_compressor_arm_to_sealed_cache_only_argv(
+    tmp_path, monkeypatch
+) -> None:
+    from rwkv_lab import vision_train
+
+    read_root = tmp_path / "read"
+    run_directory = tmp_path / "write" / "run"
+    read_root.mkdir()
+    run_directory.mkdir(parents=True)
+    image = read_root / "image.png"
+    image.write_bytes(b"image")
+    row = json.dumps({"image": str(image), "text": "caption"}) + "\n"
+    train_manifest = read_root / "train.jsonl"
+    eval_manifest = read_root / "eval.jsonl"
+    train_manifest.write_text(row, encoding="utf-8")
+    eval_manifest.write_text(row, encoding="utf-8")
+    files = {
+        name: read_root / name
+        for name in ("rwkv.pt", "moonvit.safetensors", "vocab.txt", "compressor.pt")
+    }
+    for path in files.values():
+        path.write_bytes(b"sealed")
+    directories = {
+        name: read_root / name
+        for name in ("moon-cache", "fusion-cache", "siglip2", "dinov2", "sam")
+    }
+    for path in directories.values():
+        path.mkdir()
+    observed = []
+    node_run_directory = run_directory / "nodes" / "compressor_arm"
+
+    def fake_train(argv, **hooks):
+        observed.append((argv, hooks))
+        checkpoint = node_run_directory / "checkpoint-current"
+        checkpoint.mkdir(parents=True)
+        (checkpoint / "state.pt").write_bytes(b"checkpoint")
+        return {
+            "status": "complete",
+            "step": 1,
+            "checkpoint": str(checkpoint.resolve()),
+            "best_eval_loss": 1.25,
+        }
+
+    monkeypatch.setattr(vision_train, "train", fake_train)
+    invocation = SimpleNamespace(
+        inputs={
+            "config": {
+                "arm": "compressor",
+                "train_manifests": (str(train_manifest),),
+                "eval_manifests": (str(eval_manifest),),
+                "rwkv_checkpoint": str(files["rwkv.pt"]),
+                "moonvit_checkpoint": str(files["moonvit.safetensors"]),
+                "vocab": str(files["vocab.txt"]),
+                "moon_cache": str(directories["moon-cache"]),
+                "compressor_checkpoint": str(files["compressor.pt"]),
+                "fusion_cache": str(directories["fusion-cache"]),
+                "siglip2_model": str(directories["siglip2"]),
+                "dinov2_model": str(directories["dinov2"]),
+                "sam_model": str(directories["sam"]),
+                "steps": 1,
+                "checkpoint_every": 1,
+                "eval_every": 1,
+                "log_every": 1,
+                "require_fused_ce": False,
+            }
+        },
+        workspace=_sealed_workspace(read_root, run_directory),
+        publishes={"checkpoint": {}, "result": {}},
+        resume=None,
+        node_id="compressor_arm",
+    )
+    components = SimpleNamespace()
+    profiler = SimpleNamespace()
+    observability = SimpleNamespace(
+        keepalive=lambda *_args: __import__("contextlib").nullcontext()
+    )
+    controls = SimpleNamespace(effective_values={})
+
+    result = _vision_frozen_adapter(
+        invocation,
+        components,
+        step_profiler=profiler,
+        observability=observability,
+        controls=controls,
+    )
+
+    argv, hooks = observed[0]
+    assert argv[argv.index("--rwkv") + 1] == str(files["rwkv.pt"].resolve())
+    assert argv[argv.index("--vocab") + 1] == str(files["vocab.txt"].resolve())
+    assert argv[argv.index("--resume") + 1] == "none"
+    assert "--feature-cache-only" in argv
+    assert "--fusion-cache-only" in argv
+    assert "--vision-compressor-checkpoint" in argv
+    assert "--operator-profile-steps" in argv
+    assert "--no-require-fused-ce" in argv
+    assert hooks["worker_components"] is components
+    assert hooks["worker_step_profiler"] is profiler
+    assert result.event_type == "worker.completed"
+    assert result.optimizer_step == 1
+    assert result.payload["arm"] == "compressor"
+    request = result.checkpoint_requests[0]
+    assert request.source_directory == node_run_directory / "checkpoint-current"
+    assert request.resume_grade == "compatible"
+    assert "data_cursor" in request.state_components
+    assert len(result.artifact_requests) == 1
+    scalar_result = result.artifact_requests[0]
+    assert scalar_result.output_name == "result"
+    assert json.loads((scalar_result.source_directory / "result.json").read_text()) == {
+        "api_version": "rwkv-lab.scalar-metric-result/v1",
+        "direction": "minimize",
+        "metric": "eval.loss",
+        "optimizer_step": 1,
+        "subject": "compressor",
+        "value": 1.25,
+    }
+
+
+def test_vision_native_head_handler_seals_lineage_and_publishes_checkpoint(
+    tmp_path, monkeypatch
+) -> None:
+    from rwkv_lab import vision_native_train
+
+    read_root = tmp_path / "read"
+    run_directory = tmp_path / "write" / "run"
+    read_root.mkdir()
+    run_directory.mkdir(parents=True)
+    image = read_root / "image.png"
+    image.write_bytes(b"image")
+    row = json.dumps({"image": str(image), "caption": "fixture"}) + "\n"
+    train_manifest = read_root / "train.jsonl"
+    eval_manifest = read_root / "eval.jsonl"
+    train_manifest.write_text(row, encoding="utf-8")
+    eval_manifest.write_text(row, encoding="utf-8")
+    files = {
+        name: read_root / name
+        for name in (
+            "baseline.pt",
+            "compressor.pt",
+            "moonvit.safetensors",
+            "vocab.txt",
+        )
+    }
+    for path in files.values():
+        path.write_bytes(b"sealed")
+    directories = {
+        name: read_root / name
+        for name in ("moon-cache", "fusion-cache", "siglip2", "dinov2", "sam")
+    }
+    for path in directories.values():
+        path.mkdir()
+    observed = []
+
+    def fake_train(arguments, **hooks):
+        observed.append((arguments, hooks))
+        checkpoint = Path(arguments.out) / "checkpoint-current"
+        checkpoint.mkdir()
+        (checkpoint / "state.pt").write_bytes(b"checkpoint")
+        return {
+            "status": "complete",
+            "step": 9,
+            "checkpoint": str(checkpoint.resolve()),
+            "best_eval": 1.25,
+        }
+
+    from pathlib import Path
+
+    monkeypatch.setattr(vision_native_train, "train", fake_train)
+    invocation = SimpleNamespace(
+        inputs={
+            "config": {
+                "baseline_checkpoint": str(files["baseline.pt"]),
+                "compressor_checkpoint": str(files["compressor.pt"]),
+                "train_manifest": str(train_manifest),
+                "eval_manifest": str(eval_manifest),
+                "moon_cache": str(directories["moon-cache"]),
+                "fusion_cache": str(directories["fusion-cache"]),
+                "moonvit_checkpoint": str(files["moonvit.safetensors"]),
+                "siglip2_model": str(directories["siglip2"]),
+                "dinov2_model": str(directories["dinov2"]),
+                "sam_model": str(directories["sam"]),
+                "vocab": str(files["vocab.txt"]),
+                "output_dir": str(run_directory),
+                "steps": 9,
+                "eval_every": 9,
+                "checkpoint_every": 9,
+            }
+        },
+        workspace=_sealed_workspace(read_root, run_directory),
+        publishes={"checkpoint": {}},
+        resume=None,
+    )
+    components = SimpleNamespace()
+    profiler = SimpleNamespace()
+    observability = SimpleNamespace(
+        keepalive=lambda *_args: __import__("contextlib").nullcontext()
+    )
+    controls = SimpleNamespace(effective_values={})
+
+    result = _vision_native_head(
+        invocation,
+        components,
+        step_profiler=profiler,
+        observability=observability,
+        controls=controls,
+    )
+
+    arguments, hooks = observed[0]
+    assert arguments.baseline == str(files["baseline.pt"].resolve())
+    assert arguments.compressor == str(files["compressor.pt"].resolve())
+    assert arguments.resume_from == ""
+    assert hooks["worker_components"] is components
+    assert result.event_type == "worker.completed"
+    assert result.optimizer_step == 9
+    request = result.checkpoint_requests[0]
+    assert request.resume_grade == "compatible"
+    assert "data_cursor" not in request.state_components
+
+
+def test_scalar_metric_decision_publishes_lineage_bound_winner(
+    tmp_path, monkeypatch
+) -> None:
+    run_directory = tmp_path / "run"
+    run_directory.mkdir()
+    artifacts = {
+        "left": SimpleNamespace(artifact_id="artifact-moonvit"),
+        "right": SimpleNamespace(artifact_id="artifact-compressor"),
+    }
+    documents = {
+        "artifact-moonvit": {
+            "api_version": "rwkv-lab.scalar-metric-result/v1",
+            "direction": "minimize",
+            "metric": "eval.loss",
+            "optimizer_step": 2000,
+            "subject": "moonvit",
+            "value": 1.5,
+        },
+        "artifact-compressor": {
+            "api_version": "rwkv-lab.scalar-metric-result/v1",
+            "direction": "minimize",
+            "metric": "eval.loss",
+            "optimizer_step": 2000,
+            "subject": "compressor",
+            "value": 1.25,
+        },
+    }
+    monkeypatch.setattr(
+        "rwkv_lab.trainvm_adapters.handlers.resolve_input_artifact",
+        lambda _invocation, name, **_requirements: artifacts[name],
+    )
+    monkeypatch.setattr(
+        "rwkv_lab.trainvm_adapters.handlers.load_input_artifact_json",
+        lambda artifact, _path, **_bounds: documents[artifact.artifact_id],
+    )
+    invocation = SimpleNamespace(
+        inputs={
+            "config": {
+                "metric": "eval.loss",
+                "direction": "minimize",
+                "left_subject": "moonvit",
+                "right_subject": "compressor",
+                "absolute_tolerance": 0.01,
+            },
+            "left": {},
+            "right": {},
+        },
+        workspace={
+            "run_directory": str(run_directory),
+            "allowed_read_roots": [str(tmp_path)],
+            "allowed_write_roots": [str(tmp_path)],
+        },
+        publishes={"decision": {}},
+        resume=None,
+        node_id="compare_arms",
+        attempt_id="compare_arms@1",
+    )
+
+    result = _scalar_metric_decision(
+        invocation,
+        None,
+        observability=SimpleNamespace(
+            keepalive=lambda *_args: __import__("contextlib").nullcontext()
+        ),
+        controls=SimpleNamespace(effective_values={}),
+    )
+
+    assert result.event_type == "operation.completed"
+    assert result.payload == {
+        "outcome": "selected",
+        "selected_subject": "compressor",
+    }
+    request = result.artifact_requests[0]
+    assert request.output_name == "decision"
+    assert request.parent_artifact_ids == (
+        "artifact-moonvit",
+        "artifact-compressor",
+    )
+    decision = json.loads((request.source_directory / "decision.json").read_text())
+    assert decision["selected_subject"] == "compressor"
+    assert decision["selected_artifact_id"] == "artifact-compressor"
+    assert decision["signed_right_minus_left"] == -0.25
+
+
+def test_vision_student_handler_seals_lineage_and_publishes_checkpoint(
+    tmp_path, monkeypatch
+) -> None:
+    from rwkv_lab import vision_rwkv_student_train
+
+    read_root = tmp_path / "read"
+    run_directory = tmp_path / "write" / "run"
+    read_root.mkdir()
+    run_directory.mkdir(parents=True)
+    image = read_root / "image.png"
+    image.write_bytes(b"image")
+    row = json.dumps({"image": str(image), "caption": "fixture"}) + "\n"
+    train_manifest = read_root / "train.jsonl"
+    eval_manifest = read_root / "eval.jsonl"
+    train_manifest.write_text(row, encoding="utf-8")
+    eval_manifest.write_text(row, encoding="utf-8")
+    files = {
+        name: read_root / name
+        for name in (
+            "baseline.pt",
+            "compressor.pt",
+            "native.pt",
+            "moonvit.safetensors",
+            "vocab.txt",
+        )
+    }
+    for path in files.values():
+        path.write_bytes(b"sealed")
+    directories = {
+        name: read_root / name
+        for name in ("moon-cache", "fusion-cache", "siglip2", "dinov2", "sam")
+    }
+    for path in directories.values():
+        path.mkdir()
+    observed = []
+
+    def fake_train(arguments, **hooks):
+        observed.append((arguments, hooks))
+        checkpoint = Path(arguments.out) / "checkpoint-current"
+        checkpoint.mkdir()
+        (checkpoint / "state.pt").write_bytes(b"checkpoint")
+        return {
+            "status": "complete",
+            "step": 11,
+            "checkpoint": str(checkpoint.resolve()),
+            "best_ppl": 1.5,
+        }
+
+    from pathlib import Path
+
+    monkeypatch.setattr(vision_rwkv_student_train, "train", fake_train)
+    invocation = SimpleNamespace(
+        inputs={
+            "config": {
+                "baseline_checkpoint": str(files["baseline.pt"]),
+                "compressor_checkpoint": str(files["compressor.pt"]),
+                "native_head_checkpoint": str(files["native.pt"]),
+                "train_manifest": str(train_manifest),
+                "eval_manifest": str(eval_manifest),
+                "moon_cache": str(directories["moon-cache"]),
+                "fusion_cache": str(directories["fusion-cache"]),
+                "moonvit_checkpoint": str(files["moonvit.safetensors"]),
+                "siglip2_model": str(directories["siglip2"]),
+                "dinov2_model": str(directories["dinov2"]),
+                "sam_model": str(directories["sam"]),
+                "vocab": str(files["vocab.txt"]),
+                "output_dir": str(run_directory),
+                "steps": 11,
+                "eval_every": 11,
+                "checkpoint_every": 11,
+            }
+        },
+        workspace=_sealed_workspace(read_root, run_directory),
+        publishes={"checkpoint": {}},
+        resume=None,
+    )
+    components = SimpleNamespace()
+    profiler = SimpleNamespace()
+    observability = SimpleNamespace(
+        keepalive=lambda *_args: __import__("contextlib").nullcontext()
+    )
+    controls = SimpleNamespace(effective_values={})
+
+    result = _vision_rwkv_student(
+        invocation,
+        components,
+        step_profiler=profiler,
+        observability=observability,
+        controls=controls,
+    )
+
+    arguments, hooks = observed[0]
+    assert arguments.baseline == str(files["baseline.pt"].resolve())
+    assert arguments.compressor == str(files["compressor.pt"].resolve())
+    assert arguments.native_head == str(files["native.pt"].resolve())
+    assert arguments.resume_from == ""
+    assert hooks["worker_components"] is components
+    assert result.event_type == "worker.completed"
+    assert result.optimizer_step == 11
+    request = result.checkpoint_requests[0]
+    assert request.resume_grade == "compatible"
+    assert "data_cursor" in request.state_components
+
+
+def test_transformer_mla_handler_binds_paths_profile_and_compatible_checkpoint(
+    tmp_path, monkeypatch
+) -> None:
+    from rwkv_lab import train_mla
+
+    read_root = tmp_path / "read"
+    model_dir = read_root / "model"
+    patch_dir = read_root / "patch"
+    engram_dir = read_root / "engram"
+    run_directory = tmp_path / "write" / "run"
+    model_dir.mkdir(parents=True)
+    patch_dir.mkdir()
+    engram_dir.mkdir()
+    run_directory.mkdir(parents=True)
+    tokens = read_root / "tokens.bin"
+    tokens.write_bytes(b"\x00" * 4096)
+    observed = []
+
+    def fake_train(config, **kwargs):
+        observed.append((config, kwargs))
+        checkpoint = run_directory / "step_000010"
+        checkpoint.mkdir(exist_ok=True)
+        (checkpoint / "ckpt.pt").write_bytes(b"checkpoint")
+        return {"status": "complete", "step": 10, "checkpoint": str(checkpoint)}
+
+    monkeypatch.setattr(train_mla, "train", fake_train)
+    invocation = SimpleNamespace(
+        adapter={
+            "adapter": "rwkv-lab.transformer-mla",
+            "version": "1.0.0",
+            "operation": "train",
+            "contract": "rwkv_lab.transformer_mla.v1.Train",
+        },
+        inputs={
+            "config": {
+                "profile": "mla",
+                "model_dir": str(model_dir),
+                "patch_dir": str(patch_dir),
+                "tokens_bin": str(tokens),
+                "output_dir": str(run_directory),
+                "total_tokens_in_bin": 1024,
+                "eval_tokens": 64,
+                "max_steps": 10,
+                "warmup_steps": 2,
+                "eval_every_steps": 5,
+                "eval_batches": 2,
+                "save_every_steps": 10,
+            }
+        },
+        workspace=_sealed_workspace(read_root, run_directory),
+        publishes={"checkpoint": {}},
+    )
+    required_implementations = []
+    components = SimpleNamespace(
+        require_implementation=lambda slot, **values: required_implementations.append(
+            (slot, values)
+        )
+    )
+    profiler = SimpleNamespace()
+    observability = SimpleNamespace()
+    controls = SimpleNamespace()
+
+    result = _transformer_mla(
+        invocation,
+        components,
+        step_profiler=profiler,
+        observability=observability,
+        controls=controls,
+    )
+
+    lowered, keyword_arguments = observed[0]
+    assert lowered.model_dir == str(model_dir.resolve())
+    assert lowered.patch_dir == str(patch_dir.resolve())
+    assert lowered.tokens_bin == str(tokens.resolve())
+    assert lowered.out_dir == str(run_directory.resolve())
+    assert lowered.optimizer == "trainvm"
+    assert required_implementations == [
+        (
+            "optimizer",
+            {
+                "category": "optimizer",
+                "allowed": frozenset(
+                    {
+                        "rwkv_lab.optimizer.torch_adamw.v1",
+                        "rwkv_lab.optimizer.torch_adamw_no_decay.v2",
+                    }
+                ),
+            },
+        )
+    ]
+    assert keyword_arguments == {
+        "worker_components": components,
+        "worker_step_profiler": profiler,
+        "worker_observability": observability,
+        "worker_controls": controls,
+    }
+    assert result.optimizer_step == 10
+    assert result.checkpoint_requests[0].resume_grade == "compatible"
+    assert "topology" in result.checkpoint_requests[0].state_components
+
+    wrong_profile = SimpleNamespace(**vars(invocation))
+    wrong_profile.inputs = {
+        "config": {**invocation.inputs["config"], "profile": "full_backbone"}
+    }
+    with pytest.raises(AdapterDispatchError, match="does not match"):
+        _transformer_mla(wrong_profile, components)
+
+    with pytest.raises(AdapterDispatchError, match="do not declare initial controls"):
+        _transformer_mla(
+            invocation,
+            components,
+            observability=observability,
+            controls=SimpleNamespace(effective_values={"learning_rate": 1.0e-5}),
+        )
+
+    bad_observability = SimpleNamespace(
+        declaration=SimpleNamespace(
+            metrics={
+                "train.loss": SimpleNamespace(step_domain="token"),
+            }
+        )
+    )
+    with pytest.raises(AdapterDispatchError, match="optimizer_step"):
+        _transformer_mla(
+            invocation,
+            components,
+            observability=bad_observability,
+            controls=SimpleNamespace(effective_values={}),
+        )
+
+    engram_invocation = SimpleNamespace(**vars(invocation))
+    engram_invocation.adapter = {
+        **invocation.adapter,
+        "adapter": "rwkv-lab.transformer-mla-engram",
+        "contract": "rwkv_lab.transformer_mla_engram.v1.Train",
+    }
+    engram_invocation.inputs = {
+        "config": {
+            **invocation.inputs["config"],
+            "profile": "engram",
+            "engram_patch_dir": str(engram_dir),
+        }
+    }
+    required_implementations.clear()
+    _transformer_mla(
+        engram_invocation,
+        components,
+        observability=observability,
+        controls=controls,
+    )
+    assert required_implementations == [
+        (
+            "optimizer",
+            {
+                "category": "optimizer",
+                "allowed": frozenset(
+                    {
+                        "rwkv_lab.optimizer.torch_adamw.v1",
+                        "rwkv_lab.optimizer.torch_adamw_no_decay.v2",
+                    }
+                ),
+            },
+        ),
+        (
+            "host_optimizer",
+            {
+                "category": "optimizer",
+                "allowed": frozenset(
+                    {"rwkv_lab.optimizer.torch_sparse_adam.v1"}
+                ),
+            },
+        ),
+    ]
+
+    monkeypatch.setattr(
+        train_mla,
+        "train",
+        lambda config, **kwargs: {
+            "status": "interrupted",
+            "step": 10,
+            "checkpoint": str(run_directory / "step_000010"),
+        },
+    )
+    interrupted = _transformer_mla(
+        invocation,
+        components,
+        observability=observability,
+        controls=controls,
+    )
+    assert interrupted.event_type == "operation.failed"
+    assert interrupted.payload["reason"] == "checkpointed_interruption"
+
+
 def test_dispatch_table_is_closed_and_training_composition_is_required() -> None:
-    assert supported_adapter_keys() == {
+    expected = {
         (
             "rwkv-lab.mageflow-appearance-expert",
             "1.0.0",
@@ -485,12 +1353,67 @@ def test_dispatch_table_is_closed_and_training_composition_is_required() -> None
             "rwkv_lab.qwen_ao3.v1.Train",
         ),
         (
+            "rwkv-lab.scalar-metric-decision",
+            "1.0.0",
+            "decide",
+            "rwkv_lab.scalar_metric_decision.v1.Decide",
+        ),
+        (
+            "rwkv-lab.rwkv-posttraining",
+            "1.0.0",
+            "train",
+            "rwkv_lab.rwkv_posttraining.v1.Train",
+        ),
+        (
             "rwkv-lab.rwkv-scratch",
             "1.0.0",
             "train",
             "rwkv_lab.rwkv_scratch.v1.Train",
         ),
+        (
+            "rwkv-lab.rwkv-rlvr",
+            "1.0.0",
+            "train",
+            "rwkv_lab.rwkv_rlvr.v1.Train",
+        ),
+        (
+            "rwkv-lab.vision-teacher-compressor",
+            "1.0.0",
+            "train",
+            "rwkv_lab.vision_teacher_compressor.v1.Train",
+        ),
+        (
+            "rwkv-lab.vision-frozen-adapter",
+            "1.0.0",
+            "train",
+            "rwkv_lab.vision_frozen_adapter.v1.Train",
+        ),
+        (
+            "rwkv-lab.vision-native-head",
+            "1.0.0",
+            "train",
+            "rwkv_lab.vision_native_head.v1.Train",
+        ),
+        (
+            "rwkv-lab.vision-rwkv-student",
+            "1.0.0",
+            "train",
+            "rwkv_lab.vision_rwkv_student.v1.Train",
+        ),
     }
+    expected.update(
+        {
+            ("rwkv-lab.transformer-mla", "1.0.0", "train", "rwkv_lab.transformer_mla.v1.Train"),
+            ("rwkv-lab.transformer-mla-mtp", "1.0.0", "train", "rwkv_lab.transformer_mla_mtp.v1.Train"),
+            ("rwkv-lab.transformer-mla-mutor", "1.0.0", "train", "rwkv_lab.transformer_mla_mutor.v1.Train"),
+            ("rwkv-lab.transformer-mla-fsp", "1.0.0", "train", "rwkv_lab.transformer_mla_fsp.v1.Train"),
+            ("rwkv-lab.transformer-mla-parallel", "1.0.0", "train", "rwkv_lab.transformer_mla_parallel.v1.Train"),
+            ("rwkv-lab.transformer-mla-rwkv8", "1.0.0", "train", "rwkv_lab.transformer_mla_rwkv8.v1.Train"),
+            ("rwkv-lab.transformer-mla-engram", "1.0.0", "train", "rwkv_lab.transformer_mla_engram.v1.Train"),
+            ("rwkv-lab.transformer-mla-full-backbone", "1.0.0", "train", "rwkv_lab.transformer_mla_full_backbone.v1.Train"),
+        }
+    )
+    assert supported_adapter_keys() == expected
     unknown = SimpleNamespace(
         adapter={
             "adapter": "user.supplied.module",
@@ -589,6 +1512,51 @@ def test_runner_publishes_handler_checkpoints_before_terminal_event(
             {
                 "reason": "training_complete",
                 "checkpoint_artifact_ids": ["checkpoint-artifact-19"],
+            },
+            19,
+        )
+    ]
+
+
+def test_runner_publishes_handler_artifacts_before_terminal_event(
+    monkeypatch, tmp_path
+) -> None:
+    from rwkv_lab.trainvm_worker import ArtifactPublicationRequest
+
+    bootstrap = SimpleNamespace(run_id="run-1")
+    session = FakeSession(bootstrap)
+    request = ArtifactPublicationRequest(tmp_path, "adapter")
+    observed = []
+
+    def publish(actual_session, requests, *, progress):
+        assert actual_session is session
+        observed.extend(requests)
+        progress()
+        return (SimpleNamespace(artifact_id="adapter-artifact-19"),)
+
+    monkeypatch.setattr(
+        "rwkv_lab.trainvm_adapters.entrypoint.publish_artifact_requests", publish
+    )
+    status = run_worker(
+        bootstrap_reader=lambda _descriptor: bootstrap,
+        session_factory=lambda _bootstrap: session,
+        executor=lambda _invocation, _profiler, _observability, _controls: (
+            HandlerResult(
+                "worker.completed",
+                {"reason": "training_complete"},
+                19,
+                artifact_requests=(request,),
+            )
+        ),
+    )
+    assert status == 0
+    assert observed == [request]
+    assert session.finished == [
+        (
+            "worker.completed",
+            {
+                "reason": "training_complete",
+                "artifact_ids": ["adapter-artifact-19"],
             },
             19,
         )

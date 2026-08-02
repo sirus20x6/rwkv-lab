@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <filesystem>
 #include <limits>
 #include <map>
 #include <optional>
@@ -56,9 +57,12 @@ bool is_worker_observation(std::string_view event_type) {
          event_type == "artifact.published";
 }
 
-void require_worker_observation_shape(const Event& event) {
+void require_worker_observation_shape(const Event& event,
+                                      bool authority_artifact = false) {
   if (!is_worker_observation(event.event_type) || event.event_version != 1U ||
-      event.worker_sequence == 0U || !event.payload.is_object()) {
+      (event.worker_sequence == 0U &&
+       !(authority_artifact && event.event_type == "artifact.published")) ||
+      !event.payload.is_object()) {
     throw std::invalid_argument("worker observation is not canonical");
   }
   if (event.event_type == "worker.heartbeat") {
@@ -82,7 +86,12 @@ void require_worker_observation_shape(const Event& event) {
     const auto& labels = event.payload.contains("labels")
                              ? event.payload.at("labels")
                              : nlohmann::json{};
-    if (!event.optimizer_step || event.payload.size() != fields.size() ||
+    const bool optimizer_domain =
+        event.payload.contains("step_domain") &&
+        event.payload.at("step_domain").is_string() &&
+        event.payload.at("step_domain").get_ref<const std::string&>() ==
+            "optimizer_step";
+    if (event.payload.size() != fields.size() ||
         !std::ranges::all_of(fields, [&](std::string_view field) {
           return event.payload.contains(std::string(field));
         }) ||
@@ -92,7 +101,11 @@ void require_worker_observation_shape(const Event& event) {
         !event.payload.at("step_domain").is_string() ||
         event.payload.at("step_domain").get_ref<const std::string&>().empty() ||
         !event.payload.at("step").is_number_unsigned() ||
-        event.payload.at("step").get<std::uint64_t>() != *event.optimizer_step ||
+        (optimizer_domain &&
+         (!event.optimizer_step ||
+          event.payload.at("step").get<std::uint64_t>() !=
+              *event.optimizer_step)) ||
+        (!optimizer_domain && event.optimizer_step.has_value()) ||
         !event.payload.at("sample_weight").is_number() ||
         !std::isfinite(event.payload.at("sample_weight").get<double>()) ||
         event.payload.at("sample_weight").get<double>() <= 0.0 ||
@@ -157,6 +170,99 @@ void require_worker_observation_shape(const Event& event) {
           event.wall_time_ns) {
     throw std::invalid_argument("worker artifact manifest is not canonical");
   }
+}
+
+void require_external_profiler_artifact(const Event& event,
+                                        const CompiledPlan& plan,
+                                        const Journal& journal,
+                                        const std::set<std::string>&
+                                            preceding_event_ids) {
+  require_worker_observation_shape(event, true);
+  if (event.event_type != "artifact.published" ||
+      event.worker_sequence != 0U || event.monotonic_time_ns != 0U ||
+      event.payload.value("kind", std::string{}) != "opaque" ||
+      event.payload.value("schema", std::string{}) !=
+          "trainvm.gpu-trace.v1" ||
+      event.payload.value("fingerprint_algorithm", std::string{}) !=
+          "adapter" ||
+      !event.payload.at("parent_artifact_ids").empty())
+    throw std::runtime_error(
+        "controller-authored profiler artifact is not canonical");
+  const std::string launch_id = event.run_id + ":worker-launch:" +
+                                event.node_id + ":" + event.attempt_id;
+  const auto launch = journal.launch_binding(launch_id);
+  const std::string dispatch_id = event.run_id + ":dispatch:" +
+                                  event.node_id + ":" + event.attempt_id;
+  const auto dispatch = journal.dispatch(dispatch_id);
+  const auto invocation = journal.worker_invocation(dispatch_id);
+  if (!launch || !launch->identity.profiler || !dispatch || !invocation ||
+      dispatch->status != DispatchStatus::completed ||
+      !dispatch->result_event_id ||
+      invocation->run_id != event.run_id ||
+      invocation->node_id != event.node_id ||
+      invocation->attempt_id != event.attempt_id ||
+      event.plan_revision != invocation->plan_revision)
+    throw std::runtime_error(
+        "controller-authored profiler artifact has no completed launch");
+  const auto result = journal.event(*dispatch->result_event_id);
+  if (!result || result->worker_sequence == 0U ||
+      !preceding_event_ids.contains(result->event_id))
+    throw std::runtime_error(
+        "controller-authored profiler artifact precedes its worker result");
+  const auto& capture = launch->identity.profiler->capture;
+  if (!capture.output_artifact)
+    throw std::runtime_error(
+        "controller-authored profiler artifact has no declared output");
+  const nlohmann::json* publication = nullptr;
+  for (const auto& [output_name, candidate] : invocation->publishes.items()) {
+    (void)output_name;
+    if (candidate.is_object() &&
+        candidate.value("logical_name", std::string{}) ==
+            *capture.output_artifact) {
+      if (publication != nullptr)
+        throw std::runtime_error(
+            "controller-authored profiler artifact authority is ambiguous");
+      publication = &candidate;
+    }
+  }
+  const auto& declaration =
+      publication && publication->contains("declaration")
+          ? publication->at("declaration")
+          : nlohmann::json{};
+  const std::string artifact_id =
+      event.payload.value("artifact_id", std::string{});
+  const std::string fingerprint =
+      event.payload.value("fingerprint", std::string{});
+  const auto valid_hex = [](std::string_view value) {
+    return std::ranges::all_of(value, [](char character) {
+      return (character >= '0' && character <= '9') ||
+             (character >= 'a' && character <= 'f');
+    });
+  };
+  const bool artifact_identity =
+      artifact_id.size() == 74U && artifact_id.starts_with("gpu-trace-") &&
+      valid_hex(std::string_view(artifact_id).substr(10U));
+  const bool digest_identity =
+      fingerprint.size() == 71U && fingerprint.starts_with("sha256:") &&
+      valid_hex(std::string_view(fingerprint).substr(7U));
+  const std::string expected_uri =
+      "file://" +
+      (std::filesystem::path(plan.experiment.spec.workspace.run_directory) /
+       "trainvm_artifacts" / "gpu_traces" / artifact_id / "manifest.json")
+          .string();
+  if (!publication || !declaration.is_object() ||
+      declaration.value("type", std::string{}) != "opaque" ||
+      declaration.value("schema", std::string{}) !=
+          "trainvm.gpu-trace.v1" ||
+      declaration.value("fingerprint", std::string{}) != "adapter" ||
+      event.payload.value("logical_name", std::string{}) !=
+          *capture.output_artifact ||
+      !artifact_identity || !digest_identity ||
+      event.payload.value("uri", std::string{}) != expected_uri ||
+      event.payload.value("size_bytes", std::uint64_t{}) == 0U ||
+      event.event_id != dispatch_id + ":artifact:" + sha256_hex(artifact_id))
+    throw std::runtime_error(
+        "controller-authored profiler artifact disagrees with its authority");
 }
 
 std::string worker_observation_event_id(const Event& event,
@@ -582,12 +688,15 @@ const ExecutionState& Controller::recover() {
   std::set<std::string> replayed_process_prepares;
   std::set<std::string> replayed_process_commits;
   std::set<std::string> replayed_process_exits;
+  std::set<std::string> replayed_event_ids;
   bool current_dispatch_prepared = false;
   std::optional<Event> current_lease_acquisition;
   for (const Event& event : events) {
     if (event.plan_revision != kInitialPlanRevision) {
       throw std::runtime_error("journal recovery encountered an unsupported plan revision");
     }
+    if (!replayed_event_ids.insert(event.event_id).second)
+      throw std::runtime_error("journal recovery found a duplicate event identity");
     if (event.event_type == "run.created") {
       if (event.event_id != events.front().event_id) {
         throw std::runtime_error("journal recovery found more than one run.created event");
@@ -1488,6 +1597,15 @@ const ExecutionState& Controller::recover() {
       }
       continue;
     }
+    if (event.event_type == "artifact.published" &&
+        event.worker_sequence == 0U) {
+      if (event.run_revision != recovered.revision)
+        throw std::runtime_error(
+            "controller-authored profiler artifact has a stale run revision");
+      require_external_profiler_artifact(event, plan_, journal_,
+                                         replayed_event_ids);
+      continue;
+    }
     if (is_worker_observation(event.event_type)) {
       try {
         require_worker_observation_shape(event);
@@ -1945,6 +2063,40 @@ ResolvedLaunchSpec Controller::bind_worker_launch(
   };
   const HostLaunchProfile& host_profile = host_registry.resolve(
       expected_key, binding.identity.code_fingerprint);
+  const GpuTraceCapture* expected_trace = nullptr;
+  if (plan_.experiment.spec.execution &&
+      plan_.experiment.spec.execution->component ==
+          active_node.invoke.component &&
+      plan_.experiment.spec.execution->operation ==
+          active_node.invoke.operation &&
+      plan_.experiment.spec.execution->gpu_trace &&
+      plan_.experiment.spec.execution->gpu_trace->enabled) {
+    expected_trace = &*plan_.experiment.spec.execution->gpu_trace;
+  }
+  const bool expects_external_profiler =
+      expected_trace && expected_trace->backend &&
+      *expected_trace->backend != ProfilerBackend::torch;
+  bool profiler_matches = !binding.identity.profiler;
+  if (expects_external_profiler && binding.identity.profiler) {
+    const auto& profiler = *binding.identity.profiler;
+    const HostProfilerExecutableProfile& host_profiler =
+        host_registry.resolve_profiler(*expected_trace->backend);
+    const std::string expected_output =
+        (std::filesystem::path(
+             plan_.experiment.spec.workspace.run_directory) /
+         "trainvm_artifacts" / "gpu_traces" / ".external" /
+         sha256_hex(launch_id))
+            .string();
+    profiler_matches =
+        profiler.backend == *expected_trace->backend &&
+        profiler.capture == *expected_trace &&
+        profiler.raw_output_path == expected_output &&
+        profiler.executable.source_path == host_profiler.executable_path &&
+        profiler.executable.sealed_sha256 ==
+            host_profiler.executable_fingerprint &&
+        profiler.host_profiler_profile_digest ==
+            host_registry.profiler_profile_digest(*expected_trace->backend);
+  }
   if (binding.identity.launch_event_id != launch_id ||
       binding.identity.adapter_key != expected_key ||
       binding.identity.host != authority_host ||
@@ -1969,7 +2121,9 @@ ResolvedLaunchSpec Controller::bind_worker_launch(
       (binding.identity.code &&
        (binding.identity.code->source_path != *host_profile.code_path ||
         binding.identity.code->sealed_sha256 !=
-            host_profile.code_fingerprint))) {
+            host_profile.code_fingerprint)) ||
+      binding.identity.profiler.has_value() != expects_external_profiler ||
+      !profiler_matches) {
     throw std::invalid_argument(
         "host launch binding disagrees with the active operation");
   }

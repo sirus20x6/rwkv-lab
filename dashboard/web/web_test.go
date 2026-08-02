@@ -32,6 +32,29 @@ func TestLiveDashboardClientHasRecoveryPaths(t *testing.T) {
 	}
 }
 
+func TestLegacyDashboardDoesNotExposeTrainingMutationControls(t *testing.T) {
+	assets := Static()
+	index, err := fs.ReadFile(assets, "index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(index)
+	for _, forbidden := range []string{
+		`/api/launch`, `/api/queue/`, `/api/autostop`,
+		`/stop`, `/checkpoint`, `/control`, `/sample`,
+		`id="tune-panel"`, `id="sample-panel"`,
+	} {
+		if strings.Contains(page, forbidden) {
+			t.Fatalf("legacy dashboard still exposes training mutation control %q", forbidden)
+		}
+	}
+	if !strings.Contains(page, `data-vm-action="checkpoint"`) ||
+		!strings.Contains(page, `data-vm-action="pause"`) ||
+		!strings.Contains(page, `data-vm-action="resume"`) {
+		t.Fatal("native TrainVM lifecycle controls were removed with the legacy controls")
+	}
+}
+
 func TestEvalGalleryDoesNotReloadOnStaleLiveTicks(t *testing.T) {
 	assets := Static()
 	app, err := fs.ReadFile(assets, "app.js")
@@ -152,6 +175,26 @@ func TestNativeEvalGalleryUsesPublishedHistoryAndSideBySideViewer(t *testing.T) 
 		!strings.Contains(string(app), `item.target_image_url || item.source_image_url`) {
 		t.Fatal("native gallery is not driven by published revisions or lacks original-image fallback")
 	}
+	if !strings.Contains(string(app), `vmObservability?.eval_gallery_artifact`) ||
+		!strings.Contains(string(app), `artifact?.logical_name === logicalName`) ||
+		!strings.Contains(string(app), `vmIsDeclaredGallery(artifact)`) {
+		t.Fatal("native gallery discovery does not follow the compiled observability declaration")
+	}
+	if !strings.Contains(string(app), `history?.galleries`) ||
+		!strings.Contains(string(app), `history?.history_truncated`) ||
+		!strings.Contains(string(app), `older history truncated`) {
+		t.Fatal("native gallery history does not expose bounded-tail truncation")
+	}
+	if !strings.Contains(string(app), `immutableRunIdentityChanged`) ||
+		!strings.Contains(string(app), `resetVMGallery(selected.run_id)`) ||
+		!strings.Contains(string(app), `resetVMControls(selected.run_id)`) ||
+		!strings.Contains(string(app), `create a new run for a new plan`) {
+		t.Fatal("the browser does not fail closed when an immutable run identity changes")
+	}
+	if !strings.Contains(string(app), `requestedAfter !== vmAfter`) ||
+		!strings.Contains(string(app), `selectionGeneration !== vmSelectionGeneration`) {
+		t.Fatal("timeline replay is not fenced against stale in-flight requests")
+	}
 	if !strings.Contains(string(css), `.vm-gallery-pair { display: grid; grid-template-columns: repeat(2`) {
 		t.Fatal("native generated/original images are not rendered side by side")
 	}
@@ -193,21 +236,51 @@ func TestTrainVMPanelUsesIncrementalReadOnlyTimeline(t *testing.T) {
 		t.Fatal("native TrainVM runs and timeline have no dashboard panel")
 	}
 	if !strings.Contains(string(app), `/api/trainvm/runs`) ||
-		!strings.Contains(string(app), `timeline?after=${vmAfter}&limit=1000`) ||
+		!strings.Contains(string(app), `timeline?after=${requestedAfter}&limit=1000`) ||
 		!strings.Contains(string(app), `setInterval(refreshTrainVM, 1000)`) {
 		t.Fatal("TrainVM panel does not incrementally follow the native journal")
 	}
 	for _, required := range []string{
 		`id="vm-control-catalog"`, `id="vm-control-apply"`,
 		`id="trainvm-metrics"`, `id="trainvm-artifacts"`,
-		`/metrics?after=${vmMetricAfter}&limit=250`,
-		`/artifacts?after=${vmArtifactAfter}&limit=250`,
+		`id="trainvm-observability-state"`,
+		`/observability?after=${vmTelemetryAfter}&limit=250`,
+		`vmMetricSeries`, `vmArtifacts`, `renderVMMetricCharts`, `renderVMArtifacts`,
+		`data-vm-open-artifact`, `/artifacts/${encodeURIComponent(artifact.artifact_id)}/content?v=`,
+		`&s=${encodeURIComponent(Number(artifact.sequence || 0))}`,
 		`expected_control_revision`, `vmPendingControls`, `randomUUID`,
 		`request atomic patch`, `id="vm-control-history"`, `vmSelectionGeneration`,
 		`vmControlLoadAbort`, `vmControlRetries`, `outcome unknown · retry exact request`,
 	} {
 		if !strings.Contains(string(index)+string(app), required) {
 			t.Fatalf("TrainVM live-control surface is missing %q", required)
+		}
+	}
+}
+
+func TestTrainVMHostAuthorityPanelUsesReceiptDerivedStatus(t *testing.T) {
+	index, err := fs.ReadFile(Static(), "index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := fs.ReadFile(Static(), "app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		`id="vm-host-authority-state"`, `id="vm-host-fences"`,
+		`id="vm-host-processes"`, `/api/trainvm/host-authority`,
+		`mutation_disabled_reason`, `device_policy_installed`,
+		`process_policy_installed`, `active_fences_truncated`,
+		`active_processes_truncated`,
+	} {
+		if !strings.Contains(string(index)+string(app), required) {
+			t.Fatalf("host authority panel is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"/proc/", "pgrep", "process list"} {
+		if strings.Contains(string(app), forbidden) {
+			t.Fatalf("host authority UI infers authority from %q", forbidden)
 		}
 	}
 }

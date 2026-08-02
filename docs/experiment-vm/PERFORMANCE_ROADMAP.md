@@ -232,6 +232,47 @@ the package's own dense-GQA measurements report FA4 roughly 4–10 percent slowe
 - Expose compiler/cache/warmup state and trace artifacts generically in the dashboard; adapters may
   add family-specific panels without changing lifecycle code.
 
+### LibTorch C++ profiling parity
+
+Use the analysis workflow in
+[PyTorch Profiling 101 with Modded-NanoGPT](https://blog.underfit.ai/profiling-101-nanogpt) as the
+cross-runtime acceptance reference, while implementing the worker integration through LibTorch,
+Kineto/RecordFunction where supported, NVTX, and NVIDIA's external profilers. The required outcome
+is equivalent evidence, not dependence on the Python `torch.profiler` wrapper.
+
+- Give every LibTorch worker the same declarative wait/warmup/capture step state machine as the
+  Python Torch worker. The training loop, not an external timer, advances the schedule at exact
+  optimizer-step boundaries.
+- Add low-overhead C++ NVTX domains and RAII ranges for input wait, host-to-device transfer,
+  forward, backward, optimizer, communication, evaluation, and checkpoint publication. Nsight
+  Systems remains the stable whole-process collector because it observes LibTorch's ATen, cuBLAS,
+  cuDNN, custom CUDA, runtime, and stream activity without a Python dependency.
+- Add an optional in-process Kineto/RecordFunction collector when the pinned LibTorch distribution
+  exposes the required C++ profiler API. Treat that API as version-locked rather than assuming the
+  Python profiler's compatibility guarantees apply to C++.
+- Normalize both collectors into `trainvm.gpu-trace.v1`: exact run/node/attempt and optimizer-step
+  interval, GPU-active ratio, input-stall time, launch count, allocator pressure, communication
+  overlap, bounded operator/kernel tables, raw-trace digest, and explicit instrumentation overhead.
+- Preserve raw trace sensitivity and publication rules. Python stacks and TorchInductor/Triton
+  kernel names are optional evidence, not schema requirements; pure LibTorch traces instead retain
+  C++ symbols, ATen operations, NVTX ranges, and CUDA kernel identities.
+- Emit Perfetto/Chrome-trace-compatible flow events that preserve CPU operator -> CUDA runtime ->
+  GPU kernel causality. When the collector exposes them, retain bounded tensor shape/stride and
+  source-symbol metadata so an operator can connect a slow kernel to its model geometry and exact
+  C++ call site; stack capture remains a separately declared high-overhead mode.
+- Derive a machine-readable temporal breakdown from each completed window: compute, communication,
+  input/host wait, and unattributed GPU idle time; top operators and kernels by self/total time and
+  call count; launch latency; and communication-compute overlap. The dashboard must link each
+  summary row back to the corresponding trace interval rather than presenting an untraceable
+  aggregate.
+- Qualify the implementation with matching unprofiled, NVTX-only, Kineto, and Nsight windows so the
+  dashboard can show profiler overhead and never mistake instrumented timing for production
+  throughput.
+- Acceptance requires one bounded LibTorch training fixture whose trace can be opened directly in
+  Perfetto, whose optimizer-step and phase ranges agree with independently counted runtime events,
+  and whose synthetic input stall and communication overlap are classified within declared error
+  tolerances. A C++-only worker must pass without importing Python or TensorBoard.
+
 The bounded Torch path is implemented end to end for the native MageFlow appearance/terminal and
 Qwen adapters. One shared optimizer-step hook drives the declared wait/warmup/capture schedule; it
 freezes a Chrome trace and bounded operator summary into `trainvm.gpu-trace.v1`, binds the exact
@@ -250,6 +291,16 @@ compare windows whose node, backend, schedule, activities, profiler options, or 
 overlap classification differ. Trace cards also show the run's declared compile, warmup, and
 qualification state; warmup overlap is explicitly unknown when warmup is enabled without a declared
 step count, rather than being reported as steady state.
+
+The external-profiler launch path now binds the collector, fixed argv, capture declaration,
+run/node/attempt, worker executable, runtime closure, and output identity into the resolved host
+launch. Hostd delegates the collector and a sealed worker authority separately, and the stopped
+launcher exposes only fixed descriptors 3-6 with an empty environment. NCU executes as an immutable
+sealed copy. NSYS is instead digest-verified and inode-pinned beneath a trusted, non-worker-writable
+root because its CLI intentionally refuses anonymous executable images while discovering its
+installed support tree from `/proc/self/exe`. CPU-only qualification verifies both empty-environment
+startup and that NSYS preserves the worker authority and target descriptors through its wrapper.
+
 The shared profiler protocol also exposes an explicit input-wait context and iterable wrapper. The
 native MageFlow appearance/terminal and Qwen paths place it around their actual prefetched-batch or
 packed-row acquisition, so a complete capture publishes measured input-stall time and ratio. The
@@ -423,11 +474,34 @@ startup orphan recovery are defined in
   indistinguishable from a crash. A benchmark runner measures; this decides. That
   boundary is what stops a runner reimplementing the thresholds and quietly
   disagreeing with the `qualify_cache` node that actually admits an optimization.
-  Not yet built: the runner that executes a fixture and emits a receipt. Per the note above,
-  benchmark is not a separate executor — throughput and peak-memory gates belong to the existing
-  qualification receipt, so the runner should feed that rather than invent a parallel one. A native
-  reflected loader with a pinned digest, matching the compatibility-catalog pattern, belongs with
-  that work; until a qualification node consumes the matrix it is fixture evidence, not authority.
+  The fixture runner executes cold, warmup, and timed phases in fresh processes and emits evidence
+  for that existing qualification path. Portable fixtures run with accelerator visibility masked,
+  so their receipts prove the CPU path was measured even on an accelerator host. Accelerator
+  fixtures require a real CUDA device and fail closed when any timed cell lacks a device name,
+  capability, or nonzero CUDA allocator peak. Before every accelerator cell the runner bounds
+  resident compute-process memory and records the process residency, total and used device memory,
+  utilization, and applied allowance in the benchmark-run receipt, making ambient compositor
+  conditions auditable. Benchmark remains not a separate executor — throughput and peak-memory
+  gates belong to the existing qualification receipt rather than a parallel decision path. A native
+  reflected loader with a pinned digest, matching the compatibility-catalog pattern, still belongs
+  with authority integration; until a qualification node consumes the matrix this remains fixture
+  evidence, not authority.
+  The runner's default `--candidate eager` remains a neutral eager self-comparison.
+  `--candidate compile` instead runs the eager baseline and a `torch.compile(dynamic=False)`
+  candidate in separate fresh processes for every cold, warmup, and timed phase. The benchmark-run
+  receipt publishes each arm's compilation-included first-step cost, warm timed throughput, peak
+  memory, and deterministic final-loss/gradient-norm fingerprints; these diagnostics stay outside
+  the exact `CacheQualificationEvidence` schema. Output and gradient parity use relative tolerance
+  `1e-4` plus absolute tolerance `1e-6`. This allows ordinary float32 reduction-order noise while
+  rejecting a materially different step, and the receipt records both absolute and relative
+  observed deviations. Those measured booleans feed the existing native authority, so no speedup
+  can qualify when either fingerprint fails parity. A compiled workload can also exercise an
+  explicit out-of-set fallback bucket; shape mismatch may recompile or graph-break, but must return
+  a measurable step whose loss and gradient fingerprint match eager at the same tolerance.
+  `--compile-mode reduce-overhead` is exposed for device experiments, but it is not the default and
+  carries no CUDA-graph qualification by itself. `reduce-overhead` enables CUDA graphs only on a
+  compatible CUDA execution; until a device run demonstrates capture/replay, mismatch fallback,
+  and parity, CUDA graphs remain explicitly unqualified.
 - Audit existing optimizations against the qualification contract and publish portable versus
   machine-native receipts.
 - Implement the broadly reusable Modded NanoGPT candidates in the matrix where an existing

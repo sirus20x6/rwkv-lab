@@ -93,6 +93,12 @@ struct OperationLifecycleCapabilities {
 struct TrainingCompositionContract {
   std::string model_family;
   std::map<std::string, TrainingComponentCategory> slots;
+  // Optional per-slot key allowlists refine a category into the exact
+  // implementations whose tensor/gradient semantics the adapter supports.
+  // The component registry binds each key to an immutable implementation and
+  // descriptor digest; an omitted slot retains category-polymorphic behavior.
+  std::optional<std::map<std::string, std::vector<TrainingComponentKey>>>
+      allowed_components{};
 
   bool operator==(const TrainingCompositionContract&) const = default;
 };

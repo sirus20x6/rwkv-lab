@@ -12,30 +12,60 @@ supervision in Lightman et al., https://arxiv.org/abs/2305.20050.
 from __future__ import annotations
 
 import argparse
-from contextlib import nullcontext
+import copy
 import hashlib
 import json
-from pathlib import Path
+import math
 import random
-import copy
+import time
+from contextlib import nullcontext
 from functools import lru_cache
+from pathlib import Path
+from typing import Any
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
-from rwkv_lab.adapters import (AdapterConfig, active_adapters, adapter_parameters,
-                               inject_lora, save_adapter)
-from rwkv_lab.posttrain_data import (IGNORE_INDEX, TokenizedExample, TokenizedVariant,
-                                     DEFAULT_TEMPLATE, cache_tokenized, dataset_manifest, load_jsonl,
-                                     load_template, pack_variants, render, tokenize)
-from rwkv_lab.preference import (dpo_loss, kto_loss, orpo_loss, reward_model_loss,
-                                 OutcomeRewardHead, ProcessRewardHead, binary_calibration,
-                                 adversarial_reward_audit, process_reward_loss, sequence_logps,
-                                 simpo_loss)
-from rwkv_lab.quantization import (model_storage_bytes, qualify_accelerated_nf4,
-                                   qualify_linear_qlora, quantize_model_nf4)
-
+from rwkv_lab.adapters import (
+    AdapterConfig,
+    active_adapters,
+    adapter_parameters,
+    inject_lora,
+    save_adapter,
+)
+from rwkv_lab.posttrain_data import (
+    DEFAULT_TEMPLATE,
+    IGNORE_INDEX,
+    TokenizedExample,
+    TokenizedVariant,
+    cache_tokenized,
+    dataset_manifest,
+    load_jsonl,
+    load_template,
+    pack_variants,
+    render,
+    tokenize,
+)
+from rwkv_lab.preference import (
+    OutcomeRewardHead,
+    ProcessRewardHead,
+    adversarial_reward_audit,
+    binary_calibration,
+    dpo_loss,
+    kto_loss,
+    orpo_loss,
+    process_reward_loss,
+    reward_model_loss,
+    sequence_logps,
+    simpo_loss,
+)
+from rwkv_lab.quantization import (
+    model_storage_bytes,
+    qualify_accelerated_nf4,
+    qualify_linear_qlora,
+    quantize_model_nf4,
+)
 
 RESULT_SCHEMA = "rwkv-lab.posttrain-result.v1"
 
@@ -428,7 +458,13 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
           max_train_tokens: int = 0, packing: str = "audit",
           base_quantization: str = "none", quant_block_size: int = 64,
           quant_backend: str = "auto", activation_offload: bool = False,
-          log_every: int = 10) -> dict:
+          log_every: int = 10, minimum_learning_rate_ratio: float = 0.1,
+          warmup_steps: int = 0, weight_decay: float = 0.01,
+          max_gradient_norm: float = 1.0,
+          worker_components: Any | None = None,
+          worker_step_profiler: Any | None = None,
+          worker_observability: Any | None = None,
+          worker_controls: Any | None = None) -> dict:
     from rwkv_lab.generate import WorldVocab, build_from_ckpt
 
     if objective not in ("sft", "dpo", "kto", "orpo", "simpo", "reward", "prm"):
@@ -439,6 +475,75 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
         raise ValueError("quant_backend must be auto, portable, or torchao")
     if steps <= 0 or batch_size <= 0 or max_length < 2 or log_every <= 0:
         raise ValueError("steps/batch_size must be positive and max_length must be at least two")
+    component_evidence = None
+    component_composition_digest = None
+    if worker_components is not None:
+        worker_components.require_implementation(
+            "optimizer",
+            category="optimizer",
+            allowed=frozenset({"rwkv_lab.optimizer.torch_adamw_no_decay.v2"}),
+        )
+        optimizer_configuration = dict(
+            worker_components.configuration("optimizer", category="optimizer")
+        )
+        expected_optimizer = {
+            "learning_rate": learning_rate,
+            "beta1": 0.9,
+            "beta2": 0.999,
+            "epsilon": 1.0e-8,
+            "foreach": True,
+            "fused": False,
+        }
+        if optimizer_configuration != expected_optimizer:
+            raise ValueError(
+                "authority optimizer composition disagrees with post-training configuration"
+            )
+        schedule_kind, schedule_configuration = (
+            worker_components.learning_rate_configuration()
+        )
+        if (
+            str(schedule_kind.value)
+            != "rwkv_lab.schedule.linear_warmup_cosine.v1"
+            or schedule_configuration.warmup_steps != warmup_steps
+            or schedule_configuration.max_steps != steps
+            or not math.isclose(
+                schedule_configuration.minimum_ratio,
+                minimum_learning_rate_ratio,
+            )
+        ):
+            raise ValueError(
+                "authority learning-rate composition disagrees with post-training configuration"
+            )
+        clipping_configuration = dict(
+            worker_components.configuration(
+                "gradient_clipping", category="gradient_clipping"
+            )
+        )
+        if clipping_configuration != {
+            "max_norm": max_gradient_norm,
+            "norm_type": 2.0,
+            "error_if_nonfinite": False,
+        }:
+            raise ValueError(
+                "authority gradient-clipping composition disagrees with post-training configuration"
+            )
+        if dict(
+            worker_components.configuration(
+                "weight_decay", category="weight_decay_schedule"
+            )
+        ) != {"weight_decay": weight_decay}:
+            raise ValueError(
+                "authority weight-decay composition disagrees with post-training configuration"
+            )
+        component_evidence = dict(worker_components.evidence())
+        component_composition_digest = (
+            worker_components.composition.composition_digest
+        )
+
+    def reject_live_controls(_effective: object, assignments: object) -> None:
+        if assignments:
+            raise ValueError("RWKV post-training v1 has no live-mutable controls")
+
     device = ("cuda" if torch.cuda.is_available() else "cpu") if device == "auto" else device
     torch.manual_seed(seed)
     rng = random.Random(seed)
@@ -552,7 +657,21 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
                          "recurrent_isolation": bool(qualification["passed"])}
         if not qualification["passed"]:
             raise ValueError(f"reset-mask packing parity failed: {qualification}")
-    optimizer = torch.optim.AdamW(parameters, lr=learning_rate)
+    optimizer = (
+        worker_components.optimizer(parameters)
+        if worker_components is not None
+        else torch.optim.AdamW(parameters, lr=learning_rate, weight_decay=weight_decay)
+    )
+    learning_rate_schedule = (
+        worker_components.learning_rate_schedule(optimizer)
+        if worker_components is not None
+        else None
+    )
+    weight_decay_schedule = (
+        worker_components.weight_decay_schedule(optimizer)
+        if worker_components is not None
+        else None
+    )
     root = Path(output)
     root.mkdir(parents=True, exist_ok=True)
     log = (root / "train.jsonl").open("w", buffering=1)
@@ -608,6 +727,10 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
     if initial_eval is not None:
         log.write(json.dumps({"kind": "eval", "step": 0, "loss": initial_eval,
                               "objective": objective}) + "\n")
+        if worker_observability is not None:
+            worker_observability.publish_if_declared(
+                "eval.loss", initial_eval, step=0
+            )
     model.train()
     loss_sum_t = torch.zeros((), dtype=torch.float32, device=device)
     last_loss_t = loss_sum_t
@@ -616,7 +739,11 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
     last_metrics: dict[str, float] = {}
     train_tokens = 0
     completed_steps = 0
+    telemetry_started = time.monotonic()
+    telemetry_tokens = 0
     for step in range(int(steps)):
+        if worker_controls is not None:
+            worker_controls.microbatch(step + 1, reject_live_controls)
         if packing == "reset" and objective != "kto":
             batch = packed_groups[rng.randrange(len(packed_groups))]
         elif kto_pools is not None:
@@ -666,10 +793,24 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
             gradient_groups.setdefault((gradient.device, gradient.dtype), []).append(gradient)
         for (_, dtype), group in gradient_groups.items():
             torch._foreach_mul_(group, finite.to(dtype=dtype))
-        torch.nn.utils.clip_grad_norm_(parameters, 1.0)
+        if worker_components is not None:
+            worker_components.gradient_clipping(parameters)
+        else:
+            torch.nn.utils.clip_grad_norm_(parameters, max_gradient_norm)
+        used_learning_rate = float(optimizer.param_groups[0]["lr"])
         optimizer.step()
         train_tokens += _batch_tokens(batch, objective)
         completed_steps = step + 1
+        if learning_rate_schedule is not None:
+            learning_rate_schedule.step()
+        if weight_decay_schedule is not None:
+            weight_decay_schedule.step(completed_steps)
+        if worker_step_profiler is not None:
+            worker_step_profiler.step(completed_steps)
+        if worker_observability is not None:
+            worker_observability.optimizer_step(completed_steps)
+        if worker_controls is not None:
+            worker_controls.optimizer_step(completed_steps, reject_live_controls)
         safe_loss = torch.where(finite, loss.detach().float(), torch.zeros_like(loss.detach().float()))
         loss_sum_t.add_(safe_loss)
         last_loss_t = safe_loss
@@ -685,6 +826,24 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
                                   "loss": scalar_loss, "objective": objective,
                                   "telemetry_steps": min(log_every, completed_steps),
                                   **last_metrics}) + "\n")
+            if worker_observability is not None:
+                elapsed = max(time.monotonic() - telemetry_started, 1.0e-12)
+                interval_tokens = train_tokens - telemetry_tokens
+                worker_observability.publish_if_declared(
+                    "train.loss", scalar_loss, step=completed_steps
+                )
+                worker_observability.publish_if_declared(
+                    "train.learning_rate",
+                    used_learning_rate,
+                    step=completed_steps,
+                )
+                worker_observability.publish_if_declared(
+                    "train.tokens_per_second",
+                    interval_tokens / elapsed,
+                    step=completed_steps,
+                )
+                telemetry_started = time.monotonic()
+                telemetry_tokens = train_tokens
             finite_window_t.fill_(True)
         if max_train_tokens and train_tokens >= max_train_tokens:
             break
@@ -701,6 +860,10 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
     if final_eval is not None:
         log.write(json.dumps({"kind": "eval", "step": completed_steps, "loss": final_eval,
                               "objective": objective}) + "\n")
+        if worker_observability is not None:
+            worker_observability.publish_if_declared(
+                "eval.loss", final_eval, step=completed_steps
+            )
     log.close()
     adapter_manifest = save_adapter(model, root / "adapter", adapter_name,
                                     parent_checkpoint=str(Path(checkpoint).resolve()),
@@ -745,6 +908,8 @@ def train(*, checkpoint: str, data: str, output: str, objective: str = "sft",
                                "compression_ratio": dense_storage / max(1, base_storage),
                                "qualification": quantization_qualification},
               "activation_offload": activation_offload, "log_every": log_every,
+              "component_evidence": component_evidence,
+              "component_composition_digest": component_composition_digest,
               "reward_model": reward_version,
               "promotion": {"status": "unassessed", "reason": "training never implies promotion"}}
     (root / "posttrain-result.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")

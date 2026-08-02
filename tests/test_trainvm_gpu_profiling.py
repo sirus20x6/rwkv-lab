@@ -7,14 +7,20 @@ from types import SimpleNamespace
 
 import pytest
 
+from rwkv_lab.trainvm_worker._canonical import canonical_dumps
 from rwkv_lab.trainvm_worker.profiling import (
+    EXTERNAL_PROFILER_AUTHORITY_SCHEMA,
+    EXTERNAL_PROFILER_WINDOW_SCHEMA,
     GPU_TRACE_SCHEMA,
+    ExternalProfilerAuthority,
+    ExternalStepProfiler,
     GpuProfileError,
     GpuTracePublisher,
     NullStepProfiler,
     _input_stall_summary,
     _interval_union_duration,
     _profile_activity_summary,
+    load_external_profiler_authority,
     trace_request_from_invocation,
 )
 
@@ -133,6 +139,7 @@ def test_trace_publisher_freezes_manifest_trace_and_receipt(tmp_path) -> None:
     assert manifest["last_optimizer_step"] == 6
     assert manifest["sensitivity"] == "restricted"
     assert manifest["instrumented_timing"] is True
+    assert manifest["trace_file_name"] == "trace.json"
     assert digest(trace.read_bytes()) == manifest["trace_sha256"]
     assert published.manifest_sha256 == digest(published.manifest_path.read_bytes())
     assert not raw.exists()
@@ -236,3 +243,142 @@ def test_null_profiler_input_boundaries_are_transparent() -> None:
         value = 3
     assert value == 3
     assert list(profiler.track_input([1, 2])) == [1, 2]
+
+
+class FakeExternalRuntime:
+    def __init__(self) -> None:
+        self.events: list[str] = []
+
+    def start_capture(self) -> None:
+        self.events.append("start")
+
+    def stop_capture(self) -> None:
+        self.events.append("stop")
+
+
+def external_authority(
+    *, backend: str = "nsys", run_id: str = "run-1"
+) -> ExternalProfilerAuthority:
+    return ExternalProfilerAuthority(
+        backend=backend,
+        run_id=run_id,
+        node_id="train",
+        attempt_id="train@1",
+        launch_profile_digest=digest(b"profile"),
+        profiler_executable_digest=digest(b"nsys"),
+        authority_digest=digest(b"authority"),
+    )
+
+
+def test_external_profiler_uses_exact_optimizer_step_window(tmp_path) -> None:
+    run = tmp_path / "run"
+    run.mkdir()
+    session = FakeSession(run)
+    session.invocation.execution = execution(
+        backend="nsys",
+        record_shapes=False,
+        profile_memory=False,
+        with_stack=False,
+    )
+    request = trace_request_from_invocation(session.invocation)
+    assert request is not None
+    runtime = FakeExternalRuntime()
+    profiler = ExternalStepProfiler(
+        session, request, authority=external_authority(), runtime=runtime
+    )
+    assert (run / "trainvm_artifacts" / "gpu_traces" / ".external").is_dir()
+    with profiler:
+        for optimizer_step in range(100, 107):
+            with profiler.input_wait():
+                pass
+            profiler.step(optimizer_step)
+    assert runtime.events == ["start", "stop"]
+    assert profiler.captured_steps == (103, 104, 105)
+    assert profiler.complete
+    launch_id = "run-1:worker-launch:train:train@1"
+    window_path = (
+        run
+        / "trainvm_artifacts"
+        / "gpu_traces"
+        / ".external"
+        / f"{hashlib.sha256(launch_id.encode()).hexdigest()}.window.json"
+    )
+    window = json.loads(window_path.read_text(encoding="utf-8"))
+    canonical_digest = window.pop("canonical_window_digest")
+    assert canonical_digest == digest(canonical_dumps(window))
+    assert window["api_version"] == EXTERNAL_PROFILER_WINDOW_SCHEMA
+    assert window["backend"] == "nsys"
+    assert window["optimizer_steps"] == [103, 104, 105]
+    assert window["captured_step_wall_time_us"] > 0
+    assert len(window["input_stall_us"]) == 3
+    assert all(value is not None and value >= 0 for value in window["input_stall_us"])
+
+
+def test_external_profiler_fails_closed_on_authority_skew_or_short_run(
+    tmp_path,
+) -> None:
+    run = tmp_path / "run"
+    run.mkdir()
+    session = FakeSession(run)
+    session.invocation.execution = execution(
+        backend="ncu",
+        record_shapes=False,
+        profile_memory=False,
+        with_stack=False,
+        activities=["accelerator"],
+    )
+    request = trace_request_from_invocation(session.invocation)
+    assert request is not None
+    with (
+        pytest.raises(GpuProfileError, match="disagrees"),
+        ExternalStepProfiler(
+            session,
+            request,
+            authority=external_authority(backend="ncu", run_id="other-run"),
+            runtime=FakeExternalRuntime(),
+        ),
+    ):
+        pass
+
+    runtime = FakeExternalRuntime()
+    with (
+        pytest.raises(GpuProfileError, match="before the external"),
+        ExternalStepProfiler(
+            session,
+            request,
+            authority=external_authority(backend="ncu"),
+            runtime=runtime,
+        ) as profiler,
+    ):
+        for optimizer_step in range(4):
+            profiler.step(optimizer_step)
+    assert runtime.events == ["start", "stop"]
+    assert not list(
+        (run / "trainvm_artifacts" / "gpu_traces" / ".external").glob("*.window.json")
+    )
+
+
+def test_external_profiler_authority_is_content_addressed() -> None:
+    body = {
+        "api_version": EXTERNAL_PROFILER_AUTHORITY_SCHEMA,
+        "attempt_id": "train@1",
+        "backend": "nsys",
+        "launch_profile_digest": digest(b"profile"),
+        "node_id": "train",
+        "profiler_executable_digest": digest(b"nsys"),
+        "run_id": "run-1",
+    }
+    raw = canonical_dumps({**body, "authority_digest": digest(canonical_dumps(body))})
+    loaded = load_external_profiler_authority(raw)
+    assert loaded.backend == "nsys"
+    assert loaded.run_id == "run-1"
+
+    tampered = canonical_dumps(
+        {
+            **body,
+            "run_id": "other-run",
+            "authority_digest": digest(canonical_dumps(body)),
+        }
+    )
+    with pytest.raises(GpuProfileError, match="invalid"):
+        load_external_profiler_authority(tampered)

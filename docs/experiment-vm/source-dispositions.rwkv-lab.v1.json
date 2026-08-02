@@ -10,7 +10,7 @@
       ".py"
     ]
   },
-  "source_tree_digest": "sha256:e97e87a67dd17e1dc3bd60f2ea77ab3ad7965aef50f8c43ae5e2c235e3063d3c",
+  "source_tree_digest": "sha256:ea707c5033adfd1a1febb60db8fd868eff1958f4610343647fea571c139a22ba",
   "entries": [
     {
       "source_path": "src/rwkv_lab/__init__.py",
@@ -666,7 +666,7 @@
       ],
       "resume_relevance": "consumer_owned",
       "compatibility_workflow_id": null,
-      "source_sha256": "sha256:264793ab4503c04a6686646591a53ab9fcb2b2c7ce010d775076aeb6b58ca73e",
+      "source_sha256": "sha256:49b6bbd6db6b8f39e2b5bea1e03e6e8ccca5262c7e9222e797f8deb25ab97a39",
       "family": "transformer",
       "coverage": "transitive",
       "consumers": [
@@ -1175,7 +1175,7 @@
       ],
       "resume_relevance": "consumer_owned",
       "compatibility_workflow_id": null,
-      "source_sha256": "sha256:ef12705dd9c92fdb57e3b659dbb0cd1054236d40e27b149d9b4239b308e61176",
+      "source_sha256": "sha256:6e7d6649591a6c36bfc723545e5b497956e6f5973c801887f0a331aae58cd5cf",
       "family": "transformer",
       "coverage": "transitive",
       "consumers": [
@@ -2233,7 +2233,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "rlvr.rwkv-train",
-      "source_sha256": "sha256:79fddebc0c58654f85d00bb442a77f7f4368e8d802ca97d3f91162fbef72ae20",
+      "source_sha256": "sha256:75dfbf2e6911dd4b2d98c16512eb9c2c4ddcfe8e7860e8cb28fd8584ee446bd1",
       "family": "rwkv_rlvr",
       "coverage": "direct",
       "consumers": [
@@ -2771,7 +2771,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "transformer.mla-train",
-      "source_sha256": "sha256:d12119430e19723b55d22ad91d85e646f9024bcf891a9a9706c6ac754581f02f",
+      "source_sha256": "sha256:69b4ffc21336c048dd309cd6f169771420e4ef7c85eac135167fe585542488fb",
       "family": "transformer",
       "coverage": "direct",
       "consumers": [
@@ -3048,7 +3048,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "vision.native-head-train",
-      "source_sha256": "sha256:f49349122fb95633cb1eaca9748f1f67d9b90cb5577bb25a3b0b2a0a1dec2646",
+      "source_sha256": "sha256:9d6dd1bedc85fb15e2f0e11eb49732a3d43066216b4f4a5fc319bcb6ffad6e11",
       "family": "vision_multimodal",
       "coverage": "direct",
       "consumers": [
@@ -3107,7 +3107,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "vision.raw-pixel-student",
-      "source_sha256": "sha256:ce6f32aa0f2f830bce32e7776b107684b62fbbf7d4c57897df71efbc1b0b823c",
+      "source_sha256": "sha256:7c8a8d0111a6dccaf464fbd362b8d4023b9d6593a95b9e2c1e600bbc6a1e7ff8",
       "family": "vision_multimodal",
       "coverage": "direct",
       "consumers": [
@@ -3164,9 +3164,9 @@
         "read_source",
         "write_artifact"
       ],
-      "resume_relevance": "exact_candidate",
+      "resume_relevance": "compatible",
       "compatibility_workflow_id": "vision.teacher-compressor",
-      "source_sha256": "sha256:8ab953ee5cc2c2e6f237e86d48c82a763f8b52d14a33809756124f74c51eaf2c",
+      "source_sha256": "sha256:d7e9697920bdc1294539282b0698ef8c8f30421b06e6af2e3b3f02b768d48323",
       "family": "vision_multimodal",
       "coverage": "direct",
       "consumers": [
@@ -3205,15 +3205,16 @@
         "read_source",
         "write_artifact"
       ],
-      "resume_relevance": "exact_candidate",
+      "resume_relevance": "compatible",
       "compatibility_workflow_id": "vision.frozen-adapter-train",
-      "source_sha256": "sha256:c0940032c073c39ed7f3ae213288380bed414af8a55b846df329dfc08c7927ec",
+      "source_sha256": "sha256:16bb7eec0eef43c1c6fcbe1197f8fbbe60573ecc708482b308956dd0cac07e34",
       "family": "vision_multimodal",
       "coverage": "direct",
       "consumers": [
         "src/rwkv_lab/vision_caption.py",
         "src/rwkv_lab/vision_native_train.py",
         "src/rwkv_lab/vision_rwkv_student_train.py",
+        "src/rwkv_lab/trainvm_adapters/handlers.py",
         "scripts/caption_radio1d_directory.py",
         "scripts/run_radio1d_captioning_first.sh",
         "scripts/run_radio1d_civitai_joy_continuation.sh"

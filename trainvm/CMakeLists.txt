@@ -60,6 +60,7 @@ add_library(trainvm_core
   src/control.cpp
   src/controller.cpp
   src/document.cpp
+  src/external_profiler_artifact.cpp
   src/fake_worker.cpp
   src/fsm.cpp
   src/host_ledger.cpp
@@ -112,6 +113,8 @@ add_library(trainvm_core
   src/reconciler.cpp
   src/resource_request_builder.cpp
   src/rwkv_lab_worker_contract.cpp
+  src/conversion_publication.cpp
+  src/profiler_launch_profiles.cpp
   src/rwkv_scratch_profiles.cpp
   src/sqlite_authority_vfs.cpp
   src/training_component_registry.cpp
@@ -428,6 +431,36 @@ target_link_libraries(rwkv_scratch_profiles_tests PRIVATE trainvm_core)
 add_test(NAME rwkv_scratch_profiles_tests
   COMMAND rwkv_scratch_profiles_tests
 )
+add_executable(profiler_launch_profiles_tests
+  tests/profiler_launch_profiles_tests.cpp
+)
+target_compile_options(profiler_launch_profiles_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(profiler_launch_profiles_tests PRIVATE trainvm_core)
+add_test(NAME profiler_launch_profiles_tests
+  COMMAND profiler_launch_profiles_tests
+)
+add_executable(external_profiler_artifact_tests
+  tests/external_profiler_artifact_tests.cpp
+)
+target_compile_options(external_profiler_artifact_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(external_profiler_artifact_tests PRIVATE trainvm_core)
+add_test(NAME external_profiler_artifact_tests
+  COMMAND external_profiler_artifact_tests
+)
+add_executable(conversion_publication_tests
+  tests/conversion_publication_tests.cpp
+)
+target_compile_options(conversion_publication_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(conversion_publication_tests PRIVATE trainvm_core)
+add_test(NAME conversion_publication_tests
+  COMMAND conversion_publication_tests
+)
 add_executable(host_ledger_tests tests/host_ledger_tests.cpp)
 target_compile_options(host_ledger_tests PRIVATE
   -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
@@ -710,6 +743,12 @@ add_test(NAME input_content_authority_python_parity
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_input_content_authority_parity.py"
     $<TARGET_FILE:trainvm>
     "${CMAKE_CURRENT_SOURCE_DIR}/../src"
+)
+add_test(NAME input_content_lock_cli
+  COMMAND ${Python3_EXECUTABLE}
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_input_content_lock.py"
+    $<TARGET_FILE:trainvm>
+    "${CMAKE_CURRENT_SOURCE_DIR}/.."
 )
 
 get_target_property(TRAINVM_SERVICE_LINKS trainvm_service LINK_LIBRARIES)

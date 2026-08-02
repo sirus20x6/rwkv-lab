@@ -122,6 +122,8 @@ struct GpuTraceCapture {
   std::optional<bool> record_shapes;
   std::optional<bool> profile_memory;
   std::optional<bool> with_stack;
+
+  bool operator==(const GpuTraceCapture&) const = default;
 };
 
 struct ExecutionPhases {

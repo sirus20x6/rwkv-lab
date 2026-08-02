@@ -32,6 +32,7 @@ type Commander interface {
 	RequestControls(context.Context, ControlRequest) (ControlResult, error)
 	RequestRunAction(context.Context, RunActionRequest) (RunActionResult, error)
 	GetDescriptor(context.Context, DescriptorRequest) (DescriptorResult, error)
+	GetHostAuthorityStatus(context.Context) (HostAuthorityStatus, error)
 }
 
 type DescriptorRequest struct {
@@ -42,6 +43,92 @@ type DescriptorRequest struct {
 type DescriptorResult struct {
 	SchemaJSON string `json:"schema_json"`
 	SchemaHash string `json:"schema_hash"`
+}
+
+type HostdCoordinatorStatus struct {
+	APIVersion                       string `json:"api_version"`
+	Lifecycle                        string `json:"lifecycle"`
+	HostID                           string `json:"host_id"`
+	BootID                           string `json:"boot_id"`
+	BrokerEpoch                      string `json:"broker_epoch"`
+	InventoryDigest                  string `json:"inventory_digest"`
+	LiveSessions                     uint64 `json:"live_sessions"`
+	AdmissionSessions                uint64 `json:"admission_sessions"`
+	StaleAdmissionSessions           uint64 `json:"stale_admission_sessions"`
+	ReleaseOnlySessions              uint64 `json:"release_only_sessions"`
+	AdmissionCountsAreCachedEvidence bool   `json:"admission_counts_are_cached_evidence"`
+	StartupAuditReceiptDigest        string `json:"startup_audit_receipt_digest,omitempty"`
+	StartupAuditPassed               bool   `json:"startup_audit_passed"`
+	PoisonReason                     string `json:"poison_reason,omitempty"`
+}
+
+type HostResourceFenceStatus struct {
+	Kind            string `json:"kind"`
+	Vendor          string `json:"vendor,omitempty"`
+	StableID        string `json:"stable_id"`
+	ParentID        string `json:"parent_id,omitempty"`
+	Generation      uint64 `json:"generation"`
+	InventoryDigest string `json:"inventory_digest"`
+	TopologyDigest  string `json:"topology_digest"`
+}
+
+type HostdProcessAuthorityStatus struct {
+	AllocationID                    string  `json:"allocation_id"`
+	JournalID                       string  `json:"journal_id"`
+	RunID                           string  `json:"run_id"`
+	LogicalLeaseID                  string  `json:"logical_lease_id"`
+	LogicalFencingToken             uint64  `json:"logical_fencing_token"`
+	LaunchID                        string  `json:"launch_id"`
+	Phase                           string  `json:"phase"`
+	CgroupPath                      string  `json:"cgroup_path"`
+	HostPID                         *int64  `json:"host_pid,omitempty"`
+	ProcessStarttimeTicks           *uint64 `json:"process_starttime_ticks,omitempty"`
+	DevicePolicyIntended            bool    `json:"device_policy_intended"`
+	DevicePolicyInstalled           bool    `json:"device_policy_installed"`
+	DevicePolicyDigest              string  `json:"device_policy_digest,omitempty"`
+	DevicePolicyInstallationDigest  string  `json:"device_policy_installation_digest,omitempty"`
+	ProcessPolicyIntended           bool    `json:"process_policy_intended"`
+	ProcessPolicyInstalled          bool    `json:"process_policy_installed"`
+	ProcessPolicyDigest             string  `json:"process_policy_digest,omitempty"`
+	ProcessPolicyInstallationDigest string  `json:"process_policy_installation_digest,omitempty"`
+	CgroupEmpty                     *bool   `json:"cgroup_empty,omitempty"`
+	AcceleratorContextsEmpty        *bool   `json:"accelerator_contexts_empty,omitempty"`
+	ContextAuditDigest              string  `json:"context_audit_digest,omitempty"`
+	TerminalReceiptDigest           string  `json:"terminal_receipt_digest,omitempty"`
+}
+
+type HostAuthorityStatus struct {
+	APIVersion                        string                        `json:"api_version"`
+	Coordinator                       HostdCoordinatorStatus        `json:"coordinator"`
+	StartupPhase                      string                        `json:"startup_phase"`
+	StartupRecoverySteps              uint64                        `json:"startup_recovery_steps"`
+	RemainingUnclosedProcessRecords   uint64                        `json:"remaining_unclosed_process_records"`
+	RemainingTerminalReleaseRecords   uint64                        `json:"remaining_terminal_release_records"`
+	LedgerVerified                    bool                          `json:"ledger_verified"`
+	LedgerVerificationReason          string                        `json:"ledger_verification_reason,omitempty"`
+	LedgerSequence                    uint64                        `json:"ledger_sequence"`
+	LedgerChainHash                   string                        `json:"ledger_chain_hash"`
+	LedgerRecordCount                 uint64                        `json:"ledger_record_count"`
+	OccupancyLedgerSequence           uint64                        `json:"occupancy_ledger_sequence"`
+	OccupancyDigest                   string                        `json:"occupancy_digest"`
+	ActiveFenceCount                  uint64                        `json:"active_fence_count"`
+	ActiveFences                      []HostResourceFenceStatus     `json:"active_fences"`
+	ActiveFencesTruncated             bool                          `json:"active_fences_truncated"`
+	ActiveProcessCount                uint64                        `json:"active_process_count"`
+	ActiveProcesses                   []HostdProcessAuthorityStatus `json:"active_processes"`
+	ActiveProcessesTruncated          bool                          `json:"active_processes_truncated"`
+	ProcessLaunchEnabled              bool                          `json:"process_launch_enabled"`
+	MutationEnabled                   bool                          `json:"mutation_enabled"`
+	MutationDisabledReason            string                        `json:"mutation_disabled_reason,omitempty"`
+	LeaseRenewalTrackedCount          uint64                        `json:"lease_renewal_tracked_count"`
+	LeaseRenewalPoisoned              bool                          `json:"lease_renewal_poisoned"`
+	LeaseRenewalFailure               string                        `json:"lease_renewal_failure,omitempty"`
+	ResourceInventoryObserved         bool                          `json:"resource_inventory_observed"`
+	ResourceInventoryObservationAgeNS uint64                        `json:"resource_inventory_observation_age_ns"`
+	CurrentInventoryDigest            string                        `json:"current_inventory_digest,omitempty"`
+	CurrentInventoryReceiptDigest     string                        `json:"current_inventory_receipt_digest,omitempty"`
+	DegradedResourceCount             uint64                        `json:"degraded_resource_count"`
+	ResourceDegradationReason         string                        `json:"resource_degradation_reason,omitempty"`
 }
 
 type SubmissionRequest struct {
@@ -359,6 +446,8 @@ func (c *GRPCCommander) Events(ctx context.Context, input EventQuery) ([]Event, 
 	stream, err := c.client.WatchEvents(ctx, &trainvmv1.WatchEventsRequest{
 		RunIds: []string{query.RunID}, AfterJournalSequence: query.After,
 		EventTypes: query.EventTypes, ReplayLimit: uint32(query.Limit),
+		ThroughJournalSequence: query.Through, NewestFirst: query.NewestFirst,
+		NewestPerMetricSeries: query.NewestPerMetricSeries,
 	})
 	if err != nil {
 		return nil, err
@@ -518,6 +607,163 @@ func (c *GRPCCommander) GetDescriptor(ctx context.Context, request DescriptorReq
 		SchemaJSON: response.GetSchemaJson(),
 		SchemaHash: response.GetSchemaHash(),
 	}, nil
+}
+
+func (c *GRPCCommander) GetHostAuthorityStatus(ctx context.Context) (HostAuthorityStatus, error) {
+	if c == nil || c.client == nil {
+		return HostAuthorityStatus{}, fmt.Errorf("TrainVM authority client is not configured")
+	}
+	response, err := c.client.GetHostAuthorityStatus(ctx, &trainvmv1.GetHostAuthorityStatusRequest{})
+	if err != nil {
+		return HostAuthorityStatus{}, err
+	}
+	return hostAuthorityStatusFromProto(response)
+}
+
+func enumSuffix(value fmt.Stringer, prefix string) (string, error) {
+	name := value.String()
+	if !strings.HasPrefix(name, prefix) || strings.HasSuffix(name, "UNSPECIFIED") {
+		return "", fmt.Errorf("TrainVM authority returned an unknown %s value", strings.ToLower(strings.TrimSuffix(prefix, "_")))
+	}
+	return strings.ToLower(strings.TrimPrefix(name, prefix)), nil
+}
+
+func hostAuthorityStatusFromProto(response *trainvmv1.GetHostAuthorityStatusResponse) (HostAuthorityStatus, error) {
+	if response == nil || response.GetCoordinator() == nil ||
+		response.GetApiVersion() != "trainvm.hostd-authority-status/v1" {
+		return HostAuthorityStatus{}, fmt.Errorf("TrainVM authority returned a malformed host authority status")
+	}
+	coordinator := response.GetCoordinator()
+	lifecycle, err := enumSuffix(coordinator.GetLifecycle(), "HOSTD_LIFECYCLE_")
+	if err != nil {
+		return HostAuthorityStatus{}, err
+	}
+	startupPhase, err := enumSuffix(response.GetStartupPhase(), "HOSTD_STARTUP_PHASE_")
+	if err != nil {
+		return HostAuthorityStatus{}, err
+	}
+	if coordinator.GetApiVersion() == "" || coordinator.GetHostId() == "" ||
+		coordinator.GetBootId() == "" || coordinator.GetBrokerEpoch() == "" ||
+		coordinator.GetInventoryDigest() == "" || response.GetLedgerChainHash() == "" ||
+		response.GetOccupancyDigest() == "" ||
+		uint64(len(response.GetActiveFences())) > response.GetActiveFenceCount() ||
+		uint64(len(response.GetActiveProcesses())) > response.GetActiveProcessCount() ||
+		response.GetActiveFencesTruncated() != (uint64(len(response.GetActiveFences())) < response.GetActiveFenceCount()) ||
+		response.GetActiveProcessesTruncated() != (uint64(len(response.GetActiveProcesses())) < response.GetActiveProcessCount()) ||
+		response.GetActiveProcessCount() != response.GetRemainingUnclosedProcessRecords()+response.GetRemainingTerminalReleaseRecords() ||
+		response.GetLedgerVerified() == (response.GetLedgerVerificationReason() != "") ||
+		response.GetMutationEnabled() == (response.GetMutationDisabledReason() != "") ||
+		response.GetLeaseRenewalPoisoned() && response.GetLeaseRenewalFailure() == "" ||
+		response.GetDegradedResourceCount() > response.GetActiveFenceCount() ||
+		response.GetResourceInventoryObserved() !=
+			(response.GetCurrentInventoryDigest() != "" && response.GetCurrentInventoryReceiptDigest() != "") ||
+		(response.GetResourceDegradationReason() == "") !=
+			(response.GetResourceInventoryObserved() && response.GetDegradedResourceCount() == 0) {
+		return HostAuthorityStatus{}, fmt.Errorf("TrainVM authority returned contradictory host authority evidence")
+	}
+	result := HostAuthorityStatus{
+		APIVersion: response.GetApiVersion(),
+		Coordinator: HostdCoordinatorStatus{
+			APIVersion: coordinator.GetApiVersion(), Lifecycle: lifecycle,
+			HostID: coordinator.GetHostId(), BootID: coordinator.GetBootId(),
+			BrokerEpoch: coordinator.GetBrokerEpoch(), InventoryDigest: coordinator.GetInventoryDigest(),
+			LiveSessions: coordinator.GetLiveSessions(), AdmissionSessions: coordinator.GetAdmissionSessions(),
+			StaleAdmissionSessions: coordinator.GetStaleAdmissionSessions(), ReleaseOnlySessions: coordinator.GetReleaseOnlySessions(),
+			AdmissionCountsAreCachedEvidence: coordinator.GetAdmissionCountsAreCachedEvidence(),
+			StartupAuditReceiptDigest:        coordinator.GetStartupAuditReceiptDigest(),
+			StartupAuditPassed:               coordinator.GetStartupAuditPassed(), PoisonReason: coordinator.GetPoisonReason(),
+		},
+		StartupPhase: startupPhase, StartupRecoverySteps: response.GetStartupRecoverySteps(),
+		RemainingUnclosedProcessRecords: response.GetRemainingUnclosedProcessRecords(),
+		RemainingTerminalReleaseRecords: response.GetRemainingTerminalReleaseRecords(),
+		LedgerVerified:                  response.GetLedgerVerified(), LedgerVerificationReason: response.GetLedgerVerificationReason(),
+		LedgerSequence: response.GetLedgerSequence(), LedgerChainHash: response.GetLedgerChainHash(),
+		LedgerRecordCount: response.GetLedgerRecordCount(), OccupancyLedgerSequence: response.GetOccupancyLedgerSequence(),
+		OccupancyDigest: response.GetOccupancyDigest(), ActiveFenceCount: response.GetActiveFenceCount(),
+		ActiveFences:          make([]HostResourceFenceStatus, 0, len(response.GetActiveFences())),
+		ActiveFencesTruncated: response.GetActiveFencesTruncated(), ActiveProcessCount: response.GetActiveProcessCount(),
+		ActiveProcesses:          make([]HostdProcessAuthorityStatus, 0, len(response.GetActiveProcesses())),
+		ActiveProcessesTruncated: response.GetActiveProcessesTruncated(), ProcessLaunchEnabled: response.GetProcessLaunchEnabled(),
+		MutationEnabled: response.GetMutationEnabled(), MutationDisabledReason: response.GetMutationDisabledReason(),
+		LeaseRenewalTrackedCount: response.GetLeaseRenewalTrackedCount(), LeaseRenewalPoisoned: response.GetLeaseRenewalPoisoned(),
+		LeaseRenewalFailure: response.GetLeaseRenewalFailure(), ResourceInventoryObserved: response.GetResourceInventoryObserved(),
+		ResourceInventoryObservationAgeNS: response.GetResourceInventoryObservationAgeNs(),
+		CurrentInventoryDigest:            response.GetCurrentInventoryDigest(), CurrentInventoryReceiptDigest: response.GetCurrentInventoryReceiptDigest(),
+		DegradedResourceCount: response.GetDegradedResourceCount(), ResourceDegradationReason: response.GetResourceDegradationReason(),
+	}
+	for _, fence := range response.GetActiveFences() {
+		if fence == nil || fence.GetStableId() == "" || fence.GetGeneration() == 0 {
+			return HostAuthorityStatus{}, fmt.Errorf("TrainVM authority returned a malformed resource fence")
+		}
+		kind, err := enumSuffix(fence.GetKind(), "HOST_RESOURCE_KIND_")
+		if err != nil {
+			return HostAuthorityStatus{}, err
+		}
+		vendor := ""
+		if fence.GetVendor() != trainvmv1.HostAcceleratorVendor_HOST_ACCELERATOR_VENDOR_UNSPECIFIED {
+			vendor, err = enumSuffix(fence.GetVendor(), "HOST_ACCELERATOR_VENDOR_")
+			if err != nil {
+				return HostAuthorityStatus{}, err
+			}
+		}
+		result.ActiveFences = append(result.ActiveFences, HostResourceFenceStatus{
+			Kind: kind, Vendor: vendor, StableID: fence.GetStableId(), ParentID: fence.GetParentId(),
+			Generation: fence.GetGeneration(), InventoryDigest: fence.GetInventoryDigest(), TopologyDigest: fence.GetTopologyDigest(),
+		})
+	}
+	for _, process := range response.GetActiveProcesses() {
+		if process == nil || process.GetAllocationId() == "" || process.GetRunId() == "" ||
+			process.GetLaunchId() == "" || process.GetCgroupPath() == "" {
+			return HostAuthorityStatus{}, fmt.Errorf("TrainVM authority returned a malformed process authority row")
+		}
+		phase, err := enumSuffix(process.GetPhase(), "HOSTD_PROCESS_PHASE_")
+		if err != nil {
+			return HostAuthorityStatus{}, err
+		}
+		row := HostdProcessAuthorityStatus{
+			AllocationID: process.GetAllocationId(), JournalID: process.GetJournalId(), RunID: process.GetRunId(),
+			LogicalLeaseID: process.GetLogicalLeaseId(), LogicalFencingToken: process.GetLogicalFencingToken(),
+			LaunchID: process.GetLaunchId(), Phase: phase, CgroupPath: process.GetCgroupPath(),
+			DevicePolicyIntended: process.GetDevicePolicyIntended(), DevicePolicyInstalled: process.GetDevicePolicyInstalled(),
+			DevicePolicyDigest: process.GetDevicePolicyDigest(), DevicePolicyInstallationDigest: process.GetDevicePolicyInstallationDigest(),
+			ProcessPolicyIntended: process.GetProcessPolicyIntended(), ProcessPolicyInstalled: process.GetProcessPolicyInstalled(),
+			ProcessPolicyDigest: process.GetProcessPolicyDigest(), ProcessPolicyInstallationDigest: process.GetProcessPolicyInstallationDigest(),
+			ContextAuditDigest: process.GetContextAuditDigest(), TerminalReceiptDigest: process.GetTerminalReceiptDigest(),
+		}
+		if process.HostPid != nil {
+			value := process.GetHostPid()
+			row.HostPID = &value
+		}
+		if process.ProcessStarttimeTicks != nil {
+			value := process.GetProcessStarttimeTicks()
+			row.ProcessStarttimeTicks = &value
+		}
+		if process.CgroupEmpty != nil {
+			value := process.GetCgroupEmpty()
+			row.CgroupEmpty = &value
+		}
+		if process.AcceleratorContextsEmpty != nil {
+			value := process.GetAcceleratorContextsEmpty()
+			row.AcceleratorContextsEmpty = &value
+		}
+		hasProcessIdentity := row.HostPID != nil && row.ProcessStarttimeTicks != nil && *row.HostPID > 0 && *row.ProcessStarttimeTicks > 0
+		policyEvidenceValid := row.DevicePolicyIntended == (row.DevicePolicyDigest != "") &&
+			row.DevicePolicyInstalled == (row.DevicePolicyInstallationDigest != "") &&
+			row.ProcessPolicyIntended == (row.ProcessPolicyDigest != "") &&
+			row.ProcessPolicyInstalled == (row.ProcessPolicyInstallationDigest != "") &&
+			(!row.DevicePolicyInstalled || row.DevicePolicyIntended) &&
+			(!row.ProcessPolicyInstalled || row.ProcessPolicyIntended)
+		terminalEvidence := row.CgroupEmpty != nil && row.AcceleratorContextsEmpty != nil &&
+			row.ContextAuditDigest != "" && row.TerminalReceiptDigest != ""
+		phaseEvidenceValid := (phase == "launch_intent" && row.HostPID == nil && row.ProcessStarttimeTicks == nil && !terminalEvidence) ||
+			(phase == "spawned" && hasProcessIdentity && !terminalEvidence) ||
+			(phase == "terminal_pending_release" && hasProcessIdentity && terminalEvidence)
+		if !policyEvidenceValid || !phaseEvidenceValid {
+			return HostAuthorityStatus{}, fmt.Errorf("TrainVM authority returned contradictory process enforcement evidence")
+		}
+		result.ActiveProcesses = append(result.ActiveProcesses, row)
+	}
+	return result, nil
 }
 
 func submissionRPCRequest(request SubmissionRequest) (*trainvmv1.SubmitExperimentRequest, error) {

@@ -2058,11 +2058,11 @@ def main(
             emit({"kind": "train", "step": step, "loss": float(loss.detach()),
                   "gnorm": float(gn.detach()),
                   "lr": lr, "tok_per_sec": int(seen / max(time.time() - t0, 1e-6))})
-            publish_metric("training_loss", float(loss.detach()), metric_step=step)
+            publish_metric("train.loss", float(loss.detach()), metric_step=step)
             publish_metric("gradient_norm", float(gn.detach()), metric_step=step)
             publish_metric("learning_rate", lr, metric_step=step)
             publish_metric(
-                "tokens_per_second",
+                "train.tokens_per_second",
                 int(seen / max(time.time() - t0, 1e-6)),
                 metric_step=step,
             )

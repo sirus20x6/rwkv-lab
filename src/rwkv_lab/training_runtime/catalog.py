@@ -40,7 +40,10 @@ def supported_worker_capabilities() -> frozenset[str]:
             "curriculum.context_length.v1",
             "normalization.layer_norm.v1",
             "optimizer.torch_adamw.v1",
+            "optimizer.torch_sparse_adam.v1",
             "optimizer.fp32_master_adamw.v1",
+            "schedule.constant.v1",
+            "schedule.linear_warmup_constant.v1",
             "schedule.linear_warmup_cosine.v1",
             "schedule.powercool.v1",
             "parameter_router.mageflow_appearance_expert.v1",
@@ -52,5 +55,6 @@ def supported_worker_capabilities() -> frozenset[str]:
             "optimizer.fp32_master_adamw_no_decay.v2",
             "objective.linear_head_cross_entropy.v1",
             "precision.bf16_parameters_fp32_reductions.v1",
+            "precision.fp32_parameters_bf16_compute.v1",
         }
     )
