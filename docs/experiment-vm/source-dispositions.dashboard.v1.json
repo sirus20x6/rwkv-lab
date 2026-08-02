@@ -1,0 +1,55 @@
+{
+  "api_version": "trainvm.source-dispositions/v1",
+  "authority": "compatibility_evidence_only",
+  "source_repository": "moe-mla",
+  "source_revision": "git-sha1:42c3b00f9c4f03e3ec2e101df2f6c9627675c3f7",
+  "source_scope": {
+    "prefix": "dashboard",
+    "recursive": true,
+    "extensions": [
+      ".py"
+    ]
+  },
+  "source_tree_digest": "sha256:69ae7225bc20c0b58f705fdefd9fe073b9f976b5e96117e220c8a82ed67b5c90",
+  "entries": [
+    {
+      "source_path": "dashboard/instrumented/train_mla.py",
+      "language": "python",
+      "class": "explicit_exclusion",
+      "canonical_entry_point": "library-only",
+      "effects": [
+        "read_source",
+        "gpu_compute",
+        "write_artifact"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:53e088bfe2daa8f88b6ec56742364f9128f18b9c444f0bf3fa601a37f67044da"
+    },
+    {
+      "source_path": "dashboard/tools/arch_panel.py",
+      "language": "python",
+      "class": "internal_utility_data_tool",
+      "canonical_entry_point": "python dashboard/tools/arch_panel.py <run_dir>",
+      "effects": [
+        "read_source"
+      ],
+      "resume_relevance": "none",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:31b2d72b0e26d330b87d1c5efe50aec10f4378f73ebd1a5591108a19760c9367"
+    },
+    {
+      "source_path": "dashboard/web/testdata/trainvm_editor_browser.py",
+      "language": "python",
+      "class": "test_fixture",
+      "canonical_entry_point": "python dashboard/web/testdata/trainvm_editor_browser.py",
+      "effects": [
+        "read_source",
+        "serve_http"
+      ],
+      "resume_relevance": "none_or_self_test_only",
+      "compatibility_workflow_id": null,
+      "source_sha256": "sha256:614db94575abd96b7f2cbd501204584590c689512a32d19f887254afb34d5424"
+    }
+  ]
+}

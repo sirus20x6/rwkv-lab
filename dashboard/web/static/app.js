@@ -1046,7 +1046,28 @@
       Number(profile.skip_steps) === Number(baseline.skip_steps) &&
       Number(profile.warmup_steps) === Number(baseline.warmup_steps) &&
       JSON.stringify(profile.activities || []) === JSON.stringify(baseline.activities || []) &&
-      JSON.stringify(profile.options || {}) === JSON.stringify(baseline.options || {});
+      JSON.stringify(profile.options || {}) === JSON.stringify(baseline.options || {}) &&
+      profile.execution_phases?.overlaps_warmup === baseline.execution_phases?.overlaps_warmup;
+  }
+
+  function vmProfilePhaseSummary(profile) {
+    const phases = profile?.execution_phases;
+    if (!phases) return "";
+    const declared = (field) => Object.prototype.hasOwnProperty.call(phases, field);
+    const compile = declared("compile_enabled") ? `compile ${phases.compile_enabled ? "on" : "off"}` : "compile undeclared";
+    let warmup = "warmup undeclared";
+    if (declared("warmup_enabled")) {
+      warmup = phases.warmup_enabled ?
+        (declared("warmup_steps_declared") ? `warmup ${Number(phases.warmup_steps_declared).toLocaleString()} steps` : "warmup steps unknown") :
+        "warmup off";
+    }
+    let qualify = "qualify undeclared";
+    if (declared("qualify_enabled")) {
+      qualify = phases.qualify_enabled ?
+        (declared("qualify_steps") ? `qualify ${Number(phases.qualify_steps).toLocaleString()} steps` : "qualify steps unknown") :
+        "qualify off";
+    }
+    return `${compile} · ${warmup} · ${qualify}`;
   }
 
   function vmSignedPercent(current, baseline) {
@@ -1067,12 +1088,14 @@
     const state = document.getElementById("vm-profile-state");
     const target = document.getElementById("vm-profile-items");
     const baseline = profiles.find((profile) => profile.artifact_id === vmProfileBaseline);
+    const phaseSummary = vmProfilePhaseSummary(profiles.find((profile) => profile.execution_phases));
     if (state) state.textContent = profiles.length ?
-      `${profiles.length} restricted trace${profiles.length === 1 ? "" : "s"} · ${baseline ? "baseline selected" : "choose a baseline"} · explicit download only` :
+      `${profiles.length} restricted trace${profiles.length === 1 ? "" : "s"} · ${phaseSummary ? `${phaseSummary} · ` : ""}${baseline ? "baseline selected" : "choose a baseline"} · explicit download only` :
       "no published traces";
     if (!target) return;
     target.innerHTML = profiles.map((profile) => {
       const summary = profile.summary || {};
+      const phases = profile.execution_phases;
       const operators = Array.isArray(summary.top_operators) ? summary.top_operators.slice(0, 5) : [];
       const windowLabel = `${Number(profile.first_optimizer_step || 0).toLocaleString()}–${Number(profile.last_optimizer_step || 0).toLocaleString()}`;
       const richSummary = vmProfileHasRichSummary(profile);
@@ -1094,6 +1117,12 @@
         }
       }
       let comparison = "";
+      let phaseQualifier = "";
+      if (phases?.overlaps_warmup === true) {
+        phaseQualifier = '<div class="vm-profile-phase"><strong>warmup overlap</strong><span>capture includes declared execution warmup; treat metrics as non-steady-state</span></div>';
+      } else if (phases && phases.overlaps_warmup === null) {
+        phaseQualifier = '<div class="vm-profile-phase"><strong>warmup overlap unknown</strong><span>warmup is enabled without a declared step count; steady-state status cannot be determined</span></div>';
+      }
       if (baseline && profile.artifact_id === baseline.artifact_id) {
         comparison = '<div class="vm-profile-comparison"><strong>comparison baseline</strong><span>other compatible windows are normalized against this trace</span></div>';
       } else if (baseline && vmProfilesComparable(profile, baseline)) {
@@ -1105,7 +1134,7 @@
           `<span>peak allocated ${vmEscape(vmSignedPercent(summary.allocator_peak_allocated_bytes, baseSummary.allocator_peak_allocated_bytes))}</span>` +
           `${Number.isFinite(Number(summary.input_stall_ratio)) && Number.isFinite(Number(baseSummary.input_stall_ratio)) ? `<span>input stall ${vmEscape(vmSignedPoints(summary.input_stall_ratio, baseSummary.input_stall_ratio))}</span>` : ""}</div>`;
       } else if (baseline) {
-        comparison = '<div class="vm-profile-comparison incompatible"><strong>not comparable</strong><span>node, backend, schedule, activities, or profiler options differ</span></div>';
+        comparison = '<div class="vm-profile-comparison incompatible"><strong>not comparable</strong><span>node, backend, schedule, activities, profiler options, or warmup status differ</span></div>';
       }
       return `<article class="vm-profile-card${baseline && profile.artifact_id === baseline.artifact_id ? " baseline" : ""}">` +
         `<div class="vm-profile-head"><strong title="${vmEscape(profile.artifact_id)}">${vmEscape(profile.backend)} · steps ${vmEscape(windowLabel)}</strong><span>#${Number(profile.sequence || 0).toLocaleString()}</span></div>` +
@@ -1115,6 +1144,7 @@
         `<div class="vm-profile-operators">${operators.map((operator) =>
           `<div class="vm-profile-operator"><span title="${vmEscape(operator.name)}">${vmEscape(operator.name)}</span><span>${Number(operator.calls || 0).toLocaleString()}×</span><span>${vmEscape(vmDurationUS(operator.accelerator_time_us))}</span></div>`
         ).join("") || '<span class="vm-profile-meta">no operator rows in summary</span>'}</div>` +
+        phaseQualifier +
         comparison +
         `<div class="vm-profile-meta">${vmEscape(profile.attempt_id)} · ${Number(profile.capture_steps || 0)} captured · ${Number(profile.skip_steps || 0)} skipped · ${Number(profile.warmup_steps || 0)} warmup</div>` +
         `<button type="button" class="vm-profile-baseline" data-artifact="${vmEscape(profile.artifact_id)}" aria-pressed="${baseline && profile.artifact_id === baseline.artifact_id ? "true" : "false"}" ${richSummary ? "" : "disabled"}>${baseline && profile.artifact_id === baseline.artifact_id ? "selected baseline" : "use as comparison baseline"}</button>` +
@@ -1139,7 +1169,7 @@
       if (!response.ok) throw new Error((await response.text()).trim() || `HTTP ${response.status}`);
       const profiles = await response.json();
       if (!Array.isArray(profiles)) throw new Error("profile response is not an array");
-      const signature = JSON.stringify(profiles.map((profile) => [profile.sequence, profile.artifact_id, profile.trace_sha256]));
+      const signature = JSON.stringify(profiles.map((profile) => [profile.sequence, profile.artifact_id, profile.trace_sha256, profile.execution_phases]));
       if (!force && signature === vmProfileSignature) return;
       vmProfileSignature = signature;
       vmProfiles = profiles;

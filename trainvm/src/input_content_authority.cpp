@@ -161,6 +161,20 @@ bool valid_utf8(std::string_view value) {
   return true;
 }
 
+// Identity of a path component above the measured root is its device/inode
+// pair, plus the ownership and mode that policy depends on. A directory's
+// st_nlink, st_size, and timestamps all change whenever an unrelated entry is
+// created or removed inside it, so comparing those on an ancestor reports
+// benign concurrent activity in a shared parent such as /tmp as a substitution
+// and fails the measurement. Content stability *inside* the root is a different
+// question and is still checked with the full same_stat comparison below.
+bool same_namespace_component(const struct stat& before,
+                              const struct stat& after) {
+  return before.st_dev == after.st_dev && before.st_ino == after.st_ino &&
+         before.st_mode == after.st_mode && before.st_uid == after.st_uid &&
+         before.st_gid == after.st_gid;
+}
+
 bool same_stat(const struct stat& before, const struct stat& after) {
   return before.st_dev == after.st_dev && before.st_ino == after.st_ino &&
          before.st_mode == after.st_mode && before.st_nlink == after.st_nlink &&
@@ -219,7 +233,7 @@ OpenedRoot open_root_by_components(const std::filesystem::path& path) {
       errno = saved_errno;
       fail_system("could not inspect opened input content root component");
     }
-    if (!same_stat(before, opened)) {
+    if (!same_namespace_component(before, opened)) {
       (void)::close(next);
       throw std::runtime_error(
           "input content root component changed while opening");
@@ -239,7 +253,7 @@ void require_unchanged_links(const std::vector<RetainedLink>& links) {
     if (::fstatat(iterator->parent.get(), iterator->name.c_str(), &observed,
                   AT_SYMLINK_NOFOLLOW) != 0)
       fail_system("could not reinspect input content root component");
-    if (!same_stat(iterator->expected, observed))
+    if (!same_namespace_component(iterator->expected, observed))
       throw std::runtime_error(
           "input content root namespace changed while hashing");
   }

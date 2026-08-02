@@ -20,6 +20,13 @@ compatibility-workflow link, and exact lowercase SHA-256 of the source bytes.
 Optional fields retain domain-specific family, coverage, consumer, language, and
 additional workflow-link evidence. Unknown fields and enum values fail closed.
 
+Three source roots are reviewed: `src/rwkv_lab` and `scripts` non-recursively,
+and `dashboard` recursively. The dashboard scope is recursive because its Python
+lives in several subdirectories, so a non-recursive prefix would let a new tool
+escape review simply by being placed one level down. It classifies the stale
+`dashboard/instrumented/train_mla.py` fork as an explicit exclusion rather than
+leaving a 2,000-line divergent trainer unclassified.
+
 The root `source_scope` declares a repository-relative prefix, whether traversal
 is recursive, and the included filename extensions. `source_tree_digest` is
 SHA-256 over the ASCII domain `trainvm.source-disposition-tree/v1`, followed in

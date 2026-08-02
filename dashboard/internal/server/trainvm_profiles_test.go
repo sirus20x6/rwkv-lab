@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,7 +18,10 @@ import (
 
 type profileReadModel struct {
 	trainvmstore.ReadModel
-	events []trainvmstore.Event
+	events            []trainvmstore.Event
+	compiledPlan      trainvmstore.CompiledPlanView
+	compiledPlanFound bool
+	compiledPlanErr   error
 }
 
 func (f *profileReadModel) Events(_ context.Context, query trainvmstore.EventQuery) ([]trainvmstore.Event, error) {
@@ -38,6 +42,10 @@ func (f *profileReadModel) Events(_ context.Context, query trainvmstore.EventQue
 		}
 	}
 	return result, nil
+}
+
+func (f *profileReadModel) CompiledPlan(context.Context, string) (trainvmstore.CompiledPlanView, bool, error) {
+	return f.compiledPlan, f.compiledPlanFound, f.compiledPlanErr
 }
 
 func prefixedTestSHA256(data []byte) string {
@@ -136,6 +144,107 @@ func TestTrainVMGPUTraceSummaryAndExplicitVerifiedDownload(t *testing.T) {
 	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "private, no-store" ||
 		response.Header().Get("Content-Disposition") == "" || !strings.Contains(response.Body.String(), "traceEvents") {
 		t.Fatalf("trace download status=%d headers=%v body=%s", response.Code, response.Header(), response.Body.String())
+	}
+}
+
+func TestTrainVMGPUTraceCorrelatesDeclaredExecutionPhases(t *testing.T) {
+	boolPointer := func(value bool) *bool { return &value }
+	uint64Pointer := func(value uint64) *uint64 { return &value }
+	tests := []struct {
+		name     string
+		plan     json.RawMessage
+		found    bool
+		planErr  error
+		expected *trainVMGPUTraceExecutionPhases
+	}{
+		{
+			name:  "capture fully after warmup",
+			plan:  json.RawMessage(`{"spec":{"execution":{"compile":{"enabled":true},"warmup":{"enabled":true,"steps":8},"qualify":{"enabled":true,"steps":4}}}}`),
+			found: true,
+			expected: &trainVMGPUTraceExecutionPhases{
+				CompileEnabled: boolPointer(true), WarmupEnabled: boolPointer(true),
+				WarmupStepsDeclared: uint64Pointer(8), QualifyEnabled: boolPointer(true),
+				QualifySteps: uint64Pointer(4), OverlapsWarmup: boolPointer(false),
+			},
+		},
+		{
+			name:  "capture starts inside warmup",
+			plan:  json.RawMessage(`{"spec":{"execution":{"compile":{"enabled":false},"warmup":{"enabled":true,"steps":13},"qualify":{"enabled":false}}}}`),
+			found: true,
+			expected: &trainVMGPUTraceExecutionPhases{
+				CompileEnabled: boolPointer(false), WarmupEnabled: boolPointer(true),
+				WarmupStepsDeclared: uint64Pointer(13), QualifyEnabled: boolPointer(false),
+				OverlapsWarmup: boolPointer(true),
+			},
+		},
+		{
+			name:  "warmup enabled without steps is unknown",
+			plan:  json.RawMessage(`{"spec":{"execution":{"warmup":{"enabled":true}}}}`),
+			found: true,
+			expected: &trainVMGPUTraceExecutionPhases{
+				WarmupEnabled: boolPointer(true), OverlapsWarmup: nil,
+			},
+		},
+		{name: "compiled plan not found"},
+		{name: "compiled plan read fails", found: true, planErr: errors.New("compiled plan unavailable")},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			srv, _, _ := trainVMGPUTraceFixture(t)
+			reader := srv.trainvm.(*profileReadModel)
+			reader.compiledPlan = trainvmstore.CompiledPlanView{
+				RunID: "vm-run", CanonicalPlan: test.plan,
+			}
+			reader.compiledPlanFound = test.found
+			reader.compiledPlanErr = test.planErr
+
+			request := httptest.NewRequest(http.MethodGet, "/api/trainvm/runs/vm-run/profiles", nil)
+			response := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(response, request)
+			var profiles []trainVMGPUTraceSummary
+			if response.Code != http.StatusOK {
+				t.Fatalf("profile list status=%d body=%s", response.Code, response.Body.String())
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &profiles); err != nil || len(profiles) != 1 {
+				t.Fatalf("decode profile list: %#v err=%v", profiles, err)
+			}
+			assertExecutionPhases(t, profiles[0].ExecutionPhases, test.expected)
+			if test.expected == nil && strings.Contains(response.Body.String(), `"execution_phases"`) {
+				t.Fatalf("unavailable plan should omit execution phases: %s", response.Body.String())
+			}
+			if test.expected != nil && test.expected.OverlapsWarmup == nil &&
+				!strings.Contains(response.Body.String(), `"overlaps_warmup":null`) {
+				t.Fatalf("unknown overlap should be explicit JSON null: %s", response.Body.String())
+			}
+
+			request = httptest.NewRequest(http.MethodGet, "/api/trainvm/runs/vm-run/profiles/gpu-trace-1", nil)
+			response = httptest.NewRecorder()
+			srv.Handler().ServeHTTP(response, request)
+			var profile trainVMGPUTraceSummary
+			if response.Code != http.StatusOK {
+				t.Fatalf("profile detail status=%d body=%s", response.Code, response.Body.String())
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &profile); err != nil {
+				t.Fatalf("decode profile detail: err=%v", err)
+			}
+			assertExecutionPhases(t, profile.ExecutionPhases, test.expected)
+		})
+	}
+}
+
+func assertExecutionPhases(t *testing.T, actual, expected *trainVMGPUTraceExecutionPhases) {
+	t.Helper()
+	actualJSON, err := json.Marshal(actual)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedJSON, err := json.Marshal(expected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(actualJSON) != string(expectedJSON) {
+		t.Fatalf("execution phases got=%s want=%s", actualJSON, expectedJSON)
 	}
 }
 

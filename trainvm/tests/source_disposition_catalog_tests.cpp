@@ -172,6 +172,26 @@ int main() {
   check(compatibility_references == 67U && all_workflow_ids.size() == 50U,
         "script catalog preserves all 67 references across 50 workflows");
 
+  // The dashboard tree is the third reviewed source root. Its scope is
+  // recursive, so a new Python file anywhere under dashboard/ must be
+  // classified rather than silently escaping review by living in a
+  // subdirectory the other two catalogs do not reach.
+  const fs::path dashboard_checked =
+      dashboard_root / "docs/experiment-vm/source-dispositions.dashboard.v1.json";
+  const auto dashboard_catalog = trainvm::SourceDispositionCatalog::load_file(
+      dashboard_checked, dashboard_root, known_ids);
+  check(dashboard_catalog.entries().size() == 3U,
+        "dashboard disposition catalog covers every reviewed dashboard module");
+  std::map<trainvm::SourceDispositionClass, std::size_t> dashboard_classes;
+  for (const auto& entry : dashboard_catalog.entries()) {
+    ++dashboard_classes[entry.disposition_class];
+  }
+  check(dashboard_classes[trainvm::SourceDispositionClass::explicit_exclusion] == 1U &&
+            dashboard_classes[trainvm::SourceDispositionClass::
+                                  internal_utility_data_tool] == 1U &&
+            dashboard_classes[trainvm::SourceDispositionClass::test_fixture] == 1U,
+        "the stale instrumented trainer fork stays an explicit exclusion, not an operation");
+
   const auto rwkv_catalog = trainvm::SourceDispositionCatalog::load_file(
       rwkv_checked, std::nullopt, known_ids);
   check(rwkv_catalog.entries().size() == 165U,
