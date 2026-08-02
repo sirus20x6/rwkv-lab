@@ -282,12 +282,12 @@ HostdDaemonConfiguration::document() const noexcept {
   return document_;
 }
 
-HostLedgerAuthorityConfig HostdDaemonConfiguration::ledger_authority() const {
-  return {.api_version = std::string(kHostLedgerAuthorityApiVersion),
+SqliteAuthorityConfig HostdDaemonConfiguration::ledger_authority() const {
+  return {.api_version = std::string(kSqliteAuthorityApiVersion),
           .ledger_path = document_.ledger_path,
           .expected_owner_uid = static_cast<uid_t>(document_.authority_uid),
           .expected_owner_gid = static_cast<gid_t>(document_.authority_gid),
-          .enforcement_grade = HostLedgerEnforcementGrade::strict_filesystem};
+          .enforcement_grade = SqliteAuthorityEnforcementGrade::strict_filesystem};
 }
 
 LinuxNvidiaInventoryConfig HostdDaemonConfiguration::inventory() const {

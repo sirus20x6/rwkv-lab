@@ -113,7 +113,25 @@ func TestTrainVMLiveStackE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	temporary := t.TempDir()
-	journal := filepath.Join(temporary, "journal.db")
+	// The service acquires its journal under the strict_filesystem grade, which
+	// requires an authority directory owned by the authority identity at exactly
+	// mode 0700 whose whole ancestry is unwritable by anyone else. A world
+	// writable /tmp cannot satisfy that, so the journal lives in a directory the
+	// build supplies. The socket stays under t.TempDir because sun_path is
+	// limited to 108 bytes and the build path is comparatively long.
+	journalDirectory := temporary
+	if base := os.Getenv("TRAINVM_E2E_AUTHORITY_DIR"); base != "" {
+		created, err := os.MkdirTemp(base, "journal")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(created) })
+		journalDirectory = created
+	}
+	if err := os.Chmod(journalDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	journal := filepath.Join(journalDirectory, "journal.db")
 	socket := filepath.Join(temporary, "trainvm.sock")
 	adapters := filepath.Join(temporary, "adapters.json")
 	hostLaunches := filepath.Join(temporary, "host-launches.json")

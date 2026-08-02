@@ -10,7 +10,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "trainvm/host_ledger_authority.hpp"
+#include "trainvm/sqlite_filesystem_authority.hpp"
 #include "trainvm/host_resources.hpp"
 #include "trainvm/host_startup_audit.hpp"
 
@@ -471,7 +471,7 @@ class HostLedgerBusy final : public HostLedgerError {
 class SQLiteHostLedger final {
  public:
   explicit SQLiteHostLedger(
-      std::shared_ptr<HostLedgerFilesystemAuthority> authority,
+      std::shared_ptr<SqliteFilesystemAuthority> authority,
       HostInventoryReceipt inventory,
       IHostLedgerFaultInjector* fault_injector = nullptr,
       std::optional<HostStartupAuditPolicy> trusted_startup_audit_policy =

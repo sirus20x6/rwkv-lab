@@ -91,6 +91,13 @@ Hostd is a systemd-owned singleton for the physical host. The default deployment
 Paths may be configured only by a root- or dedicated-authority-owned startup configuration. They are
 not experiment fields.
 
+SQLite authority directories are a narrower deployment boundary: strict acquisition requires the
+database process to run as the configured dedicated UID/GID, refuses effective UID 0 and `nobody`,
+and requires the final directory to be owned by that identity at mode 0700. No worker or other
+workload may use that UID. The emitted filesystem attestation includes the directory owner UID/GID,
+which the operator must compare with the service-account and workload-account configuration before
+admission.
+
 The implemented reflected `trainvm.hostd-daemon/v1` document is that sole configuration boundary.
 It is closed to unknown and duplicate fields and compiles all authority sub-policies, including
 transport peer identity, service roles, retained journal identity, recovery bounds, and trusted
@@ -115,13 +122,15 @@ The P0 deployment has two supported enforcement grades:
 
 ### Strict host enforcement
 
-A root or dedicated privileged hostd owns the ledger, socket, cgroup subtree, and cgroup-device BPF
-programs. TrainVM services and workers run with less privilege. Peer authorization includes kernel
-credentials and a root-owned service-cgroup identity. Workers cannot modify their cgroup membership
-or device allowlist.
+Privileged host components own the socket, cgroup subtree, and cgroup-device BPF programs, while a
+dedicated non-root/non-`nobody` database identity owns each strict SQLite authority directory and
+database. TrainVM services and workers run under different identities. Peer authorization includes
+kernel credentials and a root-owned service-cgroup identity. Workers cannot modify their cgroup
+membership or device allowlist, and no workload may run as a database authority UID.
 
 Strict mode is required when TrainVM must defend against an untrusted local process running under a
-different service identity.
+different service identity. A process running as the database authority UID is deliberately inside
+the trust boundary and can modify the main SQLite file directly.
 
 ### Cooperative same-UID enforcement
 
@@ -375,10 +384,20 @@ all match. A numeric PID is never signalled after any mismatch.
 
 ## Host ledger
 
-Hostd owns one strict SQLite ledger on a local filesystem. The file and its directory are
-root/dedicated-authority-owned, non-linkable, non-group/world-writable, and resolved without following
-symlinks. The ledger has its own stable identity, exact schema attestation, hash chain, boot-scoped
-clock evidence, and synchronous durability policy.
+Hostd owns one strict SQLite ledger on a supported local filesystem. The shared
+`SqliteFilesystemAuthority` requires a dedicated non-root/non-`nobody` effective UID/GID, a final
+mode-0700 directory, mode-0600 singleton database/lock/auxiliary files, and `openat2`
+`RESOLVE_BENEATH|RESOLVE_NO_MAGICLINKS|RESOLVE_NO_SYMLINKS`; it reattests pinned inodes before and
+after open and at database boundaries. Its attestation exposes the directory owner UID/GID. The
+ledger has its own stable identity, exact schema attestation, hash chain, boot-scoped clock evidence,
+and synchronous durability policy. It intentionally retains ordinary WAL/SHM because existing
+operation and recovery paths use multiple simultaneous SQLite connections.
+
+The single-connection journal selects `locking_mode=EXCLUSIVE` before enabling WAL, so stock SQLite
+does not create `-shm`. Executable evidence also pins stock SQLite's refusal to open symlinked `-wal`
+and `-journal` paths without writing through them. The enforced SQLite floor is 3.53.3 (3053003),
+classified as validated-at rather than a known-minimum because no earlier changelog boundary was
+established offline.
 
 The append-only authority records are:
 
@@ -640,6 +659,13 @@ an authorization input.
 Strict authorization also requires a protected service/cgroup identity. User-namespace mappings are
 recorded and checked; an unexpected mapping blocks adoption.
 
+Filesystem authority has the same limit more directly: a same-UID process can bypass SQLite and
+write the main database inode. A controlled VFS cannot prevent that and was rejected as security
+theatre for this threat model. Strict deployment therefore makes the SQLite authority UID dedicated,
+rejects root and `nobody`, verifies mode 0700 and configured UID/GID at startup, and reports that
+owner identity in attestation. Cooperative same-UID mode detects pinned-inode/namespace changes and
+latches poisoning, but does not claim to prevent same-UID content forgery.
+
 ## Dashboard and legacy telemetry
 
 The Go dashboard obtains authoritative fields from hostd:
@@ -900,7 +926,8 @@ Required adversarial cases include:
 12. device indices reorder, a UUID disappears, or topology changes across restart;
 13. two abstract locks succeed in separate network namespaces, but only shared hostd can grant;
 14. a private mount namespace cannot see hostd and fails closed;
-15. a same-UID peer outside an authorized service cgroup is refused in strict mode;
+15. a same-UID peer outside an authorized service cgroup is refused in strict mode, while database
+    inode/auxiliary/directory replacement races poison the journal without a partial commit;
 16. a worker attempts cgroup migration, fork/daemon escape, or an unassigned device open;
 17. cgroup marker paths, symlinks, inode identities, or ledger receipt bytes are forged;
 18. a process exits between enumeration, `/proc` inspection, and `pidfd_open`;
@@ -919,7 +946,8 @@ separate privileged suite and do not replace deterministic fake coverage.
 - trusting utilization thresholds as availability;
 - adopting an unknown external process by command line or executable name;
 - killing foreign accelerator users by default;
-- defending against a hostile same-UID process in cooperative mode;
+- preventing direct database content forgery by a process deliberately sharing the SQLite authority
+  UID (cooperative mode detects boundary movement but is not an identity boundary);
 - making NVML, ROCm SMI, CUDA, PyTorch, or Python part of the durable schema;
 - encoding model-family names or trainer-specific launch rules in hostd.
 
