@@ -366,7 +366,7 @@ void checked_in_component_catalog_matches_native_authority_contract() {
   const trainvm::TrainingComponentRegistry registry =
       trainvm::TrainingComponentRegistry::load_file(
           std::filesystem::absolute(path));
-  check(registry.document_json().at("components").size() == 12U &&
+  check(registry.document_json().at("components").size() == 13U &&
             registry.registry_digest().starts_with("sha256:") &&
             registry.registry_digest().size() == 71U,
         "checked-in cross-family component catalog is a canonical native authority document");
@@ -458,6 +458,21 @@ void checked_in_component_catalog_matches_native_authority_contract() {
             objective.configuration.at("chunk_size") == 2048 &&
             objective.configuration.at("prefer_fused") == true,
         "linear-head language objective resolves independently of model topology and optimizer policy");
+  const auto precision = registry.resolve({
+      .key = {.category = trainvm::TrainingComponentCategory::precision,
+              .name = "bf16_parameters_fp32_reductions",
+              .version = "1.0.0"},
+      .model_family = "rwkv",
+      .configuration = nlohmann::json::object(),
+  });
+  check(precision.descriptor.implementation ==
+            "rwkv_lab.precision.bf16_parameters_fp32_reductions.v1" &&
+            precision.descriptor.state_grade ==
+                trainvm::TrainingStateGrade::stateless &&
+            precision.configuration.at("parameter_dtype") == "bfloat16" &&
+            precision.configuration.at("reduction_dtype") == "float32" &&
+            precision.configuration.at("gradient_scaling") == false,
+        "BF16 parameter/compute and FP32 reduction policy resolves independently of optimizer state");
   const auto no_decay_optimizer = registry.resolve({
       .key = {.category = trainvm::TrainingComponentCategory::optimizer,
               .name = "torch_adamw_no_decay",

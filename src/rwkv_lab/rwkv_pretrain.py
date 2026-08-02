@@ -763,6 +763,17 @@ def resolved_worker_component_contract(
         raise ValueError(
             "authority objective composition disagrees with RWKV configuration"
         )
+    if dict(
+        worker_components.configuration("precision", category="precision")
+    ) != {
+        "parameter_dtype": "bfloat16",
+        "compute_dtype": "bfloat16",
+        "reduction_dtype": "float32",
+        "gradient_scaling": False,
+    }:
+        raise ValueError(
+            "authority precision composition disagrees with RWKV configuration"
+        )
     implementation, resolved_schedule = (
         worker_components.learning_rate_configuration()
     )
@@ -1004,6 +1015,16 @@ def main(
         )
     except ValueError as error:
         ap.error(str(error))
+    precision_policy = (
+        worker_components.precision()
+        if worker_components is not None
+        else None
+    )
+    parameter_dtype = (
+        precision_policy.parameter_dtype
+        if precision_policy is not None
+        else torch.bfloat16
+    )
     if not args.data and not args.ctx_buckets:
         ap.error("one of --data or --ctx-buckets is required")
     if args.ctx_buckets:                       # mixed-context mode: fixed-width features rejected
@@ -1095,7 +1116,11 @@ def main(
         model, ginfo = load_g1g_native(args.init_g1g, device=dev)
         if lk:
             add_loops(model, lk)                             # levers attach identity-at-init
-        model = model.to(dev, torch.bfloat16)
+        model = (
+            precision_policy.convert_module(model, dev)
+            if precision_policy is not None
+            else model.to(dev, parameter_dtype)
+        )
         print(f"init from g1g {args.init_g1g}: loaded {ginfo['loaded']}/{ginfo['n_ckpt']} tensors "
               f"(dims forced to g1g 24L/d2048/h64)", flush=True)
         if args.seed_chain:
@@ -1145,7 +1170,11 @@ def main(
             initialize_u_mup(model, u_mup_cfg)
             print(f"u-muP: base d{args.u_mup_base_width}/L{args.u_mup_base_depth} -> "
                   f"d{args.d_model}/L{args.n_layers}", flush=True)
-        model = model.to(dev, torch.bfloat16)
+        model = (
+            precision_policy.convert_module(model, dev)
+            if precision_policy is not None
+            else model.to(dev, parameter_dtype)
+        )
         if args.seed_chain:
             print("Future-Seed: cross-layer state chaining ON (s_0^L = s_T^{L-1})", flush=True)
         if args.deepembed:
@@ -1279,7 +1308,7 @@ def main(
             from rwkv_lab.online_memory import (install_compiled_online_memory,
                                                  qualify_compiled_online_memory)
             probe = torch.randn(min(args.batch, 2), min(args.seq_len, 128), args.d_model,
-                                device=dev, dtype=torch.bfloat16)
+                                device=dev, dtype=parameter_dtype)
             report = qualify_compiled_online_memory(
                 model.online_memory, probe, tolerance=2e-2, repeats=3)
             emit({"kind": "kernel_qualification", "step": 0, "report": report})
@@ -1333,7 +1362,12 @@ def main(
         heads = LookaheadSystem(args.d_model, 65536, nextlat_weight=args.nextlat_weight,
                                 top_weight=args.top_weight, lmtp_weight=args.lmtp_weight,
                                 bst_weight=args.bst_weight, jtp_weight=args.jtp_weight,
-                                lm_head=model.head).to(dev, torch.bfloat16)
+                                lm_head=model.head)
+        heads = (
+            precision_policy.convert_module(heads, dev)
+            if precision_policy is not None
+            else heads.to(dev, parameter_dtype)
+        )
         print(f"aux heads enabled={heads.enabled} extra_tokens={heads.extra_tokens}", flush=True)
     # Widest window any train batch samples: T+1 targets plus the aux heads' future-token fetch.
     width = T + 1 + (heads.extra_tokens if heads else 0)

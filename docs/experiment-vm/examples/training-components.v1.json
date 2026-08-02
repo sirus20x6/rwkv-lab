@@ -239,6 +239,26 @@
     },
     {
       "key": {
+        "category": "precision",
+        "name": "bf16_parameters_fp32_reductions",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.precision.bf16_parameters_fp32_reductions.v1",
+      "model_families": ["rwkv", "transformer", "vision"],
+      "required_capabilities": ["precision.bf16_parameters_fp32_reductions.v1"],
+      "configuration": [
+        {"name": "parameter_dtype", "type": "enumeration", "required": false, "default": "bfloat16", "values": ["bfloat16"]},
+        {"name": "compute_dtype", "type": "enumeration", "required": false, "default": "bfloat16", "values": ["bfloat16"]},
+        {"name": "reduction_dtype", "type": "enumeration", "required": false, "default": "float32", "values": ["float32"]},
+        {"name": "gradient_scaling", "type": "boolean", "required": false, "default": false}
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
         "category": "weight_decay_schedule",
         "name": "constant",
         "version": "1.0.0"

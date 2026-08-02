@@ -60,6 +60,13 @@ def test_rwkv_worker_components_drive_powercool_and_optimizer() -> None:
                 return {"microbatches_per_optimizer_step": 1}
             if (slot, category) == ("objective", "objective"):
                 return {"chunk_size": 2048, "prefer_fused": True}
+            if (slot, category) == ("precision", "precision"):
+                return {
+                    "parameter_dtype": "bfloat16",
+                    "compute_dtype": "bfloat16",
+                    "reduction_dtype": "float32",
+                    "gradient_scaling": False,
+                }
             assert (slot, category) == ("optimizer", "optimizer")
             return {
                 "learning_rate": 3.0e-4,
@@ -90,6 +97,14 @@ def test_rwkv_worker_components_drive_powercool_and_optimizer() -> None:
         def objective(self):
             return lambda hidden, head, labels, **_kwargs: torch.nn.functional.cross_entropy(
                 head(hidden).reshape(-1, head.out_features), labels.reshape(-1)
+            )
+
+        def precision(self):
+            return SimpleNamespace(
+                parameter_dtype=torch.bfloat16,
+                convert_module=lambda module, device: module.to(
+                    device=device, dtype=torch.bfloat16
+                ),
             )
 
         def evidence(self):

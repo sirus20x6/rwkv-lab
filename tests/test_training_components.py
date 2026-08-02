@@ -10,6 +10,8 @@ from rwkv_lab.training_components import (
     AdamWConfiguration,
     AdamWNoDecayConfiguration,
     AppearanceExpertRoutingConfiguration,
+    BFloat16PrecisionConfiguration,
+    BFloat16PrecisionPolicy,
     ConstantWeightDecayConfiguration,
     FixedGradientAccumulation,
     FixedGradientAccumulationConfiguration,
@@ -23,6 +25,7 @@ from rwkv_lab.training_components import (
     OptimizerImplementation,
     ParameterRouterImplementation,
     PowerCoolConfiguration,
+    PrecisionImplementation,
     ScheduleImplementation,
     TerminalExpertRoutingConfiguration,
     WeightDecayScheduleImplementation,
@@ -31,6 +34,7 @@ from rwkv_lab.training_components import (
     build_registered_objective,
     build_registered_optimizer,
     build_registered_parameter_routing,
+    build_registered_precision_policy,
     build_registered_schedule,
     build_registered_weight_decay_schedule,
     linear_warmup_cosine_multiplier,
@@ -53,6 +57,7 @@ def test_runtime_categories_have_one_way_dependency_boundaries():
         "optimizers",
         "objectives",
         "routers",
+        "precision",
         "schedules",
         "weight_decay_schedules",
     }
@@ -183,6 +188,7 @@ def test_component_catalog_and_runtime_dispatch_are_exactly_aligned():
     assert grades["optimizer"] == "exact"
     assert grades["learning_rate_schedule"] == "exact"
     assert grades["objective"] == "stateless"
+    assert grades["precision"] == "stateless"
     assert grades["parameter_router"] == "stateless"
     assert grades["gradient_accumulation"] == "stateless"
     assert grades["gradient_clipping"] == "stateless"
@@ -239,6 +245,19 @@ def test_linear_head_cross_entropy_objective_matches_reference_value_and_gradien
     hidden.grad = None
     reference.backward()
     torch.testing.assert_close(observed_gradient, hidden.grad)
+
+
+def test_bfloat16_precision_policy_owns_module_and_reduction_dtypes():
+    policy = build_registered_precision_policy(
+        PrecisionImplementation.BF16_PARAMETERS_FP32_REDUCTIONS_V1,
+        BFloat16PrecisionConfiguration(),
+    )
+    assert isinstance(policy, BFloat16PrecisionPolicy)
+    module = policy.convert_module(torch.nn.Linear(3, 4), "cpu")
+    assert module.weight.dtype is torch.bfloat16
+    reduced = policy.reduce(torch.ones(2, dtype=torch.bfloat16))
+    assert reduced.dtype is torch.float32
+    assert policy.state_dict() == {}
 
 
 def test_no_decay_optimizer_and_decay_schedule_have_independent_contracts():

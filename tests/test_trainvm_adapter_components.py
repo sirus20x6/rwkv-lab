@@ -63,6 +63,15 @@ def composition():
             "linear_head_cross_entropy",
             {"chunk_size": 2, "prefer_fused": False},
         ),
+        "precision": (
+            "bf16_parameters_fp32_reductions",
+            {
+                "parameter_dtype": "bfloat16",
+                "compute_dtype": "bfloat16",
+                "reduction_dtype": "float32",
+                "gradient_scaling": False,
+            },
+        ),
     }
     components = {}
     for slot, (name, configuration) in requested.items():
@@ -95,6 +104,7 @@ def test_worker_component_bridge_builds_optimizer_and_schedule() -> None:
     gradient_norm = runtime.gradient_clipping([parameter])
     accumulation = runtime.gradient_accumulation()
     objective = runtime.objective()
+    precision = runtime.precision()
 
     assert isinstance(optimizer, torch.optim.AdamW)
     assert optimizer.param_groups[0]["weight_decay"] == pytest.approx(0.01)
@@ -114,6 +124,8 @@ def test_worker_component_bridge_builds_optimizer_and_schedule() -> None:
             head(hidden).reshape(-1, 5), labels.reshape(-1)
         ),
     )
+    assert precision.parameter_dtype is torch.bfloat16
+    assert precision.reduce(torch.ones(1, dtype=torch.bfloat16)).dtype is torch.float32
     assert runtime.evidence()["optimizer"]["category"] == "optimizer"
 
 

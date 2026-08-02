@@ -7,6 +7,7 @@ from typing import Any
 import torch
 
 from rwkv_lab.training_components import (
+    BFloat16PrecisionPolicy,
     ConstantWeightDecaySchedule,
     FixedGradientAccumulation,
     LinearHeadCrossEntropyObjective,
@@ -18,6 +19,7 @@ from rwkv_lab.training_components import (
     objective_from_resolved_component,
     optimizer_from_resolved_component,
     parameter_routing_from_resolved_component,
+    precision_policy_from_resolved_component,
     schedule_configuration_from_resolved_component,
     schedule_from_resolved_component,
     weight_decay_schedule_from_resolved_component,
@@ -66,6 +68,16 @@ class WorkerTrainingComponents:
     ) -> LinearHeadCrossEntropyObjective:
         component = self.composition.require(slot, category="objective")
         return objective_from_resolved_component(component.runtime_envelope())
+
+    def precision(
+        self,
+        *,
+        slot: str = "precision",
+    ) -> BFloat16PrecisionPolicy:
+        component = self.composition.require(slot, category="precision")
+        return precision_policy_from_resolved_component(
+            component.runtime_envelope()
+        )
 
     def configuration(
         self, slot: str, *, category: str

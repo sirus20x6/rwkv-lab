@@ -36,6 +36,13 @@ from rwkv_lab.training_runtime.optimizers import (
     build_registered_optimizer,
     optimizer_from_resolved_component,
 )
+from rwkv_lab.training_runtime.precision import (
+    BFloat16PrecisionConfiguration,
+    BFloat16PrecisionPolicy,
+    PrecisionImplementation,
+    build_registered_precision_policy,
+    precision_policy_from_resolved_component,
+)
 from rwkv_lab.training_runtime.routers import (
     AppearanceExpertRoutingConfiguration,
     ParameterRouterImplementation,
@@ -65,6 +72,8 @@ __all__ = [
     "AdamWConfiguration",
     "AdamWNoDecayConfiguration",
     "AppearanceExpertRoutingConfiguration",
+    "BFloat16PrecisionConfiguration",
+    "BFloat16PrecisionPolicy",
     "ConstantWeightDecayConfiguration",
     "ConstantWeightDecaySchedule",
     "FixedGradientAccumulation",
@@ -79,6 +88,7 @@ __all__ = [
     "OptimizerImplementation",
     "ParameterRouterImplementation",
     "PowerCoolConfiguration",
+    "PrecisionImplementation",
     "ScheduleImplementation",
     "TerminalExpertRoutingConfiguration",
     "WeightDecayScheduleImplementation",
@@ -87,6 +97,7 @@ __all__ = [
     "build_registered_objective",
     "build_registered_optimizer",
     "build_registered_parameter_routing",
+    "build_registered_precision_policy",
     "build_registered_schedule",
     "build_registered_weight_decay_schedule",
     "gradient_accumulation_from_resolved_component",
@@ -96,6 +107,7 @@ __all__ = [
     "optimizer_from_resolved_component",
     "parameter_routing_from_resolved_component",
     "powercool_multiplier",
+    "precision_policy_from_resolved_component",
     "schedule_configuration_from_resolved_component",
     "schedule_from_resolved_component",
     "supported_implementation_ids",

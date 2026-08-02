@@ -4,6 +4,7 @@ from .gradient_accumulation import GradientAccumulationImplementation
 from .gradient_clipping import GradientClippingImplementation
 from .objectives import ObjectiveImplementation
 from .optimizers import OptimizerImplementation
+from .precision import PrecisionImplementation
 from .routers import ParameterRouterImplementation
 from .schedules import ScheduleImplementation
 from .weight_decay_schedules import WeightDecayScheduleImplementation
@@ -15,6 +16,7 @@ def supported_implementation_ids() -> frozenset[str]:
         for implementation in (
             *OptimizerImplementation,
             *ObjectiveImplementation,
+            *PrecisionImplementation,
             *ScheduleImplementation,
             *ParameterRouterImplementation,
             *GradientClippingImplementation,
@@ -39,5 +41,6 @@ def supported_worker_capabilities() -> frozenset[str]:
             "optimizer.torch_adamw_no_decay.v2",
             "optimizer.fp32_master_adamw_no_decay.v2",
             "objective.linear_head_cross_entropy.v1",
+            "precision.bf16_parameters_fp32_reductions.v1",
         }
     )

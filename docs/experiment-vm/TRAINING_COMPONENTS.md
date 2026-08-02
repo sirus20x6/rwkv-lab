@@ -21,15 +21,15 @@ compatibility-grade component.
 Tensor code stays in the runtime that implements it well. `rwkv_lab.training_components` is a
 stable compatibility facade; implementations are physically separated under
 `rwkv_lab.training_runtime` into `optimizers.py`, `schedules.py`, `routers.py`,
-`gradient_clipping.py`, `gradient_accumulation.py`, `objectives.py`, and
+`gradient_clipping.py`, `gradient_accumulation.py`, `objectives.py`, `precision.py`, and
 `weight_decay_schedules.py`, with only the shared resolved-envelope decoder at the package root.
 Each category owns its closed enum, typed
 immutable configuration, validation, construction, and resolved dispatch. Category modules do not
 import one another or any family trainer. The facade has no implementation logic and trainers do
 not depend on the category internals.
 
-Future categories follow the same rule: add `activations.py`, `normalizations.py`, `precision.py`,
-or `curricula.py` only when a
+Future categories follow the same rule: add `activations.py`, `normalizations.py`, or `curricula.py`
+only when a
 real adapter consumes the descriptor. Do not create a placeholder module or advertise decorative
 configuration. The resolved-worker dispatch functions accept only the canonical envelope from
 TrainVM and fail on extra keys, unknown implementation IDs, wrong categories, missing defaults,
@@ -55,6 +55,8 @@ The initial concrete cross-family catalog contains:
   scaling policy; v1 is stateless because its supported worker resumes only at step boundaries;
 - a stateless linear-head token cross-entropy objective with declared memory-bounded chunking and
   fused-backend preference, consumed by baseline scratch RWKV;
+- a stateless BF16 parameter/compute and FP32 reduction precision policy for baseline scratch
+  RWKV; gradient scaling is explicitly disabled rather than inferred from dtype;
 - a constant optimizer-step weight-decay schedule, paired with v2 AdamW implementations whose
   mechanics contain no decay configuration; v1 AdamW remains registered only for checkpoint and
   experiment compatibility.
@@ -64,7 +66,8 @@ the common tensor boundary. The MageFlow appearance/terminal expert trainers and
 continuation and the non-distributed scratch-RWKV path additionally consume authority-resolved
 worker compositions, including gradient clipping rather than trainer-local clipping construction;
 scratch RWKV also obtains its accumulation count and loss scaling from an independent component;
-its base LM objective is separate from topology-specific auxiliary losses. The migrated
+its base LM objective is separate from topology-specific auxiliary losses, and module conversion
+uses its declared precision policy rather than a trainer-local dtype constant. The migrated
 compositions also select weight decay independently of AdamW mechanics. Their
 composition digest
 is resume identity, and Qwen persists the registered scheduler cursor alongside optimizer state.
