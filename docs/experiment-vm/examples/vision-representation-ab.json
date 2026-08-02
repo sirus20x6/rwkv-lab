@@ -15,6 +15,7 @@
       "run_directory": "/thearray/git/moe-mla/runs/trainvm/vision-representation-ab",
       "concurrency_key": "vision-representation-ab",
       "allowed_read_roots": [
+        "/home/sirus/.cache/moe-mla/i1_eight_hour_images",
         "/thearray/git/moe-mla",
         "/thearray/downloads/cache/moe-mla"
       ],

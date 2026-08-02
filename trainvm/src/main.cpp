@@ -39,6 +39,7 @@ void usage() {
       << "  trainvm inspect-training-components <training-components.json>\n"
       << "  trainvm inspect-hostd-client <hostd-client.json>\n"
       << "  trainvm inspect-input-content-root <absolute-path>\n"
+      << "  trainvm lock-input-content <experiment.json> <root-set.json>\n"
       << "  trainvm inspect-rwkv-lab-worker <sha256-code-fingerprint>\n"
       << "  trainvm inspect-rwkv-lab-runtime-requirements\n"
       << "  trainvm inspect-rwkv-lab-deployment"
@@ -219,6 +220,56 @@ int inspect_input_content_root_command(int argc, char** argv) {
                    trainvm::measure_input_content_root(argv[2]))
                    .dump(2)
             << '\n';
+  return 0;
+}
+
+nlohmann::json read_bounded_json_file(const std::filesystem::path& path,
+                                      std::string_view label) {
+  constexpr std::uintmax_t kMaximumAuthoringDocumentBytes = 16U << 20U;
+  const auto status = std::filesystem::symlink_status(path);
+  if (!std::filesystem::is_regular_file(status) ||
+      std::filesystem::is_symlink(status))
+    throw std::runtime_error(std::string(label) +
+                             " must be a regular non-symlink file");
+  const auto size = std::filesystem::file_size(path);
+  if (size == 0U || size > kMaximumAuthoringDocumentBytes)
+    throw std::runtime_error(std::string(label) + " exceeds its byte bound");
+  std::ifstream input(path, std::ios::binary);
+  if (!input)
+    throw std::runtime_error("could not open " + std::string(label));
+  nlohmann::json document;
+  input >> document;
+  if (!input)
+    throw std::runtime_error("could not parse " + std::string(label));
+  return document;
+}
+
+int lock_input_content_command(const std::filesystem::path& experiment_path,
+                               const std::filesystem::path& root_set_path) {
+  nlohmann::json experiment =
+      read_bounded_json_file(experiment_path, "experiment document");
+  const nlohmann::json root_document =
+      read_bounded_json_file(root_set_path, "input content root set");
+  trainvm::InputContentRootSet root_set;
+  std::vector<trainvm::Diagnostic> diagnostics;
+  if (!trainvm::decode_json(root_document, root_set, "", diagnostics) ||
+      !diagnostics.empty() || trainvm::encode_json(root_set) != root_document)
+    throw std::invalid_argument(
+        "input content root set does not match its reflected schema");
+  const auto identities = trainvm::measure_input_content_root_set(root_set);
+  if (!experiment.is_object() || !experiment.contains("spec") ||
+      !experiment.at("spec").is_object() ||
+      !experiment.at("spec").contains("workspace") ||
+      !experiment.at("spec").at("workspace").is_object())
+    throw std::invalid_argument("experiment workspace is unavailable");
+  experiment["spec"]["workspace"]["input_content_roots"] =
+      trainvm::encode_json(identities);
+  const auto compiled = trainvm::compile_document(experiment);
+  if (!compiled.valid()) {
+    print_diagnostics(compiled);
+    return 2;
+  }
+  std::cout << experiment.dump(2) << '\n';
   return 0;
 }
 
@@ -523,6 +574,9 @@ int main(int argc, char** argv) {
     if (argc >= 2 &&
         std::string_view(argv[1]) == "inspect-input-content-root") {
       return inspect_input_content_root_command(argc, argv);
+    }
+    if (argc == 4 && std::string_view(argv[1]) == "lock-input-content") {
+      return lock_input_content_command(argv[2], argv[3]);
     }
     if (argc == 3 &&
         std::string_view(argv[1]) == "inspect-rwkv-lab-worker") {

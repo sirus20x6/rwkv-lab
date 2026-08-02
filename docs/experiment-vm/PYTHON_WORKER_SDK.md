@@ -198,6 +198,20 @@ but does not turn a mutable filesystem path into immutable storage. Immutable
 controller-published resume checkpoints use their existing per-object manifest verifier and are not
 double-classified as static workspace inputs.
 
+For experiment templates with several roots, keep the unhashed path list in a closed
+`trainvm.input-content-root-set/v1` document and produce the runnable snapshot without hand-editing:
+
+```sh
+trainvm lock-input-content experiment.json input-roots.json > experiment.locked.json
+trainvm validate experiment.locked.json
+```
+
+The native command decodes the root-set through the reflected schema, rejects unknown fields,
+duplicates and overlaps, measures every root with the same Merkle implementation, sorts the
+identities, replaces `workspace.input_content_roots`, and recompiles the complete experiment before
+emitting JSON. It never launches a worker or writes either source document. A later worker still
+remeasures every identity, so drift between authoring and dispatch fails closed.
+
 The fixed runner returns an already-completed replay without executing tensor work, publishes a
 durably receipted terminal result on success, freezes any declared checkpoint before that terminal
 result, and converts trainer exceptions to a bounded

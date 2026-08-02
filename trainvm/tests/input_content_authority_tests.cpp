@@ -1,4 +1,5 @@
 #include "trainvm/input_content_authority.hpp"
+#include "trainvm/reflection_json.hpp"
 
 #include <sys/stat.h>
 #include <unistd.h>
@@ -213,6 +214,46 @@ void empty_invalid_name_and_unnormalized_roots_are_rejected() {
                    "the persisted absolute root path must be strict UTF-8");
 }
 
+void root_sets_are_sorted_measured_and_nonoverlapping() {
+  require(reflected_field_names<InputContentRootSet>() ==
+              std::vector<std::string>({"api_version", "paths"}),
+          "root-set schema remains reflection-derived and closed");
+  TemporaryDirectory temporary;
+  const auto first = temporary.path() / "a-first.bin";
+  const auto second = temporary.path() / "z-second.bin";
+  write_file(first, "first");
+  write_file(second, "second");
+  const auto measured = measure_input_content_root_set({
+      .api_version = std::string(kInputContentRootSetApiVersion),
+      .paths = {second.string(), first.string()},
+  });
+  require(measured.size() == 2U && measured[0].path == first.string() &&
+              measured[1].path == second.string() &&
+              measured[0].tree_sha256 != measured[1].tree_sha256,
+          "root-set measurement canonicalizes order and binds every path");
+
+  require_rejected(
+      [&] {
+        (void)measure_input_content_root_set({
+            .api_version = "unsupported/v1",
+            .paths = {first.string()},
+        });
+      },
+      "root sets reject unsupported schema versions");
+  const auto parent = temporary.path() / "tree";
+  std::filesystem::create_directory(parent);
+  const auto child = parent / "child.bin";
+  write_file(child, "child");
+  require_rejected(
+      [&] {
+        (void)measure_input_content_root_set({
+            .api_version = std::string(kInputContentRootSetApiVersion),
+            .paths = {child.string(), parent.string()},
+        });
+      },
+      "root sets reject overlapping directory and child paths");
+}
+
 }  // namespace
 
 // An ancestor directory is shared with the rest of the machine. Creating and
@@ -273,6 +314,8 @@ int main() {
     std::cout << "PASS symlink-special\n";
     empty_invalid_name_and_unnormalized_roots_are_rejected();
     std::cout << "PASS empty-name-path\n";
+    root_sets_are_sorted_measured_and_nonoverlapping();
+    std::cout << "PASS root-set\n";
     return 0;
   } catch (const std::exception& error) {
     std::cerr << "input content authority test failure: " << error.what()

@@ -1,7 +1,7 @@
 {
   "api_version": "trainvm.compatibility-workflows/v1",
   "authority": "compatibility_evidence_only",
-  "source_tree_digest": "sha256:d2767aef475f3c29993c2534e4ef8a4c30eea24d2dfa73cdbf13ec72e70133cd",
+  "source_tree_digest": "sha256:3ee2022c2037cd0216dc4596ce997e7d93b4245ea9a50fa6176820037d74ef7d",
   "entries": [
     {
       "stable_id": "rwkv.synthetic-campaign",
@@ -1235,6 +1235,7 @@
       "stable_id": "vision.representation-ab",
       "family": "vision_multimodal",
       "source_paths": [
+        "docs/experiment-vm/examples/vision-representation-ab.input-roots.json",
         "docs/experiment-vm/examples/vision-representation-ab.json",
         "scripts/run_vision_representation_ab.py",
         "scripts/run_vision_representation_ab_arm.sh",
@@ -1243,13 +1244,16 @@
         "src/rwkv_lab/trainvm_adapters/metric_decision.py",
         "src/rwkv_lab/trainvm_adapters/vision_frozen.py",
         "src/rwkv_lab/trainvm_worker/artifact.py",
-        "src/rwkv_lab/vision_train.py"
+        "src/rwkv_lab/vision_train.py",
+        "trainvm/include/trainvm/input_content_authority.hpp",
+        "trainvm/src/input_content_authority.cpp",
+        "trainvm/src/main.cpp"
       ],
       "observed_invocation": "host_script",
       "stateful": true,
       "resume_evidence": "compatible",
       "operation_role": "campaign",
-      "notes": "The legacy sequential MoonViT-only versus frozen-compressor supervisor is replaced by one compiler- and production-registry-validated TrainVM graph. Both arms share an exclusive authority-owned lease, use the sealed compatible frozen-vision adapter, publish separate immutable checkpoints and scalar result artifacts, and derive retry-stable node-isolated run directories. A stateless sealed decision node independently re-verifies both immutable artifact trees, applies an explicit metric/direction/tolerance policy, and publishes a lineage-bound result. Static input identities must still be frozen into input_content_roots before submission.",
+      "notes": "The legacy sequential MoonViT-only versus frozen-compressor supervisor is replaced by one compiler- and production-registry-validated TrainVM graph. Both arms share an exclusive authority-owned lease, use the sealed compatible frozen-vision adapter, publish separate immutable checkpoints and scalar result artifacts, and derive retry-stable node-isolated run directories. A stateless sealed decision node independently re-verifies both immutable artifact trees, applies an explicit metric/direction/tolerance policy, and publishes a lineage-bound result. The companion closed root-set document and native lock-input-content command measure, sort, inject, and recompile all static input identities without hand-edited hashes.",
       "legacy_invocation_display": "python scripts/run_vision_representation_ab.py"
     },
     {
