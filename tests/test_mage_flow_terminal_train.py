@@ -1321,3 +1321,66 @@ def test_velocity_direction_loss_is_channel_cosine_and_image_balanced():
     assert float(contribution.detach()) == pytest.approx(1.125)
     assert prediction.grad is not None
     assert torch.isfinite(prediction.grad).all()
+
+
+def test_default_model_path_is_portable(tmp_path, monkeypatch):
+    """The default must not be one machine's absolute path.
+
+    Regression for the defect that surfaced as five CI failures the first time
+    the suite ran off the maintainer's host: the dataclass default was a bare
+    absolute path, so every config built without an explicit model_path
+    inherited it and failed validation on a path the caller never chose.
+    """
+    from rwkv_lab import mage_flow_terminal_train as trainer
+
+    monkeypatch.delenv(trainer.MAGE_FLOW_BASE_LOCAL_PATH_ENV, raising=False)
+
+    # A host that does not cache the weights resolves to None, not to a path
+    # that happens to exist only somewhere else. Asserted on a CONSTRUCTED
+    # config, not on the resolver: the defect was in the dataclass field
+    # default, so a test that only calls the helper passes even when the field
+    # still hardcodes an absolute path.
+    monkeypatch.setattr(
+        trainer, "MAGE_FLOW_BASE_HISTORICAL_PATH", str(tmp_path / "absent")
+    )
+    assert trainer.default_model_path() is None
+
+    unconfigured = trainer.TerminalExpertTrainConfig(
+        domain="photo",
+        train_manifest=str(tmp_path / "train.jsonl"),
+        expert_checkpoint=str(tmp_path / "expert.pt"),
+        output_dir=str(tmp_path / "out"),
+    )
+    assert unconfigured.model_path is None, (
+        "a config built without model_path inherited a host-specific path"
+    )
+
+    # An explicit environment override wins over everything.
+    monkeypatch.setenv(trainer.MAGE_FLOW_BASE_LOCAL_PATH_ENV, str(tmp_path))
+    assert trainer.default_model_path() == str(tmp_path)
+    monkeypatch.delenv(trainer.MAGE_FLOW_BASE_LOCAL_PATH_ENV)
+
+    # A host that DOES cache them at the historical path keeps using it, so
+    # the maintainer's existing runs are unchanged.
+    cached = tmp_path / "Mage-Flow-Base"
+    cached.mkdir()
+    monkeypatch.setattr(trainer, "MAGE_FLOW_BASE_HISTORICAL_PATH", str(cached))
+    assert trainer.default_model_path() == str(cached)
+
+
+def test_missing_explicit_model_path_names_the_configuration(tmp_path):
+    """A supplied-but-missing path is still an error, with an actionable message."""
+    from rwkv_lab import mage_flow_terminal_train as trainer
+
+    config = trainer.TerminalExpertTrainConfig(
+        domain="photo",
+        train_manifest=str(tmp_path / "train.jsonl"),
+        expert_checkpoint=str(tmp_path / "expert.pt"),
+        output_dir=str(tmp_path / "out"),
+        model_path=str(tmp_path / "not-here"),
+    )
+    with pytest.raises(ValueError) as failure:
+        config.validate()
+    message = str(failure.value)
+    assert "model_path" in message
+    assert trainer.MAGE_FLOW_BASE_LOCAL_PATH_ENV in message
