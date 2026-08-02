@@ -1,5 +1,7 @@
 #include "trainvm/document.hpp"
 
+#include "trainvm/rwkv_scratch_profiles.hpp"
+
 #include <openssl/evp.h>
 #include <yaml-cpp/yaml.h>
 
@@ -974,6 +976,63 @@ void validate_experiment(const Experiment& experiment, std::vector<Diagnostic>& 
         error(diagnostics, "training.components",
               child_path(training_path, "components"),
               "training composition requires between 1 and 64 component slots");
+      }
+      if (training.topologies) {
+        // Topologies are closed per model family. Only the rwkv family has a
+        // registry today; any other family declaring them is a compile error
+        // rather than a silently ignored field.
+        const std::string topologies_path =
+            child_path(training_path, "topologies");
+        if (training.model_family != "rwkv") {
+          error(diagnostics, "training.topologies.family", topologies_path,
+                "only the rwkv model family declares research topologies");
+        } else if (training.topologies->empty() ||
+                   training.topologies->size() > 16U) {
+          error(diagnostics, "training.topologies", topologies_path,
+                "a topology selection must name between 1 and 16 topologies");
+        } else {
+          std::vector<RwkvScratchSelection> selections;
+          bool resolved = true;
+          for (std::size_t index = 0U; index < training.topologies->size();
+               ++index) {
+            const TrainingTopologySelection& chosen =
+                (*training.topologies)[index];
+            const std::string chosen_path =
+                child_path(topologies_path, std::to_string(index));
+            const auto topology =
+                rwkv_scratch_topology_from_name(chosen.topology);
+            if (!topology) {
+              error(diagnostics, "training.topologies.unknown",
+                    child_path(chosen_path, "topology"),
+                    "unknown research topology " + chosen.topology);
+              resolved = false;
+              continue;
+            }
+            if (!chosen.parameters.is_object()) {
+              error(diagnostics, "training.topologies.parameters",
+                    child_path(chosen_path, "parameters"),
+                    "topology parameters must be an object");
+              resolved = false;
+              continue;
+            }
+            std::map<std::string, Json> assignments;
+            for (const auto& [name, value] : chosen.parameters.items())
+              assignments.emplace(name, value);
+            selections.push_back({.topology = *topology,
+                                  .assignments = std::move(assignments)});
+          }
+          if (resolved) {
+            // One call covers undeclared switches, out-of-bound values,
+            // duplicate topologies, and declared-incompatible pairs, so the
+            // compile diagnostic and the launch-time gate cannot disagree.
+            try {
+              (void)rwkv_scratch_training_block(selections);
+            } catch (const RwkvScratchProfileError& failure) {
+              error(diagnostics, "training.topologies.invalid",
+                    topologies_path, failure.what());
+            }
+          }
+        }
       }
       for (const auto& [slot, selection] : training.components) {
         const std::string selection_path = child_path(

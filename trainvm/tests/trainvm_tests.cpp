@@ -5709,6 +5709,84 @@ void test_graceful_cancel_lifecycle() {
 // replay rather than apply twice, the same key with different content must be
 // refused outright, and every attempt must leave a state a reconnecting
 // controller reconstructs exactly from the journal.
+// A research topology is selected in the document and refused at compile time
+// when it is invalid, so an operator sees a diagnostic instead of a launch
+// failure on a GPU.
+void test_topology_selection_compiles_and_refuses_invalid_combinations() {
+  const auto with_topologies = [](nlohmann::json topologies) {
+    nlohmann::json document = load_fixture();
+    auto& node = document["spec"]["workflow"]["nodes"]["train_to_boundary"];
+    node["invoke"]["training"] = {
+        {"model_family", "rwkv"},
+        {"components",
+         {{"optimizer",
+           {{"key", {{"category", "optimizer"},
+                     {"name", "optimizer.torch_adamw"},
+                     {"version", "1"}}},
+            {"configuration", nlohmann::json::object()}}}}},
+        {"topologies", std::move(topologies)},
+    };
+    return document;
+  };
+
+  const auto valid = trainvm::compile_document(with_topologies(
+      nlohmann::json::array({
+          {{"topology", "engram"},
+           {"parameters", {{"enabled", 1}, {"rows", 8192}}}},
+          {{"topology", "loop"}, {"parameters", {{"count", 4}}}},
+      })));
+  check(valid.valid(), "a document selecting engram and loop compiles");
+
+  const auto incompatible = trainvm::compile_document(with_topologies(
+      nlohmann::json::array({
+          {{"topology", "loop"}, {"parameters", nlohmann::json::object()}},
+          {{"topology", "seed_chain"},
+           {"parameters", nlohmann::json::object()}},
+      })));
+  const bool refused_pair = !incompatible.valid() &&
+      std::ranges::any_of(incompatible.diagnostics,
+                          [](const trainvm::Diagnostic& value) {
+                            return value.code == "training.topologies.invalid";
+                          });
+  check(refused_pair,
+        "seed_chain combined with loop is refused at compile time");
+
+  const auto unknown_switch = trainvm::compile_document(with_topologies(
+      nlohmann::json::array({
+          {{"topology", "loop"}, {"parameters", {{"engram_rows", 4096}}}},
+      })));
+  check(!unknown_switch.valid(),
+        "a switch belonging to another topology is refused at compile time");
+
+  const auto out_of_bound = trainvm::compile_document(with_topologies(
+      nlohmann::json::array({
+          {{"topology", "loop"}, {"parameters", {{"count", 99}}}},
+      })));
+  check(!out_of_bound.valid(),
+        "a value outside its declared bound is refused at compile time");
+
+  const auto unknown_topology = trainvm::compile_document(with_topologies(
+      nlohmann::json::array({
+          {{"topology", "warp_drive"},
+           {"parameters", nlohmann::json::object()}},
+      })));
+  const bool refused_unknown = !unknown_topology.valid() &&
+      std::ranges::any_of(unknown_topology.diagnostics,
+                          [](const trainvm::Diagnostic& value) {
+                            return value.code == "training.topologies.unknown";
+                          });
+  check(refused_unknown, "an unregistered topology is refused at compile time");
+
+  // Topologies are closed per model family.
+  nlohmann::json wrong_family = with_topologies(nlohmann::json::array({
+      {{"topology", "loop"}, {"parameters", nlohmann::json::object()}}}));
+  wrong_family["spec"]["workflow"]["nodes"]["train_to_boundary"]["invoke"]
+              ["training"]["model_family"] = "transformer";
+  const auto refused_family = trainvm::compile_document(wrong_family);
+  check(!refused_family.valid(),
+        "only the rwkv family may declare research topologies");
+}
+
 void test_adversarial_control_idempotency_and_replay() {
   const auto compiled = trainvm::compile_document(load_fixture());
   check(compiled.valid(), "adversarial control fixture compiles");
@@ -12358,6 +12436,7 @@ int main() {
     test_graceful_cancel_lifecycle();
     test_resource_releasing_pause_lifecycle();
     test_adversarial_control_idempotency_and_replay();
+    test_topology_selection_compiles_and_refuses_invalid_combinations();
     test_typed_managed_resource_release();
     test_typed_cache_qualification_executor();
     test_concurrent_worker_launch_and_readiness_replay();
