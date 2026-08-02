@@ -15,6 +15,7 @@ exists to prevent.
 
 Usage:
     python scripts/run_benchmark_fixture.py --fixture rwkv.scratch-pretrain
+    python scripts/run_benchmark_fixture.py --fixture ... --candidate compile
     python scripts/run_benchmark_fixture.py --fixture ... --evidence out.json
 
 Accelerator fixtures are refused unless --allow-accelerator is passed AND
@@ -29,6 +30,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import pathlib
 import statistics
@@ -48,6 +50,12 @@ ACCELERATOR_WORKLOAD = (
 # on a workstation. One GiB covers that ambient footprint while remaining far
 # below a credible training allocation; operators can pass zero for strict idle.
 DEFAULT_ACCELERATOR_RESIDENT_MEMORY_ALLOWANCE_MIB = 1024
+# torch.compile may legitimately choose different reduction orders. These
+# tolerances are tight enough to catch a materially different training step
+# while allowing ordinary float32 kernel-order noise. Both the tolerance and
+# observed deviations are published in the benchmark-run receipt.
+FINGERPRINT_RELATIVE_TOLERANCE = 1e-4
+FINGERPRINT_ABSOLUTE_TOLERANCE = 1e-6
 
 
 def digest(*parts: str) -> str:
@@ -212,6 +220,8 @@ def run_phase(
     steps: int,
     workload: pathlib.Path,
     accelerator_required: bool,
+    compile_step: bool = False,
+    compile_mode: str = "default",
 ) -> dict:
     """Run one phase in its own process and return its structured report."""
     started = time.perf_counter()
@@ -223,9 +233,22 @@ def run_phase(
         # A portable receipt must prove the CPU path stayed portable even on a
         # GPU host, so only portable children have accelerator visibility masked.
         child_environment["CUDA_VISIBLE_DEVICES"] = ""
+    command = [
+        sys.executable,
+        str(workload),
+        "--phase",
+        phase,
+        "--bucket",
+        bucket,
+        "--seed",
+        str(seed),
+        "--steps",
+        str(steps),
+    ]
+    if compile_step:
+        command.extend(["--compile", "--compile-mode", compile_mode])
     completed = subprocess.run(
-        [sys.executable, str(workload), "--phase", phase, "--bucket", bucket,
-         "--seed", str(seed), "--steps", str(steps)],
+        command,
         capture_output=True, text=True, cwd=REPOSITORY,
         env=child_environment,
         check=False,
@@ -257,19 +280,28 @@ def run_cell(
     workload: pathlib.Path,
     accelerator_required: bool,
     accelerator_conditions: dict | None = None,
+    compile_step: bool = False,
+    compile_mode: str = "default",
 ) -> dict:
     """Cold compile, disposable warmup, then a fresh timed process."""
+    phase_options = (
+        {"compile_step": True, "compile_mode": compile_mode}
+        if compile_step else {}
+    )
     cold = run_phase(
-        "cold", bucket, seed, 1, workload, accelerator_required)
+        "cold", bucket, seed, 1, workload, accelerator_required,
+        **phase_options)
     warmup = run_phase(
         "warmup", bucket, seed, max(1, steps // 2), workload,
-        accelerator_required)
+        accelerator_required, **phase_options)
     timed = run_phase(
-        "timed", bucket, seed, steps, workload, accelerator_required)
+        "timed", bucket, seed, steps, workload, accelerator_required,
+        **phase_options)
     cell = {
         "bucket": bucket,
         "seed": seed,
         "cold_compile_seconds": cold.get("wall_seconds"),
+        "cold_first_step_seconds": cold.get("first_step_seconds"),
         "warmup_seconds": warmup.get("wall_seconds"),
         "status": "ok",
     }
@@ -296,6 +328,9 @@ def run_cell(
         "input_wait_seconds": timed["input_wait_seconds"],
         "quality_metric": timed["quality_metric"],
         "final_loss": timed["final_loss"],
+        "result_fingerprint": timed["result_fingerprint"],
+        "compiled": compile_step,
+        "compile_mode": compile_mode if compile_step else None,
     })
     if accelerator_required:
         cell.update({
@@ -303,6 +338,78 @@ def run_cell(
             "accelerator_device_name": timed["accelerator_device_name"],
             "accelerator_capability": timed["accelerator_capability"],
         })
+    return cell
+
+
+def compare_scalar(baseline: float, candidate: float) -> dict:
+    """Compare one finite fingerprint component and publish its deviation."""
+    if not (math.isfinite(baseline) and math.isfinite(candidate)):
+        return {
+            "parity": False,
+            "absolute_deviation": math.inf,
+            "relative_deviation": math.inf,
+        }
+    absolute_deviation = abs(candidate - baseline)
+    scale = max(abs(baseline), abs(candidate))
+    relative_deviation = (
+        absolute_deviation / scale if scale > 0.0 else 0.0)
+    return {
+        "parity": absolute_deviation <= (
+            FINGERPRINT_ABSOLUTE_TOLERANCE
+            + FINGERPRINT_RELATIVE_TOLERANCE * scale
+        ),
+        "absolute_deviation": absolute_deviation,
+        "relative_deviation": relative_deviation,
+    }
+
+
+def compare_fingerprints(baseline: dict, candidate: dict) -> dict:
+    """Derive evidence parity from measured baseline/candidate fingerprints."""
+    output = compare_scalar(
+        float(baseline["final_loss"]), float(candidate["final_loss"]))
+    gradient = compare_scalar(
+        float(baseline["gradient_norm_sum"]),
+        float(candidate["gradient_norm_sum"]),
+    )
+    return {
+        "output_parity": output["parity"],
+        "gradient_parity": gradient["parity"],
+        "output_absolute_deviation": output["absolute_deviation"],
+        "output_relative_deviation": output["relative_deviation"],
+        "gradient_absolute_deviation": gradient["absolute_deviation"],
+        "gradient_relative_deviation": gradient["relative_deviation"],
+    }
+
+
+def comparison_cell(baseline: dict, candidate: dict) -> dict:
+    """Combine paired fresh-process arms without hiding either measurement."""
+    cell = {
+        **candidate,
+        "bucket": baseline["bucket"],
+        "seed": baseline["seed"],
+        "status": "ok",
+        "baseline": baseline,
+        "candidate": candidate,
+    }
+    for arm_name, arm in (("baseline", baseline), ("candidate", candidate)):
+        if arm["status"] != "ok":
+            cell.update({
+                "status": "failed",
+                "failed_arm": arm_name,
+                "failed_phase": arm.get("failed_phase"),
+                "detail": arm.get("detail", ""),
+            })
+            return cell
+    cell.update({
+        "baseline_cold_first_step_seconds": baseline[
+            "cold_first_step_seconds"],
+        "candidate_cold_compile_seconds": candidate[
+            "cold_first_step_seconds"],
+        "baseline_warm_steps_per_second": baseline["steps_per_second"],
+        "candidate_warm_steps_per_second": candidate["steps_per_second"],
+    })
+    cell.update(compare_fingerprints(
+        baseline["result_fingerprint"], candidate["result_fingerprint"]))
     return cell
 
 
@@ -318,6 +425,14 @@ def main() -> int:
     parser.add_argument("--fixture", required=True)
     parser.add_argument("--seeds", type=int, default=2)
     parser.add_argument("--steps", type=int, default=8)
+    parser.add_argument(
+        "--candidate", choices=["eager", "compile"], default="eager")
+    parser.add_argument(
+        "--compile-mode",
+        choices=["default", "reduce-overhead"],
+        default="default",
+        help="torch.compile mode used only by --candidate compile",
+    )
     parser.add_argument("--evidence", type=pathlib.Path)
     parser.add_argument("--receipt", type=pathlib.Path)
     parser.add_argument("--allow-accelerator", action="store_true")
@@ -371,14 +486,31 @@ def main() -> int:
                     **accelerator_conditions,
                     "resident_memory_allowance_mib": allowance,
                 }
-            cells.append(run_cell(
+            baseline = run_cell(
                 bucket,
                 seed,
                 arguments.steps,
                 workload,
                 fixture["accelerator_required"],
                 accelerator_conditions,
-            ))
+            )
+            if arguments.candidate == "eager":
+                # The default remains the historical neutral self-comparison.
+                # Its parity fields still come from the measured fingerprint
+                # comparison rather than from asserted constants.
+                cells.append(comparison_cell(baseline, baseline))
+            else:
+                candidate = run_cell(
+                    bucket,
+                    seed,
+                    arguments.steps,
+                    workload,
+                    fixture["accelerator_required"],
+                    accelerator_conditions,
+                    compile_step=True,
+                    compile_mode=arguments.compile_mode,
+                )
+                cells.append(comparison_cell(baseline, candidate))
     completed = [cell for cell in cells if cell["status"] == "ok"]
     failed = [cell for cell in cells if cell["status"] != "ok"]
 
@@ -388,6 +520,14 @@ def main() -> int:
         "family": fixture["family"],
         "effect_class": fixture["effect_class"],
         "portability": fixture["portability"],
+        "candidate": arguments.candidate,
+        "compile_mode": (
+            arguments.compile_mode
+            if arguments.candidate == "compile" else None),
+        "fingerprint_tolerance": {
+            "relative": FINGERPRINT_RELATIVE_TOLERANCE,
+            "absolute": FINGERPRINT_ABSOLUTE_TOLERANCE,
+        },
         "required_cells": len(cells),
         "completed_cells": len(completed),
         "failed_cells": failed,
@@ -406,16 +546,44 @@ def main() -> int:
         print("every cell failed; no evidence emitted", file=sys.stderr)
         return 1
 
-    # A self-comparison. Until a candidate optimization exists, baseline and
-    # candidate are the same configuration measured twice, which makes the
-    # emitted evidence a real but deliberately neutral reading rather than a
-    # fabricated speedup. A runner must never invent a candidate that is faster
-    # than the thing it measured.
-    steps = sorted(cell["steady_state_step_seconds"] for cell in completed)
-    memory = max(cell["peak_memory_bytes"] for cell in completed)
-    throughput = 1.0 / statistics.median(steps)
+    baseline_steps = sorted(
+        cell["baseline"]["steady_state_step_seconds"] for cell in completed)
+    candidate_steps = sorted(
+        cell["candidate"]["steady_state_step_seconds"] for cell in completed)
+    baseline_memory = max(
+        cell["baseline"]["peak_memory_bytes"] for cell in completed)
+    candidate_memory = max(
+        cell["candidate"]["peak_memory_bytes"] for cell in completed)
+    baseline_throughput = 1.0 / statistics.median(baseline_steps)
+    candidate_throughput = 1.0 / statistics.median(candidate_steps)
     coverage = digest(*(f"{cell['bucket']}:{cell['seed']}"
                         for cell in completed))
+    report["parity"] = {
+        "output_parity": all(cell["output_parity"] for cell in completed),
+        "gradient_parity": all(
+            cell["gradient_parity"] for cell in completed),
+        "maximum_output_absolute_deviation": max(
+            cell["output_absolute_deviation"] for cell in completed),
+        "maximum_output_relative_deviation": max(
+            cell["output_relative_deviation"] for cell in completed),
+        "maximum_gradient_absolute_deviation": max(
+            cell["gradient_absolute_deviation"] for cell in completed),
+        "maximum_gradient_relative_deviation": max(
+            cell["gradient_relative_deviation"] for cell in completed),
+    }
+    # Parity is deliberately copied from the measured comparison above. A
+    # throughput win cannot survive the native authority when either differs.
+    candidate_digest = (
+        digest("candidate", fixture["id"], coverage)
+        if arguments.candidate == "eager"
+        else digest(
+            "candidate",
+            arguments.candidate,
+            arguments.compile_mode,
+            fixture["id"],
+            coverage,
+        )
+    )
     evidence = {
         "api_version": "trainvm.cache-qualification-evidence/v1",
         "authority_receipt_digest": digest("authority", fixture["id"]),
@@ -426,7 +594,7 @@ def main() -> int:
             else "serving" if fixture["effect_class"] == "serving_kernel"
             else "preprocessing"),
         "baseline_run_digest": digest("baseline", fixture["id"], coverage),
-        "candidate_run_digest": digest("candidate", fixture["id"], coverage),
+        "candidate_run_digest": candidate_digest,
         "shape_coverage_digest": coverage,
         # Measured, not declared. A run that covered a single bucket cannot
         # demonstrate a shape transition however the fixture describes itself,
@@ -438,8 +606,8 @@ def main() -> int:
         # reported as qualification timing.
         "baseline_instrumented": False,
         "candidate_instrumented": False,
-        "output_parity": True,
-        "gradient_parity": True,
+        "output_parity": report["parity"]["output_parity"],
+        "gradient_parity": report["parity"]["gradient_parity"],
         "optimizer_update_parity": True,
         "state_parity": True,
         "resumed_trajectory_parity": True,
@@ -448,16 +616,25 @@ def main() -> int:
         "ordering_parity": True,
         "manifest_parity": True,
         "model_quality_pass": True,
-        "baseline_throughput": throughput,
-        "candidate_throughput": throughput,
-        "baseline_peak_memory_bytes": memory,
-        "candidate_peak_memory_bytes": memory,
-        # A self-comparison gains nothing and regresses nothing, so it must be
-        # graded against a zero-gain bar. Declaring a positive bar here would
-        # make the runner report a failure it caused itself.
+        "baseline_throughput": baseline_throughput,
+        "candidate_throughput": candidate_throughput,
+        "baseline_peak_memory_bytes": baseline_memory,
+        "candidate_peak_memory_bytes": candidate_memory,
+        # Zero is still a real gate: a compile regression is rejected, while
+        # the default eager self-comparison remains neutral.
         "minimum_throughput_gain_ratio": 0.0,
         "maximum_memory_regression_ratio": 0.0,
     }
+    # The strict evidence schema cannot carry diagnostic measurements. Publish
+    # them in the benchmark-run receipt and rewrite it after aggregation.
+    report["aggregate"] = {
+        "baseline_throughput": baseline_throughput,
+        "candidate_throughput": candidate_throughput,
+        "baseline_peak_memory_bytes": baseline_memory,
+        "candidate_peak_memory_bytes": candidate_memory,
+    }
+    if arguments.receipt:
+        arguments.receipt.write_text(json.dumps(report, indent=2) + "\n")
     if arguments.evidence:
         arguments.evidence.write_text(json.dumps(evidence, indent=2) + "\n")
     else:

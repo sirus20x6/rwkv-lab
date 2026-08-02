@@ -435,6 +435,22 @@ startup orphan recovery are defined in
   reflected loader with a pinned digest, matching the compatibility-catalog pattern, still belongs
   with authority integration; until a qualification node consumes the matrix this remains fixture
   evidence, not authority.
+  The runner's default `--candidate eager` remains a neutral eager self-comparison.
+  `--candidate compile` instead runs the eager baseline and a `torch.compile(dynamic=False)`
+  candidate in separate fresh processes for every cold, warmup, and timed phase. The benchmark-run
+  receipt publishes each arm's compilation-included first-step cost, warm timed throughput, peak
+  memory, and deterministic final-loss/gradient-norm fingerprints; these diagnostics stay outside
+  the exact `CacheQualificationEvidence` schema. Output and gradient parity use relative tolerance
+  `1e-4` plus absolute tolerance `1e-6`. This allows ordinary float32 reduction-order noise while
+  rejecting a materially different step, and the receipt records both absolute and relative
+  observed deviations. Those measured booleans feed the existing native authority, so no speedup
+  can qualify when either fingerprint fails parity. A compiled workload can also exercise an
+  explicit out-of-set fallback bucket; shape mismatch may recompile or graph-break, but must return
+  a measurable step whose loss and gradient fingerprint match eager at the same tolerance.
+  `--compile-mode reduce-overhead` is exposed for device experiments, but it is not the default and
+  carries no CUDA-graph qualification by itself. `reduce-overhead` enables CUDA graphs only on a
+  compatible CUDA execution; until a device run demonstrates capture/replay, mismatch fallback,
+  and parity, CUDA graphs remain explicitly unqualified.
 - Audit existing optimizations against the qualification contract and publish portable versus
   machine-native receipts.
 - Implement the broadly reusable Modded NanoGPT candidates in the matrix where an existing
