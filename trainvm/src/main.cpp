@@ -8,6 +8,7 @@
 #include "trainvm/rwkv_lab_worker_contract.hpp"
 #include "trainvm/input_content_authority.hpp"
 #include "trainvm/service.hpp"
+#include "trainvm/training_schedules.hpp"
 
 #include <charconv>
 #include <filesystem>
@@ -42,6 +43,8 @@ void usage() {
       << "  trainvm inspect-rwkv-lab-runtime-requirements\n"
       << "  trainvm inspect-rwkv-lab-deployment"
          "  # read trainvm.rwkv-lab-worker-runtimes/v1 JSON from stdin\n"
+      << "  trainvm inspect-training-schedule <implementation-id> "
+         "<json-config> <max-step>\n"
       << "  trainvm inspect-registry <experiments.db> [--task <task>] "
          "[--metric <metric>] [--baseline <config>] [--limit <count>]\n"
       << "  trainvm serve --journal <journal.db> --socket <trainvm.sock> "
@@ -430,6 +433,66 @@ int inspect_rwkv_lab_deployment_command(int argc, char** argv) {
   return 0;
 }
 
+int inspect_training_schedule_command(int argc, char** argv) {
+  if (argc != 5) {
+    usage();
+    return 64;
+  }
+
+  const std::string_view max_step_text(argv[4]);
+  std::int64_t max_step{};
+  const auto [end, error] = std::from_chars(
+      max_step_text.data(), max_step_text.data() + max_step_text.size(),
+      max_step);
+  if (error != std::errc{} ||
+      end != max_step_text.data() + max_step_text.size() || max_step < 0 ||
+      max_step > 100'000) {
+    throw trainvm::TrainingScheduleError(
+        "max-step must be an integer in [0, 100000]");
+  }
+
+  const std::string implementation_id(argv[2]);
+  const nlohmann::json configuration = nlohmann::json::parse(argv[3]);
+  std::vector<trainvm::Diagnostic> diagnostics;
+  nlohmann::json multipliers = nlohmann::json::array();
+  multipliers.get_ref<nlohmann::json::array_t&>().reserve(
+      static_cast<std::size_t>(max_step + 1));
+
+  if (implementation_id == "rwkv_lab.schedule.linear_warmup_cosine.v1") {
+    trainvm::LinearWarmupCosineSchedule schedule;
+    if (!trainvm::decode_json(configuration, schedule, "", diagnostics)) {
+      std::cerr << trainvm::diagnostics_json(diagnostics).dump(2) << '\n';
+      return 2;
+    }
+    for (std::int64_t step = 0; step <= max_step; ++step) {
+      multipliers.push_back(
+          trainvm::linear_warmup_cosine_multiplier(step, schedule));
+    }
+  } else if (implementation_id == "rwkv_lab.schedule.powercool.v1") {
+    trainvm::PowerCoolSchedule schedule;
+    if (!trainvm::decode_json(configuration, schedule, "", diagnostics)) {
+      std::cerr << trainvm::diagnostics_json(diagnostics).dump(2) << '\n';
+      return 2;
+    }
+    for (std::int64_t step = 0; step <= max_step; ++step) {
+      multipliers.push_back(trainvm::powercool_multiplier(step, schedule));
+    }
+  } else {
+    throw trainvm::TrainingScheduleError(
+        "unsupported training schedule implementation: " + implementation_id);
+  }
+
+  std::cout << nlohmann::json{
+                   {"implementation_id", implementation_id},
+                   {"configuration", configuration},
+                   {"max_step", max_step},
+                   {"multipliers", std::move(multipliers)},
+               }
+                   .dump(2)
+            << '\n';
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -472,6 +535,10 @@ int main(int argc, char** argv) {
     if (argc >= 2 &&
         std::string_view(argv[1]) == "inspect-rwkv-lab-deployment") {
       return inspect_rwkv_lab_deployment_command(argc, argv);
+    }
+    if (argc >= 2 &&
+        std::string_view(argv[1]) == "inspect-training-schedule") {
+      return inspect_training_schedule_command(argc, argv);
     }
     if (argc >= 3 && std::string_view(argv[1]) == "inspect-registry") {
       return inspect_registry_command(argc, argv);
