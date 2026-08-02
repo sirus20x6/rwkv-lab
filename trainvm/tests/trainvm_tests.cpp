@@ -4611,6 +4611,11 @@ void test_worker_control_service_boundary() {
   check(first_message.message_case() == trainvm::v1::WorkerToController::kMetric &&
             !first_message.has_heartbeat() && !first_message.has_event(),
         "WorkerControl telemetry variants cannot alias the result event case");
+  first_message.mutable_phase_receipt()->set_worker_sequence(1U);
+  check(first_message.message_case() ==
+            trainvm::v1::WorkerToController::kPhaseReceipt &&
+            !first_message.has_metric() && !first_message.has_event(),
+        "execution-phase receipts are a distinct closed worker message variant");
 
   const std::filesystem::path directory =
       std::filesystem::temp_directory_path() /
@@ -4825,8 +4830,46 @@ void test_worker_control_service_boundary() {
     const grpc::Status heartbeat_replay = service.record_worker_heartbeat(
         heartbeat, connection, replayed_acknowledgement);
 
+    trainvm::v1::WorkerExecutionPhaseReceipt phase_receipt;
+    const auto compile_request = std::ranges::find_if(
+        connection.welcome.execution_phase_requests(),
+        [](const trainvm::v1::WorkerExecutionPhaseRequest& request) {
+          return request.phase() ==
+                 trainvm::v1::WorkerExecutionPhaseRequest::PHASE_COMPILE;
+        });
+    if (compile_request !=
+        connection.welcome.execution_phase_requests().end()) {
+      phase_receipt.set_phase(compile_request->phase());
+      phase_receipt.set_disposition(
+          trainvm::v1::WorkerExecutionPhaseReceipt::DISPOSITION_COMPLETED);
+      phase_receipt.set_request_digest(compile_request->request_digest());
+    }
+    phase_receipt.set_steps_executed(0U);
+    phase_receipt.set_state_fingerprint_before(
+        "sha256:" + std::string(64U, 'd'));
+    phase_receipt.set_state_fingerprint_after(
+        "sha256:" + std::string(64U, 'd'));
+    phase_receipt.set_concurrency_key(connection.identity.concurrency_key);
+    phase_receipt.set_lease_id(connection.identity.lease_id);
+    phase_receipt.set_fencing_token(connection.identity.fencing_token);
+    phase_receipt.set_worker_sequence(2U);
+    phase_receipt.mutable_started_at()->set_seconds(2);
+    phase_receipt.mutable_completed_at()->set_seconds(2);
+    auto unrestored_phase_receipt = phase_receipt;
+    unrestored_phase_receipt.set_state_fingerprint_after(
+        "sha256:" + std::string(64U, 'e'));
+    std::uint64_t rejected_phase_acknowledgement = 0;
+    const grpc::Status unrestored_phase_status =
+        service.record_worker_execution_phase_receipt(
+            unrestored_phase_receipt, connection,
+            rejected_phase_acknowledgement);
+    std::uint64_t phase_acknowledgement = 0;
+    const grpc::Status phase_status =
+        service.record_worker_execution_phase_receipt(
+            phase_receipt, connection, phase_acknowledgement);
+
     trainvm::v1::MetricSample metric;
-    metric.set_worker_sequence(2);
+    metric.set_worker_sequence(3);
     metric.set_name("train.loss");
     metric.mutable_value()->set_number_value(1.25);
     metric.set_unit("dimensionless");
@@ -4849,7 +4892,7 @@ void test_worker_control_service_boundary() {
         metric, connection, metric_acknowledgement);
 
     trainvm::v1::ArtifactManifest artifact;
-    artifact.set_worker_sequence(3);
+    artifact.set_worker_sequence(4);
     artifact.set_artifact_id("checkpoint-step-11");
     artifact.set_logical_name("checkpoint");
     artifact.set_kind(trainvm::v1::ARTIFACT_KIND_CHECKPOINT);
@@ -4898,7 +4941,7 @@ void test_worker_control_service_boundary() {
     control_ack.set_concurrency_key(connection.identity.concurrency_key);
     control_ack.set_lease_id(connection.identity.lease_id);
     control_ack.set_fencing_token(connection.identity.fencing_token);
-    control_ack.set_worker_sequence(4);
+    control_ack.set_worker_sequence(5);
     control_ack.mutable_acknowledged_at()->set_seconds(4);
     std::uint64_t control_acknowledgement = 0;
     const grpc::Status control_status = service.acknowledge_worker_control(
@@ -4910,7 +4953,7 @@ void test_worker_control_service_boundary() {
         control_ack, connection, replayed_control_acknowledgement);
 
     auto gap = heartbeat;
-    gap.set_worker_sequence(6);
+    gap.set_worker_sequence(7);
     std::uint64_t ignored = 0;
     const grpc::Status gap_status =
         service.record_worker_heartbeat(gap, connection, ignored);
@@ -4919,7 +4962,7 @@ void test_worker_control_service_boundary() {
     const grpc::Status reconnect =
         service.open_worker_connection(wire_hello(launch), reconnected);
     auto result = wire_result(reconnected);
-    result.set_worker_sequence(5);
+    result.set_worker_sequence(6);
     trainvm::v1::WorkerReceipt receipt;
     const grpc::Status complete = service.complete_worker_connection(
         result, reconnected, receipt);
@@ -4932,22 +4975,29 @@ void test_worker_control_service_boundary() {
       const auto effective_controls = observer.effective_controls(run_id);
       check(open.ok() && heartbeat_status.ok() && acknowledged == 1U &&
                 heartbeat_replay.ok() && replayed_acknowledgement == 1U &&
-                after_heartbeat == 14U && observer.event_count() == 22U &&
+                after_heartbeat == 14U && observer.event_count() == 23U &&
+                connection.welcome.execution_phase_requests_size() == 2 &&
+                compile_request !=
+                    connection.welcome.execution_phase_requests().end() &&
+                unrestored_phase_status.error_code() ==
+                    grpc::StatusCode::INVALID_ARGUMENT &&
+                rejected_phase_acknowledgement == 0U && phase_status.ok() &&
+                phase_acknowledgement == 2U &&
                 undeclared_metric_status.error_code() ==
                     grpc::StatusCode::INVALID_ARGUMENT &&
                 mismatched_metric_status.error_code() ==
                     grpc::StatusCode::INVALID_ARGUMENT &&
                 rejected_metric_acknowledgement == 0U &&
-                metric_status.ok() && metric_acknowledgement == 2U &&
+                metric_status.ok() && metric_acknowledgement == 3U &&
                 undeclared_artifact_status.error_code() ==
                     grpc::StatusCode::PERMISSION_DENIED &&
                 mismatched_artifact_status.error_code() ==
                     grpc::StatusCode::INVALID_ARGUMENT &&
-                artifact_status.ok() && artifact_acknowledgement == 3U &&
+                artifact_status.ok() && artifact_acknowledgement == 4U &&
                 control_request.command && control_status.ok() &&
-                control_acknowledgement == 4U && control_replay.ok() &&
-                replayed_control_acknowledgement == 4U &&
-                after_control == 18U &&
+                control_acknowledgement == 5U && control_replay.ok() &&
+                replayed_control_acknowledgement == 5U &&
+                after_control == 19U &&
                 effective_controls.revision == 1U &&
                 effective_controls.values ==
                     nlohmann::json{{"caption_dropout", 0.2}} &&
@@ -4959,9 +5009,9 @@ void test_worker_control_service_boundary() {
                     connection.welcome.canonical_invocation_json() &&
                 reconnected.welcome.invocation_digest() ==
                     connection.welcome.invocation_digest() &&
-                reconnected.welcome.acknowledged_worker_sequence() == 4U &&
+                reconnected.welcome.acknowledged_worker_sequence() == 5U &&
                 complete.ok() &&
-                receipt.acknowledged_worker_sequence() == 5U && projection &&
+                receipt.acknowledged_worker_sequence() == 6U && projection &&
                 projection->optimizer_step == 5'500U &&
                 projection->last_heartbeat_ns == 2'200 &&
                 durable_heartbeat &&
@@ -4977,8 +5027,12 @@ void test_worker_control_service_boundary() {
                 }) == 1 &&
                 std::ranges::count_if(events, [](const trainvm::Event& event) {
                   return event.event_type == "artifact.published";
+                }) == 1 &&
+                std::ranges::count_if(events, [](const trainvm::Event& event) {
+                  return event.event_type ==
+                         "worker.execution_phase_receipted";
                 }) == 1,
-            "WorkerControl durably acknowledges replay-safe heartbeat, metric, and artifact observations without advancing the FSM");
+            "WorkerControl durably acknowledges replay-safe heartbeat, metric, artifact, and execution-phase observations without advancing the FSM");
     }
   }
 

@@ -150,6 +150,9 @@ class TrainVMService final : public v1::TrainVM::Service,
   grpc::Status record_worker_artifact(
       const v1::ArtifactManifest& artifact,
       const WorkerConnection& connection, std::uint64_t& acknowledged);
+  grpc::Status record_worker_execution_phase_receipt(
+      const v1::WorkerExecutionPhaseReceipt& receipt,
+      const WorkerConnection& connection, std::uint64_t& acknowledged);
   grpc::Status acknowledge_worker_control(
       const v1::ControlPatchAcknowledgement& acknowledgement,
       const WorkerConnection& connection, std::uint64_t& acknowledged);

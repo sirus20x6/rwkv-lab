@@ -54,7 +54,8 @@ bool is_controller_event(std::string_view event_type) {
 bool is_worker_observation(std::string_view event_type) {
   return event_type == "worker.heartbeat" ||
          event_type == "metric.sampled" ||
-         event_type == "artifact.published";
+         event_type == "artifact.published" ||
+         event_type == "worker.execution_phase_receipted";
 }
 
 void require_worker_observation_shape(const Event& event,
@@ -116,6 +117,107 @@ void require_worker_observation_shape(const Event& event,
         !(value.is_number() || value.is_boolean() || value.is_string()) ||
         (value.is_number_float() && !std::isfinite(value.get<double>()))) {
       throw std::invalid_argument("worker metric sample is not canonical");
+    }
+    return;
+  }
+  if (event.event_type == "worker.execution_phase_receipted") {
+    constexpr std::array<std::string_view, 11> fields{
+        "phase", "enabled", "requested_steps", "request_digest",
+        "disposition", "steps_executed", "state_fingerprint_before",
+        "state_fingerprint_after", "started_at_ns", "completed_at_ns",
+        "diagnostics"};
+    const auto valid_digest = [](const nlohmann::json& value) {
+      if (!value.is_string()) return false;
+      const auto& text = value.get_ref<const std::string&>();
+      return text.size() == 71U && text.starts_with("sha256:") &&
+             std::ranges::all_of(
+                 std::string_view(text).substr(7U), [](char character) {
+                   return (character >= '0' && character <= '9') ||
+                          (character >= 'a' && character <= 'f');
+                 });
+    };
+    const auto& payload = event.payload;
+    const std::string phase =
+        payload.contains("phase") && payload.at("phase").is_string()
+            ? payload.at("phase").get<std::string>()
+            : std::string{};
+    const std::string disposition =
+        payload.contains("disposition") &&
+                payload.at("disposition").is_string()
+            ? payload.at("disposition").get<std::string>()
+            : std::string{};
+    const bool enabled = payload.contains("enabled") &&
+                         payload.at("enabled").is_boolean() &&
+                         payload.at("enabled").get<bool>();
+    const auto& diagnostics = payload.contains("diagnostics")
+                                  ? payload.at("diagnostics")
+                                  : nlohmann::json{};
+    const bool canonical_diagnostics =
+        diagnostics.is_array() &&
+        std::ranges::all_of(diagnostics, [](const nlohmann::json& diagnostic) {
+          static const std::set<std::string> diagnostic_fields{
+              "severity", "code", "document_path", "message", "help"};
+          if (!diagnostic.is_object() ||
+              diagnostic.size() != diagnostic_fields.size() ||
+              !std::ranges::all_of(
+                  diagnostic_fields, [&](const std::string& field) {
+                return diagnostic.contains(field) &&
+                       diagnostic.at(field).is_string();
+                  })) {
+            return false;
+          }
+          const std::string severity =
+              diagnostic.value("severity", std::string{});
+          return (severity == "info" || severity == "warning" ||
+                  severity == "error") &&
+                 !diagnostic.value("code", std::string{}).empty() &&
+                 !diagnostic.value("message", std::string{}).empty();
+        });
+    const bool known_phase = phase == "compile" || phase == "warmup";
+    const bool known_disposition = disposition == "completed" ||
+                                   disposition == "skipped" ||
+                                   disposition == "failed";
+    const bool restored =
+        payload.contains("state_fingerprint_before") &&
+        payload.contains("state_fingerprint_after") &&
+        payload.at("state_fingerprint_before") ==
+            payload.at("state_fingerprint_after");
+    if (event.optimizer_step || event.monotonic_time_ns != 0U ||
+        payload.size() != fields.size() ||
+        !std::ranges::all_of(fields, [&](std::string_view field) {
+          return payload.contains(std::string(field));
+        }) ||
+        !known_phase || !known_disposition ||
+        !payload.at("enabled").is_boolean() ||
+        !payload.at("requested_steps").is_number_unsigned() ||
+        !payload.at("steps_executed").is_number_unsigned() ||
+        !valid_digest(payload.at("request_digest")) ||
+        !valid_digest(payload.at("state_fingerprint_before")) ||
+        !valid_digest(payload.at("state_fingerprint_after")) ||
+        !payload.at("started_at_ns").is_number_integer() ||
+        !payload.at("completed_at_ns").is_number_integer() ||
+        payload.at("started_at_ns").get<std::int64_t>() < 0 ||
+        payload.at("completed_at_ns").get<std::int64_t>() <
+            payload.at("started_at_ns").get<std::int64_t>() ||
+        event.wall_time_ns !=
+            payload.at("completed_at_ns").get<std::int64_t>() ||
+        !canonical_diagnostics || (enabled && disposition == "skipped") ||
+        (!enabled && disposition != "skipped") ||
+        ((disposition == "completed" || disposition == "skipped") &&
+         !restored) ||
+        (disposition == "failed" && diagnostics.empty()) ||
+        (phase == "compile" &&
+         payload.at("requested_steps").get<std::uint64_t>() != 0U) ||
+        (disposition == "completed" &&
+         payload.at("steps_executed").get<std::uint64_t>() !=
+             payload.at("requested_steps").get<std::uint64_t>()) ||
+        (disposition == "skipped" &&
+         payload.at("steps_executed").get<std::uint64_t>() != 0U) ||
+        (disposition == "failed" &&
+         payload.at("steps_executed").get<std::uint64_t>() >
+             payload.at("requested_steps").get<std::uint64_t>())) {
+      throw std::invalid_argument(
+          "worker execution-phase receipt is not canonical");
     }
     return;
   }
@@ -273,6 +375,11 @@ std::string worker_observation_event_id(const Event& event,
   }
   if (event.event_type == "metric.sampled") {
     return dispatch_id + ":metric:" + std::to_string(event.worker_sequence);
+  }
+  if (event.event_type == "worker.execution_phase_receipted") {
+    return dispatch_id + ":phase:" +
+           event.payload.value("phase", std::string{}) + ":" +
+           std::to_string(event.worker_sequence);
   }
   return dispatch_id + ":artifact:" + sha256_hex(
       event.payload.value("artifact_id", std::string{}));

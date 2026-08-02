@@ -244,6 +244,7 @@ func TestTrainVMPanelUsesIncrementalReadOnlyTimeline(t *testing.T) {
 		`id="vm-control-catalog"`, `id="vm-control-apply"`,
 		`id="trainvm-metrics"`, `id="trainvm-artifacts"`,
 		`id="trainvm-observability-state"`,
+		`id="vm-execution-phases"`, `renderVMExecutionPhases`,
 		`/observability?after=${vmTelemetryAfter}&limit=250`,
 		`vmMetricSeries`, `vmArtifacts`, `renderVMMetricCharts`, `renderVMArtifacts`,
 		`data-vm-open-artifact`, `/artifacts/${encodeURIComponent(artifact.artifact_id)}/content?v=`,

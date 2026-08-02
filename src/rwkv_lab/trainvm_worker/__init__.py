@@ -49,6 +49,15 @@ from .eval_gallery import (
     GalleryImage,
     PublishedEvalGallery,
 )
+from .execution_phases import (
+    ExecutionPhase,
+    ExecutionPhaseDisposition,
+    ExecutionPhaseRequest,
+    WorkerExecutionPhaseError,
+    WorkerExecutionPhaseRuntime,
+    decode_execution_phase_requests,
+    state_fingerprint,
+)
 from .invocation import (
     MAXIMUM_INVOCATION_BYTES,
     InvocationError,
@@ -141,6 +150,9 @@ __all__ = [
     "EvalGalleryError",
     "EvalGalleryItem",
     "EvalGalleryPublisher",
+    "ExecutionPhase",
+    "ExecutionPhaseDisposition",
+    "ExecutionPhaseRequest",
     "ExternalProfilerAuthority",
     "ExternalStepProfiler",
     "GalleryImage",
@@ -171,6 +183,8 @@ __all__ = [
     "WorkerCommand",
     "WorkerControlError",
     "WorkerControlRuntime",
+    "WorkerExecutionPhaseError",
+    "WorkerExecutionPhaseRuntime",
     "WorkerInvocation",
     "WorkerObservability",
     "WorkerObservabilityError",
@@ -183,6 +197,7 @@ __all__ = [
     "WorkerStepProfiler",
     "apply_worker_runtime_policy",
     "controls_from_invocation",
+    "decode_execution_phase_requests",
     "load_external_profiler_authority",
     "load_input_artifact_json",
     "load_observability_declaration",
@@ -198,6 +213,7 @@ __all__ = [
     "read_worker_bootstrap_fd",
     "resolve_input_artifact",
     "resolve_resume_checkpoint",
+    "state_fingerprint",
     "step_profiler_from_invocation",
     "trace_request_from_invocation",
 ]

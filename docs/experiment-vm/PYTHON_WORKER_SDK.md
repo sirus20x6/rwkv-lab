@@ -18,7 +18,7 @@ descriptor. It contains only:
 It contains no model path, dataset path, optimizer setting, learning-rate
 setting, shell fragment, environment override, or secret. After the worker
 opens `WorkerControl`, TrainVM returns a content-addressed
-`trainvm.worker-invocation/v1` document in `WorkerWelcome`. That immutable
+`trainvm.worker-invocation/v2` document in `WorkerWelcome`. That immutable
 invocation contains the resolved inputs, controls, artifact declarations, and
 training-component composition selected by the authority.
 
@@ -42,9 +42,20 @@ implementation as separate layers.
 - replay-aware worker/controller sequence checks;
 - typed heartbeats and scalar metrics;
 - complete artifact-manifest publication;
+- immutable compile/warmup requests and fenced execution-phase receipts;
 - typed pause, resume, checkpoint, cancel, and control commands;
 - explicit control acknowledgement at adapter-selected safe points;
 - one canonical terminal result and durable receipt.
+
+`rwkv_lab.trainvm_worker.execution_phases` owns the worker side of compile and warmup. It verifies
+that every protobuf request exactly matches the sealed invocation and request digest. The shared
+runtime captures a caller-supplied complete training-state identity before and after the phase,
+counts warmup steps through an explicit completion callback, publishes partial progress and a
+diagnostic on failure, and refuses a successful receipt unless disposable execution restored the
+same state. The identity must cover model, optimizer, RNG, scaler, data cursor, schedule segment,
+and effective controls; adapters cannot substitute a model-weights-only checksum. Repeating a
+phase after a lost connection creates another independently fenced receipt, so recovery never has
+to guess whether an unacknowledged phase ran.
 
 Before dispatch, `rwkv_lab.trainvm_worker.runtime_policy` independently parses the resource policy
 from the sealed invocation. It owns only non-root runtime controls: narrowing/rechecking process CPU

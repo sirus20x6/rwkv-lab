@@ -587,6 +587,7 @@
   const vmMetricSeriesLimit = 512;
   const vmMetricSeries = new Map();
   const vmArtifacts = new Map();
+  const vmExecutionPhases = new Map();
   const vmCheckpointSummaries = new Map();
   let vmGalleries = [];
   let vmGalleryIndex = -1;
@@ -1800,6 +1801,7 @@
     vmArtifactRenderSignature = null;
     vmMetricSeries.clear();
     vmArtifacts.clear();
+    vmExecutionPhases.clear();
     vmCheckpointSummaries.clear();
     const metrics = document.getElementById("trainvm-metrics");
     const artifacts = document.getElementById("trainvm-artifacts");
@@ -1816,6 +1818,10 @@
       state.setAttribute("aria-live", "polite");
       state.textContent = "no telemetry snapshot";
     }
+    const phases = document.getElementById("vm-execution-phases");
+    const phaseState = document.getElementById("vm-execution-phases-state");
+    if (phases) phases.innerHTML = '<div class="empty">no execution-phase receipts loaded</div>';
+    if (phaseState) phaseState.textContent = "no receipts";
   }
 
   async function refreshVMCheckpointRows() {
@@ -2068,6 +2074,37 @@
     target.textContent = text + replay;
   }
 
+  function renderVMExecutionPhases() {
+    const target = document.getElementById("vm-execution-phases");
+    const state = document.getElementById("vm-execution-phases-state");
+    if (!target || !state) return;
+    const receipts = [...vmExecutionPhases.values()]
+      .sort((left, right) => Number(right.sequence || 0) - Number(left.sequence || 0))
+      .slice(0, 12);
+    if (!receipts.length) {
+      target.innerHTML = '<div class="empty">no execution-phase receipts loaded</div>';
+      state.textContent = "no receipts";
+      return;
+    }
+    const failures = receipts.filter((receipt) => receipt.disposition === "failed").length;
+    state.textContent = failures ? `${failures} failed · ${receipts.length} visible` : `${receipts.length} receipted`;
+    target.innerHTML = receipts.map((receipt) => {
+      const durationMS = Math.max(0,
+        (Number(receipt.completed_at_ns || 0) - Number(receipt.started_at_ns || 0)) / 1e6);
+      const restored = receipt.state_fingerprint_before === receipt.state_fingerprint_after;
+      const requested = Number(receipt.requested_steps || 0);
+      const executed = Number(receipt.steps_executed || 0);
+      const diagnostic = Array.isArray(receipt.diagnostics) ? receipt.diagnostics[0] : null;
+      const disposition = String(receipt.disposition || "unknown");
+      return `<article class="vm-execution-phase ${vmEscape(disposition)}">` +
+        `<header><strong>${vmEscape(receipt.phase || "phase")}</strong><span>${vmEscape(disposition)}</span></header>` +
+        `<div>${executed.toLocaleString()}/${requested.toLocaleString()} steps · ${durationMS < 1000 ? durationMS.toFixed(1) + " ms" : (durationMS / 1000).toFixed(2) + " s"}</div>` +
+        `<div class="vm-phase-proof" title="${vmEscape(receipt.request_digest || "")}">${restored ? "state restored" : "state changed after failure"} · ${vmEscape(receipt.node_id || "—")} · ${vmEscape(receipt.attempt_id || "—")}</div>` +
+        (diagnostic ? `<div class="vm-phase-error" title="${vmEscape(diagnostic.message || "")}">${vmEscape(diagnostic.code || "phase failure")} · ${vmEscape(diagnostic.message || "")}</div>` : "") +
+        `</article>`;
+    }).join("");
+  }
+
   function renderVMObservabilityError(message) {
     const target = document.getElementById("trainvm-observability-state");
     if (!target) return;
@@ -2143,6 +2180,13 @@
         profilePublished ||= artifact.kind === "opaque" && artifact.schema === "trainvm.gpu-trace.v1";
         checkpointPublished ||= artifact.kind === "checkpoint";
       }
+      for (const receipt of snapshot.execution_phases || []) {
+        const key = `${receipt.node_id || ""}\u0000${receipt.attempt_id || ""}\u0000${receipt.phase || ""}`;
+        const previous = vmExecutionPhases.get(key);
+        if (!previous || Number(receipt.sequence || 0) > Number(previous.sequence || 0)) {
+          vmExecutionPhases.set(key, receipt);
+        }
+      }
       while (vmArtifacts.size > 1000) vmArtifacts.delete(vmArtifacts.keys().next().value);
       vmTelemetryAfter = Number(snapshot.next_sequence || vmTelemetryAfter);
       lastSnapshot = snapshot;
@@ -2150,6 +2194,7 @@
     }
     renderVMMetricCharts();
     renderVMArtifacts();
+    renderVMExecutionPhases();
     renderVMObservabilityState(lastSnapshot);
     const state = lastSnapshot?.replay_pending ? "replaying" : "caught up";
     const metricCursor = document.getElementById("trainvm-metric-cursor");
