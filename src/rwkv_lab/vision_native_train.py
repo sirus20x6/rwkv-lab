@@ -15,8 +15,10 @@ import os
 import random
 import signal
 import time
+from collections.abc import Iterator, Sequence
+from contextlib import nullcontext
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import Any
 
 import torch
 from torch import nn
@@ -50,7 +52,6 @@ from rwkv_lab.vision_train import (
     supervised_positions,
     visual_insert_positions,
 )
-
 
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMA = 1
@@ -136,7 +137,10 @@ def _load_head_state(model: RWKVNativeTeacherCompressor, state: dict) -> None:
 
 def _save_checkpoint(path: Path, *, model: RWKVNativeTeacherCompressor,
                      optimizer: torch.optim.Optimizer, step: int,
-                     best_eval: float, args: argparse.Namespace) -> None:
+                     best_eval: float, args: argparse.Namespace,
+                     component_evidence: dict | None = None,
+                     component_composition_digest: str | None = None,
+                     worker_control_state: dict | None = None) -> None:
     payload = {
         "schema": SCHEMA,
         "step": int(step),
@@ -144,6 +148,9 @@ def _save_checkpoint(path: Path, *, model: RWKVNativeTeacherCompressor,
         "native_head": _head_state(model),
         "optimizer": optimizer.state_dict(),
         "args": vars(args),
+        "component_evidence": component_evidence,
+        "component_composition_digest": component_composition_digest,
+        "worker_control_state": worker_control_state,
         "rng": {
             "python": random.getstate(),
             "torch": torch.get_rng_state(),
@@ -156,6 +163,17 @@ def _save_checkpoint(path: Path, *, model: RWKVNativeTeacherCompressor,
     with temporary.open("rb") as handle:
         os.fsync(handle.fileno())
     os.replace(temporary, path)
+
+
+def _replace_hardlink(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+    try:
+        temporary.unlink(missing_ok=True)
+        os.link(source, temporary)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _load_frozen_caption_stack(checkpoint: Path):
@@ -323,7 +341,7 @@ def _cache_dataset(manifest: Path, args: argparse.Namespace) -> TeacherCacheData
     )
 
 
-def main() -> None:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--baseline", default=(
         "runs/moonvit_rwkv_eight_hour_grounded/best/ckpt_step_00021900.pt"))
@@ -355,7 +373,101 @@ def main() -> None:
     parser.add_argument("--checkpoint-every", type=int, default=50)
     parser.add_argument("--seed", type=int, default=20260716)
     parser.add_argument("--resume", choices=("auto", "none"), default="auto")
-    args = parser.parse_args()
+    parser.add_argument("--resume-from", default="")
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--vocab", default=str(ROOT / "src/rwkv_lab/assets/rwkv_vocab_v20230424.txt"))
+    args = parser.parse_args(argv)
+    for name in (
+        "steps",
+        "batch",
+        "eval_every",
+        "eval_examples",
+        "checkpoint_every",
+    ):
+        if getattr(args, name) < 1:
+            parser.error(f"--{name.replace('_', '-')} must be positive")
+    if args.workers < 0:
+        parser.error("--workers must be nonnegative")
+    if args.device != "cuda":
+        parser.error("--device must be cuda")
+    return args
+
+
+def train(
+    args: argparse.Namespace,
+    *,
+    worker_components: Any | None = None,
+    worker_step_profiler: Any | None = None,
+    worker_observability: Any | None = None,
+    worker_controls: Any | None = None,
+) -> dict[str, Any]:
+    """Execute one native-head arm under optional sealed TrainVM services."""
+
+    component_evidence = None
+    component_composition_digest = None
+    learning_rate_schedule = None
+    weight_decay_schedule = None
+    if worker_components is not None:
+        worker_components.require_implementation(
+            "optimizer",
+            category="optimizer",
+            allowed=frozenset({"rwkv_lab.optimizer.torch_adamw_no_decay.v2"}),
+        )
+        if dict(
+            worker_components.configuration("optimizer", category="optimizer")
+        ) != {
+            "learning_rate": args.lr,
+            "beta1": 0.9,
+            "beta2": 0.95,
+            "epsilon": 1.0e-8,
+            "foreach": False,
+            "fused": True,
+        }:
+            raise ValueError(
+                "authority optimizer composition disagrees with native-head configuration"
+            )
+        worker_components.require_implementation(
+            "learning_rate",
+            category="learning_rate_schedule",
+            allowed=frozenset({"rwkv_lab.schedule.constant.v1"}),
+        )
+        if dict(
+            worker_components.configuration(
+                "learning_rate", category="learning_rate_schedule"
+            )
+        ):
+            raise ValueError("native-head constant learning-rate config must be empty")
+        if dict(
+            worker_components.configuration(
+                "gradient_clipping", category="gradient_clipping"
+            )
+        ) != {
+            "max_norm": args.grad_clip,
+            "norm_type": 2.0,
+            "error_if_nonfinite": False,
+        }:
+            raise ValueError(
+                "authority gradient clipping disagrees with native-head configuration"
+            )
+        if dict(
+            worker_components.configuration(
+                "weight_decay", category="weight_decay_schedule"
+            )
+        ) != {"weight_decay": args.weight_decay}:
+            raise ValueError(
+                "authority weight decay disagrees with native-head configuration"
+            )
+        worker_components.require_implementation(
+            "precision",
+            category="precision",
+            allowed=frozenset(
+                {"rwkv_lab.precision.fp32_parameters_bf16_compute.v1"}
+            ),
+        )
+        component_evidence = dict(worker_components.evidence())
+        component_composition_digest = (
+            worker_components.composition.composition_digest
+        )
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -400,12 +512,23 @@ def main() -> None:
     for module in (rwkv, engram, deep_vision, nextlat, grounding, frozen, identity):
         if module is not None and any(p.requires_grad for p in module.parameters()):
             raise RuntimeError(f"frozen module is trainable: {type(module).__name__}")
-    optimizer = torch.optim.AdamW(
-        [{"params": trainable, "name": "vision_native_output"}],
-        lr=args.lr, weight_decay=args.weight_decay,
-        betas=(0.9, 0.95), fused=True)
+    parameter_groups = [{"params": trainable, "name": "vision_native_output"}]
+    optimizer = (
+        worker_components.optimizer(parameter_groups)
+        if worker_components is not None
+        else torch.optim.AdamW(
+            parameter_groups,
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+            betas=(0.9, 0.95),
+            fused=True,
+        )
+    )
+    if worker_components is not None:
+        learning_rate_schedule = worker_components.learning_rate_schedule(optimizer)
+        weight_decay_schedule = worker_components.weight_decay_schedule(optimizer)
 
-    vocab = WorldVocab()
+    vocab = WorldVocab(args.vocab)
     train_rows, _ = prepare_examples(
         load_examples(args.data, stat_workers=32), vocab,
         prompt=str(baseline_args["prompt"]),
@@ -421,8 +544,11 @@ def main() -> None:
         Path(args.data), _cache_dataset(Path(args.data), args), train_rows)
     eval_dataset = CaptionTeacherDataset(
         Path(args.eval_data), _cache_dataset(Path(args.eval_data), args), eval_rows)
-    loader_args = dict(num_workers=args.workers, pin_memory=True,
-                       persistent_workers=args.workers > 0)
+    loader_args = {
+        "num_workers": args.workers,
+        "pin_memory": True,
+        "persistent_workers": args.workers > 0,
+    }
     if args.workers > 0:
         loader_args["prefetch_factor"] = 3
     train_loader = DataLoader(
@@ -434,10 +560,28 @@ def main() -> None:
 
     step = 0
     best_eval = float("inf")
-    if args.resume == "auto" and checkpoint_path.is_file():
-        saved = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    resume_path = (
+        Path(args.resume_from)
+        if args.resume_from
+        else checkpoint_path
+        if args.resume == "auto" and checkpoint_path.is_file()
+        else None
+    )
+    if resume_path is not None:
+        saved = torch.load(resume_path, map_location="cpu", weights_only=False)
         if int(saved.get("schema", -1)) != SCHEMA:
             raise ValueError("native arm checkpoint schema mismatch")
+        if worker_components is not None and (
+            saved.get("component_evidence") != component_evidence
+            or saved.get("component_composition_digest")
+            != component_composition_digest
+        ):
+            raise ValueError("native-head checkpoint component identity mismatch")
+        if worker_controls is not None:
+            control_state = saved.get("worker_control_state")
+            if not isinstance(control_state, dict):
+                raise ValueError("native-head checkpoint control state is missing")
+            worker_controls.verify_checkpoint_state(control_state)
         _load_head_state(native, saved["native_head"])
         optimizer.load_state_dict(saved["optimizer"])
         step = int(saved["step"])
@@ -445,6 +589,32 @@ def main() -> None:
         random.setstate(saved["rng"]["python"])
         torch.set_rng_state(saved["rng"]["torch"])
         torch.cuda.set_rng_state_all(saved["rng"]["cuda"])
+
+    checkpoint_directory = out / "checkpoint-current"
+    checkpoint_state = checkpoint_directory / "state.pt"
+
+    def reject_live_controls(_effective: object, assignments: object) -> None:
+        if assignments:
+            raise ValueError("vision native-head v1 has no live-mutable controls")
+
+    def save_checkpoint(path: Path = checkpoint_path) -> None:
+        _save_checkpoint(
+            path,
+            model=native,
+            optimizer=optimizer,
+            step=step,
+            best_eval=best_eval,
+            args=args,
+            component_evidence=component_evidence,
+            component_composition_digest=component_composition_digest,
+            worker_control_state=(
+                worker_controls.checkpoint_state()
+                if worker_controls is not None
+                else None
+            ),
+        )
+        if path == checkpoint_path:
+            _replace_hardlink(checkpoint_path, checkpoint_state)
 
     config = {
         **vars(args),
@@ -457,6 +627,8 @@ def main() -> None:
         "trainable_parameters": sum(p.numel() for p in trainable),
         "frozen_compressor_parameters": sum(p.numel() for p in frozen.parameters()),
         "frozen_rwkv_parameters": sum(p.numel() for p in rwkv.parameters()),
+        "component_evidence": component_evidence,
+        "component_composition_digest": component_composition_digest,
     }
     _atomic_json(out / "config.json", config)
     log_mode = "a" if step else "w"
@@ -482,9 +654,16 @@ def main() -> None:
         })
 
         while step < args.steps and not stop:
-            for indices, moon, fusion in train_loader:
+            batches = (
+                worker_step_profiler.track_input(train_loader)
+                if worker_step_profiler is not None
+                else train_loader
+            )
+            for indices, moon, fusion in batches:
                 if step >= args.steps or stop:
                     break
+                if worker_controls is not None:
+                    worker_controls.microbatch(step + 1, reject_live_controls)
                 started = time.perf_counter()
                 native.train()
                 optimizer.zero_grad(set_to_none=True)
@@ -497,9 +676,23 @@ def main() -> None:
                 if not torch.isfinite(loss):
                     raise FloatingPointError(f"non-finite native arm loss: {loss}")
                 loss.backward()
-                gnorm = torch.nn.utils.clip_grad_norm_(trainable, args.grad_clip)
+                gnorm = (
+                    worker_components.gradient_clipping(trainable)
+                    if worker_components is not None
+                    else torch.nn.utils.clip_grad_norm_(trainable, args.grad_clip)
+                )
                 optimizer.step()
                 step += 1
+                if learning_rate_schedule is not None:
+                    learning_rate_schedule.step()
+                if weight_decay_schedule is not None:
+                    weight_decay_schedule.step(step)
+                if worker_step_profiler is not None:
+                    worker_step_profiler.step(step)
+                if worker_observability is not None:
+                    worker_observability.optimizer_step(step)
+                if worker_controls is not None:
+                    worker_controls.optimizer_step(step, reject_live_controls)
                 elapsed = time.perf_counter() - started
                 event = {
                     "kind": "train", "step": step, "loss": float(loss.detach()),
@@ -515,6 +708,18 @@ def main() -> None:
                     if name in metrics:
                         event[name] = float(metrics[name])
                 _append_json(log, event)
+                if worker_observability is not None:
+                    for name, value in (
+                        ("train.loss", event["loss"]),
+                        ("train.learning_rate", event["lr"]),
+                        ("train.gradient_norm", event["gnorm"]),
+                        ("train.tokens_per_second", event["tok_per_sec"]),
+                        ("train.step_seconds", event["step_seconds"]),
+                        ("train.cross_entropy", event["ce_loss"]),
+                    ):
+                        worker_observability.publish_if_declared(
+                            name, value, step=step
+                        )
                 _atomic_json(status_path, {
                     "state": "training", "step": step,
                     "loss": event["loss"], "updated": time.time(),
@@ -523,13 +728,13 @@ def main() -> None:
                 })
 
                 if step % args.checkpoint_every == 0:
-                    _save_checkpoint(
-                        checkpoint_path, model=native, optimizer=optimizer,
-                        step=step, best_eval=best_eval, args=args)
+                    save_checkpoint()
                     _append_json(log, {"kind": "checkpoint", "step": step,
                                        "reason": "periodic", "path": str(checkpoint_path)})
 
                 if step % args.eval_every == 0:
+                    if worker_controls is not None:
+                        worker_controls.evaluation(step, reject_live_controls)
                     _atomic_json(status_path, {
                         "state": "evaluating", "step": step,
                         "updated": time.time(), "deployment_bridge": False})
@@ -546,21 +751,24 @@ def main() -> None:
                         "examples": min(args.eval_examples, len(eval_rows)),
                         "deployment_bridge": False,
                     })
+                    if worker_observability is not None:
+                        worker_observability.publish_if_declared(
+                            "eval.loss", eval_loss, step=step
+                        )
+                        worker_observability.publish_if_declared(
+                            "eval.perplexity", ppl, step=step
+                        )
                     if eval_loss < best_eval:
                         best_eval = eval_loss
                         best_path = best_dir / f"native_head_step_{step:08d}.pt"
-                        _save_checkpoint(
-                            best_path, model=native, optimizer=optimizer,
-                            step=step, best_eval=best_eval, args=args)
+                        save_checkpoint(best_path)
                         _atomic_json(best_dir / "best.json", {
                             "step": step, "loss": eval_loss, "ppl": ppl,
                             "checkpoint": best_path.name,
                             "baseline_ppl": config["baseline_best_ppl"],
                             "deployment_bridge": False,
                         })
-                    _save_checkpoint(
-                        checkpoint_path, model=native, optimizer=optimizer,
-                        step=step, best_eval=best_eval, args=args)
+                    save_checkpoint()
                     _atomic_json(status_path, {
                         "state": "training", "step": step,
                         "eval_loss": eval_loss, "eval_ppl": ppl,
@@ -568,12 +776,49 @@ def main() -> None:
                         "updated": time.time(), "deployment_bridge": False,
                     })
 
-    _save_checkpoint(checkpoint_path, model=native, optimizer=optimizer,
-                     step=step, best_eval=best_eval, args=args)
+                checkpoint_requested = bool(
+                    worker_controls is not None
+                    and worker_controls.checkpoint_boundary_requested
+                )
+                if checkpoint_requested:
+                    worker_controls.checkpoint(step, reject_live_controls)
+                    with (
+                        worker_observability.keepalive(step, "checkpointing")
+                        if worker_observability is not None
+                        else nullcontext()
+                    ):
+                        save_checkpoint()
+                    if worker_controls.checkpoint_completion_requested:
+                        worker_controls.publish_requested_checkpoint_directory(
+                            str(checkpoint_directory),
+                            optimizer_step=step,
+                            resume_grade="compatible",
+                            state_components=(
+                                "component_composition",
+                                "control_revision",
+                                "model",
+                                "optimizer",
+                                "rng_accelerator",
+                                "rng_python",
+                                "rng_torch",
+                            ),
+                        )
+
+    save_checkpoint()
     _atomic_json(status_path, {
         "state": "stopped" if stop else "complete", "step": step,
         "updated": time.time(), "deployment_bridge": False,
     })
+    return {
+        "status": "interrupted" if stop else "complete",
+        "step": step,
+        "checkpoint": str(checkpoint_directory.resolve()),
+        "best_eval": best_eval,
+    }
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    train(parse_args(argv))
 
 
 if __name__ == "__main__":
