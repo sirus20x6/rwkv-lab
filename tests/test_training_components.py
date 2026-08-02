@@ -29,6 +29,7 @@ from rwkv_lab.training_components import (
     LayerNormFactory,
     LinearHeadCrossEntropyConfiguration,
     LinearHeadCrossEntropyObjective,
+    LinearWarmupConstantConfiguration,
     LinearWarmupCosineConfiguration,
     NormalizationImplementation,
     ObjectiveImplementation,
@@ -52,6 +53,7 @@ from rwkv_lab.training_components import (
     build_registered_schedule,
     build_registered_weight_decay_schedule,
     constant_learning_rate_multiplier,
+    linear_warmup_constant_multiplier,
     linear_warmup_cosine_multiplier,
     optimizer_from_resolved_component,
     parameter_routing_from_resolved_component,
@@ -141,6 +143,16 @@ def test_constant_learning_rate_has_one_stateless_trajectory():
     ] == [1.0] * 8
     with pytest.raises(ValueError, match="nonnegative"):
         constant_learning_rate_multiplier(-1, configuration)
+
+
+def test_linear_warmup_constant_matches_rlvr_optimizer_step_trajectory():
+    configuration = LinearWarmupConstantConfiguration(warmup_steps=4)
+    assert [
+        linear_warmup_constant_multiplier(step, configuration) for step in range(6)
+    ] == pytest.approx([0.25, 0.5, 0.75, 1.0, 1.0, 1.0])
+    assert linear_warmup_constant_multiplier(
+        0, LinearWarmupConstantConfiguration(warmup_steps=0)
+    ) == pytest.approx(1.0)
 
 
 def test_powercool_has_one_shared_optimizer_step_trajectory():
@@ -635,6 +647,7 @@ def test_resolved_parameter_router_dispatch_uses_exact_catalog_defaults():
     [
         AdamWConfiguration,
         ConstantLearningRateConfiguration,
+        LinearWarmupConstantConfiguration,
         LinearWarmupCosineConfiguration,
         PowerCoolConfiguration,
     ],
@@ -647,6 +660,8 @@ def test_invalid_component_configuration_fails_before_tensor_construction(
             configuration(learning_rate=float("nan"))
         elif configuration is ConstantLearningRateConfiguration:
             configuration.from_resolved({"unexpected": True})
+        elif configuration is LinearWarmupConstantConfiguration:
+            configuration(warmup_steps=-1)
         elif configuration is LinearWarmupCosineConfiguration:
             configuration(warmup_steps=-1, max_steps=10)
         else:

@@ -283,6 +283,26 @@
     {
       "key": {
         "category": "learning_rate_schedule",
+        "name": "linear_warmup_constant",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.schedule.linear_warmup_constant.v1",
+      "model_families": ["rwkv", "transformer"],
+      "required_capabilities": ["schedule.linear_warmup_constant.v1"],
+      "configuration": [
+        {"name": "warmup_steps", "type": "integer", "required": true, "minimum": 0, "maximum": 1000000000, "unit": "optimizer_step"}
+      ],
+      "state": [
+        {"name": "cursor", "type": "integer", "required": true}
+      ],
+      "step_domain": "optimizer_step",
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "learning_rate_schedule",
         "name": "constant",
         "version": "1.0.0"
       },

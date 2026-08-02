@@ -1,7 +1,7 @@
 {
   "api_version": "trainvm.compatibility-workflows/v1",
   "authority": "compatibility_evidence_only",
-  "source_tree_digest": "sha256:e05be8f57059689e015a5aff6ec3aba63ac0e49952da79c84a8a808efdc3ac0f",
+  "source_tree_digest": "sha256:c4f4b0e308b77c2d9ee230c2d3492e5399132e118e44c8ec5eb7112dd91ff1a7",
   "entries": [
     {
       "stable_id": "rwkv.synthetic-campaign",
@@ -297,7 +297,7 @@
       ],
       "stateful": true,
       "operation_role": "training",
-      "notes": "RWKV-checkpoint-only grouped RLVR using GSPO, Dr.GRPO, or DAPO. Legacy resume does not seal configuration, tasks, verifier, reference policy, or input content.",
+      "notes": "RWKV-checkpoint-only grouped RLVR using GSPO, Dr.GRPO, or DAPO. The sealed rwkv-lab.rwkv-rlvr@1.0.0 TrainVM profile content-binds checkpoint, vocabulary, task splits, reference checkpoint, and direct-argv verifier identity; uses typed training components and budgets; emits live telemetry/profiling; and publishes a required terminal candidate checkpoint. Legacy resume still does not seal configuration, tasks, verifier, reference policy, or CUDA RNG and is not exposed as adapter resume.",
       "observed_invocation": "python_module",
       "resume_evidence": "compatible",
       "legacy_invocation_display": "python -m rwkv_lab.rlvr_train --ckpt <rwkv.pt> --out <directory>"

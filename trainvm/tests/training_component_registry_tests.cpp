@@ -368,7 +368,7 @@ void checked_in_component_catalog_matches_native_authority_contract() {
   const trainvm::TrainingComponentRegistry registry =
       trainvm::TrainingComponentRegistry::load_file(
           std::filesystem::absolute(path));
-  check(registry.document_json().at("components").size() == 20U &&
+  check(registry.document_json().at("components").size() == 21U &&
             registry.registry_digest().starts_with("sha256:") &&
             registry.registry_digest().size() == 71U,
         "checked-in cross-family component catalog is a canonical native authority document");
@@ -588,6 +588,22 @@ void checked_in_component_catalog_matches_native_authority_contract() {
                 trainvm::StepDomain::optimizer_step &&
             constant_schedule.configuration.empty(),
         "constant learning rate is an independent stateless vision-compatible schedule");
+  const auto warmup_constant = registry.resolve({
+      .key = {
+          .category =
+              trainvm::TrainingComponentCategory::learning_rate_schedule,
+          .name = "linear_warmup_constant",
+          .version = "1.0.0",
+      },
+      .model_family = "rwkv",
+      .configuration = {{"warmup_steps", 10}},
+  });
+  check(warmup_constant.descriptor.implementation ==
+                "rwkv_lab.schedule.linear_warmup_constant.v1" &&
+            warmup_constant.descriptor.state_grade ==
+                trainvm::TrainingStateGrade::exact &&
+            warmup_constant.configuration.at("warmup_steps") == 10,
+        "linear warmup to a constant rate is an exact independent RLVR schedule");
 }
 
 }  // namespace

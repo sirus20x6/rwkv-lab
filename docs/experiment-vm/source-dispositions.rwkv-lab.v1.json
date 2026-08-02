@@ -10,7 +10,7 @@
       ".py"
     ]
   },
-  "source_tree_digest": "sha256:6aa519e3e448b01bc4755dd3fece3d1826d7c72b434d9b9217ec731fca60bfed",
+  "source_tree_digest": "sha256:7a6f1c6c635ad1ef43568a3a956dbeefd149617c0fcd3d0e967b9bfec4581312",
   "entries": [
     {
       "source_path": "src/rwkv_lab/__init__.py",
@@ -2233,7 +2233,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "rlvr.rwkv-train",
-      "source_sha256": "sha256:79fddebc0c58654f85d00bb442a77f7f4368e8d802ca97d3f91162fbef72ae20",
+      "source_sha256": "sha256:75dfbf2e6911dd4b2d98c16512eb9c2c4ddcfe8e7860e8cb28fd8584ee446bd1",
       "family": "rwkv_rlvr",
       "coverage": "direct",
       "consumers": [

@@ -18,6 +18,7 @@ from rwkv_lab.trainvm_adapters.handlers import (
     AdapterDispatchError,
     HandlerResult,
     _appearance_expert,
+    _rlvr,
     _rwkv_posttraining,
     _rwkv_scratch,
     _transformer_mla,
@@ -539,6 +540,94 @@ def test_rwkv_posttraining_handler_seals_inputs_and_publishes_adapter_bundle(
     assert observed[0]["worker_components"] is components
 
 
+def test_rlvr_handler_seals_verifier_and_publishes_terminal_checkpoint(
+    tmp_path, monkeypatch
+) -> None:
+    from pathlib import Path
+
+    from rwkv_lab import rlvr_train
+
+    read_root = tmp_path / "read"
+    run_directory = tmp_path / "write" / "run"
+    read_root.mkdir()
+    run_directory.mkdir(parents=True)
+    checkpoint = read_root / "base.pt"
+    vocab = read_root / "vocab.txt"
+    tasks = read_root / "tasks.jsonl"
+    verifier = read_root / "verifier"
+    checkpoint.write_bytes(b"checkpoint")
+    vocab.write_text("vocab\n", encoding="utf-8")
+    tasks.write_text(
+        '{"id":"one","split":"train","prompt":"1+1",'
+        '"verifier":{"kind":"numeric","expected":2}}\n',
+        encoding="utf-8",
+    )
+    verifier.write_bytes(b"verifier")
+    observed = []
+
+    def fake_run(arguments, **hooks):
+        observed.append((arguments, hooks))
+        candidate = Path(arguments.out) / "rlvr.pt"
+        candidate.write_bytes(b"candidate")
+        return {
+            "status": "complete",
+            "steps_completed": 4,
+            "training_status": "complete",
+            "checkpoint": str(candidate.resolve()),
+            "promotion": {"eligible": True},
+        }
+
+    monkeypatch.setattr(rlvr_train, "run", fake_run)
+    invocation = SimpleNamespace(
+        inputs={
+            "config": {
+                "checkpoint": str(checkpoint),
+                "output_dir": str(run_directory),
+                "vocab": str(vocab),
+                "tasks": str(tasks),
+                "steps": 4,
+                "verifier_executable": str(verifier),
+                "verifier_arguments": ("--profile", "math"),
+            }
+        },
+        workspace=_sealed_workspace(read_root, run_directory),
+        publishes={"checkpoint": {}},
+        resume=None,
+    )
+    components = SimpleNamespace()
+    profiler = SimpleNamespace()
+    observability = SimpleNamespace(
+        keepalive=lambda *_args: __import__("contextlib").nullcontext()
+    )
+    controls = SimpleNamespace(effective_values={})
+
+    result = _rlvr(
+        invocation,
+        components,
+        step_profiler=profiler,
+        observability=observability,
+        controls=controls,
+    )
+
+    arguments, hooks = observed[0]
+    assert arguments.ckpt == str(checkpoint.resolve())
+    assert arguments.tasks == str(tasks.resolve())
+    assert arguments.verifier_command == (
+        str(verifier.resolve()),
+        "--profile",
+        "math",
+    )
+    assert hooks["worker_components"] is components
+    assert hooks["worker_step_profiler"] is profiler
+    assert result.event_type == "worker.completed"
+    assert result.optimizer_step == 4
+    assert result.payload["promotion_eligible"] is True
+    request = result.checkpoint_requests[0]
+    assert request.resume_grade == "terminal_checkpoint"
+    assert request.source_directory == run_directory / "checkpoint-final"
+    assert (request.source_directory / "state.pt").read_bytes() == b"candidate"
+
+
 def test_vision_compressor_handler_seals_inputs_and_publishes_checkpoint(
     tmp_path, monkeypatch
 ) -> None:
@@ -857,6 +946,12 @@ def test_dispatch_table_is_closed_and_training_composition_is_required() -> None
             "1.0.0",
             "train",
             "rwkv_lab.rwkv_scratch.v1.Train",
+        ),
+        (
+            "rwkv-lab.rwkv-rlvr",
+            "1.0.0",
+            "train",
+            "rwkv_lab.rwkv_rlvr.v1.Train",
         ),
         (
             "rwkv-lab.vision-teacher-compressor",

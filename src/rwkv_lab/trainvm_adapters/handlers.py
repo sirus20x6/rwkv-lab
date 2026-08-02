@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import shutil
 from argparse import Namespace
 from collections.abc import Callable, Mapping
 from contextlib import nullcontext
@@ -30,6 +32,7 @@ from .io import WorkspacePathAuthority, read_inline_config
 from .mageflow_controls import lower_initial_mageflow_controls
 from .posttraining import RWKVPostTrainConfig
 from .qwen_controls import lower_initial_qwen_controls
+from .rlvr import RLVRTrainConfig
 from .rwkv_scratch import RWKVScratchTrainConfig
 from .transformer_mla import PROFILE_ADAPTERS, TransformerMLATrainConfig
 from .vision_compressor import VisionTeacherCompressorConfig
@@ -693,6 +696,206 @@ def _rwkv_posttraining(
     )
 
 
+def _rlvr(
+    invocation: WorkerInvocation,
+    components: WorkerTrainingComponents,
+    step_profiler: WorkerStepProfiler | None = None,
+    observability: WorkerObservability | None = None,
+    controls: WorkerControlRuntime | None = None,
+) -> HandlerResult:
+    """Run one bounded RLVR candidate with a terminal immutable checkpoint."""
+
+    if getattr(invocation, "resume", None) is not None:
+        raise AdapterDispatchError(
+            "RLVR v1 is terminal-checkpoint only and rejects controller resume"
+        )
+    if not declares_checkpoint(invocation):
+        raise AdapterDispatchError(
+            "RLVR invocation omits its required checkpoint artifact"
+        )
+    effective_controls = (
+        getattr(controls, "effective_values", {}) if controls is not None else {}
+    )
+    if not isinstance(effective_controls, Mapping):
+        raise AdapterDispatchError("RLVR received an invalid control snapshot")
+    if effective_controls:
+        raise AdapterDispatchError("RLVR v1 does not declare initial controls")
+
+    verification = (
+        observability.keepalive(0, "verifying_inputs")
+        if observability is not None
+        else nullcontext()
+    )
+    with verification:
+        paths = WorkspacePathAuthority.from_workspace(
+            invocation.workspace, require_content=True
+        )
+        config = RLVRTrainConfig(**read_inline_config(invocation.inputs))
+        checkpoint = paths.read_path(
+            config.checkpoint, label="checkpoint", kind="file"
+        )
+        vocab = paths.read_path(config.vocab, label="vocab", kind="file")
+        tasks = (
+            paths.read_path(config.tasks, label="tasks", kind="file")
+            if config.tasks
+            else None
+        )
+        heldout_tasks = (
+            paths.read_path(
+                config.heldout_tasks, label="heldout_tasks", kind="file"
+            )
+            if config.heldout_tasks
+            else None
+        )
+        reference_checkpoint = (
+            paths.read_path(
+                config.reference_checkpoint,
+                label="reference_checkpoint",
+                kind="file",
+            )
+            if config.reference_checkpoint
+            else None
+        )
+        verifier_executable = (
+            paths.read_path(
+                config.verifier_executable,
+                label="verifier_executable",
+                kind="file",
+            )
+            if config.verifier_executable
+            else None
+        )
+        run_directory = paths.exact_run_directory(config.output_dir)
+
+    from rwkv_lab.rlvr_train import run
+
+    result = run(
+        Namespace(
+            ckpt=str(checkpoint),
+            resume="",
+            out=str(run_directory),
+            tasks=str(tasks) if tasks is not None else "",
+            heldout_tasks=str(heldout_tasks) if heldout_tasks is not None else "",
+            algorithm=config.algorithm,
+            steps=config.steps,
+            prompts_per_step=config.prompts_per_step,
+            group_size=config.group_size,
+            epochs=config.epochs,
+            max_new=config.max_new_tokens,
+            rollout_engine=config.rollout_engine,
+            rollout_devices=",".join(config.rollout_devices),
+            temperature=config.temperature,
+            eval_temperature=config.eval_temperature,
+            top_p=config.top_p,
+            top_k=config.top_k,
+            stop_token=config.stop_token,
+            lr=config.learning_rate,
+            weight_decay=config.weight_decay,
+            optimizer=config.optimizer,
+            warmup=config.warmup_steps,
+            grad_clip=config.max_gradient_norm,
+            clip_low=config.clip_low,
+            clip_high=config.clip_high,
+            kl_coef=config.kl_coefficient,
+            reference=config.reference,
+            reference_ckpt=(
+                str(reference_checkpoint)
+                if reference_checkpoint is not None
+                else ""
+            ),
+            train_tasks=config.train_tasks,
+            eval_tasks=config.eval_tasks,
+            difficulty=config.difficulty,
+            curriculum_stages=",".join(
+                str(value) for value in config.curriculum_stages
+            ),
+            sft_steps=config.sft_steps,
+            sft_batch_size=config.sft_batch_size,
+            sft_lr=config.sft_learning_rate,
+            preflight_prompts=config.preflight_prompts,
+            min_preflight_reward=config.minimum_preflight_reward,
+            max_preflight_reward=config.maximum_preflight_reward,
+            min_preflight_active_groups=config.minimum_preflight_active_groups,
+            eval_every=config.eval_every,
+            eval_prompts=config.eval_prompts,
+            eval_group_size=config.eval_group_size,
+            min_heldout_delta=config.minimum_heldout_delta,
+            confidence=config.confidence,
+            bootstrap_samples=config.bootstrap_samples,
+            require_confidence=config.require_confidence,
+            max_family_regression=config.maximum_family_regression,
+            max_rollout_tokens=config.maximum_rollout_tokens,
+            max_train_seconds=config.maximum_train_seconds,
+            save_every=config.save_every,
+            verifier_command=(
+                (str(verifier_executable), *config.verifier_arguments)
+                if verifier_executable is not None
+                else ()
+            ),
+            verifier_timeout=config.verifier_timeout,
+            log_samples=config.log_samples,
+            seed=config.seed,
+            device=config.device,
+            use_ema=config.use_ema,
+            vocab=str(vocab),
+        ),
+        worker_components=components,
+        worker_step_profiler=step_profiler or NullStepProfiler(),
+        worker_observability=observability,
+        worker_controls=controls,
+    )
+    if not isinstance(result, Mapping) or result.get("status") != "complete":
+        raise AdapterDispatchError("RLVR trainer omitted its terminal result")
+    step = result.get("steps_completed")
+    source_checkpoint = result.get("checkpoint")
+    if not isinstance(source_checkpoint, str):
+        raise AdapterDispatchError("RLVR trainer omitted its candidate checkpoint")
+    resolved_checkpoint = Path(source_checkpoint).resolve(strict=True)
+    if (
+        not resolved_checkpoint.is_file()
+        or resolved_checkpoint.is_symlink()
+        or run_directory.resolve(strict=True) not in resolved_checkpoint.parents
+    ):
+        raise AdapterDispatchError("RLVR candidate checkpoint escaped run authority")
+    checkpoint_directory = run_directory / "checkpoint-final"
+    try:
+        checkpoint_directory.mkdir(mode=0o750, exist_ok=False)
+    except FileExistsError as error:
+        raise AdapterDispatchError("RLVR checkpoint staging already exists") from error
+    state_path = checkpoint_directory / "state.pt"
+    try:
+        os.link(resolved_checkpoint, state_path)
+    except OSError:
+        shutil.copy2(resolved_checkpoint, state_path, follow_symlinks=False)
+    request = checkpoint_request(
+        invocation,
+        run_directory,
+        str(checkpoint_directory),
+        step,
+        resume_grade="terminal_checkpoint",
+        state_components=(
+            "component_composition",
+            "model",
+            "optimizer",
+            "rng_python",
+            "rng_torch",
+        ),
+    )
+    return HandlerResult(
+        "worker.completed",
+        {
+            "reason": "training_complete",
+            "training_status": result.get("training_status"),
+            "promotion_eligible": bool(
+                isinstance(result.get("promotion"), Mapping)
+                and result["promotion"].get("eligible") is True
+            ),
+        },
+        optimizer_step=request.optimizer_step,
+        checkpoint_requests=(request,),
+    )
+
+
 def _vision_teacher_compressor(
     invocation: WorkerInvocation,
     components: WorkerTrainingComponents,
@@ -1069,6 +1272,12 @@ _HANDLERS: Mapping[AdapterKey, Handler] = {
         "train",
         "rwkv_lab.rwkv_posttraining.v1.Train",
     ): _rwkv_posttraining,
+    (
+        "rwkv-lab.rwkv-rlvr",
+        "1.0.0",
+        "train",
+        "rwkv_lab.rwkv_rlvr.v1.Train",
+    ): _rlvr,
     (
         "rwkv-lab.rwkv-scratch",
         "1.0.0",
