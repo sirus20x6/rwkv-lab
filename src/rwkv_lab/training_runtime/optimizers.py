@@ -16,6 +16,10 @@ from .resolved import resolved_component_parts
 class OptimizerImplementation(str, Enum):
     TORCH_ADAMW_V1 = "rwkv_lab.optimizer.torch_adamw.v1"
     FP32_MASTER_ADAMW_V1 = "rwkv_lab.optimizer.fp32_master_adamw.v1"
+    TORCH_ADAMW_NO_DECAY_V2 = "rwkv_lab.optimizer.torch_adamw_no_decay.v2"
+    FP32_MASTER_ADAMW_NO_DECAY_V2 = (
+        "rwkv_lab.optimizer.fp32_master_adamw_no_decay.v2"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,10 +82,54 @@ class AdamWConfiguration:
         return cls(**configuration)
 
 
+@dataclass(frozen=True, slots=True)
+class AdamWNoDecayConfiguration:
+    """AdamW mechanics with decay delegated to its independent schedule."""
+
+    learning_rate: float
+    beta1: float = 0.9
+    beta2: float = 0.999
+    epsilon: float = 1.0e-8
+    foreach: bool = True
+    fused: bool = False
+
+    def __post_init__(self) -> None:
+        # Reuse the mature scalar/backend checks while forcing the optimizer's
+        # own decay to zero. The separately resolved decay component installs
+        # the effective value before the first update.
+        AdamWConfiguration(
+            learning_rate=self.learning_rate,
+            beta1=self.beta1,
+            beta2=self.beta2,
+            epsilon=self.epsilon,
+            weight_decay=0.0,
+            foreach=self.foreach,
+            fused=self.fused,
+        )
+
+    @classmethod
+    def from_resolved(
+        cls, configuration: Mapping[str, Any]
+    ) -> AdamWNoDecayConfiguration:
+        expected = {
+            "learning_rate",
+            "beta1",
+            "beta2",
+            "epsilon",
+            "foreach",
+            "fused",
+        }
+        if set(configuration) != expected:
+            raise ValueError(
+                "resolved no-decay AdamW configuration has missing or unknown fields"
+            )
+        return cls(**configuration)
+
+
 def build_registered_optimizer(
     implementation: OptimizerImplementation,
     parameters: Iterable[torch.nn.Parameter] | Iterable[Mapping[str, Any]],
-    configuration: AdamWConfiguration,
+    configuration: AdamWConfiguration | AdamWNoDecayConfiguration,
 ) -> torch.optim.Optimizer:
     """Construct one allowlisted optimizer implementation from typed values."""
 
@@ -89,13 +137,29 @@ def build_registered_optimizer(
         "lr": configuration.learning_rate,
         "betas": (configuration.beta1, configuration.beta2),
         "eps": configuration.epsilon,
-        "weight_decay": configuration.weight_decay,
+        "weight_decay": (
+            configuration.weight_decay
+            if isinstance(configuration, AdamWConfiguration)
+            else 0.0
+        ),
         "foreach": configuration.foreach,
         "fused": configuration.fused,
     }
     if implementation is OptimizerImplementation.TORCH_ADAMW_V1:
+        if not isinstance(configuration, AdamWConfiguration):
+            raise TypeError("Torch AdamW v1 requires its legacy configuration")
         return torch.optim.AdamW(parameters, **kwargs)
     if implementation is OptimizerImplementation.FP32_MASTER_ADAMW_V1:
+        if not isinstance(configuration, AdamWConfiguration):
+            raise TypeError("FP32-master AdamW v1 requires its legacy configuration")
+        return FP32MasterAdamW(parameters, **kwargs)
+    if implementation is OptimizerImplementation.TORCH_ADAMW_NO_DECAY_V2:
+        if not isinstance(configuration, AdamWNoDecayConfiguration):
+            raise TypeError("no-decay Torch AdamW requires its v2 configuration")
+        return torch.optim.AdamW(parameters, **kwargs)
+    if implementation is OptimizerImplementation.FP32_MASTER_ADAMW_NO_DECAY_V2:
+        if not isinstance(configuration, AdamWNoDecayConfiguration):
+            raise TypeError("no-decay FP32-master AdamW requires its v2 configuration")
         return FP32MasterAdamW(parameters, **kwargs)
     raise ValueError(f"unsupported optimizer implementation: {implementation!r}")
 
@@ -111,6 +175,13 @@ def optimizer_from_resolved_component(
         raise ValueError(
             "resolved optimizer implementation is not allowlisted"
         ) from error
-    return build_registered_optimizer(
-        selected, parameters, AdamWConfiguration.from_resolved(configuration)
+    typed_configuration = (
+        AdamWNoDecayConfiguration.from_resolved(configuration)
+        if selected
+        in {
+            OptimizerImplementation.TORCH_ADAMW_NO_DECAY_V2,
+            OptimizerImplementation.FP32_MASTER_ADAMW_NO_DECAY_V2,
+        }
+        else AdamWConfiguration.from_resolved(configuration)
     )
+    return build_registered_optimizer(selected, parameters, typed_configuration)

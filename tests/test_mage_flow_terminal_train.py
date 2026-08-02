@@ -130,10 +130,10 @@ def test_terminal_worker_components_are_exact_and_enter_resume_identity(tmp_path
             "beta1": config.adam_beta1,
             "beta2": config.adam_beta2,
             "epsilon": config.adam_epsilon,
-            "weight_decay": config.weight_decay,
             "foreach": True,
             "fused": False,
         },
+        "weight_decay": {"weight_decay": config.weight_decay},
         "parameter_router": {
             "shared_backbone_multiplier": config.backbone_learning_rate_multiplier,
             "repa_projection_multiplier": config.repa_learning_rate_multiplier,
@@ -163,6 +163,7 @@ def test_terminal_worker_components_are_exact_and_enter_resume_identity(tmp_path
                 "optimizer",
                 "parameter_router",
                 "learning_rate_schedule",
+                "weight_decay_schedule",
                 "gradient_clipping",
             }
             return configurations[slot]

@@ -366,7 +366,7 @@ void checked_in_component_catalog_matches_native_authority_contract() {
   const trainvm::TrainingComponentRegistry registry =
       trainvm::TrainingComponentRegistry::load_file(
           std::filesystem::absolute(path));
-  check(registry.document_json().at("components").size() == 7U &&
+  check(registry.document_json().at("components").size() == 10U &&
             registry.registry_digest().starts_with("sha256:") &&
             registry.registry_digest().size() == 71U,
         "checked-in cross-family component catalog is a canonical native authority document");
@@ -426,6 +426,29 @@ void checked_in_component_catalog_matches_native_authority_contract() {
                                {"max_norm", 1.0},
                                {"norm_type", 2.0}},
         "global-norm clipping resolves independently of optimizer and schedule policy");
+  const auto no_decay_optimizer = registry.resolve({
+      .key = {.category = trainvm::TrainingComponentCategory::optimizer,
+              .name = "torch_adamw_no_decay",
+              .version = "2.0.0"},
+      .model_family = "rwkv",
+      .configuration = {{"learning_rate", 0.0003}},
+  });
+  const auto decay = registry.resolve({
+      .key = {
+          .category =
+              trainvm::TrainingComponentCategory::weight_decay_schedule,
+          .name = "constant",
+          .version = "1.0.0"},
+      .model_family = "rwkv",
+      .configuration = {{"weight_decay", 0.1}},
+  });
+  check(!no_decay_optimizer.configuration.contains("weight_decay") &&
+            no_decay_optimizer.descriptor.implementation ==
+                "rwkv_lab.optimizer.torch_adamw_no_decay.v2" &&
+            decay.configuration == nlohmann::json{{"weight_decay", 0.1}} &&
+            decay.descriptor.step_domain ==
+                trainvm::StepDomain::optimizer_step,
+        "optimizer mechanics and weight-decay policy resolve as independent components");
   const auto powercool = registry.resolve({
       .key = {
           .category =

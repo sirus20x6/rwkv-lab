@@ -423,10 +423,10 @@ def resolved_worker_component_contract(
         "beta1": config.adam_beta1,
         "beta2": config.adam_beta2,
         "epsilon": config.adam_epsilon,
-        "weight_decay": config.weight_decay,
         "foreach": True,
         "fused": False,
     }
+    expected_decay = {"weight_decay": config.weight_decay}
     expected_router = {
         "shared_backbone_multiplier": config.shared_learning_rate_multiplier
     }
@@ -447,6 +447,14 @@ def resolved_worker_component_contract(
     if optimizer_configuration != expected_optimizer:
         raise ValueError(
             "authority optimizer composition disagrees with MageFlow configuration"
+        )
+    if dict(
+        worker_components.configuration(
+            "weight_decay", category="weight_decay_schedule"
+        )
+    ) != expected_decay:
+        raise ValueError(
+            "authority weight-decay composition disagrees with MageFlow configuration"
         )
     if router_configuration != expected_router:
         raise ValueError(
@@ -2067,6 +2075,7 @@ def train(
     if worker_components is not None:
         optimizer = worker_components.optimizer(optimizer_groups)
         scheduler = worker_components.learning_rate_schedule(optimizer)
+        weight_decay_schedule = worker_components.weight_decay_schedule(optimizer)
     else:
         optimizer = build_registered_optimizer(
             OptimizerImplementation.FP32_MASTER_ADAMW_V1,
@@ -2092,6 +2101,7 @@ def train(
                 minimum_ratio=config.min_learning_rate_ratio,
             ),
         )
+        weight_decay_schedule = None
 
     train_rows = load_domain_manifest(Path(config.train_manifest))
     eval_rows = (
@@ -2482,6 +2492,8 @@ def train(
                     trainable, config.max_grad_norm
                 )
             )
+            if weight_decay_schedule is not None:
+                weight_decay_schedule.step(global_step)
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad(set_to_none=True)

@@ -718,7 +718,6 @@ def resolved_worker_component_contract(
         "beta1": 0.9,
         "beta2": 0.95,
         "epsilon": 1.0e-8,
-        "weight_decay": args.weight_decay,
     }
     if any(
         optimizer_configuration.get(name) != value
@@ -726,6 +725,14 @@ def resolved_worker_component_contract(
     ):
         raise ValueError(
             "authority optimizer composition disagrees with RWKV configuration"
+        )
+    if dict(
+        worker_components.configuration(
+            "weight_decay", category="weight_decay_schedule"
+        )
+    ) != {"weight_decay": args.weight_decay}:
+        raise ValueError(
+            "authority weight-decay composition disagrees with RWKV configuration"
         )
     clipping_configuration = dict(
         worker_components.configuration(
@@ -1516,6 +1523,11 @@ def main(
                           muon_opts=muon_opts_from(args), u_mup_config=u_mup_cfg,
                           replicated_params=sparse_ignored_params,
                           worker_components=worker_components)
+    weight_decay_schedule = (
+        worker_components.weight_decay_schedule(opt)
+        if worker_components is not None
+        else None
+    )
     print(f"optimizer={args.optimizer} lr={args.lr} wd={args.weight_decay}", flush=True)
     step = 0; resume_recall_rng = None; did_resume = False
     if args.resume and os.path.exists(args.resume):
@@ -1827,6 +1839,8 @@ def main(
                 if worker_components is not None
                 else torch.nn.utils.clip_grad_norm_(clip_params, args.grad_clip)
             )
+        if weight_decay_schedule is not None:
+            weight_decay_schedule.step(step)
         opt.step(); step += 1
         if args.cached_fp8_up:
             refresh_channelmix_fp8(model)

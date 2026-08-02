@@ -17,6 +17,7 @@ from rwkv_lab.training_runtime.gradient_clipping import (
 )
 from rwkv_lab.training_runtime.optimizers import (
     AdamWConfiguration,
+    AdamWNoDecayConfiguration,
     OptimizerImplementation,
     build_registered_optimizer,
     optimizer_from_resolved_component,
@@ -38,10 +39,20 @@ from rwkv_lab.training_runtime.schedules import (
     schedule_configuration_from_resolved_component,
     schedule_from_resolved_component,
 )
+from rwkv_lab.training_runtime.weight_decay_schedules import (
+    ConstantWeightDecayConfiguration,
+    ConstantWeightDecaySchedule,
+    WeightDecayScheduleImplementation,
+    build_registered_weight_decay_schedule,
+    weight_decay_schedule_from_resolved_component,
+)
 
 __all__ = [
     "AdamWConfiguration",
+    "AdamWNoDecayConfiguration",
     "AppearanceExpertRoutingConfiguration",
+    "ConstantWeightDecayConfiguration",
+    "ConstantWeightDecaySchedule",
     "GlobalNormClippingConfiguration",
     "GradientClippingImplementation",
     "LinearWarmupCosineConfiguration",
@@ -50,10 +61,12 @@ __all__ = [
     "PowerCoolConfiguration",
     "ScheduleImplementation",
     "TerminalExpertRoutingConfiguration",
+    "WeightDecayScheduleImplementation",
     "build_registered_gradient_clipping",
     "build_registered_optimizer",
     "build_registered_parameter_routing",
     "build_registered_schedule",
+    "build_registered_weight_decay_schedule",
     "gradient_clipping_from_resolved_component",
     "linear_warmup_cosine_multiplier",
     "optimizer_from_resolved_component",
@@ -63,4 +76,5 @@ __all__ = [
     "schedule_from_resolved_component",
     "supported_implementation_ids",
     "supported_worker_capabilities",
+    "weight_decay_schedule_from_resolved_component",
 ]

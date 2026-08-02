@@ -756,7 +756,12 @@ def resolved_worker_component_contract(
     if worker_components is None:
         return None, None
     expected = {
-        "optimizer": asdict(_optimizer_configuration(config)),
+        "optimizer": {
+            key: value
+            for key, value in asdict(_optimizer_configuration(config)).items()
+            if key != "weight_decay"
+        },
+        "weight_decay": {"weight_decay": config.weight_decay},
         "learning_rate": asdict(_learning_rate_schedule(config, total_steps)),
         "gradient_clipping": {
             "max_norm": config.max_grad_norm,
@@ -766,6 +771,7 @@ def resolved_worker_component_contract(
     }
     categories = {
         "optimizer": "optimizer",
+        "weight_decay": "weight_decay_schedule",
         "learning_rate": "learning_rate_schedule",
         "gradient_clipping": "gradient_clipping",
     }
@@ -1042,6 +1048,11 @@ def train(
     model = load_hybrid_qlora(config)
     coverage = model_coverage_report(model)
     optimizer = _optimizer(model, config, worker_components)
+    weight_decay_schedule = (
+        worker_components.weight_decay_schedule(optimizer)
+        if worker_components is not None
+        else None
+    )
     scheduler = (
         worker_components.learning_rate_schedule(optimizer)
         if worker_components is not None
@@ -1186,6 +1197,8 @@ def train(
                 group["lr"] = lr
         else:
             lr = float(scheduler.get_last_lr()[0])
+        if weight_decay_schedule is not None:
+            weight_decay_schedule.step(step)
         optimizer.step()
         if scheduler is not None:
             scheduler.step()

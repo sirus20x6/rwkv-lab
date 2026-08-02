@@ -7,6 +7,7 @@ from typing import Any
 import torch
 
 from rwkv_lab.training_components import (
+    ConstantWeightDecaySchedule,
     LinearWarmupCosineConfiguration,
     PowerCoolConfiguration,
     ScheduleImplementation,
@@ -15,6 +16,7 @@ from rwkv_lab.training_components import (
     parameter_routing_from_resolved_component,
     schedule_configuration_from_resolved_component,
     schedule_from_resolved_component,
+    weight_decay_schedule_from_resolved_component,
 )
 from rwkv_lab.training_parameter_routing import ParameterRoutingResult
 from rwkv_lab.trainvm_worker import ResolvedTrainingComposition
@@ -87,6 +89,19 @@ class WorkerTrainingComponents:
         component = self.composition.require(slot, category="gradient_clipping")
         return gradient_clipping_from_resolved_component(
             component.runtime_envelope(), parameters
+        )
+
+    def weight_decay_schedule(
+        self,
+        optimizer: torch.optim.Optimizer,
+        *,
+        slot: str = "weight_decay",
+    ) -> ConstantWeightDecaySchedule:
+        component = self.composition.require(
+            slot, category="weight_decay_schedule"
+        )
+        return weight_decay_schedule_from_resolved_component(
+            component.runtime_envelope(), optimizer
         )
 
     def parameter_routing(

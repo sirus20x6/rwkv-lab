@@ -48,16 +48,24 @@ def test_rwkv_worker_components_drive_powercool_and_optimizer() -> None:
                     "norm_type": 2.0,
                     "error_if_nonfinite": False,
                 }
+            if (slot, category) == (
+                "weight_decay",
+                "weight_decay_schedule",
+            ):
+                return {"weight_decay": 0.1}
             assert (slot, category) == ("optimizer", "optimizer")
             return {
                 "learning_rate": 3.0e-4,
                 "beta1": 0.9,
                 "beta2": 0.95,
                 "epsilon": 1.0e-8,
-                "weight_decay": 0.1,
                 "foreach": False,
                 "fused": False,
             }
+
+        def weight_decay_schedule(self, optimizer):
+            optimizer.param_groups[0]["weight_decay"] = 0.1
+            return SimpleNamespace(step=lambda _step: None)
 
         def learning_rate_configuration(self):
             return ScheduleImplementation.POWERCOOL_V1, schedule

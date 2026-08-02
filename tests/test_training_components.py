@@ -8,7 +8,9 @@ import torch
 from rwkv_lab.mage_flow_optimizations import FP32MasterAdamW
 from rwkv_lab.training_components import (
     AdamWConfiguration,
+    AdamWNoDecayConfiguration,
     AppearanceExpertRoutingConfiguration,
+    ConstantWeightDecayConfiguration,
     GlobalNormClippingConfiguration,
     GradientClippingImplementation,
     LinearWarmupCosineConfiguration,
@@ -17,10 +19,12 @@ from rwkv_lab.training_components import (
     PowerCoolConfiguration,
     ScheduleImplementation,
     TerminalExpertRoutingConfiguration,
+    WeightDecayScheduleImplementation,
     build_registered_gradient_clipping,
     build_registered_optimizer,
     build_registered_parameter_routing,
     build_registered_schedule,
+    build_registered_weight_decay_schedule,
     linear_warmup_cosine_multiplier,
     optimizer_from_resolved_component,
     parameter_routing_from_resolved_component,
@@ -35,7 +39,13 @@ from rwkv_lab.training_components import (
 def test_runtime_categories_have_one_way_dependency_boundaries():
     root = Path(__file__).resolve().parents[1]
     runtime = root / "src/rwkv_lab/training_runtime"
-    category_names = {"gradient_clipping", "optimizers", "routers", "schedules"}
+    category_names = {
+        "gradient_clipping",
+        "optimizers",
+        "routers",
+        "schedules",
+        "weight_decay_schedules",
+    }
     family_fragments = {
         "mage_flow",
         "rwkv_pretrain",
@@ -164,6 +174,7 @@ def test_component_catalog_and_runtime_dispatch_are_exactly_aligned():
     assert grades["learning_rate_schedule"] == "exact"
     assert grades["parameter_router"] == "stateless"
     assert grades["gradient_clipping"] == "stateless"
+    assert grades["weight_decay_schedule"] == "stateless"
 
 
 def test_registered_global_norm_clipping_has_typed_reference_semantics():
@@ -180,6 +191,33 @@ def test_registered_global_norm_clipping_has_typed_reference_semantics():
     )
     assert observed == pytest.approx(10.0)
     assert parameter.grad == pytest.approx(torch.tensor([1.5, 2.0]))
+
+
+def test_no_decay_optimizer_and_decay_schedule_have_independent_contracts():
+    parameter = torch.nn.Parameter(torch.tensor([1.0]))
+    optimizer = build_registered_optimizer(
+        OptimizerImplementation.TORCH_ADAMW_NO_DECAY_V2,
+        [parameter],
+        AdamWNoDecayConfiguration(
+            learning_rate=1.0e-3,
+            beta1=0.9,
+            beta2=0.95,
+            epsilon=1.0e-8,
+            foreach=False,
+            fused=False,
+        ),
+    )
+    assert optimizer.param_groups[0]["weight_decay"] == 0.0
+    schedule = build_registered_weight_decay_schedule(
+        WeightDecayScheduleImplementation.CONSTANT_V1,
+        optimizer,
+        ConstantWeightDecayConfiguration(weight_decay=0.2),
+    )
+    assert optimizer.param_groups[0]["weight_decay"] == pytest.approx(0.2)
+    optimizer.param_groups[0]["weight_decay_multiplier"] = 0.5
+    schedule.step(1)
+    assert optimizer.param_groups[0]["weight_decay"] == pytest.approx(0.1)
+    assert schedule.state_dict() == {}
 
 
 def test_resolved_worker_component_dispatch_is_closed_and_typed():

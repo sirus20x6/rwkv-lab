@@ -29,16 +29,19 @@ def composition():
     )
     requested = {
         "optimizer": (
-            "torch_adamw",
+            "torch_adamw_no_decay",
             {
                 "learning_rate": 1e-3,
                 "beta1": 0.9,
                 "beta2": 0.999,
                 "epsilon": 1e-8,
-                "weight_decay": 0.01,
                 "foreach": True,
                 "fused": False,
             },
+        ),
+        "weight_decay": (
+            "constant",
+            {"weight_decay": 0.01},
         ),
         "learning_rate": (
             "linear_warmup_cosine",
@@ -78,11 +81,14 @@ def test_worker_component_bridge_builds_optimizer_and_schedule() -> None:
     runtime = WorkerTrainingComponents(composition(), "rwkv")
     parameter = torch.nn.Parameter(torch.tensor([1.0]))
     optimizer = runtime.optimizer([parameter])
+    decay = runtime.weight_decay_schedule(optimizer)
     schedule = runtime.learning_rate_schedule(optimizer)
     parameter.grad = torch.tensor([4.0])
     gradient_norm = runtime.gradient_clipping([parameter])
 
     assert isinstance(optimizer, torch.optim.AdamW)
+    assert optimizer.param_groups[0]["weight_decay"] == pytest.approx(0.01)
+    assert decay.state_dict() == {}
     assert isinstance(schedule, torch.optim.lr_scheduler.LRScheduler)
     assert schedule.get_last_lr() == pytest.approx([1e-3])
     assert gradient_norm == pytest.approx(4.0)

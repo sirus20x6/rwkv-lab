@@ -21,14 +21,14 @@ compatibility-grade component.
 Tensor code stays in the runtime that implements it well. `rwkv_lab.training_components` is a
 stable compatibility facade; implementations are physically separated under
 `rwkv_lab.training_runtime` into `optimizers.py`, `schedules.py`, `routers.py`, and
-`gradient_clipping.py`, with only the
+`gradient_clipping.py`, and `weight_decay_schedules.py`, with only the
 shared resolved-envelope decoder at the package root. Each category owns its closed enum, typed
 immutable configuration, validation, construction, and resolved dispatch. Category modules do not
 import one another or any family trainer. The facade has no implementation logic and trainers do
 not depend on the category internals.
 
 Future categories follow the same rule: add `activations.py`, `normalizations.py`, `objectives.py`,
-`precision.py`, `gradient_accumulation.py`, `weight_decay_schedules.py`, or `curricula.py` only when a
+`precision.py`, `gradient_accumulation.py`, or `curricula.py` only when a
 real adapter consumes the descriptor. Do not create a placeholder module or advertise decorative
 configuration. The resolved-worker dispatch functions accept only the canonical envelope from
 TrainVM and fail on extra keys, unknown implementation IDs, wrong categories, missing defaults,
@@ -49,13 +49,17 @@ The initial concrete cross-family catalog contains:
 - warmup/plateau/PowerCool over optimizer steps for RWKV and transformers;
 - appearance-expert versus shared-backbone exclusive parameter routing;
 - terminal-expert versus shared-backbone versus VAE-REPA exclusive parameter routing;
-- global-norm gradient clipping with independently declared norm, threshold, and nonfinite policy.
+- global-norm gradient clipping with independently declared norm, threshold, and nonfinite policy;
+- a constant optimizer-step weight-decay schedule, paired with v2 AdamW implementations whose
+  mechanics contain no decay configuration; v1 AdamW remains registered only for checkpoint and
+  experiment compatibility.
 
 The three MageFlow training paths, RWKV AdamW path, and Qwen transformer AdamW/PowerCool path use
 the common tensor boundary. The MageFlow appearance/terminal expert trainers and Qwen AO3
 continuation and the non-distributed scratch-RWKV path additionally consume authority-resolved
 worker compositions, including gradient clipping rather than trainer-local clipping construction;
-their composition digest
+the migrated compositions also select weight decay independently of AdamW mechanics. Their
+composition digest
 is resume identity, and Qwen persists the registered scheduler cursor alongside optimizer state.
 Scratch RWKV consumes the same optimizer slot and the typed PowerCool configuration directly; its
 optimizer-step cursor remains the schedule state because tied-head and sparse-routing transitions

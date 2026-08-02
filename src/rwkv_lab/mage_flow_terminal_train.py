@@ -567,10 +567,10 @@ def resolved_worker_component_contract(
             "beta1": config.adam_beta1,
             "beta2": config.adam_beta2,
             "epsilon": config.adam_epsilon,
-            "weight_decay": config.weight_decay,
             "foreach": True,
             "fused": False,
         },
+        "weight_decay": {"weight_decay": config.weight_decay},
         "parameter_router": {
             "shared_backbone_multiplier": config.backbone_learning_rate_multiplier,
             "repa_projection_multiplier": config.repa_learning_rate_multiplier,
@@ -593,6 +593,7 @@ def resolved_worker_component_contract(
     }
     categories = {
         "optimizer": "optimizer",
+        "weight_decay": "weight_decay_schedule",
         "parameter_router": "parameter_router",
         "learning_rate": "learning_rate_schedule",
         "gradient_clipping": "gradient_clipping",
@@ -2648,6 +2649,7 @@ def train(
     groups = list(optimizer_routing.groups)
     if worker_components is not None:
         optimizer = worker_components.optimizer(groups)
+        weight_decay_schedule = worker_components.weight_decay_schedule(optimizer)
     else:
         optimizer = build_registered_optimizer(
             OptimizerImplementation.FP32_MASTER_ADAMW_V1,
@@ -2660,6 +2662,7 @@ def train(
                 weight_decay=config.weight_decay,
             ),
         )
+        weight_decay_schedule = None
     domain_schedule = (
         json.loads(
             Path(config.domain_window_schedule).read_text(encoding="utf-8")
@@ -3406,6 +3409,8 @@ def train(
                 )
                 loop_gate_grad_norm = grad_norm.new_zeros(())
             optimizer_step_started_at = time.perf_counter()
+            if weight_decay_schedule is not None:
+                weight_decay_schedule.step(step)
             optimizer.step(
                 parameter_update_scales=(
                     {

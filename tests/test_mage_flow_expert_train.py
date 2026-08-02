@@ -51,16 +51,19 @@ def _worker_components(config: MageFlowExpertTrainConfig) -> WorkerTrainingCompo
     )
     requested = {
         "optimizer": (
-            "fp32_master_adamw",
+            "fp32_master_adamw_no_decay",
             {
                 "learning_rate": config.learning_rate,
                 "beta1": config.adam_beta1,
                 "beta2": config.adam_beta2,
                 "epsilon": config.adam_epsilon,
-                "weight_decay": config.weight_decay,
                 "foreach": True,
                 "fused": False,
             },
+        ),
+        "weight_decay": (
+            "constant",
+            {"weight_decay": config.weight_decay},
         ),
         "parameter_router": (
             "mageflow_appearance_expert",
@@ -734,7 +737,7 @@ def test_worker_composition_drives_expert_optimizer_contract_and_routing(tmp_pat
     mismatched = MageFlowExpertTrainConfig(
         **{**config.__dict__, "weight_decay": 0.02}
     )
-    with pytest.raises(ValueError, match="optimizer composition disagrees"):
+    with pytest.raises(ValueError, match="weight-decay composition disagrees"):
         resolved_worker_component_contract(mismatched, components)
 
 

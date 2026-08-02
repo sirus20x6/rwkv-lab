@@ -144,7 +144,12 @@ def test_qwen_worker_components_are_exact_and_enter_checkpoint_identity(tmp_path
     value = config(tmp_path, max_steps=100)
     total_steps = 80
     configurations = {
-        "optimizer": asdict(_optimizer_configuration(value)),
+        "optimizer": {
+            key: item
+            for key, item in asdict(_optimizer_configuration(value)).items()
+            if key != "weight_decay"
+        },
+        "weight_decay": {"weight_decay": value.weight_decay},
         "learning_rate": asdict(_learning_rate_schedule(value, total_steps)),
         "gradient_clipping": {
             "max_norm": value.max_grad_norm,
@@ -160,6 +165,7 @@ def test_qwen_worker_components_are_exact_and_enter_checkpoint_identity(tmp_path
             assert category in {
                 "optimizer",
                 "learning_rate_schedule",
+                "weight_decay_schedule",
                 "gradient_clipping",
             }
             return configurations[slot]
@@ -181,6 +187,7 @@ def test_qwen_worker_components_are_exact_and_enter_checkpoint_identity(tmp_path
     assert set(evidence) == {
         "optimizer",
         "learning_rate",
+        "weight_decay",
         "gradient_clipping",
     }
     assert composition_digest == components.composition.composition_digest
