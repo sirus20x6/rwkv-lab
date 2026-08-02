@@ -423,11 +423,18 @@ startup orphan recovery are defined in
   indistinguishable from a crash. A benchmark runner measures; this decides. That
   boundary is what stops a runner reimplementing the thresholds and quietly
   disagreeing with the `qualify_cache` node that actually admits an optimization.
-  Not yet built: the runner that executes a fixture and emits a receipt. Per the note above,
-  benchmark is not a separate executor — throughput and peak-memory gates belong to the existing
-  qualification receipt, so the runner should feed that rather than invent a parallel one. A native
-  reflected loader with a pinned digest, matching the compatibility-catalog pattern, belongs with
-  that work; until a qualification node consumes the matrix it is fixture evidence, not authority.
+  The fixture runner executes cold, warmup, and timed phases in fresh processes and emits evidence
+  for that existing qualification path. Portable fixtures run with accelerator visibility masked,
+  so their receipts prove the CPU path was measured even on an accelerator host. Accelerator
+  fixtures require a real CUDA device and fail closed when any timed cell lacks a device name,
+  capability, or nonzero CUDA allocator peak. Before every accelerator cell the runner bounds
+  resident compute-process memory and records the process residency, total and used device memory,
+  utilization, and applied allowance in the benchmark-run receipt, making ambient compositor
+  conditions auditable. Benchmark remains not a separate executor — throughput and peak-memory
+  gates belong to the existing qualification receipt rather than a parallel decision path. A native
+  reflected loader with a pinned digest, matching the compatibility-catalog pattern, still belongs
+  with authority integration; until a qualification node consumes the matrix this remains fixture
+  evidence, not authority.
 - Audit existing optimizations against the qualification contract and publish portable versus
   machine-native receipts.
 - Implement the broadly reusable Modded NanoGPT candidates in the matrix where an existing
