@@ -91,6 +91,13 @@ Hostd is a systemd-owned singleton for the physical host. The default deployment
 Paths may be configured only by a root- or dedicated-authority-owned startup configuration. They are
 not experiment fields.
 
+SQLite authority directories are a narrower deployment boundary: strict acquisition requires the
+database process to run as the configured dedicated UID/GID, refuses effective UID 0 and `nobody`,
+and requires the final directory to be owned by that identity at mode 0700. No worker or other
+workload may use that UID. The emitted filesystem attestation includes the directory owner UID/GID,
+which the operator must compare with the service-account and workload-account configuration before
+admission.
+
 The implemented reflected `trainvm.hostd-daemon/v1` document is that sole configuration boundary.
 It is closed to unknown and duplicate fields and compiles all authority sub-policies, including
 transport peer identity, service roles, retained journal identity, recovery bounds, and trusted
@@ -104,6 +111,10 @@ only after admission. The process supervisor now admits stopped-child launch onl
 restart-adoptable cgroup-device BPF program, non-root credentials, and CPU/I/O process-policy
 receipt. Privileged real-host crash qualification remains a deployment gate.
 
+`trainvm-hostd-crash-qualification --workspace DIR` executes that gate's destructive matrix and
+emits the machine-readable receipt described in
+[Real-host crash qualification](#real-host-crash-qualification).
+
 Hostd uses a filesystem `AF_UNIX` `SOCK_SEQPACKET` endpoint with peer credentials and preferably
 systemd socket activation. It does not use the abstract Unix namespace. Services in another mount
 namespace must receive the same socket through an explicit bind mount or an inherited descriptor.
@@ -115,13 +126,15 @@ The P0 deployment has two supported enforcement grades:
 
 ### Strict host enforcement
 
-A root or dedicated privileged hostd owns the ledger, socket, cgroup subtree, and cgroup-device BPF
-programs. TrainVM services and workers run with less privilege. Peer authorization includes kernel
-credentials and a root-owned service-cgroup identity. Workers cannot modify their cgroup membership
-or device allowlist.
+Privileged host components own the socket, cgroup subtree, and cgroup-device BPF programs, while a
+dedicated non-root/non-`nobody` database identity owns each strict SQLite authority directory and
+database. TrainVM services and workers run under different identities. Peer authorization includes
+kernel credentials and a root-owned service-cgroup identity. Workers cannot modify their cgroup
+membership or device allowlist, and no workload may run as a database authority UID.
 
 Strict mode is required when TrainVM must defend against an untrusted local process running under a
-different service identity.
+different service identity. A process running as the database authority UID is deliberately inside
+the trust boundary and can modify the main SQLite file directly.
 
 ### Cooperative same-UID enforcement
 
@@ -133,6 +146,35 @@ user-owned socket, and open device nodes outside hostd's launcher.
 Hostd reports its enforcement grade. A plan or site policy requesting strict isolation is rejected
 unless privileged cgroup-device enforcement and a protected client identity are active. The system
 must not describe cooperative mode as a security boundary.
+
+### SQLite auxiliary files
+
+Both authority databases are stock SQLite. SQLite derives `-wal`, `-shm`, `-journal`, and
+super-journal names by concatenation and opens them itself. It passes `O_NOFOLLOW`, so a symlink is
+refused, but it checks neither ownership, nor permissions, nor link count: a same-UID process that
+hardlinks an alias over `<db>-wal` before SQLite creates it obtains a live view of every write-ahead
+frame, and SQLite reports success.
+
+Both databases are therefore opened through `SqliteAuthorityVfs` (`trainvm/sqlite_authority_vfs.hpp`)
+rather than by public pathname. It resolves every SQLite open, delete, and access through the
+directory descriptor the authority already pinned, validates the inode with `O_NOFOLLOW` before and
+again after SQLite's own open, pins the wal-index across `xShmMap`, and refuses any name in the
+namespace that is not a declared auxiliary of that database. Refusals are counted and exposed
+through `SqliteAuthorityVfs::statistics()`.
+
+Deployment checks:
+
+- The authority directory must be owned by the service identity and grant no write bit to group or
+  other; `SqliteAuthorityVfs::create` refuses to start otherwise.
+- Nothing outside the authority may create files matching `<db>`, `<db>-wal`, `<db>-shm`,
+  `<db>-journal`, or `<db>-mj*` in that directory. Backup and log-shipping tooling that hardlinks
+  or copies auxiliaries in place must be pointed at a checkpointed copy instead.
+- A nonzero `rejected_identities` or `rejected_substitutions` count on a healthy host indicates
+  another process is writing into the authority directory and must be investigated, not retried.
+- This closes filesystem pathname races only. It does not make cooperative same-UID mode a security
+  boundary: a hostile same-UID process still has `ptrace` and `/proc/self/mem` access to the
+  authority process, and can still destroy write-ahead durability by unlinking. Strict enforcement
+  with separate service accounts remains the boundary.
 
 ## Typed C++ data model
 
@@ -346,10 +388,20 @@ all match. A numeric PID is never signalled after any mismatch.
 
 ## Host ledger
 
-Hostd owns one strict SQLite ledger on a local filesystem. The file and its directory are
-root/dedicated-authority-owned, non-linkable, non-group/world-writable, and resolved without following
-symlinks. The ledger has its own stable identity, exact schema attestation, hash chain, boot-scoped
-clock evidence, and synchronous durability policy.
+Hostd owns one strict SQLite ledger on a supported local filesystem. The shared
+`SqliteFilesystemAuthority` requires a dedicated non-root/non-`nobody` effective UID/GID, a final
+mode-0700 directory, mode-0600 singleton database/lock/auxiliary files, and `openat2`
+`RESOLVE_BENEATH|RESOLVE_NO_MAGICLINKS|RESOLVE_NO_SYMLINKS`; it reattests pinned inodes before and
+after open and at database boundaries. Its attestation exposes the directory owner UID/GID. The
+ledger has its own stable identity, exact schema attestation, hash chain, boot-scoped clock evidence,
+and synchronous durability policy. It intentionally retains ordinary WAL/SHM because existing
+operation and recovery paths use multiple simultaneous SQLite connections.
+
+The single-connection journal selects `locking_mode=EXCLUSIVE` before enabling WAL, so stock SQLite
+does not create `-shm`. Executable evidence also pins stock SQLite's refusal to open symlinked `-wal`
+and `-journal` paths without writing through them. The enforced SQLite floor is 3.53.3 (3053003),
+classified as validated-at rather than a known-minimum because no earlier changelog boundary was
+established offline.
 
 The append-only authority records are:
 
@@ -611,6 +663,13 @@ an authorization input.
 Strict authorization also requires a protected service/cgroup identity. User-namespace mappings are
 recorded and checked; an unexpected mapping blocks adoption.
 
+Filesystem authority has the same limit more directly: a same-UID process can bypass SQLite and
+write the main database inode. A controlled VFS cannot prevent that and was rejected as security
+theatre for this threat model. Strict deployment therefore makes the SQLite authority UID dedicated,
+rejects root and `nobody`, verifies mode 0700 and configured UID/GID at startup, and reports that
+owner identity in attestation. Cooperative same-UID mode detects pinned-inode/namespace changes and
+latches poisoning, but does not claim to prevent same-UID content forgery.
+
 ## Dashboard and legacy telemetry
 
 The Go dashboard obtains authoritative fields from hostd:
@@ -806,6 +865,81 @@ recovery, or admission failure.
 Privileged end-to-end qualification remains in this gate. A daemon crash is not claimed as ordinary in-memory supervisor
 replay; startup policy must consume the durable recovery records.
 
+### Real-host crash qualification
+
+`trainvm-hostd-crash-qualification` is the destructive executor for this gate. It is not a unit
+test: every case forks a real process and destroys it with `SIGKILL`, and the ledger prepare/commit
+windows are opened by a fault injector that raises `SIGKILL` from inside the live SQLite
+transaction, so nothing unwinds. It writes only beneath `--workspace` and a disposable cgroup
+subtree created under the caller's delegated scope, and it allocates a synthetic `host-mutex`
+resource rather than an accelerator, so it is safe to run beside live training. Exit status is `0`
+when the gate is open, `3` when any declared point is unqualified, and `1` on harness failure.
+
+The contract is the enumeration in `trainvm/include/trainvm/hostd_crash_qualification.hpp`. A
+receipt that omits, reorders, or duplicates a declared point is rejected by
+`validate_hostd_crash_qualification_receipt`, as is a case that claims an invariant it did not
+observe, a gate that disagrees with its own blocking points, or a digest that does not bind the
+document. An unexecutable window is reported as `unqualified` with its reason; it is never dropped.
+
+Executors:
+
+- `durable_ledger` — a real on-disk host ledger driven through admission, grant, launch intent,
+  stopped-spawn receipt, terminal exit, and bundle release. The child dies at
+  `after_process_intent_record`, `after_process_intent_commit`, `after_process_spawn_record`,
+  `after_process_spawn_commit`, `after_process_exit_record`, and `after_release_record`, plus one
+  lost-reply window after a committed release. A fresh process then runs the landed
+  `HostdTerminalReleaseRecovery`, `HostdRestartProcessRecovery`, `HostdConfiguredStartupAuditor`,
+  and `HostGrantCoordinator` admission through the wake-driven `HostdStartupController`.
+- `real_process` — restart observation of a worker that outlived its daemon, through the production
+  `LinuxProcessRecoveryProbe`: exact adoption transferred at most once, `SIGKILL` delivered only
+  through the pinned pidfd, and refusal on a changed start time, a changed executable digest, or a
+  reaped PID.
+- `real_cgroup` — `terminate_intent_or_confirm_absent` and `cleanup_terminal_or_confirm_absent`
+  against a real delegated cgroup v2 subtree, including their already-absent replay.
+- `privileged_launch` — the stopped-child, device-policy, and daemon-socket restart windows. These
+  require a root host authority with a distinct non-root worker identity and are reported
+  `unqualified: privilege_unavailable` on an unprivileged host.
+
+Invariants are named per case and are only claimed when observed: `no_double_launch` re-commits the
+exact surviving launch and spawn requests and requires an exact replay with no new durable record;
+`no_double_release` requires the resource generation to remain at exactly one across the crash and
+recovery; `no_leaked_physical_grant` requires a converged recovery to release the bundle and a
+non-terminal one to keep holding it; `no_unauthorized_adoption` requires every one-field identity
+mismatch to yield no process authority.
+
+Current unprivileged result on a delegated user scope: 13 of 16 declared points qualified, the three
+privileged launch windows unqualified, and the gate closed.
+
+The matrix has found two restart defects in the startup stack. Recovery convergence itself is
+unaffected by both, and the qualification asserts convergence directly rather than through
+admission, so each surfaces as a receipt finding that keeps the gate closed.
+
+- `startup-admission-blocked-after-convergence` (fixed). `HostdStartupController::advance` sampled
+  its startup-audit commit time *before* `admission_.admit` ran the audit, while
+  `HostdConfiguredStartupAuditor` stamps its end of observation from a later sample, so
+  `commit_startup_audit` always saw `now.boottime_ns < report.observed_end_boottime_ns` and
+  rejected. The admission authority now receives the `AuthorityClock` and the coordinator samples
+  the commit time through `IHostStartupAuditCommitTimeSource` once the observation has completed.
+  The fixed-time `run_startup_audit` overload is retained for callers that already hold a later
+  time. `hostd_startup_auditor_tests` now drives the real auditor through the real controller and
+  coordinator to admission; the previous controller tests missed the ordering because they used a
+  fixed-time fake auditor.
+- `startup-admission-epoch-not-renewable-after-restart` (fixed). `broker_epoch` is a static field of
+  the daemon configuration document, and `finalize_startup_admission` refused a second admission
+  epoch for the same `host_id`/`boot_id`/`broker_epoch` unless the audit was an exact replay — which
+  a restart never is, because `audit_id` is freshly random. A hostd that crashed and restarted
+  within one boot therefore reconciled its durable records and then could never admit again.
+  Supersession inside one runtime identity is now allowed. It is safe without that refusal:
+  `HostLedgerFilesystemAuthority::acquire` holds a host-global exclusive `flock`, so a second live
+  daemon cannot open the ledger at all; the active-epoch update is an atomic CAS; and
+  `request_bundle` authorizes only against the currently active epoch, so a superseded epoch loses
+  grant authority immediately. The superseding audit must still be bound to the current ledger head
+  and occupancy, and supersession may only move forward — an older committed audit cannot be
+  finalized again to roll the active epoch back.
+
+An unprivileged run now raises no findings; the gate is closed only by the three privileged launch
+windows.
+
 Gate:
 
 - no child executes before its spawn receipt is durable;
@@ -871,7 +1005,8 @@ Required adversarial cases include:
 12. device indices reorder, a UUID disappears, or topology changes across restart;
 13. two abstract locks succeed in separate network namespaces, but only shared hostd can grant;
 14. a private mount namespace cannot see hostd and fails closed;
-15. a same-UID peer outside an authorized service cgroup is refused in strict mode;
+15. a same-UID peer outside an authorized service cgroup is refused in strict mode, while database
+    inode/auxiliary/directory replacement races poison the journal without a partial commit;
 16. a worker attempts cgroup migration, fork/daemon escape, or an unassigned device open;
 17. cgroup marker paths, symlinks, inode identities, or ledger receipt bytes are forged;
 18. a process exits between enumeration, `/proc` inspection, and `pidfd_open`;
@@ -890,7 +1025,8 @@ separate privileged suite and do not replace deterministic fake coverage.
 - trusting utilization thresholds as availability;
 - adopting an unknown external process by command line or executable name;
 - killing foreign accelerator users by default;
-- defending against a hostile same-UID process in cooperative mode;
+- preventing direct database content forgery by a process deliberately sharing the SQLite authority
+  UID (cooperative mode detects boundary movement but is not an identity boundary);
 - making NVML, ROCm SMI, CUDA, PyTorch, or Python part of the durable schema;
 - encoding model-family names or trainer-specific launch rules in hostd.
 

@@ -15,6 +15,7 @@
 #include <grpcpp/grpcpp.h>
 
 #include "trainvm/journal.hpp"
+#include "trainvm/sqlite_filesystem_authority.hpp"
 #include "trainvm/authority_time.hpp"
 #include "trainvm/host_launch.hpp"
 #include "trainvm/hostd_client_bootstrap.hpp"
@@ -29,7 +30,10 @@ namespace trainvm {
 
 class AuthorityLock {
  public:
-  explicit AuthorityLock(const std::filesystem::path& journal_path);
+  explicit AuthorityLock(
+      const std::filesystem::path& journal_path,
+      SqliteAuthorityEnforcementGrade enforcement_grade =
+          SqliteAuthorityEnforcementGrade::cooperative_test);
   ~AuthorityLock();
 
   AuthorityLock(const AuthorityLock&) = delete;
@@ -37,13 +41,13 @@ class AuthorityLock {
 
   [[nodiscard]] const std::filesystem::path& journal_path() const noexcept;
   [[nodiscard]] const JournalFileIdentity& journal_identity() const noexcept;
+  [[nodiscard]] const std::shared_ptr<SqliteFilesystemAuthority>&
+  filesystem_authority() const noexcept;
 
  private:
   int kernel_namespace_descriptor_{-1};
-  int descriptor_{-1};
-  int journal_descriptor_{-1};
-  int directory_descriptor_{-1};
-  std::filesystem::path stable_journal_path_;
+  std::shared_ptr<SqliteFilesystemAuthority> filesystem_authority_;
+  std::filesystem::path journal_path_;
   JournalFileIdentity journal_identity_;
 };
 
@@ -62,7 +66,9 @@ class TrainVMService final : public v1::TrainVM::Service,
       std::string controller_target = {},
       // Optional authority seam for qualify_cache nodes. A plan containing one
       // fails closed when this is absent rather than assuming a verdict.
-      ICacheQualificationEvidenceResolver* cache_qualification = nullptr);
+      ICacheQualificationEvidenceResolver* cache_qualification = nullptr,
+      SqliteAuthorityEnforcementGrade filesystem_enforcement_grade =
+          SqliteAuthorityEnforcementGrade::cooperative_test);
   ~TrainVMService() override;
 
   grpc::Status SubmitExperiment(grpc::ServerContext* context,
@@ -194,7 +200,9 @@ class TrainVMService final : public v1::TrainVM::Service,
                  std::shared_ptr<IHostProcessClient> host_process_client = {},
                  std::string controller_target = {},
                  ICacheQualificationEvidenceResolver* cache_qualification =
-                     nullptr);
+                     nullptr,
+                 SqliteAuthorityEnforcementGrade filesystem_enforcement_grade =
+                     SqliteAuthorityEnforcementGrade::cooperative_test);
 
   static constexpr std::size_t kMaximumRetainedLaunches = 32U;
   static constexpr std::uint64_t kMaximumRetainedLaunchBytes = 2ULL << 30U;

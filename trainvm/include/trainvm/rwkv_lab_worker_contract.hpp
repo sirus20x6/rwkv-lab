@@ -18,13 +18,35 @@ struct RwkvLabWorkerContract final {
 [[nodiscard]] RwkvLabWorkerContract rwkv_lab_worker_contract(
     std::string code_fingerprint);
 
-struct RwkvLabWorkerDeploymentSpec final {
+struct RwkvLabWorkerAdapterRuntimeRequirements final {
+  std::string adapter;
+  std::vector<std::string> root_distributions;
+};
+
+struct RwkvLabWorkerRuntimeRequirementsContract final {
+  std::string api_version;
+  std::vector<std::string> shared_root_distributions;
+  std::vector<RwkvLabWorkerAdapterRuntimeRequirements> profiles;
+};
+
+// The native adapter catalog is the authority for the Python distributions
+// that must be sealed before any adapter code is imported.
+[[nodiscard]] RwkvLabWorkerRuntimeRequirementsContract
+rwkv_lab_worker_runtime_requirements();
+
+struct RwkvLabWorkerRuntimeDeploymentSpec final {
+  std::string adapter;
   std::string code_path;
   std::string code_fingerprint;
   std::string bootstrap_runtime_closure_fingerprint;
   std::string executable_path;
   std::string executable_fingerprint;
   std::string working_directory;
+};
+
+struct RwkvLabWorkerDeploymentSpec final {
+  std::string api_version;
+  std::vector<RwkvLabWorkerRuntimeDeploymentSpec> runtimes;
   std::vector<std::string> trusted_roots;
 };
 
@@ -34,9 +56,9 @@ struct RwkvLabWorkerDeploymentContract final {
   std::vector<std::string> provided_capabilities;
 };
 
-// Lowers one exact worker artifact/interpreter deployment into the two
-// registries consumed by TrainVM. Construction runs both native validators so
-// emitted profiles cannot drift from the reflected worker catalog.
+// Lowers exact per-adapter worker artifact/interpreter deployments into the
+// two registries consumed by TrainVM. Construction runs both native validators
+// so emitted profiles cannot drift from the reflected worker catalog.
 [[nodiscard]] RwkvLabWorkerDeploymentContract rwkv_lab_worker_deployment(
     RwkvLabWorkerDeploymentSpec spec);
 

@@ -62,13 +62,14 @@ add_library(trainvm_core
   src/fake_worker.cpp
   src/fsm.cpp
   src/host_ledger.cpp
-  src/host_ledger_authority.cpp
+  src/sqlite_filesystem_authority.cpp
   src/host_process_saga.cpp
   src/host_startup_audit.cpp
   src/hostd.cpp
   src/hostd_client_bootstrap.cpp
   src/hostd_client_configuration.cpp
   src/hostd_daemon_configuration.cpp
+  src/hostd_crash_qualification.cpp
   src/hostd_daemon_runtime.cpp
   src/hostd_journal_fence_attestor.cpp
   src/hostd_journal_logical_fence.cpp
@@ -100,6 +101,7 @@ add_library(trainvm_core
   src/host_launch_registry.cpp
   src/host_resources.cpp
   src/journal.cpp
+  src/lifecycle_admission.cpp
   src/journal_cache_lease_authority.cpp
   src/lease_renewal.cpp
   src/linux_cache_evidence.cpp
@@ -108,6 +110,7 @@ add_library(trainvm_core
   src/reconciler.cpp
   src/resource_request_builder.cpp
   src/rwkv_lab_worker_contract.cpp
+  src/sqlite_authority_vfs.cpp
   src/training_component_registry.cpp
   src/worker_bootstrap.cpp
 )
@@ -166,6 +169,13 @@ target_link_libraries(trainvm PRIVATE
 )
 
 add_executable(trainvm-hostd src/hostd_main.cpp)
+add_executable(trainvm-hostd-crash-qualification
+  src/hostd_crash_qualification_main.cpp
+)
+target_compile_options(trainvm-hostd-crash-qualification PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(trainvm-hostd-crash-qualification PRIVATE trainvm_core)
 target_compile_options(trainvm-hostd PRIVATE
   -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
 )
@@ -189,9 +199,18 @@ target_compile_definitions(trainvm_tests PRIVATE
 target_link_libraries(trainvm_tests PRIVATE trainvm_service)
 add_test(NAME trainvm_tests COMMAND trainvm_tests)
 if(TRAINVM_GO_EXECUTABLE)
+  # The live stack runs the real service, which acquires its journal under the
+  # strict_filesystem grade. That grade requires the whole authority ancestry to
+  # be unwritable outside the authority owner, so the harness cannot place its
+  # journal beneath a world-writable /tmp. Give it a journal directory in the
+  # build tree, mirroring a real deployment directory such as /var/lib/trainvm.
+  # Only the journal moves: the Unix socket stays under the shorter default
+  # temporary directory because sun_path is limited to 108 bytes.
+  file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/e2e-authority")
   add_test(NAME trainvm_dashboard_live_e2e
     COMMAND ${CMAKE_COMMAND} -E env
       TRAINVM_E2E_BINARY=$<TARGET_FILE:trainvm>
+      TRAINVM_E2E_AUTHORITY_DIR=${CMAKE_CURRENT_BINARY_DIR}/e2e-authority
       ${TRAINVM_GO_EXECUTABLE} test ./internal/server
         -run ^TestTrainVMLiveStackE2E$ -count=1
   )
@@ -265,6 +284,12 @@ target_compile_options(authority_time_tests PRIVATE
 )
 target_link_libraries(authority_time_tests PRIVATE trainvm_core)
 add_test(NAME authority_time_tests COMMAND authority_time_tests)
+add_executable(sqlite_authority_vfs_tests tests/sqlite_authority_vfs_tests.cpp)
+target_compile_options(sqlite_authority_vfs_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(sqlite_authority_vfs_tests PRIVATE trainvm_core)
+add_test(NAME sqlite_authority_vfs_tests COMMAND sqlite_authority_vfs_tests)
 add_executable(cache_namespace_tests tests/cache_namespace_tests.cpp)
 target_compile_options(cache_namespace_tests PRIVATE
   -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
@@ -344,6 +369,16 @@ target_link_libraries(resource_request_builder_tests PRIVATE trainvm_core)
 add_test(NAME resource_request_builder_tests
   COMMAND resource_request_builder_tests
 )
+add_executable(lifecycle_equivalence_tests
+  tests/lifecycle_equivalence_tests.cpp
+)
+target_compile_options(lifecycle_equivalence_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(lifecycle_equivalence_tests PRIVATE trainvm_core)
+add_test(NAME lifecycle_equivalence_tests
+  COMMAND lifecycle_equivalence_tests
+)
 add_executable(host_ledger_tests tests/host_ledger_tests.cpp)
 target_compile_options(host_ledger_tests PRIVATE
   -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
@@ -356,6 +391,14 @@ target_compile_options(host_ledger_authority_tests PRIVATE
 )
 target_link_libraries(host_ledger_authority_tests PRIVATE trainvm_core)
 add_test(NAME host_ledger_authority_tests COMMAND host_ledger_authority_tests)
+add_executable(sqlite_auxiliary_race_tests
+  tests/sqlite_auxiliary_race_tests.cpp
+)
+target_compile_options(sqlite_auxiliary_race_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(sqlite_auxiliary_race_tests PRIVATE trainvm_core)
+add_test(NAME sqlite_auxiliary_race_tests COMMAND sqlite_auxiliary_race_tests)
 add_executable(hostd_tests tests/hostd_tests.cpp)
 target_compile_options(hostd_tests PRIVATE
   -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
@@ -402,6 +445,16 @@ target_compile_options(hostd_restart_process_recovery_tests PRIVATE
 target_link_libraries(hostd_restart_process_recovery_tests PRIVATE trainvm_core)
 add_test(NAME hostd_restart_process_recovery_tests
   COMMAND hostd_restart_process_recovery_tests
+)
+add_executable(hostd_crash_qualification_tests
+  tests/hostd_crash_qualification_tests.cpp
+)
+target_compile_options(hostd_crash_qualification_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(hostd_crash_qualification_tests PRIVATE trainvm_core)
+add_test(NAME hostd_crash_qualification_tests
+  COMMAND hostd_crash_qualification_tests
 )
 add_executable(hostd_startup_controller_tests
   tests/hostd_startup_controller_tests.cpp

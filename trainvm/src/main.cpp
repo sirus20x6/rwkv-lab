@@ -33,9 +33,9 @@ void usage() {
       << "  trainvm inspect-training-components <training-components.json>\n"
       << "  trainvm inspect-hostd-client <hostd-client.json>\n"
       << "  trainvm inspect-rwkv-lab-worker <sha256-code-fingerprint>\n"
-      << "  trainvm inspect-rwkv-lab-deployment <worker.pyz> <worker-sha256> "
-         "<bootstrap-runtime-closure-sha256> <python> <python-sha256> "
-         "<working-directory> <trusted-root>...\n"
+      << "  trainvm inspect-rwkv-lab-runtime-requirements\n"
+      << "  trainvm inspect-rwkv-lab-deployment"
+         "  # read trainvm.rwkv-lab-worker-runtimes/v1 JSON from stdin\n"
       << "  trainvm inspect-registry <experiments.db> [--task <task>] "
          "[--metric <metric>] [--baseline <config>] [--limit <count>]\n"
       << "  trainvm serve --journal <journal.db> --socket <trainvm.sock> "
@@ -328,35 +328,38 @@ int inspect_rwkv_lab_worker_command(std::string code_fingerprint) {
   return 0;
 }
 
-int inspect_rwkv_lab_deployment_command(int argc, char** argv) {
-  if (argc < 9) {
+int inspect_rwkv_lab_runtime_requirements_command(int argc) {
+  if (argc != 2) {
     usage();
     return 64;
   }
-  const auto canonical = [](const char* path) {
-    return std::filesystem::canonical(path).string();
-  };
-  std::vector<std::string> trusted_roots;
-  trusted_roots.reserve(static_cast<std::size_t>(argc - 8));
-  for (int index = 8; index < argc; ++index) {
-    trusted_roots.push_back(canonical(argv[index]));
+  std::cout << trainvm::encode_json(
+                   trainvm::rwkv_lab_worker_runtime_requirements())
+                   .dump(2)
+            << '\n';
+  return 0;
+}
+
+int inspect_rwkv_lab_deployment_command(int argc, char** argv) {
+  (void)argv;
+  if (argc != 2) {
+    usage();
+    return 64;
+  }
+  trainvm::RwkvLabWorkerDeploymentSpec spec;
+  std::vector<trainvm::Diagnostic> diagnostics;
+  if (!trainvm::decode_json(read_stdin_json(), spec, "", diagnostics)) {
+    std::cerr << trainvm::diagnostics_json(diagnostics).dump(2) << '\n';
+    return 2;
   }
   const trainvm::RwkvLabWorkerDeploymentContract deployment =
-      trainvm::rwkv_lab_worker_deployment({
-          .code_path = canonical(argv[2]),
-          .code_fingerprint = argv[3],
-          .bootstrap_runtime_closure_fingerprint = argv[4],
-          .executable_path = canonical(argv[5]),
-          .executable_fingerprint = argv[6],
-          .working_directory = canonical(argv[7]),
-          .trusted_roots = std::move(trusted_roots),
-      });
+      trainvm::rwkv_lab_worker_deployment(std::move(spec));
   const trainvm::AdapterRegistry adapters(
       deployment.adapter_registry.profiles);
   const trainvm::HostLaunchRegistry launches(
       deployment.host_launch_registry);
   std::cout << nlohmann::json{
-                   {"schema", "trainvm.rwkv-lab-worker-deployment/v2"},
+                   {"schema", "trainvm.rwkv-lab-worker-deployment/v3"},
                    {"adapter_registry_digest", adapters.registry_digest()},
                    {"host_launch_registry_digest",
                     launches.registry_digest()},
@@ -399,6 +402,10 @@ int main(int argc, char** argv) {
     if (argc == 3 &&
         std::string_view(argv[1]) == "inspect-rwkv-lab-worker") {
       return inspect_rwkv_lab_worker_command(argv[2]);
+    }
+    if (argc >= 2 && std::string_view(argv[1]) ==
+                         "inspect-rwkv-lab-runtime-requirements") {
+      return inspect_rwkv_lab_runtime_requirements_command(argc);
     }
     if (argc >= 2 &&
         std::string_view(argv[1]) == "inspect-rwkv-lab-deployment") {

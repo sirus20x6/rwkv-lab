@@ -14,7 +14,7 @@
 
 #include "trainvm/authority_time.hpp"
 #include "trainvm/host_ledger.hpp"
-#include "trainvm/host_ledger_authority.hpp"
+#include "trainvm/sqlite_filesystem_authority.hpp"
 #include "trainvm/hostd_journal_fence_attestor.hpp"
 #include "trainvm/hostd_journal_logical_fence.hpp"
 #include "trainvm/hostd_ledger_singleton_token.hpp"
@@ -111,10 +111,11 @@ struct HostdDaemonRuntime::Implementation final {
 
     journal = std::make_unique<Journal>(
         configuration.journal_path(), configuration.document().journal_identity,
-        HostGrantEnforcement::required, configuration.journal_host());
+        HostGrantEnforcement::required, configuration.journal_host(), nullptr,
+        true);
 
-    ledger_authority = std::make_shared<HostLedgerFilesystemAuthority>(
-        HostLedgerFilesystemAuthority::acquire(
+    ledger_authority = std::make_shared<SqliteFilesystemAuthority>(
+        SqliteFilesystemAuthority::acquire(
             configuration.ledger_authority()));
     singleton = std::make_shared<HostdLedgerSingletonToken>(ledger_authority);
     ledger = std::make_shared<SQLiteHostLedger>(
@@ -208,7 +209,7 @@ struct HostdDaemonRuntime::Implementation final {
   std::unique_ptr<AuthorityClock> clock;
   std::unique_ptr<LinuxNvidiaInventoryCollector> inventory_kernel;
   HostInventoryReceipt inventory;
-  std::shared_ptr<HostLedgerFilesystemAuthority> ledger_authority;
+  std::shared_ptr<SqliteFilesystemAuthority> ledger_authority;
   std::shared_ptr<HostdLedgerSingletonToken> singleton;
   std::shared_ptr<SQLiteHostLedger> ledger;
   std::unique_ptr<Journal> journal;

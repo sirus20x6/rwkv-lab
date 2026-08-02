@@ -8,7 +8,7 @@
 #include <string_view>
 #include <vector>
 
-#include "trainvm/host_ledger_authority.hpp"
+#include "trainvm/sqlite_filesystem_authority.hpp"
 #include "trainvm/hostd_journal_fence_attestor.hpp"
 #include "trainvm/hostd_linux_cgroup_authority.hpp"
 #include "trainvm/hostd_linux_service_identity.hpp"
@@ -138,7 +138,7 @@ public:
 
   [[nodiscard]] const HostdDaemonConfigurationDocument &
   document() const noexcept;
-  [[nodiscard]] HostLedgerAuthorityConfig ledger_authority() const;
+  [[nodiscard]] SqliteAuthorityConfig ledger_authority() const;
   [[nodiscard]] LinuxNvidiaInventoryConfig inventory() const;
   [[nodiscard]] LinuxCgroupAuthorityConfig cgroup() const;
   [[nodiscard]] LinuxWorkerCredentialSpec worker_credentials() const;

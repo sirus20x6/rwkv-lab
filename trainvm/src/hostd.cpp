@@ -546,8 +546,38 @@ HostGrantCoordinator::HostGrantCoordinator(
 
 HostGrantCoordinator::~HostGrantCoordinator() = default;
 
+namespace {
+
+// Preserves the historical fixed-time contract for callers that already know a
+// time later than the audit observation they are about to trigger.
+class FixedStartupAuditCommitTime final
+    : public IHostStartupAuditCommitTimeSource {
+public:
+  explicit FixedStartupAuditCommitTime(HostLedgerTime value) noexcept
+      : value_(value) {}
+  [[nodiscard]] HostLedgerTime commit_time() override { return value_; }
+
+private:
+  HostLedgerTime value_;
+};
+
+} // namespace
+
 HostStartupAuditReceipt HostGrantCoordinator::run_startup_audit(
     IConfiguredHostStartupAuditorV2 &auditor, const HostLedgerTime &now) {
+  FixedStartupAuditCommitTime fixed(now);
+  return run_startup_audit_sampled(auditor, fixed);
+}
+
+HostStartupAuditReceipt HostGrantCoordinator::run_startup_audit(
+    IConfiguredHostStartupAuditorV2 &auditor,
+    IHostStartupAuditCommitTimeSource &commit_time) {
+  return run_startup_audit_sampled(auditor, commit_time);
+}
+
+HostStartupAuditReceipt HostGrantCoordinator::run_startup_audit_sampled(
+    IConfiguredHostStartupAuditorV2 &auditor,
+    IHostStartupAuditCommitTimeSource &commit_time_source) {
   {
     std::scoped_lock lock(implementation_->mutex);
     if (implementation_->lifecycle != HostdLifecycle::sealed) {
@@ -569,6 +599,24 @@ HostStartupAuditReceipt HostGrantCoordinator::run_startup_audit(
   } catch (...) {
     std::scoped_lock lock(implementation_->mutex);
     implementation_->poison("startup audit failed with an unknown error");
+    throw HostdStateError(implementation_->poison_reason);
+  }
+
+  // The commit time is sampled only now. The ledger refuses a startup-audit
+  // commit that claims to predate the report's own end of observation, so a
+  // time sampled before auditor.audit() ran can never be committed.
+  HostLedgerTime now;
+  try {
+    now = commit_time_source.commit_time();
+  } catch (const std::exception &error) {
+    std::scoped_lock lock(implementation_->mutex);
+    implementation_->poison(
+        std::string("startup audit commit time is unavailable: ") +
+        error.what());
+    throw HostdStateError(implementation_->poison_reason);
+  } catch (...) {
+    std::scoped_lock lock(implementation_->mutex);
+    implementation_->poison("startup audit commit time is unavailable");
     throw HostdStateError(implementation_->poison_reason);
   }
 

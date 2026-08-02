@@ -1,4 +1,6 @@
-#include "trainvm/host_ledger_authority.hpp"
+#include "trainvm/sqlite_filesystem_authority.hpp"
+
+#include <sqlite3.h>
 
 #include <fcntl.h>
 #include <linux/magic.h>
@@ -24,6 +26,7 @@ constexpr std::size_t kMaximumPathBytes = 4096U;
 constexpr std::size_t kMaximumFilenameBytes = 128U;
 constexpr unsigned int kProtectedDirectoryMode = 0700U;
 constexpr unsigned int kProtectedFileMode = 0600U;
+constexpr uid_t kNobodyUid = 65534U;
 
 class FileDescriptor final {
 public:
@@ -52,8 +55,7 @@ private:
 
 [[noreturn]] void throw_errno(std::string_view action) {
   const int error = errno;
-  throw HostLedgerAuthorityError(std::string(action) + ": " +
-                                 std::strerror(error));
+  throw SqliteAuthorityError(std::string(action) + ": " + std::strerror(error));
 }
 
 bool safe_filename(std::string_view value) {
@@ -73,7 +75,7 @@ bool safe_filename(std::string_view value) {
   return true;
 }
 
-HostLedgerFileIdentity identity(const struct stat &status) {
+SqliteFileIdentity identity(const struct stat &status) {
   return {.device = static_cast<std::uint64_t>(status.st_dev),
           .inode = static_cast<std::uint64_t>(status.st_ino),
           .size = status.st_size < 0
@@ -85,8 +87,8 @@ HostLedgerFileIdentity identity(const struct stat &status) {
           .link_count = static_cast<std::uint64_t>(status.st_nlink)};
 }
 
-bool same_pinned_inode(const HostLedgerFileIdentity &left,
-                       const HostLedgerFileIdentity &right) {
+bool same_pinned_inode(const SqliteFileIdentity &left,
+                       const SqliteFileIdentity &right) {
   return left.device == right.device && left.inode == right.inode &&
          left.mode == right.mode && left.owner_uid == right.owner_uid &&
          left.owner_gid == right.owner_gid &&
@@ -126,23 +128,39 @@ FileDescriptor open_beneath(int directory, std::string_view name,
 }
 
 void require_directory_policy(const struct stat &status,
-                              const HostLedgerAuthorityConfig &config,
+                              const SqliteAuthorityConfig &config,
                               bool final_directory) {
   if (!S_ISDIR(status.st_mode)) {
-    throw HostLedgerAuthorityError(
-        "authority ancestry contains a non-directory");
+    throw SqliteAuthorityError("authority ancestry contains a non-directory");
   }
   const auto permissions = static_cast<unsigned int>(status.st_mode) & 07777U;
   const bool root_owned = status.st_uid == 0U;
   const bool authority_owned = status.st_uid == config.expected_owner_uid;
-  if (!root_owned && !authority_owned) {
-    throw HostLedgerAuthorityError(
-        "authority ancestry has an unexpected owner");
+  const bool cooperative_sandbox_ancestor =
+      !final_directory &&
+      config.enforcement_grade ==
+          SqliteAuthorityEnforcementGrade::cooperative_test &&
+      status.st_uid == kNobodyUid;
+  if (!root_owned && !authority_owned && !cooperative_sandbox_ancestor) {
+    throw SqliteAuthorityError("authority ancestry has an unexpected owner");
   }
   if (final_directory) {
-    if (!authority_owned || status.st_gid != config.expected_owner_gid ||
-        permissions != kProtectedDirectoryMode) {
-      throw HostLedgerAuthorityError(
+    if (!authority_owned || status.st_gid != config.expected_owner_gid) {
+      throw SqliteAuthorityError(
+          "authority directory must be owner-controlled mode 0700");
+    }
+    if (permissions == kProtectedDirectoryMode)
+      return;
+    // strict_filesystem is the deployed grade and requires the exact 0700
+    // authority directory. cooperative_test is diagnostic isolation only, never
+    // a boundary against a same-UID process, so it accepts an owner-controlled
+    // directory that is merely not group- or world-writable. Relaxing it here
+    // keeps hermetic tests runnable under a default-mode temporary directory
+    // without loosening any deployed check.
+    if (config.enforcement_grade !=
+            SqliteAuthorityEnforcementGrade::cooperative_test ||
+        (permissions & 0022U) != 0U) {
+      throw SqliteAuthorityError(
           "authority directory must be owner-controlled mode 0700");
     }
     return;
@@ -151,22 +169,23 @@ void require_directory_policy(const struct stat &status,
   if (!group_or_world_writable)
     return;
   const bool sticky_root_directory =
-      root_owned && (permissions & static_cast<unsigned int>(S_ISVTX)) != 0U;
+      (root_owned || cooperative_sandbox_ancestor) &&
+      (permissions & static_cast<unsigned int>(S_ISVTX)) != 0U;
   if (config.enforcement_grade ==
-          HostLedgerEnforcementGrade::cooperative_test &&
+          SqliteAuthorityEnforcementGrade::cooperative_test &&
       sticky_root_directory) {
     return;
   }
-  throw HostLedgerAuthorityError(
+  throw SqliteAuthorityError(
       "authority ancestry is writable outside the authority owner");
 }
 
 struct OpenedParent final {
   FileDescriptor descriptor;
-  HostLedgerFileIdentity identity;
+  SqliteFileIdentity identity;
 };
 
-OpenedParent open_authority_parent(const HostLedgerAuthorityConfig &config) {
+OpenedParent open_authority_parent(const SqliteAuthorityConfig &config) {
   const auto parent = config.ledger_path.parent_path();
   FileDescriptor current(
       ::open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
@@ -185,7 +204,7 @@ OpenedParent open_authority_parent(const HostLedgerAuthorityConfig &config) {
   for (const auto &component_path : relative) {
     const std::string component = component_path.string();
     if (!safe_filename(component)) {
-      throw HostLedgerAuthorityError(
+      throw SqliteAuthorityError(
           "authority path contains a noncanonical component");
     }
     auto next =
@@ -209,7 +228,7 @@ OpenedParent open_authority_parent(const HostLedgerAuthorityConfig &config) {
 }
 
 std::string filesystem_name(long filesystem_type,
-                            HostLedgerEnforcementGrade grade) {
+                            SqliteAuthorityEnforcementGrade grade) {
   switch (filesystem_type) {
   case EXT4_SUPER_MAGIC:
     return "ext-family";
@@ -222,46 +241,54 @@ std::string filesystem_name(long filesystem_type,
   case 0x2FC12FC1L:
     return "zfs";
   case TMPFS_MAGIC:
-    if (grade == HostLedgerEnforcementGrade::cooperative_test)
+    if (grade == SqliteAuthorityEnforcementGrade::cooperative_test)
       return "tmpfs";
     break;
   case RAMFS_MAGIC:
-    if (grade == HostLedgerEnforcementGrade::cooperative_test)
+    if (grade == SqliteAuthorityEnforcementGrade::cooperative_test)
       return "ramfs";
     break;
   case OVERLAYFS_SUPER_MAGIC:
-    if (grade == HostLedgerEnforcementGrade::cooperative_test) {
+    if (grade == SqliteAuthorityEnforcementGrade::cooperative_test) {
       return "overlayfs";
     }
     break;
   default:
     break;
   }
-  throw HostLedgerAuthorityError(
+  throw SqliteAuthorityError(
       "authority directory is not on a supported local filesystem");
 }
 
 void validate_regular_file(const struct stat &status,
-                           const HostLedgerAuthorityConfig &config,
+                           const SqliteAuthorityConfig &config,
                            std::string_view description) {
   if (!S_ISREG(status.st_mode) || status.st_nlink != 1 ||
       status.st_uid != config.expected_owner_uid ||
       status.st_gid != config.expected_owner_gid ||
       (static_cast<unsigned int>(status.st_mode) & 07777U) !=
           kProtectedFileMode) {
-    throw HostLedgerAuthorityError(
-        std::string(description) +
-        " must be an owned 0600 singleton regular file");
+    throw SqliteAuthorityError(std::string(description) +
+                               " must be an owned 0600 singleton regular file");
   }
 }
 
+// Narrow an authority file that is already owner-owned, regular, unaliased, and
+// not group- or world-writable down to the protected 0600 mode, so that the
+// strict validation above accepts it. This only ever removes access, so it can
+// never widen a planted file, and anything failing those prior properties is
+// rejected rather than repaired. A database adopted from a run that predates
+// this policy is 0644 under the usual umask, and stock SQLite derives -wal and
+// -journal modes from the database file, so normalizing the database at
+// adoption also normalizes every auxiliary SQLite subsequently creates.
+
 struct OpenedFile final {
   FileDescriptor descriptor;
-  HostLedgerFileIdentity identity;
+  SqliteFileIdentity identity;
 };
 
 OpenedFile create_or_open_file(int parent, std::string_view name,
-                               const HostLedgerAuthorityConfig &config) {
+                               const SqliteAuthorityConfig &config) {
   bool created = false;
   FileDescriptor path_descriptor;
   int opened =
@@ -321,7 +348,7 @@ OpenedFile create_or_open_file(int parent, std::string_view name,
     }
     if (!same_pinned_inode(identity(path_descriptor_status),
                            identity(descriptor_status))) {
-      throw HostLedgerAuthorityError(
+      throw SqliteAuthorityError(
           "authority file changed while it was being opened");
     }
   }
@@ -332,7 +359,7 @@ OpenedFile create_or_open_file(int parent, std::string_view name,
     throw_errno("could not re-inspect authority file path");
   }
   if (!same_pinned_inode(identity(descriptor_status), identity(path_status))) {
-    throw HostLedgerAuthorityError(
+    throw SqliteAuthorityError(
         "authority file changed while it was being opened");
   }
   return {.descriptor = std::move(descriptor),
@@ -341,21 +368,22 @@ OpenedFile create_or_open_file(int parent, std::string_view name,
 
 } // namespace
 
-struct HostLedgerFilesystemAuthority::Implementation final {
-  HostLedgerAuthorityConfig config;
+struct SqliteFilesystemAuthority::Implementation final {
+  SqliteAuthorityConfig config;
   std::string database_name;
   std::string lock_name;
   FileDescriptor parent;
   FileDescriptor database;
   FileDescriptor lock;
-  HostLedgerFileIdentity parent_identity;
-  HostLedgerFileIdentity database_identity;
-  HostLedgerFileIdentity lock_identity;
+  SqliteFileIdentity parent_identity;
+  SqliteFileIdentity database_identity;
+  SqliteFileIdentity lock_identity;
   std::string filesystem;
   bool protected_filesystem_boundary{};
+  std::shared_ptr<SqliteAuthorityVfs> sqlite_vfs;
   mutable std::mutex mutex;
 
-  HostLedgerAuthorityAttestation attest() const {
+  SqliteAuthorityAttestation attest() const {
     auto reopened_parent = open_authority_parent(config);
     struct stat held_parent_status{};
     struct stat held_database_status{};
@@ -371,7 +399,7 @@ struct HostLedgerFilesystemAuthority::Implementation final {
         !same_pinned_inode(parent_identity, reopened_parent.identity) ||
         !same_pinned_inode(database_identity, identity(held_database_status)) ||
         !same_pinned_inode(lock_identity, identity(held_lock_status))) {
-      throw HostLedgerAuthorityError("a pinned authority inode changed");
+      throw SqliteAuthorityError("a pinned authority inode changed");
     }
     auto reopened_database = open_beneath(
         reopened_parent.descriptor.get(), database_name,
@@ -390,9 +418,9 @@ struct HostLedgerFilesystemAuthority::Implementation final {
     if (!same_pinned_inode(database_identity,
                            identity(reopened_database_status)) ||
         !same_pinned_inode(lock_identity, identity(reopened_lock_status))) {
-      throw HostLedgerAuthorityError("authority pathname inode was replaced");
+      throw SqliteAuthorityError("authority pathname inode was replaced");
     }
-    return {.api_version = std::string(kHostLedgerAuthorityApiVersion),
+    return {.api_version = std::string(kSqliteAuthorityApiVersion),
             .ledger_path = config.ledger_path,
             .enforcement_grade = config.enforcement_grade,
             .protected_filesystem_boundary = protected_filesystem_boundary,
@@ -403,30 +431,47 @@ struct HostLedgerFilesystemAuthority::Implementation final {
   }
 };
 
-HostLedgerFilesystemAuthority
-HostLedgerFilesystemAuthority::acquire(HostLedgerAuthorityConfig config) {
+SqliteFilesystemAuthority
+SqliteFilesystemAuthority::acquire(SqliteAuthorityConfig config) {
+  if (sqlite3_libversion_number() < kSqliteAuthorityMinimumVersionNumber) {
+    throw SqliteAuthorityError(
+        "SQLite is older than the auxiliary-path validated-at floor 3.53.3");
+  }
   const std::string native_path = config.ledger_path.string();
   const bool grade_is_valid =
       config.enforcement_grade ==
-          HostLedgerEnforcementGrade::strict_filesystem ||
-      config.enforcement_grade == HostLedgerEnforcementGrade::cooperative_test;
+          SqliteAuthorityEnforcementGrade::strict_filesystem ||
+      config.enforcement_grade ==
+          SqliteAuthorityEnforcementGrade::cooperative_test;
   const bool has_posix_double_slash_prefix =
       native_path.size() > 1U && native_path[0] == '/' && native_path[1] == '/';
-  if (config.api_version != kHostLedgerAuthorityApiVersion || !grade_is_valid ||
+  if (config.api_version != kSqliteAuthorityApiVersion || !grade_is_valid ||
       !config.ledger_path.is_absolute() || config.ledger_path.empty() ||
       native_path.size() > kMaximumPathBytes || has_posix_double_slash_prefix ||
       config.ledger_path.lexically_normal() != config.ledger_path) {
-    throw HostLedgerAuthorityError(
-        "ledger authority requires one canonical absolute path and v1 API");
+    throw SqliteAuthorityError(
+        "SQLite authority requires one canonical absolute path and v1 API");
+  }
+  if (config.enforcement_grade ==
+      SqliteAuthorityEnforcementGrade::strict_filesystem) {
+    const uid_t effective_uid = ::geteuid();
+    if (effective_uid == 0U || effective_uid == kNobodyUid ||
+        effective_uid != config.expected_owner_uid ||
+        ::getegid() != config.expected_owner_gid) {
+      throw SqliteAuthorityError(
+          "strict SQLite authority requires a dedicated non-root, non-nobody "
+          "effective UID/GID matching the authority owner");
+    }
   }
   const std::string database_name = config.ledger_path.filename().string();
   if (!safe_filename(database_name)) {
-    throw HostLedgerAuthorityError(
-        "ledger filename is not canonical or bounded");
+    throw SqliteAuthorityError(
+        "SQLite database filename is not canonical or bounded");
   }
   const std::string lock_name = database_name + ".authority.lock";
   if (!safe_filename(lock_name)) {
-    throw HostLedgerAuthorityError("ledger lock filename is not canonical");
+    throw SqliteAuthorityError(
+        "SQLite authority lock filename is not canonical");
   }
   auto parent = open_authority_parent(config);
   struct statfs filesystem_status{};
@@ -440,10 +485,10 @@ HostLedgerFilesystemAuthority::acquire(HostLedgerAuthorityConfig config) {
   auto lock = create_or_open_file(parent.descriptor.get(), lock_name, config);
   if (::flock(lock.descriptor.get(), LOCK_EX | LOCK_NB) != 0) {
     if (errno == EWOULDBLOCK || errno == EAGAIN) {
-      throw HostLedgerAuthorityError(
-          "another host ledger authority already owns this lock");
+      throw SqliteAuthorityError(
+          "another SQLite filesystem authority already owns this lock");
     }
-    throw_errno("could not acquire host-global ledger flock");
+    throw_errno("could not acquire host-global SQLite authority flock");
   }
   auto implementation = std::make_unique<Implementation>();
   implementation->config = std::move(config);
@@ -458,44 +503,51 @@ HostLedgerFilesystemAuthority::acquire(HostLedgerAuthorityConfig config) {
   implementation->filesystem = filesystem;
   implementation->protected_filesystem_boundary =
       implementation->config.enforcement_grade ==
-      HostLedgerEnforcementGrade::strict_filesystem;
-  HostLedgerFilesystemAuthority result(std::move(implementation));
+      SqliteAuthorityEnforcementGrade::strict_filesystem;
+  // The pinned parent descriptor closes pathname races on the database and
+  // lock files, but SQLite opens `-wal`, `-shm`, and `-journal` itself, by
+  // concatenated pathname and without any identity check. The authority VFS
+  // extends the same pinned-descriptor discipline to those auxiliaries.
+  implementation->sqlite_vfs = SqliteAuthorityVfs::create(
+      implementation->parent.get(), implementation->database_name,
+      implementation->config.expected_owner_uid);
+  SqliteFilesystemAuthority result(std::move(implementation));
   (void)result.attest_before_open();
   return result;
 }
 
-HostLedgerFilesystemAuthority::HostLedgerFilesystemAuthority(
+SqliteFilesystemAuthority::SqliteFilesystemAuthority(
     std::unique_ptr<Implementation> implementation) noexcept
     : implementation_(std::move(implementation)) {}
 
-HostLedgerFilesystemAuthority::~HostLedgerFilesystemAuthority() = default;
-HostLedgerFilesystemAuthority::HostLedgerFilesystemAuthority(
-    HostLedgerFilesystemAuthority &&) noexcept = default;
-HostLedgerFilesystemAuthority &HostLedgerFilesystemAuthority::operator=(
-    HostLedgerFilesystemAuthority &&) noexcept = default;
+SqliteFilesystemAuthority::~SqliteFilesystemAuthority() = default;
+SqliteFilesystemAuthority::SqliteFilesystemAuthority(
+    SqliteFilesystemAuthority &&) noexcept = default;
+SqliteFilesystemAuthority &SqliteFilesystemAuthority::operator=(
+    SqliteFilesystemAuthority &&) noexcept = default;
 
-HostLedgerAuthorityAttestation
-HostLedgerFilesystemAuthority::attest_before_open() const {
+SqliteAuthorityAttestation
+SqliteFilesystemAuthority::attest_before_open() const {
   if (!implementation_) {
-    throw HostLedgerAuthorityError("ledger authority has been moved from");
+    throw SqliteAuthorityError("SQLite authority has been moved from");
   }
   std::scoped_lock guard(implementation_->mutex);
   return implementation_->attest();
 }
 
-HostLedgerAuthorityAttestation
-HostLedgerFilesystemAuthority::attest_after_open() const {
+SqliteAuthorityAttestation
+SqliteFilesystemAuthority::attest_after_open() const {
   return attest_before_open();
 }
 
-std::vector<HostLedgerAuxiliaryFile>
-HostLedgerFilesystemAuthority::validate_auxiliary_files() const {
+std::vector<SqliteAuxiliaryFile>
+SqliteFilesystemAuthority::validate_auxiliary_files() const {
   if (!implementation_) {
-    throw HostLedgerAuthorityError("ledger authority has been moved from");
+    throw SqliteAuthorityError("SQLite authority has been moved from");
   }
   std::scoped_lock guard(implementation_->mutex);
   (void)implementation_->attest();
-  std::vector<HostLedgerAuxiliaryFile> result;
+  std::vector<SqliteAuxiliaryFile> result;
   for (const std::string_view suffix : {"-wal", "-shm", "-journal"}) {
     const std::string name =
         implementation_->database_name + std::string(suffix);
@@ -519,7 +571,7 @@ HostLedgerFilesystemAuthority::validate_auxiliary_files() const {
                           "SQLite auxiliary file");
     if (!same_pinned_inode(identity(path_status),
                            identity(descriptor_status))) {
-      throw HostLedgerAuthorityError(
+      throw SqliteAuthorityError(
           "SQLite auxiliary path changed during validation");
     }
     result.push_back({.suffix = std::string(suffix),
@@ -528,21 +580,27 @@ HostLedgerFilesystemAuthority::validate_auxiliary_files() const {
   return result;
 }
 
-const std::filesystem::path &
-HostLedgerFilesystemAuthority::ledger_path() const {
+const std::filesystem::path &SqliteFilesystemAuthority::ledger_path() const {
   if (!implementation_) {
-    throw HostLedgerAuthorityError("ledger authority has been moved from");
+    throw SqliteAuthorityError("SQLite authority has been moved from");
   }
   return implementation_->config.ledger_path;
 }
 
-bool HostLedgerFilesystemAuthority::is_protected_filesystem_boundary() const {
+const SqliteAuthorityVfs &SqliteFilesystemAuthority::sqlite_vfs() const {
+  if (!implementation_ || !implementation_->sqlite_vfs) {
+    throw SqliteAuthorityError("SQLite authority has been moved from");
+  }
+  return *implementation_->sqlite_vfs;
+}
+
+bool SqliteFilesystemAuthority::is_protected_filesystem_boundary() const {
   return implementation_ && implementation_->protected_filesystem_boundary;
 }
 
-int HostLedgerFilesystemAuthority::duplicate_database_fd() const {
+int SqliteFilesystemAuthority::duplicate_database_fd() const {
   if (!implementation_) {
-    throw HostLedgerAuthorityError("ledger authority has been moved from");
+    throw SqliteAuthorityError("SQLite authority has been moved from");
   }
   const int duplicated =
       ::fcntl(implementation_->database.get(), F_DUPFD_CLOEXEC, 3);

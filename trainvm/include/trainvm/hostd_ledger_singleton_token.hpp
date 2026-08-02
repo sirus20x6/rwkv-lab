@@ -2,7 +2,7 @@
 
 #include <memory>
 
-#include "trainvm/host_ledger_authority.hpp"
+#include "trainvm/sqlite_filesystem_authority.hpp"
 #include "trainvm/hostd_transport.hpp"
 
 namespace trainvm {
@@ -14,12 +14,12 @@ namespace trainvm {
 class HostdLedgerSingletonToken final : public IHostdSingletonToken {
 public:
   explicit HostdLedgerSingletonToken(
-      std::shared_ptr<HostLedgerFilesystemAuthority> authority);
+      std::shared_ptr<SqliteFilesystemAuthority> authority);
 
   [[nodiscard]] bool attest_held() const override;
 
 private:
-  std::shared_ptr<HostLedgerFilesystemAuthority> authority_;
+  std::shared_ptr<SqliteFilesystemAuthority> authority_;
 };
 
 } // namespace trainvm

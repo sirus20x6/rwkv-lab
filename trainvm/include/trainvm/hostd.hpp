@@ -193,6 +193,15 @@ public:
 // Session IDs remain bounded test capabilities rather than transport-bound
 // credentials. The retained peer source is re-observed on every use so this
 // abstraction fails closed when its simulated connection/peer disappears.
+// Supplies the startup-audit commit time. It is sampled by the coordinator
+// after the audit observation completes, because the ledger refuses a commit
+// time earlier than the report's observed end.
+class IHostStartupAuditCommitTimeSource {
+public:
+  virtual ~IHostStartupAuditCommitTimeSource() = default;
+  [[nodiscard]] virtual HostLedgerTime commit_time() = 0;
+};
+
 class HostGrantCoordinator final {
 public:
   HostGrantCoordinator(HostdCoordinatorConfig config,
@@ -210,9 +219,17 @@ public:
   HostGrantCoordinator(HostGrantCoordinator &&) = delete;
   HostGrantCoordinator &operator=(HostGrantCoordinator &&) = delete;
 
+  // The audit observation runs inside this call, and the ledger requires the
+  // commit time to be no earlier than the report's end of observation. A
+  // caller that samples its clock beforehand can therefore only pass a time it
+  // knows to be later; production callers must use the sampling overload
+  // below, which samples once the observation has completed.
   [[nodiscard]] HostStartupAuditReceipt
   run_startup_audit(IConfiguredHostStartupAuditorV2 &auditor,
                     const HostLedgerTime &now);
+  [[nodiscard]] HostStartupAuditReceipt
+  run_startup_audit(IConfiguredHostStartupAuditorV2 &auditor,
+                    IHostStartupAuditCommitTimeSource &commit_time);
 
   [[nodiscard]] HostdConnectedSession
   connect(HostdConnectRequest request,
@@ -249,6 +266,10 @@ public:
   status(std::string_view session_id) const;
 
 private:
+  [[nodiscard]] HostStartupAuditReceipt
+  run_startup_audit_sampled(IConfiguredHostStartupAuditorV2 &auditor,
+                            IHostStartupAuditCommitTimeSource &commit_time);
+
   struct Implementation;
   std::unique_ptr<Implementation> implementation_;
 };
