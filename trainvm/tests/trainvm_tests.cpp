@@ -7843,6 +7843,16 @@ void test_service_registry_and_reconciliation() {
     trainvm::v1::RunSummary run_summary;
     const grpc::Status get_status =
         service.GetRun(nullptr, &get_request, &run_summary);
+    trainvm::v1::GetCompiledPlanRequest plan_request;
+    plan_request.set_run_id(run_id);
+    trainvm::v1::GetCompiledPlanResponse plan_response;
+    const grpc::Status plan_status =
+        service.GetCompiledPlan(nullptr, &plan_request, &plan_response);
+    trainvm::v1::GetCompiledPlanRequest missing_plan_request;
+    missing_plan_request.set_run_id("missing-run");
+    trainvm::v1::GetCompiledPlanResponse missing_plan_response;
+    const grpc::Status missing_plan_status = service.GetCompiledPlan(
+        nullptr, &missing_plan_request, &missing_plan_response);
     trainvm::v1::ListRunsRequest list_request;
     list_request.add_observed_states(
         trainvm::v1::OBSERVED_STATE_QUEUED);
@@ -7897,7 +7907,14 @@ void test_service_registry_and_reconciliation() {
             : std::string{};
     check(second_status.ok() && second_created.has_run() &&
               !second_run_id.empty() && get_status.ok() &&
-              run_summary.identity().run_id() == run_id &&
+              run_summary.identity().run_id() == run_id && plan_status.ok() &&
+              plan_response.journal_id() == journal_id &&
+              plan_response.run().run_id() == run_id &&
+              plan_response.run().revision() == created.run().revision() &&
+              plan_response.run().plan_hash() == created.plan_hash() &&
+              nlohmann::json::parse(plan_response.canonical_plan_json()) ==
+                  nlohmann::json::parse(created.canonical_plan()) &&
+              missing_plan_status.error_code() == grpc::StatusCode::NOT_FOUND &&
               run_summary.observed_state() ==
                   trainvm::v1::OBSERVED_STATE_QUEUED &&
               run_summary.last_event_sequence() > 0U &&

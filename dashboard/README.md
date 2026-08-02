@@ -29,7 +29,10 @@ is retained only as an explicit read-only compatibility fallback for offline leg
 never selected automatically. The HTTP surface remains `/api/trainvm/runs`,
 `/api/trainvm/runs/{run}`, and
 `/api/trainvm/runs/{run}/timeline?after=SEQUENCE&limit=COUNT`, with typed incremental
-`/metrics` and `/artifacts` siblings rendered in the native run panel.
+`/metrics` and `/artifacts` siblings rendered in the native run panel. The `/plan` sibling returns
+the authority-verified immutable compiled plan; the browser derives its layered workflow graph,
+cycles, terminal transitions, visited nodes, and current attempt from that document without
+experiment-family switches.
 A short readiness probe disables mutations while the authority is unavailable.
 Mutation requests are intentionally restricted to loopback HTTP hosts to prevent DNS-rebinding
 access to the local command authority.

@@ -23,6 +23,7 @@ const (
 	TrainVM_DiffPlan_FullMethodName         = "/trainvm.v1.TrainVM/DiffPlan"
 	TrainVM_CommandRun_FullMethodName       = "/trainvm.v1.TrainVM/CommandRun"
 	TrainVM_GetRun_FullMethodName           = "/trainvm.v1.TrainVM/GetRun"
+	TrainVM_GetCompiledPlan_FullMethodName  = "/trainvm.v1.TrainVM/GetCompiledPlan"
 	TrainVM_ListRuns_FullMethodName         = "/trainvm.v1.TrainVM/ListRuns"
 	TrainVM_WatchEvents_FullMethodName      = "/trainvm.v1.TrainVM/WatchEvents"
 	TrainVM_GetControlView_FullMethodName   = "/trainvm.v1.TrainVM/GetControlView"
@@ -37,6 +38,7 @@ type TrainVMClient interface {
 	DiffPlan(ctx context.Context, in *PlanDiffRequest, opts ...grpc.CallOption) (*PlanDiffResponse, error)
 	CommandRun(ctx context.Context, in *RunCommandRequest, opts ...grpc.CallOption) (*RunCommandResponse, error)
 	GetRun(ctx context.Context, in *GetRunRequest, opts ...grpc.CallOption) (*RunSummary, error)
+	GetCompiledPlan(ctx context.Context, in *GetCompiledPlanRequest, opts ...grpc.CallOption) (*GetCompiledPlanResponse, error)
 	ListRuns(ctx context.Context, in *ListRunsRequest, opts ...grpc.CallOption) (*ListRunsResponse, error)
 	WatchEvents(ctx context.Context, in *WatchEventsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[EventEnvelope], error)
 	GetControlView(ctx context.Context, in *GetControlViewRequest, opts ...grpc.CallOption) (*GetControlViewResponse, error)
@@ -85,6 +87,16 @@ func (c *trainVMClient) GetRun(ctx context.Context, in *GetRunRequest, opts ...g
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(RunSummary)
 	err := c.cc.Invoke(ctx, TrainVM_GetRun_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *trainVMClient) GetCompiledPlan(ctx context.Context, in *GetCompiledPlanRequest, opts ...grpc.CallOption) (*GetCompiledPlanResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetCompiledPlanResponse)
+	err := c.cc.Invoke(ctx, TrainVM_GetCompiledPlan_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -148,6 +160,7 @@ type TrainVMServer interface {
 	DiffPlan(context.Context, *PlanDiffRequest) (*PlanDiffResponse, error)
 	CommandRun(context.Context, *RunCommandRequest) (*RunCommandResponse, error)
 	GetRun(context.Context, *GetRunRequest) (*RunSummary, error)
+	GetCompiledPlan(context.Context, *GetCompiledPlanRequest) (*GetCompiledPlanResponse, error)
 	ListRuns(context.Context, *ListRunsRequest) (*ListRunsResponse, error)
 	WatchEvents(*WatchEventsRequest, grpc.ServerStreamingServer[EventEnvelope]) error
 	GetControlView(context.Context, *GetControlViewRequest) (*GetControlViewResponse, error)
@@ -173,6 +186,9 @@ func (UnimplementedTrainVMServer) CommandRun(context.Context, *RunCommandRequest
 }
 func (UnimplementedTrainVMServer) GetRun(context.Context, *GetRunRequest) (*RunSummary, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetRun not implemented")
+}
+func (UnimplementedTrainVMServer) GetCompiledPlan(context.Context, *GetCompiledPlanRequest) (*GetCompiledPlanResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetCompiledPlan not implemented")
 }
 func (UnimplementedTrainVMServer) ListRuns(context.Context, *ListRunsRequest) (*ListRunsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListRuns not implemented")
@@ -279,6 +295,24 @@ func _TrainVM_GetRun_Handler(srv interface{}, ctx context.Context, dec func(inte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _TrainVM_GetCompiledPlan_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetCompiledPlanRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TrainVMServer).GetCompiledPlan(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TrainVM_GetCompiledPlan_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TrainVMServer).GetCompiledPlan(ctx, req.(*GetCompiledPlanRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _TrainVM_ListRuns_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ListRunsRequest)
 	if err := dec(in); err != nil {
@@ -366,6 +400,10 @@ var TrainVM_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetRun",
 			Handler:    _TrainVM_GetRun_Handler,
+		},
+		{
+			MethodName: "GetCompiledPlan",
+			Handler:    _TrainVM_GetCompiledPlan_Handler,
 		},
 		{
 			MethodName: "ListRuns",

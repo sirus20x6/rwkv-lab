@@ -3871,6 +3871,47 @@ grpc::Status TrainVMService::GetRun(grpc::ServerContext* context,
   }
 }
 
+grpc::Status TrainVMService::GetCompiledPlan(
+    grpc::ServerContext* context,
+    const v1::GetCompiledPlanRequest* request,
+    v1::GetCompiledPlanResponse* response) {
+  if (request == nullptr || response == nullptr ||
+      request->ByteSizeLong() > 4'096U || request->run_id().empty() ||
+      request->run_id().size() > 256U) {
+    return {grpc::StatusCode::INVALID_ARGUMENT,
+            "compiled-plan read requires a bounded run identity"};
+  }
+  if (cancelled(context)) return cancellation_status();
+  try {
+    std::scoped_lock lock(command_mutex_);
+    const auto projection = journal_.projection(request->run_id());
+    if (!projection) {
+      return {grpc::StatusCode::NOT_FOUND, "run does not exist"};
+    }
+    const auto plan = journal_.compiled_plan(projection->plan_hash);
+    if (!plan) {
+      return {grpc::StatusCode::DATA_LOSS,
+              "run has no persisted compiled plan"};
+    }
+    const std::string canonical = plan->canonical_plan.dump();
+    if (canonical.empty() || canonical.size() > kMaximumSubmissionBytes) {
+      return {grpc::StatusCode::DATA_LOSS,
+              "persisted compiled plan exceeds the authority read bound"};
+    }
+    response->set_journal_id(journal_.journal_id());
+    auto* identity = response->mutable_run();
+    identity->set_run_id(projection->run_id);
+    identity->set_revision(projection->run_revision);
+    identity->set_plan_hash(projection->plan_hash);
+    response->set_canonical_plan_json(canonical);
+    return grpc::Status::OK;
+  } catch (const std::invalid_argument& exception) {
+    return {grpc::StatusCode::DATA_LOSS, exception.what()};
+  } catch (const std::exception& exception) {
+    return {grpc::StatusCode::DATA_LOSS, exception.what()};
+  }
+}
+
 grpc::Status TrainVMService::ListRuns(grpc::ServerContext* context,
                                       const v1::ListRunsRequest* request,
                                       v1::ListRunsResponse* response) {

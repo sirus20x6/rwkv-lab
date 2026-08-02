@@ -506,6 +506,19 @@ message GetRunRequest {
   string run_id = 1;
 }
 
+// The immutable compiled plan behind a run. Dashboards use this authority read
+// to render the workflow FSM without opening the journal or inferring a graph
+// from event/log filenames.
+message GetCompiledPlanRequest {
+  string run_id = 1;
+}
+
+message GetCompiledPlanResponse {
+  string journal_id = 1;
+  RunIdentity run = 2;
+  string canonical_plan_json = 3;
+}
+
 message ListRunsRequest {
   repeated ObservedState observed_states = 1;
   map<string, string> labels = 2;
@@ -582,6 +595,7 @@ service TrainVM {
   rpc DiffPlan(PlanDiffRequest) returns (PlanDiffResponse);
   rpc CommandRun(RunCommandRequest) returns (RunCommandResponse);
   rpc GetRun(GetRunRequest) returns (RunSummary);
+  rpc GetCompiledPlan(GetCompiledPlanRequest) returns (GetCompiledPlanResponse);
   rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
   rpc WatchEvents(WatchEventsRequest) returns (stream EventEnvelope);
   rpc GetControlView(GetControlViewRequest) returns (GetControlViewResponse);

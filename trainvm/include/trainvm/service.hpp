@@ -78,6 +78,11 @@ class TrainVMService final : public v1::TrainVM::Service,
                       const v1::GetRunRequest* request,
                       v1::RunSummary* response) override;
 
+  grpc::Status GetCompiledPlan(
+      grpc::ServerContext* context,
+      const v1::GetCompiledPlanRequest* request,
+      v1::GetCompiledPlanResponse* response) override;
+
   grpc::Status ListRuns(grpc::ServerContext* context,
                         const v1::ListRunsRequest* request,
                         v1::ListRunsResponse* response) override;

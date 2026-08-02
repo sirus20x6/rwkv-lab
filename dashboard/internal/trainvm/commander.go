@@ -2,6 +2,7 @@ package trainvm
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -277,6 +278,49 @@ func (c *GRPCCommander) Run(ctx context.Context, runID string) (Run, bool, error
 	}
 	run, err := runFromProto(response)
 	return run, err == nil, err
+}
+
+func (c *GRPCCommander) CompiledPlan(ctx context.Context, runID string) (CompiledPlanView, bool, error) {
+	if c == nil || c.client == nil {
+		return CompiledPlanView{}, false, fmt.Errorf("TrainVM authority client is not configured")
+	}
+	runID = strings.TrimSpace(runID)
+	if runID == "" || len(runID) > 256 {
+		return CompiledPlanView{}, false, &ValidationError{Message: "bounded run ID is required"}
+	}
+	response, err := c.client.GetCompiledPlan(ctx, &trainvmv1.GetCompiledPlanRequest{RunId: runID})
+	if status.Code(err) == codes.NotFound {
+		return CompiledPlanView{}, false, nil
+	}
+	if err != nil {
+		return CompiledPlanView{}, false, err
+	}
+	view, err := compiledPlanFromProto(runID, response)
+	return view, err == nil, err
+}
+
+func compiledPlanFromProto(runID string, response *trainvmv1.GetCompiledPlanResponse) (CompiledPlanView, error) {
+	if response == nil {
+		return CompiledPlanView{}, fmt.Errorf("TrainVM authority returned an empty compiled plan")
+	}
+	identity := response.GetRun()
+	canonical := response.GetCanonicalPlanJson()
+	if identity == nil || response.GetJournalId() == "" || len(response.GetJournalId()) != 32 ||
+		identity.GetRunId() != runID || identity.GetRevision() == 0 || identity.GetPlanHash() == "" ||
+		canonical == "" || len(canonical) > compiledPlanMaximumBytes || !json.Valid([]byte(canonical)) {
+		return CompiledPlanView{}, fmt.Errorf("TrainVM authority returned a malformed compiled plan")
+	}
+	actualHash := fmt.Sprintf("%x", sha256.Sum256([]byte(canonical)))
+	if actualHash != identity.GetPlanHash() {
+		return CompiledPlanView{}, fmt.Errorf(
+			"TrainVM authority returned a mismatched compiled-plan hash: expected %s, got %s",
+			identity.GetPlanHash(), actualHash)
+	}
+	return CompiledPlanView{
+		JournalID: response.GetJournalId(), RunID: identity.GetRunId(),
+		RunRevision: identity.GetRevision(), PlanHash: identity.GetPlanHash(),
+		CanonicalPlan: json.RawMessage(canonical),
+	}, nil
 }
 
 func (c *GRPCCommander) Timeline(ctx context.Context, runID string, after uint64, limit int) ([]Event, error) {

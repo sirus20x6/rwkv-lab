@@ -54,6 +54,11 @@ class TrainVMStub(object):
                 request_serializer=trainvm_dot_v1_dot_trainvm__pb2.GetRunRequest.SerializeToString,
                 response_deserializer=trainvm_dot_v1_dot_trainvm__pb2.RunSummary.FromString,
                 _registered_method=True)
+        self.GetCompiledPlan = channel.unary_unary(
+                '/trainvm.v1.TrainVM/GetCompiledPlan',
+                request_serializer=trainvm_dot_v1_dot_trainvm__pb2.GetCompiledPlanRequest.SerializeToString,
+                response_deserializer=trainvm_dot_v1_dot_trainvm__pb2.GetCompiledPlanResponse.FromString,
+                _registered_method=True)
         self.ListRuns = channel.unary_unary(
                 '/trainvm.v1.TrainVM/ListRuns',
                 request_serializer=trainvm_dot_v1_dot_trainvm__pb2.ListRunsRequest.SerializeToString,
@@ -98,6 +103,12 @@ class TrainVMServicer(object):
         raise NotImplementedError('Method not implemented!')
 
     def GetRun(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetCompiledPlan(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -149,6 +160,11 @@ def add_TrainVMServicer_to_server(servicer, server):
                     servicer.GetRun,
                     request_deserializer=trainvm_dot_v1_dot_trainvm__pb2.GetRunRequest.FromString,
                     response_serializer=trainvm_dot_v1_dot_trainvm__pb2.RunSummary.SerializeToString,
+            ),
+            'GetCompiledPlan': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetCompiledPlan,
+                    request_deserializer=trainvm_dot_v1_dot_trainvm__pb2.GetCompiledPlanRequest.FromString,
+                    response_serializer=trainvm_dot_v1_dot_trainvm__pb2.GetCompiledPlanResponse.SerializeToString,
             ),
             'ListRuns': grpc.unary_unary_rpc_method_handler(
                     servicer.ListRuns,
@@ -279,6 +295,33 @@ class TrainVM(object):
             '/trainvm.v1.TrainVM/GetRun',
             trainvm_dot_v1_dot_trainvm__pb2.GetRunRequest.SerializeToString,
             trainvm_dot_v1_dot_trainvm__pb2.RunSummary.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetCompiledPlan(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/trainvm.v1.TrainVM/GetCompiledPlan',
+            trainvm_dot_v1_dot_trainvm__pb2.GetCompiledPlanRequest.SerializeToString,
+            trainvm_dot_v1_dot_trainvm__pb2.GetCompiledPlanResponse.FromString,
             options,
             channel_credentials,
             insecure,

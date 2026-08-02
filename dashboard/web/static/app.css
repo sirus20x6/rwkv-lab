@@ -173,6 +173,25 @@ details.panel[open] .d-caret { transform: rotate(90deg); color: var(--accent); }
 .vm-lifecycle-actions > .sub { font: var(--fs-xs)/1.25 var(--mono); text-align: right; }
 .vm-lifecycle-actions > .sub.error { color: var(--err); }
 .vm-lifecycle-actions > .sub.ok { color: var(--ok); }
+.vm-workflow { margin-bottom: 12px; border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden; background: var(--bg); }
+.vm-workflow-graph { min-height: 150px; max-height: min(52vh, 620px); overflow: auto; background: radial-gradient(circle at 1px 1px, color-mix(in srgb, var(--border) 55%, transparent) 1px, transparent 0); background-size: 18px 18px; }
+.vm-graph-canvas { position: relative; display: inline-block; min-width: 100%; min-height: 148px; padding: 16px; box-sizing: border-box; }
+.vm-graph-edges { position: absolute; inset: 0; z-index: 1; overflow: visible; pointer-events: none; color: var(--muted); }
+.vm-graph-edges path { fill: none; stroke: color-mix(in srgb, var(--muted) 70%, transparent); stroke-width: 1.5; }
+.vm-graph-edges path.back { stroke: var(--warn); stroke-dasharray: 5 4; }
+.vm-graph-layers { position: relative; z-index: 2; display: flex; align-items: flex-start; gap: 70px; min-width: max-content; }
+.vm-graph-layer { display: grid; gap: 14px; width: 220px; }
+.vm-graph-node { position: relative; min-width: 0; padding: 8px 9px; border: 1px solid var(--border-hi); border-radius: var(--r-sm); background: var(--bg-panel); box-shadow: 0 3px 10px rgba(0,0,0,.22); }
+.vm-graph-node.visited { border-color: color-mix(in srgb, var(--ok) 55%, var(--border)); }
+.vm-graph-node.current { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 24%, transparent), 0 4px 14px rgba(0,0,0,.3); }
+.vm-graph-node.terminal { border-style: dashed; background: var(--bg-elev); }
+.vm-node-head { display: flex; justify-content: space-between; gap: 7px; align-items: baseline; }
+.vm-node-head strong { color: var(--text); font: 600 var(--fs-xs)/1.25 var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vm-node-head span { color: var(--accent); font: 600 var(--fs-xs)/1.2 var(--mono); }
+.vm-node-operation, .vm-node-attempt { margin-top: 4px; color: var(--muted); font: var(--fs-xs)/1.25 var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vm-node-attempt { color: var(--text-dim); }
+.vm-node-transitions { display: grid; gap: 2px; margin-top: 6px; padding-top: 5px; border-top: 1px solid var(--divider); }
+.vm-node-transitions span { color: var(--muted); font: var(--fs-xs)/1.2 var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .vm-telemetry { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
 .vm-telemetry > section { min-width: 0; border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden; background: var(--bg); }
 .vm-telemetry-list { min-height: 54px; max-height: 170px; overflow: auto; font-family: var(--mono); }

@@ -3,6 +3,7 @@ package trainvm
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 )
@@ -81,6 +82,16 @@ func TestReadOnlyRunProjectionAndTimeline(t *testing.T) {
 	}
 	if _, found, err := reader.Run(ctx, "missing"); err != nil || found {
 		t.Fatalf("missing run found=%v err=%v", found, err)
+	}
+	plan, found, err := reader.CompiledPlan(ctx, "run-a")
+	if err != nil || !found || plan.JournalID != "0123456789abcdef0123456789abcdef" ||
+		plan.RunID != "run-a" || plan.RunRevision != 3 ||
+		plan.PlanHash != "3db87fc6e885535afe28e5639a1512f00aafbf75d1dae317655c10a2aec00a12" ||
+		!json.Valid(plan.CanonicalPlan) {
+		t.Fatalf("unexpected compiled plan: %#v found=%v err=%v", plan, found, err)
+	}
+	if _, found, err := reader.CompiledPlan(ctx, "missing"); err != nil || found {
+		t.Fatalf("missing compiled plan found=%v err=%v", found, err)
 	}
 	events, err := reader.Timeline(ctx, "run-a", 7, 10)
 	if err != nil {
@@ -201,5 +212,8 @@ func TestControlsRejectsTamperedPersistedPlan(t *testing.T) {
 	defer reader.Close()
 	if _, _, err := reader.Controls(context.Background(), "run-a"); err == nil {
 		t.Fatal("tampered persisted plan unexpectedly reached the dashboard")
+	}
+	if _, _, err := reader.CompiledPlan(context.Background(), "run-a"); err == nil {
+		t.Fatal("tampered persisted plan unexpectedly reached the workflow graph")
 	}
 }

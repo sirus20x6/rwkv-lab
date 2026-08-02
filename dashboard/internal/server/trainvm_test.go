@@ -171,6 +171,17 @@ func TestTrainVMReadModelEndpoints(t *testing.T) {
 		t.Fatalf("run status=%d body=%s", response.Code, response.Body.String())
 	}
 
+	request = httptest.NewRequest(http.MethodGet, "/api/trainvm/runs/vm-run/plan", nil)
+	response = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	var plan trainvmstore.CompiledPlanView
+	if err := json.Unmarshal(response.Body.Bytes(), &plan); err != nil ||
+		response.Code != http.StatusOK || plan.RunID != "vm-run" || plan.RunRevision != 2 ||
+		plan.PlanHash != "baa59aa47fcce31100a77393fcaeb04265bbfc3af2235c62a65ba2006225811a" ||
+		!json.Valid(plan.CanonicalPlan) {
+		t.Fatalf("unexpected compiled plan: %#v err=%v body=%s", plan, err, response.Body.String())
+	}
+
 	request = httptest.NewRequest(http.MethodGet, "/api/trainvm/runs/vm-run/timeline?after=2&limit=1", nil)
 	response = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(response, request)

@@ -599,6 +599,12 @@
   let vmControlLoadAbort = null;
   let vmSubmitBusy = false;
   let vmActionBusy = false;
+  let vmCompiledPlan = null;
+  let vmPlanRun = "";
+  let vmPlanLoadGeneration = 0;
+  let vmWorkflowEdges = [];
+  let vmWorkflowSignature = "";
+  const vmVisitedNodes = new Set();
   const vmInvalidControls = new Set();
   const vmControlRetries = new Map();
   const vmActionRetries = new Map();
@@ -700,6 +706,203 @@
     }
   }
 
+  function resetVMWorkflow(runID = "") {
+    vmCompiledPlan = null;
+    vmPlanRun = "";
+    vmPlanLoadGeneration += 1;
+    vmWorkflowEdges = [];
+    vmWorkflowSignature = "";
+    vmVisitedNodes.clear();
+    const graph = document.getElementById("vm-workflow-graph");
+    const state = document.getElementById("vm-workflow-state");
+    if (graph) graph.innerHTML = `<div class="empty">${runID ? "loading authority plan…" : "select a native run"}</div>`;
+    if (state) state.textContent = runID ? "loading immutable plan" : "select a native run";
+  }
+
+  function vmWorkflowModel(plan) {
+    const workflow = plan?.canonical_plan?.spec?.workflow;
+    const declared = workflow?.nodes && typeof workflow.nodes === "object" ? workflow.nodes : {};
+    const entrypoint = String(workflow?.entrypoint || "");
+    const nodes = new Map(Object.entries(declared));
+    const edges = [];
+    for (const [source, node] of nodes) {
+      for (const transition of Array.isArray(node?.transitions) ? node.transitions : []) {
+        const target = String(transition?.target || "");
+        if (!target) continue;
+        if (!nodes.has(target)) nodes.set(target, null);
+        edges.push({ source, target, event: String(transition?.on || "transition"), where: transition?.where || null });
+      }
+    }
+    const distance = new Map();
+    if (nodes.has(entrypoint)) distance.set(entrypoint, 0);
+    for (let pass = 0; pass < nodes.size; pass += 1) {
+      let changed = false;
+      for (const edge of edges) {
+        if (!distance.has(edge.source) || edge.target === entrypoint) continue;
+        const candidate = distance.get(edge.source) + 1;
+        if (!distance.has(edge.target) || candidate < distance.get(edge.target)) {
+          distance.set(edge.target, candidate);
+          changed = true;
+        }
+      }
+      if (!changed) break;
+    }
+    const lastLayer = Math.max(0, ...distance.values()) + 1;
+    for (const name of nodes.keys()) if (!distance.has(name)) distance.set(name, lastLayer);
+    const layers = new Map();
+    for (const name of nodes.keys()) {
+      const layer = distance.get(name);
+      if (!layers.has(layer)) layers.set(layer, []);
+      layers.get(layer).push(name);
+    }
+    for (const names of layers.values()) names.sort((left, right) => left.localeCompare(right));
+    for (const edge of edges) edge.back = distance.get(edge.target) <= distance.get(edge.source);
+    return { entrypoint, nodes, edges, layers: [...layers.entries()].sort((left, right) => left[0] - right[0]) };
+  }
+
+  function renderVMWorkflowGraph() {
+    const target = document.getElementById("vm-workflow-graph");
+    const state = document.getElementById("vm-workflow-state");
+    if (!target || !vmCompiledPlan || !vmSelectedRun || vmCompiledPlan.run_id !== vmSelectedRun.run_id) return;
+    const signature = JSON.stringify([
+      vmCompiledPlan.plan_hash, vmSelectedRun.current_node_id, vmSelectedRun.current_attempt_id,
+      vmSelectedRun.observed_state, [...vmVisitedNodes].sort(),
+    ]);
+    if (signature === vmWorkflowSignature && target.querySelector(".vm-graph-canvas")) return;
+    vmWorkflowSignature = signature;
+    const model = vmWorkflowModel(vmCompiledPlan);
+    if (!model.nodes.size || !model.entrypoint) {
+      target.innerHTML = '<div class="empty">compiled plan has no workflow graph</div>';
+      if (state) state.textContent = `plan ${String(vmCompiledPlan.plan_hash || "").slice(0, 12)}`;
+      return;
+    }
+    const outgoing = new Map();
+    for (const edge of model.edges) {
+      if (!outgoing.has(edge.source)) outgoing.set(edge.source, []);
+      outgoing.get(edge.source).push(edge);
+    }
+    const terminalObserved = String(vmSelectedRun.observed_state || "");
+    const layers = model.layers.map(([layer, names]) =>
+      `<div class="vm-graph-layer" data-vm-layer="${layer}">` + names.map((name) => {
+        const node = model.nodes.get(name);
+        const terminal = !node || name.startsWith("$");
+        const current = name === vmSelectedRun.current_node_id;
+        const observedTerminal = terminal && ((name === "$failed" && terminalObserved === "failed") ||
+          (name === "$completed" && terminalObserved === "completed") ||
+          (name === "$cancelled" && terminalObserved === "cancelled"));
+        const visited = current || observedTerminal || vmVisitedNodes.has(name);
+        const invoke = node?.invoke || {};
+        const operation = terminal ? "terminal state" : `${invoke.component || "?"}.${invoke.operation || "?"}`;
+        const effect = terminal ? "terminal" : String(node.effect || "effect");
+        const transitions = (outgoing.get(name) || []).map((edge) =>
+          `<span title="${vmEscape(edge.where ? JSON.stringify(edge.where) : edge.event)}">${vmEscape(edge.event)} → ${vmEscape(edge.target)}</span>`).join("");
+        const classes = ["vm-graph-node", current ? "current" : "", visited ? "visited" : "", terminal ? "terminal" : ""].filter(Boolean).join(" ");
+        return `<article class="${classes}" data-vm-node="${vmEscape(name)}" title="${vmEscape(node?.description || name)}">` +
+          `<div class="vm-node-head"><strong>${vmEscape(name)}</strong><span>${vmEscape(current ? "current" : effect)}</span></div>` +
+          `<div class="vm-node-operation">${vmEscape(operation)}</div>` +
+          (current && vmSelectedRun.current_attempt_id ? `<div class="vm-node-attempt">${vmEscape(vmSelectedRun.current_attempt_id)}</div>` : "") +
+          (transitions ? `<div class="vm-node-transitions">${transitions}</div>` : "") + `</article>`;
+      }).join("") + `</div>`).join("");
+    vmWorkflowEdges = model.edges;
+    target.innerHTML = `<div class="vm-graph-canvas"><svg class="vm-graph-edges" aria-hidden="true"></svg><div class="vm-graph-layers">${layers}</div></div>`;
+    if (state) state.textContent = `${model.nodes.size} nodes · ${model.edges.length} transitions · ${String(vmCompiledPlan.plan_hash || "").slice(0, 12)}`;
+    requestAnimationFrame(layoutVMWorkflowEdges);
+  }
+
+  function layoutVMWorkflowEdges() {
+    const target = document.getElementById("vm-workflow-graph");
+    const canvas = target?.querySelector(".vm-graph-canvas");
+    const svg = canvas?.querySelector(".vm-graph-edges");
+    if (!canvas || !svg || !vmWorkflowEdges.length) return;
+    const namespace = "http://www.w3.org/2000/svg";
+    const width = Math.max(canvas.scrollWidth, canvas.clientWidth);
+    const height = Math.max(canvas.scrollHeight, canvas.clientHeight);
+    svg.replaceChildren();
+    svg.setAttribute("width", String(width));
+    svg.setAttribute("height", String(height));
+    svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+    const defs = document.createElementNS(namespace, "defs");
+    const marker = document.createElementNS(namespace, "marker");
+    marker.setAttribute("id", "vm-graph-arrow");
+    marker.setAttribute("viewBox", "0 0 10 10");
+    marker.setAttribute("refX", "9");
+    marker.setAttribute("refY", "5");
+    marker.setAttribute("markerWidth", "5");
+    marker.setAttribute("markerHeight", "5");
+    marker.setAttribute("orient", "auto-start-reverse");
+    const arrow = document.createElementNS(namespace, "path");
+    arrow.setAttribute("d", "M 0 0 L 10 5 L 0 10 z");
+    arrow.setAttribute("fill", "currentColor");
+    marker.appendChild(arrow);
+    defs.appendChild(marker);
+    svg.appendChild(defs);
+    const root = canvas.getBoundingClientRect();
+    const nodeElements = new Map([...canvas.querySelectorAll("[data-vm-node]")].map((node) => [node.dataset.vmNode, node]));
+    for (const edge of vmWorkflowEdges) {
+      const source = nodeElements.get(edge.source);
+      const destination = nodeElements.get(edge.target);
+      if (!source || !destination) continue;
+      const from = source.getBoundingClientRect();
+      const to = destination.getBoundingClientRect();
+      const startX = from.right - root.left;
+      const startY = from.top + from.height / 2 - root.top;
+      let endX = to.left - root.left;
+      let endY = to.top + to.height / 2 - root.top;
+      let pathData;
+      if (source === destination) {
+        endX = from.right - root.left;
+        endY = from.top + from.height * .75 - root.top;
+        pathData = `M ${startX} ${startY} C ${startX + 42} ${startY - 34}, ${endX + 42} ${endY + 34}, ${endX} ${endY}`;
+      } else if (edge.back) {
+        const bendY = Math.max(8, Math.min(startY, endY) - 24);
+        pathData = `M ${startX} ${startY} C ${startX + 32} ${bendY}, ${endX - 32} ${bendY}, ${endX} ${endY}`;
+      } else {
+        const control = Math.max(28, (endX - startX) * .45);
+        pathData = `M ${startX} ${startY} C ${startX + control} ${startY}, ${endX - control} ${endY}, ${endX} ${endY}`;
+      }
+      const path = document.createElementNS(namespace, "path");
+      path.setAttribute("d", pathData);
+      path.setAttribute("marker-end", "url(#vm-graph-arrow)");
+      if (edge.back) path.setAttribute("class", "back");
+      const title = document.createElementNS(namespace, "title");
+      title.textContent = `${edge.source} · ${edge.event} → ${edge.target}`;
+      path.appendChild(title);
+      svg.appendChild(path);
+    }
+  }
+
+  async function refreshVMCompiledPlan(run, force = false) {
+    if (!run) return;
+    if (!force && vmPlanRun === run.run_id && vmCompiledPlan?.plan_hash === run.plan_hash) {
+      renderVMWorkflowGraph();
+      return;
+    }
+    const runID = run.run_id;
+    const selectionGeneration = vmSelectionGeneration;
+    const loadGeneration = ++vmPlanLoadGeneration;
+    const state = document.getElementById("vm-workflow-state");
+    if (state) state.textContent = "loading immutable plan";
+    try {
+      const response = await fetch(`/api/trainvm/runs/${encodeURIComponent(runID)}/plan`, { cache: "no-store" });
+      if (selectionGeneration !== vmSelectionGeneration || loadGeneration !== vmPlanLoadGeneration || runID !== vmSelected) return;
+      if (!response.ok) throw new Error((await response.text()).trim() || `HTTP ${response.status}`);
+      const plan = await response.json();
+      if (plan.run_id !== runID || plan.plan_hash !== run.plan_hash ||
+          (vmJournalID && plan.journal_id !== vmJournalID) ||
+          !plan.canonical_plan || typeof plan.canonical_plan !== "object") {
+        throw new Error("compiled-plan identity mismatch");
+      }
+      vmPlanRun = runID;
+      vmCompiledPlan = plan;
+      renderVMWorkflowGraph();
+    } catch (error) {
+      if (selectionGeneration !== vmSelectionGeneration || loadGeneration !== vmPlanLoadGeneration || runID !== vmSelected) return;
+      const graph = document.getElementById("vm-workflow-graph");
+      if (graph) graph.innerHTML = `<div class="empty">workflow unavailable · ${vmEscape(error.message)}</div>`;
+      if (state) state.textContent = "authority plan unavailable";
+    }
+  }
+
   function sameVMValue(left, right) {
     return JSON.stringify(left) === JSON.stringify(right);
   }
@@ -718,6 +921,7 @@
     vmPendingControls = {};
     vmControlIntent = "";
     vmInvalidControls.clear();
+    resetVMWorkflow(runID);
     resetVMGallery(runID);
     resetVMProfiles(runID);
     if (vmControlLoadAbort) vmControlLoadAbort.abort();
@@ -1380,6 +1584,7 @@
     const fragment = document.createDocumentFragment();
     for (const event of events) {
       if (event.run_id !== vmSelected) continue;
+      if (event.node_id) vmVisitedNodes.add(event.node_id);
       const row = document.createElement("div");
       row.className = "vm-event";
       row.innerHTML = `<span class="vm-seq">#${Number(event.sequence).toLocaleString()}</span>` +
@@ -1394,6 +1599,7 @@
     const cursor = document.getElementById("trainvm-cursor");
     if (cursor) cursor.textContent = `sequence ${vmAfter.toLocaleString()}`;
     target.scrollTop = target.scrollHeight;
+    if (vmCompiledPlan) renderVMWorkflowGraph();
   }
 
   function resetVMTelemetry() {
@@ -1529,6 +1735,7 @@
         resetVMTelemetry();
         resetVMGallery(vmSelected);
         resetVMProfiles(vmSelected);
+        resetVMWorkflow(vmSelected);
         const timeline = document.getElementById("trainvm-timeline");
         if (timeline) timeline.innerHTML = '<div class="empty">native journal changed · reloading authoritative history…</div>';
       }
@@ -1567,7 +1774,7 @@
       vmSelectedRun = selected || null;
       if (selected) {
         renderVMSummary(selected);
-        await refreshVMControlView(selected);
+        await Promise.all([refreshVMControlView(selected), refreshVMCompiledPlan(selected)]);
         if ((commandAvailabilityChanged || previousObservedState !== selected.observed_state) &&
             vmSelectedRun && vmControlView) renderVMControls();
         if (commandAvailabilityChanged || previousObservedState !== selected.observed_state) renderVMActions();
@@ -1663,6 +1870,7 @@
   window.trainboard = { watchActiveRun, openEvalSamples, resetEvalSamples };
   window.addEventListener("resize", () => {
     document.querySelectorAll("article.eval-sample").forEach(layoutEvalBoxOverlay);
+    layoutVMWorkflowEdges();
   });
 
   // SSE remains the efficient primary transport. This tiny selected-run poll

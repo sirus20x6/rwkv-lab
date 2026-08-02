@@ -20,6 +20,8 @@ type Reader struct {
 	db *sql.DB
 }
 
+const compiledPlanMaximumBytes = 2 << 20
+
 // ReadModel is the dashboard's bounded TrainVM projection API. Production
 // wiring uses the native gRPC authority; Reader remains only as an explicit
 // legacy compatibility adapter for offline journals and migration tests.
@@ -27,6 +29,7 @@ type ReadModel interface {
 	JournalID(context.Context) (string, error)
 	Runs(context.Context) ([]Run, error)
 	Run(context.Context, string) (Run, bool, error)
+	CompiledPlan(context.Context, string) (CompiledPlanView, bool, error)
 	Events(context.Context, EventQuery) ([]Event, error)
 	Timeline(context.Context, string, uint64, int) ([]Event, error)
 	Controls(context.Context, string) (ControlView, bool, error)
@@ -62,6 +65,14 @@ type Event struct {
 	MonotonicTimeNS uint64          `json:"monotonic_time_ns"`
 	OptimizerStep   *uint64         `json:"optimizer_step,omitempty"`
 	Payload         json.RawMessage `json:"payload"`
+}
+
+type CompiledPlanView struct {
+	JournalID     string          `json:"journal_id"`
+	RunID         string          `json:"run_id"`
+	RunRevision   uint64          `json:"run_revision"`
+	PlanHash      string          `json:"plan_hash"`
+	CanonicalPlan json.RawMessage `json:"canonical_plan"`
 }
 
 type ControlDescriptor struct {
@@ -168,6 +179,48 @@ func (r *Reader) Run(ctx context.Context, runID string) (Run, bool, error) {
 		return Run{}, false, fmt.Errorf("read TrainVM run: %w", err)
 	}
 	return run, true, nil
+}
+
+func (r *Reader) CompiledPlan(ctx context.Context, runID string) (CompiledPlanView, bool, error) {
+	if strings.TrimSpace(runID) == "" || len(runID) > 256 {
+		return CompiledPlanView{}, false, &ValidationError{Message: "bounded run ID is required"}
+	}
+	transaction, err := r.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return CompiledPlanView{}, false, fmt.Errorf("begin TrainVM compiled-plan snapshot: %w", err)
+	}
+	defer transaction.Rollback()
+	var view CompiledPlanView
+	var canonical string
+	err = transaction.QueryRowContext(ctx, `
+		SELECT journal.value, run_projection.run_id, run_projection.run_revision,
+		       run_projection.plan_hash, compiled_plans.canonical_plan_json
+		FROM run_projection
+		JOIN compiled_plans ON compiled_plans.plan_hash=run_projection.plan_hash
+		JOIN journal_meta AS journal ON journal.key='journal_id'
+		WHERE run_projection.run_id=?`, runID).
+		Scan(&view.JournalID, &view.RunID, &view.RunRevision, &view.PlanHash, &canonical)
+	if err == sql.ErrNoRows {
+		return CompiledPlanView{}, false, nil
+	}
+	if err != nil {
+		return CompiledPlanView{}, false, fmt.Errorf("read TrainVM compiled plan: %w", err)
+	}
+	if len(view.JournalID) != 32 || view.RunID != runID || view.RunRevision == 0 ||
+		len(canonical) == 0 || len(canonical) > compiledPlanMaximumBytes || !json.Valid([]byte(canonical)) {
+		return CompiledPlanView{}, false, fmt.Errorf("TrainVM compiled-plan snapshot is malformed")
+	}
+	actualHash := fmt.Sprintf("%x", sha256.Sum256([]byte(canonical)))
+	if actualHash != view.PlanHash {
+		return CompiledPlanView{}, false, fmt.Errorf(
+			"TrainVM persisted plan failed integrity verification: expected %s, got %s",
+			view.PlanHash, actualHash)
+	}
+	view.CanonicalPlan = json.RawMessage(canonical)
+	if err := transaction.Commit(); err != nil {
+		return CompiledPlanView{}, false, fmt.Errorf("commit TrainVM compiled-plan snapshot: %w", err)
+	}
+	return view, true, nil
 }
 
 type rowScanner interface {

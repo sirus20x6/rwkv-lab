@@ -16,6 +16,9 @@ func (*telemetryFixtureReader) Runs(context.Context) ([]Run, error)       { retu
 func (*telemetryFixtureReader) Run(context.Context, string) (Run, bool, error) {
 	return Run{}, false, nil
 }
+func (*telemetryFixtureReader) CompiledPlan(context.Context, string) (CompiledPlanView, bool, error) {
+	return CompiledPlanView{}, false, nil
+}
 func (r *telemetryFixtureReader) Events(_ context.Context, query EventQuery) ([]Event, error) {
 	r.query = query
 	return r.events, nil

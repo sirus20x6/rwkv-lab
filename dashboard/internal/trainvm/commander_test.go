@@ -2,15 +2,19 @@ package trainvm
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	trainvmv1 "trainboard/gen/trainvm/v1"
 
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -385,6 +389,35 @@ func TestNativeReadProjectionConversionsPreserveCursorsAndTypedControls(t *testi
 		view.Commands[0].Status != "applied" || view.Commands[0].EffectiveStep == nil ||
 		string(view.Commands[0].Assignments) != `{"learning_rate":0.00025}` {
 		t.Fatalf("unexpected native control view conversion: %#v err=%v", view, err)
+	}
+}
+
+func TestCompiledPlanConversionVerifiesEveryAuthorityIdentity(t *testing.T) {
+	canonical := `{"metadata":{"name":"graph"},"spec":{"workflow":{"nodes":{}}}}`
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(canonical)))
+	response := &trainvmv1.GetCompiledPlanResponse{
+		JournalId:         "0123456789abcdef0123456789abcdef",
+		Run:               &trainvmv1.RunIdentity{RunId: "run-1", Revision: 7, PlanHash: hash},
+		CanonicalPlanJson: canonical,
+	}
+	view, err := compiledPlanFromProto("run-1", response)
+	if err != nil || view.RunRevision != 7 || view.PlanHash != hash ||
+		string(view.CanonicalPlan) != canonical {
+		t.Fatalf("unexpected compiled plan: %#v err=%v", view, err)
+	}
+	for name, mutate := range map[string]func(*trainvmv1.GetCompiledPlanResponse){
+		"wrong run":       func(value *trainvmv1.GetCompiledPlanResponse) { value.Run.RunId = "run-2" },
+		"wrong hash":      func(value *trainvmv1.GetCompiledPlanResponse) { value.Run.PlanHash = strings.Repeat("0", 64) },
+		"invalid JSON":    func(value *trainvmv1.GetCompiledPlanResponse) { value.CanonicalPlanJson = "{" },
+		"missing journal": func(value *trainvmv1.GetCompiledPlanResponse) { value.JournalId = "" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			copy := proto.Clone(response).(*trainvmv1.GetCompiledPlanResponse)
+			mutate(copy)
+			if _, err := compiledPlanFromProto("run-1", copy); err == nil {
+				t.Fatal("malformed authority compiled plan unexpectedly accepted")
+			}
+		})
 	}
 }
 

@@ -221,6 +221,44 @@ func TestTrainVMLifecycleActionsUseNativeAuthorityAndExactRetry(t *testing.T) {
 	}
 }
 
+func TestTrainVMWorkflowGraphIsAuthorityDrivenAndFamilyAgnostic(t *testing.T) {
+	assets := Static()
+	index, err := fs.ReadFile(assets, "index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := fs.ReadFile(assets, "app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	css, err := fs.ReadFile(assets, "app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	combined := string(index) + string(app) + string(css)
+	for _, required := range []string{
+		`id="vm-workflow-graph"`, `/api/trainvm/runs/${encodeURIComponent(runID)}/plan`,
+		`plan?.canonical_plan?.spec?.workflow`, `node?.transitions`,
+		`data-vm-node=`, `vmSelectedRun.current_node_id`, `vmVisitedNodes`,
+		`layoutVMWorkflowEdges`, `marker-end`, `.vm-graph-layers`, `.vm-graph-node.current`,
+	} {
+		if !strings.Contains(combined, required) {
+			t.Fatalf("TrainVM workflow graph is missing %q", required)
+		}
+	}
+	graphStart := strings.Index(string(app), "function vmWorkflowModel")
+	graphEnd := strings.Index(string(app), "function sameVMValue")
+	if graphStart < 0 || graphEnd <= graphStart {
+		t.Fatal("could not isolate the workflow graph implementation")
+	}
+	graphImplementation := strings.ToLower(string(app)[graphStart:graphEnd])
+	for _, forbidden := range []string{"mageflow", "rwkv", "transformer"} {
+		if strings.Contains(graphImplementation, forbidden) {
+			t.Fatalf("workflow graph embeds a family-specific branch for %q", forbidden)
+		}
+	}
+}
+
 func TestTrainVMEditorIsSchemaDrivenAndNativeCompiled(t *testing.T) {
 	assets := Static()
 	index, err := fs.ReadFile(assets, "index.html")

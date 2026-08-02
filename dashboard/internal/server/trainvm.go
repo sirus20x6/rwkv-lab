@@ -115,6 +115,25 @@ func (s *Server) handleTrainVMRun(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(run)
 }
 
+func (s *Server) handleTrainVMCompiledPlan(w http.ResponseWriter, r *http.Request) {
+	if s.trainvm == nil {
+		http.Error(w, "TrainVM journal is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	view, found, err := s.trainvm.CompiledPlan(r.Context(), r.PathValue("run"))
+	if err != nil {
+		writeTrainVMAuthorityError(w, err)
+		return
+	}
+	if !found {
+		http.Error(w, "no such TrainVM run or persisted plan", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(view)
+}
+
 func (s *Server) handleTrainVMTimeline(w http.ResponseWriter, r *http.Request) {
 	if s.trainvm == nil {
 		http.Error(w, "TrainVM journal is not configured", http.StatusServiceUnavailable)
