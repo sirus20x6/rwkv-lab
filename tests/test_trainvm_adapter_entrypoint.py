@@ -16,6 +16,7 @@ from rwkv_lab.trainvm_adapters.handlers import (
     AdapterDispatchError,
     HandlerResult,
     _appearance_expert,
+    _rwkv_scratch,
     execute_invocation,
     supported_adapter_keys,
 )
@@ -217,6 +218,69 @@ def test_appearance_handler_returns_declared_immutable_checkpoint_request(
     assert request.state_components[0] == "component_composition"
 
 
+def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoint(
+    tmp_path, monkeypatch
+) -> None:
+    from rwkv_lab import rwkv_pretrain
+
+    read_root = tmp_path / "read"
+    run_directory = tmp_path / "write" / "run"
+    read_root.mkdir()
+    run_directory.parent.mkdir()
+    corpus = read_root / "tokens.bin"
+    corpus.write_bytes(b"\x00\x00" * 1024)
+    observed = []
+
+    def train(arguments, **kwargs):
+        observed.append((arguments, kwargs))
+        checkpoint = run_directory / "checkpoint-final" / "state.pt"
+        checkpoint.write_bytes(b"checkpoint")
+        return {"checkpoint": str(checkpoint), "step": 120}
+
+    monkeypatch.setattr(rwkv_pretrain, "main", train)
+    invocation = SimpleNamespace(
+        inputs={
+            "config": {
+                "data": str(corpus),
+                "output_dir": str(run_directory),
+                "steps": 120,
+            }
+        },
+        workspace={
+            "run_directory": str(run_directory),
+            "allowed_read_roots": [str(read_root)],
+            "allowed_write_roots": [str(run_directory.parent)],
+        },
+        publishes={"checkpoint": {}},
+    )
+    components = SimpleNamespace()
+    profiler = SimpleNamespace()
+    observability = SimpleNamespace()
+
+    result = _rwkv_scratch(
+        invocation,
+        components,
+        step_profiler=profiler,
+        observability=observability,
+    )
+    arguments, keyword_arguments = observed[0]
+    assert arguments[arguments.index("--data") + 1] == str(corpus.resolve())
+    assert arguments[arguments.index("--out") + 1] == str(run_directory.resolve())
+    assert arguments[arguments.index("--optimizer") + 1] == "adamw"
+    assert arguments[arguments.index("--lr-schedule") + 1] == "powercool"
+    assert "--compile" not in arguments
+    assert keyword_arguments == {
+        "worker_components": components,
+        "worker_step_profiler": profiler,
+        "worker_observability": observability,
+    }
+    assert result.optimizer_step == 120
+    assert len(result.checkpoint_requests) == 1
+    request = result.checkpoint_requests[0]
+    assert request.source_directory == run_directory / "checkpoint-final"
+    assert request.resume_grade == "terminal_checkpoint"
+
+
 def test_dispatch_table_is_closed_and_training_composition_is_required() -> None:
     assert supported_adapter_keys() == {
         (
@@ -236,6 +300,12 @@ def test_dispatch_table_is_closed_and_training_composition_is_required() -> None
             "1.0.0",
             "train",
             "rwkv_lab.qwen_ao3.v1.Train",
+        ),
+        (
+            "rwkv-lab.rwkv-scratch",
+            "1.0.0",
+            "train",
+            "rwkv_lab.rwkv_scratch.v1.Train",
         ),
     }
     unknown = SimpleNamespace(

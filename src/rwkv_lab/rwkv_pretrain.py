@@ -21,6 +21,7 @@ import math
 import os
 import time
 from collections.abc import Sequence
+from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -48,6 +49,7 @@ from rwkv_lab.training_components import (
 
 if TYPE_CHECKING:
     from rwkv_lab.trainvm_adapters import WorkerTrainingComponents
+    from rwkv_lab.trainvm_worker import WorkerObservability, WorkerStepProfiler
 from rwkv_lab.training_speedups import (
     AsyncCPUBatchPrefetcher,
     context_batch_for_step,
@@ -768,6 +770,8 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     worker_components: WorkerTrainingComponents | None = None,
+    worker_step_profiler: WorkerStepProfiler | None = None,
+    worker_observability: WorkerObservability | None = None,
 ):
     enable_fast_matmul()
     ap = argparse.ArgumentParser()
@@ -1021,6 +1025,26 @@ def main(
     jl = open(os.path.join(args.out, "train.jsonl"), "w", buffering=1) if dist.is_primary \
         else open(os.devnull, "w")
     emit = lambda r: jl.write(json.dumps(r) + "\n")
+
+    def publish_metric(
+        name: str,
+        value: int | float,
+        *,
+        metric_step: int,
+        sample_weight: float = 1.0,
+    ) -> None:
+        if worker_observability is not None:
+            worker_observability.publish_if_declared(
+                name,
+                value,
+                step=metric_step,
+                sample_weight=sample_weight,
+            )
+
+    def publish_eval(metric_step: int, value: float) -> None:
+        publish_metric("validation_loss", value, metric_step=metric_step)
+        publish_metric("perplexity", math.exp(value), metric_step=metric_step)
+
     dev = dist.device; T = args.seq_len
     context_stages = parse_context_curriculum(
         args.ctx_curriculum, max_seq_len=T)
@@ -1716,6 +1740,7 @@ def main(
         if not args.steps and (time.time() - t0) / 60.0 >= args.minutes: break
         if step % args.eval_every == 0:
             vl = val_loss(); emit({"kind": "eval", "step": step, "loss": vl, "val_loss": vl, "ppl": math.exp(vl)})
+            publish_eval(step, vl)
             print(f"[{step}] val {vl:.4f} (ppl {math.exp(vl):.2f})  {(time.time()-t0)/60:.1f}min", flush=True)
         train_seq_len, train_batch_size = context_batch_for_step(
             context_stages, step=step, total_steps=context_horizon or 1,
@@ -1765,7 +1790,13 @@ def main(
         sparse_recalled_rows = []
         ga = max(args.grad_accum, 1)
         for micro_step in range(ga):          # effective batch = batch * ga
-            sample = sample_train(train_batch_size, train_width)
+            input_wait = (
+                worker_step_profiler.input_wait()
+                if worker_step_profiler is not None
+                else nullcontext()
+            )
+            with input_wait:
+                sample = sample_train(train_batch_size, train_width)
             x, precomputed_recall = sample if isinstance(sample, tuple) else (sample, None)
             # Mixed-ctx rows are exactly T_bucket wide (pad-masked); flat windows are T+1(+extra).
             xin, tgt = ((x[:, :-1], x[:, 1:]) if buckets is not None
@@ -1842,6 +1873,10 @@ def main(
         if weight_decay_schedule is not None:
             weight_decay_schedule.step(step)
         opt.step(); step += 1
+        if worker_step_profiler is not None:
+            worker_step_profiler.step(step)
+        if worker_observability is not None:
+            worker_observability.optimizer_step(step)
         if args.cached_fp8_up:
             refresh_channelmix_fp8(model)
         if ema is not None:
@@ -1852,7 +1887,16 @@ def main(
             emit({"kind": "train", "step": step, "loss": float(loss.detach()),
                   "gnorm": float(gn.detach()),
                   "lr": lr, "tok_per_sec": int(seen / max(time.time() - t0, 1e-6))})
+            publish_metric("training_loss", float(loss.detach()), metric_step=step)
+            publish_metric("gradient_norm", float(gn.detach()), metric_step=step)
+            publish_metric("learning_rate", lr, metric_step=step)
+            publish_metric(
+                "tokens_per_second",
+                int(seen / max(time.time() - t0, 1e-6)),
+                metric_step=step,
+            )
     vl = val_loss(); emit({"kind": "eval", "step": step, "loss": vl, "val_loss": vl, "ppl": math.exp(vl)})
+    publish_eval(step, vl)
     if recall_pool is not None:
         recall_pool.shutdown(wait=False, cancel_futures=True)
     if cpu_prefetcher is not None:
@@ -1921,6 +1965,11 @@ def main(
             torch.save(blob, args.save)
         print(f"saved -> {args.save}", flush=True)
     print(f"DONE {tag}: {step} steps, final val {vl:.4f} (ppl {math.exp(vl):.2f})", flush=True)
+    return {
+        "checkpoint": args.save or None,
+        "final_validation_loss": vl,
+        "step": step,
+    }
 
 
 if __name__ == "__main__":

@@ -76,6 +76,7 @@ def checkpoint_request(
     step: object,
     *,
     state_components: tuple[str, ...],
+    resume_grade: str = "compatible",
 ) -> CheckpointPublicationRequest:
     if (
         not isinstance(checkpoint, str)
@@ -105,7 +106,7 @@ def checkpoint_request(
     return CheckpointPublicationRequest(
         source_directory=source,
         optimizer_step=step,
-        resume_grade="compatible",
+        resume_grade=resume_grade,
         state_components=state_components,
         parent_artifact_ids=tuple(parents),
     )

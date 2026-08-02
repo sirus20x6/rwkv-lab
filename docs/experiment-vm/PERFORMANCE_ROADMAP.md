@@ -387,9 +387,12 @@ startup orphan recovery are defined in
   now dispatches a closed set of typed MageFlow/Qwen contracts, accepts only invocation-frozen
   inline configuration, confines every top-level model/data/checkpoint/cache/output path to
   authority workspace roots, and reports a receipted terminal event. Recursive immutable identity
-  for paths referenced inside data/model manifests, trainer safe-point controls, RWKV's typed config adapter,
-  MLA/Engram transformer variants, additional component families, and removal of the remaining
-  legacy family switches remain.
+  The baseline non-distributed scratch-RWKV path now has a closed typed v1 adapter configuration,
+  path-authority lowering, terminal-checkpoint publication, sealed scalar metrics/heartbeats, and
+  the shared bounded step profiler; research topology levers remain excluded until their state is
+  represented by later adapter versions. Recursive immutable identity for paths referenced inside
+  data/model manifests, trainer safe-point controls, broader RWKV/MLA/Engram variants, additional
+  component families, and removal of the remaining legacy family switches remain.
 - Keep implementation boundaries aligned with component ownership: optimizer algorithms,
   parameter routing, LR schedules, weight-decay schedules, activations, normalization, objectives,
   precision/scaling, gradient policy, and curricula live in separate source/test modules. Shared

@@ -18,6 +18,7 @@ from .io import (
     read_inline_config,
     require_run_directory,
 )
+from .rwkv_scratch import RWKVScratchTrainConfig
 
 __all__ = [
     "WORKER_BOOTSTRAP_DESCRIPTOR",
@@ -25,6 +26,7 @@ __all__ = [
     "AdapterDispatchError",
     "AdapterInputError",
     "HandlerResult",
+    "RWKVScratchTrainConfig",
     "WorkerEntrypointError",
     "WorkerTrainingComponents",
     "WorkspacePathAuthority",

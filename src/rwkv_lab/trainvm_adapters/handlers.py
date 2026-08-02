@@ -21,6 +21,7 @@ from .checkpoints import (
 )
 from .components import WorkerTrainingComponents
 from .io import WorkspacePathAuthority, read_inline_config
+from .rwkv_scratch import RWKVScratchTrainConfig
 
 
 class AdapterDispatchError(ValueError):
@@ -306,6 +307,83 @@ def _qwen_ao3(
     )
 
 
+def _rwkv_scratch(
+    invocation: WorkerInvocation,
+    components: WorkerTrainingComponents,
+    step_profiler: WorkerStepProfiler | None = None,
+    observability: WorkerObservability | None = None,
+) -> HandlerResult:
+    from rwkv_lab.rwkv_pretrain import main as train
+
+    config = RWKVScratchTrainConfig(**read_inline_config(invocation.inputs))
+    paths = WorkspacePathAuthority.from_workspace(invocation.workspace)
+    data = paths.read_path(config.data, label="data", kind="file")
+    run_directory = paths.exact_run_directory(config.output_dir)
+    resume = (
+        paths.read_path(config.resume, label="resume", kind="file")
+        if config.resume
+        else None
+    )
+    checkpoint_directory = run_directory / "checkpoint-final"
+    try:
+        checkpoint_directory.mkdir(mode=0o750, parents=True, exist_ok=False)
+    except FileExistsError as error:
+        raise AdapterDispatchError(
+            "scratch-RWKV checkpoint staging already exists"
+        ) from error
+    checkpoint = checkpoint_directory / "state.pt"
+    try:
+        result = train(
+            config.trainer_arguments(
+                data=str(data),
+                output_dir=str(run_directory),
+                checkpoint=str(checkpoint),
+                resume=(str(resume) if resume is not None else None),
+            ),
+            worker_components=components,
+            worker_step_profiler=step_profiler or NullStepProfiler(),
+            worker_observability=observability,
+        )
+    except SystemExit as error:
+        raise AdapterDispatchError(
+            "scratch-RWKV rejected its typed adapter configuration"
+        ) from error
+    if not isinstance(result, Mapping):
+        raise AdapterDispatchError("scratch-RWKV omitted its terminal result")
+    step = result.get("step")
+    if not isinstance(step, int) or isinstance(step, bool) or step < 0:
+        raise AdapterDispatchError("scratch-RWKV returned an invalid optimizer step")
+    if result.get("checkpoint") != str(checkpoint) or not checkpoint.is_file():
+        raise AdapterDispatchError(
+            "scratch-RWKV omitted its authority-selected terminal checkpoint"
+        )
+    requests: tuple[CheckpointPublicationRequest, ...] = ()
+    if declares_checkpoint(invocation):
+        requests = (
+            checkpoint_request(
+                invocation,
+                run_directory,
+                str(checkpoint_directory),
+                step,
+                resume_grade="terminal_checkpoint",
+                state_components=(
+                    "component_composition",
+                    "model",
+                    "optimizer",
+                    "rng_accelerator",
+                    "rng_numpy",
+                    "rng_torch",
+                ),
+            ),
+        )
+    return HandlerResult(
+        "worker.completed",
+        {"reason": "training_complete"},
+        optimizer_step=step,
+        checkpoint_requests=requests,
+    )
+
+
 def _optional_read_path(
     paths: WorkspacePathAuthority,
     value: str | None,
@@ -349,6 +427,12 @@ _HANDLERS: Mapping[AdapterKey, Handler] = {
         "train",
         "rwkv_lab.qwen_ao3.v1.Train",
     ): _qwen_ao3,
+    (
+        "rwkv-lab.rwkv-scratch",
+        "1.0.0",
+        "train",
+        "rwkv_lab.rwkv_scratch.v1.Train",
+    ): _rwkv_scratch,
 }
 
 
