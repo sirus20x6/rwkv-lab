@@ -1,0 +1,393 @@
+{
+  "api_version": "trainvm.rwkv-lab/v1alpha1",
+  "kind": "Experiment",
+  "metadata": {
+    "name": "vision-representation-ab",
+    "description": "Run the established cached MoonViT and frozen-compressor vision representation arms under one authority-owned TrainVM lease.",
+    "labels": {
+      "family": "vision-multimodal",
+      "campaign": "representation-ab"
+    }
+  },
+  "spec": {
+    "workspace": {
+      "root": "/thearray/git/moe-mla",
+      "run_directory": "/thearray/git/moe-mla/runs/trainvm/vision-representation-ab",
+      "concurrency_key": "vision-representation-ab",
+      "allowed_read_roots": [
+        "/thearray/git/moe-mla",
+        "/thearray/downloads/cache/moe-mla"
+      ],
+      "allowed_write_roots": [
+        "/thearray/git/moe-mla/runs/trainvm/vision-representation-ab"
+      ]
+    },
+    "resources": {
+      "accelerators": {
+        "vendor": "nvidia",
+        "count": 1,
+        "minimum_memory_gib": 48,
+        "exclusive": true
+      },
+      "minimum_host_memory_gib": 64,
+      "cpu_threads": 16,
+      "lease_timeout_seconds": 30,
+      "cpu_io_policy": {
+        "cpu_weight": 100,
+        "io_weight": 100,
+        "omp_threads": 8,
+        "preprocessing_workers": 8,
+        "nice": 0
+      }
+    },
+    "parameters": {},
+    "artifacts": {
+      "moonvit_checkpoint": {
+        "type": "checkpoint",
+        "schema": "rwkv-lab.vision-frozen-adapter-checkpoint.v1",
+        "immutability": "immutable",
+        "fingerprint": "manifest_sha256"
+      },
+      "compressor_checkpoint": {
+        "type": "checkpoint",
+        "schema": "rwkv-lab.vision-frozen-adapter-checkpoint.v1",
+        "immutability": "immutable",
+        "fingerprint": "manifest_sha256"
+      }
+    },
+    "components": {
+      "core": {
+        "adapter": "trainvm.core",
+        "version": "1.0.0",
+        "runtime": "builtin",
+        "operations": {
+          "acquire_resources": {
+            "contract": "trainvm.v1.AcquireResources"
+          },
+          "release_resources": {
+            "contract": "trainvm.v1.ReleaseResources"
+          }
+        }
+      },
+      "vision": {
+        "adapter": "rwkv-lab.vision-frozen-adapter",
+        "version": "1.0.0",
+        "runtime": "python_worker",
+        "operations": {
+          "train": {
+            "contract": "rwkv_lab.vision_frozen_adapter.v1.Train"
+          }
+        }
+      }
+    },
+    "workflow": {
+      "entrypoint": "acquire_gpu",
+      "nodes": {
+        "acquire_gpu": {
+          "description": "Acquire one exclusive GPU for both sequential A/B arms.",
+          "invoke": {
+            "component": "core",
+            "operation": "acquire_resources",
+            "inputs": {
+              "concurrency_key": {
+                "literal": "vision-representation-ab"
+              }
+            }
+          },
+          "idempotency": "receipt_required",
+          "effect": "resource",
+          "transitions": [
+            {
+              "on": "resource.acquired",
+              "target": "moonvit_arm"
+            },
+            {
+              "on": "operation.failed",
+              "target": "$failed"
+            }
+          ]
+        },
+        "moonvit_arm": {
+          "description": "Train the cached MoonViT-only representation arm in its node-isolated run directory.",
+          "invoke": {
+            "component": "vision",
+            "operation": "train",
+            "inputs": {
+              "config": {
+                "literal": {
+                  "arm": "moonvit",
+                  "train_manifests": [
+                    "/thearray/git/moe-mla/curated_vision/vision_next_shard_001_ocr10_train.jsonl"
+                  ],
+                  "eval_manifests": [
+                    "/thearray/git/moe-mla/curated_vision/vision_next_shard_000_ocr10_eval.jsonl"
+                  ],
+                  "rwkv_checkpoint": "/thearray/git/moe-mla/models/rwkv7-g1h-2.9b-20260710-ctx10240.pth",
+                  "moonvit_checkpoint": "/thearray/git/moe-mla/models/kimi-k2.6-moonvit/model-00064-of-000064.safetensors",
+                  "vocab": "/thearray/git/moe-mla/src/rwkv_lab/assets/rwkv_vocab_v20230424.txt",
+                  "moon_cache": "/thearray/downloads/cache/moe-mla/moonvit_next_128_shard_001_ocr10"
+                }
+              }
+            },
+            "training": {
+              "model_family": "vision",
+              "components": {
+                "gradient_clipping": {
+                  "key": {
+                    "category": "gradient_clipping",
+                    "name": "global_norm",
+                    "version": "1.0.0"
+                  },
+                  "configuration": {
+                    "max_norm": 1.0,
+                    "norm_type": 2.0,
+                    "error_if_nonfinite": false
+                  }
+                },
+                "optimizer": {
+                  "key": {
+                    "category": "optimizer",
+                    "name": "torch_adamw",
+                    "version": "1.0.0"
+                  },
+                  "configuration": {
+                    "learning_rate": 0.0002,
+                    "beta1": 0.9,
+                    "beta2": 0.95,
+                    "epsilon": 1e-08,
+                    "weight_decay": 0.01,
+                    "foreach": false,
+                    "fused": true
+                  }
+                },
+                "precision": {
+                  "key": {
+                    "category": "precision",
+                    "name": "fp32_parameters_bf16_compute",
+                    "version": "1.0.0"
+                  },
+                  "configuration": {
+                    "parameter_dtype": "float32",
+                    "compute_dtype": "bfloat16",
+                    "reduction_dtype": "float32",
+                    "gradient_scaling": false
+                  }
+                }
+              }
+            }
+          },
+          "publishes": {
+            "checkpoint": "moonvit_checkpoint"
+          },
+          "idempotency": "receipt_required",
+          "effect": "process",
+          "timeout_seconds": 172800,
+          "transitions": [
+            {
+              "on": "worker.completed",
+              "target": "compressor_arm"
+            },
+            {
+              "on": "operation.failed",
+              "target": "$failed"
+            }
+          ]
+        },
+        "compressor_arm": {
+          "description": "Train the cached frozen-compressor representation arm in a separate node-isolated run directory.",
+          "invoke": {
+            "component": "vision",
+            "operation": "train",
+            "inputs": {
+              "config": {
+                "literal": {
+                  "arm": "compressor",
+                  "train_manifests": [
+                    "/thearray/git/moe-mla/curated_vision/vision_next_shard_001_ocr10_train.jsonl"
+                  ],
+                  "eval_manifests": [
+                    "/thearray/git/moe-mla/curated_vision/vision_next_shard_000_ocr10_eval.jsonl"
+                  ],
+                  "rwkv_checkpoint": "/thearray/git/moe-mla/models/rwkv7-g1h-2.9b-20260710-ctx10240.pth",
+                  "moonvit_checkpoint": "/thearray/git/moe-mla/models/kimi-k2.6-moonvit/model-00064-of-000064.safetensors",
+                  "vocab": "/thearray/git/moe-mla/src/rwkv_lab/assets/rwkv_vocab_v20230424.txt",
+                  "moon_cache": "/thearray/downloads/cache/moe-mla/moonvit_next_128_shard_001_ocr10",
+                  "compressor_checkpoint": "/thearray/git/moe-mla/models/vision/teacher-compressor-so400m-dinov2-sam-128x1024-v1.pt",
+                  "fusion_cache": "/thearray/downloads/cache/moe-mla/fusion_so400m_next_128_shard_001_ocr10",
+                  "siglip2_model": "/thearray/git/moe-mla/models/vision/siglip2-so400m-patch16-512",
+                  "dinov2_model": "/thearray/git/moe-mla/models/vision/dinov2-base",
+                  "sam_model": "/thearray/git/moe-mla/models/vision/sam-vit-base"
+                }
+              }
+            },
+            "training": {
+              "model_family": "vision",
+              "components": {
+                "gradient_clipping": {
+                  "key": {
+                    "category": "gradient_clipping",
+                    "name": "global_norm",
+                    "version": "1.0.0"
+                  },
+                  "configuration": {
+                    "max_norm": 1.0,
+                    "norm_type": 2.0,
+                    "error_if_nonfinite": false
+                  }
+                },
+                "optimizer": {
+                  "key": {
+                    "category": "optimizer",
+                    "name": "torch_adamw",
+                    "version": "1.0.0"
+                  },
+                  "configuration": {
+                    "learning_rate": 0.0002,
+                    "beta1": 0.9,
+                    "beta2": 0.95,
+                    "epsilon": 1e-08,
+                    "weight_decay": 0.01,
+                    "foreach": false,
+                    "fused": true
+                  }
+                },
+                "precision": {
+                  "key": {
+                    "category": "precision",
+                    "name": "fp32_parameters_bf16_compute",
+                    "version": "1.0.0"
+                  },
+                  "configuration": {
+                    "parameter_dtype": "float32",
+                    "compute_dtype": "bfloat16",
+                    "reduction_dtype": "float32",
+                    "gradient_scaling": false
+                  }
+                }
+              }
+            }
+          },
+          "publishes": {
+            "checkpoint": "compressor_checkpoint"
+          },
+          "idempotency": "receipt_required",
+          "effect": "process",
+          "timeout_seconds": 172800,
+          "transitions": [
+            {
+              "on": "worker.completed",
+              "target": "release_gpu"
+            },
+            {
+              "on": "operation.failed",
+              "target": "$failed"
+            }
+          ]
+        },
+        "release_gpu": {
+          "description": "Release the shared GPU lease after both arms complete.",
+          "invoke": {
+            "component": "core",
+            "operation": "release_resources",
+            "inputs": {
+              "concurrency_key": {
+                "literal": "vision-representation-ab"
+              }
+            }
+          },
+          "idempotency": "replay_safe",
+          "effect": "resource",
+          "transitions": [
+            {
+              "on": "resource.released",
+              "target": "$completed"
+            },
+            {
+              "on": "operation.failed",
+              "target": "$failed"
+            }
+          ]
+        }
+      }
+    },
+    "controls": {
+      "catalog": {}
+    },
+    "observability": {
+      "heartbeat_seconds": 5,
+      "metrics": [
+        {
+          "name": "train.loss",
+          "type": "gauge",
+          "unit": "dimensionless",
+          "step_domain": "optimizer_step",
+          "aggregation": "mean"
+        },
+        {
+          "name": "train.gradient_norm",
+          "type": "gauge",
+          "unit": "ratio",
+          "step_domain": "optimizer_step",
+          "aggregation": "last"
+        },
+        {
+          "name": "train.loop_gradient_norm",
+          "type": "gauge",
+          "unit": "ratio",
+          "step_domain": "optimizer_step",
+          "aggregation": "last"
+        },
+        {
+          "name": "train.engram_gradient_norm",
+          "type": "gauge",
+          "unit": "ratio",
+          "step_domain": "optimizer_step",
+          "aggregation": "last"
+        },
+        {
+          "name": "train.batch_captions",
+          "type": "gauge",
+          "unit": "caption",
+          "step_domain": "optimizer_step",
+          "aggregation": "mean"
+        },
+        {
+          "name": "train.text_tokens",
+          "type": "gauge",
+          "unit": "token",
+          "step_domain": "optimizer_step",
+          "aggregation": "mean"
+        },
+        {
+          "name": "train.step_seconds",
+          "type": "gauge",
+          "unit": "second",
+          "step_domain": "optimizer_step",
+          "aggregation": "mean"
+        },
+        {
+          "name": "eval.loss",
+          "type": "gauge",
+          "unit": "dimensionless",
+          "step_domain": "optimizer_step",
+          "aggregation": "last"
+        },
+        {
+          "name": "eval.perplexity",
+          "type": "gauge",
+          "unit": "dimensionless",
+          "step_domain": "optimizer_step",
+          "aggregation": "last"
+        }
+      ],
+      "retain_raw_metrics_days": 30
+    },
+    "recovery": {
+      "exact_resume": false,
+      "reconcile": "adopt_if_fingerprint_matches",
+      "orphan_policy": "adopt_if_identity_matches",
+      "graceful_stop_seconds": 300,
+      "release_accelerators_when_paused": true
+    }
+  }
+}
