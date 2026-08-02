@@ -20,7 +20,9 @@ Reads `/thearray/git/moe-mla/runs/`. Ingests all `train.jsonl` logs + system tel
 SQLite DB (`trainboard.db`). GPU-light — safe to run alongside live training.
 The dashboard uses one lazy gRPC client for `<repo>/trainvm.sock` (or `-trainvm-socket PATH`) for
 bounded run projections, query-bound pagination, resumable timeline replay, typed control views,
-descriptors, submissions, and revision-checked control patches. The independently supervised native
+descriptors, submissions, revision-checked control patches, and revision-fenced lifecycle commands.
+Checkpoint-now, retained-resource pause, checkpoint-first GPU-releasing pause, exact resume, and
+graceful cancel are posted to `/api/trainvm/runs/{run}/actions`; the independently supervised native
 authority remains the only process that opens or mutates its journal; an unavailable authority is
 reported as unavailable instead of serving an unsynchronized database snapshot. `-trainvm-db PATH`
 is retained only as an explicit read-only compatibility fallback for offline legacy journals and is
@@ -38,6 +40,8 @@ canonicalization, and plan hashing; that preview endpoint cannot launch a run. V
 frozen and posted to `/api/trainvm/experiments`, where the native authority independently recompiles
 them and creates an idempotent queued run. Ambiguous browser failures retain the exact serialized
 request and key in session storage for an exact retry; the dashboard never writes the journal.
+Ambiguous live-control or lifecycle-command outcomes likewise retain the exact in-memory serialized
+body and idempotency key, block competing mutations, and expose only an exact retry until resolved.
 The one-second shared snapshot reads conversion quality from ingestion-time rollups plus one batched
 codec query; it does not fan out KPI/count queries per layer. Run-sidecar and campaign/dataset discovery
 are cached, so multiple panels and browser tabs do not repeatedly walk the 1TB-scale `runs/` tree.

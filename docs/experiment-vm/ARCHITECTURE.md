@@ -411,6 +411,8 @@ The redesigned experiment view includes:
 - resolved-plan preview and semantic diff before launch or live revision;
 - graph and timeline views showing current node, attempt, transition, and wait reason;
 - desired/observed state and heartbeat/resource ownership;
+- revision-fenced checkpoint, pause, GPU-releasing pause, resume, and graceful-cancel actions whose
+  ambiguous outcomes can only replay the exact serialized idempotent intent;
 - controls grouped by application point, with pending/effective/rejected revisions;
 - metrics selected from their descriptors rather than hard-coded field lists;
 - artifact and checkpoint lineage;

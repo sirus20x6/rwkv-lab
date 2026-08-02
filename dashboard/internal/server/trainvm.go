@@ -290,6 +290,16 @@ type trainVMControlRequest struct {
 	Assignments             map[string]any `json:"assignments"`
 }
 
+type trainVMRunActionRequest struct {
+	ExpectedRunRevision    uint64 `json:"expected_run_revision"`
+	IdempotencyKey         string `json:"idempotency_key"`
+	Reason                 string `json:"reason"`
+	Action                 string `json:"action"`
+	CheckpointFirst        bool   `json:"checkpoint_first"`
+	ReleaseResources       bool   `json:"release_resources"`
+	GracefulTimeoutSeconds uint64 `json:"graceful_timeout_seconds"`
+}
+
 type trainVMSubmissionRequest struct {
 	SourceDocument                      string `json:"source_document"`
 	SourceFormat                        string `json:"source_format"`
@@ -406,6 +416,71 @@ func (s *Server) handleTrainVMControls(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		writeTrainVMAuthorityError(w, err)
+		return
+	}
+	httpStatus := http.StatusOK
+	switch result.Disposition {
+	case "ACCEPTED":
+		httpStatus = http.StatusAccepted
+	case "ALREADY_APPLIED":
+		httpStatus = http.StatusOK
+	case "CONFLICT":
+		httpStatus = http.StatusConflict
+	case "REJECTED":
+		httpStatus = http.StatusUnprocessableEntity
+	default:
+		http.Error(w, "native authority returned an unknown disposition", http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(httpStatus)
+	_ = json.NewEncoder(w).Encode(result)
+}
+
+func (s *Server) handleTrainVMRunAction(w http.ResponseWriter, r *http.Request) {
+	if s.commander == nil || s.trainvm == nil {
+		http.Error(w, "TrainVM read model and command authority are both required", http.StatusServiceUnavailable)
+		return
+	}
+	if !validateTrainVMMutation(w, r, "lifecycle action") {
+		return
+	}
+	var input trainVMRunActionRequest
+	if !decodeTrainVMMutation(w, r, "lifecycle action", trainVMCommandLimit, &input) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	runID := r.PathValue("run")
+	run, found, err := s.trainvm.Run(ctx, runID)
+	if err != nil {
+		writeTrainVMAuthorityError(w, err)
+		return
+	}
+	if !found {
+		http.Error(w, "no such TrainVM run", http.StatusNotFound)
+		return
+	}
+	journalID, err := s.trainvm.JournalID(ctx)
+	if err != nil {
+		writeTrainVMAuthorityError(w, err)
+		return
+	}
+	result, err := s.commander.RequestRunAction(ctx, trainvmstore.RunActionRequest{
+		RunID: runID, ExpectedJournalID: journalID, ExpectedPlanHash: run.PlanHash,
+		ExpectedRunRevision: input.ExpectedRunRevision, IdempotencyKey: input.IdempotencyKey,
+		Author: "dashboard", Reason: input.Reason, Action: input.Action,
+		CheckpointFirst: input.CheckpointFirst, ReleaseResources: input.ReleaseResources,
+		GracefulTimeoutSeconds: input.GracefulTimeoutSeconds,
+	})
+	if err != nil {
+		writeTrainVMAuthorityError(w, err)
+		return
+	}
+	if result.Action != strings.ToLower(strings.TrimSpace(input.Action)) &&
+		(result.Disposition == "ACCEPTED" || result.Disposition == "ALREADY_APPLIED") {
+		http.Error(w, "native authority returned a mismatched lifecycle action", http.StatusBadGateway)
 		return
 	}
 	httpStatus := http.StatusOK

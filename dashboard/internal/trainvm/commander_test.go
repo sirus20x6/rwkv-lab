@@ -11,6 +11,7 @@ import (
 
 	trainvmv1 "trainboard/gen/trainvm/v1"
 
+	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -163,6 +164,162 @@ func TestControlResultMapsTypedNativeResponse(t *testing.T) {
 		result.Status != "APPLIED" || result.Assignments["rate"] != 0.125 ||
 		len(result.Diagnostics) != 1 || result.Diagnostics[0].Code != "control.note" {
 		t.Fatalf("unexpected control result: %#v", result)
+	}
+}
+
+func TestRunActionRPCRequestMapsEveryTypedCommand(t *testing.T) {
+	base := RunActionRequest{
+		RunID: " run-1 ", ExpectedJournalID: " journal-1 ", ExpectedPlanHash: " plan-1 ",
+		ExpectedRunRevision: 7, IdempotencyKey: " intent-1 ", Author: " operator ", Reason: " reason ",
+	}
+	tests := map[string]struct {
+		configure func(*RunActionRequest)
+		check     func(*testing.T, *trainvmv1.RunCommandRequest)
+	}{
+		"checkpoint": {check: func(t *testing.T, wire *trainvmv1.RunCommandRequest) {
+			if wire.GetCheckpoint() == nil || wire.GetCheckpoint().GetReason() != "reason" {
+				t.Fatalf("checkpoint payload lost: %#v", wire)
+			}
+		}},
+		"pause": {configure: func(request *RunActionRequest) {
+			request.CheckpointFirst = true
+			request.ReleaseResources = true
+		}, check: func(t *testing.T, wire *trainvmv1.RunCommandRequest) {
+			if wire.GetPause() == nil || !wire.GetPause().GetCheckpointFirst() || !wire.GetPause().GetReleaseResources() {
+				t.Fatalf("pause payload lost: %#v", wire)
+			}
+		}},
+		"resume": {check: func(t *testing.T, wire *trainvmv1.RunCommandRequest) {
+			if wire.GetResume() == nil {
+				t.Fatalf("resume payload lost: %#v", wire)
+			}
+		}},
+		"cancel": {configure: func(request *RunActionRequest) {
+			request.GracefulTimeoutSeconds = 30
+		}, check: func(t *testing.T, wire *trainvmv1.RunCommandRequest) {
+			if wire.GetCancel() == nil || wire.GetCancel().GetReason() != "reason" ||
+				wire.GetCancel().GetGracefulTimeout().GetSeconds() != 30 {
+				t.Fatalf("cancel payload lost: %#v", wire)
+			}
+		}},
+	}
+	for action, test := range tests {
+		t.Run(action, func(t *testing.T) {
+			request := base
+			request.Action = action
+			if test.configure != nil {
+				test.configure(&request)
+			}
+			wire, err := runActionRPCRequest(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if wire.GetRunId() != "run-1" || wire.GetExpectedJournalId() != "journal-1" ||
+				wire.GetExpectedPlanHash() != "plan-1" || wire.GetExpectedRunRevision() != 7 ||
+				wire.GetIdempotencyKey() != "intent-1" || wire.GetAuthor() != "operator" || wire.GetReason() != "reason" {
+				t.Fatalf("authority fence lost: %#v", wire)
+			}
+			test.check(t, wire)
+		})
+	}
+}
+
+func TestRunActionRPCRequestRejectsUnsafeCombinations(t *testing.T) {
+	base := RunActionRequest{
+		RunID: "run-1", ExpectedJournalID: "journal-1", ExpectedPlanHash: "plan-1",
+		ExpectedRunRevision: 7, IdempotencyKey: "intent-1", Author: "operator", Reason: "reason",
+	}
+	tests := map[string]RunActionRequest{}
+	unknown := base
+	unknown.Action = "restart"
+	tests["unknown action"] = unknown
+	unsafeRelease := base
+	unsafeRelease.Action, unsafeRelease.ReleaseResources = "pause", true
+	tests["release without checkpoint"] = unsafeRelease
+	wrongFlag := base
+	wrongFlag.Action, wrongFlag.CheckpointFirst = "resume", true
+	tests["pause flag on resume"] = wrongFlag
+	wrongTimeout := base
+	wrongTimeout.Action, wrongTimeout.GracefulTimeoutSeconds = "checkpoint", 1
+	tests["timeout on checkpoint"] = wrongTimeout
+	hugeTimeout := base
+	hugeTimeout.Action, hugeTimeout.GracefulTimeoutSeconds = "cancel", 86401
+	tests["unbounded timeout"] = hugeTimeout
+	missingReason := base
+	missingReason.Action, missingReason.Reason = "pause", " "
+	tests["missing reason"] = missingReason
+	for name, request := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := runActionRPCRequest(request)
+			var validationError *ValidationError
+			if !errors.As(err, &validationError) {
+				t.Fatalf("expected ValidationError, got %T: %v", err, err)
+			}
+		})
+	}
+}
+
+func TestRunActionResultPreservesAuthorityLineage(t *testing.T) {
+	checkpoint, err := runActionResult("checkpoint", &trainvmv1.RunCommandResponse{
+		Disposition:     trainvmv1.RunCommandResponse_DISPOSITION_ALREADY_APPLIED,
+		CommandSequence: 19,
+		Checkpoint: &trainvmv1.CheckpointCommandResult{
+			CommandId: "checkpoint-1", ControllerSequence: 11,
+			Status: trainvmv1.CheckpointCommandResult_STATUS_APPLIED,
+			Reason: "operator snapshot", OptimizerStep: 42, ArtifactId: "artifact-42",
+		},
+	})
+	if err != nil || checkpoint.Action != "checkpoint" || checkpoint.CommandSequence != 19 ||
+		checkpoint.CommandID != "checkpoint-1" || checkpoint.ControllerSequence != 11 ||
+		checkpoint.Status != "APPLIED" || checkpoint.OptimizerStep != 42 || checkpoint.ArtifactID != "artifact-42" {
+		t.Fatalf("checkpoint result lost lineage: %#v err=%v", checkpoint, err)
+	}
+
+	pause, err := runActionResult("pause", &trainvmv1.RunCommandResponse{
+		Disposition: trainvmv1.RunCommandResponse_DISPOSITION_ACCEPTED,
+		Lifecycle: &trainvmv1.LifecycleCommandResult{
+			CommandId: "pause-1", ControllerSequence: 12,
+			Kind:            trainvmv1.LifecycleCommandResult_KIND_PAUSE,
+			Status:          trainvmv1.LifecycleCommandResult_STATUS_REQUESTED,
+			CheckpointFirst: true, ReleaseResources: true, OptimizerStep: 43,
+			ArtifactId: "artifact-43", Reason: "release GPU",
+		},
+	})
+	if err != nil || pause.Action != "pause" || !pause.CheckpointFirst || !pause.ReleaseResources ||
+		pause.CommandID != "pause-1" || pause.Status != "REQUESTED" {
+		t.Fatalf("pause result lost lineage: %#v err=%v", pause, err)
+	}
+
+	cancel, err := runActionResult("cancel", &trainvmv1.RunCommandResponse{
+		Disposition: trainvmv1.RunCommandResponse_DISPOSITION_ACCEPTED,
+		Lifecycle: &trainvmv1.LifecycleCommandResult{
+			Kind:            trainvmv1.LifecycleCommandResult_KIND_CANCEL,
+			Status:          trainvmv1.LifecycleCommandResult_STATUS_REQUESTED,
+			GracefulTimeout: durationpb.New(30 * time.Second),
+		},
+	})
+	if err != nil || cancel.GracefulTimeoutSeconds != 30 {
+		t.Fatalf("cancel timeout lost: %#v err=%v", cancel, err)
+	}
+}
+
+func TestRunActionResultRejectsMismatchedAuthorityShape(t *testing.T) {
+	for name, response := range map[string]*trainvmv1.RunCommandResponse{
+		"missing accepted result": {Disposition: trainvmv1.RunCommandResponse_DISPOSITION_ACCEPTED},
+		"wrong lifecycle kind": {
+			Disposition: trainvmv1.RunCommandResponse_DISPOSITION_ACCEPTED,
+			Lifecycle:   &trainvmv1.LifecycleCommandResult{Kind: trainvmv1.LifecycleCommandResult_KIND_CANCEL},
+		},
+		"wrong result variant": {
+			Disposition: trainvmv1.RunCommandResponse_DISPOSITION_ACCEPTED,
+			Checkpoint:  &trainvmv1.CheckpointCommandResult{},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := runActionResult("pause", response); err == nil {
+				t.Fatal("mismatched authority response unexpectedly accepted")
+			}
+		})
 	}
 }
 

@@ -119,6 +119,21 @@
           </nav>
           <section class="vm-detail" aria-live="polite">
             <div id="trainvm-summary" class="vm-summary"><div class="empty">select a native run</div></div>
+            <section class="vm-lifecycle" aria-labelledby="vm-lifecycle-title">
+              <div class="vm-timeline-head"><span id="vm-lifecycle-title">run lifecycle</span><span>native authority · durable commands</span></div>
+              <div class="vm-lifecycle-actions">
+                <input id="vm-action-reason" type="text" maxlength="500" placeholder="reason for this action" aria-label="Reason for lifecycle action" disabled />
+                <div class="vm-action-buttons">
+                  <button class="btn sm" type="button" data-vm-action="checkpoint" disabled>checkpoint now</button>
+                  <button class="btn sm" type="button" data-vm-action="pause" disabled>pause</button>
+                  <button class="btn sm" type="button" data-vm-action="pause" data-checkpoint-first="true" data-release-resources="true" disabled>pause &amp; release GPU</button>
+                  <button class="btn sm" type="button" data-vm-action="resume" disabled>resume</button>
+                  <label class="vm-cancel-timeout">cancel grace <input id="vm-cancel-timeout" type="number" min="0" max="86400" step="1" value="30" aria-label="Cancel graceful timeout in seconds" disabled /> s</label>
+                  <button class="btn sm danger" type="button" data-vm-action="cancel" disabled>cancel</button>
+                </div>
+                <span id="vm-action-state" class="sub">select a native run</span>
+              </div>
+            </section>
             <div class="vm-telemetry">
               <section>
                 <div class="vm-timeline-head"><span>native metrics</span><span id="trainvm-metric-cursor">sequence —</span></div>

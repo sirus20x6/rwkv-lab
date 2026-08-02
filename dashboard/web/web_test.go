@@ -190,6 +190,37 @@ func TestTrainVMPanelUsesIncrementalReadOnlyTimeline(t *testing.T) {
 	}
 }
 
+func TestTrainVMLifecycleActionsUseNativeAuthorityAndExactRetry(t *testing.T) {
+	assets := Static()
+	index, err := fs.ReadFile(assets, "index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := fs.ReadFile(assets, "app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	combined := string(index) + string(app)
+	for _, required := range []string{
+		`id="vm-action-reason"`, `data-vm-action="checkpoint"`,
+		`data-vm-action="pause"`, `data-release-resources="true"`,
+		`data-vm-action="resume"`, `data-vm-action="cancel"`,
+		`id="vm-cancel-timeout"`, `/actions`, `expected_run_revision`,
+		`checkpoint_first: checkpointFirst`, `release_resources: releaseResources`,
+		`graceful_timeout_seconds: gracefulTimeout`, `vmActionRetries`,
+		`body: submission.body`, `outcome unknown · retry exact action`,
+		`observed === "running" && hasWorker`, `observed === "paused" && hasNode`,
+	} {
+		if !strings.Contains(combined, required) {
+			t.Fatalf("TrainVM lifecycle surface is missing %q", required)
+		}
+	}
+	if strings.Contains(string(app), "process.kill") || strings.Contains(string(app), "SIGSTOP") ||
+		strings.Contains(string(app), "SIGCONT") {
+		t.Fatal("TrainVM lifecycle UI bypasses native authority with process signalling")
+	}
+}
+
 func TestTrainVMEditorIsSchemaDrivenAndNativeCompiled(t *testing.T) {
 	assets := Static()
 	index, err := fs.ReadFile(assets, "index.html")

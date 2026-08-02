@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	trainvmv1 "trainboard/gen/trainvm/v1"
 
@@ -18,6 +19,7 @@ import (
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -26,6 +28,7 @@ import (
 type Commander interface {
 	SubmitExperiment(context.Context, SubmissionRequest) (SubmissionResult, error)
 	RequestControls(context.Context, ControlRequest) (ControlResult, error)
+	RequestRunAction(context.Context, RunActionRequest) (RunActionResult, error)
 	GetDescriptor(context.Context, DescriptorRequest) (DescriptorResult, error)
 }
 
@@ -91,6 +94,38 @@ type ControlResult struct {
 	Status          string              `json:"status,omitempty"`
 	Assignments     map[string]any      `json:"assignments,omitempty"`
 	Diagnostics     []ControlDiagnostic `json:"diagnostics,omitempty"`
+}
+
+// RunActionRequest carries the complete immutable operator intent for a
+// lifecycle mutation. Action is one of checkpoint, pause, resume, or cancel.
+type RunActionRequest struct {
+	RunID                  string
+	ExpectedJournalID      string
+	ExpectedPlanHash       string
+	ExpectedRunRevision    uint64
+	IdempotencyKey         string
+	Author                 string
+	Reason                 string
+	Action                 string
+	CheckpointFirst        bool
+	ReleaseResources       bool
+	GracefulTimeoutSeconds uint64
+}
+
+type RunActionResult struct {
+	Disposition            string              `json:"disposition"`
+	CommandSequence        uint64              `json:"command_sequence,omitempty"`
+	Action                 string              `json:"action,omitempty"`
+	CommandID              string              `json:"command_id,omitempty"`
+	ControllerSequence     uint64              `json:"controller_sequence,omitempty"`
+	Status                 string              `json:"status,omitempty"`
+	CheckpointFirst        bool                `json:"checkpoint_first,omitempty"`
+	ReleaseResources       bool                `json:"release_resources,omitempty"`
+	OptimizerStep          uint64              `json:"optimizer_step,omitempty"`
+	ArtifactID             string              `json:"artifact_id,omitempty"`
+	Reason                 string              `json:"reason,omitempty"`
+	GracefulTimeoutSeconds uint64              `json:"graceful_timeout_seconds,omitempty"`
+	Diagnostics            []ControlDiagnostic `json:"diagnostics,omitempty"`
 }
 
 type ControlDiagnostic struct {
@@ -312,6 +347,21 @@ func (c *GRPCCommander) RequestControls(ctx context.Context, request ControlRequ
 		return ControlResult{}, err
 	}
 	return controlResult(response), nil
+}
+
+func (c *GRPCCommander) RequestRunAction(ctx context.Context, request RunActionRequest) (RunActionResult, error) {
+	if c == nil || c.client == nil {
+		return RunActionResult{}, fmt.Errorf("TrainVM authority client is not configured")
+	}
+	rpcRequest, err := runActionRPCRequest(request)
+	if err != nil {
+		return RunActionResult{}, err
+	}
+	response, err := c.client.CommandRun(ctx, rpcRequest)
+	if err != nil {
+		return RunActionResult{}, err
+	}
+	return runActionResult(request.Action, response)
 }
 
 func (c *GRPCCommander) SubmitExperiment(ctx context.Context, request SubmissionRequest) (SubmissionResult, error) {
@@ -658,6 +708,65 @@ func controlRPCRequest(request ControlRequest) (*trainvmv1.RunCommandRequest, er
 	}, nil
 }
 
+func runActionRPCRequest(request RunActionRequest) (*trainvmv1.RunCommandRequest, error) {
+	request.RunID = strings.TrimSpace(request.RunID)
+	request.ExpectedJournalID = strings.TrimSpace(request.ExpectedJournalID)
+	request.ExpectedPlanHash = strings.TrimSpace(request.ExpectedPlanHash)
+	request.IdempotencyKey = strings.TrimSpace(request.IdempotencyKey)
+	request.Author = strings.TrimSpace(request.Author)
+	request.Reason = strings.TrimSpace(request.Reason)
+	request.Action = strings.ToLower(strings.TrimSpace(request.Action))
+	if request.RunID == "" || request.ExpectedJournalID == "" || request.ExpectedPlanHash == "" ||
+		request.IdempotencyKey == "" || request.Author == "" || request.Reason == "" {
+		return nil, invalidControlRequest(
+			"run ID, journal ID, plan hash, idempotency key, author, and reason are required")
+	}
+	if len(request.RunID) > 256 || len(request.ExpectedJournalID) > 256 ||
+		len(request.ExpectedPlanHash) > 256 || len(request.IdempotencyKey) > 256 ||
+		len(request.Author) > 256 || len(request.Reason) > 4096 {
+		return nil, invalidControlRequest("lifecycle command contains an overlong bounded field")
+	}
+	if request.Action != "pause" && (request.CheckpointFirst || request.ReleaseResources) {
+		return nil, invalidControlRequest("checkpoint_first and release_resources are valid only for pause")
+	}
+	if request.ReleaseResources && !request.CheckpointFirst {
+		return nil, invalidControlRequest("a resource-releasing pause must checkpoint first")
+	}
+	if request.Action != "cancel" && request.GracefulTimeoutSeconds != 0 {
+		return nil, invalidControlRequest("graceful_timeout_seconds is valid only for cancel")
+	}
+	if request.GracefulTimeoutSeconds > 86400 {
+		return nil, invalidControlRequest("graceful_timeout_seconds must not exceed 86400")
+	}
+
+	wire := &trainvmv1.RunCommandRequest{
+		RunId: request.RunID, ExpectedRunRevision: request.ExpectedRunRevision,
+		IdempotencyKey: request.IdempotencyKey, Author: request.Author, Reason: request.Reason,
+		ExpectedJournalId: request.ExpectedJournalID, ExpectedPlanHash: request.ExpectedPlanHash,
+	}
+	switch request.Action {
+	case "checkpoint":
+		wire.Command = &trainvmv1.RunCommandRequest_Checkpoint{Checkpoint: &trainvmv1.CheckpointCommand{Reason: request.Reason}}
+	case "pause":
+		wire.Command = &trainvmv1.RunCommandRequest_Pause{Pause: &trainvmv1.PauseCommand{
+			CheckpointFirst: request.CheckpointFirst, ReleaseResources: request.ReleaseResources,
+		}}
+	case "resume":
+		wire.Command = &trainvmv1.RunCommandRequest_Resume{Resume: &trainvmv1.ResumeCommand{}}
+	case "cancel":
+		timeout := durationpb.New(time.Duration(request.GracefulTimeoutSeconds) * time.Second)
+		if err := timeout.CheckValid(); err != nil {
+			return nil, invalidControlRequest("invalid graceful timeout: %v", err)
+		}
+		wire.Command = &trainvmv1.RunCommandRequest_Cancel{Cancel: &trainvmv1.CancelCommand{
+			Reason: request.Reason, GracefulTimeout: timeout,
+		}}
+	default:
+		return nil, invalidControlRequest("action must be checkpoint, pause, resume, or cancel")
+	}
+	return wire, nil
+}
+
 func scalarValue(value any) (*trainvmv1.ScalarValue, error) {
 	switch typed := value.(type) {
 	case json.Number:
@@ -714,6 +823,66 @@ func controlResult(response *trainvmv1.RunCommandResponse) ControlResult {
 		})
 	}
 	return result
+}
+
+func runActionResult(action string, response *trainvmv1.RunCommandResponse) (RunActionResult, error) {
+	if response == nil {
+		return RunActionResult{}, fmt.Errorf("TrainVM authority returned an empty lifecycle response")
+	}
+	action = strings.ToLower(strings.TrimSpace(action))
+	result := RunActionResult{
+		Disposition:     strings.TrimPrefix(response.GetDisposition().String(), "DISPOSITION_"),
+		CommandSequence: response.GetCommandSequence(), Action: action,
+	}
+	for _, diagnostic := range response.GetDiagnostics() {
+		result.Diagnostics = append(result.Diagnostics, ControlDiagnostic{
+			Severity: strings.TrimPrefix(diagnostic.GetSeverity().String(), "SEVERITY_"),
+			Code:     diagnostic.GetCode(), Path: diagnostic.GetDocumentPath(),
+			Message: diagnostic.GetMessage(), Help: diagnostic.GetHelp(),
+		})
+	}
+	if action == "checkpoint" {
+		if checkpoint := response.GetCheckpoint(); checkpoint != nil {
+			result.CommandID = checkpoint.GetCommandId()
+			result.ControllerSequence = checkpoint.GetControllerSequence()
+			result.Status = strings.TrimPrefix(checkpoint.GetStatus().String(), "STATUS_")
+			result.Reason = checkpoint.GetReason()
+			result.OptimizerStep = checkpoint.GetOptimizerStep()
+			result.ArtifactID = checkpoint.GetArtifactId()
+		} else if result.Disposition == "ACCEPTED" || result.Disposition == "ALREADY_APPLIED" {
+			return RunActionResult{}, fmt.Errorf("TrainVM authority omitted the checkpoint result")
+		}
+		if response.GetLifecycle() != nil {
+			return RunActionResult{}, fmt.Errorf("TrainVM authority returned a lifecycle result for checkpoint")
+		}
+		return result, nil
+	}
+	if response.GetCheckpoint() != nil {
+		return RunActionResult{}, fmt.Errorf("TrainVM authority returned a checkpoint result for %s", action)
+	}
+	if lifecycle := response.GetLifecycle(); lifecycle != nil {
+		kind := strings.ToLower(strings.TrimPrefix(lifecycle.GetKind().String(), "KIND_"))
+		if kind != action {
+			return RunActionResult{}, fmt.Errorf("TrainVM authority returned %s result for %s", kind, action)
+		}
+		result.CommandID = lifecycle.GetCommandId()
+		result.ControllerSequence = lifecycle.GetControllerSequence()
+		result.Status = strings.TrimPrefix(lifecycle.GetStatus().String(), "STATUS_")
+		result.CheckpointFirst = lifecycle.GetCheckpointFirst()
+		result.ReleaseResources = lifecycle.GetReleaseResources()
+		result.OptimizerStep = lifecycle.GetOptimizerStep()
+		result.ArtifactID = lifecycle.GetArtifactId()
+		result.Reason = lifecycle.GetReason()
+		if timeout := lifecycle.GetGracefulTimeout(); timeout != nil {
+			if err := timeout.CheckValid(); err != nil || timeout.Nanos != 0 || timeout.Seconds < 0 {
+				return RunActionResult{}, fmt.Errorf("TrainVM authority returned an invalid graceful timeout")
+			}
+			result.GracefulTimeoutSeconds = uint64(timeout.Seconds)
+		}
+	} else if result.Disposition == "ACCEPTED" || result.Disposition == "ALREADY_APPLIED" {
+		return RunActionResult{}, fmt.Errorf("TrainVM authority omitted the %s lifecycle result", action)
+	}
+	return result, nil
 }
 
 func scalarJSONValue(value *trainvmv1.ScalarValue) any {

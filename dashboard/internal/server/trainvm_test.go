@@ -22,6 +22,8 @@ import (
 type fakeTrainVMCommander struct {
 	request          trainvmstore.ControlRequest
 	result           trainvmstore.ControlResult
+	actionRequest    trainvmstore.RunActionRequest
+	actionResult     trainvmstore.RunActionResult
 	submission       trainvmstore.SubmissionRequest
 	submissionResult trainvmstore.SubmissionResult
 	descriptor       trainvmstore.DescriptorRequest
@@ -51,8 +53,21 @@ func (f *fakeTrainVMCommander) RequestControls(_ context.Context,
 	return f.result, f.err
 }
 
+func (f *fakeTrainVMCommander) RequestRunAction(_ context.Context,
+	request trainvmstore.RunActionRequest) (trainvmstore.RunActionResult, error) {
+	f.actionRequest = request
+	return f.actionResult, f.err
+}
+
 func newTrainVMControlRequest(body string) *http.Request {
 	request := httptest.NewRequest(http.MethodPost, "/api/trainvm/runs/vm-run/controls",
+		strings.NewReader(body))
+	request.Host = "127.0.0.1:9124"
+	return request
+}
+
+func newTrainVMActionRequest(body string) *http.Request {
+	request := httptest.NewRequest(http.MethodPost, "/api/trainvm/runs/vm-run/actions",
 		strings.NewReader(body))
 	request.Host = "127.0.0.1:9124"
 	return request
@@ -361,6 +376,100 @@ func TestTrainVMControlEndpointUsesNativeCommander(t *testing.T) {
 	}
 	if _, ok := commander.request.Assignments["eval_every"].(json.Number); !ok {
 		t.Fatalf("JSON number type was lost: %#v", commander.request.Assignments)
+	}
+}
+
+func TestTrainVMLifecycleEndpointUsesNativeCommander(t *testing.T) {
+	commander := &fakeTrainVMCommander{actionResult: trainvmstore.RunActionResult{
+		Disposition: "ACCEPTED", Action: "pause", CommandID: "pause-1",
+		ControllerSequence: 12, Status: "REQUESTED", CheckpointFirst: true,
+		ReleaseResources: true,
+	}}
+	srv := New(Config{Commander: commander, TrainVM: trainVMFixture(t)})
+	request := newTrainVMActionRequest(`{
+		"expected_run_revision":7,
+		"idempotency_key":"tab-action-intent",
+		"reason":"release GPU for interactive work",
+		"action":"pause",
+		"checkpoint_first":true,
+		"release_resources":true,
+		"graceful_timeout_seconds":0
+	}`)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	got := commander.actionRequest
+	if response.Code != http.StatusAccepted || got.RunID != "vm-run" ||
+		got.ExpectedJournalID != "0123456789abcdef0123456789abcdef" ||
+		got.ExpectedPlanHash != "baa59aa47fcce31100a77393fcaeb04265bbfc3af2235c62a65ba2006225811a" ||
+		got.ExpectedRunRevision != 7 || got.IdempotencyKey != "tab-action-intent" ||
+		got.Author != "dashboard" || got.Action != "pause" || !got.CheckpointFirst || !got.ReleaseResources ||
+		!strings.Contains(response.Body.String(), `"command_id":"pause-1"`) {
+		t.Fatalf("unexpected action forwarding: status=%d request=%#v body=%s",
+			response.Code, got, response.Body.String())
+	}
+}
+
+func TestTrainVMLifecycleEndpointSharesStrictMutationBoundary(t *testing.T) {
+	for name, test := range map[string]struct {
+		body        string
+		contentType string
+		host        string
+		origin      string
+		expected    int
+	}{
+		"unknown field":  {body: `{"mystery":true}`, contentType: "application/json", host: "127.0.0.1", expected: http.StatusBadRequest},
+		"trailing JSON":  {body: `{}` + ` {}`, contentType: "application/json", host: "127.0.0.1", expected: http.StatusBadRequest},
+		"wrong type":     {body: `{}`, contentType: "text/plain", host: "127.0.0.1", expected: http.StatusUnsupportedMediaType},
+		"rebound host":   {body: `{}`, contentType: "application/json", host: "attacker.invalid", expected: http.StatusForbidden},
+		"foreign origin": {body: `{}`, contentType: "application/json", host: "127.0.0.1:9124", origin: "https://attacker.invalid", expected: http.StatusForbidden},
+	} {
+		t.Run(name, func(t *testing.T) {
+			commander := &fakeTrainVMCommander{}
+			srv := New(Config{Commander: commander, TrainVM: trainVMFixture(t)})
+			request := newTrainVMActionRequest(test.body)
+			request.Host = test.host
+			request.Header.Set("Content-Type", test.contentType)
+			if test.origin != "" {
+				request.Header.Set("Origin", test.origin)
+			}
+			response := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(response, request)
+			if response.Code != test.expected || commander.actionRequest.RunID != "" {
+				t.Fatalf("status=%d expected=%d forwarded=%#v body=%s",
+					response.Code, test.expected, commander.actionRequest, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestTrainVMLifecycleEndpointStatusMapping(t *testing.T) {
+	for name, test := range map[string]struct {
+		commander trainvmstore.Commander
+		expected  int
+	}{
+		"disabled":    {commander: nil, expected: http.StatusServiceUnavailable},
+		"unavailable": {commander: &fakeTrainVMCommander{err: status.Error(codes.Unavailable, "offline")}, expected: http.StatusServiceUnavailable},
+		"validation":  {commander: &fakeTrainVMCommander{err: &trainvmstore.ValidationError{Message: "bad request"}}, expected: http.StatusBadRequest},
+		"accepted":    {commander: &fakeTrainVMCommander{actionResult: trainvmstore.RunActionResult{Disposition: "ACCEPTED", Action: "resume"}}, expected: http.StatusAccepted},
+		"replayed":    {commander: &fakeTrainVMCommander{actionResult: trainvmstore.RunActionResult{Disposition: "ALREADY_APPLIED", Action: "resume"}}, expected: http.StatusOK},
+		"conflict":    {commander: &fakeTrainVMCommander{actionResult: trainvmstore.RunActionResult{Disposition: "CONFLICT", Action: "resume"}}, expected: http.StatusConflict},
+		"rejected":    {commander: &fakeTrainVMCommander{actionResult: trainvmstore.RunActionResult{Disposition: "REJECTED", Action: "resume"}}, expected: http.StatusUnprocessableEntity},
+	} {
+		t.Run(name, func(t *testing.T) {
+			config := Config{Commander: test.commander}
+			if test.commander != nil {
+				config.TrainVM = trainVMFixture(t)
+			}
+			srv := New(config)
+			request := newTrainVMActionRequest(`{"expected_run_revision":7,"idempotency_key":"action-1","reason":"continue","action":"resume"}`)
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(response, request)
+			if response.Code != test.expected {
+				t.Fatalf("status=%d expected=%d body=%s", response.Code, test.expected, response.Body.String())
+			}
+		})
 	}
 }
 
