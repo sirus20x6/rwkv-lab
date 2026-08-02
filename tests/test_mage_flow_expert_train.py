@@ -76,6 +76,14 @@ def _worker_components(config: MageFlowExpertTrainConfig) -> WorkerTrainingCompo
                 "minimum_ratio": config.min_learning_rate_ratio,
             },
         ),
+        "gradient_clipping": (
+            "global_norm",
+            {
+                "max_norm": config.max_grad_norm,
+                "norm_type": 2.0,
+                "error_if_nonfinite": False,
+            },
+        ),
     }
     components = {}
     for slot, (name, configuration) in requested.items():

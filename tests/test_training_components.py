@@ -9,12 +9,15 @@ from rwkv_lab.mage_flow_optimizations import FP32MasterAdamW
 from rwkv_lab.training_components import (
     AdamWConfiguration,
     AppearanceExpertRoutingConfiguration,
+    GlobalNormClippingConfiguration,
+    GradientClippingImplementation,
     LinearWarmupCosineConfiguration,
     OptimizerImplementation,
     ParameterRouterImplementation,
     PowerCoolConfiguration,
     ScheduleImplementation,
     TerminalExpertRoutingConfiguration,
+    build_registered_gradient_clipping,
     build_registered_optimizer,
     build_registered_parameter_routing,
     build_registered_schedule,
@@ -32,7 +35,7 @@ from rwkv_lab.training_components import (
 def test_runtime_categories_have_one_way_dependency_boundaries():
     root = Path(__file__).resolve().parents[1]
     runtime = root / "src/rwkv_lab/training_runtime"
-    category_names = {"optimizers", "routers", "schedules"}
+    category_names = {"gradient_clipping", "optimizers", "routers", "schedules"}
     family_fragments = {
         "mage_flow",
         "rwkv_pretrain",
@@ -160,6 +163,23 @@ def test_component_catalog_and_runtime_dispatch_are_exactly_aligned():
     assert grades["optimizer"] == "exact"
     assert grades["learning_rate_schedule"] == "exact"
     assert grades["parameter_router"] == "stateless"
+    assert grades["gradient_clipping"] == "stateless"
+
+
+def test_registered_global_norm_clipping_has_typed_reference_semantics():
+    parameter = torch.nn.Parameter(torch.tensor([3.0, 4.0]))
+    parameter.grad = torch.tensor([6.0, 8.0])
+    observed = build_registered_gradient_clipping(
+        GradientClippingImplementation.GLOBAL_NORM_V1,
+        [parameter],
+        GlobalNormClippingConfiguration(
+            max_norm=2.5,
+            norm_type=2.0,
+            error_if_nonfinite=True,
+        ),
+    )
+    assert observed == pytest.approx(10.0)
+    assert parameter.grad == pytest.approx(torch.tensor([1.5, 2.0]))
 
 
 def test_resolved_worker_component_dispatch_is_closed_and_typed():

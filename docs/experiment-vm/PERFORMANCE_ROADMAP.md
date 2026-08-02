@@ -374,7 +374,10 @@ startup orphan recovery are defined in
   The typed C++ registry, exact composition/submission locks, capability-augmented launches, native
   descriptor RPC, descriptor-generated dashboard composer, category-separated tensor runtime,
   typed worker-composition bridge, concrete MageFlow optimizer/schedule factories, and exhaustive
-  appearance/terminal expert parameter routers are implemented. Both MageFlow expert trainers and
+  appearance/terminal expert parameter routers are implemented. Global-norm gradient clipping is
+  now a fourth physically independent tensor-runtime category with its own typed descriptor and is
+  consumed by the MageFlow appearance/terminal, Qwen, and non-distributed scratch-RWKV paths,
+  including the terminal loop-gate group as a separate slot. Both MageFlow expert trainers and
   the Qwen AO3 transformer continuation and scratch-RWKV PowerCool paths now consume verified
   worker slots and bind composition identity into resume state. RWKV retains a pure schedule state
   machine because its optimizer topology can change during training. The fixed fd-4 Python runner

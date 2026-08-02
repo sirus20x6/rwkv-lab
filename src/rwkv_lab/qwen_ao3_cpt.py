@@ -758,10 +758,16 @@ def resolved_worker_component_contract(
     expected = {
         "optimizer": asdict(_optimizer_configuration(config)),
         "learning_rate": asdict(_learning_rate_schedule(config, total_steps)),
+        "gradient_clipping": {
+            "max_norm": config.max_grad_norm,
+            "norm_type": 2.0,
+            "error_if_nonfinite": True,
+        },
     }
     categories = {
         "optimizer": "optimizer",
         "learning_rate": "learning_rate_schedule",
+        "gradient_clipping": "gradient_clipping",
     }
     for slot, configuration in expected.items():
         actual = dict(
@@ -1160,10 +1166,17 @@ def train(
                 cursor=cursor,
                 total_steps=total_steps,
             )
-        grad_norm = torch.nn.utils.clip_grad_norm_(
-            [p for p in model.parameters() if p.requires_grad],
-            config.max_grad_norm,
-            error_if_nonfinite=True,
+        trainable_parameters = [
+            parameter for parameter in model.parameters() if parameter.requires_grad
+        ]
+        grad_norm = (
+            worker_components.gradient_clipping(trainable_parameters)
+            if worker_components is not None
+            else torch.nn.utils.clip_grad_norm_(
+                trainable_parameters,
+                config.max_grad_norm,
+                error_if_nonfinite=True,
+            )
         )
         if scheduler is None:
             lr = config.learning_rate * powercool_multiplier(

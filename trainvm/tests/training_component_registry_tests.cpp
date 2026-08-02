@@ -366,7 +366,7 @@ void checked_in_component_catalog_matches_native_authority_contract() {
   const trainvm::TrainingComponentRegistry registry =
       trainvm::TrainingComponentRegistry::load_file(
           std::filesystem::absolute(path));
-  check(registry.document_json().at("components").size() == 6U &&
+  check(registry.document_json().at("components").size() == 7U &&
             registry.registry_digest().starts_with("sha256:") &&
             registry.registry_digest().size() == 71U,
         "checked-in cross-family component catalog is a canonical native authority document");
@@ -408,6 +408,24 @@ void checked_in_component_catalog_matches_native_authority_contract() {
             router.configuration.at("shared_backbone_multiplier") == 0.5 &&
             router.configuration.at("repa_projection_multiplier") == 1.0,
         "terminal expert ownership and LR multipliers resolve as one stateless component");
+  const auto clipping = registry.resolve({
+      .key = {
+          .category = trainvm::TrainingComponentCategory::gradient_clipping,
+          .name = "global_norm",
+          .version = "1.0.0"},
+      .model_family = "transformer",
+      .configuration = {{"max_norm", 1.0},
+                        {"error_if_nonfinite", true}},
+  });
+  check(clipping.descriptor.implementation ==
+            "rwkv_lab.gradient_clipping.global_norm.v1" &&
+            clipping.descriptor.state_grade ==
+                trainvm::TrainingStateGrade::stateless &&
+            clipping.configuration ==
+                nlohmann::json{{"error_if_nonfinite", true},
+                               {"max_norm", 1.0},
+                               {"norm_type", 2.0}},
+        "global-norm clipping resolves independently of optimizer and schedule policy");
   const auto powercool = registry.resolve({
       .key = {
           .category =

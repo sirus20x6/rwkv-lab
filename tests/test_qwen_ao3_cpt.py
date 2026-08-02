@@ -146,13 +146,22 @@ def test_qwen_worker_components_are_exact_and_enter_checkpoint_identity(tmp_path
     configurations = {
         "optimizer": asdict(_optimizer_configuration(value)),
         "learning_rate": asdict(_learning_rate_schedule(value, total_steps)),
+        "gradient_clipping": {
+            "max_norm": value.max_grad_norm,
+            "norm_type": 2.0,
+            "error_if_nonfinite": True,
+        },
     }
 
     class Components:
         composition = SimpleNamespace(composition_digest="sha256:" + "c" * 64)
 
         def configuration(self, slot, *, category):
-            assert category in {"optimizer", "learning_rate_schedule"}
+            assert category in {
+                "optimizer",
+                "learning_rate_schedule",
+                "gradient_clipping",
+            }
             return configurations[slot]
 
         def evidence(self):
@@ -169,7 +178,11 @@ def test_qwen_worker_components_are_exact_and_enter_checkpoint_identity(tmp_path
     evidence, composition_digest = resolved_worker_component_contract(
         value, total_steps, components
     )
-    assert set(evidence) == {"optimizer", "learning_rate"}
+    assert set(evidence) == {
+        "optimizer",
+        "learning_rate",
+        "gradient_clipping",
+    }
     assert composition_digest == components.composition.composition_digest
 
     configurations["learning_rate"] = {

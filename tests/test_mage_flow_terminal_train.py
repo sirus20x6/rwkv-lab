@@ -143,6 +143,16 @@ def test_terminal_worker_components_are_exact_and_enter_resume_identity(tmp_path
             "max_steps": config.max_steps,
             "minimum_ratio": config.min_learning_rate_ratio,
         },
+        "gradient_clipping": {
+            "max_norm": config.max_grad_norm,
+            "norm_type": 2.0,
+            "error_if_nonfinite": False,
+        },
+        "loop_gate_gradient_clipping": {
+            "max_norm": config.loop_gate_max_grad_norm,
+            "norm_type": 2.0,
+            "error_if_nonfinite": False,
+        },
     }
 
     class Components:
@@ -153,6 +163,7 @@ def test_terminal_worker_components_are_exact_and_enter_resume_identity(tmp_path
                 "optimizer",
                 "parameter_router",
                 "learning_rate_schedule",
+                "gradient_clipping",
             }
             return configurations[slot]
 

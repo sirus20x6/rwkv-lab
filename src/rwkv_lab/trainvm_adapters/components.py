@@ -10,6 +10,7 @@ from rwkv_lab.training_components import (
     LinearWarmupCosineConfiguration,
     PowerCoolConfiguration,
     ScheduleImplementation,
+    gradient_clipping_from_resolved_component,
     optimizer_from_resolved_component,
     parameter_routing_from_resolved_component,
     schedule_configuration_from_resolved_component,
@@ -75,6 +76,17 @@ class WorkerTrainingComponents:
         component = self.composition.require(slot, category="learning_rate_schedule")
         return schedule_configuration_from_resolved_component(
             component.runtime_envelope()
+        )
+
+    def gradient_clipping(
+        self,
+        parameters: Iterable[torch.Tensor],
+        *,
+        slot: str = "gradient_clipping",
+    ) -> torch.Tensor:
+        component = self.composition.require(slot, category="gradient_clipping")
+        return gradient_clipping_from_resolved_component(
+            component.runtime_envelope(), parameters
         )
 
     def parameter_routing(

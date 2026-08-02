@@ -413,6 +413,11 @@ def resolved_worker_component_contract(
             "learning_rate", category="learning_rate_schedule"
         )
     )
+    clipping_configuration = dict(
+        worker_components.configuration(
+            "gradient_clipping", category="gradient_clipping"
+        )
+    )
     expected_optimizer = {
         "learning_rate": config.learning_rate,
         "beta1": config.adam_beta1,
@@ -434,6 +439,11 @@ def resolved_worker_component_contract(
         ),
         "minimum_ratio": config.min_learning_rate_ratio,
     }
+    expected_clipping = {
+        "max_norm": config.max_grad_norm,
+        "norm_type": 2.0,
+        "error_if_nonfinite": False,
+    }
     if optimizer_configuration != expected_optimizer:
         raise ValueError(
             "authority optimizer composition disagrees with MageFlow configuration"
@@ -445,6 +455,10 @@ def resolved_worker_component_contract(
     if schedule_configuration != expected_schedule:
         raise ValueError(
             "authority LR-schedule composition disagrees with MageFlow configuration"
+        )
+    if clipping_configuration != expected_clipping:
+        raise ValueError(
+            "authority gradient-clipping composition disagrees with MageFlow configuration"
         )
     return (
         float(optimizer_configuration["learning_rate"]),
@@ -2461,7 +2475,13 @@ def train(
             optimizer_start = torch.cuda.Event(enable_timing=True)
             optimizer_end = torch.cuda.Event(enable_timing=True)
             optimizer_start.record()
-            grad_norm = torch.nn.utils.clip_grad_norm_(trainable, config.max_grad_norm)
+            grad_norm = (
+                worker_components.gradient_clipping(trainable)
+                if worker_components is not None
+                else torch.nn.utils.clip_grad_norm_(
+                    trainable, config.max_grad_norm
+                )
+            )
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad(set_to_none=True)

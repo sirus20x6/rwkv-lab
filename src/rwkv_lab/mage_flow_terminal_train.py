@@ -580,11 +580,23 @@ def resolved_worker_component_contract(
             "max_steps": config.max_steps,
             "minimum_ratio": config.min_learning_rate_ratio,
         },
+        "gradient_clipping": {
+            "max_norm": config.max_grad_norm,
+            "norm_type": 2.0,
+            "error_if_nonfinite": False,
+        },
+        "loop_gate_gradient_clipping": {
+            "max_norm": config.loop_gate_max_grad_norm,
+            "norm_type": 2.0,
+            "error_if_nonfinite": False,
+        },
     }
     categories = {
         "optimizer": "optimizer",
         "parameter_router": "parameter_router",
         "learning_rate": "learning_rate_schedule",
+        "gradient_clipping": "gradient_clipping",
+        "loop_gate_gradient_clipping": "gradient_clipping",
     }
     for slot, configuration in expected.items():
         actual = dict(
@@ -3366,18 +3378,31 @@ def train(
                 or config.loop_gate_max_grad_norm != config.max_grad_norm
             )
             if isolate_loop_gates:
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    main_trainable,
-                    config.max_grad_norm,
-                )
-                loop_gate_grad_norm = torch.nn.utils.clip_grad_norm_(
-                    loop_gate_parameters,
-                    config.loop_gate_max_grad_norm,
-                )
+                if worker_components is not None:
+                    grad_norm = worker_components.gradient_clipping(
+                        main_trainable
+                    )
+                    loop_gate_grad_norm = worker_components.gradient_clipping(
+                        loop_gate_parameters,
+                        slot="loop_gate_gradient_clipping",
+                    )
+                else:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        main_trainable,
+                        config.max_grad_norm,
+                    )
+                    loop_gate_grad_norm = torch.nn.utils.clip_grad_norm_(
+                        loop_gate_parameters,
+                        config.loop_gate_max_grad_norm,
+                    )
             else:
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    trainable,
-                    config.max_grad_norm,
+                grad_norm = (
+                    worker_components.gradient_clipping(trainable)
+                    if worker_components is not None
+                    else torch.nn.utils.clip_grad_norm_(
+                        trainable,
+                        config.max_grad_norm,
+                    )
                 )
                 loop_gate_grad_norm = grad_norm.new_zeros(())
             optimizer_step_started_at = time.perf_counter()

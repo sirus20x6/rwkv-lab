@@ -706,6 +706,10 @@ def resolved_worker_component_contract(
         raise ValueError("RWKV worker composition currently requires PowerCool")
     if args.u_mup_base_width:
         raise ValueError("RWKV worker composition does not yet encode u-muP routing")
+    if args.distributed != "none":
+        raise ValueError(
+            "RWKV worker composition does not yet encode distributed gradient clipping"
+        )
     optimizer_configuration = dict(
         worker_components.configuration("optimizer", category="optimizer")
     )
@@ -722,6 +726,19 @@ def resolved_worker_component_contract(
     ):
         raise ValueError(
             "authority optimizer composition disagrees with RWKV configuration"
+        )
+    clipping_configuration = dict(
+        worker_components.configuration(
+            "gradient_clipping", category="gradient_clipping"
+        )
+    )
+    if clipping_configuration != {
+        "max_norm": args.grad_clip,
+        "norm_type": 2.0,
+        "error_if_nonfinite": False,
+    }:
+        raise ValueError(
+            "authority gradient-clipping composition disagrees with RWKV configuration"
         )
     implementation, resolved_schedule = (
         worker_components.learning_rate_configuration()
@@ -1805,7 +1822,11 @@ def main(
             clip_params = list(model.parameters()) + (
                 list(heads.parameters()) if heads else []
             )
-            gn = torch.nn.utils.clip_grad_norm_(clip_params, args.grad_clip)
+            gn = (
+                worker_components.gradient_clipping(clip_params)
+                if worker_components is not None
+                else torch.nn.utils.clip_grad_norm_(clip_params, args.grad_clip)
+            )
         opt.step(); step += 1
         if args.cached_fp8_up:
             refresh_channelmix_fp8(model)

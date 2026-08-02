@@ -20,14 +20,15 @@ compatibility-grade component.
 
 Tensor code stays in the runtime that implements it well. `rwkv_lab.training_components` is a
 stable compatibility facade; implementations are physically separated under
-`rwkv_lab.training_runtime` into `optimizers.py`, `schedules.py`, and `routers.py`, with only the
+`rwkv_lab.training_runtime` into `optimizers.py`, `schedules.py`, `routers.py`, and
+`gradient_clipping.py`, with only the
 shared resolved-envelope decoder at the package root. Each category owns its closed enum, typed
 immutable configuration, validation, construction, and resolved dispatch. Category modules do not
 import one another or any family trainer. The facade has no implementation logic and trainers do
 not depend on the category internals.
 
 Future categories follow the same rule: add `activations.py`, `normalizations.py`, `objectives.py`,
-`precision.py`, `gradient_policy.py`, `weight_decay_schedules.py`, or `curricula.py` only when a
+`precision.py`, `gradient_accumulation.py`, `weight_decay_schedules.py`, or `curricula.py` only when a
 real adapter consumes the descriptor. Do not create a placeholder module or advertise decorative
 configuration. The resolved-worker dispatch functions accept only the canonical envelope from
 TrainVM and fail on extra keys, unknown implementation IDs, wrong categories, missing defaults,
@@ -47,11 +48,14 @@ The initial concrete cross-family catalog contains:
 - linear warmup followed by a cosine tail over optimizer steps;
 - warmup/plateau/PowerCool over optimizer steps for RWKV and transformers;
 - appearance-expert versus shared-backbone exclusive parameter routing;
-- terminal-expert versus shared-backbone versus VAE-REPA exclusive parameter routing.
+- terminal-expert versus shared-backbone versus VAE-REPA exclusive parameter routing;
+- global-norm gradient clipping with independently declared norm, threshold, and nonfinite policy.
 
 The three MageFlow training paths, RWKV AdamW path, and Qwen transformer AdamW/PowerCool path use
 the common tensor boundary. The MageFlow appearance/terminal expert trainers and Qwen AO3
-continuation additionally consume authority-resolved worker compositions; their composition digest
+continuation and the non-distributed scratch-RWKV path additionally consume authority-resolved
+worker compositions, including gradient clipping rather than trainer-local clipping construction;
+their composition digest
 is resume identity, and Qwen persists the registered scheduler cursor alongside optimizer state.
 Scratch RWKV consumes the same optimizer slot and the typed PowerCool configuration directly; its
 optimizer-step cursor remains the schedule state because tied-head and sparse-routing transitions

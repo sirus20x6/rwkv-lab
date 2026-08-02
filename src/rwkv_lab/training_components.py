@@ -9,6 +9,12 @@ from rwkv_lab.training_runtime.catalog import (
     supported_implementation_ids,
     supported_worker_capabilities,
 )
+from rwkv_lab.training_runtime.gradient_clipping import (
+    GlobalNormClippingConfiguration,
+    GradientClippingImplementation,
+    build_registered_gradient_clipping,
+    gradient_clipping_from_resolved_component,
+)
 from rwkv_lab.training_runtime.optimizers import (
     AdamWConfiguration,
     OptimizerImplementation,
@@ -36,15 +42,19 @@ from rwkv_lab.training_runtime.schedules import (
 __all__ = [
     "AdamWConfiguration",
     "AppearanceExpertRoutingConfiguration",
+    "GlobalNormClippingConfiguration",
+    "GradientClippingImplementation",
     "LinearWarmupCosineConfiguration",
     "OptimizerImplementation",
     "ParameterRouterImplementation",
     "PowerCoolConfiguration",
     "ScheduleImplementation",
     "TerminalExpertRoutingConfiguration",
+    "build_registered_gradient_clipping",
     "build_registered_optimizer",
     "build_registered_parameter_routing",
     "build_registered_schedule",
+    "gradient_clipping_from_resolved_component",
     "linear_warmup_cosine_multiplier",
     "optimizer_from_resolved_component",
     "parameter_routing_from_resolved_component",

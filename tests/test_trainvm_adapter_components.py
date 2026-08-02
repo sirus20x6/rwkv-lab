@@ -44,6 +44,14 @@ def composition():
             "linear_warmup_cosine",
             {"warmup_steps": 0, "max_steps": 4, "minimum_ratio": 0.1},
         ),
+        "gradient_clipping": (
+            "global_norm",
+            {
+                "max_norm": 1.0,
+                "norm_type": 2.0,
+                "error_if_nonfinite": True,
+            },
+        ),
     }
     components = {}
     for slot, (name, configuration) in requested.items():
@@ -71,10 +79,14 @@ def test_worker_component_bridge_builds_optimizer_and_schedule() -> None:
     parameter = torch.nn.Parameter(torch.tensor([1.0]))
     optimizer = runtime.optimizer([parameter])
     schedule = runtime.learning_rate_schedule(optimizer)
+    parameter.grad = torch.tensor([4.0])
+    gradient_norm = runtime.gradient_clipping([parameter])
 
     assert isinstance(optimizer, torch.optim.AdamW)
     assert isinstance(schedule, torch.optim.lr_scheduler.LRScheduler)
     assert schedule.get_last_lr() == pytest.approx([1e-3])
+    assert gradient_norm == pytest.approx(4.0)
+    assert parameter.grad == pytest.approx(torch.tensor([1.0]))
     assert runtime.evidence()["optimizer"]["category"] == "optimizer"
 
 

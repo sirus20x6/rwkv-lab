@@ -3,6 +3,25 @@
   "components": [
     {
       "key": {
+        "category": "gradient_clipping",
+        "name": "global_norm",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.gradient_clipping.global_norm.v1",
+      "model_families": ["mageflow", "rwkv", "transformer", "vision"],
+      "required_capabilities": ["gradient_clipping.global_norm.v1"],
+      "configuration": [
+        {"name": "max_norm", "type": "number", "required": true, "minimum": 1e-12, "maximum": 1000000000000.0, "unit": "ratio"},
+        {"name": "norm_type", "type": "number", "required": false, "default": 2.0, "minimum": 1e-12, "maximum": 1000000000000.0, "unit": "ratio"},
+        {"name": "error_if_nonfinite", "type": "boolean", "required": false, "default": false}
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
         "category": "parameter_router",
         "name": "mageflow_appearance_expert",
         "version": "1.0.0"
