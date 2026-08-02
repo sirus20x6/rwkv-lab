@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -87,6 +88,12 @@ struct CacheNamespaceAuthorityReceipt {
   std::string adapter_registry_digest;
   std::string host_launch_registry_digest;
   std::string invocation_digest;
+  std::string run_id;
+  std::string node_id;
+  std::string attempt_id;
+  std::string concurrency_key;
+  std::string lease_id;
+  std::uint64_t fencing_token{};
   std::string launch_spec_digest;
   std::string inventory_receipt_digest;
   std::string resource_binding_digest;

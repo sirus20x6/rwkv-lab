@@ -1,10 +1,16 @@
-#include "trainvm/cache_namespace_authority.hpp"
+#include "trainvm/cache_artifact_authority.hpp"
+#include "trainvm/journal_cache_lease_authority.hpp"
+#include "trainvm/linux_immutable_cache_store.hpp"
 
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <utility>
+
+#include <unistd.h>
 
 #include "trainvm/reflection_json.hpp"
 
@@ -30,6 +36,8 @@ void rejected(Callable&& callable, const std::string& message) {
   try {
     std::forward<Callable>(callable)();
   } catch (const CacheNamespaceAuthorityError&) {
+    return;
+  } catch (const CacheArtifactAuthorityError&) {
     return;
   }
   throw std::runtime_error(message);
@@ -244,6 +252,151 @@ class Probe final : public ICacheRuntimeProbe {
   }
 };
 
+class LeaseAuthority final : public ICacheLeaseAuthority {
+public:
+  bool current{true};
+  std::size_t calls{};
+
+  void require_current(const ResourceLease &) override {
+    ++calls;
+    if (!current) {
+      throw CacheArtifactAuthorityError("test lease is stale");
+    }
+  }
+};
+
+class ArtifactStore final : public ICacheArtifactStore {
+public:
+  bool mutate_on_verify{};
+  std::size_t publications{};
+  std::size_t verifications{};
+  ImmutableCacheTreeReceipt receipt;
+
+  ImmutableCacheTreeReceipt
+  publish(const CacheNamespaceAuthorityReceipt &authority,
+          const CacheArtifactCandidate &) override {
+    ++publications;
+    receipt = {
+        .api_version = "trainvm.immutable-cache-tree/v1",
+        .namespace_digest = authority.cache_namespace.namespace_digest,
+        .artifact_tree_digest = hash('3'),
+        .manifest_digest = hash('4'),
+        .content_address =
+            "cache/" + authority.cache_namespace.namespace_digest.substr(7U) +
+            "/" + hash('3').substr(7U),
+        .file_count = 7U,
+        .total_bytes = 4096U,
+        .immutable = true,
+        .store_receipt_digest = hash('5'),
+    };
+    return receipt;
+  }
+
+  ImmutableCacheTreeReceipt verify(const std::string &) override {
+    ++verifications;
+    auto result = receipt;
+    if (mutate_on_verify)
+      result.artifact_tree_digest = hash('f');
+    return result;
+  }
+};
+
+CacheQualificationEvidence qualification_evidence() {
+  return {
+      .api_version = "trainvm.cache-qualification-evidence/v1",
+      .authority_receipt_digest = hash('1'),
+      .namespace_digest = hash('2'),
+      .artifact_tree_digest = hash('3'),
+      .workload_class = CacheWorkloadClass::training,
+      .baseline_run_digest = hash('6'),
+      .candidate_run_digest = hash('7'),
+      .shape_coverage_digest = hash('8'),
+      .transition_coverage = true,
+      .baseline_instrumented = false,
+      .candidate_instrumented = false,
+      .output_parity = true,
+      .gradient_parity = true,
+      .optimizer_update_parity = true,
+      .state_parity = true,
+      .resumed_trajectory_parity = true,
+      .determinism_parity = true,
+      .content_parity = false,
+      .ordering_parity = false,
+      .manifest_parity = false,
+      .model_quality_pass = true,
+      .baseline_throughput = 100.0,
+      .candidate_throughput = 125.0,
+      .baseline_peak_memory_bytes = 1000U,
+      .candidate_peak_memory_bytes = 1050U,
+      .minimum_throughput_gain_ratio = 0.10,
+      .maximum_memory_regression_ratio = 0.10,
+  };
+}
+
+class QualificationAuthority final : public ICacheQualificationEvidenceSource {
+public:
+  CacheQualificationEvidence evidence{qualification_evidence()};
+  std::size_t capture_calls{};
+  std::size_t verification_calls{};
+  bool trusted{true};
+
+  CacheQualificationEvidence
+  capture(const CacheNamespaceAuthorityReceipt &,
+          const ImmutableCacheTreeReceipt &) override {
+    ++capture_calls;
+    return evidence;
+  }
+
+  void
+  require_trusted(const CacheNamespaceAuthorityReceipt &authority,
+                  const ImmutableCacheTreeReceipt &artifact,
+                  const CacheQualificationReceipt &qualification) override {
+    ++verification_calls;
+    CacheQualificationEvidence expected = evidence;
+    expected.authority_receipt_digest = authority.receipt_digest;
+    expected.namespace_digest = artifact.namespace_digest;
+    expected.artifact_tree_digest = artifact.artifact_tree_digest;
+    if (!trusted || qualification.evidence != expected) {
+      throw CacheArtifactAuthorityError(
+          "test qualification evidence is not trusted");
+    }
+  }
+};
+
+ResourceLease lease_for(const CacheNamespaceAuthorityReceipt &receipt) {
+  return {
+      .concurrency_key = receipt.concurrency_key,
+      .owner_run_id = receipt.run_id,
+      .lease_id = receipt.lease_id,
+      .fencing_token = receipt.fencing_token,
+      .clock_domain = ResourceLease::kBootTimeDomain,
+      .boot_id = std::string(kBoot),
+      .acquired_boottime_ns = 1U,
+      .expires_boottime_ns = 1000U,
+      .acquired_wall_time_ns = 1U,
+      .expires_wall_time_ns = 1000U,
+  };
+}
+
+AuthorityTimeSample authority_time(std::int64_t value) {
+  return {.wall = {.nanoseconds = value},
+          .boot = {.nanoseconds = value},
+          .boot_id = std::string(kBoot)};
+}
+
+void remove_test_tree(const std::filesystem::path &root) {
+  if (!std::filesystem::exists(root))
+    return;
+  for (const auto &entry : std::filesystem::recursive_directory_iterator(
+           root, std::filesystem::directory_options::skip_permission_denied)) {
+    std::error_code ignored;
+    std::filesystem::permissions(entry.path(),
+                                 std::filesystem::perms::owner_all,
+                                 std::filesystem::perm_options::add, ignored);
+  }
+  std::filesystem::remove_all(root);
+}
+
 struct Fixture {
   AdapterRegistry adapters{adapter_registry()};
   HostLaunchRegistry launches{launch_registry()};
@@ -284,6 +437,263 @@ int main() {
                 cache_namespace_authority_receipt_json(first)
                         .at("receipt_digest") == first.receipt_digest,
             "authority builder binds registries, launch, inventory, runtime, compile inputs, and device");
+
+    const auto qualified = qualify_cache_artifact(qualification_evidence());
+    require(qualified.qualified && qualified.rejection_reasons.empty() &&
+                cache_qualification_receipt_json(qualified).at(
+                    "receipt_digest") == qualified.receipt_digest,
+            "training cache qualification requires parity, quality, coverage, "
+            "and unprofiled speed evidence");
+    auto slow = qualification_evidence();
+    slow.candidate_throughput = 105.0;
+    slow.gradient_parity = false;
+    const auto rejected_qualification = qualify_cache_artifact(slow);
+    require(!rejected_qualification.qualified &&
+                rejected_qualification.rejection_reasons ==
+                    std::vector<std::string>{"gradient_parity_failed",
+                                             "throughput_gate_failed"},
+            "failed correctness and speed gates produce a deterministic "
+            "rejection receipt");
+    auto forged_qualification = rejected_qualification;
+    forged_qualification.qualified = true;
+    forged_qualification.rejection_reasons.clear();
+    const nlohmann::json forged_qualification_body{
+        {"api_version", forged_qualification.api_version},
+        {"evidence", encode_json(forged_qualification.evidence)},
+        {"qualified", forged_qualification.qualified},
+        {"rejection_reasons", forged_qualification.rejection_reasons},
+    };
+    forged_qualification.receipt_digest =
+        "sha256:" + sha256_hex(nlohmann::json{
+                        {"domain", "trainvm.cache-qualification-receipt/v1"},
+                        {"value", forged_qualification_body},
+                    }
+                                   .dump());
+    rejected(
+        [&] { (void)cache_qualification_receipt_json(forged_qualification); },
+        "a self-hashed receipt cannot override the deterministic qualification "
+        "decision");
+
+    LeaseAuthority lease_authority;
+    ArtifactStore artifact_store;
+    QualificationAuthority qualification_authority;
+    CacheArtifactAuthority artifact_authority(lease_authority, artifact_store,
+                                              qualification_authority);
+    auto publication = artifact_authority.publish({
+        .authority = first,
+        .publisher_lease = lease_for(first),
+        .candidate = {.source_directory = "/run/trainvm/cache-candidate",
+                      .maximum_file_count = 100U,
+                      .maximum_total_bytes = 1U << 20U},
+    });
+    require(
+        publication.qualification.qualified &&
+            publication.artifact.file_count == 7U &&
+            publication.publisher_lease.fencing_token == first.fencing_token &&
+            lease_authority.calls == 2U && artifact_store.publications == 1U &&
+            cache_artifact_publication_receipt_json(publication)
+                    .at("publication_digest") == publication.publication_digest,
+        "publication binds qualification and immutable tree creation between "
+        "two live-fence checks");
+
+    qualification_authority.evidence.candidate_throughput = 105.0;
+    rejected(
+        [&] {
+          (void)artifact_authority.publish({
+              .authority = first,
+              .publisher_lease = lease_for(first),
+              .candidate =
+                  {
+                      .source_directory = "/run/trainvm/cache-candidate",
+                      .maximum_file_count = 100U,
+                      .maximum_total_bytes = 1U << 20U,
+                  },
+          });
+        },
+        "a trusted qualification source must veto a candidate that misses its "
+        "speed gate");
+    require(qualification_authority.capture_calls == 2U &&
+                artifact_store.publications == 2U &&
+                lease_authority.calls == 3U,
+            "qualification is captured only after a current publisher stores "
+            "exact candidate bytes");
+    qualification_authority.evidence = qualification_evidence();
+    lease_authority.calls = 0U;
+
+    const auto adoption = artifact_authority.adopt({
+        .current_authority = first,
+        .adopter_lease = lease_for(first),
+        .publication = publication,
+    });
+    require(adoption.content_address == publication.artifact.content_address &&
+                adoption.publication_digest == publication.publication_digest &&
+                adoption.grant_digest.starts_with("sha256:") &&
+                lease_authority.calls == 2U &&
+                artifact_store.verifications == 1U &&
+                qualification_authority.verification_calls == 1U,
+            "adoption re-verifies immutable bytes and the current owner around "
+            "the store read");
+
+    qualification_authority.trusted = false;
+    rejected(
+        [&] {
+          (void)artifact_authority.adopt({
+              .current_authority = first,
+              .adopter_lease = lease_for(first),
+              .publication = publication,
+          });
+        },
+        "adoption must re-attest qualification through its trusted evidence "
+        "source");
+    qualification_authority.trusted = true;
+
+    artifact_store.mutate_on_verify = true;
+    rejected(
+        [&] {
+          (void)artifact_authority.adopt({
+              .current_authority = first,
+              .adopter_lease = lease_for(first),
+              .publication = publication,
+          });
+        },
+        "immutable-store mutation must reject cache adoption");
+    artifact_store.mutate_on_verify = false;
+
+    auto wrong_lease = lease_for(first);
+    wrong_lease.fencing_token += 1U;
+    rejected(
+        [&] {
+          (void)artifact_authority.publish({
+              .authority = first,
+              .publisher_lease = wrong_lease,
+              .candidate = {.source_directory = "/run/trainvm/cache-candidate",
+                            .maximum_file_count = 100U,
+                            .maximum_total_bytes = 1U << 20U},
+          });
+        },
+        "a different publisher fence must not enter the immutable store");
+
+    const auto store_temporary =
+        std::filesystem::temp_directory_path() /
+        ("trainvm-cache-store-" +
+         std::to_string(static_cast<long long>(::getpid())));
+    remove_test_tree(store_temporary);
+    const auto source_root = store_temporary / "source";
+    const auto candidate_root = source_root / "candidate";
+    const auto publication_root = store_temporary / "published";
+    std::filesystem::create_directories(candidate_root / "nested");
+    std::filesystem::create_directories(publication_root);
+    std::ofstream(candidate_root / "graph.bin", std::ios::binary)
+        << "compiled-graph";
+    std::ofstream(candidate_root / "nested" / "kernel.bin", std::ios::binary)
+        << "compiled-kernel";
+    try {
+      LinuxImmutableCacheStore linux_store({
+          .publication_root = publication_root,
+          .allowed_source_roots = {source_root},
+          .authority_uid = ::geteuid(),
+          .source_uid = ::geteuid(),
+          .maximum_file_count = 100U,
+          .maximum_total_bytes = 1U << 20U,
+          .maximum_single_file_bytes = 1U << 20U,
+      });
+      CacheArtifactAuthority linux_authority(lease_authority, linux_store,
+                                             qualification_authority);
+      const auto linux_publication = linux_authority.publish({
+          .authority = first,
+          .publisher_lease = lease_for(first),
+          .candidate = {.source_directory = candidate_root.string(),
+                        .maximum_file_count = 100U,
+                        .maximum_total_bytes = 1U << 20U},
+      });
+      require(
+          linux_publication.artifact.file_count == 2U &&
+              linux_publication.artifact.total_bytes == 29U &&
+              linux_store.verify(linux_publication.artifact.content_address) ==
+                  linux_publication.artifact,
+          "Linux cache store descriptor-copies, hashes, promotes, and "
+          "re-verifies a nested cache tree");
+      const auto replay = linux_authority.publish({
+          .authority = first,
+          .publisher_lease = lease_for(first),
+          .candidate = {.source_directory = candidate_root.string(),
+                        .maximum_file_count = 100U,
+                        .maximum_total_bytes = 1U << 20U},
+      });
+      require(
+          replay.artifact == linux_publication.artifact,
+          "identical Linux cache publications converge on one content address");
+
+      const std::size_t separator =
+          linux_publication.artifact.content_address.find('/');
+      const auto payload_file =
+          publication_root / "namespaces" /
+          linux_publication.artifact.content_address.substr(0U, separator) /
+          "artifacts" /
+          linux_publication.artifact.content_address.substr(separator + 1U) /
+          "payload" / "graph.bin";
+      std::filesystem::permissions(payload_file,
+                                   std::filesystem::perms::owner_write,
+                                   std::filesystem::perm_options::add);
+      rejected(
+          [&] {
+            (void)linux_store.verify(
+                linux_publication.artifact.content_address);
+          },
+          "writable published cache bytes must fail immutable verification");
+      std::filesystem::permissions(payload_file,
+                                   std::filesystem::perms::owner_write,
+                                   std::filesystem::perm_options::remove);
+
+      const auto payload_directory = payload_file.parent_path();
+      const auto undeclared_directory = payload_directory / "undeclared";
+      std::filesystem::permissions(payload_directory,
+                                   std::filesystem::perms::owner_write,
+                                   std::filesystem::perm_options::add);
+      std::filesystem::create_directory(undeclared_directory);
+      std::filesystem::permissions(undeclared_directory,
+                                   std::filesystem::perms::owner_read |
+                                       std::filesystem::perms::owner_exec |
+                                       std::filesystem::perms::group_read |
+                                       std::filesystem::perms::group_exec,
+                                   std::filesystem::perm_options::replace);
+      std::filesystem::permissions(payload_directory,
+                                   std::filesystem::perms::owner_write,
+                                   std::filesystem::perm_options::remove);
+      rejected(
+          [&] {
+            (void)linux_store.verify(
+                linux_publication.artifact.content_address);
+          },
+          "undeclared directories must fail immutable cache verification");
+      std::filesystem::permissions(payload_directory,
+                                   std::filesystem::perms::owner_write,
+                                   std::filesystem::perm_options::add);
+      std::filesystem::permissions(undeclared_directory,
+                                   std::filesystem::perms::owner_write,
+                                   std::filesystem::perm_options::add);
+      std::filesystem::remove(undeclared_directory);
+      std::filesystem::permissions(payload_directory,
+                                   std::filesystem::perms::owner_write,
+                                   std::filesystem::perm_options::remove);
+
+      const auto bad_candidate = source_root / "bad";
+      std::filesystem::create_directories(bad_candidate);
+      std::filesystem::create_symlink(candidate_root / "graph.bin",
+                                      bad_candidate / "escape");
+      rejected(
+          [&] {
+            (void)linux_store.publish(
+                first, {.source_directory = bad_candidate.string(),
+                        .maximum_file_count = 100U,
+                        .maximum_total_bytes = 1U << 20U});
+          },
+          "Linux cache publication rejects source symlinks");
+    } catch (...) {
+      remove_test_tree(store_temporary);
+      throw;
+    }
+    remove_test_tree(store_temporary);
 
     auto changed = fixture.request();
     changed.compile_inputs.shape_set_digest = hash('f');
@@ -330,6 +740,35 @@ int main() {
         {.host_id = kHost, .boot_id = std::string(kBoot)}, probe);
     rejected([&] { (void)no_compile.derive(fixture.request()); },
              "an adapter without compile authority cannot derive a cache namespace");
+
+    const auto temporary = std::filesystem::temp_directory_path() /
+                           ("trainvm-cache-lease-" +
+                            std::to_string(static_cast<long long>(::getpid())));
+    std::filesystem::create_directories(temporary);
+    try {
+      Journal journal(temporary / "journal.sqlite3", std::nullopt,
+                      HostGrantEnforcement::legacy_process_free_test);
+      const auto acquired = journal.acquire_lease(
+          "cache:test", "run-cache", "lease-cache", authority_time(10), 100);
+      require(acquired.status == LeaseAcquireStatus::acquired,
+              "journal fixture acquires a cache lease");
+      std::int64_t now_value = 20;
+      JournalCacheLeaseAuthority journal_leases(
+          journal, [&] { return authority_time(now_value); });
+      journal_leases.require_current(acquired.lease);
+      require(journal.release_lease(
+                  acquired.lease.concurrency_key, acquired.lease.owner_run_id,
+                  acquired.lease.lease_id, acquired.lease.fencing_token,
+                  authority_time(30)),
+              "journal fixture releases its cache lease");
+      now_value = 40;
+      rejected([&] { journal_leases.require_current(acquired.lease); },
+               "production cache lease authority rejects a released fence");
+    } catch (...) {
+      std::filesystem::remove_all(temporary);
+      throw;
+    }
+    std::filesystem::remove_all(temporary);
   } catch (const std::exception& exception) {
     std::cerr << "cache_namespace_authority_tests: " << exception.what()
               << '\n';

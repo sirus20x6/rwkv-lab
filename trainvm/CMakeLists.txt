@@ -53,6 +53,7 @@ add_library(trainvm_core
   src/adapter_registry.cpp
   src/authority_time.cpp
   src/authority_document.cpp
+  src/cache_artifact_authority.cpp
   src/cache_namespace.cpp
   src/cache_namespace_authority.cpp
   src/control.cpp
@@ -99,7 +100,9 @@ add_library(trainvm_core
   src/host_launch_registry.cpp
   src/host_resources.cpp
   src/journal.cpp
+  src/journal_cache_lease_authority.cpp
   src/lease_renewal.cpp
+  src/linux_immutable_cache_store.cpp
   src/linux_nvidia_inventory.cpp
   src/reconciler.cpp
   src/resource_request_builder.cpp

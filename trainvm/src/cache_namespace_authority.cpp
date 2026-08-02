@@ -188,6 +188,12 @@ nlohmann::json authority_receipt_body(
       {"host_launch_registry_digest", receipt.host_launch_registry_digest},
       {"inventory_receipt_digest", receipt.inventory_receipt_digest},
       {"invocation_digest", receipt.invocation_digest},
+      {"run_id", receipt.run_id},
+      {"node_id", receipt.node_id},
+      {"attempt_id", receipt.attempt_id},
+      {"concurrency_key", receipt.concurrency_key},
+      {"lease_id", receipt.lease_id},
+      {"fencing_token", receipt.fencing_token},
       {"launch_spec_digest", receipt.launch_spec_digest},
       {"resource_binding_digest", receipt.resource_binding_digest},
       {"runtime_probe_digest", receipt.runtime_probe_digest},
@@ -207,6 +213,12 @@ void validate_authority_receipt(
       !valid_sha256(receipt.adapter_registry_digest) ||
       !valid_sha256(receipt.host_launch_registry_digest) ||
       !valid_sha256(receipt.invocation_digest) ||
+      receipt.run_id.empty() || receipt.run_id.size() > 1024U ||
+      receipt.node_id.empty() || receipt.node_id.size() > 1024U ||
+      receipt.attempt_id.empty() || receipt.attempt_id.size() > 1024U ||
+      receipt.concurrency_key.empty() ||
+      receipt.concurrency_key.size() > 1024U || receipt.lease_id.empty() ||
+      receipt.lease_id.size() > 1024U || receipt.fencing_token == 0U ||
       !valid_sha256(receipt.launch_spec_digest) ||
       !valid_sha256(receipt.inventory_receipt_digest) ||
       !valid_sha256(receipt.resource_binding_digest) ||
@@ -350,6 +362,12 @@ CacheNamespaceAuthorityReceipt CacheNamespaceAuthority::derive(
       .adapter_registry_digest = adapters_.registry_digest(),
       .host_launch_registry_digest = launches_.registry_digest(),
       .invocation_digest = invocation.invocation_digest,
+      .run_id = invocation.run_id,
+      .node_id = invocation.node_id,
+      .attempt_id = invocation.attempt_id,
+      .concurrency_key = launch.identity.concurrency_key,
+      .lease_id = launch.identity.lease_id,
+      .fencing_token = launch.identity.fencing_token,
       .launch_spec_digest = launch.spec_digest,
       .inventory_receipt_digest = inventory.receipt_digest,
       .resource_binding_digest = resources.digest,

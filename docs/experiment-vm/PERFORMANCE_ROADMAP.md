@@ -174,11 +174,21 @@ Single-run speedrun results are hypotheses, not production defaults.
 - Treat a namespace document as an untrusted claim. The separate authority builder now recomputes
   it from the exact adapter and host-launch registries, sealed invocation/launch, validated host
   inventory and selected-resource fences, a bounded runtime-probe interface, and a digest-only
-  compile-input manifest. It emits a self-bound authority receipt and makes any registry, launch,
-  device, runtime, topology, shape, precision, option, constant, or checkpoint change cold. Cache
-  reuse remains disabled until the production sealed-runtime probe and publication layer also bind
-  the active owner/fence, symlink-safe paths, atomic immutable promotion, qualification, and an
-  artifact-tree digest receipt; neither a claim nor an authority receipt alone authorizes bytes.
+  compile-input manifest. It emits a self-bound authority receipt, including the exact run, node,
+  attempt, concurrency scope, lease, and fencing token, and makes any registry, launch, device,
+  runtime, topology, shape, precision, option, constant, or checkpoint change cold.
+- Keep cache qualification, publication, and adoption as distinct authorities. The artifact
+  authority now checks the live journal fence before and after potentially long publication and
+  qualification work; obtains correctness, trajectory, quality, shape-transition, unprofiled
+  throughput, and memory evidence only through a trusted evidence-source interface; and requires a
+  second live-fence and byte verification around adoption. The Linux immutable store pins allowed
+  source and publication roots, traverses beneath descriptors without following symlinks or mount
+  crossings, rejects nonregular/changing/unbounded input, hashes a canonical manifest, fsyncs and
+  atomically promotes a read-only content-addressed tree, and re-hashes every declared file while
+  rejecting writable or undeclared content. The production lease implementation reads the exact
+  active boot-scoped journal lease. Runtime reuse remains disabled until the service graph supplies
+  a sealed-runtime probe and a journal/artifact-backed qualification evidence source, then wires
+  publication and adoption into worker launch; caller-provided evidence never authorizes reuse.
 - Add typed CPU/I/O policy: CPU set, CPU weight, I/O weight, worker count, OpenMP thread count, and
   nice level. Record effective policy and throttling as evidence. The non-root worker runtime now
   parses the sealed policy in one category-owned module, narrows and reattests CPU affinity, applies
