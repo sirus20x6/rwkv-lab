@@ -42,6 +42,35 @@ bool valid_sha256_fingerprint(std::string_view value) {
          });
 }
 
+bool symbolic_identity(std::string_view value) {
+  constexpr std::size_t kMaximumIdentityBytes = 192U;
+  if (value.empty() || value.size() > kMaximumIdentityBytes ||
+      !((value.front() >= 'a' && value.front() <= 'z') ||
+        (value.front() >= 'A' && value.front() <= 'Z'))) {
+    return false;
+  }
+  return std::ranges::all_of(value, [](char character) {
+    return (character >= 'a' && character <= 'z') ||
+           (character >= 'A' && character <= 'Z') ||
+           (character >= '0' && character <= '9') || character == '_' ||
+           character == '-' || character == '.' || character == ':';
+  });
+}
+
+void validate_training_contract(
+    const TrainingCompositionContract& contract) {
+  if (!symbolic_identity(contract.model_family) || contract.slots.empty() ||
+      contract.slots.size() > 64U ||
+      std::ranges::any_of(contract.slots, [](const auto& slot) {
+        return !symbolic_identity(slot.first) ||
+               enum_to_string(slot.second) == "<invalid>";
+      })) {
+    throw std::invalid_argument(
+        "adapter training composition contract must declare a bounded model "
+        "family and between 1 and 64 symbolic slots");
+  }
+}
+
 std::vector<AdapterProfile> core_profiles() {
   const auto key = [](std::string operation, std::string contract) {
     return AdapterKey{.adapter = "trainvm.core",
@@ -127,6 +156,13 @@ void validate_profile(AdapterProfile& profile) {
   }
   const bool builtin = profile.key.runtime == ComponentRuntime::builtin;
   validate_lifecycle(profile.lifecycle);
+  if (profile.training_composition) {
+    validate_training_contract(*profile.training_composition);
+    if (profile.effect != Effect::process) {
+      throw std::invalid_argument(
+          "adapter training composition contracts require process effect");
+    }
+  }
   if (profile.lifecycle.stateful && profile.effect != Effect::process) {
     throw std::invalid_argument(
         "stateful adapter operations must have process effect");
@@ -134,9 +170,11 @@ void validate_profile(AdapterProfile& profile) {
   if (builtin) {
     if (!profile.code_fingerprint.empty() ||
         !profile.required_capabilities.empty() ||
-        profile.lifecycle != OperationLifecycleCapabilities{}) {
+        profile.lifecycle != OperationLifecycleCapabilities{} ||
+        profile.training_composition) {
       throw std::invalid_argument(
-          "builtin adapter profiles cannot carry worker launch or lifecycle authority");
+          "builtin adapter profiles cannot carry worker launch, lifecycle, or "
+          "training-composition authority");
     }
     const bool acquire =
         profile.key.adapter == "trainvm.core" &&
@@ -400,6 +438,39 @@ void AdapterRegistry::validate_plan(const CompiledPlan& plan) const {
       throw AdapterResolutionError(
           "workflow node " + name +
           " disagrees with its authority-owned effect or idempotency class");
+    }
+    if (profile.training_composition) {
+      if (!node.invoke.training) {
+        throw AdapterResolutionError(
+            "workflow node " + name +
+            " omits the training composition required by its authority-owned adapter profile");
+      }
+      const TrainingCompositionContract& contract =
+          *profile.training_composition;
+      const TrainingComposition& composition = *node.invoke.training;
+      if (composition.model_family != contract.model_family) {
+        throw AdapterResolutionError(
+            "workflow node " + name +
+            " training model family disagrees with its authority-owned adapter profile");
+      }
+      if (composition.components.size() != contract.slots.size()) {
+        throw AdapterResolutionError(
+            "workflow node " + name +
+            " training component slots disagree with its authority-owned adapter profile");
+      }
+      for (const auto& [slot, category] : contract.slots) {
+        const auto selected = composition.components.find(slot);
+        if (selected == composition.components.end() ||
+            selected->second.key.category != category) {
+          throw AdapterResolutionError(
+              "workflow node " + name + " training component slot " + slot +
+              " disagrees with its authority-owned category contract");
+        }
+      }
+    } else if (node.invoke.training) {
+      throw AdapterResolutionError(
+          "workflow node " + name +
+          " attaches a training composition to an adapter profile that does not consume one");
     }
     if (reachable.contains(name)) {
       if (node.effect == Effect::process &&

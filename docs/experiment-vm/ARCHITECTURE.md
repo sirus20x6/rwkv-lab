@@ -201,6 +201,15 @@ profile phases against an operation actually invoked by a reachable workflow
 node. These declarations describe protocol support only; they do not
 themselves authorize a legacy launcher.
 
+An operation that consumes shared training components additionally owns one
+reflected `TrainingCompositionContract`: an exact model-family identity and a
+closed map from semantic slot name to `TrainingComponentCategory`. Every node
+using that operation must provide exactly those slots and categories. An
+operation without the contract rejects any attached composition. This keeps a
+field from appearing declarative while being ignored by the selected trainer,
+and moves missing/extra/wrong-family failures ahead of leases and worker
+launches.
+
 Adding a trainer family requires one adapter and its tests. Creating another experiment from
 registered operations requires no new Go handler, HTML form, subprocess code, or Python supervisor.
 The dashboard generates its editor and live controls from descriptors.

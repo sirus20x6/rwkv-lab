@@ -447,6 +447,9 @@ void test_reflection_and_compiler() {
                     "pause_keep_resources", "pause_release_resources",
                     "compile", "warmup", "qualify", "profile",
                     "resume_grade"}) &&
+            trainvm::reflected_field_names<
+                trainvm::TrainingCompositionContract>() ==
+                std::vector<std::string>({"model_family", "slots"}) &&
             trainvm::enum_from_string<trainvm::ResumeGrade>("exact") ==
                 trainvm::ResumeGrade::exact &&
             trainvm::enum_to_string(
@@ -7552,12 +7555,24 @@ void test_adapter_registry_file_contract() {
              }));
   const trainvm::AdapterRegistry reordered =
       trainvm::AdapterRegistry::load_file(reordered_path);
+  auto composition_document = original_document;
+  composition_document["profiles"].at(0)["training_composition"] = {
+      {"model_family", "mageflow"},
+      {"slots", {{"optimizer", "optimizer"},
+                 {"backbone_activation", "activation"}}},
+  };
+  const auto composition_path = directory / "registry-composition.json";
+  write_json(composition_path, composition_document);
+  const trainvm::AdapterRegistry composition_registry =
+      trainvm::AdapterRegistry::load_file(composition_path);
   const auto compiled = trainvm::compile_document(load_fixture());
   check(compiled.valid(), "registry file fixture plan compiles");
   if (compiled.valid()) {
     const auto& mageflow =
         compiled.plan->experiment.spec.components.at("mageflow");
     const auto& resolved = loaded.resolve(mageflow, "train");
+    const auto& composition_resolved =
+        composition_registry.resolve(mageflow, "train");
     check(resolved.code_fingerprint ==
               "sha256:" + std::string(64, 'a') &&
               resolved.required_capabilities ==
@@ -7574,7 +7589,17 @@ void test_adapter_registry_file_contract() {
               loaded.registry_digest() == reordered.registry_digest() &&
               loaded.registry_digest() ==
                   trainvm::AdapterRegistry(fixture_adapter_profiles())
-                      .registry_digest(),
+                      .registry_digest() &&
+              composition_resolved.training_composition &&
+              composition_resolved.training_composition->model_family ==
+                  "mageflow" &&
+              composition_resolved.training_composition->slots ==
+                  std::map<std::string,
+                           trainvm::TrainingComponentCategory>{
+                      {"backbone_activation",
+                       trainvm::TrainingComponentCategory::activation},
+                      {"optimizer",
+                       trainvm::TrainingComponentCategory::optimizer}},
           "reflection-decoded external sibling profiles may repeat schema field names and canonicalize order into a stable full-registry digest");
   }
 
@@ -7671,6 +7696,20 @@ void test_adapter_registry_file_contract() {
     unknown_resume_grade_rejected = true;
   }
 
+  auto malformed_composition_document = original_document;
+  malformed_composition_document["profiles"].at(0)
+                                ["training_composition"] = {
+      {"model_family", "mageflow"}, {"slots", nlohmann::json::object()}};
+  const auto malformed_composition_path =
+      directory / "registry-malformed-composition.json";
+  write_json(malformed_composition_path, malformed_composition_document);
+  bool malformed_composition_rejected = false;
+  try {
+    (void)trainvm::AdapterRegistry::load_file(malformed_composition_path);
+  } catch (const std::invalid_argument&) {
+    malformed_composition_rejected = true;
+  }
+
   auto reserved_namespace_document = original_document;
   reserved_namespace_document["profiles"].at(0)["key"]["adapter"] =
       "trainvm.core";
@@ -7726,9 +7765,10 @@ void test_adapter_registry_file_contract() {
             missing_lifecycle_field_rejected &&
             unknown_lifecycle_field_rejected &&
             unknown_resume_grade_rejected &&
+            malformed_composition_rejected &&
             reserved_namespace_rejected && duplicate_key_rejected &&
             empty_rejected && oversized_rejected,
-        "registry file loading rejects symlinks, missing or unknown lifecycle fields, unknown grades, incompatible versions, reserved trainvm.core names, duplicate keys, and unbounded files");
+        "registry file loading rejects symlinks, missing or unknown lifecycle fields, unknown grades, malformed training contracts, incompatible versions, reserved trainvm.core names, duplicate keys, and unbounded files");
   std::filesystem::remove_all(directory);
 }
 
@@ -8083,10 +8123,27 @@ void test_service_registry_and_reconciliation() {
               {"version", "1.0.0"}}},
             {"configuration", nlohmann::json::object()}}}}},
     };
+    training_fixture["spec"]["workflow"]["nodes"]["resume_training"]
+                    ["invoke"]["training"] =
+        training_fixture["spec"]["workflow"]["nodes"]
+                        ["train_to_boundary"]["invoke"]["training"];
     const auto training_plan = trainvm::compile_document(training_fixture);
     check(training_plan.valid(),
           "training-component service fixture compiles");
     if (training_plan.valid()) {
+      auto training_profiles = fixture_adapter_profiles();
+      const auto training_profile = std::ranges::find_if(
+          training_profiles, [](const trainvm::AdapterProfile& profile) {
+            return profile.key.operation == "train";
+          });
+      if (training_profile != training_profiles.end()) {
+        training_profile->training_composition =
+            trainvm::TrainingCompositionContract{
+                .model_family = "mageflow",
+                .slots = {{"backbone_activation",
+                           trainvm::TrainingComponentCategory::activation}},
+            };
+      }
       const auto database_path = directory / "training-components.db";
       std::string journal_id;
       {
@@ -8096,7 +8153,7 @@ void test_service_registry_and_reconciliation() {
       std::int64_t authority_now_ns = 8'000;
       trainvm::TrainVMService service(
           database_path,
-          trainvm::AdapterRegistry(fixture_adapter_profiles()),
+          trainvm::AdapterRegistry(std::move(training_profiles)),
           fixture_disabled_host_launch_registry(),
           fixture_test_host_identity(),
           [&authority_now_ns] { return test_time(authority_now_ns); },
@@ -8284,6 +8341,86 @@ void test_adapter_registry_and_reconciler() {
   }
   check(stateful_downgrade_rejected && compatible_nonexact_accepted,
         "exact recovery rejects a compatible-only stateful trainer while the same mixed stateful/stateless graph remains valid without an exact request");
+
+  nlohmann::json composed_source = load_fixture();
+  const nlohmann::json activation_composition = {
+      {"model_family", "mageflow"},
+      {"components",
+       {{"backbone_activation",
+         {{"key",
+           {{"category", "activation"},
+            {"name", "silu"},
+            {"version", "1.0.0"}}},
+          {"configuration", nlohmann::json::object()}}}}},
+  };
+  composed_source["spec"]["workflow"]["nodes"]["train_to_boundary"]
+                 ["invoke"]["training"] = activation_composition;
+  composed_source["spec"]["workflow"]["nodes"]["resume_training"]
+                 ["invoke"]["training"] = activation_composition;
+  const auto composed = trainvm::compile_document(composed_source);
+  auto composed_profiles = fixture_adapter_profiles();
+  const auto composed_profile = std::ranges::find_if(
+      composed_profiles, [](const trainvm::AdapterProfile& profile) {
+        return profile.key.operation == "train";
+      });
+  if (composed_profile != composed_profiles.end()) {
+    composed_profile->training_composition =
+        trainvm::TrainingCompositionContract{
+            .model_family = "mageflow",
+            .slots = {{"backbone_activation",
+                       trainvm::TrainingComponentCategory::activation}},
+        };
+  }
+  const auto rejects_composition_plan = [](
+      std::vector<trainvm::AdapterProfile> profiles,
+      const trainvm::CompiledPlan& plan) {
+    try {
+      trainvm::AdapterRegistry(std::move(profiles)).validate_plan(plan);
+    } catch (const trainvm::AdapterResolutionError&) {
+      return true;
+    }
+    return false;
+  };
+  bool exact_composition_accepted = composed.valid();
+  if (composed.valid()) {
+    try {
+      trainvm::AdapterRegistry(composed_profiles).validate_plan(*composed.plan);
+    } catch (const std::exception&) {
+      exact_composition_accepted = false;
+    }
+  }
+  const bool missing_composition_rejected =
+      rejects_composition_plan(composed_profiles, *compiled.plan);
+  const bool undeclared_composition_rejected =
+      composed.valid() &&
+      rejects_composition_plan(fixture_adapter_profiles(), *composed.plan);
+  bool wrong_family_rejected = false;
+  bool wrong_slot_rejected = false;
+  bool wrong_category_rejected = false;
+  if (composed.valid()) {
+    auto wrong_family = *composed.plan;
+    wrong_family.experiment.spec.workflow.nodes.at("train_to_boundary")
+        .invoke.training->model_family = "rwkv";
+    wrong_family_rejected =
+        rejects_composition_plan(composed_profiles, wrong_family);
+    auto wrong_slot = *composed.plan;
+    auto& slots = wrong_slot.experiment.spec.workflow.nodes
+                      .at("train_to_boundary")
+                      .invoke.training->components;
+    slots.emplace("invented_slot", slots.begin()->second);
+    wrong_slot_rejected =
+        rejects_composition_plan(composed_profiles, wrong_slot);
+    auto wrong_category = *composed.plan;
+    wrong_category.experiment.spec.workflow.nodes.at("train_to_boundary")
+        .invoke.training->components.at("backbone_activation")
+        .key.category = trainvm::TrainingComponentCategory::optimizer;
+    wrong_category_rejected =
+        rejects_composition_plan(composed_profiles, wrong_category);
+  }
+  check(exact_composition_accepted && missing_composition_rejected &&
+            undeclared_composition_rejected && wrong_family_rejected &&
+            wrong_slot_rejected && wrong_category_rejected,
+        "adapter profiles close the exact training model family, slot names, and categories before worker launch");
 
   const auto rejects_lifecycle = [](trainvm::OperationLifecycleCapabilities lifecycle) {
     auto profiles = fixture_adapter_profiles();

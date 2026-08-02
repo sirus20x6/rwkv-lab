@@ -3,6 +3,7 @@
 #include <compare>
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -51,6 +52,17 @@ struct OperationLifecycleCapabilities {
   bool operator==(const OperationLifecycleCapabilities&) const = default;
 };
 
+// The exact component surface consumed by one adapter operation. The adapter
+// owns slot semantics; experiment documents may select implementations for
+// these slots, but cannot invent new slots or attach components to an adapter
+// that does not declare a composition contract.
+struct TrainingCompositionContract {
+  std::string model_family;
+  std::map<std::string, TrainingComponentCategory> slots;
+
+  bool operator==(const TrainingCompositionContract&) const = default;
+};
+
 struct AdapterProfile {
   AdapterKey key;
   Effect effect{};
@@ -58,6 +70,7 @@ struct AdapterProfile {
   std::string code_fingerprint;
   std::vector<std::string> required_capabilities;
   OperationLifecycleCapabilities lifecycle{};
+  std::optional<TrainingCompositionContract> training_composition{};
 };
 
 struct AdapterRegistryDocument {

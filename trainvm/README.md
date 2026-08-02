@@ -446,6 +446,31 @@ launcher):
 }
 ```
 
+Training operations that consume the shared component registry also declare
+an exact composition contract:
+
+```json
+{
+  "training_composition": {
+    "model_family": "mageflow",
+    "slots": {
+      "optimizer": "optimizer",
+      "parameter_router": "parameter_router",
+      "learning_rate": "learning_rate_schedule"
+    }
+  }
+}
+```
+
+The keys are adapter-owned semantic slot names and the values are closed
+`TrainingComponentCategory` values. A contracted operation requires exactly
+that model family and slot/category map. Missing, extra, renamed, or
+category-mismatched slots are rejected before resource acquisition. Profiles
+without this field reject attached training compositions, and builtin
+operations cannot declare one. Component implementation names and
+configuration remain experiment choices resolved through the separate
+authority registry.
+
 `resume_grade` is one of `none`, `restart_only`, `terminal_checkpoint`,
 `compatible`, or `exact`. Stateless profiles must use `none` and cannot declare
 checkpoint or pause controls. Stateful profiles must have `process` effect.
@@ -459,8 +484,8 @@ compile, warmup, qualification, and profiling phases must target an operation
 actually invoked by a reachable workflow node.
 
 The canonical plan adapter lock is `trainvm.adapter-lock/v2`. Lifecycle fields
-are part of its digest; legacy v1 locks are rejected rather than silently
-upgraded.
+and any training-composition contract are part of its digest; legacy v1 locks
+are rejected rather than silently upgraded.
 
 ## Journal CLI
 
