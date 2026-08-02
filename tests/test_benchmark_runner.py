@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -21,6 +22,13 @@ import pytest
 REPOSITORY = pathlib.Path(__file__).resolve().parents[1]
 RUNNER = REPOSITORY / "scripts/run_benchmark_fixture.py"
 MATRIX = REPOSITORY / "docs/experiment-vm/benchmark-matrix.v1.json"
+PORTABLE_WORKLOAD = (
+    REPOSITORY / "scripts/benchmark_workloads/portable_lm_step.py"
+)
+QUALIFIED_EVIDENCE = (
+    REPOSITORY
+    / "docs/experiment-vm/examples/qualification-evidence.qualified.v1.json"
+)
 
 # Three buckets, so the run can actually demonstrate a shape transition.
 PORTABLE_FIXTURE = "rwkv.scratch-pretrain"
@@ -82,6 +90,89 @@ def test_workload_selection_follows_fixture_accelerator_requirement():
     assert benchmark_runner.workload_for_fixture(
         {"accelerator_required": True}
     ) == benchmark_runner.ACCELERATOR_WORKLOAD
+
+
+def test_run_phase_selects_eager_or_compile_candidate(monkeypatch):
+    commands = []
+
+    def completed(command, **_kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps({"median_step_seconds": 1.0}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(benchmark_runner.subprocess, "run", completed)
+    eager_report = benchmark_runner.run_phase(
+        "timed",
+        "seq8xbatch1",
+        0,
+        2,
+        benchmark_runner.PORTABLE_WORKLOAD,
+        False,
+    )
+    report = benchmark_runner.run_phase(
+        "timed",
+        "seq8xbatch1",
+        0,
+        2,
+        benchmark_runner.PORTABLE_WORKLOAD,
+        False,
+        compile_step=True,
+        compile_mode="reduce-overhead",
+    )
+    assert eager_report["status"] == report["status"] == "ok"
+    assert "--compile" not in commands[0]
+    assert "--compile" in commands[1]
+    assert commands[1][-2:] == ["--compile-mode", "reduce-overhead"]
+
+
+@pytest.mark.parametrize(
+    ("candidate", "output_parity", "gradient_parity"),
+    [
+        (
+            {"final_loss": 2.000001, "gradient_norm_sum": 8.000004},
+            True,
+            True,
+        ),
+        (
+            {"final_loss": 2.01, "gradient_norm_sum": 8.1},
+            False,
+            False,
+        ),
+    ],
+)
+def test_fingerprint_comparison_is_measured(
+    candidate, output_parity, gradient_parity,
+):
+    comparison = benchmark_runner.compare_fingerprints(
+        {"final_loss": 2.0, "gradient_norm_sum": 8.0}, candidate)
+    assert comparison["output_parity"] is output_parity
+    assert comparison["gradient_parity"] is gradient_parity
+    assert comparison["output_relative_deviation"] >= 0.0
+    assert comparison["gradient_relative_deviation"] >= 0.0
+
+
+def test_parity_failure_is_rejected_by_native_authority():
+    comparison = benchmark_runner.compare_fingerprints(
+        {"final_loss": 2.0, "gradient_norm_sum": 8.0},
+        {"final_loss": 2.01, "gradient_norm_sum": 8.0},
+    )
+    document = json.loads(QUALIFIED_EVIDENCE.read_text())
+    document["output_parity"] = comparison["output_parity"]
+    binary = find_trainvm()
+    verdict = subprocess.run(
+        [binary, "qualify-evidence"],
+        input=json.dumps(document),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert verdict.returncode == 3, verdict.stdout + verdict.stderr
+    assert "output_parity_failed" in json.loads(
+        verdict.stdout)["rejection_reasons"]
 
 
 def test_ambient_accelerator_residency_is_within_default_allowance():
@@ -185,6 +276,55 @@ def test_missing_accelerator_usage_marker_prevents_evidence(
     assert benchmark_runner.main() == 1
     assert not evidence.exists()
     assert "accelerator cell failure; no evidence emitted" in capsys.readouterr().err
+
+
+@pytest.mark.slow
+def test_compiled_candidate_falls_back_cleanly_on_unseen_shape(tmp_path):
+    environment = {
+        **os.environ,
+        "PYTHONPATH": str(REPOSITORY / "src"),
+        "CUDA_VISIBLE_DEVICES": "",
+        "TORCHINDUCTOR_CACHE_DIR": str(tmp_path / "inductor-cache"),
+    }
+
+    def run_workload(*arguments):
+        return subprocess.run(
+            [sys.executable, str(PORTABLE_WORKLOAD), *arguments],
+            capture_output=True,
+            text=True,
+            cwd=REPOSITORY,
+            env=environment,
+            check=False,
+            timeout=300,
+        )
+
+    common = [
+        "--phase", "timed",
+        "--bucket", "seq8xbatch2",
+        "--fallback-bucket", "seq11xbatch1",
+        "--seed", "0",
+        "--steps", "2",
+    ]
+    eager = run_workload(*common)
+    compiled = run_workload(*common, "--compile")
+    assert eager.returncode == 0, eager.stdout + eager.stderr
+    assert compiled.returncode == 0, compiled.stdout + compiled.stderr
+
+    eager_report = json.loads(eager.stdout)
+    compiled_report = json.loads(compiled.stdout)
+    fallback = compiled_report["fallback"]
+    assert fallback["bucket"] == "seq11xbatch1"
+    assert fallback["step_seconds"] > 0.0
+    assert benchmark_runner.compare_fingerprints(
+        eager_report["result_fingerprint"],
+        compiled_report["result_fingerprint"],
+    )["output_parity"] is True
+    fallback_parity = benchmark_runner.compare_fingerprints(
+        eager_report["fallback"]["result_fingerprint"],
+        fallback["result_fingerprint"],
+    )
+    assert fallback_parity["output_parity"] is True
+    assert fallback_parity["gradient_parity"] is True
 
 
 @pytest.mark.slow
@@ -302,3 +442,56 @@ def test_accelerator_fixture_emits_evidence_the_gate_accepts(tmp_path):
     )
     assert verdict.returncode == 0, verdict.stdout + verdict.stderr
     assert json.loads(verdict.stdout)["qualified"] is True
+
+
+@pytest.mark.slow
+@pytest.mark.gpu
+def test_compiled_accelerator_candidate_is_judged_by_authority(tmp_path):
+    cuda_probe = subprocess.run(
+        [sys.executable, "-c", "import torch; print(torch.cuda.is_available())"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if cuda_probe.returncode != 0 or cuda_probe.stdout.strip() != "True":
+        pytest.skip("CUDA is not available")
+    if shutil.which("nvidia-smi") is None:
+        pytest.skip("nvidia-smi is not available")
+
+    evidence = tmp_path / "compiled-evidence.json"
+    receipt = tmp_path / "compiled-receipt.json"
+    result = run_runner(
+        "--fixture", ACCELERATOR_FIXTURE,
+        "--candidate", "compile",
+        "--allow-accelerator",
+        "--seeds", "1",
+        "--steps", "4",
+        "--evidence", str(evidence),
+        "--receipt", str(receipt),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    report = json.loads(receipt.read_text())
+    assert report["candidate"] == "compile"
+    assert report["completed_cells"] == report["required_cells"] >= 1
+    assert not report["failed_cells"]
+    for cell in report["cells"]:
+        assert cell["candidate"]["compiled"] is True
+        assert cell["candidate_cold_compile_seconds"] > 0.0
+        assert cell["baseline_warm_steps_per_second"] > 0.0
+        assert cell["candidate_warm_steps_per_second"] > 0.0
+        assert cell["output_relative_deviation"] >= 0.0
+        assert cell["gradient_relative_deviation"] >= 0.0
+
+    binary = find_trainvm()
+    verdict = subprocess.run(
+        [binary, "qualify-evidence"],
+        input=evidence.read_text(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert verdict.returncode in (0, 3), verdict.stdout + verdict.stderr
+    authority_receipt = json.loads(verdict.stdout)
+    assert authority_receipt["evidence"] == json.loads(evidence.read_text())
+    assert authority_receipt["qualified"] is (verdict.returncode == 0)
