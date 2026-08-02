@@ -189,6 +189,51 @@ bool install_inherited_worker_descriptors(std::optional<int> code_fd,
   return ::dup3(worker_bootstrap_fd, kLinuxWorkerBootstrapDescriptor, 0) >= 0;
 }
 
+bool install_inherited_profiled_worker_descriptors(
+    std::optional<int> code_fd, int worker_bootstrap_fd,
+    int profiler_authority_fd, int target_executable_fd) noexcept {
+  if ((code_fd && *code_fd <= kLinuxProfilerTargetExecutableDescriptor) ||
+      worker_bootstrap_fd <= kLinuxProfilerTargetExecutableDescriptor ||
+      profiler_authority_fd <= kLinuxProfilerTargetExecutableDescriptor ||
+      target_executable_fd <= kLinuxProfilerTargetExecutableDescriptor) {
+    return false;
+  }
+  if (code_fd && ::dup3(*code_fd, kLinuxWorkerCodeDescriptor, 0) < 0)
+    return false;
+  return ::dup3(worker_bootstrap_fd, kLinuxWorkerBootstrapDescriptor, 0) >= 0 &&
+         ::dup3(profiler_authority_fd, kLinuxProfilerAuthorityDescriptor, 0) >=
+             0 &&
+         ::dup3(target_executable_fd,
+                kLinuxProfilerTargetExecutableDescriptor, 0) >= 0;
+}
+
+bool valid_digest(std::string_view value) {
+  return value.size() == 71U && value.starts_with("sha256:") &&
+         std::ranges::all_of(value.substr(7U), [](char character) {
+           return (character >= '0' && character <= '9') ||
+                  (character >= 'a' && character <= 'f');
+         });
+}
+
+std::vector<std::string> compose_exec_arguments(
+    const LinuxStoppedLaunchSpec& spec) {
+  std::vector<std::string> result;
+  const std::size_t profiler_arguments =
+      spec.profiler ? spec.profiler->arguments.size() + 1U : 0U;
+  result.reserve(1U + profiler_arguments + spec.arguments.size());
+  if (spec.profiler) {
+    result.push_back(spec.profiler->executable_name);
+    result.insert(result.end(), spec.profiler->arguments.begin(),
+                  spec.profiler->arguments.end());
+    result.push_back("/proc/self/fd/" +
+                     std::to_string(kLinuxProfilerTargetExecutableDescriptor));
+  } else {
+    result.push_back(spec.executable_name);
+  }
+  result.insert(result.end(), spec.arguments.begin(), spec.arguments.end());
+  return result;
+}
+
 bool install_worker_credentials(
     const LinuxWorkerCredentialSpec& credentials) noexcept {
   if (credentials.uid == 0U || credentials.gid == 0U ||
@@ -302,11 +347,38 @@ void require_descriptor_identity(const LinuxStoppedLaunchSpec& spec) {
   struct stat code {};
   struct stat bootstrap {};
   struct stat working_directory {};
+  struct stat profiler_executable {};
+  struct stat profiler_authority {};
   const int seals = ::fcntl(spec.executable_fd, F_GET_SEALS);
   const int code_seals = spec.code_fd ? ::fcntl(*spec.code_fd, F_GET_SEALS) : 0;
   const int bootstrap_seals = ::fcntl(spec.worker_bootstrap_fd, F_GET_SEALS);
+  const int profiler_executable_seals = spec.profiler
+      ? ::fcntl(spec.profiler->executable_fd, F_GET_SEALS)
+      : 0;
+  const int profiler_authority_seals = spec.profiler
+      ? ::fcntl(spec.profiler->authority_fd, F_GET_SEALS)
+      : 0;
   constexpr int required_seals =
       F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+  const bool profiler_executable_valid = !spec.profiler ||
+      (::fstat(spec.profiler->executable_fd, &profiler_executable) == 0 &&
+       S_ISREG(profiler_executable.st_mode) &&
+       (spec.profiler->execute_from_source
+            ? static_cast<std::uint64_t>(profiler_executable.st_dev) ==
+                      spec.profiler->source_device &&
+                  static_cast<std::uint64_t>(profiler_executable.st_ino) ==
+                      spec.profiler->source_inode &&
+                  static_cast<std::uint64_t>(profiler_executable.st_size) ==
+                      spec.profiler->source_size &&
+                  static_cast<std::uint32_t>(profiler_executable.st_mode) ==
+                      spec.profiler->source_mode &&
+                  static_cast<std::uint32_t>(profiler_executable.st_uid) ==
+                      spec.profiler->source_uid &&
+                  static_cast<std::uint32_t>(profiler_executable.st_gid) ==
+                      spec.profiler->source_gid
+            : profiler_executable_seals >= 0 &&
+                  (profiler_executable_seals & required_seals) ==
+                      required_seals));
   if (spec.cgroup_fd < 0 || spec.executable_fd < 0 ||
       spec.worker_bootstrap_fd < 0 ||
       spec.working_directory_fd < 0 ||
@@ -324,6 +396,12 @@ void require_descriptor_identity(const LinuxStoppedLaunchSpec& spec) {
       ::fstat(spec.worker_bootstrap_fd, &bootstrap) != 0 ||
       !S_ISREG(bootstrap.st_mode) || bootstrap_seals < 0 ||
       (bootstrap_seals & required_seals) != required_seals ||
+      !profiler_executable_valid ||
+      (spec.profiler &&
+       (
+        ::fstat(spec.profiler->authority_fd, &profiler_authority) != 0 ||
+        !S_ISREG(profiler_authority.st_mode) || profiler_authority_seals < 0 ||
+        (profiler_authority_seals & required_seals) != required_seals)) ||
       ::fstat(spec.working_directory_fd, &working_directory) != 0 ||
       !S_ISDIR(working_directory.st_mode)) {
     reject("stopped launch descriptors do not match sealed authority");
@@ -335,17 +413,27 @@ void validate_spec(const LinuxStoppedLaunchSpec& spec) {
       !canonical_absolute_path(spec.expected_cgroup_path) ||
       spec.expected_cgroup_device == 0U || spec.expected_cgroup_inode == 0U ||
       spec.executable_name.empty() || spec.executable_name.size() > 4096U ||
-      spec.executable_digest.size() != 71U ||
-      !spec.executable_digest.starts_with("sha256:") ||
-      !std::ranges::all_of(spec.executable_digest.substr(7U), [](char value) {
-        return (value >= '0' && value <= '9') ||
-               (value >= 'a' && value <= 'f');
-      }) ||
+      !valid_digest(spec.executable_digest) ||
       ::geteuid() != 0U || spec.credentials.uid == 0U ||
       spec.credentials.gid == 0U || !spec.credentials.no_new_privileges ||
       (spec.nice && (*spec.nice < -20 || *spec.nice > 19)) ||
       spec.arguments.size() > 256U) {
     reject("stopped launch specification is malformed or unbounded");
+  }
+  if (spec.profiler &&
+      (spec.profiler->executable_fd < 0 || spec.profiler->authority_fd < 0 ||
+       !canonical_absolute_path(spec.profiler->executable_name) ||
+       !valid_digest(spec.profiler->executable_digest) ||
+       (spec.profiler->execute_from_source &&
+        (spec.profiler->source_device == 0U ||
+         spec.profiler->source_inode == 0U ||
+         spec.profiler->source_size == 0U ||
+         (spec.profiler->source_mode & S_IFMT) != S_IFREG ||
+         (spec.profiler->source_mode & 0111U) == 0U ||
+         (spec.profiler->source_mode & (S_IWGRP | S_IWOTH)) != 0U)) ||
+       spec.profiler->arguments.empty() ||
+       spec.profiler->arguments.size() + spec.arguments.size() + 2U > 256U)) {
+    reject("stopped profiler wrapper specification is malformed or unbounded");
   }
   const std::string bootstrap_argument =
       "--trainvm-bootstrap-fd=" +
@@ -366,6 +454,19 @@ void validate_spec(const LinuxStoppedLaunchSpec& spec) {
       reject("stopped launch argv is malformed or unbounded");
     }
     argument_bytes += argument.size();
+  }
+  if (spec.profiler) {
+    if (argument_bytes > 65'536U - spec.profiler->executable_name.size())
+      reject("stopped profiler wrapper argv exceeds its byte bound");
+    argument_bytes += spec.profiler->executable_name.size();
+    for (const std::string& argument : spec.profiler->arguments) {
+      if (argument.empty() || argument.size() > 4096U ||
+          argument.find('\0') != std::string::npos ||
+          argument_bytes > 65'536U - argument.size()) {
+        reject("stopped profiler wrapper argv is malformed or unbounded");
+      }
+      argument_bytes += argument.size();
+    }
   }
   require_descriptor_identity(spec);
 }
@@ -483,18 +584,30 @@ std::optional<LinuxChildExitObservation> LinuxStoppedChild::reap(
 LinuxStoppedChild LinuxStoppedLauncherKernel::spawn_stopped(
     const LinuxStoppedLaunchSpec& spec) const {
   validate_spec(spec);
+  Descriptor inherited_executable(
+      ::fcntl(spec.executable_fd, F_DUPFD_CLOEXEC, 64));
   Descriptor inherited_code(
       spec.code_fd ? ::fcntl(*spec.code_fd, F_DUPFD_CLOEXEC, 64) : -1);
   Descriptor inherited_bootstrap(
       ::fcntl(spec.worker_bootstrap_fd, F_DUPFD_CLOEXEC, 64));
-  if ((spec.code_fd && inherited_code.get() < 0) ||
-      inherited_bootstrap.get() < 0) {
+  Descriptor inherited_profiler_executable(
+      spec.profiler
+          ? ::fcntl(spec.profiler->executable_fd, F_DUPFD_CLOEXEC, 64)
+          : -1);
+  Descriptor inherited_profiler_authority(
+      spec.profiler ? ::fcntl(spec.profiler->authority_fd, F_DUPFD_CLOEXEC, 64)
+                    : -1);
+  if (inherited_executable.get() < 0 ||
+      (spec.code_fd && inherited_code.get() < 0) ||
+      inherited_bootstrap.get() < 0 ||
+      (spec.profiler && (inherited_profiler_executable.get() < 0 ||
+                         inherited_profiler_authority.get() < 0))) {
     reject(system_error("could not duplicate inherited worker descriptor"));
   }
+  std::vector<std::string> argument_storage = compose_exec_arguments(spec);
   std::vector<char*> arguments;
-  arguments.reserve(spec.arguments.size() + 2U);
-  arguments.push_back(const_cast<char*>(spec.executable_name.c_str()));
-  for (const std::string& argument : spec.arguments) {
+  arguments.reserve(argument_storage.size() + 1U);
+  for (const std::string& argument : argument_storage) {
     arguments.push_back(const_cast<char*>(argument.c_str()));
   }
   arguments.push_back(nullptr);
@@ -527,10 +640,17 @@ LinuxStoppedChild LinuxStoppedLauncherKernel::spawn_stopped(
     (void)::close(ready_read.release());
     const bool prepared =
         ::fchdir(spec.working_directory_fd) == 0 &&
-        install_inherited_worker_descriptors(
-            spec.code_fd ? std::optional<int>{inherited_code.get()}
-                         : std::nullopt,
-            inherited_bootstrap.get()) &&
+        (spec.profiler
+             ? install_inherited_profiled_worker_descriptors(
+                   spec.code_fd ? std::optional<int>{inherited_code.get()}
+                                : std::nullopt,
+                   inherited_bootstrap.get(),
+                   inherited_profiler_authority.get(),
+                   inherited_executable.get())
+             : install_inherited_worker_descriptors(
+                   spec.code_fd ? std::optional<int>{inherited_code.get()}
+                                : std::nullopt,
+                   inherited_bootstrap.get())) &&
         install_process_priority(spec.nice) &&
         install_worker_credentials(spec.credentials);
     const char ready_command = 'R';
@@ -551,7 +671,10 @@ LinuxStoppedChild LinuxStoppedLauncherKernel::spawn_stopped(
       ::_exit(125);
     }
     char* const environment[] = {nullptr};
-    (void)::execveat(spec.executable_fd, "", arguments.data(), environment,
+    const int launch_executable = spec.profiler
+        ? inherited_profiler_executable.get()
+        : inherited_executable.get();
+    (void)::execveat(launch_executable, "", arguments.data(), environment,
                      AT_EMPTY_PATH);
     ::_exit(126);
   }
@@ -638,6 +761,19 @@ bool install_inherited_worker_descriptors(
     std::optional<int> code_fd, int worker_bootstrap_fd) noexcept {
   return trainvm::install_inherited_worker_descriptors(code_fd,
                                                         worker_bootstrap_fd);
+}
+
+bool install_inherited_profiled_worker_descriptors(
+    std::optional<int> code_fd, int worker_bootstrap_fd,
+    int profiler_authority_fd, int target_executable_fd) noexcept {
+  return trainvm::install_inherited_profiled_worker_descriptors(
+      code_fd, worker_bootstrap_fd, profiler_authority_fd,
+      target_executable_fd);
+}
+
+std::vector<std::string> compose_exec_arguments(
+    const LinuxStoppedLaunchSpec& spec) {
+  return trainvm::compose_exec_arguments(spec);
 }
 
 bool worker_status_has_credentials(

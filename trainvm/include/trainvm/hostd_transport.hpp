@@ -424,6 +424,8 @@ struct HostdMutationRequest final {
     std::optional<int> code_fd;
     int working_directory_fd{-1};
     int worker_bootstrap_fd{-1};
+    std::optional<int> profiler_executable_fd = std::nullopt;
+    std::optional<int> profiler_authority_fd = std::nullopt;
 
     bool operator==(const DelegatedLaunchDescriptors &) const = default;
   };

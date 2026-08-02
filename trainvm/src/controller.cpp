@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <filesystem>
 #include <limits>
 #include <map>
 #include <optional>
@@ -1954,6 +1955,40 @@ ResolvedLaunchSpec Controller::bind_worker_launch(
   };
   const HostLaunchProfile& host_profile = host_registry.resolve(
       expected_key, binding.identity.code_fingerprint);
+  const GpuTraceCapture* expected_trace = nullptr;
+  if (plan_.experiment.spec.execution &&
+      plan_.experiment.spec.execution->component ==
+          active_node.invoke.component &&
+      plan_.experiment.spec.execution->operation ==
+          active_node.invoke.operation &&
+      plan_.experiment.spec.execution->gpu_trace &&
+      plan_.experiment.spec.execution->gpu_trace->enabled) {
+    expected_trace = &*plan_.experiment.spec.execution->gpu_trace;
+  }
+  const bool expects_external_profiler =
+      expected_trace && expected_trace->backend &&
+      *expected_trace->backend != ProfilerBackend::torch;
+  bool profiler_matches = !binding.identity.profiler;
+  if (expects_external_profiler && binding.identity.profiler) {
+    const auto& profiler = *binding.identity.profiler;
+    const HostProfilerExecutableProfile& host_profiler =
+        host_registry.resolve_profiler(*expected_trace->backend);
+    const std::string expected_output =
+        (std::filesystem::path(
+             plan_.experiment.spec.workspace.run_directory) /
+         "trainvm_artifacts" / "gpu_traces" / ".external" /
+         sha256_hex(launch_id))
+            .string();
+    profiler_matches =
+        profiler.backend == *expected_trace->backend &&
+        profiler.capture == *expected_trace &&
+        profiler.raw_output_path == expected_output &&
+        profiler.executable.source_path == host_profiler.executable_path &&
+        profiler.executable.sealed_sha256 ==
+            host_profiler.executable_fingerprint &&
+        profiler.host_profiler_profile_digest ==
+            host_registry.profiler_profile_digest(*expected_trace->backend);
+  }
   if (binding.identity.launch_event_id != launch_id ||
       binding.identity.adapter_key != expected_key ||
       binding.identity.host != authority_host ||
@@ -1978,7 +2013,9 @@ ResolvedLaunchSpec Controller::bind_worker_launch(
       (binding.identity.code &&
        (binding.identity.code->source_path != *host_profile.code_path ||
         binding.identity.code->sealed_sha256 !=
-            host_profile.code_fingerprint))) {
+            host_profile.code_fingerprint)) ||
+      binding.identity.profiler.has_value() != expects_external_profiler ||
+      !profiler_matches) {
     throw std::invalid_argument(
         "host launch binding disagrees with the active operation");
   }

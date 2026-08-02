@@ -10,6 +10,7 @@
 #include "trainvm/journal.hpp"
 #include "trainvm/lease_renewal.hpp"
 #include "trainvm/model.hpp"
+#include "trainvm/profiler_launch_profiles.hpp"
 #include "trainvm/reflection_json.hpp"
 #include "trainvm/reconciler.hpp"
 #include "trainvm/service.hpp"
@@ -7294,7 +7295,13 @@ void test_host_launch_registry_contract() {
             trainvm::reflected_field_names<
                 trainvm::HostLaunchRegistryDocument>() ==
                 std::vector<std::string>({"api_version", "trusted_roots",
-                                          "profiles"}),
+                                          "profiles",
+                                          "profiler_executables"}) &&
+            trainvm::reflected_field_names<
+                trainvm::HostProfilerExecutableProfile>() ==
+                std::vector<std::string>({
+                    "backend", "version", "executable_path",
+                    "executable_fingerprint"}),
         "host launch registry types expose their complete reflected schema");
 
   const auto key = [](std::string adapter, std::string version,
@@ -7340,11 +7347,21 @@ void test_host_launch_registry_contract() {
       .public_arguments = {"--worker"},
       .working_directory = "/srv/trainvm/runs/run-1",
   };
+  const trainvm::HostProfilerExecutableProfile nsys_profile{
+      .backend = trainvm::ProfilerBackend::nsys,
+      .version = trainvm::profiler_launch_profile(
+                     trainvm::ProfilerBackend::nsys)
+                     .version,
+      .executable_path = "/opt/trainvm/profilers/nsys",
+      .executable_fingerprint = "sha256:" + std::string(64U, 'f'),
+  };
   const trainvm::HostLaunchRegistryDocument document{
       .api_version = "trainvm.host-launches/v4",
       .trusted_roots = {"/usr/libexec/trainvm", "/srv/trainvm",
                         "/opt/trainvm"},
       .profiles = {native_profile, python_profile},
+      .profiler_executables =
+          std::vector<trainvm::HostProfilerExecutableProfile>{nsys_profile},
   };
 
   const std::filesystem::path directory =
@@ -7382,6 +7399,8 @@ void test_host_launch_registry_contract() {
       loaded.resolve(python_profile.key, python_code);
   const auto& resolved_native =
       loaded.resolve(native_profile.key, native_code);
+  const auto& resolved_nsys =
+      loaded.resolve_profiler(trainvm::ProfilerBackend::nsys);
   auto canonical_document = document;
   std::ranges::sort(canonical_document.trusted_roots);
   std::ranges::sort(
@@ -7407,12 +7426,17 @@ void test_host_launch_registry_contract() {
                                           "/usr/libexec/trainvm"}) &&
             loaded.registry_digest() == expected_registry_digest &&
             loaded.profile_digest(python_profile.key, python_code) ==
-                expected_python_digest,
+                expected_python_digest &&
+            resolved_nsys == nsys_profile &&
+            !loaded.profiler_profile_digest(trainvm::ProfilerBackend::nsys)
+                 .empty(),
         "host launch loader reflection-decodes both runtimes and canonicalizes trusted-root and profile order");
 
   auto reordered = document;
   std::ranges::reverse(reordered.trusted_roots);
   std::ranges::reverse(reordered.profiles);
+  if (reordered.profiler_executables)
+    std::ranges::reverse(*reordered.profiler_executables);
   const auto reordered_path = directory / "host-launches-reordered.json";
   write_document(reordered_path, trainvm::encode_json(reordered));
   const trainvm::HostLaunchRegistry reordered_registry =
@@ -7426,7 +7450,9 @@ void test_host_launch_registry_contract() {
             reordered_registry.resolve(python_profile.key, python_code) ==
                 resolved_python &&
             reordered_registry.resolve(native_profile.key, native_code) ==
-                resolved_native,
+                resolved_native &&
+            reordered_registry.resolve_profiler(
+                trainvm::ProfilerBackend::nsys) == resolved_nsys,
         "host launch registry semantics are invariant to document collection order");
   auto changed_document = document;
   changed_document.profiles.at(1).public_arguments.push_back("--changed");
@@ -7506,6 +7532,16 @@ void test_host_launch_registry_contract() {
   legacy["api_version"] = "trainvm.host-launches/v1";
   auto duplicate_profile = encoded;
   duplicate_profile["profiles"].push_back(duplicate_profile["profiles"].at(0));
+  auto duplicate_profiler = encoded;
+  duplicate_profiler["profiler_executables"].push_back(
+      duplicate_profiler["profiler_executables"].at(0));
+  auto torch_profiler = encoded;
+  torch_profiler["profiler_executables"].at(0)["backend"] = "torch";
+  auto profiler_version_skew = encoded;
+  profiler_version_skew["profiler_executables"].at(0)["version"] = "2.0.0";
+  auto profiler_escape = encoded;
+  profiler_escape["profiler_executables"].at(0)["executable_path"] =
+      "/usr/bin/nsys";
   auto relative_root = encoded;
   relative_root["trusted_roots"].at(0) = "usr/libexec/trainvm";
   auto noncanonical_root = encoded;
@@ -7566,7 +7602,9 @@ void test_host_launch_registry_contract() {
   auto empty_roots = encoded;
   empty_roots["trusted_roots"] = nlohmann::json::array();
   check(rejects(unknown) && rejects(future) && rejects(legacy) &&
-            rejects(duplicate_profile) &&
+            rejects(duplicate_profile) && rejects(duplicate_profiler) &&
+            rejects(torch_profiler) && rejects(profiler_version_skew) &&
+            rejects(profiler_escape) &&
             rejects(relative_root) && rejects(noncanonical_root) &&
             rejects(overlapping_roots) && rejects(executable_escape) &&
             rejects(code_escape) && rejects(working_directory_escape) &&
@@ -7701,6 +7739,13 @@ void test_host_launch_resolution_and_binding() {
       std::filesystem::perms::owner_read |
           std::filesystem::perms::owner_exec,
       std::filesystem::perm_options::replace);
+  const auto profiler_executable = directory / "nsys";
+  std::filesystem::copy_file("/usr/bin/true", profiler_executable);
+  std::filesystem::permissions(
+      profiler_executable,
+      std::filesystem::perms::owner_read |
+          std::filesystem::perms::owner_exec,
+      std::filesystem::perm_options::replace);
   const auto code = directory / "worker.pyz";
   {
     std::ofstream output(code, std::ios::binary);
@@ -7716,6 +7761,8 @@ void test_host_launch_resolution_and_binding() {
     return "sha256:" + trainvm::sha256_hex(bytes);
   };
   const std::string executable_digest = file_digest(executable);
+  const std::string profiler_executable_digest =
+      file_digest(profiler_executable);
   const std::string code_digest = file_digest(code);
   const trainvm::AdapterKey key{
       .adapter = "rwkv-lab.mageflow",
@@ -7741,6 +7788,24 @@ void test_host_launch_resolution_and_binding() {
       .api_version = "trainvm.host-launches/v4",
       .trusted_roots = {directory.string()},
       .profiles = {profile},
+      .profiler_executables =
+          std::vector<trainvm::HostProfilerExecutableProfile>{
+              {
+                  .backend = trainvm::ProfilerBackend::nsys,
+                  .version = trainvm::profiler_launch_profile(
+                                 trainvm::ProfilerBackend::nsys)
+                                 .version,
+                  .executable_path = profiler_executable.string(),
+                  .executable_fingerprint = profiler_executable_digest,
+              },
+              {
+                  .backend = trainvm::ProfilerBackend::ncu,
+                  .version = trainvm::profiler_launch_profile(
+                                 trainvm::ProfilerBackend::ncu)
+                                 .version,
+                  .executable_path = profiler_executable.string(),
+                  .executable_fingerprint = profiler_executable_digest,
+              }},
   });
   const trainvm::HostIdentity host{
       .host_id = "sha256:" + std::string(64U, '1'),
@@ -7762,6 +7827,33 @@ void test_host_launch_resolution_and_binding() {
   trainvm::HostLaunchResolver resolver(registry, host);
   auto first = resolver.resolve(ticket, key);
   auto second = resolver.resolve(ticket, key);
+  trainvm::GpuTraceCapture external_capture{
+      .enabled = true,
+      .backend = trainvm::ProfilerBackend::nsys,
+      .warmup_steps = 2,
+      .skip_steps = 3,
+      .capture_steps = 4,
+      .output_artifact = "gpu_trace",
+      .activities = std::vector<trainvm::ProfilerActivity>{
+          trainvm::ProfilerActivity::cpu,
+          trainvm::ProfilerActivity::accelerator},
+      .record_shapes = false,
+      .profile_memory = false,
+      .with_stack = false,
+  };
+  const std::string external_output =
+      (directory / "work" / "trainvm_artifacts" / "gpu_traces" /
+       ".external" / trainvm::sha256_hex(ticket.launch_nonce))
+          .string();
+  auto external =
+      resolver.resolve(ticket, key, external_capture, external_output);
+  auto expected_profiler_arguments =
+      trainvm::profiler_capture_argv(external_capture, external_output);
+  expected_profiler_arguments.erase(expected_profiler_arguments.begin());
+  auto ncu_capture = external_capture;
+  ncu_capture.backend = trainvm::ProfilerBackend::ncu;
+  auto ncu_external = resolver.resolve(
+      ticket, key, ncu_capture, external_output + "-ncu");
   auto unsupported_ticket = ticket;
   unsupported_ticket.required_capabilities.push_back("worker.unimplemented");
   std::ranges::sort(unsupported_ticket.required_capabilities);
@@ -7783,8 +7875,63 @@ void test_host_launch_resolution_and_binding() {
             first.spec().identity.code_argument_index == 1U &&
             first.spec().identity.public_arguments ==
                 std::vector<std::string>({"-I", "worker.pyz"}) &&
+            external.spec().identity.profiler &&
+            external.spec().identity.profiler->backend ==
+                trainvm::ProfilerBackend::nsys &&
+            external.spec().identity.profiler->execute_from_source &&
+            external.spec().identity.profiler->capture == external_capture &&
+            external.spec().identity.profiler->raw_output_path ==
+                external_output &&
+            external.spec().identity.profiler->executable.sealed_sha256 ==
+                profiler_executable_digest &&
+            external.spec().identity.profiler->public_arguments ==
+                expected_profiler_arguments &&
+            ncu_external.spec().identity.profiler &&
+            !ncu_external.spec().identity.profiler->execute_from_source &&
             unsupported_capability_rejected,
         "repeated host resolution produces one deterministic versioned binding and rejects requirements absent from sealed worker capability authority");
+
+  const auto external_profiler_fd =
+      external.duplicate_profiler_executable_fd();
+  const auto external_authority_fd =
+      external.duplicate_profiler_authority_fd();
+  const auto ncu_profiler_fd =
+      ncu_external.duplicate_profiler_executable_fd();
+  struct stat pinned_profiler_metadata {};
+  const bool pinned_profiler_matches =
+      external_profiler_fd &&
+      ::fstat(*external_profiler_fd, &pinned_profiler_metadata) == 0 &&
+      static_cast<std::uint64_t>(pinned_profiler_metadata.st_dev) ==
+          external.spec().identity.profiler->executable.source_device &&
+      static_cast<std::uint64_t>(pinned_profiler_metadata.st_ino) ==
+          external.spec().identity.profiler->executable.source_inode;
+  constexpr int required_profiler_seals =
+      F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+  check(external_profiler_fd && external_authority_fd &&
+            pinned_profiler_matches && ncu_profiler_fd &&
+            (::fcntl(*ncu_profiler_fd, F_GET_SEALS) &
+             required_profiler_seals) == required_profiler_seals &&
+            trainvm::external_profiler_authority_from_sealed_fd(
+                *external_authority_fd,
+                external.spec().identity.profiler->authority.authority_digest) ==
+                external.spec().identity.profiler->authority,
+        "external resolution retains backend-compatible profiler bytes and exact worker authority");
+  if (ncu_profiler_fd) (void)::close(*ncu_profiler_fd);
+  if (external_profiler_fd && external_authority_fd) {
+    const int external_worker_fd = external.duplicate_executable_fd();
+    const auto external_code_fd = external.duplicate_code_fd();
+    const int external_work_fd = external.duplicate_working_directory_fd();
+    auto adopted_external = trainvm::ResolvedLaunch::adopt_delegated(
+        external.spec(), external_worker_fd, external_code_fd,
+        external_work_fd, external_profiler_fd, external_authority_fd);
+    check(adopted_external.spec() == external.spec(),
+          "delegated external profiler authority is reattested exactly");
+    (void)::close(external_worker_fd);
+    if (external_code_fd) (void)::close(*external_code_fd);
+    (void)::close(external_work_fd);
+    (void)::close(*external_profiler_fd);
+    (void)::close(*external_authority_fd);
+  }
 
   const int executable_fd = first.duplicate_executable_fd();
   const auto code_fd = first.duplicate_code_fd();
@@ -7836,8 +7983,10 @@ void test_host_launch_resolution_and_binding() {
   const nlohmann::json public_manifest =
       trainvm::resolved_launch_spec_json(first.spec());
   const auto decoded = trainvm::resolved_launch_spec_from_json(public_manifest);
+  const auto decoded_external = trainvm::resolved_launch_spec_from_json(
+      trainvm::resolved_launch_spec_json(external.spec()));
   const std::string manifest_text = public_manifest.dump();
-  check(decoded == first.spec() &&
+  check(decoded == first.spec() && decoded_external == external.spec() &&
             manifest_text.find("authorization_token") == std::string::npos &&
             manifest_text.find("process_instance") == std::string::npos &&
             manifest_text.find("secret://") == std::string::npos,
@@ -7856,11 +8005,25 @@ void test_host_launch_resolution_and_binding() {
   } catch (const std::invalid_argument&) {
     forged_rejected = true;
   }
+  auto forged_external = external.spec();
+  forged_external.identity.profiler->execute_from_source = false;
+  forged_external.spec_digest =
+      "sha256:" + trainvm::sha256_hex(
+                       trainvm::resolved_launch_identity_json(
+                           forged_external.identity)
+                           .dump());
+  bool forged_external_rejected = false;
+  try {
+    (void)trainvm::resolved_launch_spec_from_json(
+        trainvm::resolved_launch_spec_json(forged_external));
+  } catch (const std::invalid_argument&) {
+    forged_external_rejected = true;
+  }
   auto moved = std::move(second);
   auto move_assigned = resolver.resolve(ticket, key);
   move_assigned = std::move(moved);
   const int moved_fd = move_assigned.duplicate_executable_fd();
-  check(forged_rejected && moved_fd >= 0,
+  check(forged_rejected && forged_external_rejected && moved_fd >= 0,
         "self-hashed malformed bindings fail semantics and move-only FD ownership remains valid");
   if (moved_fd >= 0) (void)::close(moved_fd);
 

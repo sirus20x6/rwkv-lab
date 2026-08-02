@@ -272,6 +272,16 @@ compare windows whose node, backend, schedule, activities, profiler options, or 
 overlap classification differ. Trace cards also show the run's declared compile, warmup, and
 qualification state; warmup overlap is explicitly unknown when warmup is enabled without a declared
 step count, rather than being reported as steady state.
+
+The external-profiler launch path now binds the collector, fixed argv, capture declaration,
+run/node/attempt, worker executable, runtime closure, and output identity into the resolved host
+launch. Hostd delegates the collector and a sealed worker authority separately, and the stopped
+launcher exposes only fixed descriptors 3-6 with an empty environment. NCU executes as an immutable
+sealed copy. NSYS is instead digest-verified and inode-pinned beneath a trusted, non-worker-writable
+root because its CLI intentionally refuses anonymous executable images while discovering its
+installed support tree from `/proc/self/exe`. CPU-only qualification verifies both empty-environment
+startup and that NSYS preserves the worker authority and target descriptors through its wrapper.
+
 The shared profiler protocol also exposes an explicit input-wait context and iterable wrapper. The
 native MageFlow appearance/terminal and Qwen paths place it around their actual prefetched-batch or
 packed-row acquisition, so a complete capture publishes measured input-stall time and ratio. The
