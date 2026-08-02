@@ -261,6 +261,8 @@ public:
       const std::string& launch_event_id) const;
   [[nodiscard]] std::optional<ControlCommand> control_command(
       const std::string& command_id) const;
+  [[nodiscard]] std::uint64_t control_command_sequence(
+      const std::string& command_id) const;
   [[nodiscard]] std::vector<ControlCommand> pending_control_commands(
       const std::string& run_id,
       std::uint64_t after_control_revision) const;
@@ -271,6 +273,11 @@ public:
       const std::string& run_id) const;
   [[nodiscard]] EffectiveControlSnapshot effective_controls(
       const std::string& run_id) const;
+  [[nodiscard]] std::optional<CheckpointCommand> checkpoint_command(
+      const std::string& command_id) const;
+  [[nodiscard]] std::vector<CheckpointCommand> pending_checkpoint_commands(
+      const std::string& run_id,
+      std::uint64_t after_controller_sequence) const;
   [[nodiscard]] std::optional<WorkerInvocationSpec> worker_invocation(
       const std::string& dispatch_id) const;
   LeaseAcquireResult acquire_lease(const std::string& concurrency_key,
@@ -481,6 +488,14 @@ public:
                                               nlohmann::json effective_values,
                                               nlohmann::json diagnostics,
                                               const AuthorityTimeSample& now);
+  CheckpointSubmission submit_checkpoint_command(CheckpointCommand command);
+  CheckpointCommand acknowledge_checkpoint_command(
+      const std::string& run_id, const std::string& command_id,
+      const ControlAcknowledgementIdentity& identity,
+      CheckpointCommandStatus status,
+      std::optional<std::uint64_t> optimizer_step,
+      std::string artifact_id, nlohmann::json diagnostics,
+      const AuthorityTimeSample& now);
 };
 
 nlohmann::json event_json(const Event& event);

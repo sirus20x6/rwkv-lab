@@ -227,6 +227,22 @@ message ControlCommandResult {
   repeated ControlAssignment assignments = 6;
 }
 
+message CheckpointCommandResult {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    STATUS_REQUESTED = 1;
+    STATUS_APPLIED = 2;
+    STATUS_REJECTED = 3;
+  }
+
+  string command_id = 1;
+  uint64 controller_sequence = 2;
+  Status status = 3;
+  string reason = 4;
+  uint64 optimizer_step = 5;
+  string artifact_id = 6;
+}
+
 message RunCommandResponse {
   enum Disposition {
     DISPOSITION_UNSPECIFIED = 0;
@@ -241,6 +257,7 @@ message RunCommandResponse {
   uint64 command_sequence = 3;
   repeated Diagnostic diagnostics = 4;
   ControlCommandResult control = 5;
+  CheckpointCommandResult checkpoint = 6;
 }
 
 message ArtifactManifest {
@@ -341,6 +358,25 @@ message ControlPatchAcknowledgement {
   google.protobuf.Timestamp acknowledged_at = 12;
 }
 
+message CheckpointAcknowledgement {
+  enum Disposition {
+    DISPOSITION_UNSPECIFIED = 0;
+    DISPOSITION_APPLIED = 1;
+    DISPOSITION_REJECTED = 2;
+  }
+
+  string command_id = 1;
+  Disposition disposition = 2;
+  uint64 optimizer_step = 3;
+  string artifact_id = 4;
+  repeated Diagnostic diagnostics = 5;
+  string concurrency_key = 6;
+  string lease_id = 7;
+  uint64 fencing_token = 8;
+  uint64 worker_sequence = 9;
+  google.protobuf.Timestamp acknowledged_at = 10;
+}
+
 message WorkerToController {
   oneof message {
     WorkerHello hello = 1;
@@ -349,6 +385,7 @@ message WorkerToController {
     MetricSample metric = 4;
     ArtifactManifest artifact = 5;
     ControlPatchAcknowledgement control_ack = 6;
+    CheckpointAcknowledgement checkpoint_ack = 7;
   }
 }
 

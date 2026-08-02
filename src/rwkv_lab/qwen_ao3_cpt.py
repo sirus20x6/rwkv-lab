@@ -1295,6 +1295,11 @@ def train(
             worker_observability.optimizer_step(step)
         should_log = step % config.log_every == 0
         should_save = bool(config.save_every and step % config.save_every == 0)
+        checkpoint_requested = bool(
+            worker_controls is not None
+            and worker_controls.checkpoint_boundary_requested
+        )
+        should_save = should_save or checkpoint_requested
         # Converting CUDA scalars to Python values synchronizes the device.
         # Keep the hot path asynchronous and pay for that synchronization only
         # when a metric is actually consumed.
@@ -1374,6 +1379,25 @@ def train(
                 worker_controls=worker_controls,
             )
             latest_checkpoint_step = step
+            if worker_controls is not None and worker_controls.checkpoint_requested:
+                worker_controls.publish_requested_checkpoint_directory(
+                    str(latest_checkpoint),
+                    optimizer_step=step,
+                    resume_grade="exact",
+                    state_components=(
+                        "component_composition",
+                        "control_revision",
+                        "data_cursor",
+                        "expert_routing",
+                        "lr_schedule",
+                        "model",
+                        "optimizer",
+                        "rng_accelerator",
+                        "rng_numpy",
+                        "rng_python",
+                        "rng_torch",
+                    ),
+                )
         if interrupted["value"]:
             checkpoint = latest_checkpoint
             if checkpoint is None or latest_checkpoint_step != step:

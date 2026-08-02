@@ -5,6 +5,8 @@ from collections.abc import Mapping
 import pytest
 
 from rwkv_lab.trainvm_worker import (
+    CheckpointDisposition,
+    CheckpointPublicationRequest,
     CommandKind,
     ControlAssignment,
     ControlDisposition,
@@ -27,6 +29,9 @@ class FakeSession:
                 int,
                 tuple[tuple[int, str, str, str, str], ...],
             ]
+        ] = []
+        self.checkpoint_acknowledgements: list[
+            tuple[WorkerCommand, CheckpointDisposition, int, str]
         ] = []
 
     def poll_commands(self, maximum: int | None = None) -> tuple[WorkerCommand, ...]:
@@ -56,6 +61,23 @@ class FakeSession:
             )
         )
         return len(self.acknowledgements)
+
+    def acknowledge_checkpoint(
+        self,
+        command: WorkerCommand,
+        disposition: CheckpointDisposition,
+        *,
+        optimizer_step: int = 0,
+        artifact_id: str = "",
+        diagnostics: tuple[tuple[int, str, str, str, str], ...] = (),
+        wait: bool = True,
+    ) -> int:
+        assert wait is True
+        assert diagnostics == ()
+        self.checkpoint_acknowledgements.append(
+            (command, disposition, optimizer_step, artifact_id)
+        )
+        return len(self.checkpoint_acknowledgements)
 
 
 def control_command(
@@ -265,14 +287,59 @@ def test_invalid_initial_and_command_scalars_fail_closed(value: object) -> None:
     assert session.acknowledgements[0][4][0][1] == "control.invalid_assignment"
 
 
-def test_lifecycle_commands_fail_closed_until_protocol_supports_them() -> None:
+def test_pause_resume_and_cancel_commands_remain_fail_closed() -> None:
     session = FakeSession(
         WorkerCommand(1, "pause-1", CommandKind.PAUSE, checkpoint_first=True)
     )
     runtime = WorkerControlRuntime(session, {}, 0)
 
-    with pytest.raises(WorkerControlError, match="lifecycle command unsupported"):
+    with pytest.raises(WorkerControlError, match="pause, resume, or cancel"):
         runtime.checkpoint(1, lambda *_: None)
+
+
+def test_checkpoint_command_blocks_later_controls_until_immutable_publication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpoint = WorkerCommand(10, "checkpoint-10", CommandKind.CHECKPOINT)
+    later_control = control_command(
+        3,
+        expected=2,
+        apply_point=wire.APPLY_POINT_NEXT_OPTIMIZER_STEP,
+        assignments=(ControlAssignment("learning_rate", 1.0e-6),),
+    )
+    session = FakeSession(checkpoint, later_control)
+    runtime = WorkerControlRuntime(session, {"learning_rate": 2.0e-6}, 2)
+    assert runtime.optimizer_step(5, lambda *_: pytest.fail("must not overtake")) == ()
+    assert runtime.checkpoint_boundary_requested
+    assert runtime.checkpoint_requested
+
+    class Published:
+        artifact_id = "checkpoint-artifact"
+
+    class Publisher:
+        def __init__(self, _session: object, *, output_name: str) -> None:
+            assert output_name == "checkpoint"
+
+        def publish(self, *_args: object, **_kwargs: object) -> Published:
+            return Published()
+
+    monkeypatch.setattr(
+        "rwkv_lab.trainvm_worker.checkpoint.CheckpointPublisher", Publisher
+    )
+    published = runtime.publish_requested_checkpoint(
+        CheckpointPublicationRequest(
+            source_directory="/run/checkpoint",
+            optimizer_step=5,
+            resume_grade="exact",
+            state_components=("model", "optimizer"),
+        )
+    )
+
+    assert published is not None
+    assert session.checkpoint_acknowledgements == [
+        (checkpoint, CheckpointDisposition.APPLIED, 5, "checkpoint-artifact")
+    ]
+    assert runtime.optimizer_step(6, lambda *_: None)[0].control_revision == 3
 
 
 @pytest.mark.parametrize("effective_step", [0, -1, True])

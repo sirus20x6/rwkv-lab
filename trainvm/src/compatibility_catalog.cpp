@@ -38,7 +38,7 @@ constexpr std::size_t kMaximumPathBytes = 512U;
 constexpr std::size_t kMaximumLegacyDisplayBytes = 1024U;
 constexpr std::size_t kMaximumNotesBytes = 2048U;
 constexpr std::string_view kReviewedCatalogDigest =
-    "sha256:2d04245548c1a6050ca23cb770dc905b84bf6b80b0bfb824d1c6c0745dfcd25e";
+    "sha256:9393813ef5aa9593e89ae4c953654974babc0dd426d3c31e982804807b74199c";
 
 constexpr std::array<std::string_view, 140> kReviewedWorkflowIds = {
     "acquisition.civitai-anima",

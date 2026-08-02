@@ -2676,10 +2676,14 @@ def train(
                     output_dir,
                     step=global_step,
                 )
-            if global_step % config.checkpoint_every == 0:
+            checkpoint_requested = bool(
+                worker_controls is not None
+                and worker_controls.checkpoint_boundary_requested
+            )
+            if global_step % config.checkpoint_every == 0 or checkpoint_requested:
                 if mutable_controls is not None:
                     worker_controls.checkpoint(global_step, mutable_controls.apply)
-                save_training_checkpoint(
+                checkpoint = save_training_checkpoint(
                     controller,
                     optimizer,
                     scheduler,
@@ -2697,6 +2701,25 @@ def train(
                         else None
                     ),
                 )
+                if worker_controls is not None and worker_controls.checkpoint_requested:
+                    worker_controls.publish_requested_checkpoint_directory(
+                        str(checkpoint),
+                        optimizer_step=global_step,
+                        resume_grade="exact",
+                        state_components=(
+                            "component_composition",
+                            "control_revision",
+                            "data_cursor",
+                            "lr_schedule",
+                            "model",
+                            "optimizer",
+                            "parameter_routing",
+                            "rng_accelerator",
+                            "rng_numpy",
+                            "rng_python",
+                            "rng_torch",
+                        ),
+                    )
             if stop_requested["value"]:
                 if mutable_controls is not None:
                     worker_controls.checkpoint(global_step, mutable_controls.apply)

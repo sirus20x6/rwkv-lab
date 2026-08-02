@@ -5,7 +5,10 @@ import threading
 import time
 from collections.abc import Iterable
 
+from test_trainvm_worker_documents import bootstrap_document, invocation_document
+
 from rwkv_lab.trainvm_worker import (
+    CheckpointDisposition,
     CommandKind,
     ControlDisposition,
     WorkerSession,
@@ -13,13 +16,14 @@ from rwkv_lab.trainvm_worker import (
 )
 from rwkv_lab.trainvm_worker.session import wire
 
-from test_trainvm_worker_documents import bootstrap_document, invocation_document
-
 
 class FakeController:
-    def __init__(self, *, send_control: bool = False) -> None:
+    def __init__(
+        self, *, send_control: bool = False, send_checkpoint: bool = False
+    ) -> None:
         self.received: list[wire.WorkerToController] = []
         self.send_control = send_control
+        self.send_checkpoint = send_checkpoint
         self.control_sent = threading.Event()
 
     def __call__(
@@ -55,7 +59,7 @@ class FakeController:
         if self.send_control:
             yield wire.ControllerToWorker(
                 command=wire.WorkerCommand(
-                    controller_sequence=8,
+                    controller_sequence=18,
                     command_id="control-1",
                     controls=wire.ControlPatchCommand(
                         expected_control_revision=0,
@@ -68,6 +72,15 @@ class FakeController:
                         control_revision=8,
                         apply_point=wire.APPLY_POINT_NEXT_OPTIMIZER_STEP,
                     ),
+                )
+            )
+            self.control_sent.set()
+        if self.send_checkpoint:
+            yield wire.ControllerToWorker(
+                command=wire.WorkerCommand(
+                    controller_sequence=19,
+                    command_id="checkpoint-1",
+                    checkpoint=wire.CheckpointCommand(reason="operator snapshot"),
                 )
             )
             self.control_sent.set()
@@ -139,6 +152,8 @@ def test_control_command_is_typed_and_acknowledged_at_safe_point() -> None:
     assert controller.control_sent.wait(2)
     (command,) = wait_for_commands(session)
     assert command.kind is CommandKind.CONTROLS
+    assert command.controller_sequence == 18
+    assert command.control_revision == 8
     assert command.apply_point == wire.APPLY_POINT_NEXT_OPTIMIZER_STEP
     assert command.assignments[0].key == "learning_rate"
     assert command.assignments[0].value == 1e-6
@@ -154,4 +169,56 @@ def test_control_command_is_typed_and_acknowledged_at_safe_point() -> None:
     assert acknowledgement.control_revision == 8
     assert acknowledgement.effective_step == 4
     assert acknowledgement.effective_values[0].key == "learning_rate"
+    session.close()
+
+
+def test_checkpoint_command_is_typed_and_acknowledges_published_artifact() -> None:
+    controller = FakeController(send_checkpoint=True)
+    session = WorkerSession(
+        load_worker_bootstrap(bootstrap_document()), connector=controller
+    )
+    session.start()
+    assert controller.control_sent.wait(2)
+    (command,) = wait_for_commands(session)
+    assert command.kind is CommandKind.CHECKPOINT
+    assert command.controller_sequence == 19
+    assert command.reason == "operator snapshot"
+    session.acknowledge_checkpoint(
+        command,
+        CheckpointDisposition.APPLIED,
+        optimizer_step=7,
+        artifact_id="checkpoint-artifact",
+        wait=True,
+    )
+    session.finish("node.completed", {"ok": True}, optimizer_step=7)
+    acknowledgement = controller.received[-2].checkpoint_ack
+    assert acknowledgement.optimizer_step == 7
+    assert acknowledgement.artifact_id == "checkpoint-artifact"
+    session.close()
+
+
+def test_identical_artifact_republication_reuses_the_durable_receipt() -> None:
+    controller = FakeController()
+    session = WorkerSession(
+        load_worker_bootstrap(bootstrap_document()), connector=controller
+    )
+    session.start()
+    values = {
+        "artifact_id": "checkpoint-repeat",
+        "logical_name": "checkpoint",
+        "kind": wire.ARTIFACT_KIND_CHECKPOINT,
+        "schema": "test.checkpoint.v1",
+        "uri": "file:///run/checkpoint-repeat",
+        "size_bytes": 12,
+        "fingerprint_algorithm": "manifest_sha256",
+        "fingerprint": "a" * 64,
+    }
+    assert session.artifact(**values) == 1
+    assert session.artifact(**values) == 1
+    session.finish("node.completed", {"ok": True}, optimizer_step=1)
+    assert [message.WhichOneof("message") for message in controller.received] == [
+        "hello",
+        "artifact",
+        "event",
+    ]
     session.close()

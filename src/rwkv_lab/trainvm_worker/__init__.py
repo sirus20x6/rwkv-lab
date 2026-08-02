@@ -67,6 +67,7 @@ from .runtime_policy import (
     load_worker_runtime_policy,
 )
 from .session import (
+    CheckpointDisposition,
     CommandKind,
     ControlAssignment,
     ControlDisposition,
@@ -95,6 +96,7 @@ __all__ = [
     "RESOLVED_TRAINING_API_VERSION",
     "AppliedControlPatch",
     "BootstrapError",
+    "CheckpointDisposition",
     "CheckpointPublicationError",
     "CheckpointPublicationRequest",
     "CheckpointPublisher",

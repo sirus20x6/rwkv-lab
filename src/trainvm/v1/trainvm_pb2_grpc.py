@@ -64,6 +64,11 @@ class TrainVMStub(object):
                 request_serializer=trainvm_dot_v1_dot_trainvm__pb2.WatchEventsRequest.SerializeToString,
                 response_deserializer=trainvm_dot_v1_dot_trainvm__pb2.EventEnvelope.FromString,
                 _registered_method=True)
+        self.GetControlView = channel.unary_unary(
+                '/trainvm.v1.TrainVM/GetControlView',
+                request_serializer=trainvm_dot_v1_dot_trainvm__pb2.GetControlViewRequest.SerializeToString,
+                response_deserializer=trainvm_dot_v1_dot_trainvm__pb2.GetControlViewResponse.FromString,
+                _registered_method=True)
         self.GetDescriptor = channel.unary_unary(
                 '/trainvm.v1.TrainVM/GetDescriptor',
                 request_serializer=trainvm_dot_v1_dot_trainvm__pb2.DescriptorRequest.SerializeToString,
@@ -110,6 +115,12 @@ class TrainVMServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetControlView(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def GetDescriptor(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -148,6 +159,11 @@ def add_TrainVMServicer_to_server(servicer, server):
                     servicer.WatchEvents,
                     request_deserializer=trainvm_dot_v1_dot_trainvm__pb2.WatchEventsRequest.FromString,
                     response_serializer=trainvm_dot_v1_dot_trainvm__pb2.EventEnvelope.SerializeToString,
+            ),
+            'GetControlView': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetControlView,
+                    request_deserializer=trainvm_dot_v1_dot_trainvm__pb2.GetControlViewRequest.FromString,
+                    response_serializer=trainvm_dot_v1_dot_trainvm__pb2.GetControlViewResponse.SerializeToString,
             ),
             'GetDescriptor': grpc.unary_unary_rpc_method_handler(
                     servicer.GetDescriptor,
@@ -317,6 +333,33 @@ class TrainVM(object):
             '/trainvm.v1.TrainVM/WatchEvents',
             trainvm_dot_v1_dot_trainvm__pb2.WatchEventsRequest.SerializeToString,
             trainvm_dot_v1_dot_trainvm__pb2.EventEnvelope.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetControlView(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/trainvm.v1.TrainVM/GetControlView',
+            trainvm_dot_v1_dot_trainvm__pb2.GetControlViewRequest.SerializeToString,
+            trainvm_dot_v1_dot_trainvm__pb2.GetControlViewResponse.FromString,
             options,
             channel_credentials,
             insecure,

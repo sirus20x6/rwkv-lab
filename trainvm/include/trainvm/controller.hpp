@@ -56,6 +56,17 @@ class Controller {
                                       nlohmann::json effective_values,
                                       nlohmann::json diagnostics,
                                       const AuthorityTimeSample& now);
+  CheckpointSubmission request_checkpoint(
+      const std::string& idempotency_key,
+      std::uint64_t expected_run_revision, const std::string& reason,
+      const std::string& author, const std::string& audit_reason);
+  CheckpointCommand acknowledge_checkpoint(
+      const std::string& command_id,
+      const ControlAcknowledgementIdentity& identity,
+      CheckpointCommandStatus status,
+      std::optional<std::uint64_t> optimizer_step,
+      std::string artifact_id, nlohmann::json diagnostics,
+      const AuthorityTimeSample& now);
 
   [[nodiscard]] const ExecutionState& state() const;
   [[nodiscard]] const CompiledPlan& plan() const;

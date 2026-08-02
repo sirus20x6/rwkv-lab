@@ -1962,6 +1962,112 @@ bool same_command_request(const ControlCommand& left, const ControlCommand& righ
          left.author == right.author && left.reason == right.reason;
 }
 
+std::string checkpoint_status_name(CheckpointCommandStatus status) {
+  switch (status) {
+    case CheckpointCommandStatus::requested:
+      return "requested";
+    case CheckpointCommandStatus::applied:
+      return "applied";
+    case CheckpointCommandStatus::rejected:
+      return "rejected";
+  }
+  throw std::invalid_argument("invalid checkpoint command status");
+}
+
+CheckpointCommand checkpoint_command_from_events(
+    const Event& requested, std::uint64_t controller_sequence,
+    const std::optional<Event>& acknowledgement) {
+  if (requested.event_type != "checkpoint.requested" ||
+      requested.worker_sequence != 0U || controller_sequence == 0U ||
+      !requested.payload.is_object()) {
+    throw std::runtime_error("stored checkpoint request is malformed");
+  }
+  const auto required_string = [&](std::string_view key) {
+    const auto found = requested.payload.find(std::string(key));
+    if (found == requested.payload.end() || !found->is_string() ||
+        found->get_ref<const std::string&>().empty()) {
+      throw std::runtime_error("stored checkpoint request identity is malformed");
+    }
+    return found->get<std::string>();
+  };
+  CheckpointCommand command{
+      .command_id = required_string("command_id"),
+      .run_id = requested.run_id,
+      .idempotency_key = required_string("idempotency_key"),
+      .expected_run_revision = requested.payload.value(
+          "expected_run_revision", std::uint64_t{}),
+      .controller_sequence = controller_sequence,
+      .plan_revision = requested.plan_revision,
+      .node_id = requested.node_id,
+      .attempt_id = requested.attempt_id,
+      .reason = required_string("reason"),
+      .author = required_string("author"),
+      .audit_reason = required_string("audit_reason"),
+      .status = CheckpointCommandStatus::requested,
+      .optimizer_step = std::nullopt,
+      .artifact_id = "",
+      .diagnostics = nlohmann::json::array(),
+      .acknowledgement = std::nullopt,
+      .acknowledged_at_ns = std::nullopt,
+  };
+  if (command.command_id + ":requested" != requested.event_id ||
+      command.expected_run_revision != requested.run_revision ||
+      command.node_id.empty() || command.attempt_id.empty()) {
+    throw std::runtime_error("stored checkpoint request envelope is malformed");
+  }
+  if (!acknowledgement) return command;
+  const Event& acknowledged = *acknowledgement;
+  if (acknowledged.event_id != command.command_id + ":ack" ||
+      acknowledged.event_type != "checkpoint.acknowledged" ||
+      acknowledged.run_id != command.run_id ||
+      acknowledged.plan_revision != command.plan_revision ||
+      acknowledged.node_id != command.node_id ||
+      acknowledged.attempt_id != command.attempt_id ||
+      acknowledged.worker_sequence == 0U || !acknowledged.payload.is_object() ||
+      acknowledged.payload.value("command_id", std::string{}) !=
+          command.command_id) {
+    throw std::runtime_error("stored checkpoint acknowledgement is malformed");
+  }
+  const std::string status =
+      acknowledged.payload.value("status", std::string{});
+  if (status == "applied") {
+    command.status = CheckpointCommandStatus::applied;
+  } else if (status == "rejected") {
+    command.status = CheckpointCommandStatus::rejected;
+  } else {
+    throw std::runtime_error("stored checkpoint acknowledgement status is malformed");
+  }
+  command.optimizer_step = acknowledged.optimizer_step;
+  command.artifact_id =
+      acknowledged.payload.value("artifact_id", std::string{});
+  const auto diagnostics = acknowledged.payload.find("diagnostics");
+  if (diagnostics == acknowledged.payload.end() || !diagnostics->is_array()) {
+    throw std::runtime_error("stored checkpoint diagnostics are malformed");
+  }
+  command.diagnostics = *diagnostics;
+  command.acknowledgement = ControlAcknowledgementIdentity{
+      .concurrency_key = acknowledged.payload.value(
+          "concurrency_key", std::string{}),
+      .lease_id = acknowledged.payload.value("lease_id", std::string{}),
+      .fencing_token = acknowledged.payload.value(
+          "fencing_token", std::uint64_t{}),
+      .node_id = acknowledged.node_id,
+      .attempt_id = acknowledged.attempt_id,
+      .worker_sequence = acknowledged.worker_sequence,
+  };
+  command.acknowledged_at_ns = acknowledged.wall_time_ns;
+  if (command.acknowledgement->concurrency_key.empty() ||
+      command.acknowledgement->lease_id.empty() ||
+      command.acknowledgement->fencing_token == 0U ||
+      (command.status == CheckpointCommandStatus::applied &&
+       (!command.optimizer_step || command.artifact_id.empty())) ||
+      (command.status == CheckpointCommandStatus::rejected &&
+       (command.optimizer_step || !command.artifact_id.empty()))) {
+    throw std::runtime_error("stored checkpoint acknowledgement result is malformed");
+  }
+  return command;
+}
+
 int open_existing_directory_by_components(
     const std::filesystem::path& absolute_path) {
   if (!absolute_path.is_absolute()) {
@@ -4727,6 +4833,235 @@ ControlCommand Journal::acknowledge_control_command(
   return command;
 }
 
+CheckpointSubmission Journal::submit_checkpoint_command(
+    CheckpointCommand command) {
+  if (command.command_id.empty() || command.run_id.empty() ||
+      command.idempotency_key.empty() || command.reason.empty() ||
+      command.author.empty() || command.audit_reason.empty() ||
+      command.controller_sequence != 0U ||
+      command.status != CheckpointCommandStatus::requested ||
+      command.optimizer_step || !command.artifact_id.empty() ||
+      !command.diagnostics.empty() || command.acknowledgement ||
+      command.acknowledged_at_ns) {
+    throw std::invalid_argument("new checkpoint command has invalid request state");
+  }
+  Transaction transaction(database_);
+  if (const auto existing = checkpoint_command(command.command_id)) {
+    const bool same =
+        existing->run_id == command.run_id &&
+        existing->idempotency_key == command.idempotency_key &&
+        existing->expected_run_revision == command.expected_run_revision &&
+        existing->plan_revision == command.plan_revision &&
+        existing->reason == command.reason && existing->author == command.author &&
+        existing->audit_reason == command.audit_reason;
+    if (!same) {
+      throw std::invalid_argument(
+          "checkpoint command idempotency identity has different content");
+    }
+    transaction.commit();
+    return {.command = *existing, .inserted = false};
+  }
+  Statement run(database_, R"sql(
+    SELECT run_revision, desired_state, observed_state,
+           current_node_id, current_attempt_id
+    FROM run_projection WHERE run_id=?
+  )sql");
+  bind_text(run.get(), 1, command.run_id);
+  if (sqlite3_step(run.get()) != SQLITE_ROW) {
+    throw std::invalid_argument("cannot checkpoint an unknown run");
+  }
+  const auto revision =
+      static_cast<std::uint64_t>(sqlite3_column_int64(run.get(), 0));
+  const std::string node_id = column_text(run.get(), 3);
+  const std::string attempt_id = column_text(run.get(), 4);
+  if (revision != command.expected_run_revision) {
+    throw std::invalid_argument("checkpoint command expected_run_revision conflict");
+  }
+  if (column_text(run.get(), 1) != "running" ||
+      column_text(run.get(), 2) != "running" || node_id.empty() ||
+      attempt_id.empty()) {
+    throw std::invalid_argument(
+        "checkpoint-now requires an active running worker attempt");
+  }
+  if ((!command.node_id.empty() && command.node_id != node_id) ||
+      (!command.attempt_id.empty() && command.attempt_id != attempt_id)) {
+    throw std::invalid_argument("checkpoint command targets a stale worker attempt");
+  }
+  command.node_id = node_id;
+  command.attempt_id = attempt_id;
+  const Event requested{
+      .event_id = command.command_id + ":requested",
+      .run_id = command.run_id,
+      .run_revision = revision,
+      .plan_revision = command.plan_revision,
+      .node_id = command.node_id,
+      .attempt_id = command.attempt_id,
+      .worker_sequence = 0,
+      .event_type = "checkpoint.requested",
+      .event_version = 1,
+      .wall_time_ns = 0,
+      .monotonic_time_ns = 0,
+      .optimizer_step = std::nullopt,
+      .payload = {{"command_id", command.command_id},
+                  {"idempotency_key", command.idempotency_key},
+                  {"expected_run_revision", command.expected_run_revision},
+                  {"plan_revision", command.plan_revision},
+                  {"reason", command.reason},
+                  {"author", command.author},
+                  {"audit_reason", command.audit_reason}},
+  };
+  command.controller_sequence = append_uncommitted(requested);
+  transaction.commit();
+  return {.command = std::move(command), .inserted = true};
+}
+
+CheckpointCommand Journal::acknowledge_checkpoint_command(
+    const std::string& run_id, const std::string& command_id,
+    const ControlAcknowledgementIdentity& identity,
+    CheckpointCommandStatus status,
+    std::optional<std::uint64_t> optimizer_step, std::string artifact_id,
+    nlohmann::json diagnostics, const AuthorityTimeSample& now) {
+  if (run_id.empty() || command_id.empty() ||
+      identity.concurrency_key.empty() || identity.lease_id.empty() ||
+      identity.fencing_token == 0U || identity.node_id.empty() ||
+      identity.attempt_id.empty() || identity.worker_sequence == 0U ||
+      status == CheckpointCommandStatus::requested || !diagnostics.is_array() ||
+      (status == CheckpointCommandStatus::applied &&
+       (!optimizer_step || artifact_id.empty())) ||
+      (status == CheckpointCommandStatus::rejected &&
+       (optimizer_step || !artifact_id.empty()))) {
+    throw std::invalid_argument("invalid checkpoint command acknowledgement");
+  }
+  require_authority_time(now);
+  Transaction transaction(database_);
+  const auto stored = checkpoint_command(command_id);
+  if (!stored || stored->run_id != run_id) {
+    throw std::invalid_argument("cannot acknowledge an unknown checkpoint command");
+  }
+  if (stored->status != CheckpointCommandStatus::requested) {
+    if (stored->status == status && stored->optimizer_step == optimizer_step &&
+        stored->artifact_id == artifact_id && stored->diagnostics == diagnostics &&
+        stored->acknowledgement == identity) {
+      transaction.commit();
+      return *stored;
+    }
+    throw std::invalid_argument(
+        "checkpoint command already has a different acknowledgement");
+  }
+  if (stored->node_id != identity.node_id ||
+      stored->attempt_id != identity.attempt_id) {
+    throw std::invalid_argument(
+        "checkpoint acknowledgement is from a stale worker attempt");
+  }
+  if (host_grant_enforcement_ == HostGrantEnforcement::required) {
+    const std::string launch_id = run_id + ":worker-launch:" +
+                                  identity.node_id + ":" + identity.attempt_id;
+    const auto binding = launch_binding(launch_id);
+    if (!binding || binding->identity.run_id != run_id ||
+        binding->identity.concurrency_key != identity.concurrency_key ||
+        binding->identity.lease_id != identity.lease_id ||
+        binding->identity.fencing_token != identity.fencing_token) {
+      throw OperationPreconditionError(
+          "checkpoint acknowledgement has no exact durable worker launch binding");
+    }
+    require_live_host_grant_claim(binding->identity.host_grant, run_id,
+                                  identity.concurrency_key, identity.lease_id,
+                                  identity.fencing_token);
+  }
+  Statement run(database_, R"sql(
+    SELECT run_revision, desired_state, observed_state,
+           current_node_id, current_attempt_id
+    FROM run_projection WHERE run_id=?
+  )sql");
+  bind_text(run.get(), 1, run_id);
+  if (sqlite3_step(run.get()) != SQLITE_ROW ||
+      column_text(run.get(), 1) != "running" ||
+      column_text(run.get(), 2) != "running" ||
+      column_text(run.get(), 3) != identity.node_id ||
+      column_text(run.get(), 4) != identity.attempt_id) {
+    throw std::invalid_argument(
+        "checkpoint acknowledgement has no active worker attempt");
+  }
+  const auto run_revision =
+      static_cast<std::uint64_t>(sqlite3_column_int64(run.get(), 0));
+  Statement lease(database_, R"sql(
+    SELECT 1 FROM resource_leases
+    WHERE concurrency_key=? AND owner_run_id=? AND lease_id=? AND fencing_token=?
+      AND clock_domain='boottime/v1' AND boot_id=?
+      AND released_wall_time_ns IS NULL
+      AND acquired_boottime_ns<=? AND expires_boottime_ns>?
+      AND NOT EXISTS(
+        SELECT 1 FROM resource_lease_releases AS release
+        WHERE release.concurrency_key=resource_leases.concurrency_key
+          AND release.owner_run_id=resource_leases.owner_run_id
+          AND release.lease_id=resource_leases.lease_id
+          AND release.fencing_token=resource_leases.fencing_token
+      )
+  )sql");
+  bind_text(lease.get(), 1, identity.concurrency_key);
+  bind_text(lease.get(), 2, run_id);
+  bind_text(lease.get(), 3, identity.lease_id);
+  bind_integer(lease.get(), 4,
+               checked_integer(identity.fencing_token, "fencing_token"));
+  bind_text(lease.get(), 5, now.boot_id);
+  bind_integer(lease.get(), 6, now.boot.nanoseconds);
+  bind_integer(lease.get(), 7, now.boot.nanoseconds);
+  if (sqlite3_step(lease.get()) != SQLITE_ROW) {
+    throw std::invalid_argument(
+        "checkpoint acknowledgement has no matching active fenced lease");
+  }
+  if (status == CheckpointCommandStatus::applied) {
+    Statement artifact(database_, R"sql(
+      SELECT worker_sequence, payload_json FROM events
+      WHERE run_id=? AND node_id=? AND attempt_id=?
+        AND event_type='artifact.published'
+        AND json_extract(payload_json, '$.artifact_id')=?
+      ORDER BY journal_sequence DESC LIMIT 1
+    )sql");
+    bind_text(artifact.get(), 1, run_id);
+    bind_text(artifact.get(), 2, identity.node_id);
+    bind_text(artifact.get(), 3, identity.attempt_id);
+    bind_text(artifact.get(), 4, artifact_id);
+    if (sqlite3_step(artifact.get()) != SQLITE_ROW ||
+        static_cast<std::uint64_t>(sqlite3_column_int64(artifact.get(), 0)) >=
+            identity.worker_sequence) {
+      throw std::invalid_argument(
+          "checkpoint acknowledgement has no prior published artifact");
+    }
+    const nlohmann::json artifact_payload =
+        nlohmann::json::parse(column_text(artifact.get(), 1));
+    if (artifact_payload.value("kind", std::string{}) != "checkpoint" ||
+        !artifact_payload.value("complete", false)) {
+      throw std::invalid_argument(
+          "checkpoint acknowledgement artifact is not a complete checkpoint");
+    }
+  }
+  const Event acknowledged{
+      .event_id = command_id + ":ack",
+      .run_id = run_id,
+      .run_revision = run_revision,
+      .plan_revision = stored->plan_revision,
+      .node_id = identity.node_id,
+      .attempt_id = identity.attempt_id,
+      .worker_sequence = identity.worker_sequence,
+      .event_type = "checkpoint.acknowledged",
+      .event_version = 1,
+      .wall_time_ns = now.wall.nanoseconds,
+      .monotonic_time_ns = 0,
+      .optimizer_step = optimizer_step,
+      .payload = {{"command_id", command_id},
+                  {"status", checkpoint_status_name(status)},
+                  {"artifact_id", artifact_id},
+                  {"diagnostics", diagnostics},
+                  {"concurrency_key", identity.concurrency_key},
+                  {"lease_id", identity.lease_id},
+                  {"fencing_token", identity.fencing_token}},
+  };
+  append_uncommitted(acknowledged);
+  transaction.commit();
+  return *checkpoint_command(command_id);
+}
+
 std::optional<ControlCommand> Journal::control_command(const std::string& command_id) const {
   Statement query(database_, R"sql(
     SELECT command_id, run_id, idempotency_key, expected_run_revision,
@@ -4746,6 +5081,79 @@ std::optional<ControlCommand> Journal::control_command(const std::string& comman
     throw std::runtime_error("could not read control command");
   }
   return command_from_row(query.get());
+}
+
+std::uint64_t Journal::control_command_sequence(
+    const std::string& command_id) const {
+  Statement query(database_, R"sql(
+    SELECT journal_sequence FROM events
+    WHERE event_id=? AND event_type='control.requested'
+  )sql");
+  bind_text(query.get(), 1, command_id + ":requested");
+  if (sqlite3_step(query.get()) != SQLITE_ROW) {
+    throw std::invalid_argument("control command has no durable request event");
+  }
+  return static_cast<std::uint64_t>(sqlite3_column_int64(query.get(), 0));
+}
+
+std::optional<CheckpointCommand> Journal::checkpoint_command(
+    const std::string& command_id) const {
+  Statement query(database_, R"sql(
+    SELECT journal_sequence, event_id, run_id, run_revision, plan_revision,
+           node_id, attempt_id, worker_sequence, event_type, event_version,
+           wall_time_ns, monotonic_time_ns, optimizer_step, payload_json
+    FROM events WHERE event_id=? AND event_type='checkpoint.requested'
+  )sql");
+  bind_text(query.get(), 1, command_id + ":requested");
+  const int status = sqlite3_step(query.get());
+  if (status == SQLITE_DONE) return std::nullopt;
+  if (status != SQLITE_ROW) {
+    throw std::runtime_error("could not read checkpoint command");
+  }
+  const std::uint64_t sequence =
+      static_cast<std::uint64_t>(sqlite3_column_int64(query.get(), 0));
+  const Event requested = event_from_row(query.get());
+  return checkpoint_command_from_events(
+      requested, sequence, event(command_id + ":ack"));
+}
+
+std::vector<CheckpointCommand> Journal::pending_checkpoint_commands(
+    const std::string& run_id,
+    std::uint64_t after_controller_sequence) const {
+  if (run_id.empty()) {
+    throw std::invalid_argument(
+        "pending checkpoint lookup requires a run identity");
+  }
+  Statement query(database_, R"sql(
+    SELECT journal_sequence, event_id, run_id, run_revision, plan_revision,
+           node_id, attempt_id, worker_sequence, event_type, event_version,
+           wall_time_ns, monotonic_time_ns, optimizer_step, payload_json
+    FROM events AS requested
+    WHERE run_id=? AND event_type='checkpoint.requested'
+      AND journal_sequence>?
+      AND NOT EXISTS(
+        SELECT 1 FROM events AS acknowledged
+        WHERE acknowledged.event_id =
+              json_extract(requested.payload_json, '$.command_id') || ':ack'
+      )
+    ORDER BY journal_sequence
+  )sql");
+  bind_text(query.get(), 1, run_id);
+  bind_integer(query.get(), 2,
+               checked_integer(after_controller_sequence,
+                               "after_controller_sequence"));
+  std::vector<CheckpointCommand> commands;
+  int status = SQLITE_OK;
+  while ((status = sqlite3_step(query.get())) == SQLITE_ROW) {
+    const auto sequence =
+        static_cast<std::uint64_t>(sqlite3_column_int64(query.get(), 0));
+    commands.push_back(checkpoint_command_from_events(
+        event_from_row(query.get()), sequence, std::nullopt));
+  }
+  if (status != SQLITE_DONE) {
+    throw std::runtime_error("could not scan pending checkpoint commands");
+  }
+  return commands;
 }
 
 std::vector<ControlCommand> Journal::pending_control_commands(

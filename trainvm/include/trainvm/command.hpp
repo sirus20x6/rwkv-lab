@@ -12,6 +12,8 @@ namespace trainvm {
 
 enum class ControlCommandStatus { requested, applied, rejected, restart_required };
 
+enum class CheckpointCommandStatus { requested, applied, rejected };
+
 struct ControlAcknowledgementIdentity {
   std::string concurrency_key;
   std::string lease_id;
@@ -48,6 +50,37 @@ struct ControlCommand {
 
 struct ControlSubmission {
   ControlCommand command;
+  bool inserted{};
+};
+
+// Checkpoint-now commands are journal events instead of mutable scheduler
+// state.  controller_sequence is the request event's global journal sequence,
+// which gives lifecycle and control commands one ordered worker stream without
+// conflating that ordering with the independently versioned control document.
+struct CheckpointCommand {
+  std::string command_id;
+  std::string run_id;
+  std::string idempotency_key;
+  std::uint64_t expected_run_revision{};
+  std::uint64_t controller_sequence{};
+  std::uint64_t plan_revision{1};
+  std::string node_id;
+  std::string attempt_id;
+  std::string reason;
+  std::string author;
+  std::string audit_reason;
+  CheckpointCommandStatus status{CheckpointCommandStatus::requested};
+  std::optional<std::uint64_t> optimizer_step;
+  std::string artifact_id;
+  nlohmann::json diagnostics = nlohmann::json::array();
+  std::optional<ControlAcknowledgementIdentity> acknowledgement;
+  std::optional<std::int64_t> acknowledged_at_ns;
+
+  bool operator==(const CheckpointCommand&) const = default;
+};
+
+struct CheckpointSubmission {
+  CheckpointCommand command;
   bool inserted{};
 };
 

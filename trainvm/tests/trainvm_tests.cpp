@@ -5103,7 +5103,11 @@ void test_worker_control_grpc_stream() {
         worker_command_message.command().has_controls() &&
         worker_command_message.command().command_id() ==
             live_control_response.control().command_id() &&
-        worker_command_message.command().controller_sequence() == 1U &&
+        worker_command_message.command().controller_sequence() ==
+            service.journal_.control_command_sequence(
+                live_control_response.control().command_id()) &&
+        worker_command_message.command().controller_sequence() ==
+            live_control_response.command_sequence() &&
         worker_command_message.command().controls().control_revision() == 1U &&
         worker_command_message.command().controls().apply_point() ==
             trainvm::v1::APPLY_POINT_NEXT_MICROBATCH;
@@ -5128,6 +5132,19 @@ void test_worker_control_grpc_stream() {
     const bool control_ack_written = primary->Write(control_ack_message);
     const bool control_ack_received = primary->Read(&control_receipt);
 
+    trainvm::v1::RunCommandRequest checkpoint_request;
+    checkpoint_request.set_run_id(launch.run_id);
+    checkpoint_request.set_expected_run_revision(5);
+    checkpoint_request.set_idempotency_key("grpc-checkpoint-now");
+    checkpoint_request.set_author("operator");
+    checkpoint_request.set_reason("exercise immutable checkpoint authority");
+    checkpoint_request.set_expected_journal_id(service.journal_.journal_id());
+    checkpoint_request.set_expected_plan_hash(compiled.plan->plan_hash);
+    checkpoint_request.mutable_checkpoint()->set_reason("operator snapshot");
+    trainvm::v1::RunCommandResponse checkpoint_response;
+    const grpc::Status checkpoint_status = service.CommandRun(
+        nullptr, &checkpoint_request, &checkpoint_response);
+
     trainvm::v1::WorkerToController metric_message;
     auto* metric = metric_message.mutable_metric();
     metric->set_worker_sequence(3);
@@ -5141,6 +5158,22 @@ void test_worker_control_grpc_stream() {
     trainvm::v1::ControllerToWorker metric_ack;
     const bool metric_written = primary->Write(metric_message);
     const bool metric_received = primary->Read(&metric_ack);
+
+    trainvm::v1::ControllerToWorker checkpoint_command_message;
+    const bool checkpoint_command_received =
+        primary->Read(&checkpoint_command_message);
+    const bool checkpoint_command_valid =
+        checkpoint_status.ok() && checkpoint_response.has_checkpoint() &&
+        checkpoint_response.disposition() ==
+            trainvm::v1::RunCommandResponse::DISPOSITION_ACCEPTED &&
+        checkpoint_command_received && checkpoint_command_message.has_command() &&
+        checkpoint_command_message.command().has_checkpoint() &&
+        checkpoint_command_message.command().command_id() ==
+            checkpoint_response.checkpoint().command_id() &&
+        checkpoint_command_message.command().controller_sequence() ==
+            checkpoint_response.checkpoint().controller_sequence() &&
+        checkpoint_command_message.command().checkpoint().reason() ==
+            "operator snapshot";
 
     trainvm::v1::WorkerToController artifact_message;
     auto* artifact = artifact_message.mutable_artifact();
@@ -5160,6 +5193,23 @@ void test_worker_control_grpc_stream() {
     trainvm::v1::ControllerToWorker artifact_ack;
     const bool artifact_written = primary->Write(artifact_message);
     const bool artifact_received = primary->Read(&artifact_ack);
+
+    trainvm::v1::WorkerToController checkpoint_ack_message;
+    auto* checkpoint_ack = checkpoint_ack_message.mutable_checkpoint_ack();
+    checkpoint_ack->set_command_id(
+        checkpoint_response.checkpoint().command_id());
+    checkpoint_ack->set_disposition(
+        trainvm::v1::CheckpointAcknowledgement::DISPOSITION_APPLIED);
+    checkpoint_ack->set_optimizer_step(21);
+    checkpoint_ack->set_artifact_id("grpc-checkpoint");
+    checkpoint_ack->set_concurrency_key(launch.concurrency_key);
+    checkpoint_ack->set_lease_id(launch.lease_id);
+    checkpoint_ack->set_fencing_token(launch.fencing_token);
+    checkpoint_ack->set_worker_sequence(5);
+    checkpoint_ack->mutable_acknowledged_at()->set_seconds(5);
+    trainvm::v1::ControllerToWorker checkpoint_receipt;
+    const bool checkpoint_ack_written = primary->Write(checkpoint_ack_message);
+    const bool checkpoint_ack_received = primary->Read(&checkpoint_receipt);
     telemetry_acknowledged =
         heartbeat_written && heartbeat_received &&
         heartbeat_ack.has_acknowledge_worker_sequence() &&
@@ -5168,12 +5218,16 @@ void test_worker_control_grpc_stream() {
         control_receipt.has_acknowledge_worker_sequence() &&
         control_receipt.acknowledge_worker_sequence() == 2U && metric_written &&
         metric_received && metric_ack.has_acknowledge_worker_sequence() &&
-        metric_ack.acknowledge_worker_sequence() == 3U && artifact_written &&
+        metric_ack.acknowledge_worker_sequence() == 3U &&
+        checkpoint_command_valid && artifact_written &&
         artifact_received && artifact_ack.has_acknowledge_worker_sequence() &&
-        artifact_ack.acknowledge_worker_sequence() == 4U;
+        artifact_ack.acknowledge_worker_sequence() == 4U &&
+        checkpoint_ack_written && checkpoint_ack_received &&
+        checkpoint_receipt.has_acknowledge_worker_sequence() &&
+        checkpoint_receipt.acknowledge_worker_sequence() == 5U;
 
     auto result = result_for(welcome_message.welcome());
-    result.mutable_event()->set_worker_sequence(5);
+    result.mutable_event()->set_worker_sequence(6);
     result_written = primary->Write(result);
     primary->WritesDone();
     receipt_received = primary->Read(&receipt_message);
@@ -5200,7 +5254,7 @@ void test_worker_control_grpc_stream() {
               primary_status.ok() &&
               receipt_message.receipt().event_id() ==
                   welcome_message.welcome().dispatch_id() + ":result" &&
-              receipt_message.receipt().acknowledged_worker_sequence() == 5U &&
+              receipt_message.receipt().acknowledged_worker_sequence() == 6U &&
               receipt_message.receipt().committed_run_revision() == 7U &&
               dispatch &&
               dispatch->status == trainvm::DispatchStatus::completed &&
@@ -5209,7 +5263,7 @@ void test_worker_control_grpc_stream() {
                       receipt_message.receipt().event_id()} &&
               projection && projection->observed_state == "acquiring" &&
               projection->run_revision == 7U &&
-              observer.events_for_run(run_id).size() == 22U,
+              observer.events_for_run(run_id).size() == 24U,
           "WorkerControl gRPC orders Hello, durable telemetry acknowledgements, Event, and durable Receipt");
   }
 

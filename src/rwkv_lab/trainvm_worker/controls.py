@@ -8,6 +8,7 @@ from types import MappingProxyType
 from typing import Protocol
 
 from .session import (
+    CheckpointDisposition,
     CommandKind,
     ControlDisposition,
     WorkerCommand,
@@ -47,6 +48,17 @@ class _Session(Protocol):
         *,
         effective_values: Mapping[str, Scalar] | None = None,
         effective_step: int = 0,
+        diagnostics: tuple[tuple[int, str, str, str, str], ...] = (),
+        wait: bool = True,
+    ) -> int: ...
+
+    def acknowledge_checkpoint(
+        self,
+        command: WorkerCommand,
+        disposition: CheckpointDisposition,
+        *,
+        optimizer_step: int = 0,
+        artifact_id: str = "",
         diagnostics: tuple[tuple[int, str, str, str, str], ...] = (),
         wait: bool = True,
     ) -> int: ...
@@ -126,9 +138,12 @@ class WorkerControlRuntime:
 
     def _collect(self) -> None:
         commands = self._session.poll_commands()
-        if any(command.kind is not CommandKind.CONTROLS for command in commands):
+        if any(
+            command.kind not in {CommandKind.CONTROLS, CommandKind.CHECKPOINT}
+            for command in commands
+        ):
             raise WorkerControlError(
-                "worker received a lifecycle command unsupported by this protocol revision"
+                "worker received a pause, resume, or cancel command unsupported by this protocol revision"
             )
         self._pending.extend(commands)
 
@@ -151,6 +166,8 @@ class WorkerControlRuntime:
         applied: list[AppliedControlPatch] = []
         while self._pending:
             command = self._pending[0]
+            if command.kind is CommandKind.CHECKPOINT:
+                break
             if command.expected_control_revision != self._revision:
                 self._session.acknowledge_controls(
                     command,
@@ -247,6 +264,112 @@ class WorkerControlRuntime:
                 )
             )
         return tuple(applied)
+
+    @property
+    def checkpoint_requested(self) -> bool:
+        self._collect()
+        return bool(
+            self._pending and self._pending[0].kind is CommandKind.CHECKPOINT
+        )
+
+    @property
+    def checkpoint_boundary_requested(self) -> bool:
+        self._collect()
+        if not self._pending:
+            return False
+        command = self._pending[0]
+        return command.kind is CommandKind.CHECKPOINT or (
+            command.kind is CommandKind.CONTROLS
+            and command.apply_point == wire.APPLY_POINT_NEXT_CHECKPOINT
+        )
+
+    def publish_requested_checkpoint(
+        self,
+        request: object,
+        *,
+        progress: Callable[[int], None] | None = None,
+    ) -> object | None:
+        """Publish one saved safe-point and acknowledge consecutive requests.
+
+        The request is deliberately duck-typed here to keep the scalar-control
+        module independent of checkpoint filesystem mechanics.
+        """
+
+        self._collect()
+        commands: list[WorkerCommand] = []
+        for command in self._pending:
+            if command.kind is not CommandKind.CHECKPOINT:
+                break
+            commands.append(command)
+        if not commands:
+            return None
+        from .checkpoint import (  # local import avoids a module cycle
+            CheckpointPublicationRequest,
+            CheckpointPublisher,
+        )
+
+        if not isinstance(request, CheckpointPublicationRequest):
+            raise WorkerControlError(
+                "checkpoint publication requires a typed immutable request"
+            )
+        try:
+            published = CheckpointPublisher(
+                self._session, output_name=request.output_name
+            ).publish(
+                request.source_directory,
+                optimizer_step=request.optimizer_step,
+                resume_grade=request.resume_grade,
+                state_components=request.state_components,
+                parent_artifact_ids=request.parent_artifact_ids,
+                progress=progress,
+            )
+        except Exception:
+            diagnostics = _diagnostic(
+                "checkpoint.publication_failed",
+                "worker could not publish the requested immutable checkpoint",
+            )
+            for command in commands:
+                self._session.acknowledge_checkpoint(
+                    command,
+                    CheckpointDisposition.REJECTED,
+                    diagnostics=diagnostics,
+                )
+                self._pending.pop(0)
+            raise
+        for command in commands:
+            self._session.acknowledge_checkpoint(
+                command,
+                CheckpointDisposition.APPLIED,
+                optimizer_step=request.optimizer_step,
+                artifact_id=published.artifact_id,
+            )
+            self._pending.pop(0)
+        return published
+
+    def publish_requested_checkpoint_directory(
+        self,
+        source_directory: str,
+        *,
+        optimizer_step: int,
+        resume_grade: str,
+        state_components: tuple[str, ...],
+        output_name: str = "checkpoint",
+        parent_artifact_ids: tuple[str, ...] = (),
+        progress: Callable[[int], None] | None = None,
+    ) -> object | None:
+        from .checkpoint import CheckpointPublicationRequest
+
+        return self.publish_requested_checkpoint(
+            CheckpointPublicationRequest(
+                source_directory=source_directory,
+                optimizer_step=optimizer_step,
+                resume_grade=resume_grade,
+                state_components=state_components,
+                output_name=output_name,
+                parent_artifact_ids=parent_artifact_ids,
+            ),
+            progress=progress,
+        )
 
     def microbatch(
         self, step: int, applier: ControlApplier

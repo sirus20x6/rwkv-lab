@@ -6,11 +6,12 @@ import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Self
 
 try:
     import grpc
     from google.protobuf.timestamp_pb2 import Timestamp
+
     from trainvm.v1 import trainvm_pb2 as wire
     from trainvm.v1 import trainvm_pb2_grpc as wire_grpc
 except ImportError as error:  # pragma: no cover - depends on installation extra
@@ -41,6 +42,11 @@ class ControlDisposition(str, Enum):
     APPLIED = "applied"
     REJECTED = "rejected"
     RESTART_REQUIRED = "restart_required"
+
+
+class CheckpointDisposition(str, Enum):
+    APPLIED = "applied"
+    REJECTED = "rejected"
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,7 +88,7 @@ def _timestamp_now() -> Timestamp:
     return value
 
 
-def _scalar(value: bool | int | float | str) -> wire.ScalarValue:
+def _scalar(value: bool | int | float | str) -> wire.ScalarValue:  # noqa: PYI041
     if isinstance(value, bool):
         return wire.ScalarValue(boolean_value=value)
     if isinstance(value, int):
@@ -144,8 +150,7 @@ def _command(value: wire.WorkerCommand) -> WorkerCommand:
             for item in controls.assignments
         )
         if (
-            controls.control_revision != value.controller_sequence
-            or not controls.control_revision
+            not controls.control_revision
             or controls.apply_point == wire.APPLY_POINT_UNSPECIFIED
         ):
             raise WorkerSessionError("control command revision is inconsistent")
@@ -193,6 +198,7 @@ class WorkerSession:
         self._next_worker_sequence = 1
         self._acknowledged_worker_sequence = 0
         self._last_controller_sequence = bootstrap.last_acked_controller_sequence
+        self._published_artifacts: dict[str, tuple[tuple[object, ...], int]] = {}
 
     @property
     def invocation(self) -> WorkerInvocation:
@@ -281,7 +287,7 @@ class WorkerSession:
                     self._accept_receipt(message.receipt)
                 else:
                     raise WorkerSessionError("controller response variant is missing")
-        except BaseException as error:
+        except BaseException as error:  # noqa: BLE001 - preserve thread failures
             with self._condition:
                 if not self._closed:
                     self._error = error
@@ -442,7 +448,7 @@ class WorkerSession:
     def metric(
         self,
         name: str,
-        value: bool | int | float | str,
+        value: bool | int | float | str,  # noqa: PYI041
         *,
         unit: str,
         step_domain: str,
@@ -484,9 +490,27 @@ class WorkerSession:
         parent_artifact_ids: Iterable[str] = (),
         wait: bool = True,
     ) -> int:
-        sequence = self._allocate_sequence()
         parents = tuple(parent_artifact_ids)
-        return self._send(
+        identity = (
+            logical_name,
+            kind,
+            schema,
+            uri,
+            size_bytes,
+            fingerprint_algorithm,
+            fingerprint,
+            parents,
+        )
+        with self._condition:
+            previous = self._published_artifacts.get(artifact_id)
+        if previous is not None:
+            if previous[0] != identity:
+                raise WorkerSessionError(
+                    "artifact identity was reused with different immutable content"
+                )
+            return previous[1]
+        sequence = self._allocate_sequence()
+        result = self._send(
             wire.WorkerToController(
                 artifact=wire.ArtifactManifest(
                     artifact_id=artifact_id,
@@ -508,6 +532,9 @@ class WorkerSession:
             sequence,
             wait,
         )
+        with self._condition:
+            self._published_artifacts[artifact_id] = (identity, result)
+        return result
 
     def acknowledge_controls(
         self,
@@ -555,6 +582,57 @@ class WorkerSession:
         )
         return self._send(
             wire.WorkerToController(control_ack=acknowledgement),
+            sequence,
+            wait,
+        )
+
+    def acknowledge_checkpoint(
+        self,
+        command: WorkerCommand,
+        disposition: CheckpointDisposition,
+        *,
+        optimizer_step: int = 0,
+        artifact_id: str = "",
+        diagnostics: Iterable[tuple[int, str, str, str, str]] = (),
+        wait: bool = True,
+    ) -> int:
+        if command.kind is not CommandKind.CHECKPOINT:
+            raise WorkerSessionError(
+                "only a checkpoint command has a checkpoint acknowledgement"
+            )
+        applied = disposition is CheckpointDisposition.APPLIED
+        if applied != bool(optimizer_step and artifact_id):
+            raise WorkerSessionError(
+                "checkpoint acknowledgement result is inconsistent"
+            )
+        dispositions = {
+            CheckpointDisposition.APPLIED: wire.CheckpointAcknowledgement.DISPOSITION_APPLIED,
+            CheckpointDisposition.REJECTED: wire.CheckpointAcknowledgement.DISPOSITION_REJECTED,
+        }
+        sequence = self._allocate_sequence()
+        acknowledgement = wire.CheckpointAcknowledgement(
+            command_id=command.command_id,
+            disposition=dispositions[disposition],
+            optimizer_step=optimizer_step,
+            artifact_id=artifact_id,
+            diagnostics=[
+                wire.Diagnostic(
+                    severity=severity,
+                    code=code,
+                    document_path=document_path,
+                    message=message,
+                    help=help_text,
+                )
+                for severity, code, document_path, message, help_text in diagnostics
+            ],
+            concurrency_key=self.bootstrap.concurrency_key,
+            lease_id=self.bootstrap.lease_id,
+            fencing_token=self.bootstrap.fencing_token,
+            worker_sequence=sequence,
+            acknowledged_at=_timestamp_now(),
+        )
+        return self._send(
+            wire.WorkerToController(checkpoint_ack=acknowledgement),
             sequence,
             wait,
         )
@@ -613,7 +691,7 @@ class WorkerSession:
                 self._channel.close()
             self._condition.notify_all()
 
-    def __enter__(self) -> WorkerSession:
+    def __enter__(self) -> Self:
         self.start()
         return self
 
@@ -622,6 +700,7 @@ class WorkerSession:
 
 
 __all__ = [
+    "CheckpointDisposition",
     "CommandKind",
     "ControlAssignment",
     "ControlDisposition",

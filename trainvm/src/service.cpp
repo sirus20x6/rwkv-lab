@@ -654,7 +654,8 @@ v1::WorkerCommand worker_control_command(const ControlCommand& command) {
         "only a durable requested control can be sent to a worker");
   }
   v1::WorkerCommand output;
-  output.set_controller_sequence(command.control_revision);
+  // The stream sequence is assigned by the caller from the durable request
+  // event. Control revision remains the version of the effective-value state.
   output.set_command_id(command.command_id);
   auto* controls = output.mutable_controls();
   controls->set_expected_control_revision(command.expected_control_revision);
@@ -668,6 +669,55 @@ v1::WorkerCommand worker_control_command(const ControlCommand& command) {
     set_wire_scalar(iterator.value(), *assignment->mutable_value());
   }
   return output;
+}
+
+v1::WorkerCommand worker_checkpoint_command(const CheckpointCommand& command) {
+  if (command.status != CheckpointCommandStatus::requested ||
+      command.command_id.empty() || command.controller_sequence == 0U) {
+    throw std::invalid_argument(
+        "only a durable requested checkpoint can be sent to a worker");
+  }
+  v1::WorkerCommand output;
+  output.set_controller_sequence(command.controller_sequence);
+  output.set_command_id(command.command_id);
+  output.mutable_checkpoint()->set_reason(command.reason);
+  return output;
+}
+
+void fill_checkpoint_result(const CheckpointCommand& command,
+                            v1::RunCommandResponse& response) {
+  response.set_command_sequence(command.controller_sequence);
+  auto* output = response.mutable_checkpoint();
+  output->set_command_id(command.command_id);
+  output->set_controller_sequence(command.controller_sequence);
+  output->set_reason(command.reason);
+  switch (command.status) {
+    case CheckpointCommandStatus::requested:
+      output->set_status(v1::CheckpointCommandResult::STATUS_REQUESTED);
+      break;
+    case CheckpointCommandStatus::applied:
+      output->set_status(v1::CheckpointCommandResult::STATUS_APPLIED);
+      break;
+    case CheckpointCommandStatus::rejected:
+      output->set_status(v1::CheckpointCommandResult::STATUS_REJECTED);
+      break;
+  }
+  if (command.optimizer_step) output->set_optimizer_step(*command.optimizer_step);
+  output->set_artifact_id(command.artifact_id);
+  add_stored_diagnostics(response, command.diagnostics);
+}
+
+v1::RunCommandResponse::Disposition replay_disposition(
+    const CheckpointCommand& command) {
+  switch (command.status) {
+    case CheckpointCommandStatus::requested:
+      return v1::RunCommandResponse::DISPOSITION_ACCEPTED;
+    case CheckpointCommandStatus::applied:
+      return v1::RunCommandResponse::DISPOSITION_ALREADY_APPLIED;
+    case CheckpointCommandStatus::rejected:
+      return v1::RunCommandResponse::DISPOSITION_REJECTED;
+  }
+  throw std::invalid_argument("invalid checkpoint command status");
 }
 
 v1::RunCommandResponse::Disposition replay_disposition(const ControlCommand& command) {
@@ -1054,8 +1104,9 @@ nlohmann::json acknowledgement_assignments(
   return output;
 }
 
+template <typename Acknowledgement>
 nlohmann::json acknowledgement_diagnostics(
-    const v1::ControlPatchAcknowledgement& acknowledgement) {
+    const Acknowledgement& acknowledgement) {
   nlohmann::json output = nlohmann::json::array();
   for (const auto& diagnostic : acknowledgement.diagnostics()) {
     if (diagnostic.code().empty() || diagnostic.message().empty()) {
@@ -2536,6 +2587,98 @@ grpc::Status TrainVMService::acknowledge_worker_control(
   }
 }
 
+grpc::Status TrainVMService::acknowledge_worker_checkpoint(
+    const v1::CheckpointAcknowledgement& acknowledgement,
+    const WorkerConnection& connection, std::uint64_t& acknowledged) {
+  if (acknowledgement.ByteSizeLong() > kMaximumWorkerMessageBytes) {
+    return {grpc::StatusCode::RESOURCE_EXHAUSTED,
+            "worker checkpoint acknowledgement exceeds 64 KiB"};
+  }
+  try {
+    if (acknowledgement.command_id().empty() ||
+        acknowledgement.worker_sequence() == 0U ||
+        acknowledgement.concurrency_key() != connection.identity.concurrency_key ||
+        acknowledgement.lease_id() != connection.identity.lease_id ||
+        acknowledgement.fencing_token() != connection.identity.fencing_token ||
+        !acknowledgement.has_acknowledged_at()) {
+      return {grpc::StatusCode::INVALID_ARGUMENT,
+              "checkpoint acknowledgement has an invalid command or fenced identity"};
+    }
+    (void)timestamp_ns(acknowledgement.acknowledged_at());
+    CheckpointCommandStatus status;
+    switch (acknowledgement.disposition()) {
+      case v1::CheckpointAcknowledgement::DISPOSITION_APPLIED:
+        status = CheckpointCommandStatus::applied;
+        break;
+      case v1::CheckpointAcknowledgement::DISPOSITION_REJECTED:
+        status = CheckpointCommandStatus::rejected;
+        break;
+      case v1::CheckpointAcknowledgement::DISPOSITION_UNSPECIFIED:
+        return {grpc::StatusCode::INVALID_ARGUMENT,
+                "checkpoint acknowledgement disposition is unspecified"};
+      default:
+        return {grpc::StatusCode::INVALID_ARGUMENT,
+                "checkpoint acknowledgement disposition is invalid"};
+    }
+    const bool applied = status == CheckpointCommandStatus::applied;
+    if ((applied && (acknowledgement.optimizer_step() == 0U ||
+                     acknowledgement.artifact_id().empty())) ||
+        (!applied && (acknowledgement.optimizer_step() != 0U ||
+                      !acknowledgement.artifact_id().empty()))) {
+      return {grpc::StatusCode::INVALID_ARGUMENT,
+              "checkpoint acknowledgement result is inconsistent"};
+    }
+    std::scoped_lock lock(command_mutex_);
+    const auto projection = journal_.projection(connection.identity.run_id);
+    const auto command =
+        journal_.checkpoint_command(acknowledgement.command_id());
+    if (!projection || !command ||
+        command->run_id != connection.identity.run_id ||
+        command->node_id != connection.identity.node_id ||
+        command->attempt_id != connection.identity.attempt_id) {
+      return {grpc::StatusCode::FAILED_PRECONDITION,
+              "checkpoint acknowledgement does not match a durable command"};
+    }
+    const std::uint64_t latest = journal_.latest_worker_sequence(
+        connection.identity.run_id, connection.identity.node_id,
+        connection.identity.attempt_id);
+    const auto stored =
+        journal_.event(acknowledgement.command_id() + ":ack");
+    if (latest == std::numeric_limits<std::uint64_t>::max() ||
+        acknowledgement.worker_sequence() > latest + 1U ||
+        (acknowledgement.worker_sequence() <= latest && !stored)) {
+      return {grpc::StatusCode::FAILED_PRECONDITION,
+              "checkpoint acknowledgement sequence is not the next durable message or an exact replay"};
+    }
+    const auto plan = journal_.compiled_plan(projection->plan_hash);
+    if (!plan) {
+      return {grpc::StatusCode::DATA_LOSS,
+              "worker run has no persisted compiled plan"};
+    }
+    Controller controller(*plan, journal_, connection.identity.run_id);
+    controller.recover();
+    (void)controller.acknowledge_checkpoint(
+        acknowledgement.command_id(),
+        ControlAcknowledgementIdentity{
+            .concurrency_key = connection.identity.concurrency_key,
+            .lease_id = connection.identity.lease_id,
+            .fencing_token = connection.identity.fencing_token,
+            .node_id = connection.identity.node_id,
+            .attempt_id = connection.identity.attempt_id,
+            .worker_sequence = acknowledgement.worker_sequence()},
+        status,
+        applied ? std::optional<std::uint64_t>{
+                      acknowledgement.optimizer_step()}
+                : std::nullopt,
+        acknowledgement.artifact_id(),
+        acknowledgement_diagnostics(acknowledgement), authority_now());
+    acknowledged = acknowledgement.worker_sequence();
+    return grpc::Status::OK;
+  } catch (const std::exception& exception) {
+    return worker_failure(exception);
+  }
+}
+
 grpc::Status TrainVMService::Connect(
     grpc::ServerContext* context,
     grpc::ServerReaderWriter<v1::ControllerToWorker,
@@ -2594,22 +2737,34 @@ grpc::Status TrainVMService::Connect(
   std::uint64_t last_sent_controller_sequence =
       hello.last_acked_controller_sequence();
   const auto send_pending_commands = [&]() -> grpc::Status {
-    std::vector<ControlCommand> commands;
+    std::vector<v1::WorkerCommand> commands;
     try {
       std::scoped_lock lock(command_mutex_);
-      commands = journal_.pending_control_commands(
-          connection.identity.run_id, last_sent_controller_sequence);
+      for (const auto& control : journal_.pending_control_commands(
+               connection.identity.run_id, 0U)) {
+        const std::uint64_t sequence =
+            journal_.control_command_sequence(control.command_id);
+        if (sequence <= last_sent_controller_sequence) continue;
+        auto command = worker_control_command(control);
+        command.set_controller_sequence(sequence);
+        commands.push_back(std::move(command));
+      }
+      for (const auto& checkpoint : journal_.pending_checkpoint_commands(
+               connection.identity.run_id, last_sent_controller_sequence)) {
+        commands.push_back(worker_checkpoint_command(checkpoint));
+      }
+      std::ranges::sort(commands, {}, &v1::WorkerCommand::controller_sequence);
     } catch (const std::exception& exception) {
       return worker_failure(exception);
     }
     for (const auto& command : commands) {
       v1::ControllerToWorker response;
-      *response.mutable_command() = worker_control_command(command);
+      *response.mutable_command() = command;
       if (!stream->Write(response)) {
         return {grpc::StatusCode::CANCELLED,
                 "worker disconnected before a durable controller command"};
       }
-      last_sent_controller_sequence = command.control_revision;
+      last_sent_controller_sequence = command.controller_sequence();
     }
     return grpc::Status::OK;
   };
@@ -2654,6 +2809,9 @@ grpc::Status TrainVMService::Connect(
     } else if (message.has_control_ack()) {
       status = acknowledge_worker_control(message.control_ack(), connection,
                                           acknowledged);
+    } else if (message.has_checkpoint_ack()) {
+      status = acknowledge_worker_checkpoint(message.checkpoint_ack(), connection,
+                                             acknowledged);
     } else {
       return finish({grpc::StatusCode::INVALID_ARGUMENT,
                      message.has_hello()
@@ -2951,8 +3109,9 @@ grpc::Status TrainVMService::CommandRun(grpc::ServerContext* context,
   if (request->ByteSizeLong() > kMaximumCommandBytes) {
     return {grpc::StatusCode::RESOURCE_EXHAUSTED, "command exceeds 64 KiB"};
   }
-  if (!request->has_controls()) {
-    return {grpc::StatusCode::UNIMPLEMENTED, "only live-control commands are implemented"};
+  if (!request->has_controls() && !request->has_checkpoint()) {
+    return {grpc::StatusCode::UNIMPLEMENTED,
+            "this lifecycle command is not implemented yet"};
   }
   if (request->run_id().empty() || request->idempotency_key().empty() ||
       request->author().empty() || request->reason().empty() ||
@@ -2987,6 +3146,45 @@ grpc::Status TrainVMService::CommandRun(grpc::ServerContext* context,
     Controller controller(*plan, journal_, request->run_id());
     controller.recover();
     if (cancelled(context)) return cancellation_status();
+    if (request->has_checkpoint()) {
+      if (request->checkpoint().reason().empty()) {
+        return {grpc::StatusCode::INVALID_ARGUMENT,
+                "checkpoint-now requires a command reason"};
+      }
+      const auto& state = controller.state();
+      if (state.current_node_id.empty()) {
+        return {grpc::StatusCode::FAILED_PRECONDITION,
+                "checkpoint-now requires an active worker node"};
+      }
+      const Node& node =
+          plan->experiment.spec.workflow.nodes.at(state.current_node_id);
+      const Component& component =
+          plan->experiment.spec.components.at(node.invoke.component);
+      const AdapterProfile& profile =
+          adapter_registry_.resolve(component, node.invoke.operation);
+      if (!profile.lifecycle.checkpoint_now) {
+        response->set_disposition(
+            v1::RunCommandResponse::DISPOSITION_REJECTED);
+        auto* diagnostic = response->add_diagnostics();
+        diagnostic->set_severity(v1::Diagnostic::SEVERITY_ERROR);
+        diagnostic->set_code("checkpoint.unsupported_by_operation");
+        diagnostic->set_message(
+            "the active adapter operation does not declare checkpoint-now");
+        fill_run_summary(*projection, journal_, *response);
+        return grpc::Status::OK;
+      }
+      const auto submission = controller.request_checkpoint(
+          request->idempotency_key(), request->expected_run_revision(),
+          request->checkpoint().reason(), request->author(), request->reason());
+      response->set_disposition(
+          submission.inserted
+              ? v1::RunCommandResponse::DISPOSITION_ACCEPTED
+              : replay_disposition(submission.command));
+      fill_checkpoint_result(submission.command, *response);
+      fill_run_summary(*journal_.projection(request->run_id()), journal_,
+                       *response);
+      return grpc::Status::OK;
+    }
     const auto assignments = assignments_json(request->controls());
     if (cancelled(context)) return cancellation_status();
     const auto validation = controller.request_controls(
@@ -3008,13 +3206,15 @@ grpc::Status TrainVMService::CommandRun(grpc::ServerContext* context,
                                   ? replay_disposition(*validation.command)
                                   : v1::RunCommandResponse::DISPOSITION_ACCEPTED);
     fill_control_result(*validation.command, *response);
+    response->set_command_sequence(
+        journal_.control_command_sequence(validation.command->command_id));
     fill_run_summary(*journal_.projection(request->run_id()), journal_, *response);
     return grpc::Status::OK;
   } catch (const std::invalid_argument& exception) {
     response->set_disposition(v1::RunCommandResponse::DISPOSITION_CONFLICT);
     auto* diagnostic = response->add_diagnostics();
     diagnostic->set_severity(v1::Diagnostic::SEVERITY_ERROR);
-    diagnostic->set_code("control.conflict");
+    diagnostic->set_code("command.conflict");
     diagnostic->set_message(exception.what());
     if (const auto projection = journal_.projection(request->run_id())) {
       fill_run_summary(*projection, journal_, *response);

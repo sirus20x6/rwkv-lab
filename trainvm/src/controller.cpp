@@ -44,7 +44,8 @@ bool is_controller_event(std::string_view event_type) {
          event_type == "node.dispatch_completed" ||
          event_type.starts_with("host.resource_") ||
          event_type.starts_with("host.process_") ||
-         event_type.starts_with("control.");
+         event_type.starts_with("control.") ||
+         event_type.starts_with("checkpoint.");
 }
 
 bool is_worker_observation(std::string_view event_type) {
@@ -435,6 +436,18 @@ std::string_view control_status_name(ControlCommandStatus status) {
   throw std::runtime_error("invalid control command status");
 }
 
+std::string_view checkpoint_status_name(CheckpointCommandStatus status) {
+  switch (status) {
+    case CheckpointCommandStatus::requested:
+      return "requested";
+    case CheckpointCommandStatus::applied:
+      return "applied";
+    case CheckpointCommandStatus::rejected:
+      return "rejected";
+  }
+  throw std::invalid_argument("invalid checkpoint command status");
+}
+
 }  // namespace
 
 Controller::Controller(const CompiledPlan& plan, Journal& journal, std::string run_id)
@@ -536,6 +549,7 @@ const ExecutionState& Controller::recover() {
   std::optional<std::pair<std::string, std::string>> expected_completion;
   std::optional<std::string> expected_reacquisition_cause_id;
   std::map<std::string, std::string> replayed_control_status;
+  std::map<std::string, std::string> replayed_checkpoint_status;
   std::set<std::string> replayed_process_prepares;
   std::set<std::string> replayed_process_commits;
   std::set<std::string> replayed_process_exits;
@@ -1195,6 +1209,68 @@ const ExecutionState& Controller::recover() {
       replayed_control_status[command->command_id] = suffix;
       continue;
     }
+    if (event.event_type.starts_with("checkpoint.")) {
+      const std::string command_id =
+          event.payload.value("command_id", std::string{});
+      const auto command = journal_.checkpoint_command(command_id);
+      if (command_id.empty() || !command || command->run_id != run_id_ ||
+          event.run_revision != recovered.revision ||
+          event.plan_revision != kInitialPlanRevision ||
+          event.node_id != recovered.current_node_id ||
+          event.attempt_id != recovered.current_attempt_id ||
+          phase != ReplayPhase::ready || expected_completion ||
+          runtime_observed_state != "running") {
+        throw std::runtime_error(
+            "checkpoint journal event is outside its active worker attempt");
+      }
+      auto previous = replayed_checkpoint_status.find(command_id);
+      if (event.event_type == "checkpoint.requested") {
+        const nlohmann::json expected_payload{
+            {"command_id", command->command_id},
+            {"idempotency_key", command->idempotency_key},
+            {"expected_run_revision", command->expected_run_revision},
+            {"plan_revision", command->plan_revision},
+            {"reason", command->reason},
+            {"author", command->author},
+            {"audit_reason", command->audit_reason},
+        };
+        if (previous != replayed_checkpoint_status.end() ||
+            event.worker_sequence != 0U || event.payload != expected_payload ||
+            event.run_revision != command->expected_run_revision) {
+          throw std::runtime_error(
+              "checkpoint request event disagrees with its durable command");
+        }
+        replayed_checkpoint_status[command_id] = "requested";
+      } else {
+        if (event.event_type != "checkpoint.acknowledged" ||
+            previous == replayed_checkpoint_status.end() ||
+            previous->second != "requested" || !command->acknowledgement ||
+            !command->acknowledged_at_ns) {
+          throw std::runtime_error(
+              "checkpoint acknowledgement has no preceding request event");
+        }
+        const auto& identity = *command->acknowledgement;
+        const std::string status(checkpoint_status_name(command->status));
+        const nlohmann::json expected_payload{
+            {"command_id", command->command_id},
+            {"status", status},
+            {"artifact_id", command->artifact_id},
+            {"diagnostics", command->diagnostics},
+            {"concurrency_key", identity.concurrency_key},
+            {"lease_id", identity.lease_id},
+            {"fencing_token", identity.fencing_token},
+        };
+        if (event.payload != expected_payload ||
+            event.optimizer_step != command->optimizer_step ||
+            event.worker_sequence != identity.worker_sequence ||
+            event.wall_time_ns != *command->acknowledged_at_ns) {
+          throw std::runtime_error(
+              "checkpoint acknowledgement event disagrees with its durable command");
+        }
+        replayed_checkpoint_status[command_id] = status;
+      }
+      continue;
+    }
     if (is_worker_observation(event.event_type)) {
       try {
         require_worker_observation_shape(event);
@@ -1302,6 +1378,13 @@ const ExecutionState& Controller::recover() {
     if (!command || status != control_status_name(command->status)) {
       throw std::runtime_error(
           "control command projection disagrees with journal replay");
+    }
+  }
+  for (const auto& [command_id, status] : replayed_checkpoint_status) {
+    const auto command = journal_.checkpoint_command(command_id);
+    if (!command || status != checkpoint_status_name(command->status)) {
+      throw std::runtime_error(
+          "checkpoint command projection disagrees with journal replay");
     }
   }
   const auto projection = journal_.projection(run_id_);
@@ -2250,6 +2333,65 @@ ControlCommand Controller::acknowledge_controls(
   return journal_.acknowledge_control_command(run_id_, command_id, identity, status, effective_step,
                                               std::move(effective_values),
                                               std::move(diagnostics), now);
+}
+
+CheckpointSubmission Controller::request_checkpoint(
+    const std::string& idempotency_key,
+    std::uint64_t expected_run_revision, const std::string& reason,
+    const std::string& author, const std::string& audit_reason) {
+  if (!initialized_) {
+    throw std::logic_error(
+        "controller must create or recover before requesting a checkpoint");
+  }
+  if (idempotency_key.empty() || reason.empty() || author.empty() ||
+      audit_reason.empty()) {
+    throw std::invalid_argument(
+        "checkpoint request idempotency key, reason, author, and audit reason are required");
+  }
+  const std::string command_id =
+      "checkpoint-" +
+      sha256_hex(nlohmann::json({{"run_id", run_id_},
+                                 {"idempotency_key", idempotency_key}})
+                     .dump());
+  return journal_.submit_checkpoint_command(CheckpointCommand{
+      .command_id = command_id,
+      .run_id = run_id_,
+      .idempotency_key = idempotency_key,
+      .expected_run_revision = expected_run_revision,
+      .controller_sequence = 0,
+      .plan_revision = kInitialPlanRevision,
+      .node_id = "",
+      .attempt_id = "",
+      .reason = reason,
+      .author = author,
+      .audit_reason = audit_reason,
+      .status = CheckpointCommandStatus::requested,
+      .optimizer_step = std::nullopt,
+      .artifact_id = "",
+      .diagnostics = nlohmann::json::array(),
+      .acknowledgement = std::nullopt,
+      .acknowledged_at_ns = std::nullopt,
+  });
+}
+
+CheckpointCommand Controller::acknowledge_checkpoint(
+    const std::string& command_id,
+    const ControlAcknowledgementIdentity& identity,
+    CheckpointCommandStatus status,
+    std::optional<std::uint64_t> optimizer_step, std::string artifact_id,
+    nlohmann::json diagnostics, const AuthorityTimeSample& now) {
+  if (!initialized_) {
+    throw std::logic_error(
+        "controller must create or recover before acknowledging a checkpoint");
+  }
+  if (identity.concurrency_key !=
+      plan_.experiment.spec.workspace.concurrency_key) {
+    throw std::invalid_argument(
+        "checkpoint acknowledgement lease key differs from the compiled workspace");
+  }
+  return journal_.acknowledge_checkpoint_command(
+      run_id_, command_id, identity, status, optimizer_step,
+      std::move(artifact_id), std::move(diagnostics), now);
 }
 
 const ExecutionState& Controller::state() const {

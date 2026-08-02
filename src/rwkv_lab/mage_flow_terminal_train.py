@@ -3696,10 +3696,15 @@ def train(
                 evaluation_metrics is not None
                 and _best_evaluation_improved(output_dir, evaluation_metrics)
             )
+            checkpoint_requested = bool(
+                worker_controls is not None
+                and worker_controls.checkpoint_boundary_requested
+            )
             if (
                 step % config.checkpoint_every == 0
                 or stop["requested"]
                 or best_evaluation
+                or checkpoint_requested
             ):
                 if mutable_controls is not None:
                     worker_controls.checkpoint(step, mutable_controls.apply)
@@ -3729,6 +3734,26 @@ def train(
                         else None
                     ),
                 )
+                if worker_controls is not None and worker_controls.checkpoint_requested:
+                    worker_controls.publish_requested_checkpoint_directory(
+                        str(checkpoint),
+                        optimizer_step=step,
+                        resume_grade="exact",
+                        state_components=(
+                            "component_composition",
+                            "control_revision",
+                            "data_cursor",
+                            "expert_routing",
+                            "lr_schedule",
+                            "model",
+                            "optimizer",
+                            "parameter_routing",
+                            "rng_accelerator",
+                            "rng_numpy",
+                            "rng_python",
+                            "rng_torch",
+                        ),
+                    )
                 if best_evaluation:
                     _promote_best_checkpoint(
                         checkpoint,

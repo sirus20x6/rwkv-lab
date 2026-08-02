@@ -118,7 +118,7 @@ def _appearance_expert(
         step_fields=("global_step", "step"),
         state_components=(
             "component_composition",
-            "control_state",
+            "control_revision",
             "data_cursor",
             "lr_schedule",
             "model",
@@ -228,7 +228,7 @@ def _terminal_expert(
         step_fields=("step",),
         state_components=(
             "component_composition",
-            "control_state",
+            "control_revision",
             "data_cursor",
             "expert_routing",
             "lr_schedule",
@@ -303,7 +303,7 @@ def _qwen_ao3(
                 step,
                 state_components=(
                     "component_composition",
-                    "control_state",
+                    "control_revision",
                     "data_cursor",
                     "expert_routing",
                     "model",
@@ -389,7 +389,7 @@ def _rwkv_scratch(
                 resume_grade="terminal_checkpoint",
                 state_components=(
                     "component_composition",
-                    "control_state",
+                    "control_revision",
                     "model",
                     "optimizer",
                     "rng_accelerator",
