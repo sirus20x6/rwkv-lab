@@ -79,6 +79,8 @@ def test_terminal_config_selects_one_resident_domain(tmp_path):
     expert = tmp_path / "photo.safetensors"
     expert.touch()
     config = TerminalExpertTrainConfig(
+        # Explicit: the field default is an absolute path on one host.
+        model_path=None,
         domain="photo",
         train_manifest=str(manifest),
         expert_checkpoint=str(expert),
@@ -224,6 +226,8 @@ def test_terminal_config_rejects_neutral_or_missing_domain(tmp_path):
     expert = tmp_path / "expert.safetensors"
     expert.touch()
     general = TerminalExpertTrainConfig(
+        # Explicit: the field default is an absolute path on one host.
+        model_path=None,
         domain="general",
         train_manifest=str(manifest),
         expert_checkpoint=str(expert),
@@ -487,6 +491,8 @@ def test_explicit_lightning_block_migration_requires_optimizer_reset(tmp_path):
     checkpoint = old_run / "checkpoint-00000002"
     checkpoint.mkdir()
     old = TerminalExpertTrainConfig(
+        # Explicit: the field default is an absolute path on one host.
+        model_path=None,
         domain="photo",
         train_manifest=str(manifest),
         expert_checkpoint=str(expert),
@@ -529,6 +535,8 @@ def test_lightning_resume_does_not_repeat_architecture_optimizer_reset(tmp_path)
     checkpoint = run / "checkpoint-00000002"
     checkpoint.mkdir()
     migrated = TerminalExpertTrainConfig(
+        # Explicit: the field default is an absolute path on one host.
+        model_path=None,
         domain="photo",
         train_manifest=str(manifest),
         expert_checkpoint=str(expert),
@@ -909,6 +917,8 @@ def test_terminal_config_accepts_two_checkpoint_alternating_schedule(tmp_path):
     photo.touch()
     animation.touch()
     config = TerminalExpertTrainConfig(
+        # Explicit: the field default is an absolute path on one host.
+        model_path=None,
         domain="animation",
         train_manifest=str(train_manifest),
         eval_manifest=str(eval_manifest),
