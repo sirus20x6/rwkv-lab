@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from types import MappingProxyType, SimpleNamespace
 from typing import Self
 
 import pytest
 
+from rwkv_lab.trainvm_adapters.content_authority import measure_input_content_root
 from rwkv_lab.trainvm_adapters.entrypoint import (
     WORKER_BOOTSTRAP_DESCRIPTOR,
     WorkerEntrypointError,
@@ -67,6 +69,15 @@ class FakeSession:
         return len(self.heartbeats)
 
 
+def _sealed_workspace(read_root, run_directory):
+    return {
+        "run_directory": str(run_directory),
+        "allowed_read_roots": [str(read_root)],
+        "input_content_roots": [asdict(measure_input_content_root(read_root))],
+        "allowed_write_roots": [str(run_directory.parent)],
+    }
+
+
 def test_inline_config_is_frozen_content_not_a_mutable_path(tmp_path) -> None:
     frozen = MappingProxyType(
         {"config": MappingProxyType({"steps": 12, "buckets": (512, 768)})}
@@ -123,6 +134,84 @@ def test_workspace_path_authority_confines_reads_writes_and_symlinks(tmp_path) -
         authority.write_directory(str(outside / "cache"), label="cache")
 
 
+def test_workspace_reads_require_declared_content_coverage(tmp_path) -> None:
+    read_root = tmp_path / "read"
+    write_root = tmp_path / "write"
+    read_root.mkdir()
+    write_root.mkdir()
+    sealed = read_root / "sealed.bin"
+    uncovered = read_root / "uncovered.bin"
+    sealed.write_bytes(b"sealed")
+    uncovered.write_bytes(b"uncovered")
+    authority = WorkspacePathAuthority.from_workspace(
+        {
+            "run_directory": str(write_root / "run"),
+            "allowed_read_roots": [str(read_root)],
+            "input_content_roots": (
+                MappingProxyType(asdict(measure_input_content_root(sealed))),
+            ),
+            "allowed_write_roots": [str(write_root)],
+        },
+        require_content=True,
+    )
+    assert authority.read_path(str(sealed), label="sealed", kind="file") == sealed
+    with pytest.raises(AdapterInputError, match="not covered"):
+        authority.read_path(str(uncovered), label="uncovered", kind="file")
+
+
+def test_packed_manifest_cannot_escape_its_verified_directory(tmp_path) -> None:
+    read_root = tmp_path / "read"
+    pack = read_root / "pack"
+    write_root = tmp_path / "write"
+    pack.mkdir(parents=True)
+    write_root.mkdir()
+    (read_root / "outside.bin").write_bytes(b"packed")
+    (pack / "manifest.json").write_text(
+        json.dumps({"packed_file": "../outside.bin"}), encoding="utf-8"
+    )
+    authority = WorkspacePathAuthority.from_workspace(
+        {
+            "run_directory": str(write_root / "run"),
+            "allowed_read_roots": [str(read_root)],
+            "input_content_roots": [asdict(measure_input_content_root(read_root))],
+            "allowed_write_roots": [str(write_root)],
+        },
+        require_content=True,
+    )
+    with pytest.raises(AdapterInputError, match="escapes"):
+        authority.verify_json_relative_file_reference(
+            pack,
+            manifest_name="manifest.json",
+            field="packed_file",
+            label="train pack",
+        )
+
+
+def test_jsonl_reference_scan_rejects_an_oversized_line(tmp_path) -> None:
+    read_root = tmp_path / "read"
+    write_root = tmp_path / "write"
+    read_root.mkdir()
+    write_root.mkdir()
+    manifest = read_root / "oversized.jsonl"
+    manifest.write_bytes(b"x" * (4 * 1024 * 1024 + 1))
+    authority = WorkspacePathAuthority.from_workspace(
+        {
+            "run_directory": str(write_root / "run"),
+            "allowed_read_roots": [str(read_root)],
+            "input_content_roots": [asdict(measure_input_content_root(read_root))],
+            "allowed_write_roots": [str(write_root)],
+        },
+        require_content=True,
+    )
+
+    with pytest.raises(AdapterInputError, match="line 1 exceeds its size bound"):
+        authority.verify_jsonl_file_references(
+            manifest,
+            fields=("image", "image_path"),
+            label="training manifest",
+        )
+
+
 def test_appearance_handler_passes_only_canonical_authorized_paths(
     tmp_path, monkeypatch
 ) -> None:
@@ -133,18 +222,22 @@ def test_appearance_handler_passes_only_canonical_authorized_paths(
     read_root.mkdir()
     run_directory.mkdir(parents=True)
     manifest = read_root / "train.jsonl"
-    manifest.write_text("{}\n", encoding="utf-8")
+    image = read_root / "image.png"
+    image.write_bytes(b"image")
+    manifest.write_text(json.dumps({"image": str(image)}) + "\n", encoding="utf-8")
     observed = []
     monkeypatch.setattr(
         mage_flow_expert_train,
         "train",
-        lambda config, *, worker_components, worker_step_profiler, worker_observability, worker_controls: observed.append(
-            (
-                config,
-                worker_components,
-                worker_step_profiler,
-                worker_observability,
-                worker_controls,
+        lambda config, *, worker_components, worker_step_profiler, worker_observability, worker_controls: (
+            observed.append(
+                (
+                    config,
+                    worker_components,
+                    worker_step_profiler,
+                    worker_observability,
+                    worker_controls,
+                )
             )
         ),
     )
@@ -155,11 +248,7 @@ def test_appearance_handler_passes_only_canonical_authorized_paths(
                 "output_dir": str(run_directory),
             }
         },
-        workspace={
-            "run_directory": str(run_directory),
-            "allowed_read_roots": [str(read_root)],
-            "allowed_write_roots": [str(run_directory.parent)],
-        },
+        workspace=_sealed_workspace(read_root, run_directory),
     )
     components = SimpleNamespace()
     observability = SimpleNamespace()
@@ -174,9 +263,7 @@ def test_appearance_handler_passes_only_canonical_authorized_paths(
 
     assert _appearance_expert(
         invocation, components, observability=observability, controls=controls
-    ) == HandlerResult(
-        "worker.completed", {"reason": "training_complete"}
-    )
+    ) == HandlerResult("worker.completed", {"reason": "training_complete"})
     assert observed[0][0].train_manifest == str(manifest.resolve())
     assert observed[0][0].output_dir == str(run_directory.resolve())
     assert observed[0][1] is components
@@ -185,6 +272,81 @@ def test_appearance_handler_passes_only_canonical_authorized_paths(
     assert observed[0][0].learning_rate == pytest.approx(2.0e-5)
     assert observed[0][0].eval_every == 25
     assert observed[0][0].caption_dropout == pytest.approx(0.2)
+
+
+def test_family_handler_rejects_same_path_mutation_before_trainer_call(
+    tmp_path, monkeypatch
+) -> None:
+    from rwkv_lab import mage_flow_expert_train
+
+    read_root = tmp_path / "read"
+    run_directory = tmp_path / "write" / "run"
+    read_root.mkdir()
+    run_directory.mkdir(parents=True)
+    manifest = read_root / "train.jsonl"
+    image = read_root / "image.png"
+    image.write_bytes(b"image")
+    manifest.write_text(json.dumps({"image": str(image)}) + "\n", encoding="utf-8")
+    workspace = _sealed_workspace(read_root, run_directory)
+    manifest.write_text('{"changed":true}\n', encoding="utf-8")
+    called = False
+
+    def train(*_args, **_kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(mage_flow_expert_train, "train", train)
+    invocation = SimpleNamespace(
+        inputs={
+            "config": {
+                "train_manifest": str(manifest),
+                "output_dir": str(run_directory),
+            }
+        },
+        workspace=workspace,
+    )
+    with pytest.raises(AdapterInputError, match="content identity verification"):
+        _appearance_expert(invocation, SimpleNamespace())
+    assert called is False
+
+
+def test_mageflow_manifest_cannot_reference_unsealed_payload(
+    tmp_path, monkeypatch
+) -> None:
+    from rwkv_lab import mage_flow_expert_train
+
+    read_root = tmp_path / "read"
+    run_directory = tmp_path / "write" / "run"
+    read_root.mkdir()
+    run_directory.mkdir(parents=True)
+    image = read_root / "outside-root.png"
+    image.write_bytes(b"image")
+    manifest = read_root / "train.jsonl"
+    manifest.write_text(json.dumps({"image": str(image)}) + "\n", encoding="utf-8")
+    called = False
+
+    def train(*_args, **_kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(mage_flow_expert_train, "train", train)
+    invocation = SimpleNamespace(
+        inputs={
+            "config": {
+                "train_manifest": str(manifest),
+                "output_dir": str(run_directory),
+            }
+        },
+        workspace={
+            "run_directory": str(run_directory),
+            "allowed_read_roots": [str(read_root)],
+            "input_content_roots": [asdict(measure_input_content_root(manifest))],
+            "allowed_write_roots": [str(run_directory.parent)],
+        },
+    )
+    with pytest.raises(AdapterInputError, match="not covered"):
+        _appearance_expert(invocation, SimpleNamespace())
+    assert called is False
 
 
 def test_appearance_handler_returns_declared_immutable_checkpoint_request(
@@ -197,7 +359,9 @@ def test_appearance_handler_returns_declared_immutable_checkpoint_request(
     read_root.mkdir()
     run_directory.mkdir(parents=True)
     manifest = read_root / "train.jsonl"
-    manifest.write_text("{}\n", encoding="utf-8")
+    image = read_root / "image.png"
+    image.write_bytes(b"image")
+    manifest.write_text(json.dumps({"image": str(image)}) + "\n", encoding="utf-8")
 
     def train(config, **_kwargs):
         checkpoint = run_directory / "checkpoint-00000023"
@@ -221,11 +385,7 @@ def test_appearance_handler_returns_declared_immutable_checkpoint_request(
                 "output_dir": str(run_directory),
             }
         },
-        workspace={
-            "run_directory": str(run_directory),
-            "allowed_read_roots": [str(read_root)],
-            "allowed_write_roots": [str(run_directory.parent)],
-        },
+        workspace=_sealed_workspace(read_root, run_directory),
         publishes={"checkpoint": {}},
     )
 
@@ -270,11 +430,7 @@ def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoin
                 "steps": 120,
             }
         },
-        workspace={
-            "run_directory": str(run_directory),
-            "allowed_read_roots": [str(read_root)],
-            "allowed_write_roots": [str(run_directory.parent)],
-        },
+        workspace=_sealed_workspace(read_root, run_directory),
         publishes={"checkpoint": {}},
     )
     components = SimpleNamespace()
@@ -416,11 +572,13 @@ def test_runner_publishes_handler_checkpoints_before_terminal_event(
     status = run_worker(
         bootstrap_reader=lambda _descriptor: bootstrap,
         session_factory=lambda _bootstrap: session,
-        executor=lambda _invocation, _profiler, _observability, _controls: HandlerResult(
-            "worker.completed",
-            {"reason": "training_complete"},
-            19,
-            (request,),
+        executor=lambda _invocation, _profiler, _observability, _controls: (
+            HandlerResult(
+                "worker.completed",
+                {"reason": "training_complete"},
+                19,
+                (request,),
+            )
         ),
     )
     assert status == 0
@@ -471,8 +629,8 @@ def test_runner_reports_sanitized_failure_and_skips_completed_replay() -> None:
         run_worker(
             bootstrap_reader=lambda _descriptor: bootstrap,
             session_factory=lambda _bootstrap: completed,
-            executor=lambda _invocation, _profiler, _observability, _controls: pytest.fail(
-                "replayed completed work"
+            executor=lambda _invocation, _profiler, _observability, _controls: (
+                pytest.fail("replayed completed work")
             ),
         )
         == 0

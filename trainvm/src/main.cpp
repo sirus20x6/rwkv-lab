@@ -5,6 +5,7 @@
 #include "trainvm/journal.hpp"
 #include "trainvm/reflection_json.hpp"
 #include "trainvm/rwkv_lab_worker_contract.hpp"
+#include "trainvm/input_content_authority.hpp"
 #include "trainvm/service.hpp"
 
 #include <charconv>
@@ -32,6 +33,7 @@ void usage() {
       << "  trainvm validate-catalog <compatibility.json> <repository-root>\n"
       << "  trainvm inspect-training-components <training-components.json>\n"
       << "  trainvm inspect-hostd-client <hostd-client.json>\n"
+      << "  trainvm inspect-input-content-root <absolute-path>\n"
       << "  trainvm inspect-rwkv-lab-worker <sha256-code-fingerprint>\n"
       << "  trainvm inspect-rwkv-lab-runtime-requirements\n"
       << "  trainvm inspect-rwkv-lab-deployment"
@@ -159,6 +161,18 @@ int inspect_hostd_client_command(const std::filesystem::path& path) {
                    {"canonical_configuration",
                     trainvm::encode_json(configuration.document())},
                }
+                   .dump(2)
+            << '\n';
+  return 0;
+}
+
+int inspect_input_content_root_command(int argc, char** argv) {
+  if (argc != 3) {
+    usage();
+    return 64;
+  }
+  std::cout << trainvm::encode_json(
+                   trainvm::measure_input_content_root(argv[2]))
                    .dump(2)
             << '\n';
   return 0;
@@ -398,6 +412,10 @@ int main(int argc, char** argv) {
     if (argc == 3 &&
         std::string_view(argv[1]) == "inspect-hostd-client") {
       return inspect_hostd_client_command(argv[2]);
+    }
+    if (argc >= 2 &&
+        std::string_view(argv[1]) == "inspect-input-content-root") {
+      return inspect_input_content_root_command(argc, argv);
     }
     if (argc == 3 &&
         std::string_view(argv[1]) == "inspect-rwkv-lab-worker") {

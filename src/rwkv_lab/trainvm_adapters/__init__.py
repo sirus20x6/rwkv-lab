@@ -1,6 +1,12 @@
 """Family adapter integration above the generic worker and tensor runtimes."""
 
 from .components import AdapterComponentError, WorkerTrainingComponents
+from .content_authority import (
+    ContentAuthorityError,
+    InputContentRootIdentity,
+    measure_input_content_root,
+    verify_input_content_roots,
+)
 from .entrypoint import (
     WORKER_BOOTSTRAP_DESCRIPTOR,
     WorkerEntrypointError,
@@ -25,14 +31,18 @@ __all__ = [
     "AdapterComponentError",
     "AdapterDispatchError",
     "AdapterInputError",
+    "ContentAuthorityError",
     "HandlerResult",
+    "InputContentRootIdentity",
     "RWKVScratchTrainConfig",
     "WorkerEntrypointError",
     "WorkerTrainingComponents",
     "WorkspacePathAuthority",
     "execute_invocation",
+    "measure_input_content_root",
     "read_inline_config",
     "require_run_directory",
     "run_worker",
     "supported_adapter_keys",
+    "verify_input_content_roots",
 ]

@@ -16,6 +16,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
 find_package(SQLite3 REQUIRED)
 find_package(yaml-cpp CONFIG REQUIRED)
 find_package(Protobuf CONFIG REQUIRED)
@@ -99,6 +100,7 @@ add_library(trainvm_core
   src/host_launch.cpp
   src/host_launch_registry.cpp
   src/host_resources.cpp
+  src/input_content_authority.cpp
   src/journal.cpp
   src/journal_cache_lease_authority.cpp
   src/lease_renewal.cpp
@@ -595,6 +597,20 @@ target_compile_options(linux_nvidia_inventory_tests PRIVATE
 )
 target_link_libraries(linux_nvidia_inventory_tests PRIVATE trainvm_core)
 add_test(NAME linux_nvidia_inventory_tests COMMAND linux_nvidia_inventory_tests)
+add_executable(input_content_authority_tests
+  tests/input_content_authority_tests.cpp
+)
+target_compile_options(input_content_authority_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(input_content_authority_tests PRIVATE trainvm_core)
+add_test(NAME input_content_authority_tests COMMAND input_content_authority_tests)
+add_test(NAME input_content_authority_python_parity
+  COMMAND ${Python3_EXECUTABLE}
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_input_content_authority_parity.py"
+    $<TARGET_FILE:trainvm>
+    "${CMAKE_CURRENT_SOURCE_DIR}/../src"
+)
 
 get_target_property(TRAINVM_SERVICE_LINKS trainvm_service LINK_LIBRARIES)
 if("trainvm_compatibility_catalog" IN_LIST TRAINVM_SERVICE_LINKS)

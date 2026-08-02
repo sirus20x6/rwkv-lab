@@ -232,6 +232,14 @@ and values. It then freezes the resolved per-node compositions in a content-addr
 lock. The same resolved object is included in the immutable worker invocation; experiments never
 supply import paths, argv, environment variables, or implementation code.
 
+Static trainer inputs use reflected `input_content_roots` rather than pathname identity. The native
+authority measures a bounded descriptor-relative Merkle tree and freezes its path, kind, file count,
+byte count, and root digest in the plan. The Python worker independently remeasures every declared
+root before importing a family trainer and confines every ordinary adapter read to those verified
+roots. Symlinks and special nodes are forbidden. Controller-published checkpoint artifacts retain
+their separate canonical object-manifest verifier because replacement checkpoints are selected by
+durable runtime lineage rather than the original static plan.
+
 Required capabilities from all selected components are unioned with the adapter operation's
 capabilities before the launch intent is committed. The immutable `trainvm.host-launches/v4`
 profile for the exact sealed code bytes independently declares its provided capabilities; host

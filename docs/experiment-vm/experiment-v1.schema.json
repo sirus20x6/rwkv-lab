@@ -72,8 +72,38 @@
         "root": {"type": "string", "minLength": 1},
         "run_directory": {"type": "string", "minLength": 1},
         "concurrency_key": {"$ref": "#/$defs/identifier"},
-        "allowed_read_roots": {"type": "array", "items": {"type": "string", "minLength": 1}},
-        "allowed_write_roots": {"type": "array", "items": {"type": "string", "minLength": 1}}
+        "allowed_read_roots": {
+          "type": "array", "maxItems": 256, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 4096}
+        },
+        "input_content_roots": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": {"$ref": "#/$defs/input_content_root"}
+        },
+        "allowed_write_roots": {
+          "type": "array", "maxItems": 256, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 4096}
+        }
+      }
+    },
+    "input_content_root": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "api_version", "path", "kind", "file_count", "total_bytes", "tree_sha256"
+      ],
+      "properties": {
+        "api_version": {"const": "trainvm.input-content-root/v1"},
+        "path": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "kind": {"enum": ["file", "directory"]},
+        "file_count": {"type": "integer", "minimum": 1, "maximum": 10000000},
+        "total_bytes": {"type": "integer", "minimum": 0, "maximum": 18014398509481984},
+        "tree_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
       }
     },
     "resources": {
