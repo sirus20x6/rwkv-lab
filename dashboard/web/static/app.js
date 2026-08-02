@@ -2348,7 +2348,7 @@
   // animations" settings can suppress CSS animations wholesale, and these
   // pulses carry live state. Writes a 0..1 sine to --pulse only while a
   // pulse-carrying element is actually on the page.
-  const PULSE_SEL = ".conv-cell.converting, .dot.stalling, .queue-item.running, .alert.critical";
+  const PULSE_SEL = ".conv-cell.converting, .dot.stalling, .alert.critical";
   setInterval(() => {
     const root = document.documentElement;
     if (!document.querySelector(PULSE_SEL)) {

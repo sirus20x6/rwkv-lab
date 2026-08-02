@@ -32,6 +32,29 @@ func TestLiveDashboardClientHasRecoveryPaths(t *testing.T) {
 	}
 }
 
+func TestLegacyDashboardDoesNotExposeTrainingMutationControls(t *testing.T) {
+	assets := Static()
+	index, err := fs.ReadFile(assets, "index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(index)
+	for _, forbidden := range []string{
+		`/api/launch`, `/api/queue/`, `/api/autostop`,
+		`/stop`, `/checkpoint`, `/control`, `/sample`,
+		`id="tune-panel"`, `id="sample-panel"`,
+	} {
+		if strings.Contains(page, forbidden) {
+			t.Fatalf("legacy dashboard still exposes training mutation control %q", forbidden)
+		}
+	}
+	if !strings.Contains(page, `data-vm-action="checkpoint"`) ||
+		!strings.Contains(page, `data-vm-action="pause"`) ||
+		!strings.Contains(page, `data-vm-action="resume"`) {
+		t.Fatal("native TrainVM lifecycle controls were removed with the legacy controls")
+	}
+}
+
 func TestEvalGalleryDoesNotReloadOnStaleLiveTicks(t *testing.T) {
 	assets := Static()
 	app, err := fs.ReadFile(assets, "app.js")

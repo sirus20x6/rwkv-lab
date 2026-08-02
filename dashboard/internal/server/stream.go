@@ -1,7 +1,6 @@
 package server
 
 import (
-	"fmt"
 	"net/http"
 	"path/filepath"
 	"time"
@@ -74,7 +73,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 }
 
 // pushTick renders one stream tick for one connection. All shared content
-// (system header, run list, alerts, conv map, queue) comes from the global
+// (system header, run list, alerts, conversion map) comes from the global
 // once-per-second snapshot — the only per-connection DB work is the small
 // selected-run queries, so N open tabs no longer multiply the heavy aggregates.
 func (s *Server) pushTick(sse *datastar.ServerSentEventGenerator, tabID string,
@@ -97,19 +96,12 @@ func (s *Server) pushTick(sse *datastar.ServerSentEventGenerator, tabID string,
 	patch("sys-host", snap.sysHost, 0)
 	patch("sys-proc", snap.sysProc, 0)
 	patch("run-list", snap.runList, 15*time.Second)
-	// Global alerts banner (+ auto-stop toggle).
+	// Global alerts banner.
 	if snap.alerts != "" {
 		patch("alerts", snap.alerts, 0)
 	}
 	// Whole-model conversion map.
 	patch("conv", snap.conv, 0)
-	// Launch queue.
-	if snap.queue != "" {
-		patch("queue", snap.queue, 0)
-	}
-	// Launch-args history datalist (recent launches/enqueues).
-	patch("launch-history", snap.launchHist, 0)
-
 	signals := map[string]any{
 		"now":         time.Now().Format("15:04:05"),
 		"runVersions": snap.versions,
@@ -152,10 +144,6 @@ func (s *Server) pushTick(sse *datastar.ServerSentEventGenerator, tabID string,
 			applyEvalContractKPIs(&k, snap.bestByRun[sel])
 			patch("kpis:"+sel, renderKPIs(k), 0)
 			signals["kpi"] = k
-		}
-		// Live-tuning overrides (desired vs applied) for the tuning panel.
-		if controls, err := s.db.GetControls(sel); err == nil {
-			patch("controls:"+sel, renderControls(controls), 0)
 		}
 		// Hidden element the Pixi glue observes for (run, version) changes.
 		_ = sse.PatchElementf(`<div id="active-run" data-run="%s" data-v="%d" hidden></div>`,
@@ -211,24 +199,6 @@ func (s *Server) handleRunSelect(w http.ResponseWriter, r *http.Request) {
 		_ = sse.PatchElements(renderKPIs(k))
 		signals["kpi"] = k
 	}
-	// Reset staged live-tune overrides on run switch (values staged for one run
-	// must not silently carry to another) and surface the run's current config
-	// values so the tuning inputs show what an override would replace.
-	ctlReset := map[string]any{}
-	ctlCur := map[string]any{}
-	for k := range controlWhitelist {
-		ctlReset[k] = ""
-		ctlCur[k] = ""
-	}
-	if cfg := s.readSidecarConfig(name); cfg != nil {
-		for k := range controlWhitelist {
-			if v, ok := cfg[k]; ok && v != nil {
-				ctlCur[k] = fmt.Sprint(v)
-			}
-		}
-	}
-	signals["ctl"] = ctlReset
-	signals["ctlCur"] = ctlCur
 	_ = sse.MarshalAndPatchSignals(signals)
 }
 

@@ -1,6 +1,6 @@
 // Package server wires the HTTP surface for trainboard: the static front-end
 // shell, the Datastar SSE stream, the Pixi series endpoints, and the
-// confirm-gated control actions. This file holds the router + lifecycle; the
+// native TrainVM control plane. This file holds the router + lifecycle; the
 // per-area handlers live in handlers.go, stream.go, and control.go.
 package server
 
@@ -57,8 +57,6 @@ type Server struct {
 	// (signal-less client) shares the "_" bucket. seen drives idle GC.
 	selected map[string]string
 	seen     map[string]time.Time
-
-	queueAuto atomic.Bool // opt-in: auto-start next queued run when GPU free (off by default)
 
 	discoveryMu sync.Mutex
 	discovery   map[string]discoveryEntry // short-lived filesystem discovery cache
@@ -217,38 +215,22 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/runs/{name}/eval-samples/{step}/image/{index}", s.handleEvalSampleImage)
 	s.mux.HandleFunc("GET /api/runs/{name}/eval-samples/{step}/target-image/{index}", s.handleEvalSampleTargetImage)
 
-	// Control actions (confirm-gated client-side, validated + audited here).
-	s.mux.HandleFunc("POST /api/runs/{name}/stop", s.handleStop)
-	s.mux.HandleFunc("POST /api/runs/{name}/checkpoint", s.handleCheckpoint)
+	// Legacy run metadata remains editable. Training lifecycle and live-control
+	// mutations are intentionally available only through the native TrainVM API.
 	s.mux.HandleFunc("POST /api/runs/{name}/notes", s.handleNotes)
 	s.mux.HandleFunc("POST /api/runs/{name}/tags", s.handleTags)
-	s.mux.HandleFunc("POST /api/runs/{name}/control", s.handleSetControl)
-	s.mux.HandleFunc("POST /api/runs/{name}/sample", s.handleSample)
 	s.mux.HandleFunc("GET /api/runs/{name}/architecture", s.handleArchitecture)
-	s.mux.HandleFunc("POST /api/launch", s.handleLaunch)
 	s.mux.HandleFunc("POST /api/alerts/ack", s.handleAckAlert)
-	s.mux.HandleFunc("POST /api/autostop", s.handleAutoStop)
-	s.mux.HandleFunc("POST /api/convboard/accept", s.handleAcceptLayer)
 	s.mux.HandleFunc("GET /api/leaderboard", s.handleLeaderboard)
 	s.mux.HandleFunc("GET /api/experiments", s.handleExperiments)
-	s.mux.HandleFunc("POST /api/experiments/run", s.handleRunConfig)
-	s.mux.HandleFunc("POST /api/experiments/launch", s.handleLaunchExperiment)
 	s.mux.HandleFunc("GET /api/rlvr", s.handleRLVR)
-	s.mux.HandleFunc("POST /api/rlvr/launch", s.handleLaunchRLVR)
 	s.mux.HandleFunc("GET /api/posttraining", s.handlePosttraining)
+	// Read-only dataset validation remains available. It does not create runs,
+	// mutate datasets, or exercise trainer process authority.
 	s.mux.HandleFunc("POST /api/posttraining/inspect", s.handleInspectPosttraining)
-	s.mux.HandleFunc("POST /api/posttraining/version", s.handleVersionPosttraining)
-	s.mux.HandleFunc("POST /api/posttraining/campaign", s.handleLaunchPosttrainingCampaign)
-	s.mux.HandleFunc("POST /api/posttraining/compare", s.handleComparePosttraining)
-	s.mux.HandleFunc("POST /api/posttraining/feedback", s.handlePosttrainingFeedback)
 	s.mux.HandleFunc("GET /api/qualification", s.handleQualification)
-	s.mux.HandleFunc("POST /api/qualification/run", s.handleRunQualification)
 	s.mux.HandleFunc("GET /api/research-capabilities", s.handleResearchCapabilities)
 	s.mux.HandleFunc("GET /api/diff", s.handleDiff)
-	s.mux.HandleFunc("POST /api/queue/enqueue", s.handleEnqueue)
-	s.mux.HandleFunc("POST /api/queue/start-next", s.handleStartNext)
-	s.mux.HandleFunc("POST /api/queue/cancel", s.handleCancelQueue)
-	s.mux.HandleFunc("POST /api/queue/auto", s.handleQueueAuto)
 
 	// NOTE: /api/runs/{run}/architecture and /api/system/history are phase 4b.
 }
@@ -277,8 +259,7 @@ func (s *Server) Run(ctx context.Context) error {
 		Handler:           s.mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-	go s.queueManager(ctx) // reconcile running items + opt-in auto-start
-	go s.refreshLoop(ctx)  // shared once-per-second tick snapshot for all streams
+	go s.refreshLoop(ctx) // shared once-per-second tick snapshot for all streams
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

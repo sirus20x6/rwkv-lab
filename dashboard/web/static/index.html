@@ -28,18 +28,7 @@
   <script src="/static/vendor/pixi.min.js"></script>
 </head>
 <body data-signals="{ tabId:(window.__tabId || ''), selectedRun:'', hasSel:false, now:'', runVersions:{}, kpi:{}, runFilter:'',
-                      notes:'', tags:'', launchScript:'convert_train.py', launchArgs:'', toast:'', toastKind:'',
-                      samplePrompt:'', sampleMaxNew:'200', sampleTemp:'0.8', sampleBusy:false,
-                      ctl:{ w_lmce:'', w_block:'', w_smt:'', w_dmt:'', lr:'', lr_scale:'', eval_every:'', save_every:'', log_every:'', grad_clip:'',
-                            weight_decay:'', tail_weight_decay:'', wd_tail_frac:'', nuc_weight:'', nuc_every:'',
-                            grokfast_lamb:'', grokfast_alpha:'', readout_lr_mult:'',
-                            sm_spectral_power:'', sm_scale:'', ddc_strength:'', pc_strength:'', llr_smax:'',
-                            w_cos:'', w_cka:'', w_flow:'', w_bridge:'', agreement_gate:'' },
-                      ctlCur:{ w_lmce:'', w_block:'', w_smt:'', w_dmt:'', lr:'', lr_scale:'', eval_every:'', save_every:'', log_every:'', grad_clip:'',
-                            weight_decay:'', tail_weight_decay:'', wd_tail_frac:'', nuc_weight:'', nuc_every:'',
-                            grokfast_lamb:'', grokfast_alpha:'', readout_lr_mult:'',
-                            sm_spectral_power:'', sm_scale:'', ddc_strength:'', pc_strength:'', llr_smax:'',
-                            w_cos:'', w_cka:'', w_flow:'', w_bridge:'', agreement_gate:'' },
+                      notes:'', tags:'', toast:'', toastKind:'',
                       ptDataset:'', ptMerge:'', ptRunA:'', ptRunB:'', ptPrompt:'', ptSeed:'0', ptMaxNew:'200', ptTemp:'0.8',
                       ptOutA:'', ptOutB:'', ptChosen:'', ptBusy:false,
                       showLB:false, diffA:'', diffB:'' }"
@@ -66,27 +55,6 @@
         <input id="run-search" type="search" placeholder="Filter runs" autocomplete="off"
                data-bind="runFilter" />
         <div id="run-list"><div class="empty">connecting…</div></div>
-      </div>
-
-      <div class="side-section">
-        <div class="section-heading"><h2>launch</h2></div>
-        <select class="ctl-input" data-bind="launchScript">
-	          <option value="convert_train.py">convert_train.py</option>
-	          <option value="distill_consolidate.py">distill_consolidate.py</option>
-	          <option value="drive_isolation.py">drive_isolation.py</option>
-	          <option value="posttrain_train.py">posttrain_train.py</option>
-	        </select>
-        <input class="ctl-input" placeholder="args e.g. --layer 1 --out runs/x" data-bind="launchArgs" list="launch-history" />
-        <datalist id="launch-history"></datalist>
-        <div class="launch-btns">
-          <button class="btn" data-on:click="confirm('Launch '+$launchScript+' '+$launchArgs+'?\\nThis spawns a training process (competes for GPU).') && @post('/api/launch')"><svg class="bi" viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.5v9l7-4.5z"/></svg><span>launch now</span></button>
-          <button class="btn" data-on:click="@post('/api/queue/enqueue')"><svg class="bi" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" stroke="currentColor" stroke-width="2" fill="none"/></svg><span>queue</span></button>
-        </div>
-      </div>
-
-      <div class="side-section">
-        <div class="section-heading"><h2>queue</h2></div>
-        <div id="queue-list"><div class="empty">queue empty</div></div>
       </div>
     </aside>
 
@@ -265,13 +233,6 @@
       </div>
 
       <div id="run-detail" data-show="$hasSel">
-        <div class="control-bar">
-          <button class="btn danger"
-            data-on:click="confirm('Stop '+$selectedRun+'? It will save a checkpoint and exit gracefully (SIGINT).') && @post('/api/runs/'+$selectedRun+'/stop')"><svg class="bi" viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.2"/></svg><span>stop</span></button>
-          <button class="btn"
-            data-on:click="confirm('Request a checkpoint for '+$selectedRun+'? (instrumented trainer only — refused otherwise.)') && @post('/api/runs/'+$selectedRun+'/checkpoint')"><svg class="bi" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5h8v11l-4-3-4 3z"/></svg><span>checkpoint now</span></button>
-        </div>
-
         <div class="kpis" id="run-kpis">
           <div class="kpi"><div class="kpi-label">step</div>
             <div class="kpi-val" data-text="typeof $kpi.step==='number' ? $kpi.step.toLocaleString() : '—'">—</div></div>
@@ -320,7 +281,6 @@
             <button class="jump" data-jump="#conv-panel">conversion</button>
             <button class="jump" data-jump="#grounding-panel">grounding</button>
             <button class="jump" data-jump="#custom-panel">custom</button>
-            <button class="jump" data-jump="#tune-panel">tuning</button>
             <button class="jump" data-jump="#notes-panel">notes</button>
           </nav>
           <nav class="tailnav" aria-label="x window">
@@ -402,76 +362,6 @@
 
         <div id="looprw-panel" class="panel hidden"></div>
 
-        <div class="panel tune-panel" id="tune-panel"><div class="panel-title">live tuning
-            <span class="sub">applies on the trainer's next poll · instrumented runs only · only highlighted (staged) fields are sent</span></div>
-
-          <div class="tune-section">
-            <div class="tune-section-head">objective weights</div>
-            <div class="tune-grid">
-              <label class="tune-control range-control" data-class="{staged: $ctl.w_lmce!==''}"><span>w_lmce</span><input class="range" type="range" min="0" max="2" step="0.01" data-bind="ctl.w_lmce" /><input class="ctl-input" type="number" step="any" data-attr:placeholder="($ctlCur.w_lmce||'unset')" data-bind="ctl.w_lmce" /></label>
-              <label class="tune-control range-control" data-class="{staged: $ctl.w_block!==''}"><span>w_block</span><input class="range" type="range" min="0" max="2" step="0.01" data-bind="ctl.w_block" /><input class="ctl-input" type="number" step="any" data-attr:placeholder="($ctlCur.w_block||'unset')" data-bind="ctl.w_block" /></label>
-              <label class="tune-control range-control" data-class="{staged: $ctl.w_smt!==''}"><span>w_smt</span><input class="range" type="range" min="0" max="2" step="0.01" data-bind="ctl.w_smt" /><input class="ctl-input" type="number" step="any" data-attr:placeholder="($ctlCur.w_smt||'unset')" data-bind="ctl.w_smt" /></label>
-              <label class="tune-control range-control" data-class="{staged: $ctl.w_dmt!==''}"><span>w_dmt</span><input class="range" type="range" min="0" max="2" step="0.01" data-bind="ctl.w_dmt" /><input class="ctl-input" type="number" step="any" data-attr:placeholder="($ctlCur.w_dmt||'unset')" data-bind="ctl.w_dmt" /></label>
-              <label class="tune-control range-control" data-class="{staged: $ctl.w_cos!==''}"><span>w_cos</span><input class="range" type="range" min="0" max="2" step="0.01" data-bind="ctl.w_cos" /><input class="ctl-input" type="number" step="any" data-attr:placeholder="($ctlCur.w_cos||'unset')" data-bind="ctl.w_cos" /></label>
-              <label class="tune-control range-control" data-class="{staged: $ctl.w_cka!==''}"><span>w_cka</span><input class="range" type="range" min="0" max="2" step="0.01" data-bind="ctl.w_cka" /><input class="ctl-input" type="number" step="any" data-attr:placeholder="($ctlCur.w_cka||'unset')" data-bind="ctl.w_cka" /></label>
-              <label class="tune-control range-control" data-class="{staged: $ctl.w_flow!==''}"><span>w_flow</span><input class="range" type="range" min="0" max="2" step="0.01" data-bind="ctl.w_flow" /><input class="ctl-input" type="number" step="any" data-attr:placeholder="($ctlCur.w_flow||'unset')" data-bind="ctl.w_flow" /></label>
-              <label class="tune-control range-control" data-class="{staged: $ctl.w_bridge!==''}"><span>w_bridge</span><input class="range" type="range" min="0" max="2" step="0.01" data-bind="ctl.w_bridge" /><input class="ctl-input" type="number" step="any" data-attr:placeholder="($ctlCur.w_bridge||'unset')" data-bind="ctl.w_bridge" /></label>
-              <div class="tune-control" data-class="{staged: $ctl.agreement_gate!==''}">
-                <span>agreement_gate</span>
-                <div class="seg">
-                  <button class="seg-btn" data-on:click="$ctl.agreement_gate='0'">off</button>
-                  <button class="seg-btn" data-on:click="$ctl.agreement_gate='1'">on</button>
-                </div>
-                <input class="ctl-input" type="number" min="0" max="1" step="1" data-attr:placeholder="($ctlCur.agreement_gate||'unset')" data-bind="ctl.agreement_gate" />
-              </div>
-            </div>
-          </div>
-
-          <div class="tune-section">
-            <div class="tune-section-head">optimizer &amp; grokking</div>
-            <div class="tune-grid">
-              <label class="tune-control" data-class="{staged: $ctl.lr!==''}"><span>lr</span><input class="ctl-input" type="number" step="any" data-attr:placeholder="($ctlCur.lr||'direct lr')" data-bind="ctl.lr" /></label>
-              <div class="tune-control" data-class="{staged: $ctl.lr_scale!==''}"><span>lr_scale</span><select class="ctl-input" data-bind="ctl.lr_scale"><option value="">unset</option><option value="0.25">0.25x</option><option value="0.5">0.5x cool</option><option value="0.75">0.75x</option><option value="1">1x</option><option value="1.25">1.25x</option><option value="1.5">1.5x</option><option value="2">2x</option></select></div>
-              <div class="tune-control" data-class="{staged: $ctl.grad_clip!==''}"><span>grad_clip</span><div class="seg"><button class="seg-btn" data-on:click="$ctl.grad_clip='0'">off</button><button class="seg-btn" data-on:click="$ctl.grad_clip='0.5'">0.5</button><button class="seg-btn" data-on:click="$ctl.grad_clip='1'">1</button></div><input class="ctl-input" type="number" step="any" data-attr:placeholder="($ctlCur.grad_clip||'unset')" data-bind="ctl.grad_clip" /></div>
-              <label class="tune-control" data-class="{staged: $ctl.weight_decay!==''}"><span>weight_decay</span><input class="ctl-input" type="number" step="any" data-attr:placeholder="($ctlCur.weight_decay||'unset')" data-bind="ctl.weight_decay" /></label>
-              <label class="tune-control" data-class="{staged: $ctl.tail_weight_decay!==''}"><span>tail_weight_decay</span><input class="ctl-input" type="number" step="any" data-attr:placeholder="($ctlCur.tail_weight_decay||'unset')" data-bind="ctl.tail_weight_decay" /></label>
-              <label class="tune-control range-control" data-class="{staged: $ctl.wd_tail_frac!==''}"><span>wd_tail_frac</span><input class="range" type="range" min="0" max="1" step="0.01" data-bind="ctl.wd_tail_frac" /><input class="ctl-input" type="number" min="0" max="1" step="0.01" data-attr:placeholder="($ctlCur.wd_tail_frac||'unset')" data-bind="ctl.wd_tail_frac" /></label>
-              <label class="tune-control" data-class="{staged: $ctl.nuc_weight!==''}"><span>nuc_weight</span><input class="ctl-input" type="number" step="any" data-attr:placeholder="($ctlCur.nuc_weight||'unset')" data-bind="ctl.nuc_weight" /></label>
-              <div class="tune-control" data-class="{staged: $ctl.nuc_every!==''}"><span>nuc_every</span><select class="ctl-input" data-bind="ctl.nuc_every"><option value="">unset</option><option value="0">off</option><option value="50">50</option><option value="100">100</option><option value="200">200</option><option value="500">500</option><option value="1000">1000</option></select></div>
-              <label class="tune-control range-control" data-class="{staged: $ctl.grokfast_lamb!==''}"><span>grokfast_lamb</span><input class="range" type="range" min="0" max="5" step="0.05" data-bind="ctl.grokfast_lamb" /><input class="ctl-input" type="number" step="any" data-attr:placeholder="($ctlCur.grokfast_lamb||'unset')" data-bind="ctl.grokfast_lamb" /></label>
-              <label class="tune-control range-control" data-class="{staged: $ctl.grokfast_alpha!==''}"><span>grokfast_alpha</span><input class="range" type="range" min="0.8" max="0.999" step="0.001" data-bind="ctl.grokfast_alpha" /><input class="ctl-input" type="number" min="0" max="0.999" step="0.001" data-attr:placeholder="($ctlCur.grokfast_alpha||'unset')" data-bind="ctl.grokfast_alpha" /></label>
-              <div class="tune-control" data-class="{staged: $ctl.readout_lr_mult!==''}"><span>readout_lr_mult</span><div class="seg"><button class="seg-btn" data-on:click="$ctl.readout_lr_mult='1'">1x</button><button class="seg-btn" data-on:click="$ctl.readout_lr_mult='2'">2x</button><button class="seg-btn" data-on:click="$ctl.readout_lr_mult='4'">4x</button></div><input class="ctl-input" type="number" step="any" data-attr:placeholder="($ctlCur.readout_lr_mult||'unset')" data-bind="ctl.readout_lr_mult" /></div>
-            </div>
-          </div>
-
-          <div class="tune-section">
-            <div class="tune-section-head">spectral Muon, DDC &amp; LLR</div>
-            <div class="tune-grid">
-              <label class="tune-control range-control" data-class="{staged: $ctl.sm_spectral_power!==''}"><span>sm_spectral_power</span><input class="range" type="range" min="0" max="1" step="0.01" data-bind="ctl.sm_spectral_power" /><input class="ctl-input" type="number" min="0" max="1" step="0.01" data-attr:placeholder="($ctlCur.sm_spectral_power||'unset')" data-bind="ctl.sm_spectral_power" /></label>
-              <label class="tune-control range-control" data-class="{staged: $ctl.sm_scale!==''}"><span>sm_scale</span><input class="range" type="range" min="0" max="1.5" step="0.01" data-bind="ctl.sm_scale" /><input class="ctl-input" type="number" min="0" step="0.01" data-attr:placeholder="($ctlCur.sm_scale||'unset')" data-bind="ctl.sm_scale" /></label>
-              <label class="tune-control range-control" data-class="{staged: $ctl.ddc_strength!==''}"><span>ddc_strength</span><input class="range" type="range" min="0" max="1" step="0.01" data-bind="ctl.ddc_strength" /><input class="ctl-input" type="number" min="0" max="1" step="0.01" data-attr:placeholder="($ctlCur.ddc_strength||'unset')" data-bind="ctl.ddc_strength" /></label>
-              <label class="tune-control range-control" data-class="{staged: $ctl.pc_strength!==''}"><span>pc_strength</span><input class="range" type="range" min="0" max="1" step="0.01" data-bind="ctl.pc_strength" /><input class="ctl-input" type="number" min="0" max="1" step="0.01" data-attr:placeholder="($ctlCur.pc_strength||'unset')" data-bind="ctl.pc_strength" /></label>
-              <label class="tune-control range-control" data-class="{staged: $ctl.llr_smax!==''}"><span>llr_smax</span><input class="range" type="range" min="1" max="10" step="0.1" data-bind="ctl.llr_smax" /><input class="ctl-input" type="number" min="1" step="0.1" data-attr:placeholder="($ctlCur.llr_smax||'unset')" data-bind="ctl.llr_smax" /></label>
-            </div>
-          </div>
-
-          <div class="tune-section">
-            <div class="tune-section-head">cadence</div>
-            <div class="tune-grid compact">
-              <div class="tune-control" data-class="{staged: $ctl.eval_every!==''}"><span>eval_every</span><select class="ctl-input" data-bind="ctl.eval_every"><option value="">unset</option><option value="50">50</option><option value="100">100</option><option value="250">250</option><option value="500">500</option><option value="1000">1000</option></select><input class="ctl-input" type="number" min="1" step="1" data-attr:placeholder="($ctlCur.eval_every||'custom')" data-bind="ctl.eval_every" /></div>
-              <div class="tune-control" data-class="{staged: $ctl.save_every!==''}"><span>save_every</span><select class="ctl-input" data-bind="ctl.save_every"><option value="">unset</option><option value="0">off</option><option value="250">250</option><option value="500">500</option><option value="1000">1000</option><option value="2000">2000</option></select><input class="ctl-input" type="number" min="0" step="1" data-attr:placeholder="($ctlCur.save_every||'custom')" data-bind="ctl.save_every" /></div>
-              <div class="tune-control" data-class="{staged: $ctl.log_every!==''}"><span>log_every</span><select class="ctl-input" data-bind="ctl.log_every"><option value="">unset</option><option value="1">1</option><option value="5">5</option><option value="10">10</option><option value="25">25</option><option value="50">50</option></select><input class="ctl-input" type="number" min="1" step="1" data-attr:placeholder="($ctlCur.log_every||'custom')" data-bind="ctl.log_every" /></div>
-            </div>
-          </div>
-
-          <div class="tune-actions">
-            <button class="btn apply-tune" data-on:click="@post('/api/runs/'+$selectedRun+'/control')"
-              data-text="(c => c>0 ? 'apply '+c+' staged override'+(c===1?'':'s') : 'nothing staged — edit a field to stage it')([$ctl.w_lmce,$ctl.w_block,$ctl.w_smt,$ctl.w_dmt,$ctl.w_cos,$ctl.w_cka,$ctl.w_flow,$ctl.w_bridge,$ctl.agreement_gate,$ctl.lr,$ctl.lr_scale,$ctl.grad_clip,$ctl.weight_decay,$ctl.tail_weight_decay,$ctl.wd_tail_frac,$ctl.nuc_weight,$ctl.nuc_every,$ctl.grokfast_lamb,$ctl.grokfast_alpha,$ctl.readout_lr_mult,$ctl.sm_spectral_power,$ctl.sm_scale,$ctl.ddc_strength,$ctl.pc_strength,$ctl.llr_smax,$ctl.eval_every,$ctl.save_every,$ctl.log_every].filter(v=>v!=='').length)">apply staged overrides</button>
-            <button class="btn clear-tune" data-on:click="$ctl.w_lmce='';$ctl.w_block='';$ctl.w_smt='';$ctl.w_dmt='';$ctl.w_cos='';$ctl.w_cka='';$ctl.w_flow='';$ctl.w_bridge='';$ctl.agreement_gate='';$ctl.lr='';$ctl.lr_scale='';$ctl.grad_clip='';$ctl.weight_decay='';$ctl.tail_weight_decay='';$ctl.wd_tail_frac='';$ctl.nuc_weight='';$ctl.nuc_every='';$ctl.grokfast_lamb='';$ctl.grokfast_alpha='';$ctl.readout_lr_mult='';$ctl.sm_spectral_power='';$ctl.sm_scale='';$ctl.ddc_strength='';$ctl.pc_strength='';$ctl.llr_smax='';$ctl.eval_every='';$ctl.save_every='';$ctl.log_every=''">clear staged</button>
-          </div>
-          <div id="controls-list" class="controls-list"></div>
-        </div>
-
         <div class="panel" id="notes-panel"><div class="panel-title">notes &amp; tags</div>
           <textarea class="ctl-input" rows="2" placeholder="run notes…" data-bind="notes"></textarea>
           <div class="ctl-row">
@@ -479,20 +369,6 @@
             <button class="btn" data-on:click="@post('/api/runs/'+$selectedRun+'/notes')">save notes</button>
             <button class="btn" data-on:click="@post('/api/runs/'+$selectedRun+'/tags')">save tags</button>
           </div>
-        </div>
-
-        <!-- Sample from the run's saved checkpoint (rwkv_lab.generate; needs runs/<name>/ckpt.pt). -->
-        <div class="panel" id="sample-panel"><div class="panel-title">sample — generate from this run's checkpoint</div>
-          <textarea class="ctl-input" rows="2" data-bind="samplePrompt"
-                    placeholder="prompt — wrapped in the corpus chat format (User: … Assistant:)"></textarea>
-          <div class="ctl-row">
-            <input class="ctl-input" style="max-width:110px" title="max new tokens" data-bind="sampleMaxNew" />
-            <input class="ctl-input" style="max-width:90px" title="temperature (0 = greedy)" data-bind="sampleTemp" />
-            <button class="btn" data-attr:disabled="$sampleBusy"
-                    data-on:click="@post('/api/runs/'+$selectedRun+'/sample')">▶ sample</button>
-            <span data-show="$sampleBusy">sampling…</span>
-          </div>
-          <pre id="sample-out" class="sample-out" style="white-space:pre-wrap;overflow-x:auto"></pre>
         </div>
       </div>
 

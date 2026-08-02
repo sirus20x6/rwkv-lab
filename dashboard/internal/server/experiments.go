@@ -3,8 +3,8 @@ package server
 // Experiments panel: reads the rwkv-lab results registry (experiments.db, written by
 // experiment.py / config.py) and renders a per-task ranked table (acc mean±std + significance,
 // loop-gate engagement, params, FLOP/token, length-gen) plus an interactive builder — task
-// dropdown, model number-pickers, seeds/steps, and lever checkboxes — that launches
-// experiment.py with those parameters. Also lists experiments/*.yaml with one-click run.
+// historical experiment definitions. Experiment launch authority now belongs to
+// the declarative TrainVM control plane; this board is inspection-only.
 
 import (
 	"database/sql"
@@ -13,7 +13,6 @@ import (
 	"math"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -403,8 +402,10 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 	var b strings.Builder
 	b.WriteString(`<div id="experiments-body" class="exp-body">`)
 
-	// --- interactive builder: task dropdown, model pickers, seeds/steps, lever checkboxes ---
-	b.WriteString(`<div class="exp-build"><div class="exp-h">new experiment</div>`)
+	// Keep the legacy form visible as a configuration reference, but make its
+	// migration state explicit and prevent it from acting as launch authority.
+	b.WriteString(`<div class="exp-build"><div class="exp-h">legacy experiment form · read-only</div>`)
+	b.WriteString(`<div class="empty">Direct launches from this board are retired. Define and submit new work as a declarative TrainVM experiment.</div><fieldset disabled>`)
 	b.WriteString(`<table class="field-tbl"><tr><td class="f-l">task</td><td><select data-bind-task>`)
 	for _, t := range knownTasks {
 		fmt.Fprintf(&b, `<option value="%s">%s — %s</option>`, t.Name, t.Name, esc(t.Desc))
@@ -532,14 +533,12 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 			`<td class="lev-d">%s</td></tr>`, lv.Name, lv.Name, chk, gate, lv.Name, lv.Name, esc(lv.Desc))
 	}
 	b.WriteString(`</table></div>`)
-	b.WriteString(`<button class="btn" data-on:click="@post('/api/experiments/launch')">▶ run experiment</button>`)
-	b.WriteString(`</div></div>`)
+	b.WriteString(`</fieldset></div></div>`)
 
-	// --- launchable config files ---
-	b.WriteString(`<div class="exp-configs"><div class="exp-h">config files</div>`)
+	// --- historical config files (inspection only) ---
+	b.WriteString(`<div class="exp-configs"><div class="exp-h">config files · read-only</div>`)
 	for _, c := range s.listConfigs() {
-		fmt.Fprintf(&b, `<div class="exp-cfg"><code>%s</code>`+
-			`<button class="btn sm" data-on:click="@post('/api/experiments/run?cfg=%s')">run</button></div>`, esc(c), esc(c))
+		fmt.Fprintf(&b, `<div class="exp-cfg"><code>%s</code></div>`, esc(c))
 	}
 	b.WriteString(`</div>`)
 
@@ -589,7 +588,7 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Strings(tasks)
 	if len(tasks) == 0 {
-		b.WriteString(`<div class="empty">no results yet — build one above or run a config</div>`)
+		b.WriteString(`<div class="empty">no legacy aggregate results have been recorded</div>`)
 	}
 	for _, task := range tasks {
 		rowsT := reg[task]
@@ -626,255 +625,12 @@ func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 	_ = sse.PatchElements(b.String())
 }
 
-// handleLaunchExperiment reads the builder's Datastar signals and spawns experiment.py with them.
-func (s *Server) handleLaunchExperiment(w http.ResponseWriter, r *http.Request) {
-	var sig map[string]any
-	_ = datastar.ReadSignals(r, &sig) // MUST read the body before creating the SSE (it closes r.Body)
-	if sig == nil {
-		sig = map[string]any{}
-	}
-	sse := datastar.NewSSE(w, r)
-	str := func(k, def string) string {
-		if v, ok := sig[k]; ok {
-			return fmt.Sprintf("%v", v)
-		}
-		return def
-	}
-	task := str("task", "recall")
-	if !validTask(task) {
-		toastErr(sse, "launch: unknown task")
-		return
-	}
-	configs := []string{"baseline"} // significance reference — always run
-	lmOnlyPicked := false
-	newModelPicked, umupPicked, nvfp4Picked := false, false, false
-	for _, lv := range knownLevers {
-		if lv.Name == "baseline" {
-			continue
-		}
-		if b, _ := sig["lev_"+lv.Name].(bool); b {
-			configs = append(configs, lv.Name)
-			lmOnlyPicked = lmOnlyPicked || lv.LMOnly
-			newModelPicked = newModelPicked || isNewModelLever(lv.Name)
-			umupPicked = umupPicked || lv.Name == "umup_256"
-			nvfp4Picked = nvfp4Picked || strings.HasPrefix(lv.Name, "nvfp4")
-		}
-	}
-	if len(configs) < 2 {
-		toastErr(sse, "launch: check at least one lever to compare against baseline")
-		return
-	}
-	init := str("init", "scratch")
-	if newModelPicked && init != "scratch" {
-		toastErr(sse, "launch: u-muP, online memory, balance-state, and NVFP4 arms require from-scratch initialization")
-		return
-	}
-	if umupPicked && str("optimizer", "adamw") == "muon" {
-		toastErr(sse, "launch: the u-muP arm currently supports AdamW-family optimizers, not Muon")
-		return
-	}
-	fp8On, _ := sig["fp8"].(bool)
-	if nvfp4Picked && fp8On {
-		toastErr(sse, "launch: NVFP4 and FP8 are mutually exclusive operand formats")
-		return
-	}
-	budget := []string{"--steps", str("amount", "20000")} // fixed steps, or wall-clock minutes
-	if str("budget", "steps") == "minutes" {
-		budget = []string{"--minutes", str("amount", "10")}
-	}
-	optArgs := []string{"--optimizer", str("optimizer", "adamw"), "--lr", str("lr", "6e-4"),
-		"--weight-decay", str("wd", "0.1")}
-	if wu := str("warmup", "0"); wu != "" && wu != "0" {
-		optArgs = append(optArgs, "--warmup", wu)
-	}
-	if str("optimizer", "adamw") == "muon" { // Muon-variant flags
-		optArgs = append(optArgs, "--sm-scale", str("sm_scale", "0.4"),
-			"--sm-spectral-power", str("sm_spectral_power", "0.0"),
-			"--sm-ddc-strength", str("sm_ddc_strength", "0.0"), "--sm-ns-steps", str("sm_ns_steps", "5"))
-		for _, t := range []struct{ Sig, Flag string }{
-			{"sm_mona", "--sm-mona"}, {"sm_second_moment", "--sm-second-moment"},
-			{"sm_rsav", "--sm-rsav"}, {"sm_da_muon", "--sm-da-muon"}, {"sm_aro", "--sm-aro"},
-			{"sm_aro_compile", "--sm-aro-compile"}} {
-			if on, _ := sig[t.Sig].(bool); on {
-				optArgs = append(optArgs, t.Flag, "1")
-			}
-		}
-	}
-	if fp8On { // fp8 compute — orthogonal to the optimizer
-		optArgs = append(optArgs, "--fp8")
-	}
-	if on, _ := sig["docompile"].(bool); on { // torch.compile the train forward
-		optArgs = append(optArgs, "--compile")
-	}
-	if init == "convert" { // per-layer GDN→RWKV distillation — not a config sweep
-		toast(sse, "conversion (GDN→RWKV) runs in the conversion board / queue — it's per-layer teacher distillation, not a compare-configs sweep")
-		return
-	}
-	// LM path: an LM corpus task, OR a continuation (g1g / resume) which is inherently an LM.
-	if isLMTask(task) || init == "g1g" || init == "resume" {
-		distributed := str("distributed", "none")
-		if distributed != "none" && distributed != "fsdp2" {
-			toastErr(sse, "launch: invalid distributed backend")
-			return
-		}
-		worldSize, parseErr := boundedInt(str("worldsize", "2"), 2, 1, 128)
-		if parseErr != nil {
-			toastErr(sse, "launch: invalid world size")
-			return
-		}
-		actCkpt, _ := sig["actckpt"].(bool)
-		cpuOffload, _ := sig["cpuoffload"].(bool)
-		compileOn, _ := sig["docompile"].(bool)
-		if distributed == "fsdp2" && worldSize == "1" {
-			toastErr(sse, "launch: FSDP2 needs world size > 1")
-			return
-		}
-		if distributed == "fsdp2" && compileOn {
-			toastErr(sse, "launch: compile + FSDP2 is not parity-qualified")
-			return
-		}
-		if cpuOffload && distributed != "fsdp2" {
-			toastErr(sse, "launch: CPU offload requires FSDP2")
-			return
-		}
-		lrSchedule := str("lrschedule", "cosine")
-		if lrSchedule != "cosine" && lrSchedule != "constant" {
-			toastErr(sse, "launch: invalid LR schedule")
-			return
-		}
-		decaySteps, parseErr := boundedInt(str("decaysteps", "0"), 0, 0, 2_000_000_000)
-		if parseErr != nil {
-			toastErr(sse, "launch: invalid decay horizon")
-			return
-		}
-		args := append([]string{"-m", "rwkv_lab.config", "run-lm", "--levers", strings.Join(configs, ","),
-			"--d-model", str("dmodel", "1024"), "--n-layers", str("nlayers", "18"), "--head-size", str("headsize", "64"),
-			"--batch", str("batch", "16"), "--seq-len", str("ctxlen", "1024"),
-			"--seeds", str("seeds", "1")}, budget...)
-		if task == blendTask {
-			args = append(args, "--corpus", "blend")
-		} else if task == blendMixTask {
-			args = append(args, "--corpus", "blend-mix")
-		}
-		args = append(args, optArgs...)
-		args = append(args, "--distributed", distributed, "--world-size", worldSize,
-			"--lr-schedule", lrSchedule, "--decay-steps", decaySteps)
-		if actCkpt {
-			args = append(args, "--activation-checkpointing")
-		}
-		if cpuOffload {
-			args = append(args, "--cpu-offload")
-		}
-		if ga := str("gradaccum", "1"); ga != "" && ga != "1" { // effective batch = batch × N
-			args = append(args, "--grad-accum", ga)
-		}
-		if em := str("ema", "0"); em != "" && em != "0" { // EMA shadow weights (eval + ckpt)
-			args = append(args, "--ema", em)
-		}
-		note := "from scratch"
-		if init == "g1g" {
-			args = append(args, "--init-g1g", "models/rwkv7-g1g-1.5b.pth")
-			note = "continued from g1g"
-		} else if init == "resume" {
-			rp := str("resume", "")
-			if rp == "" {
-				toastErr(sse, "resume: enter a checkpoint path (runs/<name>/ckpt.pt)")
-				return
-			}
-			args = append(args, "--resume", rp)
-			note = "resumed from " + rp
-		}
-		pid, err := s.spawnPy(args, "lm_experiment.log")
-		if err != nil {
-			toastErr(sse, "launch failed: "+err.Error())
-			return
-		}
-		toast(sse, fmt.Sprintf("launched LM sweep [%s] · %s (pid %d) — runs appear in the leaderboard", strings.Join(configs, ","), note, pid))
-		return
-	}
-	if lmOnlyPicked { // synthetic task can't supply the token future these objectives need
-		toastErr(sse, "launch: top/lmtp/bst/jtp need an LM corpus — pick 'local-lm' or 'blend-lm' as the task")
-		return
-	}
-	args := append([]string{"-m", "rwkv_lab.experiment",
-		"--task", task + ":" + str("tasklen", "16"), "--configs", strings.Join(configs, ","),
-		"--seeds", str("seeds", "1"), "--d-model", str("dmodel", "1024"), "--n-layers", str("nlayers", "18"),
-		"--head-size", str("headsize", "64"), "--batch", str("batch", "16")}, budget...)
-	if gb := str("genblock", "1"); gb != "" && gb != "1" { // synthetic-only: amortize gen launches
-		args = append(args, "--gen-block", gb)
-	}
-	if on, ok := sig["halving"].(bool); ok && !on {
-		args = append(args, "--no-halving")
-	}
-	if on, _ := sig["factorial"].(bool); on {
-		args = append(args, "--factorial")
-	}
-	args = append(args, "--confirm-seeds", str("confirmseeds", "8"))
-	args = append(args, optArgs...)
-	pid, err := s.spawnPy(args, "exp_"+task+".log")
-	if err != nil {
-		toastErr(sse, "launch: "+err.Error())
-		return
-	}
-	toast(sse, fmt.Sprintf("launched %s [%s] (pid %d) — expand again to see results", task, strings.Join(configs, ","), pid))
+// Legacy mutation routes remain as fail-closed stubs until the central router
+// unregisters them. They never translate legacy names into TrainVM identities.
+func (s *Server) handleLaunchExperiment(w http.ResponseWriter, _ *http.Request) {
+	http.Error(w, "legacy experiment launch is retired; submit a declarative TrainVM experiment", http.StatusGone)
 }
 
-// spawnPy launches `python -m <module> …` detached, logging to runs/<logName>, and returns the pid.
-func (s *Server) spawnPy(args []string, logName string) (int, error) {
-	lf, err := os.Create(filepath.Join(s.cfg.RunsDir, logName))
-	if err != nil {
-		return 0, err
-	}
-	cmd := exec.Command(filepath.Join(s.cfg.RepoRoot, ".venv", "bin", "python"), args...)
-	cmd.Dir = s.cfg.RepoRoot
-	cmd.Env = append(os.Environ(), "PYTHONPATH=src", "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True")
-	cmd.Stdout, cmd.Stderr = lf, lf
-	if err := cmd.Start(); err != nil {
-		lf.Close()
-		return 0, err
-	}
-	go func() { _ = cmd.Wait(); lf.Close() }()
-	return cmd.Process.Pid, nil
-}
-
-func contains(xs []string, v string) bool {
-	for _, x := range xs {
-		if x == v {
-			return true
-		}
-	}
-	return false
-}
-
-// handleRunConfig launches `python -m rwkv_lab.config run <cfg>` (a config file under experiments/).
-func (s *Server) handleRunConfig(w http.ResponseWriter, r *http.Request) {
-	sse := datastar.NewSSE(w, r)
-	cfg := r.URL.Query().Get("cfg")
-	if cfg == "" || strings.Contains(cfg, "..") || !strings.HasPrefix(cfg, "experiments/") ||
-		!(strings.HasSuffix(cfg, ".yaml") || strings.HasSuffix(cfg, ".yml") || strings.HasSuffix(cfg, ".json")) {
-		toastErr(sse, "run refused: cfg must be experiments/*.yaml")
-		return
-	}
-	if _, err := os.Stat(filepath.Join(s.cfg.RepoRoot, cfg)); err != nil {
-		toastErr(sse, "run refused: "+cfg+" not found")
-		return
-	}
-	base := strings.TrimSuffix(filepath.Base(cfg), filepath.Ext(cfg))
-	logPath := filepath.Join(s.cfg.RunsDir, "config_"+base+".log")
-	lf, err := os.Create(logPath)
-	if err != nil {
-		toastErr(sse, "run refused: "+err.Error())
-		return
-	}
-	cmd := exec.Command(filepath.Join(s.cfg.RepoRoot, ".venv", "bin", "python"), "-m", "rwkv_lab.config", "run", cfg)
-	cmd.Dir = s.cfg.RepoRoot
-	cmd.Env = append(os.Environ(), "PYTHONPATH=src", "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True")
-	cmd.Stdout, cmd.Stderr = lf, lf
-	if err := cmd.Start(); err != nil {
-		lf.Close()
-		toastErr(sse, "run failed: "+err.Error())
-		return
-	}
-	go func() { _ = cmd.Wait(); lf.Close() }()
-	toast(sse, fmt.Sprintf("launched %s (pid %d) — log %s", base, cmd.Process.Pid, filepath.Base(logPath)))
+func (s *Server) handleRunConfig(w http.ResponseWriter, _ *http.Request) {
+	http.Error(w, "legacy config launch is retired; migrate it to a declarative TrainVM experiment", http.StatusGone)
 }
