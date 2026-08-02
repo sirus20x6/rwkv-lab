@@ -133,9 +133,14 @@ adapter profile.
 artifact for the currently migrated training adapters. The stored zipapp contains the complete
 `rwkv_lab` Python source surface, the checked-in TrainVM protobuf package, one fixed `__main__`, and
 an embedded canonical per-member SHA-256 manifest. It also embeds a
-`trainvm.python-bootstrap-runtime-closure/v1` manifest produced by the exact copied interpreter.
-That manifest binds the interpreter identity, Python standard-library tree, and the complete
-installed-file closure of the shared pre-dispatch `grpcio`, `protobuf`, and `torch` distributions.
+`trainvm.python-bootstrap-runtime-closure/v2` manifest produced by the exact copied interpreter.
+That manifest binds the interpreter identity, Python standard-library tree, declared root
+distributions, and their recursively complete installed-file closure. The reflected native
+`trainvm.rwkv-lab-worker-runtime-requirements/v1` contract is the sole adapter-to-root-distribution
+authority: the materializer queries it with `inspect-rwkv-lab-runtime-requirements` instead of
+maintaining a second Python dependency map. Shared dispatch and evaluation roots include `grpcio`,
+`pillow`, `protobuf`, and `torch`; adapter profiles add their exact MageFlow, Qwen, or RWKV trainer
+roots.
 The stdlib-only guard verifies its canonical digest, permissions, non-worker-writable ancestors,
 symlinks, sizes, and every regular-file SHA-256 before importing the worker entrypoint or any
 third-party module. Member order, timestamps, modes, and bytes are
@@ -147,9 +152,10 @@ tuples for the MageFlow appearance expert, MageFlow terminal expert, Qwen AO3 co
 scratch RWKV pretraining. An experiment cannot select an import string, script, argv, environment
 override, or entry-point path.
 
-`trainvm inspect-rwkv-lab-deployment` lowers the exact zipapp, bootstrap-runtime-closure, and
-interpreter fingerprints, paths, working directory, and trusted roots into matching reflected
-adapter and `trainvm.host-launches/v4` documents. Every one of the four profiles advertises the
+`trainvm inspect-rwkv-lab-deployment` lowers each adapter's exact zipapp,
+bootstrap-runtime-closure, and interpreter fingerprints, paths, working directory, and trusted
+roots into matching reflected adapter and `trainvm.host-launches/v4` documents. Every one of the
+four profiles advertises the
 capability set implemented by those exact
 worker bytes; requested capabilities may only narrow it. The artifact execution gate loads the
 zipapp under `python -I` with an empty environment, verifies that the generated host registry binds
@@ -189,7 +195,10 @@ Materialize an immutable deployment directory without hand-editing either regist
 ```sh
 scripts/materialize_trainvm_worker_deployment.py \
   --trainvm /opt/trainvm/bin/trainvm \
-  --python /opt/trainvm/python/bin/python3 \
+  --adapter-python rwkv-lab.mageflow-appearance-expert=/opt/trainvm/venvs/mageflow/bin/python3 \
+  --adapter-python rwkv-lab.mageflow-terminal-expert=/opt/trainvm/venvs/mageflow/bin/python3 \
+  --adapter-python rwkv-lab.qwen-ao3=/opt/trainvm/venvs/qwen/bin/python3 \
+  --adapter-python rwkv-lab.rwkv-scratch=/opt/trainvm/venvs/rwkv/bin/python3 \
   --source-root /src/rwkv-lab/src \
   --output-directory /opt/trainvm/workers/rwkv-lab-v1 \
   --working-directory /srv/trainvm/work \
@@ -197,9 +206,12 @@ scripts/materialize_trainvm_worker_deployment.py \
   --trusted-root /srv/trainvm
 ```
 
-The command publishes `rwkv-lab-worker.pyz`, `bootstrap-runtime-closure.json`, `adapters.json`,
-`host-launches.json`, and a digest-bound `deployment-receipt.json`. It is byte-idempotent and
-refuses to replace changed outputs unless the operator explicitly supplies `--replace`.
+The command groups adapters only when both interpreter and native-declared root set match, then
+publishes contract-grouped worker zipapps and closure manifests plus `adapters.json`,
+`host-launches.json`, and a digest-bound `deployment-receipt.json`. The two MageFlow routes can
+share one runtime group; Qwen and RWKV remain separate. `--python` remains a shared-root fixture and
+compatibility mode. Materialization is byte-idempotent and refuses to replace changed outputs
+unless the operator explicitly supplies `--replace`.
 
 The interpreter path must be a regular executable, not the usual symlink created by many virtual
 environment tools. Hostd refuses symlink traversal for launch artifacts, and silently resolving a

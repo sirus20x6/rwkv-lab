@@ -240,7 +240,10 @@ resolution proves the required set is a subset and freezes both sets in
 request. A worker therefore cannot accept an optimizer or fused kernel it did not independently
 advertise. The same profile binds the exact argv index replaced by sealed code fd 3, allowing
 `python -I /proc/self/fd/3` while rejecting an out-of-range or native code slot. It also binds the
-bootstrap-runtime-closure digest verified by the packaged worker before third-party imports;
+adapter-specific bootstrap-runtime-closure digest verified by the packaged worker before
+third-party imports. A reflected native requirements contract declares each registered adapter's
+root Python distributions, so deployment tooling discovers MageFlow, transformer, and RWKV runtime
+closure policy from the same C++ catalog that owns adapter identity;
 resolved-launch replay and cache authority require that same digest rather than trusting a probe to
 choose its own closure. Components may only attach to external process
 operations, and an exact-resume plan rejects any selected stateful component whose state grade is
