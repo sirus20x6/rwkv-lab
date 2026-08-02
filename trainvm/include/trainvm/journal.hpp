@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -21,6 +22,7 @@
 #include "trainvm/host_launch.hpp"
 #include "trainvm/host_ledger.hpp"
 #include "trainvm/hostd_process_protocol.hpp"
+#include "trainvm/sqlite_authority_vfs.hpp"
 #include "trainvm/command.hpp"
 #include "trainvm/lease.hpp"
 #include "trainvm/worker.hpp"
@@ -28,6 +30,7 @@
 namespace trainvm {
 
 class Controller;
+class SqliteFilesystemAuthority;
 
 // A durable command was valid when issued but has lost the active run/resource
 // fence required to apply it. Boundary services map this typed condition to
@@ -230,7 +233,9 @@ public:
       HostGrantEnforcement host_grant_enforcement =
           HostGrantEnforcement::required,
       std::optional<HostIdentity> expected_host_grant_authority =
-          std::nullopt);
+          std::nullopt,
+      std::shared_ptr<SqliteFilesystemAuthority> filesystem_authority = {},
+      bool require_exclusive_wal = false);
   ~Journal();
 
   Journal(const Journal&) = delete;
@@ -397,7 +402,12 @@ public:
   };
 
   sqlite3* database_{};
+  // Declared after `database_` so it outlives the sqlite3_close in ~Journal:
+  // unregistering the VFS while a connection still holds it is undefined.
+  std::shared_ptr<SqliteAuthorityVfs> authority_vfs_;
   std::optional<JournalFileIdentity> expected_file_;
+  std::shared_ptr<SqliteFilesystemAuthority> filesystem_authority_;
+  bool exclusive_wal_{};
   HostGrantEnforcement host_grant_enforcement_;
   std::optional<HostIdentity> expected_host_grant_authority_;
   mutable std::atomic<bool> authority_poisoned_{false};

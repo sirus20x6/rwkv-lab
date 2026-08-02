@@ -2,6 +2,7 @@
 
 #include "trainvm/document.hpp"
 #include "trainvm/reflection_json.hpp"
+#include "trainvm/sqlite_filesystem_authority.hpp"
 
 #include <sqlite3.h>
 
@@ -39,6 +40,8 @@ PRAGMA busy_timeout=5000;
 PRAGMA trusted_schema=OFF;
 )sql";
 
+constexpr std::string_view kExclusiveLockingPragma =
+    "PRAGMA locking_mode=EXCLUSIVE;";
 constexpr std::string_view kWalPragma = "PRAGMA journal_mode=WAL;";
 
 constexpr std::string_view kSchema = R"sql(
@@ -2266,13 +2269,32 @@ bool safe_authority_file(const struct stat& status, std::uint64_t owner_uid) {
          (status.st_mode & (S_IWGRP | S_IWOTH)) == 0;
 }
 
+void execute_connection_pragma(sqlite3* database, std::string_view sql,
+                               std::string_view action) {
+  char* error_message = nullptr;
+  if (sqlite3_exec(database, std::string(sql).c_str(), nullptr, nullptr,
+                   &error_message) != SQLITE_OK) {
+    const std::string message =
+        error_message != nullptr ? error_message : sqlite3_errmsg(database);
+    sqlite3_free(error_message);
+    throw std::runtime_error(std::string(action) + ": " + message);
+  }
+}
+
 }  // namespace
 
 Journal::Journal(const std::filesystem::path& path,
                  std::optional<JournalFileIdentity> expected_file,
                  HostGrantEnforcement host_grant_enforcement,
-                 std::optional<HostIdentity> expected_host_grant_authority)
+                 std::optional<HostIdentity> expected_host_grant_authority,
+                 std::shared_ptr<SqliteFilesystemAuthority> filesystem_authority,
+                 bool require_exclusive_wal)
     : expected_file_(std::move(expected_file)),
+      filesystem_authority_(std::move(filesystem_authority)),
+      exclusive_wal_(
+          require_exclusive_wal ||
+          (filesystem_authority_ &&
+           filesystem_authority_->is_protected_filesystem_boundary())),
       host_grant_enforcement_(host_grant_enforcement),
       expected_host_grant_authority_(
           std::move(expected_host_grant_authority)) {
@@ -2296,10 +2318,69 @@ Journal::Journal(const std::filesystem::path& path,
   if (!expected_file_ && !parent.empty()) {
     std::filesystem::create_directories(parent);
   }
+  // Create the database at the protected 0600 mode before SQLite can create it
+  // at the process umask. Stock SQLite derives -wal, -shm, and -journal modes
+  // from the database file, so establishing 0600 here is what lets every
+  // auxiliary satisfy the authority's owned-0600-singleton policy. A file that
+  // already exists is left untouched: widening or narrowing an established
+  // inode here would mask exactly the interference the authority must detect.
+  if (!filesystem_authority_) {
+    const int created =
+        ::open(path.c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+               S_IRUSR | S_IWUSR);
+    if (created >= 0) {
+      (void)::close(created);
+    } else if (errno != EEXIST) {
+      throw std::runtime_error("could not create the journal database: " +
+                               std::string(std::strerror(errno)));
+    }
+  }
+  if (filesystem_authority_) {
+    const auto authority_path = filesystem_authority_->ledger_path();
+    if (std::filesystem::absolute(path).lexically_normal() != authority_path) {
+      throw std::invalid_argument(
+          "journal path does not match its SQLite filesystem authority");
+    }
+    (void)filesystem_authority_->attest_before_open();
+    (void)filesystem_authority_->validate_auxiliary_files();
+  }
+
+  // An authority-bound journal is opened through the controlled VFS. Stock
+  // SQLite derives `-wal`, `-shm`, and `-journal` by string concatenation and
+  // opens them with a plain `open(2)` that checks neither ownership nor link
+  // count, so a same-UID process can hardlink an alias over an auxiliary and
+  // read or corrupt authority state through it. The VFS resolves every one of
+  // those names relative to a pinned directory descriptor and validates the
+  // inode on both sides of SQLite's own open.
+  std::string open_path = path.string();
+  const char* open_vfs = nullptr;
+  if (filesystem_authority_) {
+    // Prefer the VFS the filesystem authority already owns. Its directory
+    // descriptor was pinned only after the strict mode-0700, ancestry, and
+    // supported-filesystem checks, so the confinement and the deployment
+    // identity boundary are anchored to the same validated descriptor.
+    const SqliteAuthorityVfs& authority_vfs = filesystem_authority_->sqlite_vfs();
+    open_path = authority_vfs.database_path();
+    open_vfs = authority_vfs.vfs_name().c_str();
+  } else if (expected_file_) {
+    const int directory =
+        open_existing_directory_by_components(expected_file_->directory_path);
+    try {
+      authority_vfs_ = SqliteAuthorityVfs::create(
+          directory, expected_file_->journal_name,
+          static_cast<uid_t>(expected_file_->owner_uid));
+    } catch (...) {
+      (void)::close(directory);
+      throw;
+    }
+    (void)::close(directory);
+    open_path = authority_vfs_->database_path();
+    open_vfs = authority_vfs_->vfs_name().c_str();
+  }
+
   const int open_flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE |
                          (expected_file_ ? 0 : SQLITE_OPEN_NOFOLLOW);
-  if (sqlite3_open_v2(path.c_str(), &database_, open_flags,
-                      nullptr) !=
+  if (sqlite3_open_v2(open_path.c_str(), &database_, open_flags, open_vfs) !=
       SQLITE_OK) {
     const std::string message = database_ ? sqlite3_errmsg(database_) : "unknown error";
     if (database_) {
@@ -2309,6 +2390,15 @@ Journal::Journal(const std::filesystem::path& path,
     throw std::runtime_error("sqlite open failed: " + message);
   }
   try {
+    if (filesystem_authority_) {
+      (void)filesystem_authority_->attest_after_open();
+      (void)filesystem_authority_->validate_auxiliary_files();
+    }
+    if (exclusive_wal_) {
+      execute_connection_pragma(
+          database_, kExclusiveLockingPragma,
+          "could not select exclusive journal locking mode");
+    }
     if (expected_file_) {
       require_file_identity(*expected_file_);
       if (sqlite3_set_authorizer(database_, &Journal::authorize_database_operation,
@@ -2318,6 +2408,17 @@ Journal::Journal(const std::filesystem::path& path,
       (void)sqlite3_commit_hook(database_, &Journal::authorize_commit, this);
     }
     initialize();
+    if (filesystem_authority_) {
+      (void)filesystem_authority_->attest_after_open();
+      const auto auxiliary = filesystem_authority_->validate_auxiliary_files();
+      if (exclusive_wal_ &&
+          std::ranges::any_of(auxiliary, [](const auto& file) {
+            return file.suffix == "-shm";
+          })) {
+        throw std::runtime_error(
+            "exclusive journal locking unexpectedly created SQLite SHM");
+      }
+    }
   } catch (...) {
     sqlite3_close(database_);
     database_ = nullptr;
@@ -2410,6 +2511,17 @@ bool Journal::validate_authority_boundary() const noexcept {
   if (!expected_file_) return true;
   if (authority_poisoned_.load(std::memory_order_acquire)) return false;
   try {
+    if (filesystem_authority_) {
+      (void)filesystem_authority_->attest_after_open();
+      const auto auxiliary = filesystem_authority_->validate_auxiliary_files();
+      if (exclusive_wal_ &&
+          std::ranges::any_of(auxiliary, [](const auto& file) {
+            return file.suffix == "-shm";
+          })) {
+        throw std::runtime_error(
+            "exclusive journal locking created an unexpected SHM file");
+      }
+    }
     require_namespace_identity(*expected_file_);
     return true;
   } catch (...) {

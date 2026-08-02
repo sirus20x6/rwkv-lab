@@ -1,7 +1,9 @@
 #include "trainvm/rwkv_lab_worker_contract.hpp"
 
 #include <algorithm>
+#include <map>
 #include <ranges>
+#include <stdexcept>
 #include <utility>
 
 namespace trainvm {
@@ -30,6 +32,23 @@ OperationLifecycleCapabilities resumable_training_lifecycle() {
       .profile = true,
       .resume_grade = ResumeGrade::compatible,
   };
+}
+
+std::vector<std::string> canonical_distributions(
+    std::initializer_list<std::string_view> values) {
+  std::vector<std::string> result;
+  result.reserve(values.size());
+  for (const std::string_view value : values) {
+    if (value.empty()) {
+      throw std::logic_error("runtime distribution name must not be empty");
+    }
+    result.emplace_back(value);
+  }
+  std::ranges::sort(result);
+  if (std::ranges::adjacent_find(result) != result.end()) {
+    throw std::logic_error("runtime distribution names must be unique");
+  }
+  return result;
 }
 
 AdapterProfile profile(AdapterKey adapter_key, std::string code_fingerprint,
@@ -156,27 +175,110 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
   };
 }
 
+RwkvLabWorkerRuntimeRequirementsContract
+rwkv_lab_worker_runtime_requirements() {
+  const std::vector<std::string> shared = canonical_distributions(
+      {"grpcio", "pillow", "protobuf", "torch"});
+  std::map<std::string, std::vector<std::string>> requirements{
+      {"rwkv-lab.mageflow-appearance-expert",
+       canonical_distributions(
+           {"accelerate", "deepspeed", "diffusers", "einops", "flash-attn",
+            "grpcio", "huggingface-hub", "mage-flow", "numpy", "pillow",
+            "protobuf", "safetensors", "torch", "transformers"})},
+      {"rwkv-lab.mageflow-terminal-expert",
+       canonical_distributions(
+           {"accelerate", "deepspeed", "diffusers", "einops", "flash-attn",
+            "grpcio", "huggingface-hub", "mage-flow", "numpy", "pillow",
+            "protobuf", "safetensors", "torch", "transformers"})},
+      {"rwkv-lab.qwen-ao3",
+       canonical_distributions(
+           {"accelerate", "bitsandbytes", "causal-conv1d", "einops",
+            "flash-attn", "flash-linear-attention", "grpcio",
+            "huggingface-hub", "numpy", "packaging", "peft", "pillow",
+            "protobuf", "psutil", "safetensors", "tokenizers", "torch",
+            "transformers", "zstandard"})},
+      {"rwkv-lab.rwkv-scratch",
+       canonical_distributions(
+           {"einops", "grpcio", "numpy", "pillow", "protobuf", "torch"})},
+  };
+
+  const RwkvLabWorkerContract worker =
+      rwkv_lab_worker_contract("sha256:" + std::string(64U, '0'));
+  std::vector<RwkvLabWorkerAdapterRuntimeRequirements> profiles;
+  profiles.reserve(worker.adapter_registry.profiles.size());
+  for (const AdapterProfile& profile : worker.adapter_registry.profiles) {
+    const auto selected = requirements.find(profile.key.adapter);
+    if (selected == requirements.end()) {
+      throw std::logic_error(
+          "runtime requirements omit a registered rwkv_lab adapter");
+    }
+    if (!std::ranges::includes(selected->second, shared)) {
+      throw std::logic_error(
+          "adapter runtime requirements omit a shared worker distribution");
+    }
+    profiles.push_back({
+        .adapter = profile.key.adapter,
+        .root_distributions = std::move(selected->second),
+    });
+    requirements.erase(selected);
+  }
+  if (!requirements.empty()) {
+    throw std::logic_error(
+        "runtime requirements name an unregistered rwkv_lab adapter");
+  }
+  return {
+      .api_version =
+          "trainvm.rwkv-lab-worker-runtime-requirements/v1",
+      .shared_root_distributions = shared,
+      .profiles = std::move(profiles),
+  };
+}
+
 RwkvLabWorkerDeploymentContract rwkv_lab_worker_deployment(
     RwkvLabWorkerDeploymentSpec spec) {
-  RwkvLabWorkerContract worker =
-      rwkv_lab_worker_contract(spec.code_fingerprint);
+  if (spec.api_version != "trainvm.rwkv-lab-worker-runtimes/v1") {
+    throw std::invalid_argument(
+        "rwkv_lab deployment runtime spec has an unsupported api_version");
+  }
+  std::map<std::string, RwkvLabWorkerRuntimeDeploymentSpec> runtimes;
+  for (auto& runtime : spec.runtimes) {
+    if (runtime.adapter.empty() ||
+        !runtimes.emplace(runtime.adapter, std::move(runtime)).second) {
+      throw std::invalid_argument(
+          "rwkv_lab deployment requires unique nonempty adapter runtimes");
+    }
+  }
+  RwkvLabWorkerContract worker = rwkv_lab_worker_contract(
+      "sha256:" + std::string(64U, '0'));
   std::ranges::sort(spec.trusted_roots);
   std::vector<HostLaunchProfile> launches;
   launches.reserve(worker.adapter_registry.profiles.size());
-  for (const AdapterProfile& adapter : worker.adapter_registry.profiles) {
+  for (AdapterProfile& adapter : worker.adapter_registry.profiles) {
+    const auto selected = runtimes.find(adapter.key.adapter);
+    if (selected == runtimes.end()) {
+      throw std::invalid_argument(
+          "rwkv_lab deployment omits a registered adapter runtime");
+    }
+    const RwkvLabWorkerRuntimeDeploymentSpec& runtime = selected->second;
+    adapter.code_fingerprint = runtime.code_fingerprint;
     launches.push_back({
         .key = adapter.key,
         .code_fingerprint = adapter.code_fingerprint,
         .bootstrap_runtime_closure_fingerprint =
-            spec.bootstrap_runtime_closure_fingerprint,
+            runtime.bootstrap_runtime_closure_fingerprint,
         .provided_capabilities = worker.provided_capabilities,
-        .executable_path = spec.executable_path,
-        .executable_fingerprint = spec.executable_fingerprint,
-        .code_path = spec.code_path,
+        .executable_path = runtime.executable_path,
+        .executable_fingerprint = runtime.executable_fingerprint,
+        .code_path = runtime.code_path,
         .code_argument_index = 1U,
         .public_arguments = {"-I", "rwkv-lab-worker.pyz"},
-        .working_directory = spec.working_directory,
+        .working_directory = runtime.working_directory,
     });
+    runtimes.erase(selected);
+  }
+  if (!runtimes.empty()) {
+    throw std::invalid_argument(
+        "rwkv_lab deployment names an unregistered adapter runtime");
   }
   HostLaunchRegistryDocument host{
       .api_version = "trainvm.host-launches/v4",

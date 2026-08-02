@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import subprocess
@@ -142,6 +143,13 @@ def run_completed_replay(
                     )
                 )
                 observed.extend(request_iterator)
+            except grpc.RpcError as error:
+                # A completed worker closes its request stream immediately after
+                # Welcome. grpcio may surface that normal peer cancellation to
+                # the server iterator depending on scheduler timing.
+                if not observed or error.code() != grpc.StatusCode.CANCELLED:
+                    errors.append(error)
+                    context.abort(grpc.StatusCode.INTERNAL, "fixture rejected worker")
             except BaseException as error:  # noqa: BLE001
                 errors.append(error)
                 context.abort(grpc.StatusCode.INTERNAL, "fixture rejected worker")
@@ -253,6 +261,55 @@ def main() -> int:
     materializer = Path(sys.argv[3]).resolve(strict=True)
     trainvm = Path(sys.argv[4]).resolve(strict=True)
     source_root = Path(sys.argv[5]).resolve(strict=True)
+    requirements = json.loads(
+        subprocess.check_output(
+            [str(trainvm), "inspect-rwkv-lab-runtime-requirements"], text=True
+        )
+    )
+    if requirements["api_version"] != (
+        "trainvm.rwkv-lab-worker-runtime-requirements/v1"
+    ):
+        raise SystemExit("native runtime requirements schema drifted")
+    adapters = tuple(profile["adapter"] for profile in requirements["profiles"])
+    shared_distributions = tuple(requirements["shared_root_distributions"])
+    if (
+        len(adapters) != 4
+        or len(set(adapters)) != len(adapters)
+        or shared_distributions != tuple(sorted(set(shared_distributions)))
+        or any(
+            not set(shared_distributions).issubset(profile["root_distributions"])
+            for profile in requirements["profiles"]
+        )
+    ):
+        raise SystemExit("native runtime requirements are not canonical")
+
+    module_spec = importlib.util.spec_from_file_location(
+        "materialize_trainvm_worker_deployment", materializer
+    )
+    if module_spec is None or module_spec.loader is None:
+        raise SystemExit("could not load deployment materializer")
+    sys.path.insert(0, str(materializer.parent))
+    materializer_module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(materializer_module)
+    grouped = materializer_module._runtime_groups(
+        adapters,
+        {
+            adapter: Path(
+                "/runtime/mageflow"
+                if "mageflow" in adapter
+                else f"/runtime/{adapter}"
+            )
+            for adapter in adapters
+        },
+        {
+            profile["adapter"]: tuple(profile["root_distributions"])
+            for profile in requirements["profiles"]
+        },
+    )
+    if len(grouped) != 3 or not any(
+        members == list(adapters[:2]) for members in grouped.values()
+    ):
+        raise SystemExit("per-adapter runtime grouping drifted from native requirements")
     with tempfile.TemporaryDirectory(prefix="trainvm-worker-artifact-") as raw:
         directory = Path(raw)
         first = directory / "first.pyz"
@@ -365,30 +422,40 @@ def main() -> int:
             python_root = python_path.parent
         deployment = json.loads(
             subprocess.check_output(
-                [
-                    str(trainvm),
-                    "inspect-rwkv-lab-deployment",
-                    str(first),
-                    digest(first),
-                    json.loads(runtime_closure.read_text())["closure_digest"],
-                    str(python_path),
-                    digest(python_path),
-                    str(directory),
-                    str(directory),
-                    str(python_root),
-                ],
+                [str(trainvm), "inspect-rwkv-lab-deployment"],
+                input=json.dumps(
+                    {
+                        "api_version": "trainvm.rwkv-lab-worker-runtimes/v1",
+                        "runtimes": [
+                            {
+                                "adapter": adapter,
+                                "code_path": str(first),
+                                "code_fingerprint": digest(first),
+                                "bootstrap_runtime_closure_fingerprint": closure_document[
+                                    "closure_digest"
+                                ],
+                                "executable_path": str(python_path),
+                                "executable_fingerprint": digest(python_path),
+                                "working_directory": str(directory),
+                            }
+                            for adapter in adapters
+                        ],
+                        "trusted_roots": [str(directory), str(python_root)],
+                    },
+                    separators=(",", ":"),
+                ),
                 text=True,
             )
         )
         profiles = deployment["host_launch_registry"]["profiles"]
-        if deployment["schema"] != "trainvm.rwkv-lab-worker-deployment/v2":
+        if deployment["schema"] != "trainvm.rwkv-lab-worker-deployment/v3":
             raise SystemExit("deployment inspector emitted the wrong schema")
         if len(profiles) != 4 or any(
             profile["code_argument_index"] != 1
             or profile["public_arguments"] != ["-I", "rwkv-lab-worker.pyz"]
             or profile["code_fingerprint"] != digest(first)
             or profile["bootstrap_runtime_closure_fingerprint"]
-            != json.loads(runtime_closure.read_text())["closure_digest"]
+            != closure_document["closure_digest"]
             for profile in profiles
         ):
             raise SystemExit("deployment registry drifted from sealed worker artifact")
@@ -427,27 +494,31 @@ def main() -> int:
         )
         if first_materialization != second_materialization:
             raise SystemExit("worker deployment materialization is not idempotent")
-        for name in (
-            "rwkv-lab-worker.pyz",
-            "bootstrap-runtime-closure.json",
-            "adapters.json",
-            "host-launches.json",
-            "deployment-receipt.json",
-        ):
+        for name in ("adapters.json", "host-launches.json", "deployment-receipt.json"):
             if not (deployment_directory / name).is_file():
                 raise SystemExit(f"worker deployment omitted {name}")
-        deployed_closure = deployment_directory / "bootstrap-runtime-closure.json"
+        if len(first_materialization["runtime_groups"]) != 1:
+            raise SystemExit("shared-interpreter fixture did not coalesce runtime groups")
+        runtime_group = first_materialization["runtime_groups"][0]
+        if runtime_group["adapters"] != list(adapters):
+            raise SystemExit("materialized runtime group has the wrong adapter membership")
+        deployed_artifact = Path(runtime_group["worker_artifact"]["output"])
+        deployed_closure = Path(runtime_group["runtime_closure"]["output"])
+        if not deployed_artifact.is_file() or not deployed_closure.is_file():
+            raise SystemExit("worker deployment omitted grouped runtime payloads")
         deployed_closure_document = json.loads(deployed_closure.read_text())
         deployed_profiles = json.loads(
             (deployment_directory / "host-launches.json").read_text()
         )["profiles"]
         if (
             first_materialization["schema"]
-            != "trainvm.rwkv-lab-worker-deployment-materialization/v2"
-            or first_materialization["runtime_closure"]["closure_digest"]
+            != "trainvm.rwkv-lab-worker-deployment-materialization/v3"
+            or runtime_group["runtime_closure"]["closure_digest"]
             != deployed_closure_document["closure_digest"]
-            or first_materialization["runtime_closure"]["manifest_sha256"]
+            or runtime_group["runtime_closure"]["manifest_sha256"]
             != digest(deployed_closure)
+            or runtime_group["worker_artifact"]["archive_sha256"]
+            != digest(deployed_artifact)
             or any(
                 profile["bootstrap_runtime_closure_fingerprint"]
                 != deployed_closure_document["closure_digest"]

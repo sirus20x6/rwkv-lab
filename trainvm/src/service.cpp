@@ -1,5 +1,7 @@
 #include "trainvm/service.hpp"
 
+#include "trainvm/lifecycle_admission.hpp"
+
 #include "trainvm/controller.hpp"
 #include "trainvm/document.hpp"
 #include "trainvm/reflection_json.hpp"
@@ -37,79 +39,12 @@
 #include <grpcpp/security/server_credentials.h>
 
 namespace trainvm {
-namespace {
 
-int open_directory_by_components(const std::filesystem::path& absolute_path,
-                                 bool create_missing) {
-  if (!absolute_path.is_absolute()) {
-    throw std::runtime_error("authority directory path must be absolute");
-  }
-  int current = ::open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-  if (current < 0) {
-    throw std::runtime_error("could not open filesystem root: " +
-                             std::string(std::strerror(errno)));
-  }
-  for (const auto& part : absolute_path.relative_path()) {
-    const std::string component = part.string();
-    if (component.empty() || component == "." || component == ".." ||
-        component.find('/') != std::string::npos) {
-      (void)::close(current);
-      throw std::runtime_error("authority directory has a noncanonical component");
-    }
-    int next = ::openat(current, component.c_str(),
-                        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    if (next < 0 && errno == ENOENT && create_missing) {
-      if (::mkdirat(current, component.c_str(), S_IRWXU) != 0 &&
-          errno != EEXIST) {
-        const std::string message = std::strerror(errno);
-        (void)::close(current);
-        throw std::runtime_error("could not create authority directory component " +
-                                 component + ": " + message);
-      }
-      next = ::openat(current, component.c_str(),
-                      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    }
-    if (next < 0) {
-      const std::string message = std::strerror(errno);
-      (void)::close(current);
-      throw std::runtime_error("could not securely resolve authority directory component " +
-                               component + ": " + message);
-    }
-    (void)::close(current);
-    current = next;
-  }
-  return current;
-}
-
-bool safe_owned_regular(const struct stat& status, uid_t owner) {
-  return S_ISREG(status.st_mode) && status.st_uid == owner &&
-         status.st_nlink == 1 &&
-         (status.st_mode & (S_IWGRP | S_IWOTH)) == 0;
-}
-
-void require_safe_sqlite_auxiliary(int directory_descriptor,
-                                   std::string_view name, uid_t owner) {
-  struct stat status {};
-  const std::string owned_name(name);
-  if (::fstatat(directory_descriptor, owned_name.c_str(), &status,
-                AT_SYMLINK_NOFOLLOW) != 0) {
-    if (errno == ENOENT) return;
-    throw std::runtime_error("could not inspect SQLite auxiliary " + owned_name +
-                             ": " + std::strerror(errno));
-  }
-  if (!safe_owned_regular(status, owner)) {
-    throw std::runtime_error(
-        "SQLite auxiliary is not a safe unique owned regular file " +
-        owned_name);
-  }
-}
-
-}  // namespace
-
-AuthorityLock::AuthorityLock(const std::filesystem::path& journal_path) {
+AuthorityLock::AuthorityLock(
+    const std::filesystem::path& journal_path,
+    SqliteAuthorityEnforcementGrade enforcement_grade) {
   const auto absolute_journal =
       std::filesystem::absolute(journal_path).lexically_normal();
-  const std::filesystem::path parent = absolute_journal.parent_path();
   const std::string filename = absolute_journal.filename().string();
   if (filename.empty() || filename == "." || filename == ".." ||
       filename.find('/') != std::string::npos) {
@@ -120,18 +55,7 @@ AuthorityLock::AuthorityLock(const std::filesystem::path& journal_path) {
       (void)::close(kernel_namespace_descriptor_);
       kernel_namespace_descriptor_ = -1;
     }
-    if (descriptor_ >= 0) {
-      (void)::close(descriptor_);
-      descriptor_ = -1;
-    }
-    if (journal_descriptor_ >= 0) {
-      (void)::close(journal_descriptor_);
-      journal_descriptor_ = -1;
-    }
-    if (directory_descriptor_ >= 0) {
-      (void)::close(directory_descriptor_);
-      directory_descriptor_ = -1;
-    }
+    filesystem_authority_.reset();
   };
   const auto fail = [&](std::string message) -> void {
     close_all();
@@ -166,114 +90,52 @@ AuthorityLock::AuthorityLock(const std::filesystem::path& journal_path) {
   }
 
   try {
-    directory_descriptor_ = open_directory_by_components(parent, true);
+    filesystem_authority_ = std::make_shared<SqliteFilesystemAuthority>(
+        SqliteFilesystemAuthority::acquire({
+            .api_version = std::string(kSqliteAuthorityApiVersion),
+            .ledger_path = absolute_journal,
+            .expected_owner_uid = ::geteuid(),
+            .expected_owner_gid = ::getegid(),
+            .enforcement_grade = enforcement_grade,
+        }));
   } catch (const std::exception& exception) {
     fail(exception.what());
   }
-  struct stat directory_status {};
-  if (directory_descriptor_ < 0 ||
-      ::fstat(directory_descriptor_, &directory_status) != 0 ||
-      !S_ISDIR(directory_status.st_mode) ||
-      directory_status.st_uid != ::geteuid() ||
-      (directory_status.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
-    const std::string message = std::strerror(errno);
-    fail("authority journal directory is not a safe owned directory " +
-         parent.string() + ": " + message);
-  }
-
+  const auto attestation = filesystem_authority_->attest_before_open();
+  (void)filesystem_authority_->validate_auxiliary_files();
   const std::string lock_name = filename + ".authority.lock";
-  descriptor_ = ::openat(directory_descriptor_, lock_name.c_str(),
-                         O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_RDWR,
-                         S_IRUSR | S_IWUSR);
-  struct stat lock_status {};
-  if (descriptor_ < 0 || ::fstat(descriptor_, &lock_status) != 0 ||
-      !S_ISREG(lock_status.st_mode) || lock_status.st_uid != ::geteuid() ||
-      lock_status.st_nlink != 1 ||
-      (lock_status.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
-    const std::string message = std::strerror(errno);
-    fail("authority sidecar is not a safe unique regular file " + lock_name +
-         ": " + message);
-  }
-  if (::flock(descriptor_, LOCK_EX | LOCK_NB) != 0) {
-    const std::string message = std::strerror(errno);
-    fail("another TrainVM authority owns " + lock_name + ": " + message);
-  }
-  if (::fchmod(descriptor_, S_IRUSR | S_IWUSR) != 0) {
-    const std::string message = std::strerror(errno);
-    fail("could not restrict authority lock " + lock_name + ": " + message);
-  }
-
-  journal_descriptor_ = ::openat(
-      directory_descriptor_, filename.c_str(),
-      O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_RDWR, S_IRUSR | S_IWUSR);
-  struct stat journal_status {};
-  if (journal_descriptor_ < 0 ||
-      ::fstat(journal_descriptor_, &journal_status) != 0 ||
-      !S_ISREG(journal_status.st_mode) ||
-      journal_status.st_uid != ::geteuid() || journal_status.st_nlink != 1 ||
-      (journal_status.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
-    const std::string message = std::strerror(errno);
-    fail("authority journal is not a safe unique regular file " + filename +
-         ": " + message);
-  }
-  if (::flock(journal_descriptor_, LOCK_EX | LOCK_NB) != 0) {
-    const std::string message = std::strerror(errno);
-    fail("another TrainVM authority owns " + filename + ": " + message);
-  }
-  if (::fchmod(journal_descriptor_, S_IRUSR | S_IWUSR) != 0) {
-    const std::string message = std::strerror(errno);
-    fail("could not restrict authority journal " + filename + ": " + message);
-  }
-
-  try {
-    for (const std::string_view suffix :
-         {std::string_view{"-journal"}, std::string_view{"-wal"},
-          std::string_view{"-shm"}}) {
-      require_safe_sqlite_auxiliary(directory_descriptor_, filename +
-                                        std::string(suffix),
-                                    ::geteuid());
-    }
-  } catch (const std::exception& exception) {
-    fail(exception.what());
-  }
-
   journal_identity_ = {
-      .directory_path = parent.string(),
+      .directory_path = absolute_journal.parent_path().string(),
       .journal_name = filename,
       .authority_name = lock_name,
-      .directory_device = static_cast<std::uint64_t>(directory_status.st_dev),
-      .directory_inode = static_cast<std::uint64_t>(directory_status.st_ino),
-      .device = static_cast<std::uint64_t>(journal_status.st_dev),
-      .inode = static_cast<std::uint64_t>(journal_status.st_ino),
-      .authority_device = static_cast<std::uint64_t>(lock_status.st_dev),
-      .authority_inode = static_cast<std::uint64_t>(lock_status.st_ino),
-      .owner_uid = static_cast<std::uint64_t>(::geteuid()),
+      .directory_device = attestation.authority_directory.device,
+      .directory_inode = attestation.authority_directory.inode,
+      .device = attestation.database_file.device,
+      .inode = attestation.database_file.inode,
+      .authority_device = attestation.lock_file.device,
+      .authority_inode = attestation.lock_file.inode,
+      .owner_uid = attestation.authority_directory.owner_uid,
   };
-  stable_journal_path_ = std::filesystem::path("/proc/self/fd") /
-                         std::to_string(directory_descriptor_) / filename;
+  journal_path_ = absolute_journal;
 }
 
 AuthorityLock::~AuthorityLock() {
   if (kernel_namespace_descriptor_ >= 0) {
     ::close(kernel_namespace_descriptor_);
   }
-  if (descriptor_ >= 0) {
-    ::close(descriptor_);
-  }
-  if (journal_descriptor_ >= 0) {
-    ::close(journal_descriptor_);
-  }
-  if (directory_descriptor_ >= 0) {
-    ::close(directory_descriptor_);
-  }
 }
 
 const std::filesystem::path& AuthorityLock::journal_path() const noexcept {
-  return stable_journal_path_;
+  return journal_path_;
 }
 
 const JournalFileIdentity& AuthorityLock::journal_identity() const noexcept {
   return journal_identity_;
+}
+
+const std::shared_ptr<SqliteFilesystemAuthority>&
+AuthorityLock::filesystem_authority() const noexcept {
+  return filesystem_authority_;
 }
 
 namespace {
@@ -1368,13 +1230,15 @@ TrainVMService::TrainVMService(
     std::function<AuthorityTimeSample()> authority_clock,
     TrainingComponentRegistry training_components,
     std::optional<HostdClientConfiguration> hostd_configuration,
-    std::string controller_target)
+    std::string controller_target,
+    SqliteAuthorityEnforcementGrade filesystem_enforcement_grade)
     : TrainVMService(journal_path, std::move(adapter_registry),
                      std::move(host_launch_registry),
                      HostLaunchResolver::local_host_identity(),
                      std::move(authority_clock),
                      HostGrantEnforcement::required,
-                     std::move(training_components)) {
+                     std::move(training_components), {}, {}, {},
+                     filesystem_enforcement_grade) {
   if (hostd_configuration) {
     configure_hostd(*hostd_configuration, std::move(controller_target));
   }
@@ -1394,11 +1258,14 @@ TrainVMService::TrainVMService(
     TrainingComponentRegistry training_components,
     std::shared_ptr<IHostGrantClient> host_grant_client,
     std::shared_ptr<IHostProcessClient> host_process_client,
-    std::string controller_target)
-    : authority_lock_(std::make_unique<AuthorityLock>(journal_path)),
+    std::string controller_target,
+    SqliteAuthorityEnforcementGrade filesystem_enforcement_grade)
+    : authority_lock_(std::make_unique<AuthorityLock>(
+          journal_path, filesystem_enforcement_grade)),
       journal_(authority_lock_->journal_path(),
                authority_lock_->journal_identity(),
-               host_grant_enforcement, authority_host),
+               host_grant_enforcement, authority_host,
+               authority_lock_->filesystem_authority()),
       authority_clock_(
           authority_clock
               ? std::make_shared<AuthorityClock>(std::move(authority_clock))
@@ -3746,14 +3613,14 @@ grpc::Status TrainVMService::CommandRun(grpc::ServerContext* context,
           plan->experiment.spec.components.at(node.invoke.component);
       const AdapterProfile& profile =
           adapter_registry_.resolve(component, node.invoke.operation);
-      if (!profile.lifecycle.graceful_stop) {
+      if (const auto refused = admit_lifecycle_control(
+              profile.lifecycle, LifecycleControlVerb::cancel, false)) {
         response->set_disposition(
             v1::RunCommandResponse::DISPOSITION_REJECTED);
         auto* diagnostic = response->add_diagnostics();
         diagnostic->set_severity(v1::Diagnostic::SEVERITY_ERROR);
-        diagnostic->set_code("cancel.unsupported_by_operation");
-        diagnostic->set_message(
-            "the active adapter operation does not declare graceful stop");
+        diagnostic->set_code(refused->code);
+        diagnostic->set_message(refused->message);
         fill_run_summary(*projection, journal_, *response);
         return grpc::Status::OK;
       }
@@ -3791,19 +3658,19 @@ grpc::Status TrainVMService::CommandRun(grpc::ServerContext* context,
         return {grpc::StatusCode::INVALID_ARGUMENT,
                 "resource-releasing pause requires checkpoint_first"};
       }
-      const bool supported =
-          release ? profile.lifecycle.pause_release_resources
-                  : profile.lifecycle.pause_keep_resources;
-      if (!supported ||
-          (pause && request->pause().checkpoint_first() &&
-           !profile.lifecycle.checkpoint_now)) {
+      const LifecycleControlVerb verb =
+          !pause ? LifecycleControlVerb::resume
+                 : (release ? LifecycleControlVerb::pause_release_resources
+                            : LifecycleControlVerb::pause_keep_resources);
+      if (const auto refused = admit_lifecycle_control(
+              profile.lifecycle, verb,
+              pause && request->pause().checkpoint_first())) {
         response->set_disposition(
             v1::RunCommandResponse::DISPOSITION_REJECTED);
         auto* diagnostic = response->add_diagnostics();
         diagnostic->set_severity(v1::Diagnostic::SEVERITY_ERROR);
-        diagnostic->set_code("lifecycle.unsupported_by_operation");
-        diagnostic->set_message(
-            "the active adapter operation does not declare the requested lifecycle protocol");
+        diagnostic->set_code(refused->code);
+        diagnostic->set_message(refused->message);
         fill_run_summary(*projection, journal_, *response);
         return grpc::Status::OK;
       }
@@ -3838,14 +3705,15 @@ grpc::Status TrainVMService::CommandRun(grpc::ServerContext* context,
           plan->experiment.spec.components.at(node.invoke.component);
       const AdapterProfile& profile =
           adapter_registry_.resolve(component, node.invoke.operation);
-      if (!profile.lifecycle.checkpoint_now) {
+      if (const auto refused = admit_lifecycle_control(
+              profile.lifecycle, LifecycleControlVerb::checkpoint_now,
+              false)) {
         response->set_disposition(
             v1::RunCommandResponse::DISPOSITION_REJECTED);
         auto* diagnostic = response->add_diagnostics();
         diagnostic->set_severity(v1::Diagnostic::SEVERITY_ERROR);
-        diagnostic->set_code("checkpoint.unsupported_by_operation");
-        diagnostic->set_message(
-            "the active adapter operation does not declare checkpoint-now");
+        diagnostic->set_code(refused->code);
+        diagnostic->set_message(refused->message);
         fill_run_summary(*projection, journal_, *response);
         return grpc::Status::OK;
       }
@@ -4269,7 +4137,8 @@ int serve(const std::filesystem::path& journal_path,
                          std::move(host_launch_registry), {},
                          std::move(training_components),
                          std::move(hostd_configuration),
-                         "unix:" + absolute_socket.string());
+                         "unix:" + absolute_socket.string(),
+                         SqliteAuthorityEnforcementGrade::strict_filesystem);
   SocketAuthorityLock socket_authority(absolute_socket);
   remove_stale_socket(absolute_socket);
   SocketCleanupGuard socket_cleanup(absolute_socket);

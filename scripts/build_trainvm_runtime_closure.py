@@ -19,9 +19,10 @@ from typing import Any
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
-SCHEMA = "trainvm.python-bootstrap-runtime-closure/v1"
-REQUIRED_DISTRIBUTIONS = (
+SCHEMA = "trainvm.python-bootstrap-runtime-closure/v2"
+DEFAULT_ROOT_DISTRIBUTIONS = (
     "grpcio",
+    "pillow",
     "protobuf",
     "torch",
 )
@@ -82,8 +83,10 @@ def _add_path(paths: dict[str, dict[str, Any]], path: Path) -> None:
         _add_path(paths, target)
 
 
-def _distribution_closure() -> list[importlib.metadata.Distribution]:
-    pending = deque(canonicalize_name(name) for name in REQUIRED_DISTRIBUTIONS)
+def _distribution_closure(
+    root_distributions: tuple[str, ...],
+) -> list[importlib.metadata.Distribution]:
+    pending = deque(root_distributions)
     selected: dict[str, importlib.metadata.Distribution] = {}
     while pending:
         requested = pending.popleft()
@@ -135,9 +138,9 @@ def _stdlib_files() -> list[Path]:
     return files
 
 
-def build() -> dict[str, Any]:
+def build(root_distributions: tuple[str, ...]) -> dict[str, Any]:
     paths: dict[str, dict[str, Any]] = {}
-    distributions = _distribution_closure()
+    distributions = _distribution_closure(root_distributions)
     for path in _stdlib_files():
         _add_path(paths, path)
     identities = []
@@ -162,6 +165,7 @@ def build() -> dict[str, Any]:
             "prefix": sys.prefix,
             "version": ".".join(str(value) for value in sys.version_info[:3]),
         },
+        "root_distributions": list(root_distributions),
     }
     return {**body, "closure_digest": _digest(_canonical(body))}
 
@@ -190,8 +194,20 @@ def _publish(output: Path, data: bytes) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--distribution",
+        action="append",
+        default=[],
+        help="root installed distribution to include recursively (repeatable)",
+    )
     arguments = parser.parse_args()
-    document = build()
+    requested = arguments.distribution or list(DEFAULT_ROOT_DISTRIBUTIONS)
+    root_distributions = tuple(
+        sorted({canonicalize_name(name) for name in requested})
+    )
+    if not root_distributions or any(not name for name in root_distributions):
+        raise ValueError("runtime closure roots must be nonempty distributions")
+    document = build(root_distributions)
     data = _canonical(document) + b"\n"
     _publish(arguments.output, data)
     print(
@@ -201,6 +217,7 @@ def main() -> int:
                 "output": str(arguments.output.absolute()),
                 "closure_digest": document["closure_digest"],
                 "manifest_sha256": _digest(data),
+                "root_distributions": list(root_distributions),
                 "distribution_count": len(document["distributions"]),
                 "file_count": len(document["files"]),
                 "total_bytes": sum(

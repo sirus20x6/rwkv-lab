@@ -49,6 +49,30 @@ int main() {
                     contract.provided_capabilities.end(),
             "rwkv_lab provided capabilities must be canonical");
 
+    const auto runtime_requirements =
+        trainvm::rwkv_lab_worker_runtime_requirements();
+    require(runtime_requirements.api_version ==
+                    "trainvm.rwkv-lab-worker-runtime-requirements/v1" &&
+                runtime_requirements.profiles.size() == 4U &&
+                runtime_requirements.shared_root_distributions ==
+                    std::vector<std::string>(
+                        {"grpcio", "pillow", "protobuf", "torch"}),
+            "native runtime requirements must expose the shared worker closure");
+    for (std::size_t index = 0;
+         index < runtime_requirements.profiles.size(); ++index) {
+      const auto& requirements = runtime_requirements.profiles.at(index);
+      require(requirements.adapter ==
+                      contract.adapter_registry.profiles.at(index).key.adapter &&
+                  std::ranges::is_sorted(requirements.root_distributions) &&
+                  std::ranges::adjacent_find(
+                      requirements.root_distributions) ==
+                      requirements.root_distributions.end() &&
+                  std::ranges::includes(requirements.root_distributions,
+                                        runtime_requirements
+                                            .shared_root_distributions),
+              "each runtime profile must exactly cover one registered adapter");
+    }
+
     const auto& appearance = find_profile(
         contract, "rwkv-lab.mageflow-appearance-expert");
     const auto& terminal = find_profile(
@@ -98,28 +122,46 @@ int main() {
                                   component_capabilities),
             "sealed rwkv_lab worker contract must cover the checked-in component catalog");
 
+    std::vector<trainvm::RwkvLabWorkerRuntimeDeploymentSpec> runtimes;
+    for (const trainvm::AdapterProfile& profile :
+         contract.adapter_registry.profiles) {
+      runtimes.push_back({
+          .adapter = profile.key.adapter,
+          .code_path = "/opt/trainvm/workers/" + profile.key.adapter + ".pyz",
+          .code_fingerprint = fingerprint,
+          .bootstrap_runtime_closure_fingerprint = runtime_closure,
+          .executable_path = "/opt/trainvm/python/bin/python3",
+          .executable_fingerprint = "sha256:" + std::string(64U, 'b'),
+          .working_directory = "/srv/trainvm/work",
+      });
+    }
+    runtimes.at(2).code_fingerprint =
+        "sha256:" + std::string(64U, 'd');
+    runtimes.at(2).bootstrap_runtime_closure_fingerprint =
+        "sha256:" + std::string(64U, 'e');
     const auto deployment = trainvm::rwkv_lab_worker_deployment({
-        .code_path = "/opt/trainvm/workers/rwkv-lab.pyz",
-        .code_fingerprint = fingerprint,
-        .bootstrap_runtime_closure_fingerprint = runtime_closure,
-        .executable_path = "/opt/trainvm/python/bin/python3",
-        .executable_fingerprint = "sha256:" + std::string(64U, 'b'),
-        .working_directory = "/srv/trainvm/work",
+        .api_version = "trainvm.rwkv-lab-worker-runtimes/v1",
+        .runtimes = runtimes,
         .trusted_roots = {"/srv/trainvm", "/opt/trainvm"},
     });
-    require(trainvm::encode_json(deployment.adapter_registry) ==
-                    trainvm::encode_json(contract.adapter_registry) &&
+    require(deployment.adapter_registry.profiles.size() ==
+                    contract.adapter_registry.profiles.size() &&
                 deployment.provided_capabilities ==
                     contract.provided_capabilities &&
                 deployment.host_launch_registry.api_version ==
                     "trainvm.host-launches/v4" &&
                 deployment.host_launch_registry.profiles.size() == 4U,
-            "deployment lowering must retain the exact reflected worker catalog");
+            "deployment lowering must retain the complete reflected worker catalog");
     for (const trainvm::HostLaunchProfile& launch :
          deployment.host_launch_registry.profiles) {
-      require(launch.code_fingerprint == fingerprint &&
+      const auto expected = std::ranges::find_if(
+          runtimes, [&](const auto& runtime) {
+            return runtime.adapter == launch.key.adapter;
+          });
+      require(expected != runtimes.end() &&
+                  launch.code_fingerprint == expected->code_fingerprint &&
                   launch.bootstrap_runtime_closure_fingerprint ==
-                      runtime_closure &&
+                      expected->bootstrap_runtime_closure_fingerprint &&
                   launch.provided_capabilities ==
                       contract.provided_capabilities &&
                   launch.code_argument_index == 1U &&
@@ -127,6 +169,29 @@ int main() {
                       std::vector<std::string>({"-I", "rwkv-lab-worker.pyz"}),
               "each deployment profile must bind isolation before its sealed code slot");
     }
+    const auto qwen_profile = std::ranges::find_if(
+        deployment.adapter_registry.profiles, [](const auto& profile) {
+          return profile.key.adapter == "rwkv-lab.qwen-ao3";
+        });
+    require(
+        qwen_profile != deployment.adapter_registry.profiles.end() &&
+            qwen_profile->code_fingerprint == runtimes.at(2).code_fingerprint,
+            "adapter registry and host profile must share each adapter-specific code identity");
+
+    auto missing_runtime = runtimes;
+    missing_runtime.pop_back();
+    bool missing_runtime_rejected = false;
+    try {
+      (void)trainvm::rwkv_lab_worker_deployment({
+          .api_version = "trainvm.rwkv-lab-worker-runtimes/v1",
+          .runtimes = std::move(missing_runtime),
+          .trusted_roots = {"/srv/trainvm", "/opt/trainvm"},
+      });
+    } catch (const std::invalid_argument&) {
+      missing_runtime_rejected = true;
+    }
+    require(missing_runtime_rejected,
+            "deployment lowering must reject a missing adapter runtime");
 
     bool invalid_fingerprint_rejected = false;
     try {
