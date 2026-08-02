@@ -85,6 +85,49 @@ jobs:
           path: evidence/
           if-no-files-found: warn
 
+  # The CPU job above deliberately omits flash-linear-attention, so any test
+  # asserting against the *real* package importorskips itself there. That skip
+  # is only honest if the assertion still runs somewhere, otherwise the suite
+  # keeps a test it never executes. This job installs the real dependency and
+  # runs exactly the `fla`-marked tests.
+  #
+  # No hand-maintained file list: selection is by marker, and pytest exits 5
+  # ("no tests collected") if the marker is ever dropped, so deleting the
+  # coverage fails this job instead of passing quietly.
+  python-fla:
+    name: fla dependency tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install (CPU torch + package + flash-linear-attention)
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e '.[vision,test,trainvm-worker]'
+          # The real dependency this job exists to exercise. It is a CUDA-stack
+          # package, but importing it and driving its Cache type works on CPU.
+          pip install flash-linear-attention
+
+      - name: The fla-marked assertions run against the installed package
+        run: |
+          mkdir -p evidence
+          python -m pytest -q -m "fla and not gpu" tests \
+            --junitxml=evidence/python-fla.xml
+
+      - name: Publish evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-python-fla
+          path: evidence/
+          if-no-files-found: warn
+
   schema-golden:
     name: Schema and example documents
     runs-on: ubuntu-latest
