@@ -112,6 +112,7 @@ add_library(trainvm_core
   src/reconciler.cpp
   src/resource_request_builder.cpp
   src/rwkv_lab_worker_contract.cpp
+  src/rwkv_scratch_profiles.cpp
   src/sqlite_authority_vfs.cpp
   src/training_component_registry.cpp
   src/worker_bootstrap.cpp
@@ -151,6 +152,15 @@ target_link_libraries(trainvm_experiment_analysis
   PRIVATE SQLite3::SQLite3 nlohmann_json::nlohmann_json
 )
 
+add_library(trainvm_training_schedules
+  src/training_schedules.cpp
+)
+target_include_directories(trainvm_training_schedules PUBLIC include)
+target_compile_options(trainvm_training_schedules PUBLIC -freflection)
+target_compile_options(trainvm_training_schedules PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+
 add_library(trainvm_service src/service.cpp)
 target_include_directories(trainvm_service PUBLIC include)
 target_compile_options(trainvm_service PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror)
@@ -168,6 +178,7 @@ target_compile_options(trainvm PRIVATE
 )
 target_link_libraries(trainvm PRIVATE
   trainvm_service trainvm_compatibility_catalog trainvm_experiment_analysis
+  trainvm_training_schedules
 )
 
 add_executable(trainvm-hostd src/hostd_main.cpp)
@@ -338,6 +349,23 @@ target_link_libraries(experiment_analysis_tests PRIVATE
   trainvm_experiment_analysis SQLite3::SQLite3
 )
 add_test(NAME experiment_analysis_tests COMMAND experiment_analysis_tests)
+add_executable(training_schedule_tests tests/training_schedule_tests.cpp)
+target_compile_options(training_schedule_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(training_schedule_tests PRIVATE
+  trainvm_training_schedules
+)
+add_test(NAME training_schedule_tests COMMAND training_schedule_tests)
+if(TRAINVM_PYTHON_EXECUTABLE)
+  add_test(NAME training_schedule_python_parity
+    COMMAND ${CMAKE_COMMAND} -E env
+      PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../src
+      ${TRAINVM_PYTHON_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_training_schedule_parity.py
+      $<TARGET_FILE:trainvm>
+  )
+endif()
 set(TRAINVM_LEGACY_SOURCE_ROOT "" CACHE PATH
   "Optional original moe-mla root for live source-disposition digest checks"
 )
@@ -380,6 +408,25 @@ target_compile_options(lifecycle_equivalence_tests PRIVATE
 target_link_libraries(lifecycle_equivalence_tests PRIVATE trainvm_core)
 add_test(NAME lifecycle_equivalence_tests
   COMMAND lifecycle_equivalence_tests
+)
+add_executable(authority_fuzz_tests tests/authority_fuzz_tests.cpp)
+target_compile_options(authority_fuzz_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(authority_fuzz_tests PRIVATE trainvm_core)
+add_test(NAME authority_fuzz_tests COMMAND authority_fuzz_tests)
+add_executable(rwkv_scratch_profiles_tests
+  tests/rwkv_scratch_profiles_tests.cpp
+)
+target_compile_options(rwkv_scratch_profiles_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_compile_definitions(rwkv_scratch_profiles_tests PRIVATE
+  TRAINVM_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/.."
+)
+target_link_libraries(rwkv_scratch_profiles_tests PRIVATE trainvm_core)
+add_test(NAME rwkv_scratch_profiles_tests
+  COMMAND rwkv_scratch_profiles_tests
 )
 add_executable(host_ledger_tests tests/host_ledger_tests.cpp)
 target_compile_options(host_ledger_tests PRIVATE
@@ -686,6 +733,30 @@ add_test(
   COMMAND trainvm validate-catalog
     "${CMAKE_CURRENT_SOURCE_DIR}/../docs/experiment-vm/compatibility-workflows.v1.json"
     "${CMAKE_CURRENT_SOURCE_DIR}/.."
+)
+# The gate must be reachable from a runner and must report a rejection as a
+# distinct, non-zero verdict rather than a crash. Both directions are pinned:
+# a qualified receipt exits 0, a rejected one exits 3 with attributable reasons.
+add_test(
+  NAME trainvm_cli_qualify_evidence_qualified
+  COMMAND ${CMAKE_COMMAND} -E env
+    "TRAINVM_EVIDENCE=${CMAKE_CURRENT_SOURCE_DIR}/../docs/experiment-vm/examples/qualification-evidence.qualified.v1.json"
+    ${CMAKE_COMMAND} -DTRAINVM_BINARY=$<TARGET_FILE:trainvm>
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/run_qualify_evidence.cmake"
+)
+set_tests_properties(trainvm_cli_qualify_evidence_qualified PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"qualified\": true"
+)
+add_test(
+  NAME trainvm_cli_qualify_evidence_rejected
+  COMMAND ${CMAKE_COMMAND} -E env
+    "TRAINVM_EVIDENCE=${CMAKE_CURRENT_SOURCE_DIR}/../docs/experiment-vm/examples/qualification-evidence.rejected.v1.json"
+    "TRAINVM_EXPECT_REJECTED=1"
+    ${CMAKE_COMMAND} -DTRAINVM_BINARY=$<TARGET_FILE:trainvm>
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/run_qualify_evidence.cmake"
+)
+set_tests_properties(trainvm_cli_qualify_evidence_rejected PROPERTIES
+  PASS_REGULAR_EXPRESSION "throughput_gate_failed"
 )
 add_test(
   NAME trainvm_cli_inspect_training_components

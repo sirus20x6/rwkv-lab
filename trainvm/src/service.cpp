@@ -782,6 +782,28 @@ void fill_run_summary(const RunProjection& projection, const Journal& journal,
   output.set_latest_requested_control_revision(requested);
   output.set_latest_effective_control_revision(effective);
   output.set_last_event_sequence(projection.last_event_sequence);
+  // Fork provenance is authority-owned history: it is read back from the
+  // durable run.created submission rather than carried on the mutable
+  // projection, so it cannot drift from what was actually fenced at creation.
+  if (const auto created = journal.event(projection.run_id + ":created");
+      created && created->payload.contains("submission")) {
+    const auto& submission = created->payload.at("submission");
+    if (submission.is_object() && submission.contains("forked_from")) {
+      const auto& forked = submission.at("forked_from");
+      if (forked.is_object() && forked.contains("run_id") &&
+          forked.contains("run_revision") && forked.contains("plan_hash") &&
+          forked.at("run_id").is_string() &&
+          forked.at("run_revision").is_number_unsigned() &&
+          forked.at("plan_hash").is_string()) {
+        output.set_forked_from_run_id(
+            forked.at("run_id").get<std::string>());
+        output.set_forked_from_run_revision(
+            forked.at("run_revision").get<std::uint64_t>());
+        output.set_forked_from_plan_hash(
+            forked.at("plan_hash").get<std::string>());
+      }
+    }
+  }
   const auto times = journal.run_wall_time_bounds(projection.run_id);
   if (times) {
     set_timestamp_ns(times->created_wall_time_ns, *output.mutable_created_at());

@@ -310,6 +310,26 @@ func TestTrainVMLiveStackE2E(t *testing.T) {
 		t.Fatalf("fork did not create a distinct child identity: %#v", forked)
 	}
 
+	// The child must carry its parent's exact identity when read back, so a
+	// comparison view never has to infer lineage from names or ordering.
+	childID, _ := child["run_id"].(string)
+	reread := liveE2ERequest(t, handler, http.MethodGet,
+		"/api/trainvm/runs/"+childID, nil, http.StatusOK)
+	if reread["forked_from_run_id"] != rootID ||
+		reread["forked_from_plan_hash"] != planHash {
+		t.Fatalf("forked run lost its parent identity on read-back: %#v", reread)
+	}
+	parentRevision, ok := reread["forked_from_run_revision"].(float64)
+	if !ok || uint64(parentRevision) != uint64(revision) {
+		t.Fatalf("forked run lost its parent revision on read-back: %#v", reread)
+	}
+	// An unforked run must not gain fabricated provenance.
+	rootRun := liveE2ERequest(t, handler, http.MethodGet,
+		"/api/trainvm/runs/"+rootID, nil, http.StatusOK)
+	if rootRun["forked_from_run_id"] != nil && rootRun["forked_from_run_id"] != "" {
+		t.Fatalf("root run reported a parent it never had: %#v", rootRun)
+	}
+
 	if err := stopAuthority(); err != nil {
 		t.Fatalf("native authority shutdown failed: %v stdout=%s stderr=%s", err, stdout.String(), stderr.String())
 	}

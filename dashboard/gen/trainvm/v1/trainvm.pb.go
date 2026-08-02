@@ -1194,8 +1194,15 @@ type RunSummary struct {
 	LatestRequestedControlRevision uint64 `protobuf:"varint,14,opt,name=latest_requested_control_revision,json=latestRequestedControlRevision,proto3" json:"latest_requested_control_revision,omitempty"`
 	LatestEffectiveControlRevision uint64 `protobuf:"varint,15,opt,name=latest_effective_control_revision,json=latestEffectiveControlRevision,proto3" json:"latest_effective_control_revision,omitempty"`
 	LastEventSequence              uint64 `protobuf:"varint,16,opt,name=last_event_sequence,json=lastEventSequence,proto3" json:"last_event_sequence,omitempty"`
-	unknownFields                  protoimpl.UnknownFields
-	sizeCache                      protoimpl.SizeCache
+	// Immutable fork provenance, replayed from the run.created submission. A
+	// forked run keeps its parent's exact identity so a comparison view never
+	// has to infer lineage from names, timestamps, or ordering. All three are
+	// set together or not at all; an unforked run leaves them empty.
+	ForkedFromRunId       string `protobuf:"bytes,17,opt,name=forked_from_run_id,json=forkedFromRunId,proto3" json:"forked_from_run_id,omitempty"`
+	ForkedFromRunRevision uint64 `protobuf:"varint,18,opt,name=forked_from_run_revision,json=forkedFromRunRevision,proto3" json:"forked_from_run_revision,omitempty"`
+	ForkedFromPlanHash    string `protobuf:"bytes,19,opt,name=forked_from_plan_hash,json=forkedFromPlanHash,proto3" json:"forked_from_plan_hash,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *RunSummary) Reset() {
@@ -1339,6 +1346,27 @@ func (x *RunSummary) GetLastEventSequence() uint64 {
 		return x.LastEventSequence
 	}
 	return 0
+}
+
+func (x *RunSummary) GetForkedFromRunId() string {
+	if x != nil {
+		return x.ForkedFromRunId
+	}
+	return ""
+}
+
+func (x *RunSummary) GetForkedFromRunRevision() uint64 {
+	if x != nil {
+		return x.ForkedFromRunRevision
+	}
+	return 0
+}
+
+func (x *RunSummary) GetForkedFromPlanHash() string {
+	if x != nil {
+		return x.ForkedFromPlanHash
+	}
+	return ""
 }
 
 type SubmitExperimentRequest struct {
@@ -5233,7 +5261,7 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\vRunIdentity\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1a\n" +
 	"\brevision\x18\x02 \x01(\x04R\brevision\x12\x1b\n" +
-	"\tplan_hash\x18\x03 \x01(\tR\bplanHash\"\xf8\x06\n" +
+	"\tplan_hash\x18\x03 \x01(\tR\bplanHash\"\x91\b\n" +
 	"\n" +
 	"RunSummary\x123\n" +
 	"\bidentity\x18\x01 \x01(\v2\x17.trainvm.v1.RunIdentityR\bidentity\x12'\n" +
@@ -5255,7 +5283,10 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\x1aeffective_control_revision\x18\r \x01(\x04B\x02\x18\x01R\x18effectiveControlRevision\x12I\n" +
 	"!latest_requested_control_revision\x18\x0e \x01(\x04R\x1elatestRequestedControlRevision\x12I\n" +
 	"!latest_effective_control_revision\x18\x0f \x01(\x04R\x1elatestEffectiveControlRevision\x12.\n" +
-	"\x13last_event_sequence\x18\x10 \x01(\x04R\x11lastEventSequence\"\xfd\x04\n" +
+	"\x13last_event_sequence\x18\x10 \x01(\x04R\x11lastEventSequence\x12+\n" +
+	"\x12forked_from_run_id\x18\x11 \x01(\tR\x0fforkedFromRunId\x127\n" +
+	"\x18forked_from_run_revision\x18\x12 \x01(\x04R\x15forkedFromRunRevision\x121\n" +
+	"\x15forked_from_plan_hash\x18\x13 \x01(\tR\x12forkedFromPlanHash\"\xfd\x04\n" +
 	"\x17SubmitExperimentRequest\x12'\n" +
 	"\x0fsource_document\x18\x01 \x01(\tR\x0esourceDocument\x12#\n" +
 	"\rsource_format\x18\x02 \x01(\tR\fsourceFormat\x12\x1d\n" +

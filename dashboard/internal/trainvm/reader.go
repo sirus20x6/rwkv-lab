@@ -48,6 +48,11 @@ type Run struct {
 	LastHeartbeatNS  int64  `json:"last_heartbeat_ns"`
 	LastEventSeq     uint64 `json:"last_event_sequence"`
 	FailureSummary   string `json:"failure_summary"`
+	// Immutable fork provenance replayed from run.created. Empty on a run that
+	// was not forked; never inferred from names, timestamps, or ordering.
+	ForkedFromRunID       string `json:"forked_from_run_id,omitempty"`
+	ForkedFromRunRevision uint64 `json:"forked_from_run_revision,omitempty"`
+	ForkedFromPlanHash    string `json:"forked_from_plan_hash,omitempty"`
 }
 
 type Event struct {

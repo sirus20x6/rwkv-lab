@@ -15,11 +15,13 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <condition_variable>
 #include <cstring>
 #include <filesystem>
@@ -40,6 +42,17 @@
 namespace {
 
 using namespace trainvm;
+
+// Shared with authority_fuzz_tests so one knob widens every generated sweep.
+std::uint64_t fuzz_rounds() {
+  const char *value = std::getenv("TRAINVM_FUZZ_ROUNDS");
+  if (value == nullptr || *value == '\0') return 1U;
+  try {
+    return std::max<std::uint64_t>(1U, std::stoull(value));
+  } catch (const std::exception &) {
+    return 1U;
+  }
+}
 
 void require(bool condition, std::string_view message) {
   if (!condition)
@@ -2092,6 +2105,233 @@ void mutation_transport_dispatches_replays_and_disconnects() {
           "every connection consumes a journal challenge and reattests peer and fence");
 }
 
+// Every declared transport interruption point, crossed with every mutation
+// kind the surface accepts, asserted against the whole durable fingerprint
+// rather than a single reconciliation lookup.
+//
+// The hand-written coverage above interrupts four pre-dispatch checkpoints and
+// one post-dispatch checkpoint, for request_bundle only, and checks that no
+// bundle outcome exists. That leaves before_reply_send and after_reply_send
+// unexercised entirely, leaves release_bundle and reconcile_bundle_outcome
+// uninterrupted at every point, and would not notice an interruption that left
+// the chain head, occupancy digest, or a resource generation moved while the
+// bundle outcome stayed absent.
+//
+// TRAINVM_FUZZ_SEED and TRAINVM_FUZZ_ROUNDS match the authority fuzz suite so
+// one knob widens every generated sweep.
+void mutation_transport_interruptions_preserve_durable_state() {
+  TemporaryDirectory directory;
+  auto logical = std::make_shared<MutationLogicalFence>();
+  CoordinatorFixture fixture(directory, logical);
+  fixture.admit();
+  auto held = std::make_shared<HeldToken>();
+  auto authority = std::make_shared<HostdSocketAuthority>(
+      HostdSocketAuthority::self_bind(socket_config(directory),
+                                      directory.parent_fd(), held));
+  auto nonce = std::make_shared<MutationNonce>();
+  auto challenge_time = std::make_shared<MutationChallengeTime>();
+  auto journal = std::make_shared<MutationJournalAttestor>();
+  auto verifier = std::make_shared<HostdSessionChallengeVerifier>(
+      HostdSessionChallengeVerifierConfig{
+          .api_version = std::string(kHostdSessionChallengeApiVersion),
+          .host_id = fixture.observed.host_id,
+          .boot_id = fixture.observed.boot_id,
+          .broker_epoch = fixture.observed.broker_epoch,
+          .challenge_ttl_ns = 2'000'000'000LL,
+          .maximum_outstanding_challenges = 16U,
+          .maximum_outstanding_challenges_per_peer = 4U},
+      nonce, challenge_time, journal);
+  auto kernel = std::make_shared<MutationLinuxKernel>();
+  auto service = std::make_shared<MutationServiceAuthority>();
+  auto ledger_time = std::make_shared<MutationLedgerTime>();
+  auto fault = std::make_shared<MutationFaultInjector>();
+  auto process_supervisor =
+      std::make_shared<LedgerProcessSupervisor>(*fixture.ledger);
+  HostdStatusServer status_server(
+      authority, fixture.coordinator,
+      {.allowed_uid = ::geteuid(), .allowed_gid = ::getegid()});
+  HostdMutationServer server(
+      authority, fixture.coordinator, verifier, kernel, service, ledger_time,
+      {.api_version = std::string(kHostdMutationTransportApiVersion),
+       .allowed_uid = ::geteuid(),
+       .allowed_gid = ::getegid(),
+       .socket_peer_grade = HostdLinuxSessionEnforcementGrade::
+           cooperative_namespace_observation,
+       .enforcement_grade =
+           HostdMutationTransportEnforcementGrade::cooperative_test,
+       .maximum_payload_bytes = kHostdStatusMaximumPayloadBytes,
+       .per_session_timeout_ns = 2'000'000'000LL,
+       .fault_injector = fault},
+      process_supervisor);
+  const HostdMutationClientConfig client{
+      .socket_path = authority->socket_path(),
+      .expected_endpoint = authority->reattest(),
+      .expected_server_uid = ::geteuid(),
+      .expected_server_gid = ::getegid(),
+      .maximum_payload_bytes = kHostdStatusMaximumPayloadBytes};
+  const HostdMutationOpen open{
+      .api_version = std::string(kHostdMutationProtocolApiVersion),
+      .claim = mutation_claim()};
+
+  // Byte-exact view of everything durable the ledger exposes. Any interruption
+  // that moves one field of this has forked durable history.
+  struct DurableFingerprint final {
+    std::uint64_t record_count{};
+    std::string chain_hash;
+    std::uint64_t ledger_sequence{};
+    std::string occupancy_digest;
+    std::size_t active_fences{};
+    std::size_t recovery_records{};
+    std::size_t terminal_records{};
+    bool operator==(const DurableFingerprint &) const = default;
+  };
+  const auto fingerprint = [&fixture]() {
+    const auto head = fixture.ledger->chain_head();
+    const auto occupancy = fixture.ledger->occupancy();
+    return DurableFingerprint{
+        .record_count = fixture.ledger->record_count(),
+        .chain_hash = head.chain_hash,
+        .ledger_sequence = head.ledger_sequence,
+        .occupancy_digest = occupancy.occupancy_digest,
+        .active_fences = occupancy.active_fences.size(),
+        .recovery_records =
+            fixture.ledger->active_process_recovery_records().size(),
+        .terminal_records =
+            fixture.ledger->active_terminal_process_release_records().size(),
+    };
+  };
+
+  const auto attempt = [&](HostdMutationRequest mutation,
+                           std::uint64_t correlation) {
+    std::exception_ptr client_error;
+    std::optional<HostdMutationReply> reply;
+    std::jthread client_thread([&] {
+      try {
+        reply = hostd_request_mutation(client, mutation, correlation,
+                                       deadline());
+      } catch (...) {
+        client_error = std::current_exception();
+      }
+    });
+    const HostdServeResult served = server.serve_one(deadline());
+    client_thread.join();
+    require(fixture.coordinator->status().live_sessions == 0U,
+            "every interrupted mutation tears down its coordinator session");
+    return std::pair{served, std::move(reply)};
+  };
+
+  const std::array checkpoints{
+      HostdMutationTransportCheckpoint::after_challenge_sent,
+      HostdMutationTransportCheckpoint::after_command_received,
+      HostdMutationTransportCheckpoint::after_challenge_verified,
+      HostdMutationTransportCheckpoint::after_coordinator_connected,
+      HostdMutationTransportCheckpoint::after_dispatch_committed,
+      HostdMutationTransportCheckpoint::before_reply_send,
+      HostdMutationTransportCheckpoint::after_reply_send,
+  };
+  // A checkpoint at or after the durable dispatch may leave an outcome; every
+  // earlier one must leave nothing at all.
+  const auto is_post_dispatch = [](HostdMutationTransportCheckpoint value) {
+    return value == HostdMutationTransportCheckpoint::after_dispatch_committed ||
+           value == HostdMutationTransportCheckpoint::before_reply_send ||
+           value == HostdMutationTransportCheckpoint::after_reply_send;
+  };
+
+  const std::uint64_t rounds = fuzz_rounds();
+  std::uint64_t correlation = 500U;
+  std::size_t interruptions = 0U;
+  for (std::uint64_t round = 0U; round < rounds; ++round) {
+    for (std::size_t index = 0U; index < checkpoints.size(); ++index) {
+      const auto checkpoint = checkpoints[index];
+      const std::string id = "sweep-" + std::to_string(round) + "-" +
+                             std::to_string(index);
+      const auto request = mutation_request("request-" + id);
+
+      const DurableFingerprint before = fingerprint();
+      const std::size_t visits_before = fault->visits;
+      fault->selected = checkpoint;
+      const auto [served, reply] = attempt(
+          {.open = open,
+           .mutation = HostdMutationKind::request_bundle,
+           .bundle_request = request,
+           .release_request = std::nullopt},
+          ++correlation);
+      (void)served;
+      (void)reply;
+      require(!fault->selected,
+              "the transport never reached the armed interruption point");
+      require(fault->visits > visits_before,
+              "the armed checkpoint was not visited by the transport at all");
+      ++interruptions;
+
+      std::string reason;
+      require(fixture.ledger->verify(&reason),
+              "interruption at a transport checkpoint broke the ledger chain: " +
+                  reason);
+      require(verifier->outstanding_challenges() == 0U,
+              "an interrupted exchange leaks no outstanding challenge");
+
+      const DurableFingerprint after = fingerprint();
+      const auto outcome = fixture.ledger->reconcile_bundle_outcome(request);
+      if (!is_post_dispatch(checkpoint)) {
+        require(after == before,
+                "a pre-dispatch interruption moved durable state");
+        require(!outcome,
+                "a pre-dispatch interruption left a durable outcome");
+        continue;
+      }
+
+      // Post-dispatch: the outcome is durable exactly once, and the retry the
+      // client is expected to make must replay it without moving anything.
+      require(outcome.has_value(),
+              "a post-dispatch interruption lost its durable outcome");
+      const DurableFingerprint settled = fingerprint();
+      fault->selected.reset();
+      const auto [retried, retry_reply] = attempt(
+          {.open = open,
+           .mutation = HostdMutationKind::request_bundle,
+           .bundle_request = request,
+           .release_request = std::nullopt},
+          ++correlation);
+      require(retried == HostdServeResult::served && retry_reply &&
+                  retry_reply->bundle_result &&
+                  retry_reply->bundle_result->replayed,
+              "retry after a post-dispatch interruption must replay, not redo");
+      require(fingerprint() == settled,
+              "the retry after a post-dispatch interruption appended history");
+
+      // Release it so the next round starts from an unoccupied resource.
+      if (retry_reply->bundle_result->grant) {
+        const auto &grant = *retry_reply->bundle_result->grant;
+        const auto release = seal_resource_release_request({
+            .api_version = std::string(kHostLedgerReleaseRequestApiVersion),
+            .release_request_id = "release-" + id,
+            .allocation_id = grant.allocation_id,
+            .grant_digest = grant.receipt_digest,
+            .journal_id = grant.journal_id,
+            .run_id = grant.run_id,
+            .logical_lease_id = grant.logical_lease_id,
+            .logical_fencing_token = grant.logical_fencing_token,
+            .canonical_request_digest = {},
+        });
+        const auto [released, release_reply] = attempt(
+            {.open = open,
+             .mutation = HostdMutationKind::release_bundle,
+             .bundle_request = std::nullopt,
+             .release_request = release},
+            ++correlation);
+        require(released == HostdServeResult::served && release_reply,
+                "the swept grant is released before the next round");
+      }
+    }
+  }
+  require(interruptions == rounds * checkpoints.size(),
+          "every declared checkpoint was interrupted in every round");
+  std::string reason;
+  require(fixture.ledger->verify(&reason),
+          "the ledger chain survives the whole interruption sweep: " + reason);
+}
+
 } // namespace
 
 int main() {
@@ -2105,6 +2345,8 @@ int main() {
        client_rejects_corruption_delegation_and_no_children_exist},
       {"mutation-dispatch",
        mutation_transport_dispatches_replays_and_disconnects},
+      {"mutation-interruption-sweep",
+       mutation_transport_interruptions_preserve_durable_state},
   };
   try {
     for (const auto &[name, test] : tests) {

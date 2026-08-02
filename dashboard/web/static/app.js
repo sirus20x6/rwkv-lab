@@ -640,7 +640,16 @@
       fact("optimizer step", Number(run.optimizer_step || 0).toLocaleString()) +
       fact("revision", String(run.run_revision || 0)) +
       fact("experiment", run.experiment_name, run.experiment_name) +
-      fact("plan", String(run.plan_hash || "").slice(0, 12), run.plan_hash);
+      fact("plan", String(run.plan_hash || "").slice(0, 12), run.plan_hash) +
+      // Lineage is shown only when the authority reports it. A run with no
+      // parent shows nothing rather than an invented "root", so provenance is
+      // never something the view guessed.
+      (run.forked_from_run_id
+        ? fact(
+            "forked from",
+            `${run.forked_from_run_id} · r${run.forked_from_run_revision || 0}`,
+            `parent plan ${run.forked_from_plan_hash || "unknown"}`)
+        : "");
     renderVMActions();
   }
 

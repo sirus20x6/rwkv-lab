@@ -107,6 +107,13 @@ message RunSummary {
   uint64 latest_requested_control_revision = 14;
   uint64 latest_effective_control_revision = 15;
   uint64 last_event_sequence = 16;
+  // Immutable fork provenance, replayed from the run.created submission. A
+  // forked run keeps its parent's exact identity so a comparison view never
+  // has to infer lineage from names, timestamps, or ordering. All three are
+  // set together or not at all; an unforked run leaves them empty.
+  string forked_from_run_id = 17;
+  uint64 forked_from_run_revision = 18;
+  string forked_from_plan_hash = 19;
 }
 
 enum ControlType {

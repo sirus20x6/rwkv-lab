@@ -144,6 +144,8 @@ jobs:
       - run: pip install jsonschema
       - name: Example experiment documents match the checked-in schema
         run: python scripts/validate_experiment_documents.py
+      - name: Benchmark fixtures match the qualification contract
+        run: python scripts/validate_benchmark_matrix.py
 
   go:
     name: Dashboard (Go)
