@@ -236,6 +236,8 @@ def test_terminal_config_rejects_neutral_or_missing_domain(tmp_path):
     with pytest.raises(ValueError, match="photo or animation"):
         general.validate()
     photo = TerminalExpertTrainConfig(
+        # Explicit: the field default is an absolute path on one host.
+        model_path=None,
         domain="photo",
         train_manifest=str(manifest),
         expert_checkpoint=str(expert),
