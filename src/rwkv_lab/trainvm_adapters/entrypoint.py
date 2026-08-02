@@ -6,11 +6,13 @@ from dataclasses import replace
 
 from rwkv_lab.trainvm_worker import (
     WorkerBootstrap,
+    WorkerControlRuntime,
     WorkerInvocation,
     WorkerObservability,
     WorkerSession,
     WorkerStepProfiler,
     apply_worker_runtime_policy,
+    controls_from_invocation,
     observability_from_invocation,
     publish_checkpoint_requests,
     read_worker_bootstrap_fd,
@@ -28,7 +30,13 @@ class WorkerEntrypointError(RuntimeError):
 
 BootstrapReader = Callable[[int], WorkerBootstrap]
 InvocationExecutor = Callable[
-    [WorkerInvocation, WorkerStepProfiler, WorkerObservability], HandlerResult
+    [
+        WorkerInvocation,
+        WorkerStepProfiler,
+        WorkerObservability,
+        WorkerControlRuntime,
+    ],
+    HandlerResult,
 ]
 SessionFactory = Callable[[WorkerBootstrap], WorkerSession]
 
@@ -65,11 +73,13 @@ def run_worker(
                 observability = observability_from_invocation(
                     session, session.invocation
                 )
+                controls = controls_from_invocation(session, session.invocation)
                 observability.optimizer_step(0, "initializing")
                 result = executor(
                     session.invocation,
                     step_profiler,
                     observability,
+                    controls,
                 )
             published_checkpoints = publish_checkpoint_requests(
                 session,

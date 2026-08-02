@@ -243,8 +243,11 @@ MageFlow terminal/TREAD, or Qwen AO3 state into immutable, per-file-hashed, cano
 revisions before emitting the terminal event. The snapshot is independent of trainer retention,
 binds producer/step/resume-grade/state inventory and parent lineage, and rejects symlink,
 nonregular, outside-workspace, changing-source, or mutated-replay trees. This closes terminal
-artifact visibility and durable handoff for the three native adapters; on-demand safe-point command
-handling and stronger content binding for exact resume remain separate lifecycle work.
+artifact visibility and durable handoff for the three native adapters. On-demand safe-point command
+handling now has a shared ordered/atomic worker runtime, and scratch RWKV consumes its microbatch,
+optimizer, evaluation, and checkpoint boundaries while persisting the effective control snapshot.
+Mutable MageFlow/Qwen control application, lifecycle pause/checkpoint/cancel, and stronger content
+binding for exact resume remain separate lifecycle work.
 The dashboard verifies the snapshot envelope and renders its optimizer step, resume grade, state
 inventory, file/byte counts, tree digest, and parent lineage in the generic artifact stream.
 

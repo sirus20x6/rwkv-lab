@@ -34,6 +34,8 @@ class FakeSession:
         self.completed_before_connect = completed
         self.invocation = SimpleNamespace(
             run_id="run-1",
+            controls={},
+            effective_control_revision=0,
             observability={
                 "heartbeat_seconds": 5,
                 "metrics": [],
@@ -256,12 +258,14 @@ def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoin
     components = SimpleNamespace()
     profiler = SimpleNamespace()
     observability = SimpleNamespace()
+    controls = SimpleNamespace()
 
     result = _rwkv_scratch(
         invocation,
         components,
         step_profiler=profiler,
         observability=observability,
+        controls=controls,
     )
     arguments, keyword_arguments = observed[0]
     assert arguments[arguments.index("--data") + 1] == str(corpus.resolve())
@@ -273,6 +277,7 @@ def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoin
         "worker_components": components,
         "worker_step_profiler": profiler,
         "worker_observability": observability,
+        "worker_controls": controls,
     }
     assert result.optimizer_step == 120
     assert len(result.checkpoint_requests) == 1
@@ -350,7 +355,7 @@ def test_runner_reports_success_with_optimizer_step() -> None:
             else pytest.fail("wrong descriptor")
         ),
         session_factory=factory,
-        executor=lambda invocation, _profiler, _observability: HandlerResult(
+        executor=lambda invocation, _profiler, _observability, _controls: HandlerResult(
             "worker.completed", {"reason": "training_complete"}, 41
         ),
     )
@@ -389,7 +394,7 @@ def test_runner_publishes_handler_checkpoints_before_terminal_event(
     status = run_worker(
         bootstrap_reader=lambda _descriptor: bootstrap,
         session_factory=lambda _bootstrap: session,
-        executor=lambda _invocation, _profiler, _observability: HandlerResult(
+        executor=lambda _invocation, _profiler, _observability, _controls: HandlerResult(
             "worker.completed",
             {"reason": "training_complete"},
             19,
@@ -415,7 +420,10 @@ def test_runner_reports_sanitized_failure_and_skips_completed_replay() -> None:
     failed = FakeSession(bootstrap)
 
     def raise_secret(
-        _invocation: object, _profiler: object, _observability: object
+        _invocation: object,
+        _profiler: object,
+        _observability: object,
+        _controls: object,
     ) -> HandlerResult:
         raise RuntimeError("secret dataset path")
 
@@ -441,7 +449,7 @@ def test_runner_reports_sanitized_failure_and_skips_completed_replay() -> None:
         run_worker(
             bootstrap_reader=lambda _descriptor: bootstrap,
             session_factory=lambda _bootstrap: completed,
-            executor=lambda _invocation, _profiler, _observability: pytest.fail(
+            executor=lambda _invocation, _profiler, _observability, _controls: pytest.fail(
                 "replayed completed work"
             ),
         )

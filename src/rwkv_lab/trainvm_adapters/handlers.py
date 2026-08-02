@@ -8,6 +8,7 @@ from typing import Any
 from rwkv_lab.trainvm_worker import (
     CheckpointPublicationRequest,
     NullStepProfiler,
+    WorkerControlRuntime,
     WorkerInvocation,
     WorkerObservability,
     WorkerStepProfiler,
@@ -43,6 +44,7 @@ Handler = Callable[
         WorkerTrainingComponents,
         WorkerStepProfiler,
         WorkerObservability,
+        WorkerControlRuntime,
     ],
     HandlerResult,
 ]
@@ -53,6 +55,7 @@ def _appearance_expert(
     components: WorkerTrainingComponents,
     step_profiler: WorkerStepProfiler | None = None,
     observability: WorkerObservability | None = None,
+    controls: WorkerControlRuntime | None = None,
 ) -> HandlerResult:
     from rwkv_lab.mage_flow_expert_train import MageFlowExpertTrainConfig, train
 
@@ -134,6 +137,7 @@ def _terminal_expert(
     components: WorkerTrainingComponents,
     step_profiler: WorkerStepProfiler | None = None,
     observability: WorkerObservability | None = None,
+    controls: WorkerControlRuntime | None = None,
 ) -> HandlerResult:
     from rwkv_lab.mage_flow_terminal_train import TerminalExpertTrainConfig, train
 
@@ -239,6 +243,7 @@ def _qwen_ao3(
     components: WorkerTrainingComponents,
     step_profiler: WorkerStepProfiler | None = None,
     observability: WorkerObservability | None = None,
+    controls: WorkerControlRuntime | None = None,
 ) -> HandlerResult:
     from rwkv_lab.qwen_ao3_cpt import QwenAO3Config, train
 
@@ -312,6 +317,7 @@ def _rwkv_scratch(
     components: WorkerTrainingComponents,
     step_profiler: WorkerStepProfiler | None = None,
     observability: WorkerObservability | None = None,
+    controls: WorkerControlRuntime | None = None,
 ) -> HandlerResult:
     from rwkv_lab.rwkv_pretrain import main as train
 
@@ -343,6 +349,7 @@ def _rwkv_scratch(
             worker_components=components,
             worker_step_profiler=step_profiler or NullStepProfiler(),
             worker_observability=observability,
+            worker_controls=controls,
         )
     except SystemExit as error:
         raise AdapterDispatchError(
@@ -368,6 +375,7 @@ def _rwkv_scratch(
                 resume_grade="terminal_checkpoint",
                 state_components=(
                     "component_composition",
+                    "control_state",
                     "model",
                     "optimizer",
                     "rng_accelerator",
@@ -444,6 +452,7 @@ def execute_invocation(
     invocation: WorkerInvocation,
     step_profiler: WorkerStepProfiler | None = None,
     observability: WorkerObservability | None = None,
+    controls: WorkerControlRuntime | None = None,
 ) -> HandlerResult:
     adapter = invocation.adapter
     key = (
@@ -465,9 +474,12 @@ def execute_invocation(
     )
     if observability is None:
         raise AdapterDispatchError("training adapter has no worker observability authority")
+    if controls is None:
+        raise AdapterDispatchError("training adapter has no worker control authority")
     return handler(
         invocation,
         components,
         step_profiler or NullStepProfiler(),
         observability,
+        controls,
     )

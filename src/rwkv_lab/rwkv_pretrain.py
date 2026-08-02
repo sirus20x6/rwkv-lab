@@ -53,7 +53,11 @@ from rwkv_lab.training_components import (
 if TYPE_CHECKING:
     from rwkv_lab.training_components import LayerNormFactory
     from rwkv_lab.trainvm_adapters import WorkerTrainingComponents
-    from rwkv_lab.trainvm_worker import WorkerObservability, WorkerStepProfiler
+    from rwkv_lab.trainvm_worker import (
+        WorkerControlRuntime,
+        WorkerObservability,
+        WorkerStepProfiler,
+    )
 from rwkv_lab.training_speedups import (
     AsyncCPUBatchPrefetcher,
 )
@@ -833,6 +837,7 @@ def main(
     worker_components: WorkerTrainingComponents | None = None,
     worker_step_profiler: WorkerStepProfiler | None = None,
     worker_observability: WorkerObservability | None = None,
+    worker_controls: WorkerControlRuntime | None = None,
 ):
     enable_fast_matmul()
     ap = argparse.ArgumentParser()
@@ -1685,6 +1690,13 @@ def main(
             "component_composition_digest"
         ) != component_digest:
             raise ValueError("resume training-component composition mismatch")
+        if worker_controls is not None and (
+            ck.get("effective_control_revision")
+            != worker_controls.effective_revision
+            or ck.get("effective_controls")
+            != dict(worker_controls.effective_values)
+        ):
+            raise ValueError("resume worker-control state mismatch")
         if heads is not None and ck.get("heads") is not None:
             heads.load_state_dict(ck["heads"])
         if ema is not None:                  # saved EMA if present, else re-seed from loaded weights
@@ -1860,10 +1872,17 @@ def main(
 
     model.train(); t0 = time.time(); seen = 0; last_context_shape = None
     print(f"budget={'%.1f min' % args.minutes if not args.steps else str(args.steps)+' steps'}", flush=True)
+
+    def reject_live_controls(_effective, assignments):
+        if assignments:
+            raise ValueError("scratch-RWKV controls require a replacement worker")
+
     while True:
         if args.steps and step >= args.steps: break
         if not args.steps and (time.time() - t0) / 60.0 >= args.minutes: break
         if step % args.eval_every == 0:
+            if worker_controls is not None and step > 0:
+                worker_controls.evaluation(step, reject_live_controls)
             vl = val_loss(); emit({"kind": "eval", "step": step, "loss": vl, "val_loss": vl, "ppl": math.exp(vl)})
             publish_eval(step, vl)
             print(f"[{step}] val {vl:.4f} (ppl {math.exp(vl):.2f})  {(time.time()-t0)/60:.1f}min", flush=True)
@@ -1924,6 +1943,8 @@ def main(
             else range(ga)
         )
         for micro_step in microbatch_indices:  # effective batch = batch * ga
+            if worker_controls is not None:
+                worker_controls.microbatch(step + 1, reject_live_controls)
             input_wait = (
                 worker_step_profiler.input_wait()
                 if worker_step_profiler is not None
@@ -2026,6 +2047,8 @@ def main(
         if weight_decay_schedule is not None:
             weight_decay_schedule.step(step)
         opt.step(); step += 1
+        if worker_controls is not None:
+            worker_controls.optimizer_step(step, reject_live_controls)
         if worker_step_profiler is not None:
             worker_step_profiler.step(step)
         if worker_observability is not None:
@@ -2048,6 +2071,8 @@ def main(
                 int(seen / max(time.time() - t0, 1e-6)),
                 metric_step=step,
             )
+    if worker_controls is not None:
+        worker_controls.evaluation(step, reject_live_controls)
     vl = val_loss(); emit({"kind": "eval", "step": step, "loss": vl, "val_loss": vl, "ppl": math.exp(vl)})
     publish_eval(step, vl)
     if recall_pool is not None:
@@ -2055,6 +2080,8 @@ def main(
     if cpu_prefetcher is not None:
         cpu_prefetcher.close()
     emit({"kind": "checkpoint", "step": step})
+    if worker_controls is not None:
+        worker_controls.checkpoint(step, reject_live_controls)
     if args.save:
         # Self-describing architecture is shared by ordinary .pt and FSDP2/DCP checkpoints.
         arch = {"d_model": args.d_model, "n_layers": args.n_layers,
@@ -2103,6 +2130,13 @@ def main(
                      "torch_rng": torch.get_rng_state()}
         if component_digest is not None:
             rng_extra["component_composition_digest"] = component_digest
+        if worker_controls is not None:
+            rng_extra["effective_control_revision"] = (
+                worker_controls.effective_revision
+            )
+            rng_extra["effective_controls"] = dict(
+                worker_controls.effective_values
+            )
         if torch.cuda.is_available():
             rng_extra["cuda_rng"] = torch.cuda.get_rng_state(dev).cpu()
         if args.distributed == "fsdp2":

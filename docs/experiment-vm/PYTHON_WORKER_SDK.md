@@ -104,9 +104,17 @@ The helper is deliberately trainer-family-neutral; MageFlow, RWKV vision, and tr
 adapters must not implement their own gallery-directory conventions.
 
 The receive thread never performs tensor work and never opens dashboard or
-journal storage. A trainer polls `poll_commands()` at its own microbatch,
-optimizer-step, eval, or checkpoint boundary, applies an eligible control, and
-then calls `acknowledge_controls()` with the effective values and step.
+journal storage. `WorkerControlRuntime` drains that transport only at a trainer-owned
+microbatch, optimizer-step, eval, or checkpoint boundary. It preserves revision order across
+different safe points, applies each patch atomically through a family callback, acknowledges the
+exact requested values and effective step, rejects stale/duplicate/adapter-invalid patches without
+mutating effective state, and reports pause/restart controls as replacement-worker work. The fixed
+runner constructs this service from the sealed invocation rather than giving a trainer the session.
+Scratch RWKV consumes all four safe-point hooks, persists the effective control snapshot in its
+terminal checkpoint, verifies it on resume, and honestly rejects live mutation because its v1
+catalog is restart-only. Mutable MageFlow/Qwen controls and lifecycle pause/checkpoint/cancel remain
+adapter/checkpoint-state work; their handler signatures carry the service but do not advertise
+consumption yet.
 
 ## Fixed adapter runner
 
@@ -130,9 +138,9 @@ immutable artifact manifests with authority-verified fingerprints rather than pa
 The fixed runner returns an already-completed replay without executing tensor work, publishes a
 durably receipted terminal result on success, freezes any declared checkpoint before that terminal
 result, and converts trainer exceptions to a bounded
-`operation.failed` event containing only an error class. It deliberately does not claim live
-pause/checkpoint/control support yet: trainers must first expose safe-point hooks through this
-session before their registry capability can advertise those controls. Top-level paths are now
+`operation.failed` event containing only an error class. It does not claim live lifecycle
+pause/checkpoint/cancel support yet, and mutable-control capability remains per-adapter rather than
+an inference from the shared runtime. Top-level paths are now
 confined, but nested references inside image JSONL and packed-corpus/model manifests remain
 non-production-qualified until the authority binds their immutable artifact identities and the
 adapter recursively validates every referenced object.
