@@ -693,6 +693,30 @@ add_test(
     "${CMAKE_CURRENT_SOURCE_DIR}/../docs/experiment-vm/compatibility-workflows.v1.json"
     "${CMAKE_CURRENT_SOURCE_DIR}/.."
 )
+# The gate must be reachable from a runner and must report a rejection as a
+# distinct, non-zero verdict rather than a crash. Both directions are pinned:
+# a qualified receipt exits 0, a rejected one exits 3 with attributable reasons.
+add_test(
+  NAME trainvm_cli_qualify_evidence_qualified
+  COMMAND ${CMAKE_COMMAND} -E env
+    "TRAINVM_EVIDENCE=${CMAKE_CURRENT_SOURCE_DIR}/../docs/experiment-vm/examples/qualification-evidence.qualified.v1.json"
+    ${CMAKE_COMMAND} -DTRAINVM_BINARY=$<TARGET_FILE:trainvm>
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/run_qualify_evidence.cmake"
+)
+set_tests_properties(trainvm_cli_qualify_evidence_qualified PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"qualified\": true"
+)
+add_test(
+  NAME trainvm_cli_qualify_evidence_rejected
+  COMMAND ${CMAKE_COMMAND} -E env
+    "TRAINVM_EVIDENCE=${CMAKE_CURRENT_SOURCE_DIR}/../docs/experiment-vm/examples/qualification-evidence.rejected.v1.json"
+    "TRAINVM_EXPECT_REJECTED=1"
+    ${CMAKE_COMMAND} -DTRAINVM_BINARY=$<TARGET_FILE:trainvm>
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/run_qualify_evidence.cmake"
+)
+set_tests_properties(trainvm_cli_qualify_evidence_rejected PROPERTIES
+  PASS_REGULAR_EXPRESSION "throughput_gate_failed"
+)
 add_test(
   NAME trainvm_cli_inspect_training_components
   COMMAND trainvm inspect-training-components

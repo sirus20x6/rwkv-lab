@@ -413,6 +413,13 @@ startup orphan recovery are defined in
   dimension nothing computes. `portable` means the baseline is meaningful without an accelerator;
   a portable fixture that requires one is a validator error. This distinction was previously named
   here but nowhere defined.
+  `trainvm qualify-evidence` reads a `trainvm.cache-qualification-evidence/v1`
+  document on stdin, runs the implemented gate, and prints the receipt. Its exit
+  status is the verdict: 0 qualified, 3 rejected with attributable reasons, 1 for
+  a malformed document, so a rejection is a reportable outcome rather than
+  indistinguishable from a crash. A benchmark runner measures; this decides. That
+  boundary is what stops a runner reimplementing the thresholds and quietly
+  disagreeing with the `qualify_cache` node that actually admits an optimization.
   Not yet built: the runner that executes a fixture and emits a receipt. Per the note above,
   benchmark is not a separate executor — throughput and peak-memory gates belong to the existing
   qualification receipt, so the runner should feed that rather than invent a parallel one. A native
