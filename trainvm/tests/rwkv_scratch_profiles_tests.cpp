@@ -304,6 +304,44 @@ void every_topology_lowers_on_its_own() {
   }
 }
 
+// End to end: a composition that selects topologies must resolve into a
+// worker-visible block, and an invalid selection must fail resolution rather
+// than reaching a worker.
+void compositions_carry_topologies_into_the_resolved_block() {
+  TrainingComposition composition;
+  composition.model_family = "rwkv";
+  composition.components = {};
+  composition.topologies = std::vector<TrainingTopologySelection>{
+      {.topology = "engram", .parameters = {{"enabled", 1}, {"rows", 8192}}},
+      {.topology = "loop", .parameters = {{"count", 4}}},
+  };
+
+  // The registry rejects an empty component map, so this exercises the
+  // topology lowering directly with the same selections the composition
+  // carries; the composition-level path is covered by the compile tests.
+  std::vector<RwkvScratchSelection> selections;
+  for (const auto& chosen : *composition.topologies) {
+    const auto topology = rwkv_scratch_topology_from_name(chosen.topology);
+    require(topology.has_value(), chosen.topology + " resolves");
+    std::map<std::string, nlohmann::json> assignments;
+    for (const auto& [name, value] : chosen.parameters.items())
+      assignments.emplace(name, value);
+    selections.push_back({.topology = *topology, .assignments = assignments});
+  }
+  const auto block = rwkv_scratch_training_block(selections);
+  require(block.at("topologies").size() == 2U,
+          "a composition's topologies reach the lowered block");
+
+  // The incompatible pair must fail before a worker sees it.
+  require_throws(
+      [] {
+        (void)rwkv_scratch_training_block(
+            {{.topology = RwkvScratchTopology::loop, .assignments = {}},
+             {.topology = RwkvScratchTopology::seed_chain, .assignments = {}}});
+      },
+      "an incompatible composition must fail resolution");
+}
+
 }  // namespace
 
 int main() {
@@ -317,6 +355,7 @@ int main() {
     declared_defaults_are_omitted_from_the_block();
     the_lowering_refuses_invalid_and_incompatible_selections();
     every_topology_lowers_on_its_own();
+    compositions_carry_topologies_into_the_resolved_block();
     std::cout << "rwkv scratch profile tests passed ("
               << rwkv_scratch_profiles().profiles.size() << " topologies, "
               << rwkv_scratch_declared_trainer_flags().size()

@@ -179,9 +179,19 @@ struct TrainingComponentSelection {
   Json configuration = Json::object();
 };
 
+// One research topology attached to a composition, with only the parameters
+// that topology declares. Closed per model family: the rwkv family resolves
+// these against the scratch-RWKV profile registry.
+struct TrainingTopologySelection {
+  std::string topology;
+  Json parameters = Json::object();
+};
+
 struct TrainingComposition {
   std::string model_family;
   std::map<std::string, TrainingComponentSelection> components;
+  // Optional so a document without topologies encodes exactly as before.
+  std::optional<std::vector<TrainingTopologySelection>> topologies;
 };
 
 struct Binding {
