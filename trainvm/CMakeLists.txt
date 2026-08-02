@@ -60,6 +60,7 @@ add_library(trainvm_core
   src/control.cpp
   src/controller.cpp
   src/document.cpp
+  src/external_profiler_artifact.cpp
   src/fake_worker.cpp
   src/fsm.cpp
   src/host_ledger.cpp
@@ -439,6 +440,16 @@ target_compile_options(profiler_launch_profiles_tests PRIVATE
 target_link_libraries(profiler_launch_profiles_tests PRIVATE trainvm_core)
 add_test(NAME profiler_launch_profiles_tests
   COMMAND profiler_launch_profiles_tests
+)
+add_executable(external_profiler_artifact_tests
+  tests/external_profiler_artifact_tests.cpp
+)
+target_compile_options(external_profiler_artifact_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(external_profiler_artifact_tests PRIVATE trainvm_core)
+add_test(NAME external_profiler_artifact_tests
+  COMMAND external_profiler_artifact_tests
 )
 add_executable(conversion_publication_tests
   tests/conversion_publication_tests.cpp

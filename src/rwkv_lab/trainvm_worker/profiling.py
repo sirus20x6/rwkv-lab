@@ -45,11 +45,13 @@ except ImportError as error:  # pragma: no cover - installation contract
 
 GPU_TRACE_SCHEMA = "trainvm.gpu-trace.v1"
 EXTERNAL_PROFILER_AUTHORITY_SCHEMA = "trainvm.external-profiler-authority/v1"
+EXTERNAL_PROFILER_WINDOW_SCHEMA = "trainvm.external-profiler-window/v1"
 EXTERNAL_PROFILER_AUTHORITY_DESCRIPTOR = 5
 EXTERNAL_PROFILER_NVTX_RANGE = "trainvm.profile.capture"
 MAXIMUM_TRACE_BYTES = 2 * 1024 * 1024 * 1024
 MAXIMUM_KERNEL_ROWS = 256
 MAXIMUM_EXTERNAL_PROFILER_AUTHORITY_BYTES = 16 * 1024
+MAXIMUM_EXTERNAL_PROFILER_WINDOW_BYTES = 64 * 1024
 _F_GET_SEALS = getattr(fcntl, "F_GET_SEALS", 1034)
 _F_SEAL_SEAL = getattr(fcntl, "F_SEAL_SEAL", 0x0001)
 _F_SEAL_SHRINK = getattr(fcntl, "F_SEAL_SHRINK", 0x0002)
@@ -388,6 +390,94 @@ class GpuTracePublisher:
             raise GpuProfileError("external GPU trace staging escaped authority")
         return root
 
+    @property
+    def external_capture_prefix(self) -> Path:
+        bootstrap = self._session.bootstrap
+        launch_id = (
+            f"{_text(bootstrap.run_id, 'run ID', 1024)}:worker-launch:"
+            f"{_text(bootstrap.node_id, 'node ID', 1024)}:"
+            f"{_text(bootstrap.attempt_id, 'attempt ID', 1024)}"
+        )
+        return (
+            self.external_staging_root
+            / hashlib.sha256(launch_id.encode("utf-8")).hexdigest()
+        )
+
+    def publish_external_window(
+        self,
+        *,
+        authority: ExternalProfilerAuthority,
+        optimizer_steps: tuple[int, ...],
+        input_stall_us: tuple[float | None, ...],
+        captured_step_wall_time_us: float,
+    ) -> Path:
+        """Freeze the worker-side evidence needed to normalize a parent trace."""
+
+        if (
+            authority.backend != self._request.backend
+            or len(optimizer_steps) != self._request.capture_steps
+            or len(input_stall_us) != len(optimizer_steps)
+            or any(step < 0 for step in optimizer_steps)
+            or any(right <= left for left, right in pairwise(optimizer_steps))
+            or any(
+                value is not None and (not math.isfinite(value) or value < 0)
+                for value in input_stall_us
+            )
+            or not math.isfinite(captured_step_wall_time_us)
+            or captured_step_wall_time_us <= 0
+        ):
+            raise GpuProfileError("external GPU trace window evidence is invalid")
+        bootstrap = self._session.bootstrap
+        invocation = self._session.invocation
+        body: dict[str, object] = {
+            "api_version": EXTERNAL_PROFILER_WINDOW_SCHEMA,
+            "attempt_id": _text(bootstrap.attempt_id, "attempt ID", 1024),
+            "authority_digest": _text(
+                authority.authority_digest, "authority digest", 128
+            ),
+            "backend": self._request.backend,
+            "capture_steps": self._request.capture_steps,
+            "captured_step_wall_time_us": captured_step_wall_time_us,
+            "input_stall_us": list(input_stall_us),
+            "invocation_digest": _text(
+                invocation.invocation_digest, "invocation digest", 128
+            ),
+            "node_id": _text(bootstrap.node_id, "node ID", 1024),
+            "optimizer_steps": list(optimizer_steps),
+            "run_id": _text(bootstrap.run_id, "run ID", 1024),
+            "skip_steps": self._request.skip_steps,
+            "warmup_steps": self._request.warmup_steps,
+        }
+        document = {
+            **body,
+            "canonical_window_digest": sha256_digest(canonical_dumps(body)),
+        }
+        encoded = canonical_dumps(document)
+        if len(encoded) > MAXIMUM_EXTERNAL_PROFILER_WINDOW_BYTES:
+            raise GpuProfileError("external GPU trace window exceeds its bound")
+        destination = Path(str(self.external_capture_prefix) + ".window.json")
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".window-", suffix=".json", dir=self.external_staging_root
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as target:
+                target.write(encoded)
+                target.flush()
+                os.fsync(target.fileno())
+            temporary.chmod(0o440)
+            try:
+                os.link(temporary, destination, follow_symlinks=False)
+                _fsync_directory(self.external_staging_root)
+            except FileExistsError:
+                if not destination.is_file() or destination.read_bytes() != encoded:
+                    raise GpuProfileError(
+                        "external GPU trace window identity already exists with different bytes"
+                    )
+            return destination
+        finally:
+            temporary.unlink(missing_ok=True)
+
     def publish(
         self,
         *,
@@ -431,6 +521,7 @@ class GpuTracePublisher:
             "sensitivity": "restricted",
             "skip_steps": self._request.skip_steps,
             "summary": dict(summary),
+            "trace_file_name": "trace.json",
             "trace_sha256": trace_sha256,
             "trace_size_bytes": trace_size,
             "warmup_steps": self._request.warmup_steps,
@@ -617,7 +708,12 @@ class ExternalStepProfiler:
         self._steps_seen = 0
         self._last_step: int | None = None
         self._captured_steps: list[int] = []
+        self._pending_input_stall_us = 0.0
+        self._pending_input_observations = 0
+        self._captured_input_stall_us: list[float | None] = []
         self._active = False
+        self._capture_started_ns: int | None = None
+        self._capture_wall_time_us: float | None = None
         self._entered = False
         self._finished = False
 
@@ -653,6 +749,7 @@ class ExternalStepProfiler:
             raise GpuProfileError("external GPU capture is already active")
         assert self._runtime is not None
         self._runtime.start_capture()
+        self._capture_started_ns = time.perf_counter_ns()
         self._active = True
 
     def _stop(self) -> None:
@@ -662,6 +759,14 @@ class ExternalStepProfiler:
         try:
             self._runtime.stop_capture()
         finally:
+            stopped = time.perf_counter_ns()
+            if self._capture_started_ns is not None:
+                elapsed = (stopped - self._capture_started_ns) / 1000.0
+                if elapsed <= 0 or not math.isfinite(elapsed):
+                    raise GpuProfileError(
+                        "external GPU trace wall-clock observation is invalid"
+                    )
+                self._capture_wall_time_us = elapsed
             self._active = False
 
     def __enter__(self) -> Self:
@@ -677,10 +782,30 @@ class ExternalStepProfiler:
 
     @contextmanager
     def input_wait(self) -> Iterator[None]:
-        yield
+        started = time.perf_counter_ns()
+        try:
+            yield
+        finally:
+            elapsed = (time.perf_counter_ns() - started) / 1000.0
+            if elapsed < 0 or not math.isfinite(elapsed):
+                raise GpuProfileError("input-stall clock observation is invalid")
+            self._pending_input_stall_us += elapsed
+            self._pending_input_observations += 1
 
     def track_input(self, values: Iterable[_InputItem]) -> Iterator[_InputItem]:
-        return iter(values)
+        iterator = iter(values)
+        while True:
+            started = time.perf_counter_ns()
+            try:
+                value = next(iterator)
+            except StopIteration:
+                return
+            elapsed = (time.perf_counter_ns() - started) / 1000.0
+            if elapsed < 0 or not math.isfinite(elapsed):
+                raise GpuProfileError("input-stall clock observation is invalid")
+            self._pending_input_stall_us += elapsed
+            self._pending_input_observations += 1
+            yield value
 
     def step(self, optimizer_step: int) -> None:
         if (
@@ -698,6 +823,13 @@ class ExternalStepProfiler:
             if not self._active:
                 raise GpuProfileError("external GPU trace window is not active")
             self._captured_steps.append(optimizer_step)
+            self._captured_input_stall_us.append(
+                self._pending_input_stall_us
+                if self._pending_input_observations > 0
+                else None
+            )
+        self._pending_input_stall_us = 0.0
+        self._pending_input_observations = 0
         self._steps_seen += 1
         if self._steps_seen == self._request.total_steps:
             self._stop()
@@ -718,6 +850,15 @@ class ExternalStepProfiler:
             raise GpuProfileError(
                 "training ended before the external GPU trace window completed"
             )
+        assert self._authority is not None
+        if self._capture_wall_time_us is None:
+            raise GpuProfileError("external GPU trace has no captured wall time")
+        self._publisher.publish_external_window(
+            authority=self._authority,
+            optimizer_steps=tuple(self._captured_steps),
+            input_stall_us=tuple(self._captured_input_stall_us),
+            captured_step_wall_time_us=self._capture_wall_time_us,
+        )
 
 
 def _event_value(event: object, *names: str) -> float:
@@ -1049,6 +1190,7 @@ __all__ = [
     "EXTERNAL_PROFILER_AUTHORITY_DESCRIPTOR",
     "EXTERNAL_PROFILER_AUTHORITY_SCHEMA",
     "EXTERNAL_PROFILER_NVTX_RANGE",
+    "EXTERNAL_PROFILER_WINDOW_SCHEMA",
     "GPU_TRACE_SCHEMA",
     "ExternalProfilerAuthority",
     "ExternalStepProfiler",
