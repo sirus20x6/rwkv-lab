@@ -26,9 +26,17 @@ type fakeTrainVMCommander struct {
 	actionResult     trainvmstore.RunActionResult
 	submission       trainvmstore.SubmissionRequest
 	submissionResult trainvmstore.SubmissionResult
+	planDiff         trainvmstore.PlanDiffRequest
+	planDiffResult   trainvmstore.PlanDiffResult
 	descriptor       trainvmstore.DescriptorRequest
 	descriptorResult trainvmstore.DescriptorResult
 	err              error
+}
+
+func (f *fakeTrainVMCommander) DiffPlan(_ context.Context,
+	request trainvmstore.PlanDiffRequest) (trainvmstore.PlanDiffResult, error) {
+	f.planDiff = request
+	return f.planDiffResult, f.err
 }
 
 func (f *fakeTrainVMCommander) GetDescriptor(_ context.Context,
@@ -493,7 +501,7 @@ func TestTrainVMSubmissionEndpointUsesNativeCommander(t *testing.T) {
 	}}
 	srv := New(Config{Commander: commander, TrainVM: trainVMFixture(t)})
 	request := httptest.NewRequest(http.MethodPost, "/api/trainvm/experiments",
-		strings.NewReader(`{"source_document":"{\"kind\":\"Experiment\"}","source_format":"json","create_run":true,"idempotency_key":"submit-1","expected_journal_id":"0123456789abcdef0123456789abcdef","expected_plan_hash":"native-plan","expected_adapter_lock_digest":"native-lock","expected_training_component_lock_digest":"training-lock","reason":"launch test"}`))
+		strings.NewReader(`{"source_document":"{\"kind\":\"Experiment\"}","source_format":"json","create_run":true,"idempotency_key":"submit-1","expected_journal_id":"0123456789abcdef0123456789abcdef","expected_plan_hash":"native-plan","expected_adapter_lock_digest":"native-lock","expected_training_component_lock_digest":"training-lock","reason":"launch test","forked_from_run_id":"vm-run","expected_parent_run_revision":2,"expected_parent_plan_hash":"baa59aa47fcce31100a77393fcaeb04265bbfc3af2235c62a65ba2006225811a"}`))
 	request.Host = "127.0.0.1:9124"
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
@@ -506,9 +514,50 @@ func TestTrainVMSubmissionEndpointUsesNativeCommander(t *testing.T) {
 		commander.submission.ExpectedPlanHash != "native-plan" ||
 		commander.submission.ExpectedAdapterLockDigest != "native-lock" ||
 		commander.submission.ExpectedTrainingComponentLockDigest != "training-lock" ||
+		commander.submission.ForkedFromRunID != "vm-run" ||
+		commander.submission.ExpectedParentRunRevision != 2 ||
+		commander.submission.ExpectedParentPlanHash != "baa59aa47fcce31100a77393fcaeb04265bbfc3af2235c62a65ba2006225811a" ||
 		!strings.Contains(response.Body.String(), `"run_id":"run-new"`) {
 		t.Fatalf("unexpected submission forwarding: status=%d request=%#v body=%s",
 			response.Code, commander.submission, response.Body.String())
+	}
+}
+
+func TestTrainVMPlanDiffEndpointFencesSelectedRunAndProposedPlan(t *testing.T) {
+	commander := &fakeTrainVMCommander{planDiffResult: trainvmstore.PlanDiffResult{
+		ProposedPlanHash: "proposed-plan", SemanticDiff: json.RawMessage(`[{"op":"replace","path":"/metadata/name","value":"next"}]`),
+		Diagnostics: []trainvmstore.ControlDiagnostic{{Severity: "WARNING", Code: "plan.adoption_requires_new_run"}},
+	}}
+	srv := New(Config{Commander: commander, TrainVM: trainVMFixture(t)})
+	request := httptest.NewRequest(http.MethodPost, "/api/trainvm/runs/vm-run/diff",
+		strings.NewReader(`{"expected_run_revision":2,"proposed_source_document":"{\"kind\":\"Experiment\"}","source_format":"json","expected_journal_id":"0123456789abcdef0123456789abcdef","expected_current_plan_hash":"baa59aa47fcce31100a77393fcaeb04265bbfc3af2235c62a65ba2006225811a","expected_proposed_plan_hash":"proposed-plan"}`))
+	request.Host = "127.0.0.1:9124"
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || commander.planDiff.RunID != "vm-run" ||
+		commander.planDiff.ExpectedRunRevision != 2 ||
+		commander.planDiff.ExpectedJournalID != "0123456789abcdef0123456789abcdef" ||
+		commander.planDiff.ExpectedCurrentPlanHash != "baa59aa47fcce31100a77393fcaeb04265bbfc3af2235c62a65ba2006225811a" ||
+		commander.planDiff.ExpectedProposedPlanHash != "proposed-plan" ||
+		!strings.Contains(response.Body.String(), `"semantic_diff":[{"op":"replace"`) {
+		t.Fatalf("unexpected plan diff forwarding: status=%d request=%#v body=%s",
+			response.Code, commander.planDiff, response.Body.String())
+	}
+}
+
+func TestTrainVMPlanDiffEndpointRejectsStaleSelectedRun(t *testing.T) {
+	commander := &fakeTrainVMCommander{}
+	srv := New(Config{Commander: commander, TrainVM: trainVMFixture(t)})
+	request := httptest.NewRequest(http.MethodPost, "/api/trainvm/runs/vm-run/diff",
+		strings.NewReader(`{"expected_run_revision":1,"proposed_source_document":"{}","source_format":"json","expected_journal_id":"0123456789abcdef0123456789abcdef","expected_current_plan_hash":"baa59aa47fcce31100a77393fcaeb04265bbfc3af2235c62a65ba2006225811a","expected_proposed_plan_hash":"proposed-plan"}`))
+	request.Host = "127.0.0.1:9124"
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusConflict || commander.planDiff.RunID != "" {
+		t.Fatalf("stale plan diff reached authority: status=%d request=%#v body=%s",
+			response.Code, commander.planDiff, response.Body.String())
 	}
 }
 

@@ -187,6 +187,7 @@
           <div class="vm-editor-toolbar">
             <button class="btn sm" id="vm-load-example" type="button">load reference experiment</button>
             <button class="btn sm" id="vm-compile" type="button">compile preview</button>
+            <button class="btn sm" id="vm-diff" type="button" disabled>compare selected run</button>
             <input id="vm-submit-reason" type="text" maxlength="240" placeholder="reason for submission" aria-label="Submission reason" />
             <button class="btn sm" id="vm-submit" type="button" disabled>create queued run</button>
             <span id="vm-editor-state" class="sub">open to load schema</span>
@@ -204,6 +205,7 @@
               <div class="vm-editor-heading">native compiler</div>
               <div id="vm-diagnostics" class="vm-diagnostics"><div class="empty">compile to inspect diagnostics</div></div>
               <div id="vm-plan-preview" class="vm-plan-preview"></div>
+              <div id="vm-plan-diff" class="vm-plan-diff"><div class="empty">select a run and compare a valid draft</div></div>
               <details class="vm-raw-editor">
                 <summary>advanced JSON source</summary>
                 <textarea id="vm-json-source" spellcheck="false" aria-label="Experiment JSON source"></textarea>

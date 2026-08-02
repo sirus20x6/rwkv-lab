@@ -1353,6 +1353,9 @@ type SubmitExperimentRequest struct {
 	ExpectedPlanHash                    string                 `protobuf:"bytes,8,opt,name=expected_plan_hash,json=expectedPlanHash,proto3" json:"expected_plan_hash,omitempty"`                                                               // required for create_run; fences preview/compiler skew
 	ExpectedAdapterLockDigest           string                 `protobuf:"bytes,9,opt,name=expected_adapter_lock_digest,json=expectedAdapterLockDigest,proto3" json:"expected_adapter_lock_digest,omitempty"`                                  // required for create_run; fences registry skew
 	ExpectedTrainingComponentLockDigest string                 `protobuf:"bytes,10,opt,name=expected_training_component_lock_digest,json=expectedTrainingComponentLockDigest,proto3" json:"expected_training_component_lock_digest,omitempty"` // required only when preview selects training components
+	ForkedFromRunId                     string                 `protobuf:"bytes,11,opt,name=forked_from_run_id,json=forkedFromRunId,proto3" json:"forked_from_run_id,omitempty"`                                                               // optional; all fork fields are required together for create_run
+	ExpectedParentRunRevision           uint64                 `protobuf:"varint,12,opt,name=expected_parent_run_revision,json=expectedParentRunRevision,proto3" json:"expected_parent_run_revision,omitempty"`
+	ExpectedParentPlanHash              string                 `protobuf:"bytes,13,opt,name=expected_parent_plan_hash,json=expectedParentPlanHash,proto3" json:"expected_parent_plan_hash,omitempty"`
 	unknownFields                       protoimpl.UnknownFields
 	sizeCache                           protoimpl.SizeCache
 }
@@ -1453,6 +1456,27 @@ func (x *SubmitExperimentRequest) GetExpectedAdapterLockDigest() string {
 func (x *SubmitExperimentRequest) GetExpectedTrainingComponentLockDigest() string {
 	if x != nil {
 		return x.ExpectedTrainingComponentLockDigest
+	}
+	return ""
+}
+
+func (x *SubmitExperimentRequest) GetForkedFromRunId() string {
+	if x != nil {
+		return x.ForkedFromRunId
+	}
+	return ""
+}
+
+func (x *SubmitExperimentRequest) GetExpectedParentRunRevision() uint64 {
+	if x != nil {
+		return x.ExpectedParentRunRevision
+	}
+	return 0
+}
+
+func (x *SubmitExperimentRequest) GetExpectedParentPlanHash() string {
+	if x != nil {
+		return x.ExpectedParentPlanHash
 	}
 	return ""
 }
@@ -1566,13 +1590,16 @@ func (x *SubmitExperimentResponse) GetCanonicalTrainingComponentLock() string {
 }
 
 type PlanDiffRequest struct {
-	state                  protoimpl.MessageState `protogen:"open.v1"`
-	RunId                  string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
-	ExpectedRevision       uint64                 `protobuf:"varint,2,opt,name=expected_revision,json=expectedRevision,proto3" json:"expected_revision,omitempty"`
-	ProposedSourceDocument string                 `protobuf:"bytes,3,opt,name=proposed_source_document,json=proposedSourceDocument,proto3" json:"proposed_source_document,omitempty"`
-	SourceFormat           string                 `protobuf:"bytes,4,opt,name=source_format,json=sourceFormat,proto3" json:"source_format,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	state                    protoimpl.MessageState `protogen:"open.v1"`
+	RunId                    string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	ExpectedRevision         uint64                 `protobuf:"varint,2,opt,name=expected_revision,json=expectedRevision,proto3" json:"expected_revision,omitempty"`
+	ProposedSourceDocument   string                 `protobuf:"bytes,3,opt,name=proposed_source_document,json=proposedSourceDocument,proto3" json:"proposed_source_document,omitempty"`
+	SourceFormat             string                 `protobuf:"bytes,4,opt,name=source_format,json=sourceFormat,proto3" json:"source_format,omitempty"`
+	ExpectedJournalId        string                 `protobuf:"bytes,5,opt,name=expected_journal_id,json=expectedJournalId,proto3" json:"expected_journal_id,omitempty"`
+	ExpectedCurrentPlanHash  string                 `protobuf:"bytes,6,opt,name=expected_current_plan_hash,json=expectedCurrentPlanHash,proto3" json:"expected_current_plan_hash,omitempty"`
+	ExpectedProposedPlanHash string                 `protobuf:"bytes,7,opt,name=expected_proposed_plan_hash,json=expectedProposedPlanHash,proto3" json:"expected_proposed_plan_hash,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *PlanDiffRequest) Reset() {
@@ -1629,6 +1656,27 @@ func (x *PlanDiffRequest) GetProposedSourceDocument() string {
 func (x *PlanDiffRequest) GetSourceFormat() string {
 	if x != nil {
 		return x.SourceFormat
+	}
+	return ""
+}
+
+func (x *PlanDiffRequest) GetExpectedJournalId() string {
+	if x != nil {
+		return x.ExpectedJournalId
+	}
+	return ""
+}
+
+func (x *PlanDiffRequest) GetExpectedCurrentPlanHash() string {
+	if x != nil {
+		return x.ExpectedCurrentPlanHash
+	}
+	return ""
+}
+
+func (x *PlanDiffRequest) GetExpectedProposedPlanHash() string {
+	if x != nil {
+		return x.ExpectedProposedPlanHash
 	}
 	return ""
 }
@@ -5207,7 +5255,7 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\x1aeffective_control_revision\x18\r \x01(\x04B\x02\x18\x01R\x18effectiveControlRevision\x12I\n" +
 	"!latest_requested_control_revision\x18\x0e \x01(\x04R\x1elatestRequestedControlRevision\x12I\n" +
 	"!latest_effective_control_revision\x18\x0f \x01(\x04R\x1elatestEffectiveControlRevision\x12.\n" +
-	"\x13last_event_sequence\x18\x10 \x01(\x04R\x11lastEventSequence\"\xd4\x03\n" +
+	"\x13last_event_sequence\x18\x10 \x01(\x04R\x11lastEventSequence\"\xfd\x04\n" +
 	"\x17SubmitExperimentRequest\x12'\n" +
 	"\x0fsource_document\x18\x01 \x01(\tR\x0esourceDocument\x12#\n" +
 	"\rsource_format\x18\x02 \x01(\tR\fsourceFormat\x12\x1d\n" +
@@ -5220,7 +5268,10 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\x12expected_plan_hash\x18\b \x01(\tR\x10expectedPlanHash\x12?\n" +
 	"\x1cexpected_adapter_lock_digest\x18\t \x01(\tR\x19expectedAdapterLockDigest\x12T\n" +
 	"'expected_training_component_lock_digest\x18\n" +
-	" \x01(\tR#expectedTrainingComponentLockDigest\"\xe8\x03\n" +
+	" \x01(\tR#expectedTrainingComponentLockDigest\x12+\n" +
+	"\x12forked_from_run_id\x18\v \x01(\tR\x0fforkedFromRunId\x12?\n" +
+	"\x1cexpected_parent_run_revision\x18\f \x01(\x04R\x19expectedParentRunRevision\x129\n" +
+	"\x19expected_parent_plan_hash\x18\r \x01(\tR\x16expectedParentPlanHash\"\xe8\x03\n" +
 	"\x18SubmitExperimentResponse\x12-\n" +
 	"\x12canonical_document\x18\x01 \x01(\tR\x11canonicalDocument\x12%\n" +
 	"\x0ecanonical_plan\x18\x02 \x01(\tR\rcanonicalPlan\x12\x1b\n" +
@@ -5230,12 +5281,15 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\x13adapter_lock_digest\x18\x06 \x01(\tR\x11adapterLockDigest\x124\n" +
 	"\x16canonical_adapter_lock\x18\a \x01(\tR\x14canonicalAdapterLock\x12C\n" +
 	"\x1etraining_component_lock_digest\x18\b \x01(\tR\x1btrainingComponentLockDigest\x12I\n" +
-	"!canonical_training_component_lock\x18\t \x01(\tR\x1ecanonicalTrainingComponentLock\"\xb4\x01\n" +
+	"!canonical_training_component_lock\x18\t \x01(\tR\x1ecanonicalTrainingComponentLock\"\xe0\x02\n" +
 	"\x0fPlanDiffRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12+\n" +
 	"\x11expected_revision\x18\x02 \x01(\x04R\x10expectedRevision\x128\n" +
 	"\x18proposed_source_document\x18\x03 \x01(\tR\x16proposedSourceDocument\x12#\n" +
-	"\rsource_format\x18\x04 \x01(\tR\fsourceFormat\"\xcd\x01\n" +
+	"\rsource_format\x18\x04 \x01(\tR\fsourceFormat\x12.\n" +
+	"\x13expected_journal_id\x18\x05 \x01(\tR\x11expectedJournalId\x12;\n" +
+	"\x1aexpected_current_plan_hash\x18\x06 \x01(\tR\x17expectedCurrentPlanHash\x12=\n" +
+	"\x1bexpected_proposed_plan_hash\x18\a \x01(\tR\x18expectedProposedPlanHash\"\xcd\x01\n" +
 	"\x10PlanDiffResponse\x12,\n" +
 	"\x12adoptable_in_place\x18\x01 \x01(\bR\x10adoptableInPlace\x12#\n" +
 	"\rsemantic_diff\x18\x02 \x01(\tR\fsemanticDiff\x12,\n" +

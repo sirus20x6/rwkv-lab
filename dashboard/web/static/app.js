@@ -911,11 +911,25 @@
     return JSON.parse(JSON.stringify(values || {}));
   }
 
+  function publishVMRunSelection(run) {
+    const detail = run ? {
+      runID: String(run.run_id || ""),
+      runRevision: Number(run.run_revision || 0),
+      planHash: String(run.plan_hash || ""),
+    } : null;
+    const previous = window.__trainVMSelectedRun || null;
+    if (previous?.runID === detail?.runID && previous?.runRevision === detail?.runRevision &&
+        previous?.planHash === detail?.planHash) return;
+    window.__trainVMSelectedRun = detail;
+    window.dispatchEvent(new CustomEvent("trainvm-run-selected", { detail }));
+  }
+
   function selectVMRun(runID) {
     if (vmSelected === runID) return false;
     vmSelected = runID;
     vmSelectionGeneration += 1;
     vmSelectedRun = null;
+    publishVMRunSelection(null);
     vmControlRun = "";
     vmControlView = null;
     vmPendingControls = {};
@@ -1772,6 +1786,7 @@
       const previousObservedState = vmSelectedRun?.run_id === selected?.run_id ?
         vmSelectedRun?.observed_state : "";
       vmSelectedRun = selected || null;
+      publishVMRunSelection(vmSelectedRun);
       if (selected) {
         renderVMSummary(selected);
         await Promise.all([refreshVMControlView(selected), refreshVMCompiledPlan(selected)]);

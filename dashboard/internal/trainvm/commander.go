@@ -28,6 +28,7 @@ import (
 // commands to the native TrainVM authority and never receive a journal path.
 type Commander interface {
 	SubmitExperiment(context.Context, SubmissionRequest) (SubmissionResult, error)
+	DiffPlan(context.Context, PlanDiffRequest) (PlanDiffResult, error)
 	RequestControls(context.Context, ControlRequest) (ControlResult, error)
 	RequestRunAction(context.Context, RunActionRequest) (RunActionResult, error)
 	GetDescriptor(context.Context, DescriptorRequest) (DescriptorResult, error)
@@ -54,6 +55,9 @@ type SubmissionRequest struct {
 	ExpectedTrainingComponentLockDigest string
 	Author                              string
 	Reason                              string
+	ForkedFromRunID                     string
+	ExpectedParentRunRevision           uint64
+	ExpectedParentPlanHash              string
 }
 
 type SubmissionResult struct {
@@ -72,6 +76,23 @@ type RunIdentity struct {
 	RunID    string `json:"run_id"`
 	Revision uint64 `json:"revision"`
 	PlanHash string `json:"plan_hash"`
+}
+
+type PlanDiffRequest struct {
+	RunID                    string
+	ExpectedRunRevision      uint64
+	ProposedSourceDocument   string
+	SourceFormat             string
+	ExpectedJournalID        string
+	ExpectedCurrentPlanHash  string
+	ExpectedProposedPlanHash string
+}
+
+type PlanDiffResult struct {
+	AdoptableInPlace bool                `json:"adoptable_in_place"`
+	SemanticDiff     json.RawMessage     `json:"semantic_diff,omitempty"`
+	ProposedPlanHash string              `json:"proposed_plan_hash,omitempty"`
+	Diagnostics      []ControlDiagnostic `json:"diagnostics,omitempty"`
 }
 
 type ControlRequest struct {
@@ -441,6 +462,42 @@ func (c *GRPCCommander) SubmitExperiment(ctx context.Context, request Submission
 	return result, nil
 }
 
+func (c *GRPCCommander) DiffPlan(ctx context.Context, request PlanDiffRequest) (PlanDiffResult, error) {
+	if c == nil || c.client == nil {
+		return PlanDiffResult{}, fmt.Errorf("TrainVM authority client is not configured")
+	}
+	rpcRequest, err := planDiffRPCRequest(request)
+	if err != nil {
+		return PlanDiffResult{}, err
+	}
+	response, err := c.client.DiffPlan(ctx, rpcRequest)
+	if err != nil {
+		return PlanDiffResult{}, err
+	}
+	result := PlanDiffResult{
+		AdoptableInPlace: response.GetAdoptableInPlace(),
+		ProposedPlanHash: strings.TrimSpace(response.GetProposedPlanHash()),
+	}
+	if encoded := response.GetSemanticDiff(); encoded != "" {
+		if len(encoded) > 2<<20 || !json.Valid([]byte(encoded)) {
+			return PlanDiffResult{}, fmt.Errorf("TrainVM authority returned an invalid semantic plan diff")
+		}
+		var patch []json.RawMessage
+		if err := json.Unmarshal([]byte(encoded), &patch); err != nil {
+			return PlanDiffResult{}, fmt.Errorf("TrainVM authority returned a non-array semantic plan diff: %w", err)
+		}
+		result.SemanticDiff = json.RawMessage(encoded)
+	}
+	for _, diagnostic := range response.GetDiagnostics() {
+		result.Diagnostics = append(result.Diagnostics, ControlDiagnostic{
+			Severity: strings.TrimPrefix(diagnostic.GetSeverity().String(), "SEVERITY_"),
+			Code:     diagnostic.GetCode(), Path: diagnostic.GetDocumentPath(),
+			Message: diagnostic.GetMessage(), Help: diagnostic.GetHelp(),
+		})
+	}
+	return result, nil
+}
+
 func (c *GRPCCommander) GetDescriptor(ctx context.Context, request DescriptorRequest) (DescriptorResult, error) {
 	if c == nil || c.client == nil {
 		return DescriptorResult{}, fmt.Errorf("TrainVM authority client is not configured")
@@ -472,6 +529,8 @@ func submissionRPCRequest(request SubmissionRequest) (*trainvmv1.SubmitExperimen
 	request.ExpectedTrainingComponentLockDigest = strings.TrimSpace(request.ExpectedTrainingComponentLockDigest)
 	request.Author = strings.TrimSpace(request.Author)
 	request.Reason = strings.TrimSpace(request.Reason)
+	request.ForkedFromRunID = strings.TrimSpace(request.ForkedFromRunID)
+	request.ExpectedParentPlanHash = strings.TrimSpace(request.ExpectedParentPlanHash)
 	if request.SourceDocument == "" || request.ExpectedJournalID == "" ||
 		(request.SourceFormat != "json" && request.SourceFormat != "yaml") {
 		return nil, &ValidationError{Message: "source document, json/yaml format, and journal ID are required"}
@@ -480,6 +539,11 @@ func submissionRPCRequest(request SubmissionRequest) (*trainvmv1.SubmitExperimen
 		request.Reason == "" || request.ExpectedPlanHash == "" || request.ExpectedAdapterLockDigest == "") {
 		return nil, &ValidationError{Message: "run creation requires an idempotency key, author, reason, and expected plan and adapter-lock hashes"}
 	}
+	hasForkIdentity := request.ForkedFromRunID != "" || request.ExpectedParentRunRevision != 0 || request.ExpectedParentPlanHash != ""
+	if hasForkIdentity && (!request.CreateRun || request.ForkedFromRunID == "" || len(request.ForkedFromRunID) > 256 ||
+		request.ExpectedParentRunRevision == 0 || request.ExpectedParentPlanHash == "") {
+		return nil, &ValidationError{Message: "run fork requires a bounded parent run ID, revision, and plan hash"}
+	}
 	return &trainvmv1.SubmitExperimentRequest{
 		SourceDocument: request.SourceDocument, SourceFormat: request.SourceFormat,
 		CreateRun: request.CreateRun, IdempotencyKey: request.IdempotencyKey,
@@ -487,6 +551,31 @@ func submissionRPCRequest(request SubmissionRequest) (*trainvmv1.SubmitExperimen
 		ExpectedPlanHash:                    request.ExpectedPlanHash,
 		ExpectedAdapterLockDigest:           request.ExpectedAdapterLockDigest,
 		ExpectedTrainingComponentLockDigest: request.ExpectedTrainingComponentLockDigest,
+		ForkedFromRunId:                     request.ForkedFromRunID,
+		ExpectedParentRunRevision:           request.ExpectedParentRunRevision,
+		ExpectedParentPlanHash:              request.ExpectedParentPlanHash,
+	}, nil
+}
+
+func planDiffRPCRequest(request PlanDiffRequest) (*trainvmv1.PlanDiffRequest, error) {
+	request.RunID = strings.TrimSpace(request.RunID)
+	request.SourceFormat = strings.TrimSpace(strings.ToLower(request.SourceFormat))
+	request.ExpectedJournalID = strings.TrimSpace(request.ExpectedJournalID)
+	request.ExpectedCurrentPlanHash = strings.TrimSpace(request.ExpectedCurrentPlanHash)
+	request.ExpectedProposedPlanHash = strings.TrimSpace(request.ExpectedProposedPlanHash)
+	if request.RunID == "" || len(request.RunID) > 256 || request.ExpectedRunRevision == 0 ||
+		request.ProposedSourceDocument == "" || len(request.ProposedSourceDocument) > 2<<20 ||
+		(request.SourceFormat != "json" && request.SourceFormat != "yaml") ||
+		request.ExpectedJournalID == "" || request.ExpectedCurrentPlanHash == "" ||
+		request.ExpectedProposedPlanHash == "" {
+		return nil, &ValidationError{Message: "plan diff requires bounded run, revision, source, journal, current-plan, and proposed-plan identities"}
+	}
+	return &trainvmv1.PlanDiffRequest{
+		RunId: request.RunID, ExpectedRevision: request.ExpectedRunRevision,
+		ProposedSourceDocument: request.ProposedSourceDocument, SourceFormat: request.SourceFormat,
+		ExpectedJournalId:        request.ExpectedJournalID,
+		ExpectedCurrentPlanHash:  request.ExpectedCurrentPlanHash,
+		ExpectedProposedPlanHash: request.ExpectedProposedPlanHash,
 	}, nil
 }
 

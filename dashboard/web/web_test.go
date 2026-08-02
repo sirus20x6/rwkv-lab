@@ -329,6 +329,41 @@ func TestTrainVMSubmissionFreezesPreviewAndRetriesExactIntent(t *testing.T) {
 	}
 }
 
+func TestTrainVMPlanDiffCreatesExplicitImmutableRevisionFork(t *testing.T) {
+	assets := Static()
+	index, err := fs.ReadFile(assets, "index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	editor, err := fs.ReadFile(assets, "trainvm-editor.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := fs.ReadFile(assets, "app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	combined := string(index) + string(editor) + string(app)
+	for _, required := range []string{
+		`id="vm-diff"`, `id="vm-plan-diff"`,
+		`/api/trainvm/runs/${encodeURIComponent(identity.runID)}/diff`,
+		`expected_current_plan_hash: identity.planHash`,
+		`expected_proposed_plan_hash: preview.planHash`,
+		`Array.isArray(result?.semantic_diff)`, `create revision fork`,
+		`payload.forked_from_run_id = fork.runID`,
+		`payload.expected_parent_run_revision = fork.runRevision`,
+		`payload.expected_parent_plan_hash = fork.planHash`,
+		`trainvm-run-selected`, `runRevision: Number(run.run_revision || 0)`,
+	} {
+		if !strings.Contains(combined, required) {
+			t.Fatalf("TrainVM immutable plan-fork workflow is missing %q", required)
+		}
+	}
+	if strings.Contains(string(editor), "adopt_plan") {
+		t.Fatal("editor attempts to mutate an active plan instead of creating a fork")
+	}
+}
+
 func TestTrainVMWaitingStatesAreNotRenderedAsTerminalOrControllable(t *testing.T) {
 	assets := Static()
 	app, err := fs.ReadFile(assets, "app.js")

@@ -39,13 +39,14 @@ Implemented now:
 - a native gRPC command authority over a permission-restricted Unix socket, with an exclusive
   journal-owner lock, typed control results, serialized optimistic updates, and fenced worker acks;
 - strict in-memory JSON/YAML experiment submission, canonical recompilation by the authority,
-  journal-bound idempotency identities, atomic queued run creation, and deterministic queued-run
-  recovery without launching work;
+  journal-bound idempotency identities, atomic queued run creation, explicit parent-fenced revision
+  forks with durable lineage, and deterministic queued-run recovery without launching work;
 - native dashboard read APIs for bounded run summaries, hash-verified immutable compiled plans,
-  state/label-filtered cursor pagination, revision-fenced semantic plan diffs, typed control catalog/effective/history snapshots, and
-  resumable filtered event streaming or bounded replay from durable journal sequence numbers; page
-  tokens are bound to the exact journal and query rather than trusted as client-provided SQL
-  cursors, and the production Go dashboard now consumes these RPCs instead of opening the journal;
+  state/label-filtered cursor pagination, journal/current/proposed-plan-fenced semantic diffs, typed
+  control catalog/effective/history snapshots, and resumable filtered event streaming or bounded
+  replay from durable journal sequence numbers; page tokens are bound to the exact journal and query
+  rather than trusted as client-provided SQL cursors, and the production Go dashboard now consumes
+  these RPCs instead of opening the journal;
 - separate typed Go telemetry projections for `metric.sampled` and `artifact.published` events,
   backed by event-type-filtered durable cursors and a composite journal index; the native dashboard
   panel renders these incrementally without folding metric or artifact semantics into the generic

@@ -3384,6 +3384,18 @@ grpc::Status TrainVMService::SubmitExperiment(grpc::ServerContext* context,
               "run creation requires an idempotency key, author, reason, and "
               "expected plan and adapter-lock hashes"};
     }
+    const bool has_fork_identity =
+        !request->forked_from_run_id().empty() ||
+        request->expected_parent_run_revision() != 0U ||
+        !request->expected_parent_plan_hash().empty();
+    if (has_fork_identity &&
+        (!request->create_run() || request->forked_from_run_id().empty() ||
+         request->forked_from_run_id().size() > 256U ||
+         request->expected_parent_run_revision() == 0U ||
+         request->expected_parent_plan_hash().empty())) {
+      return {grpc::StatusCode::INVALID_ARGUMENT,
+              "run fork requires a bounded parent run ID, revision, and plan hash"};
+    }
     if (cancelled(context))
       return cancellation_status();
 
@@ -3508,6 +3520,13 @@ grpc::Status TrainVMService::SubmitExperiment(grpc::ServerContext* context,
         expected_submission["training_component_lock"] =
             nlohmann::json::parse(training_lock_manifest);
       }
+      if (has_fork_identity) {
+        expected_submission["forked_from"] = {
+            {"run_id", request->forked_from_run_id()},
+            {"run_revision", request->expected_parent_run_revision()},
+            {"plan_hash", request->expected_parent_plan_hash()},
+        };
+      }
       if (stored_submission != expected_submission) {
         throw RunCreationConflict(
             "run already exists with a different submission identity");
@@ -3528,6 +3547,22 @@ grpc::Status TrainVMService::SubmitExperiment(grpc::ServerContext* context,
       return grpc::Status::OK;
     }
 
+    if (has_fork_identity) {
+      if (request->forked_from_run_id() == run_id) {
+        return {grpc::StatusCode::INVALID_ARGUMENT,
+                "a run cannot be forked from itself"};
+      }
+      const auto parent = journal_.projection(request->forked_from_run_id());
+      if (!parent) {
+        return {grpc::StatusCode::NOT_FOUND, "fork parent run does not exist"};
+      }
+      if (parent->run_revision != request->expected_parent_run_revision() ||
+          parent->plan_hash != request->expected_parent_plan_hash()) {
+        return {grpc::StatusCode::FAILED_PRECONDITION,
+                "fork parent identity is stale"};
+      }
+    }
+
     nlohmann::json submission_identity{
         {"idempotency_key", request->idempotency_key()},
         {"source_format", request->source_format()},
@@ -3543,6 +3578,13 @@ grpc::Status TrainVMService::SubmitExperiment(grpc::ServerContext* context,
           training_lock_digest;
       submission_identity["training_component_lock"] =
           nlohmann::json::parse(training_lock_manifest);
+    }
+    if (has_fork_identity) {
+      submission_identity["forked_from"] = {
+          {"run_id", request->forked_from_run_id()},
+          {"run_revision", request->expected_parent_run_revision()},
+          {"plan_hash", request->expected_parent_plan_hash()},
+      };
     }
     Controller controller(*compiled.plan, journal_, run_id);
     controller.create_queued(submission_identity);
@@ -3575,12 +3617,19 @@ grpc::Status TrainVMService::DiffPlan(grpc::ServerContext* context,
   if (request->ByteSizeLong() > kMaximumSubmissionBytes ||
       request->run_id().empty() || request->run_id().size() > 256U ||
       request->proposed_source_document().empty() ||
-      request->source_format().empty()) {
+      request->source_format().empty() ||
+      request->expected_journal_id().empty() ||
+      request->expected_current_plan_hash().empty() ||
+      request->expected_proposed_plan_hash().empty()) {
     return {grpc::StatusCode::INVALID_ARGUMENT,
             "plan diff requires a bounded run ID, source, and format"};
   }
   if (cancelled(context)) return cancellation_status();
   try {
+    if (request->expected_journal_id() != journal_.journal_id()) {
+      return {grpc::StatusCode::FAILED_PRECONDITION,
+              "plan diff journal identity is stale"};
+    }
     const CompileResult proposed = compile_document_source(
         request->proposed_source_document(), request->source_format());
     for (const Diagnostic& diagnostic : proposed.diagnostics) {
@@ -3588,6 +3637,10 @@ grpc::Status TrainVMService::DiffPlan(grpc::ServerContext* context,
     }
     if (!proposed.valid() || !proposed.plan) return grpc::Status::OK;
     response->set_proposed_plan_hash(proposed.plan->plan_hash);
+    if (proposed.plan->plan_hash != request->expected_proposed_plan_hash()) {
+      return {grpc::StatusCode::FAILED_PRECONDITION,
+              "authority compiler plan hash differs from the validated preview"};
+    }
     std::scoped_lock lock(command_mutex_);
     const auto projection = journal_.projection(request->run_id());
     if (!projection) {
@@ -3596,6 +3649,10 @@ grpc::Status TrainVMService::DiffPlan(grpc::ServerContext* context,
     if (request->expected_revision() != projection->run_revision) {
       return {grpc::StatusCode::FAILED_PRECONDITION,
               "plan diff run revision is stale"};
+    }
+    if (request->expected_current_plan_hash() != projection->plan_hash) {
+      return {grpc::StatusCode::FAILED_PRECONDITION,
+              "plan diff current plan identity is stale"};
     }
     const auto current = journal_.compiled_plan(projection->plan_hash);
     if (!current) {

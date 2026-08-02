@@ -329,6 +329,91 @@ type trainVMSubmissionRequest struct {
 	ExpectedAdapterLockDigest           string `json:"expected_adapter_lock_digest"`
 	ExpectedTrainingComponentLockDigest string `json:"expected_training_component_lock_digest"`
 	Reason                              string `json:"reason"`
+	ForkedFromRunID                     string `json:"forked_from_run_id"`
+	ExpectedParentRunRevision           uint64 `json:"expected_parent_run_revision"`
+	ExpectedParentPlanHash              string `json:"expected_parent_plan_hash"`
+}
+
+type trainVMPlanDiffRequest struct {
+	ExpectedRunRevision      uint64 `json:"expected_run_revision"`
+	ProposedSourceDocument   string `json:"proposed_source_document"`
+	SourceFormat             string `json:"source_format"`
+	ExpectedJournalID        string `json:"expected_journal_id"`
+	ExpectedCurrentPlanHash  string `json:"expected_current_plan_hash"`
+	ExpectedProposedPlanHash string `json:"expected_proposed_plan_hash"`
+}
+
+func (s *Server) handleTrainVMPlanDiff(w http.ResponseWriter, r *http.Request) {
+	if s.commander == nil || s.trainvm == nil {
+		http.Error(w, "TrainVM read model and command authority are both required", http.StatusServiceUnavailable)
+		return
+	}
+	if !validateTrainVMMutation(w, r, "plan diff") {
+		return
+	}
+	var input trainVMPlanDiffRequest
+	if !decodeTrainVMMutation(w, r, "plan diff", trainVMDraftLimit, &input) {
+		return
+	}
+	runID := strings.TrimSpace(r.PathValue("run"))
+	input.ExpectedJournalID = strings.TrimSpace(input.ExpectedJournalID)
+	input.ExpectedCurrentPlanHash = strings.TrimSpace(input.ExpectedCurrentPlanHash)
+	input.ExpectedProposedPlanHash = strings.TrimSpace(input.ExpectedProposedPlanHash)
+	if runID == "" || len(runID) > 256 || input.ExpectedRunRevision == 0 || input.ProposedSourceDocument == "" ||
+		input.ExpectedJournalID == "" || input.ExpectedCurrentPlanHash == "" ||
+		input.ExpectedProposedPlanHash == "" {
+		http.Error(w, "plan diff requires run, revision, source, journal, and plan identities", http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	journalID, err := s.trainvm.JournalID(ctx)
+	if err != nil {
+		writeTrainVMAuthorityError(w, err)
+		return
+	}
+	if input.ExpectedJournalID != journalID {
+		http.Error(w, "plan diff journal identity is stale", http.StatusConflict)
+		return
+	}
+	run, found, err := s.trainvm.Run(ctx, runID)
+	if err != nil {
+		writeTrainVMAuthorityError(w, err)
+		return
+	}
+	if !found {
+		http.Error(w, "no such TrainVM run", http.StatusNotFound)
+		return
+	}
+	if run.RunRevision != input.ExpectedRunRevision || run.PlanHash != input.ExpectedCurrentPlanHash {
+		http.Error(w, "plan diff run identity is stale", http.StatusConflict)
+		return
+	}
+	result, err := s.commander.DiffPlan(ctx, trainvmstore.PlanDiffRequest{
+		RunID: runID, ExpectedRunRevision: input.ExpectedRunRevision,
+		ProposedSourceDocument: input.ProposedSourceDocument, SourceFormat: input.SourceFormat,
+		ExpectedJournalID:        input.ExpectedJournalID,
+		ExpectedCurrentPlanHash:  input.ExpectedCurrentPlanHash,
+		ExpectedProposedPlanHash: input.ExpectedProposedPlanHash,
+	})
+	if err != nil {
+		writeTrainVMAuthorityError(w, err)
+		return
+	}
+	if result.ProposedPlanHash == "" || len(result.SemanticDiff) == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_ = json.NewEncoder(w).Encode(result)
+		return
+	}
+	if result.ProposedPlanHash != input.ExpectedProposedPlanHash {
+		http.Error(w, "native authority returned a mismatched proposed plan identity", http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(result)
 }
 
 func (s *Server) handleTrainVMSubmit(w http.ResponseWriter, r *http.Request) {
@@ -354,6 +439,8 @@ func (s *Server) handleTrainVMSubmit(w http.ResponseWriter, r *http.Request) {
 	input.ExpectedPlanHash = strings.TrimSpace(input.ExpectedPlanHash)
 	input.ExpectedAdapterLockDigest = strings.TrimSpace(input.ExpectedAdapterLockDigest)
 	input.ExpectedTrainingComponentLockDigest = strings.TrimSpace(input.ExpectedTrainingComponentLockDigest)
+	input.ForkedFromRunID = strings.TrimSpace(input.ForkedFromRunID)
+	input.ExpectedParentPlanHash = strings.TrimSpace(input.ExpectedParentPlanHash)
 	if input.ExpectedJournalID == "" || (input.CreateRun && (input.ExpectedPlanHash == "" || input.ExpectedAdapterLockDigest == "")) {
 		http.Error(w, "submission requires expected journal, plan, and adapter-lock identities", http.StatusBadRequest)
 		return
@@ -362,6 +449,14 @@ func (s *Server) handleTrainVMSubmit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "submission journal identity is stale", http.StatusConflict)
 		return
 	}
+	hasForkIdentity := input.ForkedFromRunID != "" || input.ExpectedParentRunRevision != 0 || input.ExpectedParentPlanHash != ""
+	if hasForkIdentity {
+		if !input.CreateRun || input.ForkedFromRunID == "" || len(input.ForkedFromRunID) > 256 ||
+			input.ExpectedParentRunRevision == 0 || input.ExpectedParentPlanHash == "" {
+			http.Error(w, "run fork requires a parent run, revision, and plan hash", http.StatusBadRequest)
+			return
+		}
+	}
 	result, err := s.commander.SubmitExperiment(ctx, trainvmstore.SubmissionRequest{
 		SourceDocument: input.SourceDocument, SourceFormat: input.SourceFormat,
 		CreateRun: input.CreateRun, IdempotencyKey: input.IdempotencyKey,
@@ -369,6 +464,9 @@ func (s *Server) handleTrainVMSubmit(w http.ResponseWriter, r *http.Request) {
 		ExpectedAdapterLockDigest:           input.ExpectedAdapterLockDigest,
 		ExpectedTrainingComponentLockDigest: input.ExpectedTrainingComponentLockDigest,
 		Author:                              "dashboard", Reason: input.Reason,
+		ForkedFromRunID:           input.ForkedFromRunID,
+		ExpectedParentRunRevision: input.ExpectedParentRunRevision,
+		ExpectedParentPlanHash:    input.ExpectedParentPlanHash,
 	})
 	if err != nil {
 		writeTrainVMAuthorityError(w, err)

@@ -12,6 +12,10 @@
   let submissionStorageAvailable = true;
   let submittedDraftSource = null;
   let authorityJournalID = "";
+  let selectedRunIdentity = null;
+  let planDiff = null;
+  let planDiffBusy = false;
+  let planDiffGeneration = 0;
   let trainingRegistry = null;
   let composerNode = "";
   let composerFamily = "";
@@ -259,6 +263,7 @@
   function scheduleCompile() {
     compileGeneration += 1;
     validatedDraft = null;
+    resetPlanDiff("draft changed · compare again after validation");
     submittedDraftSource = null;
     updateSubmitState();
     clearTimeout(compileTimer);
@@ -309,7 +314,7 @@
   }
 
   function lockEditor(locked) {
-    document.querySelectorAll("#vm-schema-form input, #vm-schema-form select, #vm-json-source, #vm-apply-json, #vm-load-example, #vm-compile")
+    document.querySelectorAll("#vm-schema-form input, #vm-schema-form select, #vm-json-source, #vm-apply-json, #vm-load-example, #vm-compile, #vm-diff")
       .forEach((control) => {
         if (locked && !control.disabled) {
           control.dataset.vmIntentDisabled = "true";
@@ -323,20 +328,48 @@
 
   function updateSubmitState(message = "") {
     const button = byID("vm-submit");
+    const diffButton = byID("vm-diff");
     const reason = byID("vm-submit-reason");
     if (!button) return;
     const retry = Boolean(submissionIntent);
+    const retryPayload = retry ? JSON.parse(submissionIntent.body) : null;
+    const fork = currentForkIdentity();
     const alreadySubmitted = Boolean(validatedDraft && submittedDraftSource === validatedDraft.source);
     button.disabled = submissionBusy || (!retry &&
       (!validatedDraft || !reason?.value.trim() || !authorityJournalID || alreadySubmitted));
     button.textContent = submissionBusy ? "submitting…" :
-      (retry ? "retry exact submission" : "create queued run");
+      (retry ? (retryPayload?.forked_from_run_id ? "retry exact fork" : "retry exact submission") :
+        (fork ? "create revision fork" : "create queued run"));
+    if (diffButton) {
+      diffButton.disabled = submissionBusy || planDiffBusy || !validatedDraft || !selectedRunIdentity;
+      diffButton.textContent = planDiffBusy ? "comparing…" : "compare selected run";
+    }
     if (reason) reason.disabled = retry || submissionBusy;
     lockEditor(retry || submissionBusy);
     if (message) {
       const state = byID("vm-editor-state");
       if (state) state.textContent = message;
     }
+  }
+
+  function currentForkIdentity() {
+    if (!planDiff || planDiff.result.adoptable_in_place || !validatedDraft || !selectedRunIdentity) return null;
+    if (planDiff.source !== validatedDraft.source || planDiff.proposedPlanHash !== validatedDraft.planHash ||
+        planDiff.runID !== selectedRunIdentity.runID || planDiff.runRevision !== selectedRunIdentity.runRevision ||
+        planDiff.currentPlanHash !== selectedRunIdentity.planHash) return null;
+    return {
+      runID: planDiff.runID,
+      runRevision: planDiff.runRevision,
+      planHash: planDiff.currentPlanHash,
+    };
+  }
+
+  function resetPlanDiff(message = "select a run and compare a valid draft") {
+    planDiffGeneration += 1;
+    planDiff = null;
+    planDiffBusy = false;
+    const target = byID("vm-plan-diff");
+    if (target) target.innerHTML = `<div class="empty">${escapeHTML(message)}</div>`;
   }
 
   function renderDiagnostics(result) {
@@ -360,10 +393,81 @@
       `<details class="vm-canonical"><summary>canonical reflected plan</summary><pre>${escapeHTML(JSON.stringify(result.canonical_plan, null, 2))}</pre></details>`;
   }
 
+  function renderPlanDiff(result, identity) {
+    const target = byID("vm-plan-diff");
+    if (!target) return;
+    const operations = Array.isArray(result.semantic_diff) ? result.semantic_diff : [];
+    const shortRun = identity.runID.length > 28 ? `${identity.runID.slice(0, 25)}…` : identity.runID;
+    if (!operations.length) {
+      target.innerHTML = `<div class="vm-diff-head"><strong>plans are identical</strong><span>${escapeHTML(shortRun)} · r${identity.runRevision}</span></div>` +
+        `<div class="empty">No semantic changes; a lineage fork is not needed.</div>`;
+      return;
+    }
+    const rows = operations.map((operation) => {
+      const value = Object.prototype.hasOwnProperty.call(operation, "value") ?
+        JSON.stringify(operation.value) : (operation.from || "—");
+      return `<div class="vm-diff-op"><code>${escapeHTML(operation.op || "change")}</code>` +
+        `<code>${escapeHTML(operation.path || "/")}</code><code>${escapeHTML(value)}</code></div>`;
+    }).join("");
+    target.innerHTML = `<div class="vm-diff-head"><strong>${operations.length} semantic change${operations.length === 1 ? "" : "s"}</strong>` +
+      `<span>fork from ${escapeHTML(shortRun)} · r${identity.runRevision}</span></div>${rows}`;
+  }
+
+  async function compareDraft() {
+    if (planDiffBusy || !validatedDraft || !selectedRunIdentity || !authorityJournalID) return;
+    const identity = { ...selectedRunIdentity };
+    const preview = { ...validatedDraft };
+    const generation = ++planDiffGeneration;
+    planDiffBusy = true;
+    updateSubmitState("requesting authority semantic diff…");
+    try {
+      const response = await fetch(`/api/trainvm/runs/${encodeURIComponent(identity.runID)}/diff`, {
+        method: "POST", cache: "no-store", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_run_revision: identity.runRevision,
+          proposed_source_document: preview.source,
+          source_format: "json",
+          expected_journal_id: authorityJournalID,
+          expected_current_plan_hash: identity.planHash,
+          expected_proposed_plan_hash: preview.planHash,
+        }),
+      });
+      const text = await response.text();
+      if (generation !== planDiffGeneration) return;
+      let result = null;
+      try { result = JSON.parse(text); } catch (_) { /* HTTP text is shown below. */ }
+      if (!response.ok) throw new Error(result?.diagnostics?.[0]?.message || text.trim() || `HTTP ${response.status}`);
+      if (result?.proposed_plan_hash !== preview.planHash || !Array.isArray(result?.semantic_diff)) {
+        throw new Error("authority returned an inconsistent semantic diff");
+      }
+      planDiff = {
+        runID: identity.runID, runRevision: identity.runRevision,
+        currentPlanHash: identity.planHash, proposedPlanHash: preview.planHash,
+        source: preview.source, result,
+      };
+      renderPlanDiff(result, identity);
+      updateSubmitState(result.adoptable_in_place ?
+        "identical to selected run · no fork lineage needed" :
+        `validated fork from ${identity.runID} r${identity.runRevision}`);
+    } catch (error) {
+      if (generation !== planDiffGeneration) return;
+      planDiff = null;
+      const target = byID("vm-plan-diff");
+      if (target) target.innerHTML = `<div class="vm-diag error">${escapeHTML(error.message)}</div>`;
+      updateSubmitState("semantic diff unavailable");
+    } finally {
+      if (generation === planDiffGeneration) {
+        planDiffBusy = false;
+        updateSubmitState();
+      }
+    }
+  }
+
   async function compileDraft() {
     if (!draft) return;
     clearTimeout(compileTimer);
     validatedDraft = null;
+    resetPlanDiff("compile a valid draft before comparing");
     updateSubmitState();
     const generation = ++compileGeneration;
     const source = JSON.stringify(draft);
@@ -401,8 +505,8 @@
     if (!submissionIntent) {
       if (!validatedDraft || !reason?.value.trim() || !authorityJournalID ||
           submittedDraftSource === validatedDraft.source) return;
-      submissionIntent = {
-        body: JSON.stringify({
+      const fork = currentForkIdentity();
+      const payload = {
           source_document: validatedDraft.source,
           source_format: "json",
           create_run: true,
@@ -413,7 +517,14 @@
           expected_training_component_lock_digest:
             validatedDraft.trainingComponentLockDigest,
           reason: reason.value.trim(),
-        }),
+      };
+      if (fork) {
+        payload.forked_from_run_id = fork.runID;
+        payload.expected_parent_run_revision = fork.runRevision;
+        payload.expected_parent_plan_hash = fork.planHash;
+      }
+      submissionIntent = {
+        body: JSON.stringify(payload),
         source: validatedDraft.source,
         journalID: authorityJournalID,
         planHash: validatedDraft.planHash,
@@ -467,7 +578,10 @@
       persistSubmissionIntent();
       submittedDraftSource = intent.source;
       if (reason) reason.value = "";
-      finalMessage = `queued · ${runID}`;
+      const submittedPayload = JSON.parse(intent.body);
+      finalMessage = submittedPayload.forked_from_run_id ?
+        `fork queued · ${runID} · from ${submittedPayload.forked_from_run_id} r${submittedPayload.expected_parent_run_revision}` :
+        `queued · ${runID}`;
       window.dispatchEvent(new CustomEvent("trainvm-refresh", { detail: { runID } }));
     } catch (_) {
       finalMessage = submissionStorageAvailable ?
@@ -484,6 +598,7 @@
     clearTimeout(compileTimer);
     compileGeneration += 1;
     validatedDraft = null;
+    resetPlanDiff("loading selected-run comparison context…");
     submittedDraftSource = null;
     updateSubmitState();
     const state = byID("vm-editor-state");
@@ -509,6 +624,7 @@
       }
       authorityJournalID = String(runs.journal_id || "");
       if (!authorityJournalID) throw new Error("TrainVM journal identity unavailable");
+      applySelectedRun(window.__trainVMSelectedRun || null);
       loaded = true;
       renderForm();
       updateSubmitState();
@@ -518,21 +634,43 @@
     }
   }
 
+  function applySelectedRun(detail) {
+    const candidate = detail && typeof detail === "object" ? {
+      runID: String(detail.runID || ""),
+      runRevision: Number(detail.runRevision || 0),
+      planHash: String(detail.planHash || ""),
+    } : null;
+    const next = candidate?.runID && Number.isInteger(candidate.runRevision) && candidate.runRevision > 0 && candidate.planHash ? candidate : null;
+    const changed = selectedRunIdentity?.runID !== next?.runID ||
+      selectedRunIdentity?.runRevision !== next?.runRevision ||
+      selectedRunIdentity?.planHash !== next?.planHash;
+    selectedRunIdentity = next;
+    if (changed) {
+      resetPlanDiff(next ? `selected ${next.runID} r${next.runRevision} · compare when ready` :
+        "select a run and compare a valid draft");
+      updateSubmitState();
+    }
+  }
+
   const authoring = byID("trainvm-authoring");
   restoreSubmissionIntent();
   updateSubmitState();
   if (authoring) authoring.addEventListener("toggle", () => { if (authoring.open) loadAuthoring(); });
   byID("vm-load-example")?.addEventListener("click", () => loadAuthoring(true));
   byID("vm-compile")?.addEventListener("click", compileDraft);
+  byID("vm-diff")?.addEventListener("click", compareDraft);
   byID("vm-submit")?.addEventListener("click", submitDraft);
   byID("vm-submit-reason")?.addEventListener("input", () => updateSubmitState());
   byID("vm-json-source")?.addEventListener("input", () => {
     clearTimeout(compileTimer);
     compileGeneration += 1;
     validatedDraft = null;
+    resetPlanDiff("raw source changed · apply and compile before comparing");
     submittedDraftSource = null;
     updateSubmitState("raw source changed · apply JSON before compiling");
   });
+  window.addEventListener("trainvm-run-selected", (event) => applySelectedRun(event.detail));
+  applySelectedRun(window.__trainVMSelectedRun || null);
   byID("vm-apply-json")?.addEventListener("click", () => {
     const source = byID("vm-json-source");
     try {

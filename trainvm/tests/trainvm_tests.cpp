@@ -3587,6 +3587,46 @@ void test_submission_and_queue_boundary() {
           "submission cannot fabricate running state without lease and worker evidence");
   }
 
+  auto fork_fixture = fixture;
+  fork_fixture["metadata"]["description"] = "explicit revision fork";
+  const auto fork_compiled = trainvm::compile_document(fork_fixture);
+  check(fork_compiled.valid(), "revision fork fixture compiles");
+  auto fork_request = request(true, "submission-fork", fork_fixture.dump());
+  fork_request.set_expected_plan_hash(fork_compiled.plan->plan_hash);
+  fork_request.set_forked_from_run_id(run_id);
+  fork_request.set_expected_parent_run_revision(created.run().revision());
+  fork_request.set_expected_parent_plan_hash(created.run().plan_hash());
+  trainvm::v1::SubmitExperimentResponse forked;
+  const auto fork_status =
+      service->SubmitExperiment(nullptr, &fork_request, &forked);
+  trainvm::v1::SubmitExperimentResponse replayed_fork;
+  const auto replayed_fork_status =
+      service->SubmitExperiment(nullptr, &fork_request, &replayed_fork);
+  auto stale_fork = fork_request;
+  stale_fork.set_idempotency_key("submission-stale-fork");
+  stale_fork.set_expected_parent_run_revision(created.run().revision() + 1U);
+  trainvm::v1::SubmitExperimentResponse stale_fork_response;
+  const auto stale_fork_status =
+      service->SubmitExperiment(nullptr, &stale_fork, &stale_fork_response);
+  {
+    trainvm::Journal journal(database_path);
+    const auto fork_event = forked.has_run()
+        ? journal.event(forked.run().run_id() + ":created")
+        : std::nullopt;
+    check(fork_status.ok() && forked.has_run() &&
+              forked.run().plan_hash() == fork_compiled.plan->plan_hash &&
+              replayed_fork_status.ok() && replayed_fork.has_run() &&
+              replayed_fork.run().run_id() == forked.run().run_id() &&
+              fork_event &&
+              fork_event->payload.at("submission").at("forked_from") ==
+                  nlohmann::json({{"run_id", run_id},
+                                  {"run_revision", created.run().revision()},
+                                  {"plan_hash", created.run().plan_hash()}}) &&
+              stale_fork_status.error_code() ==
+                  grpc::StatusCode::FAILED_PRECONDITION,
+          "revision forks persist exact parent lineage, replay idempotently, and reject stale parents");
+  }
+
   check(sqlite3_open(database_path.c_str(), &raw_database) == SQLITE_OK,
         "submission chain test opens journal for fault injection");
   if (raw_database != nullptr) {
@@ -7881,14 +7921,21 @@ void test_service_registry_and_reconciliation() {
     same_diff.set_expected_revision(created.run().revision());
     same_diff.set_proposed_source_document(fixture.dump());
     same_diff.set_source_format("json");
+    same_diff.set_expected_journal_id(journal_id);
+    same_diff.set_expected_current_plan_hash(created.plan_hash());
+    same_diff.set_expected_proposed_plan_hash(compiled.plan->plan_hash);
     trainvm::v1::PlanDiffResponse same_diff_response;
     const grpc::Status same_diff_status =
         service.DiffPlan(nullptr, &same_diff, &same_diff_response);
     auto changed_fixture = fixture;
     changed_fixture["metadata"]["description"] =
         "read-plane semantic diff fixture";
+    const auto changed_compiled =
+        trainvm::compile_document(changed_fixture);
     trainvm::v1::PlanDiffRequest changed_diff = same_diff;
     changed_diff.set_proposed_source_document(changed_fixture.dump());
+    changed_diff.set_expected_proposed_plan_hash(
+        changed_compiled.plan->plan_hash);
     trainvm::v1::PlanDiffResponse changed_diff_response;
     const grpc::Status changed_diff_status =
         service.DiffPlan(nullptr, &changed_diff, &changed_diff_response);
@@ -7897,6 +7944,23 @@ void test_service_registry_and_reconciliation() {
     trainvm::v1::PlanDiffResponse stale_diff_response;
     const grpc::Status stale_diff_status =
         service.DiffPlan(nullptr, &stale_diff, &stale_diff_response);
+    trainvm::v1::PlanDiffRequest wrong_diff_journal = same_diff;
+    wrong_diff_journal.set_expected_journal_id(
+        "00000000000000000000000000000000");
+    trainvm::v1::PlanDiffResponse wrong_diff_journal_response;
+    const grpc::Status wrong_diff_journal_status = service.DiffPlan(
+        nullptr, &wrong_diff_journal, &wrong_diff_journal_response);
+    trainvm::v1::PlanDiffRequest wrong_current_plan = same_diff;
+    wrong_current_plan.set_expected_current_plan_hash(std::string(64, '0'));
+    trainvm::v1::PlanDiffResponse wrong_current_plan_response;
+    const grpc::Status wrong_current_plan_status = service.DiffPlan(
+        nullptr, &wrong_current_plan, &wrong_current_plan_response);
+    trainvm::v1::PlanDiffRequest wrong_proposed_plan = same_diff;
+    wrong_proposed_plan.set_expected_proposed_plan_hash(
+        std::string(64, '0'));
+    trainvm::v1::PlanDiffResponse wrong_proposed_plan_response;
+    const grpc::Status wrong_proposed_plan_status = service.DiffPlan(
+        nullptr, &wrong_proposed_plan, &wrong_proposed_plan_response);
     const auto first_page_id =
         first_page.runs_size() == 1
             ? first_page.runs(0).identity().run_id()
@@ -7941,6 +8005,12 @@ void test_service_registry_and_reconciliation() {
               changed_diff_response.semantic_diff() != "[]" &&
               changed_diff_response.diagnostics_size() == 1 &&
               stale_diff_status.error_code() ==
+                  grpc::StatusCode::FAILED_PRECONDITION &&
+              wrong_diff_journal_status.error_code() ==
+                  grpc::StatusCode::FAILED_PRECONDITION &&
+              wrong_current_plan_status.error_code() ==
+                  grpc::StatusCode::FAILED_PRECONDITION &&
+              wrong_proposed_plan_status.error_code() ==
                   grpc::StatusCode::FAILED_PRECONDITION,
           "native read APIs expose bounded summaries, query-bound pagination, and honest semantic plan diffs");
 

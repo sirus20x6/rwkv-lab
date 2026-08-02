@@ -71,6 +71,8 @@ func TestSubmissionRPCRequestFencesAuthorityAndPreview(t *testing.T) {
 		ExpectedPlanHash: " plan-1 ", ExpectedAdapterLockDigest: " lock-1 ",
 		ExpectedTrainingComponentLockDigest: " training-lock-1 ",
 		Author:                              " operator ", Reason: " launch ",
+		ForkedFromRunID: " parent-1 ", ExpectedParentRunRevision: 9,
+		ExpectedParentPlanHash: " parent-plan-1 ",
 	})
 	if err != nil {
 		t.Fatalf("map submission request: %v", err)
@@ -81,9 +83,43 @@ func TestSubmissionRPCRequestFencesAuthorityAndPreview(t *testing.T) {
 		request.GetExpectedPlanHash() != "plan-1" ||
 		request.GetExpectedAdapterLockDigest() != "lock-1" ||
 		request.GetExpectedTrainingComponentLockDigest() != "training-lock-1" ||
+		request.GetForkedFromRunId() != "parent-1" ||
+		request.GetExpectedParentRunRevision() != 9 ||
+		request.GetExpectedParentPlanHash() != "parent-plan-1" ||
 		request.GetAuthor() != "operator" ||
 		request.GetReason() != "launch" {
 		t.Fatalf("submission fence was not preserved: %#v", request)
+	}
+}
+
+func TestPlanDiffRPCRequestFencesBothPlansAndAuthority(t *testing.T) {
+	request, err := planDiffRPCRequest(PlanDiffRequest{
+		RunID: " run-1 ", ExpectedRunRevision: 7,
+		ProposedSourceDocument: `{"kind":"Experiment"}`, SourceFormat: " JSON ",
+		ExpectedJournalID: " journal-1 ", ExpectedCurrentPlanHash: " current-1 ",
+		ExpectedProposedPlanHash: " proposed-1 ",
+	})
+	if err != nil {
+		t.Fatalf("map plan diff request: %v", err)
+	}
+	if request.GetRunId() != "run-1" || request.GetExpectedRevision() != 7 ||
+		request.GetSourceFormat() != "json" || request.GetExpectedJournalId() != "journal-1" ||
+		request.GetExpectedCurrentPlanHash() != "current-1" ||
+		request.GetExpectedProposedPlanHash() != "proposed-1" {
+		t.Fatalf("plan diff fences were not preserved: %#v", request)
+	}
+}
+
+func TestSubmissionRPCRequestRejectsPartialForkIdentity(t *testing.T) {
+	_, err := submissionRPCRequest(SubmissionRequest{
+		SourceDocument: "{}", SourceFormat: "json", CreateRun: true,
+		IdempotencyKey: "submission-1", ExpectedJournalID: "journal-1",
+		ExpectedPlanHash: "plan-1", ExpectedAdapterLockDigest: "lock-1",
+		Author: "operator", Reason: "launch", ForkedFromRunID: "parent-1",
+	})
+	var validationError *ValidationError
+	if !errors.As(err, &validationError) {
+		t.Fatalf("expected ValidationError, got %T: %v", err, err)
 	}
 }
 

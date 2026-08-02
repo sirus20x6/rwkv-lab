@@ -329,9 +329,12 @@ Multi-control patches apply atomically. The worker validates the whole patch, ap
 safe point, and acks the effective values and step. Rejection leaves the previous revision active.
 The dashboard shows requested, accepted, effective, and superseded values separately.
 
-Graph edits are allowed only for nodes that have not begun. TrainVM recompiles the proposed revision,
-shows a semantic diff, and adopts it at a node boundary. Completed nodes and their artifact bindings
-are immutable. Replacing an active or completed node creates a forked run.
+The current protocol recompiles a proposed document and shows a semantic diff fenced to the journal,
+selected run revision, current plan hash, and validated proposed plan hash. It does not mutate an
+active plan in place. A changed document is submitted as a new queued run whose `run.created` event
+records the exact parent run ID, revision, and plan hash. Exact retries replay that child identity;
+stale parent identities fail closed. Completed nodes and artifact bindings remain immutable. A future
+protocol may adopt edits limited to nodes that have not begun, but that is not claimed today.
 
 ## Events, metrics, and artifacts
 
@@ -483,7 +486,8 @@ Exit: a new composition of registered operations needs only a document and no da
 
 - Route all commands through TrainVM and remove Python access to `trainboard.db`.
 - Rebuild dashboard projections from the event journal; retain legacy log ingestion only for old runs.
-- Add graph revisions/forks and historical replay UI.
+- Preserve immutable selected-run semantic diffs and lineage-recorded forks; extend historical
+  replay beyond the durable workflow/timeline and eval/profile scrubbers where useful.
 
 Exit: no active run depends on PID discovery, status-file polling, or a shell supervisor for recovery.
 

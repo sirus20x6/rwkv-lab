@@ -294,7 +294,7 @@ details.panel[open] .d-caret { transform: rotate(90deg); color: var(--accent); }
 .vm-authoring { margin-top: 14px; border-top: 1px solid var(--divider); padding-top: 10px; color-scheme: dark; }
 .vm-authoring > summary { cursor: pointer; color: var(--text-dim); font: 600 var(--fs-sm)/1.3 var(--mono); text-transform: uppercase; letter-spacing: .05em; }
 .vm-authoring > summary span { color: var(--muted); font: 400 var(--fs-xs)/1.3 var(--sans); text-transform: none; letter-spacing: 0; margin-left: 8px; }
-.vm-editor-toolbar { display: flex; align-items: center; gap: 8px; margin: 12px 0; }
+.vm-editor-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
 .vm-editor-toolbar .sub { margin-left: auto; }
 .vm-editor-toolbar input { min-width: 180px; flex: 1 1 260px; padding: 5px 7px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--bg-elev); color: var(--text); font: var(--fs-xs)/1.25 var(--mono); }
 .vm-editor-toolbar input:focus { outline: none; border-color: var(--accent); }
@@ -335,6 +335,14 @@ details.panel[open] .d-caret { transform: rotate(90deg); color: var(--accent); }
 .vm-diag.warning { border-left: 3px solid var(--warn); }
 .vm-diag code { color: var(--accent); margin-right: 6px; }
 .vm-plan-preview { margin-top: 9px; }
+.vm-plan-diff { margin-top: 9px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg); }
+.vm-plan-diff .empty { padding: 8px 9px; }
+.vm-diff-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 7px 9px; border-bottom: 1px solid var(--divider); font: var(--fs-xs)/1.35 var(--mono); }
+.vm-diff-head strong { color: var(--accent); }
+.vm-diff-op { display: grid; grid-template-columns: minmax(52px, auto) minmax(150px, 1fr) minmax(180px, 2fr); gap: 8px; padding: 6px 9px; border-bottom: 1px solid var(--divider); font: var(--fs-xs)/1.35 var(--mono); }
+.vm-diff-op:last-child { border-bottom: 0; }
+.vm-diff-op code:first-child { color: var(--warn); text-transform: uppercase; }
+.vm-diff-op code { overflow-wrap: anywhere; }
 .vm-plan-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
 .vm-plan-summary .vm-fact { background: var(--bg); }
 .vm-canonical { margin-top: 8px; }
