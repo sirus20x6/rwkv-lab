@@ -84,6 +84,14 @@
             <div class="empty">expand to load native runs</div>
           </nav>
           <section class="vm-detail">
+            <section class="vm-host-authority" aria-labelledby="vm-host-authority-title">
+              <div class="vm-timeline-head"><span id="vm-host-authority-title">hostd authority</span><span id="vm-host-authority-state">not observed</span></div>
+              <div id="vm-host-authority-summary" class="vm-summary"><div class="empty">expand to load receipt-derived host state</div></div>
+              <div class="vm-host-authority-rows">
+                <div><strong>resource fences</strong><div id="vm-host-fences" class="vm-authority-list"><div class="empty">not loaded</div></div></div>
+                <div><strong>process authority</strong><div id="vm-host-processes" class="vm-authority-list"><div class="empty">not loaded</div></div></div>
+              </div>
+            </section>
             <div id="trainvm-summary" class="vm-summary"><div class="empty">select a native run</div></div>
             <div id="trainvm-observability-state" class="vm-observability-state waiting" aria-live="polite" aria-atomic="true">no telemetry snapshot</div>
             <section class="vm-lifecycle" aria-labelledby="vm-lifecycle-title">

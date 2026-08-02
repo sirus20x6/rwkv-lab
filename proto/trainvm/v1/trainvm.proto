@@ -615,6 +615,134 @@ message DescriptorResponse {
   string schema_hash = 2;
 }
 
+enum HostdLifecycle {
+  HOSTD_LIFECYCLE_UNSPECIFIED = 0;
+  HOSTD_LIFECYCLE_SEALED = 1;
+  HOSTD_LIFECYCLE_STARTUP_AUDITING = 2;
+  HOSTD_LIFECYCLE_STARTUP_BLOCKED = 3;
+  HOSTD_LIFECYCLE_ADMITTING = 4;
+  HOSTD_LIFECYCLE_POISONED = 5;
+}
+
+enum HostdStartupPhase {
+  HOSTD_STARTUP_PHASE_UNSPECIFIED = 0;
+  HOSTD_STARTUP_PHASE_RECONCILING = 1;
+  HOSTD_STARTUP_PHASE_AUDITING = 2;
+  HOSTD_STARTUP_PHASE_ADMITTING = 3;
+  HOSTD_STARTUP_PHASE_EXHAUSTED = 4;
+  HOSTD_STARTUP_PHASE_FAILED = 5;
+}
+
+enum HostdProcessPhase {
+  HOSTD_PROCESS_PHASE_UNSPECIFIED = 0;
+  HOSTD_PROCESS_PHASE_LAUNCH_INTENT = 1;
+  HOSTD_PROCESS_PHASE_SPAWNED = 2;
+  HOSTD_PROCESS_PHASE_TERMINAL_PENDING_RELEASE = 3;
+}
+
+enum HostResourceKind {
+  HOST_RESOURCE_KIND_UNSPECIFIED = 0;
+  HOST_RESOURCE_KIND_ACCELERATOR = 1;
+  HOST_RESOURCE_KIND_ACCELERATOR_PARTITION = 2;
+  HOST_RESOURCE_KIND_HOST_MUTEX = 3;
+}
+
+enum HostAcceleratorVendor {
+  HOST_ACCELERATOR_VENDOR_UNSPECIFIED = 0;
+  HOST_ACCELERATOR_VENDOR_NVIDIA = 1;
+  HOST_ACCELERATOR_VENDOR_AMD = 2;
+  HOST_ACCELERATOR_VENDOR_INTEL = 3;
+  HOST_ACCELERATOR_VENDOR_OTHER = 4;
+}
+
+message HostdCoordinatorAuthorityStatus {
+  string api_version = 1;
+  HostdLifecycle lifecycle = 2;
+  string host_id = 3;
+  string boot_id = 4;
+  string broker_epoch = 5;
+  string inventory_digest = 6;
+  uint64 live_sessions = 7;
+  uint64 admission_sessions = 8;
+  uint64 stale_admission_sessions = 9;
+  uint64 release_only_sessions = 10;
+  bool admission_counts_are_cached_evidence = 11;
+  string startup_audit_receipt_digest = 12;
+  bool startup_audit_passed = 13;
+  string poison_reason = 14;
+}
+
+message HostResourceFenceStatus {
+  HostResourceKind kind = 1;
+  HostAcceleratorVendor vendor = 2;
+  string stable_id = 3;
+  string parent_id = 4;
+  uint64 generation = 5;
+  string inventory_digest = 6;
+  string topology_digest = 7;
+}
+
+message HostdProcessAuthorityStatus {
+  string allocation_id = 1;
+  string journal_id = 2;
+  string run_id = 3;
+  string logical_lease_id = 4;
+  uint64 logical_fencing_token = 5;
+  string launch_id = 6;
+  HostdProcessPhase phase = 7;
+  string cgroup_path = 8;
+  optional int64 host_pid = 9;
+  optional uint64 process_starttime_ticks = 10;
+  bool device_policy_intended = 11;
+  bool device_policy_installed = 12;
+  string device_policy_digest = 13;
+  string device_policy_installation_digest = 14;
+  bool process_policy_intended = 15;
+  bool process_policy_installed = 16;
+  string process_policy_digest = 17;
+  string process_policy_installation_digest = 18;
+  optional bool cgroup_empty = 19;
+  optional bool accelerator_contexts_empty = 20;
+  string context_audit_digest = 21;
+  string terminal_receipt_digest = 22;
+}
+
+message GetHostAuthorityStatusRequest {}
+
+message GetHostAuthorityStatusResponse {
+  string api_version = 1;
+  HostdCoordinatorAuthorityStatus coordinator = 2;
+  HostdStartupPhase startup_phase = 3;
+  uint64 startup_recovery_steps = 4;
+  uint64 remaining_unclosed_process_records = 5;
+  uint64 remaining_terminal_release_records = 6;
+  bool ledger_verified = 7;
+  string ledger_verification_reason = 8;
+  uint64 ledger_sequence = 9;
+  string ledger_chain_hash = 10;
+  uint64 ledger_record_count = 11;
+  uint64 occupancy_ledger_sequence = 12;
+  string occupancy_digest = 13;
+  uint64 active_fence_count = 14;
+  repeated HostResourceFenceStatus active_fences = 15;
+  bool active_fences_truncated = 16;
+  uint64 active_process_count = 17;
+  repeated HostdProcessAuthorityStatus active_processes = 18;
+  bool active_processes_truncated = 19;
+  bool process_launch_enabled = 20;
+  bool mutation_enabled = 21;
+  string mutation_disabled_reason = 22;
+  uint64 lease_renewal_tracked_count = 23;
+  bool lease_renewal_poisoned = 24;
+  string lease_renewal_failure = 25;
+  bool resource_inventory_observed = 26;
+  string current_inventory_digest = 27;
+  string current_inventory_receipt_digest = 28;
+  uint64 degraded_resource_count = 29;
+  string resource_degradation_reason = 30;
+  uint64 resource_inventory_observation_age_ns = 31;
+}
+
 service TrainVM {
   rpc SubmitExperiment(SubmitExperimentRequest) returns (SubmitExperimentResponse);
   rpc DiffPlan(PlanDiffRequest) returns (PlanDiffResponse);
@@ -625,6 +753,7 @@ service TrainVM {
   rpc WatchEvents(WatchEventsRequest) returns (stream EventEnvelope);
   rpc GetControlView(GetControlViewRequest) returns (GetControlViewResponse);
   rpc GetDescriptor(DescriptorRequest) returns (DescriptorResponse);
+  rpc GetHostAuthorityStatus(GetHostAuthorityStatusRequest) returns (GetHostAuthorityStatusResponse);
 }
 
 service WorkerControl {

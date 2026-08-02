@@ -22,6 +22,13 @@ SQLite DB (`trainboard.db`). GPU-light — safe to run alongside live training.
 The dashboard uses one lazy gRPC client for `<repo>/trainvm.sock` (or `-trainvm-socket PATH`) for
 bounded run projections, query-bound pagination, resumable timeline replay, typed control views,
 descriptors, submissions, revision-checked control patches, and revision-fenced lifecycle commands.
+The host-global `/api/trainvm/host-authority` view is projected from TrainVM's
+`GetHostAuthorityStatus` RPC, which performs a fresh bounded read over hostd's pinned v3 status
+transport. It reports exact coordinator/startup state, ledger chain and occupancy digests, complete
+fence/process counts, fresh inventory/topology degradation evidence, lease-renewal coordinator
+health, terminal cgroup/context cleanup receipts, and a bounded receipt-derived row prefix with
+explicit truncation. The UI does not infer launch health, leases, policy installation, cleanup, or
+recovery from PID discovery or `/proc`.
 Checkpoint-now, retained-resource pause, checkpoint-first GPU-releasing pause, exact resume, and
 graceful cancel are posted to `/api/trainvm/runs/{run}/actions`; the independently supervised native
 authority remains the only process that opens or mutates its journal; an unavailable authority is

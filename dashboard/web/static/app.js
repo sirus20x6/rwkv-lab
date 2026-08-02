@@ -614,6 +614,7 @@
   let vmPlanLoadGeneration = 0;
   let vmWorkflowEdges = [];
   let vmWorkflowSignature = "";
+  let vmHostBusy = false;
   const vmVisitedNodes = new Set();
   const vmInvalidControls = new Set();
   const vmControlRetries = new Map();
@@ -623,6 +624,94 @@
     return String(value ?? "").replace(/[&<>"']/g, (char) => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
     })[char]);
+  }
+
+  function renderVMHostAuthority(status) {
+    const state = document.getElementById("vm-host-authority-state");
+    const summary = document.getElementById("vm-host-authority-summary");
+    const fences = document.getElementById("vm-host-fences");
+    const processes = document.getElementById("vm-host-processes");
+    if (!state || !summary || !fences || !processes) return;
+    const resourceHealthy = Boolean(status.resource_inventory_observed) && Number(status.degraded_resource_count || 0) === 0;
+    const renewalHealthy = !status.lease_renewal_poisoned && !status.lease_renewal_failure;
+    const healthy = Boolean(status.mutation_enabled) && resourceHealthy && renewalHealthy;
+    state.textContent = !status.mutation_enabled ?
+      `disabled · ${status.mutation_disabled_reason || "authority did not supply a reason"}` :
+      !resourceHealthy ? `admitting · ${status.resource_degradation_reason || "resource health unknown"}` :
+      !renewalHealthy ? `admitting · renewal degraded · ${status.lease_renewal_failure || "coordinator poisoned"}` :
+      "admitting · mutations enabled";
+    state.className = healthy ? "ok" : "bad";
+    const fact = (label, value, title = "") =>
+      `<div class="vm-fact"><span>${vmEscape(label)}</span><strong title="${vmEscape(title || value)}">${vmEscape(value ?? "—")}</strong></div>`;
+    const coordinator = status.coordinator || {};
+    summary.innerHTML =
+      fact("coordinator", coordinator.lifecycle || "unknown", coordinator.poison_reason || "") +
+      fact("startup", status.startup_phase || "unknown") +
+      fact("ledger", status.ledger_verified ? `verified · #${Number(status.ledger_sequence || 0).toLocaleString()}` : "verification failed", status.ledger_verification_reason || status.ledger_chain_hash || "") +
+      fact("launch", status.process_launch_enabled ? "strict enabled" : "disabled") +
+      fact("fences", Number(status.active_fence_count || 0).toLocaleString()) +
+      fact("resource health", status.resource_inventory_observed ?
+        (Number(status.degraded_resource_count || 0) === 0 ?
+          `intact · ${Math.round(Number(status.resource_inventory_observation_age_ns || 0) / 1e9)}s old` :
+          `${Number(status.degraded_resource_count).toLocaleString()} degraded`) :
+        "observation failed", status.resource_degradation_reason || status.current_inventory_receipt_digest || "") +
+      fact("processes", Number(status.active_process_count || 0).toLocaleString()) +
+      fact("lease renewal", status.lease_renewal_poisoned ? "poisoned" :
+        `${Number(status.lease_renewal_tracked_count || 0).toLocaleString()} tracked`, status.lease_renewal_failure || "") +
+      fact("recovery backlog", `${Number(status.remaining_unclosed_process_records || 0).toLocaleString()} live · ${Number(status.remaining_terminal_release_records || 0).toLocaleString()} release`) +
+      fact("startup audit", coordinator.startup_audit_receipt_digest ? (coordinator.startup_audit_passed ? "passed" : "failed") : "not committed", coordinator.startup_audit_receipt_digest || "");
+    const fenceRows = Array.isArray(status.active_fences) ? status.active_fences : [];
+    fences.innerHTML = fenceRows.map((fence) =>
+      `<div class="vm-authority-row"><span title="${vmEscape(fence.stable_id)}">${vmEscape(fence.stable_id)}</span>` +
+      `<span>${vmEscape([fence.kind, fence.vendor].filter(Boolean).join(" · "))}</span><span>gen ${Number(fence.generation || 0).toLocaleString()}</span></div>`
+    ).join("") || '<div class="empty">no active resource fences</div>';
+    if (status.active_fences_truncated) fences.insertAdjacentHTML("beforeend", '<div class="empty">bounded prefix shown · more fences are active</div>');
+    const processRows = Array.isArray(status.active_processes) ? status.active_processes : [];
+    processes.innerHTML = processRows.map((process) => {
+      const device = process.device_policy_intended ? (process.device_policy_installed ? "device ✓" : "device ✗") : "device n/a";
+      const policy = process.process_policy_intended ? (process.process_policy_installed ? "host policy ✓" : "host policy ✗") : "host policy n/a";
+      const incomplete = (process.device_policy_intended && !process.device_policy_installed) ||
+        (process.process_policy_intended && !process.process_policy_installed);
+      const terminal = process.phase === "terminal_pending_release";
+      const cleanupComplete = terminal && process.cgroup_empty === true && process.accelerator_contexts_empty === true;
+      const cleanup = terminal ? ` · cleanup ${cleanupComplete ? "✓" : "✗"}` : "";
+      return `<div class="vm-authority-row"><span title="${vmEscape(process.launch_id)}">${vmEscape(process.run_id || process.launch_id)}</span>` +
+        `<span>${vmEscape(process.phase)} · pid ${process.host_pid == null ? "—" : Number(process.host_pid).toLocaleString()}</span>` +
+        `<span class="${incomplete || (terminal && !cleanupComplete) ? "bad" : "ok"}">${vmEscape(device)} · ${vmEscape(policy)}${vmEscape(cleanup)}</span></div>`;
+    }).join("") || '<div class="empty">no active process authority records</div>';
+    if (status.active_processes_truncated) processes.insertAdjacentHTML("beforeend", '<div class="empty">bounded prefix shown · more process records are active</div>');
+  }
+
+  function renderVMHostAuthorityUnavailable(message) {
+    const state = document.getElementById("vm-host-authority-state");
+    const summary = document.getElementById("vm-host-authority-summary");
+    const fences = document.getElementById("vm-host-fences");
+    const processes = document.getElementById("vm-host-processes");
+    if (state) {
+      state.textContent = message;
+      state.className = "bad";
+    }
+    if (summary) summary.innerHTML = '<div class="empty">no authority receipt available</div>';
+    if (fences) fences.innerHTML = '<div class="empty">not observable</div>';
+    if (processes) processes.innerHTML = '<div class="empty">not observable</div>';
+  }
+
+  async function refreshVMHostAuthority() {
+    if (vmHostBusy) return;
+    vmHostBusy = true;
+    try {
+      const response = await fetch("/api/trainvm/host-authority", { cache: "no-store" });
+      if (!response.ok) {
+        renderVMHostAuthorityUnavailable(`authority unavailable · HTTP ${response.status}`);
+        return;
+      }
+      const payload = await response.json();
+      renderVMHostAuthority(payload);
+    } catch (_) {
+      renderVMHostAuthorityUnavailable("authority transport unavailable");
+    } finally {
+      vmHostBusy = false;
+    }
   }
 
   function renderVMRunList(runs) {
@@ -2071,6 +2160,7 @@
     if (!panel || !panel.open || vmBusy || (document.hidden && !force)) return;
     vmBusy = true;
     try {
+      void refreshVMHostAuthority();
       const response = await fetch("/api/trainvm/runs", { cache: "no-store" });
       if (!response.ok) {
         renderVMObservabilityError(`run authority unavailable · HTTP ${response.status} · retrying`);

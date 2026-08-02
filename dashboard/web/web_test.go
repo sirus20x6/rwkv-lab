@@ -258,6 +258,33 @@ func TestTrainVMPanelUsesIncrementalReadOnlyTimeline(t *testing.T) {
 	}
 }
 
+func TestTrainVMHostAuthorityPanelUsesReceiptDerivedStatus(t *testing.T) {
+	index, err := fs.ReadFile(Static(), "index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := fs.ReadFile(Static(), "app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		`id="vm-host-authority-state"`, `id="vm-host-fences"`,
+		`id="vm-host-processes"`, `/api/trainvm/host-authority`,
+		`mutation_disabled_reason`, `device_policy_installed`,
+		`process_policy_installed`, `active_fences_truncated`,
+		`active_processes_truncated`,
+	} {
+		if !strings.Contains(string(index)+string(app), required) {
+			t.Fatalf("host authority panel is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"/proc/", "pgrep", "process list"} {
+		if strings.Contains(string(app), forbidden) {
+			t.Fatalf("host authority UI infers authority from %q", forbidden)
+		}
+	}
+}
+
 func TestTrainVMLifecycleActionsUseNativeAuthorityAndExactRetry(t *testing.T) {
 	assets := Static()
 	index, err := fs.ReadFile(assets, "index.html")

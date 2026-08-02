@@ -322,6 +322,22 @@ struct CoordinatorFixture final {
   std::shared_ptr<HostGrantCoordinator> coordinator;
 };
 
+class FixedAuthorityStatusSource final : public IHostdAuthorityStatusSource {
+public:
+  explicit FixedAuthorityStatusSource(HostdAuthorityStatus value)
+      : value_(std::move(value)) {}
+
+  [[nodiscard]] HostdAuthorityStatus snapshot() const override {
+    ++observations;
+    return value_;
+  }
+
+  mutable std::size_t observations{};
+
+private:
+  HostdAuthorityStatus value_;
+};
+
 constexpr std::string_view kMutationEvidenceDigest =
     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -1317,6 +1333,64 @@ void status_only_lifecycle_and_endpoint_identity() {
   invalid_text_thread.join();
   require(invalid_text_result == HostdServeResult::rejected,
           "server normalizes invalid status serialization state to rejection");
+}
+
+void authority_status_round_trips_receipt_derived_health() {
+  TemporaryDirectory directory;
+  CoordinatorFixture fixture(directory);
+  fixture.admit();
+  const ResourceOccupancySnapshot occupancy = fixture.ledger->occupancy();
+  HostdAuthorityStatus expected;
+  expected.api_version = std::string(kHostdAuthorityStatusApiVersion);
+  expected.startup_phase = HostdStartupPhase::admitting;
+  expected.startup_recovery_steps = 2U;
+  expected.ledger_verified = true;
+  expected.ledger_chain_head = fixture.ledger->chain_head();
+  expected.ledger_record_count = fixture.ledger->record_count();
+  expected.occupancy_ledger_sequence = occupancy.ledger_sequence;
+  expected.occupancy_digest = occupancy.occupancy_digest;
+  expected.resource_inventory_observed = true;
+  expected.current_inventory_digest = fixture.observed.inventory_digest;
+  expected.current_inventory_receipt_digest = fixture.observed.receipt_digest;
+  expected.process_launch_enabled = true;
+  expected.mutation_enabled = true;
+
+  auto source = std::make_shared<FixedAuthorityStatusSource>(expected);
+  auto authority = std::make_shared<HostdSocketAuthority>(
+      HostdSocketAuthority::self_bind(socket_config(directory),
+                                      directory.parent_fd(),
+                                      std::make_shared<HeldToken>()));
+  HostdStatusServer server(authority, fixture.coordinator, peer_policy(), {},
+                           source);
+  HostdServeResult served = HostdServeResult::timed_out;
+  std::jthread server_thread([&] { served = server.serve_one(deadline()); });
+  const HostdStatusReply reply =
+      hostd_request_status(client_config(*authority), 901U, deadline());
+  server_thread.join();
+  require(served == HostdServeResult::served && reply.status &&
+              reply.authority_status && *reply.authority_status == expected &&
+              source->observations == 1U,
+          "status transport carries one exact bounded authority snapshot");
+
+  HostdAuthorityStatus contradictory = expected;
+  contradictory.resource_inventory_observed = false;
+  auto contradictory_source =
+      std::make_shared<FixedAuthorityStatusSource>(contradictory);
+  HostdStatusServer contradictory_server(authority, fixture.coordinator,
+                                          peer_policy(), {},
+                                          contradictory_source);
+  HostdServeResult rejected = HostdServeResult::served;
+  std::jthread contradictory_thread(
+      [&] { rejected = contradictory_server.serve_one(deadline()); });
+  require_throws<HostdTransportError>(
+      [&] {
+        (void)hostd_request_status(client_config(*authority), 902U,
+                                   deadline());
+      },
+      "contradictory inventory observation is refused");
+  contradictory_thread.join();
+  require(rejected == HostdServeResult::rejected,
+          "server rejects contradictory resource health before projection");
 }
 
 void malformed_packets_rights_and_deadlines_are_bounded() {
@@ -2340,6 +2414,7 @@ int main() {
       {"startup-faults", startup_faults_rollback_and_restore_process_state},
       {"replacement", path_replacement_poison_and_guarded_move_cleanup},
       {"status", status_only_lifecycle_and_endpoint_identity},
+      {"authority-status", authority_status_round_trips_receipt_derived_health},
       {"framing", malformed_packets_rights_and_deadlines_are_bounded},
       {"client-hardening",
        client_rejects_corruption_delegation_and_no_children_exist},

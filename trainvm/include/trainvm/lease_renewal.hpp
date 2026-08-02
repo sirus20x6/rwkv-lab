@@ -40,6 +40,14 @@ struct LeaseRenewalTickResult final {
   bool operator==(const LeaseRenewalTickResult&) const = default;
 };
 
+struct LeaseRenewalCoordinatorSnapshot final {
+  std::size_t tracked_count{};
+  bool poisoned{};
+  std::string poison_reason;
+
+  bool operator==(const LeaseRenewalCoordinatorSnapshot&) const = default;
+};
+
 // A production-shaped but deliberately manual lease-renewal state machine.
 // Service integration may call tick from a future supervisor, but this class
 // owns no thread, timer, process, or worker-launch capability. A restarted
@@ -61,6 +69,7 @@ class LeaseRenewalCoordinator final {
   [[nodiscard]] std::vector<LeaseRenewalTickResult> tick();
   [[nodiscard]] bool poisoned() const;
   [[nodiscard]] std::size_t tracked_count() const;
+  [[nodiscard]] LeaseRenewalCoordinatorSnapshot snapshot() const;
 
  private:
   [[noreturn]] void poison(std::string reason);

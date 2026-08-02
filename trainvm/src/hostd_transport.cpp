@@ -536,6 +536,147 @@ nlohmann::json status_json(const HostdCoordinatorStatus &status) {
                                 : nlohmann::json(nullptr)}};
 }
 
+std::string startup_phase_name(HostdStartupPhase phase) {
+  switch (phase) {
+  case HostdStartupPhase::reconciling:
+    return "reconciling";
+  case HostdStartupPhase::auditing:
+    return "auditing";
+  case HostdStartupPhase::admitting:
+    return "admitting";
+  case HostdStartupPhase::exhausted:
+    return "exhausted";
+  case HostdStartupPhase::failed:
+    return "failed";
+  }
+  throw HostdTransportError("hostd startup phase is invalid");
+}
+
+std::string process_phase_name(HostdProcessAuthorityPhase phase) {
+  switch (phase) {
+  case HostdProcessAuthorityPhase::launch_intent:
+    return "launch_intent";
+  case HostdProcessAuthorityPhase::spawned:
+    return "spawned";
+  case HostdProcessAuthorityPhase::terminal_pending_release:
+    return "terminal_pending_release";
+  }
+  throw HostdTransportError("hostd process authority phase is invalid");
+}
+
+std::string resource_kind_name(HostResourceKind kind) {
+  switch (kind) {
+  case HostResourceKind::accelerator:
+    return "accelerator";
+  case HostResourceKind::accelerator_partition:
+    return "accelerator_partition";
+  case HostResourceKind::host_mutex:
+    return "host_mutex";
+  }
+  throw HostdTransportError("hostd resource kind is invalid");
+}
+
+std::optional<std::string> vendor_name(
+    const std::optional<HostAcceleratorVendor> &vendor) {
+  if (!vendor)
+    return std::nullopt;
+  switch (*vendor) {
+  case HostAcceleratorVendor::nvidia:
+    return "nvidia";
+  case HostAcceleratorVendor::amd:
+    return "amd";
+  case HostAcceleratorVendor::intel:
+    return "intel";
+  case HostAcceleratorVendor::other:
+    return "other";
+  }
+  throw HostdTransportError("hostd resource vendor is invalid");
+}
+
+nlohmann::json fence_status_json(const ResourceFence &fence) {
+  return {
+      {"generation", fence.generation},
+      {"inventory_digest", fence.inventory_digest},
+      {"resource",
+       {{"kind", resource_kind_name(fence.resource.kind)},
+        {"parent_id", fence.resource.parent_id},
+        {"stable_id", fence.resource.stable_id},
+        {"vendor", vendor_name(fence.resource.vendor)}}},
+      {"topology_digest", fence.topology_digest},
+  };
+}
+
+nlohmann::json process_status_json(
+    const HostdProcessAuthorityStatus &status) {
+  return {
+      {"accelerator_contexts_empty", status.accelerator_contexts_empty},
+      {"allocation_id", status.allocation_id},
+      {"cgroup_empty", status.cgroup_empty},
+      {"cgroup_path", status.cgroup_path},
+      {"context_audit_digest", status.context_audit_digest},
+      {"device_policy_digest", status.device_policy_digest},
+      {"device_policy_installation_digest",
+       status.device_policy_installation_digest},
+      {"device_policy_installed", status.device_policy_installed},
+      {"device_policy_intended", status.device_policy_intended},
+      {"host_pid", status.host_pid},
+      {"journal_id", status.journal_id},
+      {"launch_id", status.launch_id},
+      {"logical_fencing_token", status.logical_fencing_token},
+      {"logical_lease_id", status.logical_lease_id},
+      {"phase", process_phase_name(status.phase)},
+      {"process_policy_digest", status.process_policy_digest},
+      {"process_policy_installation_digest",
+       status.process_policy_installation_digest},
+      {"process_policy_installed", status.process_policy_installed},
+      {"process_policy_intended", status.process_policy_intended},
+      {"process_starttime_ticks", status.process_starttime_ticks},
+      {"run_id", status.run_id},
+      {"terminal_receipt_digest", status.terminal_receipt_digest},
+  };
+}
+
+nlohmann::json authority_status_json(const HostdAuthorityStatus &status) {
+  nlohmann::json fences = nlohmann::json::array();
+  for (const ResourceFence &fence : status.active_fences)
+    fences.push_back(fence_status_json(fence));
+  nlohmann::json processes = nlohmann::json::array();
+  for (const HostdProcessAuthorityStatus &process : status.active_processes)
+    processes.push_back(process_status_json(process));
+  return {
+      {"active_fence_count", status.active_fence_count},
+      {"active_fences", std::move(fences)},
+      {"active_fences_truncated", status.active_fences_truncated},
+      {"active_process_count", status.active_process_count},
+      {"active_processes", std::move(processes)},
+      {"active_processes_truncated", status.active_processes_truncated},
+      {"api_version", status.api_version},
+      {"ledger_chain_head", chain_head_json(status.ledger_chain_head)},
+      {"ledger_record_count", status.ledger_record_count},
+      {"ledger_verification_reason", status.ledger_verification_reason},
+      {"ledger_verified", status.ledger_verified},
+      {"mutation_disabled_reason", status.mutation_disabled_reason},
+      {"mutation_enabled", status.mutation_enabled},
+      {"current_inventory_digest", status.current_inventory_digest},
+      {"current_inventory_receipt_digest",
+       status.current_inventory_receipt_digest},
+      {"degraded_resource_count", status.degraded_resource_count},
+      {"occupancy_digest", status.occupancy_digest},
+      {"occupancy_ledger_sequence", status.occupancy_ledger_sequence},
+      {"process_launch_enabled", status.process_launch_enabled},
+      {"resource_degradation_reason", status.resource_degradation_reason},
+      {"resource_inventory_observation_age_ns",
+       status.resource_inventory_observation_age_ns},
+      {"resource_inventory_observed", status.resource_inventory_observed},
+      {"remaining_terminal_release_records",
+       status.remaining_terminal_release_records},
+      {"remaining_unclosed_process_records",
+       status.remaining_unclosed_process_records},
+      {"startup_phase", startup_phase_name(status.startup_phase)},
+      {"startup_recovery_steps", status.startup_recovery_steps},
+  };
+}
+
 HostLedgerChainHead parse_chain_head(const nlohmann::json &value) {
   require_fields(value, {"chain_hash", "ledger_sequence"});
   const auto &sequence = value.at("ledger_sequence");
@@ -584,6 +725,255 @@ std::size_t parse_size(const nlohmann::json &value,
     throw HostdTransportError(std::string(description) +
                               " is outside the platform size range");
   }
+}
+
+std::uint64_t parse_unsigned_integer(const nlohmann::json &value,
+                                     std::string_view description) {
+  if (!value.is_number_unsigned())
+    throw HostdTransportError(std::string(description) +
+                              " is not an exact unsigned integer");
+  try {
+    return value.get<std::uint64_t>();
+  } catch (const nlohmann::json::exception &) {
+    throw HostdTransportError(std::string(description) +
+                              " is outside the unsigned integer range");
+  }
+}
+
+std::optional<std::string> parse_optional_string(
+    const nlohmann::json &value, std::string_view description) {
+  if (value.is_null())
+    return std::nullopt;
+  if (!value.is_string())
+    throw HostdTransportError(std::string(description) +
+                              " is not a string or null");
+  return value.get<std::string>();
+}
+
+std::optional<bool> parse_optional_bool(const nlohmann::json &value,
+                                        std::string_view description) {
+  if (value.is_null())
+    return std::nullopt;
+  if (!value.is_boolean())
+    throw HostdTransportError(std::string(description) +
+                              " is not a boolean or null");
+  return value.get<bool>();
+}
+
+std::optional<std::int64_t> parse_optional_signed(
+    const nlohmann::json &value, std::string_view description) {
+  if (value.is_null())
+    return std::nullopt;
+  return parse_signed_integer(value, description);
+}
+
+std::optional<std::uint64_t> parse_optional_unsigned(
+    const nlohmann::json &value, std::string_view description) {
+  if (value.is_null())
+    return std::nullopt;
+  return parse_unsigned_integer(value, description);
+}
+
+HostdStartupPhase parse_startup_phase(const std::string &value) {
+  if (value == "reconciling")
+    return HostdStartupPhase::reconciling;
+  if (value == "auditing")
+    return HostdStartupPhase::auditing;
+  if (value == "admitting")
+    return HostdStartupPhase::admitting;
+  if (value == "exhausted")
+    return HostdStartupPhase::exhausted;
+  if (value == "failed")
+    return HostdStartupPhase::failed;
+  throw HostdTransportError("hostd startup phase is invalid");
+}
+
+HostdProcessAuthorityPhase parse_process_phase(const std::string &value) {
+  if (value == "launch_intent")
+    return HostdProcessAuthorityPhase::launch_intent;
+  if (value == "spawned")
+    return HostdProcessAuthorityPhase::spawned;
+  if (value == "terminal_pending_release")
+    return HostdProcessAuthorityPhase::terminal_pending_release;
+  throw HostdTransportError("hostd process authority phase is invalid");
+}
+
+HostResourceKind parse_resource_kind(const std::string &value) {
+  if (value == "accelerator")
+    return HostResourceKind::accelerator;
+  if (value == "accelerator_partition")
+    return HostResourceKind::accelerator_partition;
+  if (value == "host_mutex")
+    return HostResourceKind::host_mutex;
+  throw HostdTransportError("hostd resource kind is invalid");
+}
+
+std::optional<HostAcceleratorVendor>
+parse_resource_vendor(const nlohmann::json &value) {
+  const auto name = parse_optional_string(value, "resource vendor");
+  if (!name)
+    return std::nullopt;
+  if (*name == "nvidia")
+    return HostAcceleratorVendor::nvidia;
+  if (*name == "amd")
+    return HostAcceleratorVendor::amd;
+  if (*name == "intel")
+    return HostAcceleratorVendor::intel;
+  if (*name == "other")
+    return HostAcceleratorVendor::other;
+  throw HostdTransportError("hostd resource vendor is invalid");
+}
+
+ResourceFence parse_fence_status(const nlohmann::json &value) {
+  require_fields(value,
+                 {"generation", "inventory_digest", "resource",
+                  "topology_digest"});
+  const auto &resource = value.at("resource");
+  require_fields(resource, {"kind", "parent_id", "stable_id", "vendor"});
+  return {
+      .resource =
+          {.kind = parse_resource_kind(
+               resource.at("kind").get<std::string>()),
+           .vendor = parse_resource_vendor(resource.at("vendor")),
+           .stable_id = resource.at("stable_id").get<std::string>(),
+           .parent_id =
+               parse_optional_string(resource.at("parent_id"), "parent_id")},
+      .generation =
+          parse_unsigned_integer(value.at("generation"), "fence generation"),
+      .inventory_digest =
+          value.at("inventory_digest").get<std::string>(),
+      .topology_digest = value.at("topology_digest").get<std::string>(),
+  };
+}
+
+HostdProcessAuthorityStatus parse_process_status(
+    const nlohmann::json &value) {
+  require_fields(
+      value,
+      {"accelerator_contexts_empty", "allocation_id", "cgroup_empty",
+       "cgroup_path", "context_audit_digest", "device_policy_digest",
+       "device_policy_installation_digest", "device_policy_installed",
+       "device_policy_intended", "host_pid", "journal_id", "launch_id",
+       "logical_fencing_token", "logical_lease_id", "phase",
+       "process_policy_digest", "process_policy_installation_digest",
+       "process_policy_installed", "process_policy_intended",
+       "process_starttime_ticks", "run_id", "terminal_receipt_digest"});
+  return {
+      .allocation_id = value.at("allocation_id").get<std::string>(),
+      .journal_id = value.at("journal_id").get<std::string>(),
+      .run_id = value.at("run_id").get<std::string>(),
+      .logical_lease_id = value.at("logical_lease_id").get<std::string>(),
+      .logical_fencing_token = parse_unsigned_integer(
+          value.at("logical_fencing_token"), "logical fencing token"),
+      .launch_id = value.at("launch_id").get<std::string>(),
+      .phase = parse_process_phase(value.at("phase").get<std::string>()),
+      .cgroup_path = value.at("cgroup_path").get<std::string>(),
+      .host_pid = parse_optional_signed(value.at("host_pid"), "host_pid"),
+      .process_starttime_ticks = parse_optional_unsigned(
+          value.at("process_starttime_ticks"), "process_starttime_ticks"),
+      .device_policy_intended =
+          value.at("device_policy_intended").get<bool>(),
+      .device_policy_installed =
+          value.at("device_policy_installed").get<bool>(),
+      .device_policy_digest =
+          value.at("device_policy_digest").get<std::string>(),
+      .device_policy_installation_digest =
+          value.at("device_policy_installation_digest").get<std::string>(),
+      .process_policy_intended =
+          value.at("process_policy_intended").get<bool>(),
+      .process_policy_installed =
+          value.at("process_policy_installed").get<bool>(),
+      .process_policy_digest =
+          value.at("process_policy_digest").get<std::string>(),
+      .process_policy_installation_digest =
+          value.at("process_policy_installation_digest").get<std::string>(),
+      .cgroup_empty =
+          parse_optional_bool(value.at("cgroup_empty"), "cgroup_empty"),
+      .accelerator_contexts_empty = parse_optional_bool(
+          value.at("accelerator_contexts_empty"),
+          "accelerator_contexts_empty"),
+      .context_audit_digest =
+          value.at("context_audit_digest").get<std::string>(),
+      .terminal_receipt_digest =
+          value.at("terminal_receipt_digest").get<std::string>(),
+  };
+}
+
+HostdAuthorityStatus parse_authority_status(const nlohmann::json &value) {
+  require_fields(
+      value,
+      {"active_fence_count", "active_fences", "active_fences_truncated",
+       "active_process_count", "active_processes",
+       "active_processes_truncated", "api_version", "ledger_chain_head",
+       "ledger_record_count", "ledger_verification_reason",
+       "ledger_verified", "mutation_disabled_reason", "mutation_enabled",
+       "current_inventory_digest", "current_inventory_receipt_digest",
+       "degraded_resource_count",
+       "occupancy_digest", "occupancy_ledger_sequence",
+       "process_launch_enabled", "resource_degradation_reason",
+       "resource_inventory_observation_age_ns",
+       "resource_inventory_observed", "remaining_terminal_release_records",
+       "remaining_unclosed_process_records", "startup_phase",
+       "startup_recovery_steps"});
+  if (!value.at("active_fences").is_array() ||
+      !value.at("active_processes").is_array())
+    throw HostdTransportError("hostd authority rows are not arrays");
+  HostdAuthorityStatus status{
+      .api_version = value.at("api_version").get<std::string>(),
+      .startup_phase =
+          parse_startup_phase(value.at("startup_phase").get<std::string>()),
+      .startup_recovery_steps = parse_size(
+          value.at("startup_recovery_steps"), "startup_recovery_steps"),
+      .remaining_unclosed_process_records = parse_size(
+          value.at("remaining_unclosed_process_records"),
+          "remaining_unclosed_process_records"),
+      .remaining_terminal_release_records = parse_size(
+          value.at("remaining_terminal_release_records"),
+          "remaining_terminal_release_records"),
+      .ledger_verified = value.at("ledger_verified").get<bool>(),
+      .ledger_verification_reason =
+          value.at("ledger_verification_reason").get<std::string>(),
+      .ledger_chain_head = parse_chain_head(value.at("ledger_chain_head")),
+      .ledger_record_count = parse_unsigned_integer(
+          value.at("ledger_record_count"), "ledger_record_count"),
+      .occupancy_ledger_sequence = parse_unsigned_integer(
+          value.at("occupancy_ledger_sequence"),
+          "occupancy_ledger_sequence"),
+      .occupancy_digest = value.at("occupancy_digest").get<std::string>(),
+      .resource_inventory_observed =
+          value.at("resource_inventory_observed").get<bool>(),
+      .resource_inventory_observation_age_ns = parse_unsigned_integer(
+          value.at("resource_inventory_observation_age_ns"),
+          "resource_inventory_observation_age_ns"),
+      .current_inventory_digest =
+          value.at("current_inventory_digest").get<std::string>(),
+      .current_inventory_receipt_digest =
+          value.at("current_inventory_receipt_digest").get<std::string>(),
+      .degraded_resource_count = parse_size(
+          value.at("degraded_resource_count"), "degraded_resource_count"),
+      .resource_degradation_reason =
+          value.at("resource_degradation_reason").get<std::string>(),
+      .active_fence_count =
+          parse_size(value.at("active_fence_count"), "active_fence_count"),
+      .active_fences = {},
+      .active_fences_truncated =
+          value.at("active_fences_truncated").get<bool>(),
+      .active_process_count = parse_size(value.at("active_process_count"),
+                                         "active_process_count"),
+      .active_processes = {},
+      .active_processes_truncated =
+          value.at("active_processes_truncated").get<bool>(),
+      .process_launch_enabled =
+          value.at("process_launch_enabled").get<bool>(),
+      .mutation_enabled = value.at("mutation_enabled").get<bool>(),
+      .mutation_disabled_reason =
+          value.at("mutation_disabled_reason").get<std::string>(),
+  };
+  for (const auto &fence : value.at("active_fences"))
+    status.active_fences.push_back(parse_fence_status(fence));
+  for (const auto &process : value.at("active_processes"))
+    status.active_processes.push_back(parse_process_status(process));
+  return status;
 }
 
 HostStartupAuditDisposition parse_audit_disposition(const std::string &value) {
@@ -781,6 +1171,156 @@ void validate_status_semantics(const HostdCoordinatorStatus &status) {
   throw HostdTransportError("hostd coordinator lifecycle is invalid");
 }
 
+void validate_fence_status(const ResourceFence &fence) {
+  const HostResourceId &resource = fence.resource;
+  const bool accelerator = resource.kind == HostResourceKind::accelerator;
+  const bool partition =
+      resource.kind == HostResourceKind::accelerator_partition;
+  const bool mutex = resource.kind == HostResourceKind::host_mutex;
+  if ((!accelerator && !partition && !mutex) ||
+      !valid_identifier(resource.stable_id) || fence.generation == 0U ||
+      !valid_digest(fence.inventory_digest) ||
+      !valid_digest(fence.topology_digest) ||
+      (accelerator && (!resource.vendor || resource.parent_id)) ||
+      (partition && (!resource.vendor || !resource.parent_id ||
+                     !valid_identifier(*resource.parent_id) ||
+                     *resource.parent_id == resource.stable_id)) ||
+      (mutex && (resource.vendor || resource.parent_id ||
+                 !resource.stable_id.starts_with("host-mutex:")))) {
+    throw HostdTransportError("hostd authority resource fence is invalid");
+  }
+}
+
+bool valid_status_path(std::string_view path) {
+  return !path.empty() && path.size() <= 4'096U && path.front() == '/' &&
+         path.find('\0') == std::string_view::npos &&
+         valid_bounded_text(path, 4'096U, false);
+}
+
+void validate_process_status(const HostdProcessAuthorityStatus &status) {
+  const bool has_process = status.host_pid.has_value() &&
+                           status.process_starttime_ticks.has_value();
+  const bool terminal = status.phase ==
+                        HostdProcessAuthorityPhase::terminal_pending_release;
+  const bool spawned = status.phase == HostdProcessAuthorityPhase::spawned;
+  const bool intent = status.phase == HostdProcessAuthorityPhase::launch_intent;
+  if ((!intent && !spawned && !terminal) ||
+      !valid_identifier(status.allocation_id) ||
+      !valid_identifier(status.journal_id) || !valid_identifier(status.run_id) ||
+      !valid_identifier(status.logical_lease_id) ||
+      status.logical_fencing_token == 0U ||
+      !valid_identifier(status.launch_id) ||
+      !valid_status_path(status.cgroup_path) ||
+      (status.host_pid.has_value() !=
+       status.process_starttime_ticks.has_value()) ||
+      (has_process && (*status.host_pid <= 0 ||
+                       *status.process_starttime_ticks == 0U)) ||
+      (intent && has_process) || (!intent && !has_process) ||
+      (status.device_policy_intended !=
+       !status.device_policy_digest.empty()) ||
+      (status.device_policy_installed !=
+       !status.device_policy_installation_digest.empty()) ||
+      (status.process_policy_intended !=
+       !status.process_policy_digest.empty()) ||
+      (status.process_policy_installed !=
+       !status.process_policy_installation_digest.empty()) ||
+      (status.device_policy_installed &&
+       !status.device_policy_intended) ||
+      (status.process_policy_installed &&
+       !status.process_policy_intended) ||
+      (!status.device_policy_digest.empty() &&
+       !valid_digest(status.device_policy_digest)) ||
+      (!status.device_policy_installation_digest.empty() &&
+       !valid_digest(status.device_policy_installation_digest)) ||
+      (!status.process_policy_digest.empty() &&
+       !valid_digest(status.process_policy_digest)) ||
+      (!status.process_policy_installation_digest.empty() &&
+       !valid_digest(status.process_policy_installation_digest)) ||
+      (intent &&
+       (status.device_policy_installed || status.process_policy_installed)) ||
+      (terminal != status.cgroup_empty.has_value()) ||
+      (terminal != status.accelerator_contexts_empty.has_value()) ||
+      (terminal != !status.context_audit_digest.empty()) ||
+      (terminal != !status.terminal_receipt_digest.empty()) ||
+      (terminal && (!valid_digest(status.context_audit_digest) ||
+                    !valid_digest(status.terminal_receipt_digest)))) {
+    throw HostdTransportError("hostd process authority status is invalid");
+  }
+}
+
+void validate_authority_status_semantics(
+    const HostdAuthorityStatus &status,
+    const HostdCoordinatorStatus &coordinator) {
+  validate_chain_head(status.ledger_chain_head);
+  if (status.api_version != kHostdAuthorityStatusApiVersion ||
+      status.startup_recovery_steps > 1'000'000U ||
+      status.remaining_unclosed_process_records >
+          HostResourceBounds::maximum_active_fences ||
+      status.remaining_terminal_release_records >
+          HostResourceBounds::maximum_active_fences ||
+      status.active_fence_count >
+          HostResourceBounds::maximum_active_fences ||
+      status.active_process_count >
+          HostResourceBounds::maximum_active_fences ||
+      status.active_fences.size() >
+          HostdAuthorityStatus::maximum_reported_rows ||
+      status.active_processes.size() >
+          HostdAuthorityStatus::maximum_reported_rows ||
+      status.active_fences.size() > status.active_fence_count ||
+      status.active_processes.size() > status.active_process_count ||
+      status.active_fences_truncated !=
+          (status.active_fences.size() < status.active_fence_count) ||
+      status.active_processes_truncated !=
+          (status.active_processes.size() < status.active_process_count) ||
+      status.active_process_count !=
+          status.remaining_unclosed_process_records +
+              status.remaining_terminal_release_records ||
+      status.occupancy_ledger_sequence >
+          status.ledger_chain_head.ledger_sequence ||
+      !valid_digest(status.occupancy_digest) ||
+      status.degraded_resource_count > status.active_fence_count ||
+      (status.resource_inventory_observed !=
+       (!status.current_inventory_digest.empty() &&
+        !status.current_inventory_receipt_digest.empty())) ||
+      (!status.current_inventory_digest.empty() &&
+       !valid_digest(status.current_inventory_digest)) ||
+      (!status.current_inventory_receipt_digest.empty() &&
+       !valid_digest(status.current_inventory_receipt_digest)) ||
+      (status.resource_degradation_reason.empty() !=
+       (status.resource_inventory_observed &&
+        status.degraded_resource_count == 0U)) ||
+      !valid_bounded_text(status.resource_degradation_reason,
+                          kMaximumPoisonReasonBytes, true) ||
+      !valid_bounded_text(status.ledger_verification_reason,
+                          kMaximumPoisonReasonBytes, true) ||
+      !valid_bounded_text(status.mutation_disabled_reason,
+                          kMaximumPoisonReasonBytes, true) ||
+      (status.ledger_verified !=
+       status.ledger_verification_reason.empty()) ||
+      (status.mutation_enabled ==
+       !status.mutation_disabled_reason.empty()) ||
+      (status.mutation_enabled &&
+       (!status.ledger_verified || !status.process_launch_enabled ||
+        status.startup_phase != HostdStartupPhase::admitting ||
+        coordinator.lifecycle != HostdLifecycle::admitting))) {
+    throw HostdTransportError("hostd authority status semantics are invalid");
+  }
+  std::set<std::string> resource_ids;
+  for (const ResourceFence &fence : status.active_fences) {
+    validate_fence_status(fence);
+    if (!resource_ids.insert(fence.resource.stable_id).second)
+      throw HostdTransportError(
+          "hostd authority status repeats a resource fence");
+  }
+  std::set<std::string> launch_ids;
+  for (const HostdProcessAuthorityStatus &process : status.active_processes) {
+    validate_process_status(process);
+    if (!launch_ids.insert(process.launch_id).second)
+      throw HostdTransportError(
+          "hostd authority status repeats a process launch");
+  }
+}
+
 HostdCoordinatorStatus parse_validated_status(const nlohmann::json &value) {
   try {
     HostdCoordinatorStatus status = parse_status(value);
@@ -790,6 +1330,19 @@ HostdCoordinatorStatus parse_validated_status(const nlohmann::json &value) {
     throw;
   } catch (const nlohmann::json::exception &) {
     throw HostdTransportError("hostd status JSON types are invalid");
+  }
+}
+
+HostdAuthorityStatus parse_validated_authority_status(
+    const nlohmann::json &value, const HostdCoordinatorStatus &coordinator) {
+  try {
+    HostdAuthorityStatus status = parse_authority_status(value);
+    validate_authority_status_semantics(status, coordinator);
+    return status;
+  } catch (const HostdTransportError &) {
+    throw;
+  } catch (const nlohmann::json::exception &) {
+    throw HostdTransportError("hostd authority status JSON types are invalid");
   }
 }
 
@@ -1568,8 +2121,10 @@ int HostdSocketAuthority::listener_fd() const noexcept {
 HostdStatusServer::HostdStatusServer(
     std::shared_ptr<HostdSocketAuthority> authority,
     std::shared_ptr<HostGrantCoordinator> coordinator,
-    HostdStatusPeerPolicy peer_policy, HostdStatusTransportLimits limits)
+    HostdStatusPeerPolicy peer_policy, HostdStatusTransportLimits limits,
+    std::shared_ptr<IHostdAuthorityStatusSource> authority_status_source)
     : authority_(std::move(authority)), coordinator_(std::move(coordinator)),
+      authority_status_source_(std::move(authority_status_source)),
       peer_policy_(peer_policy), limits_(limits) {
   if (!authority_ || !coordinator_ || limits_.maximum_payload_bytes == 0U ||
       limits_.maximum_payload_bytes > kHostdStatusMaximumPayloadBytes ||
@@ -1647,9 +2202,17 @@ HostdServeResult HostdStatusServer::serve_accepted(
     }
     const HostdCoordinatorStatus status = coordinator_->status();
     validate_status_semantics(status);
+    std::optional<HostdAuthorityStatus> authority_status;
+    if (authority_status_source_) {
+      authority_status = authority_status_source_->snapshot();
+      validate_authority_status_semantics(*authority_status, status);
+    }
     const auto response = encode_packet(
         kStatusResponseOpcode, request.correlation_id,
         {{"api_version", kHostdStatusTransportApiVersion},
+         {"authority_status", authority_status
+                                  ? authority_status_json(*authority_status)
+                                  : nlohmann::json(nullptr)},
          {"status", status_json(status)}});
     if (response.size() - kHostdStatusWireHeaderBytes >
         limits_.maximum_payload_bytes) {
@@ -2142,13 +2705,20 @@ request_status_impl(const HostdStatusClientConfig &config,
     throw HostdTransportError("hostd response correlation is inexact");
   const nlohmann::json payload = parse_canonical_json(response.payload);
   if (response.opcode == kStatusResponseOpcode) {
-    require_fields(payload, {"api_version", "status"});
+    require_fields(payload, {"api_version", "authority_status", "status"});
     if (payload.at("api_version").get<std::string>() !=
         kHostdStatusTransportApiVersion)
       throw HostdTransportError("hostd status response API is unsupported");
+    HostdCoordinatorStatus status =
+        parse_validated_status(payload.at("status"));
+    std::optional<HostdAuthorityStatus> authority_status;
+    if (!payload.at("authority_status").is_null())
+      authority_status = parse_validated_authority_status(
+          payload.at("authority_status"), status);
     return {.kind = HostdStatusReplyKind::status,
             .correlation_id = response.correlation_id,
-            .status = parse_validated_status(payload.at("status")),
+            .status = std::move(status),
+            .authority_status = std::move(authority_status),
             .error = std::nullopt};
   }
   if (response.opcode == kErrorResponseOpcode) {
@@ -2164,6 +2734,7 @@ request_status_impl(const HostdStatusClientConfig &config,
     return {.kind = HostdStatusReplyKind::error,
             .correlation_id = response.correlation_id,
             .status = std::nullopt,
+            .authority_status = std::nullopt,
             .error = HostdTypedError{.code = code, .message = message}};
   }
   throw HostdTransportError("hostd response opcode is unsupported");

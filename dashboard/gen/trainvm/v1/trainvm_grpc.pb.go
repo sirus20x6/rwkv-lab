@@ -19,15 +19,16 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	TrainVM_SubmitExperiment_FullMethodName = "/trainvm.v1.TrainVM/SubmitExperiment"
-	TrainVM_DiffPlan_FullMethodName         = "/trainvm.v1.TrainVM/DiffPlan"
-	TrainVM_CommandRun_FullMethodName       = "/trainvm.v1.TrainVM/CommandRun"
-	TrainVM_GetRun_FullMethodName           = "/trainvm.v1.TrainVM/GetRun"
-	TrainVM_GetCompiledPlan_FullMethodName  = "/trainvm.v1.TrainVM/GetCompiledPlan"
-	TrainVM_ListRuns_FullMethodName         = "/trainvm.v1.TrainVM/ListRuns"
-	TrainVM_WatchEvents_FullMethodName      = "/trainvm.v1.TrainVM/WatchEvents"
-	TrainVM_GetControlView_FullMethodName   = "/trainvm.v1.TrainVM/GetControlView"
-	TrainVM_GetDescriptor_FullMethodName    = "/trainvm.v1.TrainVM/GetDescriptor"
+	TrainVM_SubmitExperiment_FullMethodName       = "/trainvm.v1.TrainVM/SubmitExperiment"
+	TrainVM_DiffPlan_FullMethodName               = "/trainvm.v1.TrainVM/DiffPlan"
+	TrainVM_CommandRun_FullMethodName             = "/trainvm.v1.TrainVM/CommandRun"
+	TrainVM_GetRun_FullMethodName                 = "/trainvm.v1.TrainVM/GetRun"
+	TrainVM_GetCompiledPlan_FullMethodName        = "/trainvm.v1.TrainVM/GetCompiledPlan"
+	TrainVM_ListRuns_FullMethodName               = "/trainvm.v1.TrainVM/ListRuns"
+	TrainVM_WatchEvents_FullMethodName            = "/trainvm.v1.TrainVM/WatchEvents"
+	TrainVM_GetControlView_FullMethodName         = "/trainvm.v1.TrainVM/GetControlView"
+	TrainVM_GetDescriptor_FullMethodName          = "/trainvm.v1.TrainVM/GetDescriptor"
+	TrainVM_GetHostAuthorityStatus_FullMethodName = "/trainvm.v1.TrainVM/GetHostAuthorityStatus"
 )
 
 // TrainVMClient is the client API for TrainVM service.
@@ -43,6 +44,7 @@ type TrainVMClient interface {
 	WatchEvents(ctx context.Context, in *WatchEventsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[EventEnvelope], error)
 	GetControlView(ctx context.Context, in *GetControlViewRequest, opts ...grpc.CallOption) (*GetControlViewResponse, error)
 	GetDescriptor(ctx context.Context, in *DescriptorRequest, opts ...grpc.CallOption) (*DescriptorResponse, error)
+	GetHostAuthorityStatus(ctx context.Context, in *GetHostAuthorityStatusRequest, opts ...grpc.CallOption) (*GetHostAuthorityStatusResponse, error)
 }
 
 type trainVMClient struct {
@@ -152,6 +154,16 @@ func (c *trainVMClient) GetDescriptor(ctx context.Context, in *DescriptorRequest
 	return out, nil
 }
 
+func (c *trainVMClient) GetHostAuthorityStatus(ctx context.Context, in *GetHostAuthorityStatusRequest, opts ...grpc.CallOption) (*GetHostAuthorityStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetHostAuthorityStatusResponse)
+	err := c.cc.Invoke(ctx, TrainVM_GetHostAuthorityStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // TrainVMServer is the server API for TrainVM service.
 // All implementations must embed UnimplementedTrainVMServer
 // for forward compatibility.
@@ -165,6 +177,7 @@ type TrainVMServer interface {
 	WatchEvents(*WatchEventsRequest, grpc.ServerStreamingServer[EventEnvelope]) error
 	GetControlView(context.Context, *GetControlViewRequest) (*GetControlViewResponse, error)
 	GetDescriptor(context.Context, *DescriptorRequest) (*DescriptorResponse, error)
+	GetHostAuthorityStatus(context.Context, *GetHostAuthorityStatusRequest) (*GetHostAuthorityStatusResponse, error)
 	mustEmbedUnimplementedTrainVMServer()
 }
 
@@ -201,6 +214,9 @@ func (UnimplementedTrainVMServer) GetControlView(context.Context, *GetControlVie
 }
 func (UnimplementedTrainVMServer) GetDescriptor(context.Context, *DescriptorRequest) (*DescriptorResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetDescriptor not implemented")
+}
+func (UnimplementedTrainVMServer) GetHostAuthorityStatus(context.Context, *GetHostAuthorityStatusRequest) (*GetHostAuthorityStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetHostAuthorityStatus not implemented")
 }
 func (UnimplementedTrainVMServer) mustEmbedUnimplementedTrainVMServer() {}
 func (UnimplementedTrainVMServer) testEmbeddedByValue()                 {}
@@ -378,6 +394,24 @@ func _TrainVM_GetDescriptor_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _TrainVM_GetHostAuthorityStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetHostAuthorityStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TrainVMServer).GetHostAuthorityStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TrainVM_GetHostAuthorityStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TrainVMServer).GetHostAuthorityStatus(ctx, req.(*GetHostAuthorityStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // TrainVM_ServiceDesc is the grpc.ServiceDesc for TrainVM service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -416,6 +450,10 @@ var TrainVM_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetDescriptor",
 			Handler:    _TrainVM_GetDescriptor_Handler,
+		},
+		{
+			MethodName: "GetHostAuthorityStatus",
+			Handler:    _TrainVM_GetHostAuthorityStatus_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

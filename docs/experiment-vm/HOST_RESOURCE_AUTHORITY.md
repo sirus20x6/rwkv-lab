@@ -120,6 +120,22 @@ systemd socket activation. It does not use the abstract Unix namespace. Services
 namespace must receive the same socket through an explicit bind mount or an inherited descriptor.
 Failure to reach that shared endpoint is a hard failure, not permission to start another hostd.
 
+The status transport is `trainvm.hostd-status-transport/v3`. Every admitted production runtime
+supplies a `trainvm.hostd-authority-status/v1` snapshot alongside coordinator status. The snapshot
+is inspection evidence only: it contains no session, mutation capability, pidfd, or bearer token.
+It binds startup phase and recovery backlog, ledger verification and chain head, occupancy digest,
+resource fence generations, process launch intent/spawn/terminal-release state, and intended versus
+installed device and CPU/I/O policy digests. Complete counts and digests are always returned; at most
+eight deterministic rows are included so worst-case bounded identifiers and cgroup paths fit the
+64 KiB packet, with explicit truncation flags. TrainVM exposes the freshly validated snapshot through
+`GetHostAuthorityStatus`. Hostd seals a recent host inventory receipt (refreshed at most once per
+30 seconds rather than on every one-second dashboard poll) and compares every active fence with the
+observed host/boot, resource identity, parent relationship, and topology digest. Capture failure is
+distinct from an intact observation; observation age, degraded fence counts, and the exact current
+inventory receipt digest cross the typed boundary. TrainVM adds its own
+lease-renewal coordinator count, poison state, and supervisor failure evidence. The dashboard
+consumes those receipts and never substitutes process discovery for authority health.
+
 ## Authority and threat model
 
 The P0 deployment has two supported enforcement grades:

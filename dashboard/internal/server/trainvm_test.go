@@ -30,7 +30,12 @@ type fakeTrainVMCommander struct {
 	planDiffResult   trainvmstore.PlanDiffResult
 	descriptor       trainvmstore.DescriptorRequest
 	descriptorResult trainvmstore.DescriptorResult
+	hostAuthority    trainvmstore.HostAuthorityStatus
 	err              error
+}
+
+func (f *fakeTrainVMCommander) GetHostAuthorityStatus(_ context.Context) (trainvmstore.HostAuthorityStatus, error) {
+	return f.hostAuthority, f.err
 }
 
 func (f *fakeTrainVMCommander) DiffPlan(_ context.Context,
@@ -72,6 +77,45 @@ func newTrainVMControlRequest(body string) *http.Request {
 		strings.NewReader(body))
 	request.Host = "127.0.0.1:9124"
 	return request
+}
+
+func TestTrainVMHostAuthorityEndpointUsesOnlyNativeCommanderEvidence(t *testing.T) {
+	expected := trainvmstore.HostAuthorityStatus{
+		APIVersion:   "trainvm.hostd-authority-status/v1",
+		Coordinator:  trainvmstore.HostdCoordinatorStatus{Lifecycle: "admitting", HostID: "host-1"},
+		StartupPhase: "admitting", LedgerVerified: true,
+		ActiveFences:         []trainvmstore.HostResourceFenceStatus{},
+		ActiveProcesses:      []trainvmstore.HostdProcessAuthorityStatus{},
+		ProcessLaunchEnabled: true, MutationEnabled: true,
+	}
+	commander := &fakeTrainVMCommander{hostAuthority: expected}
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/trainvm/host-authority", nil)
+	New(Config{Commander: commander}).Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("unexpected host authority response: status=%d headers=%v body=%s", response.Code, response.Header(), response.Body.String())
+	}
+	var observed trainvmstore.HostAuthorityStatus
+	if err := json.Unmarshal(response.Body.Bytes(), &observed); err != nil ||
+		observed.APIVersion != expected.APIVersion || !observed.MutationEnabled ||
+		observed.Coordinator.HostID != "host-1" {
+		t.Fatalf("unexpected host authority payload: %#v err=%v", observed, err)
+	}
+
+	unconfigured := httptest.NewRecorder()
+	New(Config{}).Handler().ServeHTTP(unconfigured,
+		httptest.NewRequest(http.MethodGet, "/api/trainvm/host-authority", nil))
+	if unconfigured.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unconfigured host authority endpoint returned %d", unconfigured.Code)
+	}
+
+	commander.err = status.Error(codes.FailedPrecondition, "hostd status source is absent")
+	failedPrecondition := httptest.NewRecorder()
+	New(Config{Commander: commander}).Handler().ServeHTTP(failedPrecondition,
+		httptest.NewRequest(http.MethodGet, "/api/trainvm/host-authority", nil))
+	if failedPrecondition.Code != http.StatusServiceUnavailable {
+		t.Fatalf("missing hostd status source returned %d, want 503", failedPrecondition.Code)
+	}
 }
 
 func newTrainVMActionRequest(body string) *http.Request {

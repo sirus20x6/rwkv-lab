@@ -182,6 +182,7 @@ func (s *Server) routes() {
 	// Timeline markers (checkpoints/alerts/controls/actions) for chart overlays.
 	s.mux.HandleFunc("GET /api/timeline/{run}", s.handleTimeline)
 	s.mux.HandleFunc("GET /api/trainvm/runs", s.handleTrainVMRuns)
+	s.mux.HandleFunc("GET /api/trainvm/host-authority", s.handleTrainVMHostAuthority)
 	s.mux.HandleFunc("GET /api/trainvm/runs/{run}", s.handleTrainVMRun)
 	s.mux.HandleFunc("GET /api/trainvm/runs/{run}/plan", s.handleTrainVMCompiledPlan)
 	s.mux.HandleFunc("GET /api/trainvm/runs/{run}/timeline", s.handleTrainVMTimeline)

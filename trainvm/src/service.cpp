@@ -433,6 +433,79 @@ v1::ControlCommandResult::Status wire_command_status(ControlCommandStatus status
   return v1::ControlCommandResult::STATUS_UNSPECIFIED;
 }
 
+v1::HostdLifecycle wire_hostd_lifecycle(HostdLifecycle lifecycle) {
+  switch (lifecycle) {
+    case HostdLifecycle::sealed:
+      return v1::HOSTD_LIFECYCLE_SEALED;
+    case HostdLifecycle::startup_auditing:
+      return v1::HOSTD_LIFECYCLE_STARTUP_AUDITING;
+    case HostdLifecycle::startup_blocked:
+      return v1::HOSTD_LIFECYCLE_STARTUP_BLOCKED;
+    case HostdLifecycle::admitting:
+      return v1::HOSTD_LIFECYCLE_ADMITTING;
+    case HostdLifecycle::poisoned:
+      return v1::HOSTD_LIFECYCLE_POISONED;
+  }
+  return v1::HOSTD_LIFECYCLE_UNSPECIFIED;
+}
+
+v1::HostdStartupPhase wire_hostd_startup_phase(HostdStartupPhase phase) {
+  switch (phase) {
+    case HostdStartupPhase::reconciling:
+      return v1::HOSTD_STARTUP_PHASE_RECONCILING;
+    case HostdStartupPhase::auditing:
+      return v1::HOSTD_STARTUP_PHASE_AUDITING;
+    case HostdStartupPhase::admitting:
+      return v1::HOSTD_STARTUP_PHASE_ADMITTING;
+    case HostdStartupPhase::exhausted:
+      return v1::HOSTD_STARTUP_PHASE_EXHAUSTED;
+    case HostdStartupPhase::failed:
+      return v1::HOSTD_STARTUP_PHASE_FAILED;
+  }
+  return v1::HOSTD_STARTUP_PHASE_UNSPECIFIED;
+}
+
+v1::HostdProcessPhase wire_hostd_process_phase(
+    HostdProcessAuthorityPhase phase) {
+  switch (phase) {
+    case HostdProcessAuthorityPhase::launch_intent:
+      return v1::HOSTD_PROCESS_PHASE_LAUNCH_INTENT;
+    case HostdProcessAuthorityPhase::spawned:
+      return v1::HOSTD_PROCESS_PHASE_SPAWNED;
+    case HostdProcessAuthorityPhase::terminal_pending_release:
+      return v1::HOSTD_PROCESS_PHASE_TERMINAL_PENDING_RELEASE;
+  }
+  return v1::HOSTD_PROCESS_PHASE_UNSPECIFIED;
+}
+
+v1::HostResourceKind wire_host_resource_kind(HostResourceKind kind) {
+  switch (kind) {
+    case HostResourceKind::accelerator:
+      return v1::HOST_RESOURCE_KIND_ACCELERATOR;
+    case HostResourceKind::accelerator_partition:
+      return v1::HOST_RESOURCE_KIND_ACCELERATOR_PARTITION;
+    case HostResourceKind::host_mutex:
+      return v1::HOST_RESOURCE_KIND_HOST_MUTEX;
+  }
+  return v1::HOST_RESOURCE_KIND_UNSPECIFIED;
+}
+
+v1::HostAcceleratorVendor wire_host_accelerator_vendor(
+    const std::optional<HostAcceleratorVendor>& vendor) {
+  if (!vendor) return v1::HOST_ACCELERATOR_VENDOR_UNSPECIFIED;
+  switch (*vendor) {
+    case HostAcceleratorVendor::nvidia:
+      return v1::HOST_ACCELERATOR_VENDOR_NVIDIA;
+    case HostAcceleratorVendor::amd:
+      return v1::HOST_ACCELERATOR_VENDOR_AMD;
+    case HostAcceleratorVendor::intel:
+      return v1::HOST_ACCELERATOR_VENDOR_INTEL;
+    case HostAcceleratorVendor::other:
+      return v1::HOST_ACCELERATOR_VENDOR_OTHER;
+  }
+  return v1::HOST_ACCELERATOR_VENDOR_UNSPECIFIED;
+}
+
 nlohmann::json assignment_value(const v1::ScalarValue& input) {
   switch (input.value_case()) {
     case v1::ScalarValue::kNumberValue:
@@ -1346,6 +1419,8 @@ void TrainVMService::configure_hostd(
   hostd_claim_provider_ = std::move(bundle.claim_provider);
   host_grant_client_ = std::move(bundle.resource_client);
   host_process_client_ = std::move(bundle.process_client);
+  hostd_status_client_ = configuration.status();
+  hostd_status_timeout_ns_ = configuration.request_timeout_ns();
   controller_target_ = std::move(controller_target);
   host_grant_saga_ = std::make_unique<HostGrantSagaReconciler>(
       journal_, *host_grant_client_);
@@ -4195,6 +4270,178 @@ grpc::Status TrainVMService::GetDescriptor(
       response->set_schema_hash(training_components_.registry_digest());
     }
     return grpc::Status::OK;
+  } catch (const std::exception& exception) {
+    return {grpc::StatusCode::DATA_LOSS, exception.what()};
+  }
+}
+
+grpc::Status TrainVMService::GetHostAuthorityStatus(
+    grpc::ServerContext* context,
+    const v1::GetHostAuthorityStatusRequest* request,
+    v1::GetHostAuthorityStatusResponse* response) {
+  if (request == nullptr || response == nullptr ||
+      request->ByteSizeLong() > 64U) {
+    return {grpc::StatusCode::INVALID_ARGUMENT,
+            "host authority status requires an empty bounded request"};
+  }
+  if (cancelled(context)) return cancellation_status();
+  if (!hostd_status_client_ || hostd_status_timeout_ns_ <= 0) {
+    return {grpc::StatusCode::FAILED_PRECONDITION,
+            "TrainVM has no configured hostd authority status source"};
+  }
+  try {
+    const std::int64_t now = hostd_monotonic_now_ns();
+    if (hostd_status_timeout_ns_ >
+        std::numeric_limits<std::int64_t>::max() - now) {
+      return {grpc::StatusCode::INTERNAL,
+              "hostd status deadline exceeds the authority clock range"};
+    }
+    std::uint64_t correlation =
+        hostd_status_correlation_.fetch_add(1U, std::memory_order_relaxed);
+    if (correlation == 0U) {
+      correlation =
+          hostd_status_correlation_.fetch_add(1U, std::memory_order_relaxed);
+    }
+    const HostdStatusReply reply = hostd_request_status(
+        *hostd_status_client_, correlation, now + hostd_status_timeout_ns_);
+    if (cancelled(context)) return cancellation_status();
+    if (reply.kind == HostdStatusReplyKind::error) {
+      const std::string detail = reply.error
+                                     ? reply.error->code + ": " +
+                                           reply.error->message
+                                     : "hostd returned an incomplete typed error";
+      return {grpc::StatusCode::UNAVAILABLE, detail};
+    }
+    if (!reply.status || !reply.authority_status) {
+      return {grpc::StatusCode::DATA_LOSS,
+              "hostd omitted its typed authority snapshot"};
+    }
+    const HostdCoordinatorStatus& coordinator = *reply.status;
+    const HostdAuthorityStatus& authority = *reply.authority_status;
+    response->set_api_version(authority.api_version);
+    auto* wire_coordinator = response->mutable_coordinator();
+    wire_coordinator->set_api_version(coordinator.api_version);
+    wire_coordinator->set_lifecycle(
+        wire_hostd_lifecycle(coordinator.lifecycle));
+    wire_coordinator->set_host_id(coordinator.host_id);
+    wire_coordinator->set_boot_id(coordinator.boot_id);
+    wire_coordinator->set_broker_epoch(coordinator.broker_epoch);
+    wire_coordinator->set_inventory_digest(coordinator.inventory_digest);
+    wire_coordinator->set_live_sessions(coordinator.live_sessions);
+    wire_coordinator->set_admission_sessions(coordinator.admission_sessions);
+    wire_coordinator->set_stale_admission_sessions(
+        coordinator.stale_admission_sessions);
+    wire_coordinator->set_release_only_sessions(
+        coordinator.release_only_sessions);
+    wire_coordinator->set_admission_counts_are_cached_evidence(
+        coordinator.admission_counts_are_cached_evidence);
+    if (coordinator.startup_audit) {
+      wire_coordinator->set_startup_audit_receipt_digest(
+          coordinator.startup_audit->receipt_digest);
+      wire_coordinator->set_startup_audit_passed(
+          coordinator.startup_audit->disposition ==
+          HostStartupAuditDisposition::passed);
+    }
+    wire_coordinator->set_poison_reason(coordinator.poison_reason);
+
+    response->set_startup_phase(
+        wire_hostd_startup_phase(authority.startup_phase));
+    response->set_startup_recovery_steps(authority.startup_recovery_steps);
+    response->set_remaining_unclosed_process_records(
+        authority.remaining_unclosed_process_records);
+    response->set_remaining_terminal_release_records(
+        authority.remaining_terminal_release_records);
+    response->set_ledger_verified(authority.ledger_verified);
+    response->set_ledger_verification_reason(
+        authority.ledger_verification_reason);
+    response->set_ledger_sequence(
+        authority.ledger_chain_head.ledger_sequence);
+    response->set_ledger_chain_hash(authority.ledger_chain_head.chain_hash);
+    response->set_ledger_record_count(authority.ledger_record_count);
+    response->set_occupancy_ledger_sequence(
+        authority.occupancy_ledger_sequence);
+    response->set_occupancy_digest(authority.occupancy_digest);
+    response->set_active_fence_count(authority.active_fence_count);
+    response->set_active_fences_truncated(
+        authority.active_fences_truncated);
+    for (const ResourceFence& fence : authority.active_fences) {
+      auto* output = response->add_active_fences();
+      output->set_kind(wire_host_resource_kind(fence.resource.kind));
+      output->set_vendor(
+          wire_host_accelerator_vendor(fence.resource.vendor));
+      output->set_stable_id(fence.resource.stable_id);
+      output->set_parent_id(fence.resource.parent_id.value_or(""));
+      output->set_generation(fence.generation);
+      output->set_inventory_digest(fence.inventory_digest);
+      output->set_topology_digest(fence.topology_digest);
+    }
+    response->set_active_process_count(authority.active_process_count);
+    response->set_active_processes_truncated(
+        authority.active_processes_truncated);
+    for (const HostdProcessAuthorityStatus& process :
+         authority.active_processes) {
+      auto* output = response->add_active_processes();
+      output->set_allocation_id(process.allocation_id);
+      output->set_journal_id(process.journal_id);
+      output->set_run_id(process.run_id);
+      output->set_logical_lease_id(process.logical_lease_id);
+      output->set_logical_fencing_token(process.logical_fencing_token);
+      output->set_launch_id(process.launch_id);
+      output->set_phase(wire_hostd_process_phase(process.phase));
+      output->set_cgroup_path(process.cgroup_path);
+      if (process.host_pid) output->set_host_pid(*process.host_pid);
+      if (process.process_starttime_ticks) {
+        output->set_process_starttime_ticks(
+            *process.process_starttime_ticks);
+      }
+      output->set_device_policy_intended(process.device_policy_intended);
+      output->set_device_policy_installed(process.device_policy_installed);
+      output->set_device_policy_digest(process.device_policy_digest);
+      output->set_device_policy_installation_digest(
+          process.device_policy_installation_digest);
+      output->set_process_policy_intended(process.process_policy_intended);
+      output->set_process_policy_installed(process.process_policy_installed);
+      output->set_process_policy_digest(process.process_policy_digest);
+      output->set_process_policy_installation_digest(
+          process.process_policy_installation_digest);
+      if (process.cgroup_empty)
+        output->set_cgroup_empty(*process.cgroup_empty);
+      if (process.accelerator_contexts_empty) {
+        output->set_accelerator_contexts_empty(
+            *process.accelerator_contexts_empty);
+      }
+      output->set_context_audit_digest(process.context_audit_digest);
+      output->set_terminal_receipt_digest(process.terminal_receipt_digest);
+    }
+    response->set_process_launch_enabled(authority.process_launch_enabled);
+    response->set_mutation_enabled(authority.mutation_enabled);
+    response->set_mutation_disabled_reason(
+        authority.mutation_disabled_reason);
+    const LeaseRenewalCoordinatorSnapshot renewal =
+        lease_renewals_.snapshot();
+    response->set_lease_renewal_tracked_count(renewal.tracked_count);
+    response->set_lease_renewal_poisoned(renewal.poisoned);
+    const std::optional<std::string> renewal_failure =
+        reconciliation_failure("__lease_renewal__");
+    response->set_lease_renewal_failure(
+        renewal.poison_reason.empty()
+            ? renewal_failure.value_or("")
+            : renewal.poison_reason);
+    response->set_resource_inventory_observed(
+        authority.resource_inventory_observed);
+    response->set_resource_inventory_observation_age_ns(
+        authority.resource_inventory_observation_age_ns);
+    response->set_current_inventory_digest(
+        authority.current_inventory_digest);
+    response->set_current_inventory_receipt_digest(
+        authority.current_inventory_receipt_digest);
+    response->set_degraded_resource_count(
+        authority.degraded_resource_count);
+    response->set_resource_degradation_reason(
+        authority.resource_degradation_reason);
+    return grpc::Status::OK;
+  } catch (const HostdTransportError& exception) {
+    return {grpc::StatusCode::UNAVAILABLE, exception.what()};
   } catch (const std::exception& exception) {
     return {grpc::StatusCode::DATA_LOSS, exception.what()};
   }

@@ -2321,6 +2321,7 @@ void test_lease_renewal_authority() {
     const auto early = coordinator.tick();
     const auto due = coordinator.tick();
     const auto duplicate = coordinator.tick();
+    const auto status = coordinator.snapshot();
     check(early.size() == 1U &&
               early.front().status ==
                   trainvm::LeaseRenewalTickStatus::not_due &&
@@ -2333,7 +2334,9 @@ void test_lease_renewal_authority() {
               duplicate.size() == 1U &&
               duplicate.front().status ==
                   trainvm::LeaseRenewalTickStatus::not_due &&
-              coordinator.tracked_count() == 1U,
+              coordinator.tracked_count() == 1U &&
+              status.tracked_count == 1U && !status.poisoned &&
+              status.poison_reason.empty(),
           "manual coordinator renews only inside its margin and duplicate ticks do not extend twice");
   }
 
@@ -2490,11 +2493,14 @@ void test_lease_renewal_authority() {
     } catch (const trainvm::LeaseRenewalCoordinatorError&) {
       poison_sticky = true;
     }
+    const auto status = coordinator.snapshot();
     check(first.size() == 1U &&
               first.front().status ==
                   trainvm::LeaseRenewalTickStatus::not_due &&
               regression_poisoned && poison_sticky && coordinator.poisoned() &&
-              coordinator.tracked_count() == 0U && source_calls == 2U,
+              coordinator.tracked_count() == 0U && source_calls == 2U &&
+              status.poisoned && status.tracked_count == 0U &&
+              !status.poison_reason.empty(),
           "clock regression permanently poisons and stops the manual coordinator");
   }
 
@@ -3368,6 +3374,13 @@ void test_command_service() {
   trainvm::TrainVMService service(
       database_path, trainvm::AdapterRegistry(fixture_adapter_profiles()),
       fixture_disabled_host_launch_registry());
+  trainvm::v1::GetHostAuthorityStatusRequest host_status_request;
+  trainvm::v1::GetHostAuthorityStatusResponse host_status_response;
+  const grpc::Status host_status = service.GetHostAuthorityStatus(
+      nullptr, &host_status_request, &host_status_response);
+  check(host_status.error_code() == grpc::StatusCode::FAILED_PRECONDITION &&
+            host_status_response.ByteSizeLong() == 0U,
+        "service fails closed instead of synthesizing host health when hostd is not configured");
   auto request = [&] (std::string idempotency_key, std::uint64_t expected_control_revision,
                      double value) {
     trainvm::v1::RunCommandRequest output;

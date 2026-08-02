@@ -157,6 +157,13 @@ std::size_t LeaseRenewalCoordinator::tracked_count() const {
   return targets_.size();
 }
 
+LeaseRenewalCoordinatorSnapshot LeaseRenewalCoordinator::snapshot() const {
+  std::scoped_lock lock(mutex_);
+  return {.tracked_count = targets_.size(),
+          .poisoned = poison_reason_.has_value(),
+          .poison_reason = poison_reason_.value_or("")};
+}
+
 [[noreturn]] void LeaseRenewalCoordinator::poison(std::string reason) {
   poison_reason_ = "lease renewal coordinator is poisoned until restart: " +
                    std::move(reason);

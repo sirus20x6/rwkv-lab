@@ -23,6 +23,27 @@ import (
 const trainVMDraftLimit = 2 << 20
 const trainVMCommandLimit = 64 << 10
 
+func (s *Server) handleTrainVMHostAuthority(w http.ResponseWriter, r *http.Request) {
+	if s.commander == nil {
+		http.Error(w, "TrainVM authority is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	authority, err := s.commander.GetHostAuthorityStatus(r.Context())
+	if err != nil {
+		// A missing hostd binding is an operationally unavailable inspection
+		// source, not a conflicting user mutation.
+		if status.Code(err) == codes.FailedPrecondition {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		writeTrainVMAuthorityError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(authority)
+}
+
 func (s *Server) handleTrainVMRuns(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
