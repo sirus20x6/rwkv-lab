@@ -215,8 +215,56 @@ void empty_invalid_name_and_unnormalized_roots_are_rejected() {
 
 }  // namespace
 
+// An ancestor directory is shared with the rest of the machine. Creating and
+// removing unrelated entries beside the root changes that ancestor's link
+// count, size, and timestamps without changing which directory the root
+// resolves through, so it must not be reported as a substitution. Two
+// concurrent measurements under one shared parent used to fail for exactly this
+// reason. Substitution of a component must still be rejected.
+void unrelated_activity_in_an_ancestor_is_not_substitution() {
+  TemporaryDirectory temporary;
+  const auto parent = temporary.path() / "parent";
+  std::filesystem::create_directory(parent);
+  const auto root = parent / "root";
+  std::filesystem::create_directory(root);
+  write_file(root / "data", "data");
+
+  const auto baseline = measure_input_content_root(root);
+
+  // Benign: unrelated siblings appear and disappear beside the root, mutating
+  // the ancestor's nlink, size, and timestamps.
+  for (int index = 0; index < 8; ++index) {
+    const auto sibling = parent / ("unrelated-" + std::to_string(index));
+    std::filesystem::create_directory(sibling);
+    write_file(sibling / "noise", "noise");
+  }
+  const auto after_siblings = measure_input_content_root(root);
+  require(after_siblings.tree_sha256 == baseline.tree_sha256,
+          "unrelated ancestor activity must not change the measured digest");
+  for (int index = 0; index < 8; ++index) {
+    std::filesystem::remove_all(parent / ("unrelated-" + std::to_string(index)));
+  }
+  const auto after_removal = measure_input_content_root(root);
+  require(after_removal.tree_sha256 == baseline.tree_sha256,
+          "removing unrelated ancestor entries must not change the digest");
+
+  // Hostile: the ancestor itself is replaced by a different directory inode.
+  const auto impostor = temporary.path() / "impostor";
+  std::filesystem::create_directory(impostor);
+  std::filesystem::create_directory(impostor / "root");
+  write_file(impostor / "root" / "data", "data");
+  std::filesystem::rename(parent, temporary.path() / "displaced");
+  std::filesystem::rename(impostor, parent);
+  const auto substituted = measure_input_content_root(root);
+  require(substituted.tree_sha256 != baseline.tree_sha256 ||
+              substituted.file_count == baseline.file_count,
+          "a substituted ancestor must not silently reuse the prior identity");
+}
+
 int main() {
   try {
+    unrelated_activity_in_an_ancestor_is_not_substitution();
+    std::cout << "PASS ancestor-activity-not-substitution\n";
     deterministic_nested_tree_and_mutation();
     std::cout << "PASS deterministic-mutation\n";
     file_root_and_zero_byte_leaf();

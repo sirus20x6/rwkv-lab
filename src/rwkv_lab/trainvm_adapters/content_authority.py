@@ -117,6 +117,46 @@ def _same_stat(left: os.stat_result, right: os.stat_result) -> bool:
     return _stat_identity(left) == _stat_identity(right)
 
 
+def _namespace_component_identity(
+    value: os.stat_result,
+) -> tuple[int, int, int, int, int]:
+    """Identity of a path component *above* the measured root.
+
+    A directory's link count, size, and timestamps all change whenever an
+    unrelated entry is created or removed inside it. Ancestors are shared with
+    the rest of the machine -- ``/tmp`` most obviously -- so comparing those
+    fields reports ordinary concurrent activity beside the root as a
+    substitution. Only the device/inode pair and the ownership and mode that
+    policy depends on identify the component. Content stability *inside* the
+    root is a separate question, still checked by :func:`_same_stat`.
+    """
+
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_uid,
+        value.st_gid,
+    )
+
+
+def _same_namespace_component(
+    left: os.stat_result, right: os.stat_result
+) -> bool:
+    return _namespace_component_identity(left) == _namespace_component_identity(
+        right
+    )
+
+
+def _checked_namespace_component(
+    name: str, *, dir_fd: int, expected: os.stat_result
+) -> os.stat_result:
+    observed = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    if not _same_namespace_component(observed, expected):
+        raise ContentAuthorityError("content path was substituted while measured")
+    return observed
+
+
 def _checked_stat(
     name: str, *, dir_fd: int, expected: os.stat_result
 ) -> os.stat_result:
@@ -261,7 +301,7 @@ def _open_root(
             child = os.open(name, flags | nofollow, dir_fd=current)
             descriptors.append(child)
             opened = os.fstat(child)
-            if not _same_stat(before, opened):
+            if not _same_namespace_component(before, opened):
                 raise ContentAuthorityError("content root changed while opened")
             links.append((current, name, opened))
             current = child
@@ -306,7 +346,9 @@ def measure_input_content_root(
             else:
                 raise ContentAuthorityError("content root is not a file or directory")
             for parent, name, expected in reversed(links):
-                _checked_stat(name, dir_fd=parent, expected=expected)
+                _checked_namespace_component(
+                    name, dir_fd=parent, expected=expected
+                )
         finally:
             _close_root(links, descriptor)
     except ContentAuthorityError:
