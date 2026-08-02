@@ -23,6 +23,7 @@ from .controls import (
     WorkerCancellationRequested,
     WorkerControlError,
     WorkerControlRuntime,
+    WorkerResourcesReleasedPause,
     controls_from_invocation,
 )
 from .eval_gallery import (
@@ -137,6 +138,7 @@ __all__ = [
     "WorkerObservability",
     "WorkerObservabilityError",
     "WorkerReceipt",
+    "WorkerResourcesReleasedPause",
     "WorkerRuntimePolicy",
     "WorkerRuntimePolicyError",
     "WorkerSession",

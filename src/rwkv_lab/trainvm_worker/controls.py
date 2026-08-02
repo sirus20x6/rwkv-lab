@@ -28,6 +28,10 @@ class WorkerCancellationRequested(RuntimeError):
     """The authority accepted a graceful cancel at a trainer safe point."""
 
 
+class WorkerResourcesReleasedPause(RuntimeError):
+    """The authority accepted a pause that retires this worker process."""
+
+
 def _valid_scalar(value: object) -> bool:
     if isinstance(value, (bool, str)):
         return True
@@ -410,6 +414,10 @@ class WorkerControlRuntime:
                 )
             self._pending.pop(0)
             if command.kind is CommandKind.PAUSE:
+                if command.release_resources:
+                    raise WorkerResourcesReleasedPause(
+                        "worker resources will be released while paused"
+                    )
                 self._wait_for_resume(
                     request.optimizer_step
                     if isinstance(request, CheckpointPublicationRequest)

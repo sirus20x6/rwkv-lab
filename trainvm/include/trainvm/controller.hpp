@@ -86,6 +86,8 @@ class Controller {
       const AuthorityTimeSample& now);
   const ExecutionState& complete_cancellation(
       const std::string& command_id, const AuthorityTimeSample& now);
+  const ExecutionState& complete_resource_releasing_pause(
+      const std::string& command_id, const AuthorityTimeSample& now);
 
   [[nodiscard]] const ExecutionState& state() const;
   [[nodiscard]] const CompiledPlan& plan() const;

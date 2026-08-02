@@ -2659,6 +2659,16 @@ const ExecutionState& Controller::complete_cancellation(
   return recover();
 }
 
+const ExecutionState& Controller::complete_resource_releasing_pause(
+    const std::string& command_id, const AuthorityTimeSample& now) {
+  if (!initialized_) {
+    throw std::logic_error(
+        "controller must create or recover before completing resource pause");
+  }
+  journal_.complete_resource_releasing_pause(run_id_, command_id, now);
+  return recover();
+}
+
 const ExecutionState& Controller::state() const {
   if (!initialized_) {
     throw std::logic_error("controller has no initialized execution state");

@@ -26,7 +26,10 @@ from rwkv_lab.trainvm_adapters.io import (
     read_inline_config,
     require_run_directory,
 )
-from rwkv_lab.trainvm_worker import WorkerCancellationRequested
+from rwkv_lab.trainvm_worker import (
+    WorkerCancellationRequested,
+    WorkerResourcesReleasedPause,
+)
 
 
 class FakeSession:
@@ -477,12 +480,18 @@ def test_runner_reports_sanitized_failure_and_skips_completed_replay() -> None:
     assert completed.finished == []
 
 
-def test_runner_treats_acknowledged_cancellation_as_clean_process_exit() -> None:
+@pytest.mark.parametrize(
+    "lifecycle_exit",
+    [WorkerCancellationRequested, WorkerResourcesReleasedPause],
+)
+def test_runner_treats_acknowledged_lifecycle_exit_as_clean_process_exit(
+    lifecycle_exit: type[RuntimeError],
+) -> None:
     bootstrap = SimpleNamespace(run_id="run-1")
     session = FakeSession(bootstrap)
 
     def cancel_at_safe_point(*_args: object) -> HandlerResult:
-        raise WorkerCancellationRequested("operator requested")
+        raise lifecycle_exit("operator requested")
 
     assert (
         run_worker(

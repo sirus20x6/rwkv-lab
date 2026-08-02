@@ -512,6 +512,9 @@ public:
   void complete_cancellation(const std::string& run_id,
                              const std::string& command_id,
                              const AuthorityTimeSample& now);
+  void complete_resource_releasing_pause(const std::string& run_id,
+                                         const std::string& command_id,
+                                         const AuthorityTimeSample& now);
 };
 
 nlohmann::json event_json(const Event& event);

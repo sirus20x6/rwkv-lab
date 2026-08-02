@@ -3759,8 +3759,8 @@ std::vector<RunProjection> Journal::reconcilable_projections(
            last_heartbeat_ns, last_event_sequence, failure_summary
     FROM run_projection
     WHERE run_id > ?
-      AND desired_state IN ('queued', 'running', 'cancelled')
-      AND observed_state IN ('queued', 'acquiring', 'running', 'cancelling')
+      AND desired_state IN ('queued', 'running', 'paused', 'cancelled')
+      AND observed_state IN ('queued', 'acquiring', 'running', 'pausing', 'cancelling')
     ORDER BY run_id
     LIMIT ?
   )sql");
@@ -5477,6 +5477,7 @@ LifecycleCommand Journal::acknowledge_lifecycle_command(
   if (status == LifecycleCommandStatus::applied) {
     const bool cancelling = stored->kind == LifecycleCommandKind::cancel;
     const bool pause = stored->kind == LifecycleCommandKind::pause;
+    const bool releasing_pause = pause && stored->release_resources;
     const std::string desired_state =
         cancelling ? "cancelled" : (pause ? "paused" : "running");
     const std::string intermediate_state =
@@ -5512,7 +5513,7 @@ LifecycleCommand Journal::acknowledge_lifecycle_command(
         .payload = {{"state", intermediate_state},
                     {"cause_command_id", command_id}},
     });
-    if (!cancelling) events.push_back(Event{
+    if (!cancelling && !releasing_pause) events.push_back(Event{
         .event_id = command_id + ":observed-final",
         .run_id = run_id,
         .run_revision = run_revision + 3U,
@@ -5599,6 +5600,79 @@ void Journal::complete_cancellation(const std::string& run_id,
       .monotonic_time_ns = 0,
       .optimizer_step = std::nullopt,
       .payload = {{"state", "cancelled"},
+                  {"cause_command_id", command_id}},
+  });
+  transaction.commit();
+}
+
+void Journal::complete_resource_releasing_pause(
+    const std::string& run_id, const std::string& command_id,
+    const AuthorityTimeSample& now) {
+  if (run_id.empty() || command_id.empty()) {
+    throw std::invalid_argument("resource pause completion identity is required");
+  }
+  require_authority_time(now);
+  Transaction transaction(database_);
+  const auto command = lifecycle_command(command_id);
+  if (!command || command->run_id != run_id ||
+      command->kind != LifecycleCommandKind::pause ||
+      !command->release_resources || !command->checkpoint_first ||
+      command->status != LifecycleCommandStatus::applied ||
+      !command->acknowledgement || !command->acknowledged_at_ns ||
+      !command->optimizer_step || command->artifact_id.empty()) {
+    throw std::invalid_argument(
+        "resource pause completion has no applied checkpoint command");
+  }
+  Statement projection(database_, R"sql(
+    SELECT run_revision, desired_state, observed_state,
+           current_node_id, current_attempt_id
+    FROM run_projection WHERE run_id=?
+  )sql");
+  bind_text(projection.get(), 1, run_id);
+  if (sqlite3_step(projection.get()) != SQLITE_ROW) {
+    throw std::invalid_argument("resource pause run does not exist");
+  }
+  const auto revision = static_cast<std::uint64_t>(
+      sqlite3_column_int64(projection.get(), 0));
+  if (column_text(projection.get(), 1) != "paused" ||
+      column_text(projection.get(), 2) != "pausing" ||
+      column_text(projection.get(), 3) != command->node_id ||
+      column_text(projection.get(), 4) != command->attempt_id) {
+    throw OperationPreconditionError(
+        "resource pause completion is stale for the run projection");
+  }
+  if (host_grant_enforcement_ == HostGrantEnforcement::required) {
+    const auto& identity = *command->acknowledgement;
+    Statement released(database_, R"sql(
+      SELECT 1 FROM resource_lease_releases
+      WHERE concurrency_key=? AND owner_run_id=? AND lease_id=?
+        AND fencing_token=? AND clock_domain='boottime/v1' AND boot_id=?
+    )sql");
+    bind_text(released.get(), 1, identity.concurrency_key);
+    bind_text(released.get(), 2, run_id);
+    bind_text(released.get(), 3, identity.lease_id);
+    bind_integer(released.get(), 4,
+                 checked_integer(identity.fencing_token, "fencing_token"));
+    bind_text(released.get(), 5, now.boot_id);
+    if (sqlite3_step(released.get()) != SQLITE_ROW) {
+      throw OperationPreconditionError(
+          "resource pause cannot finish before fenced lease release");
+    }
+  }
+  append_uncommitted(Event{
+      .event_id = command_id + ":observed-final",
+      .run_id = run_id,
+      .run_revision = revision + 1U,
+      .plan_revision = command->plan_revision,
+      .node_id = command->node_id,
+      .attempt_id = command->attempt_id,
+      .worker_sequence = 0,
+      .event_type = "run.observed_state_changed",
+      .event_version = 1,
+      .wall_time_ns = now.wall.nanoseconds,
+      .monotonic_time_ns = 0,
+      .optimizer_step = std::nullopt,
+      .payload = {{"state", "paused"},
                   {"cause_command_id", command_id}},
   });
   transaction.commit();

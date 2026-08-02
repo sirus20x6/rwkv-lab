@@ -5492,6 +5492,118 @@ void test_graceful_cancel_lifecycle() {
   std::filesystem::remove_all(directory);
 }
 
+void test_resource_releasing_pause_lifecycle() {
+  const auto compiled = trainvm::compile_document(load_fixture());
+  check(compiled.valid(), "resource-releasing pause fixture compiles");
+  if (!compiled.valid()) return;
+  const auto directory = std::filesystem::temp_directory_path() /
+                         ("trainvm-release-pause-test-" +
+                          std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  const auto database_path = directory / "journal.db";
+  const std::string run_id = "resource-releasing-pause-run";
+  {
+    trainvm::Journal journal(
+        database_path, std::nullopt,
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
+    trainvm::Controller controller(*compiled.plan, journal, run_id);
+    controller.create_queued(fixture_adapter_locked_submission(*compiled.plan));
+    (void)controller.begin_acquisition(test_time(1'000));
+    const auto launch = controller.prepare_worker_launch(
+        {.code_fingerprint = "sha256:" + std::string(64U, '9'),
+         .required_capabilities = {"worker.controls"}},
+        test_time(1'100));
+    (void)bind_test_worker_launch(controller, launch, 1'150);
+    (void)controller.accept_worker_hello(
+        {.run_id = launch.run_id,
+         .node_id = launch.node_id,
+         .attempt_id = launch.attempt_id,
+         .launch_nonce = launch.launch_nonce,
+         .adapter = launch.adapter,
+         .adapter_version = launch.adapter_version,
+         .code_fingerprint = launch.code_fingerprint,
+         .capabilities = launch.required_capabilities,
+         .last_acked_controller_sequence = 0U,
+         .concurrency_key = launch.concurrency_key,
+         .lease_id = launch.lease_id,
+         .fencing_token = launch.fencing_token},
+        test_time(1'175));
+    const auto dispatch = controller.prepare_dispatch(test_time(1'175));
+    const std::string artifact_id = "release-pause-checkpoint";
+    (void)controller.record_worker_observation(
+        {.event_id = dispatch.dispatch_id + ":artifact:" +
+                     trainvm::sha256_hex(artifact_id),
+         .run_id = run_id,
+         .run_revision = dispatch.run_revision,
+         .plan_revision = dispatch.plan_revision,
+         .node_id = launch.node_id,
+         .attempt_id = launch.attempt_id,
+         .worker_sequence = 1U,
+         .event_type = "artifact.published",
+         .event_version = 1U,
+         .wall_time_ns = 1'180,
+         .monotonic_time_ns = 1'180U,
+         .optimizer_step = std::nullopt,
+         .payload = {{"artifact_id", artifact_id},
+                     {"logical_name", "checkpoint"},
+                     {"kind", "checkpoint"},
+                     {"schema", "trainvm.checkpoint.v1"},
+                     {"uri", "file:///sealed/release-pause"},
+                     {"size_bytes", std::uint64_t{4096}},
+                     {"fingerprint_algorithm", "manifest_sha256"},
+                     {"fingerprint", std::string(64U, 'a')},
+                     {"complete", true},
+                     {"producer_node_id", launch.node_id},
+                     {"producer_attempt_id", launch.attempt_id},
+                     {"parent_artifact_ids", nlohmann::json::array()},
+                     {"published_at_ns", std::int64_t{1'180}}}},
+        {.run_id = launch.run_id,
+         .node_id = launch.node_id,
+         .attempt_id = launch.attempt_id,
+         .launch_nonce = launch.launch_nonce,
+         .concurrency_key = launch.concurrency_key,
+         .lease_id = launch.lease_id,
+         .fencing_token = launch.fencing_token},
+        test_time(1'180));
+    const auto before = journal.projection(run_id);
+    const auto submitted = controller.request_lifecycle(
+        trainvm::LifecycleCommandKind::pause, "release-pause-once",
+        before->run_revision, true, true, "operator",
+        "release accelerator while paused");
+    (void)controller.acknowledge_lifecycle(
+        submitted.command.command_id,
+        {.concurrency_key = launch.concurrency_key,
+         .lease_id = launch.lease_id,
+         .fencing_token = launch.fencing_token,
+         .node_id = launch.node_id,
+         .attempt_id = launch.attempt_id,
+         .worker_sequence = 2U},
+        trainvm::LifecycleCommandStatus::applied, std::uint64_t{9},
+        artifact_id, nlohmann::json::array(), test_time(1'200));
+    controller.recover();
+    const auto pausing = journal.projection(run_id);
+    check(pausing && pausing->desired_state == "paused" &&
+              pausing->observed_state == "pausing" &&
+              pausing->run_revision == before->run_revision + 2U,
+          "resource-releasing pause remains nonfinal until cleanup");
+    (void)controller.complete_resource_releasing_pause(
+        submitted.command.command_id, test_time(1'250));
+    const auto paused = journal.projection(run_id);
+    check(paused && paused->desired_state == "paused" &&
+              paused->observed_state == "paused" &&
+              paused->run_revision == before->run_revision + 3U &&
+              paused->current_node_id == launch.node_id &&
+              paused->current_attempt_id == launch.attempt_id,
+          "resource-releasing pause becomes resumable only at cleanup completion");
+    trainvm::Controller replay(*compiled.plan, journal, run_id);
+    replay.recover();
+    check(replay.state() == controller.state(),
+          "resource-releasing pause replays deterministically after restart");
+  }
+  std::filesystem::remove_all(directory);
+}
+
 void test_typed_managed_resource_release() {
   const auto compiled = trainvm::compile_document(load_fixture());
   check(compiled.valid(), "typed resource release fixture compiles");
@@ -11039,6 +11151,7 @@ int main() {
     test_worker_control_service_boundary();
     test_worker_control_grpc_stream();
     test_graceful_cancel_lifecycle();
+    test_resource_releasing_pause_lifecycle();
     test_typed_managed_resource_release();
     test_concurrent_worker_launch_and_readiness_replay();
     test_concurrent_fenced_result_content_conflict();

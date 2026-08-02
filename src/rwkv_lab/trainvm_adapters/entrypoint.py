@@ -10,6 +10,7 @@ from rwkv_lab.trainvm_worker import (
     WorkerControlRuntime,
     WorkerInvocation,
     WorkerObservability,
+    WorkerResourcesReleasedPause,
     WorkerSession,
     WorkerStepProfiler,
     apply_worker_runtime_policy,
@@ -100,7 +101,7 @@ def run_worker(
                         ],
                     },
                 )
-        except WorkerCancellationRequested:
+        except (WorkerCancellationRequested, WorkerResourcesReleasedPause):
             # The lifecycle acknowledgement is the durable terminal intent.
             # Host authority observes/reaps the process and releases resources;
             # a normal operation result would race the cancellation state.

@@ -1391,6 +1391,11 @@ void TrainVMService::configure_hostd(
 }
 
 ReconcileResult TrainVMService::reconcile_once(const std::string& run_id) {
+  if (const auto disposition = reconcile_resource_releasing_pause(run_id)) {
+    return {.disposition = *disposition,
+            .run_id = run_id,
+            .launch = std::nullopt};
+  }
   if (const auto disposition = reconcile_cancellation(run_id)) {
     return {.disposition = *disposition,
             .run_id = run_id,
@@ -1554,6 +1559,120 @@ std::optional<std::string> TrainVMService::reconciliation_failure(
   return found == reconciliation_failures_.end()
              ? std::nullopt
              : std::optional<std::string>{found->second};
+}
+
+std::optional<ReconcileDisposition>
+TrainVMService::reconcile_resource_releasing_pause(
+    const std::string& run_id) {
+  std::scoped_lock lock(command_mutex_);
+  const auto projection = journal_.projection(run_id);
+  if (!projection || projection->desired_state != "paused" ||
+      projection->observed_state != "pausing") {
+    return std::nullopt;
+  }
+  const auto plan = journal_.compiled_plan(projection->plan_hash);
+  if (!plan) {
+    throw std::runtime_error(
+        "cannot reconcile resource pause without a persisted plan");
+  }
+  std::string command_id;
+  for (const Event& event : journal_.events_for_run(run_id)) {
+    if (event.event_type == "run.observed_state_changed" &&
+        event.payload.value("state", std::string{}) == "pausing") {
+      const std::string candidate =
+          event.payload.value("cause_command_id", std::string{});
+      const auto command = journal_.lifecycle_command(candidate);
+      if (command && command->kind == LifecycleCommandKind::pause &&
+          command->release_resources) {
+        command_id = candidate;
+      }
+    }
+  }
+  const auto command = journal_.lifecycle_command(command_id);
+  if (!command || command->kind != LifecycleCommandKind::pause ||
+      !command->release_resources || !command->checkpoint_first ||
+      command->status != LifecycleCommandStatus::applied ||
+      !command->acknowledgement || !command->acknowledged_at_ns ||
+      !command->optimizer_step || command->artifact_id.empty() ||
+      command->node_id != projection->current_node_id ||
+      command->attempt_id != projection->current_attempt_id) {
+    throw OperationPreconditionError(
+        "pausing projection has no exact resource-release command");
+  }
+  const AuthorityTimeSample now = authority_now();
+  const std::int64_t grace_ns =
+      plan->experiment.spec.recovery.graceful_stop_seconds *
+      1'000'000'000LL;
+  const std::int64_t deadline =
+      grace_ns > std::numeric_limits<std::int64_t>::max() -
+                     *command->acknowledged_at_ns
+          ? std::numeric_limits<std::int64_t>::max()
+          : *command->acknowledged_at_ns + grace_ns;
+  if (now.wall.nanoseconds < deadline) return std::nullopt;
+
+  if (!host_process_saga_ || !host_grant_saga_) {
+    Controller controller(*plan, journal_, run_id);
+    controller.recover();
+    (void)controller.complete_resource_releasing_pause(command_id, now);
+    return ReconcileDisposition::builtin_completed;
+  }
+
+  const std::string launch_id = run_id + ":worker-launch:" +
+                                command->node_id + ":" +
+                                command->attempt_id;
+  auto process = journal_.host_process_saga(launch_id);
+  if (!process || !process->committed) {
+    throw OperationPreconditionError(
+        "resource pause has no durable committed worker process");
+  }
+  if (!process->exited) {
+    process = host_process_saga_->reconcile_exit(launch_id, true, now);
+    if (!process->exited) {
+      throw std::runtime_error(
+          "resource pause process exit returned no terminal receipt");
+    }
+    return ReconcileDisposition::host_process_exited;
+  }
+
+  const ResourceBundleGrant& grant = process->prepare.grant;
+  auto grant_saga = journal_.host_grant_saga(grant.request_id);
+  if (!grant_saga || !grant_saga->grant ||
+      grant_saga->grant->receipt_digest != grant.receipt_digest ||
+      grant_saga->busy_outcome_digest) {
+    throw OperationPreconditionError(
+        "resource pause has no exact durable physical grant");
+  }
+  if (!grant_saga->release_receipt) {
+    const ResourceReleaseRequest release = seal_resource_release_request({
+        .api_version = std::string(kHostLedgerReleaseRequestApiVersion),
+        .release_request_id =
+            "host-release-" +
+            sha256_hex(grant.request_id + "\n" + grant.receipt_digest),
+        .allocation_id = grant.allocation_id,
+        .grant_digest = grant.receipt_digest,
+        .journal_id = grant.journal_id,
+        .run_id = grant.run_id,
+        .logical_lease_id = grant.logical_lease_id,
+        .logical_fencing_token = grant.logical_fencing_token,
+        .canonical_request_digest = {},
+    });
+    grant_saga = host_grant_saga_->reconcile_release(
+        grant.request_id, release, now);
+    if (!grant_saga->release_receipt) {
+      throw std::runtime_error(
+          "resource pause release returned no receipt");
+    }
+    return ReconcileDisposition::host_grant_released;
+  }
+
+  const auto& identity = *command->acknowledgement;
+  (void)journal_.release_lease(identity.concurrency_key, run_id,
+                               identity.lease_id,
+                               identity.fencing_token, now);
+  Controller controller(*plan, journal_, run_id);
+  controller.recover();
+  (void)controller.complete_resource_releasing_pause(command_id, now);
+  return ReconcileDisposition::builtin_completed;
 }
 
 std::optional<ReconcileDisposition> TrainVMService::reconcile_cancellation(
@@ -3536,18 +3655,28 @@ grpc::Status TrainVMService::CommandRun(grpc::ServerContext* context,
           plan->experiment.spec.components.at(node.invoke.component);
       const AdapterProfile& profile =
           adapter_registry_.resolve(component, node.invoke.operation);
-      if (pause && request->pause().release_resources()) {
+      const bool release = pause && request->pause().release_resources();
+      if (release && !request->pause().checkpoint_first()) {
+        return {grpc::StatusCode::INVALID_ARGUMENT,
+                "resource-releasing pause requires checkpoint_first"};
+      }
+      if (!pause &&
+          !journal_.active_lease(
+              plan->experiment.spec.workspace.concurrency_key,
+              authority_now())) {
         response->set_disposition(
             v1::RunCommandResponse::DISPOSITION_REJECTED);
         auto* diagnostic = response->add_diagnostics();
         diagnostic->set_severity(v1::Diagnostic::SEVERITY_ERROR);
-        diagnostic->set_code("pause.release_resources_not_implemented");
+        diagnostic->set_code("resume.reacquisition_not_implemented");
         diagnostic->set_message(
-            "resource-releasing pause is not implemented in this controller revision");
+            "released-resource resume requires the reacquisition protocol");
         fill_run_summary(*projection, journal_, *response);
         return grpc::Status::OK;
       }
-      const bool supported = profile.lifecycle.pause_keep_resources;
+      const bool supported =
+          release ? profile.lifecycle.pause_release_resources
+                  : profile.lifecycle.pause_keep_resources;
       if (!supported ||
           (pause && request->pause().checkpoint_first() &&
            !profile.lifecycle.checkpoint_now)) {
@@ -3565,7 +3694,7 @@ grpc::Status TrainVMService::CommandRun(grpc::ServerContext* context,
           pause ? LifecycleCommandKind::pause
                 : LifecycleCommandKind::resume,
           request->idempotency_key(), request->expected_run_revision(),
-          pause && request->pause().checkpoint_first(), false,
+          pause && request->pause().checkpoint_first(), release,
           request->author(), request->reason());
       response->set_disposition(
           submission.inserted

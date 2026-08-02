@@ -16,6 +16,7 @@ from rwkv_lab.trainvm_worker import (
     WorkerCommand,
     WorkerControlError,
     WorkerControlRuntime,
+    WorkerResourcesReleasedPause,
 )
 from rwkv_lab.trainvm_worker.session import wire
 
@@ -369,6 +370,48 @@ def test_retained_pause_waits_for_durable_resume_without_publishing() -> None:
         item[1] is LifecycleDisposition.APPLIED
         for item in session.lifecycle_acknowledgements
     )
+
+
+def test_resource_releasing_pause_publishes_checkpoint_then_retires_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pause = WorkerCommand(
+        11,
+        "pause-11",
+        CommandKind.PAUSE,
+        checkpoint_first=True,
+        release_resources=True,
+    )
+    session = FakeSession(pause)
+    runtime = WorkerControlRuntime(session, {}, 0)
+
+    class Published:
+        artifact_id = "pause-checkpoint"
+
+    class Publisher:
+        def __init__(self, _session: object, *, output_name: str) -> None:
+            assert output_name == "checkpoint"
+
+        def publish(self, *_args: object, **_kwargs: object) -> Published:
+            return Published()
+
+    monkeypatch.setattr(
+        "rwkv_lab.trainvm_worker.checkpoint.CheckpointPublisher", Publisher
+    )
+    with pytest.raises(WorkerResourcesReleasedPause, match="released"):
+        runtime.publish_requested_checkpoint(
+            CheckpointPublicationRequest(
+                source_directory="/run/checkpoint",
+                optimizer_step=9,
+                resume_grade="exact",
+                state_components=("model", "optimizer"),
+            )
+        )
+
+    assert session.heartbeats == []
+    assert session.lifecycle_acknowledgements == [
+        (pause, LifecycleDisposition.APPLIED, 9, "pause-checkpoint")
+    ]
 
 
 def test_paused_barrier_acknowledges_ordered_controls_before_resume() -> None:
