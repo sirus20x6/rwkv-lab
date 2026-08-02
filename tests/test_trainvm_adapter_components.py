@@ -91,8 +91,15 @@ def composition():
     }
     components = {}
     for slot, (name, configuration) in requested.items():
+        category = {
+            "learning_rate": "learning_rate_schedule",
+            "weight_decay": "weight_decay_schedule",
+        }.get(slot, slot)
         descriptor = next(
-            item for item in registry["components"] if item["key"]["name"] == name
+            item
+            for item in registry["components"]
+            if item["key"]["category"] == category
+            and item["key"]["name"] == name
         )
         components[slot] = {
             "configuration": configuration,

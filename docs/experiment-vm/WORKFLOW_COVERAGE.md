@@ -56,7 +56,8 @@ authority for the legacy entrypoints:
 | `qwen_ao3_cpt` | `compatible` | atomic cursor/config/RNG checkpoint and signal safe point exist, and packed-token/base-model trees are now content-bound; exact trajectory equivalence remains unproven |
 | MageFlow full-backbone pretrain and routed expert trainer | `compatible` | static manifests, payload trees, source checkpoints, and caches are recursively content-bound; complete exact-resume trajectory evidence remains outstanding |
 | MageFlow terminal/TREAD trainer | `compatible` | static image/caption roots, source checkpoints, schedules, caches, and expert banks are recursively bound in addition to strong cursor/RNG state; exact trajectory evidence remains outstanding |
-| canonical `vision_train` and vision teacher compressor | `exact` candidates | atomic sampler/RNG and manifest-bound state; require the same golden gate |
+| canonical `vision_train` | `exact` candidate | atomic sampler/RNG and manifest-bound state; requires the golden trajectory gate |
+| vision teacher compressor | `compatible` | the canonical trainer now has a sealed `rwkv-lab.vision-teacher-compressor@1.0.0` TrainVM profile with content-bound manifests, caches, teacher/model inputs, controller-selected resume, deterministic sampler/RNG restoration, live telemetry/profiling, and required checkpoint publication; exact trajectory equivalence remains unproven |
 | vision native head and raw-pixel student | `compatible` | missing cursor or external-input identity prevents exactness |
 | direct RLVR and external LTX wrapper | `compatible` | resume state or upstream resume exists, but verifier/config/revision/input closure is incomplete |
 | deterministic materializers, validation, generation, evaluation, and diagnostics | `none` | stateless/replay semantics are represented by effect and idempotency, not a fictitious training-resume grade |
@@ -91,6 +92,7 @@ stateful process operation is graded `compatible`, `terminal_checkpoint`,
 | RADIO/V4H eval restarts | shell loops treat exit 42 inconsistently; some bound rapid restarts and others accept it indefinitely, with no optimizer-step progress check | cyclic train/eval node with `worker.restart_requested`, visit/time bounds, and monotonic optimizer-step guard | clean-process eval safe point, checkpoint ack, no-progress rejection |
 | vision representation A/B | Python supervisor launches two arms sequentially and scans JSONL for completion, but publishes no versioned comparison or decision | two arm nodes or a parameterized map template; result artifacts feed a deterministic compare/decision node | run-arm operation, versioned metric/result contract, decision receipt |
 | Multi-teacher vision representation distillation | teacher caches, canonical compressor, native projection and raw-pixel student supervisors | staged cache, compressor, native-head, student, and transfer graph with manifest-bound handoffs | multi-teacher cache lineage, representation checkpoint, reconstruction/relational/caption eval |
+| Typed vision teacher compression | canonical `vision_teacher_compressor` now backs the sealed `rwkv-lab.vision-teacher-compressor@1.0.0` profile | one resumable vision-distillation node resolves every manifest/cache/model path through content authority, consumes a closed constant-LR/AdamW/FP32-parameter-BF16-compute component composition, emits train/eval metrics and bounded traces, and protocol-publishes a required compatible checkpoint | implemented deterministic data cursor and Python/Torch/CUDA RNG recovery; exact-resume golden qualification and downstream native-head/student adapters remain |
 | External video/audio LoRA orchestration | separately reviewed `ltx23_lora plan`, `prepare`, `train`, and composite `run` effects record an upstream revision but may accept unknown/dirty HEAD, overwrite receipts/config, and resume from path existence alone | new wrapper must require an expected clean revision and immutable config/input/cache/checkpoint receipts before preprocess, train, validation, or resume | exact clean external revision, structured config/input hashes, upstream resume contract, cache/checkpoint/video receipts |
 | GPU launch queue | Go table plus PID liveness and optional start-next | queued desired state plus exclusive resource lease | no trainer-specific capability |
 | Multi-GPU and campaign device-slot scheduling | FSDP2/DCP workers and campaign-local device allocators | topology-aware resource leases, per-device child attempts, bounded replica/slot allocation | distributed rendezvous identity, reshardable checkpoint, device-slot release receipt |
@@ -190,7 +192,7 @@ training acceptance.
 The separate `rwkv_lab_worker_artifact` CTest now closes the non-GPU project-code deployment
 boundary: it builds the real worker zipapp twice, verifies exact bytes and every embedded source
 digest, loads it under isolated Python with an empty environment, completes a real sealed-bootstrap
-gRPC already-completed replay, lowers all thirteen real adapter profiles into the v3 host registry, and
+gRPC already-completed replay, lowers all fourteen real adapter profiles into the v3 host registry, and
 materializes the same deployment twice without drift. It
 does not replace the outstanding privileged hostd or real trainer qualification scenarios below.
 

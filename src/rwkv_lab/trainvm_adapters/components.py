@@ -8,9 +8,11 @@ import torch
 
 from rwkv_lab.training_components import (
     BFloat16PrecisionPolicy,
+    ConstantLearningRateConfiguration,
     ConstantWeightDecaySchedule,
     ContextLengthCurriculum,
     FixedGradientAccumulation,
+    FP32ParametersBFloat16ComputePolicy,
     LayerNormFactory,
     LinearHeadCrossEntropyObjective,
     LinearWarmupCosineConfiguration,
@@ -126,7 +128,7 @@ class WorkerTrainingComponents:
         self,
         *,
         slot: str = "precision",
-    ) -> BFloat16PrecisionPolicy:
+    ) -> BFloat16PrecisionPolicy | FP32ParametersBFloat16ComputePolicy:
         component = self.composition.require(slot, category="precision")
         return precision_policy_from_resolved_component(
             component.runtime_envelope()
@@ -150,7 +152,9 @@ class WorkerTrainingComponents:
         self, *, slot: str = "learning_rate"
     ) -> tuple[
         ScheduleImplementation,
-        LinearWarmupCosineConfiguration | PowerCoolConfiguration,
+        ConstantLearningRateConfiguration
+        | LinearWarmupCosineConfiguration
+        | PowerCoolConfiguration,
     ]:
         component = self.composition.require(slot, category="learning_rate_schedule")
         return schedule_configuration_from_resolved_component(

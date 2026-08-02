@@ -21,6 +21,7 @@ from rwkv_lab.trainvm_adapters.handlers import (
     _rwkv_posttraining,
     _rwkv_scratch,
     _transformer_mla,
+    _vision_teacher_compressor,
     execute_invocation,
     supported_adapter_keys,
 )
@@ -538,6 +539,100 @@ def test_rwkv_posttraining_handler_seals_inputs_and_publishes_adapter_bundle(
     assert observed[0]["worker_components"] is components
 
 
+def test_vision_compressor_handler_seals_inputs_and_publishes_checkpoint(
+    tmp_path, monkeypatch
+) -> None:
+    from rwkv_lab import vision_teacher_compressor
+
+    read_root = tmp_path / "read"
+    run_directory = tmp_path / "write" / "run"
+    image = read_root / "image.png"
+    moon_cache = read_root / "moon-cache"
+    fusion_cache = read_root / "fusion-cache"
+    model_directories = [read_root / name for name in ("siglip", "dino", "sam")]
+    read_root.mkdir()
+    run_directory.mkdir(parents=True)
+    moon_cache.mkdir()
+    fusion_cache.mkdir()
+    for directory in model_directories:
+        directory.mkdir()
+    image.write_bytes(b"image")
+    manifest_row = json.dumps({"image": str(image)}) + "\n"
+    train_manifest = read_root / "train.jsonl"
+    eval_manifest = read_root / "eval.jsonl"
+    train_manifest.write_text(manifest_row, encoding="utf-8")
+    eval_manifest.write_text(manifest_row, encoding="utf-8")
+    moonvit = read_root / "moonvit.safetensors"
+    moonvit.write_bytes(b"weights")
+    observed = []
+
+    def fake_train(arguments, **hooks):
+        observed.append((arguments, hooks))
+        checkpoint = arguments.out / "checkpoint-current"
+        checkpoint.mkdir()
+        (checkpoint / "state.pt").write_bytes(b"checkpoint")
+        return {
+            "status": "complete",
+            "step": 7,
+            "checkpoint": str(checkpoint.resolve()),
+            "best_eval": 0.5,
+        }
+
+    monkeypatch.setattr(vision_teacher_compressor, "train", fake_train)
+    invocation = SimpleNamespace(
+        inputs={
+            "config": {
+                "train_manifest": str(train_manifest),
+                "eval_manifest": str(eval_manifest),
+                "moon_cache": str(moon_cache),
+                "fusion_cache": str(fusion_cache),
+                "output_dir": str(run_directory),
+                "moonvit_checkpoint": str(moonvit),
+                "siglip2_model": str(model_directories[0]),
+                "dinov2_model": str(model_directories[1]),
+                "sam_model": str(model_directories[2]),
+                "steps": 7,
+                "eval_every": 7,
+                "checkpoint_every": 7,
+                "log_every": 1,
+            }
+        },
+        workspace=_sealed_workspace(read_root, run_directory),
+        publishes={"checkpoint": {}},
+        resume=None,
+    )
+    components = SimpleNamespace()
+    profiler = SimpleNamespace()
+    observability = SimpleNamespace(
+        keepalive=lambda *_args: __import__("contextlib").nullcontext()
+    )
+    controls = SimpleNamespace(effective_values={})
+
+    result = _vision_teacher_compressor(
+        invocation,
+        components,
+        step_profiler=profiler,
+        observability=observability,
+        controls=controls,
+    )
+
+    arguments, hooks = observed[0]
+    assert arguments.data == train_manifest.resolve()
+    assert arguments.eval_data == eval_manifest.resolve()
+    assert arguments.resume == "none"
+    assert arguments.resume_from is None
+    assert arguments.preflight_only is False
+    assert hooks["worker_components"] is components
+    assert hooks["worker_step_profiler"] is profiler
+    assert result.event_type == "worker.completed"
+    assert result.optimizer_step == 7
+    assert len(result.checkpoint_requests) == 1
+    request = result.checkpoint_requests[0]
+    assert request.source_directory == run_directory / "checkpoint-current"
+    assert request.resume_grade == "compatible"
+    assert "data_cursor" in request.state_components
+
+
 def test_transformer_mla_handler_binds_paths_profile_and_compatible_checkpoint(
     tmp_path, monkeypatch
 ) -> None:
@@ -762,6 +857,12 @@ def test_dispatch_table_is_closed_and_training_composition_is_required() -> None
             "1.0.0",
             "train",
             "rwkv_lab.rwkv_scratch.v1.Train",
+        ),
+        (
+            "rwkv-lab.vision-teacher-compressor",
+            "1.0.0",
+            "train",
+            "rwkv_lab.vision_teacher_compressor.v1.Train",
         ),
     }
     expected.update(

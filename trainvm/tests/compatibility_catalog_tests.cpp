@@ -213,7 +213,6 @@ int main() {
   };
   std::set<std::string> exact_candidates = {
       "vision.frozen-adapter-train",
-      "vision.teacher-compressor",
   };
   bool saw_restart_only_review = false;
   bool saw_mutable_legacy_export = false;
