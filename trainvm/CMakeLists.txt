@@ -100,6 +100,7 @@ add_library(trainvm_core
   src/host_launch_registry.cpp
   src/host_resources.cpp
   src/journal.cpp
+  src/lifecycle_admission.cpp
   src/journal_cache_lease_authority.cpp
   src/lease_renewal.cpp
   src/linux_cache_evidence.cpp
@@ -343,6 +344,16 @@ target_compile_options(resource_request_builder_tests PRIVATE
 target_link_libraries(resource_request_builder_tests PRIVATE trainvm_core)
 add_test(NAME resource_request_builder_tests
   COMMAND resource_request_builder_tests
+)
+add_executable(lifecycle_equivalence_tests
+  tests/lifecycle_equivalence_tests.cpp
+)
+target_compile_options(lifecycle_equivalence_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(lifecycle_equivalence_tests PRIVATE trainvm_core)
+add_test(NAME lifecycle_equivalence_tests
+  COMMAND lifecycle_equivalence_tests
 )
 add_executable(host_ledger_tests tests/host_ledger_tests.cpp)
 target_compile_options(host_ledger_tests PRIVATE
