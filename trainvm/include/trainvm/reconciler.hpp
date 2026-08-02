@@ -24,6 +24,7 @@ enum class ReconcileDisposition {
   host_grant_acquired,
   host_grant_busy,
   host_process_exited,
+  external_profiler_artifact_published,
   host_grant_released,
   launch_prepared,
   launch_replayed,

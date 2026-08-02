@@ -1137,15 +1137,15 @@
     return `${scaled.toFixed(unit === 0 ? 0 : 2)} ${units[unit]}`;
   }
 
-  function vmProfileHasRichSummary(profile) {
+  function vmProfileHasTimingSummary(profile) {
     const summary = profile?.summary || {};
-    return ["accelerator_launch_count", "captured_step_wall_time_us", "gpu_active_ratio", "gpu_active_time_us", "allocator_peak_allocated_bytes", "allocator_peak_reserved_bytes"]
+    return ["accelerator_launch_count", "captured_step_wall_time_us"]
       .every((field) => Number.isFinite(Number(summary[field])) && Number(summary[field]) >= 0) &&
       Number(profile?.capture_steps) > 0;
   }
 
   function vmProfilesComparable(profile, baseline) {
-    if (!vmProfileHasRichSummary(profile) || !vmProfileHasRichSummary(baseline)) return false;
+    if (!vmProfileHasTimingSummary(profile) || !vmProfileHasTimingSummary(baseline)) return false;
     return profile.node_id === baseline.node_id &&
       profile.backend === baseline.backend &&
       Number(profile.capture_steps) === Number(baseline.capture_steps) &&
@@ -1204,20 +1204,26 @@
       const phases = profile.execution_phases;
       const operators = Array.isArray(summary.top_operators) ? summary.top_operators.slice(0, 5) : [];
       const windowLabel = `${Number(profile.first_optimizer_step || 0).toLocaleString()}–${Number(profile.last_optimizer_step || 0).toLocaleString()}`;
-      const richSummary = vmProfileHasRichSummary(profile);
+      const timingSummary = vmProfileHasTimingSummary(profile);
       const facts = [
         ["accelerator op time", vmDurationUS(summary.accelerator_time_us)],
         ["CPU op time", vmDurationUS(summary.cpu_time_us)],
         ["raw trace", vmBytes(profile.trace_size_bytes)],
       ];
-      if (richSummary) {
+      if (timingSummary) {
         facts.splice(0, 0,
-          ["GPU active", `${(Number(summary.gpu_active_ratio) * 100).toFixed(1)}%`],
           ["captured wall", vmDurationUS(summary.captured_step_wall_time_us)],
           ["GPU launches", `${(Number(summary.accelerator_launch_count) / Math.max(1, Number(profile.capture_steps))).toFixed(1)}/step`],
-          ["peak allocated", vmBytes(summary.allocator_peak_allocated_bytes)],
-          ["peak reserved", vmBytes(summary.allocator_peak_reserved_bytes)],
         );
+        if (Number.isFinite(Number(summary.gpu_active_ratio)) && Number(summary.gpu_active_ratio) >= 0) {
+          facts.splice(0, 0, ["GPU active", `${(Number(summary.gpu_active_ratio) * 100).toFixed(1)}%`]);
+        }
+        if (Number.isFinite(Number(summary.allocator_peak_allocated_bytes)) && Number(summary.allocator_peak_allocated_bytes) >= 0) {
+          facts.splice(3, 0, ["peak allocated", vmBytes(summary.allocator_peak_allocated_bytes)]);
+        }
+        if (Number.isFinite(Number(summary.allocator_peak_reserved_bytes)) && Number(summary.allocator_peak_reserved_bytes) >= 0) {
+          facts.splice(4, 0, ["peak reserved", vmBytes(summary.allocator_peak_reserved_bytes)]);
+        }
         if (Number.isFinite(Number(summary.input_stall_ratio)) && Number(summary.input_stall_ratio) >= 0) {
           facts.splice(3, 0, ["input stall", `${(Number(summary.input_stall_ratio) * 100).toFixed(1)}%`]);
         }
@@ -1235,13 +1241,15 @@
         const baseSummary = baseline.summary || {};
         comparison = `<div class="vm-profile-comparison"><strong>Δ from steps ${Number(baseline.first_optimizer_step).toLocaleString()}–${Number(baseline.last_optimizer_step).toLocaleString()}</strong>` +
           `<span>wall/step ${vmEscape(vmSignedPercent(Number(summary.captured_step_wall_time_us) / Number(profile.capture_steps), Number(baseSummary.captured_step_wall_time_us) / Number(baseline.capture_steps)))}</span>` +
-          `<span>GPU active ${vmEscape(vmSignedPoints(summary.gpu_active_ratio, baseSummary.gpu_active_ratio))}</span>` +
           `<span>launches/step ${vmEscape(vmSignedPercent(Number(summary.accelerator_launch_count) / Number(profile.capture_steps), Number(baseSummary.accelerator_launch_count) / Number(baseline.capture_steps)))}</span>` +
-          `<span>peak allocated ${vmEscape(vmSignedPercent(summary.allocator_peak_allocated_bytes, baseSummary.allocator_peak_allocated_bytes))}</span>` +
+          `${Number.isFinite(Number(summary.gpu_active_ratio)) && Number.isFinite(Number(baseSummary.gpu_active_ratio)) ? `<span>GPU active ${vmEscape(vmSignedPoints(summary.gpu_active_ratio, baseSummary.gpu_active_ratio))}</span>` : ""}` +
+          `${Number.isFinite(Number(summary.allocator_peak_allocated_bytes)) && Number.isFinite(Number(baseSummary.allocator_peak_allocated_bytes)) ? `<span>peak allocated ${vmEscape(vmSignedPercent(summary.allocator_peak_allocated_bytes, baseSummary.allocator_peak_allocated_bytes))}</span>` : ""}` +
           `${Number.isFinite(Number(summary.input_stall_ratio)) && Number.isFinite(Number(baseSummary.input_stall_ratio)) ? `<span>input stall ${vmEscape(vmSignedPoints(summary.input_stall_ratio, baseSummary.input_stall_ratio))}</span>` : ""}</div>`;
       } else if (baseline) {
         comparison = '<div class="vm-profile-comparison incompatible"><strong>not comparable</strong><span>node, backend, schedule, activities, profiler options, or warmup status differ</span></div>';
       }
+      const downloadLabel = profile.trace_file_name === "trace.sqlite" ? "download restricted Nsight Systems SQLite" :
+        (profile.trace_file_name === "trace.ncu-rep" ? "download restricted Nsight Compute report" : "download restricted Chrome trace");
       return `<article class="vm-profile-card${baseline && profile.artifact_id === baseline.artifact_id ? " baseline" : ""}">` +
         `<div class="vm-profile-head"><strong title="${vmEscape(profile.artifact_id)}">${vmEscape(profile.backend)} · steps ${vmEscape(windowLabel)}</strong><span>#${Number(profile.sequence || 0).toLocaleString()}</span></div>` +
         `<div class="vm-profile-facts">${facts.map(([label, value]) =>
@@ -1253,8 +1261,8 @@
         phaseQualifier +
         comparison +
         `<div class="vm-profile-meta">${vmEscape(profile.attempt_id)} · ${Number(profile.capture_steps || 0)} captured · ${Number(profile.skip_steps || 0)} skipped · ${Number(profile.warmup_steps || 0)} warmup</div>` +
-        `<button type="button" class="vm-profile-baseline" data-artifact="${vmEscape(profile.artifact_id)}" aria-pressed="${baseline && profile.artifact_id === baseline.artifact_id ? "true" : "false"}" ${richSummary ? "" : "disabled"}>${baseline && profile.artifact_id === baseline.artifact_id ? "selected baseline" : "use as comparison baseline"}</button>` +
-        `<a class="vm-profile-download" href="${vmEscape(profile.trace_download_url)}" download>download restricted Chrome trace</a>` +
+        `<button type="button" class="vm-profile-baseline" data-artifact="${vmEscape(profile.artifact_id)}" aria-pressed="${baseline && profile.artifact_id === baseline.artifact_id ? "true" : "false"}" ${timingSummary ? "" : "disabled"}>${baseline && profile.artifact_id === baseline.artifact_id ? "selected baseline" : "use as comparison baseline"}</button>` +
+        `<a class="vm-profile-download" href="${vmEscape(profile.trace_download_url)}" download>${downloadLabel}</a>` +
       `</article>`;
     }).join("") || '<div class="empty">no bounded GPU traces published yet</div>';
     target.querySelectorAll(".vm-profile-baseline").forEach((button) => {
@@ -1281,7 +1289,7 @@
       vmProfiles = profiles;
       if (!profiles.some((profile) => profile.artifact_id === vmProfileBaseline)) {
         vmProfileBaseline = profiles.length > 1 ?
-          (profiles.find(vmProfileHasRichSummary)?.artifact_id || "") : "";
+          (profiles.find(vmProfileHasTimingSummary)?.artifact_id || "") : "";
       }
       renderVMProfiles(vmProfiles);
     } catch (error) {

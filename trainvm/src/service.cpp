@@ -4,6 +4,7 @@
 
 #include "trainvm/controller.hpp"
 #include "trainvm/document.hpp"
+#include "trainvm/external_profiler_artifact.hpp"
 #include "trainvm/reflection_json.hpp"
 
 #include <fcntl.h>
@@ -1530,6 +1531,7 @@ void TrainVMService::reconcile_until_quiescent(const std::string& run_id) {
       case ReconcileDisposition::lease_acquired:
       case ReconcileDisposition::host_grant_acquired:
       case ReconcileDisposition::host_process_exited:
+      case ReconcileDisposition::external_profiler_artifact_published:
       case ReconcileDisposition::host_grant_released:
       case ReconcileDisposition::builtin_completed:
       // A committed qualification verdict advances the node either way, so the
@@ -1974,6 +1976,32 @@ std::optional<ReconcileDisposition> TrainVMService::reconcile_host_release(
       }
       return ReconcileDisposition::host_process_exited;
     }
+    const auto binding = journal_.launch_binding(launch_id);
+    if (!binding) {
+      throw OperationPreconditionError(
+          "release node has a process without its durable launch binding");
+    }
+    if (binding->identity.profiler) {
+      const auto window = std::filesystem::path(
+          binding->identity.profiler->raw_output_path + ".window.json");
+      std::error_code filesystem_error;
+      const bool has_window = std::filesystem::exists(window, filesystem_error);
+      if (filesystem_error) {
+        throw std::runtime_error(
+            "external profiler window identity could not be inspected");
+      }
+      if (has_window) {
+        const auto& exit = process->exited->receipt.request;
+        if (exit.wait_code != CLD_EXITED || exit.wait_status != 0) {
+          throw OperationPreconditionError(
+              "external profiler exited unsuccessfully after sealing a capture window");
+        }
+        if (reconcile_external_profiler_artifact(*projection, *plan, *process,
+                                                 *binding)) {
+          return ReconcileDisposition::external_profiler_artifact_published;
+        }
+      }
+    }
   }
 
   const std::string& concurrency_key =
@@ -2017,6 +2045,103 @@ std::optional<ReconcileDisposition> TrainVMService::reconcile_host_release(
         "host release reconciliation returned no receipt");
   }
   return ReconcileDisposition::host_grant_released;
+}
+
+bool TrainVMService::reconcile_external_profiler_artifact(
+    const RunProjection& projection, const CompiledPlan& plan,
+    const HostProcessSagaSnapshot& process,
+    const ResolvedLaunchSpec& binding) {
+  if (!binding.identity.profiler || !process.exited) {
+    throw std::invalid_argument(
+        "external profiler publication requires a terminal profiler launch");
+  }
+  const auto& profiler = *binding.identity.profiler;
+  const std::string dispatch_id = projection.run_id + ":dispatch:" +
+                                  binding.identity.node_id + ":" +
+                                  binding.identity.attempt_id;
+  const auto dispatch = journal_.dispatch(dispatch_id);
+  const auto invocation = journal_.worker_invocation(dispatch_id);
+  if (!dispatch || dispatch->status != DispatchStatus::completed ||
+      !dispatch->result_event_id || !invocation ||
+      invocation->run_id != projection.run_id ||
+      invocation->node_id != binding.identity.node_id ||
+      invocation->attempt_id != binding.identity.attempt_id) {
+    throw OperationPreconditionError(
+        "external profiler publication has no completed immutable invocation");
+  }
+  if (!profiler.capture.output_artifact) {
+    throw OperationPreconditionError(
+        "external profiler publication has no declared logical artifact");
+  }
+  const nlohmann::json* publication = nullptr;
+  for (const auto& [output_name, candidate] : invocation->publishes.items()) {
+    (void)output_name;
+    if (candidate.is_object() &&
+        candidate.value("logical_name", std::string{}) ==
+            *profiler.capture.output_artifact) {
+      if (publication != nullptr) {
+        throw OperationPreconditionError(
+            "external profiler publication authority is ambiguous");
+      }
+      publication = &candidate;
+    }
+  }
+  if (!publication || !publication->contains("declaration") ||
+      !publication->at("declaration").is_object() ||
+      publication->at("declaration").value("type", std::string{}) !=
+          "opaque" ||
+      publication->at("declaration").value("schema", std::string{}) !=
+          "trainvm.gpu-trace.v1" ||
+      publication->at("declaration").value("fingerprint", std::string{}) !=
+          "adapter") {
+    throw OperationPreconditionError(
+        "external profiler output declaration is incompatible");
+  }
+  const ExternalProfilerPublishedArtifact artifact =
+      publish_external_profiler_artifact({
+          .backend = profiler.backend,
+          .run_id = projection.run_id,
+          .node_id = binding.identity.node_id,
+          .attempt_id = binding.identity.attempt_id,
+          .authority_digest = profiler.authority.authority_digest,
+          .invocation_digest = invocation->invocation_digest,
+          .capture = profiler.capture,
+          .raw_output_prefix = profiler.raw_output_path,
+          .run_directory = plan.experiment.spec.workspace.run_directory,
+      });
+  const std::int64_t published_at_ns =
+      process.exited->receipt.observed_wall_time_ns;
+  const Event event{
+      .event_id = dispatch_id + ":artifact:" +
+                  sha256_hex(artifact.artifact_id),
+      .run_id = projection.run_id,
+      .run_revision = projection.run_revision,
+      .plan_revision = invocation->plan_revision,
+      .node_id = binding.identity.node_id,
+      .attempt_id = binding.identity.attempt_id,
+      .worker_sequence = 0U,
+      .event_type = "artifact.published",
+      .event_version = 1U,
+      .wall_time_ns = published_at_ns,
+      .monotonic_time_ns = 0,
+      .optimizer_step = std::nullopt,
+      .payload = {
+          {"artifact_id", artifact.artifact_id},
+          {"logical_name", *profiler.capture.output_artifact},
+          {"kind", "opaque"},
+          {"schema", "trainvm.gpu-trace.v1"},
+          {"uri", "file://" + artifact.manifest_path.string()},
+          {"size_bytes", artifact.size_bytes},
+          {"fingerprint_algorithm", "adapter"},
+          {"fingerprint", artifact.manifest_fingerprint},
+          {"complete", true},
+          {"producer_node_id", binding.identity.node_id},
+          {"producer_attempt_id", binding.identity.attempt_id},
+          {"parent_artifact_ids", nlohmann::json::array()},
+          {"published_at_ns", published_at_ns},
+      },
+  };
+  return journal_.publish_external_profiler_artifact(event);
 }
 
 std::optional<ReconcileDisposition> TrainVMService::reconcile_host_grant(

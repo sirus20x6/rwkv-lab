@@ -138,6 +138,10 @@ void external_collectors_follow_optimizer_steps_not_kernel_counts() {
   require(include != ncu.end() && std::next(include) != ncu.end() &&
               *std::next(include) == "trainvm.profile.capture",
           "ncu is filtered by the fixed TrainVM capture range");
+  const auto log_file = std::ranges::find(ncu, std::string("--log-file"));
+  require(log_file != ncu.end() && std::next(log_file) != ncu.end() &&
+              *std::next(log_file) == "/tmp/trainvm-ncu.csv",
+          "ncu emits a fixed raw CSV summary beside its restricted report");
 }
 
 void external_lifecycle_is_exact_and_bounded() {

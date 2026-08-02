@@ -873,13 +873,13 @@ void validate_experiment(const Experiment& experiment, std::vector<Diagnostic>& 
         error(diagnostics, "execution.trace_accelerator", std::string(path),
               "nsys and ncu profiling require an NVIDIA accelerator");
       }
-      if (trace.backend && *trace.backend == ProfilerBackend::ncu &&
+      if (trace.backend && *trace.backend != ProfilerBackend::torch &&
           trace.activities &&
           *trace.activities != std::vector<ProfilerActivity>{
                                    ProfilerActivity::accelerator}) {
         error(diagnostics, "execution.trace_activities",
               child_path(std::string(path), "activities"),
-              "ncu capture supports only the accelerator activity");
+              "nsys and ncu capture support only the accelerator activity");
       }
       if (trace.backend && *trace.backend != ProfilerBackend::torch &&
           (trace.record_shapes || trace.profile_memory || trace.with_stack)) {
