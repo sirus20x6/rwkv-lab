@@ -55,6 +55,10 @@ def composition():
                 "error_if_nonfinite": True,
             },
         ),
+        "gradient_accumulation": (
+            "fixed",
+            {"microbatches_per_optimizer_step": 4},
+        ),
     }
     components = {}
     for slot, (name, configuration) in requested.items():
@@ -85,6 +89,7 @@ def test_worker_component_bridge_builds_optimizer_and_schedule() -> None:
     schedule = runtime.learning_rate_schedule(optimizer)
     parameter.grad = torch.tensor([4.0])
     gradient_norm = runtime.gradient_clipping([parameter])
+    accumulation = runtime.gradient_accumulation()
 
     assert isinstance(optimizer, torch.optim.AdamW)
     assert optimizer.param_groups[0]["weight_decay"] == pytest.approx(0.01)
@@ -93,6 +98,8 @@ def test_worker_component_bridge_builds_optimizer_and_schedule() -> None:
     assert schedule.get_last_lr() == pytest.approx([1e-3])
     assert gradient_norm == pytest.approx(4.0)
     assert parameter.grad == pytest.approx(torch.tensor([1.0]))
+    assert accumulation.microbatches_per_optimizer_step == 4
+    assert accumulation.scale_loss(torch.tensor(8.0)) == pytest.approx(2.0)
     assert runtime.evidence()["optimizer"]["category"] == "optimizer"
 
 

@@ -749,6 +749,14 @@ def resolved_worker_component_contract(
         raise ValueError(
             "authority gradient-clipping composition disagrees with RWKV configuration"
         )
+    if dict(
+        worker_components.configuration(
+            "gradient_accumulation", category="gradient_accumulation"
+        )
+    ) != {"microbatches_per_optimizer_step": args.grad_accum}:
+        raise ValueError(
+            "authority gradient-accumulation composition disagrees with RWKV configuration"
+        )
     implementation, resolved_schedule = (
         worker_components.learning_rate_configuration()
     )
@@ -1552,6 +1560,11 @@ def main(
         if worker_components is not None
         else None
     )
+    gradient_accumulation = (
+        worker_components.gradient_accumulation()
+        if worker_components is not None
+        else None
+    )
     print(f"optimizer={args.optimizer} lr={args.lr} wd={args.weight_decay}", flush=True)
     step = 0; resume_recall_rng = None; did_resume = False
     if args.resume and os.path.exists(args.resume):
@@ -1788,8 +1801,17 @@ def main(
         opt.zero_grad(set_to_none=True)
         sparse_vocab_rows = []
         sparse_recalled_rows = []
-        ga = max(args.grad_accum, 1)
-        for micro_step in range(ga):          # effective batch = batch * ga
+        ga = (
+            gradient_accumulation.microbatches_per_optimizer_step
+            if gradient_accumulation is not None
+            else max(args.grad_accum, 1)
+        )
+        microbatch_indices = (
+            gradient_accumulation.microbatch_indices()
+            if gradient_accumulation is not None
+            else range(ga)
+        )
+        for micro_step in microbatch_indices:  # effective batch = batch * ga
             input_wait = (
                 worker_step_profiler.input_wait()
                 if worker_step_profiler is not None
@@ -1834,7 +1856,12 @@ def main(
             if args.distributed == "fsdp2" and ga > 1:
                 from rwkv_lab.distributed import set_requires_gradient_sync
                 set_requires_gradient_sync(model, micro_step == ga - 1)
-            (loss / ga if ga > 1 else loss).backward()
+            scaled_loss = (
+                gradient_accumulation.scale_loss(loss)
+                if gradient_accumulation is not None
+                else (loss / ga if ga > 1 else loss)
+            )
+            scaled_loss.backward()
             seen += xin.shape[0] * xin.shape[1]
         if args.fsdp_sparse_embeddings:
             from rwkv_lab.distributed import sparse_sync_parameter_rows

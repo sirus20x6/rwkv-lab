@@ -399,11 +399,12 @@ startup orphan recovery are defined in
   modules may not import family trainers; family adapters compose them through typed registry
   contracts. Add a component only when a runtime path consumes it, so the registry cannot advertise
   decorative configuration that training silently ignores. The Python runtime now physically
-  separates optimizer mechanics, LR schedules, parameter routing, gradient clipping, and
-  weight-decay schedules behind the stable `training_components` facade; category dependency
-  checks prevent regressions. Activation, normalization, objective, precision,
-  accumulation/synchronization, and curriculum modules are created as their first real adapter
-  migrations land, not as empty scaffolding.
+  separates optimizer mechanics, LR schedules, parameter routing, gradient clipping, weight-decay
+  schedules, and scratch-RWKV's fixed step-boundary gradient accumulation behind the stable
+  `training_components` facade; category dependency checks prevent regressions. Activation,
+  normalization, objective, precision, distributed synchronization/mid-update accumulation, and
+  curriculum modules are created as their first real adapter migrations land, not as empty
+  scaffolding.
 - Make component state and schedule domains explicit in checkpoint manifests, with exhaustive
   parameter ownership and exact-resume trajectory tests.
 - Add representative benchmark fixtures for MageFlow/flow, RWKV LM, transformer LM, vision/RWKV,

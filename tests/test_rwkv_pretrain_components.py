@@ -53,6 +53,11 @@ def test_rwkv_worker_components_drive_powercool_and_optimizer() -> None:
                 "weight_decay_schedule",
             ):
                 return {"weight_decay": 0.1}
+            if (slot, category) == (
+                "gradient_accumulation",
+                "gradient_accumulation",
+            ):
+                return {"microbatches_per_optimizer_step": 1}
             assert (slot, category) == ("optimizer", "optimizer")
             return {
                 "learning_rate": 3.0e-4,
@@ -73,6 +78,13 @@ def test_rwkv_worker_components_drive_powercool_and_optimizer() -> None:
         def gradient_clipping(self, parameters):
             return torch.nn.utils.clip_grad_norm_(parameters, 1.0)
 
+        def gradient_accumulation(self):
+            return SimpleNamespace(
+                microbatches_per_optimizer_step=1,
+                microbatch_indices=lambda: range(1),
+                scale_loss=lambda loss: loss,
+            )
+
         def evidence(self):
             return {
                 "optimizer": {"implementation": "test"},
@@ -90,6 +102,7 @@ def test_rwkv_worker_components_drive_powercool_and_optimizer() -> None:
         lr=3.0e-4,
         weight_decay=0.1,
         grad_clip=1.0,
+        grad_accum=1,
         distributed="none",
     )
     resolved, evidence, composition_digest = resolved_worker_component_contract(

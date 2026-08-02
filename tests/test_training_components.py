@@ -11,7 +11,10 @@ from rwkv_lab.training_components import (
     AdamWNoDecayConfiguration,
     AppearanceExpertRoutingConfiguration,
     ConstantWeightDecayConfiguration,
+    FixedGradientAccumulation,
+    FixedGradientAccumulationConfiguration,
     GlobalNormClippingConfiguration,
+    GradientAccumulationImplementation,
     GradientClippingImplementation,
     LinearWarmupCosineConfiguration,
     OptimizerImplementation,
@@ -20,6 +23,7 @@ from rwkv_lab.training_components import (
     ScheduleImplementation,
     TerminalExpertRoutingConfiguration,
     WeightDecayScheduleImplementation,
+    build_registered_gradient_accumulation,
     build_registered_gradient_clipping,
     build_registered_optimizer,
     build_registered_parameter_routing,
@@ -40,6 +44,7 @@ def test_runtime_categories_have_one_way_dependency_boundaries():
     root = Path(__file__).resolve().parents[1]
     runtime = root / "src/rwkv_lab/training_runtime"
     category_names = {
+        "gradient_accumulation",
         "gradient_clipping",
         "optimizers",
         "routers",
@@ -173,6 +178,7 @@ def test_component_catalog_and_runtime_dispatch_are_exactly_aligned():
     assert grades["optimizer"] == "exact"
     assert grades["learning_rate_schedule"] == "exact"
     assert grades["parameter_router"] == "stateless"
+    assert grades["gradient_accumulation"] == "stateless"
     assert grades["gradient_clipping"] == "stateless"
     assert grades["weight_decay_schedule"] == "stateless"
 
@@ -191,6 +197,21 @@ def test_registered_global_norm_clipping_has_typed_reference_semantics():
     )
     assert observed == pytest.approx(10.0)
     assert parameter.grad == pytest.approx(torch.tensor([1.5, 2.0]))
+
+
+def test_fixed_gradient_accumulation_owns_microbatch_count_and_loss_scaling():
+    policy = build_registered_gradient_accumulation(
+        GradientAccumulationImplementation.FIXED_V1,
+        FixedGradientAccumulationConfiguration(
+            microbatches_per_optimizer_step=4
+        ),
+    )
+    assert isinstance(policy, FixedGradientAccumulation)
+    assert tuple(policy.microbatch_indices()) == (0, 1, 2, 3)
+    loss = torch.tensor(8.0, requires_grad=True)
+    policy.scale_loss(loss).backward()
+    assert loss.grad == pytest.approx(torch.tensor(0.25))
+    assert policy.state_dict() == {}
 
 
 def test_no_decay_optimizer_and_decay_schedule_have_independent_contracts():

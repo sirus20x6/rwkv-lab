@@ -8,9 +8,11 @@ import torch
 
 from rwkv_lab.training_components import (
     ConstantWeightDecaySchedule,
+    FixedGradientAccumulation,
     LinearWarmupCosineConfiguration,
     PowerCoolConfiguration,
     ScheduleImplementation,
+    gradient_accumulation_from_resolved_component,
     gradient_clipping_from_resolved_component,
     optimizer_from_resolved_component,
     parameter_routing_from_resolved_component,
@@ -89,6 +91,18 @@ class WorkerTrainingComponents:
         component = self.composition.require(slot, category="gradient_clipping")
         return gradient_clipping_from_resolved_component(
             component.runtime_envelope(), parameters
+        )
+
+    def gradient_accumulation(
+        self,
+        *,
+        slot: str = "gradient_accumulation",
+    ) -> FixedGradientAccumulation:
+        component = self.composition.require(
+            slot, category="gradient_accumulation"
+        )
+        return gradient_accumulation_from_resolved_component(
+            component.runtime_envelope()
         )
 
     def weight_decay_schedule(

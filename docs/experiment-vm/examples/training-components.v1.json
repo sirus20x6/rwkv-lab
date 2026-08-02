@@ -3,6 +3,24 @@
   "components": [
     {
       "key": {
+        "category": "gradient_accumulation",
+        "name": "fixed",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.gradient_accumulation.fixed.v1",
+      "model_families": ["mageflow", "rwkv", "transformer", "vision"],
+      "required_capabilities": ["gradient_accumulation.fixed.v1"],
+      "configuration": [
+        {"name": "microbatches_per_optimizer_step", "type": "integer", "required": true, "minimum": 1, "maximum": 65536, "unit": "count"}
+      ],
+      "state": [],
+      "step_domain": "microbatch",
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
         "category": "gradient_clipping",
         "name": "global_norm",
         "version": "1.0.0"
