@@ -381,6 +381,12 @@ target_link_libraries(lifecycle_equivalence_tests PRIVATE trainvm_core)
 add_test(NAME lifecycle_equivalence_tests
   COMMAND lifecycle_equivalence_tests
 )
+add_executable(authority_fuzz_tests tests/authority_fuzz_tests.cpp)
+target_compile_options(authority_fuzz_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(authority_fuzz_tests PRIVATE trainvm_core)
+add_test(NAME authority_fuzz_tests COMMAND authority_fuzz_tests)
 add_executable(host_ledger_tests tests/host_ledger_tests.cpp)
 target_compile_options(host_ledger_tests PRIVATE
   -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
