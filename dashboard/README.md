@@ -43,6 +43,12 @@ canonicalization, and plan hashing; that preview endpoint cannot launch a run. V
 frozen and posted to `/api/trainvm/experiments`, where the native authority independently recompiles
 them and creates an idempotent queued run. Ambiguous browser failures retain the exact serialized
 request and key in session storage for an exact retry; the dashboard never writes the journal.
+The authoring UI obtains exact native operation and training-component catalogs from
+`/api/trainvm/operations` and `/api/trainvm/training-components`. It renders lifecycle, typed ports,
+closed model-family slots, and component configuration directly from those descriptors. Adding a
+compatible registered adapter therefore requires no Go route or JavaScript family branch. The Go
+bridge bounds, canonicalizes, hashes, and semantically validates both descriptor envelopes before
+the browser can use them; native compilation remains the final plan authority.
 Ambiguous live-control or lifecycle-command outcomes likewise retain the exact in-memory serialized
 body and idempotency key, block competing mutations, and expose only an exact retry until resolved.
 The one-second shared snapshot reads conversion quality from ingestion-time rollups plus one batched

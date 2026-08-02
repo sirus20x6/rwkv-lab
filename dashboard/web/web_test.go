@@ -2,6 +2,7 @@ package web
 
 import (
 	"io/fs"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -306,9 +307,17 @@ func TestTrainVMSubmissionFreezesPreviewAndRetriesExactIntent(t *testing.T) {
 		`result.adapter_lock_digest !== intent.adapterLockDigest`,
 		`String(result.training_component_lock_digest || "") !==`,
 		`fetch("/api/trainvm/training-components"`,
+		`fetch("/api/trainvm/operations"`,
 		`descriptor.configuration || []`,
-		`const value = field.default;`,
+		`const value = hasConfigured ? configuration[field.name] : field.default;`,
 		`node.invoke.training.components[composerSlot]`,
+		`operation.training_composition.model_family`,
+		`compatibleComponents(category, composition.model_family)`,
+		`data-vm-operation-slot`,
+		`data-vm-add-property`,
+		`data-vm-add-map`,
+		`data-vm-add-array`,
+		`#vm-operation-composer input`,
 		`sessionStorage.setItem`,
 		`body: intent.body`,
 		`submissionBusy`,
@@ -326,6 +335,21 @@ func TestTrainVMSubmissionFreezesPreviewAndRetriesExactIntent(t *testing.T) {
 		if !strings.Contains(string(app), required) {
 			t.Fatalf("created TrainVM run selection is missing %q", required)
 		}
+	}
+}
+
+func TestTrainVMDescriptorComposerRoundTripsInBrowser(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is not installed")
+	}
+	command := exec.Command(python, "testdata/trainvm_editor_browser.py")
+	output, err := command.CombinedOutput()
+	if exitError, ok := err.(*exec.ExitError); ok && exitError.ExitCode() == 77 {
+		t.Skip("Playwright is not installed")
+	}
+	if err != nil {
+		t.Fatalf("descriptor composer browser contract failed: %v\n%s", err, output)
 	}
 }
 

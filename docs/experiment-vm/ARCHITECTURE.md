@@ -210,6 +210,20 @@ field from appearing declarative while being ignored by the selected trainer,
 and moves missing/extra/wrong-family failures ahead of leases and worker
 launches.
 
+The same native registry publishes the canonical `trainvm.operations/v1`
+authoring document through the exact `trainvm.operations@1.0.0` descriptor
+selector. Each exact adapter/version/runtime/operation/contract key carries its
+effect, idempotency, lifecycle, capabilities, optional training composition,
+and mandatory bounded input/output maps. Port value types are closed; published
+outputs are artifacts and may narrow both artifact type and schema. Registry
+construction rejects omitted declarations, oversized surfaces, or primitive
+outputs. Plan validation then rejects missing required or unknown ports,
+incompatible literal/reference types, artifact type/schema disagreement, and
+undeclared or omitted publications before any resource lease or worker launch.
+Descriptors describe the protocol the current handler actually implements;
+local trainer files are not advertised as outputs until the worker protocol
+publishes them.
+
 Adding a trainer family requires one adapter and its tests. Creating another experiment from
 registered operations requires no new Go handler, HTML form, subprocess code, or Python supervisor.
 The dashboard generates its editor and live controls from descriptors.

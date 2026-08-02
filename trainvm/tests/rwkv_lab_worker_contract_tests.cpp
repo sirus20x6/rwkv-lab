@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <ranges>
 #include <set>
@@ -10,6 +11,9 @@
 #include <string_view>
 #include <vector>
 
+#include <unistd.h>
+
+#include "trainvm/reflection_json.hpp"
 #include "trainvm/training_component_registry.hpp"
 
 namespace {
@@ -30,6 +34,16 @@ const trainvm::AdapterProfile& find_profile(
     throw std::runtime_error("expected rwkv_lab adapter profile is absent");
   }
   return *profile;
+}
+
+nlohmann::json load_mageflow_fixture() {
+  const auto path = std::filesystem::path(TRAINVM_SOURCE_ROOT) /
+                    "docs/experiment-vm/examples/mageflow-cache-resume.json";
+  std::ifstream input(path);
+  if (!input) throw std::runtime_error("could not open MageFlow fixture");
+  nlohmann::json source;
+  input >> source;
+  return source;
 }
 
 }  // namespace
@@ -105,6 +119,232 @@ int main() {
                 !rwkv.lifecycle.pause_keep_resources &&
                 !rwkv.lifecycle.pause_release_resources,
             "real trainer lifecycle grades must not overclaim checkpoint support");
+
+    require(
+        trainvm::reflected_field_names<trainvm::OperationPortDescriptor>() ==
+                std::vector<std::string>({"type", "required", "artifact_type",
+                                          "artifact_schema", "description"}) &&
+            trainvm::reflected_field_names<
+                trainvm::OperationAuthoringDeclaration>() ==
+                std::vector<std::string>({"inputs", "outputs"}) &&
+            trainvm::reflected_field_names<
+                trainvm::OperationDescriptorDocument>() ==
+                std::vector<std::string>({"api_version", "operations"}),
+        "operation descriptor authority must remain reflection-derived");
+
+    const trainvm::AdapterRegistry operation_registry(
+        contract.adapter_registry.profiles);
+    const nlohmann::json operation_document =
+        operation_registry.operation_descriptors_json();
+    require(operation_document.at("api_version") ==
+                    "trainvm.operations/v1" &&
+                operation_document.at("operations").size() == 4U &&
+                operation_registry.operation_descriptors_digest() ==
+                    "sha256:" +
+                        trainvm::sha256_hex(operation_document.dump()),
+            "operation descriptor document must exactly enumerate and hash the registered profiles");
+    const auto& operations = operation_document.at("operations");
+    require(operations.at(0).at("key").at("adapter") ==
+                    "rwkv-lab.mageflow-appearance-expert" &&
+                operations.at(1).at("key").at("adapter") ==
+                    "rwkv-lab.mageflow-terminal-expert" &&
+                operations.at(2).at("key").at("adapter") ==
+                    "rwkv-lab.qwen-ao3" &&
+                operations.at(3).at("key").at("adapter") ==
+                    "rwkv-lab.rwkv-scratch",
+            "operation descriptors must use canonical exact-key ordering");
+    for (const nlohmann::json& operation : operations) {
+      require(operation.at("authoring").at("inputs").at("config").at(
+                  "type") == "object" &&
+                  operation.at("authoring").at("inputs").at("config").at(
+                      "required") == true &&
+                  operation.at("authoring").at("outputs").at("checkpoint").at(
+                      "type") == "artifact" &&
+                  operation.at("authoring").at("outputs").at("checkpoint").at(
+                      "required") == false &&
+                  operation.at("authoring").at("outputs").at("checkpoint").at(
+                      "artifact_type") == "checkpoint" &&
+                  operation.contains("lifecycle") &&
+                  operation.contains("training_composition"),
+              "each real trainer descriptor must expose honest ports, lifecycle, and slots");
+    }
+    require(appearance.authoring &&
+                appearance.authoring->outputs.size() == 1U &&
+                appearance.authoring->outputs.contains("checkpoint") &&
+                !appearance.authoring->outputs.contains("eval_gallery") &&
+                !appearance.authoring->outputs.contains("log") &&
+                !appearance.authoring->outputs.contains("metrics"),
+            "real adapter descriptors must not advertise local gallery, log, or metric files as artifact outputs until handlers protocol-publish them");
+
+    nlohmann::json exact_source = load_mageflow_fixture();
+    exact_source["spec"].erase("execution");
+    exact_source["spec"]["recovery"]["exact_resume"] = false;
+    exact_source["spec"]["components"]["mageflow"] = {
+        {"adapter", "rwkv-lab.mageflow-appearance-expert"},
+        {"version", "1.0.0"},
+        {"runtime", "python_worker"},
+        {"operations",
+         {{"train",
+           {{"contract",
+             "rwkv_lab.mageflow_appearance_expert.v1.Train"}}}}},
+    };
+    nlohmann::json acquire = exact_source["spec"]["workflow"]["nodes"]
+                                         ["acquire_gpu"];
+    acquire["transitions"][0]["target"] = "train_to_boundary";
+    nlohmann::json train = exact_source["spec"]["workflow"]["nodes"]
+                                       ["train_to_boundary"];
+    train["invoke"]["inputs"] = {
+        {"config", {{"literal", nlohmann::json::object()}}},
+    };
+    train["invoke"]["training"] = {
+        {"model_family", "mageflow"},
+        {"components",
+         {
+             {"gradient_clipping",
+              {{"key",
+                {{"category", "gradient_clipping"},
+                 {"name", "global_norm"},
+                 {"version", "1.0.0"}}},
+               {"configuration", nlohmann::json::object()}}},
+             {"learning_rate",
+              {{"key",
+                {{"category", "learning_rate_schedule"},
+                 {"name", "linear_warmup_cosine"},
+                 {"version", "1.0.0"}}},
+               {"configuration", nlohmann::json::object()}}},
+             {"optimizer",
+              {{"key",
+                {{"category", "optimizer"},
+                 {"name", "torch_adamw"},
+                 {"version", "1.0.0"}}},
+               {"configuration", nlohmann::json::object()}}},
+             {"parameter_router",
+              {{"key",
+                {{"category", "parameter_router"},
+                 {"name", "mageflow_appearance_expert"},
+                 {"version", "1.0.0"}}},
+               {"configuration", nlohmann::json::object()}}},
+             {"weight_decay",
+              {{"key",
+                {{"category", "weight_decay_schedule"},
+                 {"name", "constant"},
+                 {"version", "1.0.0"}}},
+               {"configuration", nlohmann::json::object()}}},
+         }},
+    };
+    train["publishes"] = {{"checkpoint", "checkpoint"}};
+    train["transitions"] = {
+        {{"on", "worker.completed"}, {"target", "release_gpu"}},
+        {{"on", "operation.failed"}, {"target", "$failed"}},
+    };
+    nlohmann::json release = exact_source["spec"]["workflow"]["nodes"]
+                                         ["release_gpu"];
+    exact_source["spec"]["workflow"] = {
+        {"entrypoint", "acquire_gpu"},
+        {"nodes",
+         {{"acquire_gpu", std::move(acquire)},
+          {"train_to_boundary", std::move(train)},
+          {"release_gpu", std::move(release)}}},
+    };
+    const trainvm::CompileResult exact_plan =
+        trainvm::compile_document(exact_source);
+    require(exact_plan.valid(),
+            "exact appearance-expert authoring fixture must compile");
+    const auto registry_path =
+        std::filesystem::temp_directory_path() /
+        ("trainvm-exact-operation-" + std::to_string(::getpid()) + ".json");
+    {
+      std::ofstream output(registry_path, std::ios::binary | std::ios::trunc);
+      output << trainvm::encode_json(contract.adapter_registry).dump();
+    }
+    std::filesystem::permissions(
+        registry_path, std::filesystem::perms::owner_read |
+                           std::filesystem::perms::owner_write,
+        std::filesystem::perm_options::replace);
+    bool exact_plan_accepted = exact_plan.valid();
+    if (exact_plan.valid()) {
+      try {
+        trainvm::AdapterRegistry::load_file(
+            std::filesystem::absolute(registry_path))
+            .validate_plan(*exact_plan.plan);
+      } catch (const std::exception&) {
+        exact_plan_accepted = false;
+      }
+    }
+    std::filesystem::remove(registry_path);
+    require(exact_plan_accepted,
+            "an executable exact-profile plan must validate against the production rwkv_lab worker registry plus core operations");
+
+    std::vector<trainvm::AdapterProfile> extended_profiles =
+        contract.adapter_registry.profiles;
+    trainvm::AdapterProfile synthetic = extended_profiles.at(2);
+    synthetic.key.adapter = "rwkv-lab.synthetic-compatible";
+    synthetic.key.contract = "rwkv_lab.synthetic_compatible.v1.Train";
+    extended_profiles.push_back(synthetic);
+    const trainvm::AdapterRegistry extended_registry(
+        std::move(extended_profiles));
+    const nlohmann::json extended_document =
+        extended_registry.operation_descriptors_json();
+    const auto& extended_operations =
+        extended_document.at("operations");
+    require(extended_operations.size() == 5U &&
+                std::ranges::any_of(
+                    extended_operations, [](const nlohmann::json& operation) {
+                      return operation.at("key").at("adapter") ==
+                                 "rwkv-lab.synthetic-compatible" &&
+                             operation.at("training_composition")
+                                     .at("model_family") == "transformer";
+                    }),
+            "a compatible newly registered profile must automatically enter the operation descriptor document");
+
+    bool missing_authoring_rejected = false;
+    try {
+      synthetic.authoring = std::nullopt;
+      (void)trainvm::AdapterRegistry({synthetic});
+    } catch (const std::invalid_argument& error) {
+      missing_authoring_rejected =
+          std::string_view(error.what()).find("authoring") !=
+          std::string_view::npos;
+    }
+    require(missing_authoring_rejected,
+            "registered profiles missing authoring declarations must fail closed");
+
+    bool primitive_output_rejected = false;
+    try {
+      synthetic = contract.adapter_registry.profiles.at(2);
+      synthetic.authoring->outputs.at("checkpoint").type =
+          trainvm::OperationPortType::string;
+      synthetic.authoring->outputs.at("checkpoint").artifact_type =
+          std::nullopt;
+      (void)trainvm::AdapterRegistry({synthetic});
+    } catch (const std::invalid_argument& error) {
+      primitive_output_rejected =
+          std::string_view(error.what()).find("artifact ports") !=
+          std::string_view::npos;
+    }
+    bool oversized_authoring_rejected = false;
+    try {
+      synthetic = contract.adapter_registry.profiles.at(2);
+      synthetic.authoring->inputs.clear();
+      for (std::size_t index = 0; index < 65U; ++index) {
+        synthetic.authoring->inputs.emplace(
+            "input_" + std::to_string(index),
+            trainvm::OperationPortDescriptor{
+                .type = trainvm::OperationPortType::string,
+                .required = false,
+                .artifact_type = std::nullopt,
+                .artifact_schema = std::nullopt,
+                .description = std::nullopt,
+            });
+      }
+      (void)trainvm::AdapterRegistry({synthetic});
+    } catch (const std::invalid_argument& error) {
+      oversized_authoring_rejected =
+          std::string_view(error.what()).find("at most 64") !=
+          std::string_view::npos;
+    }
+    require(primitive_output_rejected && oversized_authoring_rejected,
+            "operation descriptors must reject primitive publishes and unbounded authoring surfaces");
 
     const auto component_path =
         std::filesystem::path(TRAINVM_SOURCE_ROOT) /

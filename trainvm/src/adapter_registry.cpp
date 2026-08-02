@@ -71,6 +71,262 @@ void validate_training_contract(
   }
 }
 
+OperationPortDescriptor port(OperationPortType type, bool required,
+                             std::optional<ArtifactType> artifact_type = {}) {
+  return {
+      .type = type,
+      .required = required,
+      .artifact_type = artifact_type,
+      .artifact_schema = std::nullopt,
+      .description = std::nullopt,
+  };
+}
+
+OperationAuthoringDeclaration core_authoring(std::string_view operation) {
+  if (operation == "acquire_resources" || operation == "release_resources") {
+    return {
+        .inputs = {{"concurrency_key",
+                    port(OperationPortType::string, true)}},
+        .outputs = {},
+    };
+  }
+  if (operation == "validate_artifact") {
+    return {
+        .inputs = {
+            {"artifact", port(OperationPortType::artifact, true)},
+            {"required_schema", port(OperationPortType::string, true)},
+        },
+        .outputs = {},
+    };
+  }
+  throw std::logic_error("core authoring declaration has no typed executor");
+}
+
+void validate_port(std::string_view name, const OperationPortDescriptor& port) {
+  constexpr std::size_t kMaximumDescriptionBytes = 4U << 10U;
+  constexpr std::size_t kMaximumSchemaBytes = 512U;
+  if (!symbolic_identity(name)) {
+    throw std::invalid_argument(
+        "adapter operation port names must be bounded symbolic identities");
+  }
+  if (enum_to_string(port.type) == "<invalid>" ||
+      (port.artifact_type &&
+       enum_to_string(*port.artifact_type) == "<invalid>")) {
+    throw std::invalid_argument(
+        "adapter operation ports must use closed value and artifact types");
+  }
+  if (port.type != OperationPortType::artifact &&
+      (port.artifact_type || port.artifact_schema)) {
+    throw std::invalid_argument(
+        "only artifact operation ports may narrow artifact type or schema");
+  }
+  if ((port.artifact_schema &&
+       (port.artifact_schema->empty() ||
+        port.artifact_schema->size() > kMaximumSchemaBytes)) ||
+      (port.description &&
+       port.description->size() > kMaximumDescriptionBytes)) {
+    throw std::invalid_argument(
+        "adapter operation port schema and description must be bounded");
+  }
+}
+
+void validate_authoring(const OperationAuthoringDeclaration& authoring) {
+  constexpr std::size_t kMaximumPorts = 64U;
+  if (authoring.inputs.size() > kMaximumPorts ||
+      authoring.outputs.size() > kMaximumPorts) {
+    throw std::invalid_argument(
+        "adapter operation authoring declarations support at most 64 inputs "
+        "and 64 outputs");
+  }
+  for (const auto& [name, descriptor] : authoring.inputs) {
+    validate_port(name, descriptor);
+  }
+  for (const auto& [name, descriptor] : authoring.outputs) {
+    validate_port(name, descriptor);
+    if (descriptor.type != OperationPortType::artifact) {
+      throw std::invalid_argument(
+          "adapter operation outputs must be artifact ports because workflow "
+          "publishes bind logical artifacts");
+    }
+  }
+}
+
+std::optional<OperationPortType> literal_type(const nlohmann::json& value) {
+  if (value.is_string()) return OperationPortType::string;
+  if (value.is_number_integer() || value.is_number_unsigned()) {
+    return OperationPortType::integer;
+  }
+  if (value.is_number_float()) return OperationPortType::number;
+  if (value.is_boolean()) return OperationPortType::boolean;
+  if (value.is_object()) return OperationPortType::object;
+  return std::nullopt;
+}
+
+OperationPortType parameter_type(ParameterType type) {
+  switch (type) {
+    case ParameterType::string:
+    case ParameterType::path:
+    case ParameterType::duration:
+      return OperationPortType::string;
+    case ParameterType::integer:
+      return OperationPortType::integer;
+    case ParameterType::number:
+      return OperationPortType::number;
+    case ParameterType::boolean:
+      return OperationPortType::boolean;
+  }
+  throw AdapterResolutionError("parameter uses an invalid closed type");
+}
+
+OperationPortType control_type(ControlType type) {
+  switch (type) {
+    case ControlType::number:
+      return OperationPortType::number;
+    case ControlType::integer:
+      return OperationPortType::integer;
+    case ControlType::boolean:
+      return OperationPortType::boolean;
+    case ControlType::string:
+    case ControlType::enumeration:
+      return OperationPortType::string;
+  }
+  throw AdapterResolutionError("control uses an invalid closed type");
+}
+
+bool compatible_value_type(OperationPortType expected,
+                           OperationPortType actual) {
+  return expected == actual ||
+         (expected == OperationPortType::number &&
+          actual == OperationPortType::integer);
+}
+
+const Artifact* bound_artifact(const Binding& binding, const Spec& spec) {
+  std::string logical_name;
+  if (binding.artifact) {
+    logical_name = *binding.artifact;
+  } else if (binding.node_output) {
+    const auto producer = spec.workflow.nodes.find(binding.node_output->node);
+    if (producer == spec.workflow.nodes.end() || !producer->second.publishes) {
+      return nullptr;
+    }
+    const auto published =
+        producer->second.publishes->find(binding.node_output->name);
+    if (published == producer->second.publishes->end()) return nullptr;
+    logical_name = published->second;
+  } else {
+    return nullptr;
+  }
+  const auto artifact = spec.artifacts.find(logical_name);
+  return artifact == spec.artifacts.end() ? nullptr : &artifact->second;
+}
+
+std::optional<OperationPortType> bound_value_type(const Binding& binding,
+                                                  const Spec& spec) {
+  if (binding.literal) return literal_type(*binding.literal);
+  if (binding.parameter) {
+    const auto parameter = spec.parameters.find(*binding.parameter);
+    if (parameter != spec.parameters.end()) {
+      return parameter_type(parameter->second.type);
+    }
+  }
+  if (binding.control) {
+    const auto control = spec.controls.catalog.find(*binding.control);
+    if (control != spec.controls.catalog.end()) {
+      return control_type(control->second.type);
+    }
+  }
+  if (binding.context) {
+    return *binding.context == "plan_revision" ? OperationPortType::integer
+                                                : OperationPortType::string;
+  }
+  if (binding.artifact || binding.node_output) {
+    return OperationPortType::artifact;
+  }
+  return std::nullopt;
+}
+
+void require_artifact_contract(const Artifact& artifact,
+                               const OperationPortDescriptor& port,
+                               std::string_view message_prefix) {
+  if (port.artifact_type && artifact.type != *port.artifact_type) {
+    throw AdapterResolutionError(std::string(message_prefix) +
+                                 " has an incompatible artifact type");
+  }
+  if (port.artifact_schema &&
+      (!artifact.schema || *artifact.schema != *port.artifact_schema)) {
+    throw AdapterResolutionError(std::string(message_prefix) +
+                                 " has an incompatible artifact schema");
+  }
+}
+
+void validate_operation_authoring(const std::string& node_name,
+                                  const Node& node,
+                                  const AdapterProfile& profile,
+                                  const Spec& spec) {
+  if (!profile.authoring) {
+    throw AdapterResolutionError(
+        "resolved operation unexpectedly lacks authoring authority");
+  }
+  const OperationAuthoringDeclaration& authoring = *profile.authoring;
+  for (const auto& [name, port] : authoring.inputs) {
+    if (port.required && !node.invoke.inputs.contains(name)) {
+      throw AdapterResolutionError("workflow node " + node_name +
+                                   " omits required operation input " + name);
+    }
+  }
+  for (const auto& [name, binding] : node.invoke.inputs) {
+    const auto declared = authoring.inputs.find(name);
+    if (declared == authoring.inputs.end()) {
+      throw AdapterResolutionError("workflow node " + node_name +
+                                   " supplies undeclared operation input " +
+                                   name);
+    }
+    const auto actual = bound_value_type(binding, spec);
+    if (!actual || !compatible_value_type(declared->second.type, *actual)) {
+      throw AdapterResolutionError("workflow node " + node_name +
+                                   " input " + name +
+                                   " has an incompatible value type");
+    }
+    if (declared->second.type == OperationPortType::artifact) {
+      const Artifact* artifact = bound_artifact(binding, spec);
+      if (artifact == nullptr) {
+        throw AdapterResolutionError("workflow node " + node_name +
+                                     " input " + name +
+                                     " has no statically known artifact contract");
+      }
+      require_artifact_contract(
+          *artifact, declared->second,
+          "workflow node " + node_name + " input " + name);
+    }
+  }
+
+  const std::map<std::string, std::string> empty_publishes;
+  const auto& publishes = node.publishes ? *node.publishes : empty_publishes;
+  for (const auto& [name, port] : authoring.outputs) {
+    if (port.required && !publishes.contains(name)) {
+      throw AdapterResolutionError("workflow node " + node_name +
+                                   " omits required operation output " + name);
+    }
+  }
+  for (const auto& [name, logical_name] : publishes) {
+    const auto declared = authoring.outputs.find(name);
+    if (declared == authoring.outputs.end()) {
+      throw AdapterResolutionError("workflow node " + node_name +
+                                   " publishes undeclared operation output " +
+                                   name);
+    }
+    const auto artifact = spec.artifacts.find(logical_name);
+    if (artifact == spec.artifacts.end()) {
+      throw AdapterResolutionError("workflow node " + node_name +
+                                   " output " + name +
+                                   " has no declared logical artifact");
+    }
+    require_artifact_contract(
+        artifact->second, declared->second,
+        "workflow node " + node_name + " output " + name);
+  }
+}
+
 std::vector<AdapterProfile> core_profiles() {
   const auto key = [](std::string operation, std::string contract) {
     return AdapterKey{.adapter = "trainvm.core",
@@ -84,17 +340,20 @@ std::vector<AdapterProfile> core_profiles() {
        .effect = Effect::resource,
        .idempotency = Idempotency::receipt_required,
        .code_fingerprint = {},
-       .required_capabilities = {}},
+       .required_capabilities = {},
+       .authoring = core_authoring("acquire_resources")},
       {.key = key("validate_artifact", "trainvm.v1.ValidateArtifact"),
        .effect = Effect::read_only,
        .idempotency = Idempotency::replay_safe,
        .code_fingerprint = {},
-       .required_capabilities = {}},
+       .required_capabilities = {},
+       .authoring = core_authoring("validate_artifact")},
       {.key = key("release_resources", "trainvm.v1.ReleaseResources"),
        .effect = Effect::resource,
        .idempotency = Idempotency::replay_safe,
        .code_fingerprint = {},
-       .required_capabilities = {}},
+       .required_capabilities = {},
+       .authoring = core_authoring("release_resources")},
   };
 }
 
@@ -155,6 +414,12 @@ void validate_profile(AdapterProfile& profile) {
     throw std::invalid_argument("adapter profile key fields must not be empty");
   }
   const bool builtin = profile.key.runtime == ComponentRuntime::builtin;
+  if (!profile.authoring) {
+    throw std::invalid_argument(
+        "adapter profile must publish an explicit operation authoring "
+        "declaration");
+  }
+  validate_authoring(*profile.authoring);
   validate_lifecycle(profile.lifecycle);
   if (profile.training_composition) {
     validate_training_contract(*profile.training_composition);
@@ -218,6 +483,11 @@ void validate_profile(AdapterProfile& profile) {
 }  // namespace
 
 AdapterRegistry::AdapterRegistry(std::vector<AdapterProfile> profiles) {
+  constexpr std::size_t kMaximumProfiles = 4U << 10U;
+  if (profiles.empty() || profiles.size() > kMaximumProfiles) {
+    throw std::invalid_argument(
+        "adapter registry must contain between 1 and 4096 operation profiles");
+  }
   std::set<std::tuple<std::string, std::string, ComponentRuntime, std::string>>
       selectors;
   for (AdapterProfile& profile : profiles) {
@@ -244,6 +514,18 @@ AdapterRegistry::AdapterRegistry(std::vector<AdapterProfile> profiles) {
                                     {"api_version", "trainvm.adapters/v2"},
                                     {"profiles", std::move(canonical_profiles)}}
                                     .dump());
+  OperationDescriptorDocument descriptors{
+      .api_version = "trainvm.operations/v1",
+      .operations = {},
+  };
+  descriptors.operations.reserve(profiles_.size());
+  for (const auto& [key, profile] : profiles_) {
+    (void)key;
+    descriptors.operations.push_back(profile);
+  }
+  operation_descriptors_json_ = encode_json(descriptors);
+  operation_descriptors_digest_ =
+      "sha256:" + sha256_hex(operation_descriptors_json_.dump());
 }
 
 AdapterRegistry AdapterRegistry::load_file(
@@ -433,6 +715,8 @@ void AdapterRegistry::validate_plan(const CompiledPlan& plan) const {
         plan.experiment.spec.components.at(node.invoke.component);
     const AdapterProfile& profile =
         resolve(component, node.invoke.operation);
+    validate_operation_authoring(name, node, profile,
+                                 plan.experiment.spec);
     if (profile.effect != node.effect ||
         profile.idempotency != node.idempotency) {
       throw AdapterResolutionError(
@@ -566,6 +850,14 @@ WorkerLaunchRequest AdapterRegistry::worker_launch_request(
 
 const std::string& AdapterRegistry::registry_digest() const {
   return registry_digest_;
+}
+
+nlohmann::json AdapterRegistry::operation_descriptors_json() const {
+  return operation_descriptors_json_;
+}
+
+const std::string& AdapterRegistry::operation_descriptors_digest() const {
+  return operation_descriptors_digest_;
 }
 
 std::string AdapterRegistry::plan_lock_digest(const CompiledPlan& plan) const {

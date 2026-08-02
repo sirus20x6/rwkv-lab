@@ -213,6 +213,10 @@ trainvm::AdapterProfile external_profile(std::string adapter) {
       .code_fingerprint = "sha256:" + std::string(64U, 'a'),
       .required_capabilities = {},
       .lifecycle = {},
+      .authoring = trainvm::OperationAuthoringDeclaration{
+          .inputs = {},
+          .outputs = {},
+      },
   };
 }
 

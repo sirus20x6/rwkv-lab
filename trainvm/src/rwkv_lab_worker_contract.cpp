@@ -62,6 +62,31 @@ AdapterProfile profile(AdapterKey adapter_key, std::string code_fingerprint,
       .required_capabilities = {"worker.controls", "worker.metrics"},
       .lifecycle = lifecycle,
       .training_composition = std::move(composition),
+      .authoring = OperationAuthoringDeclaration{
+          .inputs = {
+              {"config",
+               OperationPortDescriptor{
+                   .type = OperationPortType::object,
+                   .required = true,
+                   .artifact_type = std::nullopt,
+                   .artifact_schema = std::nullopt,
+                   .description =
+                       "Typed trainer configuration object consumed by this "
+                       "exact adapter contract.",
+               }},
+          },
+          .outputs = {
+              {"checkpoint",
+               OperationPortDescriptor{
+                   .type = OperationPortType::artifact,
+                   .required = false,
+                   .artifact_type = ArtifactType::checkpoint,
+                   .artifact_schema = std::nullopt,
+                   .description =
+                       "Optional authority-published trainer checkpoint.",
+               }},
+          },
+      },
   };
 }
 

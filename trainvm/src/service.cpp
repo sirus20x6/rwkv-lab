@@ -4108,16 +4108,22 @@ grpc::Status TrainVMService::GetDescriptor(
             "descriptor selector exceeds its bound"};
   }
   if (cancelled(context)) return cancellation_status();
-  if (request->adapter() != "trainvm.training-components" ||
-      request->version() != "1.0.0") {
+  if (request->version() != "1.0.0" ||
+      (request->adapter() != "trainvm.training-components" &&
+       request->adapter() != "trainvm.operations")) {
     return {grpc::StatusCode::NOT_FOUND,
             "no descriptor matches the exact requested provider and version"};
   }
   try {
-    const std::string canonical =
-        training_components_.document_json().dump();
-    response->set_schema_json(canonical);
-    response->set_schema_hash(training_components_.registry_digest());
+    if (request->adapter() == "trainvm.operations") {
+      response->set_schema_json(
+          adapter_registry_.operation_descriptors_json().dump());
+      response->set_schema_hash(
+          adapter_registry_.operation_descriptors_digest());
+    } else {
+      response->set_schema_json(training_components_.document_json().dump());
+      response->set_schema_hash(training_components_.registry_digest());
+    }
     return grpc::Status::OK;
   } catch (const std::exception& exception) {
     return {grpc::StatusCode::DATA_LOSS, exception.what()};

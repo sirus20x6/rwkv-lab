@@ -96,6 +96,19 @@ void check(bool condition, std::string_view message) {
   }
 }
 
+trainvm::OperationPortDescriptor operation_port(
+    trainvm::OperationPortType type, bool required,
+    std::optional<trainvm::ArtifactType> artifact_type = std::nullopt,
+    std::optional<std::string> artifact_schema = std::nullopt) {
+  return {
+      .type = type,
+      .required = required,
+      .artifact_type = artifact_type,
+      .artifact_schema = std::move(artifact_schema),
+      .description = std::nullopt,
+  };
+}
+
 nlohmann::json load_fixture() {
   const std::filesystem::path path = std::filesystem::path(TRAINVM_SOURCE_ROOT) /
       "docs/experiment-vm/examples/mageflow-cache-resume.json";
@@ -186,21 +199,39 @@ std::vector<trainvm::AdapterProfile> fixture_adapter_profiles(
        .effect = trainvm::Effect::resource,
        .idempotency = trainvm::Idempotency::receipt_required,
        .code_fingerprint = {},
-       .required_capabilities = {}},
+       .required_capabilities = {},
+       .authoring = trainvm::OperationAuthoringDeclaration{
+           .inputs = {{"concurrency_key",
+                       operation_port(trainvm::OperationPortType::string,
+                                      true)}},
+           .outputs = {}}},
       {.key = key("trainvm.core", "1.0.0",
                   trainvm::ComponentRuntime::builtin, "validate_artifact",
                   "trainvm.v1.ValidateArtifact"),
        .effect = trainvm::Effect::read_only,
        .idempotency = trainvm::Idempotency::replay_safe,
        .code_fingerprint = {},
-       .required_capabilities = {}},
+       .required_capabilities = {},
+       .authoring = trainvm::OperationAuthoringDeclaration{
+           .inputs = {
+               {"artifact",
+                operation_port(trainvm::OperationPortType::artifact, true)},
+               {"required_schema",
+                operation_port(trainvm::OperationPortType::string, true)},
+           },
+           .outputs = {}}},
       {.key = key("trainvm.core", "1.0.0",
                   trainvm::ComponentRuntime::builtin, "release_resources",
                   "trainvm.v1.ReleaseResources"),
        .effect = trainvm::Effect::resource,
        .idempotency = trainvm::Idempotency::replay_safe,
        .code_fingerprint = {},
-       .required_capabilities = {}},
+       .required_capabilities = {},
+       .authoring = trainvm::OperationAuthoringDeclaration{
+           .inputs = {{"concurrency_key",
+                       operation_port(trainvm::OperationPortType::string,
+                                      true)}},
+           .outputs = {}}},
       {.key = key("rwkv-lab.mageflow", "1.0.0",
                   trainvm::ComponentRuntime::python_worker, "train",
                   "rwkv_lab.mageflow.v1.Train"),
@@ -219,6 +250,37 @@ std::vector<trainvm::AdapterProfile> fixture_adapter_profiles(
            .qualify = true,
            .profile = true,
            .resume_grade = trainvm::ResumeGrade::exact,
+       },
+       .authoring = trainvm::OperationAuthoringDeclaration{
+           .inputs = {
+               {"checkpoint",
+                operation_port(trainvm::OperationPortType::artifact, false,
+                               trainvm::ArtifactType::checkpoint,
+                               "rwkv-lab.mageflow-checkpoint.v1")},
+               {"config",
+                operation_port(trainvm::OperationPortType::string, true)},
+               {"encoder_cache",
+                operation_port(trainvm::OperationPortType::artifact, false,
+                               trainvm::ArtifactType::dataset,
+                               "rwkv-lab.encoder-cache.v1")},
+               {"run_directory",
+                operation_port(trainvm::OperationPortType::string, true)},
+               {"stop_at_step",
+                operation_port(trainvm::OperationPortType::integer, false)},
+           },
+           .outputs = {
+               {"checkpoint",
+                operation_port(trainvm::OperationPortType::artifact, false,
+                               trainvm::ArtifactType::checkpoint,
+                               "rwkv-lab.mageflow-checkpoint.v1")},
+               {"eval_gallery",
+                operation_port(trainvm::OperationPortType::artifact, false,
+                               trainvm::ArtifactType::image_gallery,
+                               "rwkv-lab.eval-gallery.v2")},
+               {"log",
+               operation_port(trainvm::OperationPortType::artifact, false,
+                               trainvm::ArtifactType::path)},
+           },
        }},
       {.key = key("rwkv-lab.mageflow", "1.0.0",
                   trainvm::ComponentRuntime::python_worker,
@@ -227,7 +289,26 @@ std::vector<trainvm::AdapterProfile> fixture_adapter_profiles(
        .effect = trainvm::Effect::workspace_write,
        .idempotency = trainvm::Idempotency::replay_safe,
        .code_fingerprint = worker_fingerprint,
-       .required_capabilities = {"worker.metrics", "worker.controls"}},
+       .required_capabilities = {"worker.metrics", "worker.controls"},
+       .authoring = trainvm::OperationAuthoringDeclaration{
+           .inputs = {
+               {"checkpoint",
+                operation_port(trainvm::OperationPortType::artifact, true,
+                               trainvm::ArtifactType::checkpoint,
+                               "rwkv-lab.mageflow-checkpoint.v1")},
+               {"config",
+                operation_port(trainvm::OperationPortType::string, true)},
+               {"final_step",
+                operation_port(trainvm::OperationPortType::integer, true)},
+               {"output_directory",
+                operation_port(trainvm::OperationPortType::string, true)},
+           },
+           .outputs = {{"plan",
+                        operation_port(trainvm::OperationPortType::artifact,
+                                       false,
+                                       trainvm::ArtifactType::report,
+                                       "rwkv-lab.mageflow-cache-plan.v1")}}},
+       },
       {.key = key("rwkv-lab.mageflow", "1.0.0",
                   trainvm::ComponentRuntime::python_worker, "cache_encoders",
                   "rwkv_lab.mageflow.v1.CacheEncoders"),
@@ -246,7 +327,22 @@ std::vector<trainvm::AdapterProfile> fixture_adapter_profiles(
            .qualify = false,
            .profile = false,
            .resume_grade = trainvm::ResumeGrade::none,
-       }},
+       },
+       .authoring = trainvm::OperationAuthoringDeclaration{
+           .inputs = {
+               {"output_directory",
+                operation_port(trainvm::OperationPortType::string, true)},
+               {"plan",
+                operation_port(trainvm::OperationPortType::artifact, true,
+                               trainvm::ArtifactType::report,
+                               "rwkv-lab.mageflow-cache-plan.v1")},
+           },
+           .outputs = {{"cache",
+                        operation_port(trainvm::OperationPortType::artifact,
+                                       false,
+                                       trainvm::ArtifactType::dataset,
+                                       "rwkv-lab.encoder-cache.v1")}}},
+       },
   };
 }
 
@@ -8640,6 +8736,8 @@ void test_service_registry_and_reconciliation() {
                            trainvm::TrainingComponentCategory::activation}},
             };
       }
+      const trainvm::AdapterRegistry expected_operation_registry(
+          training_profiles);
       const auto database_path = directory / "training-components.db";
       std::string journal_id;
       {
@@ -8669,8 +8767,14 @@ void test_service_registry_and_reconciliation() {
       trainvm::v1::DescriptorResponse descriptor_response;
       const grpc::Status descriptor_status = service.GetDescriptor(
           nullptr, &descriptor_request, &descriptor_response);
+      trainvm::v1::DescriptorRequest operations_request;
+      operations_request.set_adapter("trainvm.operations");
+      operations_request.set_version("1.0.0");
+      trainvm::v1::DescriptorResponse operations_response;
+      const grpc::Status operations_status = service.GetDescriptor(
+          nullptr, &operations_request, &operations_response);
       trainvm::v1::DescriptorRequest unknown_descriptor;
-      unknown_descriptor.set_adapter("trainvm.training-components");
+      unknown_descriptor.set_adapter("trainvm.operations");
       unknown_descriptor.set_version("2.0.0");
       trainvm::v1::DescriptorResponse unknown_descriptor_response;
       const grpc::Status unknown_descriptor_status = service.GetDescriptor(
@@ -8710,6 +8814,16 @@ void test_service_registry_and_reconciliation() {
                     fixture_training_component_registry().registry_digest() &&
                 nlohmann::json::parse(descriptor_response.schema_json()) ==
                     fixture_training_component_registry().document_json() &&
+                operations_status.ok() &&
+                operations_response.schema_hash() ==
+                    expected_operation_registry
+                        .operation_descriptors_digest() &&
+                nlohmann::json::parse(operations_response.schema_json()) ==
+                    expected_operation_registry
+                        .operation_descriptors_json() &&
+                nlohmann::json::parse(operations_response.schema_json())
+                        .at("operations")
+                        .size() == 6U &&
                 unknown_descriptor_status.error_code() ==
                     grpc::StatusCode::NOT_FOUND &&
                 preview.training_component_lock_digest().starts_with(
@@ -8805,6 +8919,67 @@ void test_adapter_registry_and_reconciler() {
             train_profile.lifecycle.resume_grade ==
                 trainvm::ResumeGrade::exact,
         "adapter registry resolves exact authority-owned operation and lifecycle profiles while allowing a stateless process node in an exact-recovery plan");
+
+  const auto rejects_authoring_plan = [&](const trainvm::CompiledPlan& plan,
+                                          std::vector<trainvm::AdapterProfile>
+                                              profiles =
+                                                  fixture_adapter_profiles()) {
+    try {
+      trainvm::AdapterRegistry(std::move(profiles)).validate_plan(plan);
+    } catch (const trainvm::AdapterResolutionError&) {
+      return true;
+    }
+    return false;
+  };
+  auto missing_input_plan = *compiled.plan;
+  missing_input_plan.experiment.spec.workflow.nodes.at("train_to_boundary")
+      .invoke.inputs.erase("config");
+  auto unknown_input_plan = *compiled.plan;
+  unknown_input_plan.experiment.spec.workflow.nodes.at("train_to_boundary")
+      .invoke.inputs.emplace("invented", trainvm::Binding{
+                                        .literal = "value",
+                                        .parameter = std::nullopt,
+                                        .artifact = std::nullopt,
+                                        .control = std::nullopt,
+                                        .context = std::nullopt,
+                                        .node_output = std::nullopt,
+                                    });
+  auto wrong_value_type_plan = *compiled.plan;
+  auto& wrong_value_binding = wrong_value_type_plan.experiment.spec.workflow
+                                  .nodes.at("train_to_boundary")
+                                  .invoke.inputs.at("stop_at_step");
+  wrong_value_binding.parameter.reset();
+  wrong_value_binding.literal = "not-an-integer";
+  auto wrong_artifact_type_plan = *compiled.plan;
+  wrong_artifact_type_plan.experiment.spec.workflow.nodes.at("resume_training")
+      .invoke.inputs.at("checkpoint").artifact = "eval_gallery";
+  auto wrong_artifact_schema_plan = *compiled.plan;
+  wrong_artifact_schema_plan.experiment.spec.artifacts.at("encoder_cache")
+      .schema = "rwkv-lab.wrong-cache.v1";
+  auto undeclared_publish_plan = *compiled.plan;
+  undeclared_publish_plan.experiment.spec.workflow.nodes.at("train_to_boundary")
+      .publishes->emplace("invented", "checkpoint");
+  auto required_output_profiles = fixture_adapter_profiles();
+  const auto required_output_profile = std::ranges::find_if(
+      required_output_profiles, [](const trainvm::AdapterProfile& profile) {
+        return profile.key.operation == "train";
+      });
+  if (required_output_profile != required_output_profiles.end()) {
+    required_output_profile->authoring->outputs.at("checkpoint").required =
+        true;
+  }
+  auto missing_output_plan = *compiled.plan;
+  missing_output_plan.experiment.spec.workflow.nodes.at("train_to_boundary")
+      .publishes->erase("checkpoint");
+  check(rejects_authoring_plan(missing_input_plan) &&
+            rejects_authoring_plan(unknown_input_plan) &&
+            rejects_authoring_plan(wrong_value_type_plan) &&
+            rejects_authoring_plan(wrong_artifact_type_plan) &&
+            rejects_authoring_plan(wrong_artifact_schema_plan) &&
+            rejects_authoring_plan(undeclared_publish_plan) &&
+            rejects_authoring_plan(missing_output_plan,
+                                   std::move(required_output_profiles)),
+        "operation authoring authority rejects missing and unknown inputs, value and artifact contract mismatches, undeclared publishes, and omitted required outputs");
 
   auto compatible_train_profiles = fixture_adapter_profiles();
   const auto compatible_train = std::ranges::find_if(

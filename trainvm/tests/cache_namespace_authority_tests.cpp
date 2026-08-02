@@ -65,6 +65,10 @@ AdapterRegistry adapter_registry(bool compile = true) {
                     .graceful_stop = true,
                     .compile = compile,
                     .resume_grade = ResumeGrade::compatible},
+      .authoring = OperationAuthoringDeclaration{
+          .inputs = {},
+          .outputs = {},
+      },
   }});
 }
 
