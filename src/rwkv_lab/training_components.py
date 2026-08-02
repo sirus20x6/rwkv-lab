@@ -56,6 +56,7 @@ from rwkv_lab.training_runtime.optimizers import (
     AdamWConfiguration,
     AdamWNoDecayConfiguration,
     OptimizerImplementation,
+    SparseAdamConfiguration,
     build_registered_optimizer,
     optimizer_from_resolved_component,
 )
@@ -122,6 +123,7 @@ __all__ = [
     "PowerCoolConfiguration",
     "PrecisionImplementation",
     "RegisteredActivation",
+    "SparseAdamConfiguration",
     "ScheduleImplementation",
     "TerminalExpertRoutingConfiguration",
     "WeightDecayScheduleImplementation",

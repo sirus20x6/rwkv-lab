@@ -19,15 +19,17 @@ Design choices:
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import math
 import shutil
 import signal
 import sys
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 import numpy as np
 import torch
@@ -143,10 +145,8 @@ from .mutor_module import MuToRHead, mutor_loss
 from .fsp_module import FSPHead, fsp_loss
 from .parallel_heads_module import ParallelHeads, parallel_heads_loss
 from .safe_torch import safe_torch_load
-# Engram imports are deferred to main() because engram_ext lives outside this
-# package (under /thearray/git/engram/python). Import at call site only when
-# engram is actually enabled — keeps import of this module cheap for callers
-# that never touch Engram (eval_only.py, etc.).
+# Engram imports are deferred to the training entry point so non-Engram runs do
+# not require the separately attested ``engram-ext`` runtime distribution.
 
 
 def _text_model(model):
@@ -637,19 +637,29 @@ from .muon_helpers import _ParamProxy, _make_guarded_muonclip_class  # noqa: E40
 # ---------------------------------------------------------------------------
 @torch.no_grad()
 def eval_loss(model, arr: np.memmap, eval_start: int, eval_end: int,
-              cfg: TrainConfig, device: torch.device) -> tuple[float, float]:
+              cfg: TrainConfig, device: torch.device,
+              objective: Any | None = None,
+              heartbeat: Any | None = None) -> tuple[float, float]:
     model.eval()
     text_model = _text_model(model)
     rng = np.random.default_rng(12345)  # deterministic eval
     total_loss = 0.0
     total_tokens = 0
     for _ in range(cfg.eval_batches):
+        if heartbeat is not None:
+            heartbeat()
         ids = sample_windows(arr, eval_start, eval_end, cfg.seq_len,
                              cfg.micro_batch_size, rng).to(device)
         x, y = ids[:, :-1], ids[:, 1:]
         outputs = text_model(input_ids=x, use_cache=False)
         hidden = _last_hidden(outputs)
-        loss = chunked_lmhead_ce(hidden, model.lm_head, y, fused=bool(cfg.fused_ce)) * y.numel()
+        loss = (
+            objective(hidden, model.lm_head, y)
+            if objective is not None
+            else chunked_lmhead_ce(
+                hidden, model.lm_head, y, fused=bool(cfg.fused_ce)
+            )
+        ) * y.numel()
         total_loss += loss.item()
         total_tokens += y.numel()
         del ids, x, y, outputs, hidden, loss
@@ -664,7 +674,9 @@ def eval_loss(model, arr: np.memmap, eval_start: int, eval_end: int,
 @torch.no_grad()
 def multi_horizon_eval(model, arr: np.memmap, eval_start: int, eval_end: int,
                        cfg: TrainConfig, device: torch.device,
-                       horizons: tuple[int, ...] = (1, 2, 3, 4)) -> dict:
+                       horizons: tuple[int, ...] = (1, 2, 3, 4),
+                       metric_chunk_size: int = 2048,
+                       heartbeat: Any | None = None) -> dict:
     """Return {horizon k: {ppl, loss, top1, top5, tokens}} for each horizon.
     h=1 uses backbone; h>=2 uses k-1 chained MTP calls teacher-forced with
     ground-truth intermediate tokens."""
@@ -698,6 +710,8 @@ def multi_horizon_eval(model, arr: np.memmap, eval_start: int, eval_end: int,
     _eval_batches = model._eval_batches_cache
 
     for _b_idx in range(cfg.eval_batches):
+        if heartbeat is not None:
+            heartbeat()
         w_full = _eval_batches[_b_idx]
         B, L = w_full.shape
         T = L - 1
@@ -706,7 +720,12 @@ def multi_horizon_eval(model, arr: np.memmap, eval_start: int, eval_end: int,
         outputs = text_model(input_ids=x, use_cache=False)
         backbone_hidden = _last_hidden(outputs)
         if 1 in horizons:
-            m = chunked_lmhead_metrics(backbone_hidden, model.lm_head, w_full[:, 1:])
+            m = chunked_lmhead_metrics(
+                backbone_hidden,
+                model.lm_head,
+                w_full[:, 1:],
+                chunk=metric_chunk_size,
+            )
             totals[1]["loss_sum"] += m["loss_sum"]
             totals[1]["top1"] += m["top_counts"][1]
             totals[1]["top5"] += m["top_counts"][5]
@@ -743,7 +762,12 @@ def multi_horizon_eval(model, arr: np.memmap, eval_start: int, eval_end: int,
                 )
                 if k in horizons:
                     labels_k = w_full[:, k:L]
-                    m = chunked_lmhead_metrics(mtp_out, model.lm_head, labels_k)
+                    m = chunked_lmhead_metrics(
+                        mtp_out,
+                        model.lm_head,
+                        labels_k,
+                        chunk=metric_chunk_size,
+                    )
                     totals[k]["loss_sum"] += m["loss_sum"]
                     totals[k]["top1"] += m["top_counts"][1]
                     totals[k]["top5"] += m["top_counts"][5]
@@ -795,10 +819,51 @@ def _prune_old_checkpoints(out_dir: Path, keep: int) -> None:
             print(f"[ckpt prune] failed to remove {d.name}: {e}")
 
 
+def _commit_checkpoint_directory(staged: Path, final: Path) -> None:
+    """Atomically publish a new checkpoint, including same-step replacement.
+
+    A plain delete-then-rename creates a window where no completed checkpoint
+    exists. Linux ``renameat2(RENAME_EXCHANGE)`` swaps two directories in one
+    namespace operation: before the swap the old checkpoint is authoritative;
+    afterwards the new one is. The displaced old directory is left at the
+    dot-prefixed staging path and can be removed without risking the final.
+    """
+
+    if not final.exists():
+        staged.rename(final)
+        return
+    renameat2 = getattr(ctypes.CDLL(None, use_errno=True), "renameat2", None)
+    if renameat2 is None:
+        raise OSError("same-step checkpoint replacement requires renameat2")
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    at_fdcwd = -100
+    rename_exchange = 2
+    if renameat2(
+        at_fdcwd,
+        str(staged).encode(),
+        at_fdcwd,
+        str(final).encode(),
+        rename_exchange,
+    ) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, "atomic checkpoint directory exchange failed")
+    shutil.rmtree(staged)
+
+
 def save_checkpoint(step: int, mla_modules: list[MLAAttention], optimizer, cfg: TrainConfig,
                     model=None, engram_modules: list | None = None,
                     optimizer_host=None, optimizer_aux=None,
-                    plateau_state: dict | None = None) -> None:
+                    plateau_state: dict | None = None,
+                    component_evidence: dict[str, Any] | None = None,
+                    component_composition_digest: str | None = None,
+                    worker_control_state: dict[str, object] | None = None) -> Path:
     # Write to a dot-prefixed temp dir first, then rename. Makes the save
     # atomic: a kill mid-write leaves a .step_XXXXXX.tmp/ that the resume
     # code ignores (only step_XXXXXX/ dirs match the glob).
@@ -844,6 +909,12 @@ def save_checkpoint(step: int, mla_modules: list[MLAAttention], optimizer, cfg: 
     }
     if plateau_state is not None:
         payload["plateau_state"] = plateau_state
+    if component_evidence is not None:
+        payload["trainvm_component_evidence"] = component_evidence
+    if component_composition_digest is not None:
+        payload["component_composition_digest"] = component_composition_digest
+    if worker_control_state is not None:
+        payload["trainvm_worker_controls"] = worker_control_state
     if mtp_extra_sd is not None:
         payload["mtp_extra_state_dict"] = mtp_extra_sd
 
@@ -926,11 +997,10 @@ def save_checkpoint(step: int, mla_modules: list[MLAAttention], optimizer, cfg: 
         "step": step,
         "config": asdict(cfg),
     }, indent=2))
-    # Atomic commit: rename temp dir to final. If final exists (re-save of the
-    # same step), replace it.
-    if out_final.exists():
-        shutil.rmtree(out_final)
-    out.rename(out_final)
+    # Atomic commit also covers a same-step re-save without ever removing the
+    # previously completed directory from the authoritative final pathname.
+    _commit_checkpoint_directory(out, out_final)
+    return out_final
 
 
 def _full_attn_indices(cfg: TrainConfig) -> list[int]:
@@ -939,15 +1009,86 @@ def _full_attn_indices(cfg: TrainConfig) -> list[int]:
 
 
 # ---------------------------------------------------------------------------
-# Main
+# TrainVM-capable trainer entry point
 # ---------------------------------------------------------------------------
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    for f in TrainConfig.__dataclass_fields__.values():
-        ap.add_argument(f"--{f.name.replace('_','-')}", type=type(f.default), default=f.default)
-    args = ap.parse_args()
-    cfg = TrainConfig(**{k.replace("-","_"): v for k, v in vars(args).items()})
+def train(
+    cfg: TrainConfig,
+    *,
+    worker_components: Any | None = None,
+    worker_step_profiler: Any | None = None,
+    worker_observability: Any | None = None,
+    worker_controls: Any | None = None,
+) -> dict[str, object]:
     validate_train_config(cfg)
+    _interrupt_flag["count"] = 0
+    # Install before any model/data load or baseline evaluation. A first TERM
+    # requests a checkpoint at the earliest safe point; a second retains the
+    # legacy hard-stop escape hatch.
+    signal.signal(signal.SIGINT, _sig_handler)
+    signal.signal(signal.SIGTERM, _sig_handler)
+
+    component_evidence: dict[str, Any] | None = None
+    component_composition_digest: str | None = None
+    trainvm_accumulation = None
+    trainvm_objective = None
+    trainvm_weight_decay = None
+    trainvm_scheduler = None
+    if worker_components is not None:
+        accumulation = worker_components.gradient_accumulation()
+        trainvm_accumulation = accumulation
+        if accumulation.microbatches_per_optimizer_step != cfg.grad_accum_steps:
+            raise ValueError(
+                "TrainVM gradient accumulation disagrees with trainer configuration"
+            )
+        precision = worker_components.precision()
+        if precision.parameter_dtype is not torch.bfloat16:
+            raise ValueError("MLA v1 profiles require BF16 parameters")
+        trainvm_objective = worker_components.objective()
+        schedule_kind, schedule = worker_components.learning_rate_configuration()
+        if str(schedule_kind.value) != "rwkv_lab.schedule.linear_warmup_cosine.v1":
+            raise ValueError("MLA v1 profiles require linear-warmup cosine scheduling")
+        if (
+            schedule.warmup_steps != cfg.warmup_steps
+            or schedule.max_steps != cfg.max_steps
+            or not math.isclose(schedule.minimum_ratio, cfg.min_lr / cfg.lr)
+        ):
+            raise ValueError("TrainVM learning-rate schedule disagrees with trainer configuration")
+        decay = worker_components.configuration(
+            "weight_decay", category="weight_decay_schedule"
+        )
+        if not math.isclose(float(decay["weight_decay"]), cfg.weight_decay):
+            raise ValueError("TrainVM weight decay disagrees with trainer configuration")
+        clipping = worker_components.configuration(
+            "gradient_clipping", category="gradient_clipping"
+        )
+        if not math.isclose(float(clipping["max_norm"]), cfg.grad_clip):
+            raise ValueError("TrainVM gradient clipping disagrees with trainer configuration")
+        optimizer_configuration = worker_components.configuration(
+            "optimizer", category="optimizer"
+        )
+        if not math.isclose(
+            float(optimizer_configuration["learning_rate"]), cfg.lr
+        ):
+            raise ValueError("TrainVM optimizer disagrees with trainer learning rate")
+        if cfg.engram_enabled:
+            host_optimizer_configuration = worker_components.configuration(
+                "host_optimizer", category="optimizer"
+            )
+            if not math.isclose(
+                float(host_optimizer_configuration["learning_rate"]),
+                cfg.lr * cfg.engram_lr_mult,
+            ):
+                raise ValueError(
+                    "TrainVM Engram host optimizer disagrees with its learning rate"
+                )
+        component_evidence = dict(worker_components.evidence())
+        component_composition_digest = (
+            worker_components.composition.composition_digest
+        )
+
+    def reject_live_controls(_effective: object, assignments: object) -> None:
+        if assignments:
+            raise ValueError("Transformer MLA v1 has no live-mutable controls")
 
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
@@ -959,18 +1100,57 @@ def main() -> None:
     def log(row: dict) -> None:
         log_f.write(json.dumps(row) + "\n")
         log_f.flush()
+        if worker_observability is None:
+            return
+        step_now = row.get("step")
+        if not isinstance(step_now, int) or isinstance(step_now, bool) or step_now < 0:
+            return
+        names = {
+            "train": {
+                "loss": "train.loss",
+                "lr": "train.learning_rate",
+                "gnorm": "train.gradient_norm",
+                "tok_per_sec": "train.tokens_per_second",
+            },
+            "eval": {
+                "loss": "eval.loss",
+                "ppl": "eval.perplexity",
+                "top1_acc": "eval.top1_accuracy",
+                "top5_acc": "eval.top5_accuracy",
+            },
+        }.get(row.get("kind"), {})
+        for field, metric in names.items():
+            value = row.get(field)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                worker_observability.publish_if_declared(metric, value, step=step_now)
+
+    def training_ce(
+        hidden: torch.Tensor, linear_head: torch.nn.Module, labels: torch.Tensor
+    ) -> torch.Tensor:
+        if trainvm_objective is not None:
+            return trainvm_objective(hidden, linear_head, labels)
+        return chunked_lmhead_ce(
+            hidden, linear_head, labels, fused=bool(cfg.fused_ce)
+        )
 
     print("Loading model (this can take ~1 minute)...")
-    model, mla_modules = load_converted_model(
-        model_dir=cfg.model_dir, patch_dir=cfg.patch_dir,
-        device_map="cuda:0", dtype=torch.bfloat16,
-        freeze_non_mla=bool(cfg.freeze_non_mla),
-        install_mtp=bool(cfg.install_mtp),
-        rwkv8_deltanet_layers=cfg.rwkv8_deltanet_layers,
-        rwkv8_ffn_hidden_size=cfg.rwkv8_ffn_hidden_size or None,
-        rwkv8_init_output_scale=cfg.rwkv8_init_output_scale,
-        rwkv8_swap_mode=cfg.rwkv8_swap_mode,
-    )
+    with (
+        worker_observability.keepalive(0, "loading")
+        if worker_observability is not None
+        else nullcontext()
+    ):
+        model, mla_modules = load_converted_model(
+            model_dir=cfg.model_dir, patch_dir=cfg.patch_dir,
+            device_map="cuda:0", dtype=torch.bfloat16,
+            freeze_non_mla=bool(cfg.freeze_non_mla),
+            install_mtp=bool(cfg.install_mtp),
+            rwkv8_deltanet_layers=cfg.rwkv8_deltanet_layers,
+            rwkv8_ffn_hidden_size=cfg.rwkv8_ffn_hidden_size or None,
+            rwkv8_init_output_scale=cfg.rwkv8_init_output_scale,
+            rwkv8_swap_mode=cfg.rwkv8_swap_mode,
+        )
+    if worker_observability is not None:
+        worker_observability.optimizer_step(0, "loaded")
     if not cfg.freeze_non_mla:
         print("freeze_non_mla=0: backbone + MTP + lm_head + embeddings all trainable")
     mtp_installed = getattr(model, "mtp_trainer", None) is not None
@@ -1064,11 +1244,8 @@ def main() -> None:
     if cfg.engram_enabled:
         if not cfg.engram_patch_dir:
             raise ValueError("--engram-enabled=1 requires --engram-patch-dir=<dir>")
-        # Deferred imports — engram_ext is under /thearray/git/engram/python
-        import sys as _sys
-        _ENGRAM_PY = "/thearray/git/engram/python"
-        if _ENGRAM_PY not in _sys.path:
-            _sys.path.insert(0, _ENGRAM_PY)
+        # The sealed runtime deployment owns this import. Never prepend a
+        # machine-local checkout: that would bypass dependency attestation.
         from engram_ext.engram_module import EngramConfig as _EngramConfig
         from .engram_integration import install_engram
         from .load_mla_engram import _apply_engram_patch, _read_patch
@@ -1250,9 +1427,14 @@ def main() -> None:
     n_total = sum(p.numel() for p in model.parameters())
     print(f"trainable params: {n_train/1e9:.3f}B / {n_total/1e9:.3f}B")
 
-    # 8-bit AdamW via bitsandbytes: saves ~8GB of optimizer state vs fp32 AdamW
-    # for a 1.3B trainable param count. Required to fit on 96GB with the 35B base.
-    import bitsandbytes as bnb
+    # Legacy CLI runs use bitsandbytes. TrainVM profiles instead construct the
+    # optimizer from the authority-resolved component, so the executable does
+    # not silently substitute its historical optimizer default.
+    bnb = None
+    if worker_components is None:
+        import bitsandbytes as bnb
+    elif cfg.optimizer != "trainvm":
+        raise ValueError("TrainVM MLA profiles require the resolved optimizer")
     if engram_modules:
         # Split trainable params into three bins:
         #   - main (MLA / MTP / aux / anything else trainable): base LR, standard WD
@@ -1272,12 +1454,24 @@ def main() -> None:
         if eng_gpu_params:
             param_groups.append(
                 {"params": eng_gpu_params, "lr": cfg.lr * cfg.engram_lr_mult,
-                 "weight_decay": 0.0}
+                 "weight_decay": 0.0, "weight_decay_multiplier": 0.0}
             )
-        optimizer = bnb.optim.AdamW8bit(param_groups, betas=(0.9, 0.95))
+        optimizer = (
+            worker_components.optimizer(param_groups)
+            if worker_components is not None
+            else bnb.optim.AdamW8bit(param_groups, betas=(0.9, 0.95))
+        )
         if eng_host_params:
-            optimizer_host = torch.optim.SparseAdam(
-                eng_host_params, lr=cfg.lr * cfg.engram_lr_mult, betas=(0.9, 0.95)
+            optimizer_host = (
+                worker_components.optimizer(
+                    eng_host_params, slot="host_optimizer"
+                )
+                if worker_components is not None
+                else torch.optim.SparseAdam(
+                    eng_host_params,
+                    lr=cfg.lr * cfg.engram_lr_mult,
+                    betas=(0.9, 0.95),
+                )
             )
         print(f"  main (MLA/MTP/aux/...): {sum(p.numel() for p in main_params)/1e6:.1f}M @ lr={cfg.lr:.1e}")
         if eng_gpu_params:
@@ -1287,7 +1481,9 @@ def main() -> None:
             print(f"  engram host (SparseAdam): {sum(p.numel() for p in eng_host_params)/1e9:.2f}B "
                   f"@ lr={cfg.lr*cfg.engram_lr_mult:.1e}")
     else:
-        if cfg.optimizer == "muonclip":
+        if cfg.optimizer == "trainvm":
+            optimizer = worker_components.optimizer(trainable)
+        elif cfg.optimizer == "muonclip":
             # MuonClip from the muon-clip pkg. Constructor takes (model, model_config, MuonConfig)
             # and auto-routes 2D → Muon and other → Adam internally based on p.ndim.
             # We disable QK-clipping because its weight-rescale math hardcodes
@@ -1428,6 +1624,16 @@ def main() -> None:
     if cfg.resume:
         print(f"resuming from: {cfg.resume}")
         ckpt = safe_torch_load(cfg.resume, map_location="cpu")
+        if worker_components is not None:
+            saved_components = ckpt.get("component_composition_digest")
+            if saved_components != component_composition_digest:
+                raise ValueError(
+                    "resume checkpoint was produced by a different TrainVM component composition"
+                )
+            saved_controls = ckpt.get("trainvm_worker_controls")
+            if saved_controls is None or worker_controls is None:
+                raise ValueError("resume checkpoint omits TrainVM control state")
+            worker_controls.verify_checkpoint_state(saved_controls)
         saved_mla = ckpt["mla_state_dicts"]
         if cfg.mla_from_patch:
             print(f"mla_from_patch=1: IGNORING ckpt's mla_state_dicts, keeping "
@@ -1630,6 +1836,10 @@ def main() -> None:
                     g["peak_lr"] = _pk
                 print("optimizer state restored from checkpoint")
             except (ValueError, KeyError, RuntimeError) as e:
+                if worker_components is not None:
+                    raise ValueError(
+                        "TrainVM resume optimizer state is incompatible"
+                    ) from e
                 print(f"optimizer state skipped (incompatible with current training "
                       f"mode: {e}). Starting with fresh optimizer state.")
         if "optimizer_state_host" in ckpt and optimizer_host is not None:
@@ -1637,6 +1847,10 @@ def main() -> None:
                 optimizer_host.load_state_dict(ckpt["optimizer_state_host"])
                 print("optimizer_host (SparseAdam) state restored from checkpoint")
             except (ValueError, KeyError, RuntimeError) as e:
+                if worker_components is not None:
+                    raise ValueError(
+                        "TrainVM resume host-optimizer state is incompatible"
+                    ) from e
                 print(f"optimizer_host state skipped: {e}")
         if "optimizer_state_aux" in ckpt and optimizer_aux is not None:
             try:
@@ -1652,6 +1866,12 @@ def main() -> None:
         _resume_plateau_state = ckpt.get("plateau_state")
         print(f"resumed at step {start_step}")
         del ckpt
+
+    if worker_components is not None:
+        trainvm_weight_decay = worker_components.weight_decay_schedule(optimizer)
+        trainvm_scheduler = worker_components.learning_rate_schedule(optimizer)
+        if start_step > 0:
+            trainvm_scheduler.step(start_step)
 
     arr, train_end, eval_end = open_tokens(cfg)
     eval_start = train_end
@@ -1671,11 +1891,24 @@ def main() -> None:
 
     # Helper: run eval, optionally including horizon-2/3/4 metrics when MTP is installed.
     def do_eval(step_now: int, prefix: str = "") -> None:
+        if worker_controls is not None and step_now > 0:
+            worker_controls.evaluation(step_now, reject_live_controls)
         t0 = time.time()
         if mtp_installed:
             horizons = (1, 2, 3, 4)
             results = multi_horizon_eval(model, arr, eval_start, eval_end, cfg, device,
-                                         horizons=horizons)
+                                         horizons=horizons,
+                                         metric_chunk_size=(
+                                             trainvm_objective.configuration.chunk_size
+                                             if trainvm_objective is not None else 2048
+                                         ),
+                                         heartbeat=(
+                                             lambda: worker_observability.optimizer_step(
+                                                 step_now, "evaluating"
+                                             )
+                                             if worker_observability is not None
+                                             else None
+                                         ))
             # Print compact summary + log
             lines = [f"  {prefix}step {step_now}  ({time.time()-t0:.0f}s)"]
             for k in horizons:
@@ -1697,7 +1930,22 @@ def main() -> None:
                     row[f"h{k}_top5"] = results[k]["top5_acc"]
             h1_for_rop = results[1]["ppl"]
         else:
-            el, ep = eval_loss(model, arr, eval_start, eval_end, cfg, device)
+            el, ep = eval_loss(
+                model,
+                arr,
+                eval_start,
+                eval_end,
+                cfg,
+                device,
+                objective=trainvm_objective,
+                heartbeat=(
+                    lambda: worker_observability.optimizer_step(
+                        step_now, "evaluating"
+                    )
+                    if worker_observability is not None
+                    else None
+                ),
+            )
             print(f"  {prefix}step {step_now} | eval_loss={el:.4f}  ppl={ep:.2f}  ({time.time()-t0:.0f}s)")
             row = {"step": step_now, "kind": "eval", "loss": el, "ppl": ep}
             h1_for_rop = ep
@@ -1713,15 +1961,43 @@ def main() -> None:
                 row["rop_dropped"] = True
         log(row)
 
+    def finish_interrupted(step_now: int) -> dict[str, object]:
+        print(f"[interrupt] saving at step {step_now} before exit...")
+        with (
+            worker_observability.keepalive(step_now, "checkpointing")
+            if worker_observability is not None
+            else nullcontext()
+        ):
+            checkpoint_path = save_checkpoint(
+                step_now, mla_modules, optimizer, cfg, model=model,
+                engram_modules=engram_modules, optimizer_host=optimizer_host,
+                optimizer_aux=optimizer_aux,
+                plateau_state=plateau_ctrl.state_dict(),
+                component_evidence=component_evidence,
+                component_composition_digest=component_composition_digest,
+                worker_control_state=(
+                    worker_controls.checkpoint_state()
+                    if worker_controls is not None else None
+                ),
+            )
+        log({"step": step_now, "kind": "checkpoint", "reason": "interrupt"})
+        log_f.close()
+        print(f"[interrupt] saved -> {checkpoint_path}. bye.")
+        if worker_components is not None:
+            return {
+                "status": "interrupted",
+                "step": step_now,
+                "checkpoint": str(checkpoint_path),
+            }
+        sys.exit(0)
+
     # Baseline eval (at whatever step we resumed from) before continuing training
+    if _interrupt_flag["count"] > 0:
+        return finish_interrupted(start_step)
     print("baseline eval...")
     do_eval(start_step)
-
-    # Install signal handlers for graceful save-and-exit. The first Ctrl-C /
-    # TERM will finish the current accum step, save, and exit cleanly; the
-    # second forces exit if the save itself hangs.
-    signal.signal(signal.SIGINT, _sig_handler)
-    signal.signal(signal.SIGTERM, _sig_handler)
+    if _interrupt_flag["count"] > 0:
+        return finish_interrupted(start_step)
 
     # DataLoader prefetch: overlap memmap reads with GPU compute. 1 worker is
     # enough at micro_batch_size=1 because each sample is only ~16 KB; the
@@ -1773,6 +2049,10 @@ def main() -> None:
             optimizer_aux.zero_grad(set_to_none=True)
         accum_loss_t = None
         for _ in range(cfg.grad_accum_steps):
+            if worker_observability is not None:
+                worker_observability.optimizer_step(step, "train")
+            if worker_controls is not None:
+                worker_controls.microbatch(step + 1, reject_live_controls)
             ids = next(_train_iter).to(device, non_blocking=True)
             x, y = ids[:, :-1], ids[:, 1:]
             if cfg.train_aux_only:
@@ -1846,8 +2126,9 @@ def main() -> None:
                     # beyond label range). Labels for this horizon: y[k+1 : T].
                     valid_logits_hidden = mtp_out_k[:, :L_k - 1]
                     valid_labels = y[:, k + 1:]  # length T - k - 1 = L_k - 1
-                    loss_h = chunked_lmhead_ce(valid_logits_hidden, model.lm_head, valid_labels,
-                                               fused=bool(cfg.fused_ce))
+                    loss_h = training_ce(
+                        valid_logits_hidden, model.lm_head, valid_labels
+                    )
                     losses_by_horizon.append(weight * loss_h)
 
                     prev_out = mtp_out_k
@@ -1889,8 +2170,7 @@ def main() -> None:
                 text_model = _text_model(model)
                 outputs = text_model(input_ids=x, use_cache=False)
                 backbone_hidden = _last_hidden(outputs)
-                lm_loss = chunked_lmhead_ce(backbone_hidden, model.lm_head, y,
-                                            fused=bool(cfg.fused_ce))
+                lm_loss = training_ce(backbone_hidden, model.lm_head, y)
 
                 T = x.shape[1]
                 # Precompute full-range RoPE once; each horizon slices.
@@ -1917,8 +2197,9 @@ def main() -> None:
                     )
                     valid_logits_hidden = mtp_out_k[:, :L_k - 1]
                     valid_labels = y[:, k + 1:]
-                    loss_h = chunked_lmhead_ce(valid_logits_hidden, model.lm_head, valid_labels,
-                                               fused=bool(cfg.fused_ce))
+                    loss_h = training_ce(
+                        valid_logits_hidden, model.lm_head, valid_labels
+                    )
                     chain_losses.append(weight * loss_h)
                     prev_out = mtp_out_k
                     del hidden_k, ids_k, pos_k, cos_k, sin_k
@@ -1962,8 +2243,7 @@ def main() -> None:
                     text_model = _text_model(model)
                     outputs = text_model(input_ids=x, use_cache=False)
                     backbone_hidden = _last_hidden(outputs)
-                    loss = chunked_lmhead_ce(backbone_hidden, model.lm_head, y,
-                                             fused=bool(cfg.fused_ce))
+                    loss = training_ce(backbone_hidden, model.lm_head, y)
                     if cfg.mutor_enabled:
                         mut_l, n_mut = mutor_loss(
                             backbone_hidden, y, model.lm_head, model.mutor_head,
@@ -1992,12 +2272,16 @@ def main() -> None:
                     text_model = _text_model(model)
                     outputs = text_model(input_ids=x, use_cache=False)
                     hidden = _last_hidden(outputs)
-                    loss = chunked_lmhead_ce(hidden, model.lm_head, y,
-                                             fused=bool(cfg.fused_ce))
+                    loss = training_ce(hidden, model.lm_head, y)
                     logits = loss  # placeholder for downstream del
                     del outputs, hidden
 
-            (loss / cfg.grad_accum_steps).backward()
+            scaled_loss = (
+                trainvm_accumulation.scale_loss(loss)
+                if trainvm_accumulation is not None
+                else loss / cfg.grad_accum_steps
+            )
+            scaled_loss.backward()
             loss_for_log = loss.detach() / cfg.grad_accum_steps
             accum_loss_t = loss_for_log if accum_loss_t is None else accum_loss_t + loss_for_log
             running_tokens += y.numel()
@@ -2013,10 +2297,21 @@ def main() -> None:
         # group's stored peak, then multiply by the ROP plateau-multiplier (if
         # enabled). The plateau mult is set inside do_eval() and persists between
         # evals; it can only reduce, never raise.
-        lr = lr_at(step, cfg, start_step=start_step)
+        lr = (
+            float(optimizer.param_groups[0]["lr"])
+            if trainvm_scheduler is not None
+            else lr_at(step, cfg, start_step=start_step)
+        )
         sched_frac = lr / cfg.lr if cfg.lr > 0 else 1.0
         rop_mult = plateau_ctrl.mult if plateau_ctrl is not None else 1.0
-        if engram_modules and len(optimizer.param_groups) >= 2:
+        if trainvm_scheduler is not None:
+            # The registered scheduler already set every main optimizer group,
+            # preserving declared per-group base-LR ratios. Engram's separately
+            # declared sparse host optimizer follows the same normalized phase.
+            if optimizer_host is not None:
+                for group in optimizer_host.param_groups:
+                    group["lr"] = lr * cfg.engram_lr_mult
+        elif engram_modules and len(optimizer.param_groups) >= 2:
             optimizer.param_groups[0]["lr"] = lr * rop_mult
             optimizer.param_groups[1]["lr"] = lr * cfg.engram_lr_mult * rop_mult
         elif cfg.optimizer in ("muon", "muonclip"):
@@ -2045,13 +2340,29 @@ def main() -> None:
             and step % cfg.grad_clip_every == 0
         )
         if clip_due:
-            last_gnorm_t = torch.nn.utils.clip_grad_norm_(clip_targets, cfg.grad_clip).detach()
+            last_gnorm_t = (
+                worker_components.gradient_clipping(clip_targets).detach()
+                if worker_components is not None
+                else torch.nn.utils.clip_grad_norm_(
+                    clip_targets, cfg.grad_clip
+                ).detach()
+            )
+        if trainvm_weight_decay is not None:
+            trainvm_weight_decay.step(step)
         optimizer.step()
         if optimizer_host is not None:
             optimizer_host.step()
         if optimizer_aux is not None:
             optimizer_aux.step()
+        if trainvm_scheduler is not None:
+            trainvm_scheduler.step()
         step += 1
+        if worker_step_profiler is not None:
+            worker_step_profiler.step(step)
+        if worker_observability is not None:
+            worker_observability.optimizer_step(step)
+        if worker_controls is not None:
+            worker_controls.optimizer_step(step, reject_live_controls)
 
         if step % cfg.log_every == 0:
             dt = time.time() - t_win
@@ -2095,38 +2406,102 @@ def main() -> None:
         # Time-based save (wall clock, independent of step count)
         time_save_due = (cfg.save_every_seconds > 0
                         and time.time() - last_save_time >= cfg.save_every_seconds)
-        if step_save_due or time_save_due:
+        checkpoint_requested = bool(
+            worker_controls is not None
+            and worker_controls.checkpoint_boundary_requested
+        )
+        if step_save_due or time_save_due or checkpoint_requested:
             reason = "step" if step_save_due else f"{int(time.time()-last_save_time)}s elapsed"
+            if checkpoint_requested:
+                reason = "controller request"
             print(f"  [ckpt] saving at step {step} ({reason})...")
-            save_checkpoint(step, mla_modules, optimizer, cfg, model=model,
-                            engram_modules=engram_modules, optimizer_host=optimizer_host,
-                            optimizer_aux=optimizer_aux,
-                            plateau_state=plateau_ctrl.state_dict())
+            if worker_controls is not None:
+                worker_controls.checkpoint(step, reject_live_controls)
+            with (
+                worker_observability.keepalive(step, "checkpointing")
+                if worker_observability is not None
+                else nullcontext()
+            ):
+                checkpoint_path = save_checkpoint(
+                    step, mla_modules, optimizer, cfg, model=model,
+                    engram_modules=engram_modules, optimizer_host=optimizer_host,
+                    optimizer_aux=optimizer_aux,
+                    plateau_state=plateau_ctrl.state_dict(),
+                    component_evidence=component_evidence,
+                    component_composition_digest=component_composition_digest,
+                    worker_control_state=(
+                        worker_controls.checkpoint_state()
+                        if worker_controls is not None else None
+                    ),
+                )
             _prune_old_checkpoints(Path(cfg.out_dir), cfg.max_saved_checkpoints)
             log({"step": step, "kind": "checkpoint"})
+            if (
+                worker_controls is not None
+                and worker_controls.checkpoint_completion_requested
+            ):
+                worker_controls.publish_requested_checkpoint_directory(
+                    str(checkpoint_path),
+                    optimizer_step=step,
+                    resume_grade="compatible",
+                    state_components=(
+                        "component_composition",
+                        "control_revision",
+                        "lr_schedule",
+                        "model",
+                        "optimizer",
+                        "optimizer_groups",
+                        "plateau_state",
+                        "topology",
+                    ),
+                    progress=lambda _bytes: worker_observability.optimizer_step(
+                        step, "checkpointing"
+                    )
+                    if worker_observability is not None
+                    else None,
+                )
             last_save_time = time.time()
             t_win = time.time()
 
         # Signal-based save-and-exit (Ctrl-C / systemd stop)
         if _interrupt_flag["count"] > 0:
-            print(f"[interrupt] saving at step {step} before exit...")
-            save_checkpoint(step, mla_modules, optimizer, cfg, model=model,
-                            engram_modules=engram_modules, optimizer_host=optimizer_host,
-                            optimizer_aux=optimizer_aux,
-                            plateau_state=plateau_ctrl.state_dict())
-            log({"step": step, "kind": "checkpoint", "reason": "interrupt"})
-            log_f.close()
-            print(f"[interrupt] saved -> {cfg.out_dir}/step_{step:06d}. bye.")
-            sys.exit(0)
+            return finish_interrupted(step)
 
     # Final eval + save (never pruned — always the latest)
     do_eval(step, prefix="final ")
-    save_checkpoint(step, mla_modules, optimizer, cfg, model=model,
-                    engram_modules=engram_modules, optimizer_host=optimizer_host,
-                    optimizer_aux=optimizer_aux,
-                    plateau_state=plateau_ctrl.state_dict())
+    with (
+        worker_observability.keepalive(step, "checkpointing")
+        if worker_observability is not None
+        else nullcontext()
+    ):
+        checkpoint_path = save_checkpoint(
+            step, mla_modules, optimizer, cfg, model=model,
+            engram_modules=engram_modules, optimizer_host=optimizer_host,
+            optimizer_aux=optimizer_aux,
+            plateau_state=plateau_ctrl.state_dict(),
+            component_evidence=component_evidence,
+            component_composition_digest=component_composition_digest,
+            worker_control_state=(
+                worker_controls.checkpoint_state()
+                if worker_controls is not None else None
+            ),
+        )
     log_f.close()
     print(f"done. step {step} / {cfg.max_steps}  ckpt -> {cfg.out_dir}/step_{step:06d}")
+    return {"status": "complete", "step": step, "checkpoint": str(checkpoint_path)}
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    for field in TrainConfig.__dataclass_fields__.values():
+        ap.add_argument(
+            f"--{field.name.replace('_','-')}",
+            type=type(field.default),
+            default=field.default,
+        )
+    args = ap.parse_args()
+    cfg = TrainConfig(**vars(args))
+    train(cfg)
 
 
 if __name__ == "__main__":

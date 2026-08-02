@@ -212,6 +212,28 @@
     {
       "key": {
         "category": "optimizer",
+        "name": "torch_sparse_adam",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.optimizer.torch_sparse_adam.v1",
+      "model_families": ["transformer"],
+      "required_capabilities": ["optimizer.torch_sparse_adam.v1"],
+      "configuration": [
+        {"name": "learning_rate", "type": "number", "required": true, "minimum": 1e-12, "maximum": 1.0, "unit": "ratio"},
+        {"name": "beta1", "type": "number", "required": false, "default": 0.9, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
+        {"name": "beta2", "type": "number", "required": false, "default": 0.999, "minimum": 0.0, "maximum": 0.999999999999, "unit": "ratio"},
+        {"name": "epsilon", "type": "number", "required": false, "default": 1e-8, "minimum": 1e-16, "maximum": 1.0, "unit": "ratio"}
+      ],
+      "state": [
+        {"name": "sparse_parameter_state_manifest", "type": "string", "required": true}
+      ],
+      "state_grade": "exact",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "optimizer",
         "name": "fp32_master_adamw_no_decay",
         "version": "2.0.0"
       },
