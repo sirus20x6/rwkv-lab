@@ -10,7 +10,7 @@
       ".py"
     ]
   },
-  "source_tree_digest": "sha256:7a6f1c6c635ad1ef43568a3a956dbeefd149617c0fcd3d0e967b9bfec4581312",
+  "source_tree_digest": "sha256:8e1cb49626f9c08c072d7bcf461aee42cbf5e495536857c0bbf360f9e165c542",
   "entries": [
     {
       "source_path": "src/rwkv_lab/__init__.py",
@@ -3048,7 +3048,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "vision.native-head-train",
-      "source_sha256": "sha256:f49349122fb95633cb1eaca9748f1f67d9b90cb5577bb25a3b0b2a0a1dec2646",
+      "source_sha256": "sha256:9d6dd1bedc85fb15e2f0e11eb49732a3d43066216b4f4a5fc319bcb6ffad6e11",
       "family": "vision_multimodal",
       "coverage": "direct",
       "consumers": [

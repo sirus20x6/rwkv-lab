@@ -1,7 +1,7 @@
 {
   "api_version": "trainvm.compatibility-workflows/v1",
   "authority": "compatibility_evidence_only",
-  "source_tree_digest": "sha256:c4f4b0e308b77c2d9ee230c2d3492e5399132e118e44c8ec5eb7112dd91ff1a7",
+  "source_tree_digest": "sha256:cebfe14f87072a587f2267d3518e061a9956c818ab7ab8d1354bb4d0a6e7e2bf",
   "entries": [
     {
       "stable_id": "rwkv.synthetic-campaign",
@@ -128,7 +128,7 @@
       ],
       "stateful": true,
       "operation_role": "training",
-      "notes": "Native representation head trainer; legacy resume does not preserve a complete sampler cursor and input closure.",
+      "notes": "Native representation head trainer. The sealed rwkv-lab.vision-native-head@1.0.0 TrainVM profile content-binds baseline/compressor checkpoints, manifests, caches, teacher/model identities, and vocabulary; enforces the compressor-owned trainable scope; consumes typed optimizer/schedule/decay/clipping/precision components; emits live telemetry/profiling; and publishes required compatible checkpoints. The length-bucket sampler cursor is not checkpointed, so exactness is not claimed.",
       "observed_invocation": "python_module",
       "resume_evidence": "compatible",
       "legacy_invocation_display": "python -m rwkv_lab.vision_native_train <arguments>"

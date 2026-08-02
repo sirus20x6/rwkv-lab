@@ -197,7 +197,7 @@ int main() {
   check(rwkv_catalog.entries().size() == 165U,
         "RWKV disposition catalog covers all 165 reviewed modules");
   check(rwkv_catalog.catalog_digest() ==
-            "sha256:f7a1e91cac7d67f1063758a7ea1a2cb72a324695b3b05a73ec8b5b74896aa72e",
+            "sha256:b2602723c5836b0f92ae4d659b5d143dd1074c9bd1b83ed0ec405326559f73a0",
         "RWKV catalog pins the exact reviewed canonical mapping");
   classes.clear();
   std::map<std::string, std::size_t> coverage;
