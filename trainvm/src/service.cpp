@@ -1315,6 +1315,36 @@ void populate_invocation(v1::WorkerWelcome& welcome,
       worker_invocation_canonical_json(invocation);
   welcome.set_canonical_invocation_json(canonical);
   welcome.set_invocation_digest(invocation.invocation_digest);
+
+  if (!invocation.execution.is_object()) return;
+  const auto append_phase = [&](std::string_view name,
+                                v1::WorkerExecutionPhaseRequest::Phase phase) {
+    const auto declaration = invocation.execution.find(name);
+    if (declaration == invocation.execution.end() ||
+        !declaration->is_object()) {
+      return;
+    }
+    const bool enabled = declaration->value("enabled", false);
+    nlohmann::json digest_body{{"api_version",
+                                "trainvm.worker-execution-phase-request/v1"},
+                               {"enabled", enabled},
+                               {"invocation_digest",
+                                invocation.invocation_digest},
+                               {"phase", name}};
+    auto* request = welcome.add_execution_phase_requests();
+    request->set_phase(phase);
+    request->set_enabled(enabled);
+    if (name == "warmup" && declaration->contains("steps")) {
+      const auto steps = declaration->at("steps").get<std::uint64_t>();
+      request->set_steps(steps);
+      digest_body["steps"] = steps;
+    }
+    request->set_request_digest("sha256:" + sha256_hex(digest_body.dump()));
+  };
+  append_phase("compile",
+               v1::WorkerExecutionPhaseRequest::PHASE_COMPILE);
+  append_phase("warmup",
+               v1::WorkerExecutionPhaseRequest::PHASE_WARMUP);
 }
 
 }  // namespace
@@ -3046,6 +3076,140 @@ grpc::Status TrainVMService::record_worker_artifact(
   }
 }
 
+grpc::Status TrainVMService::record_worker_execution_phase_receipt(
+    const v1::WorkerExecutionPhaseReceipt& receipt,
+    const WorkerConnection& connection, std::uint64_t& acknowledged) {
+  if (receipt.ByteSizeLong() > kMaximumWorkerMessageBytes) {
+    return {grpc::StatusCode::RESOURCE_EXHAUSTED,
+            "worker execution-phase receipt exceeds 64 KiB"};
+  }
+  try {
+    const auto valid_digest = [](std::string_view value) {
+      return value.size() == 71U && value.starts_with("sha256:") &&
+             std::ranges::all_of(value.substr(7U), [](char character) {
+               return (character >= '0' && character <= '9') ||
+                      (character >= 'a' && character <= 'f');
+             });
+    };
+    if (receipt.worker_sequence() == 0U ||
+        !valid_digest(receipt.request_digest()) ||
+        !valid_digest(receipt.state_fingerprint_before()) ||
+        !valid_digest(receipt.state_fingerprint_after()) ||
+        receipt.concurrency_key() != connection.identity.concurrency_key ||
+        receipt.lease_id() != connection.identity.lease_id ||
+        receipt.fencing_token() != connection.identity.fencing_token ||
+        !receipt.has_started_at() || !receipt.has_completed_at()) {
+      return {grpc::StatusCode::INVALID_ARGUMENT,
+              "execution-phase receipt has invalid content or fenced identity"};
+    }
+
+    std::string phase_name;
+    switch (receipt.phase()) {
+      case v1::WorkerExecutionPhaseRequest::PHASE_COMPILE:
+        phase_name = "compile";
+        break;
+      case v1::WorkerExecutionPhaseRequest::PHASE_WARMUP:
+        phase_name = "warmup";
+        break;
+      case v1::WorkerExecutionPhaseRequest::PHASE_UNSPECIFIED:
+      default:
+        return {grpc::StatusCode::INVALID_ARGUMENT,
+                "execution-phase receipt phase is invalid"};
+    }
+    const v1::WorkerExecutionPhaseRequest* request = nullptr;
+    for (const auto& candidate :
+         connection.welcome.execution_phase_requests()) {
+      if (candidate.phase() != receipt.phase()) continue;
+      if (request != nullptr) {
+        return {grpc::StatusCode::DATA_LOSS,
+                "worker invocation has duplicate execution-phase requests"};
+      }
+      request = &candidate;
+    }
+    if (request == nullptr ||
+        request->request_digest() != receipt.request_digest()) {
+      return {grpc::StatusCode::PERMISSION_DENIED,
+              "execution-phase receipt is not authorized by its immutable request"};
+    }
+
+    std::string disposition;
+    switch (receipt.disposition()) {
+      case v1::WorkerExecutionPhaseReceipt::DISPOSITION_COMPLETED:
+        disposition = "completed";
+        break;
+      case v1::WorkerExecutionPhaseReceipt::DISPOSITION_SKIPPED:
+        disposition = "skipped";
+        break;
+      case v1::WorkerExecutionPhaseReceipt::DISPOSITION_FAILED:
+        disposition = "failed";
+        break;
+      case v1::WorkerExecutionPhaseReceipt::DISPOSITION_UNSPECIFIED:
+      default:
+        return {grpc::StatusCode::INVALID_ARGUMENT,
+                "execution-phase receipt disposition is invalid"};
+    }
+    const nlohmann::json diagnostics = acknowledgement_diagnostics(receipt);
+    const bool completed = disposition == "completed";
+    const bool skipped = disposition == "skipped";
+    const bool failed = disposition == "failed";
+    if ((request->enabled() && skipped) ||
+        (!request->enabled() && !skipped) ||
+        (failed && diagnostics.empty()) ||
+        ((completed || skipped) &&
+         receipt.state_fingerprint_before() !=
+             receipt.state_fingerprint_after())) {
+      return {grpc::StatusCode::INVALID_ARGUMENT,
+              "execution-phase disposition or restored-state proof is inconsistent"};
+    }
+    const std::uint64_t requested_steps =
+        request->has_steps() ? request->steps() : 0U;
+    if ((skipped && receipt.steps_executed() != 0U) ||
+        (completed && receipt.steps_executed() != requested_steps) ||
+        (failed && receipt.steps_executed() > requested_steps)) {
+      return {grpc::StatusCode::INVALID_ARGUMENT,
+              "execution-phase receipt step count disagrees with its request"};
+    }
+    const std::int64_t started_at_ns = timestamp_ns(receipt.started_at());
+    const std::int64_t completed_at_ns = timestamp_ns(receipt.completed_at());
+    if (completed_at_ns < started_at_ns) {
+      return {grpc::StatusCode::INVALID_ARGUMENT,
+              "execution-phase receipt timestamps are reversed"};
+    }
+
+    const Event event{
+        .event_id = connection.dispatch.dispatch_id + ":phase:" + phase_name +
+                    ":" + std::to_string(receipt.worker_sequence()),
+        .run_id = connection.identity.run_id,
+        .run_revision = connection.dispatch.run_revision,
+        .plan_revision = connection.dispatch.plan_revision,
+        .node_id = connection.identity.node_id,
+        .attempt_id = connection.identity.attempt_id,
+        .worker_sequence = receipt.worker_sequence(),
+        .event_type = "worker.execution_phase_receipted",
+        .event_version = 1,
+        .wall_time_ns = completed_at_ns,
+        .monotonic_time_ns = 0,
+        .optimizer_step = std::nullopt,
+        .payload = {{"phase", phase_name},
+                    {"enabled", request->enabled()},
+                    {"requested_steps", requested_steps},
+                    {"request_digest", receipt.request_digest()},
+                    {"disposition", disposition},
+                    {"steps_executed", receipt.steps_executed()},
+                    {"state_fingerprint_before",
+                     receipt.state_fingerprint_before()},
+                    {"state_fingerprint_after",
+                     receipt.state_fingerprint_after()},
+                    {"started_at_ns", started_at_ns},
+                    {"completed_at_ns", completed_at_ns},
+                    {"diagnostics", diagnostics}},
+    };
+    return commit_worker_observation(event, connection, acknowledged);
+  } catch (const std::exception& exception) {
+    return worker_failure(exception);
+  }
+}
+
 grpc::Status TrainVMService::acknowledge_worker_control(
     const v1::ControlPatchAcknowledgement& acknowledgement,
     const WorkerConnection& connection, std::uint64_t& acknowledged) {
@@ -3491,6 +3655,9 @@ grpc::Status TrainVMService::Connect(
     } else if (message.has_lifecycle_ack()) {
       status = acknowledge_worker_lifecycle(message.lifecycle_ack(), connection,
                                             acknowledged);
+    } else if (message.has_phase_receipt()) {
+      status = record_worker_execution_phase_receipt(
+          message.phase_receipt(), connection, acknowledged);
     } else {
       return finish({grpc::StatusCode::INVALID_ARGUMENT,
                      message.has_hello()

@@ -19,8 +19,15 @@ except ImportError as error:  # pragma: no cover - depends on installation extra
         "TrainVM worker sessions require the 'trainvm-worker' project extra"
     ) from error
 
-from ._canonical import canonical_dumps
+from ._canonical import canonical_dumps, is_digest
 from .bootstrap import WorkerBootstrap
+from .execution_phases import (
+    ExecutionPhase,
+    ExecutionPhaseDisposition,
+    ExecutionPhaseRequest,
+    WorkerExecutionPhaseError,
+    decode_execution_phase_requests,
+)
 from .invocation import WorkerInvocation, load_worker_invocation
 
 MAXIMUM_WORKER_MESSAGE_BYTES = 64 * 1024
@@ -91,6 +98,14 @@ def _timestamp_now() -> Timestamp:
     value = Timestamp()
     value.GetCurrentTime()
     return value
+
+
+def _timestamp_from_ns(value: int) -> Timestamp:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise WorkerSessionError("worker timestamp must be nonnegative nanoseconds")
+    result = Timestamp()
+    result.FromNanoseconds(value)
+    return result
 
 
 def _scalar(value: bool | int | float | str) -> wire.ScalarValue:  # noqa: PYI041
@@ -197,6 +212,7 @@ class WorkerSession:
         self._thread: threading.Thread | None = None
         self._welcome: wire.WorkerWelcome | None = None
         self._invocation: WorkerInvocation | None = None
+        self._execution_phase_requests: tuple[ExecutionPhaseRequest, ...] = ()
         self._receipt: WorkerReceipt | None = None
         self._error: BaseException | None = None
         self._closed = False
@@ -220,6 +236,13 @@ class WorkerSession:
                 and self._welcome.disposition
                 == wire.WorkerWelcome.DISPOSITION_ALREADY_COMPLETED
             )
+
+    @property
+    def execution_phase_requests(self) -> tuple[ExecutionPhaseRequest, ...]:
+        with self._condition:
+            if self._welcome is None:
+                raise WorkerSessionError("worker session has no Welcome phase requests")
+            return self._execution_phase_requests
 
     @property
     def acknowledged_worker_sequence(self) -> int:
@@ -325,7 +348,9 @@ class WorkerSession:
                 or welcome.lease_id != value.lease_id
                 or welcome.fencing_token != value.fencing_token
             ):
-                raise WorkerSessionError("WorkerWelcome disagrees with sealed bootstrap")
+                raise WorkerSessionError(
+                    "WorkerWelcome disagrees with sealed bootstrap"
+                )
             invocation = load_worker_invocation(
                 welcome.canonical_invocation_json,
                 expected_digest=welcome.invocation_digest,
@@ -342,9 +367,18 @@ class WorkerSession:
                 or invocation.adapter["operation"] != welcome.operation
             ):
                 raise WorkerSessionError("WorkerWelcome invocation binding disagrees")
+            try:
+                phase_requests = decode_execution_phase_requests(
+                    welcome.execution_phase_requests, invocation
+                )
+            except WorkerExecutionPhaseError as error:
+                raise WorkerSessionError(
+                    "WorkerWelcome execution-phase binding disagrees"
+                ) from error
             self._welcome = wire.WorkerWelcome()
             self._welcome.CopyFrom(welcome)
             self._invocation = invocation
+            self._execution_phase_requests = phase_requests
             self._acknowledged_worker_sequence = welcome.acknowledged_worker_sequence
             self._next_worker_sequence = welcome.acknowledged_worker_sequence + 1
             self._condition.notify_all()
@@ -352,9 +386,13 @@ class WorkerSession:
     def _accept_ack(self, sequence: int) -> None:
         with self._condition:
             if self._welcome is None or sequence <= self._acknowledged_worker_sequence:
-                raise WorkerSessionError("worker acknowledgement is stale or precedes Welcome")
+                raise WorkerSessionError(
+                    "worker acknowledgement is stale or precedes Welcome"
+                )
             if sequence >= self._next_worker_sequence:
-                raise WorkerSessionError("controller acknowledged an unsent worker sequence")
+                raise WorkerSessionError(
+                    "controller acknowledged an unsent worker sequence"
+                )
             self._acknowledged_worker_sequence = sequence
             self._condition.notify_all()
 
@@ -411,9 +449,7 @@ class WorkerSession:
             self._next_worker_sequence += 1
             return sequence
 
-    def _send(
-        self, message: wire.WorkerToController, sequence: int, wait: bool
-    ) -> int:
+    def _send(self, message: wire.WorkerToController, sequence: int, wait: bool) -> int:
         if message.ByteSize() > MAXIMUM_WORKER_MESSAGE_BYTES:
             raise WorkerSessionError("worker message exceeds 64 KiB")
         self._outgoing.put(message)
@@ -433,9 +469,7 @@ class WorkerSession:
                     )
                 self._condition.wait(remaining)
 
-    def heartbeat(
-        self, optimizer_step: int, phase: str, *, wait: bool = False
-    ) -> int:
+    def heartbeat(self, optimizer_step: int, phase: str, *, wait: bool = False) -> int:
         sequence = self._allocate_sequence()
         return self._send(
             wire.WorkerToController(
@@ -541,6 +575,109 @@ class WorkerSession:
             self._published_artifacts[artifact_id] = (identity, result)
         return result
 
+    def execution_phase_receipt(
+        self,
+        request: ExecutionPhaseRequest,
+        disposition: ExecutionPhaseDisposition,
+        *,
+        steps_executed: int,
+        state_fingerprint_before: str,
+        state_fingerprint_after: str,
+        started_at_ns: int,
+        completed_at_ns: int,
+        diagnostics: Iterable[tuple[int, str, str, str, str]] = (),
+        wait: bool = True,
+    ) -> int:
+        with self._condition:
+            if request not in self._execution_phase_requests:
+                raise WorkerSessionError(
+                    "execution-phase receipt has no authority request"
+                )
+        if (
+            isinstance(steps_executed, bool)
+            or not isinstance(steps_executed, int)
+            or steps_executed < 0
+            or isinstance(started_at_ns, bool)
+            or not isinstance(started_at_ns, int)
+            or started_at_ns < 0
+            or isinstance(completed_at_ns, bool)
+            or not isinstance(completed_at_ns, int)
+            or completed_at_ns < 0
+            or not is_digest(state_fingerprint_before)
+            or not is_digest(state_fingerprint_after)
+        ):
+            raise WorkerSessionError("execution-phase receipt content is invalid")
+        if completed_at_ns < started_at_ns:
+            raise WorkerSessionError("execution-phase receipt timestamps are reversed")
+        requested_steps = request.steps or 0
+        diagnostic_values = tuple(diagnostics)
+        if (
+            (request.enabled and disposition is ExecutionPhaseDisposition.SKIPPED)
+            or (
+                not request.enabled
+                and disposition is not ExecutionPhaseDisposition.SKIPPED
+            )
+            or (
+                disposition
+                in {
+                    ExecutionPhaseDisposition.COMPLETED,
+                    ExecutionPhaseDisposition.SKIPPED,
+                }
+                and state_fingerprint_before != state_fingerprint_after
+            )
+            or (
+                disposition is ExecutionPhaseDisposition.COMPLETED
+                and steps_executed != requested_steps
+            )
+            or (
+                disposition is ExecutionPhaseDisposition.SKIPPED and steps_executed != 0
+            )
+            or (
+                disposition is ExecutionPhaseDisposition.FAILED
+                and (steps_executed > requested_steps or not diagnostic_values)
+            )
+        ):
+            raise WorkerSessionError(
+                "execution-phase disposition, steps, or state proof is inconsistent"
+            )
+        phase_values = {
+            ExecutionPhase.COMPILE: wire.WorkerExecutionPhaseRequest.PHASE_COMPILE,
+            ExecutionPhase.WARMUP: wire.WorkerExecutionPhaseRequest.PHASE_WARMUP,
+        }
+        disposition_values = {
+            ExecutionPhaseDisposition.COMPLETED: wire.WorkerExecutionPhaseReceipt.DISPOSITION_COMPLETED,
+            ExecutionPhaseDisposition.SKIPPED: wire.WorkerExecutionPhaseReceipt.DISPOSITION_SKIPPED,
+            ExecutionPhaseDisposition.FAILED: wire.WorkerExecutionPhaseReceipt.DISPOSITION_FAILED,
+        }
+        sequence = self._allocate_sequence()
+        receipt = wire.WorkerExecutionPhaseReceipt(
+            phase=phase_values[request.phase],
+            disposition=disposition_values[disposition],
+            request_digest=request.request_digest,
+            steps_executed=steps_executed,
+            state_fingerprint_before=state_fingerprint_before,
+            state_fingerprint_after=state_fingerprint_after,
+            diagnostics=[
+                wire.Diagnostic(
+                    severity=severity,
+                    code=code,
+                    document_path=document_path,
+                    message=message,
+                    help=help_text,
+                )
+                for severity, code, document_path, message, help_text in diagnostic_values
+            ],
+            concurrency_key=self.bootstrap.concurrency_key,
+            lease_id=self.bootstrap.lease_id,
+            fencing_token=self.bootstrap.fencing_token,
+            worker_sequence=sequence,
+            started_at=_timestamp_from_ns(started_at_ns),
+            completed_at=_timestamp_from_ns(completed_at_ns),
+        )
+        return self._send(
+            wire.WorkerToController(phase_receipt=receipt), sequence, wait
+        )
+
     def acknowledge_controls(
         self,
         command: WorkerCommand,
@@ -552,7 +689,9 @@ class WorkerSession:
         wait: bool = True,
     ) -> int:
         if command.kind is not CommandKind.CONTROLS:
-            raise WorkerSessionError("only a control command has a control acknowledgement")
+            raise WorkerSessionError(
+                "only a control command has a control acknowledgement"
+            )
         dispositions = {
             ControlDisposition.APPLIED: wire.ControlPatchAcknowledgement.DISPOSITION_APPLIED,
             ControlDisposition.REJECTED: wire.ControlPatchAcknowledgement.DISPOSITION_REJECTED,
@@ -661,14 +800,13 @@ class WorkerSession:
                 "only lifecycle commands have lifecycle acknowledgements"
             )
         applied = disposition is LifecycleDisposition.APPLIED
-        needs_checkpoint = command.kind is CommandKind.PAUSE and command.checkpoint_first
-        if (
-            (applied and needs_checkpoint) != bool(optimizer_step and artifact_id)
-            or (not needs_checkpoint and (optimizer_step or artifact_id))
+        needs_checkpoint = (
+            command.kind is CommandKind.PAUSE and command.checkpoint_first
+        )
+        if (applied and needs_checkpoint) != bool(optimizer_step and artifact_id) or (
+            not needs_checkpoint and (optimizer_step or artifact_id)
         ):
-            raise WorkerSessionError(
-                "lifecycle acknowledgement result is inconsistent"
-            )
+            raise WorkerSessionError("lifecycle acknowledgement result is inconsistent")
         kinds = {
             CommandKind.PAUSE: wire.LifecycleAcknowledgement.KIND_PAUSE,
             CommandKind.RESUME: wire.LifecycleAcknowledgement.KIND_RESUME,
@@ -774,6 +912,9 @@ __all__ = [
     "CommandKind",
     "ControlAssignment",
     "ControlDisposition",
+    "ExecutionPhase",
+    "ExecutionPhaseDisposition",
+    "ExecutionPhaseRequest",
     "LifecycleDisposition",
     "WorkerCommand",
     "WorkerReceipt",

@@ -376,6 +376,49 @@ message WorkerHeartbeat {
   google.protobuf.Timestamp observed_at = 4;
 }
 
+// One immutable execution phase selected by the authority from the compiled
+// experiment and the exact worker invocation.  The request digest binds the
+// declaration and invocation identity; workers must echo it in the receipt.
+message WorkerExecutionPhaseRequest {
+  enum Phase {
+    PHASE_UNSPECIFIED = 0;
+    PHASE_COMPILE = 1;
+    PHASE_WARMUP = 2;
+  }
+
+  Phase phase = 1;
+  bool enabled = 2;
+  optional uint64 steps = 3;
+  string request_digest = 4;
+}
+
+// Durable evidence that a worker executed (or deliberately skipped) one
+// authority-requested compile/warmup phase.  State fingerprints cover model,
+// optimizer, RNG, scaler, data cursor, schedule and effective controls so a
+// disposable warmup cannot silently advance the training trajectory.
+message WorkerExecutionPhaseReceipt {
+  enum Disposition {
+    DISPOSITION_UNSPECIFIED = 0;
+    DISPOSITION_COMPLETED = 1;
+    DISPOSITION_SKIPPED = 2;
+    DISPOSITION_FAILED = 3;
+  }
+
+  WorkerExecutionPhaseRequest.Phase phase = 1;
+  Disposition disposition = 2;
+  string request_digest = 3;
+  uint64 steps_executed = 4;
+  string state_fingerprint_before = 5;
+  string state_fingerprint_after = 6;
+  repeated Diagnostic diagnostics = 7;
+  string concurrency_key = 8;
+  string lease_id = 9;
+  uint64 fencing_token = 10;
+  uint64 worker_sequence = 11;
+  google.protobuf.Timestamp started_at = 12;
+  google.protobuf.Timestamp completed_at = 13;
+}
+
 message ControlPatchAcknowledgement {
   enum Disposition {
     DISPOSITION_UNSPECIFIED = 0;
@@ -453,6 +496,7 @@ message WorkerToController {
     ControlPatchAcknowledgement control_ack = 6;
     CheckpointAcknowledgement checkpoint_ack = 7;
     LifecycleAcknowledgement lifecycle_ack = 8;
+    WorkerExecutionPhaseReceipt phase_receipt = 9;
   }
 }
 
@@ -494,6 +538,7 @@ message WorkerWelcome {
   uint64 acknowledged_worker_sequence = 16;
   bytes canonical_invocation_json = 17;
   string invocation_digest = 18;
+  repeated WorkerExecutionPhaseRequest execution_phase_requests = 19;
 }
 
 message WorkerReceipt {

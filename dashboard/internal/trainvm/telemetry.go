@@ -170,18 +170,46 @@ type WorkerHeartbeatPoint struct {
 	WorkerSequence uint64 `json:"worker_sequence"`
 }
 
+type ExecutionPhaseDiagnostic struct {
+	Severity     string `json:"severity"`
+	Code         string `json:"code"`
+	DocumentPath string `json:"document_path"`
+	Message      string `json:"message"`
+	Help         string `json:"help"`
+}
+
+type ExecutionPhaseReceiptPoint struct {
+	Sequence               uint64                     `json:"sequence"`
+	RunID                  string                     `json:"run_id"`
+	NodeID                 string                     `json:"node_id"`
+	AttemptID              string                     `json:"attempt_id"`
+	WorkerSequence         uint64                     `json:"worker_sequence"`
+	Phase                  string                     `json:"phase"`
+	Enabled                bool                       `json:"enabled"`
+	RequestedSteps         uint64                     `json:"requested_steps"`
+	RequestDigest          string                     `json:"request_digest"`
+	Disposition            string                     `json:"disposition"`
+	StepsExecuted          uint64                     `json:"steps_executed"`
+	StateFingerprintBefore string                     `json:"state_fingerprint_before"`
+	StateFingerprintAfter  string                     `json:"state_fingerprint_after"`
+	StartedAtNS            int64                      `json:"started_at_ns"`
+	CompletedAtNS          int64                      `json:"completed_at_ns"`
+	Diagnostics            []ExecutionPhaseDiagnostic `json:"diagnostics"`
+}
+
 type TelemetrySnapshot struct {
-	JournalID      string                   `json:"journal_id"`
-	Run            Run                      `json:"run"`
-	Observability  ObservabilityDeclaration `json:"observability"`
-	AfterSequence  uint64                   `json:"after_sequence"`
-	TargetSequence uint64                   `json:"target_sequence"`
-	NextSequence   uint64                   `json:"next_sequence"`
-	ReplayPending  bool                     `json:"replay_pending"`
-	CaughtUp       bool                     `json:"caught_up"`
-	Heartbeats     []WorkerHeartbeatPoint   `json:"heartbeats"`
-	Metrics        []MetricPoint            `json:"metrics"`
-	Artifacts      []ObservableArtifact     `json:"artifacts"`
+	JournalID       string                       `json:"journal_id"`
+	Run             Run                          `json:"run"`
+	Observability   ObservabilityDeclaration     `json:"observability"`
+	AfterSequence   uint64                       `json:"after_sequence"`
+	TargetSequence  uint64                       `json:"target_sequence"`
+	NextSequence    uint64                       `json:"next_sequence"`
+	ReplayPending   bool                         `json:"replay_pending"`
+	CaughtUp        bool                         `json:"caught_up"`
+	Heartbeats      []WorkerHeartbeatPoint       `json:"heartbeats"`
+	Metrics         []MetricPoint                `json:"metrics"`
+	Artifacts       []ObservableArtifact         `json:"artifacts"`
+	ExecutionPhases []ExecutionPhaseReceiptPoint `json:"execution_phases"`
 }
 
 type PublishedArtifact struct {
@@ -320,6 +348,83 @@ func heartbeatFromEvent(event Event) (WorkerHeartbeatPoint, error) {
 		AttemptID: event.AttemptID, Phase: payload.Phase,
 		OptimizerStep: *event.OptimizerStep, ObservedAtNS: payload.ObservedAtNS,
 		AcceptedAtNS: event.WallTimeNS, WorkerSequence: event.WorkerSequence,
+	}, nil
+}
+
+func validSHA256Digest(value string) bool {
+	if len(value) != 71 || !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	for _, character := range value[7:] {
+		if (character < '0' || character > '9') &&
+			(character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func executionPhaseReceiptFromEvent(event Event) (ExecutionPhaseReceiptPoint, error) {
+	var payload struct {
+		Phase                  string                     `json:"phase"`
+		Enabled                bool                       `json:"enabled"`
+		RequestedSteps         uint64                     `json:"requested_steps"`
+		RequestDigest          string                     `json:"request_digest"`
+		Disposition            string                     `json:"disposition"`
+		StepsExecuted          uint64                     `json:"steps_executed"`
+		StateFingerprintBefore string                     `json:"state_fingerprint_before"`
+		StateFingerprintAfter  string                     `json:"state_fingerprint_after"`
+		StartedAtNS            int64                      `json:"started_at_ns"`
+		CompletedAtNS          int64                      `json:"completed_at_ns"`
+		Diagnostics            []ExecutionPhaseDiagnostic `json:"diagnostics"`
+	}
+	if err := strictPayload(event.Payload, &payload); err != nil ||
+		event.EventType != "worker.execution_phase_receipted" ||
+		event.Sequence == 0 || event.WorkerSequence == 0 ||
+		event.OptimizerStep != nil || event.WallTimeNS != payload.CompletedAtNS ||
+		!validBoundedText(event.RunID, 256, false) ||
+		!validBoundedText(event.NodeID, 256, false) ||
+		!validBoundedText(event.AttemptID, 256, false) ||
+		(payload.Phase != "compile" && payload.Phase != "warmup") ||
+		(payload.Disposition != "completed" && payload.Disposition != "skipped" &&
+			payload.Disposition != "failed") ||
+		!validSHA256Digest(payload.RequestDigest) ||
+		!validSHA256Digest(payload.StateFingerprintBefore) ||
+		!validSHA256Digest(payload.StateFingerprintAfter) ||
+		payload.StartedAtNS < 0 || payload.CompletedAtNS < payload.StartedAtNS ||
+		payload.Diagnostics == nil || len(payload.Diagnostics) > 64 ||
+		(payload.Enabled && payload.Disposition == "skipped") ||
+		(!payload.Enabled && payload.Disposition != "skipped") ||
+		(payload.Phase == "compile" && payload.RequestedSteps != 0) ||
+		(payload.Disposition == "completed" && payload.StepsExecuted != payload.RequestedSteps) ||
+		(payload.Disposition == "skipped" && payload.StepsExecuted != 0) ||
+		(payload.Disposition == "failed" &&
+			(payload.StepsExecuted > payload.RequestedSteps || len(payload.Diagnostics) == 0)) ||
+		(payload.Disposition != "failed" &&
+			payload.StateFingerprintBefore != payload.StateFingerprintAfter) {
+		return ExecutionPhaseReceiptPoint{}, fmt.Errorf(
+			"TrainVM execution-phase event %q has a malformed payload", event.EventID)
+	}
+	for _, diagnostic := range payload.Diagnostics {
+		if (diagnostic.Severity != "info" && diagnostic.Severity != "warning" &&
+			diagnostic.Severity != "error") ||
+			!validBoundedText(diagnostic.Code, 256, false) ||
+			!validBoundedText(diagnostic.Message, 4096, false) ||
+			len(diagnostic.DocumentPath) > 1024 || len(diagnostic.Help) > 4096 {
+			return ExecutionPhaseReceiptPoint{}, fmt.Errorf(
+				"TrainVM execution-phase event %q has malformed diagnostics", event.EventID)
+		}
+	}
+	return ExecutionPhaseReceiptPoint{
+		Sequence: event.Sequence, RunID: event.RunID, NodeID: event.NodeID,
+		AttemptID: event.AttemptID, WorkerSequence: event.WorkerSequence,
+		Phase: payload.Phase, Enabled: payload.Enabled,
+		RequestedSteps: payload.RequestedSteps, RequestDigest: payload.RequestDigest,
+		Disposition: payload.Disposition, StepsExecuted: payload.StepsExecuted,
+		StateFingerprintBefore: payload.StateFingerprintBefore,
+		StateFingerprintAfter:  payload.StateFingerprintAfter,
+		StartedAtNS:            payload.StartedAtNS, CompletedAtNS: payload.CompletedAtNS,
+		Diagnostics: payload.Diagnostics,
 	}, nil
 }
 
@@ -591,6 +696,7 @@ func CaptureRunPlanPrefix(
 var telemetryEventTypes = []string{
 	"artifact.published",
 	"metric.sampled",
+	"worker.execution_phase_receipted",
 	"worker.heartbeat",
 }
 
@@ -677,9 +783,10 @@ func ProjectTelemetrySnapshot(
 	snapshot := TelemetrySnapshot{
 		JournalID: journalID, Run: run, Observability: declaration,
 		AfterSequence: after, TargetSequence: run.LastEventSeq, NextSequence: after,
-		Heartbeats: make([]WorkerHeartbeatPoint, 0),
-		Metrics:    make([]MetricPoint, 0),
-		Artifacts:  make([]ObservableArtifact, 0),
+		Heartbeats:      make([]WorkerHeartbeatPoint, 0),
+		Metrics:         make([]MetricPoint, 0),
+		Artifacts:       make([]ObservableArtifact, 0),
+		ExecutionPhases: make([]ExecutionPhaseReceiptPoint, 0),
 	}
 	if after == run.LastEventSeq {
 		snapshot.NextSequence = run.LastEventSeq
@@ -703,6 +810,7 @@ func ProjectTelemetrySnapshot(
 			{eventType: "metric.sampled", limit: maximumLiveMetricSeries + 1,
 				newestPerMetricSeries: true},
 			{eventType: "artifact.published", limit: limit},
+			{eventType: "worker.execution_phase_receipted", limit: 64},
 		} {
 			page, queryErr := reader.Events(ctx, EventQuery{
 				RunID: runID, After: 0, Through: run.LastEventSeq, Limit: query.limit,
@@ -748,7 +856,8 @@ func ProjectTelemetrySnapshot(
 	previous := after
 	for _, event := range events {
 		validType := event.EventType == "worker.heartbeat" ||
-			event.EventType == "metric.sampled" || event.EventType == "artifact.published"
+			event.EventType == "metric.sampled" || event.EventType == "artifact.published" ||
+			event.EventType == "worker.execution_phase_receipted"
 		if !validType || event.RunID != runID || event.Sequence <= previous ||
 			event.Sequence > run.LastEventSeq {
 			return TelemetrySnapshot{}, true,
@@ -780,6 +889,12 @@ func ProjectTelemetrySnapshot(
 				return TelemetrySnapshot{}, true, parseErr
 			}
 			snapshot.Artifacts = append(snapshot.Artifacts, RedactArtifact(artifact))
+		case "worker.execution_phase_receipted":
+			phase, parseErr := executionPhaseReceiptFromEvent(event)
+			if parseErr != nil {
+				return TelemetrySnapshot{}, true, parseErr
+			}
+			snapshot.ExecutionPhases = append(snapshot.ExecutionPhases, phase)
 		default:
 			return TelemetrySnapshot{}, true,
 				fmt.Errorf("TrainVM authority returned an unrequested telemetry event type")
