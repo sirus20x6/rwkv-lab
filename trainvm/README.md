@@ -213,9 +213,11 @@ Implemented now:
   fence; a separate cache-artifact authority with journal-backed live-lease checks, trusted
   qualification-evidence seam, and a descriptor-rooted Linux immutable store that hashes, fsyncs,
   atomically promotes, and re-verifies content-addressed cache trees without following symlinks or
-  accepting writable/undeclared content. Cache reuse remains disabled until the service graph
-  provides the production sealed-runtime probe and journal/artifact-backed qualification evidence
-  source and integrates publication/adoption into worker launch;
+  accepting writable/undeclared content; separate descriptor-rooted production readers accept
+  runtime closure and qualification evidence only as canonical immutable authority-owned receipts,
+  and qualification is reread before adoption. Cache reuse remains disabled until hostd/controller
+  freezes those receipts and the service graph integrates namespace derivation,
+  publication/adoption, and worker launch;
 - `validate`, `plan`, `simulate`, journal inspection/replay, and strict hostd-client configuration
   inspection CLI commands.
 
@@ -288,8 +290,8 @@ The sealed payload hashes cover only the copied executable/interpreter, adapter 
 bootstrap. They do not yet claim a reproducible dynamic-library, Python standard-library, or import
 closure. Guarded Python launch and immutable cache publication primitives are implemented, but
 runtime/cache reproducibility and production qualification remain incomplete until an isolated
-runtime-closure policy, a trusted qualification-evidence source, and service/worker adoption wiring
-are enforced.
+runtime-closure publication policy and service/worker adoption wiring are enforced. The immutable
+runtime and qualification readers fail closed but do not themselves create trusted evidence.
 
 ## Toolchain
 

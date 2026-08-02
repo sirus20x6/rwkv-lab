@@ -39,6 +39,8 @@ struct CacheRuntimeProbeContext {
   std::string resource_binding_digest;
   std::vector<ObservedHostResource> selected_resources;
   bool placement_specific{};
+
+  bool operator==(const CacheRuntimeProbeContext&) const = default;
 };
 
 // One bounded runtime observation. Production implementations run inside the

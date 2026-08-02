@@ -102,6 +102,7 @@ add_library(trainvm_core
   src/journal.cpp
   src/journal_cache_lease_authority.cpp
   src/lease_renewal.cpp
+  src/linux_cache_evidence.cpp
   src/linux_immutable_cache_store.cpp
   src/linux_nvidia_inventory.cpp
   src/reconciler.cpp

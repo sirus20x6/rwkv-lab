@@ -1,5 +1,6 @@
 #include "trainvm/cache_artifact_authority.hpp"
 #include "trainvm/journal_cache_lease_authority.hpp"
+#include "trainvm/linux_cache_evidence.hpp"
 #include "trainvm/linux_immutable_cache_store.hpp"
 
 #include <cstdlib>
@@ -339,12 +340,18 @@ public:
   std::size_t capture_calls{};
   std::size_t verification_calls{};
   bool trusted{true};
+  bool misbind{};
 
   CacheQualificationEvidence
-  capture(const CacheNamespaceAuthorityReceipt &,
-          const ImmutableCacheTreeReceipt &) override {
+  capture(const CacheNamespaceAuthorityReceipt& authority,
+          const ImmutableCacheTreeReceipt& artifact) override {
     ++capture_calls;
-    return evidence;
+    CacheQualificationEvidence result = evidence;
+    result.authority_receipt_digest = authority.receipt_digest;
+    result.namespace_digest = artifact.namespace_digest;
+    result.artifact_tree_digest = artifact.artifact_tree_digest;
+    if (misbind) result.artifact_tree_digest = hash('f');
+    return result;
   }
 
   void
@@ -397,6 +404,23 @@ void remove_test_tree(const std::filesystem::path &root) {
   std::filesystem::remove_all(root);
 }
 
+struct ScopedTestTree {
+  std::filesystem::path root;
+  ~ScopedTestTree() { remove_test_tree(root); }
+};
+
+void write_immutable_receipt(const std::filesystem::path& path,
+                             const nlohmann::json& document) {
+  std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+  stream << document.dump();
+  stream.close();
+  if (!stream) throw std::runtime_error("test receipt write failed");
+  std::filesystem::permissions(
+      path, std::filesystem::perms::owner_read |
+                std::filesystem::perms::group_read,
+      std::filesystem::perm_options::replace);
+}
+
 struct Fixture {
   AdapterRegistry adapters{adapter_registry()};
   HostLaunchRegistry launches{launch_registry()};
@@ -437,6 +461,56 @@ int main() {
                 cache_namespace_authority_receipt_json(first)
                         .at("receipt_digest") == first.receipt_digest,
             "authority builder binds registries, launch, inventory, runtime, compile inputs, and device");
+
+    ScopedTestTree evidence_tree{
+        std::filesystem::temp_directory_path() /
+        ("trainvm-cache-evidence-" +
+         std::to_string(static_cast<long long>(::getpid())))};
+    remove_test_tree(evidence_tree.root);
+    std::filesystem::create_directories(evidence_tree.root / "runtime");
+    std::filesystem::create_directories(evidence_tree.root / "qualification");
+    const CacheRuntimeProbeContext runtime_context{
+        .host = {.host_id = kHost, .boot_id = std::string(kBoot)},
+        .launch_spec_digest = fixture.resolved_launch.spec_digest,
+        .inventory_receipt_digest = fixture.host_inventory.receipt_digest,
+        .resource_binding_digest = first.resource_binding_digest,
+        .selected_resources = fixture.host_inventory.resources,
+        .placement_specific = true,
+    };
+    const CacheRuntimeProbeSnapshot runtime_snapshot =
+        probe.capture(runtime_context);
+    const auto runtime_receipt_path =
+        evidence_tree.root / "runtime" /
+        cache_runtime_probe_receipt_name(runtime_context);
+    write_immutable_receipt(
+        runtime_receipt_path,
+        cache_runtime_probe_receipt_json(runtime_context, runtime_snapshot));
+    LinuxSealedCacheRuntimeProbe sealed_runtime({
+        .receipt_root = evidence_tree.root,
+        .authority_uid = ::geteuid(),
+        .maximum_receipt_bytes = 1U << 20U,
+    });
+    CacheNamespaceAuthority sealed_namespace_authority(
+        fixture.adapters, fixture.launches,
+        {.host_id = kHost, .boot_id = std::string(kBoot)}, sealed_runtime);
+    require(sealed_namespace_authority.derive(fixture.request()) == first,
+            "an immutable runtime receipt reproduces the exact authority "
+            "namespace without accepting runtime identity from the plan");
+    std::filesystem::permissions(
+        runtime_receipt_path, std::filesystem::perms::owner_write,
+        std::filesystem::perm_options::add);
+    rejected([&] { (void)sealed_runtime.capture(runtime_context); },
+             "a writable runtime receipt cannot authorize a cache namespace");
+    std::filesystem::permissions(
+        runtime_receipt_path, std::filesystem::perms::owner_write,
+        std::filesystem::perm_options::remove);
+    const auto runtime_receipt_alias = evidence_tree.root / "runtime-alias";
+    std::filesystem::create_hard_link(runtime_receipt_path,
+                                      runtime_receipt_alias);
+    rejected([&] { (void)sealed_runtime.capture(runtime_context); },
+             "a multiply-linked runtime receipt is outside immutable receipt "
+             "authority");
+    std::filesystem::remove(runtime_receipt_alias);
 
     const auto qualified = qualify_cache_artifact(qualification_evidence());
     require(qualified.qualified && qualified.rejection_reasons.empty() &&
@@ -518,6 +592,22 @@ int main() {
             "qualification is captured only after a current publisher stores "
             "exact candidate bytes");
     qualification_authority.evidence = qualification_evidence();
+    qualification_authority.misbind = true;
+    rejected(
+        [&] {
+          (void)artifact_authority.publish({
+              .authority = first,
+              .publisher_lease = lease_for(first),
+              .candidate = {
+                  .source_directory = "/run/trainvm/cache-candidate",
+                  .maximum_file_count = 100U,
+                  .maximum_total_bytes = 1U << 20U,
+              },
+          });
+        },
+        "publication must not repair qualification evidence bound to other "
+        "artifact bytes");
+    qualification_authority.misbind = false;
     lease_authority.calls = 0U;
 
     const auto adoption = artifact_authority.adopt({
@@ -613,6 +703,62 @@ int main() {
                   linux_publication.artifact,
           "Linux cache store descriptor-copies, hashes, promotes, and "
           "re-verifies a nested cache tree");
+
+      CacheQualificationEvidence immutable_evidence =
+          qualification_evidence();
+      immutable_evidence.authority_receipt_digest = first.receipt_digest;
+      immutable_evidence.namespace_digest =
+          linux_publication.artifact.namespace_digest;
+      immutable_evidence.artifact_tree_digest =
+          linux_publication.artifact.artifact_tree_digest;
+      const auto qualification_receipt_path =
+          evidence_tree.root / "qualification" /
+          cache_qualification_evidence_receipt_name(
+              first, linux_publication.artifact);
+      write_immutable_receipt(
+          qualification_receipt_path,
+          cache_qualification_evidence_receipt_json(
+              first, linux_publication.artifact, immutable_evidence));
+      LinuxImmutableCacheQualificationSource immutable_qualification({
+          .receipt_root = evidence_tree.root,
+          .authority_uid = ::geteuid(),
+          .maximum_receipt_bytes = 1U << 20U,
+      });
+      CacheArtifactAuthority immutable_evidence_authority(
+          lease_authority, linux_store, immutable_qualification);
+      const auto immutable_publication =
+          immutable_evidence_authority.publish({
+              .authority = first,
+              .publisher_lease = lease_for(first),
+              .candidate = {.source_directory = candidate_root.string(),
+                            .maximum_file_count = 100U,
+                            .maximum_total_bytes = 1U << 20U},
+          });
+      const auto immutable_adoption = immutable_evidence_authority.adopt({
+          .current_authority = first,
+          .adopter_lease = lease_for(first),
+          .publication = immutable_publication,
+      });
+      require(immutable_publication.artifact == linux_publication.artifact &&
+                  immutable_adoption.content_address ==
+                      linux_publication.artifact.content_address,
+              "immutable qualification evidence authorizes publication and "
+              "is re-attested before cache adoption");
+      std::filesystem::permissions(
+          qualification_receipt_path,
+          std::filesystem::perms::owner_write,
+          std::filesystem::perm_options::add);
+      rejected(
+          [&] {
+            (void)immutable_qualification.capture(
+                first, linux_publication.artifact);
+          },
+          "writable qualification evidence cannot authorize cache adoption");
+      std::filesystem::permissions(
+          qualification_receipt_path,
+          std::filesystem::perms::owner_write,
+          std::filesystem::perm_options::remove);
+
       const auto replay = linux_authority.publish({
           .authority = first,
           .publisher_lease = lease_for(first),

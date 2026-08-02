@@ -298,9 +298,12 @@ CacheArtifactAuthority::publish(CacheArtifactPublicationRequest request) const {
   }
   CacheQualificationEvidence evidence =
       qualification_.capture(request.authority, tree);
-  evidence.authority_receipt_digest = request.authority.receipt_digest;
-  evidence.namespace_digest = tree.namespace_digest;
-  evidence.artifact_tree_digest = tree.artifact_tree_digest;
+  if (evidence.authority_receipt_digest != request.authority.receipt_digest ||
+      evidence.namespace_digest != tree.namespace_digest ||
+      evidence.artifact_tree_digest != tree.artifact_tree_digest) {
+    throw CacheArtifactAuthorityError(
+        "cache qualification evidence is bound to different authority bytes");
+  }
   CacheQualificationReceipt qualification =
       qualify_cache_artifact(std::move(evidence));
   if (!qualification.qualified) {
