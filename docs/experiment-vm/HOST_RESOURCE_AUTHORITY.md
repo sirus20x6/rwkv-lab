@@ -869,13 +869,21 @@ admission, so each surfaces as a receipt finding that keeps the gate closed.
   time. `hostd_startup_auditor_tests` now drives the real auditor through the real controller and
   coordinator to admission; the previous controller tests missed the ordering because they used a
   fixed-time fake auditor.
-- `startup-admission-epoch-not-renewable-after-restart` (open). `broker_epoch` is a static field of
-  the daemon configuration document, and `finalize_startup_admission` refuses a second admission
-  epoch for the same `host_id`/`boot_id`/`broker_epoch` unless the audit is an exact replay. A hostd
-  that crashes and restarts within one boot therefore reconciles its durable records and then cannot
-  admit. Either the daemon must derive a fresh broker epoch per incarnation — which the example
-  configuration and this document currently do not require — or the ledger must accept a superseding
-  epoch bound to the new audit.
+- `startup-admission-epoch-not-renewable-after-restart` (fixed). `broker_epoch` is a static field of
+  the daemon configuration document, and `finalize_startup_admission` refused a second admission
+  epoch for the same `host_id`/`boot_id`/`broker_epoch` unless the audit was an exact replay — which
+  a restart never is, because `audit_id` is freshly random. A hostd that crashed and restarted
+  within one boot therefore reconciled its durable records and then could never admit again.
+  Supersession inside one runtime identity is now allowed. It is safe without that refusal:
+  `HostLedgerFilesystemAuthority::acquire` holds a host-global exclusive `flock`, so a second live
+  daemon cannot open the ledger at all; the active-epoch update is an atomic CAS; and
+  `request_bundle` authorizes only against the currently active epoch, so a superseded epoch loses
+  grant authority immediately. The superseding audit must still be bound to the current ledger head
+  and occupancy, and supersession may only move forward — an older committed audit cannot be
+  finalized again to roll the active epoch back.
+
+An unprivileged run now raises no findings; the gate is closed only by the three privileged launch
+windows.
 
 Gate:
 

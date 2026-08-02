@@ -196,6 +196,30 @@ void production_auditor_reaches_admission_through_the_controller() {
   require(controller.advance().phase == HostdStartupPhase::admitting &&
               recovery.steps == 1U,
           "an already admitted controller neither re-audits nor re-recovers");
+
+  // The daemon dies and comes back on the same ledger, boot, and configured
+  // broker epoch. It must reach admission again rather than being locked out
+  // until the machine reboots.
+  HostdConfiguredStartupAuditor restarted_auditor(*ledger, authority_clock,
+                                                  config());
+  ConvergedRecovery restarted_recovery;
+  HostGrantCoordinator restarted_coordinator(coordinator_config(), ledger);
+  HostdCoordinatorStartupAdmission restarted_admission(restarted_coordinator);
+  HostdStartupController restarted_controller(restarted_recovery,
+                                              restarted_admission,
+                                              restarted_auditor,
+                                              authority_clock, {});
+  const HostdStartupControllerStatus restarted_status =
+      restarted_controller.advance();
+  require(restarted_status.phase == HostdStartupPhase::admitting,
+          "a restarted daemon reaches admission within the same boot");
+  require(restarted_status.admission_receipt.has_value() &&
+              restarted_status.admission_receipt->audit_id !=
+                  status.admission_receipt->audit_id,
+          "the restart commits its own audit rather than replaying the prior");
+  require(restarted_coordinator.status().lifecycle ==
+              HostdLifecycle::admitting,
+          "the restarted coordinator lifecycle reaches admitting");
 }
 
 // The commit time is the coordinator's to sample, and it must be taken after
