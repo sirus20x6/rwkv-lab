@@ -69,6 +69,7 @@ add_library(trainvm_core
   src/hostd_client_bootstrap.cpp
   src/hostd_client_configuration.cpp
   src/hostd_daemon_configuration.cpp
+  src/hostd_crash_qualification.cpp
   src/hostd_daemon_runtime.cpp
   src/hostd_journal_fence_attestor.cpp
   src/hostd_journal_logical_fence.cpp
@@ -166,6 +167,13 @@ target_link_libraries(trainvm PRIVATE
 )
 
 add_executable(trainvm-hostd src/hostd_main.cpp)
+add_executable(trainvm-hostd-crash-qualification
+  src/hostd_crash_qualification_main.cpp
+)
+target_compile_options(trainvm-hostd-crash-qualification PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(trainvm-hostd-crash-qualification PRIVATE trainvm_core)
 target_compile_options(trainvm-hostd PRIVATE
   -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
 )
@@ -402,6 +410,16 @@ target_compile_options(hostd_restart_process_recovery_tests PRIVATE
 target_link_libraries(hostd_restart_process_recovery_tests PRIVATE trainvm_core)
 add_test(NAME hostd_restart_process_recovery_tests
   COMMAND hostd_restart_process_recovery_tests
+)
+add_executable(hostd_crash_qualification_tests
+  tests/hostd_crash_qualification_tests.cpp
+)
+target_compile_options(hostd_crash_qualification_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(hostd_crash_qualification_tests PRIVATE trainvm_core)
+add_test(NAME hostd_crash_qualification_tests
+  COMMAND hostd_crash_qualification_tests
 )
 add_executable(hostd_startup_controller_tests
   tests/hostd_startup_controller_tests.cpp
