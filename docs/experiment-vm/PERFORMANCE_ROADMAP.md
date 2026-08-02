@@ -375,9 +375,14 @@ startup orphan recovery are defined in
   The prerequisite v2 inventory capability model is implemented: exact assigned and shared NVIDIA
   driver nodes are topology-bound, capability drift degrades the resource, and unmapped partitions
   fail launch eligibility rather than borrowing their parent node.
-- Resolve the remaining stock-SQLite auxiliary pathname race in the declared host threat model:
-  trusted isolated authority directory, controlled VFS, or host-global lock broker. Do not treat
-  the network-namespace-local abstract socket as the host-wide GPU/resource fence.
+- The stock-SQLite auxiliary pathname design is resolved with a declared trusted authority
+  directory and one shared filesystem-authority implementation. Strict mode requires a dedicated
+  non-root/non-`nobody` UID, mode 0700, `openat2` beneath/no-symlink resolution, pinned singleton
+  inodes, and owner UID/GID attestation; journal exclusive WAL eliminates `-shm`. A controlled VFS
+  was rejected: a hostile process sharing the authority UID can write the main database directly,
+  so a VFS inside the authority process cannot close that trust-boundary failure. The
+  network-namespace-local abstract socket remains only a cooperating-process namespace fence, not
+  the host-wide GPU/resource fence.
 - Extend the implemented wake-driven, restart-scanning service supervisor (admission, launch,
   terminal process/resource release, and exact lease renewal) with typed executors for
   compile/warmup/qualification nodes and dashboard-visible supervisor health.

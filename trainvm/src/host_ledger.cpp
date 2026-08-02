@@ -1073,7 +1073,7 @@ struct SQLiteHostLedger::Implementation final {
       : trusted_startup_audit_policy(std::move(trusted_policy)) {}
 
   sqlite3* database{};
-  std::shared_ptr<HostLedgerFilesystemAuthority> authority;
+  std::shared_ptr<SqliteFilesystemAuthority> authority;
   int sqlite_database_fd{-1};
   HostInventoryReceipt inventory;
   IHostLedgerFaultInjector* faults{};
@@ -2576,7 +2576,7 @@ struct SQLiteHostLedger::Implementation final {
 };
 
 SQLiteHostLedger::SQLiteHostLedger(
-    std::shared_ptr<HostLedgerFilesystemAuthority> authority,
+    std::shared_ptr<SqliteFilesystemAuthority> authority,
     HostInventoryReceipt inventory,
     IHostLedgerFaultInjector* fault_injector,
     std::optional<HostStartupAuditPolicy> trusted_startup_audit_policy)

@@ -289,12 +289,21 @@ scan/renewal failures remain fail-closed supervisor evidence. Exact renewal repl
 expected expiry, authority-time sample, and timeout; after restart the supervisor tracks the
 journal's current active lease instead of retrying stale pre-renewal state.
 
-The journal namespace guard closes cooperating-process split authority and rejects unsafe SQLite
-side-file aliases at every SQL boundary, but stock SQLite still opens WAL/SHM/rollback files by
-pathname. A hostile same-UID process can race that open unless the authority directory is part of
-the trusted host boundary or a controlled VFS is used. The abstract-socket namespace fence is also
-network-namespace-local. Deployments must satisfy the declared trusted-directory/namespace threat
-model; these residuals are not covered by the process-launch implementation.
+The journal and host ledger share one stock-SQLite filesystem authority implementation. It requires
+an owner-controlled mode-0700 directory, resolves entries with `openat2`
+`RESOLVE_BENEATH|RESOLVE_NO_MAGICLINKS|RESOLVE_NO_SYMLINKS`, pins directory/database/lock inodes,
+and accepts only owned mode-0600 regular singleton (`nlink == 1`) auxiliaries. Stock SQLite 3.53.3
+was measured to refuse symlinked WAL and rollback-journal paths without writing through them; the
+runtime therefore enforces 3.53.3 as a validated-at (not known-minimum) floor. The single-connection
+journal selects exclusive locking before WAL, and an executable test proves that no `-shm` file is
+created. The multi-connection host ledger retains ordinary WAL/SHM locking.
+
+This boundary depends on deployment identity, not an in-process VFS claim. A process sharing the
+authority UID is inside the trust boundary by definition and can write the main database directly.
+Strict startup therefore rejects root, `nobody`, UID/GID mismatches, and a final directory other than
+mode 0700; the authority UID must be dedicated to the database service and never assigned to a
+workload. Attestation reports the directory owner UID/GID for operator verification. The
+abstract-socket namespace fence remains network-namespace-local and is not a host resource fence.
 
 The packaged Python worker now embeds a file-level closure for the exact interpreter identity,
 Python standard library, and shared pre-dispatch `grpcio`, `protobuf`, and `torch` distribution

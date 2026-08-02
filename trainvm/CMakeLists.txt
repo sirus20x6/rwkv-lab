@@ -62,7 +62,7 @@ add_library(trainvm_core
   src/fake_worker.cpp
   src/fsm.cpp
   src/host_ledger.cpp
-  src/host_ledger_authority.cpp
+  src/sqlite_filesystem_authority.cpp
   src/host_process_saga.cpp
   src/host_startup_audit.cpp
   src/hostd.cpp
@@ -189,9 +189,18 @@ target_compile_definitions(trainvm_tests PRIVATE
 target_link_libraries(trainvm_tests PRIVATE trainvm_service)
 add_test(NAME trainvm_tests COMMAND trainvm_tests)
 if(TRAINVM_GO_EXECUTABLE)
+  # The live stack runs the real service, which acquires its journal under the
+  # strict_filesystem grade. That grade requires the whole authority ancestry to
+  # be unwritable outside the authority owner, so the harness cannot place its
+  # journal beneath a world-writable /tmp. Give it a journal directory in the
+  # build tree, mirroring a real deployment directory such as /var/lib/trainvm.
+  # Only the journal moves: the Unix socket stays under the shorter default
+  # temporary directory because sun_path is limited to 108 bytes.
+  file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/e2e-authority")
   add_test(NAME trainvm_dashboard_live_e2e
     COMMAND ${CMAKE_COMMAND} -E env
       TRAINVM_E2E_BINARY=$<TARGET_FILE:trainvm>
+      TRAINVM_E2E_AUTHORITY_DIR=${CMAKE_CURRENT_BINARY_DIR}/e2e-authority
       ${TRAINVM_GO_EXECUTABLE} test ./internal/server
         -run ^TestTrainVMLiveStackE2E$ -count=1
   )
@@ -356,6 +365,14 @@ target_compile_options(host_ledger_authority_tests PRIVATE
 )
 target_link_libraries(host_ledger_authority_tests PRIVATE trainvm_core)
 add_test(NAME host_ledger_authority_tests COMMAND host_ledger_authority_tests)
+add_executable(sqlite_auxiliary_race_tests
+  tests/sqlite_auxiliary_race_tests.cpp
+)
+target_compile_options(sqlite_auxiliary_race_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(sqlite_auxiliary_race_tests PRIVATE trainvm_core)
+add_test(NAME sqlite_auxiliary_race_tests COMMAND sqlite_auxiliary_race_tests)
 add_executable(hostd_tests tests/hostd_tests.cpp)
 target_compile_options(hostd_tests PRIVATE
   -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
