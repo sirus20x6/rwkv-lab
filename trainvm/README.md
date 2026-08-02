@@ -345,10 +345,13 @@ adapter. A reflected native contract keeps MageFlow, Qwen, and RWKV requirements
 adapter catalog; the Python materializer only consumes that contract. A stdlib-only guard hashes
 and verifies the closure before third-party imports. Host-launch v4 binds its digest independently
 of the sealed zipapp, resolved-launch replay preserves it, and cache authority rejects a runtime
-probe that reports any other closure. This is not yet a claim over ELF/native-library dependency
-resolution, CUDA/driver state, or recursively referenced model/data objects. Runtime cache adoption
-and production qualification remain disabled until authority-owned worker evidence transport and
-the service graph cover those remaining layers. Immutable publishers and readers preserve trusted
+probe that reports any other closure. Static trainer data/model roots can additionally carry native
+`trainvm.input-content-root/v1` Merkle identities; the worker remeasures them before importing a
+family trainer and rejects ordinary reads outside the verified set. This is not yet a claim over
+ELF/native-library dependency resolution, CUDA/driver state, remote/object-store references, or
+payloads a dataset manifest points to outside its declared roots. Runtime cache adoption and
+production qualification remain disabled until authority-owned worker evidence transport and the
+service graph cover those remaining layers. Immutable publishers and readers preserve trusted
 evidence but do not themselves measure the running worker.
 
 ## Toolchain

@@ -108,6 +108,49 @@ void round_trip_and_resolve_public_inputs() {
   check(rejected, "tampered invocation is rejected by its digest");
 }
 
+void reflected_content_roots_are_frozen_into_invocation() {
+  nlohmann::json fixture = load_fixture();
+  fixture["spec"]["workspace"]["input_content_roots"] = {
+      {{"api_version", "trainvm.input-content-root/v1"},
+       {"path", "/thearray/git/datasets/frozen-pack"},
+       {"kind", "directory"},
+       {"file_count", 12U},
+       {"total_bytes", 4096U},
+       {"tree_sha256", "sha256:" + std::string(64U, '4')}},
+  };
+  const trainvm::CompileResult compiled = trainvm::compile_document(fixture);
+  check(compiled.valid() && compiled.plan,
+        "reflected input content root compiles into the immutable plan");
+  if (!compiled.valid() || !compiled.plan) return;
+  trainvm::WorkerInvocationContext context{
+      .run_id = "run-content",
+      .node_id = "train_to_boundary",
+      .attempt_id = "attempt-content",
+      .dispatch_id =
+          "run-content:dispatch:train_to_boundary:attempt-content",
+      .plan_revision = 1U,
+      .host_id = "sha256:" + std::string(64U, 'b'),
+      .artifacts = {},
+      .effective_controls = nlohmann::json::object(),
+      .effective_control_revision = 0U,
+      .resolved_training = nullptr,
+  };
+  const auto invocation =
+      trainvm::build_worker_invocation(*compiled.plan, context);
+  check(invocation.workspace.at("input_content_roots") ==
+            fixture["spec"]["workspace"]["input_content_roots"],
+        "worker invocation freezes exact recursive content identities");
+
+  fixture["spec"]["workspace"]["input_content_roots"][0]["path"] =
+      "//thearray/git/datasets/frozen-pack";
+  check(!trainvm::compile_document(fixture).valid(),
+        "content-root aliases fail canonical plan validation");
+  fixture["spec"]["workspace"]["input_content_roots"][0]["path"] =
+      "/outside/not-authorized";
+  check(!trainvm::compile_document(fixture).valid(),
+        "content roots outside allowed reads fail plan compilation");
+}
+
 void artifact_and_control_validation_fail_closed() {
   const trainvm::CompiledPlan plan = compiled_fixture();
   trainvm::WorkerInvocationContext context{
@@ -300,6 +343,7 @@ void python_worker_invocation_has_cross_runtime_golden_digest() {
 int main() {
   try {
     round_trip_and_resolve_public_inputs();
+    reflected_content_roots_are_frozen_into_invocation();
     artifact_and_control_validation_fail_closed();
     resolved_training_composition_is_frozen_into_invocation();
     replacement_invocation_carries_exact_resume_authority();

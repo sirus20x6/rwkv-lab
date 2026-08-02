@@ -53,6 +53,17 @@ Handler = Callable[
 ]
 
 
+def _raw_config_path(
+    config: Mapping[str, Any], name: str, *, required: bool
+) -> str | None:
+    value = config.get(name)
+    if value is None and not required:
+        return None
+    if not isinstance(value, str) or not value:
+        raise AdapterDispatchError(f"adapter config {name} is not a path string")
+    return value
+
+
 def _resume_payload(
     invocation: WorkerInvocation,
     paths: WorkspacePathAuthority,
@@ -71,6 +82,7 @@ def _resume_payload(
         str(resolved.payload_directory),
         label="controller resume checkpoint payload",
         kind="directory",
+        require_content_identity=False,
     )
 
 
@@ -81,34 +93,47 @@ def _appearance_expert(
     observability: WorkerObservability | None = None,
     controls: WorkerControlRuntime | None = None,
 ) -> HandlerResult:
+    paths = WorkspacePathAuthority.from_workspace(
+        invocation.workspace, require_content=True
+    )
+    raw_config = read_inline_config(invocation.inputs)
+    train_manifest = paths.read_path(
+        _raw_config_path(raw_config, "train_manifest", required=True) or "",
+        label="train_manifest",
+        kind="file",
+    )
+    eval_value = _raw_config_path(raw_config, "eval_manifest", required=False)
+    eval_manifest = (
+        paths.read_path(eval_value, label="eval_manifest", kind="file")
+        if eval_value
+        else None
+    )
+    paths.verify_jsonl_file_references(
+        train_manifest,
+        fields=("image", "image_path"),
+        label="train_manifest",
+    )
+    if eval_manifest is not None:
+        paths.verify_jsonl_file_references(
+            eval_manifest,
+            fields=("image", "image_path"),
+            label="eval_manifest",
+        )
     from rwkv_lab.mage_flow_expert_train import MageFlowExpertTrainConfig, train
 
-    config = MageFlowExpertTrainConfig(**read_inline_config(invocation.inputs))
+    config = MageFlowExpertTrainConfig(**raw_config)
     if controls is not None:
         lower_initial_mageflow_controls(config, controls)
-    paths = WorkspacePathAuthority.from_workspace(invocation.workspace)
     resume_payload = _resume_payload(
         invocation,
         paths,
-        required_state=frozenset(
-            {"data_cursor", "model", "optimizer", "rng_torch"}
-        ),
+        required_state=frozenset({"data_cursor", "model", "optimizer", "rng_torch"}),
     )
     config = replace(
         config,
-        train_manifest=str(
-            paths.read_path(config.train_manifest, label="train_manifest", kind="file")
-        ),
+        train_manifest=str(train_manifest),
         output_dir=str(paths.exact_run_directory(config.output_dir)),
-        eval_manifest=(
-            str(
-                paths.read_path(
-                    config.eval_manifest, label="eval_manifest", kind="file"
-                )
-            )
-            if config.eval_manifest
-            else None
-        ),
+        eval_manifest=(str(eval_manifest) if eval_manifest is not None else None),
         resume_from=(
             str(resume_payload)
             if resume_payload is not None
@@ -176,12 +201,37 @@ def _terminal_expert(
     observability: WorkerObservability | None = None,
     controls: WorkerControlRuntime | None = None,
 ) -> HandlerResult:
+    paths = WorkspacePathAuthority.from_workspace(
+        invocation.workspace, require_content=True
+    )
+    raw_config = read_inline_config(invocation.inputs)
+    train_manifest = paths.read_path(
+        _raw_config_path(raw_config, "train_manifest", required=True) or "",
+        label="train_manifest",
+        kind="file",
+    )
+    eval_value = _raw_config_path(raw_config, "eval_manifest", required=False)
+    eval_manifest = (
+        paths.read_path(eval_value, label="eval_manifest", kind="file")
+        if eval_value
+        else None
+    )
+    paths.verify_jsonl_file_references(
+        train_manifest,
+        fields=("image", "image_path"),
+        label="train_manifest",
+    )
+    if eval_manifest is not None:
+        paths.verify_jsonl_file_references(
+            eval_manifest,
+            fields=("image", "image_path"),
+            label="eval_manifest",
+        )
     from rwkv_lab.mage_flow_terminal_train import TerminalExpertTrainConfig, train
 
-    config = TerminalExpertTrainConfig(**read_inline_config(invocation.inputs))
+    config = TerminalExpertTrainConfig(**raw_config)
     if controls is not None:
         lower_initial_mageflow_controls(config, controls)
-    paths = WorkspacePathAuthority.from_workspace(invocation.workspace)
     resume_payload = _resume_payload(
         invocation,
         paths,
@@ -205,29 +255,29 @@ def _terminal_expert(
     )
     config = replace(
         config,
-        train_manifest=str(
-            paths.read_path(config.train_manifest, label="train_manifest", kind="file")
-        ),
+        train_manifest=str(train_manifest),
         expert_checkpoint=str(
             paths.read_path(
                 config.expert_checkpoint, label="expert_checkpoint", kind="file"
             )
         ),
         output_dir=str(paths.exact_run_directory(config.output_dir)),
-        eval_manifest=_optional_read_path(
-            paths, config.eval_manifest, label="eval_manifest", kind="file"
-        ),
+        eval_manifest=(str(eval_manifest) if eval_manifest is not None else None),
         shared_backbone_checkpoint=_optional_read_path(
             paths,
             config.shared_backbone_checkpoint,
             label="shared_backbone_checkpoint",
             kind="file",
         ),
-        resume_from=_optional_read_path(
-            paths,
-            str(resume_payload) if resume_payload is not None else config.resume_from,
-            label="resume_from",
-            kind="directory",
+        resume_from=(
+            str(resume_payload)
+            if resume_payload is not None
+            else _optional_read_path(
+                paths,
+                config.resume_from,
+                label="resume_from",
+                kind="directory",
+            )
         ),
         model_path=_optional_read_path(
             paths, config.model_path, label="model_path", kind="directory"
@@ -296,40 +346,62 @@ def _qwen_ao3(
     observability: WorkerObservability | None = None,
     controls: WorkerControlRuntime | None = None,
 ) -> HandlerResult:
+    paths = WorkspacePathAuthority.from_workspace(
+        invocation.workspace, require_content=True
+    )
+    raw_config = read_inline_config(invocation.inputs)
+    model_dir = paths.read_path(
+        _raw_config_path(raw_config, "model_dir", required=True) or "",
+        label="model_dir",
+        kind="directory",
+    )
+    train_pack_dir = paths.read_path(
+        _raw_config_path(raw_config, "train_pack_dir", required=True) or "",
+        label="train_pack_dir",
+        kind="directory",
+    )
+    eval_pack_dir = paths.read_path(
+        _raw_config_path(raw_config, "eval_pack_dir", required=True) or "",
+        label="eval_pack_dir",
+        kind="directory",
+    )
+    paths.verify_json_relative_file_reference(
+        train_pack_dir,
+        manifest_name="manifest.json",
+        field="packed_file",
+        label="train_pack_dir",
+    )
+    paths.verify_json_relative_file_reference(
+        eval_pack_dir,
+        manifest_name="manifest.json",
+        field="packed_file",
+        label="eval_pack_dir",
+    )
     from rwkv_lab.qwen_ao3_cpt import QwenAO3Config, train
 
-    config = QwenAO3Config(**read_inline_config(invocation.inputs))
+    config = QwenAO3Config(**raw_config)
     if controls is not None:
         config = lower_initial_qwen_controls(config, controls)
-    paths = WorkspacePathAuthority.from_workspace(invocation.workspace)
     resume_payload = _resume_payload(
         invocation,
         paths,
-        required_state=frozenset(
-            {"data_cursor", "model", "optimizer", "rng_torch"}
-        ),
+        required_state=frozenset({"data_cursor", "model", "optimizer", "rng_torch"}),
     )
     config = replace(
         config,
-        model_dir=str(
-            paths.read_path(config.model_dir, label="model_dir", kind="directory")
-        ),
-        train_pack_dir=str(
-            paths.read_path(
-                config.train_pack_dir, label="train_pack_dir", kind="directory"
-            )
-        ),
-        eval_pack_dir=str(
-            paths.read_path(
-                config.eval_pack_dir, label="eval_pack_dir", kind="directory"
-            )
-        ),
+        model_dir=str(model_dir),
+        train_pack_dir=str(train_pack_dir),
+        eval_pack_dir=str(eval_pack_dir),
         run_dir=str(paths.exact_run_directory(config.run_dir)),
-        resume=_optional_read_path(
-            paths,
-            str(resume_payload) if resume_payload is not None else config.resume,
-            label="resume",
-            kind="directory",
+        resume=(
+            str(resume_payload)
+            if resume_payload is not None
+            else _optional_read_path(
+                paths,
+                config.resume,
+                label="resume",
+                kind="directory",
+            )
         )
         or "",
     )
@@ -384,16 +456,23 @@ def _rwkv_scratch(
     observability: WorkerObservability | None = None,
     controls: WorkerControlRuntime | None = None,
 ) -> HandlerResult:
+    paths = WorkspacePathAuthority.from_workspace(
+        invocation.workspace, require_content=True
+    )
+    raw_config = read_inline_config(invocation.inputs)
+    data = paths.read_path(
+        _raw_config_path(raw_config, "data", required=True) or "",
+        label="data",
+        kind="file",
+    )
     from rwkv_lab.rwkv_pretrain import main as train
 
-    config = RWKVScratchTrainConfig(**read_inline_config(invocation.inputs))
-    paths = WorkspacePathAuthority.from_workspace(invocation.workspace)
+    config = RWKVScratchTrainConfig(**raw_config)
     resume_payload = _resume_payload(
         invocation,
         paths,
         required_state=frozenset({"model", "optimizer", "rng_torch"}),
     )
-    data = paths.read_path(config.data, label="data", kind="file")
     run_directory = paths.exact_run_directory(config.output_dir)
     resume = None
     if resume_payload is not None:
@@ -401,6 +480,7 @@ def _rwkv_scratch(
             str(resume_payload / "state.pt"),
             label="controller resume checkpoint state",
             kind="file",
+            require_content_identity=False,
         )
     elif config.resume:
         resume = paths.read_path(config.resume, label="resume", kind="file")
@@ -547,7 +627,9 @@ def execute_invocation(
         invocation.training, invocation.training.model_family
     )
     if observability is None:
-        raise AdapterDispatchError("training adapter has no worker observability authority")
+        raise AdapterDispatchError(
+            "training adapter has no worker observability authority"
+        )
     if controls is None:
         raise AdapterDispatchError("training adapter has no worker control authority")
     return handler(

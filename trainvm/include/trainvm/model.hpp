@@ -9,6 +9,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "trainvm/input_content_authority.hpp"
+
 namespace trainvm {
 
 using Json = nlohmann::json;
@@ -65,6 +67,7 @@ struct Workspace {
   std::string run_directory;
   std::string concurrency_key;
   std::optional<std::vector<std::string>> allowed_read_roots;
+  std::optional<std::vector<InputContentRootIdentity>> input_content_roots;
   std::optional<std::vector<std::string>> allowed_write_roots;
 };
 
