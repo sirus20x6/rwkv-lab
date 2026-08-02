@@ -232,6 +232,28 @@ the package's own dense-GQA measurements report FA4 roughly 4–10 percent slowe
 - Expose compiler/cache/warmup state and trace artifacts generically in the dashboard; adapters may
   add family-specific panels without changing lifecycle code.
 
+### LibTorch C++ profiling parity
+
+- Give every LibTorch worker the same declarative wait/warmup/capture step state machine as the
+  Python Torch worker. The training loop, not an external timer, advances the schedule at exact
+  optimizer-step boundaries.
+- Add low-overhead C++ NVTX domains and RAII ranges for input wait, host-to-device transfer,
+  forward, backward, optimizer, communication, evaluation, and checkpoint publication. Nsight
+  Systems remains the stable whole-process collector because it observes LibTorch's ATen, cuBLAS,
+  cuDNN, custom CUDA, runtime, and stream activity without a Python dependency.
+- Add an optional in-process Kineto/RecordFunction collector when the pinned LibTorch distribution
+  exposes the required C++ profiler API. Treat that API as version-locked rather than assuming the
+  Python profiler's compatibility guarantees apply to C++.
+- Normalize both collectors into `trainvm.gpu-trace.v1`: exact run/node/attempt and optimizer-step
+  interval, GPU-active ratio, input-stall time, launch count, allocator pressure, communication
+  overlap, bounded operator/kernel tables, raw-trace digest, and explicit instrumentation overhead.
+- Preserve raw trace sensitivity and publication rules. Python stacks and TorchInductor/Triton
+  kernel names are optional evidence, not schema requirements; pure LibTorch traces instead retain
+  C++ symbols, ATen operations, NVTX ranges, and CUDA kernel identities.
+- Qualify the implementation with matching unprofiled, NVTX-only, Kineto, and Nsight windows so the
+  dashboard can show profiler overhead and never mistake instrumented timing for production
+  throughput.
+
 The bounded Torch path is implemented end to end for the native MageFlow appearance/terminal and
 Qwen adapters. One shared optimizer-step hook drives the declared wait/warmup/capture schedule; it
 freezes a Chrome trace and bounded operator summary into `trainvm.gpu-trace.v1`, binds the exact
