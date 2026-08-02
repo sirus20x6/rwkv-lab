@@ -46,6 +46,19 @@ nlohmann::json load_mageflow_fixture() {
   return source;
 }
 
+nlohmann::json load_vision_representation_ab_fixture() {
+  const auto path = std::filesystem::path(TRAINVM_SOURCE_ROOT) /
+                    "docs/experiment-vm/examples/vision-representation-ab.json";
+  std::ifstream input(path);
+  if (!input) {
+    throw std::runtime_error(
+        "could not open vision representation A/B fixture");
+  }
+  nlohmann::json source;
+  input >> source;
+  return source;
+}
+
 }  // namespace
 
 int main() {
@@ -56,8 +69,8 @@ int main() {
     const trainvm::RwkvLabWorkerContract contract =
         trainvm::rwkv_lab_worker_contract(fingerprint);
     require(contract.adapter_registry.api_version == "trainvm.adapters/v2" &&
-                contract.adapter_registry.profiles.size() == 17U,
-            "rwkv_lab catalog must expose seventeen exact adapter profiles");
+                contract.adapter_registry.profiles.size() == 18U,
+            "rwkv_lab catalog must expose eighteen exact adapter profiles");
     require(std::ranges::is_sorted(contract.provided_capabilities) &&
                 std::ranges::adjacent_find(contract.provided_capabilities) ==
                     contract.provided_capabilities.end(),
@@ -67,7 +80,7 @@ int main() {
         trainvm::rwkv_lab_worker_runtime_requirements();
     require(runtime_requirements.api_version ==
                     "trainvm.rwkv-lab-worker-runtime-requirements/v1" &&
-                runtime_requirements.profiles.size() == 17U &&
+                runtime_requirements.profiles.size() == 18U &&
                 runtime_requirements.shared_root_distributions ==
                     std::vector<std::string>(
                         {"grpcio", "pillow", "protobuf", "torch"}),
@@ -98,6 +111,8 @@ int main() {
     const auto& rwkv = find_profile(contract, "rwkv-lab.rwkv-scratch");
     const auto& vision = find_profile(
         contract, "rwkv-lab.vision-teacher-compressor");
+    const auto& vision_frozen =
+        find_profile(contract, "rwkv-lab.vision-frozen-adapter");
     const auto& vision_native =
         find_profile(contract, "rwkv-lab.vision-native-head");
     const auto& vision_student =
@@ -186,6 +201,14 @@ int main() {
                 vision.training_composition->allowed_components->at(
                     "precision").front().name ==
                     "fp32_parameters_bf16_compute" &&
+                vision_frozen.training_composition &&
+                vision_frozen.training_composition->model_family == "vision" &&
+                vision_frozen.training_composition->slots.size() == 3U &&
+                vision_frozen.training_composition->allowed_components->at(
+                    "optimizer").front().name == "torch_adamw" &&
+                vision_frozen.training_composition->allowed_components->at(
+                    "precision").front().name ==
+                    "fp32_parameters_bf16_compute" &&
                 vision_native.training_composition &&
                 vision_native.training_composition->model_family == "vision" &&
                 vision_native.training_composition->slots.size() == 5U &&
@@ -228,6 +251,9 @@ int main() {
                 vision.lifecycle.resume_grade ==
                     trainvm::ResumeGrade::compatible &&
                 vision.lifecycle.checkpoint_now &&
+                vision_frozen.lifecycle.resume_grade ==
+                    trainvm::ResumeGrade::compatible &&
+                vision_frozen.lifecycle.checkpoint_now &&
                 vision_native.lifecycle.resume_grade ==
                     trainvm::ResumeGrade::compatible &&
                 vision_native.lifecycle.checkpoint_now &&
@@ -260,7 +286,7 @@ int main() {
         operation_registry.operation_descriptors_json();
     require(operation_document.at("api_version") ==
                     "trainvm.operations/v1" &&
-                operation_document.at("operations").size() == 17U &&
+                operation_document.at("operations").size() == 18U &&
                 operation_registry.operation_descriptors_digest() ==
                     "sha256:" +
                         trainvm::sha256_hex(operation_document.dump()),
@@ -285,10 +311,12 @@ int main() {
                 operations.at(13).at("key").at("adapter") ==
                     "rwkv-lab.transformer-mla-rwkv8" &&
                 operations.at(14).at("key").at("adapter") ==
-                    "rwkv-lab.vision-native-head" &&
+                    "rwkv-lab.vision-frozen-adapter" &&
                 operations.at(15).at("key").at("adapter") ==
-                    "rwkv-lab.vision-rwkv-student" &&
+                    "rwkv-lab.vision-native-head" &&
                 operations.at(16).at("key").at("adapter") ==
+                    "rwkv-lab.vision-rwkv-student" &&
+                operations.at(17).at("key").at("adapter") ==
                     "rwkv-lab.vision-teacher-compressor",
             "operation descriptors must use canonical exact-key ordering");
     for (const nlohmann::json& operation : operations) {
@@ -306,6 +334,9 @@ int main() {
       const bool is_vision_student =
           operation.at("key").at("adapter") ==
           "rwkv-lab.vision-rwkv-student";
+      const bool is_vision_frozen =
+          operation.at("key").at("adapter") ==
+          "rwkv-lab.vision-frozen-adapter";
       require(operation.at("authoring").at("inputs").at("config").at(
                   "type") == "object" &&
                   operation.at("authoring").at("inputs").at("config").at(
@@ -337,7 +368,8 @@ int main() {
                                      .at("checkpoint")
                                      .at("required") ==
                                  (is_vision_compressor || is_vision_native ||
-                                  is_vision_student || is_rlvr) &&
+                                  is_vision_student || is_vision_frozen ||
+                                  is_rlvr) &&
                              operation.at("authoring")
                                      .at("outputs")
                                      .at("checkpoint")
@@ -366,6 +398,12 @@ int main() {
                                       .at("checkpoint")
                                       .at("artifact_schema") ==
                                   "rwkv-lab.vision-rwkv-student-checkpoint.v1") &&
+                             (!is_vision_frozen ||
+                              operation.at("authoring")
+                                      .at("outputs")
+                                      .at("checkpoint")
+                                      .at("artifact_schema") ==
+                                  "rwkv-lab.vision-frozen-adapter-checkpoint.v1") &&
                   operation.contains("lifecycle") &&
                   operation.contains("training_composition"),
               "each real trainer descriptor must expose honest ports, lifecycle, and slots");
@@ -473,9 +511,28 @@ int main() {
         exact_plan_accepted = false;
       }
     }
-    std::filesystem::remove(registry_path);
     require(exact_plan_accepted,
             "an executable exact-profile plan must validate against the production rwkv_lab worker registry plus core operations");
+
+    const trainvm::CompileResult vision_ab_plan =
+        trainvm::compile_document(load_vision_representation_ab_fixture());
+    require(vision_ab_plan.valid(),
+            "declarative vision representation A/B fixture must compile");
+    bool vision_ab_plan_accepted = vision_ab_plan.valid();
+    if (vision_ab_plan.valid()) {
+      try {
+        trainvm::AdapterRegistry::load_file(
+            std::filesystem::absolute(registry_path))
+            .validate_plan(*vision_ab_plan.plan);
+      } catch (const std::exception& error) {
+        std::cerr << "vision A/B registry rejection: " << error.what()
+                  << '\n';
+        vision_ab_plan_accepted = false;
+      }
+    }
+    require(vision_ab_plan_accepted,
+            "declarative vision representation A/B fixture must validate against the production worker registry");
+    std::filesystem::remove(registry_path);
 
     nlohmann::json posttraining_source = exact_source;
     posttraining_source["metadata"]["name"] = "rwkv-posttraining-v1";
@@ -600,7 +657,7 @@ int main() {
         extended_registry.operation_descriptors_json();
     const auto& extended_operations =
         extended_document.at("operations");
-    require(extended_operations.size() == 18U &&
+    require(extended_operations.size() == 19U &&
                 std::ranges::any_of(
                     extended_operations, [](const nlohmann::json& operation) {
                       return operation.at("key").at("adapter") ==
@@ -709,7 +766,7 @@ int main() {
                     contract.provided_capabilities &&
                 deployment.host_launch_registry.api_version ==
                     "trainvm.host-launches/v4" &&
-                deployment.host_launch_registry.profiles.size() == 17U,
+                deployment.host_launch_registry.profiles.size() == 18U,
             "deployment lowering must retain the complete reflected worker catalog");
     for (const trainvm::HostLaunchProfile& launch :
          deployment.host_launch_registry.profiles) {

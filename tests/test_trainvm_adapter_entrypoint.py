@@ -22,6 +22,7 @@ from rwkv_lab.trainvm_adapters.handlers import (
     _rwkv_posttraining,
     _rwkv_scratch,
     _transformer_mla,
+    _vision_frozen_adapter,
     _vision_native_head,
     _vision_rwkv_student,
     _vision_teacher_compressor,
@@ -132,6 +133,13 @@ def test_workspace_path_authority_confines_reads_writes_and_symlinks(tmp_path) -
         authority.write_directory(str(write_root / "cache" / "new"), label="cache")
         == write_root / "cache" / "new"
     )
+    assert authority.node_run_directory("moonvit_arm") == (
+        write_root / "run" / "nodes" / "moonvit_arm"
+    )
+    with pytest.raises(AdapterInputError, match="node ID"):
+        authority.node_run_directory("../escape")
+    with pytest.raises(AdapterInputError, match="node ID"):
+        authority.node_run_directory("мoonvit_arm")
     with pytest.raises(AdapterInputError, match="outside declared read roots"):
         authority.read_path(
             str(read_root / "escape"), label="dataset", kind="directory"
@@ -724,6 +732,111 @@ def test_vision_compressor_handler_seals_inputs_and_publishes_checkpoint(
     assert "data_cursor" in request.state_components
 
 
+def test_frozen_vision_handler_lowers_compressor_arm_to_sealed_cache_only_argv(
+    tmp_path, monkeypatch
+) -> None:
+    from rwkv_lab import vision_train
+
+    read_root = tmp_path / "read"
+    run_directory = tmp_path / "write" / "run"
+    read_root.mkdir()
+    run_directory.mkdir(parents=True)
+    image = read_root / "image.png"
+    image.write_bytes(b"image")
+    row = json.dumps({"image": str(image), "text": "caption"}) + "\n"
+    train_manifest = read_root / "train.jsonl"
+    eval_manifest = read_root / "eval.jsonl"
+    train_manifest.write_text(row, encoding="utf-8")
+    eval_manifest.write_text(row, encoding="utf-8")
+    files = {
+        name: read_root / name
+        for name in ("rwkv.pt", "moonvit.safetensors", "vocab.txt", "compressor.pt")
+    }
+    for path in files.values():
+        path.write_bytes(b"sealed")
+    directories = {
+        name: read_root / name
+        for name in ("moon-cache", "fusion-cache", "siglip2", "dinov2", "sam")
+    }
+    for path in directories.values():
+        path.mkdir()
+    observed = []
+    node_run_directory = run_directory / "nodes" / "compressor_arm"
+
+    def fake_train(argv, **hooks):
+        observed.append((argv, hooks))
+        checkpoint = node_run_directory / "checkpoint-current"
+        checkpoint.mkdir(parents=True)
+        (checkpoint / "state.pt").write_bytes(b"checkpoint")
+        return {
+            "status": "complete",
+            "step": 1,
+            "checkpoint": str(checkpoint.resolve()),
+        }
+
+    monkeypatch.setattr(vision_train, "train", fake_train)
+    invocation = SimpleNamespace(
+        inputs={
+            "config": {
+                "arm": "compressor",
+                "train_manifests": (str(train_manifest),),
+                "eval_manifests": (str(eval_manifest),),
+                "rwkv_checkpoint": str(files["rwkv.pt"]),
+                "moonvit_checkpoint": str(files["moonvit.safetensors"]),
+                "vocab": str(files["vocab.txt"]),
+                "moon_cache": str(directories["moon-cache"]),
+                "compressor_checkpoint": str(files["compressor.pt"]),
+                "fusion_cache": str(directories["fusion-cache"]),
+                "siglip2_model": str(directories["siglip2"]),
+                "dinov2_model": str(directories["dinov2"]),
+                "sam_model": str(directories["sam"]),
+                "steps": 1,
+                "checkpoint_every": 1,
+                "eval_every": 1,
+                "log_every": 1,
+                "require_fused_ce": False,
+            }
+        },
+        workspace=_sealed_workspace(read_root, run_directory),
+        publishes={"checkpoint": {}},
+        resume=None,
+        node_id="compressor_arm",
+    )
+    components = SimpleNamespace()
+    profiler = SimpleNamespace()
+    observability = SimpleNamespace(
+        keepalive=lambda *_args: __import__("contextlib").nullcontext()
+    )
+    controls = SimpleNamespace(effective_values={})
+
+    result = _vision_frozen_adapter(
+        invocation,
+        components,
+        step_profiler=profiler,
+        observability=observability,
+        controls=controls,
+    )
+
+    argv, hooks = observed[0]
+    assert argv[argv.index("--rwkv") + 1] == str(files["rwkv.pt"].resolve())
+    assert argv[argv.index("--vocab") + 1] == str(files["vocab.txt"].resolve())
+    assert argv[argv.index("--resume") + 1] == "none"
+    assert "--feature-cache-only" in argv
+    assert "--fusion-cache-only" in argv
+    assert "--vision-compressor-checkpoint" in argv
+    assert "--operator-profile-steps" in argv
+    assert "--no-require-fused-ce" in argv
+    assert hooks["worker_components"] is components
+    assert hooks["worker_step_profiler"] is profiler
+    assert result.event_type == "worker.completed"
+    assert result.optimizer_step == 1
+    assert result.payload["arm"] == "compressor"
+    request = result.checkpoint_requests[0]
+    assert request.source_directory == node_run_directory / "checkpoint-current"
+    assert request.resume_grade == "compatible"
+    assert "data_cursor" in request.state_components
+
+
 def test_vision_native_head_handler_seals_lineage_and_publishes_checkpoint(
     tmp_path, monkeypatch
 ) -> None:
@@ -1165,6 +1278,12 @@ def test_dispatch_table_is_closed_and_training_composition_is_required() -> None
             "1.0.0",
             "train",
             "rwkv_lab.vision_teacher_compressor.v1.Train",
+        ),
+        (
+            "rwkv-lab.vision-frozen-adapter",
+            "1.0.0",
+            "train",
+            "rwkv_lab.vision_frozen_adapter.v1.Train",
         ),
         (
             "rwkv-lab.vision-native-head",

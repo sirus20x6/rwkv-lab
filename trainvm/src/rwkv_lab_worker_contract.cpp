@@ -104,6 +104,17 @@ OperationAuthoringDeclaration vision_compressor_authoring() {
   return authoring;
 }
 
+OperationAuthoringDeclaration vision_frozen_adapter_authoring() {
+  OperationAuthoringDeclaration authoring = checkpoint_authoring();
+  auto& checkpoint = authoring.outputs.at("checkpoint");
+  checkpoint.required = true;
+  checkpoint.artifact_schema =
+      "rwkv-lab.vision-frozen-adapter-checkpoint.v1";
+  checkpoint.description =
+      "Required compatible cached MoonViT/compressor caption checkpoint.";
+  return authoring;
+}
+
 OperationAuthoringDeclaration vision_native_head_authoring() {
   OperationAuthoringDeclaration authoring = checkpoint_authoring();
   auto& checkpoint = authoring.outputs.at("checkpoint");
@@ -209,6 +220,26 @@ TrainingCompositionContract vision_compressor_composition() {
               {"learning_rate",
                {{TrainingComponentCategory::learning_rate_schedule,
                  "constant", "1.0.0"}}},
+              {"optimizer",
+               {{TrainingComponentCategory::optimizer, "torch_adamw",
+                 "1.0.0"}}},
+              {"precision",
+               {{TrainingComponentCategory::precision,
+                 "fp32_parameters_bf16_compute", "1.0.0"}}},
+          },
+  };
+}
+
+TrainingCompositionContract vision_frozen_adapter_composition() {
+  return {
+      .model_family = "vision",
+      .slots = {
+          {"gradient_clipping", TrainingComponentCategory::gradient_clipping},
+          {"optimizer", TrainingComponentCategory::optimizer},
+          {"precision", TrainingComponentCategory::precision},
+      },
+      .allowed_components =
+          std::map<std::string, std::vector<TrainingComponentKey>>{
               {"optimizer",
                {{TrainingComponentCategory::optimizer, "torch_adamw",
                  "1.0.0"}}},
@@ -390,6 +421,11 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
       code_fingerprint, vision_compressor_composition(),
       resumable_training_lifecycle(), vision_compressor_authoring()));
   profiles.push_back(profile(
+      key("rwkv-lab.vision-frozen-adapter",
+          "rwkv_lab.vision_frozen_adapter.v1.Train"),
+      code_fingerprint, vision_frozen_adapter_composition(),
+      resumable_training_lifecycle(), vision_frozen_adapter_authoring()));
+  profiles.push_back(profile(
       key("rwkv-lab.vision-native-head",
           "rwkv_lab.vision_native_head.v1.Train"),
       code_fingerprint, vision_native_head_composition(),
@@ -547,6 +583,10 @@ rwkv_lab_worker_runtime_requirements() {
        canonical_distributions(
            {"grpcio", "numpy", "pillow", "protobuf", "safetensors",
             "torch", "transformers"})},
+      {"rwkv-lab.vision-frozen-adapter",
+       canonical_distributions(
+           {"einops", "flash-attn", "grpcio", "numpy", "pillow",
+            "protobuf", "safetensors", "torch", "transformers"})},
       {"rwkv-lab.vision-native-head",
        canonical_distributions(
            {"einops", "grpcio", "numpy", "pillow", "protobuf",

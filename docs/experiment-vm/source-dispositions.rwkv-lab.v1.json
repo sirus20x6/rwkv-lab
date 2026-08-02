@@ -10,7 +10,7 @@
       ".py"
     ]
   },
-  "source_tree_digest": "sha256:bf1979575770f159df6c7022164b07f61be01b180d2c749661ece572163ec506",
+  "source_tree_digest": "sha256:ea707c5033adfd1a1febb60db8fd868eff1958f4610343647fea571c139a22ba",
   "entries": [
     {
       "source_path": "src/rwkv_lab/__init__.py",
@@ -3205,15 +3205,16 @@
         "read_source",
         "write_artifact"
       ],
-      "resume_relevance": "exact_candidate",
+      "resume_relevance": "compatible",
       "compatibility_workflow_id": "vision.frozen-adapter-train",
-      "source_sha256": "sha256:c0940032c073c39ed7f3ae213288380bed414af8a55b846df329dfc08c7927ec",
+      "source_sha256": "sha256:16bb7eec0eef43c1c6fcbe1197f8fbbe60573ecc708482b308956dd0cac07e34",
       "family": "vision_multimodal",
       "coverage": "direct",
       "consumers": [
         "src/rwkv_lab/vision_caption.py",
         "src/rwkv_lab/vision_native_train.py",
         "src/rwkv_lab/vision_rwkv_student_train.py",
+        "src/rwkv_lab/trainvm_adapters/handlers.py",
         "scripts/caption_radio1d_directory.py",
         "scripts/run_radio1d_captioning_first.sh",
         "scripts/run_radio1d_civitai_joy_continuation.sh"

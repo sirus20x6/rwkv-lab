@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import argparse
 import atexit
-import copy
 import contextlib
+import copy
 import fcntl
 import gc
 import hashlib
@@ -26,10 +26,10 @@ import threading
 import time
 import zipfile
 from collections import Counter, OrderedDict
+from collections.abc import Callable, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable, Sequence
 
 import torch
 import torch.nn.functional as F
@@ -37,8 +37,6 @@ from PIL import Image
 from torch import nn
 
 from rwkv_lab.activation_checkpointing import selective_activation_checkpointing
-from rwkv_lab.generate import SEP, WorldVocab
-from rwkv_lab.fused_ce import HAS_FUSED_CE, weighted_logits_cross_entropy
 from rwkv_lab.deep_vision import DeepVisionInjector, LayerMatchedVisionInjector
 from rwkv_lab.engram_lmb import (
     BatchedStreamingEngramState,
@@ -49,18 +47,70 @@ from rwkv_lab.engram_lmb import (
     float_growth_params,
     token_rosa_recall,
 )
+from rwkv_lab.fused_ce import HAS_FUSED_CE, weighted_logits_cross_entropy
+from rwkv_lab.generate import SEP, VOCAB, WorldVocab
 from rwkv_lab.lookahead_module import NextLatPredictor, nextlat_loss
-from rwkv_lab.moonvit import (MoonViT, MoonViTPrefixProjector, feature_cache_key,
-                              valid_pooled_feature as _valid_pooled_feature,
-                              valid_pooled_feature_archive as _valid_pooled_feature_archive,
-                              valid_pooled_feature_payload as _valid_pooled_feature_payload,
-                              valid_torch_archive_storages)
+from rwkv_lab.moonvit import (
+    MoonViT,
+    MoonViTPrefixProjector,
+    feature_cache_key,
+    valid_torch_archive_storages,
+)
+from rwkv_lab.moonvit import valid_pooled_feature as _valid_pooled_feature
+from rwkv_lab.moonvit import (
+    valid_pooled_feature_archive as _valid_pooled_feature_archive,
+)
+from rwkv_lab.moonvit import (
+    valid_pooled_feature_payload as _valid_pooled_feature_payload,
+)
+from rwkv_lab.radio1d_cache import (
+    cache_is_current as radio_cache_is_current,
+)
+from rwkv_lab.radio1d_cache import (
+    cache_path as radio_cache_path,
+)
+from rwkv_lab.radio1d_cache import (
+    load_cache as load_radio_cache,
+)
+from rwkv_lab.radio1d_cache import (
+    make_metadata as make_radio_metadata,
+)
+from rwkv_lab.radio1d_cache import (
+    save_cache as save_radio_cache,
+)
+from rwkv_lab.radio1d_rwkv import (
+    DEFAULT_ADAPTIVE_TOKEN_THRESHOLD,
+    DEFAULT_COMPLEXITY_BUDGET_RATIO,
+    DEFAULT_COMPLEXITY_TOKEN_QUANTUM,
+    DEFAULT_MAX_DETAIL_TILES,
+    RadioFeatureProjector,
+    RadioPrefixInjector,
+    adaptive_tokens_per_tile,
+    build_radio_tiles,
+    choose_detail_grid,
+    encode_radio_tiles,
+    fourier_box_features,
+    load_radio1d_h,
+    tokens_per_tile_for_tile_count,
+)
 from rwkv_lab.rwkv_finetune import load_g1g_fla
+from rwkv_lab.vision_compressor_features import (
+    CanonicalLatentPrefixProjector,
+    FrozenTeacherCompressor,
+)
+from rwkv_lab.vision_fusion import (
+    AlignedFrozenVisionFeatures,
+    SamAlignedFrozenFeatures,
+    VisionFusionResidual,
+    VisionTowerConfig,
+    aligned_feature_cache_key,
+    valid_aligned_feature,
+)
+from rwkv_lab.vision_grounding import ImageTextContrastiveHead, early_token_weights
 from rwkv_lab.vision_loop import (
     capture_loop_refinement_caches,
     install_factored_timemix,
     load_loop_adapter_state,
-    loop_adapter_state,
     loop_telemetry_payload,
     loop_training_metric_tensors,
     reset_loop_adapters,
@@ -75,7 +125,6 @@ from rwkv_lab.vision_loop import (
     write_loop_telemetry,
     write_loop_telemetry_payload,
 )
-from rwkv_lab.vision_grounding import ImageTextContrastiveHead, early_token_weights
 from rwkv_lab.vision_ocr import ocr_generation_metrics
 from rwkv_lab.vision_structured import (
     BOX_RE,
@@ -85,40 +134,6 @@ from rwkv_lab.vision_structured import (
     structured_generation_metrics,
     structured_prediction_instances,
     structured_target_from_row,
-)
-from rwkv_lab.vision_fusion import (
-    AlignedFrozenVisionFeatures,
-    SamAlignedFrozenFeatures,
-    VisionFusionResidual,
-    VisionTowerConfig,
-    aligned_feature_cache_key,
-    valid_aligned_feature,
-)
-from rwkv_lab.vision_compressor_features import (
-    CanonicalLatentPrefixProjector,
-    FrozenTeacherCompressor,
-)
-from rwkv_lab.radio1d_cache import (
-    cache_is_current as radio_cache_is_current,
-    cache_path as radio_cache_path,
-    load_cache as load_radio_cache,
-    make_metadata as make_radio_metadata,
-    save_cache as save_radio_cache,
-)
-from rwkv_lab.radio1d_rwkv import (
-    DEFAULT_ADAPTIVE_TOKEN_THRESHOLD,
-    DEFAULT_COMPLEXITY_BUDGET_RATIO,
-    DEFAULT_COMPLEXITY_TOKEN_QUANTUM,
-    DEFAULT_MAX_DETAIL_TILES,
-    RadioFeatureProjector,
-    RadioPrefixInjector,
-    build_radio_tiles,
-    choose_detail_grid,
-    encode_radio_tiles,
-    fourier_box_features,
-    load_radio1d_h,
-    adaptive_tokens_per_tile,
-    tokens_per_tile_for_tile_count,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -991,7 +1006,8 @@ def cached_features(rows: Sequence[dict], vision: MoonViT,
                     projector: MoonViTPrefixProjector, cache_dir: Path | None) -> list[torch.Tensor]:
     """Load pooled frozen features, batch-encoding cache misses by image grid."""
     result: list[torch.Tensor | None] = [None] * len(rows)
-    if cache_dir is not None:
+    cache_only = bool(getattr(vision, "cache_only", False))
+    if cache_dir is not None and not cache_only:
         cache_dir.mkdir(parents=True, exist_ok=True)
     missing: list[tuple[int, Path | None, Image.Image]] = []
     device = vision.patch_embed.proj.weight.device
@@ -1020,17 +1036,23 @@ def cached_features(rows: Sequence[dict], vision: MoonViT,
             item = torch.load(path, map_location="cpu", weights_only=True)
             if not _valid_pooled_feature_archive(
                     path, item, projector.prefix_tokens, stages):
-                path.unlink(missing_ok=True)
+                if not cache_only:
+                    path.unlink(missing_ok=True)
                 return path, None
             return path, item
-        except (OSError, EOFError, RuntimeError, pickle.UnpicklingError,
+        except (OSError, EOFError, IndexError, RuntimeError, pickle.UnpicklingError,
                 zipfile.BadZipFile):
-            path.unlink(missing_ok=True)
+            if not cache_only:
+                path.unlink(missing_ok=True)
             return path, None
 
     loaded = list(_CACHE_LOAD_POOL.map(load_one, rows))
     for index, (row, (path, item)) in enumerate(zip(rows, loaded)):
         if item is None:
+            if cache_only:
+                raise FileNotFoundError(
+                    f"sealed MoonViT cache is missing or invalid for {row['image']}"
+                )
             with Image.open(row["image"]) as image:
                 missing.append((index, path, image.convert("RGB")))
         else:
@@ -1181,16 +1203,15 @@ def runtime_cached_features(rows: Sequence[dict], vision: nn.Module,
             # prefetch worker can never touch CUDA from a foreign thread.
             return load_v4h_features(
                 rows, Path(getattr(vision, "v4h_cache_dir", cache_dir)),
-                revision=str(getattr(vision, "radio_revision")),
-                lattice=int(getattr(vision, "v4h_lattice")), root=ROOT,
+                revision=str(vision.radio_revision),
+                lattice=int(vision.v4h_lattice), root=ROOT,
                 pair_axis=str(getattr(vision, "v4h_pair_axis", "columns")))
         return cached_radio_features(
             rows, vision, cache_dir,
-            revision=str(getattr(vision, "radio_revision")),
-            max_detail_tiles=int(getattr(vision, "radio_max_detail_tiles")),
-            tile_batch=int(getattr(vision, "radio_tile_batch")),
-            adaptive_token_threshold=int(getattr(
-                vision, "radio_adaptive_token_threshold")))
+            revision=str(vision.radio_revision),
+            max_detail_tiles=int(vision.radio_max_detail_tiles),
+            tile_batch=int(vision.radio_tile_batch),
+            adaptive_token_threshold=int(vision.radio_adaptive_token_threshold))
     return cached_features(rows, vision, projector, cache_dir)
 
 
@@ -1208,7 +1229,7 @@ def cached_native_v4h_features(
     from rwkv_lab.radio_v4h import cache_path, load_native_features
 
     cache_dir = Path(cache_dir)
-    revision = str(getattr(vision, "radio_revision"))
+    revision = str(vision.radio_revision)
     max_edge = int(getattr(vision, "v4h_max_edge", 2048))
     hidden_size = int(getattr(vision, "v4h_feature_width", 1280))
     packing = str(getattr(vision, "v4h_native_packing", "pair_columns"))
@@ -1387,7 +1408,9 @@ def cached_fusion_features(
         rows: Sequence[dict], tower: AlignedFrozenVisionFeatures,
         prefix_tokens: int, cache_dir: Path) -> list[torch.Tensor]:
     """Load aligned frozen three-tower features and fill cache misses."""
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_only = bool(getattr(tower, "cache_only", False))
+    if not cache_only:
+        cache_dir.mkdir(parents=True, exist_ok=True)
     paths = [_row_fusion_cache_path(
         row, cache_dir, tokens=prefix_tokens,
         tower_fingerprint=tower.cache_fingerprint) for row in rows]
@@ -1403,18 +1426,24 @@ def cached_fusion_features(
             item = torch.load(path, map_location="cpu", weights_only=True)
             if (not valid_aligned_feature(item, prefix_tokens, tower.width)
                     or not valid_torch_archive_storages(path, item)):
-                path.unlink(missing_ok=True)
+                if not cache_only:
+                    path.unlink(missing_ok=True)
                 return None
             _FEATURE_MEMORY_CACHE[path] = item
             return item
-        except (OSError, EOFError, RuntimeError, pickle.UnpicklingError,
+        except (OSError, EOFError, IndexError, RuntimeError, pickle.UnpicklingError,
                 zipfile.BadZipFile):
-            path.unlink(missing_ok=True)
+            if not cache_only:
+                path.unlink(missing_ok=True)
             return None
 
     result = list(_CACHE_LOAD_POOL.map(load_one, paths))
     missing = [index for index, item in enumerate(result) if item is None]
     if missing:
+        if cache_only:
+            raise FileNotFoundError(
+                f"sealed fusion cache is missing or invalid for {len(missing)} row(s)"
+            )
         if not tower.loaded:
             print("loading frozen vision tower for fusion cache misses", flush=True)
             tower.load_pretrained(device="cuda", dtype=torch.bfloat16)
@@ -1658,7 +1687,7 @@ def prefetch_cached_radio_rows(
     access during evaluation. Cache creation belongs exclusively to the main
     trainer thread; a prefetch miss is simply left unresolved here.
     """
-    revision = str(getattr(vision, "radio_revision"))
+    revision = str(vision.radio_revision)
 
     def load_one(row: dict) -> tuple[
             Path, tuple[torch.Tensor, ...] | None, str]:
@@ -1728,12 +1757,12 @@ def prefetch_training_batch(rows: Sequence[dict], vision: nn.Module,
         # v4h caches are pre-built and read-only; nothing to warm on the worker.
         stats.update(resident_hits=0, disk_hits=len(rows), generated=0)
         ready = len(rows)
-        visual_width = int(getattr(vision, "v4h_lattice")) ** 2 * int(
+        visual_width = int(vision.v4h_lattice) ** 2 * int(
             {int(row["_radio_tiles"]) for row in rows}.pop())
     elif isinstance(projector, RadioFeatureProjector):
         if cache_dir is None:
             raise ValueError("RADIO prefetch requires a resumable feature cache")
-        threshold = int(getattr(vision, "radio_adaptive_token_threshold"))
+        threshold = int(vision.radio_adaptive_token_threshold)
         ready, resident_hits, disk_hits = prefetch_cached_radio_rows(
             rows, vision, cache_dir,
             adaptive_token_threshold=threshold)
@@ -1753,7 +1782,7 @@ def prefetch_training_batch(rows: Sequence[dict], vision: nn.Module,
     else:
         ready = prefetch_cached_feature_rows(
             rows, vision, projector, cache_dir)  # type: ignore[arg-type]
-        visual_width = int(getattr(projector, "prefix_tokens"))
+        visual_width = int(projector.prefix_tokens)
         stats["disk_hits"] = ready
     ready += prefetch_fusion_feature_rows(
         rows, fusion_tower,
@@ -2558,8 +2587,11 @@ def persisted_args(args: argparse.Namespace) -> dict:
     genuinely reads back (``loop_reset_committed``,
     ``structured_head_initialized_step``) is configuration and stays.
     """
-    return {name: value for name, value in vars(args).items()
-            if name not in _MIGRATION_RECEIPTS}
+    return {
+        name: value
+        for name, value in vars(args).items()
+        if name not in _MIGRATION_RECEIPTS and not name.startswith("_worker_")
+    }
 
 
 def _checkpoint_snapshot(*, step: int, projector: nn.Module,
@@ -2592,6 +2624,11 @@ def _checkpoint_snapshot(*, step: int, projector: nn.Module,
             "torch": torch.get_rng_state(),
             "cuda": torch.cuda.get_rng_state_all(),
         },
+        "worker_control_state": (
+            args._worker_controls.checkpoint_state()
+            if getattr(args, "_worker_controls", None) is not None
+            else None
+        ),
         "args": persisted_args(args),
     })
 
@@ -2974,6 +3011,12 @@ def _load_checkpoint(path: Path, *, projector: nn.Module, nextlat: nn.Module | N
     if int(blob.get("schema", -1)) != CHECKPOINT_SCHEMA:
         raise ValueError(f"unsupported vision checkpoint schema {blob.get('schema')}")
     saved_args = blob.get("args", {})
+    worker_controls = getattr(args, "_worker_controls", None)
+    if worker_controls is not None:
+        control_state = blob.get("worker_control_state")
+        if not isinstance(control_state, dict):
+            raise ValueError("vision checkpoint control state is missing")
+        worker_controls.verify_checkpoint_state(control_state)
     if (saved_args.get("structured_lr") == 0.0
             and not saved_args.get("structured_lr_zero_is_freeze", False)):
         # 0.0 used to be this option's "unset" sentinel, which made a frozen
@@ -3021,7 +3064,9 @@ def _load_checkpoint(path: Path, *, projector: nn.Module, nextlat: nn.Module | N
                      "loop_ramp_steps",
                      "lr", "weight_decay", "grad_clip", "nextlat_weight",
                      "nextlat_hidden", "nextlat_kl_weight", "val_fraction",
-                     "eval_every", "eval_examples")
+                     "eval_every", "eval_examples",
+                     "worker_component_evidence",
+                     "worker_component_composition_digest")
     differences = [name for name in compatibility
                    if name not in migration_compatible
                    if saved_args.get(name) != getattr(args, name, None)]
@@ -3100,6 +3145,10 @@ def _load_checkpoint(path: Path, *, projector: nn.Module, nextlat: nn.Module | N
         "ocr_update_ratio": 0.0,
         "structured_update_ratio": 0.0,
         "structured_lr": None,
+        "feature_cache_only": False,
+        "fusion_cache_only": False,
+        "vocab": VOCAB,
+        "vocab_fingerprint": getattr(args, "vocab_fingerprint", ""),
     }
     bootstrapping_v4h_fingerprint = bool(
         saved_args.get("vision_backend", "moonvit") == "radio_v4h"
@@ -3379,7 +3428,8 @@ def _optimizer(projector: nn.Module, nextlat: nn.Module | None,
                layer_vision: LayerMatchedVisionInjector | None = None,
                vision_fusion: VisionFusionResidual | None = None,
                grounding: ImageTextContrastiveHead | None = None,
-               structured_head: StructuredSpatialHead | None = None):
+               structured_head: StructuredSpatialHead | None = None,
+               worker_components=None):
     loop_gate, loop_norm = [], []
     for wrapper in wrappers:
         gate_names = wrapper.loop.loop_param_names()
@@ -3420,10 +3470,16 @@ def _optimizer(projector: nn.Module, nextlat: nn.Module | None,
                        "weight_decay": args.weight_decay,
                        "name": "structured_head"})
     groups = [group for group in groups if group["params"]]
-    kwargs = dict(betas=(0.9, 0.95))
-    if torch.cuda.is_available():
-        kwargs["fused"] = True
-    return torch.optim.AdamW(groups, **kwargs), [p for group in groups for p in group["params"]]
+    optimizer = (
+        worker_components.optimizer(groups)
+        if worker_components is not None
+        else torch.optim.AdamW(
+            groups,
+            betas=(0.9, 0.95),
+            fused=torch.cuda.is_available(),
+        )
+    )
+    return optimizer, [p for group in groups for p in group["params"]]
 
 
 def _load_optimizer_with_grown_groups(optimizer, saved: dict, *,
@@ -4624,7 +4680,14 @@ def write_eval_samples(rows: Sequence[dict], indices: Sequence[int], *, step: in
     return artifact
 
 
-def main() -> None:
+def train(
+    argv: Sequence[str] | None = None,
+    *,
+    worker_components=None,
+    worker_step_profiler=None,
+    worker_observability=None,
+    worker_controls=None,
+) -> dict:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", nargs="+", required=True)
     ap.add_argument("--eval-data", nargs="+", default=None,
@@ -4633,6 +4696,7 @@ def main() -> None:
     ap.add_argument("--vision-backend", choices=("moonvit", "radio1d", "radio_v4h"),
                     default="moonvit")
     ap.add_argument("--moonvit", default="models/kimi-k2.6-moonvit/model-00064-of-000064.safetensors")
+    ap.add_argument("--vocab", default=VOCAB)
     ap.add_argument("--radio-model", default="models/vision/C-RADIOv4-1D-H")
     ap.add_argument("--radio-revision",
                     default="e18692120c7a3203496e1a99056a4149ede135fc")
@@ -4758,6 +4822,8 @@ def main() -> None:
                          "Enabling it repartitions the fusion feature cache.")
     ap.add_argument("--fusion-feature-cache",
                     default="caches/siglip2_dinov2_sam_aligned_v1")
+    ap.add_argument("--fusion-cache-only", action="store_true",
+                    help="treat aligned teacher features as immutable and fail on a miss")
     ap.add_argument("--vision-compressor-checkpoint", default="",
                     help="frozen six-teacher 128x1024 compressor; replaces the Moon-only prefix bridge")
     ap.add_argument("--grounding-early-tokens", type=int, default=0,
@@ -4796,6 +4862,8 @@ def main() -> None:
                     help="resume a checkpoint made at this smaller text limit; verifies its old fingerprint")
     ap.add_argument("--max-input-patches", type=int, default=1024)
     ap.add_argument("--feature-cache", default="caches/moonvit_features_stage1_v3")
+    ap.add_argument("--feature-cache-only", action="store_true",
+                    help="treat MoonViT features as immutable and fail on a miss")
     ap.add_argument("--preload-feature-cache", action="store_true",
                     help="keep deserialized cached MoonViT features in system RAM")
     ap.add_argument("--feature-cache-max-bytes", type=int, default=16 * 2**30,
@@ -4914,7 +4982,59 @@ def main() -> None:
                     help="warm-start non-vision adapters while replacing the vision bridge")
     ap.add_argument("--fresh", action="store_true",
                     help="explicitly archive an existing run and start over; incompatible with resume")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
+    component_evidence = None
+    component_composition_digest = None
+    if worker_components is not None:
+        worker_components.require_implementation(
+            "optimizer",
+            category="optimizer",
+            allowed=frozenset({"rwkv_lab.optimizer.torch_adamw.v1"}),
+        )
+        if dict(
+            worker_components.configuration("optimizer", category="optimizer")
+        ) != {
+            "learning_rate": args.lr,
+            "beta1": 0.9,
+            "beta2": 0.95,
+            "epsilon": 1.0e-8,
+            "weight_decay": args.weight_decay,
+            "foreach": False,
+            "fused": True,
+        }:
+            raise ValueError(
+                "authority optimizer composition disagrees with vision configuration"
+            )
+        if dict(
+            worker_components.configuration(
+                "gradient_clipping", category="gradient_clipping"
+            )
+        ) != {
+            "max_norm": args.grad_clip,
+            "norm_type": 2.0,
+            "error_if_nonfinite": False,
+        }:
+            raise ValueError(
+                "authority gradient clipping disagrees with vision configuration"
+            )
+        worker_components.require_implementation(
+            "precision",
+            category="precision",
+            allowed=frozenset(
+                {"rwkv_lab.precision.fp32_parameters_bf16_compute.v1"}
+            ),
+        )
+        component_evidence = dict(worker_components.evidence())
+        component_composition_digest = (
+            worker_components.composition.composition_digest
+        )
+    args.worker_component_evidence = component_evidence
+    args.worker_component_composition_digest = component_composition_digest
+    args._worker_controls = worker_controls
+
+    def reject_live_controls(_effective: object, assignments: object) -> None:
+        if assignments:
+            raise ValueError("frozen vision adapter v1 has no live-mutable controls")
     # Historical checkpoints used 0 as an "inherit --lr" sentinel. New
     # checkpoints carry this marker so an explicit zero remains a real frozen
     # optimizer group on every subsequent exact resume.
@@ -5150,6 +5270,8 @@ def main() -> None:
     # cannot overlap old cache workers that are still draining.
     atexit.register(run_lock.close)
     log_path, checkpoint_path = out / "train.jsonl", out / "last.pt"
+    checkpoint_directory = out / "checkpoint-current"
+    checkpoint_state = checkpoint_directory / "state.pt"
     eval_contract_reset_path = out / "eval_contract_reset.json"
     best_dir = out / "best"
     if args.fresh:
@@ -5222,7 +5344,7 @@ def main() -> None:
     unique_train = {}
     for row in raw_train:
         unique_train[task_identity(row)] = row
-    vocab = WorldVocab()
+    vocab = WorldVocab(args.vocab)
     unique_train_rows = list(unique_train.values())
     train_rows, train_lengths = prepare_examples(unique_train_rows, vocab,
                                                   prompt=args.prompt,
@@ -5332,6 +5454,8 @@ def main() -> None:
             if args.vision_backend == "radio_v4h" and args.radio_v4h_native:
                 from rwkv_lab.radio_v4h import (
                     cache_path as v4h_cache_path,
+                )
+                from rwkv_lab.radio_v4h import (
                     native_cache_token_count,
                     native_grid_for,
                 )
@@ -5488,6 +5612,7 @@ def main() -> None:
     args.rwkv_fingerprint = checkpoint_fingerprint(args.rwkv)
     args.moonvit_fingerprint = (checkpoint_fingerprint(args.moonvit)
                                 if args.vision_backend == "moonvit" else "")
+    args.vocab_fingerprint = checkpoint_fingerprint(args.vocab)
     args.radio_fingerprint = (checkpoint_fingerprint(args.radio_model)
                               if args.vision_backend == "radio1d" else "")
     if args.vision_backend == "radio_v4h":
@@ -5608,8 +5733,8 @@ def main() -> None:
                          if value)
     vision_compressor = None
     if args.vision_backend == "radio_v4h":
-        from rwkv_lab.radio_v4h import load_radio_v4h
         from rwkv_lab.radio1d_rwkv import RadioRWKVBridge
+        from rwkv_lab.radio_v4h import load_radio_v4h
         _atomic_json(out / "status.json", {
             "state": "loading_radio_v4h", "updated": time.time()})
         if args.radio_v4h_cache_only:
@@ -5680,6 +5805,7 @@ def main() -> None:
             args.moonvit, device="cuda",
             max_input_patches=args.max_input_patches,
             tap_layers=moonvit_taps, view_mode=args.vision_view_mode)
+        vision.cache_only = bool(args.feature_cache_only)
         vision.requires_grad_(False)
         vision.eval()
     # Trainable modules intentionally remain fp32; autocast supplies bf16 matmuls
@@ -5707,6 +5833,7 @@ def main() -> None:
             args.sam_model, tokens=args.sam_fusion_tokens)
             if args.sam_fusion
             else AlignedFrozenVisionFeatures(_vision_tower_config(args)))
+        fusion_tower.cache_only = bool(args.fusion_cache_only)
         fusion_tower.requires_grad_(False).eval()
         if args.vision_fusion or args.sam_fusion:
             vision_fusion = VisionFusionResidual(
@@ -5771,7 +5898,8 @@ def main() -> None:
         projector, nextlat, engram, wrappers, args,
         deep_vision=deep_vision, layer_vision=layer_vision,
         vision_fusion=vision_fusion,
-        grounding=grounding, structured_head=structured_head)
+        grounding=grounding, structured_head=structured_head,
+        worker_components=worker_components)
     assert_training_contract(rwkv, vision, wrappers, trainable,
                              vision_compressor=vision_compressor)
     last_checkpoint_step: int | None = None
@@ -5813,6 +5941,21 @@ def main() -> None:
             checkpoint_path, checkpoint_snapshot(checkpoint_step))
         # Update only after the atomic durable save succeeds.
         last_checkpoint_step = checkpoint_step
+
+    def stage_current_checkpoint(checkpoint_step: int) -> None:
+        """Expose one immutable-directory payload to TrainVM publication."""
+        if last_checkpoint_step != checkpoint_step:
+            save_last_checkpoint(checkpoint_step)
+        checkpoint_directory.mkdir(parents=True, exist_ok=True)
+        temporary = checkpoint_state.with_name(
+            f".{checkpoint_state.name}.{os.getpid()}.tmp"
+        )
+        try:
+            temporary.unlink(missing_ok=True)
+            os.link(checkpoint_path, temporary)
+            os.replace(temporary, checkpoint_state)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     loop_trainable = [parameter for group in optimizer.param_groups
                       if str(group.get("name", "")).startswith("loop_")
@@ -6179,6 +6322,8 @@ def main() -> None:
                        recurrent_context_fresh: bool = False) -> bool:
         """Run one scalar+qualitative eval; return whether it saved ``last.pt``."""
         nonlocal best_eval_loss
+        if worker_controls is not None:
+            worker_controls.evaluation(eval_step, reject_live_controls)
 
         cadence_due = qualitative_eval_due(
             eval_step, eval_every=args.eval_every,
@@ -6283,6 +6428,13 @@ def main() -> None:
                 if (name.startswith(("caption_", "ocr_", "structured_", "eval_"))
                     and isinstance(value, (int, float)))
             }
+        if worker_observability is not None:
+            worker_observability.publish_if_declared(
+                "eval.loss", val_loss, step=eval_step
+            )
+            worker_observability.publish_if_declared(
+                "eval.perplexity", ppl, step=eval_step
+            )
         if not caption_due:
             evaluation = {
                 "kind": "eval_artifact", "step": eval_step,
@@ -6377,6 +6529,8 @@ def main() -> None:
                     schedule_next_batch_prefetch(step + 1))
                 continue
             next_step = step + 1
+            if worker_controls is not None:
+                worker_controls.microbatch(next_step, reject_live_controls)
             desired_loop = next_step >= args.loop_start_step and args.loop_count > 1
             if desired_loop != loop_enabled:
                 # Save the exact last warmup state before exercising a delayed
@@ -6433,7 +6587,12 @@ def main() -> None:
             if prefetch_future is not None and prefetched_indices == indices:
                 wait_started = time.perf_counter()
                 try:
-                    prefetch_result = prefetch_future.result()
+                    with (
+                        worker_step_profiler.input_wait()
+                        if worker_step_profiler is not None
+                        else contextlib.nullcontext()
+                    ):
+                        prefetch_result = prefetch_future.result()
                     prefetch_ready = prefetch_result.ready
                     prefetched_recall = prefetch_result.recall
                     prefetched_native_features = prefetch_result.native_features
@@ -6526,12 +6685,16 @@ def main() -> None:
             # effective, ramped contribution is tiny. A single global clip made
             # those gradients scale projector/NextLat updates almost to zero.
             # Clip the bridge and recurrent adapters independently.
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                bridge_trainable, args.grad_clip, error_if_nonfinite=False)
-            loop_grad_norm = torch.nn.utils.clip_grad_norm_(
-                loop_trainable, args.grad_clip, error_if_nonfinite=False)
-            engram_grad_norm = torch.nn.utils.clip_grad_norm_(
-                engram_trainable, args.grad_clip, error_if_nonfinite=False)
+            clip = (
+                worker_components.gradient_clipping
+                if worker_components is not None
+                else lambda parameters: torch.nn.utils.clip_grad_norm_(
+                    parameters, args.grad_clip, error_if_nonfinite=False
+                )
+            )
+            grad_norm = clip(bridge_trainable)
+            loop_grad_norm = clip(loop_trainable)
+            engram_grad_norm = clip(engram_trainable)
             metric_names = list(metrics)
             # Gradient clipping already requires one safety barrier before the
             # optimizer. Materialize loss and auxiliary scalars in that same
@@ -6560,6 +6723,12 @@ def main() -> None:
                 sampler.commit_batch(indices)
                 step = next_step
                 checkpoint_state_valid = True
+                if worker_step_profiler is not None:
+                    worker_step_profiler.step(step)
+                if worker_observability is not None:
+                    worker_observability.optimizer_step(step)
+                if worker_controls is not None:
+                    worker_controls.optimizer_step(step, reject_live_controls)
                 if profile:
                     torch.cuda.synchronize()
                 if operator_profile is not None:
@@ -6609,6 +6778,22 @@ def main() -> None:
                                   peak_reserved_gib=round(
                                       torch.cuda.max_memory_reserved()
                                       / (1024 ** 3), 3))
+                if worker_observability is not None:
+                    for name, value in (
+                        ("train.loss", record["loss"]),
+                        ("train.gradient_norm", record["grad_norm"]),
+                        ("train.loop_gradient_norm", record["loop_grad_norm"]),
+                        ("train.engram_gradient_norm", record["engram_grad_norm"]),
+                        ("train.batch_captions", record["batch_captions"]),
+                        ("train.text_tokens", record["text_tokens"]),
+                    ):
+                        worker_observability.publish_if_declared(
+                            name, value, step=step
+                        )
+                    if "step_s" in record:
+                        worker_observability.publish_if_declared(
+                            "train.step_seconds", record["step_s"], step=step
+                        )
                 train_record = record if step % args.log_every == 0 else None
                 if args.eval_every and step % args.eval_every == 0:
                     # Evaluation is a scheduled side effect of this committed
@@ -6674,6 +6859,34 @@ def main() -> None:
                 checkpoint_writer.submit(step, checkpoint_snapshot(step))
                 _atomic_json(out / "status.json", {"state": "training", "step": step,
                                                    "updated": time.time()})
+            checkpoint_requested = bool(
+                worker_controls is not None
+                and worker_controls.checkpoint_boundary_requested
+            )
+            if checkpoint_requested:
+                worker_controls.checkpoint(step, reject_live_controls)
+                with (
+                    worker_observability.keepalive(step, "checkpointing")
+                    if worker_observability is not None
+                    else contextlib.nullcontext()
+                ):
+                    stage_current_checkpoint(step)
+                if worker_controls.checkpoint_completion_requested:
+                    worker_controls.publish_requested_checkpoint_directory(
+                        str(checkpoint_directory),
+                        optimizer_step=step,
+                        resume_grade="compatible",
+                        state_components=(
+                            "component_composition",
+                            "control_revision",
+                            "data_cursor",
+                            "model",
+                            "optimizer",
+                            "rng_accelerator",
+                            "rng_python",
+                            "rng_torch",
+                        ),
+                    )
     except KeyboardInterrupt:
         # A dashboard/operator pause must be an exact, recoverable stop rather
         # than losing every completed update since the periodic checkpoint.
@@ -6750,7 +6963,13 @@ def main() -> None:
         log.close()
 
     if interrupted:
-        return
+        stage_current_checkpoint(step)
+        return {
+            "status": "interrupted",
+            "step": step,
+            "checkpoint": str(checkpoint_directory.resolve()),
+            "best_eval_loss": best_eval_loss,
+        }
 
     # Reaching the target is itself a commit boundary. Keep an operator SIGINT
     # pending until the final checkpoint and terminal status agree; otherwise a
@@ -6773,7 +6992,18 @@ def main() -> None:
         raise
     finally:
         signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+    stage_current_checkpoint(step)
     print(f"complete: {step} steps; checkpoint {checkpoint_path}", flush=True)
+    return {
+        "status": "complete",
+        "step": step,
+        "checkpoint": str(checkpoint_directory.resolve()),
+        "best_eval_loss": best_eval_loss,
+    }
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    train(argv)
 
 
 if __name__ == "__main__":

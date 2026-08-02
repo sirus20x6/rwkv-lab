@@ -36,6 +36,7 @@ from .rlvr import RLVRTrainConfig
 from .rwkv_scratch import RWKVScratchTrainConfig
 from .transformer_mla import PROFILE_ADAPTERS, TransformerMLATrainConfig
 from .vision_compressor import VisionTeacherCompressorConfig
+from .vision_frozen import VisionFrozenAdapterConfig
 from .vision_native import VisionNativeHeadConfig
 from .vision_student import VisionRWKVStudentConfig
 
@@ -1067,6 +1068,298 @@ def _vision_teacher_compressor(
     )
 
 
+def _vision_frozen_adapter(
+    invocation: WorkerInvocation,
+    components: WorkerTrainingComponents,
+    step_profiler: WorkerStepProfiler | None = None,
+    observability: WorkerObservability | None = None,
+    controls: WorkerControlRuntime | None = None,
+) -> HandlerResult:
+    """Run the canonical cached MoonViT/compressor caption trainer."""
+
+    if not declares_checkpoint(invocation):
+        raise AdapterDispatchError(
+            "frozen vision invocation omits its required checkpoint artifact"
+        )
+    effective_controls = (
+        getattr(controls, "effective_values", {}) if controls is not None else {}
+    )
+    if not isinstance(effective_controls, Mapping):
+        raise AdapterDispatchError("frozen vision received an invalid control snapshot")
+    if effective_controls:
+        raise AdapterDispatchError("frozen vision v1 does not declare initial controls")
+
+    verification = (
+        observability.keepalive(0, "verifying_inputs")
+        if observability is not None
+        else nullcontext()
+    )
+    with verification:
+        paths = WorkspacePathAuthority.from_workspace(
+            invocation.workspace, require_content=True
+        )
+        config = VisionFrozenAdapterConfig(**read_inline_config(invocation.inputs))
+        train_manifests = tuple(
+            paths.read_path(value, label=f"train_manifests[{index}]", kind="file")
+            for index, value in enumerate(config.train_manifests)
+        )
+        eval_manifests = tuple(
+            paths.read_path(value, label=f"eval_manifests[{index}]", kind="file")
+            for index, value in enumerate(config.eval_manifests)
+        )
+        for label, manifests in (
+            ("train_manifests", train_manifests),
+            ("eval_manifests", eval_manifests),
+        ):
+            for index, manifest in enumerate(manifests):
+                paths.verify_jsonl_file_references(
+                    manifest,
+                    fields=("image", "image_path"),
+                    label=f"{label}[{index}]",
+                )
+        rwkv = paths.read_path(
+            config.rwkv_checkpoint, label="rwkv_checkpoint", kind="file"
+        )
+        moonvit = paths.read_path(
+            config.moonvit_checkpoint, label="moonvit_checkpoint", kind="file"
+        )
+        vocab = paths.read_path(config.vocab, label="vocab", kind="file")
+        moon_cache = paths.read_path(
+            config.moon_cache, label="moon_cache", kind="directory"
+        )
+        compressor = fusion_cache = siglip2 = dinov2 = sam = None
+        if config.arm == "compressor":
+            compressor = paths.read_path(
+                config.compressor_checkpoint,
+                label="compressor_checkpoint",
+                kind="file",
+            )
+            fusion_cache = paths.read_path(
+                config.fusion_cache, label="fusion_cache", kind="directory"
+            )
+            siglip2 = paths.read_path(
+                config.siglip2_model, label="siglip2_model", kind="directory"
+            )
+            dinov2 = paths.read_path(
+                config.dinov2_model, label="dinov2_model", kind="directory"
+            )
+            sam = paths.read_path(
+                config.sam_model, label="sam_model", kind="directory"
+            )
+        run_directory = paths.node_run_directory(invocation.node_id)
+        resume_payload = _resume_payload(
+            invocation,
+            paths,
+            required_state=frozenset(
+                {
+                    "component_composition",
+                    "control_revision",
+                    "data_cursor",
+                    "model",
+                    "optimizer",
+                    "rng_accelerator",
+                    "rng_python",
+                    "rng_torch",
+                }
+            ),
+        )
+        resume_file = (
+            paths.read_path(
+                str(resume_payload / "state.pt"),
+                label="resume checkpoint state",
+                kind="file",
+                require_content_identity=False,
+            )
+            if resume_payload is not None
+            else None
+        )
+
+    def csv(values: tuple[int, ...]) -> str:
+        return ",".join(str(value) for value in values)
+
+    arguments = [
+        "--data",
+        *(str(path) for path in train_manifests),
+        "--eval-data",
+        *(str(path) for path in eval_manifests),
+        "--rwkv",
+        str(rwkv),
+        "--moonvit",
+        str(moonvit),
+        "--vocab",
+        str(vocab),
+        "--vision-backend",
+        "moonvit",
+        "--feature-cache",
+        str(moon_cache),
+        "--feature-cache-only",
+        "--out",
+        str(run_directory),
+        "--steps",
+        str(config.steps),
+        "--batch",
+        str(config.batch_size),
+        "--min-batch",
+        str(config.min_batch_size),
+        "--max-batch",
+        str(config.max_batch_size),
+        "--target-batch-tokens",
+        str(config.target_batch_tokens),
+        "--max-text-tokens",
+        str(config.max_text_tokens),
+        "--prefix-tokens",
+        str(config.prefix_tokens),
+        "--feature-cache-max-bytes",
+        str(config.feature_cache_max_bytes),
+        "--max-input-patches",
+        str(config.max_input_patches),
+        "--moonvit-tap-layers",
+        csv(config.moonvit_tap_layers),
+        "--vision-view-mode",
+        config.vision_view_mode,
+        "--vision-resampler-layers",
+        "0",
+        "--deep-vision-layers",
+        csv(config.deep_vision_layers),
+        "--deep-vision-rank",
+        str(config.deep_vision_rank),
+        "--grounding-early-tokens",
+        str(config.grounding_early_tokens),
+        "--grounding-early-weight",
+        str(config.grounding_early_weight),
+        "--grounding-contrastive-weight",
+        str(config.grounding_contrastive_weight),
+        "--grounding-contrastive-dim",
+        str(config.grounding_contrastive_dim),
+        "--grounding-temperature",
+        str(config.grounding_temperature),
+        "--lr",
+        str(config.learning_rate),
+        "--loop-lr",
+        str(config.loop_learning_rate),
+        "--weight-decay",
+        str(config.weight_decay),
+        "--grad-clip",
+        str(config.max_gradient_norm),
+        "--loop-count",
+        str(config.loop_count),
+        "--loop-start-step",
+        str(config.loop_start_step),
+        "--loop-ramp-steps",
+        str(config.loop_ramp_steps),
+        "--loop-gate-cap",
+        str(config.loop_gate_cap),
+        "--engram-sites",
+        csv(config.engram_sites),
+        "--engram-drow",
+        str(config.engram_drow),
+        "--engram-rows",
+        str(config.engram_rows),
+        "--engram-lr",
+        str(config.engram_learning_rate),
+        "--engram-warmup-steps",
+        str(config.engram_warmup_steps),
+        "--engram-boundary-id",
+        str(config.engram_boundary_id),
+        "--nextlat-weight",
+        str(config.nextlat_weight),
+        "--nextlat-hidden",
+        str(config.nextlat_hidden),
+        "--manifest-stat-workers",
+        str(config.manifest_stat_workers),
+        "--checkpoint-every",
+        str(config.checkpoint_every),
+        "--eval-every",
+        str(config.eval_every),
+        "--eval-examples",
+        str(config.eval_examples),
+        "--eval-samples",
+        str(config.eval_samples),
+        "--eval-ocr-samples",
+        str(config.eval_ocr_samples),
+        "--eval-structured-samples",
+        str(config.eval_structured_samples),
+        "--eval-sample-max-new",
+        str(config.eval_sample_max_new),
+        "--eval-sample-exclude-sources",
+        config.eval_sample_exclude_sources,
+        "--log-every",
+        str(config.log_every),
+        "--profile-steps",
+        str(config.profile_steps),
+        "--operator-profile-steps",
+        "0",
+        "--seed",
+        str(config.seed),
+        "--resume",
+        str(resume_file) if resume_file is not None else "none",
+        "--sandwich-prompt" if config.sandwich_prompt else "--no-sandwich-prompt",
+        "--loop-index" if config.loop_index else "--no-loop-index",
+        (
+            "--prefetch-next-batch"
+            if config.prefetch_next_batch
+            else "--no-prefetch-next-batch"
+        ),
+        "--require-fused-ce" if config.require_fused_ce else "--no-require-fused-ce",
+    ]
+    if config.engram:
+        arguments.append("--engram")
+    if config.arm == "compressor":
+        arguments.extend(
+            (
+                "--vision-compressor-checkpoint",
+                str(compressor),
+                "--fusion-feature-cache",
+                str(fusion_cache),
+                "--fusion-cache-only",
+                "--siglip2-model",
+                str(siglip2),
+                "--dinov2-model",
+                str(dinov2),
+                "--sam-model",
+                str(sam),
+            )
+        )
+
+    from rwkv_lab.vision_train import train
+
+    result = train(
+        arguments,
+        worker_components=components,
+        worker_step_profiler=step_profiler or NullStepProfiler(),
+        worker_observability=observability,
+        worker_controls=controls,
+    )
+    if not isinstance(result, Mapping):
+        raise AdapterDispatchError("frozen vision omitted its terminal result")
+    status = result.get("status")
+    if status not in {"complete", "interrupted"}:
+        raise AdapterDispatchError("frozen vision returned an invalid status")
+    request = checkpoint_request(
+        invocation,
+        run_directory,
+        result.get("checkpoint"),
+        result.get("step"),
+        resume_grade="compatible",
+        state_components=(
+            "component_composition",
+            "control_revision",
+            "data_cursor",
+            "model",
+            "optimizer",
+            "rng_accelerator",
+            "rng_python",
+            "rng_torch",
+        ),
+    )
+    return HandlerResult(
+        "operation.failed" if status == "interrupted" else "worker.completed",
+        {"reason": completion_reason(status), "arm": config.arm},
+        optimizer_step=request.optimizer_step,
+        checkpoint_requests=(request,),
+    )
+
+
 def _vision_native_head(
     invocation: WorkerInvocation,
     components: WorkerTrainingComponents,
@@ -1638,6 +1931,12 @@ _HANDLERS: Mapping[AdapterKey, Handler] = {
         "train",
         "rwkv_lab.vision_teacher_compressor.v1.Train",
     ): _vision_teacher_compressor,
+    (
+        "rwkv-lab.vision-frozen-adapter",
+        "1.0.0",
+        "train",
+        "rwkv_lab.vision_frozen_adapter.v1.Train",
+    ): _vision_frozen_adapter,
     (
         "rwkv-lab.vision-native-head",
         "1.0.0",

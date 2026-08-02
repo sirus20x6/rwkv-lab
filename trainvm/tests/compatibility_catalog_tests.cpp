@@ -211,7 +211,7 @@ int main() {
       "control.gpu-launch-queue",
       "control.sample-launch",
   };
-  std::set<std::string> exact_candidates = {
+  std::set<std::string> sealed_compatible = {
       "vision.frozen-adapter-train",
   };
   bool saw_restart_only_review = false;
@@ -240,10 +240,10 @@ int main() {
     identifiers.insert(entry.stable_id);
     reviewed_sources.insert(entry.source_paths.begin(), entry.source_paths.end());
     required_additions.erase(entry.stable_id);
-    if (exact_candidates.contains(entry.stable_id) && entry.stateful &&
+    if (sealed_compatible.contains(entry.stable_id) && entry.stateful &&
         entry.resume_evidence ==
-            trainvm::CompatibilityResumeEvidence::exact_candidate) {
-      exact_candidates.erase(entry.stable_id);
+            trainvm::CompatibilityResumeEvidence::compatible) {
+      sealed_compatible.erase(entry.stable_id);
     }
     saw_restart_only_review = saw_restart_only_review ||
         (entry.stable_id == "review.dedupe-cutoff" && entry.stateful &&
@@ -315,10 +315,10 @@ int main() {
         "catalog contains every family and observed invocation kind");
   check(required_additions.empty(),
         "catalog retains the expanded audited workflow inventory");
-  check(reviewed_sources.size() == 145U,
+  check(reviewed_sources.size() == 149U,
         "catalog binds the complete reviewed source inventory");
-  check(exact_candidates.empty() && saw_restart_only_review,
-        "legacy exact candidates and restart-only review are classified narrowly");
+  check(sealed_compatible.empty() && saw_restart_only_review,
+        "sealed compatible operations and restart-only review are classified narrowly");
   check(saw_mutable_legacy_export && saw_mutable_frozen_export,
         "export notes disclose overwrite and verification limitations");
   check(saw_lossless_qualification && saw_split_production_qualification &&
