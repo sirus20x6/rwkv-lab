@@ -286,61 +286,11 @@ GPU or an unrelated mutex merely to satisfy the launcher protocol.
 ## Modded NanoGPT adaptation matrix
 
 Reviewed source: [KellerJordan/modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt),
-commit `bc1b58e83fa499c5df268bd6c8b98701273b96e7` (2026-07-27). Its primary benchmark is a small GPT
-trained on eight H100s to a fixed FineWeb validation-loss target. That makes its results valuable
-leads, but not universal results for our single-GPU, RWKV, flow, vision, or post-training workloads.
+commit `bc1b58e83fa499c5df268bd6c8b98701273b96e7` (2026-07-27).
 
-### Shared or broadly reusable
-
-| Technique | Dashboard/adapter treatment | Priority |
-|---|---|---|
-| Explicit compile plus disposable multi-shape warmup | Shared phase; warm a bounded declared boundary-shape set, destroy the warmup worker, and start timed work fresh | P0 |
-| Static full-graph compilation | Runtime capability, shape-bucketed; retain eager fallback only when declared | P0 |
-| Asynchronous batch fetch/index and pinned transfer | Shared input-pipeline capability with deterministic cursor and bounded queues | P0 |
-| Fused optimizer steps and scalar hyperparameters that do not recompile graphs | Runtime capability; exact optimizer-state schema required | P1 |
-| BF16 parameters with FP32 optimizer state | Precision capability; qualify per parameter class and checkpoint round trip | P1 |
-| FP8 projection matmuls and fused quantization | Shape/hardware allowlist; compare FA4/torchao/custom kernels rather than assuming one backend | P1 |
-| Fused activation/projection and loss kernels | Adapter kernel capability, parity first; retain trace evidence | P1 |
-| Parameter-bank layout and transposed weights | Adapter checkpoint-layout version with conversion and resume tests | P2 |
-| Communication/optimizer overlap and reduce-scatter ordering | Distributed-only capability; inactive on one GPU | P2 |
-
-The repository already contains analogous pieces—pinned prefetch and nonblocking transfer, PyTorch
-compile/megakernel paths, FA4 and FP8 experiments, fused losses/channel-mix kernels, FSDP prefetch,
-and `SpectralMuon`. The first work is to expose and qualify those consistently, then close measured
-gaps; it is not to add duplicate flags to every trainer.
-
-### Transformer and language-model experiment capabilities
-
-| Technique | Adaptation rule | Priority |
-|---|---|---|
-| Muon/NorMuon and Polar Express | Extend the common optimizer capability; explicit parameter routing keeps embeddings, scalar/vector gates, norms, and biases on an auxiliary optimizer | P1 |
-| Cautious weight decay tied to LR | Promote the existing `SpectralMuon` option into typed schedules and compare against ordinary decoupled decay | P1 |
-| Less-frequent auxiliary Adam updates / selective accumulation | Typed per-parameter cadence; preserve effective sample weighting and resume phase | P1 |
-| Batch-size and maximum-sequence curricula | Generic schedule segments with token-normalized metrics and warmed boundary shapes | P1 |
-| Document-aligned batch starts and maximum-document packing | Transformer data-packing capability with deterministic cursor; compare utilization and quality against the current packer | P1 |
-| FP8 LM head and MLP up projection | Transformer kernel capability with loss/logit parity and architecture-specific scaling | P1 |
-| Fused softcapped cross entropy | Optional transformer loss capability; softcap itself is algorithmic, while fusion can qualify independently | P1 |
-| Flash Attention 3, long/short windows, window warmup, YaRN | Transformer attention experiment; do not apply to RWKV or flow blocks by name | P2 |
-| Multi-token prediction | Reuse existing MTP/L-MTP/JTP support behind typed loss and schedule capabilities | P2 |
-| Accumulate selected embedding/head gradients on a different cadence | Typed parameter-group update/accumulation schedule with equal-token and resume-phase checks | P2 |
-| Tied embedding/head followed by scheduled split | Checkpoint-topology transition requiring optimizer-state conversion receipt | P2 |
-| Rotary embeddings, QK norm, ReLU-squared, partial key offset, paired heads | Architecture experiments requiring fresh quality campaigns; existing equivalents are reused, not cloned | P3 |
-| Zero-initialized projections and muP-like scaling | Fresh-initialization experiment only; cannot be retrofitted into continuation runs | P3 |
-| Embedding-to-block, block-to-block, value-embedding, MUDD/U-Net-style and gated skips | Architecture experiments, not runtime optimizations; opt-in and adapter-versioned | P3 |
-| Shared activation input for later attention layers and exponential residual decay | Transformer topology experiment with activation-memory and quality ablations | P3 |
-| Bigram hash embeddings, smear/one-token lookback, sparse attention gates | Research capabilities only after isolated ablations and scale tests | P3 |
-| Learnable XSA and lightweight dynamically composable MHA | Transformer attention research; requires clean implementation and scale tests before speed qualification | P3 |
-
-For RWKV, only mathematically compatible capabilities are candidates. Optimizer routing, fused loss,
-precision, compilation, input staging, and schedule machinery can be shared. Transformer attention
-windows, value embeddings, QK-specific changes, and GPT residual topology must not be projected onto
-RWKV by analogy. RWKV-specific fused recurrent kernels and state handling remain separate adapter
-capabilities with the same evidence contract.
-
-For diffusion/flow/image/video trainers, reusable candidates are compilation/warmup, static shape
-buckets, input staging, FP8 projection qualification, fused optimizers, and profiling. Token-only
-architectural or language-loss changes do not apply. Image-size/aspect buckets and generated-image
-eval suites replace sequence-length and perplexity gates.
+The superseding source-bound classification, per-technique compatibility/state/runtime evidence,
+dispositions, and proposed follow-up cards are maintained in
+[`MODDED_NANOGPT_INVENTORY.md`](MODDED_NANOGPT_INVENTORY.md).
 
 ## Remaining cross-family roadmap
 
