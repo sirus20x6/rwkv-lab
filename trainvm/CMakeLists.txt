@@ -171,6 +171,7 @@ target_compile_options(trainvm-hostd PRIVATE
 target_link_libraries(trainvm-hostd PRIVATE trainvm_core)
 
 enable_testing()
+find_program(TRAINVM_GO_EXECUTABLE go)
 add_test(NAME trainvm_hostd_validate_configuration
   COMMAND trainvm-hostd --validate-config
     "${CMAKE_CURRENT_SOURCE_DIR}/../docs/experiment-vm/examples/hostd-daemon.v1.json"
@@ -185,6 +186,18 @@ target_compile_definitions(trainvm_tests PRIVATE
 )
 target_link_libraries(trainvm_tests PRIVATE trainvm_service)
 add_test(NAME trainvm_tests COMMAND trainvm_tests)
+if(TRAINVM_GO_EXECUTABLE)
+  add_test(NAME trainvm_dashboard_live_e2e
+    COMMAND ${CMAKE_COMMAND} -E env
+      TRAINVM_E2E_BINARY=$<TARGET_FILE:trainvm>
+      ${TRAINVM_GO_EXECUTABLE} test ./internal/server
+        -run ^TestTrainVMLiveStackE2E$ -count=1
+  )
+  set_tests_properties(trainvm_dashboard_live_e2e PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../dashboard"
+    TIMEOUT 45
+  )
+endif()
 add_executable(adapter_invocation_tests tests/adapter_invocation_tests.cpp)
 target_compile_options(adapter_invocation_tests PRIVATE
   -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror

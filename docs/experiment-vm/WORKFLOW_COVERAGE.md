@@ -177,6 +177,13 @@ module or let a worker share a writable database.
 
 The first runtime is not ready to own training until these scenarios pass without manual file edits:
 
+The `trainvm_dashboard_live_e2e` CTest now covers the real non-GPU boundary chain: C++ daemon startup
+on its permission-restricted Unix socket, Go HTTP compile and immutable submission, authority-backed
+plan readback, revision-fenced semantic diff, lineage-recorded fork, clean shutdown, and native
+journal verification. It intentionally runs without hostd and therefore proves that launch-disabled
+authoring/replay remains usable; it does not claim worker launch, privileged host recovery, or GPU
+training acceptance.
+
 1. Validate and plan the example MageFlow document without starting a worker.
 2. Kill TrainVM before dispatch, after dispatch, before receipt, and after receipt at every node; replay
    must choose the same next action without duplicating a published artifact.

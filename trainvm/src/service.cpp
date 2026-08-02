@@ -1377,10 +1377,11 @@ TrainVMService::TrainVMService(
                      std::move(training_components)) {
   if (hostd_configuration) {
     configure_hostd(*hostd_configuration, std::move(controller_target));
-  } else if (!controller_target.empty()) {
-    throw std::invalid_argument(
-        "controller target requires hostd client configuration");
   }
+  // The gRPC authority remains useful in launch-disabled mode for compilation,
+  // immutable submission, replay, and dashboard reads. The controller target
+  // is a worker-launch bootstrap input, so it is intentionally ignored unless
+  // hostd supplies both resource and process authority.
 }
 
 TrainVMService::TrainVMService(

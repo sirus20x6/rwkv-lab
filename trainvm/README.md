@@ -47,6 +47,10 @@ Implemented now:
   replay from durable journal sequence numbers; page tokens are bound to the exact journal and query
   rather than trusted as client-provided SQL cursors, and the production Go dashboard now consumes
   these RPCs instead of opening the journal;
+- a launch-disabled, non-GPU live-stack acceptance test that starts the real C++ Unix-socket daemon,
+  drives compile/submit/read/diff/fork through the Go HTTP dashboard, shuts the daemon down, and
+  verifies the resulting native journal chain; this test also keeps hostd-free read/submission mode
+  executable while withholding worker process authority;
 - separate typed Go telemetry projections for `metric.sampled` and `artifact.published` events,
   backed by event-type-filtered durable cursors and a composite journal index; the native dashboard
   panel renders these incrementally without folding metric or artifact semantics into the generic
