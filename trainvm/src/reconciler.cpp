@@ -86,12 +86,14 @@ Reconciler::Reconciler(Journal& journal, const AdapterRegistry& registry,
 Reconciler::Reconciler(Journal& journal, const AdapterRegistry& registry,
                        const TrainingComponentRegistry& training_components,
                        std::mutex& authority_mutex,
-                       std::function<AuthorityTimeSample()> authority_clock)
+                       std::function<AuthorityTimeSample()> authority_clock,
+                       ICacheQualificationEvidenceResolver* qualification)
     : journal_(journal), registry_(registry),
       training_components_(training_components),
       authority_mutex_(authority_mutex),
       authority_clock_(
-          std::make_shared<AuthorityClock>(std::move(authority_clock))) {
+          std::make_shared<AuthorityClock>(std::move(authority_clock))),
+      qualification_(qualification) {
   if (!authority_clock_) {
     throw std::invalid_argument(
         "reconciler requires an authority-owned clock");
@@ -232,6 +234,31 @@ ReconcileResult Reconciler::step(const std::string& run_id) {
   if (node.invoke.operation == "release_resources") {
     (void)controller.release_managed_resources(now);
     result.disposition = ReconcileDisposition::builtin_completed;
+    return result;
+  }
+  if (node.invoke.operation == "qualify_cache") {
+    if (qualification_ == nullptr) {
+      throw AdapterResolutionError(
+          "authority has no configured cache qualification evidence source");
+    }
+    const auto evidence = qualification_->resolve(
+        run_id, controller.state().current_node_id,
+        controller.state().current_attempt_id);
+    if (!evidence) {
+      // No published evidence yet. Leaving the node pending keeps the run
+      // wake-driven instead of inventing a verdict, and the next wake retries.
+      result.disposition =
+          ReconcileDisposition::qualification_evidence_required;
+      return result;
+    }
+    // The gate is re-run here, inside the authority, over resolved evidence.
+    // Neither the document nor the worker supplies the verdict.
+    const CacheQualificationReceipt receipt =
+        qualify_cache_artifact(*evidence);
+    (void)controller.complete_cache_qualification(receipt, now);
+    result.disposition = receipt.qualified
+                             ? ReconcileDisposition::qualification_completed
+                             : ReconcileDisposition::qualification_rejected;
     return result;
   }
   throw AdapterResolutionError(

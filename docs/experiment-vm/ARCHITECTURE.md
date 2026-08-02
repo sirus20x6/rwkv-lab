@@ -295,6 +295,15 @@ effects use an intent/receipt protocol:
 3. commit its receipt and emitted outputs;
 4. advance the node.
 
+Builtin `trainvm.core` operations are the supervisor's typed executors. Alongside resource
+admission, artifact validation, and resource release, `qualify_cache` gates a published cache
+artifact: the supervisor resolves qualification evidence through an authority-owned seam, runs the
+qualification decision itself, and commits `cache.qualified` or `cache.rejected` as a managed
+builtin receipt. A plan must route both verdicts and must declare the `qualify` execution phase,
+so the adapter operation had to advertise qualification support before the gate can appear. The
+executor never releases the lease it runs under, and neither the experiment document nor the worker
+supplies the verdict.
+
 Operations declare one idempotency class:
 
 - `replay_safe`: repeating the same command ID is harmless;

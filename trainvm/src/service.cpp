@@ -1231,6 +1231,7 @@ TrainVMService::TrainVMService(
     TrainingComponentRegistry training_components,
     std::optional<HostdClientConfiguration> hostd_configuration,
     std::string controller_target,
+    ICacheQualificationEvidenceResolver* cache_qualification,
     SqliteAuthorityEnforcementGrade filesystem_enforcement_grade)
     : TrainVMService(journal_path, std::move(adapter_registry),
                      std::move(host_launch_registry),
@@ -1238,7 +1239,7 @@ TrainVMService::TrainVMService(
                      std::move(authority_clock),
                      HostGrantEnforcement::required,
                      std::move(training_components), {}, {}, {},
-                     filesystem_enforcement_grade) {
+                     cache_qualification, filesystem_enforcement_grade) {
   if (hostd_configuration) {
     configure_hostd(*hostd_configuration, std::move(controller_target));
   }
@@ -1259,6 +1260,7 @@ TrainVMService::TrainVMService(
     std::shared_ptr<IHostGrantClient> host_grant_client,
     std::shared_ptr<IHostProcessClient> host_process_client,
     std::string controller_target,
+    ICacheQualificationEvidenceResolver* cache_qualification,
     SqliteAuthorityEnforcementGrade filesystem_enforcement_grade)
     : authority_lock_(std::make_unique<AuthorityLock>(
           journal_path, filesystem_enforcement_grade)),
@@ -1291,7 +1293,7 @@ TrainVMService::TrainVMService(
               : nullptr),
       reconciler_(journal_, adapter_registry_, training_components_,
                   command_mutex_,
-                  [this] { return authority_now(); }) {
+                  [this] { return authority_now(); }, cache_qualification) {
   if (static_cast<bool>(host_process_client_) != !controller_target_.empty() ||
       static_cast<bool>(host_grant_client_) !=
           static_cast<bool>(host_process_client_)) {
@@ -1433,6 +1435,11 @@ void TrainVMService::reconcile_until_quiescent(const std::string& run_id) {
       case ReconcileDisposition::host_process_exited:
       case ReconcileDisposition::host_grant_released:
       case ReconcileDisposition::builtin_completed:
+      // A committed qualification verdict advances the node either way, so the
+      // run keeps draining within this wake instead of sleeping a full cadence
+      // between the gate and whatever the plan routes it to.
+      case ReconcileDisposition::qualification_completed:
+      case ReconcileDisposition::qualification_rejected:
         continue;
       case ReconcileDisposition::no_action:
       case ReconcileDisposition::lease_busy:
@@ -1440,6 +1447,9 @@ void TrainVMService::reconcile_until_quiescent(const std::string& run_id) {
       case ReconcileDisposition::launch_prepared:
       case ReconcileDisposition::launch_replayed:
       case ReconcileDisposition::awaiting_worker:
+      // Evidence has not been published yet. This is a wait, not a failure:
+      // the next supervisor wake retries the gate.
+      case ReconcileDisposition::qualification_evidence_required:
       case ReconcileDisposition::input_required:
         return;
     }
@@ -4137,7 +4147,7 @@ int serve(const std::filesystem::path& journal_path,
                          std::move(host_launch_registry), {},
                          std::move(training_components),
                          std::move(hostd_configuration),
-                         "unix:" + absolute_socket.string(),
+                         "unix:" + absolute_socket.string(), nullptr,
                          SqliteAuthorityEnforcementGrade::strict_filesystem);
   SocketAuthorityLock socket_authority(absolute_socket);
   remove_stale_socket(absolute_socket);

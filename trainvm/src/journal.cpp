@@ -33,6 +33,15 @@
 namespace trainvm {
 namespace {
 
+bool valid_sha256_digest(std::string_view value) {
+  constexpr std::string_view prefix = "sha256:";
+  return value.size() == prefix.size() + 64U && value.starts_with(prefix) &&
+         std::ranges::all_of(value.substr(prefix.size()), [](char character) {
+           return (character >= '0' && character <= '9') ||
+                  (character >= 'a' && character <= 'f');
+         });
+}
+
 constexpr std::string_view kConnectionPragmas = R"sql(
 PRAGMA synchronous=FULL;
 PRAGMA foreign_keys=ON;
@@ -4613,13 +4622,38 @@ void Journal::complete_managed_builtin_dispatch(
   });
   const bool validation = dispatch.operation == "validate_artifact";
   const bool releasing = dispatch.operation == "release_resources";
+  const bool qualifying = dispatch.operation == "qualify_cache";
   const nlohmann::json expected_result_payload =
       releasing
           ? nlohmann::json{{"concurrency_key", lease.concurrency_key},
                            {"lease_id", lease.lease_id},
                            {"fencing_token", lease.fencing_token}}
           : nlohmann::json::object();
-  if ((!validation && !releasing) || release_lease != releasing ||
+  // A qualification verdict carries its gate receipt, so its payload is
+  // checked structurally instead of against a fixed object. The authority
+  // still refuses to make a self-contradictory verdict durable.
+  const bool canonical_qualification_payload =
+      qualifying && result.payload.is_object() &&
+      result.payload.contains("receipt_digest") &&
+      result.payload.at("receipt_digest").is_string() &&
+      valid_sha256_digest(
+          result.payload.at("receipt_digest").get<std::string>()) &&
+      result.payload.contains("namespace_digest") &&
+      result.payload.at("namespace_digest").is_string() &&
+      result.payload.contains("artifact_tree_digest") &&
+      result.payload.at("artifact_tree_digest").is_string() &&
+      result.payload.contains("qualification") &&
+      result.payload.at("qualification").is_object() &&
+      result.payload.contains("qualified") &&
+      result.payload.at("qualified").is_boolean() &&
+      result.payload.contains("rejection_reasons") &&
+      result.payload.at("rejection_reasons").is_array() &&
+      result.payload.at("qualified").get<bool>() ==
+          (result.event_type == "cache.qualified") &&
+      result.payload.at("qualified").get<bool>() ==
+          result.payload.at("rejection_reasons").empty();
+  if ((!validation && !releasing && !qualifying) ||
+      release_lease != releasing ||
       dispatch.run_id != lease.owner_run_id || result.run_id != dispatch.run_id ||
       result.node_id != dispatch.node_id ||
       result.attempt_id != dispatch.attempt_id ||
@@ -4629,8 +4663,11 @@ void Journal::complete_managed_builtin_dispatch(
       (validation && result.event_type != "artifact.validated" &&
        result.event_type != "artifact.invalid") ||
       (releasing && result.event_type != "resource.released") ||
+      (qualifying && result.event_type != "cache.qualified" &&
+       result.event_type != "cache.rejected") ||
       result.wall_time_ns != now.wall.nanoseconds || result.monotonic_time_ns != 0 ||
-      result.payload != expected_result_payload ||
+      (qualifying ? !canonical_qualification_payload
+                  : result.payload != expected_result_payload) ||
       transition.event_id != result.event_id + ":transition" ||
       transition.event_type != "fsm.transitioned" ||
       transition.run_id != dispatch.run_id ||
