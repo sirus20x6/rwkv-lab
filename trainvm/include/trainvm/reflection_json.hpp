@@ -10,6 +10,7 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -182,14 +183,20 @@ bool decode_json(const nlohmann::json& input, T& output, const std::string& path
                              "expected an integer"});
       return false;
     }
-    try {
-      output = input.get<T>();
-      return true;
-    } catch (const nlohmann::json::exception&) {
+    // nlohmann narrows silently on get<T>() rather than throwing, so a wider
+    // wire value is otherwise truncated into a valid-looking one: uid
+    // 4294967296 would decode to 0. Range-check against T before assigning.
+    const bool representable =
+        input.is_number_unsigned()
+            ? std::in_range<T>(input.get<std::uint64_t>())
+            : std::in_range<T>(input.get<std::int64_t>());
+    if (!representable) {
       diagnostics.push_back({Diagnostic::Severity::error, "number.range", path,
                              "integer is outside the supported range"});
       return false;
     }
+    output = input.get<T>();
+    return true;
   } else if constexpr (std::floating_point<T>) {
     if (!input.is_number()) {
       diagnostics.push_back({Diagnostic::Severity::error, "type.number", path,

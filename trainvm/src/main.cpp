@@ -1,3 +1,4 @@
+#include "trainvm/cache_artifact_authority.hpp"
 #include "trainvm/compatibility_catalog.hpp"
 #include "trainvm/document.hpp"
 #include "trainvm/experiment_analysis.hpp"
@@ -32,6 +33,9 @@ void usage() {
       << "  trainvm plan <experiment.json> [--canonical]\n"
       << "  trainvm compile  # read JSON from stdin; emit canonical preview JSON\n"
       << "  trainvm validate-catalog <compatibility.json> <repository-root>\n"
+      << "  trainvm qualify-evidence"
+         "  # read trainvm.cache-qualification-evidence/v1 JSON from stdin;"
+         " exit 0 qualified, 3 rejected\n"
       << "  trainvm inspect-training-components <training-components.json>\n"
       << "  trainvm inspect-hostd-client <hostd-client.json>\n"
       << "  trainvm inspect-input-content-root <absolute-path>\n"
@@ -136,6 +140,43 @@ int validate_catalog_command(const std::filesystem::path& catalog_path,
                    .dump(2)
             << '\n';
   return 0;
+}
+
+// Runs the implemented qualification gate over caller-supplied evidence and
+// prints the resulting receipt. A benchmark runner is not an authority: it
+// measures, and this decides. Exposing the real gate is what stops a runner
+// reimplementing the thresholds and quietly disagreeing with the qualify_cache
+// node that actually admits an optimization.
+//
+// Exit status is the verdict: 0 qualified, 3 rejected with reasons, 1 for
+// malformed evidence. A rejection is a normal, reportable outcome and must be
+// distinguishable from a broken document.
+int qualify_evidence_command(std::istream& input) {
+  nlohmann::json document;
+  try {
+    input >> document;
+  } catch (const std::exception& error) {
+    std::cerr << "qualification evidence is not valid JSON: " << error.what()
+              << '\n';
+    return 1;
+  }
+  trainvm::CacheQualificationEvidence evidence{};
+  std::vector<trainvm::Diagnostic> diagnostics;
+  if (!trainvm::decode_json(document, evidence, "", diagnostics) ||
+      !diagnostics.empty() || trainvm::encode_json(evidence) != document) {
+    std::cerr << "qualification evidence has an invalid reflected schema; "
+                 "it must be exactly trainvm.cache-qualification-evidence/v1\n";
+    for (const auto& diagnostic : diagnostics) {
+      std::cerr << "  " << diagnostic.code << " " << diagnostic.path << " "
+                << diagnostic.message << '\n';
+    }
+    return 1;
+  }
+  const trainvm::CacheQualificationReceipt receipt =
+      trainvm::qualify_cache_artifact(std::move(evidence));
+  std::cout << trainvm::cache_qualification_receipt_json(receipt).dump(2)
+            << '\n';
+  return receipt.qualified ? 0 : 3;
 }
 
 int inspect_training_components_command(
@@ -464,6 +505,9 @@ int main(int argc, char** argv) {
     }
     if (argc == 2 && std::string_view(argv[1]) == "compile") {
       return compile_command();
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "qualify-evidence") {
+      return qualify_evidence_command(std::cin);
     }
     if (argc == 4 && std::string_view(argv[1]) == "validate-catalog") {
       return validate_catalog_command(argv[2], argv[3]);

@@ -92,4 +92,5 @@ rwkv_lab = ["assets/*.txt"]
 testpaths = ["tests"]
 markers = [
     "gpu: uses a CUDA device and must run in the serialized GPU phase",
+    "fla: needs the real flash-linear-attention package installed, not a fake",
 ]

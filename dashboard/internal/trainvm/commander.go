@@ -614,6 +614,10 @@ func runFromProto(summary *trainvmv1.RunSummary) (Run, error) {
 		LastHeartbeatNS:  heartbeat,
 		LastEventSeq:     summary.GetLastEventSequence(),
 		FailureSummary:   summary.GetFailureSummary(),
+
+		ForkedFromRunID:       summary.GetForkedFromRunId(),
+		ForkedFromRunRevision: summary.GetForkedFromRunRevision(),
+		ForkedFromPlanHash:    summary.GetForkedFromPlanHash(),
 	}, nil
 }
 

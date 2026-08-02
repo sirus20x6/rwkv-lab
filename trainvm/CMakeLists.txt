@@ -408,6 +408,12 @@ target_link_libraries(lifecycle_equivalence_tests PRIVATE trainvm_core)
 add_test(NAME lifecycle_equivalence_tests
   COMMAND lifecycle_equivalence_tests
 )
+add_executable(authority_fuzz_tests tests/authority_fuzz_tests.cpp)
+target_compile_options(authority_fuzz_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(authority_fuzz_tests PRIVATE trainvm_core)
+add_test(NAME authority_fuzz_tests COMMAND authority_fuzz_tests)
 add_executable(host_ledger_tests tests/host_ledger_tests.cpp)
 target_compile_options(host_ledger_tests PRIVATE
   -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
@@ -713,6 +719,30 @@ add_test(
   COMMAND trainvm validate-catalog
     "${CMAKE_CURRENT_SOURCE_DIR}/../docs/experiment-vm/compatibility-workflows.v1.json"
     "${CMAKE_CURRENT_SOURCE_DIR}/.."
+)
+# The gate must be reachable from a runner and must report a rejection as a
+# distinct, non-zero verdict rather than a crash. Both directions are pinned:
+# a qualified receipt exits 0, a rejected one exits 3 with attributable reasons.
+add_test(
+  NAME trainvm_cli_qualify_evidence_qualified
+  COMMAND ${CMAKE_COMMAND} -E env
+    "TRAINVM_EVIDENCE=${CMAKE_CURRENT_SOURCE_DIR}/../docs/experiment-vm/examples/qualification-evidence.qualified.v1.json"
+    ${CMAKE_COMMAND} -DTRAINVM_BINARY=$<TARGET_FILE:trainvm>
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/run_qualify_evidence.cmake"
+)
+set_tests_properties(trainvm_cli_qualify_evidence_qualified PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"qualified\": true"
+)
+add_test(
+  NAME trainvm_cli_qualify_evidence_rejected
+  COMMAND ${CMAKE_COMMAND} -E env
+    "TRAINVM_EVIDENCE=${CMAKE_CURRENT_SOURCE_DIR}/../docs/experiment-vm/examples/qualification-evidence.rejected.v1.json"
+    "TRAINVM_EXPECT_REJECTED=1"
+    ${CMAKE_COMMAND} -DTRAINVM_BINARY=$<TARGET_FILE:trainvm>
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/run_qualify_evidence.cmake"
+)
+set_tests_properties(trainvm_cli_qualify_evidence_rejected PROPERTIES
+  PASS_REGULAR_EXPRESSION "throughput_gate_failed"
 )
 add_test(
   NAME trainvm_cli_inspect_training_components

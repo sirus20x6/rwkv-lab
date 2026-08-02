@@ -399,6 +399,32 @@ startup orphan recovery are defined in
   parameter ownership and exact-resume trajectory tests.
 - Add representative benchmark fixtures for MageFlow/flow, RWKV LM, transformer LM, vision/RWKV,
   fine-tuning, distillation, and post-training rather than one synthetic GEMM.
+  The fixture matrix is declared in [`benchmark-matrix.v1.json`](benchmark-matrix.v1.json) and
+  validated by `scripts/validate_benchmark_matrix.py`. It covers ten families across
+  representative shape buckets and declares, per fixture, its effect class, portability, quality
+  gate, and whether it exercises a curriculum-stage transition. The document declares what must be
+  measured; it never carries argv, environment, an executable identity, or a measured result, and
+  the validator rejects all of those.
+  The effect class selects parity evidence exactly as the qualification contract requires, and
+  each fixture restates its class's evidence so a hand-edit is a failure rather than drift: a
+  serving fixture cannot acquire a gradient-parity claim, and a training fixture cannot drop
+  resumed-trajectory parity to look qualified. The evidence vocabulary is pinned to the parity
+  booleans actually implemented on `CacheQualificationEvidence`, so the matrix cannot require a
+  dimension nothing computes. `portable` means the baseline is meaningful without an accelerator;
+  a portable fixture that requires one is a validator error. This distinction was previously named
+  here but nowhere defined.
+  `trainvm qualify-evidence` reads a `trainvm.cache-qualification-evidence/v1`
+  document on stdin, runs the implemented gate, and prints the receipt. Its exit
+  status is the verdict: 0 qualified, 3 rejected with attributable reasons, 1 for
+  a malformed document, so a rejection is a reportable outcome rather than
+  indistinguishable from a crash. A benchmark runner measures; this decides. That
+  boundary is what stops a runner reimplementing the thresholds and quietly
+  disagreeing with the `qualify_cache` node that actually admits an optimization.
+  Not yet built: the runner that executes a fixture and emits a receipt. Per the note above,
+  benchmark is not a separate executor — throughput and peak-memory gates belong to the existing
+  qualification receipt, so the runner should feed that rather than invent a parallel one. A native
+  reflected loader with a pinned digest, matching the compatibility-catalog pattern, belongs with
+  that work; until a qualification node consumes the matrix it is fixture evidence, not authority.
 - Audit existing optimizations against the qualification contract and publish portable versus
   machine-native receipts.
 - Implement the broadly reusable Modded NanoGPT candidates in the matrix where an existing
