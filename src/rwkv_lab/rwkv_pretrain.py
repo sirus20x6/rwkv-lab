@@ -40,10 +40,13 @@ from rwkv_lab.optimizer_speedups import (
 from rwkv_lab.rwkv8_deltanet import RWKV8ChannelMixDeltaNet, RWKV8TimeMixDeltaNet
 from rwkv_lab.training_components import (
     AdamWConfiguration,
+    ContextLengthCurriculumConfiguration,
+    CurriculumImplementation,
     OptimizerImplementation,
     PowerCoolConfiguration,
     ScheduleImplementation,
     build_registered_optimizer,
+    build_registered_curriculum,
     powercool_multiplier,
 )
 
@@ -53,8 +56,6 @@ if TYPE_CHECKING:
     from rwkv_lab.trainvm_worker import WorkerObservability, WorkerStepProfiler
 from rwkv_lab.training_speedups import (
     AsyncCPUBatchPrefetcher,
-    context_batch_for_step,
-    parse_context_curriculum,
 )
 
 
@@ -789,6 +790,16 @@ def resolved_worker_component_contract(
         raise ValueError(
             "authority normalization composition disagrees with RWKV configuration"
         )
+    if dict(
+        worker_components.configuration("curriculum", category="curriculum")
+    ) != {
+        "maximum_sequence_length": args.seq_len,
+        "base_batch_size": args.batch,
+        "stages": args.ctx_curriculum,
+    }:
+        raise ValueError(
+            "authority curriculum composition disagrees with RWKV configuration"
+        )
     activation = worker_components.composition.require(
         "activation", category="activation"
     )
@@ -1060,6 +1071,18 @@ def main(
         if worker_components is not None
         else None
     )
+    context_curriculum = (
+        worker_components.curriculum()
+        if worker_components is not None
+        else build_registered_curriculum(
+            CurriculumImplementation.CONTEXT_LENGTH_V1,
+            ContextLengthCurriculumConfiguration(
+                maximum_sequence_length=args.seq_len,
+                base_batch_size=args.batch,
+                stages=args.ctx_curriculum,
+            ),
+        )
+    )
 
     def prepare_model(module: nn.Module) -> nn.Module:
         if activation_policy is not None:
@@ -1127,8 +1150,7 @@ def main(
         publish_metric("perplexity", math.exp(value), metric_step=metric_step)
 
     dev = dist.device; T = args.seq_len
-    context_stages = parse_context_curriculum(
-        args.ctx_curriculum, max_seq_len=T)
+    context_stages = context_curriculum.stages
     context_horizon = args.decay_steps or args.steps
     resume_blob = None
     if args.resume and os.path.exists(args.resume) and args.distributed != "fsdp2":
@@ -1845,9 +1867,9 @@ def main(
             vl = val_loss(); emit({"kind": "eval", "step": step, "loss": vl, "val_loss": vl, "ppl": math.exp(vl)})
             publish_eval(step, vl)
             print(f"[{step}] val {vl:.4f} (ppl {math.exp(vl):.2f})  {(time.time()-t0)/60:.1f}min", flush=True)
-        train_seq_len, train_batch_size = context_batch_for_step(
-            context_stages, step=step, total_steps=context_horizon or 1,
-            max_seq_len=T, base_batch=args.batch)
+        train_seq_len, train_batch_size = context_curriculum.for_step(
+            step, context_horizon or 1
+        )
         train_width = train_seq_len + 1 + (heads.extra_tokens if heads else 0)
         context_shape = (train_seq_len, train_batch_size)
         if context_shape != last_context_shape:

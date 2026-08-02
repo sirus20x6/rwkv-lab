@@ -366,7 +366,7 @@ void checked_in_component_catalog_matches_native_authority_contract() {
   const trainvm::TrainingComponentRegistry registry =
       trainvm::TrainingComponentRegistry::load_file(
           std::filesystem::absolute(path));
-  check(registry.document_json().at("components").size() == 16U &&
+  check(registry.document_json().at("components").size() == 17U &&
             registry.registry_digest().starts_with("sha256:") &&
             registry.registry_digest().size() == 71U,
         "checked-in cross-family component catalog is a canonical native authority document");
@@ -499,6 +499,22 @@ void checked_in_component_catalog_matches_native_authority_contract() {
                 trainvm::TrainingStateGrade::stateless &&
             normalization.configuration.at("epsilon") == 1.0e-5,
         "normalization construction resolves independently of family topology installation");
+  const auto curriculum = registry.resolve({
+      .key = {.category = trainvm::TrainingComponentCategory::curriculum,
+              .name = "context_length",
+              .version = "1.0.0"},
+      .model_family = "rwkv",
+      .configuration = {{"maximum_sequence_length", 1024},
+                        {"base_batch_size", 8}},
+  });
+  check(curriculum.descriptor.implementation ==
+            "rwkv_lab.curriculum.context_length.v1" &&
+            curriculum.descriptor.state_grade ==
+                trainvm::TrainingStateGrade::stateless &&
+            curriculum.descriptor.step_domain ==
+                trainvm::StepDomain::optimizer_step &&
+            curriculum.configuration.at("stages") == "",
+        "context curriculum resolves independently from optimizer and topology state");
   const auto no_decay_optimizer = registry.resolve({
       .key = {.category = trainvm::TrainingComponentCategory::optimizer,
               .name = "torch_adamw_no_decay",

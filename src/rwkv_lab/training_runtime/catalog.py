@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .activations import ActivationImplementation
+from .curricula import CurriculumImplementation
 from .gradient_accumulation import GradientAccumulationImplementation
 from .gradient_clipping import GradientClippingImplementation
 from .normalizations import NormalizationImplementation
@@ -17,6 +18,7 @@ def supported_implementation_ids() -> frozenset[str]:
         implementation.value
         for implementation in (
             *ActivationImplementation,
+            *CurriculumImplementation,
             *NormalizationImplementation,
             *OptimizerImplementation,
             *ObjectiveImplementation,
@@ -35,6 +37,7 @@ def supported_worker_capabilities() -> frozenset[str]:
         {
             "activation.silu.v1",
             "activation.squared_relu.v1",
+            "curriculum.context_length.v1",
             "normalization.layer_norm.v1",
             "optimizer.torch_adamw.v1",
             "optimizer.fp32_master_adamw.v1",

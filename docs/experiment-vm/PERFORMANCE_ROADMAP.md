@@ -401,10 +401,10 @@ startup orphan recovery are defined in
   decorative configuration that training silently ignores. The Python runtime now physically
   separates optimizer mechanics, LR schedules, parameter routing, gradient clipping, weight-decay
   schedules, scratch-RWKV's fixed step-boundary gradient accumulation, and its linear-head token
-  objective, BF16/FP32 precision policy, ChannelMix activation choice, and LayerNorm construction
-  behind the stable `training_components` facade; category dependency checks prevent regressions.
-  Distributed synchronization/mid-update accumulation and curriculum modules are created as their
-  first real adapter migrations land, not as empty scaffolding.
+  objective, BF16/FP32 precision policy, ChannelMix activation choice, LayerNorm construction, and
+  optimizer-step context-length curriculum behind the stable `training_components` facade;
+  category dependency checks prevent regressions. Distributed synchronization and mid-update
+  accumulation remain for their first real adapter migrations, not as empty scaffolding.
 - Make component state and schedule domains explicit in checkpoint manifests, with exhaustive
   parameter ownership and exact-resume trajectory tests.
 - Add representative benchmark fixtures for MageFlow/flow, RWKV LM, transformer LM, vision/RWKV,

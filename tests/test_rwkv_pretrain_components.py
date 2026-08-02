@@ -103,6 +103,12 @@ def test_rwkv_worker_components_drive_powercool_and_optimizer() -> None:
                 }
             if (slot, category) == ("normalization", "normalization"):
                 return {"epsilon": 1.0e-5}
+            if (slot, category) == ("curriculum", "curriculum"):
+                return {
+                    "maximum_sequence_length": 512,
+                    "base_batch_size": 16,
+                    "stages": "",
+                }
             assert (slot, category) == ("optimizer", "optimizer")
             return {
                 "learning_rate": 3.0e-4,
@@ -151,6 +157,12 @@ def test_rwkv_worker_components_drive_powercool_and_optimizer() -> None:
         def normalization(self):
             return lambda shape: torch.nn.LayerNorm(shape, eps=1.0e-5)
 
+        def curriculum(self):
+            return SimpleNamespace(
+                stages=(),
+                for_step=lambda _step, _total_steps: (512, 16),
+            )
+
         def evidence(self):
             return {
                 "optimizer": {"implementation": "test"},
@@ -170,6 +182,9 @@ def test_rwkv_worker_components_drive_powercool_and_optimizer() -> None:
         grad_clip=1.0,
         grad_accum=1,
         distributed="none",
+        seq_len=512,
+        batch=16,
+        ctx_curriculum="",
     )
     resolved, evidence, composition_digest = resolved_worker_component_contract(
         args, schedule, components

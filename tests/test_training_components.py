@@ -14,6 +14,9 @@ from rwkv_lab.training_components import (
     BFloat16PrecisionConfiguration,
     BFloat16PrecisionPolicy,
     ConstantWeightDecayConfiguration,
+    ContextLengthCurriculum,
+    ContextLengthCurriculumConfiguration,
+    CurriculumImplementation,
     FixedGradientAccumulation,
     FixedGradientAccumulationConfiguration,
     GlobalNormClippingConfiguration,
@@ -35,6 +38,7 @@ from rwkv_lab.training_components import (
     TerminalExpertRoutingConfiguration,
     WeightDecayScheduleImplementation,
     build_registered_activation,
+    build_registered_curriculum,
     build_registered_gradient_accumulation,
     build_registered_gradient_clipping,
     build_registered_normalization,
@@ -60,6 +64,7 @@ def test_runtime_categories_have_one_way_dependency_boundaries():
     runtime = root / "src/rwkv_lab/training_runtime"
     category_names = {
         "activations",
+        "curricula",
         "gradient_accumulation",
         "gradient_clipping",
         "normalizations",
@@ -202,6 +207,7 @@ def test_component_catalog_and_runtime_dispatch_are_exactly_aligned():
     assert grades["precision"] == "stateless"
     assert grades["parameter_router"] == "stateless"
     assert grades["gradient_accumulation"] == "stateless"
+    assert grades["curriculum"] == "stateless"
     assert grades["gradient_clipping"] == "stateless"
     assert grades["weight_decay_schedule"] == "stateless"
 
@@ -220,6 +226,23 @@ def test_registered_layer_norm_factory_owns_construction_not_model_state():
     assert layer.bias is not None
     assert factory.state_dict() == {}
     assert set(layer.state_dict()) == {"weight", "bias"}
+
+
+def test_context_curriculum_has_optimizer_step_domain_and_constant_token_budget():
+    curriculum = build_registered_curriculum(
+        CurriculumImplementation.CONTEXT_LENGTH_V1,
+        ContextLengthCurriculumConfiguration(
+            maximum_sequence_length=1024,
+            base_batch_size=8,
+            stages="0:256,0.25:512,0.75:1024",
+        ),
+    )
+
+    assert isinstance(curriculum, ContextLengthCurriculum)
+    assert curriculum.for_step(0, 100) == (256, 32)
+    assert curriculum.for_step(25, 100) == (512, 16)
+    assert curriculum.for_step(75, 100) == (1024, 8)
+    assert curriculum.state_dict() == {}
 
 
 def test_registered_global_norm_clipping_has_typed_reference_semantics():

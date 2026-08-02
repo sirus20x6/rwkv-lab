@@ -9,6 +9,7 @@ import torch
 from rwkv_lab.training_components import (
     BFloat16PrecisionPolicy,
     ConstantWeightDecaySchedule,
+    ContextLengthCurriculum,
     FixedGradientAccumulation,
     LayerNormFactory,
     LinearHeadCrossEntropyObjective,
@@ -17,6 +18,7 @@ from rwkv_lab.training_components import (
     RegisteredActivation,
     ScheduleImplementation,
     activation_from_resolved_component,
+    curriculum_from_resolved_component,
     gradient_accumulation_from_resolved_component,
     gradient_clipping_from_resolved_component,
     normalization_from_resolved_component,
@@ -72,6 +74,14 @@ class WorkerTrainingComponents:
     ) -> RegisteredActivation:
         component = self.composition.require(slot, category="activation")
         return activation_from_resolved_component(component.runtime_envelope())
+
+    def curriculum(
+        self,
+        *,
+        slot: str = "curriculum",
+    ) -> ContextLengthCurriculum:
+        component = self.composition.require(slot, category="curriculum")
+        return curriculum_from_resolved_component(component.runtime_envelope())
 
     def objective(
         self,

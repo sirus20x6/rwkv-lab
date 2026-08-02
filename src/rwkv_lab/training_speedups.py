@@ -2,49 +2,23 @@
 from __future__ import annotations
 
 import copy
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
-from typing import Callable
+from typing import Self
 
 import numpy as np
 import torch
 
-
-@dataclass(frozen=True)
-class ContextStage:
-    """One context-curriculum stage."""
-
-    start_fraction: float
-    seq_len: int
+from rwkv_lab.training_runtime.curricula import (
+    ContextStage,
+    context_batch_for_stages,
+    parse_context_stages,
+)
 
 
 def parse_context_curriculum(spec: str, *, max_seq_len: int) -> tuple[ContextStage, ...]:
-    """Parse ``fraction:seq_len`` stages, e.g. ``0:256,0.33:512,0.67:1024``."""
-    if not spec:
-        return ()
-    stages: list[ContextStage] = []
-    for item in spec.split(","):
-        try:
-            fraction_text, length_text = item.strip().split(":", 1)
-            stage = ContextStage(float(fraction_text), int(length_text))
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                "context curriculum must be comma-separated fraction:seq_len stages"
-            ) from exc
-        if not 0.0 <= stage.start_fraction < 1.0:
-            raise ValueError("context-curriculum fractions must be in [0, 1)")
-        if not 0 < stage.seq_len <= max_seq_len:
-            raise ValueError(
-                f"context-curriculum lengths must be in [1, {max_seq_len}]"
-            )
-        stages.append(stage)
-    if not stages or stages[0].start_fraction != 0.0:
-        raise ValueError("context curriculum must start at fraction 0")
-    if any(a.start_fraction >= b.start_fraction for a, b in zip(stages, stages[1:])):
-        raise ValueError("context-curriculum fractions must be strictly increasing")
-    if any(a.seq_len > b.seq_len for a, b in zip(stages, stages[1:])):
-        raise ValueError("context-curriculum sequence lengths must be non-decreasing")
-    return tuple(stages)
+    """Compatibility facade for the typed context-curriculum parser."""
+    return parse_context_stages(spec, maximum_sequence_length=max_seq_len)
 
 
 def context_batch_for_step(
@@ -55,19 +29,14 @@ def context_batch_for_step(
     max_seq_len: int,
     base_batch: int,
 ) -> tuple[int, int]:
-    """Return ``(seq_len, batch)`` while holding the base token budget constant."""
-    if not stages:
-        return max_seq_len, base_batch
-    if total_steps <= 0:
-        raise ValueError("context curriculum requires a positive step horizon")
-    progress = min(max(step / total_steps, 0.0), 1.0)
-    active = stages[0]
-    for stage in stages[1:]:
-        if progress < stage.start_fraction:
-            break
-        active = stage
-    token_budget = max_seq_len * base_batch
-    return active.seq_len, max(1, round(token_budget / active.seq_len))
+    """Compatibility facade for the typed curriculum state machine."""
+    return context_batch_for_stages(
+        stages,
+        step=step,
+        total_steps=total_steps,
+        maximum_sequence_length=max_seq_len,
+        base_batch_size=base_batch,
+    )
 
 
 class AsyncCPUBatchPrefetcher:
@@ -121,7 +90,7 @@ class AsyncCPUBatchPrefetcher:
         self._future.cancel()
         self._pool.shutdown(wait=False, cancel_futures=True)
 
-    def __enter__(self) -> "AsyncCPUBatchPrefetcher":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_exc) -> None:

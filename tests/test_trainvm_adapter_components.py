@@ -32,6 +32,14 @@ def composition():
             "squared_relu",
             {},
         ),
+        "curriculum": (
+            "context_length",
+            {
+                "maximum_sequence_length": 512,
+                "base_batch_size": 16,
+                "stages": "0:128,0.5:512",
+            },
+        ),
         "optimizer": (
             "torch_adamw_no_decay",
             {
@@ -114,6 +122,7 @@ def test_worker_component_bridge_builds_optimizer_and_schedule() -> None:
     objective = runtime.objective()
     precision = runtime.precision()
     activation = runtime.activation()
+    curriculum = runtime.curriculum()
     normalization = runtime.normalization()
 
     assert isinstance(optimizer, torch.optim.AdamW)
@@ -140,6 +149,8 @@ def test_worker_component_bridge_builds_optimizer_and_schedule() -> None:
         activation(torch.tensor([-2.0, 3.0])), torch.tensor([0.0, 9.0])
     )
     assert normalization(3).eps == pytest.approx(1e-5)
+    assert curriculum.for_step(0, 100) == (128, 64)
+    assert curriculum.for_step(50, 100) == (512, 16)
     assert runtime.evidence()["optimizer"]["category"] == "optimizer"
 
 

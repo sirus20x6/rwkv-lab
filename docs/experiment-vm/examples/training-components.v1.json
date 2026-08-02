@@ -51,6 +51,26 @@
     },
     {
       "key": {
+        "category": "curriculum",
+        "name": "context_length",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.curriculum.context_length.v1",
+      "model_families": ["rwkv"],
+      "required_capabilities": ["curriculum.context_length.v1"],
+      "configuration": [
+        {"name": "maximum_sequence_length", "type": "integer", "required": true, "minimum": 1, "maximum": 1048576, "unit": "tokens"},
+        {"name": "base_batch_size", "type": "integer", "required": true, "minimum": 1, "maximum": 1048576, "unit": "samples"},
+        {"name": "stages", "type": "string", "required": false, "default": ""}
+      ],
+      "state": [],
+      "step_domain": "optimizer_step",
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
         "category": "gradient_clipping",
         "name": "global_norm",
         "version": "1.0.0"
