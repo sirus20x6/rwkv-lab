@@ -146,11 +146,12 @@ std::vector<ProfilerLaunchProfile> build_profiles() {
 
   profiles.push_back(
       {.backend = ProfilerBackend::ncu,
-       .version = "1.0.0",
+       .version = "1.1.0",
        .program = "ncu",
        .fixed_arguments = {"--set=full", "--target-processes=application-only",
                            "--nvtx", "--nvtx-include",
-                           "trainvm.profile.capture"},
+                           "trainvm.profile.capture", "--csv", "--page=raw",
+                           "--print-units=base"},
        .raw_capture_sensitivity = TraceSensitivity::restricted,
        .summary_sensitivity = TraceSensitivity::publishable,
        .timing_is_qualification_grade = false,
@@ -570,6 +571,8 @@ std::vector<std::string> profiler_capture_argv(const GpuTraceCapture& capture,
   } else {
     argv.emplace_back("--export");
     argv.emplace_back(output_path);
+    argv.emplace_back("--log-file");
+    argv.emplace_back(std::string(output_path) + ".csv");
     // NCU launch counts are kernel counts, not optimizer-step counts. Filter
     // on the fixed default-domain range emitted by ProfilerStepLifecycle
     // instead of silently

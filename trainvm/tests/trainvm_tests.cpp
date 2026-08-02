@@ -1052,6 +1052,11 @@ void test_reflection_and_compiler() {
   const auto valid_ncu_result = trainvm::compile_document(valid_ncu);
   check(valid_ncu_result.valid(),
         "ncu is a typed backend with its bounded accelerator-only option surface");
+  auto valid_nsys = valid_ncu;
+  valid_nsys["spec"]["execution"]["gpu_trace"]["backend"] = "nsys";
+  const auto valid_nsys_result = trainvm::compile_document(valid_nsys);
+  check(valid_nsys_result.valid(),
+        "nsys is a typed backend with an honest accelerator-only summary surface");
 
   auto bad_binding = fixture;
   bad_binding["spec"]["workflow"]["nodes"]["prepare_cache"]["invoke"]["inputs"]["final_step"] =

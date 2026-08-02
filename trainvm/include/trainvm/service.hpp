@@ -184,6 +184,10 @@ class TrainVMService final : public v1::TrainVM::Service,
       const std::string& run_id);
   [[nodiscard]] std::optional<ReconcileDisposition> reconcile_host_release(
       const std::string& run_id);
+  [[nodiscard]] bool reconcile_external_profiler_artifact(
+      const RunProjection& projection, const CompiledPlan& plan,
+      const HostProcessSagaSnapshot& process,
+      const ResolvedLaunchSpec& binding);
   [[nodiscard]] std::optional<ReconcileDisposition> reconcile_cancellation(
       const std::string& run_id);
   [[nodiscard]] std::optional<ReconcileDisposition>

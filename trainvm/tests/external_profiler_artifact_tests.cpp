@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <sqlite3.h>
 #include <stdexcept>
@@ -94,8 +95,10 @@ void normalization_unions_activity_and_groups_kernels() {
   require(summary.accelerator_launch_count == 3U &&
               summary.kernel_or_operator_count == 2U &&
               std::abs(summary.accelerator_time_us - 110.0) < 1e-9 &&
-              std::abs(summary.gpu_active_time_us - 85.0) < 1e-9 &&
-              std::abs(summary.gpu_active_ratio - 0.85) < 1e-9 &&
+              summary.gpu_active_time_us &&
+              std::abs(*summary.gpu_active_time_us - 85.0) < 1e-9 &&
+              summary.gpu_active_ratio &&
+              std::abs(*summary.gpu_active_ratio - 0.85) < 1e-9 &&
               summary.input_stall_time_us &&
               std::abs(*summary.input_stall_time_us - 30.0) < 1e-9 &&
               summary.top_operators.size() == 2U &&
@@ -150,6 +153,120 @@ void nsys_sqlite_reader_resolves_string_identities() {
   std::filesystem::remove_all(directory);
 }
 
+void ncu_csv_reader_preserves_aggregate_duration_without_fake_activity() {
+  auto body = window_body();
+  body["backend"] = "ncu";
+  const ExternalProfilerWindow window =
+      external_profiler_window_from_canonical_json(sealed_window(body));
+  const std::filesystem::path directory =
+      std::filesystem::temp_directory_path() /
+      ("trainvm-ncu-normalizer-" +
+       std::to_string(static_cast<long long>(::getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  const auto csv_path = directory / "trace.csv";
+  {
+    std::ofstream target(csv_path);
+    target << "==PROF== disconnected\n"
+              "\"ID\",\"Kernel Name\",\"Metric Name\",\"Metric Unit\",\"Metric Value\"\n"
+              "1,\"fused,kernel\",gpu__time_duration.sum,ns,\"12,000\"\n"
+              "2,second_kernel,gpu__time_duration.sum,us,8\n"
+              "2,second_kernel,sm__cycles_elapsed.sum,cycle,999\n";
+  }
+  const ExternalProfilerSummary summary =
+      read_ncu_profiler_summary(csv_path.string(), window);
+  require(summary.accelerator_launch_count == 2U &&
+              summary.kernel_or_operator_count == 2U &&
+              std::abs(summary.accelerator_time_us - 20.0) < 1e-9 &&
+              !summary.gpu_active_time_us && !summary.gpu_active_ratio &&
+              summary.top_operators.size() == 2U,
+          "NCU summary keeps durations but does not invent timeline overlap");
+  const auto encoded = external_profiler_summary_json(summary);
+  require(!encoded.contains("gpu_active_ratio") &&
+              !encoded.contains("gpu_active_time_us"),
+          "NCU JSON omits metrics its report cannot prove");
+  std::filesystem::remove_all(directory);
+}
+
+void external_publication_is_immutable_content_addressed_and_replayable() {
+  const std::filesystem::path directory =
+      std::filesystem::temp_directory_path() /
+      ("trainvm-external-publication-" +
+       std::to_string(static_cast<long long>(::getpid())));
+  std::filesystem::remove_all(directory);
+  const auto external =
+      directory / "trainvm_artifacts" / "gpu_traces" / ".external";
+  std::filesystem::create_directories(external);
+  const std::string launch_id = "run-1:worker-launch:train:train@1";
+  const auto prefix = external / sha256_hex(launch_id);
+  {
+    std::ofstream target(prefix.string() + ".window.json");
+    target << sealed_window();
+  }
+  sqlite3* database = nullptr;
+  const std::string sqlite_path = prefix.string() + ".sqlite";
+  require(sqlite3_open(sqlite_path.c_str(), &database) == SQLITE_OK,
+          "publication fixture opens an NSYS export");
+  const char* schema = R"sql(
+    CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL(
+      start INTEGER NOT NULL, end INTEGER NOT NULL,
+      demangledName TEXT NOT NULL
+    );
+    INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES(1000, 6000, 'kernel-a');
+  )sql";
+  require(sqlite3_exec(database, schema, nullptr, nullptr, nullptr) ==
+              SQLITE_OK,
+          "publication fixture creates kernel activity");
+  sqlite3_close(database);
+
+  GpuTraceCapture capture{
+      .enabled = true,
+      .backend = ProfilerBackend::nsys,
+      .warmup_steps = 1,
+      .skip_steps = 2,
+      .capture_steps = 3,
+      .output_artifact = "gpu_trace",
+      .activities = std::vector<ProfilerActivity>{
+          ProfilerActivity::accelerator},
+      .record_shapes = std::nullopt,
+      .profile_memory = std::nullopt,
+      .with_stack = std::nullopt,
+  };
+  const ExternalProfilerPublicationRequest request{
+      .backend = ProfilerBackend::nsys,
+      .run_id = "run-1",
+      .node_id = "train",
+      .attempt_id = "train@1",
+      .authority_digest = "sha256:" + std::string(64U, 'a'),
+      .invocation_digest = "sha256:" + std::string(64U, 'b'),
+      .capture = capture,
+      .raw_output_prefix = prefix,
+      .run_directory = directory,
+  };
+  const auto first = publish_external_profiler_artifact(request);
+  const auto replay = publish_external_profiler_artifact(request);
+  require(first == replay && first.artifact_id.starts_with("gpu-trace-") &&
+              std::filesystem::is_regular_file(first.manifest_path) &&
+              std::filesystem::is_regular_file(
+                  first.manifest_path.parent_path() / "trace.sqlite"),
+          "external publication is content-addressed and replayable");
+  const auto manifest = nlohmann::json::parse(
+      std::ifstream(first.manifest_path));
+  require(manifest.at("backend") == "nsys" &&
+              manifest.at("trace_file_name") == "trace.sqlite" &&
+              manifest.at("first_optimizer_step") == 41U &&
+              manifest.at("last_optimizer_step") == 43U &&
+              manifest.at("canonical_manifest_digest")
+                  .get<std::string>()
+                  .starts_with("sha256:"),
+          "published manifest retains the exact capture identity");
+  std::filesystem::permissions(
+      first.manifest_path.parent_path(),
+      std::filesystem::perms::owner_all,
+      std::filesystem::perm_options::add);
+  std::filesystem::remove_all(directory);
+}
+
 }  // namespace
 
 int main() {
@@ -157,6 +274,8 @@ int main() {
     window_receipt_is_canonical_and_content_addressed();
     normalization_unions_activity_and_groups_kernels();
     nsys_sqlite_reader_resolves_string_identities();
+    ncu_csv_reader_preserves_aggregate_duration_without_fake_activity();
+    external_publication_is_immutable_content_addressed_and_replayable();
     std::cout << "external profiler artifact tests passed\n";
     return 0;
   } catch (const std::exception& error) {

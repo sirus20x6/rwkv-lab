@@ -392,9 +392,13 @@ func artifactFromEvent(event Event) (PublishedArtifact, error) {
 		ParentArtifactIDs    []string `json:"parent_artifact_ids"`
 		PublishedAtNS        int64    `json:"published_at_ns"`
 	}
+	// External profilers wrap the worker process and finish their report only
+	// after the worker exits. Those artifacts are controller-authored sequence
+	// zero events; every other publication remains worker-sequenced.
 	if err := strictPayload(event.Payload, &payload); err != nil ||
 		event.EventType != "artifact.published" || event.Sequence == 0 ||
-		event.WorkerSequence == 0 || event.OptimizerStep != nil ||
+		(event.WorkerSequence == 0 && !(payload.Kind == "opaque" && payload.Schema == "trainvm.gpu-trace.v1")) ||
+		event.OptimizerStep != nil ||
 		payload.ArtifactID == "" || payload.LogicalName == "" ||
 		payload.Kind == "" || payload.URI == "" ||
 		payload.FingerprintAlgorithm == "" || payload.Fingerprint == "" ||

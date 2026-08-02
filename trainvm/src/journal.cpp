@@ -7278,6 +7278,91 @@ std::optional<WorkerInvocationSpec> Journal::worker_invocation(
   return invocation;
 }
 
+bool Journal::publish_external_profiler_artifact(const Event& event) {
+  constexpr std::array<std::string_view, 13U> fields{
+      "artifact_id", "logical_name", "kind", "schema", "uri",
+      "size_bytes", "fingerprint_algorithm", "fingerprint", "complete",
+      "producer_node_id", "producer_attempt_id", "parent_artifact_ids",
+      "published_at_ns"};
+  const std::string artifact_id =
+      event.payload.value("artifact_id", std::string{});
+  const std::string dispatch_id = event.run_id + ":dispatch:" +
+                                  event.node_id + ":" + event.attempt_id;
+  const std::string launch_id = event.run_id + ":worker-launch:" +
+                                event.node_id + ":" + event.attempt_id;
+  const auto dispatch = this->dispatch(dispatch_id);
+  const auto invocation = worker_invocation(dispatch_id);
+  const auto launch = launch_binding(launch_id);
+  const auto run_projection = projection(event.run_id);
+  const auto valid_digest = [](std::string_view value) {
+    return value.size() == 71U && value.starts_with("sha256:") &&
+           std::ranges::all_of(value.substr(7U), [](char character) {
+             return (character >= '0' && character <= '9') ||
+                    (character >= 'a' && character <= 'f');
+           });
+  };
+  if (!event.payload.is_object() || event.payload.size() != fields.size() ||
+      std::ranges::any_of(fields, [&](std::string_view field) {
+        return !event.payload.contains(std::string(field));
+      }) ||
+      event.event_type != "artifact.published" || event.event_version != 1U ||
+      event.worker_sequence != 0U || event.monotonic_time_ns != 0U ||
+      event.optimizer_step || artifact_id.size() != 74U ||
+      !artifact_id.starts_with("gpu-trace-") ||
+      !std::ranges::all_of(std::string_view(artifact_id).substr(10U),
+                           [](char character) {
+                             return (character >= '0' && character <= '9') ||
+                                    (character >= 'a' && character <= 'f');
+                           }) ||
+      event.event_id != dispatch_id + ":artifact:" + sha256_hex(artifact_id) ||
+      event.payload.value("logical_name", std::string{}).empty() ||
+      event.payload.value("kind", std::string{}) != "opaque" ||
+      event.payload.value("schema", std::string{}) !=
+          "trainvm.gpu-trace.v1" ||
+      event.payload.value("fingerprint_algorithm", std::string{}) !=
+          "adapter" ||
+      !valid_digest(event.payload.value("fingerprint", std::string{})) ||
+      !event.payload.value("complete", false) ||
+      event.payload.value("size_bytes", std::uint64_t{}) == 0U ||
+      event.payload.value("producer_node_id", std::string{}) != event.node_id ||
+      event.payload.value("producer_attempt_id", std::string{}) !=
+          event.attempt_id ||
+      !event.payload.at("parent_artifact_ids").is_array() ||
+      !event.payload.at("parent_artifact_ids").empty() ||
+      event.payload.value("published_at_ns", std::int64_t{-1}) !=
+          event.wall_time_ns ||
+      !dispatch || dispatch->status != DispatchStatus::completed ||
+      !dispatch->result_event_id || !invocation || !launch ||
+      !launch->identity.profiler ||
+      !run_projection || event.run_revision != run_projection->run_revision ||
+      invocation->plan_revision != event.plan_revision) {
+    throw std::invalid_argument(
+        "external profiler artifact event is not canonical");
+  }
+  const auto& profiler = *launch->identity.profiler;
+  if (!profiler.capture.output_artifact ||
+      event.payload.value("logical_name", std::string{}) !=
+          *profiler.capture.output_artifact) {
+    throw std::invalid_argument(
+        "external profiler artifact disagrees with its declared output");
+  }
+  const std::string expected_uri =
+      "file://" +
+      (std::filesystem::path(profiler.raw_output_path).parent_path()
+           .parent_path() /
+       artifact_id / "manifest.json")
+          .string();
+  if (event.payload.value("uri", std::string{}) != expected_uri) {
+    throw std::invalid_argument(
+        "external profiler artifact URI escaped its launch authority");
+  }
+  const bool inserted = !this->event(event.event_id).has_value();
+  Transaction transaction(database_);
+  (void)append_uncommitted(event);
+  transaction.commit();
+  return inserted;
+}
+
 WorkerReadinessDisposition Journal::accept_worker_ready(
     const WorkerLaunchTicket& launch, const WorkerHelloEvidence& hello,
     const AuthorityTimeSample& now, const std::vector<Event>& events) {

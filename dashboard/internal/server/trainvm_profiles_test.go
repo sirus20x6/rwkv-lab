@@ -365,3 +365,73 @@ func TestExternalGPUTraceSummaryAndRawFormats(t *testing.T) {
 		t.Fatal("raw trace format allowlist is invalid")
 	}
 }
+
+func TestNsightSystemsTraceManifestAndRestrictedDownload(t *testing.T) {
+	srv, manifestPath, tracePath := trainVMGPUTraceFixture(t)
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest map[string]any
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	delete(manifest, "canonical_manifest_digest")
+	manifest["backend"] = "nsys"
+	manifest["trace_file_name"] = "trace.sqlite"
+	summary := manifest["summary"].(map[string]any)
+	delete(summary, "allocator_baseline_allocated_bytes")
+	delete(summary, "allocator_baseline_reserved_bytes")
+	delete(summary, "allocator_peak_allocated_bytes")
+	delete(summary, "allocator_peak_reserved_bytes")
+	body, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest["canonical_manifest_digest"] = prefixedTestSHA256(body)
+	data, err = json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(manifestPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, data, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	sqlitePath := filepath.Join(filepath.Dir(tracePath), "trace.sqlite")
+	if err := os.Rename(tracePath, sqlitePath); err != nil {
+		t.Fatal(err)
+	}
+	reader := srv.trainvm.(*profileReadModel)
+	var payload map[string]any
+	if err := json.Unmarshal(reader.events[0].Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	payload["fingerprint"] = prefixedTestSHA256(data)
+	payload["size_bytes"] = len(data) + int(manifest["trace_size_bytes"].(float64))
+	reader.events[0].Payload, err = json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader.events[0].WorkerSequence = 0
+
+	request := httptest.NewRequest(http.MethodGet, "/api/trainvm/runs/vm-run/profiles", nil)
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	var profiles []trainVMGPUTraceSummary
+	if response.Code != http.StatusOK {
+		t.Fatalf("NSYS profile list status=%d body=%s", response.Code, response.Body.String())
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &profiles); err != nil || len(profiles) != 1 ||
+		profiles[0].Backend != "nsys" || profiles[0].TraceFileName != "trace.sqlite" {
+		t.Fatalf("NSYS profile projection=%#v err=%v", profiles, err)
+	}
+	request = httptest.NewRequest(http.MethodGet, profiles[0].TraceDownloadURL, nil)
+	response = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "application/vnd.sqlite3" ||
+		!strings.Contains(response.Header().Get("Content-Disposition"), ".sqlite") {
+		t.Fatalf("NSYS trace download status=%d headers=%v", response.Code, response.Header())
+	}
+}

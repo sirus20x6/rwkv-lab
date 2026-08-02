@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -204,6 +205,35 @@ func TestRecentArtifactsKeepsBoundedTailSemanticsAndReportsTruncationThroughFenc
 	if err != nil || !truncated || len(fenced) != 2 || fenced[0].Sequence != 3 || fenced[1].Sequence != 2 {
 		t.Fatalf("fenced recent tail did not expose truncation: truncated=%t tail=%#v err=%v",
 			truncated, fenced, err)
+	}
+}
+
+func TestControllerAuthoredExternalProfilerArtifactIsTypedWithoutForgingWorkerSequence(t *testing.T) {
+	payload := json.RawMessage(`{
+		"artifact_id":"gpu-trace-1","logical_name":"gpu_trace","kind":"opaque",
+		"schema":"trainvm.gpu-trace.v1","uri":"file:///sealed/gpu-trace-1/manifest.json",
+		"size_bytes":4096,"fingerprint_algorithm":"adapter",
+		"fingerprint":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"complete":true,"producer_node_id":"train","producer_attempt_id":"train@1",
+		"parent_artifact_ids":[],"published_at_ns":3000
+	}`)
+	artifact, err := artifactFromEvent(Event{
+		Sequence: 10, EventID: "external-profile", RunID: "run-1", NodeID: "train",
+		AttemptID: "train@1", WorkerSequence: 0, EventType: "artifact.published",
+		WallTimeNS: 3_000, Payload: payload,
+	})
+	if err != nil || artifact.ArtifactID != "gpu-trace-1" || artifact.WorkerSequence != 0 {
+		t.Fatalf("controller profiler artifact was not projected: %#v err=%v", artifact, err)
+	}
+	_, err = artifactFromEvent(Event{
+		Sequence: 10, EventID: "forged-gallery", RunID: "run-1", NodeID: "train",
+		AttemptID: "train@1", WorkerSequence: 0, EventType: "artifact.published",
+		WallTimeNS: 3_000,
+		Payload: json.RawMessage(strings.ReplaceAll(string(payload),
+			`"kind":"opaque"`, `"kind":"image_gallery"`)),
+	})
+	if err == nil {
+		t.Fatal("controller sequence zero was accepted for a worker-owned artifact")
 	}
 }
 
