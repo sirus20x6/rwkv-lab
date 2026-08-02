@@ -125,8 +125,9 @@ std::string vendor_name(HostAcceleratorVendor vendor) {
   return encode_json(vendor).get<std::string>();
 }
 
-void validate_runtime_probe(const CacheRuntimeProbeSnapshot& probe,
-                            const CacheRuntimeProbeContext& context) {
+void validate_runtime_probe_snapshot_impl(
+    const CacheRuntimeProbeSnapshot& probe,
+    const CacheRuntimeProbeContext& context) {
   if (probe.api_version != "trainvm.cache-runtime-probe/v1" ||
       probe.host_id != context.host.host_id ||
       probe.boot_id != context.host.boot_id ||
@@ -232,6 +233,12 @@ void validate_authority_receipt(
 
 }  // namespace
 
+void validate_cache_runtime_probe_snapshot(
+    const CacheRuntimeProbeSnapshot& snapshot,
+    const CacheRuntimeProbeContext& context) {
+  validate_runtime_probe_snapshot_impl(snapshot, context);
+}
+
 CacheNamespaceAuthority::CacheNamespaceAuthority(
     const AdapterRegistry& adapters, const HostLaunchRegistry& launches,
     HostIdentity host, ICacheRuntimeProbe& runtime_probe)
@@ -332,7 +339,7 @@ CacheNamespaceAuthorityReceipt CacheNamespaceAuthority::derive(
       .placement_specific = request.placement_specific,
   };
   CacheRuntimeProbeSnapshot probe = runtime_probe_.capture(probe_context);
-  validate_runtime_probe(probe, probe_context);
+  validate_cache_runtime_probe_snapshot(probe, probe_context);
   const std::string probe_digest =
       digest("trainvm.cache-runtime-probe-receipt/v1", encode_json(probe));
 

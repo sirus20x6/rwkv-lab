@@ -1,9 +1,12 @@
 #include "trainvm/linux_cache_evidence.hpp"
 
+#include <array>
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
+#include <linux/fs.h>
 #include <linux/openat2.h>
+#include <openssl/rand.h>
 #include <ranges>
 #include <stdexcept>
 #include <string_view>
@@ -73,6 +76,20 @@ std::string receipt_name(std::string_view domain,
          ".json";
 }
 
+std::string temporary_name() {
+  std::array<unsigned char, 16U> bytes{};
+  if (RAND_bytes(bytes.data(), static_cast<int>(bytes.size())) != 1) {
+    fail("cache evidence temporary-name entropy failed");
+  }
+  constexpr char alphabet[] = "0123456789abcdef";
+  std::string result = ".publish-";
+  for (unsigned char byte : bytes) {
+    result.push_back(alphabet[byte >> 4U]);
+    result.push_back(alphabet[byte & 0x0fU]);
+  }
+  return result;
+}
+
 Descriptor open_beneath(int root, std::string_view relative, int flags) {
   struct open_how how{};
   how.flags = static_cast<std::uint64_t>(flags | O_CLOEXEC | O_NOFOLLOW);
@@ -99,7 +116,8 @@ void validate_directory(int descriptor, uid_t authority_uid, dev_t device,
 class ImmutableReceiptDirectory final {
  public:
   ImmutableReceiptDirectory(LinuxCacheEvidenceConfig config,
-                            std::string_view category)
+                            std::string_view category,
+                            bool require_owner_write = false)
       : config_(std::move(config)) {
     if (config_.receipt_root.empty() || !config_.receipt_root.is_absolute() ||
         config_.receipt_root.lexically_normal() != config_.receipt_root ||
@@ -124,6 +142,12 @@ class ImmutableReceiptDirectory final {
     category_ = open_beneath(root_.get(), category, O_RDONLY | O_DIRECTORY);
     validate_directory(category_.get(), config_.authority_uid, device_,
                        "cache evidence category has unsafe metadata");
+    struct stat category_metadata {};
+    if (require_owner_write &&
+        (::fstat(category_.get(), &category_metadata) != 0 ||
+         (category_metadata.st_mode & S_IWUSR) == 0)) {
+      fail("cache evidence publisher category is not owner-writable");
+    }
   }
 
   [[nodiscard]] nlohmann::json read(std::string_view name) const {
@@ -179,6 +203,58 @@ class ImmutableReceiptDirectory final {
       fail("cache evidence receipt is not canonical JSON");
     }
     return parsed;
+  }
+
+  void publish(std::string_view name, const nlohmann::json& document) const {
+    const std::string bytes = document.dump();
+    if (!document.is_object() || bytes.empty() ||
+        bytes.size() > config_.maximum_receipt_bytes) {
+      fail("cache evidence publication document is invalid or oversized");
+    }
+    const std::string final_name(name);
+    const std::string temporary = temporary_name();
+    Descriptor file(::openat(category_.get(), temporary.c_str(),
+                             O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC |
+                                 O_NOFOLLOW,
+                             0600));
+    if (file.get() < 0)
+      fail_errno("cache evidence temporary receipt creation failed");
+    try {
+      std::size_t offset = 0U;
+      while (offset < bytes.size()) {
+        const ssize_t count =
+            ::write(file.get(), bytes.data() + offset, bytes.size() - offset);
+        if (count < 0 && errno == EINTR)
+          continue;
+        if (count <= 0)
+          fail_errno("cache evidence receipt write failed");
+        offset += static_cast<std::size_t>(count);
+      }
+      if (::fchmod(file.get(), 0440) != 0 || ::fsync(file.get()) != 0) {
+        fail("cache evidence receipt mode or data sync failed");
+      }
+      if (::syscall(SYS_renameat2, category_.get(), temporary.c_str(),
+                    category_.get(), final_name.c_str(),
+                    RENAME_NOREPLACE) != 0) {
+        if (errno != EEXIST)
+          fail_errno("cache evidence atomic promotion failed");
+        if (::unlinkat(category_.get(), temporary.c_str(), 0) != 0)
+          fail_errno("cache evidence replay cleanup failed");
+        if (::fsync(category_.get()) != 0)
+          fail("cache evidence replay cleanup was not durable");
+        if (read(final_name) != document) {
+          fail("cache evidence receipt identity has conflicting content");
+        }
+        return;
+      }
+      if (::fsync(category_.get()) != 0)
+        fail("cache evidence directory sync failed");
+      if (read(final_name) != document)
+        fail("published cache evidence differs from requested bytes");
+    } catch (...) {
+      (void)::unlinkat(category_.get(), temporary.c_str(), 0);
+      throw;
+    }
   }
 
  private:
@@ -373,6 +449,54 @@ void LinuxImmutableCacheQualificationSource::require_trusted(
   if (qualification != qualify_cache_artifact(evidence)) {
     fail("cache qualification receipt is not backed by immutable evidence");
   }
+}
+
+struct LinuxCacheEvidencePublisher::Implementation {
+  explicit Implementation(LinuxCacheEvidenceConfig config)
+      : runtime(config, "runtime", true),
+        qualification(std::move(config), "qualification", true) {}
+
+  ImmutableReceiptDirectory runtime;
+  ImmutableReceiptDirectory qualification;
+};
+
+LinuxCacheEvidencePublisher::LinuxCacheEvidencePublisher(
+    LinuxCacheEvidenceConfig config)
+    : implementation_(std::make_unique<Implementation>(std::move(config))) {}
+
+LinuxCacheEvidencePublisher::~LinuxCacheEvidencePublisher() = default;
+LinuxCacheEvidencePublisher::LinuxCacheEvidencePublisher(
+    LinuxCacheEvidencePublisher&&) noexcept = default;
+LinuxCacheEvidencePublisher& LinuxCacheEvidencePublisher::operator=(
+    LinuxCacheEvidencePublisher&&) noexcept = default;
+
+std::string LinuxCacheEvidencePublisher::publish_runtime(
+    const CacheRuntimeProbeContext& context,
+    const CacheRuntimeProbeSnapshot& snapshot) {
+  validate_cache_runtime_probe_snapshot(snapshot, context);
+  const std::string name = cache_runtime_probe_receipt_name(context);
+  implementation_->runtime.publish(
+      name, cache_runtime_probe_receipt_json(context, snapshot));
+  return name;
+}
+
+std::string LinuxCacheEvidencePublisher::publish_qualification(
+    const CacheNamespaceAuthorityReceipt& authority,
+    const ImmutableCacheTreeReceipt& artifact,
+    const CacheQualificationEvidence& evidence) {
+  validate_qualification_identity(authority, artifact);
+  if (evidence.authority_receipt_digest != authority.receipt_digest ||
+      evidence.namespace_digest != artifact.namespace_digest ||
+      evidence.artifact_tree_digest != artifact.artifact_tree_digest) {
+    fail("cache qualification publication has different evidence identity");
+  }
+  (void)qualify_cache_artifact(evidence);
+  const std::string name =
+      cache_qualification_evidence_receipt_name(authority, artifact);
+  implementation_->qualification.publish(
+      name, cache_qualification_evidence_receipt_json(authority, artifact,
+                                                      evidence));
+  return name;
 }
 
 }  // namespace trainvm

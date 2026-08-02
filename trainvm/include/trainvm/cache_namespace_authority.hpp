@@ -73,6 +73,13 @@ class ICacheRuntimeProbe {
       const CacheRuntimeProbeContext& context) = 0;
 };
 
+// Shared semantic validator used both before immutable receipt publication and
+// after a probe capture, so malformed authority observations cannot poison a
+// no-replace receipt name.
+void validate_cache_runtime_probe_snapshot(
+    const CacheRuntimeProbeSnapshot& snapshot,
+    const CacheRuntimeProbeContext& context);
+
 struct CacheNamespaceAuthorityRequest {
   WorkerInvocationSpec invocation;
   ResolvedLaunchSpec launch;

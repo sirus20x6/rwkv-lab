@@ -190,9 +190,11 @@ Single-run speedrun results are hypotheses, not production defaults.
   and qualification evidence from canonical immutable receipts beneath constructor-pinned,
   authority-owned roots; they reject symlink/mount escapes, changing, writable, multiply-linked,
   oversized, noncanonical, or differently bound receipts, and qualification is reread on adoption.
-  Runtime reuse remains disabled until hostd/controller publication freezes those receipts and the
-  service graph wires namespace derivation, publication, and adoption into worker launch;
-  caller-provided evidence never authorizes reuse.
+  The paired authority publisher writes canonical typed observations through private temporary
+  files, fsyncs bytes and modes, promotes with no-replace atomic rename, replays only identical
+  history, and rejects identity conflicts. Runtime reuse remains disabled until a sealed worker
+  evidence transport feeds that publisher and the service graph wires namespace derivation,
+  publication, and adoption into worker launch; caller-provided evidence never authorizes reuse.
 - Add typed CPU/I/O policy: CPU set, CPU weight, I/O weight, worker count, OpenMP thread count, and
   nice level. Record effective policy and throttling as evidence. The non-root worker runtime now
   parses the sealed policy in one category-owned module, narrows and reattests CPU affinity, applies

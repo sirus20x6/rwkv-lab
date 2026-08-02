@@ -409,18 +409,6 @@ struct ScopedTestTree {
   ~ScopedTestTree() { remove_test_tree(root); }
 };
 
-void write_immutable_receipt(const std::filesystem::path& path,
-                             const nlohmann::json& document) {
-  std::ofstream stream(path, std::ios::binary | std::ios::trunc);
-  stream << document.dump();
-  stream.close();
-  if (!stream) throw std::runtime_error("test receipt write failed");
-  std::filesystem::permissions(
-      path, std::filesystem::perms::owner_read |
-                std::filesystem::perms::group_read,
-      std::filesystem::perm_options::replace);
-}
-
 struct Fixture {
   AdapterRegistry adapters{adapter_registry()};
   HostLaunchRegistry launches{launch_registry()};
@@ -482,9 +470,39 @@ int main() {
     const auto runtime_receipt_path =
         evidence_tree.root / "runtime" /
         cache_runtime_probe_receipt_name(runtime_context);
-    write_immutable_receipt(
-        runtime_receipt_path,
-        cache_runtime_probe_receipt_json(runtime_context, runtime_snapshot));
+    LinuxCacheEvidencePublisher evidence_publisher({
+        .receipt_root = evidence_tree.root,
+        .authority_uid = ::geteuid(),
+        .maximum_receipt_bytes = 1U << 20U,
+    });
+    require(evidence_publisher.publish_runtime(runtime_context,
+                                               runtime_snapshot) ==
+                    runtime_receipt_path.filename().string() &&
+                evidence_publisher.publish_runtime(runtime_context,
+                                                   runtime_snapshot) ==
+                    runtime_receipt_path.filename().string(),
+            "runtime receipt publication is atomic and exactly replayable");
+    auto conflicting_runtime_snapshot = runtime_snapshot;
+    conflicting_runtime_snapshot.driver_version = "different";
+    rejected(
+        [&] {
+          (void)evidence_publisher.publish_runtime(
+              runtime_context, conflicting_runtime_snapshot);
+        },
+        "runtime receipt publication never replaces conflicting history");
+    auto alternate_runtime_context = runtime_context;
+    alternate_runtime_context.resource_binding_digest = hash('f');
+    rejected(
+        [&] {
+          (void)evidence_publisher.publish_runtime(alternate_runtime_context,
+                                                   runtime_snapshot);
+        },
+        "a runtime snapshot is validated against its context before an "
+        "immutable receipt name can be poisoned");
+    auto alternate_runtime_snapshot = runtime_snapshot;
+    alternate_runtime_snapshot.resource_binding_digest = hash('f');
+    (void)evidence_publisher.publish_runtime(alternate_runtime_context,
+                                             alternate_runtime_snapshot);
     LinuxSealedCacheRuntimeProbe sealed_runtime({
         .receipt_root = evidence_tree.root,
         .authority_uid = ::geteuid(),
@@ -715,10 +733,20 @@ int main() {
           evidence_tree.root / "qualification" /
           cache_qualification_evidence_receipt_name(
               first, linux_publication.artifact);
-      write_immutable_receipt(
-          qualification_receipt_path,
-          cache_qualification_evidence_receipt_json(
-              first, linux_publication.artifact, immutable_evidence));
+      require(evidence_publisher.publish_qualification(
+                  first, linux_publication.artifact, immutable_evidence) ==
+                  qualification_receipt_path.filename().string(),
+              "qualification evidence publication is atomic and immutable");
+      auto conflicting_immutable_evidence = immutable_evidence;
+      conflicting_immutable_evidence.candidate_throughput = 126.0;
+      rejected(
+          [&] {
+            (void)evidence_publisher.publish_qualification(
+                first, linux_publication.artifact,
+                conflicting_immutable_evidence);
+          },
+          "qualification evidence publication never replaces an existing "
+          "decision input");
       LinuxImmutableCacheQualificationSource immutable_qualification({
           .receipt_root = evidence_tree.root,
           .authority_uid = ::geteuid(),

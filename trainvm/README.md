@@ -215,9 +215,10 @@ Implemented now:
   atomically promotes, and re-verifies content-addressed cache trees without following symlinks or
   accepting writable/undeclared content; separate descriptor-rooted production readers accept
   runtime closure and qualification evidence only as canonical immutable authority-owned receipts,
-  and qualification is reread before adoption. Cache reuse remains disabled until hostd/controller
-  freezes those receipts and the service graph integrates namespace derivation,
-  publication/adoption, and worker launch;
+  and qualification is reread before adoption. The corresponding publisher uses fsynced private
+  temporary files and no-replace atomic promotion, permitting only byte-identical replay. Cache
+  reuse remains disabled until a sealed worker evidence transport feeds that publisher and the
+  service graph integrates namespace derivation, publication/adoption, and worker launch;
 - `validate`, `plan`, `simulate`, journal inspection/replay, and strict hostd-client configuration
   inspection CLI commands.
 
@@ -290,8 +291,8 @@ The sealed payload hashes cover only the copied executable/interpreter, adapter 
 bootstrap. They do not yet claim a reproducible dynamic-library, Python standard-library, or import
 closure. Guarded Python launch and immutable cache publication primitives are implemented, but
 runtime/cache reproducibility and production qualification remain incomplete until an isolated
-runtime-closure publication policy and service/worker adoption wiring are enforced. The immutable
-runtime and qualification readers fail closed but do not themselves create trusted evidence.
+runtime-closure evidence transport and service/worker adoption wiring are enforced. The immutable
+publisher and readers preserve trusted evidence but do not themselves measure the running worker.
 
 ## Toolchain
 

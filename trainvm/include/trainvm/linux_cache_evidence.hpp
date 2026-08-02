@@ -84,4 +84,33 @@ class LinuxImmutableCacheQualificationSource final
   std::unique_ptr<Implementation> implementation_;
 };
 
+// Authority-side immutable publisher. It accepts typed observations, writes a
+// canonical receipt through a private temporary file, fsyncs bytes and mode,
+// promotes with renameat2(RENAME_NOREPLACE), and treats an identical existing
+// receipt as exact replay rather than replacing history.
+class LinuxCacheEvidencePublisher final {
+ public:
+  explicit LinuxCacheEvidencePublisher(LinuxCacheEvidenceConfig config);
+  ~LinuxCacheEvidencePublisher();
+
+  LinuxCacheEvidencePublisher(const LinuxCacheEvidencePublisher&) = delete;
+  LinuxCacheEvidencePublisher& operator=(
+      const LinuxCacheEvidencePublisher&) = delete;
+  LinuxCacheEvidencePublisher(LinuxCacheEvidencePublisher&&) noexcept;
+  LinuxCacheEvidencePublisher& operator=(
+      LinuxCacheEvidencePublisher&&) noexcept;
+
+  [[nodiscard]] std::string publish_runtime(
+      const CacheRuntimeProbeContext& context,
+      const CacheRuntimeProbeSnapshot& snapshot);
+  [[nodiscard]] std::string publish_qualification(
+      const CacheNamespaceAuthorityReceipt& authority,
+      const ImmutableCacheTreeReceipt& artifact,
+      const CacheQualificationEvidence& evidence);
+
+ private:
+  struct Implementation;
+  std::unique_ptr<Implementation> implementation_;
+};
+
 }  // namespace trainvm
