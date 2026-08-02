@@ -84,7 +84,7 @@ struct CheckpointSubmission {
   bool inserted{};
 };
 
-enum class LifecycleCommandKind { pause, resume };
+enum class LifecycleCommandKind { pause, resume, cancel };
 enum class LifecycleCommandStatus { requested, applied, rejected };
 
 struct LifecycleCommand {
@@ -99,6 +99,8 @@ struct LifecycleCommand {
   LifecycleCommandKind kind{LifecycleCommandKind::pause};
   bool checkpoint_first{};
   bool release_resources{};
+  std::string cancel_reason;
+  std::int64_t graceful_timeout_ns{};
   std::string author;
   std::string reason;
   LifecycleCommandStatus status{LifecycleCommandStatus::requested};

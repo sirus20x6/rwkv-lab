@@ -461,6 +461,18 @@ std::string_view lifecycle_status_name(LifecycleCommandStatus status) {
   throw std::invalid_argument("invalid lifecycle command status");
 }
 
+std::string_view lifecycle_kind_name(LifecycleCommandKind kind) {
+  switch (kind) {
+    case LifecycleCommandKind::pause:
+      return "pause";
+    case LifecycleCommandKind::resume:
+      return "resume";
+    case LifecycleCommandKind::cancel:
+      return "cancel";
+  }
+  throw std::invalid_argument("invalid lifecycle command kind");
+}
+
 }  // namespace
 
 Controller::Controller(const CompiledPlan& plan, Journal& journal, std::string run_id)
@@ -716,7 +728,13 @@ const ExecutionState& Controller::recover() {
       const std::string desired_value = desired->get<std::string>();
       const bool starting = desired_value == "running" && runtime_desired_state == "queued" &&
                             runtime_observed_state == "queued" && phase == ReplayPhase::queued;
-      const bool valid_desire = starting ||
+      const bool cancelling =
+          desired_value == "cancelled" &&
+          ((runtime_desired_state == "running" &&
+            runtime_observed_state == "running") ||
+           (runtime_desired_state == "paused" &&
+            runtime_observed_state == "paused"));
+      const bool valid_desire = starting || cancelling ||
                                 (desired_value == "paused" && runtime_desired_state == "running" &&
                                  runtime_observed_state == "running") ||
                                 (desired_value == "running" && runtime_desired_state == "paused" &&
@@ -724,7 +742,7 @@ const ExecutionState& Controller::recover() {
       if (!valid_desire || (!starting && phase != ReplayPhase::ready) || expected_completion ||
           recovered.status != ExecutionStatus::running ||
           event.run_revision != recovered.revision + 1U) {
-        throw std::runtime_error("journal contains an invalid pause/resume desire");
+        throw std::runtime_error("journal contains an invalid lifecycle desire");
       }
       runtime_desired_state = desired_value;
       recovered.revision = event.run_revision;
@@ -773,7 +791,8 @@ const ExecutionState& Controller::recover() {
       const std::string observed_value = observed->get<std::string>();
       if (observed_value == "acquiring" || observed_value == "pausing" ||
           observed_value == "paused" || observed_value == "resuming" ||
-          observed_value == "running") {
+          observed_value == "running" || observed_value == "cancelling" ||
+          observed_value == "cancelled") {
         const bool acquiring = observed_value == "acquiring" &&
                                runtime_desired_state == "running" &&
                                runtime_observed_state == "queued" &&
@@ -790,6 +809,13 @@ const ExecutionState& Controller::recover() {
             phase == ReplayPhase::worker_ready;
         const bool valid_observation =
             acquiring || worker_reacquiring || worker_started ||
+            (observed_value == "cancelling" &&
+             runtime_desired_state == "cancelled" &&
+             (runtime_observed_state == "running" ||
+              runtime_observed_state == "paused")) ||
+            (observed_value == "cancelled" &&
+             runtime_desired_state == "cancelled" &&
+             runtime_observed_state == "cancelling") ||
             (observed_value == "pausing" && runtime_desired_state == "paused" &&
              runtime_observed_state == "running") ||
             (observed_value == "paused" && runtime_desired_state == "paused" &&
@@ -809,10 +835,13 @@ const ExecutionState& Controller::recover() {
             (!event.attempt_id.empty() &&
              event.attempt_id != recovered.current_attempt_id)) {
           throw std::runtime_error(
-              "journal contains an invalid pause/resume observation");
+              "journal contains an invalid lifecycle observation");
         }
         runtime_observed_state = observed_value;
         recovered.revision = event.run_revision;
+        if (observed_value == "cancelled") {
+          recovered.status = ExecutionStatus::cancelled;
+        }
         if (acquiring) {
           require_payload_string(event, "concurrency_key",
                                  plan_.experiment.spec.workspace.concurrency_key);
@@ -1298,28 +1327,40 @@ const ExecutionState& Controller::recover() {
         throw std::runtime_error(
             "lifecycle journal event is outside its active worker attempt");
       }
-      const bool pause = command->kind == LifecycleCommandKind::pause;
-      const bool valid_state = pause
-                                   ? runtime_desired_state == "running" &&
-                                         runtime_observed_state == "running"
-                                   : runtime_desired_state == "paused" &&
-                                         runtime_observed_state == "paused";
+      const bool resume = command->kind == LifecycleCommandKind::resume;
+      const bool cancel = command->kind == LifecycleCommandKind::cancel;
+      const bool valid_state =
+          resume
+              ? runtime_desired_state == "paused" &&
+                    runtime_observed_state == "paused"
+              : cancel
+                    ? (runtime_desired_state == "running" &&
+                       runtime_observed_state == "running") ||
+                          (runtime_desired_state == "paused" &&
+                           runtime_observed_state == "paused")
+                    : runtime_desired_state == "running" &&
+                          runtime_observed_state == "running";
       if (!valid_state) {
         throw std::runtime_error(
             "lifecycle journal event is stale for the replayed run state");
       }
       auto previous = replayed_lifecycle_status.find(command_id);
       if (event.event_type == "lifecycle.requested") {
-        const nlohmann::json expected_payload{
+        nlohmann::json expected_payload{
             {"command_id", command->command_id},
             {"idempotency_key", command->idempotency_key},
             {"expected_run_revision", command->expected_run_revision},
-            {"kind", pause ? "pause" : "resume"},
+            {"kind", lifecycle_kind_name(command->kind)},
             {"checkpoint_first", command->checkpoint_first},
             {"release_resources", command->release_resources},
             {"author", command->author},
             {"reason", command->reason},
         };
+        if (command->kind == LifecycleCommandKind::cancel) {
+          expected_payload["cancel_reason"] = command->cancel_reason;
+          expected_payload["graceful_timeout_ns"] =
+              command->graceful_timeout_ns;
+        }
         if (previous != replayed_lifecycle_status.end() ||
             event.worker_sequence != 0U || event.payload != expected_payload ||
             event.run_revision != command->expected_run_revision) {
@@ -1339,7 +1380,7 @@ const ExecutionState& Controller::recover() {
         const std::string status(lifecycle_status_name(command->status));
         const nlohmann::json expected_payload{
             {"command_id", command->command_id},
-            {"kind", pause ? "pause" : "resume"},
+            {"kind", lifecycle_kind_name(command->kind)},
             {"status", status},
             {"artifact_id", command->artifact_id},
             {"diagnostics", command->diagnostics},
@@ -2509,6 +2550,9 @@ LifecycleSubmission Controller::request_lifecycle(
     throw std::invalid_argument(
         "lifecycle request idempotency key, author, and reason are required");
   }
+  if (kind == LifecycleCommandKind::cancel) {
+    throw std::invalid_argument("cancel requests require request_cancel");
+  }
   const std::string kind_name =
       kind == LifecycleCommandKind::pause ? "pause" : "resume";
   const std::string command_id =
@@ -2528,6 +2572,52 @@ LifecycleSubmission Controller::request_lifecycle(
       .kind = kind,
       .checkpoint_first = checkpoint_first,
       .release_resources = release_resources,
+      .cancel_reason = "",
+      .graceful_timeout_ns = 0,
+      .author = author,
+      .reason = reason,
+      .status = LifecycleCommandStatus::requested,
+      .optimizer_step = std::nullopt,
+      .artifact_id = "",
+      .diagnostics = nlohmann::json::array(),
+      .acknowledgement = std::nullopt,
+      .acknowledged_at_ns = std::nullopt,
+  });
+}
+
+LifecycleSubmission Controller::request_cancel(
+    const std::string& idempotency_key,
+    std::uint64_t expected_run_revision, std::string cancel_reason,
+    std::int64_t graceful_timeout_ns, const std::string& author,
+    const std::string& reason) {
+  if (!initialized_) {
+    throw std::logic_error(
+        "controller must create or recover before requesting cancellation");
+  }
+  if (idempotency_key.empty() || author.empty() || reason.empty() ||
+      cancel_reason.empty() || graceful_timeout_ns < 0) {
+    throw std::invalid_argument(
+        "cancel idempotency key, author, reasons, and nonnegative timeout are required");
+  }
+  const std::string command_id =
+      "cancel-" +
+      sha256_hex(nlohmann::json({{"run_id", run_id_},
+                                 {"idempotency_key", idempotency_key}})
+                     .dump());
+  return journal_.submit_lifecycle_command(LifecycleCommand{
+      .command_id = command_id,
+      .run_id = run_id_,
+      .idempotency_key = idempotency_key,
+      .expected_run_revision = expected_run_revision,
+      .controller_sequence = 0,
+      .plan_revision = kInitialPlanRevision,
+      .node_id = "",
+      .attempt_id = "",
+      .kind = LifecycleCommandKind::cancel,
+      .checkpoint_first = false,
+      .release_resources = false,
+      .cancel_reason = std::move(cancel_reason),
+      .graceful_timeout_ns = graceful_timeout_ns,
       .author = author,
       .reason = reason,
       .status = LifecycleCommandStatus::requested,
@@ -2557,6 +2647,16 @@ LifecycleCommand Controller::acknowledge_lifecycle(
   return journal_.acknowledge_lifecycle_command(
       run_id_, command_id, identity, status, optimizer_step,
       std::move(artifact_id), std::move(diagnostics), now);
+}
+
+const ExecutionState& Controller::complete_cancellation(
+    const std::string& command_id, const AuthorityTimeSample& now) {
+  if (!initialized_) {
+    throw std::logic_error(
+        "controller must create or recover before completing cancellation");
+  }
+  journal_.complete_cancellation(run_id_, command_id, now);
+  return recover();
 }
 
 const ExecutionState& Controller::state() const {

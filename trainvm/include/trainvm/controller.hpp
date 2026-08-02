@@ -72,6 +72,11 @@ class Controller {
       std::uint64_t expected_run_revision, bool checkpoint_first,
       bool release_resources, const std::string& author,
       const std::string& reason);
+  LifecycleSubmission request_cancel(
+      const std::string& idempotency_key,
+      std::uint64_t expected_run_revision, std::string cancel_reason,
+      std::int64_t graceful_timeout_ns, const std::string& author,
+      const std::string& reason);
   LifecycleCommand acknowledge_lifecycle(
       const std::string& command_id,
       const ControlAcknowledgementIdentity& identity,
@@ -79,6 +84,8 @@ class Controller {
       std::optional<std::uint64_t> optimizer_step,
       std::string artifact_id, nlohmann::json diagnostics,
       const AuthorityTimeSample& now);
+  const ExecutionState& complete_cancellation(
+      const std::string& command_id, const AuthorityTimeSample& now);
 
   [[nodiscard]] const ExecutionState& state() const;
   [[nodiscard]] const CompiledPlan& plan() const;

@@ -11,6 +11,7 @@ from rwkv_lab.trainvm_worker import (
     CheckpointDisposition,
     CommandKind,
     ControlDisposition,
+    LifecycleDisposition,
     WorkerSession,
     load_worker_bootstrap,
 )
@@ -19,11 +20,16 @@ from rwkv_lab.trainvm_worker.session import wire
 
 class FakeController:
     def __init__(
-        self, *, send_control: bool = False, send_checkpoint: bool = False
+        self,
+        *,
+        send_control: bool = False,
+        send_checkpoint: bool = False,
+        send_cancel: bool = False,
     ) -> None:
         self.received: list[wire.WorkerToController] = []
         self.send_control = send_control
         self.send_checkpoint = send_checkpoint
+        self.send_cancel = send_cancel
         self.control_sent = threading.Event()
 
     def __call__(
@@ -81,6 +87,18 @@ class FakeController:
                     controller_sequence=19,
                     command_id="checkpoint-1",
                     checkpoint=wire.CheckpointCommand(reason="operator snapshot"),
+                )
+            )
+            self.control_sent.set()
+        if self.send_cancel:
+            yield wire.ControllerToWorker(
+                command=wire.WorkerCommand(
+                    controller_sequence=20,
+                    command_id="cancel-1",
+                    cancel=wire.CancelCommand(
+                        reason="operator stop",
+                        graceful_timeout={"seconds": 7},
+                    ),
                 )
             )
             self.control_sent.set()
@@ -194,6 +212,33 @@ def test_checkpoint_command_is_typed_and_acknowledges_published_artifact() -> No
     acknowledgement = controller.received[-2].checkpoint_ack
     assert acknowledgement.optimizer_step == 7
     assert acknowledgement.artifact_id == "checkpoint-artifact"
+    session.close()
+
+
+def test_cancel_command_is_typed_and_has_a_fenced_lifecycle_ack() -> None:
+    controller = FakeController(send_cancel=True)
+    session = WorkerSession(
+        load_worker_bootstrap(bootstrap_document()), connector=controller
+    )
+    session.start()
+    assert controller.control_sent.wait(2)
+    (command,) = wait_for_commands(session)
+    assert command.kind is CommandKind.CANCEL
+    assert command.controller_sequence == 20
+    assert command.reason == "operator stop"
+    assert command.graceful_timeout_seconds == 7
+    session.acknowledge_lifecycle(
+        command,
+        LifecycleDisposition.APPLIED,
+        wait=True,
+    )
+    session.finish("node.completed", {"ok": True}, optimizer_step=7)
+    acknowledgement = controller.received[-2].lifecycle_ack
+    assert acknowledgement.kind == wire.LifecycleAcknowledgement.KIND_CANCEL
+    assert (
+        acknowledgement.disposition
+        == wire.LifecycleAcknowledgement.DISPOSITION_APPLIED
+    )
     session.close()
 
 

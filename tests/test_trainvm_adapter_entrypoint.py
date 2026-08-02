@@ -26,6 +26,7 @@ from rwkv_lab.trainvm_adapters.io import (
     read_inline_config,
     require_run_directory,
 )
+from rwkv_lab.trainvm_worker import WorkerCancellationRequested
 
 
 class FakeSession:
@@ -474,6 +475,25 @@ def test_runner_reports_sanitized_failure_and_skips_completed_replay() -> None:
         == 0
     )
     assert completed.finished == []
+
+
+def test_runner_treats_acknowledged_cancellation_as_clean_process_exit() -> None:
+    bootstrap = SimpleNamespace(run_id="run-1")
+    session = FakeSession(bootstrap)
+
+    def cancel_at_safe_point(*_args: object) -> HandlerResult:
+        raise WorkerCancellationRequested("operator requested")
+
+    assert (
+        run_worker(
+            bootstrap_reader=lambda _descriptor: bootstrap,
+            session_factory=lambda _bootstrap: session,
+            executor=cancel_at_safe_point,
+        )
+        == 0
+    )
+    assert session.finished == []
+    assert session.closed
 
 
 def test_cli_accepts_only_the_authority_descriptor(monkeypatch) -> None:

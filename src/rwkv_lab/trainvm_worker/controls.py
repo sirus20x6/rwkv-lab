@@ -24,6 +24,10 @@ class WorkerControlError(RuntimeError):
     pass
 
 
+class WorkerCancellationRequested(RuntimeError):
+    """The authority accepted a graceful cancel at a trainer safe point."""
+
+
 def _valid_scalar(value: object) -> bool:
     if isinstance(value, (bool, str)):
         return True
@@ -161,12 +165,11 @@ class WorkerControlRuntime:
                 CommandKind.CHECKPOINT,
                 CommandKind.PAUSE,
                 CommandKind.RESUME,
+                CommandKind.CANCEL,
             }
             for command in commands
         ):
-            raise WorkerControlError(
-                "worker received a cancel command unsupported by this protocol revision"
-            )
+            raise WorkerControlError("worker received an unsupported command")
         self._pending.extend(commands)
 
     def apply(
@@ -188,6 +191,12 @@ class WorkerControlRuntime:
         applied: list[AppliedControlPatch] = []
         while self._pending:
             command = self._pending[0]
+            if command.kind is CommandKind.CANCEL:
+                self._pending.pop(0)
+                self._session.acknowledge_lifecycle(
+                    command, LifecycleDisposition.APPLIED
+                )
+                raise WorkerCancellationRequested(command.reason)
             if command.kind is not CommandKind.CONTROLS:
                 break
             if command.expected_control_revision != self._revision:
@@ -448,6 +457,12 @@ class WorkerControlRuntime:
                     diagnostics=diagnostics,
                 )
                 continue
+            if self._pending and self._pending[0].kind is CommandKind.CANCEL:
+                command = self._pending.pop(0)
+                self._session.acknowledge_lifecycle(
+                    command, LifecycleDisposition.APPLIED
+                )
+                raise WorkerCancellationRequested(command.reason)
             if self._pending:
                 raise WorkerControlError(
                     "a non-resume command blocks the retained-resource pause barrier"

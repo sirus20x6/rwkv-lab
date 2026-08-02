@@ -652,9 +652,13 @@ class WorkerSession:
         diagnostics: Iterable[tuple[int, str, str, str, str]] = (),
         wait: bool = True,
     ) -> int:
-        if command.kind not in {CommandKind.PAUSE, CommandKind.RESUME}:
+        if command.kind not in {
+            CommandKind.PAUSE,
+            CommandKind.RESUME,
+            CommandKind.CANCEL,
+        }:
             raise WorkerSessionError(
-                "only pause and resume commands have lifecycle acknowledgements"
+                "only lifecycle commands have lifecycle acknowledgements"
             )
         applied = disposition is LifecycleDisposition.APPLIED
         needs_checkpoint = command.kind is CommandKind.PAUSE and command.checkpoint_first
@@ -668,6 +672,7 @@ class WorkerSession:
         kinds = {
             CommandKind.PAUSE: wire.LifecycleAcknowledgement.KIND_PAUSE,
             CommandKind.RESUME: wire.LifecycleAcknowledgement.KIND_RESUME,
+            CommandKind.CANCEL: wire.LifecycleAcknowledgement.KIND_CANCEL,
         }
         dispositions = {
             LifecycleDisposition.APPLIED: wire.LifecycleAcknowledgement.DISPOSITION_APPLIED,

@@ -12,6 +12,7 @@ from rwkv_lab.trainvm_worker import (
     ControlDisposition,
     LifecycleDisposition,
     SafePoint,
+    WorkerCancellationRequested,
     WorkerCommand,
     WorkerControlError,
     WorkerControlRuntime,
@@ -324,14 +325,16 @@ def test_invalid_initial_and_command_scalars_fail_closed(value: object) -> None:
     assert session.acknowledgements[0][4][0][1] == "control.invalid_assignment"
 
 
-def test_cancel_command_remains_fail_closed() -> None:
-    session = FakeSession(
-        WorkerCommand(1, "cancel-1", CommandKind.CANCEL, reason="stop")
-    )
+def test_cancel_command_is_acknowledged_at_safe_point_and_stops_adapter() -> None:
+    command = WorkerCommand(1, "cancel-1", CommandKind.CANCEL, reason="stop")
+    session = FakeSession(command)
     runtime = WorkerControlRuntime(session, {}, 0)
 
-    with pytest.raises(WorkerControlError, match="cancel command"):
+    with pytest.raises(WorkerCancellationRequested, match="stop"):
         runtime.checkpoint(1, lambda *_: None)
+    assert session.lifecycle_acknowledgements == [
+        (command, LifecycleDisposition.APPLIED, 0, "")
+    ]
 
 
 def test_retained_pause_waits_for_durable_resume_without_publishing() -> None:
@@ -408,6 +411,38 @@ def test_paused_barrier_acknowledges_ordered_controls_before_resume() -> None:
         CommandKind.PAUSE,
         CommandKind.RESUME,
     ]
+
+
+def test_cancel_stops_a_retained_paused_worker_without_resume() -> None:
+    pause = WorkerCommand(11, "pause-11", CommandKind.PAUSE)
+    cancel = WorkerCommand(
+        12,
+        "cancel-12",
+        CommandKind.CANCEL,
+        reason="cancel paused run",
+        graceful_timeout_seconds=5,
+    )
+    session = FakeSession(pause, cancel)
+    runtime = WorkerControlRuntime(session, {}, 0)
+
+    with pytest.raises(WorkerCancellationRequested, match="cancel paused run"):
+        runtime.publish_requested_checkpoint(
+            CheckpointPublicationRequest(
+                source_directory="/run/checkpoint",
+                optimizer_step=9,
+                resume_grade="exact",
+                state_components=("model", "optimizer"),
+            )
+        )
+
+    assert [item[0].kind for item in session.lifecycle_acknowledgements] == [
+        CommandKind.PAUSE,
+        CommandKind.CANCEL,
+    ]
+    assert all(
+        item[1] is LifecycleDisposition.APPLIED
+        for item in session.lifecycle_acknowledgements
+    )
 
 
 def test_checkpoint_command_blocks_later_controls_until_immutable_publication(

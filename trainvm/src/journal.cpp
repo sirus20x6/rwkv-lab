@@ -2074,6 +2074,8 @@ std::string lifecycle_kind_name(LifecycleCommandKind kind) {
       return "pause";
     case LifecycleCommandKind::resume:
       return "resume";
+    case LifecycleCommandKind::cancel:
+      return "cancel";
   }
   throw std::invalid_argument("invalid lifecycle command kind");
 }
@@ -2112,6 +2114,8 @@ LifecycleCommand lifecycle_command_from_events(
     kind = LifecycleCommandKind::pause;
   } else if (kind_name == "resume") {
     kind = LifecycleCommandKind::resume;
+  } else if (kind_name == "cancel") {
+    kind = LifecycleCommandKind::cancel;
   } else {
     throw std::runtime_error("stored lifecycle request kind is malformed");
   }
@@ -2128,6 +2132,9 @@ LifecycleCommand lifecycle_command_from_events(
       .kind = kind,
       .checkpoint_first = requested.payload.value("checkpoint_first", false),
       .release_resources = requested.payload.value("release_resources", false),
+      .cancel_reason = requested.payload.value("cancel_reason", std::string{}),
+      .graceful_timeout_ns = requested.payload.value(
+          "graceful_timeout_ns", std::int64_t{}),
       .author = required_string("author"),
       .reason = required_string("reason"),
       .status = LifecycleCommandStatus::requested,
@@ -2141,7 +2148,13 @@ LifecycleCommand lifecycle_command_from_events(
       command.expected_run_revision != requested.run_revision ||
       command.node_id.empty() || command.attempt_id.empty() ||
       (command.kind == LifecycleCommandKind::resume &&
-       (command.checkpoint_first || command.release_resources))) {
+       (command.checkpoint_first || command.release_resources ||
+        !command.cancel_reason.empty() || command.graceful_timeout_ns != 0)) ||
+      (command.kind == LifecycleCommandKind::pause &&
+       (!command.cancel_reason.empty() || command.graceful_timeout_ns != 0)) ||
+      (command.kind == LifecycleCommandKind::cancel &&
+       (command.checkpoint_first || command.release_resources ||
+        command.cancel_reason.empty() || command.graceful_timeout_ns < 0))) {
     throw std::runtime_error("stored lifecycle request envelope is malformed");
   }
   if (!acknowledgement) return command;
@@ -3746,8 +3759,8 @@ std::vector<RunProjection> Journal::reconcilable_projections(
            last_heartbeat_ns, last_event_sequence, failure_summary
     FROM run_projection
     WHERE run_id > ?
-      AND desired_state IN ('queued', 'running')
-      AND observed_state IN ('queued', 'acquiring', 'running')
+      AND desired_state IN ('queued', 'running', 'cancelled')
+      AND observed_state IN ('queued', 'acquiring', 'running', 'cancelling')
     ORDER BY run_id
     LIMIT ?
   )sql");
@@ -5212,7 +5225,13 @@ LifecycleSubmission Journal::submit_lifecycle_command(
       !command.diagnostics.empty() || command.acknowledgement ||
       command.acknowledged_at_ns ||
       (command.kind == LifecycleCommandKind::resume &&
-       (command.checkpoint_first || command.release_resources))) {
+       (command.checkpoint_first || command.release_resources ||
+        !command.cancel_reason.empty() || command.graceful_timeout_ns != 0)) ||
+      (command.kind == LifecycleCommandKind::pause &&
+       (!command.cancel_reason.empty() || command.graceful_timeout_ns != 0)) ||
+      (command.kind == LifecycleCommandKind::cancel &&
+       (command.checkpoint_first || command.release_resources ||
+        command.cancel_reason.empty() || command.graceful_timeout_ns < 0))) {
     throw std::invalid_argument("new lifecycle command has invalid request state");
   }
   Transaction transaction(database_);
@@ -5225,6 +5244,8 @@ LifecycleSubmission Journal::submit_lifecycle_command(
         existing->kind == command.kind &&
         existing->checkpoint_first == command.checkpoint_first &&
         existing->release_resources == command.release_resources &&
+        existing->cancel_reason == command.cancel_reason &&
+        existing->graceful_timeout_ns == command.graceful_timeout_ns &&
         existing->author == command.author && existing->reason == command.reason;
     if (!same) {
       throw std::invalid_argument(
@@ -5249,9 +5270,12 @@ LifecycleSubmission Journal::submit_lifecycle_command(
   const std::string node_id = column_text(run.get(), 3);
   const std::string attempt_id = column_text(run.get(), 4);
   const bool valid_state =
-      command.kind == LifecycleCommandKind::pause
-          ? desired == "running" && observed == "running"
-          : desired == "paused" && observed == "paused";
+      command.kind == LifecycleCommandKind::resume
+          ? desired == "paused" && observed == "paused"
+          : command.kind == LifecycleCommandKind::cancel
+                ? (desired == "running" && observed == "running") ||
+                      (desired == "paused" && observed == "paused")
+                : desired == "running" && observed == "running";
   if (revision != command.expected_run_revision) {
     throw std::invalid_argument("lifecycle command expected_run_revision conflict");
   }
@@ -5261,6 +5285,19 @@ LifecycleSubmission Journal::submit_lifecycle_command(
   }
   command.node_id = node_id;
   command.attempt_id = attempt_id;
+  nlohmann::json request_payload{
+      {"command_id", command.command_id},
+      {"idempotency_key", command.idempotency_key},
+      {"expected_run_revision", command.expected_run_revision},
+      {"kind", lifecycle_kind_name(command.kind)},
+      {"checkpoint_first", command.checkpoint_first},
+      {"release_resources", command.release_resources},
+      {"author", command.author},
+      {"reason", command.reason}};
+  if (command.kind == LifecycleCommandKind::cancel) {
+    request_payload["cancel_reason"] = command.cancel_reason;
+    request_payload["graceful_timeout_ns"] = command.graceful_timeout_ns;
+  }
   const Event requested{
       .event_id = command.command_id + ":requested",
       .run_id = command.run_id,
@@ -5274,14 +5311,7 @@ LifecycleSubmission Journal::submit_lifecycle_command(
       .wall_time_ns = 0,
       .monotonic_time_ns = 0,
       .optimizer_step = std::nullopt,
-      .payload = {{"command_id", command.command_id},
-                  {"idempotency_key", command.idempotency_key},
-                  {"expected_run_revision", command.expected_run_revision},
-                  {"kind", lifecycle_kind_name(command.kind)},
-                  {"checkpoint_first", command.checkpoint_first},
-                  {"release_resources", command.release_resources},
-                  {"author", command.author},
-                  {"reason", command.reason}},
+      .payload = std::move(request_payload),
   };
   command.controller_sequence = append_uncommitted(requested);
   transaction.commit();
@@ -5364,9 +5394,12 @@ LifecycleCommand Journal::acknowledge_lifecycle_command(
   const std::string desired = column_text(run.get(), 1);
   const std::string observed = column_text(run.get(), 2);
   const bool valid_state =
-      stored->kind == LifecycleCommandKind::pause
-          ? desired == "running" && observed == "running"
-          : desired == "paused" && observed == "paused";
+      stored->kind == LifecycleCommandKind::resume
+          ? desired == "paused" && observed == "paused"
+          : stored->kind == LifecycleCommandKind::cancel
+                ? (desired == "running" && observed == "running") ||
+                      (desired == "paused" && observed == "paused")
+                : desired == "running" && observed == "running";
   if (!valid_state) {
     throw std::invalid_argument(
         "lifecycle acknowledgement is stale for the run state");
@@ -5442,9 +5475,12 @@ LifecycleCommand Journal::acknowledge_lifecycle_command(
   };
   std::vector<Event> events{acknowledged};
   if (status == LifecycleCommandStatus::applied) {
+    const bool cancelling = stored->kind == LifecycleCommandKind::cancel;
     const bool pause = stored->kind == LifecycleCommandKind::pause;
-    const std::string desired_state = pause ? "paused" : "running";
-    const std::string intermediate_state = pause ? "pausing" : "resuming";
+    const std::string desired_state =
+        cancelling ? "cancelled" : (pause ? "paused" : "running");
+    const std::string intermediate_state =
+        cancelling ? "cancelling" : (pause ? "pausing" : "resuming");
     events.push_back(Event{
         .event_id = command_id + ":desired",
         .run_id = run_id,
@@ -5476,7 +5512,7 @@ LifecycleCommand Journal::acknowledge_lifecycle_command(
         .payload = {{"state", intermediate_state},
                     {"cause_command_id", command_id}},
     });
-    events.push_back(Event{
+    if (!cancelling) events.push_back(Event{
         .event_id = command_id + ":observed-final",
         .run_id = run_id,
         .run_revision = run_revision + 3U,
@@ -5495,6 +5531,77 @@ LifecycleCommand Journal::acknowledge_lifecycle_command(
   for (const Event& event : events) append_uncommitted(event);
   transaction.commit();
   return *lifecycle_command(command_id);
+}
+
+void Journal::complete_cancellation(const std::string& run_id,
+                                    const std::string& command_id,
+                                    const AuthorityTimeSample& now) {
+  if (run_id.empty() || command_id.empty()) {
+    throw std::invalid_argument("cancellation completion identity is required");
+  }
+  require_authority_time(now);
+  Transaction transaction(database_);
+  const auto command = lifecycle_command(command_id);
+  if (!command || command->run_id != run_id ||
+      command->kind != LifecycleCommandKind::cancel ||
+      command->status != LifecycleCommandStatus::applied ||
+      !command->acknowledgement || !command->acknowledged_at_ns) {
+    throw std::invalid_argument(
+        "cancellation completion has no applied durable command");
+  }
+  Statement projection(database_, R"sql(
+    SELECT run_revision, desired_state, observed_state,
+           current_node_id, current_attempt_id
+    FROM run_projection WHERE run_id=?
+  )sql");
+  bind_text(projection.get(), 1, run_id);
+  if (sqlite3_step(projection.get()) != SQLITE_ROW) {
+    throw std::invalid_argument("cancellation run does not exist");
+  }
+  const auto revision = static_cast<std::uint64_t>(
+      sqlite3_column_int64(projection.get(), 0));
+  if (column_text(projection.get(), 1) != "cancelled" ||
+      column_text(projection.get(), 2) != "cancelling" ||
+      column_text(projection.get(), 3) != command->node_id ||
+      column_text(projection.get(), 4) != command->attempt_id) {
+    throw OperationPreconditionError(
+        "cancellation completion is stale for the run projection");
+  }
+  if (host_grant_enforcement_ == HostGrantEnforcement::required) {
+    const auto& identity = *command->acknowledgement;
+    Statement released(database_, R"sql(
+      SELECT 1 FROM resource_lease_releases
+      WHERE concurrency_key=? AND owner_run_id=? AND lease_id=?
+        AND fencing_token=? AND clock_domain='boottime/v1' AND boot_id=?
+    )sql");
+    bind_text(released.get(), 1, identity.concurrency_key);
+    bind_text(released.get(), 2, run_id);
+    bind_text(released.get(), 3, identity.lease_id);
+    bind_integer(released.get(), 4,
+                 checked_integer(identity.fencing_token, "fencing_token"));
+    bind_text(released.get(), 5, now.boot_id);
+    if (sqlite3_step(released.get()) != SQLITE_ROW) {
+      throw OperationPreconditionError(
+          "cancellation cannot become terminal before fenced lease release");
+    }
+  }
+  append_uncommitted(Event{
+      .event_id = command_id + ":observed-final",
+      .run_id = run_id,
+      .run_revision = revision + 1U,
+      .plan_revision = command->plan_revision,
+      .node_id = command->node_id,
+      .attempt_id = command->attempt_id,
+      .worker_sequence = 0,
+      .event_type = "run.observed_state_changed",
+      .event_version = 1,
+      .wall_time_ns = now.wall.nanoseconds,
+      .monotonic_time_ns = 0,
+      .optimizer_step = std::nullopt,
+      .payload = {{"state", "cancelled"},
+                  {"cause_command_id", command_id}},
+  });
+  transaction.commit();
 }
 
 std::optional<ControlCommand> Journal::control_command(const std::string& command_id) const {

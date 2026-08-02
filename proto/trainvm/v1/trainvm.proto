@@ -248,6 +248,7 @@ message LifecycleCommandResult {
     KIND_UNSPECIFIED = 0;
     KIND_PAUSE = 1;
     KIND_RESUME = 2;
+    KIND_CANCEL = 3;
   }
   enum Status {
     STATUS_UNSPECIFIED = 0;
@@ -264,6 +265,8 @@ message LifecycleCommandResult {
   bool release_resources = 6;
   uint64 optimizer_step = 7;
   string artifact_id = 8;
+  string reason = 9;
+  google.protobuf.Duration graceful_timeout = 10;
 }
 
 message RunCommandResponse {
@@ -406,6 +409,7 @@ message LifecycleAcknowledgement {
     KIND_UNSPECIFIED = 0;
     KIND_PAUSE = 1;
     KIND_RESUME = 2;
+    KIND_CANCEL = 3;
   }
   enum Disposition {
     DISPOSITION_UNSPECIFIED = 0;

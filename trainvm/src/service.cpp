@@ -729,12 +729,26 @@ v1::WorkerCommand worker_lifecycle_command(const LifecycleCommand& command) {
   v1::WorkerCommand output;
   output.set_controller_sequence(command.controller_sequence);
   output.set_command_id(command.command_id);
-  if (command.kind == LifecycleCommandKind::pause) {
-    auto* pause = output.mutable_pause();
-    pause->set_checkpoint_first(command.checkpoint_first);
-    pause->set_release_resources(command.release_resources);
-  } else {
-    output.mutable_resume();
+  switch (command.kind) {
+    case LifecycleCommandKind::pause: {
+      auto* pause = output.mutable_pause();
+      pause->set_checkpoint_first(command.checkpoint_first);
+      pause->set_release_resources(command.release_resources);
+      break;
+    }
+    case LifecycleCommandKind::resume:
+      output.mutable_resume();
+      break;
+    case LifecycleCommandKind::cancel: {
+      auto* cancel = output.mutable_cancel();
+      cancel->set_reason(command.cancel_reason);
+      cancel->mutable_graceful_timeout()->set_seconds(
+          command.graceful_timeout_ns / 1'000'000'000LL);
+      cancel->mutable_graceful_timeout()->set_nanos(
+          static_cast<std::int32_t>(command.graceful_timeout_ns %
+                                    1'000'000'000LL));
+      break;
+    }
   }
   return output;
 }
@@ -745,9 +759,17 @@ void fill_lifecycle_result(const LifecycleCommand& command,
   auto* output = response.mutable_lifecycle();
   output->set_command_id(command.command_id);
   output->set_controller_sequence(command.controller_sequence);
-  output->set_kind(command.kind == LifecycleCommandKind::pause
-                       ? v1::LifecycleCommandResult::KIND_PAUSE
-                       : v1::LifecycleCommandResult::KIND_RESUME);
+  switch (command.kind) {
+    case LifecycleCommandKind::pause:
+      output->set_kind(v1::LifecycleCommandResult::KIND_PAUSE);
+      break;
+    case LifecycleCommandKind::resume:
+      output->set_kind(v1::LifecycleCommandResult::KIND_RESUME);
+      break;
+    case LifecycleCommandKind::cancel:
+      output->set_kind(v1::LifecycleCommandResult::KIND_CANCEL);
+      break;
+  }
   switch (command.status) {
     case LifecycleCommandStatus::requested:
       output->set_status(v1::LifecycleCommandResult::STATUS_REQUESTED);
@@ -763,6 +785,12 @@ void fill_lifecycle_result(const LifecycleCommand& command,
   output->set_release_resources(command.release_resources);
   if (command.optimizer_step) output->set_optimizer_step(*command.optimizer_step);
   output->set_artifact_id(command.artifact_id);
+  output->set_reason(command.cancel_reason);
+  output->mutable_graceful_timeout()->set_seconds(
+      command.graceful_timeout_ns / 1'000'000'000LL);
+  output->mutable_graceful_timeout()->set_nanos(
+      static_cast<std::int32_t>(command.graceful_timeout_ns %
+                                1'000'000'000LL));
   add_stored_diagnostics(response, command.diagnostics);
 }
 
@@ -1105,6 +1133,17 @@ std::int64_t timestamp_ns(const google::protobuf::Timestamp& timestamp) {
   return timestamp.seconds() * kNanosecondsPerSecond + timestamp.nanos();
 }
 
+std::int64_t duration_ns(const google::protobuf::Duration& duration,
+                         std::int64_t maximum_seconds) {
+  constexpr std::int64_t kNanosecondsPerSecond = 1'000'000'000LL;
+  if (maximum_seconds < 0 || duration.seconds() < 0 || duration.nanos() < 0 ||
+      duration.nanos() >= kNanosecondsPerSecond ||
+      duration.seconds() > maximum_seconds) {
+    throw std::invalid_argument("graceful timeout is out of range");
+  }
+  return duration.seconds() * kNanosecondsPerSecond + duration.nanos();
+}
+
 std::string artifact_kind_name(v1::ArtifactKind kind) {
   switch (kind) {
     case v1::ARTIFACT_KIND_PATH:
@@ -1352,6 +1391,11 @@ void TrainVMService::configure_hostd(
 }
 
 ReconcileResult TrainVMService::reconcile_once(const std::string& run_id) {
+  if (const auto disposition = reconcile_cancellation(run_id)) {
+    return {.disposition = *disposition,
+            .run_id = run_id,
+            .launch = std::nullopt};
+  }
   if (host_grant_saga_) {
     if (const auto disposition = reconcile_host_release(run_id)) {
       return {.disposition = *disposition,
@@ -1510,6 +1554,109 @@ std::optional<std::string> TrainVMService::reconciliation_failure(
   return found == reconciliation_failures_.end()
              ? std::nullopt
              : std::optional<std::string>{found->second};
+}
+
+std::optional<ReconcileDisposition> TrainVMService::reconcile_cancellation(
+    const std::string& run_id) {
+  std::scoped_lock lock(command_mutex_);
+  const auto projection = journal_.projection(run_id);
+  if (!projection || projection->desired_state != "cancelled" ||
+      projection->observed_state != "cancelling") {
+    return std::nullopt;
+  }
+  const auto plan = journal_.compiled_plan(projection->plan_hash);
+  if (!plan) {
+    throw std::runtime_error(
+        "cannot reconcile cancellation without a persisted plan");
+  }
+  std::string command_id;
+  for (const Event& event : journal_.events_for_run(run_id)) {
+    if (event.event_type == "run.observed_state_changed" &&
+        event.payload.value("state", std::string{}) == "cancelling") {
+      command_id = event.payload.value("cause_command_id", std::string{});
+    }
+  }
+  const auto command = journal_.lifecycle_command(command_id);
+  if (!command || command->kind != LifecycleCommandKind::cancel ||
+      command->status != LifecycleCommandStatus::applied ||
+      !command->acknowledgement || !command->acknowledged_at_ns ||
+      command->node_id != projection->current_node_id ||
+      command->attempt_id != projection->current_attempt_id) {
+    throw OperationPreconditionError(
+        "cancelling projection has no exact applied command");
+  }
+  const AuthorityTimeSample now = authority_now();
+  const std::int64_t deadline =
+      command->graceful_timeout_ns >
+              std::numeric_limits<std::int64_t>::max() -
+                  *command->acknowledged_at_ns
+          ? std::numeric_limits<std::int64_t>::max()
+          : *command->acknowledged_at_ns + command->graceful_timeout_ns;
+  if (now.wall.nanoseconds < deadline) return std::nullopt;
+
+  if (!host_process_saga_ || !host_grant_saga_) {
+    Controller controller(*plan, journal_, run_id);
+    controller.recover();
+    (void)controller.complete_cancellation(command_id, now);
+    return ReconcileDisposition::builtin_completed;
+  }
+
+  const std::string launch_id = run_id + ":worker-launch:" +
+                                command->node_id + ":" +
+                                command->attempt_id;
+  auto process = journal_.host_process_saga(launch_id);
+  if (!process || !process->committed) {
+    throw OperationPreconditionError(
+        "cancellation has no durable committed worker process");
+  }
+  if (!process->exited) {
+    process = host_process_saga_->reconcile_exit(launch_id, true, now);
+    if (!process->exited) {
+      throw std::runtime_error(
+          "cancellation process exit returned no terminal receipt");
+    }
+    return ReconcileDisposition::host_process_exited;
+  }
+
+  const ResourceBundleGrant& grant = process->prepare.grant;
+  auto grant_saga = journal_.host_grant_saga(grant.request_id);
+  if (!grant_saga || !grant_saga->grant ||
+      grant_saga->grant->receipt_digest != grant.receipt_digest ||
+      grant_saga->busy_outcome_digest) {
+    throw OperationPreconditionError(
+        "cancellation has no exact durable physical grant");
+  }
+  if (!grant_saga->release_receipt) {
+    const ResourceReleaseRequest release = seal_resource_release_request({
+        .api_version = std::string(kHostLedgerReleaseRequestApiVersion),
+        .release_request_id =
+            "host-release-" +
+            sha256_hex(grant.request_id + "\n" + grant.receipt_digest),
+        .allocation_id = grant.allocation_id,
+        .grant_digest = grant.receipt_digest,
+        .journal_id = grant.journal_id,
+        .run_id = grant.run_id,
+        .logical_lease_id = grant.logical_lease_id,
+        .logical_fencing_token = grant.logical_fencing_token,
+        .canonical_request_digest = {},
+    });
+    grant_saga = host_grant_saga_->reconcile_release(
+        grant.request_id, release, now);
+    if (!grant_saga->release_receipt) {
+      throw std::runtime_error(
+          "cancellation resource release returned no receipt");
+    }
+    return ReconcileDisposition::host_grant_released;
+  }
+
+  const auto& identity = *command->acknowledgement;
+  (void)journal_.release_lease(identity.concurrency_key, run_id,
+                               identity.lease_id,
+                               identity.fencing_token, now);
+  Controller controller(*plan, journal_, run_id);
+  controller.recover();
+  (void)controller.complete_cancellation(command_id, now);
+  return ReconcileDisposition::builtin_completed;
 }
 
 void TrainVMService::record_reconciliation_failure(std::string run_id,
@@ -2768,6 +2915,9 @@ grpc::Status TrainVMService::acknowledge_worker_lifecycle(
       case v1::LifecycleAcknowledgement::KIND_RESUME:
         kind = LifecycleCommandKind::resume;
         break;
+      case v1::LifecycleAcknowledgement::KIND_CANCEL:
+        kind = LifecycleCommandKind::cancel;
+        break;
       case v1::LifecycleAcknowledgement::KIND_UNSPECIFIED:
       default:
         return {grpc::StatusCode::INVALID_ARGUMENT,
@@ -2847,6 +2997,9 @@ grpc::Status TrainVMService::acknowledge_worker_lifecycle(
     if (applied && kind == LifecycleCommandKind::resume) {
       controller.recover();
       (void)controller.prepare_dispatch(now);
+    }
+    if (applied && kind == LifecycleCommandKind::cancel) {
+      notify_reconciliation(connection.identity.run_id);
     }
     acknowledged = acknowledgement.worker_sequence();
     return grpc::Status::OK;
@@ -3293,7 +3446,8 @@ grpc::Status TrainVMService::CommandRun(grpc::ServerContext* context,
     return {grpc::StatusCode::RESOURCE_EXHAUSTED, "command exceeds 64 KiB"};
   }
   if (!request->has_controls() && !request->has_checkpoint() &&
-      !request->has_pause() && !request->has_resume()) {
+      !request->has_pause() && !request->has_resume() &&
+      !request->has_cancel()) {
     return {grpc::StatusCode::UNIMPLEMENTED,
             "this lifecycle command is not implemented yet"};
   }
@@ -3330,6 +3484,45 @@ grpc::Status TrainVMService::CommandRun(grpc::ServerContext* context,
     Controller controller(*plan, journal_, request->run_id());
     controller.recover();
     if (cancelled(context)) return cancellation_status();
+    if (request->has_cancel()) {
+      const auto& state = controller.state();
+      if (state.current_node_id.empty() || request->cancel().reason().empty()) {
+        return {grpc::StatusCode::INVALID_ARGUMENT,
+                "cancel requires an active worker node and command reason"};
+      }
+      const Node& node =
+          plan->experiment.spec.workflow.nodes.at(state.current_node_id);
+      const Component& component =
+          plan->experiment.spec.components.at(node.invoke.component);
+      const AdapterProfile& profile =
+          adapter_registry_.resolve(component, node.invoke.operation);
+      if (!profile.lifecycle.graceful_stop) {
+        response->set_disposition(
+            v1::RunCommandResponse::DISPOSITION_REJECTED);
+        auto* diagnostic = response->add_diagnostics();
+        diagnostic->set_severity(v1::Diagnostic::SEVERITY_ERROR);
+        diagnostic->set_code("cancel.unsupported_by_operation");
+        diagnostic->set_message(
+            "the active adapter operation does not declare graceful stop");
+        fill_run_summary(*projection, journal_, *response);
+        return grpc::Status::OK;
+      }
+      const std::int64_t timeout = duration_ns(
+          request->cancel().graceful_timeout(),
+          plan->experiment.spec.recovery.graceful_stop_seconds);
+      const auto submission = controller.request_cancel(
+          request->idempotency_key(), request->expected_run_revision(),
+          request->cancel().reason(), timeout, request->author(),
+          request->reason());
+      response->set_disposition(
+          submission.inserted
+              ? v1::RunCommandResponse::DISPOSITION_ACCEPTED
+              : replay_disposition(submission.command));
+      fill_lifecycle_result(submission.command, *response);
+      fill_run_summary(*journal_.projection(request->run_id()), journal_,
+                       *response);
+      return grpc::Status::OK;
+    }
     if (request->has_pause() || request->has_resume()) {
       const bool pause = request->has_pause();
       const auto& state = controller.state();

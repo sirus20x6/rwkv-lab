@@ -6,6 +6,7 @@ from dataclasses import replace
 
 from rwkv_lab.trainvm_worker import (
     WorkerBootstrap,
+    WorkerCancellationRequested,
     WorkerControlRuntime,
     WorkerInvocation,
     WorkerObservability,
@@ -99,6 +100,11 @@ def run_worker(
                         ],
                     },
                 )
+        except WorkerCancellationRequested:
+            # The lifecycle acknowledgement is the durable terminal intent.
+            # Host authority observes/reaps the process and releases resources;
+            # a normal operation result would race the cancellation state.
+            return 0
         except Exception as error:  # noqa: BLE001 - trainer failures are terminal events
             # The durable event is intentionally bounded and contains neither the
             # exception message nor invocation values, which may disclose paths.

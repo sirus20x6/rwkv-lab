@@ -509,6 +509,9 @@ public:
       std::optional<std::uint64_t> optimizer_step,
       std::string artifact_id, nlohmann::json diagnostics,
       const AuthorityTimeSample& now);
+  void complete_cancellation(const std::string& run_id,
+                             const std::string& command_id,
+                             const AuthorityTimeSample& now);
 };
 
 nlohmann::json event_json(const Event& event);

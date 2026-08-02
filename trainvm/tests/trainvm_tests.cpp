@@ -5399,6 +5399,99 @@ void test_worker_control_grpc_stream() {
   std::filesystem::remove_all(directory);
 }
 
+void test_graceful_cancel_lifecycle() {
+  const auto compiled = trainvm::compile_document(load_fixture());
+  check(compiled.valid(), "graceful cancellation fixture compiles");
+  if (!compiled.valid()) return;
+  const std::filesystem::path directory =
+      std::filesystem::temp_directory_path() /
+      ("trainvm-cancel-lifecycle-test-" +
+       std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  const auto database_path = directory / "journal.db";
+  const std::string run_id = "cancel-lifecycle-run";
+  {
+    trainvm::Journal journal(
+        database_path, std::nullopt,
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
+    trainvm::Controller controller(*compiled.plan, journal, run_id);
+    controller.create_queued(fixture_adapter_locked_submission(*compiled.plan));
+    (void)controller.begin_acquisition(test_time(1'000));
+    const auto launch = controller.prepare_worker_launch(
+        {.code_fingerprint = "sha256:" + std::string(64U, '8'),
+         .required_capabilities = {"worker.controls"}},
+        test_time(1'100));
+    (void)bind_test_worker_launch(controller, launch, 1'150);
+    (void)controller.accept_worker_hello(
+        {.run_id = launch.run_id,
+         .node_id = launch.node_id,
+         .attempt_id = launch.attempt_id,
+         .launch_nonce = launch.launch_nonce,
+         .adapter = launch.adapter,
+         .adapter_version = launch.adapter_version,
+         .code_fingerprint = launch.code_fingerprint,
+         .capabilities = launch.required_capabilities,
+         .last_acked_controller_sequence = 0U,
+         .concurrency_key = launch.concurrency_key,
+         .lease_id = launch.lease_id,
+         .fencing_token = launch.fencing_token},
+        test_time(1'175));
+    const auto before = journal.projection(run_id);
+    check(before && before->desired_state == "running" &&
+              before->observed_state == "running",
+          "graceful cancellation starts from an active worker");
+    if (!before) return;
+
+    const auto submitted = controller.request_cancel(
+        "cancel-once", before->run_revision, "operator requested stop",
+        5'000'000'000LL, "operator", "test graceful cancellation");
+    const auto pending = journal.pending_lifecycle_commands(run_id, 0U);
+    check(submitted.inserted &&
+              submitted.command.kind ==
+                  trainvm::LifecycleCommandKind::cancel &&
+              submitted.command.cancel_reason == "operator requested stop" &&
+              submitted.command.graceful_timeout_ns == 5'000'000'000LL &&
+              pending.size() == 1U &&
+              pending.front().command_id == submitted.command.command_id,
+          "cancel command is durable and preserves its graceful-stop policy");
+
+    (void)controller.acknowledge_lifecycle(
+        submitted.command.command_id,
+        {.concurrency_key = launch.concurrency_key,
+         .lease_id = launch.lease_id,
+         .fencing_token = launch.fencing_token,
+         .node_id = launch.node_id,
+         .attempt_id = launch.attempt_id,
+         .worker_sequence = 1U},
+        trainvm::LifecycleCommandStatus::applied, std::nullopt, "",
+        nlohmann::json::array(), test_time(1'200));
+    controller.recover();
+    const auto cancelling = journal.projection(run_id);
+    check(cancelling && cancelling->desired_state == "cancelled" &&
+              cancelling->observed_state == "cancelling" &&
+              cancelling->run_revision == before->run_revision + 2U &&
+              controller.state().status == trainvm::ExecutionStatus::running,
+          "cancel acknowledgement records a nonterminal cleanup barrier");
+
+    (void)controller.complete_cancellation(
+        submitted.command.command_id, test_time(1'250));
+    const auto cancelled = journal.projection(run_id);
+    check(cancelled && cancelled->desired_state == "cancelled" &&
+              cancelled->observed_state == "cancelled" &&
+              cancelled->current_node_id.empty() &&
+              cancelled->current_attempt_id.empty() &&
+              cancelled->run_revision == before->run_revision + 3U &&
+              controller.state().status == trainvm::ExecutionStatus::cancelled,
+          "cancellation becomes terminal only at the explicit completion barrier");
+    trainvm::Controller replay(*compiled.plan, journal, run_id);
+    replay.recover();
+    check(replay.state() == controller.state(),
+          "graceful cancellation replays deterministically after restart");
+  }
+  std::filesystem::remove_all(directory);
+}
+
 void test_typed_managed_resource_release() {
   const auto compiled = trainvm::compile_document(load_fixture());
   check(compiled.valid(), "typed resource release fixture compiles");
@@ -10719,7 +10812,7 @@ void test_service_orders_physical_before_logical_release() {
           }));
   trainvm::SQLiteHostLedger ledger(ledger_authority, inventory);
   auto host = std::make_shared<SagaHostClient>(ledger);
-  auto process = std::make_shared<ServiceNeverProcessClient>();
+  auto process = std::make_shared<SagaProcessClient>(ledger);
   const trainvm::HostIdentity host_identity{.host_id = inventory.host_id,
                                              .boot_id = inventory.boot_id};
   const auto profiles = fixture_adapter_profiles();
@@ -10729,7 +10822,7 @@ void test_service_orders_physical_before_logical_release() {
       [] { return test_time(10); },
       trainvm::HostGrantEnforcement::required,
       trainvm::TrainingComponentRegistry({}), host, process,
-      "unix:/tmp/trainvm-terminal-release.sock");
+      "unix:/tmp/trainvm-process-saga.sock");
   const std::string run_id = "service-terminal-release-run";
   trainvm::Controller controller(*compiled.plan, service.journal_, run_id);
   controller.create_queued(
@@ -10817,6 +10910,109 @@ void test_service_orders_physical_before_logical_release() {
             projection && projection->observed_state == "completed" &&
             host->release_calls == 1U,
         "logical release occurs only after physical release and does not replay host mutation");
+
+  const std::string cancel_run_id = "service-cancel-release-run";
+  trainvm::Controller cancel_controller(
+      *compiled.plan, service.journal_, cancel_run_id);
+  cancel_controller.create_queued(
+      adapter_locked_submission(*compiled.plan, service.adapter_registry_));
+  const auto cancel_acquired = service.reconcile_once(cancel_run_id);
+  const auto cancel_lease = service.journal_.active_lease(
+      compiled.plan->experiment.spec.workspace.concurrency_key,
+      test_time(10));
+  check(cancel_acquired.disposition ==
+                trainvm::ReconcileDisposition::lease_acquired &&
+            cancel_lease && cancel_lease->owner_run_id == cancel_run_id,
+        "graceful cancellation fixture acquires a fresh fenced lease");
+  if (!cancel_lease) {
+    std::filesystem::remove_all(directory);
+    return;
+  }
+  const auto cancel_request = trainvm::build_resource_bundle_request({
+      .journal_id = service.journal_.journal_id(),
+      .plan_hash = compiled.plan->plan_hash,
+      .run_id = cancel_run_id,
+      .resources = compiled.plan->experiment.spec.resources,
+      .lease = *cancel_lease,
+  });
+  const auto cancel_granted = service.host_grant_saga_->reconcile_request(
+      cancel_request, test_time(10));
+  trainvm::Controller cancel_worker(
+      *compiled.plan, service.journal_, cancel_run_id);
+  cancel_worker.recover();
+  const auto cancel_launch = cancel_worker.prepare_worker_launch(
+      {.code_fingerprint = "sha256:" + std::string(64U, 'c'),
+       .required_capabilities = {"worker.metrics", "worker.controls"}},
+      test_time(10));
+  const auto cancel_binding = bind_test_worker_launch(
+      cancel_worker, cancel_launch, 10, host_identity);
+  (void)service.host_process_saga_->reconcile(
+      trainvm::ResolvedLaunch(
+          cancel_binding, -1,
+          cancel_binding.identity.code ? std::optional<int>{-1}
+                                       : std::nullopt,
+          -1),
+      *cancel_granted.grant,
+      trainvm::compile_linux_process_policy(std::nullopt),
+      "unix:/tmp/trainvm-process-saga.sock", test_time(10));
+  (void)cancel_worker.accept_worker_hello(
+      {.run_id = cancel_launch.run_id,
+       .node_id = cancel_launch.node_id,
+       .attempt_id = cancel_launch.attempt_id,
+       .launch_nonce = cancel_launch.launch_nonce,
+       .adapter = cancel_launch.adapter,
+       .adapter_version = cancel_launch.adapter_version,
+       .code_fingerprint = cancel_launch.code_fingerprint,
+       .capabilities = cancel_launch.required_capabilities,
+       .last_acked_controller_sequence = 0U,
+       .concurrency_key = cancel_launch.concurrency_key,
+       .lease_id = cancel_launch.lease_id,
+       .fencing_token = cancel_launch.fencing_token},
+      test_time(10));
+  const auto cancel_projection = service.journal_.projection(cancel_run_id);
+  const auto cancel_command = cancel_worker.request_cancel(
+      "cancel-release-once", cancel_projection->run_revision,
+      "operator requested stop", 0, "operator",
+      "verify physical cleanup ordering");
+  (void)cancel_worker.acknowledge_lifecycle(
+      cancel_command.command.command_id,
+      {.concurrency_key = cancel_launch.concurrency_key,
+       .lease_id = cancel_launch.lease_id,
+       .fencing_token = cancel_launch.fencing_token,
+       .node_id = cancel_launch.node_id,
+       .attempt_id = cancel_launch.attempt_id,
+       .worker_sequence = 1U},
+      trainvm::LifecycleCommandStatus::applied, std::nullopt, "",
+      nlohmann::json::array(), test_time(10));
+  const std::size_t releases_before_cancel = host->release_calls;
+  const auto cancel_exit = service.reconcile_once(cancel_run_id);
+  const auto after_exit = service.journal_.host_grant_saga(
+      cancel_request.request_id);
+  check(cancel_exit.disposition ==
+                trainvm::ReconcileDisposition::host_process_exited &&
+            after_exit && !after_exit->release_receipt &&
+            service.journal_.active_lease(cancel_lease->concurrency_key,
+                                           test_time(10)),
+        "cancel waits for durable terminal process evidence before release");
+  const auto cancel_release = service.reconcile_once(cancel_run_id);
+  check(cancel_release.disposition ==
+                trainvm::ReconcileDisposition::host_grant_released &&
+            host->release_calls == releases_before_cancel + 1U &&
+            service.journal_.active_lease(cancel_lease->concurrency_key,
+                                           test_time(10)),
+        "cancel releases the physical grant before its logical lease");
+  const auto cancel_terminal = service.reconcile_once(cancel_run_id);
+  const auto cancelled_projection =
+      service.journal_.projection(cancel_run_id);
+  check(cancel_terminal.disposition ==
+                trainvm::ReconcileDisposition::builtin_completed &&
+            !service.journal_.active_lease(cancel_lease->concurrency_key,
+                                            test_time(10)) &&
+            cancelled_projection &&
+            cancelled_projection->desired_state == "cancelled" &&
+            cancelled_projection->observed_state == "cancelled" &&
+            process->exit_calls == 1U,
+        "cancel becomes terminal only after process, grant, and lease cleanup");
   std::filesystem::remove_all(directory);
 }
 
@@ -10842,6 +11038,7 @@ int main() {
     test_worker_launch_and_readiness_boundary();
     test_worker_control_service_boundary();
     test_worker_control_grpc_stream();
+    test_graceful_cancel_lifecycle();
     test_typed_managed_resource_release();
     test_concurrent_worker_launch_and_readiness_replay();
     test_concurrent_fenced_result_content_conflict();
