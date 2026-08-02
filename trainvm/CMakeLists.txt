@@ -744,6 +744,12 @@ add_test(NAME input_content_authority_python_parity
     $<TARGET_FILE:trainvm>
     "${CMAKE_CURRENT_SOURCE_DIR}/../src"
 )
+add_test(NAME input_content_lock_cli
+  COMMAND ${Python3_EXECUTABLE}
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_input_content_lock.py"
+    $<TARGET_FILE:trainvm>
+    "${CMAKE_CURRENT_SOURCE_DIR}/.."
+)
 
 get_target_property(TRAINVM_SERVICE_LINKS trainvm_service LINK_LIBRARIES)
 if("trainvm_compatibility_catalog" IN_LIST TRAINVM_SERVICE_LINKS)

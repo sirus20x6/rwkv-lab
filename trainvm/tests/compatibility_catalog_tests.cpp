@@ -315,7 +315,7 @@ int main() {
         "catalog contains every family and observed invocation kind");
   check(required_additions.empty(),
         "catalog retains the expanded audited workflow inventory");
-  check(reviewed_sources.size() == 151U,
+  check(reviewed_sources.size() == 155U,
         "catalog binds the complete reviewed source inventory");
   check(sealed_compatible.empty() && saw_restart_only_review,
         "sealed compatible operations and restart-only review are classified narrowly");
