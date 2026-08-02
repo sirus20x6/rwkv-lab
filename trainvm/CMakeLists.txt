@@ -151,6 +151,15 @@ target_link_libraries(trainvm_experiment_analysis
   PRIVATE SQLite3::SQLite3 nlohmann_json::nlohmann_json
 )
 
+add_library(trainvm_training_schedules
+  src/training_schedules.cpp
+)
+target_include_directories(trainvm_training_schedules PUBLIC include)
+target_compile_options(trainvm_training_schedules PUBLIC -freflection)
+target_compile_options(trainvm_training_schedules PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+
 add_library(trainvm_service src/service.cpp)
 target_include_directories(trainvm_service PUBLIC include)
 target_compile_options(trainvm_service PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror)
@@ -168,6 +177,7 @@ target_compile_options(trainvm PRIVATE
 )
 target_link_libraries(trainvm PRIVATE
   trainvm_service trainvm_compatibility_catalog trainvm_experiment_analysis
+  trainvm_training_schedules
 )
 
 add_executable(trainvm-hostd src/hostd_main.cpp)
@@ -338,6 +348,23 @@ target_link_libraries(experiment_analysis_tests PRIVATE
   trainvm_experiment_analysis SQLite3::SQLite3
 )
 add_test(NAME experiment_analysis_tests COMMAND experiment_analysis_tests)
+add_executable(training_schedule_tests tests/training_schedule_tests.cpp)
+target_compile_options(training_schedule_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(training_schedule_tests PRIVATE
+  trainvm_training_schedules
+)
+add_test(NAME training_schedule_tests COMMAND training_schedule_tests)
+if(TRAINVM_PYTHON_EXECUTABLE)
+  add_test(NAME training_schedule_python_parity
+    COMMAND ${CMAKE_COMMAND} -E env
+      PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../src
+      ${TRAINVM_PYTHON_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_training_schedule_parity.py
+      $<TARGET_FILE:trainvm>
+  )
+endif()
 set(TRAINVM_LEGACY_SOURCE_ROOT "" CACHE PATH
   "Optional original moe-mla root for live source-disposition digest checks"
 )
