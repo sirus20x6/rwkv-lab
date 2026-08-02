@@ -468,6 +468,85 @@ std::string rwkv_scratch_profiles_digest(
   return hex_digest(rwkv_scratch_profiles_json(material).dump());
 }
 
+std::vector<std::pair<RwkvScratchTopology, RwkvScratchTopology>>
+rwkv_scratch_incompatible_topologies() {
+  // Future-Seed chains layer L's scan from layer L-1's final state, which has
+  // no meaning when a block is iterated with shared weights. The trainer
+  // documents this; the lowering is where it is refused.
+  return {{RwkvScratchTopology::seed_chain, RwkvScratchTopology::loop}};
+}
+
+nlohmann::json rwkv_scratch_training_block(
+    const std::vector<RwkvScratchSelection>& selections) {
+  std::set<int> chosen;
+  for (const RwkvScratchSelection& selection : selections) {
+    if (!chosen.insert(static_cast<int>(selection.topology)).second)
+      throw RwkvScratchProfileError(
+          std::string("topology ") +
+          std::string(rwkv_scratch_topology_name(selection.topology)) +
+          " is selected more than once");
+    validate_rwkv_scratch_selection(selection.topology, selection.assignments);
+  }
+  for (const auto& [left, right] : rwkv_scratch_incompatible_topologies()) {
+    if (chosen.contains(static_cast<int>(left)) &&
+        chosen.contains(static_cast<int>(right)))
+      throw RwkvScratchProfileError(
+          std::string("topologies ") +
+          std::string(rwkv_scratch_topology_name(left)) + " and " +
+          std::string(rwkv_scratch_topology_name(right)) +
+          " cannot be combined");
+  }
+
+  // Deterministic order regardless of how the caller listed them, so the same
+  // selection always lowers to the same bytes.
+  std::vector<RwkvScratchSelection> ordered = selections;
+  std::ranges::sort(ordered, {}, [](const RwkvScratchSelection& value) {
+    return static_cast<int>(value.topology);
+  });
+
+  nlohmann::json topologies = nlohmann::json::array();
+  std::set<std::string> metrics;
+  std::set<std::string> checkpoint_keys;
+  for (const RwkvScratchSelection& selection : ordered) {
+    const RwkvScratchTopologyProfile& profile =
+        rwkv_scratch_profile(selection.topology);
+    nlohmann::json parameters = nlohmann::json::object();
+    for (const RwkvScratchParameter& parameter : profile.parameters) {
+      const auto found = selection.assignments.find(parameter.name);
+      if (found == selection.assignments.end()) continue;
+      // A value equal to the declared default carries no information; omitting
+      // it keeps two otherwise-identical runs byte-identical.
+      if (found->second.dump() == parameter.default_value) continue;
+      parameters[parameter.name] = {
+          {"trainer_flag", parameter.trainer_flag},
+          {"value", found->second},
+      };
+    }
+    topologies.push_back({
+        {"topology", std::string(rwkv_scratch_topology_name(profile.topology))},
+        {"version", profile.version},
+        {"contract", profile.contract},
+        {"parameters", std::move(parameters)},
+    });
+    for (const std::string& metric : profile.state.metrics)
+      metrics.insert(metric);
+    for (const std::string& key : profile.state.checkpoint_keys)
+      checkpoint_keys.insert(key);
+  }
+
+  return {
+      {"api_version", std::string(kRwkvScratchProfilesApiVersion)},
+      {"topologies", std::move(topologies)},
+      // Carried so a resumed run cannot silently drop topology state, and so
+      // the dashboard knows which series to expect without trainer knowledge.
+      {"metrics", nlohmann::json(std::vector<std::string>(metrics.begin(),
+                                                          metrics.end()))},
+      {"checkpoint_keys",
+       nlohmann::json(std::vector<std::string>(checkpoint_keys.begin(),
+                                               checkpoint_keys.end()))},
+  };
+}
+
 std::vector<std::string> rwkv_scratch_declared_trainer_flags() {
   std::set<std::string> flags;
   for (const RwkvScratchTopologyProfile& profile : sealed_document().profiles) {
