@@ -127,6 +127,28 @@ void validate_rwkv_scratch_selection(
 [[nodiscard]] std::string rwkv_scratch_profiles_digest(
     const RwkvScratchProfileDocument& document);
 
+// A lowered, canonical training block for a selected set of topologies.
+// Topologies compose: the trainer's switches are independent, so a run may
+// attach e.g. engram and loop together. Pairs the trainer cannot combine are
+// declared below and refused here rather than discovered on a GPU.
+struct RwkvScratchSelection final {
+  RwkvScratchTopology topology{};
+  std::map<std::string, nlohmann::json> assignments;
+
+  bool operator==(const RwkvScratchSelection&) const = default;
+};
+
+// Declared incompatible pairs, refused by the lowering.
+[[nodiscard]] std::vector<std::pair<RwkvScratchTopology, RwkvScratchTopology>>
+rwkv_scratch_incompatible_topologies();
+
+// Validates every selection, refuses duplicates and declared-incompatible
+// pairs, and lowers to a canonical block. A parameter left at its declared
+// default is omitted, so the block stays minimal and two runs that differ only
+// in an explicit default are byte-identical.
+[[nodiscard]] nlohmann::json rwkv_scratch_training_block(
+    const std::vector<RwkvScratchSelection>& selections);
+
 // Every trainer flag the registry claims, deduplicated and sorted. The parity
 // test asserts this is a subset of rwkv_pretrain's actual argument surface.
 [[nodiscard]] std::vector<std::string> rwkv_scratch_declared_trainer_flags();

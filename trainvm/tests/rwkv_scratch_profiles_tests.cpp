@@ -181,6 +181,129 @@ void every_declared_flag_exists_in_the_trainer() {
           "the registry declares a meaningful share of the trainer surface");
 }
 
+// Lowering: a validated selection becomes a canonical training block that a
+// worker and the dashboard can both read without trainer knowledge.
+void selections_lower_to_a_canonical_training_block() {
+  const auto block = rwkv_scratch_training_block(
+      {{.topology = RwkvScratchTopology::loop,
+        .assignments = {{"count", 4}, {"gate", "factored"}}},
+       {.topology = RwkvScratchTopology::engram,
+        .assignments = {{"enabled", 1}, {"rows", 8192}}}});
+
+  require(block.at("api_version") == kRwkvScratchProfilesApiVersion,
+          "the training block carries its api version");
+  require(block.at("topologies").size() == 2U,
+          "the training block carries both selected topologies");
+  // Declaration order in the enum, not caller order.
+  require(block.at("topologies")[0].at("topology") == "loop" &&
+              block.at("topologies")[1].at("topology") == "engram",
+          "the training block orders topologies deterministically");
+  require(block.at("topologies")[0].at("parameters").at("count").at(
+              "trainer_flag") == "loop-count",
+          "each parameter carries the exact trainer flag it lowers to");
+  require(block.at("topologies")[0].at("parameters").at("count").at("value") ==
+              4,
+          "each parameter carries its selected value");
+
+  // Merged, deduplicated, and sorted across the selection.
+  const auto metrics = block.at("metrics");
+  require(metrics.end() != std::find(metrics.begin(), metrics.end(), nlohmann::json("loop_gate_mean")) &&
+              metrics.end() != std::find(metrics.begin(), metrics.end(), nlohmann::json("engram_hit_rate")),
+          "the block merges the declared metrics of every selected topology");
+  const auto keys = block.at("checkpoint_keys");
+  require(keys.end() != std::find(keys.begin(), keys.end(), nlohmann::json("loop_gate")) &&
+              keys.end() != std::find(keys.begin(), keys.end(), nlohmann::json("engram_table")),
+          "the block merges the declared checkpoint keys");
+
+  // Caller order must not change the bytes.
+  const auto reordered = rwkv_scratch_training_block(
+      {{.topology = RwkvScratchTopology::engram,
+        .assignments = {{"enabled", 1}, {"rows", 8192}}},
+       {.topology = RwkvScratchTopology::loop,
+        .assignments = {{"count", 4}, {"gate", "factored"}}}});
+  require(reordered == block,
+          "the lowered block is independent of caller ordering");
+}
+
+// A value equal to the declared default carries no information. Omitting it
+// keeps two otherwise-identical runs byte-identical.
+void declared_defaults_are_omitted_from_the_block() {
+  const auto explicit_default = rwkv_scratch_training_block(
+      {{.topology = RwkvScratchTopology::loop, .assignments = {{"count", 1}}}});
+  const auto omitted = rwkv_scratch_training_block(
+      {{.topology = RwkvScratchTopology::loop, .assignments = {}}});
+  require(explicit_default == omitted,
+          "spelling out a declared default must not change the lowered block");
+  require(explicit_default.at("topologies")[0].at("parameters").empty(),
+          "a default-valued parameter is omitted entirely");
+
+  const auto non_default = rwkv_scratch_training_block(
+      {{.topology = RwkvScratchTopology::loop, .assignments = {{"count", 2}}}});
+  require(non_default != omitted,
+          "a non-default value must appear in the lowered block");
+}
+
+// The lowering is the last gate before a worker sees the selection.
+void the_lowering_refuses_invalid_and_incompatible_selections() {
+  require_throws(
+      [] {
+        (void)rwkv_scratch_training_block(
+            {{.topology = RwkvScratchTopology::loop,
+              .assignments = {{"engram_rows", 4096}}}});
+      },
+      "the lowering refuses a switch the topology does not declare");
+  require_throws(
+      [] {
+        (void)rwkv_scratch_training_block(
+            {{.topology = RwkvScratchTopology::loop,
+              .assignments = {{"count", 99}}}});
+      },
+      "the lowering refuses a value outside its declared bound");
+  require_throws(
+      [] {
+        (void)rwkv_scratch_training_block(
+            {{.topology = RwkvScratchTopology::loop, .assignments = {}},
+             {.topology = RwkvScratchTopology::loop, .assignments = {}}});
+      },
+      "the lowering refuses a topology selected twice");
+
+  // Declared incompatibility, refused here rather than on a GPU.
+  require(!rwkv_scratch_incompatible_topologies().empty(),
+          "at least one incompatible pair is declared");
+  for (const auto& [left, right] : rwkv_scratch_incompatible_topologies()) {
+    require_throws(
+        [&] {
+          (void)rwkv_scratch_training_block(
+              {{.topology = left, .assignments = {}},
+               {.topology = right, .assignments = {}}});
+        },
+        "a declared-incompatible topology pair must be refused");
+    // Either alone must still be accepted, or the pair rule is too broad.
+    (void)rwkv_scratch_training_block({{.topology = left, .assignments = {}}});
+    (void)rwkv_scratch_training_block({{.topology = right, .assignments = {}}});
+  }
+}
+
+// Every topology must lower on its own, so none is unreachable in practice.
+void every_topology_lowers_on_its_own() {
+  for (const auto& profile : rwkv_scratch_profiles().profiles) {
+    const auto block =
+        rwkv_scratch_training_block({{.topology = profile.topology,
+                                      .assignments = {}}});
+    require(block.at("topologies").size() == 1U,
+            std::string(rwkv_scratch_topology_name(profile.topology)) +
+                " does not lower on its own");
+    require(block.at("topologies")[0].at("contract") == profile.contract,
+            "the lowered block names the topology's declared contract");
+    for (const auto& key : profile.state.checkpoint_keys) {
+      const auto keys = block.at("checkpoint_keys");
+      require(keys.end() != std::find(keys.begin(), keys.end(), nlohmann::json(key)),
+              std::string(rwkv_scratch_topology_name(profile.topology)) +
+                  " drops a declared checkpoint key when lowered");
+    }
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -190,6 +313,10 @@ int main() {
     undeclared_and_out_of_bound_switches_are_refused();
     the_profile_document_round_trips_and_binds_its_digest();
     every_declared_flag_exists_in_the_trainer();
+    selections_lower_to_a_canonical_training_block();
+    declared_defaults_are_omitted_from_the_block();
+    the_lowering_refuses_invalid_and_incompatible_selections();
+    every_topology_lowers_on_its_own();
     std::cout << "rwkv scratch profile tests passed ("
               << rwkv_scratch_profiles().profiles.size() << " topologies, "
               << rwkv_scratch_declared_trainer_flags().size()
