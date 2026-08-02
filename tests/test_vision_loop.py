@@ -472,8 +472,13 @@ def test_stack_legacy_fla_caches_rejects_nonbatch_shape_mismatch():
 def test_stack_installed_legacy_fla_cache_preserves_layer_states():
     # The installed LegacyFLACache accepts only list (not tuple) in
     # from_legacy_cache. Exercise the real dependency so that silent empty
-    # cache regression cannot pass the protocol-only fake.
-    from fla.models.utils import Cache as InstalledFLACache
+    # cache regression cannot pass the protocol-only fake. CPU-only
+    # environments deliberately omit fla (the RWKV-7 kernel falls back to the
+    # pure-Python reference), so skip rather than fail there.
+    InstalledFLACache = pytest.importorskip(
+        "fla.models.utils",
+        reason="requires the optional fla dependency",
+    ).Cache
 
     caches = []
     for value, length in ((1.0, 3), (2.0, 7)):
