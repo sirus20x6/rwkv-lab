@@ -201,6 +201,10 @@ def main() -> int:
         "peak_memory_bytes": peak_memory,
         "peak_memory_kind": "cuda_max_memory_allocated",
         "input_wait_seconds": input_wait,
+        # Synthesized on device; see portable_lm_step.py. The interval above is
+        # tensor construction, not dataloader stall, and no host-to-device copy
+        # is being measured because the data never leaves the device.
+        "input_pipeline": "synthetic_in_process",
         "final_loss": loss_value,
         "result_fingerprint": {
             "final_loss": loss_value,

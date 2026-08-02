@@ -176,6 +176,13 @@ def main() -> int:
         "peak_memory_bytes": peak_memory,
         "peak_memory_kind": "process_max_rss",
         "input_wait_seconds": input_wait,
+        # This workload synthesizes tensors in process. There is no decode,
+        # tokenization, bucketing, prefetch, worker pool, or host-to-device
+        # copy, so the interval above is the cost of torch.randint and is NOT
+        # dataloader stall. Declaring the source stops a reader — or a later
+        # optimization card — from treating it as a pipeline measurement and
+        # "improving" a number that describes nothing.
+        "input_pipeline": "synthetic_in_process",
         "final_loss": loss_value,
         "result_fingerprint": {
             "final_loss": loss_value,
