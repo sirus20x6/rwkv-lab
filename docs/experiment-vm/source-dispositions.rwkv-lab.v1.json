@@ -10,7 +10,7 @@
       ".py"
     ]
   },
-  "source_tree_digest": "sha256:e97e87a67dd17e1dc3bd60f2ea77ab3ad7965aef50f8c43ae5e2c235e3063d3c",
+  "source_tree_digest": "sha256:52c6cbe4b8a4aaa6b51d1e99af0e44bc26e4ae9af6a04459d7abd65aa7df3e6f",
   "entries": [
     {
       "source_path": "src/rwkv_lab/__init__.py",
@@ -666,7 +666,7 @@
       ],
       "resume_relevance": "consumer_owned",
       "compatibility_workflow_id": null,
-      "source_sha256": "sha256:264793ab4503c04a6686646591a53ab9fcb2b2c7ce010d775076aeb6b58ca73e",
+      "source_sha256": "sha256:49b6bbd6db6b8f39e2b5bea1e03e6e8ccca5262c7e9222e797f8deb25ab97a39",
       "family": "transformer",
       "coverage": "transitive",
       "consumers": [
@@ -1175,7 +1175,7 @@
       ],
       "resume_relevance": "consumer_owned",
       "compatibility_workflow_id": null,
-      "source_sha256": "sha256:ef12705dd9c92fdb57e3b659dbb0cd1054236d40e27b149d9b4239b308e61176",
+      "source_sha256": "sha256:6e7d6649591a6c36bfc723545e5b497956e6f5973c801887f0a331aae58cd5cf",
       "family": "transformer",
       "coverage": "transitive",
       "consumers": [
@@ -2771,7 +2771,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "transformer.mla-train",
-      "source_sha256": "sha256:d12119430e19723b55d22ad91d85e646f9024bcf891a9a9706c6ac754581f02f",
+      "source_sha256": "sha256:69b4ffc21336c048dd309cd6f169771420e4ef7c85eac135167fe585542488fb",
       "family": "transformer",
       "coverage": "direct",
       "consumers": [

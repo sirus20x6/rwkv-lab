@@ -16,7 +16,10 @@ host launch profile.
 The original package exposes only six console commands; many legitimate workflows are module- or
 script-only. All six console surfaces, their effectfully distinct subcommands, the reviewed
 supported module/script entrypoints and essential graph libraries, concrete trainer-specific vision
-profiles, and legacy dashboard launch/control paths are now in the evidence catalog. The inclusion
+profiles, and legacy dashboard launch/control paths are now in the evidence catalog. The dashboard
+side of that surface is closed rather than sampled: every `POST` route the legacy router registers
+has exactly one record, and the router registration bytes are bound so a new or retired mutation
+path cannot pass review silently. The inclusion
 rule is intentionally narrower than “has `__main__`”: a synthetic smoke block is not executable
 workflow evidence, while an essential component used by a supported graph is recorded only as
 `library_only`. Executability is still an explicit authority-registry property with a sealed
@@ -44,15 +47,15 @@ authority for the legacy entrypoints:
 
 | Original operation family | Current grade | Reason |
 |---|---|---|
-| `rwkv_pretrain` | `terminal_checkpoint` | the baseline non-distributed AdamW/PowerCool path has a closed TrainVM v1 config, workspace path authority, terminal immutable publication, live metrics/heartbeats, and bounded profiling; research levers remain legacy-only, and there is still no periodic/signal checkpoint or recursive data identity |
+| `rwkv_pretrain` | `terminal_checkpoint` | the baseline non-distributed AdamW/PowerCool path has a closed TrainVM v1 config, recursive static-input content authority, terminal immutable publication, live metrics/heartbeats, and bounded profiling; research levers remain legacy-only, and there is still no periodic/signal checkpoint |
 | `rwkv_finetune`, consolidation and current RWKV post-training arms | `restart_only` | interruption restarts a bounded operation from immutable inputs |
 | `gpu_engram_prefill` | `compatible` | an Engram checkpoint can warm-start weights, but optimizer, RNG, corpus cursor, and step restart |
 | `attn_L3_poc` | `terminal_checkpoint` | the standalone alignment/distillation trainer emits only a terminal `core_final.pt` |
 | `convert_train` | `compatible` | signal checkpoints and optimizer warm-start exist, but the loop, RNG, and data cursor restart |
 | canonical `train_mla` / `train_mla_engram` | `compatible` | checkpoints omit RNG and data cursor state |
-| `qwen_ao3_cpt` | `compatible` | atomic cursor/config/RNG checkpoint and signal safe point exist, but the packed-token bytes and frozen base-model bytes are not content-bound |
-| MageFlow full-backbone pretrain and routed expert trainer | `compatible` | useful state restoration exists, but the complete input/source identity closure is not exact |
-| MageFlow terminal/TREAD trainer | `compatible` | strong contract/cursor/RNG/expert-bank state exists, but manifest-referenced image/caption bytes and source checkpoints are not fully content-bound |
+| `qwen_ao3_cpt` | `compatible` | atomic cursor/config/RNG checkpoint and signal safe point exist, and packed-token/base-model trees are now content-bound; exact trajectory equivalence remains unproven |
+| MageFlow full-backbone pretrain and routed expert trainer | `compatible` | static manifests, payload trees, source checkpoints, and caches are recursively content-bound; complete exact-resume trajectory evidence remains outstanding |
+| MageFlow terminal/TREAD trainer | `compatible` | static image/caption roots, source checkpoints, schedules, caches, and expert banks are recursively bound in addition to strong cursor/RNG state; exact trajectory evidence remains outstanding |
 | canonical `vision_train` and vision teacher compressor | `exact` candidates | atomic sampler/RNG and manifest-bound state; require the same golden gate |
 | vision native head and raw-pixel student | `compatible` | missing cursor or external-input identity prevents exactness |
 | direct RLVR and external LTX wrapper | `compatible` | resume state or upstream resume exists, but verifier/config/revision/input closure is incomplete |
@@ -67,11 +70,11 @@ stateful process operation is graded `compatible`, `terminal_checkpoint`,
 | Existing workflow | Current mechanism | Declarative representation | Required adapter capability |
 |---|---|---|---|
 | Synthetic and architecture/objective A/B campaigns | distinct `rwkv_lab.experiment` and `rwkv_lab.config` campaigns, plus checked-in loop, factored-loop, latent, fixed-step-latent, and G1G sweeps | parameterized arm graph with successive-halving rungs, paired tapes, confirm nodes, and statistical decision artifact | deterministic arm, rung checkpoint, paired evaluation, campaign aggregation |
-| Scratch recurrent LM pretraining | `rwkv_lab.rwkv_pretrain`, `config run-lm`, loop/latent sweep supervisors | the closed baseline TrainVM adapter binds its scalar config and top-level corpus/resume/output paths, publishes model/optimizer/RNG/component state only at terminal completion, and exposes live scalar metrics and GPU trace hooks; it remains terminal-checkpoint grade because recursive corpus bytes, mid-run control state, and the broader research switches are not closed | terminal checkpoint grade today; future exact model/optimizer/RNG/data/control resume, distributed checkpoint, token-weighted metrics, and versioned research-topology adapters |
+| Scratch recurrent LM pretraining | `rwkv_lab.rwkv_pretrain`, `config run-lm`, loop/latent sweep supervisors | the closed baseline TrainVM adapter binds its scalar config and recursively verified corpus bytes, publishes model/optimizer/RNG/component state only at terminal completion, and exposes live scalar metrics and GPU trace hooks; it remains terminal-checkpoint grade because mid-run control state and the broader research switches are not closed | terminal checkpoint grade today; future exact model/optimizer/RNG/data/control resume, distributed checkpoint, token-weighted metrics, and versioned research-topology adapters |
 | Distributed recurrent LM handoff | `rwkv_pretrain` FSDP2/DCP supports topology changes but deliberately gives new ranks fresh RNG | explicit reshard/topology handoff node, never labeled exact resume when world size changes | source DCP manifest, old/new topology, reshard receipt, new-rank RNG policy |
 | Pretrained recurrent continuation | G1G continuation through `rwkv_pretrain`/`config run-lm` and native-load qualification | immutable parent checkpoint feeds a resumable continuation and native-parity graph | parent/checkpoint identity, exact state resume when configured, PPL/parity report |
 | Recurrent optimizer A/B harness | `rwkv_finetune` loads and trains a model but only emits `train.jsonl` and a synthetic terminal checkpoint event; its default budget is wall-clock based | explicitly non-resumable seeded arm; interruption restarts it. Deterministic comparison additionally requires a fixed step budget and deterministic backend | input model identity, optimizer config, budget kind/value, terminal metric log; no checkpoint claim |
-| Transformer MLA-family finetuning | canonical `train_mla`, `train_mla_engram`, staged watchdog; the divergent `dashboard/instrumented/train_mla.py` fork is stale and rejected | weight/optimizer checkpoint and staged handoff; current periodic checkpoints omit RNG/data cursor. MLA, MTP/aux-only, MuToR/FSP/parallel heads, RWKV8 replacement, Engram, and full-backbone unfreeze require distinct topology/freeze/optimizer-group identities | module and optimizer state, complete topology/freeze/group descriptor, baseline/periodic/final PPL, honest partial-resume grade |
+| Transformer MLA-family finetuning | canonical `train_mla` now backs eight exact TrainVM v1 profiles for MLA, MTP-only, MuToR auxiliary-only, FSP auxiliary-only, parallel-head auxiliary-only, RWKV8 replacement, Engram, and full-backbone unfreeze; `train_mla_engram` and the divergent `dashboard/instrumented/train_mla.py` remain compatibility evidence only and the legacy dashboard cannot launch either MLA script | each authority key closes its topology/freeze policy, executes the resolved optimizer/objective/accumulation/clipping/decay components, emits live train/eval metrics and heartbeats, services checkpoint/pause only at optimizer boundaries, and publishes a compatible-grade checkpoint because RNG and the exact random-window cursor remain absent | implemented compatible-grade model/optimizer/topology/group/schedule/control/component state; exact RNG and data-cursor resume remains a future profile version |
 | Lexical-memory allocation preprocessing | `engram_lmb_build freq|alloc` builds frequency and allocation artifacts but does not train | replay-safe stateless preprocessing nodes publish content-bound allocation manifests | corpus/tool identity, frequency artifact, allocation manifest |
 | Standalone lexical-memory pretraining | `gpu_engram_prefill` trains over sequential corpora and accepts Engram-weight warm starts | ordered compatibility-grade corpus-stage nodes; a warm-started operation resets optimizer, RNG, corpus cursor, and step until complete state is implemented | patch publication, allocation manifest, parent Engram weights, N-gram CE; no exact-resume claim |
 | MoE-transformer continued pretraining | AO3 prepare/tokenize/pack plus `qwen_ao3_cpt` hybrid QLoRA | immutable data-preparation artifacts feed auto-resuming adapter train/eval nodes | corpus/config fingerprints, packed cursor, atomic adapter checkpoint, PPL |
@@ -187,7 +190,7 @@ training acceptance.
 The separate `rwkv_lab_worker_artifact` CTest now closes the non-GPU project-code deployment
 boundary: it builds the real worker zipapp twice, verifies exact bytes and every embedded source
 digest, loads it under isolated Python with an empty environment, completes a real sealed-bootstrap
-gRPC already-completed replay, lowers all four real adapter profiles into the v3 host registry, and
+gRPC already-completed replay, lowers all twelve real adapter profiles into the v3 host registry, and
 materializes the same deployment twice without drift. It
 does not replace the outstanding privileged hostd or real trainer qualification scenarios below.
 

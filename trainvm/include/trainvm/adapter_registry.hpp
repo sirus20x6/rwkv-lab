@@ -33,6 +33,40 @@ enum class ResumeGrade {
   exact,
 };
 
+// A deliberately small, closed value vocabulary for operation ports. It is
+// descriptive authoring authority, not an invitation to embed arbitrary JSON
+// Schema in the adapter registry. Artifact ports may further narrow the
+// logical artifact kind and schema below.
+enum class OperationPortType {
+  string,
+  integer,
+  number,
+  boolean,
+  object,
+  artifact,
+};
+
+struct OperationPortDescriptor {
+  OperationPortType type{};
+  bool required{};
+  std::optional<ArtifactType> artifact_type;
+  std::optional<std::string> artifact_schema;
+  std::optional<std::string> description;
+
+  bool operator==(const OperationPortDescriptor&) const = default;
+};
+
+// Every registered operation must deliberately publish this declaration,
+// even when one of the maps is empty. Keeping it optional on AdapterProfile
+// lets registry validation distinguish an intentionally empty declaration
+// from metadata that was omitted by a producer.
+struct OperationAuthoringDeclaration {
+  std::map<std::string, OperationPortDescriptor> inputs;
+  std::map<std::string, OperationPortDescriptor> outputs;
+
+  bool operator==(const OperationAuthoringDeclaration&) const = default;
+};
+
 // A closed, authority-owned declaration of the lifecycle protocol implemented
 // by one exact adapter operation. These booleans are intentionally bounded:
 // experiment documents can select capabilities, but cannot add arbitrary
@@ -59,6 +93,12 @@ struct OperationLifecycleCapabilities {
 struct TrainingCompositionContract {
   std::string model_family;
   std::map<std::string, TrainingComponentCategory> slots;
+  // Optional per-slot key allowlists refine a category into the exact
+  // implementations whose tensor/gradient semantics the adapter supports.
+  // The component registry binds each key to an immutable implementation and
+  // descriptor digest; an omitted slot retains category-polymorphic behavior.
+  std::optional<std::map<std::string, std::vector<TrainingComponentKey>>>
+      allowed_components{};
 
   bool operator==(const TrainingCompositionContract&) const = default;
 };
@@ -71,6 +111,12 @@ struct AdapterProfile {
   std::vector<std::string> required_capabilities;
   OperationLifecycleCapabilities lifecycle{};
   std::optional<TrainingCompositionContract> training_composition{};
+  std::optional<OperationAuthoringDeclaration> authoring{};
+};
+
+struct OperationDescriptorDocument {
+  std::string api_version;
+  std::vector<AdapterProfile> operations;
 };
 
 struct AdapterRegistryDocument {
@@ -99,6 +145,8 @@ class AdapterRegistry {
   [[nodiscard]] WorkerLaunchRequest worker_launch_request(
       const Component& component, std::string_view operation) const;
   [[nodiscard]] const std::string& registry_digest() const;
+  [[nodiscard]] nlohmann::json operation_descriptors_json() const;
+  [[nodiscard]] const std::string& operation_descriptors_digest() const;
   [[nodiscard]] std::string plan_lock_manifest(const CompiledPlan& plan) const;
   [[nodiscard]] std::string plan_lock_digest(const CompiledPlan& plan) const;
   void validate_submission_lock(const CompiledPlan& plan,
@@ -107,6 +155,8 @@ class AdapterRegistry {
  private:
   std::map<AdapterKey, AdapterProfile> profiles_;
   std::string registry_digest_;
+  nlohmann::json operation_descriptors_json_;
+  std::string operation_descriptors_digest_;
 };
 
 }  // namespace trainvm

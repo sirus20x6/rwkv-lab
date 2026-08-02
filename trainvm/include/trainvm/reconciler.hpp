@@ -9,6 +9,7 @@
 
 #include "trainvm/adapter_registry.hpp"
 #include "trainvm/authority_time.hpp"
+#include "trainvm/cache_artifact_authority.hpp"
 #include "trainvm/journal.hpp"
 #include "trainvm/training_component_registry.hpp"
 #include "trainvm/worker.hpp"
@@ -28,6 +29,9 @@ enum class ReconcileDisposition {
   launch_replayed,
   awaiting_worker,
   builtin_completed,
+  qualification_completed,
+  qualification_rejected,
+  qualification_evidence_required,
   input_required,
   no_action,
 };
@@ -82,6 +86,23 @@ class HostGrantSagaReconciler final {
   IHostGrantSagaFaultInjector* faults_{};
 };
 
+// The authority seam for a qualify_cache node. Production resolves evidence
+// from immutable, worker-published qualification artifacts bound to the node's
+// own run/attempt; tests inject an exact fake. An experiment document is never
+// an evidence source, and the supervisor never accepts a bare verdict: it
+// always re-runs the implemented gate over whatever this returns.
+class ICacheQualificationEvidenceResolver {
+ public:
+  virtual ~ICacheQualificationEvidenceResolver() = default;
+  // Returns the evidence published for this run/node/attempt, or nullopt when
+  // the worker has not published any yet. Returning nullopt leaves the node
+  // pending instead of failing the run, so a slow publisher is a wait rather
+  // than a rejection.
+  [[nodiscard]] virtual std::optional<CacheQualificationEvidence>
+  resolve(const std::string& run_id, const std::string& node_id,
+          const std::string& attempt_id) = 0;
+};
+
 // This is launch authorization only: it may persist worker.launch_requested as
 // a protocol intent, but it MUST NOT spawn or signal an OS process. A later
 // supervisor must require a host-bound resolved launch-spec digest before exec.
@@ -103,13 +124,15 @@ class Reconciler {
   Reconciler(Journal& journal, const AdapterRegistry& registry,
              const TrainingComponentRegistry& training_components,
              std::mutex& authority_mutex,
-             std::function<AuthorityTimeSample()> authority_clock);
+             std::function<AuthorityTimeSample()> authority_clock,
+             ICacheQualificationEvidenceResolver* qualification = nullptr);
 
   Journal& journal_;
   const AdapterRegistry& registry_;
   const TrainingComponentRegistry& training_components_;
   std::mutex& authority_mutex_;
   std::shared_ptr<AuthorityClock> authority_clock_;
+  ICacheQualificationEvidenceResolver* qualification_{};
 };
 
 }  // namespace trainvm

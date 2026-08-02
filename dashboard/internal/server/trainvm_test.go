@@ -134,6 +134,10 @@ func trainVMFixture(t *testing.T) *trainvmstore.Reader {
 }
 
 func trainVMAuthoringFixture(t *testing.T) *trainvmstore.Authoring {
+	return trainVMAuthoringFixtureWithPlan(t, `{"kind":"Experiment"}`)
+}
+
+func trainVMAuthoringFixtureWithPlan(t *testing.T, canonicalPlan string) *trainvmstore.Authoring {
 	t.Helper()
 	directory := t.TempDir()
 	schema := filepath.Join(directory, "schema.json")
@@ -145,11 +149,145 @@ func trainVMAuthoringFixture(t *testing.T) *trainvmstore.Authoring {
 	if err := os.WriteFile(example, []byte(`{"kind":"Experiment"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	script := "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"valid\":true,\"plan_hash\":\"native-hash\",\"canonical_plan\":{\"kind\":\"Experiment\"}}'\n"
+	script := "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"valid\":true,\"plan_hash\":\"native-hash\",\"canonical_plan\":" + canonicalPlan + "}'\n"
 	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	return &trainvmstore.Authoring{BinaryPath: binary, SchemaPath: schema, ExamplePath: example}
+}
+
+func canonicalTestJSON(t *testing.T, value any) string {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(encoded)
+}
+
+func operationDescriptorFixture(adapter string) map[string]any {
+	return map[string]any{
+		"key": map[string]any{
+			"adapter": adapter, "version": "1.0.0", "runtime": "python_worker",
+			"operation": "train", "contract": "trainvm.test.Train",
+		},
+		"effect": "process", "idempotency": "receipt_required",
+		"code_fingerprint":      "sha256:" + strings.Repeat("a", 64),
+		"required_capabilities": []any{"trainer.test.v1"},
+		"lifecycle": map[string]any{
+			"stateful": true, "graceful_stop": true, "checkpoint_now": true,
+			"pause_keep_resources": true, "pause_release_resources": true,
+			"compile": false, "warmup": false, "qualify": false, "profile": false,
+			"resume_grade": "exact",
+		},
+		"authoring": map[string]any{
+			"inputs": map[string]any{
+				"dataset": map[string]any{
+					"type": "artifact", "required": true,
+					"artifact_type": "dataset", "artifact_schema": "trainvm.dataset/v1",
+				},
+			},
+			"outputs": map[string]any{
+				"checkpoint": map[string]any{
+					"type": "artifact", "required": true, "artifact_type": "checkpoint",
+				},
+			},
+		},
+		"training_composition": map[string]any{
+			"model_family": "rwkv", "slots": map[string]any{"optimizer": "optimizer"},
+		},
+	}
+}
+
+func trainingComponentDescriptorFixture() map[string]any {
+	return map[string]any{
+		"key": map[string]any{
+			"category": "optimizer", "name": "test_adamw", "version": "1.0.0",
+		},
+		"backend": "python", "implementation": "trainer.optimizer.test_adamw.v1",
+		"model_families":        []any{"rwkv"},
+		"required_capabilities": []any{"optimizer.test_adamw.v1"},
+		"configuration": []any{
+			map[string]any{
+				"name": "learning_rate", "type": "number", "required": true,
+				"minimum": 0.0, "maximum": 1.0,
+			},
+			map[string]any{
+				"name": "weight_decay", "type": "number", "required": false,
+				"default": 0.01, "minimum": 0.0, "maximum": 10.0,
+			},
+		},
+		"state": []any{map[string]any{
+			"name": "parameter_state_manifest", "type": "string", "required": true,
+		}},
+		"state_grade": "exact", "reference_implementation": true,
+	}
+}
+
+func coherentTrainingPreviewFixture(t *testing.T) (string, string) {
+	t.Helper()
+	descriptor := trainingComponentDescriptorFixture()
+	descriptorJSON := canonicalTestJSON(t, descriptor)
+	registryDigest := "sha256:" + strings.Repeat("b", 64)
+	key := descriptor["key"]
+	requestedConfiguration := map[string]any{"learning_rate": 0.1}
+	resolvedConfiguration := map[string]any{"learning_rate": 0.1, "weight_decay": 0.01}
+	plan := map[string]any{
+		"spec": map[string]any{
+			"workflow": map[string]any{
+				"nodes": map[string]any{
+					"train": map[string]any{
+						"invoke": map[string]any{
+							"training": map[string]any{
+								"model_family": "rwkv",
+								"components": map[string]any{
+									"optimizer": map[string]any{
+										"key": key, "configuration": requestedConfiguration,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	resolvedComponents := map[string]any{
+		"optimizer": map[string]any{
+			"configuration": resolvedConfiguration,
+			"descriptor":    descriptor,
+			"descriptor_digest": fmt.Sprintf("sha256:%x",
+				sha256.Sum256([]byte(descriptorJSON))),
+		},
+	}
+	compositionBody := map[string]any{
+		"api_version": "trainvm.resolved-training-composition/v1",
+		"components":  resolvedComponents, "model_family": "rwkv",
+		"registry_digest": registryDigest,
+	}
+	compositionJSON := canonicalTestJSON(t, compositionBody)
+	composition := map[string]any{}
+	for key, value := range compositionBody {
+		composition[key] = value
+	}
+	composition["composition_digest"] = fmt.Sprintf("sha256:%x",
+		sha256.Sum256([]byte(compositionJSON)))
+	lock := map[string]any{
+		"api_version":     "trainvm.training-component-lock/v1",
+		"nodes":           map[string]any{"train": composition},
+		"registry_digest": registryDigest,
+	}
+	return canonicalTestJSON(t, plan), canonicalTestJSON(t, lock)
+}
+
+func mutateTestJSONObject(t *testing.T, source string, mutate func(map[string]any)) string {
+	t.Helper()
+	var document map[string]any
+	if err := json.Unmarshal([]byte(source), &document); err != nil {
+		t.Fatal(err)
+	}
+	mutate(document)
+	return canonicalTestJSON(t, document)
 }
 
 func TestTrainVMReadModelEndpoints(t *testing.T) {
@@ -216,10 +354,11 @@ func TestTrainVMReadModelEndpoints(t *testing.T) {
 	request = httptest.NewRequest(http.MethodGet, "/api/trainvm/runs/vm-run/artifacts?after=3&limit=10", nil)
 	response = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(response, request)
-	var artifacts []trainvmstore.PublishedArtifact
+	var artifacts []trainvmstore.ObservableArtifact
 	if err := json.Unmarshal(response.Body.Bytes(), &artifacts); err != nil ||
 		response.Code != http.StatusOK || len(artifacts) != 1 ||
-		artifacts[0].ArtifactID != "gallery-51" || artifacts[0].Kind != "image_gallery" {
+		artifacts[0].ArtifactID != "gallery-51" || artifacts[0].Kind != "image_gallery" ||
+		strings.Contains(response.Body.String(), "file:///") {
 		t.Fatalf("unexpected artifacts: %#v err=%v body=%s", artifacts, err, response.Body.String())
 	}
 	request = httptest.NewRequest(http.MethodGet,
@@ -319,14 +458,220 @@ func TestTrainVMTrainingComponentsComeFromNativeAuthority(t *testing.T) {
 	}
 }
 
+func TestTrainVMTrainingComponentDescriptorNativeInvariants(t *testing.T) {
+	serve := func(t *testing.T, document map[string]any) *httptest.ResponseRecorder {
+		t.Helper()
+		encoded := canonicalTestJSON(t, document)
+		commander := &fakeTrainVMCommander{descriptorResult: trainvmstore.DescriptorResult{
+			SchemaJSON: encoded,
+			SchemaHash: fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(encoded))),
+		}}
+		response := httptest.NewRecorder()
+		New(Config{Commander: commander}).Handler().ServeHTTP(response,
+			httptest.NewRequest(http.MethodGet, "/api/trainvm/training-components", nil))
+		return response
+	}
+	valid := map[string]any{
+		"api_version": "trainvm.training-components/v1",
+		"components":  []any{trainingComponentDescriptorFixture()},
+	}
+	if response := serve(t, valid); response.Code != http.StatusOK {
+		t.Fatalf("valid native-shape training descriptor rejected: status=%d body=%s",
+			response.Code, response.Body.String())
+	}
+	mutations := map[string]func(map[string]any){
+		"wildcard family mixed with exact family": func(component map[string]any) {
+			component["model_families"] = []any{"*", "rwkv"}
+		},
+		"nonnumeric field carries bounds": func(component map[string]any) {
+			component["configuration"].([]any)[0].(map[string]any)["type"] = "boolean"
+		},
+		"inverted numeric bounds": func(component map[string]any) {
+			field := component["configuration"].([]any)[0].(map[string]any)
+			field["minimum"], field["maximum"] = 2.0, 1.0
+		},
+		"wrong typed default": func(component map[string]any) {
+			component["configuration"].([]any)[0].(map[string]any)["default"] = "fast"
+		},
+		"default outside numeric bounds": func(component map[string]any) {
+			component["configuration"].([]any)[0].(map[string]any)["default"] = 2.0
+		},
+		"integer default encoded as number": func(component map[string]any) {
+			field := component["configuration"].([]any)[0].(map[string]any)
+			field["type"], field["default"] = "integer", 1.5
+		},
+		"enum omits values": func(component map[string]any) {
+			field := component["configuration"].([]any)[0].(map[string]any)
+			field["type"] = "enumeration"
+			delete(field, "minimum")
+			delete(field, "maximum")
+		},
+		"enum values not canonical": func(component map[string]any) {
+			field := component["configuration"].([]any)[0].(map[string]any)
+			field["type"], field["values"] = "enumeration", []any{"z", "a"}
+			delete(field, "minimum")
+			delete(field, "maximum")
+		},
+		"enum default outside values": func(component map[string]any) {
+			field := component["configuration"].([]any)[0].(map[string]any)
+			field["type"], field["values"], field["default"] = "enumeration", []any{"a", "b"}, "c"
+			delete(field, "minimum")
+			delete(field, "maximum")
+		},
+		"oversized string default": func(component map[string]any) {
+			field := component["configuration"].([]any)[0].(map[string]any)
+			field["type"], field["default"] = "string", strings.Repeat("x", 4097)
+			delete(field, "minimum")
+			delete(field, "maximum")
+		},
+		"state carries configuration default": func(component map[string]any) {
+			component["state"].([]any)[0].(map[string]any)["default"] = "state.json"
+		},
+		"stateless grade carries state": func(component map[string]any) {
+			component["state_grade"] = "stateless"
+		},
+		"schedule category omits step domain": func(component map[string]any) {
+			component["key"].(map[string]any)["category"] = "gradient_accumulation"
+		},
+		"nonschedule category declares step domain": func(component map[string]any) {
+			component["step_domain"] = "optimizer_step"
+		},
+		"CUDA extension claims reference implementation": func(component map[string]any) {
+			component["backend"] = "cuda_extension"
+		},
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			component := trainingComponentDescriptorFixture()
+			mutate(component)
+			document := map[string]any{
+				"api_version": "trainvm.training-components/v1",
+				"components":  []any{component},
+			}
+			response := serve(t, document)
+			if response.Code != http.StatusBadGateway {
+				t.Fatalf("invalid training descriptor accepted: status=%d body=%s",
+					response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestTrainVMOperationsComeFromNativeAuthority(t *testing.T) {
+	document := canonicalTestJSON(t, map[string]any{
+		"api_version": "trainvm.operations/v1",
+		"operations":  []any{operationDescriptorFixture("rwkv.posttrain")},
+	})
+	digest := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(document)))
+	commander := &fakeTrainVMCommander{descriptorResult: trainvmstore.DescriptorResult{
+		SchemaJSON: document, SchemaHash: digest,
+	}}
+	srv := New(Config{Commander: commander})
+	request := httptest.NewRequest(http.MethodGet, "/api/trainvm/operations", nil)
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK ||
+		commander.descriptor.Provider != "trainvm.operations" ||
+		commander.descriptor.Version != "1.0.0" ||
+		response.Header().Get("Cache-Control") != "no-store" ||
+		!strings.Contains(response.Body.String(), `"api_version":"trainvm.operations/v1"`) ||
+		!strings.Contains(response.Body.String(), `"schema_hash":"`+digest+`"`) {
+		t.Fatalf("operation descriptor status=%d request=%#v body=%s",
+			response.Code, commander.descriptor, response.Body.String())
+	}
+}
+
+func TestTrainVMDescriptorBoundaryFailsClosed(t *testing.T) {
+	valid := map[string]any{
+		"api_version": "trainvm.operations/v1",
+		"operations":  []any{operationDescriptorFixture("rwkv.posttrain")},
+	}
+	duplicate := map[string]any{
+		"api_version": "trainvm.operations/v1",
+		"operations": []any{
+			operationDescriptorFixture("rwkv.posttrain"),
+			operationDescriptorFixture("rwkv.posttrain"),
+		},
+	}
+	outOfOrder := map[string]any{
+		"api_version": "trainvm.operations/v1",
+		"operations": []any{
+			operationDescriptorFixture("z.adapter"),
+			operationDescriptorFixture("a.adapter"),
+		},
+	}
+	wrongType := map[string]any{
+		"api_version": "trainvm.operations/v1",
+		"operations": []any{func() map[string]any {
+			profile := operationDescriptorFixture("rwkv.posttrain")
+			profile["effect"] = true
+			return profile
+		}()},
+	}
+	nonArtifactOutput := map[string]any{
+		"api_version": "trainvm.operations/v1",
+		"operations": []any{func() map[string]any {
+			profile := operationDescriptorFixture("rwkv.posttrain")
+			authoring := profile["authoring"].(map[string]any)
+			outputs := authoring["outputs"].(map[string]any)
+			outputs["checkpoint"] = map[string]any{"type": "string", "required": true}
+			return profile
+		}()},
+	}
+	extraEnvelope := map[string]any{
+		"api_version": "trainvm.operations/v1", "operations": []any{}, "trusted": true,
+	}
+	validDocument := canonicalTestJSON(t, valid)
+	tests := map[string]struct {
+		document string
+		digest   string
+	}{
+		"malformed JSON":  {document: "{"},
+		"oversized JSON":  {document: `{"api_version":"trainvm.operations/v1","operations":[],"padding":"` + strings.Repeat("x", trainVMDescriptorLimit) + `"}`},
+		"duplicate field": {document: `{"api_version":"trainvm.operations/v1","api_version":"trainvm.operations/v1","operations":[]}`},
+		"wrong api version": {document: canonicalTestJSON(t, map[string]any{
+			"api_version": "trainvm.operations/v2", "operations": []any{},
+		})},
+		"wrong hash":                  {document: validDocument, digest: "sha256:" + strings.Repeat("0", 64)},
+		"noncanonical JSON":           {document: "{\"operations\":[], \"api_version\":\"trainvm.operations/v1\"}"},
+		"extra envelope field":        {document: canonicalTestJSON(t, extraEnvelope)},
+		"wrong basic field type":      {document: canonicalTestJSON(t, wrongType)},
+		"non-artifact output":         {document: canonicalTestJSON(t, nonArtifactOutput)},
+		"duplicate identity":          {document: canonicalTestJSON(t, duplicate)},
+		"noncanonical identity order": {document: canonicalTestJSON(t, outOfOrder)},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			digest := test.digest
+			if digest == "" {
+				digest = fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(test.document)))
+			}
+			commander := &fakeTrainVMCommander{descriptorResult: trainvmstore.DescriptorResult{
+				SchemaJSON: test.document, SchemaHash: digest,
+			}}
+			srv := New(Config{Commander: commander})
+			request := httptest.NewRequest(http.MethodGet, "/api/trainvm/operations", nil)
+			response := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(response, request)
+			if response.Code != http.StatusBadGateway ||
+				response.Header().Get("Cache-Control") != "no-store" {
+				t.Fatalf("invalid descriptor accepted: status=%d body=%s",
+					response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
 func TestTrainVMCompileMergesAuthorityAdapterPreview(t *testing.T) {
+	trainingLock := `{"api_version":"trainvm.training-component-lock/v1","nodes":{},"registry_digest":"sha256:` + strings.Repeat("b", 64) + `"}`
 	commander := &fakeTrainVMCommander{submissionResult: trainvmstore.SubmissionResult{
-		PlanHash:                       "native-hash",
-		CanonicalPlan:                  `{"kind":"Experiment"}`,
-		AdapterLockDigest:              "sha256:adapter-lock",
-		CanonicalAdapterLock:           `{"api_version":"trainvm.adapter-lock/v1","profiles":[]}`,
-		TrainingComponentLockDigest:    "sha256:training-lock",
-		CanonicalTrainingComponentLock: `{"api_version":"trainvm.training-component-lock/v1","nodes":{}}`,
+		PlanHash:             "native-hash",
+		CanonicalPlan:        `{"kind":"Experiment"}`,
+		AdapterLockDigest:    "sha256:adapter-lock",
+		CanonicalAdapterLock: `{"api_version":"trainvm.adapter-lock/v1","profiles":[]}`,
+		TrainingComponentLockDigest: fmt.Sprintf("sha256:%x",
+			sha256.Sum256([]byte(trainingLock))),
+		CanonicalTrainingComponentLock: trainingLock,
 		Diagnostics: []trainvmstore.ControlDiagnostic{{
 			Severity: "ERROR", Code: "adapter.registry", Path: "/spec/components",
 			Message: "profile is not authorized",
@@ -346,12 +691,154 @@ func TestTrainVMCompileMergesAuthorityAdapterPreview(t *testing.T) {
 		commander.submission.ExpectedJournalID != "0123456789abcdef0123456789abcdef" ||
 		!strings.Contains(response.Body.String(), `"adapter_lock_digest":"sha256:adapter-lock"`) ||
 		!strings.Contains(response.Body.String(), `"canonical_adapter_lock":"{\"api_version\":`) ||
-		!strings.Contains(response.Body.String(), `"training_component_lock_digest":"sha256:training-lock"`) ||
+		!strings.Contains(response.Body.String(), `"training_component_lock_digest":"sha256:`) ||
 		!strings.Contains(response.Body.String(), `"canonical_training_component_lock":"{\"api_version\":`) ||
 		!strings.Contains(response.Body.String(), `"valid":false`) ||
 		!strings.Contains(response.Body.String(), `"code":"adapter.registry"`) {
 		t.Fatalf("authority adapter preview was not merged: status=%d request=%#v body=%s",
 			response.Code, commander.submission, response.Body.String())
+	}
+}
+
+func TestTrainVMCompileRejectsIncoherentTrainingComponentPreview(t *testing.T) {
+	trainingPlan := `{"spec":{"workflow":{"nodes":{"train":{"invoke":{"training":{"components":{},"model_family":"rwkv"}}}}}}}`
+	validLock := `{"api_version":"trainvm.training-component-lock/v1","nodes":{},"registry_digest":"sha256:` + strings.Repeat("b", 64) + `"}`
+	tests := map[string]struct {
+		plan   string
+		lock   string
+		digest string
+	}{
+		"digest mismatch": {
+			plan: `{"kind":"Experiment"}`, lock: validLock,
+			digest: "sha256:" + strings.Repeat("0", 64),
+		},
+		"malformed canonical lock": {
+			plan: `{"kind":"Experiment"}`, lock: "{",
+			digest: fmt.Sprintf("sha256:%x", sha256.Sum256([]byte("{"))),
+		},
+		"training plan missing lock": {plan: trainingPlan},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			commander := &fakeTrainVMCommander{submissionResult: trainvmstore.SubmissionResult{
+				PlanHash: "native-hash", CanonicalPlan: test.plan,
+				TrainingComponentLockDigest:    test.digest,
+				CanonicalTrainingComponentLock: test.lock,
+			}}
+			srv := New(Config{
+				Authoring: trainVMAuthoringFixtureWithPlan(t, test.plan),
+				Commander: commander, TrainVM: trainVMFixture(t),
+			})
+			request := httptest.NewRequest(http.MethodPost, "/api/trainvm/compile",
+				strings.NewReader(`{"kind":"Experiment"}`))
+			response := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(response, request)
+			if response.Code != http.StatusBadGateway {
+				t.Fatalf("incoherent training lock accepted: status=%d body=%s",
+					response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestTrainVMCompileAcceptsCoherentRequiredTrainingComponentPreview(t *testing.T) {
+	trainingPlan, trainingLock := coherentTrainingPreviewFixture(t)
+	commander := &fakeTrainVMCommander{submissionResult: trainvmstore.SubmissionResult{
+		PlanHash:      "native-hash",
+		CanonicalPlan: trainingPlan,
+		TrainingComponentLockDigest: fmt.Sprintf("sha256:%x",
+			sha256.Sum256([]byte(trainingLock))),
+		CanonicalTrainingComponentLock: trainingLock,
+	}}
+	srv := New(Config{
+		Authoring: trainVMAuthoringFixtureWithPlan(t, trainingPlan),
+		Commander: commander, TrainVM: trainVMFixture(t),
+	})
+	request := httptest.NewRequest(http.MethodPost, "/api/trainvm/compile",
+		strings.NewReader(`{"kind":"Experiment"}`))
+	response := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK ||
+		!strings.Contains(response.Body.String(), `"valid":true`) ||
+		!strings.Contains(response.Body.String(), `"training_component_lock_digest":"sha256:`) {
+		t.Fatalf("coherent required training lock was rejected: status=%d body=%s",
+			response.Code, response.Body.String())
+	}
+}
+
+func TestTrainVMCompileRejectsTrainingLockPlanSkew(t *testing.T) {
+	trainingPlan, validLock := coherentTrainingPreviewFixture(t)
+	mutations := map[string]func(map[string]any){
+		"extra lock envelope field": func(lock map[string]any) {
+			lock["untrusted"] = true
+		},
+		"malformed registry digest": func(lock map[string]any) {
+			lock["registry_digest"] = "sha256:NOT-CANONICAL"
+		},
+		"extra training node": func(lock map[string]any) {
+			lock["nodes"].(map[string]any)["extra"] = map[string]any{}
+		},
+		"missing training node": func(lock map[string]any) {
+			delete(lock["nodes"].(map[string]any), "train")
+		},
+		"node registry differs from envelope": func(lock map[string]any) {
+			node := lock["nodes"].(map[string]any)["train"].(map[string]any)
+			node["registry_digest"] = "sha256:" + strings.Repeat("c", 64)
+		},
+		"model family differs from plan": func(lock map[string]any) {
+			node := lock["nodes"].(map[string]any)["train"].(map[string]any)
+			node["model_family"] = "transformer"
+		},
+		"component slot differs from plan": func(lock map[string]any) {
+			node := lock["nodes"].(map[string]any)["train"].(map[string]any)
+			components := node["components"].(map[string]any)
+			components["objective"] = components["optimizer"]
+		},
+		"descriptor key differs from plan": func(lock map[string]any) {
+			node := lock["nodes"].(map[string]any)["train"].(map[string]any)
+			component := node["components"].(map[string]any)["optimizer"].(map[string]any)
+			descriptor := component["descriptor"].(map[string]any)
+			descriptor["key"].(map[string]any)["name"] = "different_optimizer"
+		},
+		"configuration differs from plan": func(lock map[string]any) {
+			node := lock["nodes"].(map[string]any)["train"].(map[string]any)
+			component := node["components"].(map[string]any)["optimizer"].(map[string]any)
+			component["configuration"].(map[string]any)["learning_rate"] = 0.2
+		},
+		"resolved configuration adds unknown field": func(lock map[string]any) {
+			node := lock["nodes"].(map[string]any)["train"].(map[string]any)
+			component := node["components"].(map[string]any)["optimizer"].(map[string]any)
+			component["configuration"].(map[string]any)["authority_extra"] = true
+		},
+		"resolved configuration changes descriptor default": func(lock map[string]any) {
+			node := lock["nodes"].(map[string]any)["train"].(map[string]any)
+			component := node["components"].(map[string]any)["optimizer"].(map[string]any)
+			component["configuration"].(map[string]any)["weight_decay"] = 0.02
+		},
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			lock := mutateTestJSONObject(t, validLock, mutate)
+			commander := &fakeTrainVMCommander{submissionResult: trainvmstore.SubmissionResult{
+				PlanHash:      "native-hash",
+				CanonicalPlan: trainingPlan,
+				TrainingComponentLockDigest: fmt.Sprintf("sha256:%x",
+					sha256.Sum256([]byte(lock))),
+				CanonicalTrainingComponentLock: lock,
+			}}
+			srv := New(Config{
+				Authoring: trainVMAuthoringFixtureWithPlan(t, trainingPlan),
+				Commander: commander, TrainVM: trainVMFixture(t),
+			})
+			request := httptest.NewRequest(http.MethodPost, "/api/trainvm/compile",
+				strings.NewReader(`{"kind":"Experiment"}`))
+			response := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(response, request)
+			if response.Code != http.StatusBadGateway {
+				t.Fatalf("plan-skewed training lock accepted: status=%d body=%s",
+					response.Code, response.Body.String())
+			}
+		})
 	}
 }
 

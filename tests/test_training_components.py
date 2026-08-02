@@ -451,6 +451,27 @@ def test_resolved_worker_component_dispatch_is_closed_and_typed():
     optimizer = optimizer_from_resolved_component(optimizer_component, [parameter])
     assert isinstance(optimizer, torch.optim.AdamW)
 
+    sparse_descriptor = next(
+        component
+        for component in components
+        if component["key"]["name"] == "torch_sparse_adam"
+    )
+    embedding = torch.nn.Embedding(8, 2, sparse=True)
+    sparse_optimizer = optimizer_from_resolved_component(
+        {
+            "descriptor": sparse_descriptor,
+            "descriptor_digest": "sha256:" + "b" * 64,
+            "configuration": {
+                "learning_rate": 5.0e-4,
+                "beta1": 0.9,
+                "beta2": 0.95,
+                "epsilon": 1.0e-8,
+            },
+        },
+        embedding.parameters(),
+    )
+    assert isinstance(sparse_optimizer, torch.optim.SparseAdam)
+
     schedule_descriptor = next(
         component
         for component in components

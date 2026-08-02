@@ -200,6 +200,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/trainvm/runs/{run}/profiles/{artifact}/trace", s.handleTrainVMProfileTrace)
 	s.mux.HandleFunc("GET /api/trainvm/schema", s.handleTrainVMSchema)
 	s.mux.HandleFunc("GET /api/trainvm/example", s.handleTrainVMExample)
+	s.mux.HandleFunc("GET /api/trainvm/operations", s.handleTrainVMOperations)
 	s.mux.HandleFunc("GET /api/trainvm/training-components", s.handleTrainVMTrainingComponents)
 	s.mux.HandleFunc("POST /api/trainvm/compile", s.handleTrainVMCompile)
 	s.mux.HandleFunc("POST /api/trainvm/experiments", s.handleTrainVMSubmit)

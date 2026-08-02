@@ -96,6 +96,19 @@ void check(bool condition, std::string_view message) {
   }
 }
 
+trainvm::OperationPortDescriptor operation_port(
+    trainvm::OperationPortType type, bool required,
+    std::optional<trainvm::ArtifactType> artifact_type = std::nullopt,
+    std::optional<std::string> artifact_schema = std::nullopt) {
+  return {
+      .type = type,
+      .required = required,
+      .artifact_type = artifact_type,
+      .artifact_schema = std::move(artifact_schema),
+      .description = std::nullopt,
+  };
+}
+
 nlohmann::json load_fixture() {
   const std::filesystem::path path = std::filesystem::path(TRAINVM_SOURCE_ROOT) /
       "docs/experiment-vm/examples/mageflow-cache-resume.json";
@@ -106,6 +119,62 @@ nlohmann::json load_fixture() {
   nlohmann::json value;
   input >> value;
   return value;
+}
+
+nlohmann::json cache_qualification_fixture() {
+  nlohmann::json document = load_fixture();
+  document["spec"]["components"]["core"]["operations"]["qualify_cache"] = {
+      {"contract", "trainvm.v1.QualifyCache"}};
+  document["spec"]["workflow"]["nodes"]["qualify_cache_artifact"] = {
+      {"description", "Gate the published cache artifact before release."},
+      {"invoke", {{"component", "core"}, {"operation", "qualify_cache"},
+                  {"inputs", nlohmann::json::object()}}},
+      {"idempotency", "replay_safe"},
+      {"effect", "read_only"},
+      {"transitions",
+       nlohmann::json::array(
+           {{{"on", "cache.qualified"}, {"target", "release_gpu"}},
+            {{"on", "cache.rejected"}, {"target", "$failed"}}})}};
+  document["spec"]["workflow"]["nodes"]["train_to_boundary"]["transitions"][1]
+          ["target"] = "qualify_cache_artifact";
+  return document;
+}
+
+// Evidence that passes every implemented gate. Individual tests degrade one
+// field at a time so a rejection reason is always attributable.
+trainvm::CacheQualificationEvidence passing_cache_evidence() {
+  const auto digest = [](char value) {
+    return "sha256:" + std::string(64U, value);
+  };
+  return {
+      .api_version = "trainvm.cache-qualification-evidence/v1",
+      .authority_receipt_digest = digest('1'),
+      .namespace_digest = digest('2'),
+      .artifact_tree_digest = digest('3'),
+      .workload_class = trainvm::CacheWorkloadClass::training,
+      .baseline_run_digest = digest('4'),
+      .candidate_run_digest = digest('5'),
+      .shape_coverage_digest = digest('6'),
+      .transition_coverage = true,
+      .baseline_instrumented = false,
+      .candidate_instrumented = false,
+      .output_parity = true,
+      .gradient_parity = true,
+      .optimizer_update_parity = true,
+      .state_parity = true,
+      .resumed_trajectory_parity = true,
+      .determinism_parity = true,
+      .content_parity = true,
+      .ordering_parity = true,
+      .manifest_parity = true,
+      .model_quality_pass = true,
+      .baseline_throughput = 100.0,
+      .candidate_throughput = 125.0,
+      .baseline_peak_memory_bytes = 1'000'000U,
+      .candidate_peak_memory_bytes = 1'020'000U,
+      .minimum_throughput_gain_ratio = 0.10,
+      .maximum_memory_regression_ratio = 0.05,
+  };
 }
 
 std::vector<trainvm::AdapterProfile> fixture_adapter_profiles(
@@ -130,21 +199,39 @@ std::vector<trainvm::AdapterProfile> fixture_adapter_profiles(
        .effect = trainvm::Effect::resource,
        .idempotency = trainvm::Idempotency::receipt_required,
        .code_fingerprint = {},
-       .required_capabilities = {}},
+       .required_capabilities = {},
+       .authoring = trainvm::OperationAuthoringDeclaration{
+           .inputs = {{"concurrency_key",
+                       operation_port(trainvm::OperationPortType::string,
+                                      true)}},
+           .outputs = {}}},
       {.key = key("trainvm.core", "1.0.0",
                   trainvm::ComponentRuntime::builtin, "validate_artifact",
                   "trainvm.v1.ValidateArtifact"),
        .effect = trainvm::Effect::read_only,
        .idempotency = trainvm::Idempotency::replay_safe,
        .code_fingerprint = {},
-       .required_capabilities = {}},
+       .required_capabilities = {},
+       .authoring = trainvm::OperationAuthoringDeclaration{
+           .inputs = {
+               {"artifact",
+                operation_port(trainvm::OperationPortType::artifact, true)},
+               {"required_schema",
+                operation_port(trainvm::OperationPortType::string, true)},
+           },
+           .outputs = {}}},
       {.key = key("trainvm.core", "1.0.0",
                   trainvm::ComponentRuntime::builtin, "release_resources",
                   "trainvm.v1.ReleaseResources"),
        .effect = trainvm::Effect::resource,
        .idempotency = trainvm::Idempotency::replay_safe,
        .code_fingerprint = {},
-       .required_capabilities = {}},
+       .required_capabilities = {},
+       .authoring = trainvm::OperationAuthoringDeclaration{
+           .inputs = {{"concurrency_key",
+                       operation_port(trainvm::OperationPortType::string,
+                                      true)}},
+           .outputs = {}}},
       {.key = key("rwkv-lab.mageflow", "1.0.0",
                   trainvm::ComponentRuntime::python_worker, "train",
                   "rwkv_lab.mageflow.v1.Train"),
@@ -163,6 +250,37 @@ std::vector<trainvm::AdapterProfile> fixture_adapter_profiles(
            .qualify = true,
            .profile = true,
            .resume_grade = trainvm::ResumeGrade::exact,
+       },
+       .authoring = trainvm::OperationAuthoringDeclaration{
+           .inputs = {
+               {"checkpoint",
+                operation_port(trainvm::OperationPortType::artifact, false,
+                               trainvm::ArtifactType::checkpoint,
+                               "rwkv-lab.mageflow-checkpoint.v1")},
+               {"config",
+                operation_port(trainvm::OperationPortType::string, true)},
+               {"encoder_cache",
+                operation_port(trainvm::OperationPortType::artifact, false,
+                               trainvm::ArtifactType::dataset,
+                               "rwkv-lab.encoder-cache.v1")},
+               {"run_directory",
+                operation_port(trainvm::OperationPortType::string, true)},
+               {"stop_at_step",
+                operation_port(trainvm::OperationPortType::integer, false)},
+           },
+           .outputs = {
+               {"checkpoint",
+                operation_port(trainvm::OperationPortType::artifact, false,
+                               trainvm::ArtifactType::checkpoint,
+                               "rwkv-lab.mageflow-checkpoint.v1")},
+               {"eval_gallery",
+                operation_port(trainvm::OperationPortType::artifact, false,
+                               trainvm::ArtifactType::image_gallery,
+                               "rwkv-lab.eval-gallery.v2")},
+               {"log",
+               operation_port(trainvm::OperationPortType::artifact, false,
+                               trainvm::ArtifactType::path)},
+           },
        }},
       {.key = key("rwkv-lab.mageflow", "1.0.0",
                   trainvm::ComponentRuntime::python_worker,
@@ -171,7 +289,26 @@ std::vector<trainvm::AdapterProfile> fixture_adapter_profiles(
        .effect = trainvm::Effect::workspace_write,
        .idempotency = trainvm::Idempotency::replay_safe,
        .code_fingerprint = worker_fingerprint,
-       .required_capabilities = {"worker.metrics", "worker.controls"}},
+       .required_capabilities = {"worker.metrics", "worker.controls"},
+       .authoring = trainvm::OperationAuthoringDeclaration{
+           .inputs = {
+               {"checkpoint",
+                operation_port(trainvm::OperationPortType::artifact, true,
+                               trainvm::ArtifactType::checkpoint,
+                               "rwkv-lab.mageflow-checkpoint.v1")},
+               {"config",
+                operation_port(trainvm::OperationPortType::string, true)},
+               {"final_step",
+                operation_port(trainvm::OperationPortType::integer, true)},
+               {"output_directory",
+                operation_port(trainvm::OperationPortType::string, true)},
+           },
+           .outputs = {{"plan",
+                        operation_port(trainvm::OperationPortType::artifact,
+                                       false,
+                                       trainvm::ArtifactType::report,
+                                       "rwkv-lab.mageflow-cache-plan.v1")}}},
+       },
       {.key = key("rwkv-lab.mageflow", "1.0.0",
                   trainvm::ComponentRuntime::python_worker, "cache_encoders",
                   "rwkv_lab.mageflow.v1.CacheEncoders"),
@@ -190,7 +327,22 @@ std::vector<trainvm::AdapterProfile> fixture_adapter_profiles(
            .qualify = false,
            .profile = false,
            .resume_grade = trainvm::ResumeGrade::none,
-       }},
+       },
+       .authoring = trainvm::OperationAuthoringDeclaration{
+           .inputs = {
+               {"output_directory",
+                operation_port(trainvm::OperationPortType::string, true)},
+               {"plan",
+                operation_port(trainvm::OperationPortType::artifact, true,
+                               trainvm::ArtifactType::report,
+                               "rwkv-lab.mageflow-cache-plan.v1")},
+           },
+           .outputs = {{"cache",
+                        operation_port(trainvm::OperationPortType::artifact,
+                                       false,
+                                       trainvm::ArtifactType::dataset,
+                                       "rwkv-lab.encoder-cache.v1")}}},
+       },
   };
 }
 
@@ -466,7 +618,8 @@ void test_reflection_and_compiler() {
                     "resume_grade"}) &&
             trainvm::reflected_field_names<
                 trainvm::TrainingCompositionContract>() ==
-                std::vector<std::string>({"model_family", "slots"}) &&
+                std::vector<std::string>(
+                    {"model_family", "slots", "allowed_components"}) &&
             trainvm::enum_from_string<trainvm::ResumeGrade>("exact") ==
                 trainvm::ResumeGrade::exact &&
             trainvm::enum_to_string(
@@ -810,6 +963,26 @@ void test_reflection_and_compiler() {
             has_diagnostic(wrong_trace_fingerprint_result,
                            "execution.trace_artifact"),
         "GPU trace output requires adapter-owned tree fingerprinting");
+
+  auto wrong_eval_gallery_type = fixture;
+  wrong_eval_gallery_type["spec"]["artifacts"]["eval_gallery"]["type"] =
+      "dataset";
+  const auto wrong_eval_gallery_type_result =
+      trainvm::compile_document(wrong_eval_gallery_type);
+  check(!wrong_eval_gallery_type_result.valid() &&
+            has_diagnostic(wrong_eval_gallery_type_result,
+                           "observability.eval_gallery_artifact"),
+        "eval gallery observability requires an image-gallery artifact");
+
+  auto wrong_eval_gallery_schema = fixture;
+  wrong_eval_gallery_schema["spec"]["artifacts"]["eval_gallery"]["schema"] =
+      "coverage.custom-eval-gallery.v1";
+  const auto wrong_eval_gallery_schema_result =
+      trainvm::compile_document(wrong_eval_gallery_schema);
+  check(!wrong_eval_gallery_schema_result.valid() &&
+            has_diagnostic(wrong_eval_gallery_schema_result,
+                           "observability.eval_gallery_artifact"),
+        "eval gallery observability requires the common v2 gallery schema");
 
   auto cpuset_conflict = fixture;
   cpuset_conflict["spec"]["resources"]["cpu_io_policy"]["cpus"] =
@@ -1323,6 +1496,73 @@ void test_journal() {
     revision_rejected = true;
   }
   check(revision_rejected, "run revision regression is rejected");
+
+  trainvm::Event metric{
+      .event_id = "metric-loss-1",
+      .run_id = "run-1",
+      .run_revision = 6,
+      .plan_revision = 1,
+      .node_id = "train",
+      .attempt_id = "train@1",
+      .worker_sequence = 1,
+      .event_type = "metric.sampled",
+      .event_version = 1,
+      .wall_time_ns = 500,
+      .monotonic_time_ns = 50,
+      .optimizer_step = 1,
+      .payload = {{"name", "train.loss"},
+                  {"value", 2.0},
+                  {"unit", "loss"},
+                  {"step_domain", "optimizer_step"},
+                  {"step", 1},
+                  {"sample_weight", 1},
+                  {"labels", {{"route", "animation"}}}},
+  };
+  auto sparse_metric = metric;
+  sparse_metric.event_id = "metric-eval-1";
+  sparse_metric.worker_sequence = 2;
+  sparse_metric.wall_time_ns = 510;
+  sparse_metric.monotonic_time_ns = 51;
+  sparse_metric.payload["name"] = "eval.quality";
+  auto latest_metric = metric;
+  latest_metric.event_id = "metric-loss-2";
+  latest_metric.worker_sequence = 3;
+  latest_metric.wall_time_ns = 520;
+  latest_metric.monotonic_time_ns = 52;
+  latest_metric.optimizer_step = 2;
+  latest_metric.payload["value"] = 1.5;
+  latest_metric.payload["step"] = 2;
+  const auto metric_sequences = trainvm::JournalTestAccess::append_batch(
+      journal, {metric, sparse_metric, latest_metric});
+  const auto latest_series = journal.sequenced_events({
+      .after_journal_sequence = 0U,
+      .through_journal_sequence = metric_sequences.back(),
+      .run_ids = {"run-1"},
+      .event_types = {"metric.sampled"},
+      .limit = 8U,
+      .newest_per_metric_series = true,
+  });
+  check(latest_series.size() == 2U &&
+            latest_series[0].event.payload.at("name") == "eval.quality" &&
+            latest_series[1].event.payload.at("name") == "train.loss" &&
+            latest_series[1].journal_sequence == metric_sequences.back(),
+        "latest-per-metric-series scan preserves sparse series and selects each newest sample");
+  bool incoherent_metric_scan_rejected = false;
+  try {
+    (void)journal.sequenced_events({
+        .after_journal_sequence = 0U,
+        .through_journal_sequence = metric_sequences.back(),
+        .run_ids = {"run-1"},
+        .event_types = {"metric.sampled"},
+        .limit = 8U,
+        .newest_first = true,
+        .newest_per_metric_series = true,
+    });
+  } catch (const std::invalid_argument&) {
+    incoherent_metric_scan_rejected = true;
+  }
+  check(incoherent_metric_scan_rejected,
+        "latest-per-metric-series scan rejects incompatible newest-first semantics");
 
   sqlite3* tamper_database = nullptr;
   check(sqlite3_open(database_path.c_str(), &tamper_database) == SQLITE_OK,
@@ -5521,6 +5761,33 @@ void test_worker_control_grpc_stream() {
   }
 
   {
+    const auto projection = trainvm::Journal(database_path).projection(run_id);
+    grpc::ClientContext context;
+    trainvm::v1::WatchEventsRequest request;
+    request.add_run_ids(run_id);
+    request.add_event_types("metric.sampled");
+    request.set_replay_limit(8U);
+    request.set_through_journal_sequence(
+        projection ? projection->last_event_sequence : 0U);
+    request.set_newest_per_metric_series(true);
+    auto stream = read_stub->WatchEvents(&context, request);
+    trainvm::v1::EventEnvelope envelope;
+    std::vector<trainvm::v1::EventEnvelope> metrics;
+    while (stream->Read(&envelope)) metrics.push_back(envelope);
+    const grpc::Status status = stream->Finish();
+    const auto payload = metrics.size() == 1U
+                             ? nlohmann::json::parse(
+                                   metrics.front().canonical_json_payload())
+                             : nlohmann::json{};
+    check(status.ok() && metrics.size() == 1U &&
+              metrics.front().event_type() == "metric.sampled" &&
+              payload.value("name", std::string{}) == "train.loss" &&
+              payload.value("value", 0.0) == 0.5 &&
+              payload.value("step", std::uint64_t{}) == 22U,
+          "TrainVM gRPC exposes the bounded latest-per-metric-series projection");
+  }
+
+  {
     trainvm::Journal observer(database_path);
     const auto dispatch = welcome_message.has_welcome()
                               ? observer.dispatch(
@@ -5649,6 +5916,113 @@ void test_graceful_cancel_lifecycle() {
 // replay rather than apply twice, the same key with different content must be
 // refused outright, and every attempt must leave a state a reconnecting
 // controller reconstructs exactly from the journal.
+// A research topology is selected in the document and refused at compile time
+// when it is invalid, so an operator sees a diagnostic instead of a launch
+// failure on a GPU.
+// The checked-in example must compile through the real authority, not merely
+// satisfy the JSON schema. A schema-valid document that the compiler rejects
+// would be a worse lie than no example at all.
+void test_checked_in_topology_example_compiles() {
+  const std::filesystem::path path =
+      std::filesystem::path(TRAINVM_SOURCE_ROOT) /
+      "docs/experiment-vm/examples/rwkv-scratch-topologies.json";
+  std::ifstream input(path);
+  check(input.good(), "the topology example document is readable");
+  if (!input) return;
+  nlohmann::json document;
+  input >> document;
+
+  const auto compiled = trainvm::compile_document(document);
+  if (!compiled.valid()) {
+    for (const auto& value : compiled.diagnostics)
+      std::cerr << "example diagnostic " << value.code << " @" << value.path
+                << ": " << value.message << '\n';
+  }
+  check(compiled.valid(), "the checked-in topology example compiles");
+  if (!compiled.valid()) return;
+
+  const auto& node =
+      compiled.plan->experiment.spec.workflow.nodes.at("train_to_boundary");
+  check(node.invoke.training && node.invoke.training->topologies &&
+            node.invoke.training->topologies->size() == 2U,
+        "the example carries both selected topologies into the plan");
+}
+
+void test_topology_selection_compiles_and_refuses_invalid_combinations() {
+  const auto with_topologies = [](nlohmann::json topologies) {
+    nlohmann::json document = load_fixture();
+    auto& node = document["spec"]["workflow"]["nodes"]["train_to_boundary"];
+    node["invoke"]["training"] = {
+        {"model_family", "rwkv"},
+        {"components",
+         {{"optimizer",
+           {{"key", {{"category", "optimizer"},
+                     {"name", "optimizer.torch_adamw"},
+                     {"version", "1"}}},
+            {"configuration", nlohmann::json::object()}}}}},
+        {"topologies", std::move(topologies)},
+    };
+    return document;
+  };
+
+  const auto valid = trainvm::compile_document(with_topologies(
+      nlohmann::json::array({
+          {{"topology", "engram"},
+           {"parameters", {{"enabled", 1}, {"rows", 8192}}}},
+          {{"topology", "loop"}, {"parameters", {{"count", 4}}}},
+      })));
+  check(valid.valid(), "a document selecting engram and loop compiles");
+
+  const auto incompatible = trainvm::compile_document(with_topologies(
+      nlohmann::json::array({
+          {{"topology", "loop"}, {"parameters", nlohmann::json::object()}},
+          {{"topology", "seed_chain"},
+           {"parameters", nlohmann::json::object()}},
+      })));
+  const bool refused_pair = !incompatible.valid() &&
+      std::ranges::any_of(incompatible.diagnostics,
+                          [](const trainvm::Diagnostic& value) {
+                            return value.code == "training.topologies.invalid";
+                          });
+  check(refused_pair,
+        "seed_chain combined with loop is refused at compile time");
+
+  const auto unknown_switch = trainvm::compile_document(with_topologies(
+      nlohmann::json::array({
+          {{"topology", "loop"}, {"parameters", {{"engram_rows", 4096}}}},
+      })));
+  check(!unknown_switch.valid(),
+        "a switch belonging to another topology is refused at compile time");
+
+  const auto out_of_bound = trainvm::compile_document(with_topologies(
+      nlohmann::json::array({
+          {{"topology", "loop"}, {"parameters", {{"count", 99}}}},
+      })));
+  check(!out_of_bound.valid(),
+        "a value outside its declared bound is refused at compile time");
+
+  const auto unknown_topology = trainvm::compile_document(with_topologies(
+      nlohmann::json::array({
+          {{"topology", "warp_drive"},
+           {"parameters", nlohmann::json::object()}},
+      })));
+  const bool refused_unknown = !unknown_topology.valid() &&
+      std::ranges::any_of(unknown_topology.diagnostics,
+                          [](const trainvm::Diagnostic& value) {
+                            return value.code == "training.topologies.unknown";
+                          });
+  check(refused_unknown, "an unregistered topology is refused at compile time");
+
+  // Topologies are closed per model family.
+  nlohmann::json wrong_family = with_topologies(nlohmann::json::array({
+      {{"topology", "loop"}, {"parameters", nlohmann::json::object()}}}));
+  wrong_family["spec"]["workflow"]["nodes"]["train_to_boundary"]["invoke"]
+              ["training"]["model_family"] = "transformer";
+  const auto refused_family = trainvm::compile_document(wrong_family);
+  check(!refused_family.valid(),
+        "only the rwkv family may declare research topologies");
+}
+
 void test_adversarial_control_idempotency_and_replay() {
   const auto compiled = trainvm::compile_document(load_fixture());
   check(compiled.valid(), "adversarial control fixture compiles");
@@ -6179,6 +6553,212 @@ void test_typed_managed_resource_release() {
   check(missing_release_receipt_rejected,
         "terminal recovery rejects a resource release without its durable lease receipt");
   std::filesystem::remove_all(directory);
+}
+
+// Drives the run to the qualification gate and returns its live controller
+// state so each scenario can commit a different verdict.
+struct CacheQualificationRun {
+  std::filesystem::path directory;
+  std::unique_ptr<trainvm::Journal> journal;
+  std::unique_ptr<trainvm::Controller> controller;
+  trainvm::ResourceLease lease;
+};
+
+CacheQualificationRun start_cache_qualification_run(
+    const trainvm::CompiledPlan& plan, std::string_view suffix) {
+  CacheQualificationRun state;
+  state.directory = std::filesystem::temp_directory_path() /
+      ("trainvm-cache-qualification-" + std::string(suffix) + "-" +
+       std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(state.directory);
+  std::filesystem::create_directories(state.directory);
+  const std::string run_id = "cache-qualification-run";
+  state.journal = std::make_unique<trainvm::Journal>(
+      state.directory / "journal.db", std::nullopt,
+      trainvm::HostGrantEnforcement::legacy_process_free_test);
+  state.controller = std::make_unique<trainvm::Controller>(
+      plan, *state.journal, run_id);
+  state.controller->create_queued();
+  state.lease = state.controller->begin_acquisition(test_time(1'000)).lease;
+  const trainvm::WorkerLaunchRequest request{
+      .code_fingerprint = "sha256:" + std::string(64U, '5'),
+      .required_capabilities = {"worker.controls"},
+  };
+  const auto launch =
+      state.controller->prepare_worker_launch(request, test_time(1'100));
+  (void)bind_test_worker_launch(*state.controller, launch, 1'150);
+  (void)state.controller->accept_worker_hello(
+      {.run_id = launch.run_id,
+       .node_id = launch.node_id,
+       .attempt_id = launch.attempt_id,
+       .launch_nonce = launch.launch_nonce,
+       .adapter = launch.adapter,
+       .adapter_version = launch.adapter_version,
+       .code_fingerprint = launch.code_fingerprint,
+       .capabilities = launch.required_capabilities,
+       .last_acked_controller_sequence = 0,
+       .concurrency_key = launch.concurrency_key,
+       .lease_id = launch.lease_id,
+       .fencing_token = launch.fencing_token},
+      test_time(1'200));
+  const auto dispatch = state.controller->prepare_dispatch(test_time(1'300));
+  const trainvm::WorkerSessionIdentity session{
+      .run_id = launch.run_id,
+      .node_id = launch.node_id,
+      .attempt_id = launch.attempt_id,
+      .launch_nonce = launch.launch_nonce,
+      .concurrency_key = launch.concurrency_key,
+      .lease_id = launch.lease_id,
+      .fencing_token = launch.fencing_token,
+  };
+  const trainvm::Event worker_result{
+      .event_id = dispatch.dispatch_id + ":result",
+      .run_id = run_id,
+      .run_revision = 5,
+      .plan_revision = 1,
+      .node_id = launch.node_id,
+      .attempt_id = launch.attempt_id,
+      .worker_sequence = 1,
+      .event_type = "worker.completed",
+      .event_version = 1,
+      .wall_time_ns = 1'400,
+      .monotonic_time_ns = 1,
+      .optimizer_step = 5'500,
+      .payload = {{"reason", "training_complete"}},
+  };
+  (void)state.controller->handle_event(worker_result, session,
+                                       test_time(1'400));
+  return state;
+}
+
+void test_typed_cache_qualification_executor() {
+  const auto compiled = trainvm::compile_document(cache_qualification_fixture());
+  check(compiled.valid(),
+        "cache qualification fixture compiles");
+  if (!compiled.valid()) {
+    for (const auto& diagnostic : compiled.diagnostics) {
+      std::cerr << "  " << diagnostic.code << " " << diagnostic.path << " "
+                << diagnostic.message << '\n';
+    }
+    return;
+  }
+
+  const auto rejects_with = [](nlohmann::json document,
+                               std::string_view code) {
+    const auto result = trainvm::compile_document(std::move(document));
+    return !result.valid() &&
+           std::ranges::any_of(result.diagnostics,
+                               [&](const trainvm::Diagnostic& diagnostic) {
+                                 return diagnostic.code == code;
+                               });
+  };
+  auto missing_rejection = cache_qualification_fixture();
+  missing_rejection["spec"]["workflow"]["nodes"]["qualify_cache_artifact"]
+                   ["transitions"].erase(1);
+  auto wrong_effect = cache_qualification_fixture();
+  wrong_effect["spec"]["workflow"]["nodes"]["qualify_cache_artifact"]
+              ["effect"] = "process";
+  auto undeclared_phase = cache_qualification_fixture();
+  undeclared_phase["spec"]["execution"].erase("qualify");
+  check(rejects_with(std::move(missing_rejection),
+                     "workflow.cache_qualification_transition") &&
+            rejects_with(std::move(wrong_effect),
+                         "workflow.cache_qualification") &&
+            rejects_with(std::move(undeclared_phase),
+                         "workflow.cache_qualification_phase"),
+        "cache qualification topology requires both verdicts, an exact typed operation, and a declared qualify phase");
+
+  auto qualified_run = start_cache_qualification_run(*compiled.plan, "pass");
+  check(qualified_run.controller->state().current_node_id ==
+            "qualify_cache_artifact",
+        "worker completion enters the typed cache qualification gate");
+
+  const trainvm::CacheQualificationReceipt passing =
+      trainvm::qualify_cache_artifact(passing_cache_evidence());
+  auto forged = passing;
+  forged.qualified = false;
+  forged.rejection_reasons = {"output_parity_failed"};
+  bool forged_verdict_rejected = false;
+  try {
+    (void)qualified_run.controller->complete_cache_qualification(
+        forged, test_time(1'500));
+  } catch (const std::exception&) {
+    forged_verdict_rejected = true;
+  }
+  bool lease_release_refused = false;
+  try {
+    (void)qualified_run.controller->complete_managed_builtin(
+        "qualify_cache", "cache.qualified", true, test_time(1'500));
+  } catch (const std::logic_error&) {
+    lease_release_refused = true;
+  }
+  bool wrong_event_refused = false;
+  try {
+    (void)qualified_run.controller->complete_managed_builtin(
+        "qualify_cache", "resource.released", false, test_time(1'500));
+  } catch (const std::logic_error&) {
+    wrong_event_refused = true;
+  }
+  check(forged_verdict_rejected && lease_release_refused && wrong_event_refused,
+        "the gate rejects a forged verdict, a lease-releasing gate, and an off-contract receipt event");
+
+  const auto& advanced =
+      qualified_run.controller->complete_cache_qualification(passing,
+                                                             test_time(1'500));
+  const auto events =
+      qualified_run.journal->events_for_run("cache-qualification-run");
+  const auto verdict = std::ranges::find_if(
+      events, [](const trainvm::Event& event) {
+        return event.event_type == "cache.qualified";
+      });
+  const auto receipts = std::ranges::count_if(
+      events, [](const trainvm::Event& event) {
+        return event.event_type == "node.dispatch_completed" &&
+               event.node_id == "qualify_cache_artifact";
+      });
+  trainvm::Controller restarted(*compiled.plan, *qualified_run.journal,
+                                "cache-qualification-run");
+  const auto& recovered = restarted.recover();
+  std::string chain_reason;
+  check(advanced.current_node_id == "release_gpu" && receipts == 1 &&
+            verdict != events.end() && verdict->worker_sequence == 0U &&
+            verdict->payload.value("receipt_digest", std::string{}) ==
+                passing.receipt_digest &&
+            verdict->payload.value("qualified", false) &&
+            recovered == advanced &&
+            qualified_run.journal->verify_chain(&chain_reason),
+        "a qualified verdict commits one receipt bound to its gate digest and replays identically");
+  check(qualified_run.journal->active_lease(
+            qualified_run.lease.concurrency_key, test_time(1'500)).has_value(),
+        "the qualification gate keeps the fence it ran under");
+
+  auto rejected_run = start_cache_qualification_run(*compiled.plan, "reject");
+  auto failing_evidence = passing_cache_evidence();
+  failing_evidence.candidate_throughput = 101.0;  // below the declared gain gate
+  failing_evidence.resumed_trajectory_parity = false;
+  const trainvm::CacheQualificationReceipt rejection =
+      trainvm::qualify_cache_artifact(failing_evidence);
+  const auto& failed =
+      rejected_run.controller->complete_cache_qualification(rejection,
+                                                           test_time(1'500));
+  const auto rejected_events =
+      rejected_run.journal->events_for_run("cache-qualification-run");
+  const auto rejection_event = std::ranges::find_if(
+      rejected_events, [](const trainvm::Event& event) {
+        return event.event_type == "cache.rejected";
+      });
+  check(!rejection.qualified &&
+            rejection.rejection_reasons ==
+                std::vector<std::string>({"resumed_trajectory_parity_failed",
+                                          "throughput_gate_failed"}) &&
+            failed.status == trainvm::ExecutionStatus::failed &&
+            rejection_event != rejected_events.end() &&
+            rejection_event->payload.at("rejection_reasons") ==
+                nlohmann::json(rejection.rejection_reasons),
+        "a rejected candidate routes to the declared failure path with attributable reasons");
+
+  std::filesystem::remove_all(qualified_run.directory);
+  std::filesystem::remove_all(rejected_run.directory);
 }
 
 void test_concurrent_worker_launch_and_readiness_replay() {
@@ -8485,6 +9065,8 @@ void test_service_registry_and_reconciliation() {
                            trainvm::TrainingComponentCategory::activation}},
             };
       }
+      const trainvm::AdapterRegistry expected_operation_registry(
+          training_profiles);
       const auto database_path = directory / "training-components.db";
       std::string journal_id;
       {
@@ -8514,8 +9096,14 @@ void test_service_registry_and_reconciliation() {
       trainvm::v1::DescriptorResponse descriptor_response;
       const grpc::Status descriptor_status = service.GetDescriptor(
           nullptr, &descriptor_request, &descriptor_response);
+      trainvm::v1::DescriptorRequest operations_request;
+      operations_request.set_adapter("trainvm.operations");
+      operations_request.set_version("1.0.0");
+      trainvm::v1::DescriptorResponse operations_response;
+      const grpc::Status operations_status = service.GetDescriptor(
+          nullptr, &operations_request, &operations_response);
       trainvm::v1::DescriptorRequest unknown_descriptor;
-      unknown_descriptor.set_adapter("trainvm.training-components");
+      unknown_descriptor.set_adapter("trainvm.operations");
       unknown_descriptor.set_version("2.0.0");
       trainvm::v1::DescriptorResponse unknown_descriptor_response;
       const grpc::Status unknown_descriptor_status = service.GetDescriptor(
@@ -8555,6 +9143,16 @@ void test_service_registry_and_reconciliation() {
                     fixture_training_component_registry().registry_digest() &&
                 nlohmann::json::parse(descriptor_response.schema_json()) ==
                     fixture_training_component_registry().document_json() &&
+                operations_status.ok() &&
+                operations_response.schema_hash() ==
+                    expected_operation_registry
+                        .operation_descriptors_digest() &&
+                nlohmann::json::parse(operations_response.schema_json()) ==
+                    expected_operation_registry
+                        .operation_descriptors_json() &&
+                nlohmann::json::parse(operations_response.schema_json())
+                        .at("operations")
+                        .size() == 6U &&
                 unknown_descriptor_status.error_code() ==
                     grpc::StatusCode::NOT_FOUND &&
                 preview.training_component_lock_digest().starts_with(
@@ -8651,6 +9249,67 @@ void test_adapter_registry_and_reconciler() {
                 trainvm::ResumeGrade::exact,
         "adapter registry resolves exact authority-owned operation and lifecycle profiles while allowing a stateless process node in an exact-recovery plan");
 
+  const auto rejects_authoring_plan = [&](const trainvm::CompiledPlan& plan,
+                                          std::vector<trainvm::AdapterProfile>
+                                              profiles =
+                                                  fixture_adapter_profiles()) {
+    try {
+      trainvm::AdapterRegistry(std::move(profiles)).validate_plan(plan);
+    } catch (const trainvm::AdapterResolutionError&) {
+      return true;
+    }
+    return false;
+  };
+  auto missing_input_plan = *compiled.plan;
+  missing_input_plan.experiment.spec.workflow.nodes.at("train_to_boundary")
+      .invoke.inputs.erase("config");
+  auto unknown_input_plan = *compiled.plan;
+  unknown_input_plan.experiment.spec.workflow.nodes.at("train_to_boundary")
+      .invoke.inputs.emplace("invented", trainvm::Binding{
+                                        .literal = "value",
+                                        .parameter = std::nullopt,
+                                        .artifact = std::nullopt,
+                                        .control = std::nullopt,
+                                        .context = std::nullopt,
+                                        .node_output = std::nullopt,
+                                    });
+  auto wrong_value_type_plan = *compiled.plan;
+  auto& wrong_value_binding = wrong_value_type_plan.experiment.spec.workflow
+                                  .nodes.at("train_to_boundary")
+                                  .invoke.inputs.at("stop_at_step");
+  wrong_value_binding.parameter.reset();
+  wrong_value_binding.literal = "not-an-integer";
+  auto wrong_artifact_type_plan = *compiled.plan;
+  wrong_artifact_type_plan.experiment.spec.workflow.nodes.at("resume_training")
+      .invoke.inputs.at("checkpoint").artifact = "eval_gallery";
+  auto wrong_artifact_schema_plan = *compiled.plan;
+  wrong_artifact_schema_plan.experiment.spec.artifacts.at("encoder_cache")
+      .schema = "rwkv-lab.wrong-cache.v1";
+  auto undeclared_publish_plan = *compiled.plan;
+  undeclared_publish_plan.experiment.spec.workflow.nodes.at("train_to_boundary")
+      .publishes->emplace("invented", "checkpoint");
+  auto required_output_profiles = fixture_adapter_profiles();
+  const auto required_output_profile = std::ranges::find_if(
+      required_output_profiles, [](const trainvm::AdapterProfile& profile) {
+        return profile.key.operation == "train";
+      });
+  if (required_output_profile != required_output_profiles.end()) {
+    required_output_profile->authoring->outputs.at("checkpoint").required =
+        true;
+  }
+  auto missing_output_plan = *compiled.plan;
+  missing_output_plan.experiment.spec.workflow.nodes.at("train_to_boundary")
+      .publishes->erase("checkpoint");
+  check(rejects_authoring_plan(missing_input_plan) &&
+            rejects_authoring_plan(unknown_input_plan) &&
+            rejects_authoring_plan(wrong_value_type_plan) &&
+            rejects_authoring_plan(wrong_artifact_type_plan) &&
+            rejects_authoring_plan(wrong_artifact_schema_plan) &&
+            rejects_authoring_plan(undeclared_publish_plan) &&
+            rejects_authoring_plan(missing_output_plan,
+                                   std::move(required_output_profiles)),
+        "operation authoring authority rejects missing and unknown inputs, value and artifact contract mismatches, undeclared publishes, and omitted required outputs");
+
   auto compatible_train_profiles = fixture_adapter_profiles();
   const auto compatible_train = std::ranges::find_if(
       compatible_train_profiles, [](const trainvm::AdapterProfile& profile) {
@@ -8710,6 +9369,11 @@ void test_adapter_registry_and_reconciler() {
             .model_family = "mageflow",
             .slots = {{"backbone_activation",
                        trainvm::TrainingComponentCategory::activation}},
+            .allowed_components = std::map<
+                std::string, std::vector<trainvm::TrainingComponentKey>>{
+                {"backbone_activation",
+                 {{trainvm::TrainingComponentCategory::activation,
+                   "silu", "1.0.0"}}}},
         };
   }
   const auto rejects_composition_plan = [](
@@ -8738,6 +9402,7 @@ void test_adapter_registry_and_reconciler() {
   bool wrong_family_rejected = false;
   bool wrong_slot_rejected = false;
   bool wrong_category_rejected = false;
+  bool disallowed_component_rejected = false;
   if (composed.valid()) {
     auto wrong_family = *composed.plan;
     wrong_family.experiment.spec.workflow.nodes.at("train_to_boundary")
@@ -8757,11 +9422,19 @@ void test_adapter_registry_and_reconciler() {
         .key.category = trainvm::TrainingComponentCategory::optimizer;
     wrong_category_rejected =
         rejects_composition_plan(composed_profiles, wrong_category);
+    auto disallowed_component = *composed.plan;
+    disallowed_component.experiment.spec.workflow.nodes
+        .at("train_to_boundary")
+        .invoke.training->components.at("backbone_activation")
+        .key.name = "gelu";
+    disallowed_component_rejected =
+        rejects_composition_plan(composed_profiles, disallowed_component);
   }
   check(exact_composition_accepted && missing_composition_rejected &&
             undeclared_composition_rejected && wrong_family_rejected &&
-            wrong_slot_rejected && wrong_category_rejected,
-        "adapter profiles close the exact training model family, slot names, and categories before worker launch");
+            wrong_slot_rejected && wrong_category_rejected &&
+            disallowed_component_rejected,
+        "adapter profiles close the exact training model family, slot names, categories, and component allowlists before worker launch");
 
   const auto rejects_lifecycle = [](trainvm::OperationLifecycleCapabilities lifecycle) {
     auto profiles = fixture_adapter_profiles();
@@ -12028,7 +12701,10 @@ int main() {
     test_graceful_cancel_lifecycle();
     test_resource_releasing_pause_lifecycle();
     test_adversarial_control_idempotency_and_replay();
+    test_topology_selection_compiles_and_refuses_invalid_combinations();
+    test_checked_in_topology_example_compiles();
     test_typed_managed_resource_release();
+    test_typed_cache_qualification_executor();
     test_concurrent_worker_launch_and_readiness_replay();
     test_concurrent_fenced_result_content_conflict();
     test_concurrent_queue_acquisition_replay();

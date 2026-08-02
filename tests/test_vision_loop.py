@@ -469,12 +469,18 @@ def test_stack_legacy_fla_caches_rejects_nonbatch_shape_mismatch():
         stack_legacy_fla_caches([first, second])
 
 
+@pytest.mark.fla
 def test_stack_installed_legacy_fla_cache_preserves_layer_states():
     # The installed LegacyFLACache accepts only list (not tuple) in
     # from_legacy_cache. Exercise the real dependency so that silent empty
     # cache regression cannot pass the protocol-only fake. CPU-only
     # environments deliberately omit fla (the RWKV-7 kernel falls back to the
     # pure-Python reference), so skip rather than fail there.
+    #
+    # The importorskip below is what keeps the default CPU job green, and the
+    # `fla` marker is what stops that skip from silently deleting the coverage:
+    # the fla-dependency CI job installs the real package and runs `-m fla`,
+    # where pytest exits 5 (no tests collected) if this marker ever disappears.
     InstalledFLACache = pytest.importorskip(
         "fla.models.utils",
         reason="requires the optional fla dependency",

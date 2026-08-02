@@ -155,6 +155,34 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+# Local Mage-Flow-Base weights. This was a bare absolute path that existed only
+# on the maintainer's host, so every TerminalExpertTrainConfig built elsewhere
+# inherited it and failed validation on a path the user never chose.
+#
+# Resolution order, chosen so the maintainer's runs behave exactly as before:
+#   1. MAGE_FLOW_BASE_PATH, for hosts that cache the weights somewhere else;
+#   2. the historical path, but only when it actually exists;
+#   3. None, meaning "not cached locally" — the run resolves by model_id.
+#
+# Step 2 is deliberately existence-checked rather than unconditional: an
+# absolute default that is merely absent should not be an error, because the
+# caller never asked for it. A path the caller DID supply is still validated.
+MAGE_FLOW_BASE_LOCAL_PATH_ENV = "MAGE_FLOW_BASE_PATH"
+MAGE_FLOW_BASE_HISTORICAL_PATH = (
+    "/thearray/git/ob/text-generation-webui/models/Mage-Flow-Base"
+)
+
+
+def default_model_path() -> str | None:
+    """Best-effort local Mage-Flow-Base directory, or None when uncached."""
+    configured = os.environ.get(MAGE_FLOW_BASE_LOCAL_PATH_ENV)
+    if configured:
+        return configured
+    if Path(MAGE_FLOW_BASE_HISTORICAL_PATH).expanduser().is_dir():
+        return MAGE_FLOW_BASE_HISTORICAL_PATH
+    return None
+
+
 @dataclass
 class TerminalExpertTrainConfig:
     domain: str
@@ -166,9 +194,7 @@ class TerminalExpertTrainConfig:
     resume_from: str | None = None
     model_id: str = MAGE_FLOW_BASE_ID
     model_revision: str = MAGE_FLOW_BASE_REVISION
-    model_path: str | None = (
-        "/thearray/git/ob/text-generation-webui/models/Mage-Flow-Base"
-    )
+    model_path: str | None = field(default_factory=lambda: default_model_path())
     official_source_revision: str = MAGE_SOURCE_REVISION
     max_steps: int = 2_000
     microbatch_size: int = 1
@@ -256,7 +282,12 @@ class TerminalExpertTrainConfig:
         if self.model_revision != MAGE_FLOW_BASE_REVISION:
             raise ValueError("unqualified Mage-Flow revision")
         if self.model_path and not Path(self.model_path).expanduser().is_dir():
-            raise ValueError("local Mage-Flow model path does not exist")
+            raise ValueError(
+                "local Mage-Flow model path does not exist: "
+                f"{self.model_path!r}. Set model_path explicitly, set "
+                f"${MAGE_FLOW_BASE_LOCAL_PATH_ENV} to where Mage-Flow-Base is "
+                "cached on this host, or leave it unset to resolve by model_id."
+            )
         if self.official_source_revision != MAGE_SOURCE_REVISION:
             raise ValueError("unqualified Mage source revision")
         if not Path(self.train_manifest).expanduser().is_file():

@@ -583,6 +583,8 @@
   let vmObservability = null;
   let vmMetricRenderSignature = null;
   let vmArtifactRenderSignature = null;
+  const vmEvalGallerySchema = "rwkv-lab.eval-gallery.v2";
+  const vmMetricSeriesLimit = 512;
   const vmMetricSeries = new Map();
   const vmArtifacts = new Map();
   const vmCheckpointSummaries = new Map();
@@ -590,6 +592,7 @@
   let vmGalleryIndex = -1;
   let vmGalleryManual = false;
   let vmGallerySignature = "";
+  let vmGalleryHistoryTruncated = false;
   let vmGalleryLoadGeneration = 0;
   let vmProfileSignature = "";
   let vmProfiles = [];
@@ -647,7 +650,16 @@
       fact("optimizer step", Number(run.optimizer_step || 0).toLocaleString()) +
       fact("revision", String(run.run_revision || 0)) +
       fact("experiment", run.experiment_name, run.experiment_name) +
-      fact("plan", String(run.plan_hash || "").slice(0, 12), run.plan_hash);
+      fact("plan", String(run.plan_hash || "").slice(0, 12), run.plan_hash) +
+      // Lineage is shown only when the authority reports it. A run with no
+      // parent shows nothing rather than an invented "root", so provenance is
+      // never something the view guessed.
+      (run.forked_from_run_id
+        ? fact(
+            "forked from",
+            `${run.forked_from_run_id} · r${run.forked_from_run_revision || 0}`,
+            `parent plan ${run.forked_from_plan_hash || "unknown"}`)
+        : "");
     renderVMActions();
   }
 
@@ -724,6 +736,35 @@
     const state = document.getElementById("vm-workflow-state");
     if (graph) graph.innerHTML = `<div class="empty">${runID ? "loading authority plan…" : "select a native run"}</div>`;
     if (state) state.textContent = runID ? "loading immutable plan" : "select a native run";
+  }
+
+  function resetVMControls(runID = "") {
+    vmControlRun = "";
+    vmControlView = null;
+    const retry = runID ? vmControlRetries.get(runID) : null;
+    vmPendingControls = retry ? cloneVMValues(retry.assignments) : {};
+    vmControlIntent = retry?.intent || "";
+    vmInvalidControls.clear();
+    if (vmControlLoadAbort) vmControlLoadAbort.abort();
+    vmControlLoadAbort = null;
+    vmControlLoadGeneration += 1;
+    const target = document.getElementById("vm-control-catalog");
+    if (target) target.innerHTML = runID ? '<div class="empty">loading declared controls…</div>' : '<div class="empty">select a native run</div>';
+    const history = document.getElementById("vm-control-history");
+    if (history) history.innerHTML = '<div class="empty">no command history loaded</div>';
+    const apply = document.getElementById("vm-control-apply");
+    if (apply) apply.disabled = true;
+    const reason = document.getElementById("vm-control-reason");
+    if (reason) {
+      reason.value = retry?.reason || "";
+      reason.disabled = true;
+    }
+    const state = document.getElementById("vm-control-state");
+    if (state) {
+      state.textContent = retry ? "outcome unknown · retry exact request" :
+        (runID ? "loading selected run…" : "no run selected");
+      state.className = retry ? "sub error" : "sub";
+    }
   }
 
   function vmWorkflowModel(plan) {
@@ -937,33 +978,10 @@
     vmSelectionGeneration += 1;
     vmSelectedRun = null;
     publishVMRunSelection(null);
-    vmControlRun = "";
-    vmControlView = null;
-    vmPendingControls = {};
-    vmControlIntent = "";
-    vmInvalidControls.clear();
     resetVMWorkflow(runID);
     resetVMGallery(runID);
     resetVMProfiles(runID);
-    if (vmControlLoadAbort) vmControlLoadAbort.abort();
-    vmControlLoadAbort = null;
-    vmControlLoadGeneration += 1;
-    const target = document.getElementById("vm-control-catalog");
-    if (target) target.innerHTML = runID ? '<div class="empty">loading declared controls…</div>' : '<div class="empty">select a native run</div>';
-    const history = document.getElementById("vm-control-history");
-    if (history) history.innerHTML = '<div class="empty">no command history loaded</div>';
-    const apply = document.getElementById("vm-control-apply");
-    if (apply) apply.disabled = true;
-    const reason = document.getElementById("vm-control-reason");
-    if (reason) {
-      reason.value = "";
-      reason.disabled = true;
-    }
-    const state = document.getElementById("vm-control-state");
-    if (state) {
-      state.textContent = runID ? "loading selected run…" : "no run selected";
-      state.className = "sub";
-    }
+    resetVMControls(runID);
     const actionRetry = vmActionRetries.get(runID);
     const actionReason = document.getElementById("vm-action-reason");
     if (actionReason) {
@@ -985,6 +1003,7 @@
     vmGalleryIndex = -1;
     vmGalleryManual = false;
     vmGallerySignature = "";
+    vmGalleryHistoryTruncated = false;
     vmGalleryLoadGeneration += 1;
     const range = document.getElementById("vm-gallery-range");
     const latest = document.getElementById("vm-gallery-latest");
@@ -1044,7 +1063,28 @@
       Number(profile.skip_steps) === Number(baseline.skip_steps) &&
       Number(profile.warmup_steps) === Number(baseline.warmup_steps) &&
       JSON.stringify(profile.activities || []) === JSON.stringify(baseline.activities || []) &&
-      JSON.stringify(profile.options || {}) === JSON.stringify(baseline.options || {});
+      JSON.stringify(profile.options || {}) === JSON.stringify(baseline.options || {}) &&
+      profile.execution_phases?.overlaps_warmup === baseline.execution_phases?.overlaps_warmup;
+  }
+
+  function vmProfilePhaseSummary(profile) {
+    const phases = profile?.execution_phases;
+    if (!phases) return "";
+    const declared = (field) => Object.prototype.hasOwnProperty.call(phases, field);
+    const compile = declared("compile_enabled") ? `compile ${phases.compile_enabled ? "on" : "off"}` : "compile undeclared";
+    let warmup = "warmup undeclared";
+    if (declared("warmup_enabled")) {
+      warmup = phases.warmup_enabled ?
+        (declared("warmup_steps_declared") ? `warmup ${Number(phases.warmup_steps_declared).toLocaleString()} steps` : "warmup steps unknown") :
+        "warmup off";
+    }
+    let qualify = "qualify undeclared";
+    if (declared("qualify_enabled")) {
+      qualify = phases.qualify_enabled ?
+        (declared("qualify_steps") ? `qualify ${Number(phases.qualify_steps).toLocaleString()} steps` : "qualify steps unknown") :
+        "qualify off";
+    }
+    return `${compile} · ${warmup} · ${qualify}`;
   }
 
   function vmSignedPercent(current, baseline) {
@@ -1065,12 +1105,14 @@
     const state = document.getElementById("vm-profile-state");
     const target = document.getElementById("vm-profile-items");
     const baseline = profiles.find((profile) => profile.artifact_id === vmProfileBaseline);
+    const phaseSummary = vmProfilePhaseSummary(profiles.find((profile) => profile.execution_phases));
     if (state) state.textContent = profiles.length ?
-      `${profiles.length} restricted trace${profiles.length === 1 ? "" : "s"} · ${baseline ? "baseline selected" : "choose a baseline"} · explicit download only` :
+      `${profiles.length} restricted trace${profiles.length === 1 ? "" : "s"} · ${phaseSummary ? `${phaseSummary} · ` : ""}${baseline ? "baseline selected" : "choose a baseline"} · explicit download only` :
       "no published traces";
     if (!target) return;
     target.innerHTML = profiles.map((profile) => {
       const summary = profile.summary || {};
+      const phases = profile.execution_phases;
       const operators = Array.isArray(summary.top_operators) ? summary.top_operators.slice(0, 5) : [];
       const windowLabel = `${Number(profile.first_optimizer_step || 0).toLocaleString()}–${Number(profile.last_optimizer_step || 0).toLocaleString()}`;
       const richSummary = vmProfileHasRichSummary(profile);
@@ -1092,6 +1134,12 @@
         }
       }
       let comparison = "";
+      let phaseQualifier = "";
+      if (phases?.overlaps_warmup === true) {
+        phaseQualifier = '<div class="vm-profile-phase"><strong>warmup overlap</strong><span>capture includes declared execution warmup; treat metrics as non-steady-state</span></div>';
+      } else if (phases && phases.overlaps_warmup === null) {
+        phaseQualifier = '<div class="vm-profile-phase"><strong>warmup overlap unknown</strong><span>warmup is enabled without a declared step count; steady-state status cannot be determined</span></div>';
+      }
       if (baseline && profile.artifact_id === baseline.artifact_id) {
         comparison = '<div class="vm-profile-comparison"><strong>comparison baseline</strong><span>other compatible windows are normalized against this trace</span></div>';
       } else if (baseline && vmProfilesComparable(profile, baseline)) {
@@ -1103,7 +1151,7 @@
           `<span>peak allocated ${vmEscape(vmSignedPercent(summary.allocator_peak_allocated_bytes, baseSummary.allocator_peak_allocated_bytes))}</span>` +
           `${Number.isFinite(Number(summary.input_stall_ratio)) && Number.isFinite(Number(baseSummary.input_stall_ratio)) ? `<span>input stall ${vmEscape(vmSignedPoints(summary.input_stall_ratio, baseSummary.input_stall_ratio))}</span>` : ""}</div>`;
       } else if (baseline) {
-        comparison = '<div class="vm-profile-comparison incompatible"><strong>not comparable</strong><span>node, backend, schedule, activities, or profiler options differ</span></div>';
+        comparison = '<div class="vm-profile-comparison incompatible"><strong>not comparable</strong><span>node, backend, schedule, activities, profiler options, or warmup status differ</span></div>';
       }
       return `<article class="vm-profile-card${baseline && profile.artifact_id === baseline.artifact_id ? " baseline" : ""}">` +
         `<div class="vm-profile-head"><strong title="${vmEscape(profile.artifact_id)}">${vmEscape(profile.backend)} · steps ${vmEscape(windowLabel)}</strong><span>#${Number(profile.sequence || 0).toLocaleString()}</span></div>` +
@@ -1113,6 +1161,7 @@
         `<div class="vm-profile-operators">${operators.map((operator) =>
           `<div class="vm-profile-operator"><span title="${vmEscape(operator.name)}">${vmEscape(operator.name)}</span><span>${Number(operator.calls || 0).toLocaleString()}×</span><span>${vmEscape(vmDurationUS(operator.accelerator_time_us))}</span></div>`
         ).join("") || '<span class="vm-profile-meta">no operator rows in summary</span>'}</div>` +
+        phaseQualifier +
         comparison +
         `<div class="vm-profile-meta">${vmEscape(profile.attempt_id)} · ${Number(profile.capture_steps || 0)} captured · ${Number(profile.skip_steps || 0)} skipped · ${Number(profile.warmup_steps || 0)} warmup</div>` +
         `<button type="button" class="vm-profile-baseline" data-artifact="${vmEscape(profile.artifact_id)}" aria-pressed="${baseline && profile.artifact_id === baseline.artifact_id ? "true" : "false"}" ${richSummary ? "" : "disabled"}>${baseline && profile.artifact_id === baseline.artifact_id ? "selected baseline" : "use as comparison baseline"}</button>` +
@@ -1137,7 +1186,7 @@
       if (!response.ok) throw new Error((await response.text()).trim() || `HTTP ${response.status}`);
       const profiles = await response.json();
       if (!Array.isArray(profiles)) throw new Error("profile response is not an array");
-      const signature = JSON.stringify(profiles.map((profile) => [profile.sequence, profile.artifact_id, profile.trace_sha256]));
+      const signature = JSON.stringify(profiles.map((profile) => [profile.sequence, profile.artifact_id, profile.trace_sha256, profile.execution_phases]));
       if (!force && signature === vmProfileSignature) return;
       vmProfileSignature = signature;
       vmProfiles = profiles;
@@ -1167,11 +1216,17 @@
     }
     if (latest) latest.disabled = !vmGalleries.length || vmGalleryIndex === vmGalleries.length - 1;
     if (state) state.textContent = vmGalleries.length ?
-      `${vmGalleryIndex + 1}/${vmGalleries.length} immutable revisions${vmGalleryManual ? " · pinned" : " · following latest"}` :
-      "no published revisions";
+      `${vmGalleryIndex + 1}/${vmGalleries.length} retained immutable revisions${vmGalleryHistoryTruncated ? " · older history truncated" : ""}${vmGalleryManual ? " · pinned" : " · following latest"}` :
+      (vmGalleryHistoryTruncated ? "no gallery in retained history · older artifacts truncated" : "no published revisions");
     if (revision) revision.textContent = gallery ?
       `${vmEscape(gallery.step_domain)} ${Number(gallery.step || 0).toLocaleString()} · ${vmEscape(gallery.attempt_id)} · #${Number(gallery.sequence || 0).toLocaleString()}` :
-      "no rwkv-lab.eval-gallery.v2 artifact published";
+      "no declared eval gallery artifact published";
+  }
+
+  function vmIsDeclaredGallery(artifact) {
+    const logicalName = String(vmObservability?.eval_gallery_artifact || "");
+    return Boolean(logicalName) && artifact?.kind === "image_gallery" &&
+      artifact?.schema === vmEvalGallerySchema && artifact?.logical_name === logicalName;
   }
 
   function renderVMGallery(gallery) {
@@ -1226,13 +1281,21 @@
       const response = await fetch(`/api/trainvm/runs/${encodeURIComponent(runID)}/galleries`, { cache: "no-store" });
       if (selectionGeneration !== vmSelectionGeneration || runID !== vmSelected) return;
       if (!response.ok) throw new Error((await response.text()).trim() || `HTTP ${response.status}`);
-      const galleries = await response.json();
-      if (selectionGeneration !== vmSelectionGeneration || runID !== vmSelected || !Array.isArray(galleries)) return;
-      const signature = JSON.stringify(galleries.map((gallery) => [gallery.sequence, gallery.artifact_id, gallery.step, gallery.item_count]));
+      const history = await response.json();
+      const galleries = history?.galleries;
+      if (selectionGeneration !== vmSelectionGeneration || runID !== vmSelected) return;
+      if (!Array.isArray(galleries) || typeof history?.history_truncated !== "boolean") {
+        throw new Error("gallery history response is malformed");
+      }
+      const signature = JSON.stringify([
+        history.history_truncated,
+        galleries.map((gallery) => [gallery.sequence, gallery.artifact_id, gallery.step, gallery.item_count]),
+      ]);
       if (!force && signature === vmGallerySignature) return;
       const pinnedArtifact = vmGalleryManual ? vmGalleries[vmGalleryIndex]?.artifact_id : "";
       vmGalleries = galleries;
       vmGallerySignature = signature;
+      vmGalleryHistoryTruncated = history.history_truncated;
       vmGalleryIndex = pinnedArtifact ? galleries.findIndex((gallery) => gallery.artifact_id === pinnedArtifact) : galleries.length - 1;
       if (vmGalleryIndex < 0 && galleries.length) {
         vmGalleryIndex = galleries.length - 1;
@@ -1246,6 +1309,7 @@
       }
     } catch (error) {
       if (selectionGeneration !== vmSelectionGeneration || runID !== vmSelected) return;
+      resetVMGallery(runID);
       const target = document.getElementById("vm-gallery-items");
       if (target) target.innerHTML = `<div class="empty">gallery history unavailable · ${vmEscape(error.message)}</div>`;
     }
@@ -1593,18 +1657,25 @@
 
   async function appendVMTimeline() {
     if (!vmSelected) return;
+    const runID = vmSelected;
+    const selectionGeneration = vmSelectionGeneration;
+    const requestedAfter = vmAfter;
     const response = await fetch(
-      `/api/trainvm/runs/${encodeURIComponent(vmSelected)}/timeline?after=${vmAfter}&limit=1000`,
+      `/api/trainvm/runs/${encodeURIComponent(runID)}/timeline?after=${requestedAfter}&limit=1000`,
       { cache: "no-store" });
+    if (selectionGeneration !== vmSelectionGeneration || runID !== vmSelected ||
+        requestedAfter !== vmAfter) return;
     if (!response.ok) return;
     const events = await response.json();
+    if (selectionGeneration !== vmSelectionGeneration || runID !== vmSelected ||
+        requestedAfter !== vmAfter) return;
     if (!Array.isArray(events) || !events.length) return;
     const target = document.getElementById("trainvm-timeline");
     if (!target) return;
     if (vmAfter === 0) target.textContent = "";
     const fragment = document.createDocumentFragment();
     for (const event of events) {
-      if (event.run_id !== vmSelected) continue;
+      if (event.run_id !== runID) continue;
       if (event.node_id) vmVisitedNodes.add(event.node_id);
       const row = document.createElement("div");
       row.className = "vm-event";
@@ -1654,7 +1725,7 @@
     if (!vmSelected) return;
     const selected = vmSelected;
     const response = await fetch(
-      `/api/trainvm/runs/${encodeURIComponent(selected)}/checkpoints`,
+      `/api/trainvm/runs/${encodeURIComponent(selected)}/checkpoints?limit=250`,
       { cache: "no-store" });
     if (!response.ok || selected !== vmSelected) return;
     const checkpoints = await response.json();
@@ -1676,6 +1747,10 @@
         });
       }
     }
+    while (vmArtifacts.size > 1000) vmArtifacts.delete(vmArtifacts.keys().next().value);
+    while (vmCheckpointSummaries.size > 1000) {
+      vmCheckpointSummaries.delete(vmCheckpointSummaries.keys().next().value);
+    }
     renderVMArtifacts();
   }
 
@@ -1691,19 +1766,16 @@
     const key = vmMetricKey(metric);
     let series = vmMetricSeries.get(key);
     if (!series) {
+      if (vmMetricSeries.size >= vmMetricSeriesLimit) return false;
       series = { key, descriptor: metric, points: [] };
       vmMetricSeries.set(key, series);
     }
-    if (series.points.some((point) => Number(point.sequence) === Number(metric.sequence))) return;
+    if (series.points.some((point) => Number(point.sequence) === Number(metric.sequence))) return true;
     series.descriptor = metric;
     series.points.push(metric);
     series.points.sort((left, right) => Number(left.sequence) - Number(right.sequence));
     if (series.points.length > 240) series.points.splice(0, series.points.length - 240);
-    if (vmMetricSeries.size > 64) {
-      const oldest = [...vmMetricSeries.values()].sort((left, right) =>
-        Number(left.points.at(-1)?.sequence || 0) - Number(right.points.at(-1)?.sequence || 0))[0];
-      if (oldest) vmMetricSeries.delete(oldest.key);
-    }
+    return true;
   }
 
   function vmSparkline(points) {
@@ -1843,7 +1915,7 @@
       const downloadable = ["sha256", "manifest_sha256"].includes(artifact.fingerprint_algorithm) &&
         /^[0-9a-f]{64}$/.test(fingerprint);
       const contentURL = `/api/trainvm/runs/${encodeURIComponent(vmSelected)}/artifacts/${encodeURIComponent(artifact.artifact_id)}/content?v=${encodeURIComponent(fingerprint)}&s=${encodeURIComponent(Number(artifact.sequence || 0))}`;
-      const special = artifact.kind === "image_gallery" && artifact.schema === "rwkv-lab.eval-gallery.v2" ?
+      const special = vmIsDeclaredGallery(artifact) ?
         `<button class="btn sm" type="button" data-vm-open-artifact="gallery" data-artifact="${vmEscape(artifact.artifact_id)}">open gallery</button>` :
         artifact.kind === "opaque" && artifact.schema === "trainvm.gpu-trace.v1" ?
           `<button class="btn sm" type="button" data-vm-open-artifact="profile" data-artifact="${vmEscape(artifact.artifact_id)}">open trace</button>` : "";
@@ -1962,10 +2034,15 @@
           vmLatestHeartbeat = heartbeat;
         }
       }
-      for (const metric of snapshot.metrics || []) ingestVMMetric(metric);
+      for (const metric of snapshot.metrics || []) {
+        if (!ingestVMMetric(metric)) {
+          renderVMObservabilityError(`run exceeds the ${vmMetricSeriesLimit}-series live metric bound`);
+          return;
+        }
+      }
       for (const artifact of snapshot.artifacts || []) {
         vmArtifacts.set(artifact.artifact_id, artifact);
-        galleryPublished ||= artifact.kind === "image_gallery" && artifact.schema === "rwkv-lab.eval-gallery.v2";
+        galleryPublished ||= vmIsDeclaredGallery(artifact);
         profilePublished ||= artifact.kind === "opaque" && artifact.schema === "trainvm.gpu-trace.v1";
         checkpointPublished ||= artifact.kind === "checkpoint";
       }
@@ -2047,9 +2124,32 @@
       if (selected && Number(selected.last_event_sequence || 0) < vmTelemetryAfter) {
         resetVMTelemetry();
       }
+      const previousSelectedRun = vmSelectedRun;
+      const immutableRunIdentityChanged = previousSelectedRun?.run_id === selected?.run_id &&
+        (String(previousSelectedRun?.plan_hash || "") !== String(selected?.plan_hash || "") ||
+         Number(selected?.run_revision || 0) < Number(previousSelectedRun?.run_revision || 0));
+      if (immutableRunIdentityChanged) {
+        // TrainVM requires a changed plan to create a new run. If one run ID
+        // changes plan hash or regresses revision, fail closed instead of
+        // combining histories whose declarations have different meanings.
+        vmSelectionGeneration += 1;
+        vmAfter = 0;
+        resetVMTelemetry();
+        resetVMGallery(selected.run_id);
+        resetVMProfiles(selected.run_id);
+        resetVMWorkflow(selected.run_id);
+        resetVMControls(selected.run_id);
+        vmSelectedRun = null;
+        publishVMRunSelection(null);
+        renderVMRunList(runs);
+        const timeline = document.getElementById("trainvm-timeline");
+        if (timeline) timeline.innerHTML = '<div class="empty">immutable run identity changed · history rejected</div>';
+        renderVMObservabilityError("authority changed an immutable run identity · create a new run for a new plan");
+        return;
+      }
       renderVMRunList(runs);
-      const previousObservedState = vmSelectedRun?.run_id === selected?.run_id ?
-        vmSelectedRun?.observed_state : "";
+      const previousObservedState = previousSelectedRun?.run_id === selected?.run_id ?
+        previousSelectedRun?.observed_state : "";
       vmSelectedRun = selected || null;
       publishVMRunSelection(vmSelectedRun);
       if (selected) {

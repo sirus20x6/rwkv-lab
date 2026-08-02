@@ -180,6 +180,7 @@ void registry_is_canonical_and_resolves_typed_configuration() {
            {.key = cosine_schedule().key,
             .configuration = nlohmann::json::object()}},
       },
+      .topologies = std::nullopt,
   };
   const auto resolved_composition =
       registry.resolve_composition(composition);
@@ -264,6 +265,7 @@ void compositions_extend_worker_authority() {
            {.key = cosine_schedule().key,
             .configuration = nlohmann::json::object()}},
       },
+      .topologies = std::nullopt,
   };
   const auto augmented = registry.augment_worker_launch_request(
       {.code_fingerprint = "sha256:" + std::string(64U, 'a'),
@@ -366,7 +368,7 @@ void checked_in_component_catalog_matches_native_authority_contract() {
   const trainvm::TrainingComponentRegistry registry =
       trainvm::TrainingComponentRegistry::load_file(
           std::filesystem::absolute(path));
-  check(registry.document_json().at("components").size() == 17U &&
+  check(registry.document_json().at("components").size() == 18U &&
             registry.registry_digest().starts_with("sha256:") &&
             registry.registry_digest().size() == 71U,
         "checked-in cross-family component catalog is a canonical native authority document");

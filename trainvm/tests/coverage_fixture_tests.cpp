@@ -213,6 +213,10 @@ trainvm::AdapterProfile external_profile(std::string adapter) {
       .code_fingerprint = "sha256:" + std::string(64U, 'a'),
       .required_capabilities = {},
       .lifecycle = {},
+      .authoring = trainvm::OperationAuthoringDeclaration{
+          .inputs = {},
+          .outputs = {},
+      },
   };
 }
 
@@ -302,6 +306,17 @@ void test_fixture_suite() {
                   "compiler-coverage",
           filename +
               ": family and fixture labels must match the reviewed manifest");
+    if (filename == "vision-distillation-training.json") {
+      const auto gallery = experiment.spec.artifacts.find("eval_gallery");
+      check(gallery != experiment.spec.artifacts.end() &&
+                gallery->second.type == trainvm::ArtifactType::image_gallery &&
+                gallery->second.schema ==
+                    std::optional<std::string>{"rwkv-lab.eval-gallery.v2"} &&
+                experiment.spec.observability.eval_gallery_artifact ==
+                    std::optional<std::string>{"eval_gallery"},
+            filename +
+                ": observability must use the common eval-gallery artifact contract");
+    }
     check_core_topology(experiment, filename);
   }
 }

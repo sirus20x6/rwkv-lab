@@ -85,6 +85,53 @@ jobs:
           path: evidence/
           if-no-files-found: warn
 
+  # The CPU job above deliberately omits flash-linear-attention, so any test
+  # asserting against the *real* package importorskips itself there. That skip
+  # is only honest if the assertion still runs somewhere, otherwise the suite
+  # keeps a test it never executes. This job installs the real dependency and
+  # runs exactly the `fla`-marked tests.
+  #
+  # No hand-maintained file list: selection is by marker, and pytest exits 5
+  # ("no tests collected") if the marker is ever dropped, so deleting the
+  # coverage fails this job instead of passing quietly.
+  python-fla:
+    name: fla dependency tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install (CPU torch + package + flash-linear-attention)
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e '.[vision,test,trainvm-worker]'
+          # Marker selection still imports every test module during collection,
+          # so this job needs the same module-scope optional dependencies as the
+          # CPU job even though it runs only the fla-marked tests.
+          pip install zstandard duckdb opencv-python-headless
+          # The real dependency this job exists to exercise. It is a CUDA-stack
+          # package, but importing it and driving its Cache type works on CPU.
+          pip install flash-linear-attention
+
+      - name: The fla-marked assertions run against the installed package
+        run: |
+          mkdir -p evidence
+          python -m pytest -q -m "fla and not gpu" tests \
+            --junitxml=evidence/python-fla.xml
+
+      - name: Publish evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-python-fla
+          path: evidence/
+          if-no-files-found: warn
+
   schema-golden:
     name: Schema and example documents
     runs-on: ubuntu-latest
@@ -97,6 +144,8 @@ jobs:
       - run: pip install jsonschema
       - name: Example experiment documents match the checked-in schema
         run: python scripts/validate_experiment_documents.py
+      - name: Benchmark fixtures match the qualification contract
+        run: python scripts/validate_benchmark_matrix.py
 
   go:
     name: Dashboard (Go)
@@ -126,9 +175,13 @@ jobs:
           if-no-files-found: warn
 
   # TrainVM requires GCC 16 with -freflection (C++26 P2996) plus protobuf,
-  # gRPC, yaml-cpp, nlohmann_json, OpenSSL and SQLite3. No GitHub-hosted runner
-  # image provides that toolchain, so this job targets a self-hosted runner and
-  # stays off until the repository variable TRAINVM_SELF_HOSTED is "true".
+  # gRPC, yaml-cpp, nlohmann_json, OpenSSL and SQLite3. The compiler is
+  # available -- the official gcc:16 image accepts -freflection -- but Debian
+  # ships no protobuf CMake config, and a source-built protobuf beside Debian's
+  # gRPC fails at generate time on a missing ALIAS target. A hosted job needs a
+  # purpose-built image with a matched protobuf/gRPC pair; see
+  # docs/experiment-vm/ACCEPTANCE_CI.md. Until then this targets a self-hosted
+  # runner and stays off unless TRAINVM_SELF_HOSTED is "true".
   # It is deliberately gated rather than emulated: a native job that cannot
   # build would report green while proving nothing. Until a runner exists, run
   # scripts/acceptance.sh locally -- it executes this same matrix.

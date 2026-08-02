@@ -782,6 +782,28 @@ void fill_run_summary(const RunProjection& projection, const Journal& journal,
   output.set_latest_requested_control_revision(requested);
   output.set_latest_effective_control_revision(effective);
   output.set_last_event_sequence(projection.last_event_sequence);
+  // Fork provenance is authority-owned history: it is read back from the
+  // durable run.created submission rather than carried on the mutable
+  // projection, so it cannot drift from what was actually fenced at creation.
+  if (const auto created = journal.event(projection.run_id + ":created");
+      created && created->payload.contains("submission")) {
+    const auto& submission = created->payload.at("submission");
+    if (submission.is_object() && submission.contains("forked_from")) {
+      const auto& forked = submission.at("forked_from");
+      if (forked.is_object() && forked.contains("run_id") &&
+          forked.contains("run_revision") && forked.contains("plan_hash") &&
+          forked.at("run_id").is_string() &&
+          forked.at("run_revision").is_number_unsigned() &&
+          forked.at("plan_hash").is_string()) {
+        output.set_forked_from_run_id(
+            forked.at("run_id").get<std::string>());
+        output.set_forked_from_run_revision(
+            forked.at("run_revision").get<std::uint64_t>());
+        output.set_forked_from_plan_hash(
+            forked.at("plan_hash").get<std::string>());
+      }
+    }
+  }
   const auto times = journal.run_wall_time_bounds(projection.run_id);
   if (times) {
     set_timestamp_ns(times->created_wall_time_ns, *output.mutable_created_at());
@@ -1231,6 +1253,7 @@ TrainVMService::TrainVMService(
     TrainingComponentRegistry training_components,
     std::optional<HostdClientConfiguration> hostd_configuration,
     std::string controller_target,
+    ICacheQualificationEvidenceResolver* cache_qualification,
     SqliteAuthorityEnforcementGrade filesystem_enforcement_grade)
     : TrainVMService(journal_path, std::move(adapter_registry),
                      std::move(host_launch_registry),
@@ -1238,7 +1261,7 @@ TrainVMService::TrainVMService(
                      std::move(authority_clock),
                      HostGrantEnforcement::required,
                      std::move(training_components), {}, {}, {},
-                     filesystem_enforcement_grade) {
+                     cache_qualification, filesystem_enforcement_grade) {
   if (hostd_configuration) {
     configure_hostd(*hostd_configuration, std::move(controller_target));
   }
@@ -1259,6 +1282,7 @@ TrainVMService::TrainVMService(
     std::shared_ptr<IHostGrantClient> host_grant_client,
     std::shared_ptr<IHostProcessClient> host_process_client,
     std::string controller_target,
+    ICacheQualificationEvidenceResolver* cache_qualification,
     SqliteAuthorityEnforcementGrade filesystem_enforcement_grade)
     : authority_lock_(std::make_unique<AuthorityLock>(
           journal_path, filesystem_enforcement_grade)),
@@ -1291,7 +1315,7 @@ TrainVMService::TrainVMService(
               : nullptr),
       reconciler_(journal_, adapter_registry_, training_components_,
                   command_mutex_,
-                  [this] { return authority_now(); }) {
+                  [this] { return authority_now(); }, cache_qualification) {
   if (static_cast<bool>(host_process_client_) != !controller_target_.empty() ||
       static_cast<bool>(host_grant_client_) !=
           static_cast<bool>(host_process_client_)) {
@@ -1433,6 +1457,11 @@ void TrainVMService::reconcile_until_quiescent(const std::string& run_id) {
       case ReconcileDisposition::host_process_exited:
       case ReconcileDisposition::host_grant_released:
       case ReconcileDisposition::builtin_completed:
+      // A committed qualification verdict advances the node either way, so the
+      // run keeps draining within this wake instead of sleeping a full cadence
+      // between the gate and whatever the plan routes it to.
+      case ReconcileDisposition::qualification_completed:
+      case ReconcileDisposition::qualification_rejected:
         continue;
       case ReconcileDisposition::no_action:
       case ReconcileDisposition::lease_busy:
@@ -1440,6 +1469,9 @@ void TrainVMService::reconcile_until_quiescent(const std::string& run_id) {
       case ReconcileDisposition::launch_prepared:
       case ReconcileDisposition::launch_replayed:
       case ReconcileDisposition::awaiting_worker:
+      // Evidence has not been published yet. This is a wait, not a failure:
+      // the next supervisor wake retries the gate.
+      case ReconcileDisposition::qualification_evidence_required:
       case ReconcileDisposition::input_required:
         return;
     }
@@ -3960,7 +3992,12 @@ grpc::Status TrainVMService::WatchEvents(
        request->after_journal_sequence() >=
            request->through_journal_sequence()) ||
       (request->newest_first() &&
-       request->through_journal_sequence() == 0U)) {
+       request->through_journal_sequence() == 0U) ||
+      (request->newest_per_metric_series() &&
+       (request->newest_first() || request->replay_limit() == 0U ||
+        request->through_journal_sequence() == 0U ||
+        request->run_ids_size() != 1 || request->event_types_size() != 1 ||
+        request->event_types(0) != "metric.sampled"))) {
     return {grpc::StatusCode::INVALID_ARGUMENT,
             "watch-events request exceeds its bounds"};
   }
@@ -3996,6 +4033,8 @@ grpc::Status TrainVMService::WatchEvents(
             .event_types = event_types,
             .limit = query_limit,
             .newest_first = request->newest_first(),
+            .newest_per_metric_series =
+                request->newest_per_metric_series(),
         });
       }
       for (const SequencedEvent& event : events) {
@@ -4139,16 +4178,22 @@ grpc::Status TrainVMService::GetDescriptor(
             "descriptor selector exceeds its bound"};
   }
   if (cancelled(context)) return cancellation_status();
-  if (request->adapter() != "trainvm.training-components" ||
-      request->version() != "1.0.0") {
+  if (request->version() != "1.0.0" ||
+      (request->adapter() != "trainvm.training-components" &&
+       request->adapter() != "trainvm.operations")) {
     return {grpc::StatusCode::NOT_FOUND,
             "no descriptor matches the exact requested provider and version"};
   }
   try {
-    const std::string canonical =
-        training_components_.document_json().dump();
-    response->set_schema_json(canonical);
-    response->set_schema_hash(training_components_.registry_digest());
+    if (request->adapter() == "trainvm.operations") {
+      response->set_schema_json(
+          adapter_registry_.operation_descriptors_json().dump());
+      response->set_schema_hash(
+          adapter_registry_.operation_descriptors_digest());
+    } else {
+      response->set_schema_json(training_components_.document_json().dump());
+      response->set_schema_hash(training_components_.registry_digest());
+    }
     return grpc::Status::OK;
   } catch (const std::exception& exception) {
     return {grpc::StatusCode::DATA_LOSS, exception.what()};
@@ -4178,7 +4223,7 @@ int serve(const std::filesystem::path& journal_path,
                          std::move(host_launch_registry), {},
                          std::move(training_components),
                          std::move(hostd_configuration),
-                         "unix:" + absolute_socket.string(),
+                         "unix:" + absolute_socket.string(), nullptr,
                          SqliteAuthorityEnforcementGrade::strict_filesystem);
   SocketAuthorityLock socket_authority(absolute_socket);
   remove_stale_socket(absolute_socket);

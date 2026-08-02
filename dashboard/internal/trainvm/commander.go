@@ -360,6 +360,7 @@ func (c *GRPCCommander) Events(ctx context.Context, input EventQuery) ([]Event, 
 		RunIds: []string{query.RunID}, AfterJournalSequence: query.After,
 		EventTypes: query.EventTypes, ReplayLimit: uint32(query.Limit),
 		ThroughJournalSequence: query.Through, NewestFirst: query.NewestFirst,
+		NewestPerMetricSeries: query.NewestPerMetricSeries,
 	})
 	if err != nil {
 		return nil, err
@@ -615,6 +616,10 @@ func runFromProto(summary *trainvmv1.RunSummary) (Run, error) {
 		LastHeartbeatNS:  heartbeat,
 		LastEventSeq:     summary.GetLastEventSequence(),
 		FailureSummary:   summary.GetFailureSummary(),
+
+		ForkedFromRunID:       summary.GetForkedFromRunId(),
+		ForkedFromRunRevision: summary.GetForkedFromRunRevision(),
+		ForkedFromPlanHash:    summary.GetForkedFromPlanHash(),
 	}, nil
 }
 

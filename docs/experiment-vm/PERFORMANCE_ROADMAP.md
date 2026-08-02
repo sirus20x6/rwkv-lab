@@ -246,7 +246,10 @@ launch count per step in the dashboard, and records baseline/peak allocated and 
 When a run has multiple compatible trace windows, the dashboard selects the oldest rich summary as
 the default comparison baseline and lets the operator change it. It shows normalized wall-time and
 launch-count deltas, GPU-active percentage-point change, and peak-allocation change; it refuses to
-compare windows whose node, backend, schedule, activities, or profiler options differ.
+compare windows whose node, backend, schedule, activities, profiler options, or declared warmup
+overlap classification differ. Trace cards also show the run's declared compile, warmup, and
+qualification state; warmup overlap is explicitly unknown when warmup is enabled without a declared
+step count, rather than being reported as steady state.
 The shared profiler protocol also exposes an explicit input-wait context and iterable wrapper. The
 native MageFlow appearance/terminal and Qwen paths place it around their actual prefetched-batch or
 packed-row acquisition, so a complete capture publishes measured input-stall time and ratio. The
@@ -336,6 +339,19 @@ startup orphan recovery are defined in
 - Extend the implemented wake-driven, restart-scanning service supervisor (admission, launch,
   terminal process/resource release, and exact lease renewal) with typed executors for
   compile/warmup/qualification nodes and dashboard-visible supervisor health.
+  The qualification executor is implemented. A `qualify_cache` node is an exact builtin
+  `trainvm.core` operation whose topology requires both a `cache.qualified` and a
+  `cache.rejected` transition and an enabled `/spec/execution/qualify` phase, so a rejected
+  candidate can never fall through as qualified. The supervisor resolves evidence through an
+  authority-owned seam, re-runs the implemented qualification gate itself, and commits the verdict
+  as a managed builtin receipt; a node without a configured evidence source fails closed, and a
+  node whose evidence has not been published yet stays pending across wakes instead of inventing a
+  verdict. The gate cannot release the fence it runs under, the journal refuses a self-contradictory
+  verdict, and replay revalidates the verdict against its own receipt. Throughput and peak-memory
+  gates are part of that same qualification receipt, so `benchmark` is not a separate executor.
+  Compile and warmup remain declaration-only: both are worker-side phases, so an authority-side
+  node would have to attest work it never observed. They need the typed worker phase protocol
+  (request/receipt messages plus SDK support) before they can become real executors.
 - Fingerprinted cache namespaces; typed CPU/I/O policy lowering and recovery attestation are
   implemented, with privileged real-host qualification remaining.
 - Declarative bounded Torch GPU profiling and dashboard trace artifacts are implemented; qualified
@@ -386,6 +402,39 @@ startup orphan recovery are defined in
   parameter ownership and exact-resume trajectory tests.
 - Add representative benchmark fixtures for MageFlow/flow, RWKV LM, transformer LM, vision/RWKV,
   fine-tuning, distillation, and post-training rather than one synthetic GEMM.
+  The fixture matrix is declared in [`benchmark-matrix.v1.json`](benchmark-matrix.v1.json) and
+  validated by `scripts/validate_benchmark_matrix.py`. It covers ten families across
+  representative shape buckets and declares, per fixture, its effect class, portability, quality
+  gate, and whether it exercises a curriculum-stage transition. The document declares what must be
+  measured; it never carries argv, environment, an executable identity, or a measured result, and
+  the validator rejects all of those.
+  The effect class selects parity evidence exactly as the qualification contract requires, and
+  each fixture restates its class's evidence so a hand-edit is a failure rather than drift: a
+  serving fixture cannot acquire a gradient-parity claim, and a training fixture cannot drop
+  resumed-trajectory parity to look qualified. The evidence vocabulary is pinned to the parity
+  booleans actually implemented on `CacheQualificationEvidence`, so the matrix cannot require a
+  dimension nothing computes. `portable` means the baseline is meaningful without an accelerator;
+  a portable fixture that requires one is a validator error. This distinction was previously named
+  here but nowhere defined.
+  `trainvm qualify-evidence` reads a `trainvm.cache-qualification-evidence/v1`
+  document on stdin, runs the implemented gate, and prints the receipt. Its exit
+  status is the verdict: 0 qualified, 3 rejected with attributable reasons, 1 for
+  a malformed document, so a rejection is a reportable outcome rather than
+  indistinguishable from a crash. A benchmark runner measures; this decides. That
+  boundary is what stops a runner reimplementing the thresholds and quietly
+  disagreeing with the `qualify_cache` node that actually admits an optimization.
+  The fixture runner executes cold, warmup, and timed phases in fresh processes and emits evidence
+  for that existing qualification path. Portable fixtures run with accelerator visibility masked,
+  so their receipts prove the CPU path was measured even on an accelerator host. Accelerator
+  fixtures require a real CUDA device and fail closed when any timed cell lacks a device name,
+  capability, or nonzero CUDA allocator peak. Before every accelerator cell the runner bounds
+  resident compute-process memory and records the process residency, total and used device memory,
+  utilization, and applied allowance in the benchmark-run receipt, making ambient compositor
+  conditions auditable. Benchmark remains not a separate executor — throughput and peak-memory
+  gates belong to the existing qualification receipt rather than a parallel decision path. A native
+  reflected loader with a pinned digest, matching the compatibility-catalog pattern, still belongs
+  with authority integration; until a qualification node consumes the matrix this remains fixture
+  evidence, not authority.
 - Audit existing optimizations against the qualification contract and publish portable versus
   machine-native receipts.
 - Implement the broadly reusable Modded NanoGPT candidates in the matrix where an existing

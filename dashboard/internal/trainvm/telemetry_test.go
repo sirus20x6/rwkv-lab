@@ -3,6 +3,7 @@ package trainvm
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -88,6 +89,33 @@ func (r *telemetryFixtureReader) Events(_ context.Context, query EventQuery) ([]
 			result = append(result, event)
 		}
 	}
+	if query.NewestPerMetricSeries {
+		sort.Slice(result, func(left, right int) bool {
+			return result[left].Sequence > result[right].Sequence
+		})
+		latest := make([]Event, 0, len(result))
+		seen := map[string]struct{}{}
+		for _, event := range result {
+			var payload struct {
+				Name   string            `json:"name"`
+				Labels map[string]string `json:"labels"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				return nil, err
+			}
+			labels, err := json.Marshal(payload.Labels)
+			if err != nil {
+				return nil, err
+			}
+			key := event.NodeID + "\x00" + event.AttemptID + "\x00" + payload.Name + "\x00" + string(labels)
+			if _, duplicate := seen[key]; duplicate {
+				continue
+			}
+			seen[key] = struct{}{}
+			latest = append(latest, event)
+		}
+		result = latest
+	}
 	sort.Slice(result, func(left, right int) bool {
 		if query.NewestFirst {
 			return result[left].Sequence > result[right].Sequence
@@ -142,6 +170,40 @@ func TestTypedMetricAndArtifactViewsUseFilteredDurableCursors(t *testing.T) {
 		artifacts[0].Kind != "image_gallery" || len(artifacts[0].ParentArtifactIDs) != 1 ||
 		artifactReader.query.EventTypes[0] != "artifact.published" {
 		t.Fatalf("unexpected artifact projection: %#v query=%#v err=%v", artifacts, artifactReader.query, err)
+	}
+}
+
+func TestRecentArtifactsKeepsBoundedTailSemanticsAndReportsTruncationThroughFence(t *testing.T) {
+	events := make([]Event, 0, 3)
+	for sequence := 1; sequence <= 3; sequence++ {
+		events = append(events, Event{
+			Sequence: uint64(sequence), EventID: fmt.Sprintf("artifact-%d", sequence),
+			RunID: "run-1", NodeID: "eval", AttemptID: "eval@1",
+			WorkerSequence: uint64(sequence), EventType: "artifact.published",
+			EventVersion: 1, WallTimeNS: int64(sequence),
+			Payload: json.RawMessage(fmt.Sprintf(`{
+				"artifact_id":"gallery-%d","logical_name":"eval_gallery","kind":"image_gallery",
+				"schema":"rwkv-lab.eval-gallery.v2","uri":"file:///sealed/gallery-%d",
+				"size_bytes":1,"fingerprint_algorithm":"sha256",
+				"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				"complete":true,"producer_node_id":"eval","producer_attempt_id":"eval@1",
+				"parent_artifact_ids":[],"published_at_ns":%d
+			}`, sequence, sequence, sequence)),
+		})
+	}
+	reader := &telemetryFixtureReader{
+		run:    Run{RunID: "run-1", LastEventSeq: 3},
+		events: events,
+	}
+	tail, found, err := RecentArtifacts(context.Background(), reader, "run-1", 2)
+	if err != nil || !found || len(tail) != 2 ||
+		tail[0].ArtifactID != "gallery-3" || tail[1].ArtifactID != "gallery-2" {
+		t.Fatalf("bounded recent tail changed semantics: found=%t tail=%#v err=%v", found, tail, err)
+	}
+	fenced, truncated, err := RecentArtifactsThrough(context.Background(), reader, "run-1", 3, 2)
+	if err != nil || !truncated || len(fenced) != 2 || fenced[0].Sequence != 3 || fenced[1].Sequence != 2 {
+		t.Fatalf("fenced recent tail did not expose truncation: truncated=%t tail=%#v err=%v",
+			truncated, fenced, err)
 	}
 }
 
@@ -258,10 +320,63 @@ func TestTelemetrySnapshotColdLoadsOneCoherentTail(t *testing.T) {
 		t.Fatalf("unexpected telemetry tail: %#v found=%v err=%v", snapshot, found, err)
 	}
 	if len(reader.queries) != 3 || !reader.queries[0].NewestFirst ||
-		!reader.queries[1].NewestFirst || !reader.queries[2].NewestFirst ||
+		reader.queries[1].NewestFirst || !reader.queries[1].NewestPerMetricSeries ||
+		!reader.queries[2].NewestFirst ||
 		reader.queries[0].Through != 9 || reader.queries[0].Limit != 1 ||
-		reader.queries[1].Limit != 10 || reader.queries[2].Limit != 10 {
+		reader.queries[1].Limit != maximumLiveMetricSeries+1 || reader.queries[2].Limit != 10 {
 		t.Fatalf("cold load did not use independently bounded upper-fenced tails: %#v", reader.queries)
+	}
+}
+
+func TestTelemetryColdLoadRepresentsEveryDeclaredMetricBeyondOldBrowserCap(t *testing.T) {
+	const metricCount = 256
+	metrics := make([]map[string]string, 0, metricCount)
+	events := make([]Event, 0, metricCount)
+	for index := 0; index < metricCount; index++ {
+		name := "metric." + strconv.Itoa(index)
+		metrics = append(metrics, map[string]string{
+			"name": name, "type": "gauge", "unit": "value",
+			"step_domain": "wall_time", "aggregation": "last",
+		})
+		events = append(events, Event{
+			Sequence: uint64(index + 1), EventID: "metric-" + strconv.Itoa(index),
+			RunID: "run-1", NodeID: "train", AttemptID: "train@1",
+			WorkerSequence: uint64(index + 1), EventType: "metric.sampled",
+			WallTimeNS: int64(index + 1), Payload: json.RawMessage(fmt.Sprintf(
+				`{"name":%q,"value":%d,"unit":"value","step_domain":"wall_time","step":%d,"sample_weight":1,"labels":{}}`,
+				name, index, index)),
+		})
+	}
+	declaration, err := json.Marshal(metrics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := telemetrySnapshotFixture(events, metricCount, string(declaration))
+	snapshot, found, err := ProjectTelemetrySnapshot(context.Background(), reader, "run-1", 0, 10)
+	if err != nil || !found || len(snapshot.Metrics) != metricCount {
+		t.Fatalf("cold load lost declared metrics: count=%d found=%v err=%v", len(snapshot.Metrics), found, err)
+	}
+}
+
+func TestTelemetryColdLoadRejectsMoreThanBoundedMetricSeries(t *testing.T) {
+	events := make([]Event, 0, maximumLiveMetricSeries+1)
+	for index := 0; index <= maximumLiveMetricSeries; index++ {
+		events = append(events, Event{
+			Sequence: uint64(index + 1), EventID: "metric-" + strconv.Itoa(index),
+			RunID: "run-1", NodeID: "train", AttemptID: "train@1",
+			WorkerSequence: uint64(index + 1), EventType: "metric.sampled",
+			WallTimeNS: int64(index + 1), Payload: json.RawMessage(fmt.Sprintf(
+				`{"name":"metric.routes","value":%d,"unit":"value","step_domain":"wall_time","step":%d,"sample_weight":1,"labels":{"route":%q}}`,
+				index, index, strconv.Itoa(index))),
+		})
+	}
+	reader := telemetrySnapshotFixture(events, maximumLiveMetricSeries+1, `[
+		{"name":"metric.routes","type":"gauge","unit":"value","step_domain":"wall_time","aggregation":"last"}
+	]`)
+	if _, found, err := ProjectTelemetrySnapshot(
+		context.Background(), reader, "run-1", 0, 10,
+	); err == nil || !found {
+		t.Fatalf("oversized live metric cardinality was accepted: found=%v err=%v", found, err)
 	}
 }
 

@@ -33,6 +33,15 @@
 namespace trainvm {
 namespace {
 
+bool valid_sha256_digest(std::string_view value) {
+  constexpr std::string_view prefix = "sha256:";
+  return value.size() == prefix.size() + 64U && value.starts_with(prefix) &&
+         std::ranges::all_of(value.substr(prefix.size()), [](char character) {
+           return (character >= '0' && character <= '9') ||
+                  (character >= 'a' && character <= 'f');
+         });
+}
+
 constexpr std::string_view kConnectionPragmas = R"sql(
 PRAGMA synchronous=FULL;
 PRAGMA foreign_keys=ON;
@@ -4042,7 +4051,11 @@ std::vector<SequencedEvent> Journal::sequenced_events(
       input.event_types.size() > kMaximumFilters ||
       (input.through_journal_sequence != 0U &&
        input.after_journal_sequence >= input.through_journal_sequence) ||
-      (input.newest_first && input.through_journal_sequence == 0U)) {
+      (input.newest_first && input.through_journal_sequence == 0U) ||
+      (input.newest_per_metric_series &&
+       (input.newest_first || input.through_journal_sequence == 0U ||
+        input.run_ids.size() != 1U || input.event_types.size() != 1U ||
+        !input.event_types.contains("metric.sampled")))) {
     throw std::invalid_argument("event scan query exceeds its bounds");
   }
   const auto invalid = [](const std::string& value) {
@@ -4052,12 +4065,29 @@ std::vector<SequencedEvent> Journal::sequenced_events(
       std::ranges::any_of(input.event_types, invalid)) {
     throw std::invalid_argument("event scan filter is malformed");
   }
-  std::string sql = R"sql(
-    SELECT journal_sequence, event_id, run_id, run_revision, plan_revision,
-           node_id, attempt_id, worker_sequence, event_type, event_version,
-           wall_time_ns, monotonic_time_ns, optimizer_step, payload_json
-    FROM events WHERE journal_sequence>?
+  constexpr std::string_view columns = R"sql(
+    journal_sequence, event_id, run_id, run_revision, plan_revision,
+    node_id, attempt_id, worker_sequence, event_type, event_version,
+    wall_time_ns, monotonic_time_ns, optimizer_step, payload_json
   )sql";
+  std::string sql;
+  if (input.newest_per_metric_series) {
+    sql = "WITH ranked_metric_series AS (SELECT ";
+    sql += columns;
+    sql += R"sql(,
+      ROW_NUMBER() OVER (
+        PARTITION BY run_id, node_id, attempt_id,
+                     json_extract(payload_json, '$.name'),
+                     json_extract(payload_json, '$.labels')
+        ORDER BY journal_sequence DESC
+      ) AS metric_series_rank
+      FROM events WHERE journal_sequence>?
+    )sql";
+  } else {
+    sql = "SELECT ";
+    sql += columns;
+    sql += " FROM events WHERE journal_sequence>?";
+  }
   if (input.through_journal_sequence != 0U) {
     sql += " AND journal_sequence<=?";
   }
@@ -4075,9 +4105,16 @@ std::vector<SequencedEvent> Journal::sequenced_events(
   };
   append_filter("run_id", input.run_ids.size());
   append_filter("event_type", input.event_types.size());
-  sql += input.newest_first
-             ? " ORDER BY journal_sequence DESC LIMIT ?"
-             : " ORDER BY journal_sequence LIMIT ?";
+  if (input.newest_per_metric_series) {
+    sql += ") SELECT ";
+    sql += columns;
+    sql += " FROM ranked_metric_series WHERE metric_series_rank=1"
+           " ORDER BY journal_sequence LIMIT ?";
+  } else {
+    sql += input.newest_first
+               ? " ORDER BY journal_sequence DESC LIMIT ?"
+               : " ORDER BY journal_sequence LIMIT ?";
+  }
   Statement query(database_, sql);
   int parameter = 1;
   bind_integer(query.get(), parameter++,
@@ -4626,13 +4663,38 @@ void Journal::complete_managed_builtin_dispatch(
   });
   const bool validation = dispatch.operation == "validate_artifact";
   const bool releasing = dispatch.operation == "release_resources";
+  const bool qualifying = dispatch.operation == "qualify_cache";
   const nlohmann::json expected_result_payload =
       releasing
           ? nlohmann::json{{"concurrency_key", lease.concurrency_key},
                            {"lease_id", lease.lease_id},
                            {"fencing_token", lease.fencing_token}}
           : nlohmann::json::object();
-  if ((!validation && !releasing) || release_lease != releasing ||
+  // A qualification verdict carries its gate receipt, so its payload is
+  // checked structurally instead of against a fixed object. The authority
+  // still refuses to make a self-contradictory verdict durable.
+  const bool canonical_qualification_payload =
+      qualifying && result.payload.is_object() &&
+      result.payload.contains("receipt_digest") &&
+      result.payload.at("receipt_digest").is_string() &&
+      valid_sha256_digest(
+          result.payload.at("receipt_digest").get<std::string>()) &&
+      result.payload.contains("namespace_digest") &&
+      result.payload.at("namespace_digest").is_string() &&
+      result.payload.contains("artifact_tree_digest") &&
+      result.payload.at("artifact_tree_digest").is_string() &&
+      result.payload.contains("qualification") &&
+      result.payload.at("qualification").is_object() &&
+      result.payload.contains("qualified") &&
+      result.payload.at("qualified").is_boolean() &&
+      result.payload.contains("rejection_reasons") &&
+      result.payload.at("rejection_reasons").is_array() &&
+      result.payload.at("qualified").get<bool>() ==
+          (result.event_type == "cache.qualified") &&
+      result.payload.at("qualified").get<bool>() ==
+          result.payload.at("rejection_reasons").empty();
+  if ((!validation && !releasing && !qualifying) ||
+      release_lease != releasing ||
       dispatch.run_id != lease.owner_run_id || result.run_id != dispatch.run_id ||
       result.node_id != dispatch.node_id ||
       result.attempt_id != dispatch.attempt_id ||
@@ -4642,8 +4704,11 @@ void Journal::complete_managed_builtin_dispatch(
       (validation && result.event_type != "artifact.validated" &&
        result.event_type != "artifact.invalid") ||
       (releasing && result.event_type != "resource.released") ||
+      (qualifying && result.event_type != "cache.qualified" &&
+       result.event_type != "cache.rejected") ||
       result.wall_time_ns != now.wall.nanoseconds || result.monotonic_time_ns != 0 ||
-      result.payload != expected_result_payload ||
+      (qualifying ? !canonical_qualification_payload
+                  : result.payload != expected_result_payload) ||
       transition.event_id != result.event_id + ":transition" ||
       transition.event_type != "fsm.transitioned" ||
       transition.run_id != dispatch.run_id ||

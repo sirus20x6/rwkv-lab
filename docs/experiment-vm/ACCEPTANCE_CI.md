@@ -50,8 +50,28 @@ requires saying why.
 ## The native and GPU jobs are gated, deliberately
 
 TrainVM needs GCC 16 with `-freflection` (C++26 P2996) plus protobuf, gRPC,
-yaml-cpp, nlohmann_json, OpenSSL and SQLite3. No GitHub-hosted runner image
-provides that toolchain, and the GPU suites need a real accelerator.
+yaml-cpp, nlohmann_json, OpenSSL and SQLite3. The GPU suites need a real
+accelerator.
+
+The compiler is **not** the obstacle, contrary to an earlier claim here. The
+official `gcc:16` image (16.1.0, Debian trixie) exists and accepts
+`-freflection`; this was verified, not assumed. What blocks a hosted native job
+is the dependency pair:
+
+- Debian trixie ships `gRPCConfig.cmake` but no `protobuf-config.cmake`, because
+  its protobuf 3.21 is autotools-built. `find_package(Protobuf CONFIG REQUIRED)`
+  therefore fails on stock `gcc:16` plus apt.
+- Building protobuf 3.21.12 from source alongside Debian's gRPC 1.51 gets past
+  `find_package` and then fails at generate time with a missing ALIAS target,
+  because the two halves no longer agree on their protobuf targets.
+
+The workable route is a purpose-built image with GCC 16 and a matched
+protobuf/gRPC pair built together from source, published once and referenced
+with `container:`. That is real but bounded work, and it is tracked as its own
+card rather than left as a footnote.
+
+Until that image exists the jobs stay gated, which is still preferable to a
+native job that cannot build reporting green.
 
 Both jobs therefore target self-hosted runners and stay off until the
 repository variable `TRAINVM_SELF_HOSTED` is set to `true`. This is a

@@ -64,6 +64,9 @@ class TrainVMService final : public v1::TrainVM::Service,
       std::optional<HostdClientConfiguration> hostd_configuration =
           std::nullopt,
       std::string controller_target = {},
+      // Optional authority seam for qualify_cache nodes. A plan containing one
+      // fails closed when this is absent rather than assuming a verdict.
+      ICacheQualificationEvidenceResolver* cache_qualification = nullptr,
       SqliteAuthorityEnforcementGrade filesystem_enforcement_grade =
           SqliteAuthorityEnforcementGrade::cooperative_test);
   ~TrainVMService() override;
@@ -196,6 +199,8 @@ class TrainVMService final : public v1::TrainVM::Service,
                  std::shared_ptr<IHostGrantClient> host_grant_client = {},
                  std::shared_ptr<IHostProcessClient> host_process_client = {},
                  std::string controller_target = {},
+                 ICacheQualificationEvidenceResolver* cache_qualification =
+                     nullptr,
                  SqliteAuthorityEnforcementGrade filesystem_enforcement_grade =
                      SqliteAuthorityEnforcementGrade::cooperative_test);
 

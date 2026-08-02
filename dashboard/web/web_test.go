@@ -2,6 +2,7 @@ package web
 
 import (
 	"io/fs"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -151,8 +152,49 @@ func TestNativeEvalGalleryUsesPublishedHistoryAndSideBySideViewer(t *testing.T) 
 		!strings.Contains(string(app), `item.target_image_url || item.source_image_url`) {
 		t.Fatal("native gallery is not driven by published revisions or lacks original-image fallback")
 	}
+	if !strings.Contains(string(app), `vmObservability?.eval_gallery_artifact`) ||
+		!strings.Contains(string(app), `artifact?.logical_name === logicalName`) ||
+		!strings.Contains(string(app), `vmIsDeclaredGallery(artifact)`) {
+		t.Fatal("native gallery discovery does not follow the compiled observability declaration")
+	}
+	if !strings.Contains(string(app), `history?.galleries`) ||
+		!strings.Contains(string(app), `history?.history_truncated`) ||
+		!strings.Contains(string(app), `older history truncated`) {
+		t.Fatal("native gallery history does not expose bounded-tail truncation")
+	}
+	if !strings.Contains(string(app), `immutableRunIdentityChanged`) ||
+		!strings.Contains(string(app), `resetVMGallery(selected.run_id)`) ||
+		!strings.Contains(string(app), `resetVMControls(selected.run_id)`) ||
+		!strings.Contains(string(app), `create a new run for a new plan`) {
+		t.Fatal("the browser does not fail closed when an immutable run identity changes")
+	}
+	if !strings.Contains(string(app), `requestedAfter !== vmAfter`) ||
+		!strings.Contains(string(app), `selectionGeneration !== vmSelectionGeneration`) {
+		t.Fatal("timeline replay is not fenced against stale in-flight requests")
+	}
 	if !strings.Contains(string(css), `.vm-gallery-pair { display: grid; grid-template-columns: repeat(2`) {
 		t.Fatal("native generated/original images are not rendered side by side")
+	}
+}
+
+func TestTrainVMGPUProfilesQualifyDeclaredWarmupState(t *testing.T) {
+	assets := Static()
+	app, err := fs.ReadFile(assets, "app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	css, err := fs.ReadFile(assets, "app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		`profile.execution_phases?.overlaps_warmup === baseline.execution_phases?.overlaps_warmup`,
+		`warmup overlap unknown`, `steady-state status cannot be determined`,
+		`profile.trace_sha256, profile.execution_phases`, `.vm-profile-phase`,
+	} {
+		if !strings.Contains(string(app)+string(css), required) {
+			t.Fatalf("GPU trace phase qualification is missing %q", required)
+		}
 	}
 }
 
@@ -171,7 +213,7 @@ func TestTrainVMPanelUsesIncrementalReadOnlyTimeline(t *testing.T) {
 		t.Fatal("native TrainVM runs and timeline have no dashboard panel")
 	}
 	if !strings.Contains(string(app), `/api/trainvm/runs`) ||
-		!strings.Contains(string(app), `timeline?after=${vmAfter}&limit=1000`) ||
+		!strings.Contains(string(app), `timeline?after=${requestedAfter}&limit=1000`) ||
 		!strings.Contains(string(app), `setInterval(refreshTrainVM, 1000)`) {
 		t.Fatal("TrainVM panel does not incrementally follow the native journal")
 	}
@@ -309,9 +351,17 @@ func TestTrainVMSubmissionFreezesPreviewAndRetriesExactIntent(t *testing.T) {
 		`result.adapter_lock_digest !== intent.adapterLockDigest`,
 		`String(result.training_component_lock_digest || "") !==`,
 		`fetch("/api/trainvm/training-components"`,
+		`fetch("/api/trainvm/operations"`,
 		`descriptor.configuration || []`,
-		`const value = field.default;`,
+		`const value = hasConfigured ? configuration[field.name] : field.default;`,
 		`node.invoke.training.components[composerSlot]`,
+		`operation.training_composition.model_family`,
+		`compatibleComponents(category, composition.model_family)`,
+		`data-vm-operation-slot`,
+		`data-vm-add-property`,
+		`data-vm-add-map`,
+		`data-vm-add-array`,
+		`#vm-operation-composer input`,
 		`sessionStorage.setItem`,
 		`body: intent.body`,
 		`submissionBusy`,
@@ -329,6 +379,21 @@ func TestTrainVMSubmissionFreezesPreviewAndRetriesExactIntent(t *testing.T) {
 		if !strings.Contains(string(app), required) {
 			t.Fatalf("created TrainVM run selection is missing %q", required)
 		}
+	}
+}
+
+func TestTrainVMDescriptorComposerRoundTripsInBrowser(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is not installed")
+	}
+	command := exec.Command(python, "testdata/trainvm_editor_browser.py")
+	output, err := command.CombinedOutput()
+	if exitError, ok := err.(*exec.ExitError); ok && exitError.ExitCode() == 77 {
+		t.Skip("Playwright is not installed")
+	}
+	if err != nil {
+		t.Fatalf("descriptor composer browser contract failed: %v\n%s", err, output)
 	}
 }
 

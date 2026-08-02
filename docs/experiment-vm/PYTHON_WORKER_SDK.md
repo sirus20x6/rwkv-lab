@@ -173,16 +173,38 @@ writes must have a resolved directory ancestor beneath a declared write root; sy
 relative or non-normalized paths fail before trainer code runs. Larger configurations must become
 immutable artifact manifests with authority-verified fingerprints rather than path references.
 
+The same workspace can declare `input_content_roots`, a strictly sorted, non-overlapping list of
+reflected `trainvm.input-content-root/v1` identities. Generate each identity with:
+
+```sh
+trainvm inspect-input-content-root /absolute/dataset-or-model-root
+```
+
+Each compact identity binds the selected absolute path, file/directory kind, bounded file count,
+total bytes, and a deterministic SHA-256 Merkle root. Directory nodes commit sorted UTF-8 child
+names, node kinds, and child digests; file nodes commit size and the full file hash. Static input
+roots reject symlinks, special files, mutation during measurement, noncanonical paths, excessive
+depth, and count/byte limit violations. The native declaration is frozen into the plan and worker
+invocation. Before importing MageFlow, Qwen, or RWKV trainer modules, the stdlib worker verifier
+walks the same descriptor-relative tree and requires an exact identity match. Every ordinary path
+read must fall within one verified content root, so pre-launch drift in a JSONL, packed corpus,
+model/tokenizer tree, expert bank, encoder cache, or schedule is rejected even when its path is
+unchanged. Production content roots must remain authority-owned and non-worker-writable for the
+duration of the invocation: measurement detects drift before dispatch and races during its walk,
+but does not turn a mutable filesystem path into immutable storage. Immutable
+controller-published resume checkpoints use their existing per-object manifest verifier and are not
+double-classified as static workspace inputs.
+
 The fixed runner returns an already-completed replay without executing tensor work, publishes a
 durably receipted terminal result on success, freezes any declared checkpoint before that terminal
 result, and converts trainer exceptions to a bounded
 `operation.failed` event containing only an error class. MageFlow and Qwen profiles expose their
 implemented compatible-resume checkpoint and safe-point lifecycle controls; scratch RWKV exposes
 only terminal-checkpoint semantics. Mutable-control and lifecycle capability remain exact
-per-adapter claims rather than inferences from the shared runtime. Top-level paths are now
-confined, but nested references inside image JSONL and packed-corpus/model manifests remain
-non-production-qualified until the authority binds their immutable artifact identities and the
-adapter recursively validates every referenced object.
+per-adapter claims rather than inferences from the shared runtime. Top-level paths are confined and
+declared content-root trees are recursively bound. A manifest that references payloads outside its
+declared root set remains invalid; remote/object-store references still require a typed immutable
+artifact provider rather than pathname authority.
 
 Install the optional runtime dependencies with:
 

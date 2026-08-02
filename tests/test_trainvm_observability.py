@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -99,3 +100,18 @@ def test_observability_rejects_invalid_runtime_samples() -> None:
         observer.publish_if_declared("train.loss", float("nan"), step=1)
     with pytest.raises(WorkerObservabilityError, match="uint64"):
         observer.optimizer_step(-1)
+
+
+def test_blocking_phase_keepalive_publishes_until_the_phase_returns() -> None:
+    selected = declaration()
+    selected["heartbeat_seconds"] = 1
+    session = FakeSession()
+    observer = WorkerObservability(
+        session, load_observability_declaration(selected)
+    )
+
+    with observer.keepalive(7, "loading"):
+        time.sleep(1.1)
+
+    assert len(session.heartbeats) >= 2
+    assert {heartbeat[:2] for heartbeat in session.heartbeats} == {(7, "loading")}

@@ -1,5 +1,7 @@
 #include "trainvm/document.hpp"
 
+#include "trainvm/rwkv_scratch_profiles.hpp"
+
 #include <openssl/evp.h>
 #include <yaml-cpp/yaml.h>
 
@@ -34,6 +36,7 @@ namespace {
 
 constexpr std::string_view kApiVersion = "trainvm.rwkv-lab/v1alpha1";
 constexpr std::string_view kKind = "Experiment";
+constexpr std::string_view kEvalGallerySchema = "rwkv-lab.eval-gallery.v2";
 const std::set<std::string> kTerminals{"$completed", "$failed", "$cancelled"};
 const std::regex kIdentifier("^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$");
 const std::regex kEventField("^[a-zA-Z][a-zA-Z0-9_.]*$");
@@ -168,6 +171,23 @@ bool path_within(const std::filesystem::path& child, const std::filesystem::path
     }
   }
   return true;
+}
+
+bool absolute_normalized_path(std::string_view value) {
+  if (value.empty() || value.size() > 4096U || value.starts_with("//") ||
+      (value.size() > 1U && value.ends_with('/'))) {
+    return false;
+  }
+  const std::filesystem::path path(value);
+  return path.is_absolute() && path == path.lexically_normal();
+}
+
+bool sha256_digest(std::string_view value) {
+  return value.size() == 71U && value.starts_with("sha256:") &&
+         std::ranges::all_of(value.substr(7U), [](char character) {
+           return (character >= '0' && character <= '9') ||
+                  (character >= 'a' && character <= 'f');
+         });
 }
 
 void validate_predicate(const Json& predicate, const std::string& path,
@@ -390,6 +410,53 @@ bool is_exact_resource_release(const Spec& spec, const Node& node) {
       Effect::resource, Idempotency::replay_safe);
 }
 
+bool is_cache_qualification(const Spec& spec, const Node& node) {
+  const auto component = spec.components.find(node.invoke.component);
+  return component != spec.components.end() &&
+         component->second.runtime == ComponentRuntime::builtin &&
+         component->second.adapter == "trainvm.core" &&
+         node.invoke.operation == "qualify_cache";
+}
+
+// A qualification node is a decision point, so both outcomes must be
+// reachable. A plan that routes only the passing verdict would silently treat
+// a rejected candidate as qualified.
+void validate_cache_qualification(const Spec& spec,
+                                  std::vector<Diagnostic>& diagnostics) {
+  for (const auto& [name, node] : spec.workflow.nodes) {
+    if (!is_cache_qualification(spec, node)) continue;
+    const std::string path = "/spec/workflow/nodes/" + name;
+    if (!is_exact_core_operation(spec, node, "qualify_cache",
+                                 "trainvm.v1.QualifyCache", Effect::read_only,
+                                 Idempotency::replay_safe)) {
+      error(diagnostics, "workflow.cache_qualification", path,
+            "cache qualification must be builtin trainvm.core 1.0.0 "
+            "qualify_cache with contract trainvm.v1.QualifyCache, read_only "
+            "effect, and replay_safe idempotency");
+    }
+    std::size_t qualified_transitions = 0U;
+    std::size_t rejected_transitions = 0U;
+    for (const Transition& transition : node.transitions) {
+      if (transition.on == "cache.qualified") ++qualified_transitions;
+      if (transition.on == "cache.rejected") ++rejected_transitions;
+    }
+    if (qualified_transitions != 1U || rejected_transitions != 1U) {
+      error(diagnostics, "workflow.cache_qualification_transition",
+            child_path(path, "transitions"),
+            "cache qualification requires exactly one cache.qualified and one "
+            "cache.rejected transition");
+    }
+    // The executor exists to enforce a declared qualification phase; without
+    // the declaration the adapter never had to prove it supports one.
+    if (!spec.execution || !spec.execution->qualify ||
+        !spec.execution->qualify->enabled) {
+      error(diagnostics, "workflow.cache_qualification_phase", path,
+            "cache qualification requires an enabled /spec/execution/qualify "
+            "phase");
+    }
+  }
+}
+
 void validate_resource_lifecycle(const Spec& spec,
                                  std::vector<Diagnostic>& diagnostics) {
   const Workflow& workflow = spec.workflow;
@@ -512,14 +579,78 @@ void validate_experiment(const Experiment& experiment, std::vector<Diagnostic>& 
   validate_map_identifiers(spec.workflow.nodes, "/spec/workflow/nodes", diagnostics);
   validate_map_identifiers(spec.controls.catalog, "/spec/controls/catalog", diagnostics);
 
-  if (spec.workspace.root.empty() || spec.workspace.run_directory.empty()) {
-    error(diagnostics, "workspace.path", "/spec/workspace", "root and run_directory must not be empty");
+  if (!absolute_normalized_path(spec.workspace.root) ||
+      !absolute_normalized_path(spec.workspace.run_directory)) {
+    error(diagnostics, "workspace.path", "/spec/workspace",
+          "root and run_directory must be absolute normalized paths");
   }
+  const auto validate_workspace_roots = [&](const auto& optional_roots,
+                                            std::string_view name) {
+    if (!optional_roots) return;
+    std::set<std::string> unique;
+    if (optional_roots->size() > 256U) {
+      error(diagnostics, "workspace.roots",
+            "/spec/workspace/" + std::string(name),
+            "workspace root lists may contain at most 256 paths");
+    }
+    for (std::size_t index = 0U; index < optional_roots->size(); ++index) {
+      const std::string& root = optional_roots->at(index);
+      if (!absolute_normalized_path(root) || !unique.insert(root).second) {
+        error(diagnostics, "workspace.roots",
+              "/spec/workspace/" + std::string(name) + "/" +
+                  std::to_string(index),
+              "workspace roots must be unique absolute normalized paths");
+      }
+    }
+  };
+  validate_workspace_roots(spec.workspace.allowed_read_roots,
+                           "allowed_read_roots");
+  validate_workspace_roots(spec.workspace.allowed_write_roots,
+                           "allowed_write_roots");
   if (spec.workspace.allowed_write_roots &&
       std::none_of(spec.workspace.allowed_write_roots->begin(), spec.workspace.allowed_write_roots->end(),
                    [&](const std::string& root) { return path_within(spec.workspace.run_directory, root); })) {
     error(diagnostics, "workspace.write_policy", "/spec/workspace/run_directory",
           "run_directory is outside every allowed_write_root");
+  }
+  if (spec.workspace.input_content_roots) {
+    const auto& roots = *spec.workspace.input_content_roots;
+    if (roots.empty() || roots.size() > 256U) {
+      error(diagnostics, "workspace.content_roots",
+            "/spec/workspace/input_content_roots",
+            "input content roots must contain between 1 and 256 identities");
+    }
+    std::set<std::string> paths;
+    std::string previous_path;
+    for (std::size_t index = 0U; index < roots.size(); ++index) {
+      const InputContentRootIdentity& root = roots[index];
+      const std::string path = "/spec/workspace/input_content_roots/" +
+                               std::to_string(index);
+      const bool within_read_root = spec.workspace.allowed_read_roots &&
+          std::ranges::any_of(*spec.workspace.allowed_read_roots,
+                              [&](const std::string& allowed) {
+            return path_within(root.path, allowed);
+          });
+      if (root.api_version != "trainvm.input-content-root/v1" ||
+          !absolute_normalized_path(root.path) || !within_read_root ||
+          root.file_count == 0U || root.file_count > 10'000'000U ||
+          root.total_bytes > (16ULL << 50U) ||
+          !sha256_digest(root.tree_sha256)) {
+        error(diagnostics, "workspace.content_root", path,
+              "input content root identity is malformed or outside declared read roots");
+      }
+      const bool overlaps = std::ranges::any_of(
+          paths, [&](const std::string& existing) {
+            return path_within(root.path, existing) ||
+                   path_within(existing, root.path);
+          });
+      if (!paths.insert(root.path).second || overlaps ||
+          (!previous_path.empty() && previous_path >= root.path)) {
+        error(diagnostics, "workspace.content_root_order", path + "/path",
+              "input content root paths must be nonoverlapping, unique, and strictly sorted");
+      }
+      previous_path = root.path;
+    }
   }
 
   const auto& accelerators = spec.resources.accelerators;
@@ -847,6 +978,63 @@ void validate_experiment(const Experiment& experiment, std::vector<Diagnostic>& 
               child_path(training_path, "components"),
               "training composition requires between 1 and 64 component slots");
       }
+      if (training.topologies) {
+        // Topologies are closed per model family. Only the rwkv family has a
+        // registry today; any other family declaring them is a compile error
+        // rather than a silently ignored field.
+        const std::string topologies_path =
+            child_path(training_path, "topologies");
+        if (training.model_family != "rwkv") {
+          error(diagnostics, "training.topologies.family", topologies_path,
+                "only the rwkv model family declares research topologies");
+        } else if (training.topologies->empty() ||
+                   training.topologies->size() > 16U) {
+          error(diagnostics, "training.topologies", topologies_path,
+                "a topology selection must name between 1 and 16 topologies");
+        } else {
+          std::vector<RwkvScratchSelection> selections;
+          bool resolved = true;
+          for (std::size_t index = 0U; index < training.topologies->size();
+               ++index) {
+            const TrainingTopologySelection& chosen =
+                (*training.topologies)[index];
+            const std::string chosen_path =
+                child_path(topologies_path, std::to_string(index));
+            const auto topology =
+                rwkv_scratch_topology_from_name(chosen.topology);
+            if (!topology) {
+              error(diagnostics, "training.topologies.unknown",
+                    child_path(chosen_path, "topology"),
+                    "unknown research topology " + chosen.topology);
+              resolved = false;
+              continue;
+            }
+            if (!chosen.parameters.is_object()) {
+              error(diagnostics, "training.topologies.parameters",
+                    child_path(chosen_path, "parameters"),
+                    "topology parameters must be an object");
+              resolved = false;
+              continue;
+            }
+            std::map<std::string, Json> assignments;
+            for (const auto& [name, value] : chosen.parameters.items())
+              assignments.emplace(name, value);
+            selections.push_back({.topology = *topology,
+                                  .assignments = std::move(assignments)});
+          }
+          if (resolved) {
+            // One call covers undeclared switches, out-of-bound values,
+            // duplicate topologies, and declared-incompatible pairs, so the
+            // compile diagnostic and the launch-time gate cannot disagree.
+            try {
+              (void)rwkv_scratch_training_block(selections);
+            } catch (const RwkvScratchProfileError& failure) {
+              error(diagnostics, "training.topologies.invalid",
+                    topologies_path, failure.what());
+            }
+          }
+        }
+      }
       for (const auto& [slot, selection] : training.components) {
         const std::string selection_path = child_path(
             child_path(training_path, "components"), slot);
@@ -954,6 +1142,7 @@ void validate_experiment(const Experiment& experiment, std::vector<Diagnostic>& 
     }
   }
   validate_resource_lifecycle(spec, diagnostics);
+  validate_cache_qualification(spec, diagnostics);
 
   if (workflow.nodes.contains(workflow.entrypoint)) {
     std::set<std::string> reachable;
@@ -1145,6 +1334,19 @@ void validate_experiment(const Experiment& experiment, std::vector<Diagnostic>& 
            {"/spec/recovery/checkpoint_artifact", spec.recovery.checkpoint_artifact}}) {
     if (artifact_name && !spec.artifacts.contains(*artifact_name)) {
       error(diagnostics, "reference.artifact", path, "unknown artifact: " + *artifact_name);
+    }
+  }
+  if (spec.observability.eval_gallery_artifact) {
+    const auto artifact = spec.artifacts.find(
+        *spec.observability.eval_gallery_artifact);
+    if (artifact != spec.artifacts.end() &&
+        (artifact->second.type != ArtifactType::image_gallery ||
+         artifact->second.schema !=
+             std::optional<std::string>{kEvalGallerySchema})) {
+      error(diagnostics, "observability.eval_gallery_artifact",
+            "/spec/observability/eval_gallery_artifact",
+            "eval gallery observability must reference an image_gallery "
+            "artifact with schema rwkv-lab.eval-gallery.v2");
     }
   }
   if (spec.recovery.exact_resume && !spec.recovery.checkpoint_artifact) {

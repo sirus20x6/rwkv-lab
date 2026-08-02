@@ -48,6 +48,11 @@ type Run struct {
 	LastHeartbeatNS  int64  `json:"last_heartbeat_ns"`
 	LastEventSeq     uint64 `json:"last_event_sequence"`
 	FailureSummary   string `json:"failure_summary"`
+	// Immutable fork provenance replayed from run.created. Empty on a run that
+	// was not forked; never inferred from names, timestamps, or ordering.
+	ForkedFromRunID       string `json:"forked_from_run_id,omitempty"`
+	ForkedFromRunRevision uint64 `json:"forked_from_run_revision,omitempty"`
+	ForkedFromPlanHash    string `json:"forked_from_plan_hash,omitempty"`
 }
 
 type Event struct {
@@ -242,12 +247,22 @@ func (r *Reader) Events(ctx context.Context, input EventQuery) ([]Event, error) 
 	if err != nil {
 		return nil, err
 	}
-	statement := `
-		SELECT journal_sequence, event_id, run_id, run_revision, plan_revision,
-		       node_id, attempt_id, worker_sequence, event_type, event_version,
-		       wall_time_ns, monotonic_time_ns, optimizer_step, payload_json
-		FROM events
-		WHERE run_id=? AND journal_sequence>?`
+	const eventColumns = `journal_sequence, event_id, run_id, run_revision, plan_revision,
+			node_id, attempt_id, worker_sequence, event_type, event_version,
+			wall_time_ns, monotonic_time_ns, optimizer_step, payload_json`
+	statement := "SELECT " + eventColumns + " FROM events WHERE run_id=? AND journal_sequence>?"
+	if query.NewestPerMetricSeries {
+		statement = `WITH ranked_metric_series AS (
+			SELECT ` + eventColumns + `,
+			       ROW_NUMBER() OVER (
+			         PARTITION BY run_id, node_id, attempt_id,
+			                      json_extract(payload_json, '$.name'),
+			                      json_extract(payload_json, '$.labels')
+			         ORDER BY journal_sequence DESC
+			       ) AS metric_series_rank
+			FROM events
+			WHERE run_id=? AND journal_sequence>?`
+	}
 	arguments := []any{query.RunID, query.After}
 	if query.Through != 0 {
 		statement += " AND journal_sequence<=?"
@@ -259,7 +274,10 @@ func (r *Reader) Events(ctx context.Context, input EventQuery) ([]Event, error) 
 			arguments = append(arguments, eventType)
 		}
 	}
-	if query.NewestFirst {
+	if query.NewestPerMetricSeries {
+		statement += ") SELECT " + eventColumns +
+			" FROM ranked_metric_series WHERE metric_series_rank=1 ORDER BY journal_sequence LIMIT ?"
+	} else if query.NewestFirst {
 		statement += " ORDER BY journal_sequence DESC LIMIT ?"
 	} else {
 		statement += " ORDER BY journal_sequence LIMIT ?"

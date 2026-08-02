@@ -23,6 +23,20 @@ func TestMageFlowExpertTrainerIsRecognized(t *testing.T) {
 	}
 }
 
+func TestMLATrainersRemainObservableButCannotUseLegacyLaunchAuthority(t *testing.T) {
+	for _, script := range []string{"train_mla.py", "train_mla_engram.py"} {
+		if AllowedScript(script) {
+			t.Fatalf("%s retained legacy dashboard launch authority", script)
+		}
+		if _, ok := ModuleForScript(script); ok {
+			t.Fatalf("%s retained a legacy launch module", script)
+		}
+	}
+	if got := matchedScript([]string{"python", "-m", "rwkv_lab.train_mla"}); got != "train_mla.py" {
+		t.Fatalf("legacy MLA process is no longer observable: %q", got)
+	}
+}
+
 func TestLivenessUsesFreshStatusHeartbeatDuringLongEvaluation(t *testing.T) {
 	root := t.TempDir()
 	run := filepath.Join(root, "vision")

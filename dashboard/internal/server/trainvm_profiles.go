@@ -78,27 +78,97 @@ type trainVMGPUTraceManifest struct {
 }
 
 type trainVMGPUTraceSummary struct {
-	Sequence                uint64                       `json:"sequence"`
-	ArtifactID              string                       `json:"artifact_id"`
-	LogicalName             string                       `json:"logical_name"`
-	NodeID                  string                       `json:"node_id"`
-	AttemptID               string                       `json:"attempt_id"`
-	Backend                 string                       `json:"backend"`
-	FirstOptimizerStep      uint64                       `json:"first_optimizer_step"`
-	LastOptimizerStep       uint64                       `json:"last_optimizer_step"`
-	CaptureSteps            uint64                       `json:"capture_steps"`
-	SkipSteps               uint64                       `json:"skip_steps"`
-	WarmupSteps             uint64                       `json:"warmup_steps"`
-	Activities              []string                     `json:"activities"`
-	Options                 trainVMGPUTraceOptions       `json:"options"`
-	Summary                 trainVMGPUTraceSummaryValues `json:"summary"`
-	TraceSHA256             string                       `json:"trace_sha256"`
-	TraceSizeBytes          uint64                       `json:"trace_size_bytes"`
-	Sensitivity             string                       `json:"sensitivity"`
-	InvocationDigest        string                       `json:"invocation_digest"`
-	CanonicalManifestDigest string                       `json:"canonical_manifest_digest"`
-	PublishedAtNS           int64                        `json:"published_at_ns"`
-	TraceDownloadURL        string                       `json:"trace_download_url"`
+	Sequence                uint64                          `json:"sequence"`
+	ArtifactID              string                          `json:"artifact_id"`
+	LogicalName             string                          `json:"logical_name"`
+	NodeID                  string                          `json:"node_id"`
+	AttemptID               string                          `json:"attempt_id"`
+	Backend                 string                          `json:"backend"`
+	FirstOptimizerStep      uint64                          `json:"first_optimizer_step"`
+	LastOptimizerStep       uint64                          `json:"last_optimizer_step"`
+	CaptureSteps            uint64                          `json:"capture_steps"`
+	SkipSteps               uint64                          `json:"skip_steps"`
+	WarmupSteps             uint64                          `json:"warmup_steps"`
+	Activities              []string                        `json:"activities"`
+	Options                 trainVMGPUTraceOptions          `json:"options"`
+	Summary                 trainVMGPUTraceSummaryValues    `json:"summary"`
+	TraceSHA256             string                          `json:"trace_sha256"`
+	TraceSizeBytes          uint64                          `json:"trace_size_bytes"`
+	Sensitivity             string                          `json:"sensitivity"`
+	InvocationDigest        string                          `json:"invocation_digest"`
+	CanonicalManifestDigest string                          `json:"canonical_manifest_digest"`
+	PublishedAtNS           int64                           `json:"published_at_ns"`
+	TraceDownloadURL        string                          `json:"trace_download_url"`
+	ExecutionPhases         *trainVMGPUTraceExecutionPhases `json:"execution_phases,omitempty"`
+}
+
+type trainVMGPUTraceExecutionPhases struct {
+	CompileEnabled      *bool   `json:"compile_enabled,omitempty"`
+	WarmupEnabled       *bool   `json:"warmup_enabled,omitempty"`
+	WarmupStepsDeclared *uint64 `json:"warmup_steps_declared,omitempty"`
+	QualifyEnabled      *bool   `json:"qualify_enabled,omitempty"`
+	QualifySteps        *uint64 `json:"qualify_steps,omitempty"`
+	OverlapsWarmup      *bool   `json:"overlaps_warmup"`
+}
+
+type trainVMDeclaredExecutionPhase struct {
+	Enabled *bool   `json:"enabled"`
+	Steps   *uint64 `json:"steps"`
+}
+
+type trainVMDeclaredExecutionPhases struct {
+	Compile *trainVMDeclaredExecutionPhase `json:"compile"`
+	Warmup  *trainVMDeclaredExecutionPhase `json:"warmup"`
+	Qualify *trainVMDeclaredExecutionPhase `json:"qualify"`
+}
+
+func (s *Server) declaredExecutionPhases(ctx context.Context, runID string) *trainVMDeclaredExecutionPhases {
+	view, found, err := s.trainvm.CompiledPlan(ctx, runID)
+	if err != nil || !found {
+		return nil
+	}
+	var plan struct {
+		Spec struct {
+			Execution *trainVMDeclaredExecutionPhases `json:"execution"`
+		} `json:"spec"`
+	}
+	if err := json.Unmarshal(view.CanonicalPlan, &plan); err != nil {
+		return nil
+	}
+	return plan.Spec.Execution
+}
+
+func (phases *trainVMDeclaredExecutionPhases) gpuTraceState(firstOptimizerStep uint64) *trainVMGPUTraceExecutionPhases {
+	if phases == nil {
+		return nil
+	}
+	state := &trainVMGPUTraceExecutionPhases{}
+	if phases.Compile != nil {
+		state.CompileEnabled = phases.Compile.Enabled
+	}
+	if phases.Warmup != nil {
+		state.WarmupEnabled = phases.Warmup.Enabled
+		state.WarmupStepsDeclared = phases.Warmup.Steps
+	}
+	if phases.Qualify != nil {
+		state.QualifyEnabled = phases.Qualify.Enabled
+		state.QualifySteps = phases.Qualify.Steps
+	}
+
+	overlapsWarmup := false
+	if phases.Warmup != nil {
+		if phases.Warmup.Enabled == nil {
+			return state
+		}
+		if *phases.Warmup.Enabled {
+			if phases.Warmup.Steps == nil {
+				return state
+			}
+			overlapsWarmup = firstOptimizerStep < *phases.Warmup.Steps
+		}
+	}
+	state.OverlapsWarmup = &overlapsWarmup
+	return state
 }
 
 func (s *Server) publishedGPUTraces(ctx context.Context, runID string) ([]trainvmstore.PublishedArtifact, error) {
@@ -312,6 +382,7 @@ func (s *Server) handleTrainVMProfiles(w http.ResponseWriter, r *http.Request) {
 		writeTrainVMAuthorityError(w, err)
 		return
 	}
+	phases := s.declaredExecutionPhases(r.Context(), r.PathValue("run"))
 	result := make([]trainVMGPUTraceSummary, 0, len(artifacts))
 	for _, artifact := range artifacts {
 		manifest, _, err := s.loadGPUTrace(artifact)
@@ -319,7 +390,9 @@ func (s *Server) handleTrainVMProfiles(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
-		result = append(result, gpuTraceSummary(artifact, manifest))
+		summary := gpuTraceSummary(artifact, manifest)
+		summary.ExecutionPhases = phases.gpuTraceState(summary.FirstOptimizerStep)
+		result = append(result, summary)
 	}
 	sort.SliceStable(result, func(i, j int) bool {
 		if result[i].FirstOptimizerStep != result[j].FirstOptimizerStep {
@@ -357,7 +430,11 @@ func (s *Server) handleTrainVMProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(gpuTraceSummary(artifact, manifest))
+	summary := gpuTraceSummary(artifact, manifest)
+	if phases := s.declaredExecutionPhases(r.Context(), artifact.RunID); phases != nil {
+		summary.ExecutionPhases = phases.gpuTraceState(summary.FirstOptimizerStep)
+	}
+	_ = json.NewEncoder(w).Encode(summary)
 }
 
 func (s *Server) handleTrainVMProfileTrace(w http.ResponseWriter, r *http.Request) {

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 from urllib.parse import unquote, urlparse
@@ -18,10 +19,22 @@ from rwkv_lab.trainvm_worker import (
     publish_checkpoint_requests,
     resolve_resume_checkpoint,
 )
+from rwkv_lab.trainvm_worker.checkpoint import _STATE_COMPONENTS
 
 
 def digest(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
+
+
+def test_dashboard_checkpoint_state_vocabulary_matches_worker_authority() -> None:
+    source = (
+        Path(__file__).parents[1]
+        / "dashboard/internal/server/trainvm_checkpoints.go"
+    ).read_text(encoding="utf-8")
+    start = source.index("func validCheckpointStateComponent")
+    end = source.index("func checkpointCanonicalDigest", start)
+    dashboard_components = frozenset(re.findall(r'"([a-z][a-z0-9_]*)"', source[start:end]))
+    assert dashboard_components == _STATE_COMPONENTS
 
 
 class FakeCheckpointSession:
@@ -90,6 +103,8 @@ def test_checkpoint_is_copied_hashed_promoted_and_published(tmp_path: Path) -> N
             "data_cursor",
             "model",
             "optimizer",
+            "optimizer_groups",
+            "plateau_state",
             "rng_torch",
         ),
         parent_artifact_ids=("base-model-1",),
@@ -132,6 +147,8 @@ def test_checkpoint_is_copied_hashed_promoted_and_published(tmp_path: Path) -> N
             "data_cursor",
             "model",
             "optimizer",
+            "optimizer_groups",
+            "plateau_state",
             "rng_torch",
         ),
         parent_artifact_ids=("base-model-1",),

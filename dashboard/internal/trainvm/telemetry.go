@@ -13,13 +13,16 @@ import (
 )
 
 type EventQuery struct {
-	RunID       string
-	After       uint64
-	Through     uint64
-	Limit       int
-	EventTypes  []string
-	NewestFirst bool
+	RunID                 string
+	After                 uint64
+	Through               uint64
+	Limit                 int
+	EventTypes            []string
+	NewestFirst           bool
+	NewestPerMetricSeries bool
 }
+
+const maximumLiveMetricSeries = 512
 
 func normalizeEventQuery(input EventQuery) (EventQuery, error) {
 	input.RunID = strings.TrimSpace(input.RunID)
@@ -34,6 +37,11 @@ func normalizeEventQuery(input EventQuery) (EventQuery, error) {
 	}
 	if input.NewestFirst && input.Through == 0 {
 		return EventQuery{}, &ValidationError{Message: "newest-first event scans require an upper fence"}
+	}
+	if input.NewestPerMetricSeries &&
+		(input.Through == 0 || input.NewestFirst || len(input.EventTypes) != 1 ||
+			input.EventTypes[0] != "metric.sampled") {
+		return EventQuery{}, &ValidationError{Message: "newest-per-series scans require an upper fence and only metric.sampled"}
 	}
 	if len(input.EventTypes) > 64 {
 		return EventQuery{}, &ValidationError{Message: "event-type filter exceeds 64 values"}
@@ -216,7 +224,9 @@ type ObservableArtifact struct {
 	WorkerSequence       uint64   `json:"worker_sequence"`
 }
 
-func observableArtifact(artifact PublishedArtifact) ObservableArtifact {
+// RedactArtifact removes the worker-authored storage locator before data
+// crosses into a browser-facing projection.
+func RedactArtifact(artifact PublishedArtifact) ObservableArtifact {
 	return ObservableArtifact{
 		Sequence: artifact.Sequence, RunID: artifact.RunID,
 		ArtifactID: artifact.ArtifactID, LogicalName: artifact.LogicalName,
@@ -456,6 +466,124 @@ func Artifacts(ctx context.Context, reader ReadModel, runID string, after uint64
 	return result, nil
 }
 
+// RecentArtifacts returns a bounded newest-first tail captured against one
+// durable run prefix. It is intended for specialized dashboard projections
+// that verify manifests without scanning an entire long-running history.
+func RecentArtifacts(
+	ctx context.Context, reader ReadModel, runID string, limit int,
+) ([]PublishedArtifact, bool, error) {
+	if limit < 1 || limit > 1_000 {
+		return nil, false, &ValidationError{Message: "recent artifact limit must be from 1 through 1000"}
+	}
+	run, found, err := reader.Run(ctx, runID)
+	if err != nil || !found {
+		return nil, found, err
+	}
+	if run.LastEventSeq == 0 {
+		return []PublishedArtifact{}, true, nil
+	}
+	result, _, err := RecentArtifactsThrough(
+		ctx, reader, runID, run.LastEventSeq, limit,
+	)
+	if err != nil {
+		return nil, true, err
+	}
+	return result, true, nil
+}
+
+// RecentArtifactsThrough returns a newest-first artifact tail from one caller-
+// captured durable run prefix. Truncated is true only when an older artifact
+// exists beyond the returned tail; callers must never present that tail as a
+// complete history.
+func RecentArtifactsThrough(
+	ctx context.Context, reader ReadModel, runID string, through uint64, limit int,
+) ([]PublishedArtifact, bool, error) {
+	if limit < 1 || limit > 1_000 {
+		return nil, false, &ValidationError{Message: "recent artifact limit must be from 1 through 1000"}
+	}
+	if through == 0 {
+		return []PublishedArtifact{}, false, nil
+	}
+	events, err := reader.Events(ctx, EventQuery{
+		RunID: runID, After: 0, Through: through, Limit: limit,
+		EventTypes: []string{"artifact.published"}, NewestFirst: true,
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	if len(events) > limit {
+		return nil, false, fmt.Errorf("TrainVM authority exceeded the bounded artifact tail")
+	}
+	result := make([]PublishedArtifact, 0, len(events))
+	var previous uint64
+	for index, event := range events {
+		if event.RunID != runID || event.Sequence == 0 || event.Sequence > through ||
+			(index > 0 && event.Sequence >= previous) {
+			return nil, false, fmt.Errorf("TrainVM authority returned an incoherent artifact tail")
+		}
+		previous = event.Sequence
+		artifact, parseErr := artifactFromEvent(event)
+		if parseErr != nil {
+			return nil, false, parseErr
+		}
+		result = append(result, artifact)
+	}
+	truncated := false
+	if len(events) == limit && events[len(events)-1].Sequence > 1 {
+		older, olderErr := reader.Events(ctx, EventQuery{
+			RunID: runID, After: 0, Through: events[len(events)-1].Sequence - 1,
+			Limit: 1, EventTypes: []string{"artifact.published"}, NewestFirst: true,
+		})
+		if olderErr != nil {
+			return nil, false, olderErr
+		}
+		if len(older) > 1 {
+			return nil, false, fmt.Errorf("TrainVM authority exceeded the artifact truncation sentinel")
+		}
+		if len(older) == 1 {
+			if older[0].RunID != runID || older[0].Sequence == 0 ||
+				older[0].Sequence >= events[len(events)-1].Sequence {
+				return nil, false, fmt.Errorf("TrainVM authority returned an incoherent artifact truncation sentinel")
+			}
+			truncated = true
+		}
+	}
+	return result, truncated, nil
+}
+
+// CaptureRunPlanPrefix obtains one coherent journal/run/compiled-plan identity.
+// The reads are retried once so a concurrent plan adoption can settle; a
+// continuing race fails closed rather than mixing declarations and events.
+func CaptureRunPlanPrefix(
+	ctx context.Context, reader ReadModel, runID string,
+) (string, Run, CompiledPlanView, bool, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		journalBefore, err := reader.JournalID(ctx)
+		if err != nil {
+			return "", Run{}, CompiledPlanView{}, false, err
+		}
+		run, found, err := reader.Run(ctx, runID)
+		if err != nil || !found {
+			return "", Run{}, CompiledPlanView{}, found, err
+		}
+		plan, found, err := reader.CompiledPlan(ctx, runID)
+		if err != nil || !found {
+			return "", Run{}, CompiledPlanView{}, found, err
+		}
+		journalAfter, err := reader.JournalID(ctx)
+		if err != nil {
+			return "", Run{}, CompiledPlanView{}, false, err
+		}
+		if journalBefore == journalAfter && journalBefore == plan.JournalID &&
+			run.RunID == runID && plan.RunID == runID &&
+			run.RunRevision == plan.RunRevision && run.PlanHash == plan.PlanHash {
+			return journalBefore, run, plan, true, nil
+		}
+	}
+	return "", Run{}, CompiledPlanView{}, false,
+		fmt.Errorf("TrainVM run changed while its plan-bound artifact prefix was being captured")
+}
+
 var telemetryEventTypes = []string{
 	"artifact.published",
 	"metric.sampled",
@@ -563,16 +691,20 @@ func ProjectTelemetrySnapshot(
 		// independently bounded tails against the same captured upper fence,
 		// then merge them into one ordered snapshot and browser cursor.
 		for _, query := range []struct {
-			eventType string
-			limit     int
+			eventType             string
+			limit                 int
+			newestPerMetricSeries bool
 		}{
 			{eventType: "worker.heartbeat", limit: 1},
-			{eventType: "metric.sampled", limit: limit},
+			{eventType: "metric.sampled", limit: maximumLiveMetricSeries + 1,
+				newestPerMetricSeries: true},
 			{eventType: "artifact.published", limit: limit},
 		} {
 			page, queryErr := reader.Events(ctx, EventQuery{
 				RunID: runID, After: 0, Through: run.LastEventSeq, Limit: query.limit,
-				EventTypes: []string{query.eventType}, NewestFirst: true,
+				EventTypes:            []string{query.eventType},
+				NewestFirst:           !query.newestPerMetricSeries,
+				NewestPerMetricSeries: query.newestPerMetricSeries,
 			})
 			if queryErr != nil {
 				return TelemetrySnapshot{}, true, queryErr
@@ -580,6 +712,10 @@ func ProjectTelemetrySnapshot(
 			if len(page) > query.limit {
 				return TelemetrySnapshot{}, true,
 					fmt.Errorf("TrainVM authority exceeded the bounded telemetry tail")
+			}
+			if query.newestPerMetricSeries && len(page) > maximumLiveMetricSeries {
+				return TelemetrySnapshot{}, true,
+					fmt.Errorf("TrainVM run exceeds the %d-series live metric bound", maximumLiveMetricSeries)
 			}
 			events = append(events, page...)
 		}
@@ -639,7 +775,7 @@ func ProjectTelemetrySnapshot(
 			if parseErr != nil {
 				return TelemetrySnapshot{}, true, parseErr
 			}
-			snapshot.Artifacts = append(snapshot.Artifacts, observableArtifact(artifact))
+			snapshot.Artifacts = append(snapshot.Artifacts, RedactArtifact(artifact))
 		default:
 			return TelemetrySnapshot{}, true,
 				fmt.Errorf("TrainVM authority returned an unrequested telemetry event type")

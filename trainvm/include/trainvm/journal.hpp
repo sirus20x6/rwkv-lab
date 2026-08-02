@@ -101,6 +101,7 @@ struct EventScanQuery final {
   std::set<std::string, std::less<>> event_types;
   std::size_t limit{};
   bool newest_first{};
+  bool newest_per_metric_series{};
 };
 
 struct RunWallTimeBounds final {

@@ -210,6 +210,20 @@ field from appearing declarative while being ignored by the selected trainer,
 and moves missing/extra/wrong-family failures ahead of leases and worker
 launches.
 
+The same native registry publishes the canonical `trainvm.operations/v1`
+authoring document through the exact `trainvm.operations@1.0.0` descriptor
+selector. Each exact adapter/version/runtime/operation/contract key carries its
+effect, idempotency, lifecycle, capabilities, optional training composition,
+and mandatory bounded input/output maps. Port value types are closed; published
+outputs are artifacts and may narrow both artifact type and schema. Registry
+construction rejects omitted declarations, oversized surfaces, or primitive
+outputs. Plan validation then rejects missing required or unknown ports,
+incompatible literal/reference types, artifact type/schema disagreement, and
+undeclared or omitted publications before any resource lease or worker launch.
+Descriptors describe the protocol the current handler actually implements;
+local trainer files are not advertised as outputs until the worker protocol
+publishes them.
+
 Adding a trainer family requires one adapter and its tests. Creating another experiment from
 registered operations requires no new Go handler, HTML form, subprocess code, or Python supervisor.
 The dashboard generates its editor and live controls from descriptors.
@@ -231,6 +245,14 @@ rejects unknown or ill-typed fields, applies declared defaults, and canonicalize
 and values. It then freezes the resolved per-node compositions in a content-addressed submission
 lock. The same resolved object is included in the immutable worker invocation; experiments never
 supply import paths, argv, environment variables, or implementation code.
+
+Static trainer inputs use reflected `input_content_roots` rather than pathname identity. The native
+authority measures a bounded descriptor-relative Merkle tree and freezes its path, kind, file count,
+byte count, and root digest in the plan. The Python worker independently remeasures every declared
+root before importing a family trainer and confines every ordinary adapter read to those verified
+roots. Symlinks and special nodes are forbidden. Controller-published checkpoint artifacts retain
+their separate canonical object-manifest verifier because replacement checkpoints are selected by
+durable runtime lineage rather than the original static plan.
 
 Required capabilities from all selected components are unioned with the adapter operation's
 capabilities before the launch intent is committed. The immutable `trainvm.host-launches/v4`
@@ -294,6 +316,15 @@ effects use an intent/receipt protocol:
 2. perform or reconcile the effect;
 3. commit its receipt and emitted outputs;
 4. advance the node.
+
+Builtin `trainvm.core` operations are the supervisor's typed executors. Alongside resource
+admission, artifact validation, and resource release, `qualify_cache` gates a published cache
+artifact: the supervisor resolves qualification evidence through an authority-owned seam, runs the
+qualification decision itself, and commits `cache.qualified` or `cache.rejected` as a managed
+builtin receipt. A plan must route both verdicts and must declare the `qualify` execution phase,
+so the adapter operation had to advertise qualification support before the gate can appear. The
+executor never releases the lease it runs under, and neither the experiment document nor the worker
+supplies the verdict.
 
 Operations declare one idempotency class:
 

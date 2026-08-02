@@ -26,7 +26,21 @@ const liveE2EAdapterRegistry = `{
       "idempotency": "receipt_required",
       "code_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "required_capabilities": ["worker.controls", "worker.metrics"],
-      "lifecycle": {"stateful":true,"graceful_stop":true,"checkpoint_now":true,"pause_keep_resources":true,"pause_release_resources":true,"compile":true,"warmup":true,"qualify":true,"profile":true,"resume_grade":"exact"}
+      "lifecycle": {"stateful":true,"graceful_stop":true,"checkpoint_now":true,"pause_keep_resources":true,"pause_release_resources":true,"compile":true,"warmup":true,"qualify":true,"profile":true,"resume_grade":"exact"},
+      "authoring": {
+        "inputs": {
+          "checkpoint": {"type":"artifact","required":false,"artifact_type":"checkpoint","artifact_schema":"rwkv-lab.mageflow-checkpoint.v1"},
+          "config": {"type":"string","required":true},
+          "encoder_cache": {"type":"artifact","required":false,"artifact_type":"dataset","artifact_schema":"rwkv-lab.encoder-cache.v1"},
+          "run_directory": {"type":"string","required":true},
+          "stop_at_step": {"type":"integer","required":false}
+        },
+        "outputs": {
+          "checkpoint": {"type":"artifact","required":false,"artifact_type":"checkpoint","artifact_schema":"rwkv-lab.mageflow-checkpoint.v1"},
+          "eval_gallery": {"type":"artifact","required":false,"artifact_type":"image_gallery","artifact_schema":"rwkv-lab.eval-gallery.v2"},
+          "log": {"type":"artifact","required":false,"artifact_type":"path"}
+        }
+      }
     },
     {
       "key": {"adapter":"rwkv-lab.mageflow","version":"1.0.0","runtime":"python_worker","operation":"prepare_cache_span","contract":"rwkv_lab.mageflow.v1.PrepareCacheSpan"},
@@ -34,7 +48,18 @@ const liveE2EAdapterRegistry = `{
       "idempotency": "replay_safe",
       "code_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "required_capabilities": ["worker.controls", "worker.metrics"],
-      "lifecycle": {"stateful":false,"graceful_stop":false,"checkpoint_now":false,"pause_keep_resources":false,"pause_release_resources":false,"compile":false,"warmup":false,"qualify":false,"profile":false,"resume_grade":"none"}
+      "lifecycle": {"stateful":false,"graceful_stop":false,"checkpoint_now":false,"pause_keep_resources":false,"pause_release_resources":false,"compile":false,"warmup":false,"qualify":false,"profile":false,"resume_grade":"none"},
+      "authoring": {
+        "inputs": {
+          "checkpoint": {"type":"artifact","required":true,"artifact_type":"checkpoint","artifact_schema":"rwkv-lab.mageflow-checkpoint.v1"},
+          "config": {"type":"string","required":true},
+          "final_step": {"type":"integer","required":true},
+          "output_directory": {"type":"string","required":true}
+        },
+        "outputs": {
+          "plan": {"type":"artifact","required":false,"artifact_type":"report","artifact_schema":"rwkv-lab.mageflow-cache-plan.v1"}
+        }
+      }
     },
     {
       "key": {"adapter":"rwkv-lab.mageflow","version":"1.0.0","runtime":"python_worker","operation":"cache_encoders","contract":"rwkv_lab.mageflow.v1.CacheEncoders"},
@@ -42,7 +67,16 @@ const liveE2EAdapterRegistry = `{
       "idempotency": "receipt_required",
       "code_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "required_capabilities": ["worker.controls", "worker.metrics"],
-      "lifecycle": {"stateful":false,"graceful_stop":true,"checkpoint_now":false,"pause_keep_resources":false,"pause_release_resources":false,"compile":false,"warmup":false,"qualify":false,"profile":false,"resume_grade":"none"}
+      "lifecycle": {"stateful":false,"graceful_stop":true,"checkpoint_now":false,"pause_keep_resources":false,"pause_release_resources":false,"compile":false,"warmup":false,"qualify":false,"profile":false,"resume_grade":"none"},
+      "authoring": {
+        "inputs": {
+          "output_directory": {"type":"string","required":true},
+          "plan": {"type":"artifact","required":true,"artifact_type":"report","artifact_schema":"rwkv-lab.mageflow-cache-plan.v1"}
+        },
+        "outputs": {
+          "cache": {"type":"artifact","required":false,"artifact_type":"dataset","artifact_schema":"rwkv-lab.encoder-cache.v1"}
+        }
+      }
     }
   ]
 }`
@@ -280,6 +314,26 @@ func TestTrainVMLiveStackE2E(t *testing.T) {
 	child := liveE2EIdentity(t, forked["run"])
 	if child["run_id"] == rootID || child["plan_hash"] != proposedHash {
 		t.Fatalf("fork did not create a distinct child identity: %#v", forked)
+	}
+
+	// The child must carry its parent's exact identity when read back, so a
+	// comparison view never has to infer lineage from names or ordering.
+	childID, _ := child["run_id"].(string)
+	reread := liveE2ERequest(t, handler, http.MethodGet,
+		"/api/trainvm/runs/"+childID, nil, http.StatusOK)
+	if reread["forked_from_run_id"] != rootID ||
+		reread["forked_from_plan_hash"] != planHash {
+		t.Fatalf("forked run lost its parent identity on read-back: %#v", reread)
+	}
+	parentRevision, ok := reread["forked_from_run_revision"].(float64)
+	if !ok || uint64(parentRevision) != uint64(revision) {
+		t.Fatalf("forked run lost its parent revision on read-back: %#v", reread)
+	}
+	// An unforked run must not gain fabricated provenance.
+	rootRun := liveE2ERequest(t, handler, http.MethodGet,
+		"/api/trainvm/runs/"+rootID, nil, http.StatusOK)
+	if rootRun["forked_from_run_id"] != nil && rootRun["forked_from_run_id"] != "" {
+		t.Fatalf("root run reported a parent it never had: %#v", rootRun)
 	}
 
 	if err := stopAuthority(); err != nil {

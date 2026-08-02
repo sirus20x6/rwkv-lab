@@ -1194,8 +1194,15 @@ type RunSummary struct {
 	LatestRequestedControlRevision uint64 `protobuf:"varint,14,opt,name=latest_requested_control_revision,json=latestRequestedControlRevision,proto3" json:"latest_requested_control_revision,omitempty"`
 	LatestEffectiveControlRevision uint64 `protobuf:"varint,15,opt,name=latest_effective_control_revision,json=latestEffectiveControlRevision,proto3" json:"latest_effective_control_revision,omitempty"`
 	LastEventSequence              uint64 `protobuf:"varint,16,opt,name=last_event_sequence,json=lastEventSequence,proto3" json:"last_event_sequence,omitempty"`
-	unknownFields                  protoimpl.UnknownFields
-	sizeCache                      protoimpl.SizeCache
+	// Immutable fork provenance, replayed from the run.created submission. A
+	// forked run keeps its parent's exact identity so a comparison view never
+	// has to infer lineage from names, timestamps, or ordering. All three are
+	// set together or not at all; an unforked run leaves them empty.
+	ForkedFromRunId       string `protobuf:"bytes,17,opt,name=forked_from_run_id,json=forkedFromRunId,proto3" json:"forked_from_run_id,omitempty"`
+	ForkedFromRunRevision uint64 `protobuf:"varint,18,opt,name=forked_from_run_revision,json=forkedFromRunRevision,proto3" json:"forked_from_run_revision,omitempty"`
+	ForkedFromPlanHash    string `protobuf:"bytes,19,opt,name=forked_from_plan_hash,json=forkedFromPlanHash,proto3" json:"forked_from_plan_hash,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *RunSummary) Reset() {
@@ -1339,6 +1346,27 @@ func (x *RunSummary) GetLastEventSequence() uint64 {
 		return x.LastEventSequence
 	}
 	return 0
+}
+
+func (x *RunSummary) GetForkedFromRunId() string {
+	if x != nil {
+		return x.ForkedFromRunId
+	}
+	return ""
+}
+
+func (x *RunSummary) GetForkedFromRunRevision() uint64 {
+	if x != nil {
+		return x.ForkedFromRunRevision
+	}
+	return 0
+}
+
+func (x *RunSummary) GetForkedFromPlanHash() string {
+	if x != nil {
+		return x.ForkedFromPlanHash
+	}
+	return ""
 }
 
 type SubmitExperimentRequest struct {
@@ -4692,9 +4720,15 @@ type WatchEventsRequest struct {
 	ThroughJournalSequence uint64 `protobuf:"varint,5,opt,name=through_journal_sequence,json=throughJournalSequence,proto3" json:"through_journal_sequence,omitempty"`
 	// Return the newest matching events first. This is valid only for a bounded,
 	// upper-fenced replay and lets observers cold-load a fixed-size tail window.
-	NewestFirst   bool `protobuf:"varint,6,opt,name=newest_first,json=newestFirst,proto3" json:"newest_first,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	NewestFirst bool `protobuf:"varint,6,opt,name=newest_first,json=newestFirst,proto3" json:"newest_first,omitempty"`
+	// Return only the newest event for each distinct metric series. A series is
+	// identified by run, node, attempt, metric name, and its complete label map.
+	// This is valid only for an upper-fenced bounded replay filtered to exactly
+	// metric.sampled; it prevents high-rate metrics from starving sparse series
+	// during a dashboard cold load.
+	NewestPerMetricSeries bool `protobuf:"varint,7,opt,name=newest_per_metric_series,json=newestPerMetricSeries,proto3" json:"newest_per_metric_series,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *WatchEventsRequest) Reset() {
@@ -4765,6 +4799,13 @@ func (x *WatchEventsRequest) GetThroughJournalSequence() uint64 {
 func (x *WatchEventsRequest) GetNewestFirst() bool {
 	if x != nil {
 		return x.NewestFirst
+	}
+	return false
+}
+
+func (x *WatchEventsRequest) GetNewestPerMetricSeries() bool {
+	if x != nil {
+		return x.NewestPerMetricSeries
 	}
 	return false
 }
@@ -5253,7 +5294,7 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\vRunIdentity\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1a\n" +
 	"\brevision\x18\x02 \x01(\x04R\brevision\x12\x1b\n" +
-	"\tplan_hash\x18\x03 \x01(\tR\bplanHash\"\xf8\x06\n" +
+	"\tplan_hash\x18\x03 \x01(\tR\bplanHash\"\x91\b\n" +
 	"\n" +
 	"RunSummary\x123\n" +
 	"\bidentity\x18\x01 \x01(\v2\x17.trainvm.v1.RunIdentityR\bidentity\x12'\n" +
@@ -5275,7 +5316,10 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\x1aeffective_control_revision\x18\r \x01(\x04B\x02\x18\x01R\x18effectiveControlRevision\x12I\n" +
 	"!latest_requested_control_revision\x18\x0e \x01(\x04R\x1elatestRequestedControlRevision\x12I\n" +
 	"!latest_effective_control_revision\x18\x0f \x01(\x04R\x1elatestEffectiveControlRevision\x12.\n" +
-	"\x13last_event_sequence\x18\x10 \x01(\x04R\x11lastEventSequence\"\xfd\x04\n" +
+	"\x13last_event_sequence\x18\x10 \x01(\x04R\x11lastEventSequence\x12+\n" +
+	"\x12forked_from_run_id\x18\x11 \x01(\tR\x0fforkedFromRunId\x127\n" +
+	"\x18forked_from_run_revision\x18\x12 \x01(\x04R\x15forkedFromRunRevision\x121\n" +
+	"\x15forked_from_plan_hash\x18\x13 \x01(\tR\x12forkedFromPlanHash\"\xfd\x04\n" +
 	"\x17SubmitExperimentRequest\x12'\n" +
 	"\x0fsource_document\x18\x01 \x01(\tR\x0esourceDocument\x12#\n" +
 	"\rsource_format\x18\x02 \x01(\tR\fsourceFormat\x12\x1d\n" +
@@ -5654,7 +5698,7 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"\x04runs\x18\x01 \x03(\v2\x16.trainvm.v1.RunSummaryR\x04runs\x12&\n" +
 	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\x12\x1d\n" +
 	"\n" +
-	"journal_id\x18\x03 \x01(\tR\tjournalId\"\x84\x02\n" +
+	"journal_id\x18\x03 \x01(\tR\tjournalId\"\xbd\x02\n" +
 	"\x12WatchEventsRequest\x12\x17\n" +
 	"\arun_ids\x18\x01 \x03(\tR\x06runIds\x124\n" +
 	"\x16after_journal_sequence\x18\x02 \x01(\x04R\x14afterJournalSequence\x12\x1f\n" +
@@ -5662,7 +5706,8 @@ const file_trainvm_v1_trainvm_proto_rawDesc = "" +
 	"eventTypes\x12!\n" +
 	"\freplay_limit\x18\x04 \x01(\rR\vreplayLimit\x128\n" +
 	"\x18through_journal_sequence\x18\x05 \x01(\x04R\x16throughJournalSequence\x12!\n" +
-	"\fnewest_first\x18\x06 \x01(\bR\vnewestFirst\".\n" +
+	"\fnewest_first\x18\x06 \x01(\bR\vnewestFirst\x127\n" +
+	"\x18newest_per_metric_series\x18\a \x01(\bR\x15newestPerMetricSeries\".\n" +
 	"\x15GetControlViewRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\"\xcb\x03\n" +
 	"\x11ControlDescriptor\x12+\n" +

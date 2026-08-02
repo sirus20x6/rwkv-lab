@@ -1,6 +1,6 @@
 # Native algorithm migration
 
-Status: first CPU-only tranche implemented on `dashboard/declarative-vm-fsm`.
+Status: CPU-only analysis and learning-rate schedule tranches implemented.
 
 The goal is not to rewrite PyTorch in C++. It is to move deterministic control,
 analysis, validation, and measured hot paths into strongly typed native code while
@@ -36,26 +36,40 @@ the Python helper. Seeded Monte Carlo results are reproducible within the native
 contract but intentionally do not claim byte-for-byte equality with NumPy's PCG64
 stream; migration receipts must record the analysis implementation/version.
 
+`trainvm_training_schedules` now owns the reflected configuration validation and
+pure multiplier math for `rwkv_lab.schedule.linear_warmup_cosine.v1` and
+`rwkv_lab.schedule.powercool.v1`. The bounded `trainvm inspect-training-schedule`
+diagnostic exposes those native values over an optimizer-step range. The binding
+evidence is `training_schedule_python_parity`, which evaluates a configuration and
+step grid against `rwkv_lab.training_runtime.schedules` and requires exact results
+for exactly representable cases or at most `1e-12` relative error elsewhere.
+
+Python continues to own the PyTorch `LambdaLR` construction,
+`rebase_learning_rate_schedule`, and every operation that reads or mutates
+optimizer or scheduler state. This tranche does not move optimizer mechanics,
+parameter routing, or trainer lifecycle state into C++.
+
 ## Next low-risk tranches
 
 1. Move experiment result writes behind typed TrainVM events and an authority-owned
    projection, then retire Python's direct writable `experiments.db` connection.
 2. Port grokking metric aggregation, comparison/report formatting, control-patch
-   normalization, power/cooling policy calculations, and deterministic manifest
-   joins or cache validation.
+   normalization, and deterministic manifest joins or cache validation.
 3. Add cross-language golden fixtures that run both implementations during shadow
    mode and bind decision-version identities into result artifacts.
 4. Profile before moving tensor work. Only measured bottlenecks graduate to
    C++/CUDA extensions: fused softcapped cross entropy, RWKV recurrence/channel
    mix, optimizer kernels such as Muon, and qualified FP4/FP8 paths.
 5. Add a reflected native registry for composable optimizer, parameter-routing,
-   schedule, activation, normalization, loss, precision, clipping, accumulation,
-   and curriculum contracts. Keep tensor kernels in their qualified runtime;
-   native code owns configuration/state validation and composition where useful.
+   activation, normalization, loss, precision, clipping, accumulation, and
+   curriculum contracts. Keep tensor kernels in their qualified runtime; native
+   code owns configuration/state validation and composition where useful.
 
 ## Boundaries
 
 - Native analysis is read-only diagnostic authority, not run or host authority.
+- Native schedules own pure configuration validation and multiplier math, not
+  optimizer/scheduler construction or state.
 - No arbitrary SQL, Python, shell, command, or expression is admitted through its
   API.
 - Database and JSON bounds are part of the fail-closed contract.

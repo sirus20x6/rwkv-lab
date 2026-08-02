@@ -8,8 +8,10 @@ ones are published and owns their unit and step-domain semantics.
 from __future__ import annotations
 
 import math
+import threading
 import time
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Protocol
@@ -172,25 +174,63 @@ class WorkerObservability:
         self.declaration = declaration
         self._monotonic_ns = monotonic_ns
         self._last_heartbeat_ns: int | None = None
+        self._heartbeat_lock = threading.Lock()
 
     def optimizer_step(self, step: int, phase: str = "train") -> int | None:
         step = _uint64(step, "optimizer step")
         if not is_bounded_text(phase, 128):
             raise WorkerObservabilityError("worker heartbeat phase is invalid")
-        now = self._monotonic_ns()
-        if not isinstance(now, int) or isinstance(now, bool) or now < 0:
-            raise WorkerObservabilityError("worker monotonic clock is invalid")
-        if self._last_heartbeat_ns is not None and now < self._last_heartbeat_ns:
-            raise WorkerObservabilityError("worker monotonic clock regressed")
-        interval = self.declaration.heartbeat_seconds * 1_000_000_000
-        if (
-            self._last_heartbeat_ns is not None
-            and now - self._last_heartbeat_ns < interval
-        ):
-            return None
-        sequence = self._session.heartbeat(step, phase, wait=False)
-        self._last_heartbeat_ns = now
-        return sequence
+        with self._heartbeat_lock:
+            now = self._monotonic_ns()
+            if not isinstance(now, int) or isinstance(now, bool) or now < 0:
+                raise WorkerObservabilityError("worker monotonic clock is invalid")
+            if self._last_heartbeat_ns is not None and now < self._last_heartbeat_ns:
+                raise WorkerObservabilityError("worker monotonic clock regressed")
+            interval = self.declaration.heartbeat_seconds * 1_000_000_000
+            if (
+                self._last_heartbeat_ns is not None
+                and now - self._last_heartbeat_ns < interval
+            ):
+                return None
+            sequence = self._session.heartbeat(step, phase, wait=False)
+            self._last_heartbeat_ns = now
+            return sequence
+
+    @contextmanager
+    def keepalive(self, step: int, phase: str):
+        """Keep a declared heartbeat alive around one blocking worker phase."""
+
+        step = _uint64(step, "optimizer step")
+        if not is_bounded_text(phase, 128):
+            raise WorkerObservabilityError("worker heartbeat phase is invalid")
+        self.optimizer_step(step, phase)
+        stopped = threading.Event()
+        failures: list[BaseException] = []
+
+        def pulse() -> None:
+            interval = max(0.05, self.declaration.heartbeat_seconds / 2.0)
+            while not stopped.wait(interval):
+                try:
+                    self.optimizer_step(step, phase)
+                except BaseException as error:  # noqa: BLE001 - relay after join
+                    failures.append(error)
+                    stopped.set()
+
+        thread = threading.Thread(
+            target=pulse,
+            name=f"trainvm-heartbeat-{phase}",
+            daemon=True,
+        )
+        thread.start()
+        body_failed = True
+        try:
+            yield
+            body_failed = False
+        finally:
+            stopped.set()
+            thread.join()
+            if failures and not body_failed:
+                raise failures[0]
 
     def publish_if_declared(
         self,
