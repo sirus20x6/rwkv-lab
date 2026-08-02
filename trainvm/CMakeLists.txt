@@ -112,6 +112,7 @@ add_library(trainvm_core
   src/reconciler.cpp
   src/resource_request_builder.cpp
   src/rwkv_lab_worker_contract.cpp
+  src/profiler_launch_profiles.cpp
   src/rwkv_scratch_profiles.cpp
   src/sqlite_authority_vfs.cpp
   src/training_component_registry.cpp
@@ -427,6 +428,16 @@ target_compile_definitions(rwkv_scratch_profiles_tests PRIVATE
 target_link_libraries(rwkv_scratch_profiles_tests PRIVATE trainvm_core)
 add_test(NAME rwkv_scratch_profiles_tests
   COMMAND rwkv_scratch_profiles_tests
+)
+add_executable(profiler_launch_profiles_tests
+  tests/profiler_launch_profiles_tests.cpp
+)
+target_compile_options(profiler_launch_profiles_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(profiler_launch_profiles_tests PRIVATE trainvm_core)
+add_test(NAME profiler_launch_profiles_tests
+  COMMAND profiler_launch_profiles_tests
 )
 add_executable(host_ledger_tests tests/host_ledger_tests.cpp)
 target_compile_options(host_ledger_tests PRIVATE
