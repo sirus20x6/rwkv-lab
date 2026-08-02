@@ -136,6 +136,9 @@ class TrainVMService final : public v1::TrainVM::Service,
   grpc::Status acknowledge_worker_checkpoint(
       const v1::CheckpointAcknowledgement& acknowledgement,
       const WorkerConnection& connection, std::uint64_t& acknowledged);
+  grpc::Status acknowledge_worker_lifecycle(
+      const v1::LifecycleAcknowledgement& acknowledgement,
+      const WorkerConnection& connection, std::uint64_t& acknowledged);
   grpc::Status commit_worker_observation(
       Event event, const WorkerConnection& connection,
       std::uint64_t& acknowledged);

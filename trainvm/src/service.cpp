@@ -720,6 +720,65 @@ v1::RunCommandResponse::Disposition replay_disposition(
   throw std::invalid_argument("invalid checkpoint command status");
 }
 
+v1::WorkerCommand worker_lifecycle_command(const LifecycleCommand& command) {
+  if (command.status != LifecycleCommandStatus::requested ||
+      command.command_id.empty() || command.controller_sequence == 0U) {
+    throw std::invalid_argument(
+        "only a durable requested lifecycle command can be sent to a worker");
+  }
+  v1::WorkerCommand output;
+  output.set_controller_sequence(command.controller_sequence);
+  output.set_command_id(command.command_id);
+  if (command.kind == LifecycleCommandKind::pause) {
+    auto* pause = output.mutable_pause();
+    pause->set_checkpoint_first(command.checkpoint_first);
+    pause->set_release_resources(command.release_resources);
+  } else {
+    output.mutable_resume();
+  }
+  return output;
+}
+
+void fill_lifecycle_result(const LifecycleCommand& command,
+                           v1::RunCommandResponse& response) {
+  response.set_command_sequence(command.controller_sequence);
+  auto* output = response.mutable_lifecycle();
+  output->set_command_id(command.command_id);
+  output->set_controller_sequence(command.controller_sequence);
+  output->set_kind(command.kind == LifecycleCommandKind::pause
+                       ? v1::LifecycleCommandResult::KIND_PAUSE
+                       : v1::LifecycleCommandResult::KIND_RESUME);
+  switch (command.status) {
+    case LifecycleCommandStatus::requested:
+      output->set_status(v1::LifecycleCommandResult::STATUS_REQUESTED);
+      break;
+    case LifecycleCommandStatus::applied:
+      output->set_status(v1::LifecycleCommandResult::STATUS_APPLIED);
+      break;
+    case LifecycleCommandStatus::rejected:
+      output->set_status(v1::LifecycleCommandResult::STATUS_REJECTED);
+      break;
+  }
+  output->set_checkpoint_first(command.checkpoint_first);
+  output->set_release_resources(command.release_resources);
+  if (command.optimizer_step) output->set_optimizer_step(*command.optimizer_step);
+  output->set_artifact_id(command.artifact_id);
+  add_stored_diagnostics(response, command.diagnostics);
+}
+
+v1::RunCommandResponse::Disposition replay_disposition(
+    const LifecycleCommand& command) {
+  switch (command.status) {
+    case LifecycleCommandStatus::requested:
+      return v1::RunCommandResponse::DISPOSITION_ACCEPTED;
+    case LifecycleCommandStatus::applied:
+      return v1::RunCommandResponse::DISPOSITION_ALREADY_APPLIED;
+    case LifecycleCommandStatus::rejected:
+      return v1::RunCommandResponse::DISPOSITION_REJECTED;
+  }
+  throw std::invalid_argument("invalid lifecycle command status");
+}
+
 v1::RunCommandResponse::Disposition replay_disposition(const ControlCommand& command) {
   switch (command.status) {
     case ControlCommandStatus::requested:
@@ -2232,6 +2291,8 @@ grpc::Status TrainVMService::complete_worker_connection(
     const std::uint64_t latest = journal_.latest_worker_sequence(
         event.run_id, event.node_id, event.attempt_id);
     const auto stored = journal_.event(event.event_id);
+    event.run_revision = stored ? stored->run_revision
+                                : projection->run_revision;
     if (latest == std::numeric_limits<std::uint64_t>::max() ||
         event.worker_sequence > latest + 1U ||
         (event.worker_sequence <= latest && !stored)) {
@@ -2285,6 +2346,8 @@ grpc::Status TrainVMService::commit_worker_observation(
         connection.identity.run_id, connection.identity.node_id,
         connection.identity.attempt_id);
     const auto stored = journal_.event(event.event_id);
+    event.run_revision = stored ? stored->run_revision
+                                : projection->run_revision;
     if (latest == std::numeric_limits<std::uint64_t>::max() ||
         event.worker_sequence > latest + 1U ||
         (event.worker_sequence <= latest && !stored)) {
@@ -2679,6 +2742,119 @@ grpc::Status TrainVMService::acknowledge_worker_checkpoint(
   }
 }
 
+grpc::Status TrainVMService::acknowledge_worker_lifecycle(
+    const v1::LifecycleAcknowledgement& acknowledgement,
+    const WorkerConnection& connection, std::uint64_t& acknowledged) {
+  if (acknowledgement.ByteSizeLong() > kMaximumWorkerMessageBytes) {
+    return {grpc::StatusCode::RESOURCE_EXHAUSTED,
+            "worker lifecycle acknowledgement exceeds 64 KiB"};
+  }
+  try {
+    if (acknowledgement.command_id().empty() ||
+        acknowledgement.worker_sequence() == 0U ||
+        acknowledgement.concurrency_key() != connection.identity.concurrency_key ||
+        acknowledgement.lease_id() != connection.identity.lease_id ||
+        acknowledgement.fencing_token() != connection.identity.fencing_token ||
+        !acknowledgement.has_acknowledged_at()) {
+      return {grpc::StatusCode::INVALID_ARGUMENT,
+              "lifecycle acknowledgement has an invalid command or fenced identity"};
+    }
+    (void)timestamp_ns(acknowledgement.acknowledged_at());
+    LifecycleCommandKind kind;
+    switch (acknowledgement.kind()) {
+      case v1::LifecycleAcknowledgement::KIND_PAUSE:
+        kind = LifecycleCommandKind::pause;
+        break;
+      case v1::LifecycleAcknowledgement::KIND_RESUME:
+        kind = LifecycleCommandKind::resume;
+        break;
+      case v1::LifecycleAcknowledgement::KIND_UNSPECIFIED:
+      default:
+        return {grpc::StatusCode::INVALID_ARGUMENT,
+                "lifecycle acknowledgement kind is invalid"};
+    }
+    LifecycleCommandStatus status;
+    switch (acknowledgement.disposition()) {
+      case v1::LifecycleAcknowledgement::DISPOSITION_APPLIED:
+        status = LifecycleCommandStatus::applied;
+        break;
+      case v1::LifecycleAcknowledgement::DISPOSITION_REJECTED:
+        status = LifecycleCommandStatus::rejected;
+        break;
+      case v1::LifecycleAcknowledgement::DISPOSITION_UNSPECIFIED:
+      default:
+        return {grpc::StatusCode::INVALID_ARGUMENT,
+                "lifecycle acknowledgement disposition is invalid"};
+    }
+    std::scoped_lock lock(command_mutex_);
+    const auto projection = journal_.projection(connection.identity.run_id);
+    const auto command = journal_.lifecycle_command(acknowledgement.command_id());
+    if (!projection || !command ||
+        command->run_id != connection.identity.run_id ||
+        command->node_id != connection.identity.node_id ||
+        command->attempt_id != connection.identity.attempt_id ||
+        command->kind != kind) {
+      return {grpc::StatusCode::FAILED_PRECONDITION,
+              "lifecycle acknowledgement does not match a durable command"};
+    }
+    const bool applied = status == LifecycleCommandStatus::applied;
+    const bool needs_checkpoint =
+        kind == LifecycleCommandKind::pause && command->checkpoint_first;
+    if ((applied && needs_checkpoint &&
+         (acknowledgement.optimizer_step() == 0U ||
+          acknowledgement.artifact_id().empty())) ||
+        (applied && !needs_checkpoint &&
+         (acknowledgement.optimizer_step() != 0U ||
+          !acknowledgement.artifact_id().empty())) ||
+        (!applied && (acknowledgement.optimizer_step() != 0U ||
+                      !acknowledgement.artifact_id().empty()))) {
+      return {grpc::StatusCode::INVALID_ARGUMENT,
+              "lifecycle acknowledgement result is inconsistent"};
+    }
+    const std::uint64_t latest = journal_.latest_worker_sequence(
+        connection.identity.run_id, connection.identity.node_id,
+        connection.identity.attempt_id);
+    const auto stored = journal_.event(acknowledgement.command_id() + ":ack");
+    if (latest == std::numeric_limits<std::uint64_t>::max() ||
+        acknowledgement.worker_sequence() > latest + 1U ||
+        (acknowledgement.worker_sequence() <= latest && !stored)) {
+      return {grpc::StatusCode::FAILED_PRECONDITION,
+              "lifecycle acknowledgement sequence is not the next durable message or an exact replay"};
+    }
+    const auto plan = journal_.compiled_plan(projection->plan_hash);
+    if (!plan) {
+      return {grpc::StatusCode::DATA_LOSS,
+              "worker run has no persisted compiled plan"};
+    }
+    Controller controller(*plan, journal_, connection.identity.run_id);
+    controller.recover();
+    const AuthorityTimeSample now = authority_now();
+    (void)controller.acknowledge_lifecycle(
+        acknowledgement.command_id(),
+        ControlAcknowledgementIdentity{
+            .concurrency_key = connection.identity.concurrency_key,
+            .lease_id = connection.identity.lease_id,
+            .fencing_token = connection.identity.fencing_token,
+            .node_id = connection.identity.node_id,
+            .attempt_id = connection.identity.attempt_id,
+            .worker_sequence = acknowledgement.worker_sequence()},
+        status,
+        applied && needs_checkpoint
+            ? std::optional<std::uint64_t>{acknowledgement.optimizer_step()}
+            : std::nullopt,
+        acknowledgement.artifact_id(),
+        acknowledgement_diagnostics(acknowledgement), now);
+    if (applied && kind == LifecycleCommandKind::resume) {
+      controller.recover();
+      (void)controller.prepare_dispatch(now);
+    }
+    acknowledged = acknowledgement.worker_sequence();
+    return grpc::Status::OK;
+  } catch (const std::exception& exception) {
+    return worker_failure(exception);
+  }
+}
+
 grpc::Status TrainVMService::Connect(
     grpc::ServerContext* context,
     grpc::ServerReaderWriter<v1::ControllerToWorker,
@@ -2753,6 +2929,10 @@ grpc::Status TrainVMService::Connect(
                connection.identity.run_id, last_sent_controller_sequence)) {
         commands.push_back(worker_checkpoint_command(checkpoint));
       }
+      for (const auto& lifecycle : journal_.pending_lifecycle_commands(
+               connection.identity.run_id, last_sent_controller_sequence)) {
+        commands.push_back(worker_lifecycle_command(lifecycle));
+      }
       std::ranges::sort(commands, {}, &v1::WorkerCommand::controller_sequence);
     } catch (const std::exception& exception) {
       return worker_failure(exception);
@@ -2812,6 +2992,9 @@ grpc::Status TrainVMService::Connect(
     } else if (message.has_checkpoint_ack()) {
       status = acknowledge_worker_checkpoint(message.checkpoint_ack(), connection,
                                              acknowledged);
+    } else if (message.has_lifecycle_ack()) {
+      status = acknowledge_worker_lifecycle(message.lifecycle_ack(), connection,
+                                            acknowledged);
     } else {
       return finish({grpc::StatusCode::INVALID_ARGUMENT,
                      message.has_hello()
@@ -3109,7 +3292,8 @@ grpc::Status TrainVMService::CommandRun(grpc::ServerContext* context,
   if (request->ByteSizeLong() > kMaximumCommandBytes) {
     return {grpc::StatusCode::RESOURCE_EXHAUSTED, "command exceeds 64 KiB"};
   }
-  if (!request->has_controls() && !request->has_checkpoint()) {
+  if (!request->has_controls() && !request->has_checkpoint() &&
+      !request->has_pause() && !request->has_resume()) {
     return {grpc::StatusCode::UNIMPLEMENTED,
             "this lifecycle command is not implemented yet"};
   }
@@ -3146,6 +3330,59 @@ grpc::Status TrainVMService::CommandRun(grpc::ServerContext* context,
     Controller controller(*plan, journal_, request->run_id());
     controller.recover();
     if (cancelled(context)) return cancellation_status();
+    if (request->has_pause() || request->has_resume()) {
+      const bool pause = request->has_pause();
+      const auto& state = controller.state();
+      if (state.current_node_id.empty()) {
+        return {grpc::StatusCode::FAILED_PRECONDITION,
+                "pause and resume require an active worker node"};
+      }
+      const Node& node =
+          plan->experiment.spec.workflow.nodes.at(state.current_node_id);
+      const Component& component =
+          plan->experiment.spec.components.at(node.invoke.component);
+      const AdapterProfile& profile =
+          adapter_registry_.resolve(component, node.invoke.operation);
+      if (pause && request->pause().release_resources()) {
+        response->set_disposition(
+            v1::RunCommandResponse::DISPOSITION_REJECTED);
+        auto* diagnostic = response->add_diagnostics();
+        diagnostic->set_severity(v1::Diagnostic::SEVERITY_ERROR);
+        diagnostic->set_code("pause.release_resources_not_implemented");
+        diagnostic->set_message(
+            "resource-releasing pause is not implemented in this controller revision");
+        fill_run_summary(*projection, journal_, *response);
+        return grpc::Status::OK;
+      }
+      const bool supported = profile.lifecycle.pause_keep_resources;
+      if (!supported ||
+          (pause && request->pause().checkpoint_first() &&
+           !profile.lifecycle.checkpoint_now)) {
+        response->set_disposition(
+            v1::RunCommandResponse::DISPOSITION_REJECTED);
+        auto* diagnostic = response->add_diagnostics();
+        diagnostic->set_severity(v1::Diagnostic::SEVERITY_ERROR);
+        diagnostic->set_code("lifecycle.unsupported_by_operation");
+        diagnostic->set_message(
+            "the active adapter operation does not declare the requested lifecycle protocol");
+        fill_run_summary(*projection, journal_, *response);
+        return grpc::Status::OK;
+      }
+      const auto submission = controller.request_lifecycle(
+          pause ? LifecycleCommandKind::pause
+                : LifecycleCommandKind::resume,
+          request->idempotency_key(), request->expected_run_revision(),
+          pause && request->pause().checkpoint_first(), false,
+          request->author(), request->reason());
+      response->set_disposition(
+          submission.inserted
+              ? v1::RunCommandResponse::DISPOSITION_ACCEPTED
+              : replay_disposition(submission.command));
+      fill_lifecycle_result(submission.command, *response);
+      fill_run_summary(*journal_.projection(request->run_id()), journal_,
+                       *response);
+      return grpc::Status::OK;
+    }
     if (request->has_checkpoint()) {
       if (request->checkpoint().reason().empty()) {
         return {grpc::StatusCode::INVALID_ARGUMENT,

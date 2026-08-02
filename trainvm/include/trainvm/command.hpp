@@ -84,4 +84,36 @@ struct CheckpointSubmission {
   bool inserted{};
 };
 
+enum class LifecycleCommandKind { pause, resume };
+enum class LifecycleCommandStatus { requested, applied, rejected };
+
+struct LifecycleCommand {
+  std::string command_id;
+  std::string run_id;
+  std::string idempotency_key;
+  std::uint64_t expected_run_revision{};
+  std::uint64_t controller_sequence{};
+  std::uint64_t plan_revision{1};
+  std::string node_id;
+  std::string attempt_id;
+  LifecycleCommandKind kind{LifecycleCommandKind::pause};
+  bool checkpoint_first{};
+  bool release_resources{};
+  std::string author;
+  std::string reason;
+  LifecycleCommandStatus status{LifecycleCommandStatus::requested};
+  std::optional<std::uint64_t> optimizer_step;
+  std::string artifact_id;
+  nlohmann::json diagnostics = nlohmann::json::array();
+  std::optional<ControlAcknowledgementIdentity> acknowledgement;
+  std::optional<std::int64_t> acknowledged_at_ns;
+
+  bool operator==(const LifecycleCommand&) const = default;
+};
+
+struct LifecycleSubmission {
+  LifecycleCommand command;
+  bool inserted{};
+};
+
 }  // namespace trainvm

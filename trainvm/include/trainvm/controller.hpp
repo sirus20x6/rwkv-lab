@@ -67,6 +67,18 @@ class Controller {
       std::optional<std::uint64_t> optimizer_step,
       std::string artifact_id, nlohmann::json diagnostics,
       const AuthorityTimeSample& now);
+  LifecycleSubmission request_lifecycle(
+      LifecycleCommandKind kind, const std::string& idempotency_key,
+      std::uint64_t expected_run_revision, bool checkpoint_first,
+      bool release_resources, const std::string& author,
+      const std::string& reason);
+  LifecycleCommand acknowledge_lifecycle(
+      const std::string& command_id,
+      const ControlAcknowledgementIdentity& identity,
+      LifecycleCommandStatus status,
+      std::optional<std::uint64_t> optimizer_step,
+      std::string artifact_id, nlohmann::json diagnostics,
+      const AuthorityTimeSample& now);
 
   [[nodiscard]] const ExecutionState& state() const;
   [[nodiscard]] const CompiledPlan& plan() const;

@@ -243,6 +243,29 @@ message CheckpointCommandResult {
   string artifact_id = 6;
 }
 
+message LifecycleCommandResult {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    KIND_PAUSE = 1;
+    KIND_RESUME = 2;
+  }
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    STATUS_REQUESTED = 1;
+    STATUS_APPLIED = 2;
+    STATUS_REJECTED = 3;
+  }
+
+  string command_id = 1;
+  uint64 controller_sequence = 2;
+  Kind kind = 3;
+  Status status = 4;
+  bool checkpoint_first = 5;
+  bool release_resources = 6;
+  uint64 optimizer_step = 7;
+  string artifact_id = 8;
+}
+
 message RunCommandResponse {
   enum Disposition {
     DISPOSITION_UNSPECIFIED = 0;
@@ -258,6 +281,7 @@ message RunCommandResponse {
   repeated Diagnostic diagnostics = 4;
   ControlCommandResult control = 5;
   CheckpointCommandResult checkpoint = 6;
+  LifecycleCommandResult lifecycle = 7;
 }
 
 message ArtifactManifest {
@@ -377,6 +401,31 @@ message CheckpointAcknowledgement {
   google.protobuf.Timestamp acknowledged_at = 10;
 }
 
+message LifecycleAcknowledgement {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    KIND_PAUSE = 1;
+    KIND_RESUME = 2;
+  }
+  enum Disposition {
+    DISPOSITION_UNSPECIFIED = 0;
+    DISPOSITION_APPLIED = 1;
+    DISPOSITION_REJECTED = 2;
+  }
+
+  string command_id = 1;
+  Kind kind = 2;
+  Disposition disposition = 3;
+  uint64 optimizer_step = 4;
+  string artifact_id = 5;
+  repeated Diagnostic diagnostics = 6;
+  string concurrency_key = 7;
+  string lease_id = 8;
+  uint64 fencing_token = 9;
+  uint64 worker_sequence = 10;
+  google.protobuf.Timestamp acknowledged_at = 11;
+}
+
 message WorkerToController {
   oneof message {
     WorkerHello hello = 1;
@@ -386,6 +435,7 @@ message WorkerToController {
     ArtifactManifest artifact = 5;
     ControlPatchAcknowledgement control_ack = 6;
     CheckpointAcknowledgement checkpoint_ack = 7;
+    LifecycleAcknowledgement lifecycle_ack = 8;
   }
 }
 

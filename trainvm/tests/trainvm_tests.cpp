@@ -5210,6 +5210,120 @@ void test_worker_control_grpc_stream() {
     trainvm::v1::ControllerToWorker checkpoint_receipt;
     const bool checkpoint_ack_written = primary->Write(checkpoint_ack_message);
     const bool checkpoint_ack_received = primary->Read(&checkpoint_receipt);
+
+    trainvm::v1::RunCommandRequest pause_request;
+    pause_request.set_run_id(launch.run_id);
+    pause_request.set_expected_run_revision(5);
+    pause_request.set_idempotency_key("grpc-pause");
+    pause_request.set_author("operator");
+    pause_request.set_reason("exercise retained-resource pause");
+    pause_request.set_expected_journal_id(service.journal_.journal_id());
+    pause_request.set_expected_plan_hash(compiled.plan->plan_hash);
+    pause_request.mutable_pause()->set_checkpoint_first(false);
+    pause_request.mutable_pause()->set_release_resources(false);
+    trainvm::v1::RunCommandResponse pause_response;
+    const grpc::Status pause_status =
+        service.CommandRun(nullptr, &pause_request, &pause_response);
+
+    trainvm::v1::WorkerToController pause_trigger_message;
+    auto* pause_trigger = pause_trigger_message.mutable_heartbeat();
+    pause_trigger->set_worker_sequence(6);
+    pause_trigger->set_optimizer_step(21);
+    pause_trigger->set_phase("training");
+    pause_trigger->mutable_observed_at()->set_seconds(6);
+    trainvm::v1::ControllerToWorker pause_trigger_receipt;
+    const bool pause_trigger_written = primary->Write(pause_trigger_message);
+    const bool pause_trigger_received = primary->Read(&pause_trigger_receipt);
+    trainvm::v1::ControllerToWorker pause_command_message;
+    const bool pause_command_received = primary->Read(&pause_command_message);
+    const bool pause_command_valid =
+        pause_status.ok() && pause_response.has_lifecycle() &&
+        pause_response.lifecycle().kind() ==
+            trainvm::v1::LifecycleCommandResult::KIND_PAUSE &&
+        pause_command_received && pause_command_message.has_command() &&
+        pause_command_message.command().has_pause() &&
+        pause_command_message.command().controller_sequence() ==
+            pause_response.command_sequence();
+
+    trainvm::v1::WorkerToController pause_ack_message;
+    auto* pause_ack = pause_ack_message.mutable_lifecycle_ack();
+    pause_ack->set_command_id(pause_response.lifecycle().command_id());
+    pause_ack->set_kind(
+        trainvm::v1::LifecycleAcknowledgement::KIND_PAUSE);
+    pause_ack->set_disposition(
+        trainvm::v1::LifecycleAcknowledgement::DISPOSITION_APPLIED);
+    pause_ack->set_concurrency_key(launch.concurrency_key);
+    pause_ack->set_lease_id(launch.lease_id);
+    pause_ack->set_fencing_token(launch.fencing_token);
+    pause_ack->set_worker_sequence(7);
+    pause_ack->mutable_acknowledged_at()->set_seconds(7);
+    trainvm::v1::ControllerToWorker pause_ack_receipt;
+    const bool pause_ack_written = primary->Write(pause_ack_message);
+    const bool pause_ack_received = primary->Read(&pause_ack_receipt);
+    const auto paused_projection = service.journal_.projection(launch.run_id);
+
+    trainvm::v1::RunCommandRequest resume_request;
+    resume_request.set_run_id(launch.run_id);
+    resume_request.set_expected_run_revision(8);
+    resume_request.set_idempotency_key("grpc-resume");
+    resume_request.set_author("operator");
+    resume_request.set_reason("exercise retained-resource resume");
+    resume_request.set_expected_journal_id(service.journal_.journal_id());
+    resume_request.set_expected_plan_hash(compiled.plan->plan_hash);
+    resume_request.mutable_resume();
+    trainvm::v1::RunCommandResponse resume_response;
+    const grpc::Status resume_status =
+        service.CommandRun(nullptr, &resume_request, &resume_response);
+
+    trainvm::v1::WorkerToController resume_trigger_message;
+    auto* resume_trigger = resume_trigger_message.mutable_heartbeat();
+    resume_trigger->set_worker_sequence(8);
+    resume_trigger->set_optimizer_step(21);
+    resume_trigger->set_phase("paused");
+    resume_trigger->mutable_observed_at()->set_seconds(8);
+    trainvm::v1::ControllerToWorker resume_trigger_receipt;
+    const bool resume_trigger_written = primary->Write(resume_trigger_message);
+    const bool resume_trigger_received = primary->Read(&resume_trigger_receipt);
+    trainvm::v1::ControllerToWorker resume_command_message;
+    const bool resume_command_received = primary->Read(&resume_command_message);
+    const bool resume_command_valid =
+        resume_status.ok() && resume_response.has_lifecycle() &&
+        resume_response.lifecycle().kind() ==
+            trainvm::v1::LifecycleCommandResult::KIND_RESUME &&
+        resume_command_received && resume_command_message.has_command() &&
+        resume_command_message.command().has_resume() &&
+        resume_command_message.command().controller_sequence() ==
+            resume_response.command_sequence();
+
+    trainvm::v1::WorkerToController resume_ack_message;
+    auto* resume_ack = resume_ack_message.mutable_lifecycle_ack();
+    resume_ack->set_command_id(resume_response.lifecycle().command_id());
+    resume_ack->set_kind(
+        trainvm::v1::LifecycleAcknowledgement::KIND_RESUME);
+    resume_ack->set_disposition(
+        trainvm::v1::LifecycleAcknowledgement::DISPOSITION_APPLIED);
+    resume_ack->set_concurrency_key(launch.concurrency_key);
+    resume_ack->set_lease_id(launch.lease_id);
+    resume_ack->set_fencing_token(launch.fencing_token);
+    resume_ack->set_worker_sequence(9);
+    resume_ack->mutable_acknowledged_at()->set_seconds(9);
+    trainvm::v1::ControllerToWorker resume_ack_receipt;
+    const bool resume_ack_written = primary->Write(resume_ack_message);
+    const bool resume_ack_received = primary->Read(&resume_ack_receipt);
+
+    trainvm::v1::WorkerToController resumed_metric_message;
+    auto* resumed_metric = resumed_metric_message.mutable_metric();
+    resumed_metric->set_worker_sequence(10);
+    resumed_metric->set_name("loss");
+    resumed_metric->mutable_value()->set_number_value(0.5);
+    resumed_metric->set_unit("loss");
+    resumed_metric->set_step_domain("optimizer_step");
+    resumed_metric->set_step(22);
+    resumed_metric->set_sample_weight(1.0);
+    resumed_metric->mutable_observed_at()->set_seconds(10);
+    trainvm::v1::ControllerToWorker resumed_metric_receipt;
+    const bool resumed_metric_written = primary->Write(resumed_metric_message);
+    const bool resumed_metric_received = primary->Read(&resumed_metric_receipt);
     telemetry_acknowledged =
         heartbeat_written && heartbeat_received &&
         heartbeat_ack.has_acknowledge_worker_sequence() &&
@@ -5224,10 +5338,23 @@ void test_worker_control_grpc_stream() {
         artifact_ack.acknowledge_worker_sequence() == 4U &&
         checkpoint_ack_written && checkpoint_ack_received &&
         checkpoint_receipt.has_acknowledge_worker_sequence() &&
-        checkpoint_receipt.acknowledge_worker_sequence() == 5U;
+        checkpoint_receipt.acknowledge_worker_sequence() == 5U &&
+        pause_trigger_written && pause_trigger_received &&
+        pause_trigger_receipt.acknowledge_worker_sequence() == 6U &&
+        pause_command_valid && pause_ack_written && pause_ack_received &&
+        pause_ack_receipt.acknowledge_worker_sequence() == 7U &&
+        paused_projection && paused_projection->desired_state == "paused" &&
+        paused_projection->observed_state == "paused" &&
+        paused_projection->run_revision == 8U &&
+        resume_trigger_written && resume_trigger_received &&
+        resume_trigger_receipt.acknowledge_worker_sequence() == 8U &&
+        resume_command_valid && resume_ack_written && resume_ack_received &&
+        resume_ack_receipt.acknowledge_worker_sequence() == 9U &&
+        resumed_metric_written && resumed_metric_received &&
+        resumed_metric_receipt.acknowledge_worker_sequence() == 10U;
 
     auto result = result_for(welcome_message.welcome());
-    result.mutable_event()->set_worker_sequence(6);
+    result.mutable_event()->set_worker_sequence(11);
     result_written = primary->Write(result);
     primary->WritesDone();
     receipt_received = primary->Read(&receipt_message);
@@ -5254,16 +5381,16 @@ void test_worker_control_grpc_stream() {
               primary_status.ok() &&
               receipt_message.receipt().event_id() ==
                   welcome_message.welcome().dispatch_id() + ":result" &&
-              receipt_message.receipt().acknowledged_worker_sequence() == 6U &&
-              receipt_message.receipt().committed_run_revision() == 7U &&
+              receipt_message.receipt().acknowledged_worker_sequence() == 11U &&
+              receipt_message.receipt().committed_run_revision() == 13U &&
               dispatch &&
               dispatch->status == trainvm::DispatchStatus::completed &&
               dispatch->result_event_id ==
                   std::optional<std::string>{
                       receipt_message.receipt().event_id()} &&
               projection && projection->observed_state == "acquiring" &&
-              projection->run_revision == 7U &&
-              observer.events_for_run(run_id).size() == 24U,
+              projection->run_revision == 13U &&
+              observer.events_for_run(run_id).size() == 37U,
           "WorkerControl gRPC orders Hello, durable telemetry acknowledgements, Event, and durable Receipt");
   }
 

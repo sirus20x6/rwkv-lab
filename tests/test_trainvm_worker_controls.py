@@ -10,6 +10,7 @@ from rwkv_lab.trainvm_worker import (
     CommandKind,
     ControlAssignment,
     ControlDisposition,
+    LifecycleDisposition,
     SafePoint,
     WorkerCommand,
     WorkerControlError,
@@ -19,7 +20,9 @@ from rwkv_lab.trainvm_worker.session import wire
 
 
 class FakeSession:
-    def __init__(self, *commands: WorkerCommand) -> None:
+    def __init__(
+        self, *commands: WorkerCommand, resume_on_heartbeat: bool = False
+    ) -> None:
         self.commands = list(commands)
         self.acknowledgements: list[
             tuple[
@@ -33,6 +36,11 @@ class FakeSession:
         self.checkpoint_acknowledgements: list[
             tuple[WorkerCommand, CheckpointDisposition, int, str]
         ] = []
+        self.lifecycle_acknowledgements: list[
+            tuple[WorkerCommand, LifecycleDisposition, int, str]
+        ] = []
+        self.resume_on_heartbeat = resume_on_heartbeat
+        self.heartbeats: list[tuple[int, str]] = []
 
     def poll_commands(self, maximum: int | None = None) -> tuple[WorkerCommand, ...]:
         count = len(self.commands) if maximum is None else maximum
@@ -78,6 +86,35 @@ class FakeSession:
             (command, disposition, optimizer_step, artifact_id)
         )
         return len(self.checkpoint_acknowledgements)
+
+    def acknowledge_lifecycle(
+        self,
+        command: WorkerCommand,
+        disposition: LifecycleDisposition,
+        *,
+        optimizer_step: int = 0,
+        artifact_id: str = "",
+        diagnostics: tuple[tuple[int, str, str, str, str], ...] = (),
+        wait: bool = True,
+    ) -> int:
+        assert wait is True
+        assert diagnostics == ()
+        self.lifecycle_acknowledgements.append(
+            (command, disposition, optimizer_step, artifact_id)
+        )
+        return len(self.lifecycle_acknowledgements)
+
+    def heartbeat(
+        self, optimizer_step: int, phase: str, *, wait: bool = False
+    ) -> int:
+        assert wait is True
+        self.heartbeats.append((optimizer_step, phase))
+        if self.resume_on_heartbeat:
+            self.resume_on_heartbeat = False
+            self.commands.append(
+                WorkerCommand(12, "resume-12", CommandKind.RESUME)
+            )
+        return len(self.heartbeats)
 
 
 def control_command(
@@ -287,14 +324,90 @@ def test_invalid_initial_and_command_scalars_fail_closed(value: object) -> None:
     assert session.acknowledgements[0][4][0][1] == "control.invalid_assignment"
 
 
-def test_pause_resume_and_cancel_commands_remain_fail_closed() -> None:
+def test_cancel_command_remains_fail_closed() -> None:
     session = FakeSession(
-        WorkerCommand(1, "pause-1", CommandKind.PAUSE, checkpoint_first=True)
+        WorkerCommand(1, "cancel-1", CommandKind.CANCEL, reason="stop")
     )
     runtime = WorkerControlRuntime(session, {}, 0)
 
-    with pytest.raises(WorkerControlError, match="pause, resume, or cancel"):
+    with pytest.raises(WorkerControlError, match="cancel command"):
         runtime.checkpoint(1, lambda *_: None)
+
+
+def test_retained_pause_waits_for_durable_resume_without_publishing() -> None:
+    pause = WorkerCommand(
+        11,
+        "pause-11",
+        CommandKind.PAUSE,
+        checkpoint_first=False,
+        release_resources=False,
+    )
+    session = FakeSession(pause, resume_on_heartbeat=True)
+    runtime = WorkerControlRuntime(session, {}, 0)
+    assert runtime.checkpoint_boundary_requested
+    runtime.checkpoint(9, lambda *_: None)
+
+    published = runtime.publish_requested_checkpoint(
+        CheckpointPublicationRequest(
+            source_directory="/run/checkpoint",
+            optimizer_step=9,
+            resume_grade="exact",
+            state_components=("model", "optimizer"),
+        )
+    )
+
+    assert published is None
+    assert session.heartbeats == [(9, "paused")]
+    assert [item[0].kind for item in session.lifecycle_acknowledgements] == [
+        CommandKind.PAUSE,
+        CommandKind.RESUME,
+    ]
+    assert all(
+        item[1] is LifecycleDisposition.APPLIED
+        for item in session.lifecycle_acknowledgements
+    )
+
+
+def test_paused_barrier_acknowledges_ordered_controls_before_resume() -> None:
+    pause = WorkerCommand(11, "pause-11", CommandKind.PAUSE)
+    restart_control = control_command(
+        12,
+        expected=0,
+        apply_point=wire.APPLY_POINT_RESTART,
+        assignments=(ControlAssignment("mixed_precision", "fp16"),),
+        requires_pause=True,
+    )
+    live_control = control_command(
+        13,
+        expected=0,
+        apply_point=wire.APPLY_POINT_NEXT_OPTIMIZER_STEP,
+        assignments=(ControlAssignment("learning_rate", 1.0e-6),),
+    )
+    resume = WorkerCommand(14, "resume-14", CommandKind.RESUME)
+    session = FakeSession(pause, restart_control, live_control, resume)
+    runtime = WorkerControlRuntime(session, {"learning_rate": 2.0e-6}, 0)
+
+    runtime.publish_requested_checkpoint(
+        CheckpointPublicationRequest(
+            source_directory="/run/checkpoint",
+            optimizer_step=9,
+            resume_grade="exact",
+            state_components=("model", "optimizer"),
+        )
+    )
+
+    assert [item[1] for item in session.acknowledgements] == [
+        ControlDisposition.RESTART_REQUIRED,
+        ControlDisposition.REJECTED,
+    ]
+    assert [item[4][0][1] for item in session.acknowledgements] == [
+        "control.restart_required",
+        "control.paused_barrier",
+    ]
+    assert [item[0].kind for item in session.lifecycle_acknowledgements] == [
+        CommandKind.PAUSE,
+        CommandKind.RESUME,
+    ]
 
 
 def test_checkpoint_command_blocks_later_controls_until_immutable_publication(

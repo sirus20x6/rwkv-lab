@@ -2701,7 +2701,10 @@ def train(
                         else None
                     ),
                 )
-                if worker_controls is not None and worker_controls.checkpoint_requested:
+                if (
+                    worker_controls is not None
+                    and worker_controls.checkpoint_completion_requested
+                ):
                     worker_controls.publish_requested_checkpoint_directory(
                         str(checkpoint),
                         optimizer_step=global_step,

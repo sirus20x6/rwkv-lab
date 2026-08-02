@@ -45,7 +45,8 @@ bool is_controller_event(std::string_view event_type) {
          event_type.starts_with("host.resource_") ||
          event_type.starts_with("host.process_") ||
          event_type.starts_with("control.") ||
-         event_type.starts_with("checkpoint.");
+         event_type.starts_with("checkpoint.") ||
+         event_type.starts_with("lifecycle.");
 }
 
 bool is_worker_observation(std::string_view event_type) {
@@ -448,6 +449,18 @@ std::string_view checkpoint_status_name(CheckpointCommandStatus status) {
   throw std::invalid_argument("invalid checkpoint command status");
 }
 
+std::string_view lifecycle_status_name(LifecycleCommandStatus status) {
+  switch (status) {
+    case LifecycleCommandStatus::requested:
+      return "requested";
+    case LifecycleCommandStatus::applied:
+      return "applied";
+    case LifecycleCommandStatus::rejected:
+      return "rejected";
+  }
+  throw std::invalid_argument("invalid lifecycle command status");
+}
+
 }  // namespace
 
 Controller::Controller(const CompiledPlan& plan, Journal& journal, std::string run_id)
@@ -550,6 +563,7 @@ const ExecutionState& Controller::recover() {
   std::optional<std::string> expected_reacquisition_cause_id;
   std::map<std::string, std::string> replayed_control_status;
   std::map<std::string, std::string> replayed_checkpoint_status;
+  std::map<std::string, std::string> replayed_lifecycle_status;
   std::set<std::string> replayed_process_prepares;
   std::set<std::string> replayed_process_commits;
   std::set<std::string> replayed_process_exits;
@@ -1271,15 +1285,92 @@ const ExecutionState& Controller::recover() {
       }
       continue;
     }
+    if (event.event_type.starts_with("lifecycle.")) {
+      const std::string command_id =
+          event.payload.value("command_id", std::string{});
+      const auto command = journal_.lifecycle_command(command_id);
+      if (command_id.empty() || !command || command->run_id != run_id_ ||
+          event.run_revision != recovered.revision ||
+          event.plan_revision != kInitialPlanRevision ||
+          event.node_id != recovered.current_node_id ||
+          event.attempt_id != recovered.current_attempt_id ||
+          phase != ReplayPhase::ready || expected_completion) {
+        throw std::runtime_error(
+            "lifecycle journal event is outside its active worker attempt");
+      }
+      const bool pause = command->kind == LifecycleCommandKind::pause;
+      const bool valid_state = pause
+                                   ? runtime_desired_state == "running" &&
+                                         runtime_observed_state == "running"
+                                   : runtime_desired_state == "paused" &&
+                                         runtime_observed_state == "paused";
+      if (!valid_state) {
+        throw std::runtime_error(
+            "lifecycle journal event is stale for the replayed run state");
+      }
+      auto previous = replayed_lifecycle_status.find(command_id);
+      if (event.event_type == "lifecycle.requested") {
+        const nlohmann::json expected_payload{
+            {"command_id", command->command_id},
+            {"idempotency_key", command->idempotency_key},
+            {"expected_run_revision", command->expected_run_revision},
+            {"kind", pause ? "pause" : "resume"},
+            {"checkpoint_first", command->checkpoint_first},
+            {"release_resources", command->release_resources},
+            {"author", command->author},
+            {"reason", command->reason},
+        };
+        if (previous != replayed_lifecycle_status.end() ||
+            event.worker_sequence != 0U || event.payload != expected_payload ||
+            event.run_revision != command->expected_run_revision) {
+          throw std::runtime_error(
+              "lifecycle request event disagrees with its durable command");
+        }
+        replayed_lifecycle_status[command_id] = "requested";
+      } else {
+        if (event.event_type != "lifecycle.acknowledged" ||
+            previous == replayed_lifecycle_status.end() ||
+            previous->second != "requested" || !command->acknowledgement ||
+            !command->acknowledged_at_ns) {
+          throw std::runtime_error(
+              "lifecycle acknowledgement has no preceding request event");
+        }
+        const auto& identity = *command->acknowledgement;
+        const std::string status(lifecycle_status_name(command->status));
+        const nlohmann::json expected_payload{
+            {"command_id", command->command_id},
+            {"kind", pause ? "pause" : "resume"},
+            {"status", status},
+            {"artifact_id", command->artifact_id},
+            {"diagnostics", command->diagnostics},
+            {"concurrency_key", identity.concurrency_key},
+            {"lease_id", identity.lease_id},
+            {"fencing_token", identity.fencing_token},
+        };
+        if (event.payload != expected_payload ||
+            event.optimizer_step != command->optimizer_step ||
+            event.worker_sequence != identity.worker_sequence ||
+            event.wall_time_ns != *command->acknowledged_at_ns) {
+          throw std::runtime_error(
+              "lifecycle acknowledgement event disagrees with its durable command");
+        }
+        replayed_lifecycle_status[command_id] = status;
+      }
+      continue;
+    }
     if (is_worker_observation(event.event_type)) {
       try {
         require_worker_observation_shape(event);
       } catch (const std::invalid_argument& exception) {
         throw std::runtime_error(exception.what());
       }
+      const bool paused_heartbeat =
+          runtime_observed_state == "paused" &&
+          event.event_type == "worker.heartbeat" &&
+          event.payload.value("phase", std::string{}) == "paused";
       if (phase != ReplayPhase::ready || expected_completion ||
           recovered.status != ExecutionStatus::running ||
-          runtime_observed_state != "running" ||
+          (runtime_observed_state != "running" && !paused_heartbeat) ||
           event.run_revision != recovered.revision ||
           event.plan_revision != kInitialPlanRevision ||
           event.node_id != recovered.current_node_id ||
@@ -1385,6 +1476,13 @@ const ExecutionState& Controller::recover() {
     if (!command || status != checkpoint_status_name(command->status)) {
       throw std::runtime_error(
           "checkpoint command projection disagrees with journal replay");
+    }
+  }
+  for (const auto& [command_id, status] : replayed_lifecycle_status) {
+    const auto command = journal_.lifecycle_command(command_id);
+    if (!command || status != lifecycle_status_name(command->status)) {
+      throw std::runtime_error(
+          "lifecycle command projection disagrees with journal replay");
     }
   }
   const auto projection = journal_.projection(run_id_);
@@ -1943,10 +2041,14 @@ const ExecutionState& Controller::record_worker_observation(
     throw std::invalid_argument(
         "worker observation event_id already has different content");
   }
+  const bool paused_heartbeat =
+      paused_ && input.event_type == "worker.heartbeat" &&
+      input.payload.value("phase", std::string{}) == "paused";
   if (input.run_id != run_id_ || input.run_revision != state_.revision ||
       input.plan_revision != kInitialPlanRevision ||
       input.node_id != state_.current_node_id ||
-      input.attempt_id != state_.current_attempt_id || paused_ ||
+      input.attempt_id != state_.current_attempt_id ||
+      (paused_ && !paused_heartbeat) ||
       state_.status != ExecutionStatus::running ||
       identity.run_id != input.run_id || identity.node_id != input.node_id ||
       identity.attempt_id != input.attempt_id ||
@@ -2390,6 +2492,69 @@ CheckpointCommand Controller::acknowledge_checkpoint(
         "checkpoint acknowledgement lease key differs from the compiled workspace");
   }
   return journal_.acknowledge_checkpoint_command(
+      run_id_, command_id, identity, status, optimizer_step,
+      std::move(artifact_id), std::move(diagnostics), now);
+}
+
+LifecycleSubmission Controller::request_lifecycle(
+    LifecycleCommandKind kind, const std::string& idempotency_key,
+    std::uint64_t expected_run_revision, bool checkpoint_first,
+    bool release_resources, const std::string& author,
+    const std::string& reason) {
+  if (!initialized_) {
+    throw std::logic_error(
+        "controller must create or recover before requesting lifecycle change");
+  }
+  if (idempotency_key.empty() || author.empty() || reason.empty()) {
+    throw std::invalid_argument(
+        "lifecycle request idempotency key, author, and reason are required");
+  }
+  const std::string kind_name =
+      kind == LifecycleCommandKind::pause ? "pause" : "resume";
+  const std::string command_id =
+      kind_name + "-" +
+      sha256_hex(nlohmann::json({{"run_id", run_id_},
+                                 {"idempotency_key", idempotency_key}})
+                     .dump());
+  return journal_.submit_lifecycle_command(LifecycleCommand{
+      .command_id = command_id,
+      .run_id = run_id_,
+      .idempotency_key = idempotency_key,
+      .expected_run_revision = expected_run_revision,
+      .controller_sequence = 0,
+      .plan_revision = kInitialPlanRevision,
+      .node_id = "",
+      .attempt_id = "",
+      .kind = kind,
+      .checkpoint_first = checkpoint_first,
+      .release_resources = release_resources,
+      .author = author,
+      .reason = reason,
+      .status = LifecycleCommandStatus::requested,
+      .optimizer_step = std::nullopt,
+      .artifact_id = "",
+      .diagnostics = nlohmann::json::array(),
+      .acknowledgement = std::nullopt,
+      .acknowledged_at_ns = std::nullopt,
+  });
+}
+
+LifecycleCommand Controller::acknowledge_lifecycle(
+    const std::string& command_id,
+    const ControlAcknowledgementIdentity& identity,
+    LifecycleCommandStatus status,
+    std::optional<std::uint64_t> optimizer_step, std::string artifact_id,
+    nlohmann::json diagnostics, const AuthorityTimeSample& now) {
+  if (!initialized_) {
+    throw std::logic_error(
+        "controller must create or recover before acknowledging lifecycle change");
+  }
+  if (identity.concurrency_key !=
+      plan_.experiment.spec.workspace.concurrency_key) {
+    throw std::invalid_argument(
+        "lifecycle acknowledgement lease key differs from the compiled workspace");
+  }
+  return journal_.acknowledge_lifecycle_command(
       run_id_, command_id, identity, status, optimizer_step,
       std::move(artifact_id), std::move(diagnostics), now);
 }

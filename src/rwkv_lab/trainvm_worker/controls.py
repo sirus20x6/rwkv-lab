@@ -11,6 +11,7 @@ from .session import (
     CheckpointDisposition,
     CommandKind,
     ControlDisposition,
+    LifecycleDisposition,
     WorkerCommand,
     wire,
 )
@@ -61,6 +62,21 @@ class _Session(Protocol):
         artifact_id: str = "",
         diagnostics: tuple[tuple[int, str, str, str, str], ...] = (),
         wait: bool = True,
+    ) -> int: ...
+
+    def acknowledge_lifecycle(
+        self,
+        command: WorkerCommand,
+        disposition: LifecycleDisposition,
+        *,
+        optimizer_step: int = 0,
+        artifact_id: str = "",
+        diagnostics: tuple[tuple[int, str, str, str, str], ...] = (),
+        wait: bool = True,
+    ) -> int: ...
+
+    def heartbeat(
+        self, optimizer_step: int, phase: str, *, wait: bool = False
     ) -> int: ...
 
 
@@ -139,11 +155,17 @@ class WorkerControlRuntime:
     def _collect(self) -> None:
         commands = self._session.poll_commands()
         if any(
-            command.kind not in {CommandKind.CONTROLS, CommandKind.CHECKPOINT}
+            command.kind
+            not in {
+                CommandKind.CONTROLS,
+                CommandKind.CHECKPOINT,
+                CommandKind.PAUSE,
+                CommandKind.RESUME,
+            }
             for command in commands
         ):
             raise WorkerControlError(
-                "worker received a pause, resume, or cancel command unsupported by this protocol revision"
+                "worker received a cancel command unsupported by this protocol revision"
             )
         self._pending.extend(commands)
 
@@ -166,7 +188,7 @@ class WorkerControlRuntime:
         applied: list[AppliedControlPatch] = []
         while self._pending:
             command = self._pending[0]
-            if command.kind is CommandKind.CHECKPOINT:
+            if command.kind is not CommandKind.CONTROLS:
                 break
             if command.expected_control_revision != self._revision:
                 self._session.acknowledge_controls(
@@ -278,9 +300,17 @@ class WorkerControlRuntime:
         if not self._pending:
             return False
         command = self._pending[0]
-        return command.kind is CommandKind.CHECKPOINT or (
+        return command.kind in {CommandKind.CHECKPOINT, CommandKind.PAUSE} or (
             command.kind is CommandKind.CONTROLS
             and command.apply_point == wire.APPLY_POINT_NEXT_CHECKPOINT
+        )
+
+    @property
+    def checkpoint_completion_requested(self) -> bool:
+        self._collect()
+        return bool(
+            self._pending
+            and self._pending[0].kind in {CommandKind.CHECKPOINT, CommandKind.PAUSE}
         )
 
     def publish_requested_checkpoint(
@@ -298,9 +328,11 @@ class WorkerControlRuntime:
         self._collect()
         commands: list[WorkerCommand] = []
         for command in self._pending:
-            if command.kind is not CommandKind.CHECKPOINT:
+            if command.kind not in {CommandKind.CHECKPOINT, CommandKind.PAUSE}:
                 break
             commands.append(command)
+            if command.kind is CommandKind.PAUSE:
+                break
         if not commands:
             return None
         from .checkpoint import (  # local import avoids a module cycle
@@ -308,43 +340,120 @@ class WorkerControlRuntime:
             CheckpointPublisher,
         )
 
-        if not isinstance(request, CheckpointPublicationRequest):
+        requires_publication = any(
+            command.kind is CommandKind.CHECKPOINT
+            or (command.kind is CommandKind.PAUSE and command.checkpoint_first)
+            for command in commands
+        )
+        if requires_publication and not isinstance(request, CheckpointPublicationRequest):
             raise WorkerControlError(
                 "checkpoint publication requires a typed immutable request"
             )
+        published = None
         try:
-            published = CheckpointPublisher(
-                self._session, output_name=request.output_name
-            ).publish(
-                request.source_directory,
-                optimizer_step=request.optimizer_step,
-                resume_grade=request.resume_grade,
-                state_components=request.state_components,
-                parent_artifact_ids=request.parent_artifact_ids,
-                progress=progress,
-            )
+            if requires_publication:
+                assert isinstance(request, CheckpointPublicationRequest)
+                published = CheckpointPublisher(
+                    self._session, output_name=request.output_name
+                ).publish(
+                    request.source_directory,
+                    optimizer_step=request.optimizer_step,
+                    resume_grade=request.resume_grade,
+                    state_components=request.state_components,
+                    parent_artifact_ids=request.parent_artifact_ids,
+                    progress=progress,
+                )
         except Exception:
             diagnostics = _diagnostic(
                 "checkpoint.publication_failed",
                 "worker could not publish the requested immutable checkpoint",
             )
             for command in commands:
-                self._session.acknowledge_checkpoint(
-                    command,
-                    CheckpointDisposition.REJECTED,
-                    diagnostics=diagnostics,
-                )
+                if command.kind is CommandKind.CHECKPOINT:
+                    self._session.acknowledge_checkpoint(
+                        command,
+                        CheckpointDisposition.REJECTED,
+                        diagnostics=diagnostics,
+                    )
+                else:
+                    self._session.acknowledge_lifecycle(
+                        command,
+                        LifecycleDisposition.REJECTED,
+                        diagnostics=diagnostics,
+                    )
                 self._pending.pop(0)
             raise
         for command in commands:
-            self._session.acknowledge_checkpoint(
-                command,
-                CheckpointDisposition.APPLIED,
-                optimizer_step=request.optimizer_step,
-                artifact_id=published.artifact_id,
-            )
+            if command.kind is CommandKind.CHECKPOINT:
+                assert published is not None
+                self._session.acknowledge_checkpoint(
+                    command,
+                    CheckpointDisposition.APPLIED,
+                    optimizer_step=request.optimizer_step,
+                    artifact_id=published.artifact_id,
+                )
+            else:
+                self._session.acknowledge_lifecycle(
+                    command,
+                    LifecycleDisposition.APPLIED,
+                    optimizer_step=(request.optimizer_step if published else 0),
+                    artifact_id=(published.artifact_id if published else ""),
+                )
             self._pending.pop(0)
+            if command.kind is CommandKind.PAUSE:
+                self._wait_for_resume(
+                    request.optimizer_step
+                    if isinstance(request, CheckpointPublicationRequest)
+                    else 0
+                )
         return published
+
+    def _wait_for_resume(self, optimizer_step: int) -> None:
+        import time
+
+        while True:
+            self._collect()
+            if self._pending and self._pending[0].kind is CommandKind.RESUME:
+                command = self._pending.pop(0)
+                self._session.acknowledge_lifecycle(
+                    command, LifecycleDisposition.APPLIED
+                )
+                return
+            if self._pending and self._pending[0].kind is CommandKind.CONTROLS:
+                command = self._pending.pop(0)
+                if command.expected_control_revision != self._revision:
+                    disposition = ControlDisposition.REJECTED
+                    diagnostics = _diagnostic(
+                        "control.worker_revision_conflict",
+                        "worker effective control revision differs from the command",
+                    )
+                elif (
+                    command.requires_pause
+                    or command.apply_point == wire.APPLY_POINT_RESTART
+                ):
+                    disposition = ControlDisposition.RESTART_REQUIRED
+                    diagnostics = _diagnostic(
+                        "control.restart_required",
+                        "control requires a paused replacement worker",
+                    )
+                else:
+                    disposition = ControlDisposition.REJECTED
+                    diagnostics = _diagnostic(
+                        "control.paused_barrier",
+                        "live control cannot be applied while the worker is paused",
+                    )
+                self._session.acknowledge_controls(
+                    command,
+                    disposition,
+                    diagnostics=diagnostics,
+                )
+                continue
+            if self._pending:
+                raise WorkerControlError(
+                    "a non-resume command blocks the retained-resource pause barrier"
+                )
+            self._session.heartbeat(optimizer_step, "paused", wait=True)
+            time.sleep(2.0)
 
     def publish_requested_checkpoint_directory(
         self,

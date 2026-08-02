@@ -49,6 +49,11 @@ class CheckpointDisposition(str, Enum):
     REJECTED = "rejected"
 
 
+class LifecycleDisposition(str, Enum):
+    APPLIED = "applied"
+    REJECTED = "rejected"
+
+
 @dataclass(frozen=True, slots=True)
 class ControlAssignment:
     key: str
@@ -637,6 +642,66 @@ class WorkerSession:
             wait,
         )
 
+    def acknowledge_lifecycle(
+        self,
+        command: WorkerCommand,
+        disposition: LifecycleDisposition,
+        *,
+        optimizer_step: int = 0,
+        artifact_id: str = "",
+        diagnostics: Iterable[tuple[int, str, str, str, str]] = (),
+        wait: bool = True,
+    ) -> int:
+        if command.kind not in {CommandKind.PAUSE, CommandKind.RESUME}:
+            raise WorkerSessionError(
+                "only pause and resume commands have lifecycle acknowledgements"
+            )
+        applied = disposition is LifecycleDisposition.APPLIED
+        needs_checkpoint = command.kind is CommandKind.PAUSE and command.checkpoint_first
+        if (
+            (applied and needs_checkpoint) != bool(optimizer_step and artifact_id)
+            or (not needs_checkpoint and (optimizer_step or artifact_id))
+        ):
+            raise WorkerSessionError(
+                "lifecycle acknowledgement result is inconsistent"
+            )
+        kinds = {
+            CommandKind.PAUSE: wire.LifecycleAcknowledgement.KIND_PAUSE,
+            CommandKind.RESUME: wire.LifecycleAcknowledgement.KIND_RESUME,
+        }
+        dispositions = {
+            LifecycleDisposition.APPLIED: wire.LifecycleAcknowledgement.DISPOSITION_APPLIED,
+            LifecycleDisposition.REJECTED: wire.LifecycleAcknowledgement.DISPOSITION_REJECTED,
+        }
+        sequence = self._allocate_sequence()
+        acknowledgement = wire.LifecycleAcknowledgement(
+            command_id=command.command_id,
+            kind=kinds[command.kind],
+            disposition=dispositions[disposition],
+            optimizer_step=optimizer_step,
+            artifact_id=artifact_id,
+            diagnostics=[
+                wire.Diagnostic(
+                    severity=severity,
+                    code=code,
+                    document_path=document_path,
+                    message=message,
+                    help=help_text,
+                )
+                for severity, code, document_path, message, help_text in diagnostics
+            ],
+            concurrency_key=self.bootstrap.concurrency_key,
+            lease_id=self.bootstrap.lease_id,
+            fencing_token=self.bootstrap.fencing_token,
+            worker_sequence=sequence,
+            acknowledged_at=_timestamp_now(),
+        )
+        return self._send(
+            wire.WorkerToController(lifecycle_ack=acknowledgement),
+            sequence,
+            wait,
+        )
+
     def finish(
         self,
         event_type: str,
@@ -704,6 +769,7 @@ __all__ = [
     "CommandKind",
     "ControlAssignment",
     "ControlDisposition",
+    "LifecycleDisposition",
     "WorkerCommand",
     "WorkerReceipt",
     "WorkerSession",

@@ -2068,6 +2068,140 @@ CheckpointCommand checkpoint_command_from_events(
   return command;
 }
 
+std::string lifecycle_kind_name(LifecycleCommandKind kind) {
+  switch (kind) {
+    case LifecycleCommandKind::pause:
+      return "pause";
+    case LifecycleCommandKind::resume:
+      return "resume";
+  }
+  throw std::invalid_argument("invalid lifecycle command kind");
+}
+
+std::string lifecycle_status_name(LifecycleCommandStatus status) {
+  switch (status) {
+    case LifecycleCommandStatus::requested:
+      return "requested";
+    case LifecycleCommandStatus::applied:
+      return "applied";
+    case LifecycleCommandStatus::rejected:
+      return "rejected";
+  }
+  throw std::invalid_argument("invalid lifecycle command status");
+}
+
+LifecycleCommand lifecycle_command_from_events(
+    const Event& requested, std::uint64_t controller_sequence,
+    const std::optional<Event>& acknowledgement) {
+  if (requested.event_type != "lifecycle.requested" ||
+      requested.worker_sequence != 0U || controller_sequence == 0U ||
+      !requested.payload.is_object()) {
+    throw std::runtime_error("stored lifecycle request is malformed");
+  }
+  const auto required_string = [&](std::string_view key) {
+    const auto found = requested.payload.find(std::string(key));
+    if (found == requested.payload.end() || !found->is_string() ||
+        found->get_ref<const std::string&>().empty()) {
+      throw std::runtime_error("stored lifecycle request identity is malformed");
+    }
+    return found->get<std::string>();
+  };
+  const std::string kind_name = required_string("kind");
+  LifecycleCommandKind kind;
+  if (kind_name == "pause") {
+    kind = LifecycleCommandKind::pause;
+  } else if (kind_name == "resume") {
+    kind = LifecycleCommandKind::resume;
+  } else {
+    throw std::runtime_error("stored lifecycle request kind is malformed");
+  }
+  LifecycleCommand command{
+      .command_id = required_string("command_id"),
+      .run_id = requested.run_id,
+      .idempotency_key = required_string("idempotency_key"),
+      .expected_run_revision = requested.payload.value(
+          "expected_run_revision", std::uint64_t{}),
+      .controller_sequence = controller_sequence,
+      .plan_revision = requested.plan_revision,
+      .node_id = requested.node_id,
+      .attempt_id = requested.attempt_id,
+      .kind = kind,
+      .checkpoint_first = requested.payload.value("checkpoint_first", false),
+      .release_resources = requested.payload.value("release_resources", false),
+      .author = required_string("author"),
+      .reason = required_string("reason"),
+      .status = LifecycleCommandStatus::requested,
+      .optimizer_step = std::nullopt,
+      .artifact_id = "",
+      .diagnostics = nlohmann::json::array(),
+      .acknowledgement = std::nullopt,
+      .acknowledged_at_ns = std::nullopt,
+  };
+  if (command.command_id + ":requested" != requested.event_id ||
+      command.expected_run_revision != requested.run_revision ||
+      command.node_id.empty() || command.attempt_id.empty() ||
+      (command.kind == LifecycleCommandKind::resume &&
+       (command.checkpoint_first || command.release_resources))) {
+    throw std::runtime_error("stored lifecycle request envelope is malformed");
+  }
+  if (!acknowledgement) return command;
+  const Event& acknowledged = *acknowledgement;
+  if (acknowledged.event_id != command.command_id + ":ack" ||
+      acknowledged.event_type != "lifecycle.acknowledged" ||
+      acknowledged.run_id != command.run_id ||
+      acknowledged.plan_revision != command.plan_revision ||
+      acknowledged.node_id != command.node_id ||
+      acknowledged.attempt_id != command.attempt_id ||
+      acknowledged.worker_sequence == 0U ||
+      acknowledged.payload.value("command_id", std::string{}) !=
+          command.command_id ||
+      acknowledged.payload.value("kind", std::string{}) != kind_name) {
+    throw std::runtime_error("stored lifecycle acknowledgement is malformed");
+  }
+  const std::string status =
+      acknowledged.payload.value("status", std::string{});
+  if (status == "applied") {
+    command.status = LifecycleCommandStatus::applied;
+  } else if (status == "rejected") {
+    command.status = LifecycleCommandStatus::rejected;
+  } else {
+    throw std::runtime_error("stored lifecycle acknowledgement status is malformed");
+  }
+  command.optimizer_step = acknowledged.optimizer_step;
+  command.artifact_id =
+      acknowledged.payload.value("artifact_id", std::string{});
+  const auto diagnostics = acknowledged.payload.find("diagnostics");
+  if (diagnostics == acknowledged.payload.end() || !diagnostics->is_array()) {
+    throw std::runtime_error("stored lifecycle diagnostics are malformed");
+  }
+  command.diagnostics = *diagnostics;
+  command.acknowledgement = ControlAcknowledgementIdentity{
+      .concurrency_key = acknowledged.payload.value(
+          "concurrency_key", std::string{}),
+      .lease_id = acknowledged.payload.value("lease_id", std::string{}),
+      .fencing_token = acknowledged.payload.value(
+          "fencing_token", std::uint64_t{}),
+      .node_id = acknowledged.node_id,
+      .attempt_id = acknowledged.attempt_id,
+      .worker_sequence = acknowledged.worker_sequence,
+  };
+  command.acknowledged_at_ns = acknowledged.wall_time_ns;
+  const bool pause_checkpoint =
+      command.kind == LifecycleCommandKind::pause && command.checkpoint_first;
+  if (command.acknowledgement->concurrency_key.empty() ||
+      command.acknowledgement->lease_id.empty() ||
+      command.acknowledgement->fencing_token == 0U ||
+      (command.status == LifecycleCommandStatus::applied && pause_checkpoint &&
+       (!command.optimizer_step || command.artifact_id.empty())) ||
+      (command.status == LifecycleCommandStatus::applied && !pause_checkpoint &&
+       (command.optimizer_step || !command.artifact_id.empty())) ||
+      (command.status == LifecycleCommandStatus::rejected &&
+       (command.optimizer_step || !command.artifact_id.empty()))) {
+    throw std::runtime_error("stored lifecycle acknowledgement result is malformed");
+  }
+  return command;
+}
+
 int open_existing_directory_by_components(
     const std::filesystem::path& absolute_path) {
   if (!absolute_path.is_absolute()) {
@@ -4080,8 +4214,14 @@ void Journal::append_fenced_worker_observation(
     FROM run_projection WHERE run_id=?
   )sql");
   bind_text(projection.get(), 1, identity.run_id);
-  if (sqlite3_step(projection.get()) != SQLITE_ROW ||
-      column_text(projection.get(), 0) != "running" ||
+  const int projection_status = sqlite3_step(projection.get());
+  const bool paused_heartbeat =
+      projection_status == SQLITE_ROW &&
+      column_text(projection.get(), 0) == "paused" &&
+      observation.event_type == "worker.heartbeat" &&
+      observation.payload.value("phase", std::string{}) == "paused";
+  if (projection_status != SQLITE_ROW ||
+      (column_text(projection.get(), 0) != "running" && !paused_heartbeat) ||
       static_cast<std::uint64_t>(sqlite3_column_int64(projection.get(), 1)) !=
           observation.run_revision ||
       column_text(projection.get(), 2) != identity.node_id ||
@@ -5062,6 +5202,301 @@ CheckpointCommand Journal::acknowledge_checkpoint_command(
   return *checkpoint_command(command_id);
 }
 
+LifecycleSubmission Journal::submit_lifecycle_command(
+    LifecycleCommand command) {
+  if (command.command_id.empty() || command.run_id.empty() ||
+      command.idempotency_key.empty() || command.author.empty() ||
+      command.reason.empty() || command.controller_sequence != 0U ||
+      command.status != LifecycleCommandStatus::requested ||
+      command.optimizer_step || !command.artifact_id.empty() ||
+      !command.diagnostics.empty() || command.acknowledgement ||
+      command.acknowledged_at_ns ||
+      (command.kind == LifecycleCommandKind::resume &&
+       (command.checkpoint_first || command.release_resources))) {
+    throw std::invalid_argument("new lifecycle command has invalid request state");
+  }
+  Transaction transaction(database_);
+  if (const auto existing = lifecycle_command(command.command_id)) {
+    const bool same =
+        existing->run_id == command.run_id &&
+        existing->idempotency_key == command.idempotency_key &&
+        existing->expected_run_revision == command.expected_run_revision &&
+        existing->plan_revision == command.plan_revision &&
+        existing->kind == command.kind &&
+        existing->checkpoint_first == command.checkpoint_first &&
+        existing->release_resources == command.release_resources &&
+        existing->author == command.author && existing->reason == command.reason;
+    if (!same) {
+      throw std::invalid_argument(
+          "lifecycle command idempotency identity has different content");
+    }
+    transaction.commit();
+    return {.command = *existing, .inserted = false};
+  }
+  Statement run(database_, R"sql(
+    SELECT run_revision, desired_state, observed_state,
+           current_node_id, current_attempt_id
+    FROM run_projection WHERE run_id=?
+  )sql");
+  bind_text(run.get(), 1, command.run_id);
+  if (sqlite3_step(run.get()) != SQLITE_ROW) {
+    throw std::invalid_argument("cannot command an unknown run");
+  }
+  const auto revision =
+      static_cast<std::uint64_t>(sqlite3_column_int64(run.get(), 0));
+  const std::string desired = column_text(run.get(), 1);
+  const std::string observed = column_text(run.get(), 2);
+  const std::string node_id = column_text(run.get(), 3);
+  const std::string attempt_id = column_text(run.get(), 4);
+  const bool valid_state =
+      command.kind == LifecycleCommandKind::pause
+          ? desired == "running" && observed == "running"
+          : desired == "paused" && observed == "paused";
+  if (revision != command.expected_run_revision) {
+    throw std::invalid_argument("lifecycle command expected_run_revision conflict");
+  }
+  if (!valid_state || node_id.empty() || attempt_id.empty()) {
+    throw std::invalid_argument(
+        "lifecycle command is invalid for the current run state");
+  }
+  command.node_id = node_id;
+  command.attempt_id = attempt_id;
+  const Event requested{
+      .event_id = command.command_id + ":requested",
+      .run_id = command.run_id,
+      .run_revision = revision,
+      .plan_revision = command.plan_revision,
+      .node_id = node_id,
+      .attempt_id = attempt_id,
+      .worker_sequence = 0,
+      .event_type = "lifecycle.requested",
+      .event_version = 1,
+      .wall_time_ns = 0,
+      .monotonic_time_ns = 0,
+      .optimizer_step = std::nullopt,
+      .payload = {{"command_id", command.command_id},
+                  {"idempotency_key", command.idempotency_key},
+                  {"expected_run_revision", command.expected_run_revision},
+                  {"kind", lifecycle_kind_name(command.kind)},
+                  {"checkpoint_first", command.checkpoint_first},
+                  {"release_resources", command.release_resources},
+                  {"author", command.author},
+                  {"reason", command.reason}},
+  };
+  command.controller_sequence = append_uncommitted(requested);
+  transaction.commit();
+  return {.command = std::move(command), .inserted = true};
+}
+
+LifecycleCommand Journal::acknowledge_lifecycle_command(
+    const std::string& run_id, const std::string& command_id,
+    const ControlAcknowledgementIdentity& identity,
+    LifecycleCommandStatus status,
+    std::optional<std::uint64_t> optimizer_step, std::string artifact_id,
+    nlohmann::json diagnostics, const AuthorityTimeSample& now) {
+  if (run_id.empty() || command_id.empty() ||
+      identity.concurrency_key.empty() || identity.lease_id.empty() ||
+      identity.fencing_token == 0U || identity.node_id.empty() ||
+      identity.attempt_id.empty() || identity.worker_sequence == 0U ||
+      status == LifecycleCommandStatus::requested || !diagnostics.is_array()) {
+    throw std::invalid_argument("invalid lifecycle command acknowledgement");
+  }
+  require_authority_time(now);
+  Transaction transaction(database_);
+  const auto stored = lifecycle_command(command_id);
+  if (!stored || stored->run_id != run_id) {
+    throw std::invalid_argument("cannot acknowledge an unknown lifecycle command");
+  }
+  const bool pause_checkpoint =
+      stored->kind == LifecycleCommandKind::pause && stored->checkpoint_first;
+  if ((status == LifecycleCommandStatus::applied && pause_checkpoint &&
+       (!optimizer_step || artifact_id.empty())) ||
+      (status == LifecycleCommandStatus::applied && !pause_checkpoint &&
+       (optimizer_step || !artifact_id.empty())) ||
+      (status == LifecycleCommandStatus::rejected &&
+       (optimizer_step || !artifact_id.empty()))) {
+    throw std::invalid_argument("lifecycle acknowledgement result is inconsistent");
+  }
+  if (stored->status != LifecycleCommandStatus::requested) {
+    if (stored->status == status && stored->optimizer_step == optimizer_step &&
+        stored->artifact_id == artifact_id && stored->diagnostics == diagnostics &&
+        stored->acknowledgement == identity) {
+      transaction.commit();
+      return *stored;
+    }
+    throw std::invalid_argument(
+        "lifecycle command already has a different acknowledgement");
+  }
+  if (stored->node_id != identity.node_id ||
+      stored->attempt_id != identity.attempt_id) {
+    throw std::invalid_argument(
+        "lifecycle acknowledgement is from a stale worker attempt");
+  }
+  if (host_grant_enforcement_ == HostGrantEnforcement::required) {
+    const std::string launch_id = run_id + ":worker-launch:" +
+                                  identity.node_id + ":" + identity.attempt_id;
+    const auto binding = launch_binding(launch_id);
+    if (!binding || binding->identity.run_id != run_id ||
+        binding->identity.concurrency_key != identity.concurrency_key ||
+        binding->identity.lease_id != identity.lease_id ||
+        binding->identity.fencing_token != identity.fencing_token) {
+      throw OperationPreconditionError(
+          "lifecycle acknowledgement has no exact durable worker launch binding");
+    }
+    require_live_host_grant_claim(binding->identity.host_grant, run_id,
+                                  identity.concurrency_key, identity.lease_id,
+                                  identity.fencing_token);
+  }
+  Statement run(database_, R"sql(
+    SELECT run_revision, desired_state, observed_state,
+           current_node_id, current_attempt_id
+    FROM run_projection WHERE run_id=?
+  )sql");
+  bind_text(run.get(), 1, run_id);
+  if (sqlite3_step(run.get()) != SQLITE_ROW ||
+      column_text(run.get(), 3) != identity.node_id ||
+      column_text(run.get(), 4) != identity.attempt_id) {
+    throw std::invalid_argument(
+        "lifecycle acknowledgement has no active worker attempt");
+  }
+  const auto run_revision =
+      static_cast<std::uint64_t>(sqlite3_column_int64(run.get(), 0));
+  const std::string desired = column_text(run.get(), 1);
+  const std::string observed = column_text(run.get(), 2);
+  const bool valid_state =
+      stored->kind == LifecycleCommandKind::pause
+          ? desired == "running" && observed == "running"
+          : desired == "paused" && observed == "paused";
+  if (!valid_state) {
+    throw std::invalid_argument(
+        "lifecycle acknowledgement is stale for the run state");
+  }
+  Statement lease(database_, R"sql(
+    SELECT 1 FROM resource_leases
+    WHERE concurrency_key=? AND owner_run_id=? AND lease_id=? AND fencing_token=?
+      AND clock_domain='boottime/v1' AND boot_id=?
+      AND released_wall_time_ns IS NULL
+      AND acquired_boottime_ns<=? AND expires_boottime_ns>?
+      AND NOT EXISTS(
+        SELECT 1 FROM resource_lease_releases AS release
+        WHERE release.concurrency_key=resource_leases.concurrency_key
+          AND release.owner_run_id=resource_leases.owner_run_id
+          AND release.lease_id=resource_leases.lease_id
+          AND release.fencing_token=resource_leases.fencing_token
+      )
+  )sql");
+  bind_text(lease.get(), 1, identity.concurrency_key);
+  bind_text(lease.get(), 2, run_id);
+  bind_text(lease.get(), 3, identity.lease_id);
+  bind_integer(lease.get(), 4,
+               checked_integer(identity.fencing_token, "fencing_token"));
+  bind_text(lease.get(), 5, now.boot_id);
+  bind_integer(lease.get(), 6, now.boot.nanoseconds);
+  bind_integer(lease.get(), 7, now.boot.nanoseconds);
+  if (sqlite3_step(lease.get()) != SQLITE_ROW) {
+    throw std::invalid_argument(
+        "lifecycle acknowledgement has no matching active fenced lease");
+  }
+  if (status == LifecycleCommandStatus::applied && pause_checkpoint) {
+    Statement artifact(database_, R"sql(
+      SELECT worker_sequence, payload_json FROM events
+      WHERE run_id=? AND node_id=? AND attempt_id=?
+        AND event_type='artifact.published'
+        AND json_extract(payload_json, '$.artifact_id')=?
+      ORDER BY journal_sequence DESC LIMIT 1
+    )sql");
+    bind_text(artifact.get(), 1, run_id);
+    bind_text(artifact.get(), 2, identity.node_id);
+    bind_text(artifact.get(), 3, identity.attempt_id);
+    bind_text(artifact.get(), 4, artifact_id);
+    if (sqlite3_step(artifact.get()) != SQLITE_ROW ||
+        static_cast<std::uint64_t>(sqlite3_column_int64(artifact.get(), 0)) >=
+            identity.worker_sequence ||
+        nlohmann::json::parse(column_text(artifact.get(), 1))
+                .value("kind", std::string{}) != "checkpoint") {
+      throw std::invalid_argument(
+          "pause acknowledgement has no prior published checkpoint");
+    }
+  }
+  const Event acknowledged{
+      .event_id = command_id + ":ack",
+      .run_id = run_id,
+      .run_revision = run_revision,
+      .plan_revision = stored->plan_revision,
+      .node_id = identity.node_id,
+      .attempt_id = identity.attempt_id,
+      .worker_sequence = identity.worker_sequence,
+      .event_type = "lifecycle.acknowledged",
+      .event_version = 1,
+      .wall_time_ns = now.wall.nanoseconds,
+      .monotonic_time_ns = 0,
+      .optimizer_step = optimizer_step,
+      .payload = {{"command_id", command_id},
+                  {"kind", lifecycle_kind_name(stored->kind)},
+                  {"status", lifecycle_status_name(status)},
+                  {"artifact_id", artifact_id},
+                  {"diagnostics", diagnostics},
+                  {"concurrency_key", identity.concurrency_key},
+                  {"lease_id", identity.lease_id},
+                  {"fencing_token", identity.fencing_token}},
+  };
+  std::vector<Event> events{acknowledged};
+  if (status == LifecycleCommandStatus::applied) {
+    const bool pause = stored->kind == LifecycleCommandKind::pause;
+    const std::string desired_state = pause ? "paused" : "running";
+    const std::string intermediate_state = pause ? "pausing" : "resuming";
+    events.push_back(Event{
+        .event_id = command_id + ":desired",
+        .run_id = run_id,
+        .run_revision = run_revision + 1U,
+        .plan_revision = stored->plan_revision,
+        .node_id = identity.node_id,
+        .attempt_id = identity.attempt_id,
+        .worker_sequence = 0,
+        .event_type = "run.desired_state_changed",
+        .event_version = 1,
+        .wall_time_ns = now.wall.nanoseconds,
+        .monotonic_time_ns = 0,
+        .optimizer_step = std::nullopt,
+        .payload = {{"state", desired_state}, {"cause_command_id", command_id}},
+    });
+    events.push_back(Event{
+        .event_id = command_id + ":observed-intermediate",
+        .run_id = run_id,
+        .run_revision = run_revision + 2U,
+        .plan_revision = stored->plan_revision,
+        .node_id = identity.node_id,
+        .attempt_id = identity.attempt_id,
+        .worker_sequence = 0,
+        .event_type = "run.observed_state_changed",
+        .event_version = 1,
+        .wall_time_ns = now.wall.nanoseconds,
+        .monotonic_time_ns = 0,
+        .optimizer_step = std::nullopt,
+        .payload = {{"state", intermediate_state},
+                    {"cause_command_id", command_id}},
+    });
+    events.push_back(Event{
+        .event_id = command_id + ":observed-final",
+        .run_id = run_id,
+        .run_revision = run_revision + 3U,
+        .plan_revision = stored->plan_revision,
+        .node_id = identity.node_id,
+        .attempt_id = identity.attempt_id,
+        .worker_sequence = 0,
+        .event_type = "run.observed_state_changed",
+        .event_version = 1,
+        .wall_time_ns = now.wall.nanoseconds,
+        .monotonic_time_ns = 0,
+        .optimizer_step = std::nullopt,
+        .payload = {{"state", desired_state}, {"cause_command_id", command_id}},
+    });
+  }
+  for (const Event& event : events) append_uncommitted(event);
+  transaction.commit();
+  return *lifecycle_command(command_id);
+}
+
 std::optional<ControlCommand> Journal::control_command(const std::string& command_id) const {
   Statement query(database_, R"sql(
     SELECT command_id, run_id, idempotency_key, expected_run_revision,
@@ -5152,6 +5587,65 @@ std::vector<CheckpointCommand> Journal::pending_checkpoint_commands(
   }
   if (status != SQLITE_DONE) {
     throw std::runtime_error("could not scan pending checkpoint commands");
+  }
+  return commands;
+}
+
+std::optional<LifecycleCommand> Journal::lifecycle_command(
+    const std::string& command_id) const {
+  Statement query(database_, R"sql(
+    SELECT journal_sequence, event_id, run_id, run_revision, plan_revision,
+           node_id, attempt_id, worker_sequence, event_type, event_version,
+           wall_time_ns, monotonic_time_ns, optimizer_step, payload_json
+    FROM events WHERE event_id=? AND event_type='lifecycle.requested'
+  )sql");
+  bind_text(query.get(), 1, command_id + ":requested");
+  const int status = sqlite3_step(query.get());
+  if (status == SQLITE_DONE) return std::nullopt;
+  if (status != SQLITE_ROW) {
+    throw std::runtime_error("could not read lifecycle command");
+  }
+  const auto sequence =
+      static_cast<std::uint64_t>(sqlite3_column_int64(query.get(), 0));
+  return lifecycle_command_from_events(
+      event_from_row(query.get()), sequence, event(command_id + ":ack"));
+}
+
+std::vector<LifecycleCommand> Journal::pending_lifecycle_commands(
+    const std::string& run_id,
+    std::uint64_t after_controller_sequence) const {
+  if (run_id.empty()) {
+    throw std::invalid_argument(
+        "pending lifecycle lookup requires a run identity");
+  }
+  Statement query(database_, R"sql(
+    SELECT journal_sequence, event_id, run_id, run_revision, plan_revision,
+           node_id, attempt_id, worker_sequence, event_type, event_version,
+           wall_time_ns, monotonic_time_ns, optimizer_step, payload_json
+    FROM events AS requested
+    WHERE run_id=? AND event_type='lifecycle.requested'
+      AND journal_sequence>?
+      AND NOT EXISTS(
+        SELECT 1 FROM events AS acknowledged
+        WHERE acknowledged.event_id =
+              json_extract(requested.payload_json, '$.command_id') || ':ack'
+      )
+    ORDER BY journal_sequence
+  )sql");
+  bind_text(query.get(), 1, run_id);
+  bind_integer(query.get(), 2,
+               checked_integer(after_controller_sequence,
+                               "after_controller_sequence"));
+  std::vector<LifecycleCommand> commands;
+  int status = SQLITE_OK;
+  while ((status = sqlite3_step(query.get())) == SQLITE_ROW) {
+    const auto sequence =
+        static_cast<std::uint64_t>(sqlite3_column_int64(query.get(), 0));
+    commands.push_back(lifecycle_command_from_events(
+        event_from_row(query.get()), sequence, std::nullopt));
+  }
+  if (status != SQLITE_DONE) {
+    throw std::runtime_error("could not scan pending lifecycle commands");
   }
   return commands;
 }
