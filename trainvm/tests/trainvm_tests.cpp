@@ -5712,6 +5712,35 @@ void test_graceful_cancel_lifecycle() {
 // A research topology is selected in the document and refused at compile time
 // when it is invalid, so an operator sees a diagnostic instead of a launch
 // failure on a GPU.
+// The checked-in example must compile through the real authority, not merely
+// satisfy the JSON schema. A schema-valid document that the compiler rejects
+// would be a worse lie than no example at all.
+void test_checked_in_topology_example_compiles() {
+  const std::filesystem::path path =
+      std::filesystem::path(TRAINVM_SOURCE_ROOT) /
+      "docs/experiment-vm/examples/rwkv-scratch-topologies.json";
+  std::ifstream input(path);
+  check(input.good(), "the topology example document is readable");
+  if (!input) return;
+  nlohmann::json document;
+  input >> document;
+
+  const auto compiled = trainvm::compile_document(document);
+  if (!compiled.valid()) {
+    for (const auto& value : compiled.diagnostics)
+      std::cerr << "example diagnostic " << value.code << " @" << value.path
+                << ": " << value.message << '\n';
+  }
+  check(compiled.valid(), "the checked-in topology example compiles");
+  if (!compiled.valid()) return;
+
+  const auto& node =
+      compiled.plan->experiment.spec.workflow.nodes.at("train_to_boundary");
+  check(node.invoke.training && node.invoke.training->topologies &&
+            node.invoke.training->topologies->size() == 2U,
+        "the example carries both selected topologies into the plan");
+}
+
 void test_topology_selection_compiles_and_refuses_invalid_combinations() {
   const auto with_topologies = [](nlohmann::json topologies) {
     nlohmann::json document = load_fixture();
@@ -12437,6 +12466,7 @@ int main() {
     test_resource_releasing_pause_lifecycle();
     test_adversarial_control_idempotency_and_replay();
     test_topology_selection_compiles_and_refuses_invalid_combinations();
+    test_checked_in_topology_example_compiles();
     test_typed_managed_resource_release();
     test_typed_cache_qualification_executor();
     test_concurrent_worker_launch_and_readiness_replay();
