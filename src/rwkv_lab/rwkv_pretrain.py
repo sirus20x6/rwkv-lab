@@ -1690,13 +1690,8 @@ def main(
             "component_composition_digest"
         ) != component_digest:
             raise ValueError("resume training-component composition mismatch")
-        if worker_controls is not None and (
-            ck.get("effective_control_revision")
-            != worker_controls.effective_revision
-            or ck.get("effective_controls")
-            != dict(worker_controls.effective_values)
-        ):
-            raise ValueError("resume worker-control state mismatch")
+        if worker_controls is not None:
+            worker_controls.verify_checkpoint_state(ck)
         if heads is not None and ck.get("heads") is not None:
             heads.load_state_dict(ck["heads"])
         if ema is not None:                  # saved EMA if present, else re-seed from loaded weights
@@ -2131,12 +2126,7 @@ def main(
         if component_digest is not None:
             rng_extra["component_composition_digest"] = component_digest
         if worker_controls is not None:
-            rng_extra["effective_control_revision"] = (
-                worker_controls.effective_revision
-            )
-            rng_extra["effective_controls"] = dict(
-                worker_controls.effective_values
-            )
+            rng_extra.update(worker_controls.checkpoint_state())
         if torch.cuda.is_available():
             rng_extra["cuda_rng"] = torch.cuda.get_rng_state(dev).cpu()
         if args.distributed == "fsdp2":

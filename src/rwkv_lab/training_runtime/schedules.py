@@ -167,6 +167,66 @@ def build_registered_schedule(
     return torch.optim.lr_scheduler.LambdaLR(optimizer, multiplier)
 
 
+def rebase_learning_rate_schedule(
+    scheduler: torch.optim.lr_scheduler.LRScheduler,
+    *,
+    old_base_learning_rate: float,
+    new_base_learning_rate: float,
+) -> None:
+    """Atomically preserve schedule phase and parameter-group LR ratios."""
+
+    for label, value in (
+        ("old base learning rate", old_base_learning_rate),
+        ("new base learning rate", new_base_learning_rate),
+    ):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value <= 0
+        ):
+            raise ValueError(f"{label} must be finite and positive")
+    groups = scheduler.optimizer.param_groups
+    if len(scheduler.base_lrs) != len(groups) or not groups:
+        raise ValueError("schedule and optimizer parameter groups disagree")
+    last_lrs = scheduler.get_last_lr()
+    if len(last_lrs) != len(groups):
+        raise ValueError("schedule last-learning-rate state is inconsistent")
+    for label, values in (
+        ("base", scheduler.base_lrs),
+        ("last", last_lrs),
+    ):
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value < 0
+            for value in values
+        ):
+            raise ValueError(f"schedule {label} learning-rate state is invalid")
+    for group in groups:
+        if "initial_lr" not in group:
+            raise ValueError("optimizer group has no schedule base learning rate")
+        for field in ("lr", "initial_lr"):
+            value = group[field]
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value < 0
+            ):
+                raise ValueError(f"optimizer group {field} is invalid")
+
+    ratio = float(new_base_learning_rate / old_base_learning_rate)
+    scheduler.base_lrs = [float(value * ratio) for value in scheduler.base_lrs]
+    for group in groups:
+        group["initial_lr"] = float(group["initial_lr"] * ratio)
+        group["lr"] = float(group["lr"] * ratio)
+    # get_last_lr() reports this checkpointed cache rather than reading the
+    # optimizer groups, so move it in the same trainer callback.
+    scheduler._last_lr = [float(value * ratio) for value in last_lrs]
+
+
 def schedule_from_resolved_component(
     component: Mapping[str, Any], optimizer: torch.optim.Optimizer
 ) -> torch.optim.lr_scheduler.LRScheduler:

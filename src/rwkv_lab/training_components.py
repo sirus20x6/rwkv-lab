@@ -80,6 +80,7 @@ from rwkv_lab.training_runtime.schedules import (
     build_registered_schedule,
     linear_warmup_cosine_multiplier,
     powercool_multiplier,
+    rebase_learning_rate_schedule,
     schedule_configuration_from_resolved_component,
     schedule_from_resolved_component,
 )
@@ -148,6 +149,7 @@ __all__ = [
     "parse_context_stages",
     "powercool_multiplier",
     "precision_policy_from_resolved_component",
+    "rebase_learning_rate_schedule",
     "schedule_configuration_from_resolved_component",
     "schedule_from_resolved_component",
     "supported_implementation_ids",

@@ -246,8 +246,11 @@ nonregular, outside-workspace, changing-source, or mutated-replay trees. This cl
 artifact visibility and durable handoff for the three native adapters. On-demand safe-point command
 handling now has a shared ordered/atomic worker runtime, and scratch RWKV consumes its microbatch,
 optimizer, evaluation, and checkpoint boundaries while persisting the effective control snapshot.
-Mutable MageFlow/Qwen control application, lifecycle pause/checkpoint/cancel, and stronger content
-binding for exact resume remain separate lifecycle work.
+MageFlow appearance also consumes live learning-rate, eval-cadence, and caption-dropout controls,
+rebases group rates without resetting schedule phase, and verifies its control snapshot before
+mutating resume state. MageFlow terminal/Qwen control application, lifecycle
+pause/checkpoint/cancel, and stronger content binding for exact resume remain separate lifecycle
+work.
 The dashboard verifies the snapshot envelope and renders its optimizer step, resume grade, state
 inventory, file/byte counts, tree digest, and parent lineage in the generic artifact stream.
 

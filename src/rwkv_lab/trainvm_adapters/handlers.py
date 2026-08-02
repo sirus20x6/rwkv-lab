@@ -22,6 +22,7 @@ from .checkpoints import (
 )
 from .components import WorkerTrainingComponents
 from .io import WorkspacePathAuthority, read_inline_config
+from .mageflow_controls import lower_initial_mageflow_controls
 from .rwkv_scratch import RWKVScratchTrainConfig
 
 
@@ -60,6 +61,8 @@ def _appearance_expert(
     from rwkv_lab.mage_flow_expert_train import MageFlowExpertTrainConfig, train
 
     config = MageFlowExpertTrainConfig(**read_inline_config(invocation.inputs))
+    if controls is not None:
+        lower_initial_mageflow_controls(config, controls)
     paths = WorkspacePathAuthority.from_workspace(invocation.workspace)
     config = replace(
         config,
@@ -105,6 +108,7 @@ def _appearance_expert(
         worker_components=components,
         worker_step_profiler=step_profiler or NullStepProfiler(),
         worker_observability=observability,
+        worker_controls=controls,
     )
     request, step, status = completed_checkpoint_request(
         invocation,
@@ -113,6 +117,7 @@ def _appearance_expert(
         step_fields=("global_step", "step"),
         state_components=(
             "component_composition",
+            "control_state",
             "data_cursor",
             "lr_schedule",
             "model",

@@ -52,6 +52,7 @@ from rwkv_lab.training_components import (
     optimizer_from_resolved_component,
     parameter_routing_from_resolved_component,
     powercool_multiplier,
+    rebase_learning_rate_schedule,
     schedule_configuration_from_resolved_component,
     schedule_from_resolved_component,
     supported_implementation_ids,
@@ -175,6 +176,67 @@ def test_registered_factories_preserve_group_rates_and_exact_state():
     )
     assert schedule.state_dict()["last_epoch"] == 0
     assert FP32MasterAdamW.master_state_key in optimizer.state_dict()
+
+
+def test_live_learning_rate_rebase_preserves_phase_groups_and_checkpoint_state():
+    first = torch.nn.Parameter(torch.tensor([1.0]))
+    second = torch.nn.Parameter(torch.tensor([2.0]))
+    optimizer = torch.optim.AdamW(
+        [
+            {"params": [first], "lr": 1.0e-3},
+            {"params": [second], "lr": 5.0e-4},
+        ]
+    )
+    schedule = build_registered_schedule(
+        ScheduleImplementation.LINEAR_WARMUP_COSINE_V1,
+        optimizer,
+        LinearWarmupCosineConfiguration(
+            warmup_steps=0, max_steps=10, minimum_ratio=0.1
+        ),
+    )
+    optimizer.step()
+    schedule.step()
+    old_epoch = schedule.last_epoch
+    old_rates = schedule.get_last_lr()
+
+    rebase_learning_rate_schedule(
+        schedule,
+        old_base_learning_rate=1.0e-3,
+        new_base_learning_rate=2.0e-4,
+    )
+
+    assert schedule.last_epoch == old_epoch
+    assert schedule.base_lrs == pytest.approx([2.0e-4, 1.0e-4])
+    assert schedule.get_last_lr() == pytest.approx(
+        [value * 0.2 for value in old_rates]
+    )
+    assert [group["lr"] for group in optimizer.param_groups] == pytest.approx(
+        schedule.get_last_lr()
+    )
+    assert [group["initial_lr"] for group in optimizer.param_groups] == pytest.approx(
+        schedule.base_lrs
+    )
+    state = schedule.state_dict()
+    assert state["base_lrs"] == pytest.approx([2.0e-4, 1.0e-4])
+    assert state["_last_lr"] == pytest.approx(schedule.get_last_lr())
+
+
+@pytest.mark.parametrize("old,new", [(0.0, 1.0e-4), (1.0e-4, float("nan"))])
+def test_live_learning_rate_rebase_rejects_invalid_bases(old, new):
+    parameter = torch.nn.Parameter(torch.tensor([1.0]))
+    optimizer = torch.optim.AdamW([parameter], lr=1.0e-3)
+    schedule = build_registered_schedule(
+        ScheduleImplementation.LINEAR_WARMUP_COSINE_V1,
+        optimizer,
+        LinearWarmupCosineConfiguration(warmup_steps=0, max_steps=2),
+    )
+
+    with pytest.raises(ValueError, match="finite and positive"):
+        rebase_learning_rate_schedule(
+            schedule,
+            old_base_learning_rate=old,
+            new_base_learning_rate=new,
+        )
 
 
 def test_component_catalog_and_runtime_dispatch_are_exactly_aligned():

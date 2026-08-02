@@ -134,8 +134,14 @@ def test_appearance_handler_passes_only_canonical_authorized_paths(
     monkeypatch.setattr(
         mage_flow_expert_train,
         "train",
-        lambda config, *, worker_components, worker_step_profiler, worker_observability: observed.append(
-            (config, worker_components, worker_step_profiler, worker_observability)
+        lambda config, *, worker_components, worker_step_profiler, worker_observability, worker_controls: observed.append(
+            (
+                config,
+                worker_components,
+                worker_step_profiler,
+                worker_observability,
+                worker_controls,
+            )
         ),
     )
     invocation = SimpleNamespace(
@@ -153,9 +159,17 @@ def test_appearance_handler_passes_only_canonical_authorized_paths(
     )
     components = SimpleNamespace()
     observability = SimpleNamespace()
+    controls = SimpleNamespace(
+        effective_values={
+            "learning_rate": 2.0e-5,
+            "eval_every": 25,
+            "caption_dropout": 0.2,
+            "mixed_precision": "bf16",
+        }
+    )
 
     assert _appearance_expert(
-        invocation, components, observability=observability
+        invocation, components, observability=observability, controls=controls
     ) == HandlerResult(
         "worker.completed", {"reason": "training_complete"}
     )
@@ -163,6 +177,10 @@ def test_appearance_handler_passes_only_canonical_authorized_paths(
     assert observed[0][0].output_dir == str(run_directory.resolve())
     assert observed[0][1] is components
     assert observed[0][3] is observability
+    assert observed[0][4] is controls
+    assert observed[0][0].learning_rate == pytest.approx(2.0e-5)
+    assert observed[0][0].eval_every == 25
+    assert observed[0][0].caption_dropout == pytest.approx(0.2)
 
 
 def test_appearance_handler_returns_declared_immutable_checkpoint_request(

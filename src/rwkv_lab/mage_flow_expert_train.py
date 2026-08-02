@@ -72,10 +72,15 @@ from rwkv_lab.training_components import (
     build_registered_schedule,
 )
 from rwkv_lab.training_parameter_routing import ParameterRoutingResult
+from rwkv_lab.trainvm_adapters.mageflow_controls import MageFlowMutableControls
 
 if TYPE_CHECKING:
     from rwkv_lab.trainvm_adapters import WorkerTrainingComponents
-    from rwkv_lab.trainvm_worker import WorkerObservability, WorkerStepProfiler
+    from rwkv_lab.trainvm_worker import (
+        WorkerControlRuntime,
+        WorkerObservability,
+        WorkerStepProfiler,
+    )
 
 RUN_SCHEMA = "rwkv-lab.mage-flow-expert-train.v1"
 OFFICIAL_REPOSITORY = "https://github.com/microsoft/Mage"
@@ -367,6 +372,7 @@ def training_contract_fingerprint(
     config: MageFlowExpertTrainConfig,
     *,
     component_composition_digest: str | None = None,
+    mutable_control_keys: Sequence[str] = (),
 ) -> str:
     """Fingerprint every setting and input that can change optimization."""
     values = asdict(config)
@@ -378,9 +384,20 @@ def training_contract_fingerprint(
     values.pop("eval_microbatch_size", None)
     values.pop("auto_resume_latest", None)
     values.pop("output_dir", None)
+    mutable = tuple(sorted(set(mutable_control_keys)))
+    unknown_mutable = set(mutable) - {
+        "learning_rate",
+        "eval_every",
+        "caption_dropout",
+    }
+    if unknown_mutable:
+        raise ValueError("training contract has an unknown mutable control")
+    for key in mutable:
+        values.pop(key, None)
     payload = {
         "schema": RUN_SCHEMA,
         "config": values,
+        "mutable_control_keys": mutable,
         "train_manifest_sha256": _file_sha256(Path(config.train_manifest)),
         "eval_manifest_sha256": (
             _file_sha256(Path(config.eval_manifest)) if config.eval_manifest else None
@@ -395,6 +412,7 @@ def training_contract_fingerprint(
 def resolved_worker_component_contract(
     config: MageFlowExpertTrainConfig,
     worker_components: WorkerTrainingComponents | None,
+    worker_controls: WorkerControlRuntime | None = None,
 ) -> tuple[float, Mapping[str, Mapping[str, str]] | None, str | None]:
     """Bind duplicated legacy config fields until the worker adapter removes them."""
 
@@ -419,7 +437,12 @@ def resolved_worker_component_contract(
         )
     )
     expected_optimizer = {
-        "learning_rate": config.learning_rate,
+        "learning_rate": (
+            optimizer_configuration["learning_rate"]
+            if worker_controls is not None
+            and "learning_rate" in worker_controls.effective_values
+            else config.learning_rate
+        ),
         "beta1": config.adam_beta1,
         "beta2": config.adam_beta2,
         "epsilon": config.adam_epsilon,
@@ -469,7 +492,7 @@ def resolved_worker_component_contract(
             "authority gradient-clipping composition disagrees with MageFlow configuration"
         )
     return (
-        float(optimizer_configuration["learning_rate"]),
+        float(config.learning_rate),
         worker_components.evidence(),
         worker_components.composition.composition_digest,
     )
@@ -1317,6 +1340,7 @@ def save_training_checkpoint(
     contract_fingerprint: str | None = None,
     transformer=None,
     fixed_expert_source_dir: Path | None = None,
+    control_state: Mapping[str, object] | None = None,
 ) -> Path:
     """Atomically save routed weights, optimizer/scheduler, RNG, and position."""
     output_dir = output_dir.expanduser().resolve()
@@ -1354,6 +1378,8 @@ def save_training_checkpoint(
         "scheduler": scheduler.state_dict(),
         "rng": _capture_rng_state(),
     }
+    if control_state is not None:
+        state.update(control_state)
     torch.save(state, temporary / "trainer_state.pt")
     _atomic_json(
         temporary / "checkpoint.json",
@@ -1368,6 +1394,11 @@ def save_training_checkpoint(
             "base_revision": controller.base_revision,
             "shared_backbone": shared_path.name if shared_path else None,
             "fixed_experts_reused": fixed_expert_source_dir is not None,
+            "effective_control_revision": (
+                control_state.get("effective_control_revision")
+                if control_state is not None
+                else None
+            ),
         },
     )
     os.replace(temporary, final)
@@ -1385,6 +1416,7 @@ def load_training_checkpoint(
     restore_optimizer: bool = True,
     restore_scheduler: bool = True,
     transformer=None,
+    worker_controls: WorkerControlRuntime | None = None,
 ) -> dict[str, int]:
     """Restore an exact local checkpoint created by this trainer."""
     checkpoint = checkpoint.expanduser().resolve()
@@ -1396,6 +1428,15 @@ def load_training_checkpoint(
         and contract.get("contract_fingerprint") != expected_contract_fingerprint
     ):
         raise ValueError("resume checkpoint training contract does not match")
+    state = torch.load(
+        checkpoint / "trainer_state.pt", map_location="cpu", weights_only=True
+    )
+    if state.get("schema") != RUN_SCHEMA:
+        raise ValueError("trainer state has an unsupported schema")
+    if state.get("contract_fingerprint") != contract.get("contract_fingerprint"):
+        raise ValueError("checkpoint contract and trainer state disagree")
+    if worker_controls is not None:
+        worker_controls.verify_checkpoint_state(state)
     load_appearance_expert(
         controller,
         "photo",
@@ -1414,13 +1455,6 @@ def load_training_checkpoint(
                 "was provided"
             )
         load_shared_trainable_backbone(transformer, shared_path)
-    state = torch.load(
-        checkpoint / "trainer_state.pt", map_location="cpu", weights_only=True
-    )
-    if state.get("schema") != RUN_SCHEMA:
-        raise ValueError("trainer state has an unsupported schema")
-    if state.get("contract_fingerprint") != contract.get("contract_fingerprint"):
-        raise ValueError("checkpoint contract and trainer state disagree")
     if restore_optimizer:
         optimizer.load_state_dict(state["optimizer"])
     if restore_scheduler:
@@ -1964,6 +1998,7 @@ def train(
     worker_components: WorkerTrainingComponents | None = None,
     worker_step_profiler: WorkerStepProfiler | None = None,
     worker_observability: WorkerObservability | None = None,
+    worker_controls: WorkerControlRuntime | None = None,
 ) -> None:
     """Run single-GPU routed expert/shared-backbone optimization."""
     config.validate()
@@ -2062,7 +2097,9 @@ def train(
     if not preflight["passed"]:
         raise RuntimeError(f"training-scope preflight failed: {preflight}")
     optimizer_learning_rate, component_evidence, component_digest = (
-        resolved_worker_component_contract(config, worker_components)
+        resolved_worker_component_contract(
+            config, worker_components, worker_controls
+        )
     )
     optimizer_routing = optimizer_parameter_routing(
         transformer,
@@ -2102,6 +2139,11 @@ def train(
             ),
         )
         weight_decay_schedule = None
+    mutable_controls = (
+        MageFlowMutableControls(config, scheduler, worker_controls)
+        if worker_controls is not None
+        else None
+    )
 
     train_rows = load_domain_manifest(Path(config.train_manifest))
     eval_rows = (
@@ -2164,7 +2206,17 @@ def train(
     if not eval_rows:
         _drop_vae_decoder(model)
     contract_fingerprint = training_contract_fingerprint(
-        config, component_composition_digest=component_digest
+        config,
+        component_composition_digest=component_digest,
+        mutable_control_keys=(
+            tuple(
+                key
+                for key in worker_controls.effective_values
+                if key in {"learning_rate", "eval_every", "caption_dropout"}
+            )
+            if worker_controls is not None
+            else ()
+        ),
     )
 
     global_step, start_epoch, start_batch = 0, 0, 0
@@ -2185,6 +2237,7 @@ def train(
             loaded_checkpoint,
             expected_contract_fingerprint=contract_fingerprint,
             transformer=transformer,
+            worker_controls=worker_controls,
         )
         global_step = restored["global_step"]
         start_epoch = restored["epoch"]
@@ -2208,6 +2261,7 @@ def train(
                 loaded_checkpoint,
                 expected_contract_fingerprint=contract_fingerprint,
                 transformer=transformer,
+                worker_controls=worker_controls,
             )
         else:
             loaded_checkpoint = Path(config.continuation_from).expanduser().resolve()
@@ -2219,6 +2273,7 @@ def train(
                 restore_optimizer=not config.continuation_reset_optimizer,
                 restore_scheduler=not config.continuation_reset_scheduler,
                 transformer=transformer,
+                worker_controls=worker_controls,
             )
             if config.continuation_reset_scheduler:
                 for parameter_group in optimizer.param_groups:
@@ -2381,6 +2436,8 @@ def train(
         },
     )
     if eval_rows and not unified_evaluation_is_complete(output_dir, global_step):
+        if mutable_controls is not None and global_step > 0:
+            worker_controls.evaluation(global_step, mutable_controls.apply)
         run_unified_evaluation(
             pipeline,
             transformer,
@@ -2440,6 +2497,8 @@ def train(
         if worker_step_profiler is not None:
             loaded_batches = worker_step_profiler.track_input(loaded_batches)
         for batch_index, batch_rows, images in loaded_batches:
+            if mutable_controls is not None:
+                worker_controls.microbatch(global_step + 1, mutable_controls.apply)
             accumulation_input_wait += time.perf_counter() - input_wait_started
             encode_start = torch.cuda.Event(enable_timing=True)
             encode_end = torch.cuda.Event(enable_timing=True)
@@ -2481,6 +2540,11 @@ def train(
             input_wait_started = time.perf_counter()
             if accumulation_index < config.gradient_accumulation_steps:
                 continue
+
+            if mutable_controls is not None:
+                worker_controls.optimizer_step(
+                    global_step + 1, mutable_controls.apply
+                )
 
             optimizer_start = torch.cuda.Event(enable_timing=True)
             optimizer_end = torch.cuda.Event(enable_timing=True)
@@ -2595,6 +2659,8 @@ def train(
             input_wait_started = update_window_started
 
             if eval_rows and global_step % config.eval_every == 0:
+                if mutable_controls is not None:
+                    worker_controls.evaluation(global_step, mutable_controls.apply)
                 run_unified_evaluation(
                     pipeline,
                     transformer,
@@ -2607,6 +2673,8 @@ def train(
                     step=global_step,
                 )
             if global_step % config.checkpoint_every == 0:
+                if mutable_controls is not None:
+                    worker_controls.checkpoint(global_step, mutable_controls.apply)
                 save_training_checkpoint(
                     controller,
                     optimizer,
@@ -2619,8 +2687,15 @@ def train(
                     contract_fingerprint=contract_fingerprint,
                     transformer=transformer,
                     fixed_expert_source_dir=fixed_expert_source_dir,
+                    control_state=(
+                        worker_controls.checkpoint_state()
+                        if worker_controls is not None
+                        else None
+                    ),
                 )
             if stop_requested["value"]:
+                if mutable_controls is not None:
+                    worker_controls.checkpoint(global_step, mutable_controls.apply)
                 checkpoint = save_training_checkpoint(
                     controller,
                     optimizer,
@@ -2633,6 +2708,11 @@ def train(
                     contract_fingerprint=contract_fingerprint,
                     transformer=transformer,
                     fixed_expert_source_dir=fixed_expert_source_dir,
+                    control_state=(
+                        worker_controls.checkpoint_state()
+                        if worker_controls is not None
+                        else None
+                    ),
                 )
                 _atomic_json(
                     output_dir / "status.json",
@@ -2654,6 +2734,8 @@ def train(
         start_batch = 0
         last_epoch, next_batch = epoch, 0
 
+    if mutable_controls is not None:
+        worker_controls.checkpoint(global_step, mutable_controls.apply)
     final_checkpoint = save_training_checkpoint(
         controller,
         optimizer,
@@ -2666,6 +2748,11 @@ def train(
         contract_fingerprint=contract_fingerprint,
         transformer=transformer,
         fixed_expert_source_dir=fixed_expert_source_dir,
+        control_state=(
+            worker_controls.checkpoint_state()
+            if worker_controls is not None
+            else None
+        ),
     )
     exports = export_final_weights(controller, transformer, output_dir)
     _atomic_json(

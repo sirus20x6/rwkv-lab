@@ -41,7 +41,11 @@ from rwkv_lab.mage_flow_expert_train import (
     unified_evaluation_is_complete,
 )
 from rwkv_lab.trainvm_adapters import WorkerTrainingComponents
-from rwkv_lab.trainvm_worker import load_resolved_training_composition
+from rwkv_lab.trainvm_worker import (
+    WorkerControlError,
+    WorkerControlRuntime,
+    load_resolved_training_composition,
+)
 
 
 def _worker_components(config: MageFlowExpertTrainConfig) -> WorkerTrainingComponents:
@@ -223,6 +227,23 @@ def test_continuation_path_is_lineage_not_contract_and_modes_are_exclusive(tmp_p
         **{**base.__dict__, "continuation_reset_scheduler": True}
     )
     assert training_contract_fingerprint(base) == training_contract_fingerprint(reset)
+    changed_live_values = MageFlowExpertTrainConfig(
+        **{
+            **base.__dict__,
+            "learning_rate": base.learning_rate * 0.5,
+            "eval_every": base.eval_every * 2,
+            "caption_dropout": 0.25,
+        }
+    )
+    mutable_keys = ("learning_rate", "eval_every", "caption_dropout")
+    assert training_contract_fingerprint(
+        base, mutable_control_keys=mutable_keys
+    ) == training_contract_fingerprint(
+        changed_live_values, mutable_control_keys=mutable_keys
+    )
+    assert training_contract_fingerprint(base) != training_contract_fingerprint(
+        changed_live_values
+    )
     invalid_reset = MageFlowExpertTrainConfig(
         **{
             **base.__dict__,
@@ -621,6 +642,16 @@ def _controller_and_optimizer():
     return model, controller, optimizer, scheduler
 
 
+class _EmptyControlSession:
+    @staticmethod
+    def poll_commands(maximum=None):
+        return ()
+
+    @staticmethod
+    def acknowledge_controls(*_args, **_kwargs):
+        raise AssertionError("checkpoint tests do not acknowledge commands")
+
+
 def test_fixed_experts_and_only_original_final_third_are_trainable():
     model = _Transformer(depth=6)
     controller = inject_appearance_experts(
@@ -734,6 +765,16 @@ def test_worker_composition_drives_expert_optimizer_contract_and_routing(tmp_pat
         [2.0e-5, 1.0e-5]
     )
 
+    config.learning_rate = 4.0e-6
+    controls = WorkerControlRuntime(
+        _EmptyControlSession(), {"learning_rate": 4.0e-6}, 3
+    )
+    learning_rate, _evidence, _digest = resolved_worker_component_contract(
+        config, components, controls
+    )
+    assert learning_rate == pytest.approx(4.0e-6)
+    config.learning_rate = 2.0e-5
+
     mismatched = MageFlowExpertTrainConfig(
         **{**config.__dict__, "weight_decay": 0.02}
     )
@@ -795,6 +836,11 @@ def test_exact_checkpoint_round_trip_and_bf16_final_exports(tmp_path):
     }
     random.seed(17)
     torch.manual_seed(19)
+    controls = WorkerControlRuntime(
+        _EmptyControlSession(),
+        {"learning_rate": 1.0e-3, "eval_every": 500},
+        7,
+    )
     checkpoint = save_training_checkpoint(
         controller,
         optimizer,
@@ -805,6 +851,7 @@ def test_exact_checkpoint_round_trip_and_bf16_final_exports(tmp_path):
         batch_index=7,
         keep_last_n=2,
         contract_fingerprint="contract-a",
+        control_state=controls.checkpoint_state(),
     )
 
     for parameter in controller.parameters():
@@ -825,10 +872,25 @@ def test_exact_checkpoint_round_trip_and_bf16_final_exports(tmp_path):
         scheduler,
         checkpoint,
         expected_contract_fingerprint="contract-a",
+        worker_controls=controls,
     )
     assert restored == {"global_step": 3, "epoch": 2, "batch_index": 7}
     for name, value in controller.wrappers[2].experts["photo"].state_dict().items():
         assert torch.equal(value, expected[name])
+    metadata = json.loads((checkpoint / "checkpoint.json").read_text())
+    assert metadata["effective_control_revision"] == 7
+    stale_controls = WorkerControlRuntime(
+        _EmptyControlSession(), {"learning_rate": 1.0e-3, "eval_every": 250}, 8
+    )
+    with pytest.raises(WorkerControlError, match="checkpoint worker-control"):
+        load_training_checkpoint(
+            controller,
+            optimizer,
+            scheduler,
+            checkpoint,
+            expected_contract_fingerprint="contract-a",
+            worker_controls=stale_controls,
+        )
 
     exports = export_final_experts(controller, tmp_path / "final")
     for path in exports.values():

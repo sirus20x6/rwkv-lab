@@ -124,6 +124,15 @@ def test_control_patch_applies_atomically_at_its_safe_point() -> None:
     assert dict(acknowledgement[2] or {}) == observed[0][1]
     assert acknowledgement[3] == 9
     assert acknowledgement[4] == ()
+    assert runtime.checkpoint_state() == {
+        "effective_control_revision": 4,
+        "effective_controls": observed[0][0],
+    }
+    runtime.verify_checkpoint_state(runtime.checkpoint_state())
+    with pytest.raises(WorkerControlError, match="checkpoint worker-control"):
+        runtime.verify_checkpoint_state(
+            {"effective_control_revision": 2, "effective_controls": observed[0][0]}
+        )
 
 
 def test_pending_commands_remain_revision_ordered_across_safe_points() -> None:

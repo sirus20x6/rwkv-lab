@@ -111,6 +111,19 @@ class WorkerControlRuntime:
     def effective_revision(self) -> int:
         return self._revision
 
+    def checkpoint_state(self) -> dict[str, object]:
+        return {
+            "effective_control_revision": self._revision,
+            "effective_controls": dict(self._effective),
+        }
+
+    def verify_checkpoint_state(self, state: Mapping[str, object]) -> None:
+        if (
+            state.get("effective_control_revision") != self._revision
+            or state.get("effective_controls") != self._effective
+        ):
+            raise WorkerControlError("checkpoint worker-control state mismatch")
+
     def _collect(self) -> None:
         commands = self._session.poll_commands()
         if any(command.kind is not CommandKind.CONTROLS for command in commands):
@@ -272,6 +285,7 @@ __all__ = [
     "AppliedControlPatch",
     "ControlApplier",
     "SafePoint",
+    "Scalar",
     "WorkerControlError",
     "WorkerControlRuntime",
     "controls_from_invocation",
