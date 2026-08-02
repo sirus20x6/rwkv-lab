@@ -67,6 +67,29 @@ class WorkerTrainingComponents:
             component.runtime_envelope(), parameters
         )
 
+    def require_implementation(
+        self,
+        slot: str,
+        *,
+        category: str,
+        allowed: frozenset[str],
+    ) -> str:
+        """Fail before tensor construction when an adapter narrows a slot.
+
+        The native adapter contract applies the same key allowlist at compile
+        time. This worker-side check is deliberate defense in depth for a
+        sealed invocation and protects direct contract tests from reaching an
+        optimizer step with incompatible dense/sparse gradient mechanics.
+        """
+
+        component = self.composition.require(slot, category=category)
+        if not allowed or component.implementation not in allowed:
+            raise AdapterComponentError(
+                f"resolved training slot {slot!r} selects an implementation "
+                "outside the adapter allowlist"
+            )
+        return component.implementation
+
     def activation(
         self,
         *,

@@ -273,7 +273,7 @@ def main() -> int:
     adapters = tuple(profile["adapter"] for profile in requirements["profiles"])
     shared_distributions = tuple(requirements["shared_root_distributions"])
     if (
-        len(adapters) != 4
+        len(adapters) != 12
         or len(set(adapters)) != len(adapters)
         or shared_distributions != tuple(sorted(set(shared_distributions)))
         or any(
@@ -306,7 +306,7 @@ def main() -> int:
             for profile in requirements["profiles"]
         },
     )
-    if len(grouped) != 3 or not any(
+    if len(grouped) != len(adapters) - 1 or not any(
         members == list(adapters[:2]) for members in grouped.values()
     ):
         raise SystemExit("per-adapter runtime grouping drifted from native requirements")
@@ -450,7 +450,7 @@ def main() -> int:
         profiles = deployment["host_launch_registry"]["profiles"]
         if deployment["schema"] != "trainvm.rwkv-lab-worker-deployment/v3":
             raise SystemExit("deployment inspector emitted the wrong schema")
-        if len(profiles) != 4 or any(
+        if len(profiles) != 12 or any(
             profile["code_argument_index"] != 1
             or profile["public_arguments"] != ["-I", "rwkv-lab-worker.pyz"]
             or profile["code_fingerprint"] != digest(first)

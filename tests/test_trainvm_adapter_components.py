@@ -152,6 +152,17 @@ def test_worker_component_bridge_builds_optimizer_and_schedule() -> None:
     assert curriculum.for_step(0, 100) == (128, 64)
     assert curriculum.for_step(50, 100) == (512, 16)
     assert runtime.evidence()["optimizer"]["category"] == "optimizer"
+    assert runtime.require_implementation(
+        "optimizer",
+        category="optimizer",
+        allowed=frozenset({"rwkv_lab.optimizer.torch_adamw_no_decay.v2"}),
+    ) == "rwkv_lab.optimizer.torch_adamw_no_decay.v2"
+    with pytest.raises(AdapterComponentError, match="outside the adapter allowlist"):
+        runtime.require_implementation(
+            "optimizer",
+            category="optimizer",
+            allowed=frozenset({"rwkv_lab.optimizer.torch_sparse_adam.v1"}),
+        )
 
 
 def test_worker_component_bridge_rejects_family_and_slot_category_confusion() -> None:
