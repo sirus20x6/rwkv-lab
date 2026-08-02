@@ -343,6 +343,8 @@ trainvm/build/trainvm validate-catalog \
   "$PWD/docs/experiment-vm/compatibility-workflows.v1.json" "$PWD"
 trainvm/build/trainvm inspect-training-components \
   "$PWD/docs/experiment-vm/examples/training-components.v1.json"
+trainvm/build/trainvm inspect-rwkv-lab-worker \
+  sha256:<worker-code-artifact-sha256>
 trainvm/build/trainvm inspect-registry "$PWD/experiments.db" \
   --task recall:16 --metric acc --baseline baseline --limit 20
 trainvm/build/trainvm serve --journal /tmp/trainvm.db --socket /tmp/trainvm.sock \
@@ -359,6 +361,15 @@ The empty training-component registry keeps composition disabled. The checked-in
 `training-components.v1.json` contains real cross-family runtime-backed descriptors for inspection
 and adapter qualification; a production daemon should enable it only with worker profiles that
 advertise the catalog's exact capabilities.
+
+`inspect-rwkv-lab-worker` emits the directly loadable `trainvm.adapters/v2`
+document for the real MageFlow appearance/terminal, Qwen AO3, and scratch-RWKV
+handlers, plus the canonical `provided_capabilities` list to place in each
+matching `trainvm.host-launches/v2` profile. The caller supplies the digest of
+the already-built immutable worker code artifact; invalid digests fail closed.
+Lifecycle grades are intentionally honest: the three cadence-checkpointed
+trainers are compatibility-resumable, while scratch RWKV exposes only its
+terminal checkpoint and cannot claim a mid-run or resource-releasing pause.
 
 The reference plan currently has the golden identity
 `d9874d50706cb8b13f3803258bde08f2175bfb4869eae860aa47994d151e901e`. This deliberate canonical

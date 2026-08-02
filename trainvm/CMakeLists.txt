@@ -107,6 +107,7 @@ add_library(trainvm_core
   src/linux_nvidia_inventory.cpp
   src/reconciler.cpp
   src/resource_request_builder.cpp
+  src/rwkv_lab_worker_contract.cpp
   src/training_component_registry.cpp
   src/worker_bootstrap.cpp
 )
@@ -172,6 +173,7 @@ target_link_libraries(trainvm-hostd PRIVATE trainvm_core)
 
 enable_testing()
 find_program(TRAINVM_GO_EXECUTABLE go)
+find_program(TRAINVM_PYTHON_EXECUTABLE python3)
 add_test(NAME trainvm_hostd_validate_configuration
   COMMAND trainvm-hostd --validate-config
     "${CMAKE_CURRENT_SOURCE_DIR}/../docs/experiment-vm/examples/hostd-daemon.v1.json"
@@ -226,6 +228,28 @@ target_link_libraries(training_component_registry_tests PRIVATE trainvm_core)
 add_test(NAME training_component_registry_tests
   COMMAND training_component_registry_tests
 )
+add_executable(rwkv_lab_worker_contract_tests
+  tests/rwkv_lab_worker_contract_tests.cpp
+)
+target_compile_options(rwkv_lab_worker_contract_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_compile_definitions(rwkv_lab_worker_contract_tests PRIVATE
+  TRAINVM_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/.."
+)
+target_link_libraries(rwkv_lab_worker_contract_tests PRIVATE trainvm_core)
+add_test(NAME rwkv_lab_worker_contract_tests
+  COMMAND rwkv_lab_worker_contract_tests
+)
+if(TRAINVM_PYTHON_EXECUTABLE)
+  add_test(NAME rwkv_lab_worker_contract_python_parity
+    COMMAND ${CMAKE_COMMAND} -E env
+      PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../src
+      ${TRAINVM_PYTHON_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_rwkv_lab_worker_contract.py
+      $<TARGET_FILE:trainvm>
+  )
+endif()
 add_executable(authority_time_tests tests/authority_time_tests.cpp)
 target_compile_options(authority_time_tests PRIVATE
   -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror

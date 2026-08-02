@@ -4,6 +4,7 @@
 #include "trainvm/fsm.hpp"
 #include "trainvm/journal.hpp"
 #include "trainvm/reflection_json.hpp"
+#include "trainvm/rwkv_lab_worker_contract.hpp"
 #include "trainvm/service.hpp"
 
 #include <charconv>
@@ -31,6 +32,7 @@ void usage() {
       << "  trainvm validate-catalog <compatibility.json> <repository-root>\n"
       << "  trainvm inspect-training-components <training-components.json>\n"
       << "  trainvm inspect-hostd-client <hostd-client.json>\n"
+      << "  trainvm inspect-rwkv-lab-worker <sha256-code-fingerprint>\n"
       << "  trainvm inspect-registry <experiments.db> [--task <task>] "
          "[--metric <metric>] [--baseline <config>] [--limit <count>]\n"
       << "  trainvm serve --journal <journal.db> --socket <trainvm.sock> "
@@ -309,6 +311,20 @@ int serve_command(int argc, char** argv) {
                         std::move(hostd));
 }
 
+int inspect_rwkv_lab_worker_command(std::string code_fingerprint) {
+  const trainvm::RwkvLabWorkerContract contract =
+      trainvm::rwkv_lab_worker_contract(std::move(code_fingerprint));
+  std::cout << nlohmann::json{
+                   {"adapter_registry",
+                    trainvm::encode_json(contract.adapter_registry)},
+                   {"provided_capabilities",
+                    contract.provided_capabilities},
+               }
+                   .dump(2)
+            << '\n';
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -332,6 +348,10 @@ int main(int argc, char** argv) {
     if (argc == 3 &&
         std::string_view(argv[1]) == "inspect-hostd-client") {
       return inspect_hostd_client_command(argv[2]);
+    }
+    if (argc == 3 &&
+        std::string_view(argv[1]) == "inspect-rwkv-lab-worker") {
+      return inspect_rwkv_lab_worker_command(argv[2]);
     }
     if (argc >= 3 && std::string_view(argv[1]) == "inspect-registry") {
       return inspect_registry_command(argc, argv);
