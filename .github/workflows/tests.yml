@@ -110,6 +110,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -e '.[vision,test,trainvm-worker]'
+          # Marker selection still imports every test module during collection,
+          # so this job needs the same module-scope optional dependencies as the
+          # CPU job even though it runs only the fla-marked tests.
+          pip install zstandard duckdb opencv-python-headless
           # The real dependency this job exists to exercise. It is a CUDA-stack
           # package, but importing it and driving its Cache type works on CPU.
           pip install flash-linear-attention
