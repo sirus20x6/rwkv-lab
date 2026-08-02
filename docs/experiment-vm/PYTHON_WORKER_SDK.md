@@ -119,7 +119,10 @@ component and preserves schedule phase plus appearance/terminal expert, backbone
 ratios; checkpoints bind and verify the
 effective revision and values, while the static training-contract identity excludes only the named
 mutable fields. Cached conditioning rejects a zero-to-positive caption-dropout transition when no
-null embedding was built. Qwen controls and lifecycle pause/checkpoint/cancel remain
+null embedding was built. Qwen retains its frozen configuration object and uses a separate mutable
+overlay for learning rate and evaluation cadence; startup LR overrides proportionally preserve the
+PowerCool minimum ratio, and live rebasing preserves the current schedule phase. Its checkpoints
+carry the same verified effective-control state. Lifecycle pause/checkpoint/cancel remains separate
 adapter/checkpoint-state work.
 
 ## Fixed adapter runner

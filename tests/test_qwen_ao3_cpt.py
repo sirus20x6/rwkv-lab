@@ -1,5 +1,5 @@
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -115,6 +115,17 @@ def test_log_cadence_is_not_part_of_resume_contract(tmp_path):
     first = config(tmp_path, log_every=10)
     second = config(tmp_path, log_every=1)
     assert _resume_contract(first) == _resume_contract(second)
+    live = replace(
+        first,
+        learning_rate=first.learning_rate * 0.2,
+        min_learning_rate=first.min_learning_rate * 0.2,
+        eval_every=25,
+    )
+    mutable = ("learning_rate", "eval_every")
+    assert _resume_contract(
+        first, mutable_control_keys=mutable
+    ) == _resume_contract(live, mutable_control_keys=mutable)
+    assert _resume_contract(first) != _resume_contract(live)
 
 
 def test_status_heartbeat_is_atomic_and_parseable(tmp_path):
@@ -191,6 +202,20 @@ def test_qwen_worker_components_are_exact_and_enter_checkpoint_identity(tmp_path
         "gradient_clipping",
     }
     assert composition_digest == components.composition.composition_digest
+
+    live = replace(
+        value,
+        learning_rate=value.learning_rate * 0.2,
+        min_learning_rate=value.min_learning_rate * 0.2,
+    )
+    controls = SimpleNamespace(
+        effective_values={"learning_rate": live.learning_rate}
+    )
+    live_evidence, live_digest = resolved_worker_component_contract(
+        live, total_steps, components, controls
+    )
+    assert live_evidence == evidence
+    assert live_digest == composition_digest
 
     configurations["learning_rate"] = {
         **configurations["learning_rate"],

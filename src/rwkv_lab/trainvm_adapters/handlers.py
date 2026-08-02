@@ -23,6 +23,7 @@ from .checkpoints import (
 from .components import WorkerTrainingComponents
 from .io import WorkspacePathAuthority, read_inline_config
 from .mageflow_controls import lower_initial_mageflow_controls
+from .qwen_controls import lower_initial_qwen_controls
 from .rwkv_scratch import RWKVScratchTrainConfig
 
 
@@ -257,6 +258,8 @@ def _qwen_ao3(
     from rwkv_lab.qwen_ao3_cpt import QwenAO3Config, train
 
     config = QwenAO3Config(**read_inline_config(invocation.inputs))
+    if controls is not None:
+        config = lower_initial_qwen_controls(config, controls)
     paths = WorkspacePathAuthority.from_workspace(invocation.workspace)
     config = replace(
         config,
@@ -284,6 +287,7 @@ def _qwen_ao3(
         worker_components=components,
         worker_step_profiler=step_profiler or NullStepProfiler(),
         worker_observability=observability,
+        worker_controls=controls,
     )
     step = result.get("step")
     checkpoint_requests: tuple[CheckpointPublicationRequest, ...] = ()
@@ -299,6 +303,7 @@ def _qwen_ao3(
                 step,
                 state_components=(
                     "component_composition",
+                    "control_state",
                     "data_cursor",
                     "expert_routing",
                     "model",

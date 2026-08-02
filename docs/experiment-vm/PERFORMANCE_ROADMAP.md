@@ -248,8 +248,9 @@ handling now has a shared ordered/atomic worker runtime, and scratch RWKV consum
 optimizer, evaluation, and checkpoint boundaries while persisting the effective control snapshot.
 Both MageFlow routes also consume live learning-rate, eval-cadence, and caption-dropout controls,
 rebase group rates without resetting schedule phase, and verify their control snapshots before
-mutating resume state. Qwen control application, lifecycle pause/checkpoint/cancel, and stronger
-content binding for exact resume remain separate lifecycle work.
+mutating resume state. Qwen's independent immutable-config overlay now does the same for learning
+rate and eval cadence while preserving its PowerCool ratio. Lifecycle pause/checkpoint/cancel and
+stronger content binding for exact resume remain separate lifecycle work.
 The dashboard verifies the snapshot envelope and renders its optimizer step, resume grade, state
 inventory, file/byte counts, tree digest, and parent lineage in the generic artifact stream.
 

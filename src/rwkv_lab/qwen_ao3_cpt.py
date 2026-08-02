@@ -30,10 +30,15 @@ from rwkv_lab.training_components import (
     build_registered_optimizer,
     powercool_multiplier,
 )
+from rwkv_lab.trainvm_adapters.qwen_controls import QwenMutableControls
 
 if TYPE_CHECKING:
     from rwkv_lab.trainvm_adapters import WorkerTrainingComponents
-    from rwkv_lab.trainvm_worker import WorkerObservability, WorkerStepProfiler
+    from rwkv_lab.trainvm_worker import (
+        WorkerControlRuntime,
+        WorkerObservability,
+        WorkerStepProfiler,
+    )
 
 SCHEMA = "rwkv-lab.qwen-ao3-cpt.v1"
 ROUTER_TARGET = "mlp.gate.weight"
@@ -738,13 +743,26 @@ def _optimizer(
     )
 
 
-def _resume_contract(config: QwenAO3Config | dict[str, Any]) -> dict[str, Any]:
+def _resume_contract(
+    config: QwenAO3Config | dict[str, Any],
+    *,
+    mutable_control_keys: tuple[str, ...] = (),
+) -> dict[str, Any]:
     value = asdict(config) if isinstance(config, QwenAO3Config) else dict(config)
     value.pop("resume", None)
     value.pop("auto_resume", None)
+    value.pop("mutable_control_keys", None)
     # Telemetry cadence does not affect model or optimizer state and may need
     # adjustment after real step latency is known.
     value.pop("log_every", None)
+    mutable = tuple(sorted(set(mutable_control_keys)))
+    if set(mutable) - {"learning_rate", "eval_every"}:
+        raise ValueError("Qwen resume contract has an unknown mutable control")
+    for key in mutable:
+        value.pop(key, None)
+    if "learning_rate" in mutable:
+        value.pop("min_learning_rate", None)
+    value["mutable_control_keys"] = mutable
     return value
 
 
@@ -752,6 +770,7 @@ def resolved_worker_component_contract(
     config: QwenAO3Config,
     total_steps: int,
     worker_components: WorkerTrainingComponents | None,
+    worker_controls: WorkerControlRuntime | None = None,
 ) -> tuple[dict[str, dict[str, str]] | None, str | None]:
     if worker_components is None:
         return None, None
@@ -769,6 +788,13 @@ def resolved_worker_component_contract(
             "error_if_nonfinite": True,
         },
     }
+    if (
+        worker_controls is not None
+        and "learning_rate" in worker_controls.effective_values
+    ):
+        expected["optimizer"]["learning_rate"] = worker_components.configuration(
+            "optimizer", category="optimizer"
+        )["learning_rate"]
     categories = {
         "optimizer": "optimizer",
         "weight_decay": "weight_decay_schedule",
@@ -827,6 +853,7 @@ def _save_checkpoint(
     run_dir: Path,
     metrics: dict[str, Any],
     component_composition_digest: str | None = None,
+    worker_controls: WorkerControlRuntime | None = None,
 ) -> Path:
     final = run_dir / f"step-{step:06d}"
     temporary = run_dir / f".step-{step:06d}.tmp-{time.time_ns()}"
@@ -840,11 +867,16 @@ def _save_checkpoint(
         save_embedding_layers=False,
     )
     _save_expert_adapters(model, temporary / "expert-adapter.safetensors")
+    mutable_control_keys = (
+        tuple(worker_controls.effective_values) if worker_controls is not None else ()
+    )
     state = {
         "schema": SCHEMA,
         "step": step,
         "cursor": cursor,
-        "config": _resume_contract(config),
+        "config": _resume_contract(
+            config, mutable_control_keys=mutable_control_keys
+        ),
         "optimizer": optimizer.state_dict(),
         "torch_rng": torch.get_rng_state(),
         "cuda_rng": torch.cuda.get_rng_state(config.cuda_index),
@@ -855,10 +887,22 @@ def _save_checkpoint(
         state["scheduler"] = scheduler.state_dict()
     if component_composition_digest is not None:
         state["component_composition_digest"] = component_composition_digest
+    if worker_controls is not None:
+        state.update(worker_controls.checkpoint_state())
     torch.save(state, temporary / "trainer-state.pt")
     (temporary / "state.json").write_text(
         json.dumps(
-            {"schema": SCHEMA, "step": step, "cursor": cursor, "metrics": metrics},
+            {
+                "schema": SCHEMA,
+                "step": step,
+                "cursor": cursor,
+                "metrics": metrics,
+                "effective_control_revision": (
+                    worker_controls.effective_revision
+                    if worker_controls is not None
+                    else None
+                ),
+            },
             indent=2,
             sort_keys=True,
         )
@@ -879,6 +923,7 @@ def _restore_state(
     config: QwenAO3Config,
     *,
     component_composition_digest: str | None = None,
+    worker_controls: WorkerControlRuntime | None = None,
 ) -> tuple[int, int]:
     if not config.resume:
         return 0, 0
@@ -889,13 +934,25 @@ def _restore_state(
     )
     if state.get("schema") != SCHEMA:
         raise ValueError("resume checkpoint schema mismatch")
-    if _resume_contract(state.get("config", {})) != _resume_contract(config):
+    mutable_control_keys = (
+        tuple(worker_controls.effective_values) if worker_controls is not None else ()
+    )
+    if _resume_contract(
+        state.get("config", {}), mutable_control_keys=mutable_control_keys
+    ) != _resume_contract(config, mutable_control_keys=mutable_control_keys):
         raise ValueError("resume checkpoint training contract mismatch")
     if component_composition_digest is not None:
         if state.get("component_composition_digest") != component_composition_digest:
             raise ValueError("resume training-component composition mismatch")
         if scheduler is None or "scheduler" not in state:
             raise ValueError("resume checkpoint has no exact LR-schedule state")
+    if worker_controls is not None:
+        metadata = json.loads((Path(config.resume) / "state.json").read_text())
+        if metadata.get("effective_control_revision") != state.get(
+            "effective_control_revision"
+        ):
+            raise ValueError("checkpoint control metadata and state disagree")
+        worker_controls.verify_checkpoint_state(state)
     optimizer.load_state_dict(state["optimizer"])
     if scheduler is not None:
         scheduler.load_state_dict(state["scheduler"])
@@ -1001,6 +1058,7 @@ def train(
     worker_components: WorkerTrainingComponents | None = None,
     worker_step_profiler: WorkerStepProfiler | None = None,
     worker_observability: WorkerObservability | None = None,
+    worker_controls: WorkerControlRuntime | None = None,
 ) -> dict[str, Any]:
     run_dir = Path(config.run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -1011,6 +1069,9 @@ def train(
         return result
     config = _resolve_auto_resume(config, run_dir)
     config.validate()
+    mutable_control_keys = (
+        tuple(worker_controls.effective_values) if worker_controls is not None else ()
+    )
     train_rows = PackedRows(config.train_pack_dir, config.context_length)
     eval_rows = PackedRows(config.eval_pack_dir, config.context_length)
     receipt_path = run_dir / "run-receipt.json"
@@ -1026,7 +1087,10 @@ def train(
             raise ValueError("resume train pack fingerprint mismatch")
         if original_receipt.get("eval_pack_manifest_sha256") != eval_rows.manifest_sha256:
             raise ValueError("resume eval pack fingerprint mismatch")
-        if _resume_contract(original_receipt.get("config", {})) != _resume_contract(config):
+        if _resume_contract(
+            original_receipt.get("config", {}),
+            mutable_control_keys=mutable_control_keys,
+        ) != _resume_contract(config, mutable_control_keys=mutable_control_keys):
             raise ValueError("resume run configuration mismatch")
     available_steps = math.ceil(
         train_rows.rows / config.gradient_accumulation_steps
@@ -1036,7 +1100,7 @@ def train(
         raise ValueError("packed train corpus has no complete optimizer step")
     learning_rate_schedule = _learning_rate_schedule(config, total_steps)
     component_evidence, component_digest = resolved_worker_component_contract(
-        config, total_steps, worker_components
+        config, total_steps, worker_components, worker_controls
     )
     random.seed(config.seed)
     np.random.seed(config.seed)
@@ -1058,11 +1122,27 @@ def train(
         if worker_components is not None
         else None
     )
+    mutable_controls = None
+    if worker_controls is not None:
+        if scheduler is None or worker_components is None:
+            raise ValueError("Qwen live controls require a resolved LR schedule")
+        mutable_controls = QwenMutableControls(
+            scheduler,
+            worker_controls,
+            learning_rate=config.learning_rate,
+            eval_every=config.eval_every,
+            constructed_base_learning_rate=float(
+                worker_components.configuration(
+                    "optimizer", category="optimizer"
+                )["learning_rate"]
+            ),
+        )
     step, cursor = _restore_state(
         optimizer,
         scheduler,
         config,
         component_composition_digest=component_digest,
+        worker_controls=worker_controls,
     )
     order = np.random.default_rng(config.seed).permutation(train_rows.rows)
     expected_cursor = min(
@@ -1074,6 +1154,8 @@ def train(
         smoke = _smoke_backward(model, train_rows, config)
     else:
         smoke = {"skipped": "resume"}
+    if mutable_controls is not None and step > 0:
+        worker_controls.evaluation(step, mutable_controls.apply)
     initial_eval = evaluate(model, eval_rows, config)
     receipt = {
         "schema": SCHEMA,
@@ -1151,6 +1233,8 @@ def train(
         if micro_batches < 1:
             raise RuntimeError("optimizer step has no packed rows remaining")
         for _ in range(micro_batches):
+            if mutable_controls is not None:
+                worker_controls.microbatch(step + 1, mutable_controls.apply)
             row = int(order[cursor])
             cursor += 1
             if worker_step_profiler is None:
@@ -1177,6 +1261,8 @@ def train(
                 cursor=cursor,
                 total_steps=total_steps,
             )
+        if mutable_controls is not None:
+            worker_controls.optimizer_step(step + 1, mutable_controls.apply)
         trainable_parameters = [
             parameter for parameter in model.parameters() if parameter.requires_grad
         ]
@@ -1251,7 +1337,14 @@ def train(
             print(json.dumps(last_metrics), flush=True)
             started = time.perf_counter()
             tokens_since_log = 0
-        if config.eval_every and step % config.eval_every == 0:
+        eval_every = (
+            mutable_controls.eval_every
+            if mutable_controls is not None
+            else config.eval_every
+        )
+        if eval_every and step % eval_every == 0:
+            if mutable_controls is not None:
+                worker_controls.evaluation(step, mutable_controls.apply)
             metrics = evaluate(model, eval_rows, config)
             log.write(
                 json.dumps(
@@ -1266,6 +1359,8 @@ def train(
             )
             log.flush()
         if should_save:
+            if mutable_controls is not None:
+                worker_controls.checkpoint(step, mutable_controls.apply)
             latest_checkpoint = _save_checkpoint(
                 model,
                 optimizer,
@@ -1276,11 +1371,14 @@ def train(
                 run_dir,
                 last_metrics,
                 component_composition_digest=component_digest,
+                worker_controls=worker_controls,
             )
             latest_checkpoint_step = step
         if interrupted["value"]:
             checkpoint = latest_checkpoint
             if checkpoint is None or latest_checkpoint_step != step:
+                if mutable_controls is not None:
+                    worker_controls.checkpoint(step, mutable_controls.apply)
                 checkpoint = _save_checkpoint(
                     model,
                     optimizer,
@@ -1291,6 +1389,7 @@ def train(
                     run_dir,
                     last_metrics,
                     component_composition_digest=component_digest,
+                    worker_controls=worker_controls,
                 )
             log.close()
             _write_status(
@@ -1305,6 +1404,8 @@ def train(
     final_eval = evaluate(model, eval_rows, config)
     checkpoint = latest_checkpoint
     if checkpoint is None or latest_checkpoint_step != step:
+        if mutable_controls is not None:
+            worker_controls.checkpoint(step, mutable_controls.apply)
         checkpoint = _save_checkpoint(
             model,
             optimizer,
@@ -1315,6 +1416,7 @@ def train(
             run_dir,
             final_eval,
             component_composition_digest=component_digest,
+            worker_controls=worker_controls,
         )
     log.write(
         json.dumps(
