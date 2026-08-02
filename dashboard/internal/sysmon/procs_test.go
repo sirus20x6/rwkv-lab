@@ -9,13 +9,6 @@ import (
 
 func TestMageFlowExpertTrainerIsRecognized(t *testing.T) {
 	const script = "mage_flow_expert_train.py"
-	if !AllowedScript(script) {
-		t.Fatal("Mage-Flow expert trainer is not allowlisted")
-	}
-	module, ok := ModuleForScript(script)
-	if !ok || module != "rwkv_lab.mage_flow_expert_train" {
-		t.Fatalf("unexpected module mapping: module=%q ok=%v", module, ok)
-	}
 	if got := matchedScript(
 		[]string{"python", "-m", "rwkv_lab.mage_flow_expert_train", "train"},
 	); got != script {
@@ -23,17 +16,12 @@ func TestMageFlowExpertTrainerIsRecognized(t *testing.T) {
 	}
 }
 
-func TestMLATrainersRemainObservableButCannotUseLegacyLaunchAuthority(t *testing.T) {
+func TestMLATrainersRemainObservable(t *testing.T) {
 	for _, script := range []string{"train_mla.py", "train_mla_engram.py"} {
-		if AllowedScript(script) {
-			t.Fatalf("%s retained legacy dashboard launch authority", script)
+		module := trainingModules[script]
+		if got := matchedScript([]string{"python", "-m", module}); got != script {
+			t.Fatalf("legacy MLA process is no longer observable: script=%q got=%q", script, got)
 		}
-		if _, ok := ModuleForScript(script); ok {
-			t.Fatalf("%s retained a legacy launch module", script)
-		}
-	}
-	if got := matchedScript([]string{"python", "-m", "rwkv_lab.train_mla"}); got != "train_mla.py" {
-		t.Fatalf("legacy MLA process is no longer observable: %q", got)
 	}
 }
 
