@@ -147,6 +147,8 @@ def _terminal_expert(
     from rwkv_lab.mage_flow_terminal_train import TerminalExpertTrainConfig, train
 
     config = TerminalExpertTrainConfig(**read_inline_config(invocation.inputs))
+    if controls is not None:
+        lower_initial_mageflow_controls(config, controls)
     paths = WorkspacePathAuthority.from_workspace(invocation.workspace)
     expert_checkpoints = (
         {
@@ -216,6 +218,7 @@ def _terminal_expert(
         worker_components=components,
         worker_step_profiler=step_profiler or NullStepProfiler(),
         worker_observability=observability,
+        worker_controls=controls,
     )
     request, step, status = completed_checkpoint_request(
         invocation,
@@ -224,6 +227,7 @@ def _terminal_expert(
         step_fields=("step",),
         state_components=(
             "component_composition",
+            "control_state",
             "data_cursor",
             "expert_routing",
             "lr_schedule",

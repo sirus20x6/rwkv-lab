@@ -1436,6 +1436,10 @@ def load_training_checkpoint(
     if state.get("contract_fingerprint") != contract.get("contract_fingerprint"):
         raise ValueError("checkpoint contract and trainer state disagree")
     if worker_controls is not None:
+        if contract.get("effective_control_revision") != state.get(
+            "effective_control_revision"
+        ):
+            raise ValueError("checkpoint control metadata and state disagree")
         worker_controls.verify_checkpoint_state(state)
     load_appearance_expert(
         controller,

@@ -112,14 +112,15 @@ mutating effective state, and reports pause/restart controls as replacement-work
 runner constructs this service from the sealed invocation rather than giving a trainer the session.
 Scratch RWKV consumes all four safe-point hooks, persists the effective control snapshot in its
 terminal checkpoint, verifies it on resume, and honestly rejects live mutation because its v1
-catalog is restart-only. The MageFlow appearance adapter additionally lowers its authority-selected
-initial controls before construction and atomically applies learning rate, evaluation cadence, and
+catalog is restart-only. Both MageFlow training adapters additionally lower their authority-selected
+initial controls before construction and atomically apply learning rate, evaluation cadence, and
 caption dropout at their declared boundaries. Learning-rate rebasing is owned by the schedule
-component and preserves schedule phase plus expert/backbone ratios; checkpoints bind and verify the
+component and preserves schedule phase plus appearance/terminal expert, backbone, and REPA group
+ratios; checkpoints bind and verify the
 effective revision and values, while the static training-contract identity excludes only the named
 mutable fields. Cached conditioning rejects a zero-to-positive caption-dropout transition when no
-null embedding was built. MageFlow terminal/Qwen controls and lifecycle pause/checkpoint/cancel
-remain adapter/checkpoint-state work.
+null embedding was built. Qwen controls and lifecycle pause/checkpoint/cancel remain
+adapter/checkpoint-state work.
 
 ## Fixed adapter runner
 

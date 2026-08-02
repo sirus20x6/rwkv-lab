@@ -185,6 +185,31 @@ def test_terminal_worker_components_are_exact_and_enter_resume_identity(tmp_path
         config, component_composition_digest=composition_digest
     )
 
+    config.learning_rate *= 0.25
+    controls = SimpleNamespace(
+        effective_values={"learning_rate": config.learning_rate}
+    )
+    live_learning_rate, _evidence, _digest = resolved_worker_component_contract(
+        config, components, controls
+    )
+    assert live_learning_rate == pytest.approx(config.learning_rate)
+    changed_controls = TerminalExpertTrainConfig(
+        **{
+            **config.__dict__,
+            "learning_rate": config.learning_rate * 0.5,
+            "eval_every": config.eval_every * 2,
+            "caption_dropout": 0.25,
+        }
+    )
+    mutable = ("learning_rate", "eval_every", "caption_dropout")
+    assert _contract_fingerprint(
+        config, mutable_control_keys=mutable
+    ) == _contract_fingerprint(
+        changed_controls, mutable_control_keys=mutable
+    )
+    assert _contract_fingerprint(config) != _contract_fingerprint(changed_controls)
+    config.learning_rate = configurations["optimizer"]["learning_rate"]
+
     configurations["parameter_router"] = {
         **configurations["parameter_router"],
         "shared_backbone_multiplier": 1.0,

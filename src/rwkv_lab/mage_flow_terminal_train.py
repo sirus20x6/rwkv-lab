@@ -21,7 +21,7 @@ import shlex
 import shutil
 import signal
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -103,10 +103,15 @@ from rwkv_lab.training_components import (
     build_registered_optimizer,
     build_registered_schedule,
 )
+from rwkv_lab.trainvm_adapters.mageflow_controls import MageFlowMutableControls
 
 if TYPE_CHECKING:
     from rwkv_lab.trainvm_adapters import WorkerTrainingComponents
-    from rwkv_lab.trainvm_worker import WorkerObservability, WorkerStepProfiler
+    from rwkv_lab.trainvm_worker import (
+        WorkerControlRuntime,
+        WorkerObservability,
+        WorkerStepProfiler,
+    )
 
 RUN_SCHEMA = "rwkv-lab.mage-flow-terminal-train.v3"
 CACHE_SPAN_SCHEMA = "rwkv-lab.mage-flow-cache-span.v1"
@@ -531,13 +536,25 @@ def _contract_fingerprint(
     config: TerminalExpertTrainConfig,
     *,
     component_composition_digest: str | None = None,
+    mutable_control_keys: Sequence[str] = (),
 ) -> str:
     values = asdict(config)
     values.pop("output_dir", None)
     values.pop("resume_from", None)
+    mutable = tuple(sorted(set(mutable_control_keys)))
+    unknown_mutable = set(mutable) - {
+        "learning_rate",
+        "eval_every",
+        "caption_dropout",
+    }
+    if unknown_mutable:
+        raise ValueError("training contract has an unknown mutable control")
+    for key in mutable:
+        values.pop(key, None)
     payload = {
         "schema": RUN_SCHEMA,
         "config": values,
+        "mutable_control_keys": mutable,
         "train_manifest_sha256": _sha256(Path(config.train_manifest)),
         "eval_manifest_sha256": (
             _sha256(Path(config.eval_manifest)) if config.eval_manifest else None
@@ -558,12 +575,20 @@ def _contract_fingerprint(
 def resolved_worker_component_contract(
     config: TerminalExpertTrainConfig,
     worker_components: WorkerTrainingComponents | None,
+    worker_controls: WorkerControlRuntime | None = None,
 ) -> tuple[float, Mapping[str, Mapping[str, str]] | None, str | None]:
     if worker_components is None:
         return config.learning_rate, None, None
     expected = {
         "optimizer": {
-            "learning_rate": config.learning_rate,
+            "learning_rate": (
+                worker_components.configuration(
+                    "optimizer", category="optimizer"
+                )["learning_rate"]
+                if worker_controls is not None
+                and "learning_rate" in worker_controls.effective_values
+                else config.learning_rate
+            ),
             "beta1": config.adam_beta1,
             "beta2": config.adam_beta2,
             "epsilon": config.adam_epsilon,
@@ -609,7 +634,7 @@ def resolved_worker_component_contract(
                 "terminal MageFlow configuration"
             )
     return (
-        float(expected["optimizer"]["learning_rate"]),
+        float(config.learning_rate),
         worker_components.evidence(),
         worker_components.composition.composition_digest,
     )
@@ -1782,6 +1807,7 @@ def _save_checkpoint(
     switcher: ResidentExpertSwitcher | None = None,
     domain_positions: Mapping[str, Mapping[str, int]] | None = None,
     window_index: int | None = None,
+    control_state: Mapping[str, object] | None = None,
 ) -> Path:
     final = output_dir / f"checkpoint-{step:08d}"
     if final.is_dir():
@@ -1814,35 +1840,32 @@ def _save_checkpoint(
         controller,
         temporary / "mageflow-shared-final-third.safetensors",
     )
-    torch.save(
-        {
-            "schema": RUN_SCHEMA,
-            "step": step,
-            "epoch": epoch,
-            "batch_index": batch_index,
-            "fingerprint": fingerprint,
-            "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict(),
-            "python_rng": random.getstate(),
-            "torch_rng": torch.get_rng_state(),
-            "cuda_rng": torch.cuda.get_rng_state_all(),
-            "resident_expert_optimizer_bank": (
-                switcher.optimizer_bank.state_dict()
-                if switcher is not None
-                else None
-            ),
-            "domain_positions": (
-                {
-                    key: dict(value)
-                    for key, value in domain_positions.items()
-                }
-                if domain_positions is not None
-                else None
-            ),
-            "window_index": window_index,
-        },
-        temporary / "trainer_state.pt",
-    )
+    trainer_state = {
+        "schema": RUN_SCHEMA,
+        "step": step,
+        "epoch": epoch,
+        "batch_index": batch_index,
+        "fingerprint": fingerprint,
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict(),
+        "python_rng": random.getstate(),
+        "torch_rng": torch.get_rng_state(),
+        "cuda_rng": torch.cuda.get_rng_state_all(),
+        "resident_expert_optimizer_bank": (
+            switcher.optimizer_bank.state_dict()
+            if switcher is not None
+            else None
+        ),
+        "domain_positions": (
+            {key: dict(value) for key, value in domain_positions.items()}
+            if domain_positions is not None
+            else None
+        ),
+        "window_index": window_index,
+    }
+    if control_state is not None:
+        trainer_state.update(control_state)
+    torch.save(trainer_state, temporary / "trainer_state.pt")
     _atomic_json(
         temporary / "checkpoint.json",
         {
@@ -1863,6 +1886,11 @@ def _save_checkpoint(
                 else None
             ),
             "window_index": window_index,
+            "effective_control_revision": (
+                control_state.get("effective_control_revision")
+                if control_state is not None
+                else None
+            ),
             "created_at": _utc_now(),
         },
     )
@@ -1982,6 +2010,7 @@ def _load_resume(
     switcher: ResidentExpertSwitcher | None,
     domain: str,
     fingerprint: str,
+    worker_controls: WorkerControlRuntime | None = None,
 ) -> tuple[int, int, int, dict[str, dict[str, int]] | None, int | None]:
     reset_architecture_optimizer = _architecture_migration_required(
         checkpoint,
@@ -2004,6 +2033,21 @@ def _load_resume(
         and not _architecture_resume_change(checkpoint, config)
     ):
         raise ValueError("resume checkpoint training contract changed")
+    state = torch.load(
+        checkpoint / "trainer_state.pt",
+        map_location="cpu",
+        weights_only=True,
+    )
+    if state.get("schema") != RUN_SCHEMA:
+        raise ValueError("resume trainer state has the wrong schema")
+    if state.get("fingerprint") != contract.get("fingerprint"):
+        raise ValueError("resume checkpoint metadata and trainer state disagree")
+    if worker_controls is not None:
+        if contract.get("effective_control_revision") != state.get(
+            "effective_control_revision"
+        ):
+            raise ValueError("checkpoint control metadata and state disagree")
+        worker_controls.verify_checkpoint_state(state)
     load_terminal_expert(
         controller,
         domain,
@@ -2026,11 +2070,6 @@ def _load_resume(
     shared = contract.get("shared_backbone")
     if shared:
         load_terminal_shared_backbone(transformer, checkpoint / str(shared))
-    state = torch.load(
-        checkpoint / "trainer_state.pt",
-        map_location="cpu",
-        weights_only=True,
-    )
     if not reset_architecture_optimizer:
         optimizer.load_state_dict(state["optimizer"])
     if fresh_repa_state is not None:
@@ -2496,6 +2535,7 @@ def train(
     worker_components: WorkerTrainingComponents | None = None,
     worker_step_profiler: WorkerStepProfiler | None = None,
     worker_observability: WorkerObservability | None = None,
+    worker_controls: WorkerControlRuntime | None = None,
 ) -> None:
     config.validate()
     try:
@@ -2635,7 +2675,9 @@ def train(
         checkpoint_mode,
     )
     optimizer_learning_rate, component_evidence, component_digest = (
-        resolved_worker_component_contract(config, worker_components)
+        resolved_worker_component_contract(
+            config, worker_components, worker_controls
+        )
     )
     optimizer_routing = terminal_optimizer_parameter_routing(
         transformer,
@@ -2698,6 +2740,11 @@ def train(
                 minimum_ratio=config.min_learning_rate_ratio,
             ),
         )
+    mutable_controls = (
+        MageFlowMutableControls(config, scheduler, worker_controls)
+        if worker_controls is not None
+        else None
+    )
     required_domains = EXPERT_DOMAINS if domain_schedule is not None else (config.domain,)
     train_rows_by_domain = {
         domain: _domain_rows(config.train_manifest, domain)
@@ -2790,7 +2837,17 @@ def train(
     if not all_eval_rows:
         _drop_vae_decoder(model)
     fingerprint = _contract_fingerprint(
-        config, component_composition_digest=component_digest
+        config,
+        component_composition_digest=component_digest,
+        mutable_control_keys=(
+            tuple(
+                key
+                for key in worker_controls.effective_values
+                if key in {"learning_rate", "eval_every", "caption_dropout"}
+            )
+            if worker_controls is not None
+            else ()
+        ),
     )
 
     step = epoch = batch_start = 0
@@ -2814,6 +2871,7 @@ def train(
             switcher=switcher,
             domain=config.domain,
             fingerprint=fingerprint,
+            worker_controls=worker_controls,
         )
     if loop_controller is not None:
         loop_controller.refresh_inference_skip_refinements()
@@ -2993,6 +3051,8 @@ def train(
         {"schema": RUN_SCHEMA, "state": "training", "step": step},
     )
     if all_eval_rows and (not config.resume_from or config.eval_on_resume):
+        if mutable_controls is not None and step > 0:
+            worker_controls.evaluation(step, mutable_controls.apply)
         if switcher is None:
             initial_evaluation = _run_evaluation(
                 pipeline=pipeline,
@@ -3200,6 +3260,8 @@ def train(
                 raise RuntimeError(
                     "rapid prefetch domain diverged from resident expert"
                 )
+            if mutable_controls is not None:
+                worker_controls.microbatch(step + 1, mutable_controls.apply)
             epoch = int(batch_epoch)
             flow = encode_domain_batch(
                 model,
@@ -3375,6 +3437,9 @@ def train(
                 sample_sum += len(active_flow["image_lens"])
             if accumulation < config.gradient_accumulation_steps:
                 continue
+
+            if mutable_controls is not None:
+                worker_controls.optimizer_step(step + 1, mutable_controls.apply)
 
             isolate_loop_gates = bool(loop_gate_parameters) and (
                 config.loop_gate_update_multiplier != 1.0
@@ -3598,6 +3663,8 @@ def train(
 
             evaluation_metrics = None
             if all_eval_rows and step % config.eval_every == 0:
+                if mutable_controls is not None:
+                    worker_controls.evaluation(step, mutable_controls.apply)
                 if switcher is None:
                     evaluation_metrics = _run_evaluation(
                         pipeline=pipeline,
@@ -3634,6 +3701,8 @@ def train(
                 or stop["requested"]
                 or best_evaluation
             ):
+                if mutable_controls is not None:
+                    worker_controls.checkpoint(step, mutable_controls.apply)
                 checkpoint = _save_checkpoint(
                     controller=controller,
                     transformer=transformer,
@@ -3653,6 +3722,11 @@ def train(
                         None
                         if config.rapid_expert_alternation
                         else window_index if domain_schedule else None
+                    ),
+                    control_state=(
+                        worker_controls.checkpoint_state()
+                        if worker_controls is not None
+                        else None
                     ),
                 )
                 if best_evaluation:
@@ -3678,6 +3752,8 @@ def train(
                 max_steps=config.max_steps,
                 covered_until_step=config.encoder_cache_covered_until_step,
             ):
+                if mutable_controls is not None:
+                    worker_controls.checkpoint(step, mutable_controls.apply)
                 checkpoint = _save_checkpoint(
                     controller=controller,
                     transformer=transformer,
@@ -3697,6 +3773,11 @@ def train(
                         None
                         if config.rapid_expert_alternation
                         else window_index if domain_schedule else None
+                    ),
+                    control_state=(
+                        worker_controls.checkpoint_state()
+                        if worker_controls is not None
+                        else None
                     ),
                 )
                 _atomic_json(
@@ -3797,6 +3878,8 @@ def train(
             "batch_start": batch_start,
         }
 
+    if mutable_controls is not None:
+        worker_controls.checkpoint(step, mutable_controls.apply)
     checkpoint = _save_checkpoint(
         controller=controller,
         transformer=transformer,
@@ -3816,6 +3899,11 @@ def train(
             None
             if config.rapid_expert_alternation
             else window_index if domain_schedule else None
+        ),
+        control_state=(
+            worker_controls.checkpoint_state()
+            if worker_controls is not None
+            else None
         ),
     )
     _export_checkpoint_experts(checkpoint, output_dir)
