@@ -87,7 +87,8 @@ func trainVMGPUTraceFixture(t *testing.T) (*Server, string, string) {
 			}},
 		},
 		"trace_sha256": prefixedTestSHA256(trace), "trace_size_bytes": uint64(len(trace)),
-		"warmup_steps": uint64(2),
+		"trace_file_name": "trace.json",
+		"warmup_steps":    uint64(2),
 	}
 	canonicalBody, err := json.Marshal(body)
 	if err != nil {
@@ -131,6 +132,7 @@ func TestTrainVMGPUTraceSummaryAndExplicitVerifiedDownload(t *testing.T) {
 		!strings.Contains(response.Body.String(), `"accelerator_launch_count":17`) ||
 		!strings.Contains(response.Body.String(), `"gpu_active_ratio":0.6`) ||
 		!strings.Contains(response.Body.String(), `"input_stall_ratio":0.2`) ||
+		!strings.Contains(response.Body.String(), `"trace_file_name":"trace.json"`) ||
 		!strings.Contains(response.Body.String(), `"sensitivity":"restricted"`) {
 		t.Fatalf("profile list status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -330,5 +332,36 @@ func TestRichGPUTraceSummaryIsAllOrNothingAndInternallyConsistent(t *testing.T) 
 	ratio = 0.4
 	if validRichGPUTraceSummary(summary) {
 		t.Fatal("active ratio inconsistent with active and wall time was accepted")
+	}
+}
+
+func TestExternalGPUTraceSummaryAndRawFormats(t *testing.T) {
+	launches := uint64(7)
+	wall := 100.0
+	active := 65.0
+	activeRatio := 0.65
+	input := 10.0
+	inputRatio := 0.1
+	summary := trainVMGPUTraceSummaryValues{
+		AcceleratorLaunchCount: &launches, CapturedStepWallTimeUS: &wall,
+		GPUActiveTimeUS: &active, GPUActiveRatio: &activeRatio,
+		InputStallTimeUS: &input, InputStallRatio: &inputRatio,
+	}
+	if !validExternalGPUTraceSummary("nsys", summary) ||
+		!validExternalGPUTraceSummary("ncu", summary) {
+		t.Fatal("consistent external summary was rejected")
+	}
+	summary.GPUActiveRatio = nil
+	summary.GPUActiveTimeUS = nil
+	if validExternalGPUTraceSummary("nsys", summary) ||
+		!validExternalGPUTraceSummary("ncu", summary) {
+		t.Fatal("backend-specific activity evidence was not enforced")
+	}
+	if !validGPUTraceFileName("torch", "trace.json") ||
+		!validGPUTraceFileName("nsys", "trace.sqlite") ||
+		!validGPUTraceFileName("ncu", "trace.ncu-rep") ||
+		validGPUTraceFileName("nsys", "../trace.sqlite") ||
+		validGPUTraceFileName("ncu", "trace.csv") {
+		t.Fatal("raw trace format allowlist is invalid")
 	}
 }

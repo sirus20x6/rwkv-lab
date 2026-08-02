@@ -74,6 +74,7 @@ type trainVMGPUTraceManifest struct {
 	Summary                 trainVMGPUTraceSummaryValues `json:"summary"`
 	TraceSHA256             string                       `json:"trace_sha256"`
 	TraceSizeBytes          uint64                       `json:"trace_size_bytes"`
+	TraceFileName           string                       `json:"trace_file_name,omitempty"`
 	WarmupSteps             uint64                       `json:"warmup_steps"`
 }
 
@@ -94,6 +95,7 @@ type trainVMGPUTraceSummary struct {
 	Summary                 trainVMGPUTraceSummaryValues    `json:"summary"`
 	TraceSHA256             string                          `json:"trace_sha256"`
 	TraceSizeBytes          uint64                          `json:"trace_size_bytes"`
+	TraceFileName           string                          `json:"trace_file_name"`
 	Sensitivity             string                          `json:"sensitivity"`
 	InvocationDigest        string                          `json:"invocation_digest"`
 	CanonicalManifestDigest string                          `json:"canonical_manifest_digest"`
@@ -284,6 +286,57 @@ func validRichGPUTraceSummary(summary trainVMGPUTraceSummaryValues) bool {
 		math.Abs(*summary.InputStallRatio-expectedInputRatio) <= 0.000001
 }
 
+func validExternalGPUTraceSummary(backend string, summary trainVMGPUTraceSummaryValues) bool {
+	if backend != "nsys" && backend != "ncu" {
+		return false
+	}
+	if summary.AcceleratorLaunchCount == nil || summary.CapturedStepWallTimeUS == nil ||
+		summary.AllocatorBaselineAllocatedBytes != nil || summary.AllocatorBaselineReservedBytes != nil ||
+		summary.AllocatorPeakAllocatedBytes != nil || summary.AllocatorPeakReservedBytes != nil ||
+		*summary.AcceleratorLaunchCount > 1_000_000_000_000 ||
+		!finiteNonnegative(*summary.CapturedStepWallTimeUS) || *summary.CapturedStepWallTimeUS <= 0 ||
+		(summary.InputStallRatio == nil) != (summary.InputStallTimeUS == nil) {
+		return false
+	}
+	activePresent := summary.GPUActiveRatio != nil || summary.GPUActiveTimeUS != nil
+	if activePresent {
+		if summary.GPUActiveRatio == nil || summary.GPUActiveTimeUS == nil {
+			return false
+		}
+		expected := *summary.GPUActiveTimeUS / *summary.CapturedStepWallTimeUS
+		if !finiteNonnegative(*summary.GPUActiveTimeUS) ||
+			*summary.GPUActiveTimeUS > *summary.CapturedStepWallTimeUS*1.000001 ||
+			!finiteNonnegative(*summary.GPUActiveRatio) || *summary.GPUActiveRatio > 1 ||
+			math.Abs(*summary.GPUActiveRatio-expected) > 0.000001 {
+			return false
+		}
+	}
+	if backend == "nsys" && !activePresent {
+		return false
+	}
+	if summary.InputStallRatio == nil {
+		return true
+	}
+	expectedInput := *summary.InputStallTimeUS / *summary.CapturedStepWallTimeUS
+	return finiteNonnegative(*summary.InputStallTimeUS) &&
+		*summary.InputStallTimeUS <= *summary.CapturedStepWallTimeUS*1.000001 &&
+		finiteNonnegative(*summary.InputStallRatio) && *summary.InputStallRatio <= 1 &&
+		math.Abs(*summary.InputStallRatio-expectedInput) <= 0.000001
+}
+
+func validGPUTraceFileName(backend, name string) bool {
+	switch backend {
+	case "torch":
+		return name == "trace.json"
+	case "nsys":
+		return name == "trace.sqlite"
+	case "ncu":
+		return name == "trace.ncu-rep"
+	default:
+		return false
+	}
+}
+
 func (s *Server) loadGPUTrace(artifact trainvmstore.PublishedArtifact) (trainVMGPUTraceManifest, string, error) {
 	var manifest trainVMGPUTraceManifest
 	manifestPath, err := fileURIPath(artifact.URI)
@@ -310,10 +363,18 @@ func (s *Server) loadGPUTrace(artifact trainvmstore.PublishedArtifact) (trainVMG
 	declaredCanonical, canonicalOK := normalizedSHA256(manifest.CanonicalManifestDigest)
 	_, traceHashOK := normalizedSHA256(manifest.TraceSHA256)
 	_, invocationOK := normalizedSHA256(manifest.InvocationDigest)
+	if manifest.TraceFileName == "" {
+		// Legacy v1 Torch manifests predate the explicit raw-trace format.
+		manifest.TraceFileName = "trace.json"
+	}
+	backendValid := manifest.Backend == "torch" || manifest.Backend == "nsys" || manifest.Backend == "ncu"
+	summaryValid := (manifest.Backend == "torch" && validRichGPUTraceSummary(manifest.Summary)) ||
+		validExternalGPUTraceSummary(manifest.Backend, manifest.Summary)
 	if err != nil || !canonicalOK || canonical != declaredCanonical || !traceHashOK || !invocationOK ||
 		manifest.APIVersion != trainVMGPUTraceSchema || manifest.RunID != artifact.RunID ||
 		manifest.NodeID != artifact.ProducerNodeID || manifest.AttemptID != artifact.ProducerAttemptID ||
-		manifest.Backend != "torch" || manifest.Sensitivity != "restricted" || !manifest.InstrumentedTiming ||
+		!backendValid || !validGPUTraceFileName(manifest.Backend, manifest.TraceFileName) ||
+		manifest.Sensitivity != "restricted" || !manifest.InstrumentedTiming ||
 		manifest.CaptureSteps == 0 || manifest.CaptureSteps > 128 || manifest.SkipSteps > 256 ||
 		manifest.WarmupSteps > 256 || manifest.CaptureSteps+manifest.SkipSteps+manifest.WarmupSteps > 512 ||
 		manifest.LastOptimizerStep < manifest.FirstOptimizerStep ||
@@ -324,7 +385,7 @@ func (s *Server) loadGPUTrace(artifact trainvmstore.PublishedArtifact) (trainVMG
 		len(manifest.Summary.TopOperators) > trainVMGPUTraceMaxOperators ||
 		manifest.Summary.KernelOrOperatorCount < int64(len(manifest.Summary.TopOperators)) ||
 		!finiteNonnegative(manifest.Summary.CPUTimeUS) || !finiteNonnegative(manifest.Summary.AcceleratorTimeUS) ||
-		!validRichGPUTraceSummary(manifest.Summary) {
+		!summaryValid {
 		return trainVMGPUTraceManifest{}, "", fmt.Errorf("GPU trace manifest identity or bounds are invalid")
 	}
 	seenActivities := map[string]struct{}{}
@@ -348,7 +409,7 @@ func (s *Server) loadGPUTrace(artifact trainvmstore.PublishedArtifact) (trainVMG
 			return trainVMGPUTraceManifest{}, "", fmt.Errorf("GPU trace operator summary is invalid")
 		}
 	}
-	tracePath := filepath.Join(filepath.Dir(resolved), "trace.json")
+	tracePath := filepath.Join(filepath.Dir(resolved), manifest.TraceFileName)
 	traceResolved, ok := s.resolveEvalImage(tracePath)
 	if !ok {
 		return trainVMGPUTraceManifest{}, "", fmt.Errorf("raw GPU trace is outside allowed data roots")
@@ -365,7 +426,8 @@ func gpuTraceSummary(artifact trainvmstore.PublishedArtifact, manifest trainVMGP
 		CaptureSteps: manifest.CaptureSteps, SkipSteps: manifest.SkipSteps, WarmupSteps: manifest.WarmupSteps,
 		Activities: manifest.Activities, Options: manifest.Options, Summary: manifest.Summary,
 		TraceSHA256: manifest.TraceSHA256, TraceSizeBytes: manifest.TraceSizeBytes,
-		Sensitivity: manifest.Sensitivity, InvocationDigest: manifest.InvocationDigest,
+		TraceFileName: manifest.TraceFileName,
+		Sensitivity:   manifest.Sensitivity, InvocationDigest: manifest.InvocationDigest,
 		CanonicalManifestDigest: manifest.CanonicalManifestDigest, PublishedAtNS: artifact.PublishedAtNS,
 		TraceDownloadURL: fmt.Sprintf("/api/trainvm/runs/%s/profiles/%s/trace?v=%s",
 			url.PathEscape(artifact.RunID), url.PathEscape(artifact.ArtifactID), traceHash),
@@ -469,8 +531,15 @@ func (s *Server) handleTrainVMProfileTrace(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "raw GPU trace is unavailable", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", artifact.ArtifactID+".json"))
+	contentType := "application/octet-stream"
+	if manifest.TraceFileName == "trace.json" {
+		contentType = "application/json"
+	} else if manifest.TraceFileName == "trace.sqlite" {
+		contentType = "application/vnd.sqlite3"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Disposition", fmt.Sprintf(
+		"attachment; filename=%q", artifact.ArtifactID+filepath.Ext(manifest.TraceFileName)))
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	http.ServeContent(w, r, filepath.Base(tracePath), info.ModTime(), file)
