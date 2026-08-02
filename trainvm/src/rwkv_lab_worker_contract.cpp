@@ -104,6 +104,39 @@ OperationAuthoringDeclaration vision_compressor_authoring() {
   return authoring;
 }
 
+OperationAuthoringDeclaration rlvr_authoring() {
+  OperationAuthoringDeclaration authoring = checkpoint_authoring();
+  auto& checkpoint = authoring.outputs.at("checkpoint");
+  checkpoint.required = true;
+  checkpoint.artifact_schema = "rwkv-lab.rlvr-candidate-checkpoint.v1";
+  checkpoint.description =
+      "Required terminal RLVR candidate checkpoint and promotion lineage.";
+  return authoring;
+}
+
+TrainingCompositionContract rlvr_composition() {
+  return {
+      .model_family = "rwkv",
+      .slots = {
+          {"gradient_clipping", TrainingComponentCategory::gradient_clipping},
+          {"learning_rate",
+           TrainingComponentCategory::learning_rate_schedule},
+          {"optimizer", TrainingComponentCategory::optimizer},
+          {"weight_decay",
+           TrainingComponentCategory::weight_decay_schedule},
+      },
+      .allowed_components =
+          std::map<std::string, std::vector<TrainingComponentKey>>{
+              {"learning_rate",
+               {{TrainingComponentCategory::learning_rate_schedule,
+                 "linear_warmup_constant", "1.0.0"}}},
+              {"optimizer",
+               {{TrainingComponentCategory::optimizer,
+                 "torch_adamw_no_decay", "2.0.0"}}},
+          },
+  };
+}
+
 TrainingCompositionContract vision_compressor_composition() {
   return {
       .model_family = "vision",
@@ -302,6 +335,20 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
       code_fingerprint, vision_compressor_composition(),
       resumable_training_lifecycle(), vision_compressor_authoring()));
   profiles.push_back(profile(
+      key("rwkv-lab.rwkv-rlvr", "rwkv_lab.rwkv_rlvr.v1.Train"),
+      code_fingerprint, rlvr_composition(),
+      {.stateful = true,
+       .graceful_stop = false,
+       .checkpoint_now = false,
+       .pause_keep_resources = false,
+       .pause_release_resources = false,
+       .compile = false,
+       .warmup = false,
+       .qualify = false,
+       .profile = true,
+       .resume_grade = ResumeGrade::terminal_checkpoint},
+      rlvr_authoring()));
+  profiles.push_back(profile(
       key("rwkv-lab.rwkv-scratch", "rwkv_lab.rwkv_scratch.v1.Train"),
       std::move(code_fingerprint),
       {.model_family = "rwkv",
@@ -355,6 +402,7 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
           "precision.bf16_parameters_fp32_reductions.v1",
           "precision.fp32_parameters_bf16_compute.v1",
           "schedule.constant.v1",
+          "schedule.linear_warmup_constant.v1",
           "schedule.linear_warmup_cosine.v1",
           "schedule.powercool.v1",
           "weight_decay_schedule.constant.v1",
@@ -427,6 +475,9 @@ rwkv_lab_worker_runtime_requirements() {
        canonical_distributions(
            {"einops", "grpcio", "numpy", "pillow", "protobuf",
             "safetensors", "torch"})},
+      {"rwkv-lab.rwkv-rlvr",
+       canonical_distributions(
+           {"einops", "grpcio", "numpy", "pillow", "protobuf", "torch"})},
       {"rwkv-lab.vision-teacher-compressor",
        canonical_distributions(
            {"grpcio", "numpy", "pillow", "protobuf", "safetensors",

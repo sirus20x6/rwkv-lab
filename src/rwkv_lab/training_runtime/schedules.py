@@ -16,6 +16,7 @@ from .resolved import resolved_component_parts
 
 class ScheduleImplementation(str, Enum):
     CONSTANT_V1 = "rwkv_lab.schedule.constant.v1"
+    LINEAR_WARMUP_CONSTANT_V1 = "rwkv_lab.schedule.linear_warmup_constant.v1"
     LINEAR_WARMUP_COSINE_V1 = "rwkv_lab.schedule.linear_warmup_cosine.v1"
     POWERCOOL_V1 = "rwkv_lab.schedule.powercool.v1"
 
@@ -31,6 +32,29 @@ class ConstantLearningRateConfiguration:
         if configuration:
             raise ValueError("resolved constant schedule configuration must be empty")
         return cls()
+
+
+@dataclass(frozen=True, slots=True)
+class LinearWarmupConstantConfiguration:
+    warmup_steps: int
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.warmup_steps, int)
+            or isinstance(self.warmup_steps, bool)
+            or self.warmup_steps < 0
+        ):
+            raise ValueError("warmup_steps must be a nonnegative integer")
+
+    @classmethod
+    def from_resolved(
+        cls, configuration: Mapping[str, Any]
+    ) -> LinearWarmupConstantConfiguration:
+        if set(configuration) != {"warmup_steps"}:
+            raise ValueError(
+                "resolved linear-warmup-constant configuration is inexact"
+            )
+        return cls(**configuration)
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +177,16 @@ def constant_learning_rate_multiplier(
     return 1.0
 
 
+def linear_warmup_constant_multiplier(
+    step: int, configuration: LinearWarmupConstantConfiguration
+) -> float:
+    if not isinstance(step, int) or isinstance(step, bool) or step < 0:
+        raise ValueError("schedule step must be a nonnegative integer")
+    if not configuration.warmup_steps:
+        return 1.0
+    return min(1.0, (step + 1) / float(configuration.warmup_steps))
+
+
 def powercool_multiplier(step: int, configuration: PowerCoolConfiguration) -> float:
     """Pure PowerCool multiplier over the zero-based optimizer-step domain."""
 
@@ -171,6 +205,7 @@ def build_registered_schedule(
     implementation: ScheduleImplementation,
     optimizer: torch.optim.Optimizer,
     configuration: ConstantLearningRateConfiguration
+    | LinearWarmupConstantConfiguration
     | LinearWarmupCosineConfiguration
     | PowerCoolConfiguration,
 ) -> torch.optim.lr_scheduler.LRScheduler:
@@ -181,6 +216,14 @@ def build_registered_schedule(
             raise TypeError("constant schedule requires its typed configuration")
         multiplier = partial(
             constant_learning_rate_multiplier, _configuration=configuration
+        )
+    elif implementation is ScheduleImplementation.LINEAR_WARMUP_CONSTANT_V1:
+        if not isinstance(configuration, LinearWarmupConstantConfiguration):
+            raise TypeError(
+                "linear-warmup-constant requires its typed configuration"
+            )
+        multiplier = partial(
+            linear_warmup_constant_multiplier, configuration=configuration
         )
     elif implementation is ScheduleImplementation.LINEAR_WARMUP_COSINE_V1:
         if not isinstance(configuration, LinearWarmupCosineConfiguration):
@@ -271,6 +314,7 @@ def schedule_configuration_from_resolved_component(
 ) -> tuple[
     ScheduleImplementation,
     ConstantLearningRateConfiguration
+    | LinearWarmupConstantConfiguration
     | LinearWarmupCosineConfiguration
     | PowerCoolConfiguration,
 ]:
@@ -285,6 +329,10 @@ def schedule_configuration_from_resolved_component(
         ) from error
     if selected is ScheduleImplementation.CONSTANT_V1:
         typed_configuration = ConstantLearningRateConfiguration.from_resolved(
+            configuration
+        )
+    elif selected is ScheduleImplementation.LINEAR_WARMUP_CONSTANT_V1:
+        typed_configuration = LinearWarmupConstantConfiguration.from_resolved(
             configuration
         )
     elif selected is ScheduleImplementation.LINEAR_WARMUP_COSINE_V1:

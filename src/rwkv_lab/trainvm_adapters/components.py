@@ -15,6 +15,7 @@ from rwkv_lab.training_components import (
     FP32ParametersBFloat16ComputePolicy,
     LayerNormFactory,
     LinearHeadCrossEntropyObjective,
+    LinearWarmupConstantConfiguration,
     LinearWarmupCosineConfiguration,
     PowerCoolConfiguration,
     RegisteredActivation,
@@ -153,6 +154,7 @@ class WorkerTrainingComponents:
     ) -> tuple[
         ScheduleImplementation,
         ConstantLearningRateConfiguration
+        | LinearWarmupConstantConfiguration
         | LinearWarmupCosineConfiguration
         | PowerCoolConfiguration,
     ]:
