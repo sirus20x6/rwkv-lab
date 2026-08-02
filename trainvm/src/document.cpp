@@ -407,6 +407,53 @@ bool is_exact_resource_release(const Spec& spec, const Node& node) {
       Effect::resource, Idempotency::replay_safe);
 }
 
+bool is_cache_qualification(const Spec& spec, const Node& node) {
+  const auto component = spec.components.find(node.invoke.component);
+  return component != spec.components.end() &&
+         component->second.runtime == ComponentRuntime::builtin &&
+         component->second.adapter == "trainvm.core" &&
+         node.invoke.operation == "qualify_cache";
+}
+
+// A qualification node is a decision point, so both outcomes must be
+// reachable. A plan that routes only the passing verdict would silently treat
+// a rejected candidate as qualified.
+void validate_cache_qualification(const Spec& spec,
+                                  std::vector<Diagnostic>& diagnostics) {
+  for (const auto& [name, node] : spec.workflow.nodes) {
+    if (!is_cache_qualification(spec, node)) continue;
+    const std::string path = "/spec/workflow/nodes/" + name;
+    if (!is_exact_core_operation(spec, node, "qualify_cache",
+                                 "trainvm.v1.QualifyCache", Effect::read_only,
+                                 Idempotency::replay_safe)) {
+      error(diagnostics, "workflow.cache_qualification", path,
+            "cache qualification must be builtin trainvm.core 1.0.0 "
+            "qualify_cache with contract trainvm.v1.QualifyCache, read_only "
+            "effect, and replay_safe idempotency");
+    }
+    std::size_t qualified_transitions = 0U;
+    std::size_t rejected_transitions = 0U;
+    for (const Transition& transition : node.transitions) {
+      if (transition.on == "cache.qualified") ++qualified_transitions;
+      if (transition.on == "cache.rejected") ++rejected_transitions;
+    }
+    if (qualified_transitions != 1U || rejected_transitions != 1U) {
+      error(diagnostics, "workflow.cache_qualification_transition",
+            child_path(path, "transitions"),
+            "cache qualification requires exactly one cache.qualified and one "
+            "cache.rejected transition");
+    }
+    // The executor exists to enforce a declared qualification phase; without
+    // the declaration the adapter never had to prove it supports one.
+    if (!spec.execution || !spec.execution->qualify ||
+        !spec.execution->qualify->enabled) {
+      error(diagnostics, "workflow.cache_qualification_phase", path,
+            "cache qualification requires an enabled /spec/execution/qualify "
+            "phase");
+    }
+  }
+}
+
 void validate_resource_lifecycle(const Spec& spec,
                                  std::vector<Diagnostic>& diagnostics) {
   const Workflow& workflow = spec.workflow;
@@ -1035,6 +1082,7 @@ void validate_experiment(const Experiment& experiment, std::vector<Diagnostic>& 
     }
   }
   validate_resource_lifecycle(spec, diagnostics);
+  validate_cache_qualification(spec, diagnostics);
 
   if (workflow.nodes.contains(workflow.entrypoint)) {
     std::set<std::string> reachable;

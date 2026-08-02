@@ -3,6 +3,7 @@
 #include <string>
 #include <string_view>
 
+#include "trainvm/cache_artifact_authority.hpp"
 #include "trainvm/document.hpp"
 #include "trainvm/dispatch.hpp"
 #include "trainvm/control.hpp"
@@ -41,6 +42,12 @@ class Controller {
       const AuthorityTimeSample& now);
   const ExecutionState& complete_artifact_validation(
       ArtifactValidationOutcome outcome, const AuthorityTimeSample& now);
+  // Commits an authority-owned cache qualification decision for the active
+  // qualify_cache node. The receipt is produced by the implemented
+  // qualification gate over evidence the authority resolved; a caller cannot
+  // hand in a bare verdict.
+  const ExecutionState& complete_cache_qualification(
+      const CacheQualificationReceipt& receipt, const AuthorityTimeSample& now);
   const ExecutionState& release_managed_resources(
       const AuthorityTimeSample& now);
   ControlPatchValidation request_controls(const std::string& idempotency_key,
@@ -115,7 +122,8 @@ class Controller {
       std::optional<AuthorityTimeSample> now);
   const ExecutionState& complete_managed_builtin(
       std::string_view expected_operation, std::string event_type,
-      bool release_lease, const AuthorityTimeSample& now);
+      bool release_lease, const AuthorityTimeSample& now,
+      nlohmann::json receipt_payload = nlohmann::json::object());
 };
 
 }  // namespace trainvm

@@ -16,7 +16,10 @@ host launch profile.
 The original package exposes only six console commands; many legitimate workflows are module- or
 script-only. All six console surfaces, their effectfully distinct subcommands, the reviewed
 supported module/script entrypoints and essential graph libraries, concrete trainer-specific vision
-profiles, and legacy dashboard launch/control paths are now in the evidence catalog. The inclusion
+profiles, and legacy dashboard launch/control paths are now in the evidence catalog. The dashboard
+side of that surface is closed rather than sampled: every `POST` route the legacy router registers
+has exactly one record, and the router registration bytes are bound so a new or retired mutation
+path cannot pass review silently. The inclusion
 rule is intentionally narrower than “has `__main__`”: a synthetic smoke block is not executable
 workflow evidence, while an essential component used by a supported graph is recorded only as
 `library_only`. Executability is still an explicit authority-registry property with a sealed

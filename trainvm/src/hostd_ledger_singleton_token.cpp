@@ -5,7 +5,7 @@
 namespace trainvm {
 
 HostdLedgerSingletonToken::HostdLedgerSingletonToken(
-    std::shared_ptr<HostLedgerFilesystemAuthority> authority)
+    std::shared_ptr<SqliteFilesystemAuthority> authority)
     : authority_(std::move(authority)) {
   if (!authority_)
     throw HostLedgerAuthorityError(

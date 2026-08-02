@@ -1,7 +1,7 @@
 {
   "api_version": "trainvm.compatibility-workflows/v1",
   "authority": "compatibility_evidence_only",
-  "source_tree_digest": "sha256:9c90bfb3a74e678d63ddd598e00b74edd27fbd32e238c90821c21b234c177024",
+  "source_tree_digest": "sha256:c824b439d8d5c6567e86711b0fcdc209fdb78664e0d233222902c318cdf39b80",
   "entries": [
     {
       "stable_id": "rwkv.synthetic-campaign",
@@ -1540,7 +1540,8 @@
       "stable_id": "control.manual-training-launch",
       "family": "control_plane",
       "source_paths": [
-        "dashboard/internal/server/control.go"
+        "dashboard/internal/server/control.go",
+        "dashboard/internal/server/server.go"
       ],
       "observed_invocation": "http_control_handler",
       "stateful": true,
@@ -1553,7 +1554,8 @@
       "stable_id": "control.gpu-launch-queue",
       "family": "control_plane",
       "source_paths": [
-        "dashboard/internal/server/queue.go"
+        "dashboard/internal/server/queue.go",
+        "dashboard/internal/server/server.go"
       ],
       "observed_invocation": "http_control_handler",
       "stateful": true,
@@ -1566,7 +1568,8 @@
       "stable_id": "control.experiment-launch",
       "family": "control_plane",
       "source_paths": [
-        "dashboard/internal/server/experiments.go"
+        "dashboard/internal/server/experiments.go",
+        "dashboard/internal/server/server.go"
       ],
       "observed_invocation": "http_control_handler",
       "stateful": true,
@@ -1579,7 +1582,8 @@
       "stable_id": "control.posttraining-launch",
       "family": "control_plane",
       "source_paths": [
-        "dashboard/internal/server/posttraining.go"
+        "dashboard/internal/server/posttraining.go",
+        "dashboard/internal/server/server.go"
       ],
       "observed_invocation": "http_control_handler",
       "stateful": true,
@@ -1592,7 +1596,8 @@
       "stable_id": "control.rlvr-launch",
       "family": "control_plane",
       "source_paths": [
-        "dashboard/internal/server/rlvr.go"
+        "dashboard/internal/server/rlvr.go",
+        "dashboard/internal/server/server.go"
       ],
       "observed_invocation": "http_control_handler",
       "stateful": true,
@@ -1605,7 +1610,8 @@
       "stable_id": "control.qualification-launch",
       "family": "control_plane",
       "source_paths": [
-        "dashboard/internal/server/qualification.go"
+        "dashboard/internal/server/qualification.go",
+        "dashboard/internal/server/server.go"
       ],
       "observed_invocation": "http_control_handler",
       "stateful": true,
@@ -1618,14 +1624,15 @@
       "stable_id": "control.sample-launch",
       "family": "control_plane",
       "source_paths": [
-        "dashboard/internal/server/sample.go"
+        "dashboard/internal/server/sample.go",
+        "dashboard/internal/server/server.go"
       ],
       "observed_invocation": "http_control_handler",
       "stateful": false,
       "resume_evidence": "none",
       "operation_role": "evaluation",
       "notes": "Legacy synchronous checkpoint generation endpoint.",
-      "legacy_invocation_display": "POST /api/sample"
+      "legacy_invocation_display": "POST /api/runs/{name}/sample"
     },
     {
       "stable_id": "oracle.lossless-gdn-map",
@@ -1831,6 +1838,230 @@
       "resume_evidence": "none",
       "operation_role": "library_oracle",
       "notes": "Importable soft-layer ROSA component used by conversion training. Its synthetic __main__ smoke test is not a launch contract."
+    },
+    {
+      "stable_id": "control.run-graceful-stop",
+      "family": "control_plane",
+      "source_paths": [
+        "dashboard/internal/server/server.go",
+        "dashboard/internal/server/control.go"
+      ],
+      "observed_invocation": "http_control_handler",
+      "stateful": true,
+      "resume_evidence": "terminal_checkpoint",
+      "operation_role": "supervisor",
+      "notes": "Legacy stop path. Resolves the run's live PID from the sysmon sampler, verifies it is a training process, and sends SIGINT so the trainer checkpoints and exits. Signal delivery is the whole protocol: there is no typed acknowledgement, safe point, or receipt.",
+      "legacy_invocation_display": "POST /api/runs/{name}/stop"
+    },
+    {
+      "stable_id": "control.run-checkpoint-now",
+      "family": "control_plane",
+      "source_paths": [
+        "dashboard/internal/server/server.go",
+        "dashboard/internal/server/control.go"
+      ],
+      "observed_invocation": "http_control_handler",
+      "stateful": true,
+      "resume_evidence": "compatible",
+      "operation_role": "supervisor",
+      "notes": "Legacy checkpoint-now path. Sends SIGUSR1 (save without exit) and refuses unless the PID is verified as an instrumented trainer. The handler observes neither the write nor its completion, so a produced checkpoint is compatible evidence only.",
+      "legacy_invocation_display": "POST /api/runs/{name}/checkpoint"
+    },
+    {
+      "stable_id": "control.run-notes-annotation",
+      "family": "control_plane",
+      "source_paths": [
+        "dashboard/internal/server/server.go",
+        "dashboard/internal/server/control.go"
+      ],
+      "observed_invocation": "http_control_handler",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "review",
+      "notes": "Legacy operator annotation. Writes the run's notes string plus an audit row; no process, file, or training state is touched.",
+      "legacy_invocation_display": "POST /api/runs/{name}/notes"
+    },
+    {
+      "stable_id": "control.run-tags-annotation",
+      "family": "control_plane",
+      "source_paths": [
+        "dashboard/internal/server/server.go",
+        "dashboard/internal/server/control.go"
+      ],
+      "observed_invocation": "http_control_handler",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "review",
+      "notes": "Legacy operator annotation. Serializes the tag list to JSON and stores it plus an audit row; no process, file, or training state is touched.",
+      "legacy_invocation_display": "POST /api/runs/{name}/tags"
+    },
+    {
+      "stable_id": "control.live-control-patch",
+      "family": "control_plane",
+      "source_paths": [
+        "dashboard/internal/server/server.go",
+        "dashboard/internal/server/livetune.go"
+      ],
+      "observed_invocation": "http_control_handler",
+      "stateful": true,
+      "resume_evidence": "compatible",
+      "operation_role": "supervisor",
+      "notes": "Legacy live-tuning path. Filters the posted object to a whitelisted numeric key set and writes pending control overrides to shared SQLite that the trainer polls and applies at its own boundary. There is no application point, effective-value acknowledgement, or revision fence; the durable row survives restart, so a restarted trainer re-reads the same overrides.",
+      "legacy_invocation_display": "POST /api/runs/{name}/control"
+    },
+    {
+      "stable_id": "control.alert-acknowledgement",
+      "family": "control_plane",
+      "source_paths": [
+        "dashboard/internal/server/server.go",
+        "dashboard/internal/server/alerts_handlers.go"
+      ],
+      "observed_invocation": "http_control_handler",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "review",
+      "notes": "Legacy alert acknowledgement. Marks one or all alerts acknowledged and repaints the banner; writes no audit row and touches no run state.",
+      "legacy_invocation_display": "POST /api/alerts/ack"
+    },
+    {
+      "stable_id": "control.autostop-arming",
+      "family": "control_plane",
+      "source_paths": [
+        "dashboard/internal/server/server.go",
+        "dashboard/internal/server/alerts_handlers.go"
+      ],
+      "observed_invocation": "http_control_handler",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "supervisor",
+      "notes": "Legacy auto-stop toggle. Flips a process-local atomic that arms the background alert detector to SIGINT training runs on a critical alert. The toggle itself holds no training state and is lost on dashboard restart, so an armed killer cannot be recovered or audited.",
+      "legacy_invocation_display": "POST /api/autostop"
+    },
+    {
+      "stable_id": "control.conversion-layer-acceptance",
+      "family": "control_plane",
+      "source_paths": [
+        "dashboard/internal/server/server.go",
+        "dashboard/internal/server/convboard.go"
+      ],
+      "observed_invocation": "http_control_handler",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "review",
+      "notes": "Legacy conversion-board promotion record. Stores a candidate layer, run, step, prospective library path, and PPL plus an audit row. It deliberately does not write the converted-layer library; promotion remains a manual assembly step, so this is provenance only.",
+      "legacy_invocation_display": "POST /api/convboard/accept"
+    },
+    {
+      "stable_id": "control.config-experiment-run",
+      "family": "control_plane",
+      "source_paths": [
+        "dashboard/internal/server/server.go",
+        "dashboard/internal/server/experiments.go"
+      ],
+      "observed_invocation": "http_control_handler",
+      "stateful": true,
+      "resume_evidence": "restart_only",
+      "operation_role": "supervisor",
+      "notes": "Legacy config-file experiment launcher. Validates that the requested path exists under the repository experiments directory and starts a detached config runner with output redirected to a log file. Unlike the allowlisted manual launcher it resolves no script allowlist, sets no process group, and writes no audit row, so the spawned process has no durable launch identity.",
+      "legacy_invocation_display": "POST /api/experiments/run"
+    },
+    {
+      "stable_id": "control.posttraining-dataset-inspection",
+      "family": "control_plane",
+      "source_paths": [
+        "dashboard/internal/server/server.go",
+        "dashboard/internal/server/posttraining.go"
+      ],
+      "observed_invocation": "http_control_handler",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "review",
+      "notes": "Legacy read-only post-training dataset inspection. Runs the dataset tool over a repository-relative JSONL and renders counts, hashes, and previews into the page; writes nothing.",
+      "legacy_invocation_display": "POST /api/posttraining/inspect"
+    },
+    {
+      "stable_id": "control.posttraining-dataset-versioning",
+      "family": "control_plane",
+      "source_paths": [
+        "dashboard/internal/server/server.go",
+        "dashboard/internal/server/posttraining.go"
+      ],
+      "observed_invocation": "http_control_handler",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "preprocess",
+      "notes": "Legacy post-training dataset versioning. Materializes an immutable dataset version tree under the repository datasets root through the dataset tool. The handler records no receipt of what was produced, so the resulting artifact identity is filesystem convention only.",
+      "legacy_invocation_display": "POST /api/posttraining/version"
+    },
+    {
+      "stable_id": "control.posttraining-comparison",
+      "family": "control_plane",
+      "source_paths": [
+        "dashboard/internal/server/server.go",
+        "dashboard/internal/server/posttraining.go"
+      ],
+      "observed_invocation": "http_control_handler",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "evaluation",
+      "notes": "Legacy A/B comparison. Generates completions from two runs' checkpoints with a shared seed and temperature and patches both outputs into the page; results live only in UI signals.",
+      "legacy_invocation_display": "POST /api/posttraining/compare"
+    },
+    {
+      "stable_id": "control.posttraining-preference-capture",
+      "family": "control_plane",
+      "source_paths": [
+        "dashboard/internal/server/server.go",
+        "dashboard/internal/server/posttraining.go"
+      ],
+      "observed_invocation": "http_control_handler",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "review",
+      "notes": "Legacy human preference capture. Appends one chosen/rejected preference record to a datasets JSONL that later post-training runs consume. Append-only file growth is the entire protocol: no audit row, no reviewer identity, and no published artifact manifest.",
+      "legacy_invocation_display": "POST /api/posttraining/feedback"
+    },
+    {
+      "stable_id": "control.queue-enqueue",
+      "family": "control_plane",
+      "source_paths": [
+        "dashboard/internal/server/server.go",
+        "dashboard/internal/server/queue.go"
+      ],
+      "observed_invocation": "http_control_handler",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "supervisor",
+      "notes": "Legacy queue admission. Checks the requested script against the sysmon allowlist and inserts a queued row plus an audit row. The row is launch intent only; spawning happens later in the queue manager.",
+      "legacy_invocation_display": "POST /api/queue/enqueue"
+    },
+    {
+      "stable_id": "control.queue-cancel",
+      "family": "control_plane",
+      "source_paths": [
+        "dashboard/internal/server/server.go",
+        "dashboard/internal/server/queue.go"
+      ],
+      "observed_invocation": "http_control_handler",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "supervisor",
+      "notes": "Legacy queue cancellation. Marks a still-queued item canceled and no-ops once it is running or done, so it can prevent a future launch but never stops a live process.",
+      "legacy_invocation_display": "POST /api/queue/cancel"
+    },
+    {
+      "stable_id": "control.queue-auto-arming",
+      "family": "control_plane",
+      "source_paths": [
+        "dashboard/internal/server/server.go",
+        "dashboard/internal/server/queue.go"
+      ],
+      "observed_invocation": "http_control_handler",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "supervisor",
+      "notes": "Legacy queue automation toggle. Flips a process-local atomic that arms the background queue manager to spawn training whenever the GPU is free. The toggle is not persisted, so an armed automatic spawner cannot be recovered after a dashboard restart.",
+      "legacy_invocation_display": "POST /api/queue/auto"
     }
   ]
 }
