@@ -70,11 +70,12 @@ AdapterRegistry adapter_registry(bool compile = true) {
 
 HostLaunchRegistry launch_registry() {
   return HostLaunchRegistry(HostLaunchRegistryDocument{
-      .api_version = "trainvm.host-launches/v1",
+      .api_version = "trainvm.host-launches/v2",
       .trusted_roots = {"/opt/trainvm"},
       .profiles = {HostLaunchProfile{
           .key = adapter_key(),
           .code_fingerprint = hash('1'),
+          .provided_capabilities = {"artifact.manifest.v1"},
           .executable_path = "/opt/trainvm/python",
           .executable_fingerprint = hash('2'),
           .code_path = "/opt/trainvm/worker.py",
@@ -150,7 +151,7 @@ ResolvedLaunchSpec launch(const AdapterRegistry& adapters,
       .topology_digest = inventory.topology_digest,
   };
   ResolvedLaunchIdentity identity{
-      .api_version = "trainvm.resolved-launch/v1",
+      .api_version = "trainvm.resolved-launch/v2",
       .launch_event_id = "run-1:worker-launch:train:train@1",
       .run_id = "run-1",
       .node_id = "train",
@@ -159,6 +160,7 @@ ResolvedLaunchSpec launch(const AdapterRegistry& adapters,
       .adapter_key = adapter_key(),
       .code_fingerprint = hash('1'),
       .required_capabilities = {"artifact.manifest.v1"},
+      .provided_capabilities = {"artifact.manifest.v1"},
       .host_registry_digest = launches.registry_digest(),
       .host_profile_digest = launches.profile_digest(adapter_key(), hash('1')),
       .concurrency_key = "gpu:0",

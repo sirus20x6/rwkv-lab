@@ -619,7 +619,7 @@ ResolvedLaunchSpec process_launch_for(const ResourceBundleGrant& grant) {
       "sha256:" + std::string(64U, 'e');
   ResolvedLaunchSpec spec{
       .identity = {
-          .api_version = "trainvm.resolved-launch/v1",
+          .api_version = "trainvm.resolved-launch/v2",
           .launch_event_id = grant.run_id + ":worker-launch:node:attempt",
           .run_id = grant.run_id,
           .node_id = "node",
@@ -632,6 +632,7 @@ ResolvedLaunchSpec process_launch_for(const ResourceBundleGrant& grant) {
                           .contract = "trainvm.worker/v1"},
           .code_fingerprint = executable_digest,
           .required_capabilities = {},
+          .provided_capabilities = {},
           .host_registry_digest =
               "sha256:" + std::string(64U, 'b'),
           .host_profile_digest =
@@ -1767,7 +1768,7 @@ void mutation_transport_dispatches_replays_and_disconnects() {
       .adapter = process_launch.identity.adapter_key.adapter,
       .adapter_version = process_launch.identity.adapter_key.version,
       .code_fingerprint = process_launch.identity.code_fingerprint,
-      .capabilities = process_launch.identity.required_capabilities,
+      .capabilities = process_launch.identity.provided_capabilities,
       .last_acked_controller_sequence = 0U,
       .concurrency_key = process_launch.identity.concurrency_key,
       .lease_id = process_launch.identity.lease_id,

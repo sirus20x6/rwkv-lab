@@ -1939,6 +1939,8 @@ ResolvedLaunchSpec Controller::bind_worker_launch(
       binding.identity.working_directory.source_path !=
           host_profile.working_directory ||
       binding.identity.code.has_value() != host_profile.code_path.has_value() ||
+      binding.identity.provided_capabilities !=
+          host_profile.provided_capabilities ||
       (binding.identity.code &&
        (binding.identity.code->source_path != *host_profile.code_path ||
         binding.identity.code->sealed_sha256 !=

@@ -475,7 +475,7 @@ bool canonical_uuid(std::string_view value) {
 
 void validate_resolved_identity(const ResolvedLaunchIdentity& identity) {
   const AdapterKey& key = identity.adapter_key;
-  if (identity.api_version != "trainvm.resolved-launch/v1" ||
+  if (identity.api_version != "trainvm.resolved-launch/v2" ||
       identity.run_id.empty() || identity.run_id.size() > 512U ||
       identity.node_id.empty() || identity.node_id.size() > 128U ||
       identity.attempt_id.empty() || identity.attempt_id.size() > 512U ||
@@ -511,17 +511,22 @@ void validate_resolved_identity(const ResolvedLaunchIdentity& identity) {
     validate_resource_fence_shape(
         claim.fences, HostResourceBounds::maximum_bundle_count);
   }
-  if (identity.required_capabilities.size() > 256U ||
-      !std::ranges::is_sorted(identity.required_capabilities) ||
-      std::ranges::adjacent_find(identity.required_capabilities) !=
-          identity.required_capabilities.end() ||
-      std::ranges::any_of(identity.required_capabilities,
-                          [](const std::string& capability) {
-                            return capability.empty() ||
-                                   capability.size() > 256U;
-                          })) {
+  const auto canonical_capabilities = [](const auto& capabilities) {
+    return capabilities.size() <= 256U &&
+           std::ranges::is_sorted(capabilities) &&
+           std::ranges::adjacent_find(capabilities) == capabilities.end() &&
+           std::ranges::none_of(capabilities,
+                                [](const std::string& capability) {
+                                  return capability.empty() ||
+                                         capability.size() > 256U;
+                                });
+  };
+  if (!canonical_capabilities(identity.required_capabilities) ||
+      !canonical_capabilities(identity.provided_capabilities) ||
+      !std::ranges::includes(identity.provided_capabilities,
+                             identity.required_capabilities)) {
     throw std::invalid_argument(
-        "resolved launch capabilities are not canonical and bounded");
+        "resolved launch required/provided capabilities are not canonical, bounded, and compatible");
   }
   const auto validate_artifact = [](const VerifiedLaunchArtifact& artifact,
                                     bool executable) {
@@ -600,6 +605,7 @@ nlohmann::json resolved_launch_identity_json(
         {"contract", identity.adapter_key.contract}}},
       {"code_fingerprint", identity.code_fingerprint},
       {"required_capabilities", identity.required_capabilities},
+      {"provided_capabilities", identity.provided_capabilities},
       {"host_registry_digest", identity.host_registry_digest},
       {"host_profile_digest", identity.host_profile_digest},
       {"concurrency_key", identity.concurrency_key},
@@ -766,6 +772,11 @@ ResolvedLaunch HostLaunchResolver::resolve(
   }
   const HostLaunchProfile& profile =
       registry_.resolve(key, ticket.code_fingerprint);
+  if (!std::ranges::includes(profile.provided_capabilities,
+                             ticket.required_capabilities)) {
+    throw HostLaunchResolutionError(
+        "host launch profile does not provide every required worker capability");
+  }
   SealedArtifact executable = resolve_artifact(
       registry_.trusted_roots(), profile.executable_path,
       profile.executable_fingerprint, true);
@@ -777,7 +788,7 @@ ResolvedLaunch HostLaunchResolver::resolve(
   OpenedPath working_directory = open_beneath(
       registry_.trusted_roots(), profile.working_directory, O_PATH, true);
   ResolvedLaunchIdentity identity{
-      .api_version = "trainvm.resolved-launch/v1",
+      .api_version = "trainvm.resolved-launch/v2",
       .launch_event_id = ticket.run_id + ":worker-launch:" + ticket.node_id +
                          ":" + ticket.attempt_id,
       .run_id = ticket.run_id,
@@ -787,6 +798,7 @@ ResolvedLaunch HostLaunchResolver::resolve(
       .adapter_key = key,
       .code_fingerprint = ticket.code_fingerprint,
       .required_capabilities = ticket.required_capabilities,
+      .provided_capabilities = profile.provided_capabilities,
       .host_registry_digest = registry_.registry_digest(),
       .host_profile_digest =
           registry_.profile_digest(key, ticket.code_fingerprint),

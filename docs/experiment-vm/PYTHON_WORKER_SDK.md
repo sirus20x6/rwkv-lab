@@ -12,7 +12,8 @@ descriptor. It contains only:
 - the TrainVM Unix-socket target;
 - run, node, attempt, launch, lease, and fencing identity;
 - the exact adapter version and code fingerprint;
-- a sorted capability set and replay cursor.
+- the sorted capability set independently bound to the sealed worker profile,
+  plus a replay cursor.
 
 It contains no model path, dataset path, optimizer setting, learning-rate
 setting, shell fragment, environment override, or secret. After the worker

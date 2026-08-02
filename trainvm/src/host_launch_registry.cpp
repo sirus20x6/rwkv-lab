@@ -99,6 +99,20 @@ void validate_key(const AdapterKey& key) {
 void validate_profile(HostLaunchProfile& profile,
                       const std::vector<std::string>& roots) {
   validate_key(profile.key);
+  if (profile.provided_capabilities.size() > 256U ||
+      std::ranges::any_of(
+          profile.provided_capabilities, [](const std::string& capability) {
+            return !bounded_text(capability, 256U);
+          })) {
+    throw std::invalid_argument(
+        "host launch provided capabilities must be bounded and nonempty");
+  }
+  std::ranges::sort(profile.provided_capabilities);
+  if (std::ranges::adjacent_find(profile.provided_capabilities) !=
+      profile.provided_capabilities.end()) {
+    throw std::invalid_argument(
+        "host launch provided capabilities must be unique");
+  }
   if (!valid_sha256(profile.code_fingerprint) ||
       !valid_sha256(profile.executable_fingerprint)) {
     throw std::invalid_argument(
@@ -179,9 +193,9 @@ std::vector<std::string> validate_roots(std::vector<std::string> roots) {
 }  // namespace
 
 HostLaunchRegistry::HostLaunchRegistry(HostLaunchRegistryDocument document) {
-  if (document.api_version != "trainvm.host-launches/v1") {
+  if (document.api_version != "trainvm.host-launches/v2") {
     throw std::invalid_argument(
-        "host launch registry api_version must be trainvm.host-launches/v1");
+        "host launch registry api_version must be trainvm.host-launches/v2");
   }
   if (document.profiles.size() > kMaximumProfiles) {
     throw std::invalid_argument(
@@ -207,7 +221,7 @@ HostLaunchRegistry::HostLaunchRegistry(HostLaunchRegistryDocument document) {
   }
   nlohmann::json canonical_registry =
       encode_json(HostLaunchRegistryDocument{
-          .api_version = "trainvm.host-launches/v1",
+          .api_version = "trainvm.host-launches/v2",
           .trusted_roots = trusted_roots_,
           .profiles = {},
       });
@@ -341,7 +355,7 @@ std::string HostLaunchRegistry::profile_digest(
   const HostLaunchProfile& profile = resolve(key, code_fingerprint);
   return "sha256:" +
          sha256_hex(nlohmann::json{
-                        {"api_version", "trainvm.host-launch-profile/v1"},
+                        {"api_version", "trainvm.host-launch-profile/v2"},
                         {"profile", encode_json(profile)},
                     }
                         .dump());

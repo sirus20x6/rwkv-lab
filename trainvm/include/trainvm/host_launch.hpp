@@ -58,6 +58,7 @@ struct ResolvedLaunchIdentity {
   AdapterKey adapter_key;
   std::string code_fingerprint;
   std::vector<std::string> required_capabilities;
+  std::vector<std::string> provided_capabilities{};
   std::string host_registry_digest;
   std::string host_profile_digest;
   std::string concurrency_key;

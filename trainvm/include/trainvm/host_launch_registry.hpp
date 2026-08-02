@@ -15,6 +15,9 @@ namespace trainvm {
 struct HostLaunchProfile {
   AdapterKey key;
   std::string code_fingerprint;
+  // Capabilities implemented by these exact sealed code bytes. Requests may
+  // require a subset, but cannot cause the worker to advertise new support.
+  std::vector<std::string> provided_capabilities{};
   std::string executable_path;
   std::string executable_fingerprint;
   std::optional<std::string> code_path;

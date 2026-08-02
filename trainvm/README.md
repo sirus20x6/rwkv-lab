@@ -93,8 +93,10 @@ Implemented now:
   concurrent/repeated steps on one fenced launch intent, and fails closed on registry drift;
 - a separate immutable host-launch registry and deterministic `worker.launch_bound` receipt that
   bind the exact active operation to a host/boot, versioned public argv, verified source evidence,
-  and sealed executable/code bytes opened beneath trusted Linux `openat2` dirfds; this resolver is
-  process-free and structurally excludes dynamic credentials;
+  sealed executable/code bytes opened beneath trusted Linux `openat2` dirfds, and the capabilities
+  provided by those exact bytes; this resolver proves required capabilities are a subset of the
+  independently declared provided set, is process-free, and structurally excludes dynamic
+  credentials;
 - a strongly typed authority-time sampler that separates display-only wall time from Linux
   `CLOCK_BOOTTIME`, latches one boot UUID, and fails closed on boot-time regression;
 - typed host inventory, probe/context evidence, topology policies, occupancy snapshots, stable
@@ -367,7 +369,7 @@ format change must update the golden test and supply a plan-schema migration rat
 returns either structured diagnostics or the native compiler's canonical plan and content hash.
 `serve` is the stateful mutation boundary. The dashboard connects to its Unix socket through gRPC;
 it never opens the journal writable. Startup requires bounded `trainvm.adapters/v2` and
-`trainvm.host-launches/v1` registry documents, decoded strictly and retained immutably for the
+`trainvm.host-launches/v2` registry documents, decoded strictly and retained immutably for the
 daemon lifetime. An explicitly supplied host registry with no profiles is the launch-disabled
 configuration; missing or invalid host authority fails startup. `SubmitExperiment`
 validates every exact adapter profile before validation succeeds or a run is created, and supports
@@ -404,6 +406,13 @@ the daemon launch-capable. Privileged crash qualification and trainer safe-point
 subsequent milestones. A worker launch ticket is a protocol authorization only
 until it is paired with a trusted descriptor digest, resolved launch specification, host identity,
 and durable process receipt.
+
+Host-launch v2 closes capability attestation over the sealed code identity. Adapter and selected
+training-component profiles form the immutable `required_capabilities` set. The exact host profile
+separately declares `provided_capabilities`; resolution fails unless `required` is a subset of
+`provided`. Both sets are frozen in `trainvm.resolved-launch/v2`, and the sealed worker bootstrap
+contains only the provided set. A run therefore cannot make a worker appear to implement FA4,
+FP8, an optimizer, or a lifecycle protocol merely by requesting that capability.
 
 Host resource admission uses a separate typed client above the same bounded mutation channel.
 Portable accelerator declarations are lowered by a pure deterministic builder into one sealed

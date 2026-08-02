@@ -33,7 +33,7 @@ void require_bootstrap_binding(const HostdProcessPrepareRequest& request,
       bootstrap.adapter != identity.adapter_key.adapter ||
       bootstrap.adapter_version != identity.adapter_key.version ||
       bootstrap.code_fingerprint != identity.code_fingerprint ||
-      bootstrap.capabilities != identity.required_capabilities ||
+      bootstrap.capabilities != identity.provided_capabilities ||
       bootstrap.concurrency_key != identity.concurrency_key ||
       bootstrap.lease_id != identity.lease_id ||
       bootstrap.fencing_token != identity.fencing_token) {

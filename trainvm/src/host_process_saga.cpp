@@ -32,7 +32,7 @@ HostProcessSagaSnapshot HostProcessSagaReconciler::reconcile(
       .adapter = identity.adapter_key.adapter,
       .adapter_version = identity.adapter_key.version,
       .code_fingerprint = identity.code_fingerprint,
-      .capabilities = identity.required_capabilities,
+      .capabilities = identity.provided_capabilities,
       .last_acked_controller_sequence = 0U,
       .concurrency_key = identity.concurrency_key,
       .lease_id = identity.lease_id,

@@ -233,8 +233,12 @@ lock. The same resolved object is included in the immutable worker invocation; e
 supply import paths, argv, environment variables, or implementation code.
 
 Required capabilities from all selected components are unioned with the adapter operation's
-capabilities before the launch intent is committed. A worker therefore cannot accept an optimizer
-or fused kernel it did not explicitly advertise. Components may only attach to external process
+capabilities before the launch intent is committed. The immutable `trainvm.host-launches/v2`
+profile for the exact sealed code bytes independently declares its provided capabilities; host
+resolution proves the required set is a subset and freezes both sets in
+`trainvm.resolved-launch/v2`. The bootstrap carries the provided set rather than echoing the
+request. A worker therefore cannot accept an optimizer or fused kernel it did not independently
+advertise. Components may only attach to external process
 operations, and an exact-resume plan rejects any selected stateful component whose state grade is
 merely compatible. Optimizer state, schedule/curriculum cursors, parameter-routing identity, and
 precision/scaler state become part of the later checkpoint manifest contract rather than ad hoc
