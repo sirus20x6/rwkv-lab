@@ -1,0 +1,17 @@
+{
+  "api_version": "trainvm.acceptance/v1",
+  "commit": "251118ed3a958c01b91bb1e1d46078f1574484dc",
+  "dirty_worktree": true,
+  "generated_at": "2026-08-02T23:46:57Z",
+  "suites": [
+    {"name": "native-configure", "status": "passed", "detail": "evidence/native-configure.log"},
+    {"name": "native-build", "status": "passed", "detail": "evidence/native-build.log"},
+    {"name": "native-ctest", "status": "passed", "detail": "evidence/native-ctest.log"},
+    {"name": "compatibility-catalog", "status": "passed", "detail": "evidence/compatibility-catalog.log"},
+    {"name": "schema-golden", "status": "passed", "detail": "evidence/schema-golden.log"},
+    {"name": "coverage-gate", "status": "passed", "detail": "evidence/coverage-gate.log"},
+    {"name": "python-cpu", "status": "passed", "detail": "evidence/python-cpu.log"},
+    {"name": "go", "status": "passed", "detail": "evidence/go.log"},
+    {"name": "gpu", "status": "skipped", "detail": "not requested; pass --gpu (shares the device with live training)"}
+  ]
+}
