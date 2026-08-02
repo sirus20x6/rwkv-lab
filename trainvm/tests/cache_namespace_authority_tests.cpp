@@ -70,7 +70,7 @@ AdapterRegistry adapter_registry(bool compile = true) {
 
 HostLaunchRegistry launch_registry() {
   return HostLaunchRegistry(HostLaunchRegistryDocument{
-      .api_version = "trainvm.host-launches/v2",
+      .api_version = "trainvm.host-launches/v3",
       .trusted_roots = {"/opt/trainvm"},
       .profiles = {HostLaunchProfile{
           .key = adapter_key(),
@@ -151,7 +151,7 @@ ResolvedLaunchSpec launch(const AdapterRegistry& adapters,
       .topology_digest = inventory.topology_digest,
   };
   ResolvedLaunchIdentity identity{
-      .api_version = "trainvm.resolved-launch/v2",
+      .api_version = "trainvm.resolved-launch/v3",
       .launch_event_id = "run-1:worker-launch:train:train@1",
       .run_id = "run-1",
       .node_id = "train",

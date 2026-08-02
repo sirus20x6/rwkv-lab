@@ -475,7 +475,7 @@ bool canonical_uuid(std::string_view value) {
 
 void validate_resolved_identity(const ResolvedLaunchIdentity& identity) {
   const AdapterKey& key = identity.adapter_key;
-  if (identity.api_version != "trainvm.resolved-launch/v2" ||
+  if (identity.api_version != "trainvm.resolved-launch/v3" ||
       identity.run_id.empty() || identity.run_id.size() > 512U ||
       identity.node_id.empty() || identity.node_id.size() > 128U ||
       identity.attempt_id.empty() || identity.attempt_id.size() > 512U ||
@@ -553,11 +553,18 @@ void validate_resolved_identity(const ResolvedLaunchIdentity& identity) {
       throw std::invalid_argument(
           "resolved Python code bytes disagree with the adapter fingerprint");
     }
+    if (identity.code_argument_index >= identity.public_arguments.size()) {
+      throw std::invalid_argument(
+          "resolved Python launch has an out-of-range code argument slot");
+    }
   } else if (identity.code ||
              identity.executable.sealed_sha256 !=
                  identity.code_fingerprint) {
     throw std::invalid_argument(
         "resolved native code bytes disagree with the adapter fingerprint");
+  } else if (identity.code_argument_index != 0U) {
+    throw std::invalid_argument(
+        "resolved native launch declares a code argument slot");
   }
   if (!canonical_absolute_path(identity.working_directory.source_path) ||
       identity.working_directory.device == 0U ||
@@ -614,6 +621,7 @@ nlohmann::json resolved_launch_identity_json(
       {"host", {{"host_id", identity.host.host_id},
                 {"boot_id", identity.host.boot_id}}},
       {"executable", file_identity_json(identity.executable)},
+      {"code_argument_index", identity.code_argument_index},
       {"public_arguments", identity.public_arguments},
       {"working_directory",
        directory_identity_json(identity.working_directory)},
@@ -788,7 +796,7 @@ ResolvedLaunch HostLaunchResolver::resolve(
   OpenedPath working_directory = open_beneath(
       registry_.trusted_roots(), profile.working_directory, O_PATH, true);
   ResolvedLaunchIdentity identity{
-      .api_version = "trainvm.resolved-launch/v2",
+      .api_version = "trainvm.resolved-launch/v3",
       .launch_event_id = ticket.run_id + ":worker-launch:" + ticket.node_id +
                          ":" + ticket.attempt_id,
       .run_id = ticket.run_id,
@@ -810,6 +818,7 @@ ResolvedLaunch HostLaunchResolver::resolve(
       .executable = executable.identity,
       .code = code ? std::optional<VerifiedLaunchArtifact>(code->identity)
                    : std::nullopt,
+      .code_argument_index = profile.code_argument_index,
       .public_arguments = profile.public_arguments,
       .working_directory =
           {.source_path = profile.working_directory,

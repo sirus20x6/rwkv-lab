@@ -36,6 +36,7 @@ struct LinuxStoppedLaunchSpec final {
   int working_directory_fd{-1};
   LinuxWorkerCredentialSpec credentials;
   std::optional<std::int32_t> nice;
+  std::uint16_t code_argument_index{};
   std::vector<std::string> arguments;
 
   bool operator==(const LinuxStoppedLaunchSpec&) const = default;

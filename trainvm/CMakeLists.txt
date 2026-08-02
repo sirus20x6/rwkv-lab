@@ -249,6 +249,14 @@ if(TRAINVM_PYTHON_EXECUTABLE)
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_rwkv_lab_worker_contract.py
       $<TARGET_FILE:trainvm>
   )
+  add_test(NAME rwkv_lab_worker_artifact
+    COMMAND ${TRAINVM_PYTHON_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_rwkv_lab_worker_artifact.py
+      ${CMAKE_CURRENT_SOURCE_DIR}/../scripts/build_trainvm_worker_artifact.py
+      ${CMAKE_CURRENT_SOURCE_DIR}/../scripts/materialize_trainvm_worker_deployment.py
+      $<TARGET_FILE:trainvm>
+      ${CMAKE_CURRENT_SOURCE_DIR}/../src
+  )
 endif()
 add_executable(authority_time_tests tests/authority_time_tests.cpp)
 target_compile_options(authority_time_tests PRIVATE

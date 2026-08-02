@@ -123,24 +123,37 @@ mutable fields. Cached conditioning rejects a zero-to-positive caption-dropout t
 null embedding was built. Qwen retains its frozen configuration object and uses a separate mutable
 overlay for learning rate and evaluation cadence; startup LR overrides proportionally preserve the
 PowerCool minimum ratio, and live rebasing preserves the current schedule phase. Its checkpoints
-carry the same verified effective-control state. Lifecycle pause/checkpoint/cancel remains separate
-adapter/checkpoint-state work.
+carry the same verified effective-control state. The lifecycle service remains separate from
+mutable controls and only exposes the checkpoint/pause/cancel surface declared by each exact
+adapter profile.
 
 ## Fixed adapter runner
 
-`scripts/trainvm_worker_entrypoint.py` is the sole sealed Python code artifact for the currently
-migrated training adapters. Hostd executes it from fd 3 and appends exactly
-`--trainvm-bootstrap-fd=4`; the runner rejects every other argument. Its dispatch table contains
-exact `(adapter, version, operation, contract)` tuples and fixed imports for the MageFlow appearance
-expert, MageFlow terminal expert, and Qwen AO3 continuation. An experiment cannot select an import
-string, script, argv, environment override, or entry-point path.
+`scripts/build_trainvm_worker_artifact.py` deterministically builds the sole sealed project-code
+artifact for the currently migrated training adapters. The stored zipapp contains the complete
+`rwkv_lab` Python source surface, the checked-in TrainVM protobuf package, one fixed `__main__`, and
+an embedded canonical per-member SHA-256 manifest. Member order, timestamps, modes, and bytes are
+fixed; the normal native test target builds it twice and requires byte equality. Hostd executes the
+sealed interpreter with `-I`, installs the zipapp at fd 3 through its separately bound code-argument
+slot, clears the environment, and appends exactly `--trainvm-bootstrap-fd=4`; the runner rejects
+every other argument. Its dispatch table contains exact `(adapter, version, operation, contract)`
+tuples for the MageFlow appearance expert, MageFlow terminal expert, Qwen AO3 continuation, and
+scratch RWKV pretraining. An experiment cannot select an import string, script, argv, environment
+override, or entry-point path.
+
+`trainvm inspect-rwkv-lab-deployment` lowers the exact zipapp/interpreter fingerprints, paths,
+working directory, and trusted roots into matching reflected adapter and `trainvm.host-launches/v3`
+documents. Every one of the four profiles advertises the capability set implemented by those exact
+worker bytes; requested capabilities may only narrow it. The artifact execution gate loads the
+zipapp under `python -I` with an empty environment and verifies that the generated host registry
+binds the archive digest and isolation-before-code argv ABI.
 
 Trainer configuration is an inline object in invocation `inputs.config`. Because the invocation is
 canonical and content-addressed, these values cannot change between submission and execution. A
 pathname to a mutable JSON configuration is rejected. The adapter also requires the trainer's run
 directory to equal `workspace.run_directory`. `WorkspacePathAuthority` canonicalizes every
 top-level model, dataset/pack, manifest, checkpoint/resume, and encoder-cache pathname used by the
-three fixed adapters. Existing reads must resolve beneath a declared read or write root; prospective
+four fixed adapters. Existing reads must resolve beneath a declared read or write root; prospective
 writes must have a resolved directory ancestor beneath a declared write root; symlink escapes and
 relative or non-normalized paths fail before trainer code runs. Larger configurations must become
 immutable artifact manifests with authority-verified fingerprints rather than path references.
@@ -148,9 +161,10 @@ immutable artifact manifests with authority-verified fingerprints rather than pa
 The fixed runner returns an already-completed replay without executing tensor work, publishes a
 durably receipted terminal result on success, freezes any declared checkpoint before that terminal
 result, and converts trainer exceptions to a bounded
-`operation.failed` event containing only an error class. It does not claim live lifecycle
-pause/checkpoint/cancel support yet, and mutable-control capability remains per-adapter rather than
-an inference from the shared runtime. Top-level paths are now
+`operation.failed` event containing only an error class. MageFlow and Qwen profiles expose their
+implemented compatible-resume checkpoint and safe-point lifecycle controls; scratch RWKV exposes
+only terminal-checkpoint semantics. Mutable-control and lifecycle capability remain exact
+per-adapter claims rather than inferences from the shared runtime. Top-level paths are now
 confined, but nested references inside image JSONL and packed-corpus/model manifests remain
 non-production-qualified until the authority binds their immutable artifact identities and the
 adapter recursively validates every referenced object.
@@ -161,6 +175,29 @@ Install the optional runtime dependencies with:
 uv sync --extra trainvm-worker
 ```
 
+Materialize an immutable deployment directory without hand-editing either registry:
+
+```sh
+scripts/materialize_trainvm_worker_deployment.py \
+  --trainvm /opt/trainvm/bin/trainvm \
+  --python /opt/trainvm/python/bin/python3 \
+  --source-root /src/rwkv-lab/src \
+  --output-directory /opt/trainvm/workers/rwkv-lab-v1 \
+  --working-directory /srv/trainvm/work \
+  --trusted-root /opt/trainvm \
+  --trusted-root /srv/trainvm
+```
+
+The command publishes `rwkv-lab-worker.pyz`, `adapters.json`, `host-launches.json`, and a digest-bound
+`deployment-receipt.json`. It is byte-idempotent and refuses to replace changed outputs unless the
+operator explicitly supplies `--replace`.
+
+The interpreter path must be a regular executable, not the usual symlink created by many virtual
+environment tools. Hostd refuses symlink traversal for launch artifacts, and silently resolving a
+venv symlink to the base interpreter would select the wrong package closure. A deployment can use a
+venv created with a copied interpreter, but that runtime tree remains unqualified until the
+third-party dependency-closure milestone described below is complete.
+
 Regenerate checked-in Python protobuf bindings after changing the protocol:
 
 ```sh
@@ -169,7 +206,9 @@ scripts/generate_trainvm_python_proto.sh
 
 Hostd descriptor delegation and the stopped launcher now attest the bootstrap, install sealed
 Python code at fd 3 and the bootstrap at fd 4, and bind their combined identity into durable launch
-evidence. The fixed runner closes the entry-point/argv boundary. Production process launch remains
-deployment-gated: TrainVM now drives the guarded hostd transaction, while complete runtime closure,
-nested path authority, privileged crash-window evidence, and per-adapter end-to-end qualification
-remain outstanding.
+evidence. The fixed runner closes the project-code entry-point/argv boundary. Production process
+launch remains deployment-gated: TrainVM drives the guarded hostd transaction, while third-party
+Python/native-library runtime closure, nested path authority, privileged crash-window evidence, and
+per-adapter end-to-end qualification remain outstanding. `-I` removes user-site and environment
+injection, but the interpreter's system/venv packages are not yet falsely treated as part of the
+zipapp fingerprint.

@@ -68,6 +68,7 @@ struct ResolvedLaunchIdentity {
   HostIdentity host;
   VerifiedLaunchArtifact executable;
   std::optional<VerifiedLaunchArtifact> code;
+  std::uint16_t code_argument_index{};
   std::vector<std::string> public_arguments;
   OpenedDirectoryIdentity working_directory;
 

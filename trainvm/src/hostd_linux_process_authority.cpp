@@ -210,9 +210,9 @@ LinuxPreparedLaunch LinuxProcessAuthority::prepare(
       resolved.duplicate_working_directory_fd());
   std::vector<std::string> arguments = spec.identity.public_arguments;
   if (code) {
-    if (arguments.empty())
-      reject("Python launch has no fixed code argument slot");
-    arguments.front() =
+    if (spec.identity.code_argument_index >= arguments.size())
+      reject("Python launch has no in-range fixed code argument slot");
+    arguments.at(spec.identity.code_argument_index) =
         "/proc/self/fd/" + std::to_string(kLinuxWorkerCodeDescriptor);
   }
   arguments.push_back("--trainvm-bootstrap-fd=" +
@@ -234,6 +234,7 @@ LinuxPreparedLaunch LinuxProcessAuthority::prepare(
                   ? std::optional<std::int32_t>{
                         static_cast<std::int32_t>(*process_policy.nice)}
                   : std::nullopt,
+      .code_argument_index = spec.identity.code_argument_index,
       .arguments = std::move(arguments),
   });
   const LinuxStoppedChildIdentity& observed = child.identity();

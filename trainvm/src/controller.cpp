@@ -1935,6 +1935,8 @@ ResolvedLaunchSpec Controller::bind_worker_launch(
           host_profile.executable_path ||
       binding.identity.executable.sealed_sha256 !=
           host_profile.executable_fingerprint ||
+      binding.identity.code_argument_index !=
+          host_profile.code_argument_index ||
       binding.identity.public_arguments != host_profile.public_arguments ||
       binding.identity.working_directory.source_path !=
           host_profile.working_directory ||

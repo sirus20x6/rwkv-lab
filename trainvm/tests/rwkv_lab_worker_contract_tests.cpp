@@ -96,6 +96,33 @@ int main() {
                                   component_capabilities),
             "sealed rwkv_lab worker contract must cover the checked-in component catalog");
 
+    const auto deployment = trainvm::rwkv_lab_worker_deployment({
+        .code_path = "/opt/trainvm/workers/rwkv-lab.pyz",
+        .code_fingerprint = fingerprint,
+        .executable_path = "/opt/trainvm/python/bin/python3",
+        .executable_fingerprint = "sha256:" + std::string(64U, 'b'),
+        .working_directory = "/srv/trainvm/work",
+        .trusted_roots = {"/srv/trainvm", "/opt/trainvm"},
+    });
+    require(trainvm::encode_json(deployment.adapter_registry) ==
+                    trainvm::encode_json(contract.adapter_registry) &&
+                deployment.provided_capabilities ==
+                    contract.provided_capabilities &&
+                deployment.host_launch_registry.api_version ==
+                    "trainvm.host-launches/v3" &&
+                deployment.host_launch_registry.profiles.size() == 4U,
+            "deployment lowering must retain the exact reflected worker catalog");
+    for (const trainvm::HostLaunchProfile& launch :
+         deployment.host_launch_registry.profiles) {
+      require(launch.code_fingerprint == fingerprint &&
+                  launch.provided_capabilities ==
+                      contract.provided_capabilities &&
+                  launch.code_argument_index == 1U &&
+                  launch.public_arguments ==
+                      std::vector<std::string>({"-I", "rwkv-lab-worker.pyz"}),
+              "each deployment profile must bind isolation before its sealed code slot");
+    }
+
     bool invalid_fingerprint_rejected = false;
     try {
       (void)trainvm::rwkv_lab_worker_contract("sha256:not-a-digest");

@@ -132,9 +132,10 @@ void validate_profile(HostLaunchProfile& profile,
       throw std::invalid_argument(
           "python host launch profiles require a canonical trusted code_path");
     }
-    if (profile.public_arguments.empty()) {
+    if (profile.public_arguments.empty() ||
+        profile.code_argument_index >= profile.public_arguments.size()) {
       throw std::invalid_argument(
-          "python host launch profiles require a fixed code argument slot");
+          "python host launch profiles require an in-range fixed code argument slot");
     }
   } else {
     if (profile.code_path) {
@@ -144,6 +145,10 @@ void validate_profile(HostLaunchProfile& profile,
     if (profile.code_fingerprint != profile.executable_fingerprint) {
       throw std::invalid_argument(
           "native host launch code and executable fingerprints must match");
+    }
+    if (profile.code_argument_index != 0U) {
+      throw std::invalid_argument(
+          "native host launch profiles cannot declare a code argument slot");
     }
   }
 
@@ -193,9 +198,9 @@ std::vector<std::string> validate_roots(std::vector<std::string> roots) {
 }  // namespace
 
 HostLaunchRegistry::HostLaunchRegistry(HostLaunchRegistryDocument document) {
-  if (document.api_version != "trainvm.host-launches/v2") {
+  if (document.api_version != "trainvm.host-launches/v3") {
     throw std::invalid_argument(
-        "host launch registry api_version must be trainvm.host-launches/v2");
+        "host launch registry api_version must be trainvm.host-launches/v3");
   }
   if (document.profiles.size() > kMaximumProfiles) {
     throw std::invalid_argument(
@@ -221,7 +226,7 @@ HostLaunchRegistry::HostLaunchRegistry(HostLaunchRegistryDocument document) {
   }
   nlohmann::json canonical_registry =
       encode_json(HostLaunchRegistryDocument{
-          .api_version = "trainvm.host-launches/v2",
+          .api_version = "trainvm.host-launches/v3",
           .trusted_roots = trusted_roots_,
           .profiles = {},
       });
@@ -355,7 +360,7 @@ std::string HostLaunchRegistry::profile_digest(
   const HostLaunchProfile& profile = resolve(key, code_fingerprint);
   return "sha256:" +
          sha256_hex(nlohmann::json{
-                        {"api_version", "trainvm.host-launch-profile/v2"},
+                        {"api_version", "trainvm.host-launch-profile/v3"},
                         {"profile", encode_json(profile)},
                     }
                         .dump());

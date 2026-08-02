@@ -352,8 +352,10 @@ void validate_spec(const LinuxStoppedLaunchSpec& spec) {
       std::to_string(kLinuxWorkerBootstrapDescriptor);
   if (spec.arguments.empty() || spec.arguments.back() != bootstrap_argument ||
       (spec.code_fd &&
-       spec.arguments.front() !=
-           "/proc/self/fd/" + std::to_string(kLinuxWorkerCodeDescriptor))) {
+       (spec.code_argument_index >= spec.arguments.size() ||
+        spec.arguments.at(spec.code_argument_index) !=
+            "/proc/self/fd/" +
+                std::to_string(kLinuxWorkerCodeDescriptor)))) {
     reject("stopped launch inherited-descriptor argv ABI is invalid");
   }
   std::size_t argument_bytes = spec.executable_name.size();

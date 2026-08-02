@@ -263,7 +263,9 @@ qualification remains a deployment gate; unit and cooperative transport evidence
 as that qualification. The transport and stopped-launcher layers
 now carry and attest sealed Python code and per-attempt bootstrap descriptors, install them at the
 fixed exec-surviving fd 3/fd 4 ABI, and bind both into durable launch evidence without exposing
-dynamic values through argv or the environment.
+dynamic values through argv or the environment. Host-launch v3 also binds the exact public argv
+slot replaced by fd 3, so Python profiles retain `-I` before the zipapp instead of accidentally
+replacing their isolation flag.
 MIG evidence is collected and attributed per instance, but grants remain disabled: the generic
 conflict selector intentionally blocks a child while its full-device parent is nonselectable, until
 a partition-aware enforcement policy proves that scheduling relationship end to end.
@@ -365,7 +367,7 @@ advertise the catalog's exact capabilities.
 `inspect-rwkv-lab-worker` emits the directly loadable `trainvm.adapters/v2`
 document for the real MageFlow appearance/terminal, Qwen AO3, and scratch-RWKV
 handlers, plus the canonical `provided_capabilities` list to place in each
-matching `trainvm.host-launches/v2` profile. The caller supplies the digest of
+matching `trainvm.host-launches/v3` profile. The caller supplies the digest of
 the already-built immutable worker code artifact; invalid digests fail closed.
 Lifecycle grades are intentionally honest: the three cadence-checkpointed
 trainers are compatibility-resumable, while scratch RWKV exposes only its
@@ -380,7 +382,7 @@ format change must update the golden test and supply a plan-schema migration rat
 returns either structured diagnostics or the native compiler's canonical plan and content hash.
 `serve` is the stateful mutation boundary. The dashboard connects to its Unix socket through gRPC;
 it never opens the journal writable. Startup requires bounded `trainvm.adapters/v2` and
-`trainvm.host-launches/v2` registry documents, decoded strictly and retained immutably for the
+`trainvm.host-launches/v3` registry documents, decoded strictly and retained immutably for the
 daemon lifetime. An explicitly supplied host registry with no profiles is the launch-disabled
 configuration; missing or invalid host authority fails startup. `SubmitExperiment`
 validates every exact adapter profile before validation succeeds or a run is created, and supports
@@ -418,10 +420,10 @@ subsequent milestones. A worker launch ticket is a protocol authorization only
 until it is paired with a trusted descriptor digest, resolved launch specification, host identity,
 and durable process receipt.
 
-Host-launch v2 closes capability attestation over the sealed code identity. Adapter and selected
+Host-launch v3 closes capability attestation and code-slot placement over the sealed code identity. Adapter and selected
 training-component profiles form the immutable `required_capabilities` set. The exact host profile
 separately declares `provided_capabilities`; resolution fails unless `required` is a subset of
-`provided`. Both sets are frozen in `trainvm.resolved-launch/v2`, and the sealed worker bootstrap
+`provided`. Both sets are frozen in `trainvm.resolved-launch/v3`, and the sealed worker bootstrap
 contains only the provided set. A run therefore cannot make a worker appear to implement FA4,
 FP8, an optimizer, or a lifecycle protocol merely by requesting that capability.
 

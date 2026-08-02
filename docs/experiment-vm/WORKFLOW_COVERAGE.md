@@ -184,6 +184,12 @@ journal verification. It intentionally runs without hostd and therefore proves t
 authoring/replay remains usable; it does not claim worker launch, privileged host recovery, or GPU
 training acceptance.
 
+The separate `rwkv_lab_worker_artifact` CTest now closes the non-GPU project-code deployment
+boundary: it builds the real worker zipapp twice, verifies exact bytes and every embedded source
+digest, loads it under isolated Python with an empty environment, lowers all four real adapter
+profiles into the v3 host registry, and materializes the same deployment twice without drift. It
+does not replace the outstanding privileged hostd or real trainer qualification scenarios below.
+
 1. Validate and plan the example MageFlow document without starting a worker.
 2. Kill TrainVM before dispatch, after dispatch, before receipt, and after receipt at every node; replay
    must choose the same next action without duplicating a published artifact.

@@ -1,5 +1,7 @@
 #include "trainvm/rwkv_lab_worker_contract.hpp"
 
+#include <algorithm>
+#include <ranges>
 #include <utility>
 
 namespace trainvm {
@@ -151,6 +153,40 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
           "worker.controls",
           "worker.metrics",
       },
+  };
+}
+
+RwkvLabWorkerDeploymentContract rwkv_lab_worker_deployment(
+    RwkvLabWorkerDeploymentSpec spec) {
+  RwkvLabWorkerContract worker =
+      rwkv_lab_worker_contract(spec.code_fingerprint);
+  std::ranges::sort(spec.trusted_roots);
+  std::vector<HostLaunchProfile> launches;
+  launches.reserve(worker.adapter_registry.profiles.size());
+  for (const AdapterProfile& adapter : worker.adapter_registry.profiles) {
+    launches.push_back({
+        .key = adapter.key,
+        .code_fingerprint = adapter.code_fingerprint,
+        .provided_capabilities = worker.provided_capabilities,
+        .executable_path = spec.executable_path,
+        .executable_fingerprint = spec.executable_fingerprint,
+        .code_path = spec.code_path,
+        .code_argument_index = 1U,
+        .public_arguments = {"-I", "rwkv-lab-worker.pyz"},
+        .working_directory = spec.working_directory,
+    });
+  }
+  HostLaunchRegistryDocument host{
+      .api_version = "trainvm.host-launches/v3",
+      .trusted_roots = std::move(spec.trusted_roots),
+      .profiles = std::move(launches),
+  };
+  (void)AdapterRegistry(worker.adapter_registry.profiles);
+  (void)HostLaunchRegistry(host);
+  return {
+      .adapter_registry = std::move(worker.adapter_registry),
+      .host_launch_registry = std::move(host),
+      .provided_capabilities = std::move(worker.provided_capabilities),
   };
 }
 

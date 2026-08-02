@@ -33,6 +33,8 @@ void usage() {
       << "  trainvm inspect-training-components <training-components.json>\n"
       << "  trainvm inspect-hostd-client <hostd-client.json>\n"
       << "  trainvm inspect-rwkv-lab-worker <sha256-code-fingerprint>\n"
+      << "  trainvm inspect-rwkv-lab-deployment <worker.pyz> <worker-sha256> "
+         "<python> <python-sha256> <working-directory> <trusted-root>...\n"
       << "  trainvm inspect-registry <experiments.db> [--task <task>] "
          "[--metric <metric>] [--baseline <config>] [--limit <count>]\n"
       << "  trainvm serve --journal <journal.db> --socket <trainvm.sock> "
@@ -325,6 +327,49 @@ int inspect_rwkv_lab_worker_command(std::string code_fingerprint) {
   return 0;
 }
 
+int inspect_rwkv_lab_deployment_command(int argc, char** argv) {
+  if (argc < 8) {
+    usage();
+    return 64;
+  }
+  const auto canonical = [](const char* path) {
+    return std::filesystem::canonical(path).string();
+  };
+  std::vector<std::string> trusted_roots;
+  trusted_roots.reserve(static_cast<std::size_t>(argc - 7));
+  for (int index = 7; index < argc; ++index) {
+    trusted_roots.push_back(canonical(argv[index]));
+  }
+  const trainvm::RwkvLabWorkerDeploymentContract deployment =
+      trainvm::rwkv_lab_worker_deployment({
+          .code_path = canonical(argv[2]),
+          .code_fingerprint = argv[3],
+          .executable_path = canonical(argv[4]),
+          .executable_fingerprint = argv[5],
+          .working_directory = canonical(argv[6]),
+          .trusted_roots = std::move(trusted_roots),
+      });
+  const trainvm::AdapterRegistry adapters(
+      deployment.adapter_registry.profiles);
+  const trainvm::HostLaunchRegistry launches(
+      deployment.host_launch_registry);
+  std::cout << nlohmann::json{
+                   {"schema", "trainvm.rwkv-lab-worker-deployment/v1"},
+                   {"adapter_registry_digest", adapters.registry_digest()},
+                   {"host_launch_registry_digest",
+                    launches.registry_digest()},
+                   {"adapter_registry",
+                    trainvm::encode_json(deployment.adapter_registry)},
+                   {"host_launch_registry",
+                    trainvm::encode_json(deployment.host_launch_registry)},
+                   {"provided_capabilities",
+                    deployment.provided_capabilities},
+               }
+                   .dump(2)
+            << '\n';
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -352,6 +397,10 @@ int main(int argc, char** argv) {
     if (argc == 3 &&
         std::string_view(argv[1]) == "inspect-rwkv-lab-worker") {
       return inspect_rwkv_lab_worker_command(argv[2]);
+    }
+    if (argc >= 2 &&
+        std::string_view(argv[1]) == "inspect-rwkv-lab-deployment") {
+      return inspect_rwkv_lab_deployment_command(argc, argv);
     }
     if (argc >= 3 && std::string_view(argv[1]) == "inspect-registry") {
       return inspect_registry_command(argc, argv);

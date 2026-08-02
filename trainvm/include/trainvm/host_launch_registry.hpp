@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <map>
 #include <optional>
@@ -21,6 +22,10 @@ struct HostLaunchProfile {
   std::string executable_path;
   std::string executable_fingerprint;
   std::optional<std::string> code_path;
+  // Index of the public argv literal replaced by hostd with the immutable
+  // inherited code descriptor. Python profiles can therefore retain flags
+  // such as `-I` before the script/zipapp without trusting a path argument.
+  std::uint16_t code_argument_index{};
   // Fixed non-secret argv literals. Dynamic invocation and credentials use
   // typed/sealed descriptors in later protocol phases, never this manifest.
   std::vector<std::string> public_arguments;
