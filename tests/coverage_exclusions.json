@@ -1,0 +1,14 @@
+{
+  "comment": "Files under tests/ that intentionally contribute no tests to the CI 'not gpu' run. scripts/ci_coverage_gate.py fails on any test_*.py absent from the run and absent from this list, and on any entry here whose file no longer exists. Every exclusion states what runs the file instead, so 'not collected' can never quietly mean 'not covered'.",
+  "excluded": {
+    "tests/test_compile_core.py": "Standalone full-size compile benchmark with no test functions. Requires an otherwise idle GPU and is run deliberately by scripts/test_parallel.sh under RWKV_GPU_STRESS=1, not by pytest collection.",
+    "tests/test_dmt_graph.py": "Standalone CUDA-graph parity program with no test functions. Same RWKV_GPU_STRESS=1 opt-in path as test_compile_core.py.",
+    "tests/test_loop_invariants.py": "Diagnostic module: defines a Core module and gate_mode_of helper, no test functions. It was named in the previous hand-maintained CI list and therefore contributed nothing while appearing covered.",
+    "tests/test_loop_new_features.py": "Diagnostic module defining a Core module, no test functions. Also named in the previous hand-maintained CI list while contributing nothing.",
+    "tests/test_megakernel.py": "Module-level pytest.mark.gpu; runs in the serialized GPU job.",
+    "tests/test_megakernel_linear.py": "Module-level pytest.mark.gpu; runs in the serialized GPU job.",
+    "tests/test_megakernel_multitoken.py": "Module-level pytest.mark.gpu; runs in the serialized GPU job.",
+    "tests/test_megakernel_ops.py": "Module-level pytest.mark.gpu; runs in the serialized GPU job.",
+    "tests/test_rosa_cuda.py": "Module-level pytest.mark.gpu; runs in the serialized GPU job."
+  }
+}

@@ -10,7 +10,7 @@ The catalog is evidence only. Its root `authority` is fixed to
 capability, credential, or execution method. Only the sealed adapter and host-execution registries
 can authorize work.
 
-The reviewed v1 inventory contains 140 effect-specific records over 141 unique source files.
+The reviewed v1 inventory contains 156 effect-specific records over 145 unique source files.
 Its closed families are `rwkv`, `transformer`, `vision_multimodal`, `mageflow_diffusion`,
 `conversion_distillation`, `rwkv_posttraining`, `rwkv_rlvr`, `external_trainer`, `data_cache`,
 `evaluation_profile_export`, and `control_plane`. The broad `transformer` name is intentional:
@@ -60,6 +60,26 @@ or resume contract: RADIO1D, V4H, MoonViT continuation, native head, raw-pixel s
 compressor are independent evidence records. Every source byte is bound and no profile carries
 adapter or host authority. Legacy dashboard launch and queue handlers are recorded under
 `control_plane` so migration cannot silently forget an old process-control path.
+
+The dashboard mutation surface is closed rather than sampled. Every route the legacy Go router
+registers with a `POST` method has exactly one `http_control_handler` record, and every such record
+binds both its handler file and `dashboard/internal/server/server.go`, the registration table
+itself. Two independent gates keep that closed:
+
+1. adding, removing, or renaming any route changes the router bytes and therefore fails the
+   `source_tree_digest` check before anything else is examined;
+2. `compatibility_catalog_tests` re-reads the registration table and fails when a served legacy
+   route has no record, or a record names a route that is no longer served. TrainVM's own
+   `/api/trainvm/` namespace is excluded because it is declarative authority, not legacy evidence.
+
+The records are candid about what the legacy control plane cannot do. Stop and checkpoint are bare
+signal deliveries with no typed acknowledgement or receipt. Live control patches are whitelisted
+numeric rows in shared SQLite that the trainer polls, with no application point or revision fence.
+`POST /api/experiments/run` starts a detached trainer with no script allowlist, no process group,
+and no audit row. The auto-stop and queue-automation toggles arm background goroutines that signal
+or spawn processes while holding their armed state only in dashboard memory, so neither survives a
+restart nor leaves an audit trail. Preference capture and dataset versioning grow training inputs
+with no published artifact manifest.
 
 Validate the checked-in inventory with:
 

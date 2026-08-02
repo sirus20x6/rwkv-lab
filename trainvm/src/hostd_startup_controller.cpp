@@ -4,13 +4,24 @@
 
 namespace trainvm {
 
+AuthorityClockStartupAuditCommitTime::AuthorityClockStartupAuditCommitTime(
+    AuthorityClock& clock) noexcept
+    : clock_(clock) {}
+
+HostLedgerTime AuthorityClockStartupAuditCommitTime::commit_time() {
+  const AuthorityTimeSample sample = clock_.sample();
+  return {.boottime_ns = sample.boot.nanoseconds,
+          .wall_time_ns = sample.wall.nanoseconds};
+}
+
 HostdCoordinatorStartupAdmission::HostdCoordinatorStartupAdmission(
     HostGrantCoordinator& coordinator)
     : coordinator_(coordinator) {}
 
 HostStartupAuditReceipt HostdCoordinatorStartupAdmission::admit(
-    IConfiguredHostStartupAuditorV2& auditor, const HostLedgerTime& now) {
-  return coordinator_.run_startup_audit(auditor, now);
+    IConfiguredHostStartupAuditorV2& auditor, AuthorityClock& clock) {
+  AuthorityClockStartupAuditCommitTime commit_time(clock);
+  return coordinator_.run_startup_audit(auditor, commit_time);
 }
 
 HostdStartupController::HostdStartupController(
@@ -62,10 +73,10 @@ HostdStartupControllerStatus HostdStartupController::advance() {
 
   status_.phase = HostdStartupPhase::auditing;
   try {
-    const AuthorityTimeSample sample = clock_.sample();
-    status_.admission_receipt = admission_.admit(
-        auditor_, {.boottime_ns = sample.boot.nanoseconds,
-                   .wall_time_ns = sample.wall.nanoseconds});
+    // The clock is handed to the admission authority rather than sampled here:
+    // the audit observation runs inside admit(), and its commit time must not
+    // predate it.
+    status_.admission_receipt = admission_.admit(auditor_, clock_);
     status_.phase = HostdStartupPhase::admitting;
     return status_;
   } catch (...) {

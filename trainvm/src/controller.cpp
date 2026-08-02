@@ -1521,8 +1521,24 @@ const ExecutionState& Controller::recover() {
           plan_.experiment.spec.components.at(node.invoke.component);
       const bool validation = node.invoke.operation == "validate_artifact";
       const bool releasing = node.invoke.operation == "release_resources";
+      const bool qualifying = node.invoke.operation == "qualify_cache";
       const auto dispatch = journal_.dispatch(dispatch_id_for(recovered));
       const auto& acquisition = current_lease_acquisition;
+      // Replay revalidates the verdict against its own receipt rather than
+      // against a fixed payload, so a hand-edited journal cannot flip a
+      // rejection into a qualification during recovery.
+      const bool replayable_qualification =
+          qualifying && event.payload.is_object() &&
+          event.payload.contains("qualified") &&
+          event.payload.at("qualified").is_boolean() &&
+          event.payload.contains("rejection_reasons") &&
+          event.payload.at("rejection_reasons").is_array() &&
+          event.payload.contains("receipt_digest") &&
+          event.payload.at("receipt_digest").is_string() &&
+          event.payload.at("qualified").get<bool>() ==
+              (event.event_type == "cache.qualified") &&
+          event.payload.at("qualified").get<bool>() ==
+              event.payload.at("rejection_reasons").empty();
       nlohmann::json expected_payload = nlohmann::json::object();
       if (releasing && acquisition) {
         expected_payload = {
@@ -1535,7 +1551,8 @@ const ExecutionState& Controller::recover() {
         };
       }
       if (component.runtime != ComponentRuntime::builtin ||
-          component.adapter != "trainvm.core" || (!validation && !releasing) ||
+          component.adapter != "trainvm.core" ||
+          (!validation && !releasing && !qualifying) ||
           !dispatch || dispatch->status != DispatchStatus::completed ||
           dispatch->result_event_id !=
               std::optional<std::string>{event.event_id} ||
@@ -1547,7 +1564,11 @@ const ExecutionState& Controller::recover() {
           (validation && event.event_type != "artifact.validated" &&
            event.event_type != "artifact.invalid") ||
           (releasing && event.event_type != "resource.released") ||
-          event.payload != expected_payload || !acquisition) {
+          (qualifying && event.event_type != "cache.qualified" &&
+           event.event_type != "cache.rejected") ||
+          (qualifying ? !replayable_qualification
+                      : event.payload != expected_payload) ||
+          !acquisition) {
         throw std::runtime_error(
             "journal contains a noncanonical managed builtin result");
       }
@@ -2216,9 +2237,27 @@ const ExecutionState& Controller::release_managed_resources(
                                   true, now);
 }
 
+const ExecutionState& Controller::complete_cache_qualification(
+    const CacheQualificationReceipt& receipt, const AuthorityTimeSample& now) {
+  // Revalidates the receipt against the gate before it can transition a run:
+  // a receipt whose verdict disagrees with its own evidence throws here rather
+  // than becoming durable history.
+  const nlohmann::json body = cache_qualification_receipt_json(receipt);
+  return complete_managed_builtin(
+      "qualify_cache",
+      receipt.qualified ? "cache.qualified" : "cache.rejected", false, now,
+      {{"receipt_digest", receipt.receipt_digest},
+       {"namespace_digest", receipt.evidence.namespace_digest},
+       {"artifact_tree_digest", receipt.evidence.artifact_tree_digest},
+       {"qualified", receipt.qualified},
+       {"rejection_reasons", receipt.rejection_reasons},
+       {"qualification", body}});
+}
+
 const ExecutionState& Controller::complete_managed_builtin(
     std::string_view expected_operation, std::string event_type,
-    bool release_lease, const AuthorityTimeSample& now) {
+    bool release_lease, const AuthorityTimeSample& now,
+    nlohmann::json receipt_payload) {
   recover();
   if (state_.status != ExecutionStatus::running || paused_) {
     throw std::logic_error("managed builtin requires an active running node");
@@ -2231,13 +2270,25 @@ const ExecutionState& Controller::complete_managed_builtin(
       component.adapter != "trainvm.core" ||
       node.invoke.operation != expected_operation ||
       (expected_operation == "validate_artifact" &&
-       event_type != "artifact.validated" && event_type != "artifact.invalid") ||
+       (event_type != "artifact.validated" && event_type != "artifact.invalid")) ||
+      (expected_operation == "qualify_cache" &&
+       (event_type != "cache.qualified" && event_type != "cache.rejected")) ||
       (expected_operation == "release_resources" &&
        (event_type != "resource.released" || !release_lease)) ||
       (expected_operation != "validate_artifact" &&
+       expected_operation != "qualify_cache" &&
        expected_operation != "release_resources")) {
     throw std::logic_error(
         "managed builtin call does not match the active trainvm.core operation");
+  }
+  // Only the resource release carries lease-release authority; a gate node can
+  // never be talked into dropping the fence it is running under.
+  if (release_lease && expected_operation != "release_resources") {
+    throw std::logic_error(
+        "only the typed resource release may release the managed lease");
+  }
+  if (!receipt_payload.is_object()) {
+    throw std::logic_error("managed builtin receipts must be typed objects");
   }
   const std::string& concurrency_key =
       plan_.experiment.spec.workspace.concurrency_key;
@@ -2280,11 +2331,11 @@ const ExecutionState& Controller::complete_managed_builtin(
     throw std::runtime_error(
         "managed builtin dispatch has no matching active projection");
   }
-  nlohmann::json payload = nlohmann::json::object();
+  nlohmann::json payload = std::move(receipt_payload);
   if (release_lease) {
-    payload = {{"concurrency_key", active->concurrency_key},
-               {"lease_id", active->lease_id},
-               {"fencing_token", active->fencing_token}};
+    payload["concurrency_key"] = active->concurrency_key;
+    payload["lease_id"] = active->lease_id;
+    payload["fencing_token"] = active->fencing_token;
   }
   const Event cause{
       .event_id = prepared.dispatch_id + ":builtin-result",

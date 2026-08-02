@@ -47,7 +47,11 @@ class FakeRecovery final : public IHostdRestartProcessRecovery {
 
 class FakeAuditor final : public IConfiguredHostStartupAuditorV2 {
  public:
-  HostStartupAuditReport audit() override { return {}; }
+  std::size_t calls{};
+  HostStartupAuditReport audit() override {
+    ++calls;
+    return {};
+  }
 };
 
 class FakeAdmission final : public IHostdStartupAdmissionAuthority {
@@ -55,11 +59,20 @@ class FakeAdmission final : public IHostdStartupAdmissionAuthority {
   bool fail{};
   std::size_t calls{};
   HostLedgerTime observed_time{};
+  // Ordering evidence: the admission authority owns both the audit and the
+  // commit time, so it must be able to sample after the audit has run.
+  std::size_t auditor_calls_before_time{};
 
-  HostStartupAuditReceipt admit(IConfiguredHostStartupAuditorV2&,
-                                const HostLedgerTime& now) override {
+  HostStartupAuditReceipt admit(IConfiguredHostStartupAuditorV2& auditor,
+                                AuthorityClock& clock) override {
     ++calls;
-    observed_time = now;
+    const HostStartupAuditReport report = auditor.audit();
+    (void)report;
+    auditor_calls_before_time =
+        static_cast<FakeAuditor&>(auditor).calls;
+    const AuthorityTimeSample sample = clock.sample();
+    observed_time = {.boottime_ns = sample.boot.nanoseconds,
+                     .wall_time_ns = sample.wall.nanoseconds};
     if (fail) throw std::runtime_error("admission failed");
     HostStartupAuditReceipt receipt;
     receipt.audit_id = "admitted";

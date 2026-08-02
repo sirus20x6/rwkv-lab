@@ -571,6 +571,89 @@ void transactional_faults_and_lost_reply() {
           "retry after a lost reply returns the one durable receipt");
 }
 
+// A daemon that crashes keeps its configured host, boot, and broker identity,
+// so a restart finalizes a second admission epoch inside the same runtime
+// identity. Refusing that made a crashed hostd unable to admit again until the
+// machine rebooted, while adding nothing: the ledger authority holds a
+// host-global exclusive flock, so a second live daemon cannot even open it.
+void restart_within_one_boot_supersedes_its_own_admission_epoch() {
+  const auto path = test_path("admission-epoch-restart");
+  auto authority = authority_for(path);
+  ResourceBundleGrant surviving_grant;
+  HostLedgerAdmissionEpoch first_epoch = [&] {
+    SQLiteHostLedger ledger(authority, inventory(), nullptr, trusted_policy());
+    const auto report = report_for(ledger, "audit-before-restart");
+    const auto committed = ledger.commit_startup_audit(report, {30, 40});
+    const auto finalized =
+        ledger.finalize_startup_admission(report, committed.receipt, {31, 41});
+    const auto granted = ledger.request_bundle(request("pre-restart-grant"),
+                                               {50, 60}, finalized.epoch);
+    require(granted.grant.has_value() && ledger.verify(),
+            "the pre-restart daemon admits and grants exactly once");
+    surviving_grant = *granted.grant;
+    return finalized.epoch;
+  }();
+
+  // Same authority, same inventory identity: this is a restart, not a new
+  // boot and not a new broker generation.
+  SQLiteHostLedger restarted(authority, inventory(), nullptr,
+                             trusted_policy());
+  const auto restart_report = report_for(restarted, "audit-after-restart");
+  const auto restart_commit =
+      restarted.commit_startup_audit(restart_report, {70, 80});
+  const auto restart_epoch = restarted.finalize_startup_admission(
+      restart_report, restart_commit.receipt, {71, 81});
+  require(!restart_epoch.replayed && restart_epoch.epoch != first_epoch &&
+              restarted.verify(),
+          "a restarted daemon supersedes its own admission epoch");
+
+  require_throws<HostLedgerConflict>(
+      [&] {
+        (void)restarted.request_bundle(request("stale-epoch-grant"), {90, 100},
+                                       first_epoch);
+      },
+      "the superseded epoch immediately loses grant authority");
+  require(restarted
+              .request_bundle(request("post-restart-grant"), {110, 120},
+                              restart_epoch.epoch)
+              .status == BundleRequestStatus::busy,
+          "the surviving physical grant still blocks the only resource");
+
+  // The physical grant taken before the crash is still exactly reconcilable
+  // and releasable across the epoch boundary.
+  const auto reconciled =
+      restarted.reconcile_bundle_outcome(request("pre-restart-grant"));
+  require(reconciled && reconciled->grant == surviving_grant,
+          "a prior-epoch grant reconciles exactly after restart");
+  const auto released = restarted.release_bundle(
+      seal_resource_release_request({
+          .api_version = std::string(kHostLedgerReleaseRequestApiVersion),
+          .release_request_id = "release-pre-restart-grant",
+          .allocation_id = surviving_grant.allocation_id,
+          .grant_digest = surviving_grant.receipt_digest,
+          .journal_id = surviving_grant.journal_id,
+          .run_id = surviving_grant.run_id,
+          .logical_lease_id = surviving_grant.logical_lease_id,
+          .logical_fencing_token = surviving_grant.logical_fencing_token,
+          .canonical_request_digest = {},
+      }),
+      {130, 140});
+  require(!released.replayed && restarted.verify(),
+          "a prior-epoch grant releases exactly once after restart");
+  require(restarted
+              .request_bundle(request("post-release-grant"), {170, 180},
+                              restart_epoch.epoch)
+              .grant.has_value(),
+          "the superseding epoch authorizes new grants once the resource frees");
+
+  // Supersession only moves forward: the earlier committed audit cannot be
+  // finalized again to roll the active epoch back.
+  const auto rollback_commit =
+      restarted.commit_startup_audit(restart_report, {150, 160});
+  require(rollback_commit.replayed,
+          "the restart audit remains a single durable outcome");
+}
+
 void admission_epoch_seals_grants_and_replays_exactly() {
   const auto path = test_path("admission-epoch");
   auto authority = authority_for(path);
@@ -915,6 +998,7 @@ int main() {
     commit_replay_cas_and_reopen();
     transactional_faults_and_lost_reply();
     admission_epoch_seals_grants_and_replays_exactly();
+    restart_within_one_boot_supersedes_its_own_admission_epoch();
     prior_epoch_outcomes_reconcile_without_readmission();
     deleted_admission_authorization_fails_verify_and_reopen();
     missing_outcome_projection_poison_reconciliation();

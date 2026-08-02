@@ -38,9 +38,9 @@ constexpr std::size_t kMaximumPathBytes = 512U;
 constexpr std::size_t kMaximumLegacyDisplayBytes = 1024U;
 constexpr std::size_t kMaximumNotesBytes = 2048U;
 constexpr std::string_view kReviewedCatalogDigest =
-    "sha256:bca77dc50bd503dd021b586ad1eb91ce1da0c54d880362c36616e5a6bfcc94a3";
+    "sha256:59d3a6ac48085a5b6378055f6f0d6a7e362051c97aa50ef2ab76b35825f373dd";
 
-constexpr std::array<std::string_view, 140> kReviewedWorkflowIds = {
+constexpr std::array<std::string_view, 156> kReviewedWorkflowIds = {
     "acquisition.civitai-anima",
     "acquisition.civitai-balanced",
     "acquisition.i1-direct-archives",
@@ -53,12 +53,28 @@ constexpr std::array<std::string_view, 140> kReviewedWorkflowIds = {
     "cache.vision-sam-dense",
     "cache.vision-ten-percent-handoff",
     "cache.vision-v4h",
+    "control.alert-acknowledgement",
+    "control.autostop-arming",
+    "control.config-experiment-run",
+    "control.conversion-layer-acceptance",
     "control.experiment-launch",
     "control.gpu-launch-queue",
+    "control.live-control-patch",
     "control.manual-training-launch",
+    "control.posttraining-comparison",
+    "control.posttraining-dataset-inspection",
+    "control.posttraining-dataset-versioning",
     "control.posttraining-launch",
+    "control.posttraining-preference-capture",
     "control.qualification-launch",
+    "control.queue-auto-arming",
+    "control.queue-cancel",
+    "control.queue-enqueue",
     "control.rlvr-launch",
+    "control.run-checkpoint-now",
+    "control.run-graceful-stop",
+    "control.run-notes-annotation",
+    "control.run-tags-annotation",
     "control.sample-launch",
     "conversion.assemble-looped",
     "conversion.attention-l3-poc",

@@ -309,6 +309,15 @@ effects use an intent/receipt protocol:
 3. commit its receipt and emitted outputs;
 4. advance the node.
 
+Builtin `trainvm.core` operations are the supervisor's typed executors. Alongside resource
+admission, artifact validation, and resource release, `qualify_cache` gates a published cache
+artifact: the supervisor resolves qualification evidence through an authority-owned seam, runs the
+qualification decision itself, and commits `cache.qualified` or `cache.rejected` as a managed
+builtin receipt. A plan must route both verdicts and must declare the `qualify` execution phase,
+so the adapter operation had to advertise qualification support before the gate can appear. The
+executor never releases the lease it runs under, and neither the experiment document nor the worker
+supplies the verdict.
+
 Operations declare one idempotency class:
 
 - `replay_safe`: repeating the same command ID is harmless;
@@ -341,6 +350,30 @@ acknowledgement at a declared safe point.
 - Resume includes the checkpoint fingerprint, plan revision, data cursor, RNG state, optimizer state,
   and compatibility decision.
 - Cancel is graceful by default and escalates only according to an explicit timeout policy.
+
+Every one of these verbs is admitted by exactly one declared adapter capability and is never
+inferred from signals, files, worker output, or the absence of a refusal. That decision is
+`admit_lifecycle_control` in `trainvm/lifecycle_admission.hpp`; the gRPC surface renders its stable
+refusal codes (`cancel.unsupported_by_operation`, `checkpoint.unsupported_by_operation`,
+`lifecycle.unsupported_by_operation`) rather than deciding for itself.
+
+`lifecycle_equivalence_tests` drives the whole matrix — every registered adapter times every verb
+times both the checkpoint-first and plain form — and compares each admission against the
+declaration restated independently of the gate, so a gate that ever answers from something other
+than the declared capability disagrees with the table. It also pins the honesty rules: only an
+`exact` grade preserves a trajectory, `compatible` resumes from a checkpoint without claiming one,
+and a `terminal_checkpoint` operation (today the scratch RWKV trainer) refuses pause, resume, and
+checkpoint-now in every form while keeping graceful cancellation. The registry's own coherence
+rules are exercised adversarially: a profile claiming a resource-releasing pause without
+checkpoint-now or without a resumable grade, a stateless profile claiming any of these, an
+`exact` profile without checkpoint-now, and a `terminal_checkpoint` profile with checkpoint-now are
+each refused at construction.
+
+Duplicate and stale commands are covered against the real controller and journal: an exact repeat
+of a control patch, checkpoint-now, or cancel replays the single durable command, the same
+idempotency key with any changed field (assignments, expected revision, author, cancel reason,
+graceful timeout) is refused without forking durable history, and a reconnecting controller
+rebuilds an identical execution state after every attempt, accepted or refused.
 
 ## Live mutation model
 

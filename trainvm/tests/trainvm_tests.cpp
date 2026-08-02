@@ -121,6 +121,62 @@ nlohmann::json load_fixture() {
   return value;
 }
 
+nlohmann::json cache_qualification_fixture() {
+  nlohmann::json document = load_fixture();
+  document["spec"]["components"]["core"]["operations"]["qualify_cache"] = {
+      {"contract", "trainvm.v1.QualifyCache"}};
+  document["spec"]["workflow"]["nodes"]["qualify_cache_artifact"] = {
+      {"description", "Gate the published cache artifact before release."},
+      {"invoke", {{"component", "core"}, {"operation", "qualify_cache"},
+                  {"inputs", nlohmann::json::object()}}},
+      {"idempotency", "replay_safe"},
+      {"effect", "read_only"},
+      {"transitions",
+       nlohmann::json::array(
+           {{{"on", "cache.qualified"}, {"target", "release_gpu"}},
+            {{"on", "cache.rejected"}, {"target", "$failed"}}})}};
+  document["spec"]["workflow"]["nodes"]["train_to_boundary"]["transitions"][1]
+          ["target"] = "qualify_cache_artifact";
+  return document;
+}
+
+// Evidence that passes every implemented gate. Individual tests degrade one
+// field at a time so a rejection reason is always attributable.
+trainvm::CacheQualificationEvidence passing_cache_evidence() {
+  const auto digest = [](char value) {
+    return "sha256:" + std::string(64U, value);
+  };
+  return {
+      .api_version = "trainvm.cache-qualification-evidence/v1",
+      .authority_receipt_digest = digest('1'),
+      .namespace_digest = digest('2'),
+      .artifact_tree_digest = digest('3'),
+      .workload_class = trainvm::CacheWorkloadClass::training,
+      .baseline_run_digest = digest('4'),
+      .candidate_run_digest = digest('5'),
+      .shape_coverage_digest = digest('6'),
+      .transition_coverage = true,
+      .baseline_instrumented = false,
+      .candidate_instrumented = false,
+      .output_parity = true,
+      .gradient_parity = true,
+      .optimizer_update_parity = true,
+      .state_parity = true,
+      .resumed_trajectory_parity = true,
+      .determinism_parity = true,
+      .content_parity = true,
+      .ordering_parity = true,
+      .manifest_parity = true,
+      .model_quality_pass = true,
+      .baseline_throughput = 100.0,
+      .candidate_throughput = 125.0,
+      .baseline_peak_memory_bytes = 1'000'000U,
+      .candidate_peak_memory_bytes = 1'020'000U,
+      .minimum_throughput_gain_ratio = 0.10,
+      .maximum_memory_regression_ratio = 0.05,
+  };
+}
+
 std::vector<trainvm::AdapterProfile> fixture_adapter_profiles(
     char fingerprint_digit = 'a') {
   const std::string worker_fingerprint =
@@ -5649,6 +5705,162 @@ void test_graceful_cancel_lifecycle() {
   std::filesystem::remove_all(directory);
 }
 
+// Adversarial control admission at a live safe point: a duplicate patch must
+// replay rather than apply twice, the same key with different content must be
+// refused outright, and every attempt must leave a state a reconnecting
+// controller reconstructs exactly from the journal.
+void test_adversarial_control_idempotency_and_replay() {
+  const auto compiled = trainvm::compile_document(load_fixture());
+  check(compiled.valid(), "adversarial control fixture compiles");
+  if (!compiled.valid()) return;
+  const auto directory = std::filesystem::temp_directory_path() /
+                         ("trainvm-adversarial-control-test-" +
+                          std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  const auto database_path = directory / "journal.db";
+  const std::string run_id = "adversarial-control-run";
+  {
+    trainvm::Journal journal(
+        database_path, std::nullopt,
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
+    trainvm::Controller controller(*compiled.plan, journal, run_id);
+    controller.create_queued(fixture_adapter_locked_submission(*compiled.plan));
+    (void)controller.begin_acquisition(test_time(1'000));
+    const auto launch = controller.prepare_worker_launch(
+        {.code_fingerprint = "sha256:" + std::string(64U, '7'),
+         .required_capabilities = {"worker.controls"}},
+        test_time(1'100));
+    (void)bind_test_worker_launch(controller, launch, 1'150);
+    (void)controller.accept_worker_hello(
+        {.run_id = launch.run_id,
+         .node_id = launch.node_id,
+         .attempt_id = launch.attempt_id,
+         .launch_nonce = launch.launch_nonce,
+         .adapter = launch.adapter,
+         .adapter_version = launch.adapter_version,
+         .code_fingerprint = launch.code_fingerprint,
+         .capabilities = launch.required_capabilities,
+         .last_acked_controller_sequence = 0U,
+         .concurrency_key = launch.concurrency_key,
+         .lease_id = launch.lease_id,
+         .fencing_token = launch.fencing_token},
+        test_time(1'175));
+
+    const auto reconnects_exactly = [&](std::string_view what) {
+      trainvm::Controller reconnected(*compiled.plan, journal, run_id);
+      reconnected.recover();
+      check(reconnected.state() == controller.state(),
+            std::string("a reconnecting controller replays exactly after ") +
+                std::string(what));
+    };
+
+    const auto before = journal.projection(run_id);
+    check(before && before->observed_state == "running",
+          "adversarial control fixture starts from an active worker");
+    if (!before) return;
+    reconnects_exactly("worker readiness");
+
+    const nlohmann::json assignments{{"learning_rate", 0.00001},
+                                     {"eval_every", 250}};
+    const std::uint64_t control_revision =
+        journal.latest_control_revision(run_id);
+    const auto first = controller.request_controls(
+        "patch-once", before->run_revision, control_revision, assignments,
+        "operator", "adversarial duplicate patch");
+    check(first.valid() && first.command && !first.replayed,
+          "the first control patch is accepted once");
+    if (!first.command) return;
+    const auto duplicate = controller.request_controls(
+        "patch-once", before->run_revision, control_revision, assignments,
+        "operator", "adversarial duplicate patch");
+    check(duplicate.replayed && duplicate.command &&
+              duplicate.command->command_id == first.command->command_id &&
+              journal.pending_control_commands(run_id, 0U).size() == 1U,
+          "an exact duplicate patch replays one durable command");
+    reconnects_exactly("a duplicate control patch");
+
+    bool changed_content_refused = false;
+    try {
+      nlohmann::json different = assignments;
+      different["__adversarial"] = true;
+      (void)controller.request_controls(
+          "patch-once", before->run_revision, control_revision, different,
+          "operator", "adversarial duplicate patch");
+    } catch (const std::invalid_argument&) {
+      changed_content_refused = true;
+    }
+    bool changed_revision_refused = false;
+    try {
+      (void)controller.request_controls(
+          "patch-once", before->run_revision + 41U, control_revision,
+          assignments, "operator", "adversarial duplicate patch");
+    } catch (const std::invalid_argument&) {
+      changed_revision_refused = true;
+    }
+    bool changed_author_refused = false;
+    try {
+      (void)controller.request_controls(
+          "patch-once", before->run_revision, control_revision, assignments,
+          "someone-else", "adversarial duplicate patch");
+    } catch (const std::invalid_argument&) {
+      changed_author_refused = true;
+    }
+    check(changed_content_refused && changed_revision_refused &&
+              changed_author_refused &&
+              journal.pending_control_commands(run_id, 0U).size() == 1U,
+          "a reused idempotency key with any changed field is refused and "
+          "forks no durable command");
+    reconnects_exactly("refused control patch retries");
+
+    const auto checkpoint = controller.request_checkpoint(
+        "checkpoint-once", before->run_revision, "operator checkpoint",
+        "operator", "adversarial duplicate checkpoint");
+    const auto checkpoint_replay = controller.request_checkpoint(
+        "checkpoint-once", before->run_revision, "operator checkpoint",
+        "operator", "adversarial duplicate checkpoint");
+    check(checkpoint.inserted && !checkpoint_replay.inserted &&
+              checkpoint_replay.command.command_id ==
+                  checkpoint.command.command_id &&
+              journal.pending_checkpoint_commands(run_id, 0U).size() == 1U,
+          "a duplicate checkpoint-now request replays one durable command");
+    reconnects_exactly("a duplicate checkpoint request");
+
+    const auto cancel = controller.request_cancel(
+        "cancel-once", before->run_revision, "operator requested stop",
+        5'000'000'000LL, "operator", "adversarial duplicate cancel");
+    const auto cancel_replay = controller.request_cancel(
+        "cancel-once", before->run_revision, "operator requested stop",
+        5'000'000'000LL, "operator", "adversarial duplicate cancel");
+    check(cancel.inserted && !cancel_replay.inserted &&
+              cancel_replay.command.command_id == cancel.command.command_id &&
+              journal.pending_lifecycle_commands(run_id, 0U).size() == 1U,
+          "a duplicate cancel request replays one durable command");
+
+    bool changed_cancel_refused = false;
+    try {
+      (void)controller.request_cancel(
+          "cancel-once", before->run_revision, "a different stop reason",
+          5'000'000'000LL, "operator", "adversarial duplicate cancel");
+    } catch (const std::invalid_argument&) {
+      changed_cancel_refused = true;
+    }
+    bool changed_timeout_refused = false;
+    try {
+      (void)controller.request_cancel(
+          "cancel-once", before->run_revision, "operator requested stop",
+          9'000'000'000LL, "operator", "adversarial duplicate cancel");
+    } catch (const std::invalid_argument&) {
+      changed_timeout_refused = true;
+    }
+    check(changed_cancel_refused && changed_timeout_refused &&
+              journal.pending_lifecycle_commands(run_id, 0U).size() == 1U,
+          "a reused cancel key with a changed reason or timeout is refused");
+    reconnects_exactly("refused cancel retries");
+  }
+  std::filesystem::remove_all(directory);
+}
+
 void test_resource_releasing_pause_lifecycle() {
   const auto compiled = trainvm::compile_document(load_fixture());
   check(compiled.valid(), "resource-releasing pause fixture compiles");
@@ -6027,6 +6239,212 @@ void test_typed_managed_resource_release() {
   check(missing_release_receipt_rejected,
         "terminal recovery rejects a resource release without its durable lease receipt");
   std::filesystem::remove_all(directory);
+}
+
+// Drives the run to the qualification gate and returns its live controller
+// state so each scenario can commit a different verdict.
+struct CacheQualificationRun {
+  std::filesystem::path directory;
+  std::unique_ptr<trainvm::Journal> journal;
+  std::unique_ptr<trainvm::Controller> controller;
+  trainvm::ResourceLease lease;
+};
+
+CacheQualificationRun start_cache_qualification_run(
+    const trainvm::CompiledPlan& plan, std::string_view suffix) {
+  CacheQualificationRun state;
+  state.directory = std::filesystem::temp_directory_path() /
+      ("trainvm-cache-qualification-" + std::string(suffix) + "-" +
+       std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(state.directory);
+  std::filesystem::create_directories(state.directory);
+  const std::string run_id = "cache-qualification-run";
+  state.journal = std::make_unique<trainvm::Journal>(
+      state.directory / "journal.db", std::nullopt,
+      trainvm::HostGrantEnforcement::legacy_process_free_test);
+  state.controller = std::make_unique<trainvm::Controller>(
+      plan, *state.journal, run_id);
+  state.controller->create_queued();
+  state.lease = state.controller->begin_acquisition(test_time(1'000)).lease;
+  const trainvm::WorkerLaunchRequest request{
+      .code_fingerprint = "sha256:" + std::string(64U, '5'),
+      .required_capabilities = {"worker.controls"},
+  };
+  const auto launch =
+      state.controller->prepare_worker_launch(request, test_time(1'100));
+  (void)bind_test_worker_launch(*state.controller, launch, 1'150);
+  (void)state.controller->accept_worker_hello(
+      {.run_id = launch.run_id,
+       .node_id = launch.node_id,
+       .attempt_id = launch.attempt_id,
+       .launch_nonce = launch.launch_nonce,
+       .adapter = launch.adapter,
+       .adapter_version = launch.adapter_version,
+       .code_fingerprint = launch.code_fingerprint,
+       .capabilities = launch.required_capabilities,
+       .last_acked_controller_sequence = 0,
+       .concurrency_key = launch.concurrency_key,
+       .lease_id = launch.lease_id,
+       .fencing_token = launch.fencing_token},
+      test_time(1'200));
+  const auto dispatch = state.controller->prepare_dispatch(test_time(1'300));
+  const trainvm::WorkerSessionIdentity session{
+      .run_id = launch.run_id,
+      .node_id = launch.node_id,
+      .attempt_id = launch.attempt_id,
+      .launch_nonce = launch.launch_nonce,
+      .concurrency_key = launch.concurrency_key,
+      .lease_id = launch.lease_id,
+      .fencing_token = launch.fencing_token,
+  };
+  const trainvm::Event worker_result{
+      .event_id = dispatch.dispatch_id + ":result",
+      .run_id = run_id,
+      .run_revision = 5,
+      .plan_revision = 1,
+      .node_id = launch.node_id,
+      .attempt_id = launch.attempt_id,
+      .worker_sequence = 1,
+      .event_type = "worker.completed",
+      .event_version = 1,
+      .wall_time_ns = 1'400,
+      .monotonic_time_ns = 1,
+      .optimizer_step = 5'500,
+      .payload = {{"reason", "training_complete"}},
+  };
+  (void)state.controller->handle_event(worker_result, session,
+                                       test_time(1'400));
+  return state;
+}
+
+void test_typed_cache_qualification_executor() {
+  const auto compiled = trainvm::compile_document(cache_qualification_fixture());
+  check(compiled.valid(),
+        "cache qualification fixture compiles");
+  if (!compiled.valid()) {
+    for (const auto& diagnostic : compiled.diagnostics) {
+      std::cerr << "  " << diagnostic.code << " " << diagnostic.path << " "
+                << diagnostic.message << '\n';
+    }
+    return;
+  }
+
+  const auto rejects_with = [](nlohmann::json document,
+                               std::string_view code) {
+    const auto result = trainvm::compile_document(std::move(document));
+    return !result.valid() &&
+           std::ranges::any_of(result.diagnostics,
+                               [&](const trainvm::Diagnostic& diagnostic) {
+                                 return diagnostic.code == code;
+                               });
+  };
+  auto missing_rejection = cache_qualification_fixture();
+  missing_rejection["spec"]["workflow"]["nodes"]["qualify_cache_artifact"]
+                   ["transitions"].erase(1);
+  auto wrong_effect = cache_qualification_fixture();
+  wrong_effect["spec"]["workflow"]["nodes"]["qualify_cache_artifact"]
+              ["effect"] = "process";
+  auto undeclared_phase = cache_qualification_fixture();
+  undeclared_phase["spec"]["execution"].erase("qualify");
+  check(rejects_with(std::move(missing_rejection),
+                     "workflow.cache_qualification_transition") &&
+            rejects_with(std::move(wrong_effect),
+                         "workflow.cache_qualification") &&
+            rejects_with(std::move(undeclared_phase),
+                         "workflow.cache_qualification_phase"),
+        "cache qualification topology requires both verdicts, an exact typed operation, and a declared qualify phase");
+
+  auto qualified_run = start_cache_qualification_run(*compiled.plan, "pass");
+  check(qualified_run.controller->state().current_node_id ==
+            "qualify_cache_artifact",
+        "worker completion enters the typed cache qualification gate");
+
+  const trainvm::CacheQualificationReceipt passing =
+      trainvm::qualify_cache_artifact(passing_cache_evidence());
+  auto forged = passing;
+  forged.qualified = false;
+  forged.rejection_reasons = {"output_parity_failed"};
+  bool forged_verdict_rejected = false;
+  try {
+    (void)qualified_run.controller->complete_cache_qualification(
+        forged, test_time(1'500));
+  } catch (const std::exception&) {
+    forged_verdict_rejected = true;
+  }
+  bool lease_release_refused = false;
+  try {
+    (void)qualified_run.controller->complete_managed_builtin(
+        "qualify_cache", "cache.qualified", true, test_time(1'500));
+  } catch (const std::logic_error&) {
+    lease_release_refused = true;
+  }
+  bool wrong_event_refused = false;
+  try {
+    (void)qualified_run.controller->complete_managed_builtin(
+        "qualify_cache", "resource.released", false, test_time(1'500));
+  } catch (const std::logic_error&) {
+    wrong_event_refused = true;
+  }
+  check(forged_verdict_rejected && lease_release_refused && wrong_event_refused,
+        "the gate rejects a forged verdict, a lease-releasing gate, and an off-contract receipt event");
+
+  const auto& advanced =
+      qualified_run.controller->complete_cache_qualification(passing,
+                                                             test_time(1'500));
+  const auto events =
+      qualified_run.journal->events_for_run("cache-qualification-run");
+  const auto verdict = std::ranges::find_if(
+      events, [](const trainvm::Event& event) {
+        return event.event_type == "cache.qualified";
+      });
+  const auto receipts = std::ranges::count_if(
+      events, [](const trainvm::Event& event) {
+        return event.event_type == "node.dispatch_completed" &&
+               event.node_id == "qualify_cache_artifact";
+      });
+  trainvm::Controller restarted(*compiled.plan, *qualified_run.journal,
+                                "cache-qualification-run");
+  const auto& recovered = restarted.recover();
+  std::string chain_reason;
+  check(advanced.current_node_id == "release_gpu" && receipts == 1 &&
+            verdict != events.end() && verdict->worker_sequence == 0U &&
+            verdict->payload.value("receipt_digest", std::string{}) ==
+                passing.receipt_digest &&
+            verdict->payload.value("qualified", false) &&
+            recovered == advanced &&
+            qualified_run.journal->verify_chain(&chain_reason),
+        "a qualified verdict commits one receipt bound to its gate digest and replays identically");
+  check(qualified_run.journal->active_lease(
+            qualified_run.lease.concurrency_key, test_time(1'500)).has_value(),
+        "the qualification gate keeps the fence it ran under");
+
+  auto rejected_run = start_cache_qualification_run(*compiled.plan, "reject");
+  auto failing_evidence = passing_cache_evidence();
+  failing_evidence.candidate_throughput = 101.0;  // below the declared gain gate
+  failing_evidence.resumed_trajectory_parity = false;
+  const trainvm::CacheQualificationReceipt rejection =
+      trainvm::qualify_cache_artifact(failing_evidence);
+  const auto& failed =
+      rejected_run.controller->complete_cache_qualification(rejection,
+                                                           test_time(1'500));
+  const auto rejected_events =
+      rejected_run.journal->events_for_run("cache-qualification-run");
+  const auto rejection_event = std::ranges::find_if(
+      rejected_events, [](const trainvm::Event& event) {
+        return event.event_type == "cache.rejected";
+      });
+  check(!rejection.qualified &&
+            rejection.rejection_reasons ==
+                std::vector<std::string>({"resumed_trajectory_parity_failed",
+                                          "throughput_gate_failed"}) &&
+            failed.status == trainvm::ExecutionStatus::failed &&
+            rejection_event != rejected_events.end() &&
+            rejection_event->payload.at("rejection_reasons") ==
+                nlohmann::json(rejection.rejection_reasons),
+        "a rejected candidate routes to the declared failure path with attributable reasons");
+
+  std::filesystem::remove_all(qualified_run.directory);
+  std::filesystem::remove_all(rejected_run.directory);
 }
 
 void test_concurrent_worker_launch_and_readiness_replay() {
@@ -11939,7 +12357,9 @@ int main() {
     test_worker_control_grpc_stream();
     test_graceful_cancel_lifecycle();
     test_resource_releasing_pause_lifecycle();
+    test_adversarial_control_idempotency_and_replay();
     test_typed_managed_resource_release();
+    test_typed_cache_qualification_executor();
     test_concurrent_worker_launch_and_readiness_replay();
     test_concurrent_fenced_result_content_conflict();
     test_concurrent_queue_acquisition_replay();
