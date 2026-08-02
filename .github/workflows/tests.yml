@@ -174,61 +174,62 @@ jobs:
           path: evidence-go.txt
           if-no-files-found: warn
 
-  # TrainVM needs GCC 16 with -freflection (C++26 P2996) plus a protobuf and
-  # gRPC pair whose CMake config packages agree. No stock image provides that
-  # combination, so .github/docker/trainvm-ci.Dockerfile builds one and
-  # .github/workflows/ci-image.yml publishes it. This job runs inside it on an
-  # ordinary hosted runner -- no self-hosted runner, no gate. Native
-  # regressions are visible on every PR.
+  # TrainVM needs GCC 16 with -freflection (C++26 P2996) and a set of
+  # dependencies no stock image provides together. The job builds its own
+  # toolchain image from .github/docker/trainvm-ci.Dockerfile and caches the
+  # layers, so it needs no registry, no package permissions, and no
+  # self-hosted runner. Native regressions are visible on every PR.
+  #
+  # Building rather than pulling is deliberate: a registry image has to be
+  # published, made visible to this repository, and kept in step with the
+  # Dockerfile. Every one of those is a way for CI to drift from the source it
+  # claims to test. The cache makes the cost a first-run one.
   native:
     name: TrainVM native (ctest)
     runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/${{ github.repository_owner }}/trainvm-ci:latest
     steps:
       - uses: actions/checkout@v4
-      # The live-stack E2E requires an authority directory whose entire
-      # ancestry is unwritable by anyone else, and CMake derives
-      # TRAINVM_E2E_AUTHORITY_DIR from the binary directory. Building under a
-      # world-writable path fails with "authority ancestry is writable outside
-      # the authority owner" -- the check working, not a bug. The workspace is
-      # owned by the job user, so build there and keep it 0755 or tighter.
-      - name: Configure
-        run: cmake -S trainvm -B trainvm/build-ci -G Ninja -DCMAKE_BUILD_TYPE=Debug
-      - name: Build
-        run: cmake --build trainvm/build-ci -j "$(nproc)"
-      # 57 of 61 suites run here. Four are excluded, each for a stated reason
-      # rather than because it was inconvenient. Excluding them keeps this job
-      # meaningful: a permanently red job teaches everyone to ignore it, which
-      # is worse than not having it.
-      #
-      #   hostd_linux_session_authority_tests
-      #     needs openat2 to pin the session procfs; a container cannot provide it.
-      #   host_resources_tests
-      #     asserts pinned inventory/occupancy digests built from a real host.
-      #   trainvm_dashboard_live_e2e
-      #   rwkv_lab_worker_artifact
-      #     not yet diagnosed. They are excluded so the job is usable today, and
-      #     tracked as a follow-up card rather than quietly dropped.
-      #
-      # All four still run in scripts/acceptance.sh on a real host.
-      - name: ctest
-        run: |
-          ctest --test-dir trainvm/build-ci --output-on-failure \
-            -E '^(hostd_linux_session_authority_tests|host_resources_tests|trainvm_dashboard_live_e2e|rwkv_lab_worker_artifact)$'
 
-      - name: Compatibility catalog
-        run: |
-          ./trainvm/build-ci/trainvm validate-catalog \
-            "$PWD/docs/experiment-vm/compatibility-workflows.v1.json" "$PWD" \
-            | tee evidence-catalog.json
-      - name: Publish evidence
-        if: always()
-        uses: actions/upload-artifact@v4
+      - uses: docker/setup-buildx-action@v3
+
+      # The Dockerfile ends in a smoke test over the whole toolchain contract,
+      # so a broken image fails here rather than as an unexplained red suite.
+      - name: Build toolchain image
+        uses: docker/build-push-action@v6
         with:
-          name: evidence-native
-          path: evidence-catalog.json
-          if-no-files-found: warn
+          context: .
+          file: .github/docker/trainvm-ci.Dockerfile
+          load: true
+          tags: trainvm-ci:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The source is copied into the container rather than built in the mount:
+      # the live-stack E2E requires an authority directory whose whole ancestry
+      # is unwritable by others, and CMake derives TRAINVM_E2E_AUTHORITY_DIR
+      # from the binary directory.
+      #
+      # 57 of 61 suites run. Four are excluded, each for a stated reason rather
+      # than because it was inconvenient -- a permanently red job teaches
+      # everyone to ignore it, which is worse than not having one:
+      #   hostd_linux_session_authority_tests  needs openat2 on the session
+      #     procfs, which a container cannot provide
+      #   host_resources_tests  asserts pinned inventory digests built from a
+      #     real host
+      #   trainvm_dashboard_live_e2e, rwkv_lab_worker_artifact  not yet
+      #     diagnosed; tracked as a follow-up rather than quietly dropped
+      # All four still run in scripts/acceptance.sh on a real host.
+      - name: Build and test
+        run: |
+          docker run --rm -v "$PWD":/w:ro trainvm-ci:ci bash -euo pipefail -c '
+            cp -a /w /build && chown -R root:root /build && cd /build
+            cmake -S trainvm -B b -G Ninja -DCMAKE_BUILD_TYPE=Debug
+            cmake --build b -j "$(nproc)"
+            ./b/trainvm validate-catalog \
+              /build/docs/experiment-vm/compatibility-workflows.v1.json /build
+            ctest --test-dir b -j 4 --output-on-failure \
+              -E "^(hostd_linux_session_authority_tests|host_resources_tests|trainvm_dashboard_live_e2e|rwkv_lab_worker_artifact)$"
+          '
 
   # GPU tests share one device. The concurrency group is intentionally global
   # rather than per-ref, so two branches cannot run CUDA suites at the same

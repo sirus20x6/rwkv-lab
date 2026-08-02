@@ -65,10 +65,15 @@ is the dependency pair:
   `find_package` and then fails at generate time with a missing ALIAS target,
   because the two halves no longer agree on their protobuf targets.
 
-That image now exists: `.github/docker/trainvm-ci.Dockerfile`, published by
-`.github/workflows/ci-image.yml` to GHCR. **The native job runs on an ordinary
-hosted runner inside it — no self-hosted runner, no gate.** Only the GPU job
-stays gated, because it needs a real accelerator.
+That image now exists: `.github/docker/trainvm-ci.Dockerfile`. **The native
+job builds it and runs the suite inside it on an ordinary hosted runner — no
+self-hosted runner, no gate.** Only the GPU job stays gated, because it needs a
+real accelerator.
+
+The job builds the image rather than pulling a published one. A registry copy
+has to be published, made visible to this repository, and kept in step with the
+Dockerfile; each of those is a way for CI to drift from the source it claims to
+test. Buildx layer caching makes the cost a first-run one.
 
 Building it surfaced three more blockers beyond the protobuf/gRPC pair, none of
 which were guessable from the outside:
