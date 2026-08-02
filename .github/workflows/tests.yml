@@ -175,9 +175,13 @@ jobs:
           if-no-files-found: warn
 
   # TrainVM requires GCC 16 with -freflection (C++26 P2996) plus protobuf,
-  # gRPC, yaml-cpp, nlohmann_json, OpenSSL and SQLite3. No GitHub-hosted runner
-  # image provides that toolchain, so this job targets a self-hosted runner and
-  # stays off until the repository variable TRAINVM_SELF_HOSTED is "true".
+  # gRPC, yaml-cpp, nlohmann_json, OpenSSL and SQLite3. The compiler is
+  # available -- the official gcc:16 image accepts -freflection -- but Debian
+  # ships no protobuf CMake config, and a source-built protobuf beside Debian's
+  # gRPC fails at generate time on a missing ALIAS target. A hosted job needs a
+  # purpose-built image with a matched protobuf/gRPC pair; see
+  # docs/experiment-vm/ACCEPTANCE_CI.md. Until then this targets a self-hosted
+  # runner and stays off unless TRAINVM_SELF_HOSTED is "true".
   # It is deliberately gated rather than emulated: a native job that cannot
   # build would report green while proving nothing. Until a runner exists, run
   # scripts/acceptance.sh locally -- it executes this same matrix.
