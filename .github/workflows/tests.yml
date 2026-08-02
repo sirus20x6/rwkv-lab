@@ -30,8 +30,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -e '.[vision]'
-          pip install pytest
+          pip install -e '.[vision,test,trainvm-worker]'
+          # Optional dependencies that whole suites import at module scope.
+          # Installing them is what makes the extra coverage real rather than
+          # a directory full of skips.
+          pip install zstandard duckdb opencv-python-headless
       - name: Every test file is covered or explicitly excluded
         run: python scripts/ci_coverage_gate.py -m "not gpu"
 
@@ -58,16 +61,20 @@ jobs:
           # is not required. A test needing an optional dependency must importorskip it.
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           # Vision extras cover the embedded-image corpus and deduplication
-          # utilities exercised by the multimodal CPU tests.
-          pip install -e '.[vision]'
-          pip install pytest pytest-xdist
+          # utilities exercised by the multimodal CPU tests; trainvm-worker
+          # supplies the protobuf runtime the TrainVM worker suites import.
+          pip install -e '.[vision,test,trainvm-worker]'
+          # Optional dependencies that whole suites import at module scope.
+          # Installing them is what makes the extra coverage real rather than
+          # a directory full of skips.
+          pip install zstandard duckdb opencv-python-headless
 
       # The whole non-GPU suite, not a named subset. A test that needs an
       # optional dependency skips itself; it does not get dropped from CI.
       - name: Run the full non-GPU suite
         run: |
           mkdir -p evidence
-          pytest -q -n auto --dist worksteal -m "not gpu" tests \
+          python -m pytest -q -n auto --dist worksteal -m "not gpu" tests \
             --junitxml=evidence/python-cpu-${{ matrix.python }}.xml
 
       - name: Publish evidence
