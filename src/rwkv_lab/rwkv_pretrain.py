@@ -48,6 +48,7 @@ from rwkv_lab.training_components import (
 )
 
 if TYPE_CHECKING:
+    from rwkv_lab.training_components import LayerNormFactory
     from rwkv_lab.trainvm_adapters import WorkerTrainingComponents
     from rwkv_lab.trainvm_worker import WorkerObservability, WorkerStepProfiler
 from rwkv_lab.training_speedups import (
@@ -64,13 +65,14 @@ def _unwrap(o):
 class Block(nn.Module):
     def __init__(self, d, n_heads, head_size, i, n_layers, loop_kw, att_kw=None, ffn_hidden=None,
                  de_vocab=0, de_dim=0, de_mode="out", de_shift=False, de_emb_res=False,
-                 routing_free_kw=None):
+                 routing_free_kw=None, normalization_factory: LayerNormFactory | None = None):
         super().__init__()
         self.i = i
+        normalization = normalization_factory or nn.LayerNorm
         if i == 0:
-            self.ln0 = nn.LayerNorm(d)
-        self.ln1 = nn.LayerNorm(d)
-        self.ln2 = nn.LayerNorm(d)
+            self.ln0 = normalization(d)
+        self.ln1 = normalization(d)
+        self.ln2 = normalization(d)
         core = RWKV8TimeMixDeltaNet(d, num_heads=n_heads, head_size=head_size, layer_idx=i,
                                     depth_layer_id=i, depth_n_layer=max(n_layers, 2),
                                     is_first_rwkv_layer=(i == 0),   # native cross-layer v-residual
@@ -263,7 +265,8 @@ class Block(nn.Module):
 class RWKV7Small(nn.Module):
     def __init__(self, vocab, d, n_layers, head_size, loop_kw, att_kw=None, ffn_hidden=None,
                  seed_chain=False, deepembed=False, de_dim=0, de_mode="out", de_shift=False,
-                 de_emb_res=False, routing_free_kw=None):
+                 de_emb_res=False, routing_free_kw=None,
+                 normalization_factory: LayerNormFactory | None = None):
         super().__init__()
         assert d % head_size == 0
         if seed_chain and loop_kw:
@@ -281,9 +284,11 @@ class RWKV7Small(nn.Module):
                                            att_kw, ffn_hidden,
                                            de_vocab=vocab if deepembed else 0, de_dim=de_dim,
                                            de_mode=de_mode, de_shift=de_shift, de_emb_res=de_emb_res,
-                                           routing_free_kw=routing_free_kw)
+                                           routing_free_kw=routing_free_kw,
+                                           normalization_factory=normalization_factory)
                                      for i in range(n_layers)])
-        self.ln_out = nn.LayerNorm(d)
+        normalization = normalization_factory or nn.LayerNorm
+        self.ln_out = normalization(d)
         self.head = nn.Linear(d, vocab, bias=False)
         self.apply(self._init)
         for b in self.blocks:                 # DeepEmbed identity-at-init: the global _init above
@@ -712,6 +717,10 @@ def resolved_worker_component_contract(
         raise ValueError(
             "RWKV worker composition does not yet encode distributed gradient clipping"
         )
+    if getattr(args, "init_g1g", ""):
+        raise ValueError(
+            "RWKV worker composition currently requires scratch topology construction"
+        )
     optimizer_configuration = dict(
         worker_components.configuration("optimizer", category="optimizer")
     )
@@ -773,6 +782,12 @@ def resolved_worker_component_contract(
     }:
         raise ValueError(
             "authority precision composition disagrees with RWKV configuration"
+        )
+    if dict(
+        worker_components.configuration("normalization", category="normalization")
+    ) != {"epsilon": 1.0e-5}:
+        raise ValueError(
+            "authority normalization composition disagrees with RWKV configuration"
         )
     activation = worker_components.composition.require(
         "activation", category="activation"
@@ -1040,6 +1055,11 @@ def main(
         if worker_components is not None
         else None
     )
+    normalization_factory = (
+        worker_components.normalization()
+        if worker_components is not None
+        else None
+    )
 
     def prepare_model(module: nn.Module) -> nn.Module:
         if activation_policy is not None:
@@ -1157,6 +1177,7 @@ def main(
                            seed_chain=bool(args.seed_chain), deepembed=bool(args.deepembed),
                            de_dim=args.de_dim, de_mode=args.de_mode, de_shift=bool(args.de_shift),
                            de_emb_res=bool(args.de_emb_res),
+                           normalization_factory=normalization_factory,
                            routing_free_kw=({"n_experts": args.routing_free_experts,
                                              "rank": args.routing_free_rank,
                                              "threshold": args.routing_free_threshold,

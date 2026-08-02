@@ -21,14 +21,15 @@ compatibility-grade component.
 Tensor code stays in the runtime that implements it well. `rwkv_lab.training_components` is a
 stable compatibility facade; implementations are physically separated under
 `rwkv_lab.training_runtime` into `optimizers.py`, `schedules.py`, `routers.py`, `activations.py`,
-`gradient_clipping.py`, `gradient_accumulation.py`, `objectives.py`, `precision.py`, and
-`weight_decay_schedules.py`, with only the shared resolved-envelope decoder at the package root.
+`normalizations.py`, `gradient_clipping.py`, `gradient_accumulation.py`, `objectives.py`,
+`precision.py`, and `weight_decay_schedules.py`, with only the shared resolved-envelope decoder at
+the package root.
 Each category owns its closed enum, typed
 immutable configuration, validation, construction, and resolved dispatch. Category modules do not
 import one another or any family trainer. The facade has no implementation logic and trainers do
 not depend on the category internals.
 
-Future categories follow the same rule: add `normalizations.py` or `curricula.py` only when a
+Future categories follow the same rule: add `curricula.py` only when a
 real adapter consumes the descriptor. Do not create a placeholder module or advertise decorative
 configuration. The resolved-worker dispatch functions accept only the canonical envelope from
 TrainVM and fail on extra keys, unknown implementation IDs, wrong categories, missing defaults,
@@ -58,6 +59,9 @@ The initial concrete cross-family catalog contains:
   RWKV; gradient scaling is explicitly disabled rather than inferred from dtype;
 - independently selected squared-ReLU and SiLU activations installed at RWKV ChannelMix topology
   points; squared-ReLU-only fused kernels reject SiLU rather than changing semantics silently;
+- an independently configured affine LayerNorm factory installed at every baseline scratch-RWKV
+  normalization site; its trainable weights remain model/checkpoint state while the factory is
+  stateless;
 - a constant optimizer-step weight-decay schedule, paired with v2 AdamW implementations whose
   mechanics contain no decay configuration; v1 AdamW remains registered only for checkpoint and
   experiment compatibility.
@@ -69,7 +73,8 @@ worker compositions, including gradient clipping rather than trainer-local clipp
 scratch RWKV also obtains its accumulation count and loss scaling from an independent component;
 its base LM objective is separate from topology-specific auxiliary losses, and module conversion
 uses its declared precision policy rather than a trainer-local dtype constant. The RWKV topology
-also installs its declared activation at every ChannelMix site. Migrated compositions select weight
+installs its declared activation at every ChannelMix site and constructs every normalization site
+through its declared LayerNorm factory. Migrated compositions select weight
 decay independently of AdamW mechanics. Their composition digest
 is resume identity, and Qwen persists the registered scheduler cursor alongside optimizer state.
 Scratch RWKV consumes the same optimizer slot and the typed PowerCool configuration directly; its

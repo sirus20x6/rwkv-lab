@@ -19,9 +19,12 @@ from rwkv_lab.training_components import (
     GlobalNormClippingConfiguration,
     GradientAccumulationImplementation,
     GradientClippingImplementation,
+    LayerNormConfiguration,
+    LayerNormFactory,
     LinearHeadCrossEntropyConfiguration,
     LinearHeadCrossEntropyObjective,
     LinearWarmupCosineConfiguration,
+    NormalizationImplementation,
     ObjectiveImplementation,
     OptimizerImplementation,
     ParameterRouterImplementation,
@@ -34,6 +37,7 @@ from rwkv_lab.training_components import (
     build_registered_activation,
     build_registered_gradient_accumulation,
     build_registered_gradient_clipping,
+    build_registered_normalization,
     build_registered_objective,
     build_registered_optimizer,
     build_registered_parameter_routing,
@@ -58,6 +62,7 @@ def test_runtime_categories_have_one_way_dependency_boundaries():
         "activations",
         "gradient_accumulation",
         "gradient_clipping",
+        "normalizations",
         "optimizers",
         "objectives",
         "routers",
@@ -193,11 +198,28 @@ def test_component_catalog_and_runtime_dispatch_are_exactly_aligned():
     assert grades["learning_rate_schedule"] == "exact"
     assert grades["objective"] == "stateless"
     assert grades["activation"] == "stateless"
+    assert grades["normalization"] == "stateless"
     assert grades["precision"] == "stateless"
     assert grades["parameter_router"] == "stateless"
     assert grades["gradient_accumulation"] == "stateless"
     assert grades["gradient_clipping"] == "stateless"
     assert grades["weight_decay_schedule"] == "stateless"
+
+
+def test_registered_layer_norm_factory_owns_construction_not_model_state():
+    factory = build_registered_normalization(
+        NormalizationImplementation.LAYER_NORM_V1,
+        LayerNormConfiguration(epsilon=2.0e-5),
+    )
+    layer = factory(8)
+
+    assert isinstance(factory, LayerNormFactory)
+    assert isinstance(layer, torch.nn.LayerNorm)
+    assert layer.eps == pytest.approx(2.0e-5)
+    assert layer.elementwise_affine
+    assert layer.bias is not None
+    assert factory.state_dict() == {}
+    assert set(layer.state_dict()) == {"weight", "bias"}
 
 
 def test_registered_global_norm_clipping_has_typed_reference_semantics():

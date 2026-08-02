@@ -10,6 +10,7 @@ from rwkv_lab.training_components import (
     BFloat16PrecisionPolicy,
     ConstantWeightDecaySchedule,
     FixedGradientAccumulation,
+    LayerNormFactory,
     LinearHeadCrossEntropyObjective,
     LinearWarmupCosineConfiguration,
     PowerCoolConfiguration,
@@ -18,6 +19,7 @@ from rwkv_lab.training_components import (
     activation_from_resolved_component,
     gradient_accumulation_from_resolved_component,
     gradient_clipping_from_resolved_component,
+    normalization_from_resolved_component,
     objective_from_resolved_component,
     optimizer_from_resolved_component,
     parameter_routing_from_resolved_component,
@@ -78,6 +80,14 @@ class WorkerTrainingComponents:
     ) -> LinearHeadCrossEntropyObjective:
         component = self.composition.require(slot, category="objective")
         return objective_from_resolved_component(component.runtime_envelope())
+
+    def normalization(
+        self,
+        *,
+        slot: str = "normalization",
+    ) -> LayerNormFactory:
+        component = self.composition.require(slot, category="normalization")
+        return normalization_from_resolved_component(component.runtime_envelope())
 
     def precision(
         self,

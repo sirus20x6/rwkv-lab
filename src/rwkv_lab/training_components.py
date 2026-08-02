@@ -28,6 +28,13 @@ from rwkv_lab.training_runtime.gradient_clipping import (
     build_registered_gradient_clipping,
     gradient_clipping_from_resolved_component,
 )
+from rwkv_lab.training_runtime.normalizations import (
+    LayerNormConfiguration,
+    LayerNormFactory,
+    NormalizationImplementation,
+    build_registered_normalization,
+    normalization_from_resolved_component,
+)
 from rwkv_lab.training_runtime.objectives import (
     LinearHeadCrossEntropyConfiguration,
     LinearHeadCrossEntropyObjective,
@@ -88,9 +95,12 @@ __all__ = [
     "GlobalNormClippingConfiguration",
     "GradientAccumulationImplementation",
     "GradientClippingImplementation",
+    "LayerNormConfiguration",
+    "LayerNormFactory",
     "LinearHeadCrossEntropyConfiguration",
     "LinearHeadCrossEntropyObjective",
     "LinearWarmupCosineConfiguration",
+    "NormalizationImplementation",
     "ObjectiveImplementation",
     "OptimizerImplementation",
     "ParameterRouterImplementation",
@@ -104,6 +114,7 @@ __all__ = [
     "build_registered_activation",
     "build_registered_gradient_accumulation",
     "build_registered_gradient_clipping",
+    "build_registered_normalization",
     "build_registered_objective",
     "build_registered_optimizer",
     "build_registered_parameter_routing",
@@ -113,6 +124,7 @@ __all__ = [
     "gradient_accumulation_from_resolved_component",
     "gradient_clipping_from_resolved_component",
     "linear_warmup_cosine_multiplier",
+    "normalization_from_resolved_component",
     "objective_from_resolved_component",
     "optimizer_from_resolved_component",
     "parameter_routing_from_resolved_component",

@@ -4,10 +4,38 @@ import pytest
 import torch
 
 from rwkv_lab.rwkv_pretrain import (
+    RWKV7Small,
     build_optimizer,
     resolved_worker_component_contract,
 )
-from rwkv_lab.training_components import PowerCoolConfiguration, ScheduleImplementation
+from rwkv_lab.training_components import (
+    LayerNormConfiguration,
+    NormalizationImplementation,
+    PowerCoolConfiguration,
+    ScheduleImplementation,
+    build_registered_normalization,
+)
+
+
+def test_rwkv_scratch_topology_uses_registered_normalization_factory() -> None:
+    factory = build_registered_normalization(
+        NormalizationImplementation.LAYER_NORM_V1,
+        LayerNormConfiguration(epsilon=3.0e-5),
+    )
+    model = RWKV7Small(
+        vocab=128,
+        d=64,
+        n_layers=2,
+        head_size=32,
+        loop_kw={},
+        normalization_factory=factory,
+    )
+
+    normalizations = [
+        module for module in model.modules() if isinstance(module, torch.nn.LayerNorm)
+    ]
+    assert len(normalizations) == 6
+    assert all(module.eps == pytest.approx(3.0e-5) for module in normalizations)
 
 
 def test_rwkv_adamw_path_uses_registered_scalar_cpu_backend():
@@ -73,6 +101,8 @@ def test_rwkv_worker_components_drive_powercool_and_optimizer() -> None:
                     "reduction_dtype": "float32",
                     "gradient_scaling": False,
                 }
+            if (slot, category) == ("normalization", "normalization"):
+                return {"epsilon": 1.0e-5}
             assert (slot, category) == ("optimizer", "optimizer")
             return {
                 "learning_rate": 3.0e-4,
@@ -117,6 +147,9 @@ def test_rwkv_worker_components_drive_powercool_and_optimizer() -> None:
             return SimpleNamespace(
                 install=lambda module: module.set_activation("squared_relu")
             )
+
+        def normalization(self):
+            return lambda shape: torch.nn.LayerNorm(shape, eps=1.0e-5)
 
         def evidence(self):
             return {

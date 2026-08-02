@@ -67,6 +67,10 @@ def composition():
             "linear_head_cross_entropy",
             {"chunk_size": 2, "prefer_fused": False},
         ),
+        "normalization": (
+            "layer_norm",
+            {"epsilon": 1e-5},
+        ),
         "precision": (
             "bf16_parameters_fp32_reductions",
             {
@@ -110,6 +114,7 @@ def test_worker_component_bridge_builds_optimizer_and_schedule() -> None:
     objective = runtime.objective()
     precision = runtime.precision()
     activation = runtime.activation()
+    normalization = runtime.normalization()
 
     assert isinstance(optimizer, torch.optim.AdamW)
     assert optimizer.param_groups[0]["weight_decay"] == pytest.approx(0.01)
@@ -134,6 +139,7 @@ def test_worker_component_bridge_builds_optimizer_and_schedule() -> None:
     torch.testing.assert_close(
         activation(torch.tensor([-2.0, 3.0])), torch.tensor([0.0, 9.0])
     )
+    assert normalization(3).eps == pytest.approx(1e-5)
     assert runtime.evidence()["optimizer"]["category"] == "optimizer"
 
 
