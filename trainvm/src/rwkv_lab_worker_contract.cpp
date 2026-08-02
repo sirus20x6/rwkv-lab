@@ -34,6 +34,43 @@ OperationLifecycleCapabilities resumable_training_lifecycle() {
   };
 }
 
+TrainingCompositionContract transformer_mla_composition() {
+  TrainingCompositionContract composition{
+      .model_family = "transformer",
+      .slots = {
+          {"gradient_accumulation",
+           TrainingComponentCategory::gradient_accumulation},
+          {"gradient_clipping", TrainingComponentCategory::gradient_clipping},
+          {"learning_rate",
+           TrainingComponentCategory::learning_rate_schedule},
+          {"objective", TrainingComponentCategory::objective},
+          {"optimizer", TrainingComponentCategory::optimizer},
+          {"precision", TrainingComponentCategory::precision},
+          {"weight_decay",
+           TrainingComponentCategory::weight_decay_schedule},
+      },
+  };
+  composition.allowed_components =
+      std::map<std::string, std::vector<TrainingComponentKey>>{
+          {"optimizer",
+           {{TrainingComponentCategory::optimizer, "torch_adamw", "1.0.0"},
+            {TrainingComponentCategory::optimizer, "torch_adamw_no_decay",
+             "2.0.0"}}},
+      };
+  return composition;
+}
+
+TrainingCompositionContract transformer_mla_engram_composition() {
+  TrainingCompositionContract composition = transformer_mla_composition();
+  composition.slots.emplace("host_optimizer",
+                            TrainingComponentCategory::optimizer);
+  composition.allowed_components->emplace(
+      "host_optimizer",
+      std::vector<TrainingComponentKey>{{TrainingComponentCategory::optimizer,
+                                         "torch_sparse_adam", "1.0.0"}});
+  return composition;
+}
+
 std::vector<std::string> canonical_distributions(
     std::initializer_list<std::string_view> values) {
   std::vector<std::string> result;
@@ -138,8 +175,32 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
            {"optimizer", TrainingComponentCategory::optimizer},
            {"weight_decay",
             TrainingComponentCategory::weight_decay_schedule},
-       }},
+      }},
       resumable_training_lifecycle()));
+  for (const auto& [adapter, contract] :
+       std::initializer_list<std::pair<std::string, std::string>>{
+           {"rwkv-lab.transformer-mla", "rwkv_lab.transformer_mla.v1.Train"},
+           {"rwkv-lab.transformer-mla-mtp",
+            "rwkv_lab.transformer_mla_mtp.v1.Train"},
+           {"rwkv-lab.transformer-mla-mutor",
+            "rwkv_lab.transformer_mla_mutor.v1.Train"},
+           {"rwkv-lab.transformer-mla-fsp",
+            "rwkv_lab.transformer_mla_fsp.v1.Train"},
+           {"rwkv-lab.transformer-mla-parallel",
+            "rwkv_lab.transformer_mla_parallel.v1.Train"},
+           {"rwkv-lab.transformer-mla-rwkv8",
+            "rwkv_lab.transformer_mla_rwkv8.v1.Train"},
+           {"rwkv-lab.transformer-mla-engram",
+            "rwkv_lab.transformer_mla_engram.v1.Train"},
+           {"rwkv-lab.transformer-mla-full-backbone",
+            "rwkv_lab.transformer_mla_full_backbone.v1.Train"},
+       }) {
+    profiles.push_back(profile(key(adapter, contract), code_fingerprint,
+                               adapter == "rwkv-lab.transformer-mla-engram"
+                                   ? transformer_mla_engram_composition()
+                                   : transformer_mla_composition(),
+                               resumable_training_lifecycle()));
+  }
   profiles.push_back(profile(
       key("rwkv-lab.rwkv-scratch", "rwkv_lab.rwkv_scratch.v1.Train"),
       std::move(code_fingerprint),
@@ -188,6 +249,7 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
           "optimizer.fp32_master_adamw_no_decay.v2",
           "optimizer.torch_adamw.v1",
           "optimizer.torch_adamw_no_decay.v2",
+          "optimizer.torch_sparse_adam.v1",
           "parameter_router.mageflow_appearance_expert.v1",
           "parameter_router.mageflow_terminal_expert.v1",
           "precision.bf16_parameters_fp32_reductions.v1",
@@ -222,6 +284,40 @@ rwkv_lab_worker_runtime_requirements() {
             "huggingface-hub", "numpy", "packaging", "peft", "pillow",
             "protobuf", "psutil", "safetensors", "tokenizers", "torch",
             "transformers", "zstandard"})},
+      {"rwkv-lab.transformer-mla",
+       canonical_distributions(
+           {"accelerate", "einops", "flash-attn", "grpcio", "numpy",
+            "pillow", "protobuf", "safetensors", "torch", "transformers"})},
+      {"rwkv-lab.transformer-mla-mtp",
+       canonical_distributions(
+           {"accelerate", "einops", "flash-attn", "grpcio", "numpy",
+            "pillow", "protobuf", "safetensors", "torch", "transformers"})},
+      {"rwkv-lab.transformer-mla-mutor",
+       canonical_distributions(
+           {"accelerate", "einops", "flash-attn", "grpcio", "numpy",
+            "pillow", "protobuf", "safetensors", "torch", "transformers"})},
+      {"rwkv-lab.transformer-mla-fsp",
+       canonical_distributions(
+           {"accelerate", "einops", "flash-attn", "grpcio", "numpy",
+            "pillow", "protobuf", "safetensors", "torch", "transformers"})},
+      {"rwkv-lab.transformer-mla-parallel",
+       canonical_distributions(
+           {"accelerate", "einops", "flash-attn", "grpcio", "numpy",
+            "pillow", "protobuf", "safetensors", "torch", "transformers"})},
+      {"rwkv-lab.transformer-mla-rwkv8",
+       canonical_distributions(
+           {"accelerate", "einops", "flash-attn", "flash-linear-attention",
+            "grpcio", "numpy", "pillow", "protobuf", "safetensors",
+            "torch", "transformers"})},
+      {"rwkv-lab.transformer-mla-engram",
+       canonical_distributions(
+           {"accelerate", "einops", "engram-ext", "flash-attn", "grpcio",
+            "numpy", "pillow", "protobuf", "safetensors", "torch",
+            "transformers"})},
+      {"rwkv-lab.transformer-mla-full-backbone",
+       canonical_distributions(
+           {"accelerate", "einops", "flash-attn", "grpcio", "numpy",
+            "pillow", "protobuf", "safetensors", "torch", "transformers"})},
       {"rwkv-lab.rwkv-scratch",
        canonical_distributions(
            {"einops", "grpcio", "numpy", "pillow", "protobuf", "torch"})},

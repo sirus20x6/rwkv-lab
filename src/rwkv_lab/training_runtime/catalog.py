@@ -40,6 +40,7 @@ def supported_worker_capabilities() -> frozenset[str]:
             "curriculum.context_length.v1",
             "normalization.layer_norm.v1",
             "optimizer.torch_adamw.v1",
+            "optimizer.torch_sparse_adam.v1",
             "optimizer.fp32_master_adamw.v1",
             "schedule.linear_warmup_cosine.v1",
             "schedule.powercool.v1",

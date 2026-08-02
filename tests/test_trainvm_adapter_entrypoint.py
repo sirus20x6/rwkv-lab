@@ -19,6 +19,7 @@ from rwkv_lab.trainvm_adapters.handlers import (
     HandlerResult,
     _appearance_expert,
     _rwkv_scratch,
+    _transformer_mla,
     execute_invocation,
     supported_adapter_keys,
 )
@@ -464,8 +465,201 @@ def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoin
     assert request.resume_grade == "terminal_checkpoint"
 
 
+def test_transformer_mla_handler_binds_paths_profile_and_compatible_checkpoint(
+    tmp_path, monkeypatch
+) -> None:
+    from rwkv_lab import train_mla
+
+    read_root = tmp_path / "read"
+    model_dir = read_root / "model"
+    patch_dir = read_root / "patch"
+    engram_dir = read_root / "engram"
+    run_directory = tmp_path / "write" / "run"
+    model_dir.mkdir(parents=True)
+    patch_dir.mkdir()
+    engram_dir.mkdir()
+    run_directory.mkdir(parents=True)
+    tokens = read_root / "tokens.bin"
+    tokens.write_bytes(b"\x00" * 4096)
+    observed = []
+
+    def fake_train(config, **kwargs):
+        observed.append((config, kwargs))
+        checkpoint = run_directory / "step_000010"
+        checkpoint.mkdir(exist_ok=True)
+        (checkpoint / "ckpt.pt").write_bytes(b"checkpoint")
+        return {"status": "complete", "step": 10, "checkpoint": str(checkpoint)}
+
+    monkeypatch.setattr(train_mla, "train", fake_train)
+    invocation = SimpleNamespace(
+        adapter={
+            "adapter": "rwkv-lab.transformer-mla",
+            "version": "1.0.0",
+            "operation": "train",
+            "contract": "rwkv_lab.transformer_mla.v1.Train",
+        },
+        inputs={
+            "config": {
+                "profile": "mla",
+                "model_dir": str(model_dir),
+                "patch_dir": str(patch_dir),
+                "tokens_bin": str(tokens),
+                "output_dir": str(run_directory),
+                "total_tokens_in_bin": 1024,
+                "eval_tokens": 64,
+                "max_steps": 10,
+                "warmup_steps": 2,
+                "eval_every_steps": 5,
+                "eval_batches": 2,
+                "save_every_steps": 10,
+            }
+        },
+        workspace=_sealed_workspace(read_root, run_directory),
+        publishes={"checkpoint": {}},
+    )
+    required_implementations = []
+    components = SimpleNamespace(
+        require_implementation=lambda slot, **values: required_implementations.append(
+            (slot, values)
+        )
+    )
+    profiler = SimpleNamespace()
+    observability = SimpleNamespace()
+    controls = SimpleNamespace()
+
+    result = _transformer_mla(
+        invocation,
+        components,
+        step_profiler=profiler,
+        observability=observability,
+        controls=controls,
+    )
+
+    lowered, keyword_arguments = observed[0]
+    assert lowered.model_dir == str(model_dir.resolve())
+    assert lowered.patch_dir == str(patch_dir.resolve())
+    assert lowered.tokens_bin == str(tokens.resolve())
+    assert lowered.out_dir == str(run_directory.resolve())
+    assert lowered.optimizer == "trainvm"
+    assert required_implementations == [
+        (
+            "optimizer",
+            {
+                "category": "optimizer",
+                "allowed": frozenset(
+                    {
+                        "rwkv_lab.optimizer.torch_adamw.v1",
+                        "rwkv_lab.optimizer.torch_adamw_no_decay.v2",
+                    }
+                ),
+            },
+        )
+    ]
+    assert keyword_arguments == {
+        "worker_components": components,
+        "worker_step_profiler": profiler,
+        "worker_observability": observability,
+        "worker_controls": controls,
+    }
+    assert result.optimizer_step == 10
+    assert result.checkpoint_requests[0].resume_grade == "compatible"
+    assert "topology" in result.checkpoint_requests[0].state_components
+
+    wrong_profile = SimpleNamespace(**vars(invocation))
+    wrong_profile.inputs = {
+        "config": {**invocation.inputs["config"], "profile": "full_backbone"}
+    }
+    with pytest.raises(AdapterDispatchError, match="does not match"):
+        _transformer_mla(wrong_profile, components)
+
+    with pytest.raises(AdapterDispatchError, match="do not declare initial controls"):
+        _transformer_mla(
+            invocation,
+            components,
+            observability=observability,
+            controls=SimpleNamespace(effective_values={"learning_rate": 1.0e-5}),
+        )
+
+    bad_observability = SimpleNamespace(
+        declaration=SimpleNamespace(
+            metrics={
+                "train.loss": SimpleNamespace(step_domain="token"),
+            }
+        )
+    )
+    with pytest.raises(AdapterDispatchError, match="optimizer_step"):
+        _transformer_mla(
+            invocation,
+            components,
+            observability=bad_observability,
+            controls=SimpleNamespace(effective_values={}),
+        )
+
+    engram_invocation = SimpleNamespace(**vars(invocation))
+    engram_invocation.adapter = {
+        **invocation.adapter,
+        "adapter": "rwkv-lab.transformer-mla-engram",
+        "contract": "rwkv_lab.transformer_mla_engram.v1.Train",
+    }
+    engram_invocation.inputs = {
+        "config": {
+            **invocation.inputs["config"],
+            "profile": "engram",
+            "engram_patch_dir": str(engram_dir),
+        }
+    }
+    required_implementations.clear()
+    _transformer_mla(
+        engram_invocation,
+        components,
+        observability=observability,
+        controls=controls,
+    )
+    assert required_implementations == [
+        (
+            "optimizer",
+            {
+                "category": "optimizer",
+                "allowed": frozenset(
+                    {
+                        "rwkv_lab.optimizer.torch_adamw.v1",
+                        "rwkv_lab.optimizer.torch_adamw_no_decay.v2",
+                    }
+                ),
+            },
+        ),
+        (
+            "host_optimizer",
+            {
+                "category": "optimizer",
+                "allowed": frozenset(
+                    {"rwkv_lab.optimizer.torch_sparse_adam.v1"}
+                ),
+            },
+        ),
+    ]
+
+    monkeypatch.setattr(
+        train_mla,
+        "train",
+        lambda config, **kwargs: {
+            "status": "interrupted",
+            "step": 10,
+            "checkpoint": str(run_directory / "step_000010"),
+        },
+    )
+    interrupted = _transformer_mla(
+        invocation,
+        components,
+        observability=observability,
+        controls=controls,
+    )
+    assert interrupted.event_type == "operation.failed"
+    assert interrupted.payload["reason"] == "checkpointed_interruption"
+
+
 def test_dispatch_table_is_closed_and_training_composition_is_required() -> None:
-    assert supported_adapter_keys() == {
+    expected = {
         (
             "rwkv-lab.mageflow-appearance-expert",
             "1.0.0",
@@ -491,6 +685,19 @@ def test_dispatch_table_is_closed_and_training_composition_is_required() -> None
             "rwkv_lab.rwkv_scratch.v1.Train",
         ),
     }
+    expected.update(
+        {
+            ("rwkv-lab.transformer-mla", "1.0.0", "train", "rwkv_lab.transformer_mla.v1.Train"),
+            ("rwkv-lab.transformer-mla-mtp", "1.0.0", "train", "rwkv_lab.transformer_mla_mtp.v1.Train"),
+            ("rwkv-lab.transformer-mla-mutor", "1.0.0", "train", "rwkv_lab.transformer_mla_mutor.v1.Train"),
+            ("rwkv-lab.transformer-mla-fsp", "1.0.0", "train", "rwkv_lab.transformer_mla_fsp.v1.Train"),
+            ("rwkv-lab.transformer-mla-parallel", "1.0.0", "train", "rwkv_lab.transformer_mla_parallel.v1.Train"),
+            ("rwkv-lab.transformer-mla-rwkv8", "1.0.0", "train", "rwkv_lab.transformer_mla_rwkv8.v1.Train"),
+            ("rwkv-lab.transformer-mla-engram", "1.0.0", "train", "rwkv_lab.transformer_mla_engram.v1.Train"),
+            ("rwkv-lab.transformer-mla-full-backbone", "1.0.0", "train", "rwkv_lab.transformer_mla_full_backbone.v1.Train"),
+        }
+    )
+    assert supported_adapter_keys() == expected
     unknown = SimpleNamespace(
         adapter={
             "adapter": "user.supplied.module",

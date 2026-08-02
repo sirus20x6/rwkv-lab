@@ -618,7 +618,8 @@ void test_reflection_and_compiler() {
                     "resume_grade"}) &&
             trainvm::reflected_field_names<
                 trainvm::TrainingCompositionContract>() ==
-                std::vector<std::string>({"model_family", "slots"}) &&
+                std::vector<std::string>(
+                    {"model_family", "slots", "allowed_components"}) &&
             trainvm::enum_from_string<trainvm::ResumeGrade>("exact") ==
                 trainvm::ResumeGrade::exact &&
             trainvm::enum_to_string(
@@ -9040,6 +9041,11 @@ void test_adapter_registry_and_reconciler() {
             .model_family = "mageflow",
             .slots = {{"backbone_activation",
                        trainvm::TrainingComponentCategory::activation}},
+            .allowed_components = std::map<
+                std::string, std::vector<trainvm::TrainingComponentKey>>{
+                {"backbone_activation",
+                 {{trainvm::TrainingComponentCategory::activation,
+                   "silu", "1.0.0"}}}},
         };
   }
   const auto rejects_composition_plan = [](
@@ -9068,6 +9074,7 @@ void test_adapter_registry_and_reconciler() {
   bool wrong_family_rejected = false;
   bool wrong_slot_rejected = false;
   bool wrong_category_rejected = false;
+  bool disallowed_component_rejected = false;
   if (composed.valid()) {
     auto wrong_family = *composed.plan;
     wrong_family.experiment.spec.workflow.nodes.at("train_to_boundary")
@@ -9087,11 +9094,19 @@ void test_adapter_registry_and_reconciler() {
         .key.category = trainvm::TrainingComponentCategory::optimizer;
     wrong_category_rejected =
         rejects_composition_plan(composed_profiles, wrong_category);
+    auto disallowed_component = *composed.plan;
+    disallowed_component.experiment.spec.workflow.nodes
+        .at("train_to_boundary")
+        .invoke.training->components.at("backbone_activation")
+        .key.name = "gelu";
+    disallowed_component_rejected =
+        rejects_composition_plan(composed_profiles, disallowed_component);
   }
   check(exact_composition_accepted && missing_composition_rejected &&
             undeclared_composition_rejected && wrong_family_rejected &&
-            wrong_slot_rejected && wrong_category_rejected,
-        "adapter profiles close the exact training model family, slot names, and categories before worker launch");
+            wrong_slot_rejected && wrong_category_rejected &&
+            disallowed_component_rejected,
+        "adapter profiles close the exact training model family, slot names, categories, and component allowlists before worker launch");
 
   const auto rejects_lifecycle = [](trainvm::OperationLifecycleCapabilities lifecycle) {
     auto profiles = fixture_adapter_profiles();

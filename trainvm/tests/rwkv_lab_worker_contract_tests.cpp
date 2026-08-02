@@ -56,8 +56,8 @@ int main() {
     const trainvm::RwkvLabWorkerContract contract =
         trainvm::rwkv_lab_worker_contract(fingerprint);
     require(contract.adapter_registry.api_version == "trainvm.adapters/v2" &&
-                contract.adapter_registry.profiles.size() == 4U,
-            "rwkv_lab catalog must expose four exact adapter profiles");
+                contract.adapter_registry.profiles.size() == 12U,
+            "rwkv_lab catalog must expose twelve exact adapter profiles");
     require(std::ranges::is_sorted(contract.provided_capabilities) &&
                 std::ranges::adjacent_find(contract.provided_capabilities) ==
                     contract.provided_capabilities.end(),
@@ -67,7 +67,7 @@ int main() {
         trainvm::rwkv_lab_worker_runtime_requirements();
     require(runtime_requirements.api_version ==
                     "trainvm.rwkv-lab-worker-runtime-requirements/v1" &&
-                runtime_requirements.profiles.size() == 4U &&
+                runtime_requirements.profiles.size() == 12U &&
                 runtime_requirements.shared_root_distributions ==
                     std::vector<std::string>(
                         {"grpcio", "pillow", "protobuf", "torch"}),
@@ -93,6 +93,47 @@ int main() {
         contract, "rwkv-lab.mageflow-terminal-expert");
     const auto& qwen = find_profile(contract, "rwkv-lab.qwen-ao3");
     const auto& rwkv = find_profile(contract, "rwkv-lab.rwkv-scratch");
+    const std::vector<std::string> transformer_adapters{
+        "rwkv-lab.transformer-mla",
+        "rwkv-lab.transformer-mla-engram",
+        "rwkv-lab.transformer-mla-fsp",
+        "rwkv-lab.transformer-mla-full-backbone",
+        "rwkv-lab.transformer-mla-mtp",
+        "rwkv-lab.transformer-mla-mutor",
+        "rwkv-lab.transformer-mla-parallel",
+        "rwkv-lab.transformer-mla-rwkv8",
+    };
+    const bool transformer_contracts_exact =
+        std::ranges::all_of(transformer_adapters, [&](const auto& adapter) {
+          const auto& transformer = find_profile(contract, adapter);
+          return transformer.training_composition &&
+                 transformer.training_composition->model_family ==
+                     "transformer" &&
+                 transformer.training_composition->slots.size() ==
+                     (adapter == "rwkv-lab.transformer-mla-engram" ? 8U : 7U) &&
+                 (adapter != "rwkv-lab.transformer-mla-engram" ||
+                  (transformer.training_composition->slots.at(
+                       "host_optimizer") ==
+                       trainvm::TrainingComponentCategory::optimizer &&
+                   transformer.training_composition->allowed_components->at(
+                       "host_optimizer") ==
+                       std::vector<trainvm::TrainingComponentKey>{{
+                           trainvm::TrainingComponentCategory::optimizer,
+                           "torch_sparse_adam", "1.0.0"}})) &&
+                 transformer.lifecycle.resume_grade ==
+                     trainvm::ResumeGrade::compatible &&
+                 transformer.lifecycle.checkpoint_now &&
+                 transformer.training_composition->allowed_components->at(
+                     "optimizer").size() == 2U &&
+                 !std::ranges::contains(
+                     transformer.training_composition->allowed_components->at(
+                         "optimizer"),
+                     trainvm::TrainingComponentKey{
+                         trainvm::TrainingComponentCategory::optimizer,
+                         "torch_sparse_adam", "1.0.0"}) &&
+                 transformer.key.contract.starts_with(
+                     "rwkv_lab.transformer_mla");
+        });
     require(appearance.training_composition &&
                 appearance.training_composition->model_family == "mageflow" &&
                 appearance.training_composition->slots.size() == 5U &&
@@ -104,7 +145,8 @@ int main() {
                 qwen.training_composition->slots.size() == 4U &&
                 rwkv.training_composition &&
                 rwkv.training_composition->model_family == "rwkv" &&
-                rwkv.training_composition->slots.size() == 10U,
+                rwkv.training_composition->slots.size() == 10U &&
+                transformer_contracts_exact,
             "real trainer profiles must expose exact family-specific slot surfaces");
     require(appearance.lifecycle.resume_grade ==
                 trainvm::ResumeGrade::compatible &&
@@ -138,7 +180,7 @@ int main() {
         operation_registry.operation_descriptors_json();
     require(operation_document.at("api_version") ==
                     "trainvm.operations/v1" &&
-                operation_document.at("operations").size() == 4U &&
+                operation_document.at("operations").size() == 12U &&
                 operation_registry.operation_descriptors_digest() ==
                     "sha256:" +
                         trainvm::sha256_hex(operation_document.dump()),
@@ -151,7 +193,13 @@ int main() {
                 operations.at(2).at("key").at("adapter") ==
                     "rwkv-lab.qwen-ao3" &&
                 operations.at(3).at("key").at("adapter") ==
-                    "rwkv-lab.rwkv-scratch",
+                    "rwkv-lab.rwkv-scratch" &&
+                operations.at(4).at("key").at("adapter") ==
+                    "rwkv-lab.transformer-mla" &&
+                operations.at(10).at("key").at("adapter") ==
+                    "rwkv-lab.transformer-mla-parallel" &&
+                operations.at(11).at("key").at("adapter") ==
+                    "rwkv-lab.transformer-mla-rwkv8",
             "operation descriptors must use canonical exact-key ordering");
     for (const nlohmann::json& operation : operations) {
       require(operation.at("authoring").at("inputs").at("config").at(
@@ -287,7 +335,7 @@ int main() {
         extended_registry.operation_descriptors_json();
     const auto& extended_operations =
         extended_document.at("operations");
-    require(extended_operations.size() == 5U &&
+    require(extended_operations.size() == 13U &&
                 std::ranges::any_of(
                     extended_operations, [](const nlohmann::json& operation) {
                       return operation.at("key").at("adapter") ==
@@ -390,7 +438,7 @@ int main() {
                     contract.provided_capabilities &&
                 deployment.host_launch_registry.api_version ==
                     "trainvm.host-launches/v4" &&
-                deployment.host_launch_registry.profiles.size() == 4U,
+                deployment.host_launch_registry.profiles.size() == 12U,
             "deployment lowering must retain the complete reflected worker catalog");
     for (const trainvm::HostLaunchProfile& launch :
          deployment.host_launch_registry.profiles) {

@@ -1,7 +1,7 @@
 """
 Wire Engram modules into the Qwen3.6-35B-A3B decoder stack.
 
-Places an `EngramModule` (from /thearray/git/engram/python/engram_ext/engram_module.py)
+Places an `EngramModule` from the attested ``engram-ext`` runtime distribution
 at specified decoder layers, threads the batch's input_ids down to them, and has
 each one residual-add its contribution at the TOP of the layer forward — matching
 the paper's placement: Engram → Attention → MoE within each selected block.
@@ -19,19 +19,13 @@ from inside that scope.
 """
 from __future__ import annotations
 
-import sys
 import warnings
-from pathlib import Path
 from typing import Any, Callable
 
 import torch
 import torch.nn as nn
 
-_ENGRAM_PATH = Path("/thearray/git/engram/python")
-if str(_ENGRAM_PATH) not in sys.path:
-    sys.path.insert(0, str(_ENGRAM_PATH))
-
-from engram_ext.engram_module import EngramConfig, EngramModule  # noqa: E402
+from engram_ext.engram_module import EngramConfig, EngramModule
 
 # Once-per-run flag: warn loudly (once) when a forward carries no token ids
 # and Engram is therefore silently inactive for that forward.
