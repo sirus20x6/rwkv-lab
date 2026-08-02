@@ -22,6 +22,13 @@ from rwkv_lab.training_runtime.gradient_clipping import (
     build_registered_gradient_clipping,
     gradient_clipping_from_resolved_component,
 )
+from rwkv_lab.training_runtime.objectives import (
+    LinearHeadCrossEntropyConfiguration,
+    LinearHeadCrossEntropyObjective,
+    ObjectiveImplementation,
+    build_registered_objective,
+    objective_from_resolved_component,
+)
 from rwkv_lab.training_runtime.optimizers import (
     AdamWConfiguration,
     AdamWNoDecayConfiguration,
@@ -65,7 +72,10 @@ __all__ = [
     "GlobalNormClippingConfiguration",
     "GradientAccumulationImplementation",
     "GradientClippingImplementation",
+    "LinearHeadCrossEntropyConfiguration",
+    "LinearHeadCrossEntropyObjective",
     "LinearWarmupCosineConfiguration",
+    "ObjectiveImplementation",
     "OptimizerImplementation",
     "ParameterRouterImplementation",
     "PowerCoolConfiguration",
@@ -74,6 +84,7 @@ __all__ = [
     "WeightDecayScheduleImplementation",
     "build_registered_gradient_accumulation",
     "build_registered_gradient_clipping",
+    "build_registered_objective",
     "build_registered_optimizer",
     "build_registered_parameter_routing",
     "build_registered_schedule",
@@ -81,6 +92,7 @@ __all__ = [
     "gradient_accumulation_from_resolved_component",
     "gradient_clipping_from_resolved_component",
     "linear_warmup_cosine_multiplier",
+    "objective_from_resolved_component",
     "optimizer_from_resolved_component",
     "parameter_routing_from_resolved_component",
     "powercool_multiplier",

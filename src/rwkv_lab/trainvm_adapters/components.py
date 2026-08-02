@@ -9,11 +9,13 @@ import torch
 from rwkv_lab.training_components import (
     ConstantWeightDecaySchedule,
     FixedGradientAccumulation,
+    LinearHeadCrossEntropyObjective,
     LinearWarmupCosineConfiguration,
     PowerCoolConfiguration,
     ScheduleImplementation,
     gradient_accumulation_from_resolved_component,
     gradient_clipping_from_resolved_component,
+    objective_from_resolved_component,
     optimizer_from_resolved_component,
     parameter_routing_from_resolved_component,
     schedule_configuration_from_resolved_component,
@@ -56,6 +58,14 @@ class WorkerTrainingComponents:
         return optimizer_from_resolved_component(
             component.runtime_envelope(), parameters
         )
+
+    def objective(
+        self,
+        *,
+        slot: str = "objective",
+    ) -> LinearHeadCrossEntropyObjective:
+        component = self.composition.require(slot, category="objective")
+        return objective_from_resolved_component(component.runtime_envelope())
 
     def configuration(
         self, slot: str, *, category: str

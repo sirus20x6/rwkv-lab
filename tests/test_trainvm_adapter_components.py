@@ -59,6 +59,10 @@ def composition():
             "fixed",
             {"microbatches_per_optimizer_step": 4},
         ),
+        "objective": (
+            "linear_head_cross_entropy",
+            {"chunk_size": 2, "prefer_fused": False},
+        ),
     }
     components = {}
     for slot, (name, configuration) in requested.items():
@@ -90,6 +94,7 @@ def test_worker_component_bridge_builds_optimizer_and_schedule() -> None:
     parameter.grad = torch.tensor([4.0])
     gradient_norm = runtime.gradient_clipping([parameter])
     accumulation = runtime.gradient_accumulation()
+    objective = runtime.objective()
 
     assert isinstance(optimizer, torch.optim.AdamW)
     assert optimizer.param_groups[0]["weight_decay"] == pytest.approx(0.01)
@@ -100,6 +105,15 @@ def test_worker_component_bridge_builds_optimizer_and_schedule() -> None:
     assert parameter.grad == pytest.approx(torch.tensor([1.0]))
     assert accumulation.microbatches_per_optimizer_step == 4
     assert accumulation.scale_loss(torch.tensor(8.0)) == pytest.approx(2.0)
+    hidden = torch.randn(1, 2, 3)
+    head = torch.nn.Linear(3, 5)
+    labels = torch.tensor([[1, 2]])
+    torch.testing.assert_close(
+        objective(hidden, head, labels),
+        torch.nn.functional.cross_entropy(
+            head(hidden).reshape(-1, 5), labels.reshape(-1)
+        ),
+    )
     assert runtime.evidence()["optimizer"]["category"] == "optimizer"
 
 

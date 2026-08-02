@@ -366,7 +366,7 @@ void checked_in_component_catalog_matches_native_authority_contract() {
   const trainvm::TrainingComponentRegistry registry =
       trainvm::TrainingComponentRegistry::load_file(
           std::filesystem::absolute(path));
-  check(registry.document_json().at("components").size() == 11U &&
+  check(registry.document_json().at("components").size() == 12U &&
             registry.registry_digest().starts_with("sha256:") &&
             registry.registry_digest().size() == 71U,
         "checked-in cross-family component catalog is a canonical native authority document");
@@ -444,6 +444,20 @@ void checked_in_component_catalog_matches_native_authority_contract() {
             accumulation.configuration.at(
                 "microbatches_per_optimizer_step") == 4,
         "fixed optimizer-step accumulation resolves independently of clipping and optimizer policy");
+  const auto objective = registry.resolve({
+      .key = {.category = trainvm::TrainingComponentCategory::objective,
+              .name = "linear_head_cross_entropy",
+              .version = "1.0.0"},
+      .model_family = "rwkv",
+      .configuration = nlohmann::json::object(),
+  });
+  check(objective.descriptor.implementation ==
+            "rwkv_lab.objective.linear_head_cross_entropy.v1" &&
+            objective.descriptor.state_grade ==
+                trainvm::TrainingStateGrade::stateless &&
+            objective.configuration.at("chunk_size") == 2048 &&
+            objective.configuration.at("prefer_fused") == true,
+        "linear-head language objective resolves independently of model topology and optimizer policy");
   const auto no_decay_optimizer = registry.resolve({
       .key = {.category = trainvm::TrainingComponentCategory::optimizer,
               .name = "torch_adamw_no_decay",

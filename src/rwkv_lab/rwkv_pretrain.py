@@ -757,6 +757,12 @@ def resolved_worker_component_contract(
         raise ValueError(
             "authority gradient-accumulation composition disagrees with RWKV configuration"
         )
+    if dict(
+        worker_components.configuration("objective", category="objective")
+    ) != {"chunk_size": 2048, "prefer_fused": True}:
+        raise ValueError(
+            "authority objective composition disagrees with RWKV configuration"
+        )
     implementation, resolved_schedule = (
         worker_components.learning_rate_configuration()
     )
@@ -1565,6 +1571,11 @@ def main(
         if worker_components is not None
         else None
     )
+    training_objective = (
+        worker_components.objective()
+        if worker_components is not None
+        else None
+    )
     print(f"optimizer={args.optimizer} lr={args.lr} wd={args.weight_decay}", flush=True)
     step = 0; resume_recall_rng = None; did_resume = False
     if args.resume and os.path.exists(args.resume):
@@ -1735,10 +1746,16 @@ def main(
                 warm_batch, warm_seq, dtype=torch.long, device=dev
             )
             warm_hidden = fwd(warm_ids, hidden_only=True)
-            from rwkv_lab.fused_ce import lmhead_cross_entropy
-            warm_loss = lmhead_cross_entropy(
-                warm_hidden, model.head, warm_ids, fused=True
-            )
+            if training_objective is not None:
+                warm_loss = training_objective(
+                    warm_hidden, model.head, warm_ids
+                )
+            else:
+                from rwkv_lab.fused_ce import lmhead_cross_entropy
+
+                warm_loss = lmhead_cross_entropy(
+                    warm_hidden, model.head, warm_ids, fused=True
+                )
             warm_loss.backward()
         opt.zero_grad(set_to_none=True)
         torch.set_rng_state(cpu_rng)
@@ -1836,9 +1853,23 @@ def main(
             # sparse copy-head mutates logits, so it retains the compatible path.
             if lmb is None:
                 hidden = fwd(xin, hidden_only=True)
-                from rwkv_lab.fused_ce import lmhead_cross_entropy
-                loss = lmhead_cross_entropy(hidden, model.head, tgt, fused=True,
-                                            ignore_index=(0 if buckets is not None else None))
+                if training_objective is not None:
+                    loss = training_objective(
+                        hidden,
+                        model.head,
+                        tgt,
+                        ignore_index=(0 if buckets is not None else None),
+                    )
+                else:
+                    from rwkv_lab.fused_ce import lmhead_cross_entropy
+
+                    loss = lmhead_cross_entropy(
+                        hidden,
+                        model.head,
+                        tgt,
+                        fused=True,
+                        ignore_index=(0 if buckets is not None else None),
+                    )
                 out = (None, hidden) if heads else None
             else:
                 out = fwd(xin, return_hidden=bool(heads),

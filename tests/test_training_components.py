@@ -16,7 +16,10 @@ from rwkv_lab.training_components import (
     GlobalNormClippingConfiguration,
     GradientAccumulationImplementation,
     GradientClippingImplementation,
+    LinearHeadCrossEntropyConfiguration,
+    LinearHeadCrossEntropyObjective,
     LinearWarmupCosineConfiguration,
+    ObjectiveImplementation,
     OptimizerImplementation,
     ParameterRouterImplementation,
     PowerCoolConfiguration,
@@ -25,6 +28,7 @@ from rwkv_lab.training_components import (
     WeightDecayScheduleImplementation,
     build_registered_gradient_accumulation,
     build_registered_gradient_clipping,
+    build_registered_objective,
     build_registered_optimizer,
     build_registered_parameter_routing,
     build_registered_schedule,
@@ -47,6 +51,7 @@ def test_runtime_categories_have_one_way_dependency_boundaries():
         "gradient_accumulation",
         "gradient_clipping",
         "optimizers",
+        "objectives",
         "routers",
         "schedules",
         "weight_decay_schedules",
@@ -177,6 +182,7 @@ def test_component_catalog_and_runtime_dispatch_are_exactly_aligned():
     }
     assert grades["optimizer"] == "exact"
     assert grades["learning_rate_schedule"] == "exact"
+    assert grades["objective"] == "stateless"
     assert grades["parameter_router"] == "stateless"
     assert grades["gradient_accumulation"] == "stateless"
     assert grades["gradient_clipping"] == "stateless"
@@ -212,6 +218,27 @@ def test_fixed_gradient_accumulation_owns_microbatch_count_and_loss_scaling():
     policy.scale_loss(loss).backward()
     assert loss.grad == pytest.approx(torch.tensor(0.25))
     assert policy.state_dict() == {}
+
+
+def test_linear_head_cross_entropy_objective_matches_reference_value_and_gradient():
+    hidden = torch.randn(2, 3, 4, requires_grad=True)
+    head = torch.nn.Linear(4, 7, bias=False)
+    labels = torch.randint(0, 7, (2, 3))
+    objective = build_registered_objective(
+        ObjectiveImplementation.LINEAR_HEAD_CROSS_ENTROPY_V1,
+        LinearHeadCrossEntropyConfiguration(chunk_size=2, prefer_fused=False),
+    )
+    assert isinstance(objective, LinearHeadCrossEntropyObjective)
+    observed = objective(hidden, head, labels)
+    reference = torch.nn.functional.cross_entropy(
+        head(hidden).float().reshape(-1, 7), labels.reshape(-1)
+    )
+    torch.testing.assert_close(observed, reference)
+    observed.backward()
+    observed_gradient = hidden.grad.detach().clone()
+    hidden.grad = None
+    reference.backward()
+    torch.testing.assert_close(observed_gradient, hidden.grad)
 
 
 def test_no_decay_optimizer_and_decay_schedule_have_independent_contracts():

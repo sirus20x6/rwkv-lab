@@ -75,6 +75,24 @@
     },
     {
       "key": {
+        "category": "objective",
+        "name": "linear_head_cross_entropy",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.objective.linear_head_cross_entropy.v1",
+      "model_families": ["rwkv", "transformer"],
+      "required_capabilities": ["objective.linear_head_cross_entropy.v1"],
+      "configuration": [
+        {"name": "chunk_size", "type": "integer", "required": false, "default": 2048, "minimum": 1, "maximum": 1048576, "unit": "count"},
+        {"name": "prefer_fused", "type": "boolean", "required": false, "default": true}
+      ],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
         "category": "optimizer",
         "name": "torch_adamw",
         "version": "1.0.0"

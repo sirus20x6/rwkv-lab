@@ -58,6 +58,8 @@ def test_rwkv_worker_components_drive_powercool_and_optimizer() -> None:
                 "gradient_accumulation",
             ):
                 return {"microbatches_per_optimizer_step": 1}
+            if (slot, category) == ("objective", "objective"):
+                return {"chunk_size": 2048, "prefer_fused": True}
             assert (slot, category) == ("optimizer", "optimizer")
             return {
                 "learning_rate": 3.0e-4,
@@ -83,6 +85,11 @@ def test_rwkv_worker_components_drive_powercool_and_optimizer() -> None:
                 microbatches_per_optimizer_step=1,
                 microbatch_indices=lambda: range(1),
                 scale_loss=lambda loss: loss,
+            )
+
+        def objective(self):
+            return lambda hidden, head, labels, **_kwargs: torch.nn.functional.cross_entropy(
+                head(hidden).reshape(-1, head.out_features), labels.reshape(-1)
             )
 
         def evidence(self):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .gradient_accumulation import GradientAccumulationImplementation
 from .gradient_clipping import GradientClippingImplementation
+from .objectives import ObjectiveImplementation
 from .optimizers import OptimizerImplementation
 from .routers import ParameterRouterImplementation
 from .schedules import ScheduleImplementation
@@ -13,6 +14,7 @@ def supported_implementation_ids() -> frozenset[str]:
         implementation.value
         for implementation in (
             *OptimizerImplementation,
+            *ObjectiveImplementation,
             *ScheduleImplementation,
             *ParameterRouterImplementation,
             *GradientClippingImplementation,
@@ -36,5 +38,6 @@ def supported_worker_capabilities() -> frozenset[str]:
             "weight_decay_schedule.constant.v1",
             "optimizer.torch_adamw_no_decay.v2",
             "optimizer.fp32_master_adamw_no_decay.v2",
+            "objective.linear_head_cross_entropy.v1",
         }
     )
