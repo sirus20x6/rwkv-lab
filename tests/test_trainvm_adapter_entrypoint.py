@@ -21,6 +21,7 @@ from rwkv_lab.trainvm_adapters.handlers import (
     _rlvr,
     _rwkv_posttraining,
     _rwkv_scratch,
+    _scalar_metric_decision,
     _transformer_mla,
     _vision_frozen_adapter,
     _vision_native_head,
@@ -772,6 +773,7 @@ def test_frozen_vision_handler_lowers_compressor_arm_to_sealed_cache_only_argv(
             "status": "complete",
             "step": 1,
             "checkpoint": str(checkpoint.resolve()),
+            "best_eval_loss": 1.25,
         }
 
     monkeypatch.setattr(vision_train, "train", fake_train)
@@ -798,7 +800,7 @@ def test_frozen_vision_handler_lowers_compressor_arm_to_sealed_cache_only_argv(
             }
         },
         workspace=_sealed_workspace(read_root, run_directory),
-        publishes={"checkpoint": {}},
+        publishes={"checkpoint": {}, "result": {}},
         resume=None,
         node_id="compressor_arm",
     )
@@ -835,6 +837,17 @@ def test_frozen_vision_handler_lowers_compressor_arm_to_sealed_cache_only_argv(
     assert request.source_directory == node_run_directory / "checkpoint-current"
     assert request.resume_grade == "compatible"
     assert "data_cursor" in request.state_components
+    assert len(result.artifact_requests) == 1
+    scalar_result = result.artifact_requests[0]
+    assert scalar_result.output_name == "result"
+    assert json.loads((scalar_result.source_directory / "result.json").read_text()) == {
+        "api_version": "rwkv-lab.scalar-metric-result/v1",
+        "direction": "minimize",
+        "metric": "eval.loss",
+        "optimizer_step": 1,
+        "subject": "compressor",
+        "value": 1.25,
+    }
 
 
 def test_vision_native_head_handler_seals_lineage_and_publishes_checkpoint(
@@ -936,6 +949,90 @@ def test_vision_native_head_handler_seals_lineage_and_publishes_checkpoint(
     request = result.checkpoint_requests[0]
     assert request.resume_grade == "compatible"
     assert "data_cursor" not in request.state_components
+
+
+def test_scalar_metric_decision_publishes_lineage_bound_winner(
+    tmp_path, monkeypatch
+) -> None:
+    run_directory = tmp_path / "run"
+    run_directory.mkdir()
+    artifacts = {
+        "left": SimpleNamespace(artifact_id="artifact-moonvit"),
+        "right": SimpleNamespace(artifact_id="artifact-compressor"),
+    }
+    documents = {
+        "artifact-moonvit": {
+            "api_version": "rwkv-lab.scalar-metric-result/v1",
+            "direction": "minimize",
+            "metric": "eval.loss",
+            "optimizer_step": 2000,
+            "subject": "moonvit",
+            "value": 1.5,
+        },
+        "artifact-compressor": {
+            "api_version": "rwkv-lab.scalar-metric-result/v1",
+            "direction": "minimize",
+            "metric": "eval.loss",
+            "optimizer_step": 2000,
+            "subject": "compressor",
+            "value": 1.25,
+        },
+    }
+    monkeypatch.setattr(
+        "rwkv_lab.trainvm_adapters.handlers.resolve_input_artifact",
+        lambda _invocation, name, **_requirements: artifacts[name],
+    )
+    monkeypatch.setattr(
+        "rwkv_lab.trainvm_adapters.handlers.load_input_artifact_json",
+        lambda artifact, _path, **_bounds: documents[artifact.artifact_id],
+    )
+    invocation = SimpleNamespace(
+        inputs={
+            "config": {
+                "metric": "eval.loss",
+                "direction": "minimize",
+                "left_subject": "moonvit",
+                "right_subject": "compressor",
+                "absolute_tolerance": 0.01,
+            },
+            "left": {},
+            "right": {},
+        },
+        workspace={
+            "run_directory": str(run_directory),
+            "allowed_read_roots": [str(tmp_path)],
+            "allowed_write_roots": [str(tmp_path)],
+        },
+        publishes={"decision": {}},
+        resume=None,
+        node_id="compare_arms",
+        attempt_id="compare_arms@1",
+    )
+
+    result = _scalar_metric_decision(
+        invocation,
+        None,
+        observability=SimpleNamespace(
+            keepalive=lambda *_args: __import__("contextlib").nullcontext()
+        ),
+        controls=SimpleNamespace(effective_values={}),
+    )
+
+    assert result.event_type == "operation.completed"
+    assert result.payload == {
+        "outcome": "selected",
+        "selected_subject": "compressor",
+    }
+    request = result.artifact_requests[0]
+    assert request.output_name == "decision"
+    assert request.parent_artifact_ids == (
+        "artifact-moonvit",
+        "artifact-compressor",
+    )
+    decision = json.loads((request.source_directory / "decision.json").read_text())
+    assert decision["selected_subject"] == "compressor"
+    assert decision["selected_artifact_id"] == "artifact-compressor"
+    assert decision["signed_right_minus_left"] == -0.25
 
 
 def test_vision_student_handler_seals_lineage_and_publishes_checkpoint(
@@ -1254,6 +1351,12 @@ def test_dispatch_table_is_closed_and_training_composition_is_required() -> None
             "1.0.0",
             "train",
             "rwkv_lab.qwen_ao3.v1.Train",
+        ),
+        (
+            "rwkv-lab.scalar-metric-decision",
+            "1.0.0",
+            "decide",
+            "rwkv_lab.scalar_metric_decision.v1.Decide",
         ),
         (
             "rwkv-lab.rwkv-posttraining",

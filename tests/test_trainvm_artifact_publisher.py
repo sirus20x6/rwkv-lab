@@ -13,6 +13,8 @@ from rwkv_lab.trainvm_worker import (
     ArtifactPublicationRequest,
     ImmutableArtifactPublisher,
     publish_artifact_requests,
+    read_input_artifact_file,
+    resolve_input_artifact,
 )
 
 
@@ -111,6 +113,99 @@ def test_directory_artifact_rejects_symlinks_and_wrong_declaration(
     )
     with pytest.raises(ArtifactPublicationError, match="incompatible"):
         ImmutableArtifactPublisher(session, output_name="adapter")
+
+
+def _input_descriptor(session, published) -> dict[str, object]:
+    announced = session.artifacts[0]
+    return {
+        "artifact_id": published.artifact_id,
+        "logical_name": announced["logical_name"],
+        "kind": "opaque",
+        "schema": announced["schema"],
+        "uri": announced["uri"],
+        "size_bytes": announced["size_bytes"],
+        "fingerprint_algorithm": announced["fingerprint_algorithm"],
+        "fingerprint": announced["fingerprint"],
+        "complete": True,
+        "producer_node_id": session.bootstrap.node_id,
+        "producer_attempt_id": session.bootstrap.attempt_id,
+        "parent_artifact_ids": list(announced["parent_artifact_ids"]),
+        "published_at_ns": 1,
+    }
+
+
+def test_input_artifact_resolution_reverifies_descriptor_manifest_and_payload(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "output"
+    source.mkdir()
+    (source / "result.json").write_text('{"score":1}\n', encoding="utf-8")
+    session = FakeArtifactSession(tmp_path)
+    published = ImmutableArtifactPublisher(session, output_name="adapter").publish(
+        source, parent_artifact_ids=("parent-1",)
+    )
+    descriptor = _input_descriptor(session, published)
+    invocation = SimpleNamespace(
+        inputs=MappingProxyType({"candidate": MappingProxyType(descriptor)}),
+        workspace=MappingProxyType(
+            {
+                "allowed_read_roots": (str(tmp_path),),
+                "allowed_write_roots": (str(tmp_path),),
+            }
+        ),
+    )
+
+    resolved = resolve_input_artifact(
+        invocation,
+        "candidate",
+        required_kind="opaque",
+        required_schema="rwkv-lab.posttraining-output.v1",
+    )
+
+    assert resolved.artifact_id == published.artifact_id
+    assert resolved.parent_artifact_ids == ("parent-1",)
+    assert (resolved.payload_directory / "result.json").read_text() == (
+        '{"score":1}\n'
+    )
+    assert read_input_artifact_file(
+        resolved, "result.json", maximum_bytes=1024
+    ) == b'{"score":1}\n'
+
+    payload = resolved.payload_directory / "result.json"
+    payload.chmod(0o640)
+    payload.write_text('{"score":2}\n', encoding="utf-8")
+    with pytest.raises(ArtifactPublicationError, match="mutated"):
+        resolve_input_artifact(
+            invocation,
+            "candidate",
+            required_kind="opaque",
+            required_schema="rwkv-lab.posttraining-output.v1",
+        )
+
+
+def test_input_artifact_resolution_rejects_descriptor_substitution(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "output"
+    source.mkdir()
+    (source / "result.json").write_text("{}", encoding="utf-8")
+    session = FakeArtifactSession(tmp_path)
+    published = ImmutableArtifactPublisher(session, output_name="adapter").publish(
+        source
+    )
+    descriptor = _input_descriptor(session, published)
+    descriptor["producer_node_id"] = "different-node"
+    invocation = SimpleNamespace(
+        inputs={"candidate": descriptor},
+        workspace={"allowed_read_roots": (str(tmp_path),)},
+    )
+    with pytest.raises(ArtifactPublicationError, match="semantics"):
+        resolve_input_artifact(
+            invocation,
+            "candidate",
+            required_kind="opaque",
+            required_schema="rwkv-lab.posttraining-output.v1",
+        )
 
 
 def test_artifact_publication_namespace_rejects_path_and_symlink_escape(
