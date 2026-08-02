@@ -381,6 +381,19 @@ startup orphan recovery are defined in
 - Extend the implemented wake-driven, restart-scanning service supervisor (admission, launch,
   terminal process/resource release, and exact lease renewal) with typed executors for
   compile/warmup/qualification nodes and dashboard-visible supervisor health.
+  The qualification executor is implemented. A `qualify_cache` node is an exact builtin
+  `trainvm.core` operation whose topology requires both a `cache.qualified` and a
+  `cache.rejected` transition and an enabled `/spec/execution/qualify` phase, so a rejected
+  candidate can never fall through as qualified. The supervisor resolves evidence through an
+  authority-owned seam, re-runs the implemented qualification gate itself, and commits the verdict
+  as a managed builtin receipt; a node without a configured evidence source fails closed, and a
+  node whose evidence has not been published yet stays pending across wakes instead of inventing a
+  verdict. The gate cannot release the fence it runs under, the journal refuses a self-contradictory
+  verdict, and replay revalidates the verdict against its own receipt. Throughput and peak-memory
+  gates are part of that same qualification receipt, so `benchmark` is not a separate executor.
+  Compile and warmup remain declaration-only: both are worker-side phases, so an authority-side
+  node would have to attest work it never observed. They need the typed worker phase protocol
+  (request/receipt messages plus SDK support) before they can become real executors.
 - Fingerprinted cache namespaces; typed CPU/I/O policy lowering and recovery attestation are
   implemented, with privileged real-host qualification remaining.
 - Declarative bounded Torch GPU profiling and dashboard trace artifacts are implemented; qualified

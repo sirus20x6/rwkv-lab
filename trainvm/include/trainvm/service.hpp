@@ -59,7 +59,10 @@ class TrainVMService final : public v1::TrainVM::Service,
           TrainingComponentRegistry({}),
       std::optional<HostdClientConfiguration> hostd_configuration =
           std::nullopt,
-      std::string controller_target = {});
+      std::string controller_target = {},
+      // Optional authority seam for qualify_cache nodes. A plan containing one
+      // fails closed when this is absent rather than assuming a verdict.
+      ICacheQualificationEvidenceResolver* cache_qualification = nullptr);
   ~TrainVMService() override;
 
   grpc::Status SubmitExperiment(grpc::ServerContext* context,
@@ -189,7 +192,9 @@ class TrainVMService final : public v1::TrainVM::Service,
                      TrainingComponentRegistry({}),
                  std::shared_ptr<IHostGrantClient> host_grant_client = {},
                  std::shared_ptr<IHostProcessClient> host_process_client = {},
-                 std::string controller_target = {});
+                 std::string controller_target = {},
+                 ICacheQualificationEvidenceResolver* cache_qualification =
+                     nullptr);
 
   static constexpr std::size_t kMaximumRetainedLaunches = 32U;
   static constexpr std::uint64_t kMaximumRetainedLaunchBytes = 2ULL << 30U;
