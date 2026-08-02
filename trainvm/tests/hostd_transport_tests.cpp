@@ -619,7 +619,7 @@ ResolvedLaunchSpec process_launch_for(const ResourceBundleGrant& grant) {
       "sha256:" + std::string(64U, 'e');
   ResolvedLaunchSpec spec{
       .identity = {
-          .api_version = "trainvm.resolved-launch/v3",
+          .api_version = "trainvm.resolved-launch/v4",
           .launch_event_id = grant.run_id + ":worker-launch:node:attempt",
           .run_id = grant.run_id,
           .node_id = "node",
@@ -631,6 +631,8 @@ ResolvedLaunchSpec process_launch_for(const ResourceBundleGrant& grant) {
                           .operation = "train",
                           .contract = "trainvm.worker/v1"},
           .code_fingerprint = executable_digest,
+          .bootstrap_runtime_closure_fingerprint =
+              "sha256:" + std::string(64U, 'd'),
           .required_capabilities = {},
           .provided_capabilities = {},
           .host_registry_digest =

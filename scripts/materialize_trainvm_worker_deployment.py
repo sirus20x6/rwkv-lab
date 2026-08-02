@@ -15,8 +15,7 @@ from typing import Any
 
 from build_trainvm_worker_artifact import build
 
-
-SCHEMA = "trainvm.rwkv-lab-worker-deployment-materialization/v1"
+SCHEMA = "trainvm.rwkv-lab-worker-deployment-materialization/v2"
 
 
 def _digest(path: Path) -> str:
@@ -82,20 +81,50 @@ def main() -> int:
     output_directory.mkdir(mode=0o750, parents=True, exist_ok=True)
     output_directory = output_directory.resolve(strict=True)
     artifact = output_directory / "rwkv-lab-worker.pyz"
+    runtime_closure = output_directory / "bootstrap-runtime-closure.json"
 
     with tempfile.TemporaryDirectory(
         prefix=".trainvm-worker-build-", dir=output_directory
     ) as raw:
+        closure_builder = (
+            Path(__file__).resolve().parent / "build_trainvm_runtime_closure.py"
+        )
+        temporary_closure = Path(raw) / runtime_closure.name
+        runtime_receipt = json.loads(
+            subprocess.check_output(
+                [
+                    str(python),
+                    "-I",
+                    str(closure_builder),
+                    "--output",
+                    str(temporary_closure),
+                ],
+                text=True,
+            )
+        )
         temporary_artifact = Path(raw) / artifact.name
-        artifact_receipt = build(source_root, temporary_artifact)
+        artifact_receipt = build(
+            source_root, temporary_artifact, temporary_closure
+        )
+        closure_bytes = temporary_closure.read_bytes()
         artifact_bytes = temporary_artifact.read_bytes()
+        if (
+            runtime_closure.exists()
+            and runtime_closure.read_bytes() != closure_bytes
+            and not arguments.replace
+        ):
+            raise FileExistsError(
+                f"refusing to replace changed runtime closure: {runtime_closure}"
+            )
         if artifact.exists() and artifact.read_bytes() != artifact_bytes and not arguments.replace:
             raise FileExistsError(
                 f"refusing to replace changed deployment artifact: {artifact}"
             )
+        _publish(runtime_closure, closure_bytes, replace=True)
         _publish(artifact, artifact_bytes, replace=True, mode=0o640)
 
     artifact_receipt["output"] = str(artifact)
+    runtime_receipt["output"] = str(runtime_closure)
     python_digest = _digest(python)
     deployment = json.loads(
         subprocess.check_output(
@@ -104,6 +133,7 @@ def main() -> int:
                 "inspect-rwkv-lab-deployment",
                 str(artifact),
                 artifact_receipt["archive_sha256"],
+                runtime_receipt["closure_digest"],
                 str(python),
                 python_digest,
                 str(working_directory),
@@ -127,6 +157,7 @@ def main() -> int:
     receipt = {
         "schema": SCHEMA,
         "worker_artifact": artifact_receipt,
+        "runtime_closure": runtime_receipt,
         "python": {"path": str(python), "sha256": python_digest},
         "working_directory": str(working_directory),
         "trusted_roots": trusted_roots,

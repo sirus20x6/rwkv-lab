@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
-import fcntl
 import os
 import subprocess
 import sys
@@ -32,6 +32,33 @@ def content_digest(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
 
 
+def write_runtime_drift_archive(source: Path, output: Path) -> None:
+    """Keep the closure manifest self-consistent but lie about one real file."""
+
+    with zipfile.ZipFile(source) as archive:
+        members = [(info, archive.read(info)) for info in archive.infolist()]
+    replaced = False
+    rewritten: list[tuple[zipfile.ZipInfo, bytes]] = []
+    for info, data in members:
+        if info.filename == "TRAINVM_RUNTIME_CLOSURE.json":
+            document = json.loads(data)
+            for entry in document["files"]:
+                if entry["kind"] == "regular":
+                    entry["sha256"] = "sha256:" + "0" * 64
+                    replaced = True
+                    break
+            body = dict(document)
+            body.pop("closure_digest")
+            document["closure_digest"] = content_digest(canonical(body))
+            data = canonical(document) + b"\n"
+        rewritten.append((info, data))
+    if not replaced:
+        raise SystemExit("runtime closure fixture has no regular file to drift")
+    with zipfile.ZipFile(output, "w", allowZip64=True) as archive:
+        for info, data in rewritten:
+            archive.writestr(info, data)
+
+
 def run_completed_replay(
     archive: Path,
     source_root: Path,
@@ -41,6 +68,7 @@ def run_completed_replay(
 ) -> None:
     sys.path.insert(0, str(source_root))
     import grpc
+
     from trainvm.v1 import trainvm_pb2 as wire
     from trainvm.v1 import trainvm_pb2_grpc as wire_grpc
 
@@ -82,7 +110,7 @@ def run_completed_replay(
     errors: list[BaseException] = []
 
     class Controller(wire_grpc.WorkerControlServicer):
-        def Connect(self, request_iterator, context):  # noqa: N802
+        def Connect(self, request_iterator, context):
             try:
                 first = next(request_iterator)
                 if first.WhichOneof("message") != "hello":
@@ -113,8 +141,7 @@ def run_completed_replay(
                         ],
                     )
                 )
-                for unexpected in request_iterator:
-                    observed.append(unexpected)
+                observed.extend(request_iterator)
             except BaseException as error:  # noqa: BLE001
                 errors.append(error)
                 context.abort(grpc.StatusCode.INTERNAL, "fixture rejected worker")
@@ -217,18 +244,29 @@ def run_completed_replay(
 
 
 def main() -> int:
-    if len(sys.argv) != 5:
+    if len(sys.argv) != 6:
         raise SystemExit(
-            "usage: verify_rwkv_lab_worker_artifact.py BUILDER MATERIALIZER TRAINVM SOURCE_ROOT"
+            "usage: verify_rwkv_lab_worker_artifact.py BUILDER CLOSURE_BUILDER MATERIALIZER TRAINVM SOURCE_ROOT"
         )
     builder = Path(sys.argv[1]).resolve(strict=True)
-    materializer = Path(sys.argv[2]).resolve(strict=True)
-    trainvm = Path(sys.argv[3]).resolve(strict=True)
-    source_root = Path(sys.argv[4]).resolve(strict=True)
+    closure_builder = Path(sys.argv[2]).resolve(strict=True)
+    materializer = Path(sys.argv[3]).resolve(strict=True)
+    trainvm = Path(sys.argv[4]).resolve(strict=True)
+    source_root = Path(sys.argv[5]).resolve(strict=True)
     with tempfile.TemporaryDirectory(prefix="trainvm-worker-artifact-") as raw:
         directory = Path(raw)
         first = directory / "first.pyz"
         second = directory / "second.pyz"
+        runtime_closure = directory / "runtime-closure.json"
+        subprocess.check_call(
+            [
+                sys.executable,
+                "-I",
+                str(closure_builder),
+                "--output",
+                str(runtime_closure),
+            ]
+        )
         receipts = []
         for output in (first, second):
             receipts.append(
@@ -241,6 +279,8 @@ def main() -> int:
                             str(source_root),
                             "--output",
                             str(output),
+                            "--runtime-closure",
+                            str(runtime_closure),
                         ],
                         text=True,
                     )
@@ -252,6 +292,14 @@ def main() -> int:
             "archive_sha256"
         ] != receipts[1]["archive_sha256"]:
             raise SystemExit("worker artifact receipt does not bind exact bytes")
+        closure_document = json.loads(runtime_closure.read_text())
+        if (
+            receipts[0]["runtime_closure_digest"]
+            != closure_document["closure_digest"]
+            or receipts[1]["runtime_closure_digest"]
+            != closure_document["closure_digest"]
+        ):
+            raise SystemExit("worker artifact receipt does not bind its runtime closure")
 
         with zipfile.ZipFile(first) as archive:
             names = archive.namelist()
@@ -275,8 +323,7 @@ def main() -> int:
             [sys.executable, "-I", str(first), "--artifact-load-test"],
             env={},
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         if loaded.returncode == 0 or (
@@ -286,6 +333,30 @@ def main() -> int:
             raise SystemExit(
                 "isolated worker artifact did not reach its closed argv boundary: "
                 + loaded.stderr[-1000:]
+            )
+
+        drifted = directory / "runtime-drift.pyz"
+        write_runtime_drift_archive(first, drifted)
+        drift_result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                str(drifted),
+                "--trainvm-bootstrap-fd=4",
+            ],
+            env={},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if (
+            drift_result.returncode == 0
+            or "RuntimeClosureError" not in drift_result.stderr
+            or "runtime closure file content changed" not in drift_result.stderr
+        ):
+            raise SystemExit(
+                "worker did not reject self-consistent runtime closure drift before bootstrap: "
+                + drift_result.stderr[-2000:]
             )
 
         python_path = Path(sys.executable).resolve(strict=True)
@@ -299,6 +370,7 @@ def main() -> int:
                     "inspect-rwkv-lab-deployment",
                     str(first),
                     digest(first),
+                    json.loads(runtime_closure.read_text())["closure_digest"],
                     str(python_path),
                     digest(python_path),
                     str(directory),
@@ -309,10 +381,14 @@ def main() -> int:
             )
         )
         profiles = deployment["host_launch_registry"]["profiles"]
+        if deployment["schema"] != "trainvm.rwkv-lab-worker-deployment/v2":
+            raise SystemExit("deployment inspector emitted the wrong schema")
         if len(profiles) != 4 or any(
             profile["code_argument_index"] != 1
             or profile["public_arguments"] != ["-I", "rwkv-lab-worker.pyz"]
             or profile["code_fingerprint"] != digest(first)
+            or profile["bootstrap_runtime_closure_fingerprint"]
+            != json.loads(runtime_closure.read_text())["closure_digest"]
             for profile in profiles
         ):
             raise SystemExit("deployment registry drifted from sealed worker artifact")
@@ -353,12 +429,34 @@ def main() -> int:
             raise SystemExit("worker deployment materialization is not idempotent")
         for name in (
             "rwkv-lab-worker.pyz",
+            "bootstrap-runtime-closure.json",
             "adapters.json",
             "host-launches.json",
             "deployment-receipt.json",
         ):
             if not (deployment_directory / name).is_file():
                 raise SystemExit(f"worker deployment omitted {name}")
+        deployed_closure = deployment_directory / "bootstrap-runtime-closure.json"
+        deployed_closure_document = json.loads(deployed_closure.read_text())
+        deployed_profiles = json.loads(
+            (deployment_directory / "host-launches.json").read_text()
+        )["profiles"]
+        if (
+            first_materialization["schema"]
+            != "trainvm.rwkv-lab-worker-deployment-materialization/v2"
+            or first_materialization["runtime_closure"]["closure_digest"]
+            != deployed_closure_document["closure_digest"]
+            or first_materialization["runtime_closure"]["manifest_sha256"]
+            != digest(deployed_closure)
+            or any(
+                profile["bootstrap_runtime_closure_fingerprint"]
+                != deployed_closure_document["closure_digest"]
+                for profile in deployed_profiles
+            )
+        ):
+            raise SystemExit(
+                "deployment receipt, closure bytes, and host profiles disagree"
+            )
     print("deterministic isolated rwkv_lab worker artifact passed")
     return 0
 

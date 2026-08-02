@@ -16,6 +16,10 @@ namespace trainvm {
 struct HostLaunchProfile {
   AdapterKey key;
   std::string code_fingerprint;
+  // Exact pre-dispatch runtime closure verified by the sealed worker before
+  // any third-party import. Cache/runtime probes must report this identity;
+  // they cannot select a different closure after launch authorization.
+  std::string bootstrap_runtime_closure_fingerprint;
   // Capabilities implemented by these exact sealed code bytes. Requests may
   // require a subset, but cannot cause the worker to advertise new support.
   std::vector<std::string> provided_capabilities{};

@@ -132,7 +132,13 @@ adapter profile.
 `scripts/build_trainvm_worker_artifact.py` deterministically builds the sole sealed project-code
 artifact for the currently migrated training adapters. The stored zipapp contains the complete
 `rwkv_lab` Python source surface, the checked-in TrainVM protobuf package, one fixed `__main__`, and
-an embedded canonical per-member SHA-256 manifest. Member order, timestamps, modes, and bytes are
+an embedded canonical per-member SHA-256 manifest. It also embeds a
+`trainvm.python-bootstrap-runtime-closure/v1` manifest produced by the exact copied interpreter.
+That manifest binds the interpreter identity, Python standard-library tree, and the complete
+installed-file closure of the shared pre-dispatch `grpcio`, `protobuf`, and `torch` distributions.
+The stdlib-only guard verifies its canonical digest, permissions, non-worker-writable ancestors,
+symlinks, sizes, and every regular-file SHA-256 before importing the worker entrypoint or any
+third-party module. Member order, timestamps, modes, and bytes are
 fixed; the normal native test target builds it twice and requires byte equality. Hostd executes the
 sealed interpreter with `-I`, installs the zipapp at fd 3 through its separately bound code-argument
 slot, clears the environment, and appends exactly `--trainvm-bootstrap-fd=4`; the runner rejects
@@ -141,13 +147,15 @@ tuples for the MageFlow appearance expert, MageFlow terminal expert, Qwen AO3 co
 scratch RWKV pretraining. An experiment cannot select an import string, script, argv, environment
 override, or entry-point path.
 
-`trainvm inspect-rwkv-lab-deployment` lowers the exact zipapp/interpreter fingerprints, paths,
-working directory, and trusted roots into matching reflected adapter and `trainvm.host-launches/v3`
-documents. Every one of the four profiles advertises the capability set implemented by those exact
+`trainvm inspect-rwkv-lab-deployment` lowers the exact zipapp, bootstrap-runtime-closure, and
+interpreter fingerprints, paths, working directory, and trusted roots into matching reflected
+adapter and `trainvm.host-launches/v4` documents. Every one of the four profiles advertises the
+capability set implemented by those exact
 worker bytes; requested capabilities may only narrow it. The artifact execution gate loads the
 zipapp under `python -I` with an empty environment, verifies that the generated host registry binds
-the archive digest and isolation-before-code argv ABI, passes a real sealed bootstrap at fd 4, and
-completes a gRPC Hello/Welcome already-completed replay without importing trainer tensor work.
+the archive and closure digests and isolation-before-code argv ABI, rejects a self-consistent
+manifest whose claimed file digest differs from the host, passes a real sealed bootstrap at fd 4,
+and completes a gRPC Hello/Welcome already-completed replay without importing trainer tensor work.
 
 Trainer configuration is an inline object in invocation `inputs.config`. Because the invocation is
 canonical and content-addressed, these values cannot change between submission and execution. A
@@ -189,15 +197,16 @@ scripts/materialize_trainvm_worker_deployment.py \
   --trusted-root /srv/trainvm
 ```
 
-The command publishes `rwkv-lab-worker.pyz`, `adapters.json`, `host-launches.json`, and a digest-bound
-`deployment-receipt.json`. It is byte-idempotent and refuses to replace changed outputs unless the
-operator explicitly supplies `--replace`.
+The command publishes `rwkv-lab-worker.pyz`, `bootstrap-runtime-closure.json`, `adapters.json`,
+`host-launches.json`, and a digest-bound `deployment-receipt.json`. It is byte-idempotent and
+refuses to replace changed outputs unless the operator explicitly supplies `--replace`.
 
 The interpreter path must be a regular executable, not the usual symlink created by many virtual
 environment tools. Hostd refuses symlink traversal for launch artifacts, and silently resolving a
 venv symlink to the base interpreter would select the wrong package closure. A deployment can use a
-venv created with a copied interpreter, but that runtime tree remains unqualified until the
-third-party dependency-closure milestone described below is complete.
+venv created with a copied interpreter. The deployment directory and every closure ancestor must
+be non-writable by the configured worker UID; materialization by that same UID is therefore not a
+production deployment boundary.
 
 Regenerate checked-in Python protobuf bindings after changing the protocol:
 
@@ -207,9 +216,11 @@ scripts/generate_trainvm_python_proto.sh
 
 Hostd descriptor delegation and the stopped launcher now attest the bootstrap, install sealed
 Python code at fd 3 and the bootstrap at fd 4, and bind their combined identity into durable launch
-evidence. The fixed runner closes the project-code entry-point/argv boundary. Production process
-launch remains deployment-gated: TrainVM drives the guarded hostd transaction, while third-party
-Python/native-library runtime closure, nested path authority, privileged crash-window evidence, and
-per-adapter end-to-end qualification remain outstanding. `-I` removes user-site and environment
-injection, but the interpreter's system/venv packages are not yet falsely treated as part of the
-zipapp fingerprint.
+evidence. Host-launch v4 additionally binds the bootstrap closure independently of the zipapp and
+requires an authority-owned cache probe to report that exact digest. The fixed runner closes the
+project-code entry-point/argv boundary and verifies the shared pre-dispatch Python closure.
+Production process launch remains deployment-gated: TrainVM drives the guarded hostd transaction,
+while per-adapter lazy trainer dependencies, system ELF/native-library and CUDA/driver closure,
+nested path authority, privileged crash-window evidence, and per-adapter end-to-end qualification
+remain outstanding. `-I` removes user-site and environment injection; those remaining layers are
+represented separately rather than being falsely treated as zipapp contents.

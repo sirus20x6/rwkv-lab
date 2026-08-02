@@ -70,11 +70,12 @@ AdapterRegistry adapter_registry(bool compile = true) {
 
 HostLaunchRegistry launch_registry() {
   return HostLaunchRegistry(HostLaunchRegistryDocument{
-      .api_version = "trainvm.host-launches/v3",
+      .api_version = "trainvm.host-launches/v4",
       .trusted_roots = {"/opt/trainvm"},
       .profiles = {HostLaunchProfile{
           .key = adapter_key(),
           .code_fingerprint = hash('1'),
+          .bootstrap_runtime_closure_fingerprint = hash('c'),
           .provided_capabilities = {"artifact.manifest.v1"},
           .executable_path = "/opt/trainvm/python",
           .executable_fingerprint = hash('2'),
@@ -151,7 +152,7 @@ ResolvedLaunchSpec launch(const AdapterRegistry& adapters,
       .topology_digest = inventory.topology_digest,
   };
   ResolvedLaunchIdentity identity{
-      .api_version = "trainvm.resolved-launch/v3",
+      .api_version = "trainvm.resolved-launch/v4",
       .launch_event_id = "run-1:worker-launch:train:train@1",
       .run_id = "run-1",
       .node_id = "train",
@@ -159,6 +160,7 @@ ResolvedLaunchSpec launch(const AdapterRegistry& adapters,
       .launch_nonce = "nonce-1",
       .adapter_key = adapter_key(),
       .code_fingerprint = hash('1'),
+      .bootstrap_runtime_closure_fingerprint = hash('c'),
       .required_capabilities = {"artifact.manifest.v1"},
       .provided_capabilities = {"artifact.manifest.v1"},
       .host_registry_digest = launches.registry_digest(),
@@ -221,6 +223,7 @@ CacheCompileInputManifest compile_inputs(
 class Probe final : public ICacheRuntimeProbe {
  public:
   bool wrong_resource{};
+  bool wrong_runtime_closure{};
   std::size_t calls{};
 
   CacheRuntimeProbeSnapshot capture(
@@ -248,7 +251,8 @@ class Probe final : public ICacheRuntimeProbe {
         .runtime_versions = {{.name = "cuda", .version = "13.1"},
                              {.name = "pytorch", .version = "2.10.0+cu130"},
                              {.name = "triton", .version = "3.6.0"}},
-        .runtime_closure_fingerprint = hash('c'),
+        .runtime_closure_fingerprint =
+            wrong_runtime_closure ? hash('f') : hash('c'),
         .host_abi_digest = hash('d'),
         .compute_compatibility_digest = hash('e'),
     };
@@ -451,6 +455,11 @@ int main() {
                 cache_namespace_authority_receipt_json(first)
                         .at("receipt_digest") == first.receipt_digest,
             "authority builder binds registries, launch, inventory, runtime, compile inputs, and device");
+    probe.wrong_runtime_closure = true;
+    rejected(
+        [&] { (void)authority.derive(fixture.request()); },
+        "a runtime probe cannot select a closure different from the sealed host launch");
+    probe.wrong_runtime_closure = false;
 
     ScopedTestTree evidence_tree{
         std::filesystem::temp_directory_path() /

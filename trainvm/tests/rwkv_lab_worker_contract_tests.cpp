@@ -37,6 +37,8 @@ const trainvm::AdapterProfile& find_profile(
 int main() {
   try {
     const std::string fingerprint = "sha256:" + std::string(64U, 'a');
+    const std::string runtime_closure =
+        "sha256:" + std::string(64U, 'c');
     const trainvm::RwkvLabWorkerContract contract =
         trainvm::rwkv_lab_worker_contract(fingerprint);
     require(contract.adapter_registry.api_version == "trainvm.adapters/v2" &&
@@ -99,6 +101,7 @@ int main() {
     const auto deployment = trainvm::rwkv_lab_worker_deployment({
         .code_path = "/opt/trainvm/workers/rwkv-lab.pyz",
         .code_fingerprint = fingerprint,
+        .bootstrap_runtime_closure_fingerprint = runtime_closure,
         .executable_path = "/opt/trainvm/python/bin/python3",
         .executable_fingerprint = "sha256:" + std::string(64U, 'b'),
         .working_directory = "/srv/trainvm/work",
@@ -109,12 +112,14 @@ int main() {
                 deployment.provided_capabilities ==
                     contract.provided_capabilities &&
                 deployment.host_launch_registry.api_version ==
-                    "trainvm.host-launches/v3" &&
+                    "trainvm.host-launches/v4" &&
                 deployment.host_launch_registry.profiles.size() == 4U,
             "deployment lowering must retain the exact reflected worker catalog");
     for (const trainvm::HostLaunchProfile& launch :
          deployment.host_launch_registry.profiles) {
       require(launch.code_fingerprint == fingerprint &&
+                  launch.bootstrap_runtime_closure_fingerprint ==
+                      runtime_closure &&
                   launch.provided_capabilities ==
                       contract.provided_capabilities &&
                   launch.code_argument_index == 1U &&

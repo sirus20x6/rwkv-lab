@@ -21,6 +21,7 @@ struct RwkvLabWorkerContract final {
 struct RwkvLabWorkerDeploymentSpec final {
   std::string code_path;
   std::string code_fingerprint;
+  std::string bootstrap_runtime_closure_fingerprint;
   std::string executable_path;
   std::string executable_fingerprint;
   std::string working_directory;

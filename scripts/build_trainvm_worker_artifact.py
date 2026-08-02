@@ -13,10 +13,15 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-
-SCHEMA = "trainvm.python-worker-artifact/v1"
+SCHEMA = "trainvm.python-worker-artifact/v2"
+RUNTIME_CLOSURE_SCHEMA = "trainvm.python-bootstrap-runtime-closure/v1"
 ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 ENTRYPOINT = (
+    b"import sys\n"
+    b"if sys.argv[1:] != ['--trainvm-bootstrap-fd=4']:\n"
+    b"    raise RuntimeError('authority worker accepts only its fixed bootstrap descriptor')\n"
+    b"from rwkv_lab.trainvm_runtime_guard import verify_embedded_runtime_closure\n"
+    b"verify_embedded_runtime_closure()\n"
     b"from rwkv_lab.trainvm_adapters.entrypoint import main\n"
     b"raise SystemExit(main())\n"
 )
@@ -57,10 +62,38 @@ def _zip_info(name: str) -> zipfile.ZipInfo:
     return info
 
 
-def build(source_root: Path, output: Path) -> dict[str, Any]:
+def _runtime_closure(path: Path) -> tuple[bytes, str]:
+    raw = path.resolve(strict=True).read_bytes()
+    if not raw.endswith(b"\n"):
+        raise ValueError("runtime closure manifest is not canonical")
+    document = json.loads(raw)
+    if not isinstance(document, dict) or set(document) != {
+        "api_version",
+        "closure_digest",
+        "distributions",
+        "files",
+        "python",
+    }:
+        raise ValueError("runtime closure manifest fields are not exact")
+    body = dict(document)
+    closure_digest = body.pop("closure_digest")
+    if (
+        document["api_version"] != RUNTIME_CLOSURE_SCHEMA
+        or raw != _canonical_bytes(document) + b"\n"
+        or closure_digest != _digest(_canonical_bytes(body))
+    ):
+        raise ValueError("runtime closure manifest digest is invalid")
+    return raw, closure_digest
+
+
+def build(
+    source_root: Path, output: Path, runtime_closure: Path
+) -> dict[str, Any]:
     source_root = source_root.resolve(strict=True)
     output = output.absolute()
     members = _source_members(source_root)
+    runtime_bytes, runtime_digest = _runtime_closure(runtime_closure)
+    members.append(("TRAINVM_RUNTIME_CLOSURE.json", runtime_bytes))
     manifest = {
         "schema": SCHEMA,
         "members": [
@@ -103,6 +136,7 @@ def build(source_root: Path, output: Path) -> dict[str, Any]:
         "schema": SCHEMA,
         "output": str(output),
         "archive_sha256": _digest(archive_bytes),
+        "runtime_closure_digest": runtime_digest,
         "source_manifest_sha256": _digest(manifest_bytes),
         "member_count": len(archive_members),
         "size": len(archive_bytes),
@@ -117,8 +151,18 @@ def main() -> int:
         default=Path(__file__).resolve().parents[1] / "src",
     )
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--runtime-closure", type=Path, required=True)
     arguments = parser.parse_args()
-    print(json.dumps(build(arguments.source_root, arguments.output), sort_keys=True))
+    print(
+        json.dumps(
+            build(
+                arguments.source_root,
+                arguments.output,
+                arguments.runtime_closure,
+            ),
+            sort_keys=True,
+        )
+    )
     return 0
 
 

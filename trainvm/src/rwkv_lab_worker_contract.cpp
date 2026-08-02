@@ -167,6 +167,8 @@ RwkvLabWorkerDeploymentContract rwkv_lab_worker_deployment(
     launches.push_back({
         .key = adapter.key,
         .code_fingerprint = adapter.code_fingerprint,
+        .bootstrap_runtime_closure_fingerprint =
+            spec.bootstrap_runtime_closure_fingerprint,
         .provided_capabilities = worker.provided_capabilities,
         .executable_path = spec.executable_path,
         .executable_fingerprint = spec.executable_fingerprint,
@@ -177,7 +179,7 @@ RwkvLabWorkerDeploymentContract rwkv_lab_worker_deployment(
     });
   }
   HostLaunchRegistryDocument host{
-      .api_version = "trainvm.host-launches/v3",
+      .api_version = "trainvm.host-launches/v4",
       .trusted_roots = std::move(spec.trusted_roots),
       .profiles = std::move(launches),
   };

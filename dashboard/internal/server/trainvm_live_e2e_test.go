@@ -48,7 +48,7 @@ const liveE2EAdapterRegistry = `{
 }`
 
 const liveE2EHostLaunchRegistry = `{
-  "api_version": "trainvm.host-launches/v3",
+  "api_version": "trainvm.host-launches/v4",
   "trusted_roots": [],
   "profiles": []
 }`

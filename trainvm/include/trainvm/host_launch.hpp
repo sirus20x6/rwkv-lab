@@ -57,6 +57,7 @@ struct ResolvedLaunchIdentity {
   std::string launch_nonce;
   AdapterKey adapter_key;
   std::string code_fingerprint;
+  std::string bootstrap_runtime_closure_fingerprint;
   std::vector<std::string> required_capabilities;
   std::vector<std::string> provided_capabilities{};
   std::string host_registry_digest;

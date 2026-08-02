@@ -1931,6 +1931,8 @@ ResolvedLaunchSpec Controller::bind_worker_launch(
           host_registry.registry_digest() ||
       binding.identity.host_profile_digest != host_registry.profile_digest(
           expected_key, binding.identity.code_fingerprint) ||
+      binding.identity.bootstrap_runtime_closure_fingerprint !=
+          host_profile.bootstrap_runtime_closure_fingerprint ||
       binding.identity.executable.source_path !=
           host_profile.executable_path ||
       binding.identity.executable.sealed_sha256 !=

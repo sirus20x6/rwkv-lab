@@ -209,7 +209,7 @@ std::vector<trainvm::AdapterProfile> fixture_external_adapter_profiles(
 
 trainvm::HostLaunchRegistry fixture_disabled_host_launch_registry() {
   return trainvm::HostLaunchRegistry({
-      .api_version = "trainvm.host-launches/v3",
+      .api_version = "trainvm.host-launches/v4",
       .trusted_roots = {},
       .profiles = {},
   });
@@ -268,11 +268,13 @@ trainvm::HostLaunchRegistry fixture_test_host_launch_registry(
       .contract = operation.contract,
   };
   return trainvm::HostLaunchRegistry({
-      .api_version = "trainvm.host-launches/v3",
+      .api_version = "trainvm.host-launches/v4",
       .trusted_roots = {"/test"},
       .profiles = {{
           .key = key,
           .code_fingerprint = launch.code_fingerprint,
+          .bootstrap_runtime_closure_fingerprint =
+              "sha256:" + std::string(64U, 'd'),
           .provided_capabilities = launch.required_capabilities,
           .executable_path = "/test/trainvm-worker",
           .executable_fingerprint =
@@ -344,6 +346,8 @@ trainvm::ResolvedLaunchSpec bind_test_worker_launch(
   const trainvm::HostLaunchProfile profile{
       .key = key,
       .code_fingerprint = launch.code_fingerprint,
+      .bootstrap_runtime_closure_fingerprint =
+          "sha256:" + std::string(64U, 'd'),
       .provided_capabilities = launch.required_capabilities,
       .executable_path = "/test/trainvm-worker",
       .executable_fingerprint = executable_digest,
@@ -381,7 +385,7 @@ trainvm::ResolvedLaunchSpec bind_test_worker_launch(
                           }}
                         : std::nullopt;
   trainvm::ResolvedLaunchIdentity identity{
-      .api_version = "trainvm.resolved-launch/v3",
+      .api_version = "trainvm.resolved-launch/v4",
       .launch_event_id = launch.run_id + ":worker-launch:" + launch.node_id +
                          ":" + launch.attempt_id,
       .run_id = launch.run_id,
@@ -390,6 +394,8 @@ trainvm::ResolvedLaunchSpec bind_test_worker_launch(
       .launch_nonce = launch.launch_nonce,
       .adapter_key = key,
       .code_fingerprint = launch.code_fingerprint,
+      .bootstrap_runtime_closure_fingerprint =
+          profile.bootstrap_runtime_closure_fingerprint,
       .required_capabilities = launch.required_capabilities,
       .provided_capabilities = launch.required_capabilities,
       .host_registry_digest = registry.registry_digest(),
@@ -6438,6 +6444,7 @@ void test_acquiring_rejects_fabricated_running_transition() {
 void test_host_launch_registry_contract() {
   check(trainvm::reflected_field_names<trainvm::HostLaunchProfile>() ==
             std::vector<std::string>({"key", "code_fingerprint",
+                                      "bootstrap_runtime_closure_fingerprint",
                                       "provided_capabilities", "executable_path",
                                       "executable_fingerprint", "code_path",
                                       "code_argument_index",
@@ -6468,6 +6475,8 @@ void test_host_launch_registry_contract() {
                  trainvm::ComponentRuntime::python_worker, "train",
                  "rwkv_lab.mageflow.v1.Train"),
       .code_fingerprint = python_code,
+      .bootstrap_runtime_closure_fingerprint =
+          "sha256:" + std::string(64U, 'd'),
       .provided_capabilities = {"worker.controls", "worker.metrics"},
       .executable_path = "/opt/trainvm/python/bin/python3",
       .executable_fingerprint = python_executable,
@@ -6481,6 +6490,8 @@ void test_host_launch_registry_contract() {
                  trainvm::ComponentRuntime::native_worker, "execute",
                  "example.native.v1.Execute"),
       .code_fingerprint = native_code,
+      .bootstrap_runtime_closure_fingerprint =
+          "sha256:" + std::string(64U, 'e'),
       .provided_capabilities = {"worker.controls"},
       .executable_path = "/usr/libexec/trainvm/native-worker",
       .executable_fingerprint = native_code,
@@ -6489,7 +6500,7 @@ void test_host_launch_registry_contract() {
       .working_directory = "/srv/trainvm/runs/run-1",
   };
   const trainvm::HostLaunchRegistryDocument document{
-      .api_version = "trainvm.host-launches/v3",
+      .api_version = "trainvm.host-launches/v4",
       .trusted_roots = {"/usr/libexec/trainvm", "/srv/trainvm",
                         "/opt/trainvm"},
       .profiles = {native_profile, python_profile},
@@ -6544,7 +6555,7 @@ void test_host_launch_registry_contract() {
       "sha256:" + trainvm::sha256_hex(
                        nlohmann::json{
                            {"api_version",
-                            "trainvm.host-launch-profile/v3"},
+                            "trainvm.host-launch-profile/v4"},
                            {"profile", trainvm::encode_json(python_profile)},
                        }
                            .dump());
@@ -6580,16 +6591,27 @@ void test_host_launch_registry_contract() {
   changed_document.profiles.at(1).public_arguments.push_back("--changed");
   const trainvm::HostLaunchRegistry changed_registry(
       std::move(changed_document));
+  auto changed_closure_document = document;
+  changed_closure_document.profiles.at(1)
+      .bootstrap_runtime_closure_fingerprint =
+      "sha256:" + std::string(64U, 'f');
+  const trainvm::HostLaunchRegistry changed_closure_registry(
+      std::move(changed_closure_document));
   check(changed_registry.registry_digest() != loaded.registry_digest() &&
             changed_registry.profile_digest(python_profile.key, python_code) !=
+                loaded.profile_digest(python_profile.key, python_code) &&
+            changed_closure_registry.registry_digest() !=
+                loaded.registry_digest() &&
+            changed_closure_registry.profile_digest(python_profile.key,
+                                                     python_code) !=
                 loaded.profile_digest(python_profile.key, python_code),
-        "host launch registry and profile digests bind launch semantics");
+        "host launch registry and profile digests bind launch semantics and runtime closure identity");
 
   const auto disabled_path = directory / "host-launches-disabled.json";
   write_document(
       disabled_path,
       trainvm::encode_json(trainvm::HostLaunchRegistryDocument{
-          .api_version = "trainvm.host-launches/v3",
+          .api_version = "trainvm.host-launches/v4",
           .trusted_roots = {},
           .profiles = {},
       }));
@@ -6638,7 +6660,7 @@ void test_host_launch_registry_contract() {
   auto unknown = encoded;
   unknown["profiles"].at(0)["unknown"] = true;
   auto future = encoded;
-  future["api_version"] = "trainvm.host-launches/v4";
+  future["api_version"] = "trainvm.host-launches/v5";
   auto legacy = encoded;
   legacy["api_version"] = "trainvm.host-launches/v1";
   auto duplicate_profile = encoded;
@@ -6676,6 +6698,9 @@ void test_host_launch_registry_contract() {
   auto invalid_fingerprint = encoded;
   invalid_fingerprint["profiles"].at(1)["executable_fingerprint"] =
       "sha256:" + std::string(64, 'G');
+  auto invalid_runtime_closure = encoded;
+  invalid_runtime_closure["profiles"].at(1)
+      ["bootstrap_runtime_closure_fingerprint"] = "sha256:not-a-digest";
   auto duplicate_capability = encoded;
   duplicate_capability["profiles"].at(1)["provided_capabilities"] =
       std::vector<std::string>{"worker.controls", "worker.controls"};
@@ -6709,7 +6734,8 @@ void test_host_launch_registry_contract() {
             rejects(python_code_slot_out_of_range) &&
             rejects(native_with_code) && rejects(native_with_code_slot) &&
             rejects(native_fingerprint_mismatch) &&
-            rejects(invalid_fingerprint) && rejects(duplicate_capability) &&
+            rejects(invalid_fingerprint) && rejects(invalid_runtime_closure) &&
+            rejects(duplicate_capability) &&
             rejects(too_many_arguments) &&
             rejects(oversized_argument) && rejects(embedded_nul) &&
             rejects(secret_argument) && rejects(dollar_template_argument) &&
@@ -6719,7 +6745,7 @@ void test_host_launch_registry_contract() {
 
   const auto duplicate_key_path = directory / "duplicate-key.json";
   write_text(duplicate_key_path,
-             R"({"api_version":"trainvm.host-launches/v3","api_version":"trainvm.host-launches/v3","trusted_roots":["/opt/trainvm"],"profiles":[]})");
+             R"({"api_version":"trainvm.host-launches/v4","api_version":"trainvm.host-launches/v4","trusted_roots":["/opt/trainvm"],"profiles":[]})");
   bool duplicate_key_rejected = false;
   try {
     (void)trainvm::HostLaunchRegistry::load_file(duplicate_key_path);
@@ -6732,7 +6758,7 @@ void test_host_launch_registry_contract() {
   nested_profile.insert(
       1U, "\"code_fingerprint\":\"" + native_code + "\",");
   write_text(nested_duplicate_key_path,
-             "{\"api_version\":\"trainvm.host-launches/v3\","
+             "{\"api_version\":\"trainvm.host-launches/v4\","
              "\"trusted_roots\":" + encoded["trusted_roots"].dump() +
              ",\"profiles\":[" + nested_profile + "]}");
   bool nested_duplicate_key_rejected = false;
@@ -6860,6 +6886,8 @@ void test_host_launch_resolution_and_binding() {
   const trainvm::HostLaunchProfile profile{
       .key = key,
       .code_fingerprint = code_digest,
+      .bootstrap_runtime_closure_fingerprint =
+          "sha256:" + std::string(64U, 'd'),
       .provided_capabilities = {"worker.controls", "worker.metrics"},
       .executable_path = executable.string(),
       .executable_fingerprint = executable_digest,
@@ -6869,7 +6897,7 @@ void test_host_launch_resolution_and_binding() {
       .working_directory = (directory / "work").string(),
   };
   const trainvm::HostLaunchRegistry registry({
-      .api_version = "trainvm.host-launches/v3",
+      .api_version = "trainvm.host-launches/v4",
       .trusted_roots = {directory.string()},
       .profiles = {profile},
   });
@@ -7076,7 +7104,7 @@ void test_host_launch_resolution_and_binding() {
   auto changed_profile = profile;
   changed_profile.public_arguments.push_back("--changed");
   const trainvm::HostLaunchRegistry changed_registry({
-      .api_version = "trainvm.host-launches/v3",
+      .api_version = "trainvm.host-launches/v4",
       .trusted_roots = {directory.string()},
       .profiles = {changed_profile},
   });
@@ -7092,7 +7120,7 @@ void test_host_launch_resolution_and_binding() {
   auto symlink_profile = profile;
   symlink_profile.executable_path = executable_link.string();
   const trainvm::HostLaunchRegistry symlink_registry({
-      .api_version = "trainvm.host-launches/v3",
+      .api_version = "trainvm.host-launches/v4",
       .trusted_roots = {directory.string()},
       .profiles = {symlink_profile},
   });
@@ -7107,7 +7135,7 @@ void test_host_launch_resolution_and_binding() {
   fingerprint_profile.executable_fingerprint =
       "sha256:" + std::string(64U, 'f');
   const trainvm::HostLaunchRegistry fingerprint_registry({
-      .api_version = "trainvm.host-launches/v3",
+      .api_version = "trainvm.host-launches/v4",
       .trusted_roots = {directory.string()},
       .profiles = {fingerprint_profile},
   });
@@ -7194,6 +7222,8 @@ void test_service_host_launch_binding() {
     launch_profiles.push_back({
         .key = profile.key,
         .code_fingerprint = code_digest,
+        .bootstrap_runtime_closure_fingerprint =
+            "sha256:" + std::string(64U, 'd'),
         .provided_capabilities = profile.required_capabilities,
         .executable_path = executable.string(),
         .executable_fingerprint = executable_digest,
@@ -7204,7 +7234,7 @@ void test_service_host_launch_binding() {
     });
   }
   const trainvm::HostLaunchRegistryDocument host_document{
-      .api_version = "trainvm.host-launches/v3",
+      .api_version = "trainvm.host-launches/v4",
       .trusted_roots = {directory.string()},
       .profiles = launch_profiles,
   };
@@ -7399,14 +7429,14 @@ void test_service_host_launch_binding() {
   }
   const bool profile_drift_rejected = rejects_without_mutation(
       trainvm::HostLaunchRegistry({
-          .api_version = "trainvm.host-launches/v3",
+          .api_version = "trainvm.host-launches/v4",
           .trusted_roots = {directory.string()},
           .profiles = std::move(changed_profiles),
       }),
       host, adapter_profiles);
   const bool registry_drift_rejected = rejects_without_mutation(
       trainvm::HostLaunchRegistry({
-          .api_version = "trainvm.host-launches/v3",
+          .api_version = "trainvm.host-launches/v4",
           .trusted_roots = {"/"},
           .profiles = launch_profiles,
       }),

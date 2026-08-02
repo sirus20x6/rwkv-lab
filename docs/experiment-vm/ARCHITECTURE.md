@@ -233,13 +233,16 @@ lock. The same resolved object is included in the immutable worker invocation; e
 supply import paths, argv, environment variables, or implementation code.
 
 Required capabilities from all selected components are unioned with the adapter operation's
-capabilities before the launch intent is committed. The immutable `trainvm.host-launches/v3`
+capabilities before the launch intent is committed. The immutable `trainvm.host-launches/v4`
 profile for the exact sealed code bytes independently declares its provided capabilities; host
 resolution proves the required set is a subset and freezes both sets in
-`trainvm.resolved-launch/v3`. The bootstrap carries the provided set rather than echoing the
+`trainvm.resolved-launch/v4`. The bootstrap carries the provided set rather than echoing the
 request. A worker therefore cannot accept an optimizer or fused kernel it did not independently
 advertise. The same profile binds the exact argv index replaced by sealed code fd 3, allowing
-`python -I /proc/self/fd/3` while rejecting an out-of-range or native code slot. Components may only attach to external process
+`python -I /proc/self/fd/3` while rejecting an out-of-range or native code slot. It also binds the
+bootstrap-runtime-closure digest verified by the packaged worker before third-party imports;
+resolved-launch replay and cache authority require that same digest rather than trusting a probe to
+choose its own closure. Components may only attach to external process
 operations, and an exact-resume plan rejects any selected stateful component whose state grade is
 merely compatible. Optimizer state, schedule/curriculum cursors, parameter-routing identity, and
 precision/scaler state become part of the later checkpoint manifest contract rather than ad hoc

@@ -253,6 +253,7 @@ if(TRAINVM_PYTHON_EXECUTABLE)
     COMMAND ${TRAINVM_PYTHON_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_rwkv_lab_worker_artifact.py
       ${CMAKE_CURRENT_SOURCE_DIR}/../scripts/build_trainvm_worker_artifact.py
+      ${CMAKE_CURRENT_SOURCE_DIR}/../scripts/build_trainvm_runtime_closure.py
       ${CMAKE_CURRENT_SOURCE_DIR}/../scripts/materialize_trainvm_worker_deployment.py
       $<TARGET_FILE:trainvm>
       ${CMAKE_CURRENT_SOURCE_DIR}/../src

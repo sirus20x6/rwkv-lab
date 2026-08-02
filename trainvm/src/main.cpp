@@ -34,7 +34,8 @@ void usage() {
       << "  trainvm inspect-hostd-client <hostd-client.json>\n"
       << "  trainvm inspect-rwkv-lab-worker <sha256-code-fingerprint>\n"
       << "  trainvm inspect-rwkv-lab-deployment <worker.pyz> <worker-sha256> "
-         "<python> <python-sha256> <working-directory> <trusted-root>...\n"
+         "<bootstrap-runtime-closure-sha256> <python> <python-sha256> "
+         "<working-directory> <trusted-root>...\n"
       << "  trainvm inspect-registry <experiments.db> [--task <task>] "
          "[--metric <metric>] [--baseline <config>] [--limit <count>]\n"
       << "  trainvm serve --journal <journal.db> --socket <trainvm.sock> "
@@ -328,7 +329,7 @@ int inspect_rwkv_lab_worker_command(std::string code_fingerprint) {
 }
 
 int inspect_rwkv_lab_deployment_command(int argc, char** argv) {
-  if (argc < 8) {
+  if (argc < 9) {
     usage();
     return 64;
   }
@@ -336,17 +337,18 @@ int inspect_rwkv_lab_deployment_command(int argc, char** argv) {
     return std::filesystem::canonical(path).string();
   };
   std::vector<std::string> trusted_roots;
-  trusted_roots.reserve(static_cast<std::size_t>(argc - 7));
-  for (int index = 7; index < argc; ++index) {
+  trusted_roots.reserve(static_cast<std::size_t>(argc - 8));
+  for (int index = 8; index < argc; ++index) {
     trusted_roots.push_back(canonical(argv[index]));
   }
   const trainvm::RwkvLabWorkerDeploymentContract deployment =
       trainvm::rwkv_lab_worker_deployment({
           .code_path = canonical(argv[2]),
           .code_fingerprint = argv[3],
-          .executable_path = canonical(argv[4]),
-          .executable_fingerprint = argv[5],
-          .working_directory = canonical(argv[6]),
+          .bootstrap_runtime_closure_fingerprint = argv[4],
+          .executable_path = canonical(argv[5]),
+          .executable_fingerprint = argv[6],
+          .working_directory = canonical(argv[7]),
           .trusted_roots = std::move(trusted_roots),
       });
   const trainvm::AdapterRegistry adapters(
@@ -354,7 +356,7 @@ int inspect_rwkv_lab_deployment_command(int argc, char** argv) {
   const trainvm::HostLaunchRegistry launches(
       deployment.host_launch_registry);
   std::cout << nlohmann::json{
-                   {"schema", "trainvm.rwkv-lab-worker-deployment/v1"},
+                   {"schema", "trainvm.rwkv-lab-worker-deployment/v2"},
                    {"adapter_registry_digest", adapters.registry_digest()},
                    {"host_launch_registry_digest",
                     launches.registry_digest()},

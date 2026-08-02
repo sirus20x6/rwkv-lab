@@ -287,6 +287,8 @@ CacheNamespaceAuthorityReceipt CacheNamespaceAuthority::derive(
       launches_.profile_digest(invocation.adapter, adapter.code_fingerprint);
   if (launch.identity.host_registry_digest != launches_.registry_digest() ||
       launch.identity.host_profile_digest != host_profile_digest ||
+      launch.identity.bootstrap_runtime_closure_fingerprint !=
+          host_profile.bootstrap_runtime_closure_fingerprint ||
       launch.identity.executable.sealed_sha256 !=
           host_profile.executable_fingerprint ||
       (launch.identity.code &&
@@ -340,6 +342,11 @@ CacheNamespaceAuthorityReceipt CacheNamespaceAuthority::derive(
   };
   CacheRuntimeProbeSnapshot probe = runtime_probe_.capture(probe_context);
   validate_cache_runtime_probe_snapshot(probe, probe_context);
+  if (probe.runtime_closure_fingerprint !=
+      launch.identity.bootstrap_runtime_closure_fingerprint) {
+    throw CacheNamespaceAuthorityError(
+        "cache runtime probe closure differs from the sealed launch authority");
+  }
   const std::string probe_digest =
       digest("trainvm.cache-runtime-probe-receipt/v1", encode_json(probe));
 

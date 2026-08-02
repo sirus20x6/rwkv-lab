@@ -114,6 +114,7 @@ void validate_profile(HostLaunchProfile& profile,
         "host launch provided capabilities must be unique");
   }
   if (!valid_sha256(profile.code_fingerprint) ||
+      !valid_sha256(profile.bootstrap_runtime_closure_fingerprint) ||
       !valid_sha256(profile.executable_fingerprint)) {
     throw std::invalid_argument(
         "host launch fingerprints must be canonical sha256 hex");
@@ -198,9 +199,9 @@ std::vector<std::string> validate_roots(std::vector<std::string> roots) {
 }  // namespace
 
 HostLaunchRegistry::HostLaunchRegistry(HostLaunchRegistryDocument document) {
-  if (document.api_version != "trainvm.host-launches/v3") {
+  if (document.api_version != "trainvm.host-launches/v4") {
     throw std::invalid_argument(
-        "host launch registry api_version must be trainvm.host-launches/v3");
+        "host launch registry api_version must be trainvm.host-launches/v4");
   }
   if (document.profiles.size() > kMaximumProfiles) {
     throw std::invalid_argument(
@@ -226,7 +227,7 @@ HostLaunchRegistry::HostLaunchRegistry(HostLaunchRegistryDocument document) {
   }
   nlohmann::json canonical_registry =
       encode_json(HostLaunchRegistryDocument{
-          .api_version = "trainvm.host-launches/v3",
+          .api_version = "trainvm.host-launches/v4",
           .trusted_roots = trusted_roots_,
           .profiles = {},
       });
@@ -360,7 +361,7 @@ std::string HostLaunchRegistry::profile_digest(
   const HostLaunchProfile& profile = resolve(key, code_fingerprint);
   return "sha256:" +
          sha256_hex(nlohmann::json{
-                        {"api_version", "trainvm.host-launch-profile/v3"},
+                        {"api_version", "trainvm.host-launch-profile/v4"},
                         {"profile", encode_json(profile)},
                     }
                         .dump());
