@@ -23,6 +23,7 @@ from rwkv_lab.trainvm_adapters.handlers import (
     _rwkv_scratch,
     _transformer_mla,
     _vision_native_head,
+    _vision_rwkv_student,
     _vision_teacher_compressor,
     execute_invocation,
     supported_adapter_keys,
@@ -824,6 +825,110 @@ def test_vision_native_head_handler_seals_lineage_and_publishes_checkpoint(
     assert "data_cursor" not in request.state_components
 
 
+def test_vision_student_handler_seals_lineage_and_publishes_checkpoint(
+    tmp_path, monkeypatch
+) -> None:
+    from rwkv_lab import vision_rwkv_student_train
+
+    read_root = tmp_path / "read"
+    run_directory = tmp_path / "write" / "run"
+    read_root.mkdir()
+    run_directory.mkdir(parents=True)
+    image = read_root / "image.png"
+    image.write_bytes(b"image")
+    row = json.dumps({"image": str(image), "caption": "fixture"}) + "\n"
+    train_manifest = read_root / "train.jsonl"
+    eval_manifest = read_root / "eval.jsonl"
+    train_manifest.write_text(row, encoding="utf-8")
+    eval_manifest.write_text(row, encoding="utf-8")
+    files = {
+        name: read_root / name
+        for name in (
+            "baseline.pt",
+            "compressor.pt",
+            "native.pt",
+            "moonvit.safetensors",
+            "vocab.txt",
+        )
+    }
+    for path in files.values():
+        path.write_bytes(b"sealed")
+    directories = {
+        name: read_root / name
+        for name in ("moon-cache", "fusion-cache", "siglip2", "dinov2", "sam")
+    }
+    for path in directories.values():
+        path.mkdir()
+    observed = []
+
+    def fake_train(arguments, **hooks):
+        observed.append((arguments, hooks))
+        checkpoint = Path(arguments.out) / "checkpoint-current"
+        checkpoint.mkdir()
+        (checkpoint / "state.pt").write_bytes(b"checkpoint")
+        return {
+            "status": "complete",
+            "step": 11,
+            "checkpoint": str(checkpoint.resolve()),
+            "best_ppl": 1.5,
+        }
+
+    from pathlib import Path
+
+    monkeypatch.setattr(vision_rwkv_student_train, "train", fake_train)
+    invocation = SimpleNamespace(
+        inputs={
+            "config": {
+                "baseline_checkpoint": str(files["baseline.pt"]),
+                "compressor_checkpoint": str(files["compressor.pt"]),
+                "native_head_checkpoint": str(files["native.pt"]),
+                "train_manifest": str(train_manifest),
+                "eval_manifest": str(eval_manifest),
+                "moon_cache": str(directories["moon-cache"]),
+                "fusion_cache": str(directories["fusion-cache"]),
+                "moonvit_checkpoint": str(files["moonvit.safetensors"]),
+                "siglip2_model": str(directories["siglip2"]),
+                "dinov2_model": str(directories["dinov2"]),
+                "sam_model": str(directories["sam"]),
+                "vocab": str(files["vocab.txt"]),
+                "output_dir": str(run_directory),
+                "steps": 11,
+                "eval_every": 11,
+                "checkpoint_every": 11,
+            }
+        },
+        workspace=_sealed_workspace(read_root, run_directory),
+        publishes={"checkpoint": {}},
+        resume=None,
+    )
+    components = SimpleNamespace()
+    profiler = SimpleNamespace()
+    observability = SimpleNamespace(
+        keepalive=lambda *_args: __import__("contextlib").nullcontext()
+    )
+    controls = SimpleNamespace(effective_values={})
+
+    result = _vision_rwkv_student(
+        invocation,
+        components,
+        step_profiler=profiler,
+        observability=observability,
+        controls=controls,
+    )
+
+    arguments, hooks = observed[0]
+    assert arguments.baseline == str(files["baseline.pt"].resolve())
+    assert arguments.compressor == str(files["compressor.pt"].resolve())
+    assert arguments.native_head == str(files["native.pt"].resolve())
+    assert arguments.resume_from == ""
+    assert hooks["worker_components"] is components
+    assert result.event_type == "worker.completed"
+    assert result.optimizer_step == 11
+    request = result.checkpoint_requests[0]
+    assert request.resume_grade == "compatible"
+    assert "data_cursor" in request.state_components
+
+
 def test_transformer_mla_handler_binds_paths_profile_and_compatible_checkpoint(
     tmp_path, monkeypatch
 ) -> None:
@@ -1066,6 +1171,12 @@ def test_dispatch_table_is_closed_and_training_composition_is_required() -> None
             "1.0.0",
             "train",
             "rwkv_lab.vision_native_head.v1.Train",
+        ),
+        (
+            "rwkv-lab.vision-rwkv-student",
+            "1.0.0",
+            "train",
+            "rwkv_lab.vision_rwkv_student.v1.Train",
         ),
     }
     expected.update(

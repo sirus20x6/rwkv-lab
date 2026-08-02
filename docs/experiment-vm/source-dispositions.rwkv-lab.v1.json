@@ -10,7 +10,7 @@
       ".py"
     ]
   },
-  "source_tree_digest": "sha256:8e1cb49626f9c08c072d7bcf461aee42cbf5e495536857c0bbf360f9e165c542",
+  "source_tree_digest": "sha256:bf1979575770f159df6c7022164b07f61be01b180d2c749661ece572163ec506",
   "entries": [
     {
       "source_path": "src/rwkv_lab/__init__.py",
@@ -3107,7 +3107,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "vision.raw-pixel-student",
-      "source_sha256": "sha256:ce6f32aa0f2f830bce32e7776b107684b62fbbf7d4c57897df71efbc1b0b823c",
+      "source_sha256": "sha256:7c8a8d0111a6dccaf464fbd362b8d4023b9d6593a95b9e2c1e600bbc6a1e7ff8",
       "family": "vision_multimodal",
       "coverage": "direct",
       "consumers": [
