@@ -1,0 +1,248 @@
+{
+  "api_version": "trainvm.benchmark-matrix/v1",
+  "authority": "benchmark_fixture_evidence_only",
+  "comment": "Representative benchmark fixtures, one per model family, so optimization claims are measured against a declared shape set rather than a single synthetic GEMM. This document declares WHAT must be measured and which parity evidence applies; it never carries argv, environment, executable identity, or a measured result. Results live in receipts produced by a qualification run. scripts/validate_benchmark_matrix.py enforces every rule described here.",
+  "effect_class_evidence": {
+    "comment": "From the qualification contract in PERFORMANCE_ROADMAP.md. Evidence is selected by operation effect class rather than assuming every operation has gradients or an optimizer. The validator requires exactly these keys per class: a training fixture cannot omit gradient parity, and a serving fixture cannot invent one.",
+    "training_kernel": [
+      "output_parity",
+      "gradient_parity",
+      "optimizer_update_parity",
+      "state_parity",
+      "resumed_trajectory_parity"
+    ],
+    "serving_kernel": [
+      "output_parity",
+      "state_parity",
+      "determinism_parity"
+    ],
+    "cache_builder": [
+      "content_parity",
+      "ordering_parity",
+      "manifest_parity"
+    ],
+    "scheduler_policy": [
+      "ownership_parity",
+      "trajectory_parity",
+      "resume_parity",
+      "throughput_evidence"
+    ]
+  },
+  "required_measurements": {
+    "comment": "Every fixture declares all five axes. A missing axis is a validator error, not a default, so a benchmark cannot quietly report throughput while hiding a compile-time or input-stall regression.",
+    "axes": [
+      "steady_state_step_time",
+      "peak_memory",
+      "input_wait",
+      "cold_compile_time",
+      "quality_gate"
+    ]
+  },
+  "fixtures": [
+    {
+      "id": "mageflow.terminal-expert-flow",
+      "family": "mageflow_diffusion",
+      "effect_class": "training_kernel",
+      "portability": "machine_native",
+      "accelerator_required": true,
+      "shape_buckets": [
+        "512x512",
+        "768x768",
+        "1024x1024"
+      ],
+      "declares_curriculum_transition": true,
+      "quality_gate": "held_out_flow_loss",
+      "notes": "Routed terminal expert training across the three resident image buckets. The curriculum transition covers the resolution change, which is where static-shape compilation and allocator behaviour usually break.",
+      "parity_evidence": [
+        "output_parity",
+        "gradient_parity",
+        "optimizer_update_parity",
+        "state_parity",
+        "resumed_trajectory_parity"
+      ]
+    },
+    {
+      "id": "rwkv.scratch-pretrain",
+      "family": "rwkv_scratch",
+      "effect_class": "training_kernel",
+      "portability": "portable",
+      "accelerator_required": false,
+      "shape_buckets": [
+        "seq512xbatch8",
+        "seq1024xbatch4",
+        "seq2048xbatch2"
+      ],
+      "declares_curriculum_transition": true,
+      "quality_gate": "validation_perplexity",
+      "notes": "Baseline non-distributed scratch RWKV. Portable because the RWKV-7 kernel has a pure-Python reference fallback, so a CPU baseline is meaningful even though it is not the production path.",
+      "parity_evidence": [
+        "output_parity",
+        "gradient_parity",
+        "optimizer_update_parity",
+        "state_parity",
+        "resumed_trajectory_parity"
+      ]
+    },
+    {
+      "id": "rwkv.pretrained-continuation",
+      "family": "rwkv_pretrained",
+      "effect_class": "training_kernel",
+      "portability": "machine_native",
+      "accelerator_required": true,
+      "shape_buckets": [
+        "seq1024xbatch4",
+        "seq4096xbatch1"
+      ],
+      "declares_curriculum_transition": false,
+      "quality_gate": "validation_perplexity",
+      "notes": "Continuation from an immutable parent checkpoint. Separate from scratch pretraining because warm-start changes both the optimizer-state cost and the quality baseline.",
+      "parity_evidence": [
+        "output_parity",
+        "gradient_parity",
+        "optimizer_update_parity",
+        "state_parity",
+        "resumed_trajectory_parity"
+      ]
+    },
+    {
+      "id": "transformer.mla-lm",
+      "family": "transformer_lm",
+      "effect_class": "training_kernel",
+      "portability": "machine_native",
+      "accelerator_required": true,
+      "shape_buckets": [
+        "seq2048xbatch2",
+        "seq4096xbatch1"
+      ],
+      "declares_curriculum_transition": false,
+      "quality_gate": "validation_perplexity",
+      "notes": "Transformer/MLA attention path. Named transformer rather than MLA so a future non-MLA attention variant is not mislabelled to fit the matrix.",
+      "parity_evidence": [
+        "output_parity",
+        "gradient_parity",
+        "optimizer_update_parity",
+        "state_parity",
+        "resumed_trajectory_parity"
+      ]
+    },
+    {
+      "id": "vision.multimodal-student",
+      "family": "vision_multimodal",
+      "effect_class": "training_kernel",
+      "portability": "machine_native",
+      "accelerator_required": true,
+      "shape_buckets": [
+        "224x224xbatch32",
+        "448x448xbatch8"
+      ],
+      "declares_curriculum_transition": true,
+      "quality_gate": "held_out_image_eval_suite",
+      "notes": "Raw-pixel vision student against a frozen teacher. The quality gate is an image eval suite rather than perplexity, which is why family-specific gates are declared per fixture.",
+      "parity_evidence": [
+        "output_parity",
+        "gradient_parity",
+        "optimizer_update_parity",
+        "state_parity",
+        "resumed_trajectory_parity"
+      ]
+    },
+    {
+      "id": "finetune.optimizer-arm",
+      "family": "fine_tuning",
+      "effect_class": "training_kernel",
+      "portability": "portable",
+      "accelerator_required": false,
+      "shape_buckets": [
+        "seq512xbatch4"
+      ],
+      "declares_curriculum_transition": false,
+      "quality_gate": "arm_terminal_loss",
+      "notes": "Short seeded fine-tuning arm. Its legacy counterpart has a wall-clock budget, so any speed claim here must fix a step budget first or the comparison measures the clock, not the kernel.",
+      "parity_evidence": [
+        "output_parity",
+        "gradient_parity",
+        "optimizer_update_parity",
+        "state_parity",
+        "resumed_trajectory_parity"
+      ]
+    },
+    {
+      "id": "distillation.cross-architecture",
+      "family": "distillation",
+      "effect_class": "training_kernel",
+      "portability": "machine_native",
+      "accelerator_required": true,
+      "shape_buckets": [
+        "seq1024xbatch4"
+      ],
+      "declares_curriculum_transition": false,
+      "quality_gate": "student_teacher_kl",
+      "notes": "Teacher-student distillation. Teacher forward cost dominates, so the input-wait axis is load-bearing rather than incidental here.",
+      "parity_evidence": [
+        "output_parity",
+        "gradient_parity",
+        "optimizer_update_parity",
+        "state_parity",
+        "resumed_trajectory_parity"
+      ]
+    },
+    {
+      "id": "conversion.layer-remap",
+      "family": "conversion",
+      "effect_class": "cache_builder",
+      "portability": "portable",
+      "accelerator_required": false,
+      "shape_buckets": [
+        "single_layer",
+        "full_stack"
+      ],
+      "declares_curriculum_transition": false,
+      "quality_gate": "converted_forward_parity",
+      "notes": "Architecture conversion is a deterministic producer, not a training kernel: it has no optimizer and no resumed trajectory, so it is graded on content, ordering, and manifest parity.",
+      "parity_evidence": [
+        "content_parity",
+        "ordering_parity",
+        "manifest_parity"
+      ]
+    },
+    {
+      "id": "posttraining.preference-arm",
+      "family": "post_training",
+      "effect_class": "training_kernel",
+      "portability": "machine_native",
+      "accelerator_required": true,
+      "shape_buckets": [
+        "seq1024xbatch2"
+      ],
+      "declares_curriculum_transition": false,
+      "quality_gate": "preference_reward",
+      "notes": "Preference post-training arm. The quality gate is a reward rather than a loss, and paired seeds are required before any promotion decision.",
+      "parity_evidence": [
+        "output_parity",
+        "gradient_parity",
+        "optimizer_update_parity",
+        "state_parity",
+        "resumed_trajectory_parity"
+      ]
+    },
+    {
+      "id": "serving.recurrent-decode",
+      "family": "serving",
+      "effect_class": "serving_kernel",
+      "portability": "machine_native",
+      "accelerator_required": true,
+      "shape_buckets": [
+        "prefill2048",
+        "decode1x1024"
+      ],
+      "declares_curriculum_transition": false,
+      "quality_gate": "greedy_output_equivalence",
+      "notes": "Recurrent serving decode. Present so serving candidates are graded without an invented backward requirement, which is the failure the effect-class split exists to prevent.",
+      "parity_evidence": [
+        "output_parity",
+        "state_parity",
+        "determinism_parity"
+      ]
+    }
+  ]
+}
