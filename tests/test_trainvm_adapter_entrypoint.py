@@ -18,6 +18,7 @@ from rwkv_lab.trainvm_adapters.handlers import (
     AdapterDispatchError,
     HandlerResult,
     _appearance_expert,
+    _rwkv_posttraining,
     _rwkv_scratch,
     _transformer_mla,
     execute_invocation,
@@ -252,7 +253,9 @@ def test_appearance_handler_passes_only_canonical_authorized_paths(
         workspace=_sealed_workspace(read_root, run_directory),
     )
     components = SimpleNamespace()
-    observability = SimpleNamespace()
+    observability = SimpleNamespace(
+        keepalive=lambda *_args: __import__("contextlib").nullcontext()
+    )
     controls = SimpleNamespace(
         effective_values={
             "learning_rate": 2.0e-5,
@@ -463,6 +466,76 @@ def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoin
     request = result.checkpoint_requests[0]
     assert request.source_directory == run_directory / "checkpoint-final"
     assert request.resume_grade == "terminal_checkpoint"
+
+
+def test_rwkv_posttraining_handler_seals_inputs_and_publishes_adapter_bundle(
+    tmp_path, monkeypatch
+) -> None:
+    from pathlib import Path
+
+    from rwkv_lab import posttrain_train
+
+    read_root = tmp_path / "read"
+    run_directory = tmp_path / "write" / "run"
+    read_root.mkdir()
+    run_directory.mkdir(parents=True)
+    checkpoint = read_root / "base.pt"
+    dataset = read_root / "sft.jsonl"
+    checkpoint.write_bytes(b"checkpoint")
+    dataset.write_text('{"schema":"fixture"}\n', encoding="utf-8")
+    observed = []
+
+    def train(**values):
+        observed.append(values)
+        output = Path(values["output"])
+        adapter = output / "adapter"
+        adapter.mkdir()
+        (adapter / "weights.safetensors").write_bytes(b"weights")
+        (output / "posttrain-result.json").write_text(
+            '{"steps":3}\n', encoding="utf-8"
+        )
+        return {"steps": 3}
+
+    monkeypatch.setattr(posttrain_train, "train", train)
+    invocation = SimpleNamespace(
+        inputs={
+            "config": {
+                "checkpoint": str(checkpoint),
+                "data": str(dataset),
+                "output_dir": str(run_directory),
+                "steps": 3,
+                "log_every": 1,
+            }
+        },
+        workspace=_sealed_workspace(read_root, run_directory),
+        publishes={"adapter": {}},
+        resume=None,
+    )
+    components = SimpleNamespace()
+    observability = SimpleNamespace(
+        keepalive=lambda *_args: __import__("contextlib").nullcontext()
+    )
+    controls = SimpleNamespace(effective_values={})
+
+    result = _rwkv_posttraining(
+        invocation,
+        components,
+        observability=observability,
+        controls=controls,
+    )
+
+    assert result.event_type == "worker.completed"
+    assert result.optimizer_step == 3
+    assert result.payload == {"reason": "training_complete", "objective": "sft"}
+    assert len(result.artifact_requests) == 1
+    assert result.artifact_requests[0].output_name == "adapter"
+    assert result.artifact_requests[0].source_directory.parent == run_directory
+    assert result.artifact_requests[0].source_directory.name.startswith(
+        "posttraining-output-"
+    )
+    assert observed[0]["checkpoint"] == str(checkpoint.resolve())
+    assert observed[0]["data"] == str(dataset.resolve())
+    assert observed[0]["worker_components"] is components
 
 
 def test_transformer_mla_handler_binds_paths_profile_and_compatible_checkpoint(
@@ -679,6 +752,12 @@ def test_dispatch_table_is_closed_and_training_composition_is_required() -> None
             "rwkv_lab.qwen_ao3.v1.Train",
         ),
         (
+            "rwkv-lab.rwkv-posttraining",
+            "1.0.0",
+            "train",
+            "rwkv_lab.rwkv_posttraining.v1.Train",
+        ),
+        (
             "rwkv-lab.rwkv-scratch",
             "1.0.0",
             "train",
@@ -796,6 +875,51 @@ def test_runner_publishes_handler_checkpoints_before_terminal_event(
             {
                 "reason": "training_complete",
                 "checkpoint_artifact_ids": ["checkpoint-artifact-19"],
+            },
+            19,
+        )
+    ]
+
+
+def test_runner_publishes_handler_artifacts_before_terminal_event(
+    monkeypatch, tmp_path
+) -> None:
+    from rwkv_lab.trainvm_worker import ArtifactPublicationRequest
+
+    bootstrap = SimpleNamespace(run_id="run-1")
+    session = FakeSession(bootstrap)
+    request = ArtifactPublicationRequest(tmp_path, "adapter")
+    observed = []
+
+    def publish(actual_session, requests, *, progress):
+        assert actual_session is session
+        observed.extend(requests)
+        progress()
+        return (SimpleNamespace(artifact_id="adapter-artifact-19"),)
+
+    monkeypatch.setattr(
+        "rwkv_lab.trainvm_adapters.entrypoint.publish_artifact_requests", publish
+    )
+    status = run_worker(
+        bootstrap_reader=lambda _descriptor: bootstrap,
+        session_factory=lambda _bootstrap: session,
+        executor=lambda _invocation, _profiler, _observability, _controls: (
+            HandlerResult(
+                "worker.completed",
+                {"reason": "training_complete"},
+                19,
+                artifact_requests=(request,),
+            )
+        ),
+    )
+    assert status == 0
+    assert observed == [request]
+    assert session.finished == [
+        (
+            "worker.completed",
+            {
+                "reason": "training_complete",
+                "artifact_ids": ["adapter-artifact-19"],
             },
             19,
         )

@@ -234,6 +234,12 @@ the package's own dense-GQA measurements report FA4 roughly 4–10 percent slowe
 
 ### LibTorch C++ profiling parity
 
+Use the analysis workflow in
+[PyTorch Profiling 101 with Modded-NanoGPT](https://blog.underfit.ai/profiling-101-nanogpt) as the
+cross-runtime acceptance reference, while implementing the worker integration through LibTorch,
+Kineto/RecordFunction where supported, NVTX, and NVIDIA's external profilers. The required outcome
+is equivalent evidence, not dependence on the Python `torch.profiler` wrapper.
+
 - Give every LibTorch worker the same declarative wait/warmup/capture step state machine as the
   Python Torch worker. The training loop, not an external timer, advances the schedule at exact
   optimizer-step boundaries.
@@ -250,9 +256,22 @@ the package's own dense-GQA measurements report FA4 roughly 4–10 percent slowe
 - Preserve raw trace sensitivity and publication rules. Python stacks and TorchInductor/Triton
   kernel names are optional evidence, not schema requirements; pure LibTorch traces instead retain
   C++ symbols, ATen operations, NVTX ranges, and CUDA kernel identities.
+- Emit Perfetto/Chrome-trace-compatible flow events that preserve CPU operator -> CUDA runtime ->
+  GPU kernel causality. When the collector exposes them, retain bounded tensor shape/stride and
+  source-symbol metadata so an operator can connect a slow kernel to its model geometry and exact
+  C++ call site; stack capture remains a separately declared high-overhead mode.
+- Derive a machine-readable temporal breakdown from each completed window: compute, communication,
+  input/host wait, and unattributed GPU idle time; top operators and kernels by self/total time and
+  call count; launch latency; and communication-compute overlap. The dashboard must link each
+  summary row back to the corresponding trace interval rather than presenting an untraceable
+  aggregate.
 - Qualify the implementation with matching unprofiled, NVTX-only, Kineto, and Nsight windows so the
   dashboard can show profiler overhead and never mistake instrumented timing for production
   throughput.
+- Acceptance requires one bounded LibTorch training fixture whose trace can be opened directly in
+  Perfetto, whose optimizer-step and phase ranges agree with independently counted runtime events,
+  and whose synthetic input stall and communication overlap are classified within declared error
+  tolerances. A C++-only worker must pass without importing Python or TensorBoard.
 
 The bounded Torch path is implemented end to end for the native MageFlow appearance/terminal and
 Qwen adapters. One shared optimizer-step hook drives the declared wait/warmup/capture schedule; it

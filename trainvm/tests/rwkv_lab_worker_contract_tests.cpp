@@ -56,8 +56,8 @@ int main() {
     const trainvm::RwkvLabWorkerContract contract =
         trainvm::rwkv_lab_worker_contract(fingerprint);
     require(contract.adapter_registry.api_version == "trainvm.adapters/v2" &&
-                contract.adapter_registry.profiles.size() == 12U,
-            "rwkv_lab catalog must expose twelve exact adapter profiles");
+                contract.adapter_registry.profiles.size() == 13U,
+            "rwkv_lab catalog must expose thirteen exact adapter profiles");
     require(std::ranges::is_sorted(contract.provided_capabilities) &&
                 std::ranges::adjacent_find(contract.provided_capabilities) ==
                     contract.provided_capabilities.end(),
@@ -67,7 +67,7 @@ int main() {
         trainvm::rwkv_lab_worker_runtime_requirements();
     require(runtime_requirements.api_version ==
                     "trainvm.rwkv-lab-worker-runtime-requirements/v1" &&
-                runtime_requirements.profiles.size() == 12U &&
+                runtime_requirements.profiles.size() == 13U &&
                 runtime_requirements.shared_root_distributions ==
                     std::vector<std::string>(
                         {"grpcio", "pillow", "protobuf", "torch"}),
@@ -92,6 +92,8 @@ int main() {
     const auto& terminal = find_profile(
         contract, "rwkv-lab.mageflow-terminal-expert");
     const auto& qwen = find_profile(contract, "rwkv-lab.qwen-ao3");
+    const auto& posttraining =
+        find_profile(contract, "rwkv-lab.rwkv-posttraining");
     const auto& rwkv = find_profile(contract, "rwkv-lab.rwkv-scratch");
     const std::vector<std::string> transformer_adapters{
         "rwkv-lab.transformer-mla",
@@ -146,6 +148,18 @@ int main() {
                 rwkv.training_composition &&
                 rwkv.training_composition->model_family == "rwkv" &&
                 rwkv.training_composition->slots.size() == 10U &&
+                posttraining.training_composition &&
+                posttraining.training_composition->model_family == "rwkv" &&
+                posttraining.training_composition->slots.size() == 4U &&
+                posttraining.training_composition->allowed_components->at(
+                    "optimizer").size() == 1U &&
+                posttraining.training_composition->allowed_components->at(
+                    "optimizer").front().category ==
+                    trainvm::TrainingComponentCategory::optimizer &&
+                posttraining.training_composition->allowed_components->at(
+                    "optimizer").front().name == "torch_adamw_no_decay" &&
+                posttraining.training_composition->allowed_components->at(
+                    "optimizer").front().version == "2.0.0" &&
                 transformer_contracts_exact,
             "real trainer profiles must expose exact family-specific slot surfaces");
     require(appearance.lifecycle.resume_grade ==
@@ -157,6 +171,11 @@ int main() {
                     trainvm::ResumeGrade::compatible &&
                 rwkv.lifecycle.resume_grade ==
                     trainvm::ResumeGrade::terminal_checkpoint &&
+                posttraining.lifecycle.resume_grade ==
+                    trainvm::ResumeGrade::restart_only &&
+                !posttraining.lifecycle.checkpoint_now &&
+                !posttraining.lifecycle.pause_keep_resources &&
+                !posttraining.lifecycle.pause_release_resources &&
                 !rwkv.lifecycle.checkpoint_now &&
                 !rwkv.lifecycle.pause_keep_resources &&
                 !rwkv.lifecycle.pause_release_resources,
@@ -180,7 +199,7 @@ int main() {
         operation_registry.operation_descriptors_json();
     require(operation_document.at("api_version") ==
                     "trainvm.operations/v1" &&
-                operation_document.at("operations").size() == 12U &&
+                operation_document.at("operations").size() == 13U &&
                 operation_registry.operation_descriptors_digest() ==
                     "sha256:" +
                         trainvm::sha256_hex(operation_document.dump()),
@@ -193,25 +212,54 @@ int main() {
                 operations.at(2).at("key").at("adapter") ==
                     "rwkv-lab.qwen-ao3" &&
                 operations.at(3).at("key").at("adapter") ==
-                    "rwkv-lab.rwkv-scratch" &&
+                    "rwkv-lab.rwkv-posttraining" &&
                 operations.at(4).at("key").at("adapter") ==
+                    "rwkv-lab.rwkv-scratch" &&
+                operations.at(5).at("key").at("adapter") ==
                     "rwkv-lab.transformer-mla" &&
-                operations.at(10).at("key").at("adapter") ==
-                    "rwkv-lab.transformer-mla-parallel" &&
                 operations.at(11).at("key").at("adapter") ==
+                    "rwkv-lab.transformer-mla-parallel" &&
+                operations.at(12).at("key").at("adapter") ==
                     "rwkv-lab.transformer-mla-rwkv8",
             "operation descriptors must use canonical exact-key ordering");
     for (const nlohmann::json& operation : operations) {
+      const bool is_posttraining =
+          operation.at("key").at("adapter") ==
+          "rwkv-lab.rwkv-posttraining";
       require(operation.at("authoring").at("inputs").at("config").at(
                   "type") == "object" &&
                   operation.at("authoring").at("inputs").at("config").at(
                       "required") == true &&
-                  operation.at("authoring").at("outputs").at("checkpoint").at(
-                      "type") == "artifact" &&
-                  operation.at("authoring").at("outputs").at("checkpoint").at(
-                      "required") == false &&
-                  operation.at("authoring").at("outputs").at("checkpoint").at(
-                      "artifact_type") == "checkpoint" &&
+                  (is_posttraining
+                       ? operation.at("authoring")
+                                 .at("outputs")
+                                 .at("adapter")
+                                 .at("type") == "artifact" &&
+                             operation.at("authoring")
+                                 .at("outputs")
+                                 .at("adapter")
+                                 .at("required") == true &&
+                             operation.at("authoring")
+                                 .at("outputs")
+                                 .at("adapter")
+                                 .at("artifact_type") == "opaque" &&
+                             operation.at("authoring")
+                                 .at("outputs")
+                                 .at("adapter")
+                                 .at("artifact_schema") ==
+                                 "rwkv-lab.posttraining-output.v1"
+                       : operation.at("authoring")
+                                     .at("outputs")
+                                     .at("checkpoint")
+                                     .at("type") == "artifact" &&
+                             operation.at("authoring")
+                                     .at("outputs")
+                                     .at("checkpoint")
+                                     .at("required") == false &&
+                             operation.at("authoring")
+                                     .at("outputs")
+                                     .at("checkpoint")
+                                     .at("artifact_type") == "checkpoint") &&
                   operation.contains("lifecycle") &&
                   operation.contains("training_composition"),
               "each real trainer descriptor must expose honest ports, lifecycle, and slots");
@@ -323,9 +371,120 @@ int main() {
     require(exact_plan_accepted,
             "an executable exact-profile plan must validate against the production rwkv_lab worker registry plus core operations");
 
+    nlohmann::json posttraining_source = exact_source;
+    posttraining_source["metadata"]["name"] = "rwkv-posttraining-v1";
+    posttraining_source["spec"]["components"]["mageflow"] = {
+        {"adapter", "rwkv-lab.rwkv-posttraining"},
+        {"version", "1.0.0"},
+        {"runtime", "python_worker"},
+        {"operations",
+         {{"train",
+           {{"contract", "rwkv_lab.rwkv_posttraining.v1.Train"}}}}},
+    };
+    posttraining_source["spec"]["artifacts"]["adapter_bundle"] = {
+        {"type", "opaque"},
+        {"schema", "rwkv-lab.posttraining-output.v1"},
+        {"immutability", "immutable"},
+        {"fingerprint", "manifest_sha256"},
+    };
+    auto& posttraining_node =
+        posttraining_source["spec"]["workflow"]["nodes"]
+                           ["train_to_boundary"];
+    posttraining_node["invoke"]["inputs"] = {
+        {"config",
+         {{"literal",
+           {{"checkpoint", "/thearray/git/moe-mla/fixtures/base.pt"},
+            {"data", "/thearray/git/moe-mla/fixtures/sft.jsonl"},
+            {"output_dir",
+             "/thearray/git/moe-mla/runs/mage-flow-cache-resume"},
+            {"steps", 10}}}}},
+    };
+    posttraining_node["invoke"]["training"] = {
+        {"model_family", "rwkv"},
+        {"components",
+         {
+             {"gradient_clipping",
+              {{"key",
+                {{"category", "gradient_clipping"},
+                 {"name", "global_norm"},
+                 {"version", "1.0.0"}}},
+               {"configuration", nlohmann::json::object()}}},
+             {"learning_rate",
+              {{"key",
+                {{"category", "learning_rate_schedule"},
+                 {"name", "linear_warmup_cosine"},
+                 {"version", "1.0.0"}}},
+               {"configuration", nlohmann::json::object()}}},
+             {"optimizer",
+              {{"key",
+                {{"category", "optimizer"},
+                 {"name", "torch_adamw_no_decay"},
+                 {"version", "2.0.0"}}},
+               {"configuration", nlohmann::json::object()}}},
+             {"weight_decay",
+              {{"key",
+                {{"category", "weight_decay_schedule"},
+                 {"name", "constant"},
+                 {"version", "1.0.0"}}},
+               {"configuration", nlohmann::json::object()}}},
+         }},
+    };
+    posttraining_node["publishes"] = {{"adapter", "adapter_bundle"}};
+    posttraining_source["spec"]["controls"]["catalog"] =
+        nlohmann::json::object();
+    posttraining_source["spec"]["recovery"].erase("checkpoint_artifact");
+    posttraining_source["spec"]["recovery"].erase(
+        "release_accelerators_when_paused");
+    const auto posttraining_plan =
+        trainvm::compile_document(posttraining_source);
+    require(posttraining_plan.valid(),
+            "descriptor-backed RWKV post-training fixture must compile");
+    {
+      std::ofstream output(registry_path, std::ios::binary | std::ios::trunc);
+      output << trainvm::encode_json(contract.adapter_registry).dump();
+    }
+    std::filesystem::permissions(
+        registry_path, std::filesystem::perms::owner_read |
+                           std::filesystem::perms::owner_write,
+        std::filesystem::perm_options::replace);
+    bool posttraining_accepted = posttraining_plan.valid();
+    std::string posttraining_error;
+    try {
+      if (posttraining_plan.valid()) {
+        trainvm::AdapterRegistry::load_file(
+            std::filesystem::absolute(registry_path))
+            .validate_plan(*posttraining_plan.plan);
+      }
+    } catch (const std::exception& error) {
+      posttraining_accepted = false;
+      posttraining_error = error.what();
+    }
+    require(posttraining_accepted,
+            "descriptor-backed RWKV post-training must validate against exact launch authority: " +
+                posttraining_error);
+    nlohmann::json missing_adapter_output = posttraining_source;
+    missing_adapter_output["spec"]["workflow"]["nodes"]
+                          ["train_to_boundary"]["publishes"] =
+        nlohmann::json::object();
+    const auto missing_adapter_plan =
+        trainvm::compile_document(missing_adapter_output);
+    bool missing_adapter_rejected = !missing_adapter_plan.valid();
+    try {
+      if (missing_adapter_plan.valid()) {
+        trainvm::AdapterRegistry::load_file(
+            std::filesystem::absolute(registry_path))
+            .validate_plan(*missing_adapter_plan.plan);
+      }
+    } catch (const std::exception&) {
+      missing_adapter_rejected = true;
+    }
+    std::filesystem::remove(registry_path);
+    require(missing_adapter_rejected,
+            "RWKV post-training cannot launch without its required immutable adapter output");
+
     std::vector<trainvm::AdapterProfile> extended_profiles =
         contract.adapter_registry.profiles;
-    trainvm::AdapterProfile synthetic = extended_profiles.at(2);
+    trainvm::AdapterProfile synthetic = qwen;
     synthetic.key.adapter = "rwkv-lab.synthetic-compatible";
     synthetic.key.contract = "rwkv_lab.synthetic_compatible.v1.Train";
     extended_profiles.push_back(synthetic);
@@ -335,7 +494,7 @@ int main() {
         extended_registry.operation_descriptors_json();
     const auto& extended_operations =
         extended_document.at("operations");
-    require(extended_operations.size() == 13U &&
+    require(extended_operations.size() == 14U &&
                 std::ranges::any_of(
                     extended_operations, [](const nlohmann::json& operation) {
                       return operation.at("key").at("adapter") ==
@@ -359,7 +518,7 @@ int main() {
 
     bool primitive_output_rejected = false;
     try {
-      synthetic = contract.adapter_registry.profiles.at(2);
+      synthetic = qwen;
       synthetic.authoring->outputs.at("checkpoint").type =
           trainvm::OperationPortType::string;
       synthetic.authoring->outputs.at("checkpoint").artifact_type =
@@ -372,7 +531,7 @@ int main() {
     }
     bool oversized_authoring_rejected = false;
     try {
-      synthetic = contract.adapter_registry.profiles.at(2);
+      synthetic = qwen;
       synthetic.authoring->inputs.clear();
       for (std::size_t index = 0; index < 65U; ++index) {
         synthetic.authoring->inputs.emplace(
@@ -423,9 +582,15 @@ int main() {
           .working_directory = "/srv/trainvm/work",
       });
     }
-    runtimes.at(2).code_fingerprint =
+    const auto qwen_runtime = std::ranges::find_if(
+        runtimes, [](const auto& runtime) {
+          return runtime.adapter == "rwkv-lab.qwen-ao3";
+        });
+    require(qwen_runtime != runtimes.end(),
+            "Qwen runtime must be present before deployment lowering");
+    qwen_runtime->code_fingerprint =
         "sha256:" + std::string(64U, 'd');
-    runtimes.at(2).bootstrap_runtime_closure_fingerprint =
+    qwen_runtime->bootstrap_runtime_closure_fingerprint =
         "sha256:" + std::string(64U, 'e');
     const auto deployment = trainvm::rwkv_lab_worker_deployment({
         .api_version = "trainvm.rwkv-lab-worker-runtimes/v1",
@@ -438,7 +603,7 @@ int main() {
                     contract.provided_capabilities &&
                 deployment.host_launch_registry.api_version ==
                     "trainvm.host-launches/v4" &&
-                deployment.host_launch_registry.profiles.size() == 12U,
+                deployment.host_launch_registry.profiles.size() == 13U,
             "deployment lowering must retain the complete reflected worker catalog");
     for (const trainvm::HostLaunchProfile& launch :
          deployment.host_launch_registry.profiles) {
@@ -463,7 +628,7 @@ int main() {
         });
     require(
         qwen_profile != deployment.adapter_registry.profiles.end() &&
-            qwen_profile->code_fingerprint == runtimes.at(2).code_fingerprint,
+            qwen_profile->code_fingerprint == qwen_runtime->code_fingerprint,
             "adapter registry and host profile must share each adapter-specific code identity");
 
     auto missing_runtime = runtimes;

@@ -149,8 +149,9 @@ func (s *Server) handlePosttraining(w http.ResponseWriter, r *http.Request) {
 	b.WriteString(`</datalist><button class="btn" data-on:click="@post('/api/posttraining/inspect')">inspect</button></div>`)
 	b.WriteString(`<div class="empty">Dataset versioning is read-only here. Create immutable dataset versions through an external or future descriptor-backed operation.</div>`)
 	b.WriteString(`<div id="posttraining-inspect"><div class="empty">select a repository JSONL dataset</div></div>`)
-	b.WriteString(`<div class="panel-title">post-training campaigns · read-only <span class="sub">persisted evidence and promotion receipts</span></div>`)
-	b.WriteString(`<div class="empty">Direct post-training campaign launch is retired. No descriptor-backed post-training campaign operation is available yet.</div>`)
+	b.WriteString(`<div class="panel-title">post-training execution <span class="sub">declarative single-run adapter training</span></div>`)
+	b.WriteString(`<div class="empty">The descriptor-backed <code>rwkv-lab.rwkv-posttraining@1.0.0</code> operation is available in the <a href="#trainvm-authoring">TrainVM composer</a> for SFT, DPO, KTO, ORPO, SimPO, reward-model, and PRM runs. Legacy multi-arm campaigns and recursive promotion remain read-only below.</div>`)
+	b.WriteString(`<div class="panel-title">legacy post-training campaigns · read-only <span class="sub">persisted evidence and promotion receipts</span></div>`)
 	b.WriteString(`<div class="pt-campaign-results">`)
 	campaigns, loops := s.readPosttrainCampaigns()
 	if len(campaigns) == 0 {

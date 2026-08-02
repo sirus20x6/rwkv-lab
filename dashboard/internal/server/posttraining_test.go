@@ -79,7 +79,9 @@ func TestPosttrainingCampaignAndAdapterLineageDiscovery(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	s.handlePosttraining(recorder, httptest.NewRequest("GET", "/api/posttraining", nil))
 	body := recorder.Body.String()
-	if !strings.Contains(body, "post-training campaigns · read-only") ||
+	if !strings.Contains(body, "legacy post-training campaigns · read-only") ||
+		!strings.Contains(body, "rwkv-lab.rwkv-posttraining@1.0.0") ||
+		!strings.Contains(body, "TrainVM composer") ||
 		!strings.Contains(body, "posttrain") || !strings.Contains(body, "eligible") ||
 		strings.Contains(body, "/api/posttraining/campaign") ||
 		strings.Contains(body, "/api/posttraining/version") ||

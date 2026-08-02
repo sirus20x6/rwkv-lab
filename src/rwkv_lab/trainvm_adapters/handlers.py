@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable, Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from rwkv_lab.trainvm_worker import (
+    ArtifactPublicationRequest,
     CheckpointPublicationRequest,
     NullStepProfiler,
     WorkerControlRuntime,
@@ -24,6 +27,7 @@ from .checkpoints import (
 from .components import WorkerTrainingComponents
 from .io import WorkspacePathAuthority, read_inline_config
 from .mageflow_controls import lower_initial_mageflow_controls
+from .posttraining import RWKVPostTrainConfig
 from .qwen_controls import lower_initial_qwen_controls
 from .rwkv_scratch import RWKVScratchTrainConfig
 from .transformer_mla import PROFILE_ADAPTERS, TransformerMLATrainConfig
@@ -39,6 +43,7 @@ class HandlerResult:
     payload: Mapping[str, Any]
     optimizer_step: int | None = None
     checkpoint_requests: tuple[CheckpointPublicationRequest, ...] = ()
+    artifact_requests: tuple[ArtifactPublicationRequest, ...] = ()
 
 
 AdapterKey = tuple[str, str, str, str]
@@ -547,6 +552,145 @@ def _rwkv_scratch(
     )
 
 
+def _rwkv_posttraining(
+    invocation: WorkerInvocation,
+    components: WorkerTrainingComponents,
+    step_profiler: WorkerStepProfiler | None = None,
+    observability: WorkerObservability | None = None,
+    controls: WorkerControlRuntime | None = None,
+) -> HandlerResult:
+    """Run one immutable-parent, restart-only RWKV post-training attempt."""
+
+    if getattr(invocation, "resume", None) is not None:
+        raise AdapterDispatchError(
+            "RWKV post-training v1 is restart-only and rejects resume state"
+        )
+    publishes = getattr(invocation, "publishes", {})
+    if not isinstance(publishes, Mapping) or "adapter" not in publishes:
+        raise AdapterDispatchError(
+            "RWKV post-training invocation omits its required adapter artifact"
+        )
+    effective_controls = (
+        getattr(controls, "effective_values", {}) if controls is not None else {}
+    )
+    if not isinstance(effective_controls, Mapping):
+        raise AdapterDispatchError(
+            "RWKV post-training received an invalid control snapshot"
+        )
+    if effective_controls:
+        raise AdapterDispatchError(
+            "RWKV post-training v1 does not declare initial controls"
+        )
+    verification = (
+        observability.keepalive(0, "verifying_inputs")
+        if observability is not None
+        else nullcontext()
+    )
+    with verification:
+        paths = WorkspacePathAuthority.from_workspace(
+            invocation.workspace, require_content=True
+        )
+        config = RWKVPostTrainConfig(**read_inline_config(invocation.inputs))
+        checkpoint = paths.read_path(
+            config.checkpoint, label="checkpoint", kind="file"
+        )
+        data = paths.read_path(config.data, label="data", kind="file")
+        eval_data = (
+            str(paths.read_path(config.eval_data, label="eval_data", kind="file"))
+            if config.eval_data
+            else ""
+        )
+        template = (
+            str(paths.read_path(config.template, label="template", kind="file"))
+            if config.template
+            else ""
+        )
+        token_cache = (
+            str(paths.write_directory(config.token_cache, label="token_cache"))
+            if config.token_cache
+            else ""
+        )
+        run_directory = paths.exact_run_directory(config.output_dir)
+    attempt_id = str(getattr(invocation, "attempt_id", "attempt"))
+    attempt_suffix = hashlib.sha256(attempt_id.encode("utf-8")).hexdigest()[:16]
+    staging = run_directory / f"posttraining-output-{attempt_suffix}"
+    try:
+        staging.mkdir(mode=0o750, parents=True, exist_ok=False)
+    except FileExistsError as error:
+        raise AdapterDispatchError(
+            "RWKV post-training output staging already exists"
+        ) from error
+    from rwkv_lab.posttrain_train import train
+
+    result = train(
+        checkpoint=str(checkpoint),
+        data=str(data),
+        output=str(staging),
+        objective=config.objective,
+        adapter_name=config.adapter_name,
+        rank=config.rank,
+        alpha=config.alpha,
+        targets=config.targets,
+        steps=config.steps,
+        batch_size=config.batch_size,
+        learning_rate=config.learning_rate,
+        minimum_learning_rate_ratio=config.minimum_learning_rate_ratio,
+        warmup_steps=config.warmup_steps,
+        weight_decay=config.weight_decay,
+        max_gradient_norm=config.max_gradient_norm,
+        beta=config.beta,
+        gamma=config.gamma,
+        max_length=config.max_length,
+        seed=config.seed,
+        device=config.device,
+        template=template,
+        eval_data=eval_data,
+        token_cache=token_cache,
+        max_train_tokens=config.max_train_tokens,
+        packing=config.packing,
+        base_quantization=config.base_quantization,
+        quant_block_size=config.quant_block_size,
+        quant_backend=config.quant_backend,
+        activation_offload=config.activation_offload,
+        log_every=config.log_every,
+        worker_components=components,
+        worker_step_profiler=step_profiler or NullStepProfiler(),
+        worker_observability=observability,
+        worker_controls=controls,
+    )
+    if not isinstance(result, Mapping):
+        raise AdapterDispatchError(
+            "RWKV post-training trainer omitted its terminal result"
+        )
+    step = result.get("steps")
+    if not isinstance(step, int) or isinstance(step, bool) or step < 1:
+        raise AdapterDispatchError(
+            "RWKV post-training trainer returned an invalid optimizer step"
+        )
+    result_path = staging / "posttrain-result.json"
+    adapter_directory = staging / "adapter"
+    if (
+        not result_path.is_file()
+        or result_path.is_symlink()
+        or not adapter_directory.is_dir()
+        or adapter_directory.is_symlink()
+    ):
+        raise AdapterDispatchError(
+            "RWKV post-training trainer omitted its result or adapter payload"
+        )
+    return HandlerResult(
+        "worker.completed",
+        {"reason": "training_complete", "objective": config.objective},
+        optimizer_step=step,
+        artifact_requests=(
+            ArtifactPublicationRequest(
+                source_directory=staging,
+                output_name="adapter",
+            ),
+        ),
+    )
+
+
 def _transformer_mla(
     invocation: WorkerInvocation,
     components: WorkerTrainingComponents,
@@ -748,6 +892,12 @@ _HANDLERS: Mapping[AdapterKey, Handler] = {
         "train",
         "rwkv_lab.qwen_ao3.v1.Train",
     ): _qwen_ao3,
+    (
+        "rwkv-lab.rwkv-posttraining",
+        "1.0.0",
+        "train",
+        "rwkv_lab.rwkv_posttraining.v1.Train",
+    ): _rwkv_posttraining,
     (
         "rwkv-lab.rwkv-scratch",
         "1.0.0",

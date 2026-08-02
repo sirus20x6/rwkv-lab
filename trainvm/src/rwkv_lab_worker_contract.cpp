@@ -34,6 +34,65 @@ OperationLifecycleCapabilities resumable_training_lifecycle() {
   };
 }
 
+OperationLifecycleCapabilities restart_only_training_lifecycle() {
+  return {
+      .stateful = true,
+      .graceful_stop = true,
+      .checkpoint_now = false,
+      .pause_keep_resources = false,
+      .pause_release_resources = false,
+      .compile = false,
+      .warmup = false,
+      .qualify = false,
+      .profile = true,
+      .resume_grade = ResumeGrade::restart_only,
+  };
+}
+
+OperationAuthoringDeclaration checkpoint_authoring() {
+  return {
+      .inputs = {
+          {"config",
+           OperationPortDescriptor{
+               .type = OperationPortType::object,
+               .required = true,
+               .artifact_type = std::nullopt,
+               .artifact_schema = std::nullopt,
+               .description =
+                   "Typed trainer configuration object consumed by this "
+                   "exact adapter contract.",
+           }},
+      },
+      .outputs = {
+          {"checkpoint",
+           OperationPortDescriptor{
+               .type = OperationPortType::artifact,
+               .required = false,
+               .artifact_type = ArtifactType::checkpoint,
+               .artifact_schema = std::nullopt,
+               .description =
+                   "Optional authority-published trainer checkpoint.",
+           }},
+      },
+  };
+}
+
+OperationAuthoringDeclaration posttraining_authoring() {
+  OperationAuthoringDeclaration authoring = checkpoint_authoring();
+  authoring.outputs = {
+      {"adapter",
+       OperationPortDescriptor{
+           .type = OperationPortType::artifact,
+           .required = true,
+           .artifact_type = ArtifactType::opaque,
+           .artifact_schema = "rwkv-lab.posttraining-output.v1",
+           .description =
+               "Immutable adapter, reward-head, result, and metric bundle.",
+       }},
+  };
+  return authoring;
+}
+
 TrainingCompositionContract transformer_mla_composition() {
   TrainingCompositionContract composition{
       .model_family = "transformer",
@@ -90,7 +149,9 @@ std::vector<std::string> canonical_distributions(
 
 AdapterProfile profile(AdapterKey adapter_key, std::string code_fingerprint,
                        TrainingCompositionContract composition,
-                       OperationLifecycleCapabilities lifecycle) {
+                       OperationLifecycleCapabilities lifecycle,
+                       std::optional<OperationAuthoringDeclaration> authoring =
+                           std::nullopt) {
   return {
       .key = std::move(adapter_key),
       .effect = Effect::process,
@@ -99,31 +160,7 @@ AdapterProfile profile(AdapterKey adapter_key, std::string code_fingerprint,
       .required_capabilities = {"worker.controls", "worker.metrics"},
       .lifecycle = lifecycle,
       .training_composition = std::move(composition),
-      .authoring = OperationAuthoringDeclaration{
-          .inputs = {
-              {"config",
-               OperationPortDescriptor{
-                   .type = OperationPortType::object,
-                   .required = true,
-                   .artifact_type = std::nullopt,
-                   .artifact_schema = std::nullopt,
-                   .description =
-                       "Typed trainer configuration object consumed by this "
-                       "exact adapter contract.",
-               }},
-          },
-          .outputs = {
-              {"checkpoint",
-               OperationPortDescriptor{
-                   .type = OperationPortType::artifact,
-                   .required = false,
-                   .artifact_type = ArtifactType::checkpoint,
-                   .artifact_schema = std::nullopt,
-                   .description =
-                       "Optional authority-published trainer checkpoint.",
-               }},
-          },
-      },
+      .authoring = authoring ? std::move(*authoring) : checkpoint_authoring(),
   };
 }
 
@@ -164,6 +201,26 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
             TrainingComponentCategory::weight_decay_schedule},
        }},
       resumable_training_lifecycle()));
+  profiles.push_back(profile(
+      key("rwkv-lab.rwkv-posttraining",
+          "rwkv_lab.rwkv_posttraining.v1.Train"),
+      code_fingerprint,
+      {.model_family = "rwkv",
+       .slots = {
+           {"gradient_clipping", TrainingComponentCategory::gradient_clipping},
+           {"learning_rate",
+            TrainingComponentCategory::learning_rate_schedule},
+           {"optimizer", TrainingComponentCategory::optimizer},
+           {"weight_decay",
+            TrainingComponentCategory::weight_decay_schedule},
+       },
+       .allowed_components =
+           std::map<std::string, std::vector<TrainingComponentKey>>{
+               {"optimizer",
+                {{TrainingComponentCategory::optimizer,
+                  "torch_adamw_no_decay", "2.0.0"}}},
+           }},
+      restart_only_training_lifecycle(), posttraining_authoring()));
   profiles.push_back(profile(
       key("rwkv-lab.qwen-ao3", "rwkv_lab.qwen_ao3.v1.Train"),
       code_fingerprint,
@@ -321,6 +378,10 @@ rwkv_lab_worker_runtime_requirements() {
       {"rwkv-lab.rwkv-scratch",
        canonical_distributions(
            {"einops", "grpcio", "numpy", "pillow", "protobuf", "torch"})},
+      {"rwkv-lab.rwkv-posttraining",
+       canonical_distributions(
+           {"einops", "grpcio", "numpy", "pillow", "protobuf",
+            "safetensors", "torch"})},
   };
 
   const RwkvLabWorkerContract worker =

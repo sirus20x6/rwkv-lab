@@ -148,8 +148,11 @@ fixed; the normal native test target builds it twice and requires byte equality.
 sealed interpreter with `-I`, installs the zipapp at fd 3 through its separately bound code-argument
 slot, clears the environment, and appends exactly `--trainvm-bootstrap-fd=4`; the runner rejects
 every other argument. Its dispatch table contains exact `(adapter, version, operation, contract)`
-tuples for the MageFlow appearance expert, MageFlow terminal expert, Qwen AO3 continuation, and
-scratch RWKV pretraining. An experiment cannot select an import string, script, argv, environment
+tuples for the MageFlow appearance and terminal experts, Qwen AO3 continuation, eight canonical
+MLA-family variants, scratch RWKV pretraining, and restart-only RWKV post-training. The latter
+publishes adapter, reward-head, terminal result, and metric files through the generic immutable-tree
+artifact boundary rather than presenting them as a resumable checkpoint. An experiment cannot
+select an import string, script, argv, environment
 override, or entry-point path.
 
 `trainvm inspect-rwkv-lab-deployment` lowers each adapter's exact zipapp,
