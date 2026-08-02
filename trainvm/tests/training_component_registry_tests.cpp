@@ -180,6 +180,7 @@ void registry_is_canonical_and_resolves_typed_configuration() {
            {.key = cosine_schedule().key,
             .configuration = nlohmann::json::object()}},
       },
+      .topologies = std::nullopt,
   };
   const auto resolved_composition =
       registry.resolve_composition(composition);
@@ -264,6 +265,7 @@ void compositions_extend_worker_authority() {
            {.key = cosine_schedule().key,
             .configuration = nlohmann::json::object()}},
       },
+      .topologies = std::nullopt,
   };
   const auto augmented = registry.augment_worker_launch_request(
       {.code_fingerprint = "sha256:" + std::string(64U, 'a'),

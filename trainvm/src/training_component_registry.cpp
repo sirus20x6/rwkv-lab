@@ -1,5 +1,7 @@
 #include "trainvm/training_component_registry.hpp"
 
+#include "trainvm/rwkv_scratch_profiles.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <ranges>
@@ -230,10 +232,13 @@ Json composition_body(const ResolvedTrainingComposition& composition) {
         {"descriptor_digest", component.descriptor_digest},
     };
   }
-  return {{"api_version", "trainvm.resolved-training-composition/v1"},
-          {"components", std::move(components)},
-          {"model_family", composition.model_family},
-          {"registry_digest", composition.registry_digest}};
+  Json body{{"api_version", "trainvm.resolved-training-composition/v1"},
+            {"components", std::move(components)},
+            {"model_family", composition.model_family},
+            {"registry_digest", composition.registry_digest}};
+  if (!composition.topologies.is_null())
+    body["topologies"] = composition.topologies;
+  return body;
 }
 
 }  // namespace
@@ -338,9 +343,26 @@ ResolvedTrainingComposition TrainingComponentRegistry::resolve_composition(
   ResolvedTrainingComposition resolved{
       .model_family = composition.model_family,
       .components = {},
+      .topologies = nullptr,
       .registry_digest = registry_digest_,
       .composition_digest = {},
   };
+  if (composition.topologies) {
+    std::vector<RwkvScratchSelection> selections;
+    for (const TrainingTopologySelection& chosen : *composition.topologies) {
+      const auto topology = rwkv_scratch_topology_from_name(chosen.topology);
+      if (!topology) reject("training composition names an unknown topology");
+      std::map<std::string, nlohmann::json> assignments;
+      for (const auto& [name, value] : chosen.parameters.items())
+        assignments.emplace(name, value);
+      selections.push_back(
+          {.topology = *topology, .assignments = std::move(assignments)});
+    }
+    // Throws on an undeclared switch, a bound violation, a duplicate, or a
+    // declared-incompatible pair. Compile already checked; this is the
+    // authority-side repeat so a plan cannot reach a worker unvalidated.
+    resolved.topologies = rwkv_scratch_training_block(selections);
+  }
   for (const auto& [slot, selection] : composition.components) {
     if (!symbolic_identity(slot))
       reject("training composition slot identity is invalid");

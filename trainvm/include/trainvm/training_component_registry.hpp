@@ -95,6 +95,10 @@ struct ResolvedTrainingComponent final {
 struct ResolvedTrainingComposition final {
   std::string model_family;
   std::map<std::string, ResolvedTrainingComponent> components;
+  // The lowered research-topology block, null when the composition selects
+  // none. Part of the composition digest, so a topology change is a different
+  // composition rather than a silent substitution.
+  nlohmann::json topologies = nullptr;
   std::string registry_digest;
   std::string composition_digest;
 
