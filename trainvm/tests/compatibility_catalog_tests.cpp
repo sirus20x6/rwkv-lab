@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -82,6 +83,33 @@ void write_json(const std::filesystem::path& path,
   output << value.dump(2) << '\n';
 }
 
+std::string read_text(const std::filesystem::path& path) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input) throw std::runtime_error("could not open " + path.string());
+  return std::string(std::istreambuf_iterator<char>(input),
+                     std::istreambuf_iterator<char>());
+}
+
+// Extracts every mutating route literal registered by the legacy Go dashboard
+// router. This is deliberately a byte scan of the checked-in registration
+// table: the catalog must not be able to drift away from the routes the
+// dashboard actually serves, and no Go toolchain is required to notice.
+std::set<std::string> registered_mutation_routes(const std::string& router) {
+  static constexpr std::string_view kRegistration = "HandleFunc(\"POST ";
+  std::set<std::string> routes;
+  for (std::size_t cursor = router.find(kRegistration);
+       cursor != std::string::npos;
+       cursor = router.find(kRegistration, cursor + 1U)) {
+    const std::size_t begin = cursor + kRegistration.size();
+    const std::size_t end = router.find('"', begin);
+    if (end == std::string::npos) {
+      throw std::runtime_error("unterminated dashboard route registration");
+    }
+    routes.insert("POST " + router.substr(begin, end - begin));
+  }
+  return routes;
+}
+
 void restore_source(const std::filesystem::path& source,
                     const std::filesystem::path& destination) {
   std::error_code error;
@@ -104,7 +132,7 @@ int main() {
   check(catalog.authority() ==
             trainvm::CompatibilityAuthority::compatibility_evidence_only,
         "catalog is explicitly compatibility evidence only");
-  check(catalog.entries().size() == 140U,
+  check(catalog.entries().size() == 156U,
         "checked-in catalog matches the compiled reviewed v1 inventory");
   check(catalog.catalog_digest() ==
             trainvm::CompatibilityCatalog::reviewed_catalog_digest(),
@@ -283,7 +311,7 @@ int main() {
         "catalog contains every family and observed invocation kind");
   check(required_additions.empty(),
         "catalog retains the expanded audited workflow inventory");
-  check(reviewed_sources.size() == 141U,
+  check(reviewed_sources.size() == 145U,
         "catalog binds the complete reviewed source inventory");
   check(exact_candidates.empty() && saw_restart_only_review,
         "legacy exact candidates and restart-only review are classified narrowly");
@@ -295,6 +323,81 @@ int main() {
         "effectfully distinct qualification, export, and external phases stay split");
   check(saw_http_control_handler,
         "dashboard HTTP controls are not mislabeled as host scripts");
+
+  // Scope gate: every legacy dashboard mutation route must be classified, and
+  // every classified route must still be served. TrainVM's own namespace is
+  // excluded because it is declarative authority, not legacy evidence.
+  static constexpr std::string_view kRouterSource =
+      "dashboard/internal/server/server.go";
+  static constexpr std::string_view kDeclarativePrefix = "POST /api/trainvm/";
+  const auto registered = registered_mutation_routes(
+      read_text(root / kRouterSource));
+  std::set<std::string> legacy_routes;
+  std::set<std::string> declarative_routes;
+  for (const auto& route : registered) {
+    (route.starts_with(kDeclarativePrefix) ? declarative_routes : legacy_routes)
+        .insert(route);
+  }
+  check(!legacy_routes.empty() && !declarative_routes.empty(),
+        "router source exposes both legacy and declarative mutation routes");
+  std::set<std::string> classified_routes;
+  bool router_bound_by_every_control_record = true;
+  bool duplicate_route_classification = false;
+  for (const auto& entry : catalog.entries()) {
+    if (entry.observed_invocation !=
+        trainvm::ObservedInvocationKind::http_control_handler) {
+      continue;
+    }
+    router_bound_by_every_control_record =
+        router_bound_by_every_control_record &&
+        std::ranges::find(entry.source_paths, kRouterSource) !=
+            entry.source_paths.end();
+    check(entry.legacy_invocation_display.has_value(),
+          "every HTTP control record displays its observed route");
+    if (!entry.legacy_invocation_display) continue;
+    duplicate_route_classification = duplicate_route_classification ||
+        !classified_routes.insert(*entry.legacy_invocation_display).second;
+  }
+  check(router_bound_by_every_control_record,
+        "every HTTP control record binds the router registration bytes");
+  check(!duplicate_route_classification,
+        "no dashboard mutation route is classified twice");
+  std::set<std::string> unclassified_routes;
+  std::ranges::set_difference(
+      legacy_routes, classified_routes,
+      std::inserter(unclassified_routes, unclassified_routes.end()));
+  for (const auto& route : unclassified_routes) {
+    std::cerr << "unclassified legacy dashboard mutation route: " << route
+              << '\n';
+  }
+  check(unclassified_routes.empty(),
+        "every legacy dashboard mutation route is classified in the catalog");
+  std::set<std::string> retired_routes;
+  std::ranges::set_difference(
+      classified_routes, legacy_routes,
+      std::inserter(retired_routes, retired_routes.end()));
+  for (const auto& route : retired_routes) {
+    std::cerr << "catalog classifies an unserved route: " << route << '\n';
+  }
+  check(retired_routes.empty(),
+        "the catalog does not retain routes the dashboard no longer serves");
+  check(classified_routes.contains("POST /api/runs/{name}/control") &&
+            classified_routes.contains("POST /api/autostop") &&
+            classified_routes.contains("POST /api/queue/auto"),
+        "live-tuning and background arming paths are explicit control records");
+
+  // The route scan must never degrade into an empty set, which would make the
+  // classification gate silently vacuous.
+  const auto sample_routes = registered_mutation_routes(
+      "\ts.mux.HandleFunc(\"GET /api/runs\", s.handleRuns)\n"
+      "\ts.mux.HandleFunc(\"POST /api/runs/{name}/stop\", s.handleStop)\n"
+      "\ts.mux.HandleFunc(\"POST /api/trainvm/compile\", s.handleCompile)\n");
+  check(sample_routes ==
+            std::set<std::string>{"POST /api/runs/{name}/stop",
+                                  "POST /api/trainvm/compile"},
+        "route extraction reads exactly the registered mutation literals");
+  check(registered_mutation_routes("no registrations here").empty(),
+        "route extraction reports nothing for a router without registrations");
   check(unseen_smoke_only_library_sources.empty() &&
             !smoke_only_source_claimed_invocable,
         "essential smoke-only modules remain explicit nonlaunchable libraries");
