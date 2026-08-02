@@ -44,12 +44,26 @@ struct HostdStartupControllerStatus final {
   bool operator==(const HostdStartupControllerStatus&) const = default;
 };
 
+// Samples the authority clock on demand, so the coordinator can take the
+// startup-audit commit time after the audit observation has finished.
+class AuthorityClockStartupAuditCommitTime final
+    : public IHostStartupAuditCommitTimeSource {
+ public:
+  explicit AuthorityClockStartupAuditCommitTime(AuthorityClock& clock) noexcept;
+  [[nodiscard]] HostLedgerTime commit_time() override;
+
+ private:
+  AuthorityClock& clock_;
+};
+
+// The admission authority owns the whole audit-and-commit boundary, including
+// when the commit time is sampled. Passing a pre-sampled time in is what made
+// the production auditor uncommittable, so the clock is handed over instead.
 class IHostdStartupAdmissionAuthority {
  public:
   virtual ~IHostdStartupAdmissionAuthority() = default;
   [[nodiscard]] virtual HostStartupAuditReceipt admit(
-      IConfiguredHostStartupAuditorV2& auditor,
-      const HostLedgerTime& now) = 0;
+      IConfiguredHostStartupAuditorV2& auditor, AuthorityClock& clock) = 0;
 };
 
 class HostdCoordinatorStartupAdmission final
@@ -58,7 +72,7 @@ class HostdCoordinatorStartupAdmission final
   explicit HostdCoordinatorStartupAdmission(HostGrantCoordinator& coordinator);
   [[nodiscard]] HostStartupAuditReceipt admit(
       IConfiguredHostStartupAuditorV2& auditor,
-      const HostLedgerTime& now) override;
+      AuthorityClock& clock) override;
 
  private:
   HostGrantCoordinator& coordinator_;

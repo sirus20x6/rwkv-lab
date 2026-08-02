@@ -1,5 +1,7 @@
 #include "trainvm/service.hpp"
 
+#include "trainvm/lifecycle_admission.hpp"
+
 #include "trainvm/controller.hpp"
 #include "trainvm/document.hpp"
 #include "trainvm/reflection_json.hpp"
@@ -3757,14 +3759,14 @@ grpc::Status TrainVMService::CommandRun(grpc::ServerContext* context,
           plan->experiment.spec.components.at(node.invoke.component);
       const AdapterProfile& profile =
           adapter_registry_.resolve(component, node.invoke.operation);
-      if (!profile.lifecycle.graceful_stop) {
+      if (const auto refused = admit_lifecycle_control(
+              profile.lifecycle, LifecycleControlVerb::cancel, false)) {
         response->set_disposition(
             v1::RunCommandResponse::DISPOSITION_REJECTED);
         auto* diagnostic = response->add_diagnostics();
         diagnostic->set_severity(v1::Diagnostic::SEVERITY_ERROR);
-        diagnostic->set_code("cancel.unsupported_by_operation");
-        diagnostic->set_message(
-            "the active adapter operation does not declare graceful stop");
+        diagnostic->set_code(refused->code);
+        diagnostic->set_message(refused->message);
         fill_run_summary(*projection, journal_, *response);
         return grpc::Status::OK;
       }
@@ -3802,19 +3804,19 @@ grpc::Status TrainVMService::CommandRun(grpc::ServerContext* context,
         return {grpc::StatusCode::INVALID_ARGUMENT,
                 "resource-releasing pause requires checkpoint_first"};
       }
-      const bool supported =
-          release ? profile.lifecycle.pause_release_resources
-                  : profile.lifecycle.pause_keep_resources;
-      if (!supported ||
-          (pause && request->pause().checkpoint_first() &&
-           !profile.lifecycle.checkpoint_now)) {
+      const LifecycleControlVerb verb =
+          !pause ? LifecycleControlVerb::resume
+                 : (release ? LifecycleControlVerb::pause_release_resources
+                            : LifecycleControlVerb::pause_keep_resources);
+      if (const auto refused = admit_lifecycle_control(
+              profile.lifecycle, verb,
+              pause && request->pause().checkpoint_first())) {
         response->set_disposition(
             v1::RunCommandResponse::DISPOSITION_REJECTED);
         auto* diagnostic = response->add_diagnostics();
         diagnostic->set_severity(v1::Diagnostic::SEVERITY_ERROR);
-        diagnostic->set_code("lifecycle.unsupported_by_operation");
-        diagnostic->set_message(
-            "the active adapter operation does not declare the requested lifecycle protocol");
+        diagnostic->set_code(refused->code);
+        diagnostic->set_message(refused->message);
         fill_run_summary(*projection, journal_, *response);
         return grpc::Status::OK;
       }
@@ -3849,14 +3851,15 @@ grpc::Status TrainVMService::CommandRun(grpc::ServerContext* context,
           plan->experiment.spec.components.at(node.invoke.component);
       const AdapterProfile& profile =
           adapter_registry_.resolve(component, node.invoke.operation);
-      if (!profile.lifecycle.checkpoint_now) {
+      if (const auto refused = admit_lifecycle_control(
+              profile.lifecycle, LifecycleControlVerb::checkpoint_now,
+              false)) {
         response->set_disposition(
             v1::RunCommandResponse::DISPOSITION_REJECTED);
         auto* diagnostic = response->add_diagnostics();
         diagnostic->set_severity(v1::Diagnostic::SEVERITY_ERROR);
-        diagnostic->set_code("checkpoint.unsupported_by_operation");
-        diagnostic->set_message(
-            "the active adapter operation does not declare checkpoint-now");
+        diagnostic->set_code(refused->code);
+        diagnostic->set_message(refused->message);
         fill_run_summary(*projection, journal_, *response);
         return grpc::Status::OK;
       }

@@ -3701,11 +3701,20 @@ SQLiteHostLedger::finalize_startup_admission(
         "startup-admission audit receipt is not exactly persisted");
   }
 
+  // A daemon that crashes and restarts within one boot keeps its configured
+  // host, boot, and broker identity, so supersession must be allowed inside
+  // the same runtime epoch. It stays safe without a same-runtime refusal:
+  // HostLedgerFilesystemAuthority::acquire holds a host-global exclusive
+  // flock, so only one live authority exists at a time; the active-epoch CAS
+  // below is atomic; and request_bundle authorizes only against the currently
+  // active epoch, so the superseded one loses grant authority immediately.
+  // The audit itself must still be freshly bound to the current ledger head
+  // and occupancy, which is enforced by the CAS after this block.
   std::optional<std::string> prior_active_digest;
+  std::uint64_t prior_audit_record_sequence = 0U;
   Statement active(implementation_->database, R"sql(
     SELECT epoch.epoch_digest, epoch.audit_id, epoch.report_digest,
-           epoch.audit_receipt_digest, epoch.host_id, epoch.boot_id,
-           epoch.broker_epoch
+           epoch.audit_receipt_digest, epoch.audit_record_sequence
     FROM active_admission_epoch AS active
     JOIN admission_epochs AS epoch ON epoch.epoch_digest=active.epoch_digest
     WHERE active.singleton=1
@@ -3717,10 +3726,8 @@ SQLiteHostLedger::finalize_startup_admission(
         column_text(active.get(), 1) == report.audit_id &&
         column_text(active.get(), 2) == report.report_digest &&
         column_text(active.get(), 3) == receipt.receipt_digest;
-    const bool same_runtime_epoch =
-        column_text(active.get(), 4) == report.host_id &&
-        column_text(active.get(), 5) == report.boot_id &&
-        column_text(active.get(), 6) == report.broker_epoch;
+    prior_audit_record_sequence = static_cast<std::uint64_t>(
+        sqlite3_column_int64(active.get(), 4));
     if (sqlite3_step(active.get()) != SQLITE_DONE) {
       throw HostLedgerError("active admission epoch is not singular");
     }
@@ -3728,10 +3735,6 @@ SQLiteHostLedger::finalize_startup_admission(
       const std::string epoch_digest = *prior_active_digest;
       transaction.commit();
       return reread(epoch_digest, true);
-    }
-    if (same_runtime_epoch) {
-      throw HostLedgerConflict(
-          "this host boot and broker already have another admission epoch");
     }
   } else if (active_status != SQLITE_DONE) {
     throw HostLedgerError("active admission epoch query failed");
@@ -3741,6 +3744,13 @@ SQLiteHostLedger::finalize_startup_admission(
       implementation_->chain_head_unlocked();
   const ResourceOccupancySnapshot current_occupancy =
       implementation_->occupancy_unlocked();
+  if (prior_active_digest &&
+      current_head.ledger_sequence < prior_audit_record_sequence) {
+    // Supersession may only move forward. An older committed audit cannot be
+    // finalized again to roll the active epoch back.
+    throw HostLedgerConflict(
+        "startup-admission cannot supersede a newer active epoch");
+  }
   if (report.host_id != implementation_->inventory.host_id ||
       report.boot_id != implementation_->inventory.boot_id ||
       report.broker_epoch != implementation_->inventory.broker_epoch ||

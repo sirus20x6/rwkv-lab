@@ -5609,6 +5609,162 @@ void test_graceful_cancel_lifecycle() {
   std::filesystem::remove_all(directory);
 }
 
+// Adversarial control admission at a live safe point: a duplicate patch must
+// replay rather than apply twice, the same key with different content must be
+// refused outright, and every attempt must leave a state a reconnecting
+// controller reconstructs exactly from the journal.
+void test_adversarial_control_idempotency_and_replay() {
+  const auto compiled = trainvm::compile_document(load_fixture());
+  check(compiled.valid(), "adversarial control fixture compiles");
+  if (!compiled.valid()) return;
+  const auto directory = std::filesystem::temp_directory_path() /
+                         ("trainvm-adversarial-control-test-" +
+                          std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  const auto database_path = directory / "journal.db";
+  const std::string run_id = "adversarial-control-run";
+  {
+    trainvm::Journal journal(
+        database_path, std::nullopt,
+        trainvm::HostGrantEnforcement::legacy_process_free_test);
+    trainvm::Controller controller(*compiled.plan, journal, run_id);
+    controller.create_queued(fixture_adapter_locked_submission(*compiled.plan));
+    (void)controller.begin_acquisition(test_time(1'000));
+    const auto launch = controller.prepare_worker_launch(
+        {.code_fingerprint = "sha256:" + std::string(64U, '7'),
+         .required_capabilities = {"worker.controls"}},
+        test_time(1'100));
+    (void)bind_test_worker_launch(controller, launch, 1'150);
+    (void)controller.accept_worker_hello(
+        {.run_id = launch.run_id,
+         .node_id = launch.node_id,
+         .attempt_id = launch.attempt_id,
+         .launch_nonce = launch.launch_nonce,
+         .adapter = launch.adapter,
+         .adapter_version = launch.adapter_version,
+         .code_fingerprint = launch.code_fingerprint,
+         .capabilities = launch.required_capabilities,
+         .last_acked_controller_sequence = 0U,
+         .concurrency_key = launch.concurrency_key,
+         .lease_id = launch.lease_id,
+         .fencing_token = launch.fencing_token},
+        test_time(1'175));
+
+    const auto reconnects_exactly = [&](std::string_view what) {
+      trainvm::Controller reconnected(*compiled.plan, journal, run_id);
+      reconnected.recover();
+      check(reconnected.state() == controller.state(),
+            std::string("a reconnecting controller replays exactly after ") +
+                std::string(what));
+    };
+
+    const auto before = journal.projection(run_id);
+    check(before && before->observed_state == "running",
+          "adversarial control fixture starts from an active worker");
+    if (!before) return;
+    reconnects_exactly("worker readiness");
+
+    const nlohmann::json assignments{{"learning_rate", 0.00001},
+                                     {"eval_every", 250}};
+    const std::uint64_t control_revision =
+        journal.latest_control_revision(run_id);
+    const auto first = controller.request_controls(
+        "patch-once", before->run_revision, control_revision, assignments,
+        "operator", "adversarial duplicate patch");
+    check(first.valid() && first.command && !first.replayed,
+          "the first control patch is accepted once");
+    if (!first.command) return;
+    const auto duplicate = controller.request_controls(
+        "patch-once", before->run_revision, control_revision, assignments,
+        "operator", "adversarial duplicate patch");
+    check(duplicate.replayed && duplicate.command &&
+              duplicate.command->command_id == first.command->command_id &&
+              journal.pending_control_commands(run_id, 0U).size() == 1U,
+          "an exact duplicate patch replays one durable command");
+    reconnects_exactly("a duplicate control patch");
+
+    bool changed_content_refused = false;
+    try {
+      nlohmann::json different = assignments;
+      different["__adversarial"] = true;
+      (void)controller.request_controls(
+          "patch-once", before->run_revision, control_revision, different,
+          "operator", "adversarial duplicate patch");
+    } catch (const std::invalid_argument&) {
+      changed_content_refused = true;
+    }
+    bool changed_revision_refused = false;
+    try {
+      (void)controller.request_controls(
+          "patch-once", before->run_revision + 41U, control_revision,
+          assignments, "operator", "adversarial duplicate patch");
+    } catch (const std::invalid_argument&) {
+      changed_revision_refused = true;
+    }
+    bool changed_author_refused = false;
+    try {
+      (void)controller.request_controls(
+          "patch-once", before->run_revision, control_revision, assignments,
+          "someone-else", "adversarial duplicate patch");
+    } catch (const std::invalid_argument&) {
+      changed_author_refused = true;
+    }
+    check(changed_content_refused && changed_revision_refused &&
+              changed_author_refused &&
+              journal.pending_control_commands(run_id, 0U).size() == 1U,
+          "a reused idempotency key with any changed field is refused and "
+          "forks no durable command");
+    reconnects_exactly("refused control patch retries");
+
+    const auto checkpoint = controller.request_checkpoint(
+        "checkpoint-once", before->run_revision, "operator checkpoint",
+        "operator", "adversarial duplicate checkpoint");
+    const auto checkpoint_replay = controller.request_checkpoint(
+        "checkpoint-once", before->run_revision, "operator checkpoint",
+        "operator", "adversarial duplicate checkpoint");
+    check(checkpoint.inserted && !checkpoint_replay.inserted &&
+              checkpoint_replay.command.command_id ==
+                  checkpoint.command.command_id &&
+              journal.pending_checkpoint_commands(run_id, 0U).size() == 1U,
+          "a duplicate checkpoint-now request replays one durable command");
+    reconnects_exactly("a duplicate checkpoint request");
+
+    const auto cancel = controller.request_cancel(
+        "cancel-once", before->run_revision, "operator requested stop",
+        5'000'000'000LL, "operator", "adversarial duplicate cancel");
+    const auto cancel_replay = controller.request_cancel(
+        "cancel-once", before->run_revision, "operator requested stop",
+        5'000'000'000LL, "operator", "adversarial duplicate cancel");
+    check(cancel.inserted && !cancel_replay.inserted &&
+              cancel_replay.command.command_id == cancel.command.command_id &&
+              journal.pending_lifecycle_commands(run_id, 0U).size() == 1U,
+          "a duplicate cancel request replays one durable command");
+
+    bool changed_cancel_refused = false;
+    try {
+      (void)controller.request_cancel(
+          "cancel-once", before->run_revision, "a different stop reason",
+          5'000'000'000LL, "operator", "adversarial duplicate cancel");
+    } catch (const std::invalid_argument&) {
+      changed_cancel_refused = true;
+    }
+    bool changed_timeout_refused = false;
+    try {
+      (void)controller.request_cancel(
+          "cancel-once", before->run_revision, "operator requested stop",
+          9'000'000'000LL, "operator", "adversarial duplicate cancel");
+    } catch (const std::invalid_argument&) {
+      changed_timeout_refused = true;
+    }
+    check(changed_cancel_refused && changed_timeout_refused &&
+              journal.pending_lifecycle_commands(run_id, 0U).size() == 1U,
+          "a reused cancel key with a changed reason or timeout is refused");
+    reconnects_exactly("refused cancel retries");
+  }
+  std::filesystem::remove_all(directory);
+}
+
 void test_resource_releasing_pause_lifecycle() {
   const auto compiled = trainvm::compile_document(load_fixture());
   check(compiled.valid(), "resource-releasing pause fixture compiles");
@@ -12026,6 +12182,7 @@ int main() {
     test_worker_control_grpc_stream();
     test_graceful_cancel_lifecycle();
     test_resource_releasing_pause_lifecycle();
+    test_adversarial_control_idempotency_and_replay();
     test_typed_managed_resource_release();
     test_typed_cache_qualification_executor();
     test_concurrent_worker_launch_and_readiness_replay();

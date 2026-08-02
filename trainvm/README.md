@@ -297,15 +297,16 @@ network-namespace-local. Deployments must satisfy the declared trusted-directory
 model; these residuals are not covered by the process-launch implementation.
 
 The packaged Python worker now embeds a file-level closure for the exact interpreter identity,
-Python standard library, and shared pre-dispatch `grpcio`, `protobuf`, and `torch` distribution
-closure. A stdlib-only guard hashes and verifies that closure before third-party imports. Host-launch
-v4 binds its digest independently of the sealed zipapp, resolved-launch replay preserves it, and
-cache authority rejects a runtime probe that reports any other closure. This is not yet a claim over
-per-adapter lazy trainer dependencies, ELF/native-library dependencies, CUDA/driver state, or
-recursively referenced model/data objects. Runtime cache adoption and production qualification
-remain disabled until authority-owned worker evidence transport and the service graph cover those
-remaining layers. Immutable publishers and readers preserve trusted evidence but do not themselves
-measure the running worker.
+Python standard library, and the recursively closed root distributions declared for its selected
+adapter. A reflected native contract keeps MageFlow, Qwen, and RWKV requirements aligned with the
+adapter catalog; the Python materializer only consumes that contract. A stdlib-only guard hashes
+and verifies the closure before third-party imports. Host-launch v4 binds its digest independently
+of the sealed zipapp, resolved-launch replay preserves it, and cache authority rejects a runtime
+probe that reports any other closure. This is not yet a claim over ELF/native-library dependency
+resolution, CUDA/driver state, or recursively referenced model/data objects. Runtime cache adoption
+and production qualification remain disabled until authority-owned worker evidence transport and
+the service graph cover those remaining layers. Immutable publishers and readers preserve trusted
+evidence but do not themselves measure the running worker.
 
 ## Toolchain
 

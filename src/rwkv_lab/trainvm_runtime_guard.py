@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 RUNTIME_CLOSURE_MEMBER = "TRAINVM_RUNTIME_CLOSURE.json"
-RUNTIME_CLOSURE_SCHEMA = "trainvm.python-bootstrap-runtime-closure/v1"
+RUNTIME_CLOSURE_SCHEMA = "trainvm.python-bootstrap-runtime-closure/v2"
 MAXIMUM_MANIFEST_BYTES = 32 * 1024 * 1024
 MAXIMUM_FILES = 100_000
 MAXIMUM_TOTAL_BYTES = 32 * 1024 * 1024 * 1024
@@ -136,6 +136,7 @@ def verify_embedded_runtime_closure(archive_path: str | None = None) -> str:
             "distributions",
             "files",
             "python",
+            "root_distributions",
         }:
             raise RuntimeClosureError("runtime closure manifest fields are not exact")
         body = dict(document)
@@ -143,6 +144,7 @@ def verify_embedded_runtime_closure(archive_path: str | None = None) -> str:
         python = body.get("python")
         distributions = body.get("distributions")
         files = body.get("files")
+        roots = body.get("root_distributions")
         if (
             body.get("api_version") != RUNTIME_CLOSURE_SCHEMA
             or closure_digest != _digest(_canonical(body))
@@ -157,6 +159,8 @@ def verify_embedded_runtime_closure(archive_path: str | None = None) -> str:
             }
             or not isinstance(distributions, list)
             or not isinstance(files, list)
+            or not isinstance(roots, list)
+            or not roots
             or not files
             or len(files) > MAXIMUM_FILES
         ):
@@ -178,6 +182,14 @@ def verify_embedded_runtime_closure(archive_path: str | None = None) -> str:
         if identities != sorted(set(identities)):
             raise RuntimeClosureError(
                 "runtime closure distributions are not canonical"
+            )
+        if (
+            any(not isinstance(name, str) or not name for name in roots)
+            or roots != sorted(set(roots))
+            or not set(roots).issubset(identities)
+        ):
+            raise RuntimeClosureError(
+                "runtime closure root distributions are not canonical"
             )
         paths: list[str] = []
         total = 0

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Materialize one sealed rwkv_lab worker and its native TrainVM registries."""
+"""Materialize sealed per-adapter rwkv_lab runtimes and TrainVM registries."""
 
 from __future__ import annotations
 
@@ -15,7 +15,8 @@ from typing import Any
 
 from build_trainvm_worker_artifact import build
 
-SCHEMA = "trainvm.rwkv-lab-worker-deployment-materialization/v2"
+SCHEMA = "trainvm.rwkv-lab-worker-deployment-materialization/v3"
+REQUIREMENTS_SCHEMA = "trainvm.rwkv-lab-worker-runtime-requirements/v1"
 
 
 def _digest(path: Path) -> str:
@@ -28,6 +29,82 @@ def _digest(path: Path) -> str:
 
 def _document_bytes(value: Any) -> bytes:
     return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _runtime_argument(value: str) -> tuple[str, Path]:
+    adapter, separator, path = value.partition("=")
+    if not separator or not adapter or not path:
+        raise argparse.ArgumentTypeError(
+            "runtime must be REGISTERED_ADAPTER=/absolute/copied/python"
+        )
+    return adapter, Path(path)
+
+
+def _runtime_requirements(
+    trainvm: Path,
+) -> tuple[tuple[str, ...], tuple[str, ...], dict[str, tuple[str, ...]]]:
+    document = json.loads(
+        subprocess.check_output(
+            [str(trainvm), "inspect-rwkv-lab-runtime-requirements"], text=True
+        )
+    )
+    if set(document) != {
+        "api_version",
+        "profiles",
+        "shared_root_distributions",
+    } or document.get("api_version") != REQUIREMENTS_SCHEMA:
+        raise ValueError("TrainVM returned an unsupported runtime requirements contract")
+    shared = tuple(document["shared_root_distributions"])
+    if not shared or tuple(sorted(set(shared))) != shared:
+        raise ValueError("shared runtime distributions are not canonical")
+    profiles: dict[str, tuple[str, ...]] = {}
+    raw_profiles = document["profiles"]
+    if not isinstance(raw_profiles, list) or not raw_profiles:
+        raise ValueError("runtime requirements must contain adapter profiles")
+    for profile in raw_profiles:
+        if not isinstance(profile, dict) or set(profile) != {
+            "adapter",
+            "root_distributions",
+        }:
+            raise ValueError("runtime requirement profile has an invalid shape")
+        adapter = profile["adapter"]
+        distributions = tuple(profile["root_distributions"])
+        if (
+            not isinstance(adapter, str)
+            or not adapter
+            or adapter in profiles
+            or not distributions
+            or tuple(sorted(set(distributions))) != distributions
+            or not set(shared).issubset(distributions)
+        ):
+            raise ValueError("runtime requirement profile is not canonical")
+        profiles[adapter] = distributions
+    return tuple(profiles), shared, profiles
+
+
+def _regular_python(path: Path) -> Path:
+    path = path.absolute()
+    metadata = path.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise ValueError(
+            "runtime Python must be a regular interpreter binary, not a venv symlink"
+        )
+    return path.resolve(strict=True)
+
+
+def _runtime_groups(
+    adapters: tuple[str, ...],
+    adapter_pythons: dict[str, Path],
+    adapter_distributions: dict[str, tuple[str, ...]],
+) -> dict[tuple[str, tuple[str, ...]], list[str]]:
+    groups: dict[tuple[str, tuple[str, ...]], list[str]] = {}
+    for adapter in adapters:
+        key = (
+            str(adapter_pythons[adapter]),
+            tuple(sorted(adapter_distributions[adapter])),
+        )
+        groups.setdefault(key, []).append(adapter)
+    return groups
 
 
 def _publish(path: Path, data: bytes, *, replace: bool, mode: int = 0o600) -> None:
@@ -54,7 +131,15 @@ def _publish(path: Path, data: bytes, *, replace: bool, mode: int = 0o600) -> No
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--trainvm", required=True, type=Path)
-    parser.add_argument("--python", required=True, type=Path)
+    parser.add_argument("--python", type=Path)
+    parser.add_argument(
+        "--adapter-python",
+        action="append",
+        default=[],
+        type=_runtime_argument,
+        metavar="ADAPTER=PYTHON",
+        help="bind one registered adapter to its copied venv interpreter",
+    )
     parser.add_argument("--source-root", required=True, type=Path)
     parser.add_argument("--output-directory", required=True, type=Path)
     parser.add_argument("--working-directory", required=True, type=Path)
@@ -63,15 +148,34 @@ def main() -> int:
     arguments = parser.parse_args()
 
     trainvm = arguments.trainvm.resolve(strict=True)
-    python_input = arguments.python.absolute()
-    python_metadata = python_input.lstat()
-    if stat.S_ISLNK(python_metadata.st_mode) or not stat.S_ISREG(
-        python_metadata.st_mode
-    ):
+    adapters, shared_distributions, adapter_distributions = (
+        _runtime_requirements(trainvm)
+    )
+    if (arguments.python is None) == (not arguments.adapter_python):
         raise ValueError(
-            "--python must name a regular interpreter binary, not a venv symlink"
+            "select exactly one of --python or four --adapter-python mappings"
         )
-    python = python_input.resolve(strict=True)
+    if arguments.python is not None:
+        python = _regular_python(arguments.python)
+        adapter_pythons = {adapter: python for adapter in adapters}
+        adapter_distributions = {
+            adapter: shared_distributions for adapter in adapters
+        }
+    else:
+        adapter_pythons = {}
+        for adapter, path in arguments.adapter_python:
+            if adapter in adapter_pythons:
+                raise ValueError(f"duplicate --adapter-python mapping: {adapter}")
+            adapter_pythons[adapter] = _regular_python(path)
+        unknown = sorted(set(adapter_pythons).difference(adapters))
+        missing = sorted(set(adapters).difference(adapter_pythons))
+        if unknown or missing:
+            raise ValueError(
+                "--adapter-python must bind every registered adapter; missing: "
+                + ", ".join(missing)
+                + "; unknown: "
+                + ", ".join(unknown)
+            )
     source_root = arguments.source_root.resolve(strict=True)
     working_directory = arguments.working_directory.resolve(strict=True)
     trusted_roots = sorted(
@@ -80,65 +184,104 @@ def main() -> int:
     output_directory = arguments.output_directory.absolute()
     output_directory.mkdir(mode=0o750, parents=True, exist_ok=True)
     output_directory = output_directory.resolve(strict=True)
-    artifact = output_directory / "rwkv-lab-worker.pyz"
-    runtime_closure = output_directory / "bootstrap-runtime-closure.json"
-
+    group_members = _runtime_groups(
+        adapters, adapter_pythons, adapter_distributions
+    )
+    runtime_groups = []
+    runtime_specs = []
+    closure_builder = (
+        Path(__file__).resolve().parent / "build_trainvm_runtime_closure.py"
+    )
     with tempfile.TemporaryDirectory(
         prefix=".trainvm-worker-build-", dir=output_directory
     ) as raw:
-        closure_builder = (
-            Path(__file__).resolve().parent / "build_trainvm_runtime_closure.py"
-        )
-        temporary_closure = Path(raw) / runtime_closure.name
-        runtime_receipt = json.loads(
-            subprocess.check_output(
-                [
-                    str(python),
-                    "-I",
-                    str(closure_builder),
-                    "--output",
-                    str(temporary_closure),
-                ],
-                text=True,
-            )
-        )
-        temporary_artifact = Path(raw) / artifact.name
-        artifact_receipt = build(
-            source_root, temporary_artifact, temporary_closure
-        )
-        closure_bytes = temporary_closure.read_bytes()
-        artifact_bytes = temporary_artifact.read_bytes()
-        if (
-            runtime_closure.exists()
-            and runtime_closure.read_bytes() != closure_bytes
-            and not arguments.replace
+        temporary_directory = Path(raw)
+        for (python_path, distributions), adapters in sorted(
+            group_members.items(), key=lambda item: item[1]
         ):
-            raise FileExistsError(
-                f"refusing to replace changed runtime closure: {runtime_closure}"
+            python = Path(python_path)
+            group_identity = hashlib.sha256(
+                _document_bytes(
+                    {"adapters": adapters, "distributions": distributions}
+                )
+            ).hexdigest()[:16]
+            artifact = output_directory / f"rwkv-lab-worker-{group_identity}.pyz"
+            runtime_closure = (
+                output_directory
+                / f"bootstrap-runtime-closure-{group_identity}.json"
             )
-        if artifact.exists() and artifact.read_bytes() != artifact_bytes and not arguments.replace:
-            raise FileExistsError(
-                f"refusing to replace changed deployment artifact: {artifact}"
+            temporary_closure = temporary_directory / runtime_closure.name
+            closure_command = [
+                str(python),
+                "-I",
+                str(closure_builder),
+                "--output",
+                str(temporary_closure),
+            ]
+            for distribution in distributions:
+                closure_command.extend(("--distribution", distribution))
+            runtime_receipt = json.loads(
+                subprocess.check_output(closure_command, text=True)
             )
-        _publish(runtime_closure, closure_bytes, replace=True)
-        _publish(artifact, artifact_bytes, replace=True, mode=0o640)
-
-    artifact_receipt["output"] = str(artifact)
-    runtime_receipt["output"] = str(runtime_closure)
-    python_digest = _digest(python)
+            temporary_artifact = temporary_directory / artifact.name
+            artifact_receipt = build(
+                source_root, temporary_artifact, temporary_closure
+            )
+            closure_bytes = temporary_closure.read_bytes()
+            artifact_bytes = temporary_artifact.read_bytes()
+            if (
+                runtime_closure.exists()
+                and runtime_closure.read_bytes() != closure_bytes
+                and not arguments.replace
+            ):
+                raise FileExistsError(
+                    f"refusing to replace changed runtime closure: {runtime_closure}"
+                )
+            if (
+                artifact.exists()
+                and artifact.read_bytes() != artifact_bytes
+                and not arguments.replace
+            ):
+                raise FileExistsError(
+                    f"refusing to replace changed deployment artifact: {artifact}"
+                )
+            _publish(runtime_closure, closure_bytes, replace=True)
+            _publish(artifact, artifact_bytes, replace=True, mode=0o640)
+            artifact_receipt["output"] = str(artifact)
+            runtime_receipt["output"] = str(runtime_closure)
+            python_digest = _digest(python)
+            runtime_groups.append(
+                {
+                    "adapters": adapters,
+                    "worker_artifact": artifact_receipt,
+                    "runtime_closure": runtime_receipt,
+                    "python": {"path": str(python), "sha256": python_digest},
+                }
+            )
+            for adapter in adapters:
+                runtime_specs.append(
+                    {
+                        "adapter": adapter,
+                        "code_path": str(artifact),
+                        "code_fingerprint": artifact_receipt["archive_sha256"],
+                        "bootstrap_runtime_closure_fingerprint": runtime_receipt[
+                            "closure_digest"
+                        ],
+                        "executable_path": str(python),
+                        "executable_fingerprint": python_digest,
+                        "working_directory": str(working_directory),
+                    }
+                )
+    runtime_specs.sort(key=lambda runtime: runtime["adapter"])
+    deployment_input = {
+        "api_version": "trainvm.rwkv-lab-worker-runtimes/v1",
+        "runtimes": runtime_specs,
+        "trusted_roots": trusted_roots,
+    }
     deployment = json.loads(
         subprocess.check_output(
-            [
-                str(trainvm),
-                "inspect-rwkv-lab-deployment",
-                str(artifact),
-                artifact_receipt["archive_sha256"],
-                runtime_receipt["closure_digest"],
-                str(python),
-                python_digest,
-                str(working_directory),
-                *trusted_roots,
-            ],
+            [str(trainvm), "inspect-rwkv-lab-deployment"],
+            input=json.dumps(deployment_input, separators=(",", ":")),
             text=True,
         )
     )
@@ -156,9 +299,7 @@ def main() -> int:
     )
     receipt = {
         "schema": SCHEMA,
-        "worker_artifact": artifact_receipt,
-        "runtime_closure": runtime_receipt,
-        "python": {"path": str(python), "sha256": python_digest},
+        "runtime_groups": runtime_groups,
         "working_directory": str(working_directory),
         "trusted_roots": trusted_roots,
         "adapter_registry": {

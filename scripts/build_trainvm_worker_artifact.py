@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA = "trainvm.python-worker-artifact/v2"
-RUNTIME_CLOSURE_SCHEMA = "trainvm.python-bootstrap-runtime-closure/v1"
+RUNTIME_CLOSURE_SCHEMA = "trainvm.python-bootstrap-runtime-closure/v2"
 ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 ENTRYPOINT = (
     b"import sys\n"
@@ -73,6 +73,7 @@ def _runtime_closure(path: Path) -> tuple[bytes, str]:
         "distributions",
         "files",
         "python",
+        "root_distributions",
     }:
         raise ValueError("runtime closure manifest fields are not exact")
     body = dict(document)

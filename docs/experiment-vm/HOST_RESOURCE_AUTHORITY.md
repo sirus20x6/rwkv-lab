@@ -104,6 +104,10 @@ only after admission. The process supervisor now admits stopped-child launch onl
 restart-adoptable cgroup-device BPF program, non-root credentials, and CPU/I/O process-policy
 receipt. Privileged real-host crash qualification remains a deployment gate.
 
+`trainvm-hostd-crash-qualification --workspace DIR` executes that gate's destructive matrix and
+emits the machine-readable receipt described in
+[Real-host crash qualification](#real-host-crash-qualification).
+
 Hostd uses a filesystem `AF_UNIX` `SOCK_SEQPACKET` endpoint with peer credentials and preferably
 systemd socket activation. It does not use the abstract Unix namespace. Services in another mount
 namespace must receive the same socket through an explicit bind mount or an inherited descriptor.
@@ -805,6 +809,81 @@ empty, consumes the startup audit exactly once, and latches configured-bound,
 recovery, or admission failure.
 Privileged end-to-end qualification remains in this gate. A daemon crash is not claimed as ordinary in-memory supervisor
 replay; startup policy must consume the durable recovery records.
+
+### Real-host crash qualification
+
+`trainvm-hostd-crash-qualification` is the destructive executor for this gate. It is not a unit
+test: every case forks a real process and destroys it with `SIGKILL`, and the ledger prepare/commit
+windows are opened by a fault injector that raises `SIGKILL` from inside the live SQLite
+transaction, so nothing unwinds. It writes only beneath `--workspace` and a disposable cgroup
+subtree created under the caller's delegated scope, and it allocates a synthetic `host-mutex`
+resource rather than an accelerator, so it is safe to run beside live training. Exit status is `0`
+when the gate is open, `3` when any declared point is unqualified, and `1` on harness failure.
+
+The contract is the enumeration in `trainvm/include/trainvm/hostd_crash_qualification.hpp`. A
+receipt that omits, reorders, or duplicates a declared point is rejected by
+`validate_hostd_crash_qualification_receipt`, as is a case that claims an invariant it did not
+observe, a gate that disagrees with its own blocking points, or a digest that does not bind the
+document. An unexecutable window is reported as `unqualified` with its reason; it is never dropped.
+
+Executors:
+
+- `durable_ledger` — a real on-disk host ledger driven through admission, grant, launch intent,
+  stopped-spawn receipt, terminal exit, and bundle release. The child dies at
+  `after_process_intent_record`, `after_process_intent_commit`, `after_process_spawn_record`,
+  `after_process_spawn_commit`, `after_process_exit_record`, and `after_release_record`, plus one
+  lost-reply window after a committed release. A fresh process then runs the landed
+  `HostdTerminalReleaseRecovery`, `HostdRestartProcessRecovery`, `HostdConfiguredStartupAuditor`,
+  and `HostGrantCoordinator` admission through the wake-driven `HostdStartupController`.
+- `real_process` — restart observation of a worker that outlived its daemon, through the production
+  `LinuxProcessRecoveryProbe`: exact adoption transferred at most once, `SIGKILL` delivered only
+  through the pinned pidfd, and refusal on a changed start time, a changed executable digest, or a
+  reaped PID.
+- `real_cgroup` — `terminate_intent_or_confirm_absent` and `cleanup_terminal_or_confirm_absent`
+  against a real delegated cgroup v2 subtree, including their already-absent replay.
+- `privileged_launch` — the stopped-child, device-policy, and daemon-socket restart windows. These
+  require a root host authority with a distinct non-root worker identity and are reported
+  `unqualified: privilege_unavailable` on an unprivileged host.
+
+Invariants are named per case and are only claimed when observed: `no_double_launch` re-commits the
+exact surviving launch and spawn requests and requires an exact replay with no new durable record;
+`no_double_release` requires the resource generation to remain at exactly one across the crash and
+recovery; `no_leaked_physical_grant` requires a converged recovery to release the bundle and a
+non-terminal one to keep holding it; `no_unauthorized_adoption` requires every one-field identity
+mismatch to yield no process authority.
+
+Current unprivileged result on a delegated user scope: 13 of 16 declared points qualified, the three
+privileged launch windows unqualified, and the gate closed.
+
+The matrix has found two restart defects in the startup stack. Recovery convergence itself is
+unaffected by both, and the qualification asserts convergence directly rather than through
+admission, so each surfaces as a receipt finding that keeps the gate closed.
+
+- `startup-admission-blocked-after-convergence` (fixed). `HostdStartupController::advance` sampled
+  its startup-audit commit time *before* `admission_.admit` ran the audit, while
+  `HostdConfiguredStartupAuditor` stamps its end of observation from a later sample, so
+  `commit_startup_audit` always saw `now.boottime_ns < report.observed_end_boottime_ns` and
+  rejected. The admission authority now receives the `AuthorityClock` and the coordinator samples
+  the commit time through `IHostStartupAuditCommitTimeSource` once the observation has completed.
+  The fixed-time `run_startup_audit` overload is retained for callers that already hold a later
+  time. `hostd_startup_auditor_tests` now drives the real auditor through the real controller and
+  coordinator to admission; the previous controller tests missed the ordering because they used a
+  fixed-time fake auditor.
+- `startup-admission-epoch-not-renewable-after-restart` (fixed). `broker_epoch` is a static field of
+  the daemon configuration document, and `finalize_startup_admission` refused a second admission
+  epoch for the same `host_id`/`boot_id`/`broker_epoch` unless the audit was an exact replay — which
+  a restart never is, because `audit_id` is freshly random. A hostd that crashed and restarted
+  within one boot therefore reconciled its durable records and then could never admit again.
+  Supersession inside one runtime identity is now allowed. It is safe without that refusal:
+  `HostLedgerFilesystemAuthority::acquire` holds a host-global exclusive `flock`, so a second live
+  daemon cannot open the ledger at all; the active-epoch update is an atomic CAS; and
+  `request_bundle` authorizes only against the currently active epoch, so a superseded epoch loses
+  grant authority immediately. The superseding audit must still be bound to the current ledger head
+  and occupancy, and supersession may only move forward — an older committed audit cannot be
+  finalized again to roll the active epoch back.
+
+An unprivileged run now raises no findings; the gate is closed only by the three privileged launch
+windows.
 
 Gate:
 
