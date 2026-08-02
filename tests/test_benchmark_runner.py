@@ -495,3 +495,24 @@ def test_compiled_accelerator_candidate_is_judged_by_authority(tmp_path):
     authority_receipt = json.loads(verdict.stdout)
     assert authority_receipt["evidence"] == json.loads(evidence.read_text())
     assert authority_receipt["qualified"] is (verdict.returncode == 0)
+
+
+def test_every_workload_declares_its_input_pipeline_source():
+    """An input-wait number is meaningless until it says what it measured.
+
+    Both workloads synthesize tensors in process: there is no decode,
+    tokenization, bucketing, prefetch, worker pool, or host-to-device copy. The
+    interval they report as input wait is the cost of building a tensor. Naming
+    the source is what stops a later input-pipeline optimization from claiming a
+    gain against a number that describes nothing, so the declaration is pinned
+    rather than left to a comment.
+    """
+    workloads = sorted(
+        (REPOSITORY / "scripts" / "benchmark_workloads").glob("*_lm_step.py"))
+    assert workloads, "no benchmark workloads found"
+    for workload in workloads:
+        source = workload.read_text(encoding="utf-8")
+        assert '"input_pipeline"' in source, (
+            f"{workload.name} reports input wait without declaring its source")
+        assert '"synthetic_in_process"' in source, (
+            f"{workload.name} must declare the synthetic source it actually has")

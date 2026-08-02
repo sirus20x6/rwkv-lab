@@ -326,6 +326,11 @@ def run_cell(
         "peak_memory_bytes": timed["peak_memory_bytes"],
         "peak_memory_kind": timed["peak_memory_kind"],
         "input_wait_seconds": timed["input_wait_seconds"],
+        # Carried so a receipt states what its input-wait number describes.
+        # Every current fixture synthesizes its tensors, so no fixture measures
+        # a real input pipeline yet, and an input-stall gain claimed against
+        # these cells would be measuring tensor construction.
+        "input_pipeline": timed.get("input_pipeline", "unknown"),
         "quality_metric": timed["quality_metric"],
         "final_loss": timed["final_loss"],
         "result_fingerprint": timed["result_fingerprint"],
