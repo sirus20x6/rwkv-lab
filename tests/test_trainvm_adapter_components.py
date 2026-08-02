@@ -28,6 +28,10 @@ def composition():
         )
     )
     requested = {
+        "activation": (
+            "squared_relu",
+            {},
+        ),
         "optimizer": (
             "torch_adamw_no_decay",
             {
@@ -105,6 +109,7 @@ def test_worker_component_bridge_builds_optimizer_and_schedule() -> None:
     accumulation = runtime.gradient_accumulation()
     objective = runtime.objective()
     precision = runtime.precision()
+    activation = runtime.activation()
 
     assert isinstance(optimizer, torch.optim.AdamW)
     assert optimizer.param_groups[0]["weight_decay"] == pytest.approx(0.01)
@@ -126,6 +131,9 @@ def test_worker_component_bridge_builds_optimizer_and_schedule() -> None:
     )
     assert precision.parameter_dtype is torch.bfloat16
     assert precision.reduce(torch.ones(1, dtype=torch.bfloat16)).dtype is torch.float32
+    torch.testing.assert_close(
+        activation(torch.tensor([-2.0, 3.0])), torch.tensor([0.0, 9.0])
+    )
     assert runtime.evidence()["optimizer"]["category"] == "optimizer"
 
 

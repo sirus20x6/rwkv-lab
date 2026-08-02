@@ -62,6 +62,7 @@ class RWKV8ChannelMixDeltaNet(nn.Module):
         layer_idx: Optional[int] = None,
         initializer_range: float = 0.02,
         init_output_scale: float = 1e-3,
+        activation: str = "squared_relu",
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -75,6 +76,8 @@ class RWKV8ChannelMixDeltaNet(nn.Module):
         self._fused_training = False
         self._cached_fp8_up = False
         self._triton_fused_training = False
+        self._activation = "squared_relu"
+        self.set_activation(activation)
 
         nn.init.normal_(self.key.weight, mean=0.0, std=initializer_range)
         nn.init.normal_(
@@ -83,10 +86,23 @@ class RWKV8ChannelMixDeltaNet(nn.Module):
             std=initializer_range * init_output_scale,
         )
 
+    @property
+    def activation_name(self) -> str:
+        return self._activation
+
+    def set_activation(self, activation: str) -> None:
+        if activation not in {"squared_relu", "silu"}:
+            raise ValueError("ChannelMix activation must be squared_relu or silu")
+        if activation != "squared_relu" and self._fused_training:
+            raise ValueError("fused ChannelMix supports only squared_relu")
+        self._activation = activation
+
     def enable_fused_training(
         self, *, cached_fp8_up: bool = False, triton_fused: bool = False
     ) -> None:
         """Enable the custom-autograd ReLU² block and optional cached FP8 W1."""
+        if self._activation != "squared_relu":
+            raise ValueError("fused ChannelMix supports only squared_relu")
         self._fused_training = True
         self._cached_fp8_up = bool(cached_fp8_up)
         self._triton_fused_training = bool(triton_fused)
@@ -166,6 +182,7 @@ class RWKV8ChannelMixDeltaNet(nn.Module):
             mixed = hidden_states + (prev - hidden_states) * xk
         use_ffn_candidate = (
             getattr(self, "_megakernel_ffn_candidate", False)
+            and self._activation == "squared_relu"
             and hidden_gate is None and mixed.shape[1] == 1
             and not torch.is_grad_enabled()
         )
@@ -187,7 +204,12 @@ class RWKV8ChannelMixDeltaNet(nn.Module):
                 use_triton=self._triton_fused_training,
             )
         else:
-            k = torch.square(F.relu(self.key(mixed)))
+            preactivation = self.key(mixed)
+            k = (
+                torch.square(F.relu(preactivation))
+                if self._activation == "squared_relu"
+                else F.silu(preactivation)
+            )
             if hidden_gate is not None:          # DeepEmbed: per-token multiplicative gate on the
                 k = k * hidden_gate              # FFN hidden; None = unchanged
             out = self.value(k)

@@ -366,7 +366,7 @@ void checked_in_component_catalog_matches_native_authority_contract() {
   const trainvm::TrainingComponentRegistry registry =
       trainvm::TrainingComponentRegistry::load_file(
           std::filesystem::absolute(path));
-  check(registry.document_json().at("components").size() == 13U &&
+  check(registry.document_json().at("components").size() == 15U &&
             registry.registry_digest().starts_with("sha256:") &&
             registry.registry_digest().size() == 71U,
         "checked-in cross-family component catalog is a canonical native authority document");
@@ -473,6 +473,19 @@ void checked_in_component_catalog_matches_native_authority_contract() {
             precision.configuration.at("reduction_dtype") == "float32" &&
             precision.configuration.at("gradient_scaling") == false,
         "BF16 parameter/compute and FP32 reduction policy resolves independently of optimizer state");
+  const auto activation = registry.resolve({
+      .key = {.category = trainvm::TrainingComponentCategory::activation,
+              .name = "silu",
+              .version = "1.0.0"},
+      .model_family = "rwkv",
+      .configuration = nlohmann::json::object(),
+  });
+  check(activation.descriptor.implementation ==
+            "rwkv_lab.activation.silu.v1" &&
+            activation.descriptor.state_grade ==
+                trainvm::TrainingStateGrade::stateless &&
+            activation.configuration.empty(),
+        "activation identity resolves independently of family topology installation");
   const auto no_decay_optimizer = registry.resolve({
       .key = {.category = trainvm::TrainingComponentCategory::optimizer,
               .name = "torch_adamw_no_decay",

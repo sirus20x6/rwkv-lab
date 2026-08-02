@@ -5,6 +5,12 @@ one owned module beneath :mod:`rwkv_lab.training_runtime`; this facade preserves
 the existing trainer API without re-coupling the implementations.
 """
 
+from rwkv_lab.training_runtime.activations import (
+    ActivationImplementation,
+    RegisteredActivation,
+    activation_from_resolved_component,
+    build_registered_activation,
+)
 from rwkv_lab.training_runtime.catalog import (
     supported_implementation_ids,
     supported_worker_capabilities,
@@ -69,6 +75,7 @@ from rwkv_lab.training_runtime.weight_decay_schedules import (
 )
 
 __all__ = [
+    "ActivationImplementation",
     "AdamWConfiguration",
     "AdamWNoDecayConfiguration",
     "AppearanceExpertRoutingConfiguration",
@@ -89,9 +96,12 @@ __all__ = [
     "ParameterRouterImplementation",
     "PowerCoolConfiguration",
     "PrecisionImplementation",
+    "RegisteredActivation",
     "ScheduleImplementation",
     "TerminalExpertRoutingConfiguration",
     "WeightDecayScheduleImplementation",
+    "activation_from_resolved_component",
+    "build_registered_activation",
     "build_registered_gradient_accumulation",
     "build_registered_gradient_clipping",
     "build_registered_objective",

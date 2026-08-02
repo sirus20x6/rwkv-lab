@@ -13,7 +13,9 @@ from rwkv_lab.training_components import (
     LinearHeadCrossEntropyObjective,
     LinearWarmupCosineConfiguration,
     PowerCoolConfiguration,
+    RegisteredActivation,
     ScheduleImplementation,
+    activation_from_resolved_component,
     gradient_accumulation_from_resolved_component,
     gradient_clipping_from_resolved_component,
     objective_from_resolved_component,
@@ -60,6 +62,14 @@ class WorkerTrainingComponents:
         return optimizer_from_resolved_component(
             component.runtime_envelope(), parameters
         )
+
+    def activation(
+        self,
+        *,
+        slot: str = "activation",
+    ) -> RegisteredActivation:
+        component = self.composition.require(slot, category="activation")
+        return activation_from_resolved_component(component.runtime_envelope())
 
     def objective(
         self,

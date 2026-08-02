@@ -774,6 +774,16 @@ def resolved_worker_component_contract(
         raise ValueError(
             "authority precision composition disagrees with RWKV configuration"
         )
+    activation = worker_components.composition.require(
+        "activation", category="activation"
+    )
+    if activation.configuration or activation.implementation not in {
+        "rwkv_lab.activation.squared_relu.v1",
+        "rwkv_lab.activation.silu.v1",
+    }:
+        raise ValueError(
+            "authority activation composition disagrees with RWKV configuration"
+        )
     implementation, resolved_schedule = (
         worker_components.learning_rate_configuration()
     )
@@ -1025,6 +1035,22 @@ def main(
         if precision_policy is not None
         else torch.bfloat16
     )
+    activation_policy = (
+        worker_components.activation()
+        if worker_components is not None
+        else None
+    )
+
+    def prepare_model(module: nn.Module) -> nn.Module:
+        if activation_policy is not None:
+            for child in module.modules():
+                if isinstance(child, RWKV8ChannelMixDeltaNet):
+                    activation_policy.install(child)
+        return (
+            precision_policy.convert_module(module, dist.device)
+            if precision_policy is not None
+            else module.to(dist.device, parameter_dtype)
+        )
     if not args.data and not args.ctx_buckets:
         ap.error("one of --data or --ctx-buckets is required")
     if args.ctx_buckets:                       # mixed-context mode: fixed-width features rejected
@@ -1116,11 +1142,7 @@ def main(
         model, ginfo = load_g1g_native(args.init_g1g, device=dev)
         if lk:
             add_loops(model, lk)                             # levers attach identity-at-init
-        model = (
-            precision_policy.convert_module(model, dev)
-            if precision_policy is not None
-            else model.to(dev, parameter_dtype)
-        )
+        model = prepare_model(model)
         print(f"init from g1g {args.init_g1g}: loaded {ginfo['loaded']}/{ginfo['n_ckpt']} tensors "
               f"(dims forced to g1g 24L/d2048/h64)", flush=True)
         if args.seed_chain:
@@ -1170,11 +1192,7 @@ def main(
             initialize_u_mup(model, u_mup_cfg)
             print(f"u-muP: base d{args.u_mup_base_width}/L{args.u_mup_base_depth} -> "
                   f"d{args.d_model}/L{args.n_layers}", flush=True)
-        model = (
-            precision_policy.convert_module(model, dev)
-            if precision_policy is not None
-            else model.to(dev, parameter_dtype)
-        )
+        model = prepare_model(model)
         if args.seed_chain:
             print("Future-Seed: cross-layer state chaining ON (s_0^L = s_T^{L-1})", flush=True)
         if args.deepembed:

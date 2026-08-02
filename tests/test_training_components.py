@@ -7,6 +7,7 @@ import torch
 
 from rwkv_lab.mage_flow_optimizations import FP32MasterAdamW
 from rwkv_lab.training_components import (
+    ActivationImplementation,
     AdamWConfiguration,
     AdamWNoDecayConfiguration,
     AppearanceExpertRoutingConfiguration,
@@ -26,9 +27,11 @@ from rwkv_lab.training_components import (
     ParameterRouterImplementation,
     PowerCoolConfiguration,
     PrecisionImplementation,
+    RegisteredActivation,
     ScheduleImplementation,
     TerminalExpertRoutingConfiguration,
     WeightDecayScheduleImplementation,
+    build_registered_activation,
     build_registered_gradient_accumulation,
     build_registered_gradient_clipping,
     build_registered_objective,
@@ -52,6 +55,7 @@ def test_runtime_categories_have_one_way_dependency_boundaries():
     root = Path(__file__).resolve().parents[1]
     runtime = root / "src/rwkv_lab/training_runtime"
     category_names = {
+        "activations",
         "gradient_accumulation",
         "gradient_clipping",
         "optimizers",
@@ -188,6 +192,7 @@ def test_component_catalog_and_runtime_dispatch_are_exactly_aligned():
     assert grades["optimizer"] == "exact"
     assert grades["learning_rate_schedule"] == "exact"
     assert grades["objective"] == "stateless"
+    assert grades["activation"] == "stateless"
     assert grades["precision"] == "stateless"
     assert grades["parameter_router"] == "stateless"
     assert grades["gradient_accumulation"] == "stateless"
@@ -258,6 +263,29 @@ def test_bfloat16_precision_policy_owns_module_and_reduction_dtypes():
     reduced = policy.reduce(torch.ones(2, dtype=torch.bfloat16))
     assert reduced.dtype is torch.float32
     assert policy.state_dict() == {}
+
+
+def test_registered_activations_are_independent_forward_and_installation_policies():
+    squared_relu = build_registered_activation(
+        ActivationImplementation.SQUARED_RELU_V1
+    )
+    silu = build_registered_activation(ActivationImplementation.SILU_V1)
+    assert isinstance(squared_relu, RegisteredActivation)
+    value = torch.tensor([-1.0, 2.0])
+    torch.testing.assert_close(squared_relu(value), torch.tensor([0.0, 4.0]))
+    torch.testing.assert_close(silu(value), torch.nn.functional.silu(value))
+
+    class InstallationPoint(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.activation = ""
+
+        def set_activation(self, value):
+            self.activation = value
+
+    module = InstallationPoint()
+    silu.install(module)
+    assert module.activation == "silu"
 
 
 def test_no_decay_optimizer_and_decay_schedule_have_independent_contracts():

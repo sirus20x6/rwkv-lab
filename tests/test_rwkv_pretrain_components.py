@@ -36,7 +36,13 @@ def test_rwkv_worker_components_drive_powercool_and_optimizer() -> None:
     )
 
     class Components:
-        composition = SimpleNamespace(composition_digest="sha256:" + "e" * 64)
+        composition = SimpleNamespace(
+            composition_digest="sha256:" + "e" * 64,
+            require=lambda slot, *, category: SimpleNamespace(
+                configuration={},
+                implementation="rwkv_lab.activation.squared_relu.v1",
+            ),
+        )
 
         def configuration(self, slot, *, category):
             if (slot, category) == (
@@ -105,6 +111,11 @@ def test_rwkv_worker_components_drive_powercool_and_optimizer() -> None:
                 convert_module=lambda module, device: module.to(
                     device=device, dtype=torch.bfloat16
                 ),
+            )
+
+        def activation(self):
+            return SimpleNamespace(
+                install=lambda module: module.set_activation("squared_relu")
             )
 
         def evidence(self):

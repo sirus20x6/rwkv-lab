@@ -3,6 +3,36 @@
   "components": [
     {
       "key": {
+        "category": "activation",
+        "name": "squared_relu",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.activation.squared_relu.v1",
+      "model_families": ["rwkv"],
+      "required_capabilities": ["activation.squared_relu.v1"],
+      "configuration": [],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "activation",
+        "name": "silu",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.activation.silu.v1",
+      "model_families": ["rwkv"],
+      "required_capabilities": ["activation.silu.v1"],
+      "configuration": [],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
         "category": "gradient_accumulation",
         "name": "fixed",
         "version": "1.0.0"

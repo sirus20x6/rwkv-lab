@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .activations import ActivationImplementation
 from .gradient_accumulation import GradientAccumulationImplementation
 from .gradient_clipping import GradientClippingImplementation
 from .objectives import ObjectiveImplementation
@@ -14,6 +15,7 @@ def supported_implementation_ids() -> frozenset[str]:
     return frozenset(
         implementation.value
         for implementation in (
+            *ActivationImplementation,
             *OptimizerImplementation,
             *ObjectiveImplementation,
             *PrecisionImplementation,
@@ -29,6 +31,8 @@ def supported_implementation_ids() -> frozenset[str]:
 def supported_worker_capabilities() -> frozenset[str]:
     return frozenset(
         {
+            "activation.silu.v1",
+            "activation.squared_relu.v1",
             "optimizer.torch_adamw.v1",
             "optimizer.fp32_master_adamw.v1",
             "schedule.linear_warmup_cosine.v1",
