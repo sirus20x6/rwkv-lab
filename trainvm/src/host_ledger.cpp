@@ -2607,11 +2607,16 @@ SQLiteHostLedger::SQLiteHostLedger(
     const auto before_attestation =
         implementation_->authority->attest_before_open();
     (void)implementation_->authority->validate_auxiliary_files();
-    const auto& path = implementation_->authority->ledger_path();
-    if (sqlite3_open_v2(path.c_str(), &implementation_->database,
+    // Opened through the authority VFS, not through the public ledger
+    // pathname: SQLite derives `-wal`, `-shm`, and `-journal` from whatever
+    // name it is given and opens them without an ownership or link-count
+    // check, so the name it is given must be one rooted at the pinned
+    // authority directory descriptor.
+    const auto& vfs = implementation_->authority->sqlite_vfs();
+    if (sqlite3_open_v2(vfs.database_path().c_str(), &implementation_->database,
                         SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE |
-                            SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW,
-                        nullptr) != SQLITE_OK) {
+                            SQLITE_OPEN_FULLMUTEX,
+                        vfs.vfs_name().c_str()) != SQLITE_OK) {
       throw HostLedgerError("could not open host ledger");
     }
     implementation_->sqlite_database_fd =

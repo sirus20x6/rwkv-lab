@@ -10,6 +10,8 @@
 
 #include <sys/types.h>
 
+#include "trainvm/sqlite_authority_vfs.hpp"
+
 namespace trainvm {
 
 inline constexpr std::string_view kHostLedgerAuthorityApiVersion =
@@ -99,6 +101,13 @@ public:
   validate_auxiliary_files() const;
 
   [[nodiscard]] const std::filesystem::path &ledger_path() const;
+
+  // The controlled VFS that confines SQLite's own opens - including the `-wal`,
+  // `-shm`, and `-journal` auxiliaries it derives by pathname - to the pinned
+  // authority directory. Callers must open the ledger through
+  // `sqlite_vfs().database_path()` and `sqlite_vfs().vfs_name()` rather than
+  // through `ledger_path()`, which remains the public, raceable name.
+  [[nodiscard]] const SqliteAuthorityVfs &sqlite_vfs() const;
   // This reports only the filesystem boundary. Host-level strict enforcement
   // additionally requires externally attested hostd identity, peer policy,
   // cgroups, and device enforcement; callers cannot claim that broader grade

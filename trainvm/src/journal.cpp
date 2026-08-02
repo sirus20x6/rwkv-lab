@@ -2296,10 +2296,35 @@ Journal::Journal(const std::filesystem::path& path,
   if (!expected_file_ && !parent.empty()) {
     std::filesystem::create_directories(parent);
   }
+
+  // An authority-bound journal is opened through the controlled VFS. Stock
+  // SQLite derives `-wal`, `-shm`, and `-journal` by string concatenation and
+  // opens them with a plain `open(2)` that checks neither ownership nor link
+  // count, so a same-UID process can hardlink an alias over an auxiliary and
+  // read or corrupt authority state through it. The VFS resolves every one of
+  // those names relative to a pinned directory descriptor and validates the
+  // inode on both sides of SQLite's own open.
+  std::string open_path = path.string();
+  const char* open_vfs = nullptr;
+  if (expected_file_) {
+    const int directory =
+        open_existing_directory_by_components(expected_file_->directory_path);
+    try {
+      authority_vfs_ = SqliteAuthorityVfs::create(
+          directory, expected_file_->journal_name,
+          static_cast<uid_t>(expected_file_->owner_uid));
+    } catch (...) {
+      (void)::close(directory);
+      throw;
+    }
+    (void)::close(directory);
+    open_path = authority_vfs_->database_path();
+    open_vfs = authority_vfs_->vfs_name().c_str();
+  }
+
   const int open_flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE |
                          (expected_file_ ? 0 : SQLITE_OPEN_NOFOLLOW);
-  if (sqlite3_open_v2(path.c_str(), &database_, open_flags,
-                      nullptr) !=
+  if (sqlite3_open_v2(open_path.c_str(), &database_, open_flags, open_vfs) !=
       SQLITE_OK) {
     const std::string message = database_ ? sqlite3_errmsg(database_) : "unknown error";
     if (database_) {

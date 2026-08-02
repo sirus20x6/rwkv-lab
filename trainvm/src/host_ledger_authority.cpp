@@ -353,6 +353,7 @@ struct HostLedgerFilesystemAuthority::Implementation final {
   HostLedgerFileIdentity lock_identity;
   std::string filesystem;
   bool protected_filesystem_boundary{};
+  std::shared_ptr<SqliteAuthorityVfs> sqlite_vfs;
   mutable std::mutex mutex;
 
   HostLedgerAuthorityAttestation attest() const {
@@ -459,6 +460,13 @@ HostLedgerFilesystemAuthority::acquire(HostLedgerAuthorityConfig config) {
   implementation->protected_filesystem_boundary =
       implementation->config.enforcement_grade ==
       HostLedgerEnforcementGrade::strict_filesystem;
+  // The pinned parent descriptor closes pathname races on the database and
+  // lock files, but SQLite opens `-wal`, `-shm`, and `-journal` itself, by
+  // concatenated pathname and without any identity check. The authority VFS
+  // extends the same pinned-descriptor discipline to those auxiliaries.
+  implementation->sqlite_vfs = SqliteAuthorityVfs::create(
+      implementation->parent.get(), implementation->database_name,
+      implementation->config.expected_owner_uid);
   HostLedgerFilesystemAuthority result(std::move(implementation));
   (void)result.attest_before_open();
   return result;
@@ -534,6 +542,13 @@ HostLedgerFilesystemAuthority::ledger_path() const {
     throw HostLedgerAuthorityError("ledger authority has been moved from");
   }
   return implementation_->config.ledger_path;
+}
+
+const SqliteAuthorityVfs &HostLedgerFilesystemAuthority::sqlite_vfs() const {
+  if (!implementation_ || !implementation_->sqlite_vfs) {
+    throw HostLedgerAuthorityError("ledger authority has been moved from");
+  }
+  return *implementation_->sqlite_vfs;
 }
 
 bool HostLedgerFilesystemAuthority::is_protected_filesystem_boundary() const {

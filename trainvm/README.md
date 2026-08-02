@@ -290,11 +290,36 @@ expected expiry, authority-time sample, and timeout; after restart the superviso
 journal's current active lease instead of retrying stale pre-renewal state.
 
 The journal namespace guard closes cooperating-process split authority and rejects unsafe SQLite
-side-file aliases at every SQL boundary, but stock SQLite still opens WAL/SHM/rollback files by
-pathname. A hostile same-UID process can race that open unless the authority directory is part of
-the trusted host boundary or a controlled VFS is used. The abstract-socket namespace fence is also
-network-namespace-local. Deployments must satisfy the declared trusted-directory/namespace threat
-model; these residuals are not covered by the process-launch implementation.
+side-file aliases at every SQL boundary. Stock SQLite nonetheless derives `-wal`, `-shm`,
+`-journal`, and super-journal names by string concatenation and opens them itself. Current SQLite
+does pass `O_NOFOLLOW` on those opens, so a planted symlink is refused upstream, but it performs no
+ownership, permission, or link-count check whatsoever: a same-UID process that pre-creates
+`<db>-wal` as a hardlink to a file it retains gets a live, readable view of every write-ahead frame
+the authority produces, and SQLite reports complete success while producing it. That vector is
+reproduced as an executable control in `sqlite_authority_vfs_tests`.
+
+Both authority databases - the event journal and the host ledger - are therefore opened through
+`SqliteAuthorityVfs`, a controlled VFS that takes pathname resolution out of SQLite's hands:
+
+- every open, delete, and access resolves through a directory descriptor the authority pinned once,
+  so no path component can be re-resolved between boundaries;
+- every open is preceded by an `O_NOFOLLOW` open and an identity check that requires an unaliased
+  (`st_nlink == 1`) regular file owned by the authority identity and unwritable by group or other;
+- every open is followed by an inode re-check, so a substitution racing between that validation and
+  SQLite's own open is detected before the handle is returned and no byte is read or written
+  through the impostor;
+- the wal-index is pinned across `xShmMap`, the one auxiliary the unix VFS opens outside `xOpen`;
+- names inside the authority namespace that are not declared auxiliaries of that database are
+  refused outright, and refusals are counted as machine-readable evidence.
+
+Two residuals remain and are deliberately not claimed as closed. A hostile same-UID process retains
+`ptrace` and `/proc/self/mem` access to the authority process and can corrupt it without touching
+the filesystem at all; same-UID isolation is a deployment property (separate service accounts), not
+something a VFS can establish. A same-UID process that can unlink the write-ahead log also destroys
+the durability of the frames it removes. What the VFS does establish is that no filesystem pathname
+race redirects or splits authority state undetected, and that a refused operation fails closed and
+stays recoverable. The abstract-socket namespace fence is also network-namespace-local. Deployments
+must still satisfy the declared trusted-directory/namespace threat model.
 
 The packaged Python worker now embeds a file-level closure for the exact interpreter identity,
 Python standard library, and the recursively closed root distributions declared for its selected

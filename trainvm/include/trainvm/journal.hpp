@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -21,6 +22,7 @@
 #include "trainvm/host_launch.hpp"
 #include "trainvm/host_ledger.hpp"
 #include "trainvm/hostd_process_protocol.hpp"
+#include "trainvm/sqlite_authority_vfs.hpp"
 #include "trainvm/command.hpp"
 #include "trainvm/lease.hpp"
 #include "trainvm/worker.hpp"
@@ -397,6 +399,9 @@ public:
   };
 
   sqlite3* database_{};
+  // Declared after `database_` so it outlives the sqlite3_close in ~Journal:
+  // unregistering the VFS while a connection still holds it is undefined.
+  std::shared_ptr<SqliteAuthorityVfs> authority_vfs_;
   std::optional<JournalFileIdentity> expected_file_;
   HostGrantEnforcement host_grant_enforcement_;
   std::optional<HostIdentity> expected_host_grant_authority_;

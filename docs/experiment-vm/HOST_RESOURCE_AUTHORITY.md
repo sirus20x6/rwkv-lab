@@ -134,6 +134,35 @@ Hostd reports its enforcement grade. A plan or site policy requesting strict iso
 unless privileged cgroup-device enforcement and a protected client identity are active. The system
 must not describe cooperative mode as a security boundary.
 
+### SQLite auxiliary files
+
+Both authority databases are stock SQLite. SQLite derives `-wal`, `-shm`, `-journal`, and
+super-journal names by concatenation and opens them itself. It passes `O_NOFOLLOW`, so a symlink is
+refused, but it checks neither ownership, nor permissions, nor link count: a same-UID process that
+hardlinks an alias over `<db>-wal` before SQLite creates it obtains a live view of every write-ahead
+frame, and SQLite reports success.
+
+Both databases are therefore opened through `SqliteAuthorityVfs` (`trainvm/sqlite_authority_vfs.hpp`)
+rather than by public pathname. It resolves every SQLite open, delete, and access through the
+directory descriptor the authority already pinned, validates the inode with `O_NOFOLLOW` before and
+again after SQLite's own open, pins the wal-index across `xShmMap`, and refuses any name in the
+namespace that is not a declared auxiliary of that database. Refusals are counted and exposed
+through `SqliteAuthorityVfs::statistics()`.
+
+Deployment checks:
+
+- The authority directory must be owned by the service identity and grant no write bit to group or
+  other; `SqliteAuthorityVfs::create` refuses to start otherwise.
+- Nothing outside the authority may create files matching `<db>`, `<db>-wal`, `<db>-shm`,
+  `<db>-journal`, or `<db>-mj*` in that directory. Backup and log-shipping tooling that hardlinks
+  or copies auxiliaries in place must be pointed at a checkpointed copy instead.
+- A nonzero `rejected_identities` or `rejected_substitutions` count on a healthy host indicates
+  another process is writing into the authority directory and must be investigated, not retried.
+- This closes filesystem pathname races only. It does not make cooperative same-UID mode a security
+  boundary: a hostile same-UID process still has `ptrace` and `/proc/self/mem` access to the
+  authority process, and can still destroy write-ahead durability by unlinking. Strict enforcement
+  with separate service accounts remains the boundary.
+
 ## Typed C++ data model
 
 Persisted types use explicit API versions and canonical serialization. C++26 reflection may generate

@@ -108,6 +108,7 @@ add_library(trainvm_core
   src/reconciler.cpp
   src/resource_request_builder.cpp
   src/rwkv_lab_worker_contract.cpp
+  src/sqlite_authority_vfs.cpp
   src/training_component_registry.cpp
   src/worker_bootstrap.cpp
 )
@@ -265,6 +266,12 @@ target_compile_options(authority_time_tests PRIVATE
 )
 target_link_libraries(authority_time_tests PRIVATE trainvm_core)
 add_test(NAME authority_time_tests COMMAND authority_time_tests)
+add_executable(sqlite_authority_vfs_tests tests/sqlite_authority_vfs_tests.cpp)
+target_compile_options(sqlite_authority_vfs_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(sqlite_authority_vfs_tests PRIVATE trainvm_core)
+add_test(NAME sqlite_authority_vfs_tests COMMAND sqlite_authority_vfs_tests)
 add_executable(cache_namespace_tests tests/cache_namespace_tests.cpp)
 target_compile_options(cache_namespace_tests PRIVATE
   -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
