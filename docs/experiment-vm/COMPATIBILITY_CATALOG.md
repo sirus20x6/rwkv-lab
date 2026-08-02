@@ -21,8 +21,9 @@ Each entry contains a stable ID, closed family, reviewed source paths, `observed
 statefulness, catalog-local `resume_evidence`, an operation role, and notes. The optional
 `legacy_invocation_display` is untrusted display text: it is never parsed or executed. The closed
 observed values are `python_module`, `console_script`, `host_script`,
-`http_control_handler`, `library_only`, and `design_only`. Go dashboard request handlers use
-`http_control_handler`; they are not mislabeled as host scripts.
+`http_control_handler`, `retired_legacy`, `library_only`, and `design_only`. Go dashboard request
+handlers use `http_control_handler`; removed dashboard mutations use `retired_legacy` so their
+parity obligations remain visible without claiming that a route or process capability still exists.
 
 This is the reviewed supported workflow surface, not an inventory of every file containing
 `__main__`. A source is included when it is an installed console command or distinct subcommand, a
@@ -62,24 +63,27 @@ adapter or host authority. Legacy dashboard launch and queue handlers are record
 `control_plane` so migration cannot silently forget an old process-control path.
 
 The dashboard mutation surface is closed rather than sampled. Every route the legacy Go router
-registers with a `POST` method has exactly one `http_control_handler` record, and every such record
-binds both its handler file and `dashboard/internal/server/server.go`, the registration table
-itself. Two independent gates keep that closed:
+registers with a `POST` method has exactly one `http_control_handler` record. Removed mutations
+remain as `retired_legacy` records, and both kinds bind their handler file plus
+`dashboard/internal/server/server.go`, the registration table itself. Two independent gates keep
+that closed:
 
 1. adding, removing, or renaming any route changes the router bytes and therefore fails the
    `source_tree_digest` check before anything else is examined;
 2. `compatibility_catalog_tests` re-reads the registration table and fails when a served legacy
-   route has no record, or a record names a route that is no longer served. TrainVM's own
-   `/api/trainvm/` namespace is excluded because it is declarative authority, not legacy evidence.
+   route has no active record, an active record names an unserved route, or a retired record becomes
+   served again. TrainVM's own `/api/trainvm/` namespace is excluded because it is declarative
+   authority, not legacy evidence.
 
-The records are candid about what the legacy control plane cannot do. Stop and checkpoint are bare
-signal deliveries with no typed acknowledgement or receipt. Live control patches are whitelisted
-numeric rows in shared SQLite that the trainer polls, with no application point or revision fence.
-`POST /api/experiments/run` starts a detached trainer with no script allowlist, no process group,
-and no audit row. The auto-stop and queue-automation toggles arm background goroutines that signal
-or spawn processes while holding their armed state only in dashboard memory, so neither survives a
-restart nor leaves an audit trail. Preference capture and dataset versioning grow training inputs
-with no published artifact manifest.
+The retired records are candid about what the legacy control plane could not do. Stop and
+checkpoint were bare signal deliveries with no typed acknowledgement or receipt. Live control
+patches were whitelisted numeric rows in shared SQLite that the trainer polled, with no application
+point or revision fence. `POST /api/experiments/run` started a detached trainer with no script
+allowlist, no process group, and no audit row. The auto-stop and queue-automation toggles armed
+background goroutines that signaled or spawned processes while holding their armed state only in
+dashboard memory, so neither survived a restart nor left an audit trail. Preference capture and
+dataset versioning grew training inputs with no published artifact manifest. These records are
+migration evidence, not callable compatibility shims.
 
 Validate the checked-in inventory with:
 

@@ -1,7 +1,7 @@
 {
   "api_version": "trainvm.compatibility-workflows/v1",
   "authority": "compatibility_evidence_only",
-  "source_tree_digest": "sha256:508e5d8f675542a1cd78f00d6163d0a95ccac771b767a35cacb15a6f51e7ad40",
+  "source_tree_digest": "sha256:367309668ecafc5890ac3419135b481280113661c00945056923553e06851d48",
   "entries": [
     {
       "stable_id": "rwkv.synthetic-campaign",
@@ -1543,11 +1543,11 @@
         "dashboard/internal/server/control.go",
         "dashboard/internal/server/server.go"
       ],
-      "observed_invocation": "http_control_handler",
+      "observed_invocation": "retired_legacy",
       "stateful": true,
       "resume_evidence": "restart_only",
       "operation_role": "supervisor",
-      "notes": "Legacy allowlisted manual launcher.",
+      "notes": "Retired from dashboard authority; retained as a migration obligation. Historical behavior: Legacy allowlisted manual launcher.",
       "legacy_invocation_display": "POST /api/launch"
     },
     {
@@ -1557,11 +1557,11 @@
         "dashboard/internal/server/queue.go",
         "dashboard/internal/server/server.go"
       ],
-      "observed_invocation": "http_control_handler",
+      "observed_invocation": "retired_legacy",
       "stateful": true,
       "resume_evidence": "compatible",
       "operation_role": "supervisor",
-      "notes": "Legacy persisted priority launch queue.",
+      "notes": "Retired from dashboard authority; retained as a migration obligation. Historical behavior: Legacy persisted priority launch queue.",
       "legacy_invocation_display": "POST /api/queue/start-next"
     },
     {
@@ -1571,11 +1571,11 @@
         "dashboard/internal/server/experiments.go",
         "dashboard/internal/server/server.go"
       ],
-      "observed_invocation": "http_control_handler",
+      "observed_invocation": "retired_legacy",
       "stateful": true,
       "resume_evidence": "restart_only",
       "operation_role": "supervisor",
-      "notes": "Legacy experiment campaign launcher.",
+      "notes": "Retired from dashboard authority; retained as a migration obligation. Historical behavior: Legacy experiment campaign launcher.",
       "legacy_invocation_display": "POST /api/experiments/launch"
     },
     {
@@ -1585,11 +1585,11 @@
         "dashboard/internal/server/posttraining.go",
         "dashboard/internal/server/server.go"
       ],
-      "observed_invocation": "http_control_handler",
+      "observed_invocation": "retired_legacy",
       "stateful": true,
       "resume_evidence": "restart_only",
       "operation_role": "supervisor",
-      "notes": "Legacy post-training campaign and generation launcher.",
+      "notes": "Retired from dashboard authority; retained as a migration obligation. Historical behavior: Legacy post-training campaign and generation launcher.",
       "legacy_invocation_display": "POST /api/posttraining/campaign"
     },
     {
@@ -1599,11 +1599,11 @@
         "dashboard/internal/server/rlvr.go",
         "dashboard/internal/server/server.go"
       ],
-      "observed_invocation": "http_control_handler",
+      "observed_invocation": "retired_legacy",
       "stateful": true,
       "resume_evidence": "restart_only",
       "operation_role": "supervisor",
-      "notes": "Legacy RLVR campaign launcher.",
+      "notes": "Retired from dashboard authority; retained as a migration obligation. Historical behavior: Legacy RLVR campaign launcher.",
       "legacy_invocation_display": "POST /api/rlvr/launch"
     },
     {
@@ -1613,11 +1613,11 @@
         "dashboard/internal/server/qualification.go",
         "dashboard/internal/server/server.go"
       ],
-      "observed_invocation": "http_control_handler",
+      "observed_invocation": "retired_legacy",
       "stateful": true,
       "resume_evidence": "restart_only",
       "operation_role": "supervisor",
-      "notes": "Legacy production qualification launcher.",
+      "notes": "Retired from dashboard authority; retained as a migration obligation. Historical behavior: Legacy production qualification launcher.",
       "legacy_invocation_display": "POST /api/qualification/run"
     },
     {
@@ -1627,11 +1627,11 @@
         "dashboard/internal/server/sample.go",
         "dashboard/internal/server/server.go"
       ],
-      "observed_invocation": "http_control_handler",
+      "observed_invocation": "retired_legacy",
       "stateful": false,
       "resume_evidence": "none",
       "operation_role": "evaluation",
-      "notes": "Legacy synchronous checkpoint generation endpoint.",
+      "notes": "Retired from dashboard authority; retained as a migration obligation. Historical behavior: Legacy synchronous checkpoint generation endpoint.",
       "legacy_invocation_display": "POST /api/runs/{name}/sample"
     },
     {
@@ -1846,11 +1846,11 @@
         "dashboard/internal/server/server.go",
         "dashboard/internal/server/control.go"
       ],
-      "observed_invocation": "http_control_handler",
+      "observed_invocation": "retired_legacy",
       "stateful": true,
       "resume_evidence": "terminal_checkpoint",
       "operation_role": "supervisor",
-      "notes": "Legacy stop path. Resolves the run's live PID from the sysmon sampler, verifies it is a training process, and sends SIGINT so the trainer checkpoints and exits. Signal delivery is the whole protocol: there is no typed acknowledgement, safe point, or receipt.",
+      "notes": "Retired from dashboard authority; retained as a migration obligation. Historical behavior: Legacy stop path. Resolves the run's live PID from the sysmon sampler, verifies it is a training process, and sends SIGINT so the trainer checkpoints and exits. Signal delivery is the whole protocol: there is no typed acknowledgement, safe point, or receipt.",
       "legacy_invocation_display": "POST /api/runs/{name}/stop"
     },
     {
@@ -1860,11 +1860,11 @@
         "dashboard/internal/server/server.go",
         "dashboard/internal/server/control.go"
       ],
-      "observed_invocation": "http_control_handler",
+      "observed_invocation": "retired_legacy",
       "stateful": true,
       "resume_evidence": "compatible",
       "operation_role": "supervisor",
-      "notes": "Legacy checkpoint-now path. Sends SIGUSR1 (save without exit) and refuses unless the PID is verified as an instrumented trainer. The handler observes neither the write nor its completion, so a produced checkpoint is compatible evidence only.",
+      "notes": "Retired from dashboard authority; retained as a migration obligation. Historical behavior: Legacy checkpoint-now path. Sends SIGUSR1 (save without exit) and refuses unless the PID is verified as an instrumented trainer. The handler observes neither the write nor its completion, so a produced checkpoint is compatible evidence only.",
       "legacy_invocation_display": "POST /api/runs/{name}/checkpoint"
     },
     {
@@ -1902,11 +1902,11 @@
         "dashboard/internal/server/server.go",
         "dashboard/internal/server/livetune.go"
       ],
-      "observed_invocation": "http_control_handler",
+      "observed_invocation": "retired_legacy",
       "stateful": true,
       "resume_evidence": "compatible",
       "operation_role": "supervisor",
-      "notes": "Legacy live-tuning path. Filters the posted object to a whitelisted numeric key set and writes pending control overrides to shared SQLite that the trainer polls and applies at its own boundary. There is no application point, effective-value acknowledgement, or revision fence; the durable row survives restart, so a restarted trainer re-reads the same overrides.",
+      "notes": "Retired from dashboard authority; retained as a migration obligation. Historical behavior: Legacy live-tuning path. Filters the posted object to a whitelisted numeric key set and writes pending control overrides to shared SQLite that the trainer polls and applies at its own boundary. There is no application point, effective-value acknowledgement, or revision fence; the durable row survives restart, so a restarted trainer re-reads the same overrides.",
       "legacy_invocation_display": "POST /api/runs/{name}/control"
     },
     {
@@ -1930,11 +1930,11 @@
         "dashboard/internal/server/server.go",
         "dashboard/internal/server/alerts_handlers.go"
       ],
-      "observed_invocation": "http_control_handler",
+      "observed_invocation": "retired_legacy",
       "stateful": false,
       "resume_evidence": "none",
       "operation_role": "supervisor",
-      "notes": "Legacy auto-stop toggle. Flips a process-local atomic that arms the background alert detector to SIGINT training runs on a critical alert. The toggle itself holds no training state and is lost on dashboard restart, so an armed killer cannot be recovered or audited.",
+      "notes": "Retired from dashboard authority; retained as a migration obligation. Historical behavior: Legacy auto-stop toggle. Flips a process-local atomic that arms the background alert detector to SIGINT training runs on a critical alert. The toggle itself holds no training state and is lost on dashboard restart, so an armed killer cannot be recovered or audited.",
       "legacy_invocation_display": "POST /api/autostop"
     },
     {
@@ -1944,11 +1944,11 @@
         "dashboard/internal/server/server.go",
         "dashboard/internal/server/convboard.go"
       ],
-      "observed_invocation": "http_control_handler",
+      "observed_invocation": "retired_legacy",
       "stateful": false,
       "resume_evidence": "none",
       "operation_role": "review",
-      "notes": "Legacy conversion-board promotion record. Stores a candidate layer, run, step, prospective library path, and PPL plus an audit row. It deliberately does not write the converted-layer library; promotion remains a manual assembly step, so this is provenance only.",
+      "notes": "Retired from dashboard authority; retained as a migration obligation. Historical behavior: Legacy conversion-board promotion record. Stores a candidate layer, run, step, prospective library path, and PPL plus an audit row. It deliberately does not write the converted-layer library; promotion remains a manual assembly step, so this is provenance only.",
       "legacy_invocation_display": "POST /api/convboard/accept"
     },
     {
@@ -1958,11 +1958,11 @@
         "dashboard/internal/server/server.go",
         "dashboard/internal/server/experiments.go"
       ],
-      "observed_invocation": "http_control_handler",
+      "observed_invocation": "retired_legacy",
       "stateful": true,
       "resume_evidence": "restart_only",
       "operation_role": "supervisor",
-      "notes": "Legacy config-file experiment launcher. Validates that the requested path exists under the repository experiments directory and starts a detached config runner with output redirected to a log file. Unlike the allowlisted manual launcher it resolves no script allowlist, sets no process group, and writes no audit row, so the spawned process has no durable launch identity.",
+      "notes": "Retired from dashboard authority; retained as a migration obligation. Historical behavior: Legacy config-file experiment launcher. Validates that the requested path exists under the repository experiments directory and starts a detached config runner with output redirected to a log file. Unlike the allowlisted manual launcher it resolves no script allowlist, sets no process group, and writes no audit row, so the spawned process has no durable launch identity.",
       "legacy_invocation_display": "POST /api/experiments/run"
     },
     {
@@ -1986,11 +1986,11 @@
         "dashboard/internal/server/server.go",
         "dashboard/internal/server/posttraining.go"
       ],
-      "observed_invocation": "http_control_handler",
+      "observed_invocation": "retired_legacy",
       "stateful": false,
       "resume_evidence": "none",
       "operation_role": "preprocess",
-      "notes": "Legacy post-training dataset versioning. Materializes an immutable dataset version tree under the repository datasets root through the dataset tool. The handler records no receipt of what was produced, so the resulting artifact identity is filesystem convention only.",
+      "notes": "Retired from dashboard authority; retained as a migration obligation. Historical behavior: Legacy post-training dataset versioning. Materializes an immutable dataset version tree under the repository datasets root through the dataset tool. The handler records no receipt of what was produced, so the resulting artifact identity is filesystem convention only.",
       "legacy_invocation_display": "POST /api/posttraining/version"
     },
     {
@@ -2000,11 +2000,11 @@
         "dashboard/internal/server/server.go",
         "dashboard/internal/server/posttraining.go"
       ],
-      "observed_invocation": "http_control_handler",
+      "observed_invocation": "retired_legacy",
       "stateful": false,
       "resume_evidence": "none",
       "operation_role": "evaluation",
-      "notes": "Legacy A/B comparison. Generates completions from two runs' checkpoints with a shared seed and temperature and patches both outputs into the page; results live only in UI signals.",
+      "notes": "Retired from dashboard authority; retained as a migration obligation. Historical behavior: Legacy A/B comparison. Generates completions from two runs' checkpoints with a shared seed and temperature and patches both outputs into the page; results live only in UI signals.",
       "legacy_invocation_display": "POST /api/posttraining/compare"
     },
     {
@@ -2014,11 +2014,11 @@
         "dashboard/internal/server/server.go",
         "dashboard/internal/server/posttraining.go"
       ],
-      "observed_invocation": "http_control_handler",
+      "observed_invocation": "retired_legacy",
       "stateful": false,
       "resume_evidence": "none",
       "operation_role": "review",
-      "notes": "Legacy human preference capture. Appends one chosen/rejected preference record to a datasets JSONL that later post-training runs consume. Append-only file growth is the entire protocol: no audit row, no reviewer identity, and no published artifact manifest.",
+      "notes": "Retired from dashboard authority; retained as a migration obligation. Historical behavior: Legacy human preference capture. Appends one chosen/rejected preference record to a datasets JSONL that later post-training runs consume. Append-only file growth is the entire protocol: no audit row, no reviewer identity, and no published artifact manifest.",
       "legacy_invocation_display": "POST /api/posttraining/feedback"
     },
     {
@@ -2028,11 +2028,11 @@
         "dashboard/internal/server/server.go",
         "dashboard/internal/server/queue.go"
       ],
-      "observed_invocation": "http_control_handler",
+      "observed_invocation": "retired_legacy",
       "stateful": false,
       "resume_evidence": "none",
       "operation_role": "supervisor",
-      "notes": "Legacy queue admission. Checks the requested script against the sysmon allowlist and inserts a queued row plus an audit row. The row is launch intent only; spawning happens later in the queue manager.",
+      "notes": "Retired from dashboard authority; retained as a migration obligation. Historical behavior: Legacy queue admission. Checks the requested script against the sysmon allowlist and inserts a queued row plus an audit row. The row is launch intent only; spawning happens later in the queue manager.",
       "legacy_invocation_display": "POST /api/queue/enqueue"
     },
     {
@@ -2042,11 +2042,11 @@
         "dashboard/internal/server/server.go",
         "dashboard/internal/server/queue.go"
       ],
-      "observed_invocation": "http_control_handler",
+      "observed_invocation": "retired_legacy",
       "stateful": false,
       "resume_evidence": "none",
       "operation_role": "supervisor",
-      "notes": "Legacy queue cancellation. Marks a still-queued item canceled and no-ops once it is running or done, so it can prevent a future launch but never stops a live process.",
+      "notes": "Retired from dashboard authority; retained as a migration obligation. Historical behavior: Legacy queue cancellation. Marks a still-queued item canceled and no-ops once it is running or done, so it can prevent a future launch but never stops a live process.",
       "legacy_invocation_display": "POST /api/queue/cancel"
     },
     {
@@ -2056,11 +2056,11 @@
         "dashboard/internal/server/server.go",
         "dashboard/internal/server/queue.go"
       ],
-      "observed_invocation": "http_control_handler",
+      "observed_invocation": "retired_legacy",
       "stateful": false,
       "resume_evidence": "none",
       "operation_role": "supervisor",
-      "notes": "Legacy queue automation toggle. Flips a process-local atomic that arms the background queue manager to spawn training whenever the GPU is free. The toggle is not persisted, so an armed automatic spawner cannot be recovered after a dashboard restart.",
+      "notes": "Retired from dashboard authority; retained as a migration obligation. Historical behavior: Legacy queue automation toggle. Flips a process-local atomic that arms the background queue manager to spawn training whenever the GPU is free. The toggle is not persisted, so an armed automatic spawner cannot be recovered after a dashboard restart.",
       "legacy_invocation_display": "POST /api/queue/auto"
     }
   ]
