@@ -157,6 +157,27 @@ func TestNativeEvalGalleryUsesPublishedHistoryAndSideBySideViewer(t *testing.T) 
 	}
 }
 
+func TestTrainVMGPUProfilesQualifyDeclaredWarmupState(t *testing.T) {
+	assets := Static()
+	app, err := fs.ReadFile(assets, "app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	css, err := fs.ReadFile(assets, "app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		`profile.execution_phases?.overlaps_warmup === baseline.execution_phases?.overlaps_warmup`,
+		`warmup overlap unknown`, `steady-state status cannot be determined`,
+		`profile.trace_sha256, profile.execution_phases`, `.vm-profile-phase`,
+	} {
+		if !strings.Contains(string(app)+string(css), required) {
+			t.Fatalf("GPU trace phase qualification is missing %q", required)
+		}
+	}
+}
+
 func TestTrainVMPanelUsesIncrementalReadOnlyTimeline(t *testing.T) {
 	assets := Static()
 	index, err := fs.ReadFile(assets, "index.html")

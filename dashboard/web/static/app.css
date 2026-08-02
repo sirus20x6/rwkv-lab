@@ -229,6 +229,8 @@ details.panel[open] .d-caret { transform: rotate(90deg); color: var(--accent); }
 .vm-profile-operators { display: grid; gap: 2px; color: var(--text-dim); }
 .vm-profile-operator { display: grid; grid-template-columns: minmax(100px, 1fr) auto auto; gap: 8px; }
 .vm-profile-operator span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vm-profile-phase { display: grid; gap: 2px; padding: 6px; border: 1px solid color-mix(in srgb, var(--warn) 55%, var(--border)); border-radius: var(--r-sm); color: var(--text-dim); }
+.vm-profile-phase strong { color: var(--warn); }
 .vm-profile-comparison { display: flex; flex-wrap: wrap; gap: 4px 10px; padding: 6px; border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border)); border-radius: var(--r-sm); color: var(--text-dim); }
 .vm-profile-comparison strong { flex-basis: 100%; color: var(--accent); }
 .vm-profile-comparison.incompatible { border-color: var(--border); color: var(--muted); }
