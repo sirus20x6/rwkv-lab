@@ -13,6 +13,8 @@ namespace trainvm {
 
 inline constexpr int kLinuxWorkerCodeDescriptor = 3;
 inline constexpr int kLinuxWorkerBootstrapDescriptor = 4;
+inline constexpr int kLinuxProfilerAuthorityDescriptor = 5;
+inline constexpr int kLinuxProfilerTargetExecutableDescriptor = 6;
 
 struct LinuxWorkerCredentialSpec final {
   uid_t uid{};
@@ -20,6 +22,27 @@ struct LinuxWorkerCredentialSpec final {
   bool no_new_privileges{};
 
   bool operator==(const LinuxWorkerCredentialSpec&) const = default;
+};
+
+// Optional host-owned outer executable. Its argv is assembled entirely from a
+// qualified profile plus an authority-owned output path before it reaches this
+// kernel boundary. The original worker remains a separately sealed target at
+// a fixed inherited descriptor; the experiment cannot replace either program.
+struct LinuxExternalProfilerLaunchSpec final {
+  int executable_fd{-1};
+  int authority_fd{-1};
+  std::string executable_name;
+  std::string executable_digest;
+  bool execute_from_source{};
+  std::uint64_t source_device{};
+  std::uint64_t source_inode{};
+  std::uint64_t source_size{};
+  std::uint32_t source_mode{};
+  std::uint32_t source_uid{};
+  std::uint32_t source_gid{};
+  std::vector<std::string> arguments;
+
+  bool operator==(const LinuxExternalProfilerLaunchSpec&) const = default;
 };
 
 struct LinuxStoppedLaunchSpec final {
@@ -38,6 +61,7 @@ struct LinuxStoppedLaunchSpec final {
   std::optional<std::int32_t> nice;
   std::uint16_t code_argument_index{};
   std::vector<std::string> arguments;
+  std::optional<LinuxExternalProfilerLaunchSpec> profiler = std::nullopt;
 
   bool operator==(const LinuxStoppedLaunchSpec&) const = default;
 };
@@ -120,6 +144,11 @@ namespace hostd_linux_stopped_launcher_test_seam {
 [[nodiscard]] std::string parse_unified_cgroup(std::string_view cgroup);
 [[nodiscard]] bool install_inherited_worker_descriptors(
     std::optional<int> code_fd, int worker_bootstrap_fd) noexcept;
+[[nodiscard]] bool install_inherited_profiled_worker_descriptors(
+    std::optional<int> code_fd, int worker_bootstrap_fd,
+    int profiler_authority_fd, int target_executable_fd) noexcept;
+[[nodiscard]] std::vector<std::string> compose_exec_arguments(
+    const LinuxStoppedLaunchSpec& spec);
 [[nodiscard]] bool worker_status_has_credentials(
     std::string_view status, const LinuxWorkerCredentialSpec& expected);
 

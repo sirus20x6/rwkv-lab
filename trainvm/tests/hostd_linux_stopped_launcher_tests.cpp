@@ -1,6 +1,7 @@
 #include "trainvm/hostd_linux_stopped_launcher.hpp"
 #include "trainvm/worker_bootstrap.hpp"
 
+#include <array>
 #include <fcntl.h>
 #include <iostream>
 #include <stdexcept>
@@ -80,6 +81,7 @@ void malformed_launch_fails_before_clone() {
                       .no_new_privileges = true},
       .nice = std::nullopt,
       .arguments = {},
+      .profiler = std::nullopt,
   };
   require_rejected(
       [&] { (void)launcher.spawn_stopped(malformed); },
@@ -152,6 +154,89 @@ void inherited_descriptor_abi_is_exact_and_exec_surviving() {
   (void)::close(code_high);
 }
 
+void profiled_launch_has_a_fixed_noninjectable_exec_shape() {
+  LinuxStoppedLaunchSpec direct;
+  direct.executable_name = "/sealed/python";
+  direct.arguments = {"-I", "/proc/self/fd/3",
+                      "--trainvm-bootstrap-fd=4"};
+  using hostd_linux_stopped_launcher_test_seam::compose_exec_arguments;
+  require(compose_exec_arguments(direct) ==
+              std::vector<std::string>{"/sealed/python", "-I",
+                                       "/proc/self/fd/3",
+                                       "--trainvm-bootstrap-fd=4"},
+          "direct launch argv retains the sealed worker ABI");
+  direct.profiler = LinuxExternalProfilerLaunchSpec{
+      .executable_fd = 70,
+      .authority_fd = 71,
+      .executable_name = "/sealed/nsys",
+      .executable_digest = "sha256:" + std::string(64U, 'b'),
+      .arguments = {"profile", "--sample=none", "--output",
+                    "/sealed/artifacts/run-1"},
+  };
+  require(compose_exec_arguments(direct) ==
+              std::vector<std::string>{
+                  "/sealed/nsys", "profile", "--sample=none", "--output",
+                  "/sealed/artifacts/run-1", "/proc/self/fd/6", "-I",
+                  "/proc/self/fd/3", "--trainvm-bootstrap-fd=4"},
+          "profiled argv is fixed profiler options followed by one inherited target");
+}
+
+void profiled_descriptor_abi_survives_the_outer_exec() {
+  auto sealed = create_sealed_worker_bootstrap({
+      .api_version = std::string(kWorkerBootstrapApiVersion),
+      .controller_target = "unix:/run/trainvm/test.sock",
+      .run_id = "run-profile-abi",
+      .node_id = "train",
+      .attempt_id = "attempt-profile-abi",
+      .launch_nonce = "launch-profile-abi",
+      .adapter = "rwkv-lab.mageflow",
+      .adapter_version = "1.0.0",
+      .code_fingerprint = "sha256:" + std::string(64U, 'a'),
+      .capabilities = {},
+      .last_acked_controller_sequence = 0U,
+      .concurrency_key = "gpu:0",
+      .lease_id = "lease-profile-abi",
+      .fencing_token = 1U,
+      .bootstrap_digest = {},
+  });
+  std::array<int, 4U> high{};
+  for (int& descriptor : high) {
+    const int copy = sealed.duplicate_fd();
+    descriptor = ::fcntl(copy, F_DUPFD_CLOEXEC, 64);
+    (void)::close(copy);
+    require(descriptor >= 64,
+            "profiled test descriptors are outside the fixed ABI range");
+  }
+  const pid_t child = ::fork();
+  require(child >= 0, "fork profiled descriptor ABI observer");
+  if (child == 0) {
+    bool valid = hostd_linux_stopped_launcher_test_seam::
+        install_inherited_profiled_worker_descriptors(
+            high[0], high[1], high[2], high[3]);
+    for (const int descriptor : {
+             kLinuxWorkerCodeDescriptor,
+             kLinuxWorkerBootstrapDescriptor,
+             kLinuxProfilerAuthorityDescriptor,
+             kLinuxProfilerTargetExecutableDescriptor,
+         }) {
+      valid = valid &&
+              (::fcntl(descriptor, F_GETFD) & FD_CLOEXEC) == 0;
+      try {
+        valid = valid &&
+                worker_bootstrap_from_sealed_fd(descriptor) == sealed.spec();
+      } catch (...) {
+        valid = false;
+      }
+    }
+    ::_exit(valid ? 0 : 1);
+  }
+  int status = 0;
+  require(::waitpid(child, &status, 0) == child && WIFEXITED(status) &&
+              WEXITSTATUS(status) == 0,
+          "code, bootstrap, profiler proof, and target descriptors survive exec");
+  for (const int descriptor : high) (void)::close(descriptor);
+}
+
 void worker_credential_status_is_strict_and_capability_free() {
   using hostd_linux_stopped_launcher_test_seam::
       worker_status_has_credentials;
@@ -192,6 +277,8 @@ int main() {
     proc_parsers_are_strict_and_comm_safe();
     malformed_launch_fails_before_clone();
     inherited_descriptor_abi_is_exact_and_exec_surviving();
+    profiled_launch_has_a_fixed_noninjectable_exec_shape();
+    profiled_descriptor_abi_survives_the_outer_exec();
     worker_credential_status_is_strict_and_capability_free();
     std::cout << "Linux stopped launcher tests passed\n";
     return 0;

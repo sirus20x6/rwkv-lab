@@ -522,9 +522,12 @@ class LedgerProcessSupervisor final : public IHostdProcessSupervisor {
   HostdProcessPreparedResult prepare(
       const HostdProcessPrepareRequest& request, int executable_fd,
       std::optional<int> code_fd, int working_directory_fd,
-      int worker_bootstrap_fd) override {
+      int worker_bootstrap_fd,
+      std::optional<int> profiler_executable_fd,
+      std::optional<int> profiler_authority_fd) override {
     require(executable_fd >= 0 && !code_fd && working_directory_fd >= 0 &&
-                worker_bootstrap_fd >= 0 &&
+                worker_bootstrap_fd >= 0 && !profiler_executable_fd &&
+                !profiler_authority_fd &&
                 ::fcntl(executable_fd, F_GETFD) >= 0 &&
                 ::fcntl(working_directory_fd, F_GETFD) >= 0 &&
                 worker_bootstrap_from_sealed_fd(

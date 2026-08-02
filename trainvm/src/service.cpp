@@ -2121,6 +2121,14 @@ void TrainVMService::require_retained_launch_capacity(
       }
       bytes += launch.identity.code->source_size;
     }
+    if (launch.identity.profiler) {
+      if (launch.identity.profiler->executable.source_size >
+          std::numeric_limits<std::uint64_t>::max() - bytes) {
+        throw HostLaunchResolutionError(
+            "retained host launch byte accounting overflowed");
+      }
+      bytes += launch.identity.profiler->executable.source_size;
+    }
     return bytes;
   };
   if (resolved_launches_.size() >= kMaximumRetainedLaunches) {
@@ -2255,7 +2263,26 @@ ResolvedLaunchSpec TrainVMService::bind_worker_launch(
     return durable;
   }
 
-  ResolvedLaunch resolved = host_launch_resolver_.resolve(launch, key);
+  std::optional<GpuTraceCapture> profiler_capture;
+  std::string profiler_output_path;
+  if (plan->experiment.spec.execution &&
+      plan->experiment.spec.execution->component == node.invoke.component &&
+      plan->experiment.spec.execution->operation == node.invoke.operation &&
+      plan->experiment.spec.execution->gpu_trace &&
+      plan->experiment.spec.execution->gpu_trace->enabled) {
+    profiler_capture = plan->experiment.spec.execution->gpu_trace;
+    if (profiler_capture->backend &&
+        *profiler_capture->backend != ProfilerBackend::torch) {
+      profiler_output_path =
+          (std::filesystem::path(plan->experiment.spec.workspace.run_directory) /
+           "trainvm_artifacts" / "gpu_traces" / ".external" /
+           sha256_hex(launch_id))
+              .string();
+    }
+  }
+  ResolvedLaunch resolved = host_launch_resolver_.resolve(
+      launch, key, std::move(profiler_capture),
+      std::move(profiler_output_path));
   require_retained_launch_capacity(resolved.spec());
   const ResolvedLaunchSpec durable = controller.bind_worker_launch(
       resolved, host_launch_registry_, authority_host_, authority_now());

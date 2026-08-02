@@ -13,11 +13,13 @@
 #include <nlohmann/json.hpp>
 
 #include "trainvm/reflection_json.hpp"
+#include "trainvm/profiler_launch_profiles.hpp"
 
 namespace trainvm {
 namespace {
 
 constexpr std::size_t kMaximumProfiles = 4'096U;
+constexpr std::size_t kMaximumProfilerExecutables = 16U;
 constexpr std::size_t kMaximumTrustedRoots = 256U;
 constexpr std::size_t kMaximumKeyBytes = 512U;
 constexpr std::size_t kMaximumPathBytes = 4'096U;
@@ -170,6 +172,20 @@ void validate_profile(HostLaunchProfile& profile,
   }
 }
 
+void validate_profiler_profile(
+    const HostProfilerExecutableProfile& profile,
+    const std::vector<std::string>& roots) {
+  if (profile.backend == ProfilerBackend::torch ||
+      !bounded_text(profile.version, 128U) ||
+      profile.version != profiler_launch_profile(profile.backend).version ||
+      !canonical_absolute_path(profile.executable_path) ||
+      !path_within_any_root(profile.executable_path, roots) ||
+      !valid_sha256(profile.executable_fingerprint)) {
+    throw std::invalid_argument(
+        "host profiler executable profile is malformed or disagrees with its sealed launch profile");
+  }
+}
+
 std::vector<std::string> validate_roots(std::vector<std::string> roots) {
   if (roots.size() > kMaximumTrustedRoots) {
     throw std::invalid_argument(
@@ -220,6 +236,22 @@ HostLaunchRegistry::HostLaunchRegistry(HostLaunchRegistryDocument document) {
           "host launch registry contains a duplicate exact key");
     }
   }
+  std::vector<HostProfilerExecutableProfile> profiler_profiles =
+      std::move(document.profiler_executables).value_or(
+          std::vector<HostProfilerExecutableProfile>{});
+  if (profiler_profiles.size() > kMaximumProfilerExecutables) {
+    throw std::invalid_argument(
+        "host profiler executable profile list exceeds the bound");
+  }
+  std::ranges::sort(
+      profiler_profiles, {}, &HostProfilerExecutableProfile::backend);
+  for (const HostProfilerExecutableProfile& profile : profiler_profiles) {
+    validate_profiler_profile(profile, trusted_roots_);
+    if (!profiler_executables_.emplace(profile.backend, profile).second) {
+      throw std::invalid_argument(
+          "host launch registry contains a duplicate profiler backend");
+    }
+  }
   nlohmann::json canonical_profiles = nlohmann::json::array();
   for (const auto& [key, profile] : profiles_) {
     (void)key;
@@ -230,6 +262,11 @@ HostLaunchRegistry::HostLaunchRegistry(HostLaunchRegistryDocument document) {
           .api_version = "trainvm.host-launches/v4",
           .trusted_roots = trusted_roots_,
           .profiles = {},
+          .profiler_executables =
+              profiler_profiles.empty()
+                  ? std::nullopt
+                  : std::optional<std::vector<HostProfilerExecutableProfile>>{
+                        profiler_profiles},
       });
   canonical_registry["profiles"] = std::move(canonical_profiles);
   registry_digest_ = "sha256:" + sha256_hex(canonical_registry.dump());
@@ -362,6 +399,31 @@ std::string HostLaunchRegistry::profile_digest(
   return "sha256:" +
          sha256_hex(nlohmann::json{
                         {"api_version", "trainvm.host-launch-profile/v4"},
+                        {"profile", encode_json(profile)},
+                    }
+                        .dump());
+}
+
+const HostProfilerExecutableProfile& HostLaunchRegistry::resolve_profiler(
+    ProfilerBackend backend) const {
+  const auto profile = profiler_executables_.find(backend);
+  if (backend == ProfilerBackend::torch ||
+      profile == profiler_executables_.end()) {
+    throw HostLaunchResolutionError(
+        "host launch registry has no external profiler backend");
+  }
+  return profile->second;
+}
+
+std::string HostLaunchRegistry::profiler_profile_digest(
+    ProfilerBackend backend) const {
+  const HostProfilerExecutableProfile& profile = resolve_profiler(backend);
+  return "sha256:" +
+         sha256_hex(nlohmann::json{
+                        {"api_version",
+                         "trainvm.host-profiler-executable-profile/v1"},
+                        {"launch_profile_document_digest",
+                         profiler_launch_profiles().document_digest},
                         {"profile", encode_json(profile)},
                     }
                         .dump());

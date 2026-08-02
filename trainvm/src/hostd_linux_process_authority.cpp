@@ -208,6 +208,12 @@ LinuxPreparedLaunch LinuxProcessAuthority::prepare(
   Descriptor code_fd(code.value_or(-1));
   Descriptor working_directory_fd(
       resolved.duplicate_working_directory_fd());
+  const std::optional<int> profiler_executable =
+      resolved.duplicate_profiler_executable_fd();
+  const std::optional<int> profiler_authority =
+      resolved.duplicate_profiler_authority_fd();
+  Descriptor profiler_executable_fd(profiler_executable.value_or(-1));
+  Descriptor profiler_authority_fd(profiler_authority.value_or(-1));
   std::vector<std::string> arguments = spec.identity.public_arguments;
   if (code) {
     if (spec.identity.code_argument_index >= arguments.size())
@@ -236,6 +242,30 @@ LinuxPreparedLaunch LinuxProcessAuthority::prepare(
                   : std::nullopt,
       .code_argument_index = spec.identity.code_argument_index,
       .arguments = std::move(arguments),
+      .profiler = identity.profiler
+          ? std::optional<LinuxExternalProfilerLaunchSpec>{
+                LinuxExternalProfilerLaunchSpec{
+                    .executable_fd = profiler_executable_fd.get(),
+                    .authority_fd = profiler_authority_fd.get(),
+                    .executable_name =
+                        identity.profiler->executable.source_path,
+                    .executable_digest =
+                        identity.profiler->executable.sealed_sha256,
+                    .execute_from_source =
+                        identity.profiler->execute_from_source,
+                    .source_device =
+                        identity.profiler->executable.source_device,
+                    .source_inode =
+                        identity.profiler->executable.source_inode,
+                    .source_size =
+                        identity.profiler->executable.source_size,
+                    .source_mode =
+                        identity.profiler->executable.source_mode,
+                    .source_uid = identity.profiler->executable.source_uid,
+                    .source_gid = identity.profiler->executable.source_gid,
+                    .arguments = identity.profiler->public_arguments,
+                }}
+          : std::nullopt,
   });
   const LinuxStoppedChildIdentity& observed = child.identity();
   if (observed.uid != worker_credentials_.uid ||
@@ -602,11 +632,14 @@ HostdLinuxProcessSupervisor::~HostdLinuxProcessSupervisor() = default;
 HostdProcessPreparedResult HostdLinuxProcessSupervisor::prepare(
     const HostdProcessPrepareRequest& request, int executable_fd,
     std::optional<int> code_fd, int working_directory_fd,
-    int worker_bootstrap_fd) {
+    int worker_bootstrap_fd,
+    std::optional<int> profiler_executable_fd,
+    std::optional<int> profiler_authority_fd) {
   // Reattestation happens on retries too, so a successful replay never turns
   // descriptor role/count validation into a confused-deputy bypass.
   ResolvedLaunch resolved = ResolvedLaunch::adopt_delegated(
-      request.launch, executable_fd, code_fd, working_directory_fd);
+      request.launch, executable_fd, code_fd, working_directory_fd,
+      profiler_executable_fd, profiler_authority_fd);
   std::scoped_lock lock(mutex_);
   const auto existing = entries_.find(request.launch.identity.launch_event_id);
   if (existing != entries_.end()) {
