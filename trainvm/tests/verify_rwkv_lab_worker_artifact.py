@@ -3,10 +3,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import fcntl
+import os
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
+from concurrent import futures
 from pathlib import Path
 
 
@@ -16,6 +20,200 @@ def digest(path: Path) -> str:
         for block in iter(lambda: stream.read(1 << 20), b""):
             value.update(block)
     return "sha256:" + value.hexdigest()
+
+
+def canonical(value: object) -> bytes:
+    return json.dumps(
+        value, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+
+
+def content_digest(value: bytes) -> str:
+    return "sha256:" + hashlib.sha256(value).hexdigest()
+
+
+def run_completed_replay(
+    archive: Path,
+    source_root: Path,
+    code_fingerprint: str,
+    capabilities: list[str],
+    directory: Path,
+) -> None:
+    sys.path.insert(0, str(source_root))
+    import grpc
+    from trainvm.v1 import trainvm_pb2 as wire
+    from trainvm.v1 import trainvm_pb2_grpc as wire_grpc
+
+    socket_path = directory / "worker-control.sock"
+    target = f"unix:{socket_path}"
+    invocation_body = {
+        "adapter": {
+            "adapter": "rwkv-lab.mageflow-appearance-expert",
+            "contract": "rwkv_lab.mageflow_appearance_expert.v1.Train",
+            "operation": "train",
+            "runtime": "python_worker",
+            "version": "1.0.0",
+        },
+        "api_version": "trainvm.worker-invocation/v1",
+        "attempt_id": "artifact-attempt",
+        "controls": {},
+        "dispatch_id": "artifact-dispatch",
+        "effective_control_revision": 0,
+        "execution": None,
+        "host_id": "sha256:" + "b" * 64,
+        "inputs": {},
+        "node_id": "train",
+        "observability": {},
+        "plan_hash": "c" * 64,
+        "plan_revision": 1,
+        "publishes": {},
+        "resources": {},
+        "run_id": "artifact-run",
+        "training": None,
+        "workspace": {},
+    }
+    invocation = canonical(
+        {
+            **invocation_body,
+            "invocation_digest": content_digest(canonical(invocation_body)),
+        }
+    )
+    observed: list[object] = []
+    errors: list[BaseException] = []
+
+    class Controller(wire_grpc.WorkerControlServicer):
+        def Connect(self, request_iterator, context):  # noqa: N802
+            try:
+                first = next(request_iterator)
+                if first.WhichOneof("message") != "hello":
+                    raise AssertionError("packaged worker did not send Hello first")
+                hello = first.hello
+                observed.append(hello)
+                yield wire.ControllerToWorker(
+                    welcome=wire.WorkerWelcome(
+                        disposition=wire.WorkerWelcome.DISPOSITION_ALREADY_COMPLETED,
+                        journal_id="artifact-journal",
+                        plan_hash="c" * 64,
+                        plan_revision=1,
+                        run_id=hello.run_id,
+                        run_revision=2,
+                        node_id=hello.node_id,
+                        attempt_id=hello.attempt_id,
+                        launch_nonce=hello.launch_nonce,
+                        concurrency_key=hello.concurrency_key,
+                        lease_id=hello.lease_id,
+                        fencing_token=hello.fencing_token,
+                        dispatch_id="artifact-dispatch",
+                        component="trainer",
+                        operation="train",
+                        acknowledged_worker_sequence=0,
+                        canonical_invocation_json=invocation,
+                        invocation_digest=json.loads(invocation)[
+                            "invocation_digest"
+                        ],
+                    )
+                )
+                for unexpected in request_iterator:
+                    observed.append(unexpected)
+            except BaseException as error:  # noqa: BLE001
+                errors.append(error)
+                context.abort(grpc.StatusCode.INTERNAL, "fixture rejected worker")
+
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=1))
+    wire_grpc.add_WorkerControlServicer_to_server(Controller(), server)
+    if server.add_insecure_port(target) != 1:
+        raise SystemExit("could not bind packaged-worker gRPC fixture")
+    server.start()
+    bootstrap_body = {
+        "adapter": "rwkv-lab.mageflow-appearance-expert",
+        "adapter_version": "1.0.0",
+        "api_version": "trainvm.worker-bootstrap/v1",
+        "attempt_id": "artifact-attempt",
+        "capabilities": capabilities,
+        "code_fingerprint": code_fingerprint,
+        "concurrency_key": "gpu:0",
+        "controller_target": target,
+        "fencing_token": 1,
+        "last_acked_controller_sequence": 0,
+        "launch_nonce": "artifact-launch",
+        "lease_id": "artifact-lease",
+        "node_id": "train",
+        "run_id": "artifact-run",
+    }
+    bootstrap = canonical(
+        {
+            **bootstrap_body,
+            "bootstrap_digest": content_digest(canonical(bootstrap_body)),
+        }
+    )
+    descriptor = os.memfd_create(
+        "trainvm-artifact-bootstrap", getattr(os, "MFD_ALLOW_SEALING", 0x0002)
+    )
+    output_read, output_write = os.pipe2(os.O_CLOEXEC)
+    try:
+        os.write(descriptor, bootstrap)
+        fcntl.fcntl(
+            descriptor,
+            getattr(fcntl, "F_ADD_SEALS", 1033),
+            getattr(fcntl, "F_SEAL_WRITE", 0x0008)
+            | getattr(fcntl, "F_SEAL_GROW", 0x0004)
+            | getattr(fcntl, "F_SEAL_SHRINK", 0x0002)
+            | getattr(fcntl, "F_SEAL_SEAL", 0x0001),
+        )
+        actions = [
+            (os.POSIX_SPAWN_DUP2, descriptor, 4),
+            (os.POSIX_SPAWN_DUP2, output_write, 1),
+            (os.POSIX_SPAWN_DUP2, output_write, 2),
+            (os.POSIX_SPAWN_CLOSE, output_read),
+        ]
+        child = os.posix_spawn(
+            sys.executable,
+            [
+                sys.executable,
+                "-I",
+                str(archive),
+                "--trainvm-bootstrap-fd=4",
+            ],
+            {},
+            file_actions=actions,
+        )
+        os.close(output_write)
+        output_write = -1
+        deadline = time.monotonic() + 30
+        status = None
+        while time.monotonic() < deadline:
+            waited, candidate = os.waitpid(child, os.WNOHANG)
+            if waited == child:
+                status = candidate
+                break
+            time.sleep(0.01)
+        if status is None:
+            os.kill(child, 9)
+            os.waitpid(child, 0)
+            raise SystemExit("packaged worker replay timed out")
+        output = bytearray()
+        while block := os.read(output_read, 64 * 1024):
+            output.extend(block)
+        if os.waitstatus_to_exitcode(status) != 0:
+            raise SystemExit(
+                "packaged worker replay failed: "
+                + output.decode("utf-8", errors="replace")[-2000:]
+            )
+    finally:
+        if output_write >= 0:
+            os.close(output_write)
+        os.close(output_read)
+        os.close(descriptor)
+        server.stop(0).wait()
+    if errors or len(observed) != 1:
+        raise SystemExit(f"packaged worker replay protocol drift: {errors!r}")
+    hello = observed[0]
+    if (
+        hello.code_fingerprint != code_fingerprint
+        or list(hello.capabilities) != capabilities
+        or hello.launch_nonce != "artifact-launch"
+    ):
+        raise SystemExit("packaged worker Hello disagrees with sealed bootstrap")
 
 
 def main() -> int:
@@ -118,6 +316,13 @@ def main() -> int:
             for profile in profiles
         ):
             raise SystemExit("deployment registry drifted from sealed worker artifact")
+        run_completed_replay(
+            first,
+            source_root,
+            digest(first),
+            deployment["provided_capabilities"],
+            directory,
+        )
 
         deployment_directory = directory / "deployment"
         materialize = [

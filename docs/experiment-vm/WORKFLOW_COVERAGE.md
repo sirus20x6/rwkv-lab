@@ -186,8 +186,9 @@ training acceptance.
 
 The separate `rwkv_lab_worker_artifact` CTest now closes the non-GPU project-code deployment
 boundary: it builds the real worker zipapp twice, verifies exact bytes and every embedded source
-digest, loads it under isolated Python with an empty environment, lowers all four real adapter
-profiles into the v3 host registry, and materializes the same deployment twice without drift. It
+digest, loads it under isolated Python with an empty environment, completes a real sealed-bootstrap
+gRPC already-completed replay, lowers all four real adapter profiles into the v3 host registry, and
+materializes the same deployment twice without drift. It
 does not replace the outstanding privileged hostd or real trainer qualification scenarios below.
 
 1. Validate and plan the example MageFlow document without starting a worker.

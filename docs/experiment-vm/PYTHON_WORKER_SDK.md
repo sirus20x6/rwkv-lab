@@ -145,8 +145,9 @@ override, or entry-point path.
 working directory, and trusted roots into matching reflected adapter and `trainvm.host-launches/v3`
 documents. Every one of the four profiles advertises the capability set implemented by those exact
 worker bytes; requested capabilities may only narrow it. The artifact execution gate loads the
-zipapp under `python -I` with an empty environment and verifies that the generated host registry
-binds the archive digest and isolation-before-code argv ABI.
+zipapp under `python -I` with an empty environment, verifies that the generated host registry binds
+the archive digest and isolation-before-code argv ABI, passes a real sealed bootstrap at fd 4, and
+completes a gRPC Hello/Welcome already-completed replay without importing trainer tensor work.
 
 Trainer configuration is an inline object in invocation `inputs.config`. Because the invocation is
 canonical and content-addressed, these values cannot change between submission and execution. A
