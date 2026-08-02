@@ -1,7 +1,7 @@
 {
   "api_version": "trainvm.compatibility-workflows/v1",
   "authority": "compatibility_evidence_only",
-  "source_tree_digest": "sha256:8ee68d210fd69400cdcc191272d4b567880f2e2b3251c4cc3ed20e9592383857",
+  "source_tree_digest": "sha256:e05be8f57059689e015a5aff6ec3aba63ac0e49952da79c84a8a808efdc3ac0f",
   "entries": [
     {
       "stable_id": "rwkv.synthetic-campaign",
@@ -115,9 +115,9 @@
       ],
       "stateful": true,
       "operation_role": "distillation",
-      "notes": "Manifest-bound multi-teacher representation compressor with atomic sampler and RNG recovery.",
+      "notes": "Manifest-bound multi-teacher representation compressor with atomic sampler and RNG recovery. The sealed rwkv-lab.vision-teacher-compressor@1.0.0 TrainVM adapter provides content authority, typed training composition, controller-selected resume, live telemetry/profiling, and required checkpoint publication; exact trajectory equivalence remains unproven.",
       "observed_invocation": "python_module",
-      "resume_evidence": "exact_candidate",
+      "resume_evidence": "compatible",
       "legacy_invocation_display": "python -m rwkv_lab.vision_teacher_compressor --data <train.jsonl> --eval-data <eval.jsonl> --out <directory>"
     },
     {

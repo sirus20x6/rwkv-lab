@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from argparse import Namespace
 from collections.abc import Callable, Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
@@ -31,6 +32,7 @@ from .posttraining import RWKVPostTrainConfig
 from .qwen_controls import lower_initial_qwen_controls
 from .rwkv_scratch import RWKVScratchTrainConfig
 from .transformer_mla import PROFILE_ADAPTERS, TransformerMLATrainConfig
+from .vision_compressor import VisionTeacherCompressorConfig
 
 
 class AdapterDispatchError(ValueError):
@@ -691,6 +693,175 @@ def _rwkv_posttraining(
     )
 
 
+def _vision_teacher_compressor(
+    invocation: WorkerInvocation,
+    components: WorkerTrainingComponents,
+    step_profiler: WorkerStepProfiler | None = None,
+    observability: WorkerObservability | None = None,
+    controls: WorkerControlRuntime | None = None,
+) -> HandlerResult:
+    """Run the canonical multi-teacher vision compressor under TrainVM authority."""
+
+    if not declares_checkpoint(invocation):
+        raise AdapterDispatchError(
+            "vision compressor invocation omits its required checkpoint artifact"
+        )
+    effective_controls = (
+        getattr(controls, "effective_values", {}) if controls is not None else {}
+    )
+    if not isinstance(effective_controls, Mapping):
+        raise AdapterDispatchError("vision compressor received an invalid control snapshot")
+    if effective_controls:
+        raise AdapterDispatchError(
+            "vision compressor v1 does not declare initial controls"
+        )
+
+    verification = (
+        observability.keepalive(0, "verifying_inputs")
+        if observability is not None
+        else nullcontext()
+    )
+    with verification:
+        paths = WorkspacePathAuthority.from_workspace(
+            invocation.workspace, require_content=True
+        )
+        config = VisionTeacherCompressorConfig(
+            **read_inline_config(invocation.inputs)
+        )
+        train_manifest = paths.read_path(
+            config.train_manifest, label="train_manifest", kind="file"
+        )
+        eval_manifest = paths.read_path(
+            config.eval_manifest, label="eval_manifest", kind="file"
+        )
+        for label, manifest in (
+            ("train_manifest", train_manifest),
+            ("eval_manifest", eval_manifest),
+        ):
+            paths.verify_jsonl_file_references(
+                manifest,
+                fields=("image", "image_path"),
+                label=label,
+            )
+        moon_cache = paths.read_path(
+            config.moon_cache, label="moon_cache", kind="directory"
+        )
+        fusion_cache = paths.read_path(
+            config.fusion_cache, label="fusion_cache", kind="directory"
+        )
+        moonvit = paths.read_path(
+            config.moonvit_checkpoint, label="moonvit_checkpoint", kind="file"
+        )
+        siglip2 = paths.read_path(
+            config.siglip2_model, label="siglip2_model", kind="directory"
+        )
+        dinov2 = paths.read_path(
+            config.dinov2_model, label="dinov2_model", kind="directory"
+        )
+        sam = paths.read_path(config.sam_model, label="sam_model", kind="directory")
+        init_from = (
+            paths.read_path(config.init_from, label="init_from", kind="file")
+            if config.init_from
+            else None
+        )
+        run_directory = paths.exact_run_directory(config.output_dir)
+        resume_payload = _resume_payload(
+            invocation,
+            paths,
+            required_state=frozenset(
+                {
+                    "component_composition",
+                    "control_revision",
+                    "data_cursor",
+                    "model",
+                    "optimizer",
+                    "rng_accelerator",
+                    "rng_python",
+                    "rng_torch",
+                }
+            ),
+        )
+        resume_file = (
+            paths.read_path(
+                str(resume_payload / "state.pt"),
+                label="resume checkpoint state",
+                kind="file",
+                require_content_identity=False,
+            )
+            if resume_payload is not None
+            else None
+        )
+
+    from rwkv_lab.vision_teacher_compressor import train
+
+    result = train(
+        Namespace(
+            data=train_manifest,
+            eval_data=eval_manifest,
+            moon_cache=moon_cache,
+            fusion_cache=fusion_cache,
+            out=run_directory,
+            moonvit=moonvit,
+            siglip2=str(siglip2),
+            dinov2=str(dinov2),
+            sam=str(sam),
+            steps=config.steps,
+            batch=config.batch_size,
+            workers=config.workers,
+            lr=config.learning_rate,
+            weight_decay=config.weight_decay,
+            teacher_dropout=config.teacher_dropout,
+            relational_weight=config.relational_weight,
+            variance_weight=config.variance_weight,
+            covariance_weight=config.covariance_weight,
+            diversity_weight=config.diversity_weight,
+            max_gradient_norm=config.max_gradient_norm,
+            eval_every=config.eval_every,
+            checkpoint_every=config.checkpoint_every,
+            log_every=config.log_every,
+            seed=config.seed,
+            resume="none",
+            resume_from=str(resume_file) if resume_file is not None else None,
+            init_from=init_from,
+            preflight_only=False,
+            device=config.device,
+        ),
+        worker_components=components,
+        worker_step_profiler=step_profiler or NullStepProfiler(),
+        worker_observability=observability,
+        worker_controls=controls,
+    )
+    if not isinstance(result, Mapping):
+        raise AdapterDispatchError("vision compressor omitted its terminal result")
+    status = result.get("status")
+    if status not in {"complete", "interrupted"}:
+        raise AdapterDispatchError("vision compressor returned an invalid status")
+    step = result.get("step")
+    request = checkpoint_request(
+        invocation,
+        run_directory,
+        result.get("checkpoint"),
+        step,
+        resume_grade="compatible",
+        state_components=(
+            "component_composition",
+            "control_revision",
+            "data_cursor",
+            "model",
+            "optimizer",
+            "rng_accelerator",
+            "rng_python",
+            "rng_torch",
+        ),
+    )
+    return HandlerResult(
+        "operation.failed" if status == "interrupted" else "worker.completed",
+        {"reason": completion_reason(status)},
+        optimizer_step=request.optimizer_step,
+        checkpoint_requests=(request,),
+    )
+
+
 def _transformer_mla(
     invocation: WorkerInvocation,
     components: WorkerTrainingComponents,
@@ -904,6 +1075,12 @@ _HANDLERS: Mapping[AdapterKey, Handler] = {
         "train",
         "rwkv_lab.rwkv_scratch.v1.Train",
     ): _rwkv_scratch,
+    (
+        "rwkv-lab.vision-teacher-compressor",
+        "1.0.0",
+        "train",
+        "rwkv_lab.vision_teacher_compressor.v1.Train",
+    ): _vision_teacher_compressor,
     **{
         (
             adapter,

@@ -10,7 +10,7 @@
       ".py"
     ]
   },
-  "source_tree_digest": "sha256:52c6cbe4b8a4aaa6b51d1e99af0e44bc26e4ae9af6a04459d7abd65aa7df3e6f",
+  "source_tree_digest": "sha256:6aa519e3e448b01bc4755dd3fece3d1826d7c72b434d9b9217ec731fca60bfed",
   "entries": [
     {
       "source_path": "src/rwkv_lab/__init__.py",
@@ -3164,9 +3164,9 @@
         "read_source",
         "write_artifact"
       ],
-      "resume_relevance": "exact_candidate",
+      "resume_relevance": "compatible",
       "compatibility_workflow_id": "vision.teacher-compressor",
-      "source_sha256": "sha256:8ab953ee5cc2c2e6f237e86d48c82a763f8b52d14a33809756124f74c51eaf2c",
+      "source_sha256": "sha256:d7e9697920bdc1294539282b0698ef8c8f30421b06e6af2e3b3f02b768d48323",
       "family": "vision_multimodal",
       "coverage": "direct",
       "consumers": [

@@ -15,9 +15,11 @@ import os
 import random
 import signal
 import time
+from collections.abc import Iterator, Sequence
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import Any
 
 import torch
 from torch import Tensor, nn
@@ -26,7 +28,6 @@ from torch.utils.data import DataLoader, Dataset, Sampler
 
 from rwkv_lab.moonvit import checkpoint_fingerprint, feature_cache_key
 from rwkv_lab.vision_fusion import VisionTowerConfig, aligned_feature_cache_key
-
 
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMA = 1
@@ -53,8 +54,9 @@ def normalized_target(value: Tensor) -> Tensor:
 class CanonicalTeacherCompressor(nn.Module):
     """Reconcile six aligned teacher streams into one fixed latent array."""
 
-    def __init__(self, config: CompressorConfig = CompressorConfig()):
+    def __init__(self, config: CompressorConfig | None = None):
         super().__init__()
+        config = config or CompressorConfig()
         if config.tokens < 1 or config.latent_width % config.heads:
             raise ValueError("tokens must be positive and latent_width divisible by heads")
         self.config = config
@@ -305,6 +307,22 @@ def _durable_save(payload: object, path: Path) -> None:
         os.close(directory)
 
 
+def _replace_hardlink(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+    try:
+        temporary.unlink(missing_ok=True)
+        os.link(source, temporary)
+        os.replace(temporary, destination)
+        directory = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _write_json(path: Path, value: object) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
@@ -313,14 +331,20 @@ def _write_json(path: Path, value: object) -> None:
 
 def checkpoint_payload(*, model: nn.Module, optimizer: torch.optim.Optimizer,
                        sampler: EpochBatchSampler, step: int, best_eval: float,
-                       args: argparse.Namespace, config: CompressorConfig) -> dict:
+                       args: argparse.Namespace, config: CompressorConfig,
+                       component_evidence: dict[str, Any] | None = None,
+                       component_composition_digest: str | None = None,
+                       worker_control_state: dict[str, object] | None = None) -> dict:
     return {"schema": SCHEMA, "step": step, "best_eval": best_eval,
             "model": _cpu_state(model), "optimizer": optimizer.state_dict(),
             "sampler": sampler.state_dict(), "config": asdict(config),
             "manifests": {"train": _manifest_sha256(args.data),
                           "eval": _manifest_sha256(args.eval_data)},
             "rng": {"python": random.getstate(), "torch": torch.get_rng_state(),
-                    "cuda": torch.cuda.get_rng_state_all()}, "args": vars(args)}
+                    "cuda": torch.cuda.get_rng_state_all()}, "args": vars(args),
+            "component_evidence": component_evidence,
+            "component_composition_digest": component_composition_digest,
+            "worker_control_state": worker_control_state}
 
 
 @torch.no_grad()
@@ -385,8 +409,90 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def main(argv: Sequence[str] | None = None) -> None:
-    args = parse_args(argv)
+def train(
+    args: argparse.Namespace,
+    *,
+    worker_components: Any | None = None,
+    worker_step_profiler: Any | None = None,
+    worker_observability: Any | None = None,
+    worker_controls: Any | None = None,
+) -> dict[str, Any]:
+    """Execute one compressor run under optional sealed TrainVM services."""
+
+    component_evidence = None
+    component_composition_digest = None
+    precision_policy = None
+    learning_rate_schedule = None
+    weight_decay_schedule = None
+    if worker_components is not None:
+        worker_components.require_implementation(
+            "optimizer",
+            category="optimizer",
+            allowed=frozenset({"rwkv_lab.optimizer.torch_adamw.v1"}),
+        )
+        expected_optimizer = {
+            "learning_rate": args.lr,
+            "beta1": 0.9,
+            "beta2": 0.999,
+            "epsilon": 1.0e-8,
+            "weight_decay": args.weight_decay,
+            "foreach": False,
+            "fused": True,
+        }
+        if dict(
+            worker_components.configuration("optimizer", category="optimizer")
+        ) != expected_optimizer:
+            raise ValueError(
+                "authority optimizer composition disagrees with compressor configuration"
+            )
+        worker_components.require_implementation(
+            "learning_rate",
+            category="learning_rate_schedule",
+            allowed=frozenset({"rwkv_lab.schedule.constant.v1"}),
+        )
+        if dict(
+            worker_components.configuration(
+                "learning_rate", category="learning_rate_schedule"
+            )
+        ):
+            raise ValueError("constant learning-rate composition must be empty")
+        if dict(
+            worker_components.configuration(
+                "gradient_clipping", category="gradient_clipping"
+            )
+        ) != {
+            "max_norm": args.max_gradient_norm,
+            "norm_type": 2.0,
+            "error_if_nonfinite": False,
+        }:
+            raise ValueError(
+                "authority gradient-clipping composition disagrees with compressor configuration"
+            )
+        if dict(
+            worker_components.configuration(
+                "weight_decay", category="weight_decay_schedule"
+            )
+        ) != {"weight_decay": args.weight_decay}:
+            raise ValueError(
+                "authority weight-decay composition disagrees with compressor configuration"
+            )
+        worker_components.require_implementation(
+            "precision",
+            category="precision",
+            allowed=frozenset(
+                {"rwkv_lab.precision.fp32_parameters_bf16_compute.v1"}
+            ),
+        )
+        precision_policy = worker_components.precision()
+        component_evidence = dict(worker_components.evidence())
+        component_composition_digest = (
+            worker_components.composition.composition_digest
+        )
+
+    def reject_live_controls(_effective: object, assignments: object) -> None:
+        if assignments:
+            raise ValueError("vision compressor v1 has no live-mutable controls")
+
     torch.set_float32_matmul_precision("high")
     random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -412,24 +518,63 @@ def main(argv: Sequence[str] | None = None) -> None:
            "sam_abs_mean": float(sample_streams[-1].float().abs().mean())},
           flush=True)
     if args.preflight_only:
-        return
-    if not torch.cuda.is_available():
+        return {"status": "preflight", "step": 0, "checkpoint": ""}
+    requested_device = torch.device(getattr(args, "device", "cuda"))
+    if requested_device.type != "cuda" or not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for compressor training")
-    device = torch.device("cuda")
-    model = CanonicalTeacherCompressor(config).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr,
-                                  weight_decay=args.weight_decay, fused=True)
+    device = requested_device
+    model = CanonicalTeacherCompressor(config)
+    model = (
+        precision_policy.convert_module(model, device)
+        if precision_policy is not None
+        else model.to(device)
+    )
+    optimizer = (
+        worker_components.optimizer(model.parameters())
+        if worker_components is not None
+        else torch.optim.AdamW(
+            model.parameters(),
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+            foreach=False,
+            fused=True,
+        )
+    )
+    if worker_components is not None:
+        learning_rate_schedule = worker_components.learning_rate_schedule(optimizer)
+        weight_decay_schedule = worker_components.weight_decay_schedule(optimizer)
     sampler = EpochBatchSampler(len(train), args.batch, args.seed)
     step, best_eval = 0, math.inf
     last = args.out / "last.pt"
-    if args.resume == "auto" and last.is_file():
-        saved = torch.load(last, map_location="cpu", weights_only=False)
+    checkpoint_directory = args.out / "checkpoint-current"
+    checkpoint_state = checkpoint_directory / "state.pt"
+    resume_from = getattr(args, "resume_from", None)
+    resume_path = (
+        Path(resume_from)
+        if resume_from
+        else last
+        if args.resume == "auto" and last.is_file()
+        else None
+    )
+    if resume_path is not None:
+        saved = torch.load(resume_path, map_location="cpu", weights_only=False)
         if saved.get("schema") != SCHEMA or saved.get("config") != asdict(config):
             raise ValueError("checkpoint schema/config does not match this run")
         expected = {"train": _manifest_sha256(args.data),
                     "eval": _manifest_sha256(args.eval_data)}
         if saved.get("manifests") != expected:
             raise ValueError("checkpoint manifest fingerprints do not match")
+        if worker_components is not None and (
+            saved.get("component_evidence") != component_evidence
+            or saved.get("component_composition_digest")
+            != component_composition_digest
+        ):
+            raise ValueError("checkpoint training-component identity does not match")
+        if worker_controls is not None:
+            worker_control_state = saved.get("worker_control_state")
+            if not isinstance(worker_control_state, dict):
+                raise ValueError("checkpoint worker-control state is missing")
+            worker_controls.verify_checkpoint_state(worker_control_state)
         model.load_state_dict(saved["model"])
         optimizer.load_state_dict(saved["optimizer"])
         sampler.load_state_dict(saved["sampler"])
@@ -439,7 +584,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         torch.cuda.set_rng_state_all(saved["rng"]["cuda"])
         print({"kind": "compressor_resume", "step": step,
                "epoch": sampler.epoch, "cursor": sampler.cursor}, flush=True)
-    elif args.init_from is not None:
+    elif args.init_from:
         saved = torch.load(args.init_from, map_location="cpu", weights_only=False)
         if saved.get("schema") != SCHEMA or saved.get("config") != asdict(config):
             raise ValueError("initial checkpoint schema/config does not match this run")
@@ -466,11 +611,34 @@ def main(argv: Sequence[str] | None = None) -> None:
     elif not legacy_metrics_path.exists() and metrics_path.exists():
         os.link(metrics_path, legacy_metrics_path)
     stop = False
+
     def request_stop(_signum, _frame):
         nonlocal stop
         stop = True
+
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
+
+    def save_current_checkpoint() -> None:
+        payload = checkpoint_payload(
+            model=model,
+            optimizer=optimizer,
+            sampler=sampler,
+            step=step,
+            best_eval=best_eval,
+            args=args,
+            config=config,
+            component_evidence=component_evidence,
+            component_composition_digest=component_composition_digest,
+            worker_control_state=(
+                worker_controls.checkpoint_state()
+                if worker_controls is not None
+                else None
+            ),
+        )
+        _durable_save(payload, last)
+        _replace_hardlink(last, checkpoint_state)
+
     model.train()
     started = time.perf_counter()
     session_examples = 0
@@ -480,7 +648,14 @@ def main(argv: Sequence[str] | None = None) -> None:
             train, batch_sampler=sampler, num_workers=args.workers,
             pin_memory=True, persistent_workers=args.workers > 0,
             prefetch_factor=2 if args.workers > 0 else None)
-        for moon, fusion in train_loader:
+        loaded_batches = (
+            worker_step_profiler.track_input(train_loader)
+            if worker_step_profiler is not None
+            else train_loader
+        )
+        for moon, fusion in loaded_batches:
+            if worker_controls is not None:
+                worker_controls.microbatch(step + 1, reject_live_controls)
             batch_started = time.perf_counter()
             moon = moon.to(device, non_blocking=True)
             fusion = fusion.to(device, non_blocking=True)
@@ -497,11 +672,28 @@ def main(argv: Sequence[str] | None = None) -> None:
                     covariance_weight=args.covariance_weight,
                     diversity_weight=args.diversity_weight)
             loss.backward()
-            gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            gradient_norm = (
+                worker_components.gradient_clipping(model.parameters())
+                if worker_components is not None
+                else torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), args.max_gradient_norm
+                )
+            )
+            used_learning_rate = float(optimizer.param_groups[0]["lr"])
             optimizer.step()
+            if learning_rate_schedule is not None:
+                learning_rate_schedule.step()
+            if weight_decay_schedule is not None:
+                weight_decay_schedule.step(step + 1)
             sampler.consumed(moon.shape[0])
             session_examples += moon.shape[0]
             step += 1
+            if worker_step_profiler is not None:
+                worker_step_profiler.step(step)
+            if worker_observability is not None:
+                worker_observability.optimizer_step(step)
+            if worker_controls is not None:
+                worker_controls.optimizer_step(step, reject_live_controls)
             batch_finished = time.perf_counter()
             if step % args.log_every == 0 or step == 1:
                 elapsed = batch_finished - started
@@ -518,37 +710,128 @@ def main(argv: Sequence[str] | None = None) -> None:
                     handle.write(json.dumps(row) + "\n")
                 _write_json(args.out / "status.json", row)
                 print(row, flush=True)
+                if worker_observability is not None:
+                    for name, value in (
+                        ("train.loss", row["loss"]),
+                        ("train.learning_rate", used_learning_rate),
+                        ("train.gradient_norm", row["gradient_norm"]),
+                        (
+                            "train.examples_per_second",
+                            row["session_examples_per_s"],
+                        ),
+                        ("train.step_seconds", row["step_s"]),
+                        ("train.reconstruction", row["reconstruction"]),
+                        ("train.relational", row["relational"]),
+                        ("train.latent_std", row["latent_std"]),
+                    ):
+                        worker_observability.publish_if_declared(
+                            name, value, step=step
+                        )
             previous_batch_finished = batch_finished
             if step % args.eval_every == 0:
-                values = evaluate(model, eval_loader, args, device)
+                if worker_controls is not None:
+                    worker_controls.evaluation(step, reject_live_controls)
+                with (
+                    worker_observability.keepalive(step, "evaluating")
+                    if worker_observability is not None
+                    else nullcontext()
+                ):
+                    values = evaluate(model, eval_loader, args, device)
                 row = {"kind": "eval", "step": step, **values, "time": time.time()}
                 with metrics_path.open("a") as handle:
                     handle.write(json.dumps(row) + "\n")
                 print(row, flush=True)
+                if worker_observability is not None:
+                    for name, value in (
+                        ("eval.loss", values["loss"]),
+                        ("eval.reconstruction", values["reconstruction"]),
+                        ("eval.relational", values["relational"]),
+                        ("eval.latent_std", values["latent_std"]),
+                    ):
+                        worker_observability.publish_if_declared(
+                            name, value, step=step
+                        )
                 if values["loss"] < best_eval:
                     best_eval = values["loss"]
                     payload = checkpoint_payload(model=model, optimizer=optimizer,
                         sampler=sampler, step=step, best_eval=best_eval,
-                        args=args, config=config)
+                        args=args, config=config,
+                        component_evidence=component_evidence,
+                        component_composition_digest=component_composition_digest,
+                        worker_control_state=(
+                            worker_controls.checkpoint_state()
+                            if worker_controls is not None else None))
                     _durable_save(payload, args.out / "best.pt")
                     _write_json(args.out / "best.json",
                                 {"step": step, "eval_loss": best_eval})
-            if step % args.checkpoint_every == 0 or step >= args.steps or stop:
-                payload = checkpoint_payload(model=model, optimizer=optimizer,
-                    sampler=sampler, step=step, best_eval=best_eval,
-                    args=args, config=config)
-                _durable_save(payload, last)
+            checkpoint_requested = bool(
+                worker_controls is not None
+                and worker_controls.checkpoint_boundary_requested
+            )
+            if (
+                step % args.checkpoint_every == 0
+                or step >= args.steps
+                or stop
+                or checkpoint_requested
+            ):
+                if worker_controls is not None:
+                    worker_controls.checkpoint(step, reject_live_controls)
+                with (
+                    worker_observability.keepalive(step, "checkpointing")
+                    if worker_observability is not None
+                    else nullcontext()
+                ):
+                    save_current_checkpoint()
                 print({"kind": "checkpoint", "step": step, "path": str(last)},
                       flush=True)
+                if (
+                    worker_controls is not None
+                    and worker_controls.checkpoint_completion_requested
+                ):
+                    worker_controls.publish_requested_checkpoint_directory(
+                        str(checkpoint_directory),
+                        optimizer_step=step,
+                        resume_grade="compatible",
+                        state_components=(
+                            "component_composition",
+                            "control_revision",
+                            "data_cursor",
+                            "model",
+                            "optimizer",
+                            "rng_accelerator",
+                            "rng_python",
+                            "rng_torch",
+                        ),
+                        progress=(
+                            lambda _bytes, current_step=step: worker_observability.optimizer_step(
+                                current_step, "checkpointing"
+                            )
+                            if worker_observability is not None
+                            else None
+                        ),
+                    )
             if step >= args.steps or stop:
                 break
         # DataLoader reached the end of the epoch. consumed() has already
         # advanced epoch/cursor exactly when the final short batch was used.
-    if not last.is_file() or torch.load(last, map_location="cpu", weights_only=False)["step"] != step:
-        _durable_save(checkpoint_payload(model=model, optimizer=optimizer,
-            sampler=sampler, step=step, best_eval=best_eval, args=args,
-            config=config), last)
+    if (
+        not last.is_file()
+        or torch.load(last, map_location="cpu", weights_only=False)["step"] != step
+    ):
+        save_current_checkpoint()
+    elif not checkpoint_state.is_file():
+        _replace_hardlink(last, checkpoint_state)
     print({"kind": "compressor_exit", "step": step, "stopped": stop}, flush=True)
+    return {
+        "status": "interrupted" if stop else "complete",
+        "step": step,
+        "checkpoint": str(checkpoint_directory.resolve()),
+        "best_eval": best_eval,
+    }
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    train(parse_args(argv))
 
 
 if __name__ == "__main__":
