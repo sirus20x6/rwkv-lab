@@ -1,7 +1,7 @@
 {
   "api_version": "trainvm.compatibility-workflows/v1",
   "authority": "compatibility_evidence_only",
-  "source_tree_digest": "sha256:cebfe14f87072a587f2267d3518e061a9956c818ab7ab8d1354bb4d0a6e7e2bf",
+  "source_tree_digest": "sha256:56f28f93f84ea231fb7fd4699b68b8f8499b0013de0ff76061cccda08039faae",
   "entries": [
     {
       "stable_id": "rwkv.synthetic-campaign",
@@ -141,7 +141,7 @@
       ],
       "stateful": true,
       "operation_role": "distillation",
-      "notes": "Raw-pixel RWKV student trainer restores sampler and RNG state but does not bind every manifest, cache, baseline, compressor, and native-head input.",
+      "notes": "Raw-pixel RWKV student trainer. The sealed rwkv-lab.vision-rwkv-student@1.0.0 TrainVM profile content-binds baseline/compressor/native-head checkpoints, manifests, caches, teacher/model identities, and vocabulary; enforces the student-only trainable scope; consumes typed optimizer/schedule/decay/clipping/precision components; restores the exact sampler cursor and Python/Torch/CUDA RNG; emits live telemetry/profiling; and publishes required compatible checkpoints. Exact trajectory equivalence remains unproven.",
       "observed_invocation": "python_module",
       "resume_evidence": "compatible",
       "legacy_invocation_display": "python -m rwkv_lab.vision_rwkv_student_train <arguments>"

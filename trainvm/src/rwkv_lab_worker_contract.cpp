@@ -114,6 +114,16 @@ OperationAuthoringDeclaration vision_native_head_authoring() {
   return authoring;
 }
 
+OperationAuthoringDeclaration vision_rwkv_student_authoring() {
+  OperationAuthoringDeclaration authoring = checkpoint_authoring();
+  auto& checkpoint = authoring.outputs.at("checkpoint");
+  checkpoint.required = true;
+  checkpoint.artifact_schema = "rwkv-lab.vision-rwkv-student-checkpoint.v1";
+  checkpoint.description =
+      "Required compatible raw-pixel Vision-RWKV student checkpoint.";
+  return authoring;
+}
+
 TrainingCompositionContract vision_native_head_composition() {
   return {
       .model_family = "vision",
@@ -139,6 +149,14 @@ TrainingCompositionContract vision_native_head_composition() {
                  "fp32_parameters_bf16_compute", "1.0.0"}}},
           },
   };
+}
+
+TrainingCompositionContract vision_rwkv_student_composition() {
+  TrainingCompositionContract composition = vision_native_head_composition();
+  composition.allowed_components->at("precision") = {
+      {TrainingComponentCategory::precision,
+       "bf16_parameters_fp32_reductions", "1.0.0"}};
+  return composition;
 }
 
 OperationAuthoringDeclaration rlvr_authoring() {
@@ -377,6 +395,11 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
       code_fingerprint, vision_native_head_composition(),
       resumable_training_lifecycle(), vision_native_head_authoring()));
   profiles.push_back(profile(
+      key("rwkv-lab.vision-rwkv-student",
+          "rwkv_lab.vision_rwkv_student.v1.Train"),
+      code_fingerprint, vision_rwkv_student_composition(),
+      resumable_training_lifecycle(), vision_rwkv_student_authoring()));
+  profiles.push_back(profile(
       key("rwkv-lab.rwkv-rlvr", "rwkv_lab.rwkv_rlvr.v1.Train"),
       code_fingerprint, rlvr_composition(),
       {.stateful = true,
@@ -525,6 +548,10 @@ rwkv_lab_worker_runtime_requirements() {
            {"grpcio", "numpy", "pillow", "protobuf", "safetensors",
             "torch", "transformers"})},
       {"rwkv-lab.vision-native-head",
+       canonical_distributions(
+           {"einops", "grpcio", "numpy", "pillow", "protobuf",
+            "safetensors", "torch", "transformers"})},
+      {"rwkv-lab.vision-rwkv-student",
        canonical_distributions(
            {"einops", "grpcio", "numpy", "pillow", "protobuf",
             "safetensors", "torch", "transformers"})},

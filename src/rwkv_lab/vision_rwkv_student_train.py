@@ -13,16 +13,15 @@ canonical compressor is an inference dependency.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import math
 import os
 import random
 import signal
 import time
+from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
-from typing import Iterator, Sequence
 
 import numpy as np
 import torch
@@ -53,7 +52,6 @@ from rwkv_lab.vision_train import (
     supervised_positions,
     visual_insert_positions,
 )
-
 
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMA = 1
@@ -256,13 +254,17 @@ def _evaluate(loader: DataLoader, rows: list[dict], *, student, compressor,
 
 
 def _checkpoint(*, student, optimizer, sampler, step: int, best_ppl: float,
-                args, config: VisionRWKVConfig) -> dict:
+                args, config: VisionRWKVConfig, component_evidence=None,
+                component_composition_digest=None, worker_control_state=None) -> dict:
     return {
         "schema": SCHEMA, "step": int(step), "best_ppl": float(best_ppl),
         "student": {name: value.detach().cpu()
                     for name, value in student.state_dict().items()},
         "optimizer": optimizer.state_dict(), "sampler": sampler.state_dict(),
         "config": asdict(config), "args": vars(args),
+        "component_evidence": component_evidence,
+        "component_composition_digest": component_composition_digest,
+        "worker_control_state": worker_control_state,
         "rng": {"python": random.getstate(), "torch": torch.get_rng_state(),
                 "cuda": torch.cuda.get_rng_state_all()},
     }
@@ -300,6 +302,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--checkpoint-every", type=int, default=250)
     parser.add_argument("--seed", type=int, default=20260716)
     parser.add_argument("--resume", choices=("auto", "none"), default="auto")
+    parser.add_argument("--resume-from", default="")
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--vocab",
+        default=str(ROOT / "src/rwkv_lab/assets/rwkv_vocab_v20230424.txt"),
+    )
     parser.add_argument("--image-size", type=int, default=512)
     parser.add_argument("--grid-size", type=int, default=16)
     parser.add_argument("--hidden-size", type=int, default=2048)
@@ -308,11 +316,85 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ffn-hidden", type=int, default=7168)
     parser.add_argument("--no-checkpoint-blocks", action="store_true")
     parser.add_argument("--preflight-only", action="store_true")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.device != "cuda":
+        parser.error("--device must be cuda")
+    return args
 
 
-def main(argv: Sequence[str] | None = None) -> None:
-    args = parse_args(argv)
+def train(
+    args: argparse.Namespace,
+    *,
+    worker_components=None,
+    worker_step_profiler=None,
+    worker_observability=None,
+    worker_controls=None,
+) -> dict:
+    component_evidence = None
+    component_composition_digest = None
+    learning_rate_schedule = None
+    weight_decay_schedule = None
+    if worker_components is not None:
+        worker_components.require_implementation(
+            "optimizer",
+            category="optimizer",
+            allowed=frozenset({"rwkv_lab.optimizer.torch_adamw_no_decay.v2"}),
+        )
+        if dict(
+            worker_components.configuration("optimizer", category="optimizer")
+        ) != {
+            "learning_rate": args.lr,
+            "beta1": 0.9,
+            "beta2": 0.95,
+            "epsilon": 1.0e-8,
+            "foreach": False,
+            "fused": True,
+        }:
+            raise ValueError(
+                "authority optimizer composition disagrees with student configuration"
+            )
+        worker_components.require_implementation(
+            "learning_rate",
+            category="learning_rate_schedule",
+            allowed=frozenset({"rwkv_lab.schedule.constant.v1"}),
+        )
+        if dict(
+            worker_components.configuration(
+                "learning_rate", category="learning_rate_schedule"
+            )
+        ):
+            raise ValueError("student constant learning-rate config must be empty")
+        if dict(
+            worker_components.configuration(
+                "gradient_clipping", category="gradient_clipping"
+            )
+        ) != {
+            "max_norm": args.grad_clip,
+            "norm_type": 2.0,
+            "error_if_nonfinite": False,
+        }:
+            raise ValueError(
+                "authority gradient clipping disagrees with student configuration"
+            )
+        if dict(
+            worker_components.configuration(
+                "weight_decay", category="weight_decay_schedule"
+            )
+        ) != {"weight_decay": args.weight_decay}:
+            raise ValueError(
+                "authority weight decay disagrees with student configuration"
+            )
+        worker_components.require_implementation(
+            "precision",
+            category="precision",
+            allowed=frozenset(
+                {"rwkv_lab.precision.bf16_parameters_fp32_reductions.v1"}
+            ),
+        )
+        component_evidence = dict(worker_components.evidence())
+        component_composition_digest = (
+            worker_components.composition.composition_digest
+        )
     if not torch.cuda.is_available() and not args.preflight_only:
         raise RuntimeError("CUDA is required for student training")
     torch.set_float32_matmul_precision("high")
@@ -348,7 +430,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     del baseline_blob
     if int(baseline_args["prefix_tokens"]) != config.native_tokens:
         raise ValueError("student native-token count does not match frozen caption RWKV")
-    vocab = WorldVocab()
+    vocab = WorldVocab(args.vocab)
     train_rows, _ = prepare_examples(
         load_examples(args.data, stat_workers=32), vocab,
         prompt=str(baseline_args["prompt"]),
@@ -369,7 +451,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                "pixels": list(pixels.shape), "geometry": geometry.tolist(),
                "moon": list(moon.shape), "fusion": list(fusion.shape),
                "config": asdict(config)}, flush=True)
-        return
+        return {"status": "preflight", "step": 0, "checkpoint": ""}
 
     _atomic_json(status_path, {"state": "loading_models", "updated": time.time()})
     compressor = FrozenTeacherCompressor.from_checkpoint(
@@ -387,15 +469,44 @@ def main(argv: Sequence[str] | None = None) -> None:
     if any(parameter.requires_grad for module in frozen_modules if module is not None
            for parameter in module.parameters()):
         raise RuntimeError("a teacher or caption module escaped the freeze contract")
-    optimizer = torch.optim.AdamW(
-        student.parameters(), lr=args.lr, weight_decay=args.weight_decay,
-        betas=(0.9, 0.95), fused=True)
+    optimizer = (
+        worker_components.optimizer(student.parameters())
+        if worker_components is not None
+        else torch.optim.AdamW(
+            student.parameters(),
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+            betas=(0.9, 0.95),
+            fused=True,
+        )
+    )
+    if worker_components is not None:
+        learning_rate_schedule = worker_components.learning_rate_schedule(optimizer)
+        weight_decay_schedule = worker_components.weight_decay_schedule(optimizer)
     sampler = EpochBatchSampler(len(train_data), args.batch, args.seed)
     step, best_ppl = 0, math.inf
-    if args.resume == "auto" and last_path.is_file():
-        saved = torch.load(last_path, map_location="cpu", weights_only=False)
+    resume_path = (
+        Path(args.resume_from)
+        if args.resume_from
+        else last_path
+        if args.resume == "auto" and last_path.is_file()
+        else None
+    )
+    if resume_path is not None:
+        saved = torch.load(resume_path, map_location="cpu", weights_only=False)
         if int(saved.get("schema", -1)) != SCHEMA or saved.get("config") != asdict(config):
             raise ValueError("student checkpoint schema/config mismatch")
+        if worker_components is not None and (
+            saved.get("component_evidence") != component_evidence
+            or saved.get("component_composition_digest")
+            != component_composition_digest
+        ):
+            raise ValueError("student checkpoint component identity mismatch")
+        if worker_controls is not None:
+            control_state = saved.get("worker_control_state")
+            if not isinstance(control_state, dict):
+                raise ValueError("student checkpoint control state is missing")
+            worker_controls.verify_checkpoint_state(control_state)
         student.load_state_dict(saved["student"])
         optimizer.load_state_dict(saved["optimizer"])
         sampler_state = dict(saved["sampler"])
@@ -408,6 +519,44 @@ def main(argv: Sequence[str] | None = None) -> None:
         random.setstate(saved["rng"]["python"])
         torch.set_rng_state(saved["rng"]["torch"])
         torch.cuda.set_rng_state_all(saved["rng"]["cuda"])
+
+    checkpoint_directory = out / "checkpoint-current"
+    checkpoint_state = checkpoint_directory / "state.pt"
+
+    def reject_live_controls(_effective: object, assignments: object) -> None:
+        if assignments:
+            raise ValueError("vision student v1 has no live-mutable controls")
+
+    def checkpoint_payload() -> dict:
+        return _checkpoint(
+            student=student,
+            optimizer=optimizer,
+            sampler=sampler,
+            step=step,
+            best_ppl=best_ppl,
+            args=args,
+            config=config,
+            component_evidence=component_evidence,
+            component_composition_digest=component_composition_digest,
+            worker_control_state=(
+                worker_controls.checkpoint_state()
+                if worker_controls is not None
+                else None
+            ),
+        )
+
+    def save_current_checkpoint() -> None:
+        _durable_save(checkpoint_payload(), last_path)
+        checkpoint_directory.mkdir(parents=True, exist_ok=True)
+        temporary = checkpoint_state.with_name(
+            f".{checkpoint_state.name}.{os.getpid()}.tmp"
+        )
+        try:
+            temporary.unlink(missing_ok=True)
+            os.link(last_path, temporary)
+            os.replace(temporary, checkpoint_state)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     loader_args = {"num_workers": args.workers, "pin_memory": True,
                    "persistent_workers": args.workers > 0}
@@ -422,7 +571,9 @@ def main(argv: Sequence[str] | None = None) -> None:
                       "student_parameters": student.parameter_count,
                       "frozen_compressor_parameters": sum(p.numel() for p in compressor.parameters()),
                       "frozen_caption_rwkv_parameters": sum(p.numel() for p in rwkv.parameters()),
-                      "student_config": asdict(config)}
+                      "student_config": asdict(config),
+                      "component_evidence": component_evidence,
+                      "component_composition_digest": component_composition_digest}
     _atomic_json(out / "config.json", config_payload)
     mode = "a" if step else "w"
     with log_path.open(mode) as log:
@@ -438,9 +589,16 @@ def main(argv: Sequence[str] | None = None) -> None:
             "updated": time.time(), "trainable_scope": "raw_pixel_vision_rwkv_student",
             "deployment_teacher_free": True})
         while step < args.steps and not stop:
-            for indices, pixels, geometry, moon, fusion in train_loader:
+            batches = (
+                worker_step_profiler.track_input(train_loader)
+                if worker_step_profiler is not None
+                else train_loader
+            )
+            for indices, pixels, geometry, moon, fusion in batches:
                 if step >= args.steps or stop:
                     break
+                if worker_controls is not None:
+                    worker_controls.microbatch(step + 1, reject_live_controls)
                 started = time.perf_counter()
                 student.train()
                 optimizer.zero_grad(set_to_none=True)
@@ -454,10 +612,26 @@ def main(argv: Sequence[str] | None = None) -> None:
                 if not torch.isfinite(loss):
                     raise FloatingPointError(f"non-finite student loss: {loss}")
                 loss.backward()
-                gradient_norm = torch.nn.utils.clip_grad_norm_(student.parameters(), args.grad_clip)
+                gradient_norm = (
+                    worker_components.gradient_clipping(student.parameters())
+                    if worker_components is not None
+                    else torch.nn.utils.clip_grad_norm_(
+                        student.parameters(), args.grad_clip
+                    )
+                )
                 optimizer.step()
                 sampler.consumed(len(indices))
                 step += 1
+                if learning_rate_schedule is not None:
+                    learning_rate_schedule.step()
+                if weight_decay_schedule is not None:
+                    weight_decay_schedule.step(step)
+                if worker_step_profiler is not None:
+                    worker_step_profiler.step(step)
+                if worker_observability is not None:
+                    worker_observability.optimizer_step(step)
+                if worker_controls is not None:
+                    worker_controls.optimizer_step(step, reject_live_controls)
                 elapsed = time.perf_counter() - started
                 event = {"kind": "train", "step": step, "loss": float(loss.detach()),
                          "lr": optimizer.param_groups[0]["lr"],
@@ -465,6 +639,19 @@ def main(argv: Sequence[str] | None = None) -> None:
                          "step_seconds": elapsed, "tok_per_sec": tokens / max(elapsed, 1e-9),
                          **{name: float(value) for name, value in metrics.items()}}
                 _append_json(log, event)
+                if worker_observability is not None:
+                    for name, value in (
+                        ("train.loss", event["loss"]),
+                        ("train.learning_rate", event["lr"]),
+                        ("train.gradient_norm", event["gnorm"]),
+                        ("train.tokens_per_second", event["tok_per_sec"]),
+                        ("train.step_seconds", event["step_seconds"]),
+                        ("train.representation_loss", event["representation_loss"]),
+                        ("train.caption_loss", event["caption_loss"]),
+                    ):
+                        worker_observability.publish_if_declared(
+                            name, value, step=step
+                        )
                 _atomic_json(status_path, {"state": "training", "step": step,
                     "loss": event["loss"], "step_seconds": elapsed,
                     "updated": time.time(),
@@ -477,6 +664,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                 evaluation = None
                 caption_eval = ppl = None
                 if eval_due:
+                    if worker_controls is not None:
+                        worker_controls.evaluation(step, reject_live_controls)
                     _atomic_json(status_path, {"state": "evaluating", "step": step,
                                                "updated": time.time()})
                     evaluation = _evaluate(eval_loader, eval_rows, student=student,
@@ -488,15 +677,20 @@ def main(argv: Sequence[str] | None = None) -> None:
                     _append_json(log, {"kind": "eval", "step": step,
                         "loss": caption_eval, "ppl": ppl,
                         **{f"eval_{name}": value for name, value in evaluation.items()}})
+                    if worker_observability is not None:
+                        worker_observability.publish_if_declared(
+                            "eval.loss", caption_eval, step=step
+                        )
+                        worker_observability.publish_if_declared(
+                            "eval.perplexity", ppl, step=step
+                        )
                     if ppl < best_ppl:
                         best_ppl = ppl
                         best_improved = True
                 if checkpoint_due or eval_due:
                     _atomic_json(status_path, {"state": "checkpointing", "step": step,
                                                "updated": time.time()})
-                    _durable_save(_checkpoint(student=student, optimizer=optimizer,
-                        sampler=sampler, step=step, best_ppl=best_ppl,
-                        args=args, config=config), last_path)
+                    save_current_checkpoint()
                     _append_json(log, {"kind": "checkpoint", "step": step,
                                        "path": str(last_path),
                                        "reason": "eval" if eval_due else "periodic"})
@@ -518,19 +712,52 @@ def main(argv: Sequence[str] | None = None) -> None:
                                                "updated": time.time(),
                                                "trainable_scope": "raw_pixel_vision_rwkv_student",
                                                "deployment_teacher_free": True})
+                checkpoint_requested = bool(
+                    worker_controls is not None
+                    and worker_controls.checkpoint_boundary_requested
+                )
+                if checkpoint_requested:
+                    worker_controls.checkpoint(step, reject_live_controls)
+                    save_current_checkpoint()
+                    if worker_controls.checkpoint_completion_requested:
+                        worker_controls.publish_requested_checkpoint_directory(
+                            str(checkpoint_directory),
+                            optimizer_step=step,
+                            resume_grade="compatible",
+                            state_components=(
+                                "component_composition",
+                                "control_revision",
+                                "data_cursor",
+                                "model",
+                                "optimizer",
+                                "rng_accelerator",
+                                "rng_python",
+                                "rng_torch",
+                            ),
+                        )
             # A fully consumed sampler advances itself on the next iterator.
         if step and (not last_path.is_file() or stop or step % args.checkpoint_every):
             _atomic_json(status_path, {"state": "checkpointing", "step": step,
                                        "updated": time.time()})
-            _durable_save(_checkpoint(student=student, optimizer=optimizer,
-                sampler=sampler, step=step, best_ppl=best_ppl,
-                args=args, config=config), last_path)
+            save_current_checkpoint()
             _append_json(log, {"kind": "checkpoint", "step": step,
                                "path": str(last_path),
                                "reason": "stop" if stop else "final"})
     _atomic_json(status_path, {"state": "stopped" if stop else "complete",
                                "step": step, "updated": time.time(),
                                "deployment_teacher_free": True})
+    if not checkpoint_state.is_file():
+        save_current_checkpoint()
+    return {
+        "status": "interrupted" if stop else "complete",
+        "step": step,
+        "checkpoint": str(checkpoint_directory.resolve()),
+        "best_ppl": best_ppl,
+    }
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    train(parse_args(argv))
 
 
 if __name__ == "__main__":
