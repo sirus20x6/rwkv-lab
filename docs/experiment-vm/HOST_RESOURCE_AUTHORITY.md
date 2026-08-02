@@ -853,14 +853,29 @@ non-terminal one to keep holding it; `no_unauthorized_adoption` requires every o
 mismatch to yield no process authority.
 
 Current unprivileged result on a delegated user scope: 13 of 16 declared points qualified, the three
-privileged launch windows unqualified, and the gate closed. The run also raised one recovery-stack
-finding, `startup-admission-blocked-after-convergence`: with the production
-`HostdConfiguredStartupAuditor`, `HostdStartupController::advance` samples its commit time *before*
-`admission_.admit` runs the audit, so `commit_startup_audit` always sees
-`now.boottime_ns < report.observed_end_boottime_ns` and rejects the commit. The existing controller
-tests do not catch this because they drive a fake auditor with fixed times. Recovery convergence
-itself is unaffected, and the qualification asserts convergence directly rather than through
-admission; a finding keeps the gate closed until the ordering is fixed.
+privileged launch windows unqualified, and the gate closed.
+
+The matrix has found two restart defects in the startup stack. Recovery convergence itself is
+unaffected by both, and the qualification asserts convergence directly rather than through
+admission, so each surfaces as a receipt finding that keeps the gate closed.
+
+- `startup-admission-blocked-after-convergence` (fixed). `HostdStartupController::advance` sampled
+  its startup-audit commit time *before* `admission_.admit` ran the audit, while
+  `HostdConfiguredStartupAuditor` stamps its end of observation from a later sample, so
+  `commit_startup_audit` always saw `now.boottime_ns < report.observed_end_boottime_ns` and
+  rejected. The admission authority now receives the `AuthorityClock` and the coordinator samples
+  the commit time through `IHostStartupAuditCommitTimeSource` once the observation has completed.
+  The fixed-time `run_startup_audit` overload is retained for callers that already hold a later
+  time. `hostd_startup_auditor_tests` now drives the real auditor through the real controller and
+  coordinator to admission; the previous controller tests missed the ordering because they used a
+  fixed-time fake auditor.
+- `startup-admission-epoch-not-renewable-after-restart` (open). `broker_epoch` is a static field of
+  the daemon configuration document, and `finalize_startup_admission` refuses a second admission
+  epoch for the same `host_id`/`boot_id`/`broker_epoch` unless the audit is an exact replay. A hostd
+  that crashes and restarts within one boot therefore reconciles its durable records and then cannot
+  admit. Either the daemon must derive a fresh broker epoch per incarnation — which the example
+  configuration and this document currently do not require — or the ledger must accept a superseding
+  epoch bound to the new audit.
 
 Gate:
 

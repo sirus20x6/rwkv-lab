@@ -802,14 +802,22 @@ HostdCrashCaseReceipt run_durable_case(
     if (!observed.admitted) {
       // Recovery converged, so admission is the remaining blocker. That is a
       // defect in the startup stack rather than a property of this window.
+      const bool epoch_exhausted =
+          observed.admission_detail.find("another admission epoch") !=
+          std::string::npos;
       record_finding(
           findings,
-          {.code = "startup-admission-blocked-after-convergence",
-           .subject = "trainvm::HostdStartupController",
+          {.code = epoch_exhausted
+                       ? "startup-admission-epoch-not-renewable-after-restart"
+                       : "startup-admission-blocked-after-convergence",
+           .subject = epoch_exhausted
+                          ? "trainvm::SQLiteHostLedger::"
+                            "finalize_startup_admission"
+                          : "trainvm::HostdStartupController",
            .detail =
                "restart recovery converged with no durable record remaining, "
-               "but the wake-driven startup controller could not commit its "
-               "admission audit: " +
+               "but the restarted daemon could not commit its admission "
+               "audit: " +
                observed.admission_detail});
     }
   } else {
