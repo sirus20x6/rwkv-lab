@@ -250,7 +250,7 @@ def test_appearance_handler_passes_only_canonical_authorized_paths(
     monkeypatch.setattr(
         mage_flow_expert_train,
         "train",
-        lambda config, *, worker_components, worker_step_profiler, worker_observability, worker_controls, worker_execution_phases: (
+        lambda config, *, worker_components, worker_step_profiler, worker_observability, worker_controls, worker_execution_phases, worker_eval_publication: (
             observed.append(
                 (
                     config,
@@ -259,6 +259,7 @@ def test_appearance_handler_passes_only_canonical_authorized_paths(
                     worker_observability,
                     worker_controls,
                     worker_execution_phases,
+                    worker_eval_publication,
                 )
             )
         ),
@@ -286,9 +287,7 @@ def test_appearance_handler_passes_only_canonical_authorized_paths(
     )
     execution_phases = SimpleNamespace(
         request=lambda phase: (
-            SimpleNamespace(enabled=True)
-            if phase is ExecutionPhase.COMPILE
-            else None
+            SimpleNamespace(enabled=True) if phase is ExecutionPhase.COMPILE else None
         )
     )
 
@@ -305,6 +304,7 @@ def test_appearance_handler_passes_only_canonical_authorized_paths(
     assert observed[0][3] is observability
     assert observed[0][4] is controls
     assert observed[0][5] is execution_phases
+    assert observed[0][6] is None
     assert observed[0][0].compile_transformer_blocks is True
     assert observed[0][0].compile_vae_encoder is True
     assert observed[0][0].learning_rate == pytest.approx(2.0e-5)
@@ -383,9 +383,7 @@ def test_terminal_handler_lowers_compile_phase_into_trainer_config(
     )
     execution_phases = SimpleNamespace(
         request=lambda phase: (
-            SimpleNamespace(enabled=True)
-            if phase is ExecutionPhase.COMPILE
-            else None
+            SimpleNamespace(enabled=True) if phase is ExecutionPhase.COMPILE else None
         )
     )
 
@@ -395,9 +393,7 @@ def test_terminal_handler_lowers_compile_phase_into_trainer_config(
         observability=SimpleNamespace(),
         execution_phases=execution_phases,
     )
-    assert result == HandlerResult(
-        "worker.completed", {"reason": "training_complete"}
-    )
+    assert result == HandlerResult("worker.completed", {"reason": "training_complete"})
     config, keyword_arguments = observed[0]
     assert config.compile_transformer_blocks is True
     assert config.compile_vae_encoder is True
@@ -437,9 +433,7 @@ def test_full_backbone_handler_seals_model_tree_and_lowers_phases(
     )
     phases = SimpleNamespace(
         request=lambda phase: (
-            SimpleNamespace(enabled=True)
-            if phase is ExecutionPhase.COMPILE
-            else None
+            SimpleNamespace(enabled=True) if phase is ExecutionPhase.COMPILE else None
         )
     )
     components = SimpleNamespace()
@@ -450,9 +444,7 @@ def test_full_backbone_handler_seals_model_tree_and_lowers_phases(
         controls=SimpleNamespace(effective_values={}),
         execution_phases=phases,
     )
-    assert result == HandlerResult(
-        "worker.completed", {"reason": "training_complete"}
-    )
+    assert result == HandlerResult("worker.completed", {"reason": "training_complete"})
     config, kwargs = observed[0]
     assert config.train_manifest == str(manifest.resolve())
     assert config.model_path == str(model_path.resolve())
@@ -643,9 +635,7 @@ def test_rwkv_posttraining_handler_seals_inputs_and_publishes_adapter_bundle(
         adapter = output / "adapter"
         adapter.mkdir()
         (adapter / "weights.safetensors").write_bytes(b"weights")
-        (output / "posttrain-result.json").write_text(
-            '{"steps":3}\n', encoding="utf-8"
-        )
+        (output / "posttrain-result.json").write_text('{"steps":3}\n', encoding="utf-8")
         return {"steps": 3}
 
     monkeypatch.setattr(posttrain_train, "train", train)
@@ -1445,9 +1435,7 @@ def test_transformer_mla_handler_binds_paths_profile_and_compatible_checkpoint(
             "host_optimizer",
             {
                 "category": "optimizer",
-                "allowed": frozenset(
-                    {"rwkv_lab.optimizer.torch_sparse_adam.v1"}
-                ),
+                "allowed": frozenset({"rwkv_lab.optimizer.torch_sparse_adam.v1"}),
             },
         ),
     ]
@@ -1548,14 +1536,54 @@ def test_dispatch_table_is_closed_and_training_composition_is_required() -> None
     }
     expected.update(
         {
-            ("rwkv-lab.transformer-mla", "1.0.0", "train", "rwkv_lab.transformer_mla.v1.Train"),
-            ("rwkv-lab.transformer-mla-mtp", "1.0.0", "train", "rwkv_lab.transformer_mla_mtp.v1.Train"),
-            ("rwkv-lab.transformer-mla-mutor", "1.0.0", "train", "rwkv_lab.transformer_mla_mutor.v1.Train"),
-            ("rwkv-lab.transformer-mla-fsp", "1.0.0", "train", "rwkv_lab.transformer_mla_fsp.v1.Train"),
-            ("rwkv-lab.transformer-mla-parallel", "1.0.0", "train", "rwkv_lab.transformer_mla_parallel.v1.Train"),
-            ("rwkv-lab.transformer-mla-rwkv8", "1.0.0", "train", "rwkv_lab.transformer_mla_rwkv8.v1.Train"),
-            ("rwkv-lab.transformer-mla-engram", "1.0.0", "train", "rwkv_lab.transformer_mla_engram.v1.Train"),
-            ("rwkv-lab.transformer-mla-full-backbone", "1.0.0", "train", "rwkv_lab.transformer_mla_full_backbone.v1.Train"),
+            (
+                "rwkv-lab.transformer-mla",
+                "1.0.0",
+                "train",
+                "rwkv_lab.transformer_mla.v1.Train",
+            ),
+            (
+                "rwkv-lab.transformer-mla-mtp",
+                "1.0.0",
+                "train",
+                "rwkv_lab.transformer_mla_mtp.v1.Train",
+            ),
+            (
+                "rwkv-lab.transformer-mla-mutor",
+                "1.0.0",
+                "train",
+                "rwkv_lab.transformer_mla_mutor.v1.Train",
+            ),
+            (
+                "rwkv-lab.transformer-mla-fsp",
+                "1.0.0",
+                "train",
+                "rwkv_lab.transformer_mla_fsp.v1.Train",
+            ),
+            (
+                "rwkv-lab.transformer-mla-parallel",
+                "1.0.0",
+                "train",
+                "rwkv_lab.transformer_mla_parallel.v1.Train",
+            ),
+            (
+                "rwkv-lab.transformer-mla-rwkv8",
+                "1.0.0",
+                "train",
+                "rwkv_lab.transformer_mla_rwkv8.v1.Train",
+            ),
+            (
+                "rwkv-lab.transformer-mla-engram",
+                "1.0.0",
+                "train",
+                "rwkv_lab.transformer_mla_engram.v1.Train",
+            ),
+            (
+                "rwkv-lab.transformer-mla-full-backbone",
+                "1.0.0",
+                "train",
+                "rwkv_lab.transformer_mla_full_backbone.v1.Train",
+            ),
         }
     )
     assert supported_adapter_keys() == expected
@@ -1636,8 +1664,8 @@ def test_runner_reports_success_with_optimizer_step() -> None:
             else pytest.fail("wrong descriptor")
         ),
         session_factory=factory,
-        executor=lambda invocation, _profiler, _observability, _controls, _phases: HandlerResult(
-            "worker.completed", {"reason": "training_complete"}, 41
+        executor=lambda invocation, _profiler, _observability, _controls, _phases, _publications: (
+            HandlerResult("worker.completed", {"reason": "training_complete"}, 41)
         ),
     )
     assert status == 0
@@ -1675,7 +1703,7 @@ def test_runner_publishes_handler_checkpoints_before_terminal_event(
     status = run_worker(
         bootstrap_reader=lambda _descriptor: bootstrap,
         session_factory=lambda _bootstrap: session,
-        executor=lambda _invocation, _profiler, _observability, _controls, _phases: (
+        executor=lambda _invocation, _profiler, _observability, _controls, _phases, _publications: (
             HandlerResult(
                 "worker.completed",
                 {"reason": "training_complete"},
@@ -1720,7 +1748,7 @@ def test_runner_publishes_handler_artifacts_before_terminal_event(
     status = run_worker(
         bootstrap_reader=lambda _descriptor: bootstrap,
         session_factory=lambda _bootstrap: session,
-        executor=lambda _invocation, _profiler, _observability, _controls, _phases: (
+        executor=lambda _invocation, _profiler, _observability, _controls, _phases, _publications: (
             HandlerResult(
                 "worker.completed",
                 {"reason": "training_complete"},
@@ -1775,7 +1803,7 @@ def test_runner_publishes_handler_eval_galleries_before_terminal_event(
     status = run_worker(
         bootstrap_reader=lambda _descriptor: bootstrap,
         session_factory=lambda _bootstrap: session,
-        executor=lambda _invocation, _profiler, _observability, _controls, _phases: (
+        executor=lambda _invocation, _profiler, _observability, _controls, _phases, _publications: (
             HandlerResult(
                 "worker.completed",
                 {"reason": "evaluation_complete"},
@@ -1809,6 +1837,7 @@ def test_runner_reports_sanitized_failure_and_skips_completed_replay() -> None:
         _observability: object,
         _controls: object,
         _phases: object,
+        _publications: object,
     ) -> HandlerResult:
         raise RuntimeError("secret dataset path")
 
@@ -1834,7 +1863,7 @@ def test_runner_reports_sanitized_failure_and_skips_completed_replay() -> None:
         run_worker(
             bootstrap_reader=lambda _descriptor: bootstrap,
             session_factory=lambda _bootstrap: completed,
-            executor=lambda _invocation, _profiler, _observability, _controls, _phases: (
+            executor=lambda _invocation, _profiler, _observability, _controls, _phases, _publications: (
                 pytest.fail("replayed completed work")
             ),
         )

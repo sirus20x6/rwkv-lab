@@ -100,13 +100,14 @@ them into a SHA-256 object store beneath the run directory. It then atomically s
 manifest, publishes that manifest through `WorkerSession.artifact()`, and returns the durable worker
 sequence. Generated and target/source images, held-out membership, condition digest, evaluator,
 checkpoint, policy, seed, sampling attributes, producer attempt, and optimizer step are all bound.
-Family handlers do not receive the controller session: they return typed
-`EvalGalleryPublicationRequest` values after evaluation has completed, and the fixed worker runner
-publishes those requests before its terminal event. This keeps transport and artifact authority out
-of evaluator code while allowing a handler to return multiple append-only gallery revisions. A
-request may refer to a checkpoint publication from the same handler by its request index; after the
-checkpoint is sealed, the runner substitutes its actual artifact ID and manifest SHA-256 before the
-gallery can be published.
+Family handlers do not receive the controller session. Terminal evaluation returns typed
+`EvalGalleryPublicationRequest` values to the fixed runner. Long MageFlow operations additionally
+receive only a same-step callback backed by `WorkerPublicationRuntime`: the trainer supplies one
+completed checkpoint directory and completed gallery result, then the runtime freezes and announces
+the checkpoint before substituting its actual artifact ID and manifest SHA-256 into the gallery.
+The runtime records each durable publication for terminal result assembly and requires strictly
+increasing optimizer steps. This keeps transport and artifact authority out of evaluator code while
+making intermediate append-only revisions visible during training rather than only after exit.
 
 `CheckpointPublisher` is the independent state-artifact path. A family handler returns only a
 typed publication request after its trainer has atomically completed a checkpoint; it never gets a
@@ -120,8 +121,9 @@ a content-addressed `trainvm.checkpoint-snapshot.v1` revision. Replays verify bo
 manifest and every frozen payload object before repeating the artifact announcement. Only after
 that durable publication succeeds does the runner emit its terminal worker event, which carries the
 published checkpoint artifact ID rather than a mutable trainer path. MageFlow appearance,
-MageFlow terminal/TREAD, and Qwen AO3 handlers all use this one publication service when their
-invocation declares a checkpoint output; their current honest resume grade remains `compatible`.
+full-backbone, and terminal/TREAD handlers use it for periodic checkpoint-bound galleries as well as
+terminal publication; Qwen AO3 uses the terminal path. Their current honest resume grade remains
+`compatible`.
 The native controller independently matches every worker artifact's logical name, kind, schema,
 and fingerprint algorithm against that sealed output declaration before it journals the event;
 undeclared, ambiguous, or shape-changing publications fail without consuming a worker sequence.

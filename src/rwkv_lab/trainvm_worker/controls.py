@@ -48,7 +48,9 @@ class SafePoint(IntEnum):
 
 
 class _Session(Protocol):
-    def poll_commands(self, maximum: int | None = None) -> tuple[WorkerCommand, ...]: ...
+    def poll_commands(
+        self, maximum: int | None = None
+    ) -> tuple[WorkerCommand, ...]: ...
 
     def acknowledge_controls(
         self,
@@ -214,7 +216,10 @@ class WorkerControlRuntime:
                 )
                 self._pending.pop(0)
                 continue
-            if command.requires_pause or command.apply_point == wire.APPLY_POINT_RESTART:
+            if (
+                command.requires_pause
+                or command.apply_point == wire.APPLY_POINT_RESTART
+            ):
                 self._session.acknowledge_controls(
                     command,
                     ControlDisposition.RESTART_REQUIRED,
@@ -303,9 +308,7 @@ class WorkerControlRuntime:
     @property
     def checkpoint_requested(self) -> bool:
         self._collect()
-        return bool(
-            self._pending and self._pending[0].kind is CommandKind.CHECKPOINT
-        )
+        return bool(self._pending and self._pending[0].kind is CommandKind.CHECKPOINT)
 
     @property
     def checkpoint_boundary_requested(self) -> bool:
@@ -358,7 +361,9 @@ class WorkerControlRuntime:
             or (command.kind is CommandKind.PAUSE and command.checkpoint_first)
             for command in commands
         )
-        if requires_publication and not isinstance(request, CheckpointPublicationRequest):
+        if requires_publication and not isinstance(
+            request, CheckpointPublicationRequest
+        ):
             raise WorkerControlError(
                 "checkpoint publication requires a typed immutable request"
             )
@@ -506,7 +511,9 @@ class WorkerControlRuntime:
     def microbatch(
         self, step: int, applier: ControlApplier
     ) -> tuple[AppliedControlPatch, ...]:
-        return self.apply(SafePoint.NEXT_MICROBATCH, effective_step=step, applier=applier)
+        return self.apply(
+            SafePoint.NEXT_MICROBATCH, effective_step=step, applier=applier
+        )
 
     def optimizer_step(
         self, step: int, applier: ControlApplier
@@ -523,7 +530,9 @@ class WorkerControlRuntime:
     def checkpoint(
         self, step: int, applier: ControlApplier
     ) -> tuple[AppliedControlPatch, ...]:
-        return self.apply(SafePoint.NEXT_CHECKPOINT, effective_step=step, applier=applier)
+        return self.apply(
+            SafePoint.NEXT_CHECKPOINT, effective_step=step, applier=applier
+        )
 
 
 def controls_from_invocation(

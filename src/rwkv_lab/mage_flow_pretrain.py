@@ -32,7 +32,7 @@ import struct
 import threading
 import time
 import zlib
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -562,9 +562,7 @@ class MageFlowTrainConfig:
         if self.eval_gen_every < 0 or self.eval_gen_samples < 0:
             raise ValueError("generation eval interval/sample count cannot be negative")
         if self.eval_gen_samples and (
-            self.eval_gen_every < 1
-            or self.eval_gen_steps < 1
-            or self.eval_gen_cfg <= 0
+            self.eval_gen_every < 1 or self.eval_gen_steps < 1 or self.eval_gen_cfg <= 0
         ):
             raise ValueError("invalid generation-eval configuration")
         if self.keep_last_n < 1:
@@ -606,9 +604,7 @@ def resolved_worker_component_contract(
             "authority optimizer composition disagrees with full-backbone configuration"
         )
     if dict(
-        worker_components.configuration(
-            "parameter_router", category="parameter_router"
-        )
+        worker_components.configuration("parameter_router", category="parameter_router")
     ):
         raise ValueError("full-backbone parameter-router configuration must be empty")
     if schedule != {
@@ -1214,8 +1210,7 @@ def _generate_eval_snapshot(
         existing = json.loads(artifact.read_text(encoding="utf-8"))
         if (
             existing.get("selection_sha256") == selection_sha256
-            and existing.get("prompt_screening", True)
-            == config.eval_gen_screen_prompts
+            and existing.get("prompt_screening", True) == config.eval_gen_screen_prompts
         ):
             return artifact
 
@@ -1242,6 +1237,7 @@ def _generate_eval_snapshot(
         model.transformer = transformer
         transformer.eval()
         if not config.eval_gen_screen_prompts:
+
             class AllowedVerdict:
                 violates = False
 
@@ -1331,6 +1327,7 @@ def train(
     worker_observability: WorkerObservability | None = None,
     worker_controls: WorkerControlRuntime | None = None,
     worker_execution_phases: WorkerExecutionPhases | None = None,
+    worker_eval_publication: Callable[[Path, int], None] | None = None,
 ) -> None:
     """Execute a full NR-MMDiT continued-pretraining run."""
     config.validate()
@@ -1366,7 +1363,12 @@ def train(
     output_dir.mkdir(parents=True, exist_ok=True)
     _json_dump(
         output_dir / "status.json",
-        {"schema": RUN_SCHEMA, "state": "initializing", "step": 0, "updated_at": _utc_now()},
+        {
+            "schema": RUN_SCHEMA,
+            "state": "initializing",
+            "step": 0,
+            "updated_at": _utc_now(),
+        },
     )
     project = ProjectConfiguration(
         project_dir=str(output_dir), logging_dir=str(output_dir / "logs")
@@ -1744,9 +1746,7 @@ def train(
                 [_load_image_tensor(row) for row in batch_rows],
             )
 
-        loaded_packs = _prefetched(
-            pack_stream, load_pack, depth=config.prefetch_packs
-        )
+        loaded_packs = _prefetched(pack_stream, load_pack, depth=config.prefetch_packs)
         if worker_step_profiler is not None:
             loaded_packs = worker_step_profiler.track_input(loaded_packs)
         for pack_index, batch_rows, images in loaded_packs:
@@ -1808,9 +1808,7 @@ def train(
             last_epoch, next_pack = epoch, pack_index + 1
             if accumulated_loss is None or accumulated_microbatches < 1:
                 raise RuntimeError("optimizer update has no accumulated loss")
-            mean_loss = float(
-                (accumulated_loss / accumulated_microbatches).item()
-            )
+            mean_loss = float((accumulated_loss / accumulated_microbatches).item())
             metrics = {
                 "train/loss": mean_loss,
                 "train/optimization_loss": mean_loss,
@@ -1849,9 +1847,7 @@ def train(
             accumulated_sequence_tokens = 0
             accumulated_loss = None
             if accelerator.is_main_process:
-                with (output_dir / "train.jsonl").open(
-                    "a", encoding="utf-8"
-                ) as handle:
+                with (output_dir / "train.jsonl").open("a", encoding="utf-8") as handle:
                     handle.write(
                         json.dumps(
                             {
@@ -1909,7 +1905,22 @@ def train(
                 worker_controls is not None
                 and worker_controls.checkpoint_boundary_requested
             )
-            if global_step % config.checkpoint_every == 0 or checkpoint_requested:
+            generation_due = bool(
+                eval_rows
+                and config.eval_gen_samples
+                and global_step % config.eval_gen_every == 0
+            )
+            publish_eval_revision = bool(
+                worker_eval_publication is not None
+                and generation_due
+                and global_step < config.max_steps
+            )
+            checkpoint = None
+            if (
+                global_step % config.checkpoint_every == 0
+                or checkpoint_requested
+                or publish_eval_revision
+            ):
                 if mutable_controls is not None:
                     worker_controls.checkpoint(global_step, mutable_controls.apply)
                 checkpoint = _save_checkpoint(
@@ -1952,11 +1963,7 @@ def train(
                             "rng_torch",
                         ),
                     )
-            if (
-                eval_rows
-                and config.eval_gen_samples
-                and global_step % config.eval_gen_every == 0
-            ):
+            if generation_due:
                 accelerator.wait_for_everyone()
                 if accelerator.is_main_process:
                     _json_dump(
@@ -1977,6 +1984,13 @@ def train(
                         output_dir,
                         step=global_step,
                     )
+                    if publish_eval_revision:
+                        if checkpoint is None:
+                            raise RuntimeError(
+                                "live eval publication omitted its checkpoint"
+                            )
+                        assert worker_eval_publication is not None
+                        worker_eval_publication(checkpoint, global_step)
                     _json_dump(
                         output_dir / "status.json",
                         {
@@ -2067,9 +2081,7 @@ def train(
             parameter_routing.report if parameter_routing is not None else None
         ),
         control_state=(
-            worker_controls.checkpoint_state()
-            if worker_controls is not None
-            else None
+            worker_controls.checkpoint_state() if worker_controls is not None else None
         ),
     )
     export_dir = _export_transformer(

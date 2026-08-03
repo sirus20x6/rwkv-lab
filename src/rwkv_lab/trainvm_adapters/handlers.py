@@ -22,6 +22,7 @@ from rwkv_lab.trainvm_worker import (
     WorkerExecutionPhases,
     WorkerInvocation,
     WorkerObservability,
+    WorkerPublicationRuntime,
     WorkerStepProfiler,
     load_input_artifact_json,
     resolve_input_artifact,
@@ -168,6 +169,48 @@ def _resume_payload(
     )
 
 
+def _mageflow_live_eval_publisher(
+    invocation: WorkerInvocation,
+    runtime: WorkerPublicationRuntime | None,
+    run_directory: Path,
+    eval_manifest: Path | None,
+    *,
+    state_components: tuple[str, ...],
+) -> Callable[[Path, int], None] | None:
+    """Give a MageFlow trainer only a same-step publication callback."""
+
+    if (
+        runtime is None
+        or eval_manifest is None
+        or not _declares_artifact_output(invocation, "eval_gallery")
+    ):
+        return None
+
+    def publish(checkpoint_directory: Path, step: int) -> None:
+        checkpoint = checkpoint_request(
+            invocation,
+            run_directory,
+            str(checkpoint_directory),
+            step,
+            resume_grade="compatible",
+            state_components=state_components,
+        )
+        gallery = completed_mageflow_gallery_request(
+            invocation,
+            run_directory,
+            eval_manifest,
+            step=step,
+            checkpoint_request_index=0,
+        )
+        if gallery is None:
+            raise AdapterDispatchError(
+                "MageFlow live eval publication omitted its gallery request"
+            )
+        runtime.publish_eval_revision(checkpoint, gallery)
+
+    return publish
+
+
 def _appearance_expert(
     invocation: WorkerInvocation,
     components: WorkerTrainingComponents,
@@ -175,6 +218,7 @@ def _appearance_expert(
     observability: WorkerObservability | None = None,
     controls: WorkerControlRuntime | None = None,
     execution_phases: WorkerExecutionPhases | None = None,
+    publications: WorkerPublicationRuntime | None = None,
 ) -> HandlerResult:
     paths = WorkspacePathAuthority.from_workspace(
         invocation.workspace, require_content=True
@@ -253,6 +297,19 @@ def _appearance_expert(
             paths, config.encoder_cache_dir, config.encoder_cache_mode
         ),
     )
+    checkpoint_state = (
+        "component_composition",
+        "control_revision",
+        "data_cursor",
+        "lr_schedule",
+        "model",
+        "optimizer",
+        "parameter_routing",
+        "rng_accelerator",
+        "rng_numpy",
+        "rng_python",
+        "rng_torch",
+    )
     train(
         config,
         worker_components=components,
@@ -260,29 +317,26 @@ def _appearance_expert(
         worker_observability=observability,
         worker_controls=controls,
         worker_execution_phases=execution_phases,
+        worker_eval_publication=_mageflow_live_eval_publisher(
+            invocation,
+            publications,
+            Path(config.output_dir),
+            eval_manifest,
+            state_components=checkpoint_state,
+        ),
     )
     request, step, status = completed_checkpoint_request(
         invocation,
         Path(config.output_dir),
         document_names=("complete.json", "status.json"),
         step_fields=("global_step", "step"),
-        state_components=(
-            "component_composition",
-            "control_revision",
-            "data_cursor",
-            "lr_schedule",
-            "model",
-            "optimizer",
-            "parameter_routing",
-            "rng_accelerator",
-            "rng_numpy",
-            "rng_python",
-            "rng_torch",
-        ),
+        state_components=checkpoint_state,
     )
     gallery = None
-    if status == "complete" and eval_manifest is not None and _declares_artifact_output(
-        invocation, "eval_gallery"
+    if (
+        status == "complete"
+        and eval_manifest is not None
+        and _declares_artifact_output(invocation, "eval_gallery")
     ):
         if request is None or step is None:
             raise AdapterDispatchError(
@@ -311,6 +365,7 @@ def _mageflow_full_backbone(
     observability: WorkerObservability | None = None,
     controls: WorkerControlRuntime | None = None,
     execution_phases: WorkerExecutionPhases | None = None,
+    publications: WorkerPublicationRuntime | None = None,
 ) -> HandlerResult:
     """Run the sealed, full NR-MMDiT continued-pretraining profile."""
 
@@ -362,9 +417,7 @@ def _mageflow_full_backbone(
     resume_payload = _resume_payload(
         invocation,
         paths,
-        required_state=frozenset(
-            {"data_cursor", "model", "optimizer", "rng_torch"}
-        ),
+        required_state=frozenset({"data_cursor", "model", "optimizer", "rng_torch"}),
     )
     config = replace(
         config,
@@ -386,6 +439,18 @@ def _mageflow_full_backbone(
             )
         ),
     )
+    checkpoint_state = (
+        "component_composition",
+        "control_revision",
+        "data_cursor",
+        "lr_schedule",
+        "model",
+        "optimizer",
+        "parameter_routing",
+        "rng_accelerator",
+        "rng_python",
+        "rng_torch",
+    )
     train(
         config,
         worker_components=components,
@@ -393,28 +458,26 @@ def _mageflow_full_backbone(
         worker_observability=observability,
         worker_controls=controls,
         worker_execution_phases=execution_phases,
+        worker_eval_publication=_mageflow_live_eval_publisher(
+            invocation,
+            publications,
+            Path(config.output_dir),
+            eval_manifest,
+            state_components=checkpoint_state,
+        ),
     )
     request, step, status = completed_checkpoint_request(
         invocation,
         Path(config.output_dir),
         document_names=("complete.json", "interrupted.json", "status.json"),
         step_fields=("global_step", "step"),
-        state_components=(
-            "component_composition",
-            "control_revision",
-            "data_cursor",
-            "lr_schedule",
-            "model",
-            "optimizer",
-            "parameter_routing",
-            "rng_accelerator",
-            "rng_python",
-            "rng_torch",
-        ),
+        state_components=checkpoint_state,
     )
     gallery = None
-    if status == "complete" and eval_manifest is not None and _declares_artifact_output(
-        invocation, "eval_gallery"
+    if (
+        status == "complete"
+        and eval_manifest is not None
+        and _declares_artifact_output(invocation, "eval_gallery")
     ):
         if request is None or step is None:
             raise AdapterDispatchError(
@@ -443,6 +506,7 @@ def _terminal_expert(
     observability: WorkerObservability | None = None,
     controls: WorkerControlRuntime | None = None,
     execution_phases: WorkerExecutionPhases | None = None,
+    publications: WorkerPublicationRuntime | None = None,
 ) -> HandlerResult:
     paths = WorkspacePathAuthority.from_workspace(
         invocation.workspace, require_content=True
@@ -558,6 +622,19 @@ def _terminal_expert(
         ),
         expert_checkpoints=expert_checkpoints,
     )
+    checkpoint_state = (
+        "component_composition",
+        "control_revision",
+        "data_cursor",
+        "expert_routing",
+        "lr_schedule",
+        "model",
+        "optimizer",
+        "parameter_routing",
+        "rng_accelerator",
+        "rng_python",
+        "rng_torch",
+    )
     train(
         config,
         worker_components=components,
@@ -565,29 +642,26 @@ def _terminal_expert(
         worker_observability=observability,
         worker_controls=controls,
         worker_execution_phases=execution_phases,
+        worker_eval_publication=_mageflow_live_eval_publisher(
+            invocation,
+            publications,
+            Path(config.output_dir),
+            eval_manifest,
+            state_components=checkpoint_state,
+        ),
     )
     request, step, status = completed_checkpoint_request(
         invocation,
         Path(config.output_dir),
         document_names=("status.json",),
         step_fields=("step",),
-        state_components=(
-            "component_composition",
-            "control_revision",
-            "data_cursor",
-            "expert_routing",
-            "lr_schedule",
-            "model",
-            "optimizer",
-            "parameter_routing",
-            "rng_accelerator",
-            "rng_python",
-            "rng_torch",
-        ),
+        state_components=checkpoint_state,
     )
     gallery = None
-    if status == "complete" and eval_manifest is not None and _declares_artifact_output(
-        invocation, "eval_gallery"
+    if (
+        status == "complete"
+        and eval_manifest is not None
+        and _declares_artifact_output(invocation, "eval_gallery")
     ):
         if request is None or step is None:
             raise AdapterDispatchError(
@@ -859,9 +933,7 @@ def _rwkv_posttraining(
             invocation.workspace, require_content=True
         )
         config = RWKVPostTrainConfig(**read_inline_config(invocation.inputs))
-        checkpoint = paths.read_path(
-            config.checkpoint, label="checkpoint", kind="file"
-        )
+        checkpoint = paths.read_path(config.checkpoint, label="checkpoint", kind="file")
         data = paths.read_path(config.data, label="data", kind="file")
         eval_data = (
             str(paths.read_path(config.eval_data, label="eval_data", kind="file"))
@@ -995,9 +1067,7 @@ def _rlvr(
             invocation.workspace, require_content=True
         )
         config = RLVRTrainConfig(**read_inline_config(invocation.inputs))
-        checkpoint = paths.read_path(
-            config.checkpoint, label="checkpoint", kind="file"
-        )
+        checkpoint = paths.read_path(config.checkpoint, label="checkpoint", kind="file")
         vocab = paths.read_path(config.vocab, label="vocab", kind="file")
         tasks = (
             paths.read_path(config.tasks, label="tasks", kind="file")
@@ -1005,9 +1075,7 @@ def _rlvr(
             else None
         )
         heldout_tasks = (
-            paths.read_path(
-                config.heldout_tasks, label="heldout_tasks", kind="file"
-            )
+            paths.read_path(config.heldout_tasks, label="heldout_tasks", kind="file")
             if config.heldout_tasks
             else None
         )
@@ -1063,9 +1131,7 @@ def _rlvr(
             kl_coef=config.kl_coefficient,
             reference=config.reference,
             reference_ckpt=(
-                str(reference_checkpoint)
-                if reference_checkpoint is not None
-                else ""
+                str(reference_checkpoint) if reference_checkpoint is not None else ""
             ),
             train_tasks=config.train_tasks,
             eval_tasks=config.eval_tasks,
@@ -1178,7 +1244,9 @@ def _vision_teacher_compressor(
         getattr(controls, "effective_values", {}) if controls is not None else {}
     )
     if not isinstance(effective_controls, Mapping):
-        raise AdapterDispatchError("vision compressor received an invalid control snapshot")
+        raise AdapterDispatchError(
+            "vision compressor received an invalid control snapshot"
+        )
     if effective_controls:
         raise AdapterDispatchError(
             "vision compressor v1 does not declare initial controls"
@@ -1193,9 +1261,7 @@ def _vision_teacher_compressor(
         paths = WorkspacePathAuthority.from_workspace(
             invocation.workspace, require_content=True
         )
-        config = VisionTeacherCompressorConfig(
-            **read_inline_config(invocation.inputs)
-        )
+        config = VisionTeacherCompressorConfig(**read_inline_config(invocation.inputs))
         train_manifest = paths.read_path(
             config.train_manifest, label="train_manifest", kind="file"
         )
@@ -1410,9 +1476,7 @@ def _vision_frozen_adapter(
             dinov2 = paths.read_path(
                 config.dinov2_model, label="dinov2_model", kind="directory"
             )
-            sam = paths.read_path(
-                config.sam_model, label="sam_model", kind="directory"
-            )
+            sam = paths.read_path(config.sam_model, label="sam_model", kind="directory")
         run_directory = paths.node_run_directory(invocation.node_id)
         resume_payload = _resume_payload(
             invocation,
@@ -1603,13 +1667,10 @@ def _vision_frozen_adapter(
     if status not in {"complete", "interrupted"}:
         raise AdapterDispatchError("frozen vision returned an invalid status")
     best_eval_loss = result.get("best_eval_loss")
-    if (
-        status == "complete"
-        and (
-            isinstance(best_eval_loss, bool)
-            or not isinstance(best_eval_loss, (int, float))
-            or not math.isfinite(float(best_eval_loss))
-        )
+    if status == "complete" and (
+        isinstance(best_eval_loss, bool)
+        or not isinstance(best_eval_loss, (int, float))
+        or not math.isfinite(float(best_eval_loss))
     ):
         raise AdapterDispatchError(
             "frozen vision completed without a finite best evaluation loss"
@@ -1894,8 +1955,7 @@ def _scalar_metric_decision(
         value = document.get("value")
         step = document.get("optimizer_step")
         if (
-            document.get("api_version")
-            != "rwkv-lab.scalar-metric-result/v1"
+            document.get("api_version") != "rwkv-lab.scalar-metric-result/v1"
             or document.get("metric") != config.metric
             or document.get("direction") != config.direction
             or document.get("subject") != expected_subject
@@ -1986,9 +2046,13 @@ def _vision_rwkv_student(
         getattr(controls, "effective_values", {}) if controls is not None else {}
     )
     if not isinstance(effective_controls, Mapping):
-        raise AdapterDispatchError("vision student received an invalid control snapshot")
+        raise AdapterDispatchError(
+            "vision student received an invalid control snapshot"
+        )
     if effective_controls:
-        raise AdapterDispatchError("vision student v1 does not declare initial controls")
+        raise AdapterDispatchError(
+            "vision student v1 does not declare initial controls"
+        )
 
     verification = (
         observability.keepalive(0, "verifying_inputs")
@@ -2208,15 +2272,9 @@ def _transformer_mla(
                 "Transformer MLA metrics require optimizer_step declarations"
             )
 
-    model_dir = paths.read_path(
-        config.model_dir, label="model_dir", kind="directory"
-    )
-    patch_dir = paths.read_path(
-        config.patch_dir, label="patch_dir", kind="directory"
-    )
-    tokens_bin = paths.read_path(
-        config.tokens_bin, label="tokens_bin", kind="file"
-    )
+    model_dir = paths.read_path(config.model_dir, label="model_dir", kind="directory")
+    patch_dir = paths.read_path(config.patch_dir, label="patch_dir", kind="directory")
+    tokens_bin = paths.read_path(config.tokens_bin, label="tokens_bin", kind="file")
     fsp_idf_path = (
         str(paths.read_path(config.fsp_idf_path, label="fsp_idf_path", kind="file"))
         if config.fsp_idf_path
@@ -2270,7 +2328,9 @@ def _transformer_mla(
         worker_controls=controls,
     )
     if not isinstance(result, Mapping):
-        raise AdapterDispatchError("Transformer MLA trainer omitted its terminal result")
+        raise AdapterDispatchError(
+            "Transformer MLA trainer omitted its terminal result"
+        )
     step = result.get("step")
     if not isinstance(step, int) or isinstance(step, bool) or step < 0:
         raise AdapterDispatchError("Transformer MLA trainer returned an invalid step")
@@ -2300,9 +2360,7 @@ def _transformer_mla(
         "operation.failed" if interrupted else "worker.completed",
         {
             "reason": (
-                "checkpointed_interruption"
-                if interrupted
-                else "training_complete"
+                "checkpointed_interruption" if interrupted else "training_complete"
             ),
             "status": str(result.get("status", "complete")),
         },
@@ -2439,6 +2497,7 @@ def execute_invocation(
     observability: WorkerObservability | None = None,
     controls: WorkerControlRuntime | None = None,
     execution_phases: WorkerExecutionPhases | None = None,
+    publications: WorkerPublicationRuntime | None = None,
 ) -> HandlerResult:
     adapter = invocation.adapter
     key = (
@@ -2492,7 +2551,7 @@ def execute_invocation(
         )
     if controls is None:
         raise AdapterDispatchError("training adapter has no worker control authority")
-    return handler(
+    arguments = (
         invocation,
         components,
         step_profiler or NullStepProfiler(),
@@ -2500,3 +2559,6 @@ def execute_invocation(
         controls,
         execution_phases,
     )
+    if handler in {_appearance_expert, _mageflow_full_backbone, _terminal_expert}:
+        return handler(*arguments, publications)
+    return handler(*arguments)
