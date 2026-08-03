@@ -253,6 +253,75 @@ void invalid_descriptors_and_requests_fail_closed() {
         "duplicate registry JSON keys are rejected");
 }
 
+void a_post_training_arm_reaches_the_worker_and_binds_the_digest() {
+  const trainvm::TrainingComponentRegistry registry({adamw(), cosine_schedule()});
+  const auto compose = [](std::optional<trainvm::PostTrainingArmDeclaration> arm) {
+    return trainvm::TrainingComposition{
+        .model_family = "rwkv",
+        .components =
+            {
+                {"optimizer",
+                 {.key = adamw().key,
+                  .configuration = nlohmann::json::object()}},
+            },
+        .topologies = std::nullopt,
+        .post_training = std::move(arm),
+    };
+  };
+  trainvm::PostTrainingArmDeclaration declared{
+      .arm_id = "arm.finetune-a",
+      .kind = "supervised_finetune",
+      .bounds = {{.kind = "optimizer_steps", .magnitude = 10000U}},
+      .reproducibility_claim = "exact",
+      .seed = 7U,
+      .verifier_identity = std::nullopt,
+      .external_mutations = std::nullopt,
+      .claims_trajectory_preserving_resume = std::nullopt,
+  };
+
+  const auto without = registry.resolve_composition(compose(std::nullopt));
+  check(without.post_training.is_null(),
+        "a composition declaring no arm carries none");
+
+  const auto with = registry.resolve_composition(compose(declared));
+  const nlohmann::json emitted = trainvm::resolved_training_composition_json(with);
+  check(emitted.contains("post_training") &&
+            emitted["post_training"]["arm_id"] == "arm.finetune-a" &&
+            emitted["post_training"]["reproducibility_claim"] == "exact" &&
+            emitted["post_training"]["bounds"][0]["kind"] == "optimizer_steps" &&
+            emitted["post_training"]["seed"] == 7U,
+        "the lowered arm travels to the worker inside the resolved composition");
+  check(!emitted["post_training"].contains("verifier_identity") &&
+            !emitted["post_training"].contains("external_mutations"),
+        "absent optional fields are omitted rather than emitted as null");
+
+  // The digest must separate two compositions that differ only in the arm.
+  // Identical components with a different endpoint or a different claim are
+  // different experiments, and a digest that could not tell them apart would
+  // let one be substituted for the other.
+  trainvm::PostTrainingArmDeclaration relabelled = declared;
+  relabelled.reproducibility_claim = "none";
+  const auto other = registry.resolve_composition(compose(relabelled));
+  check(other.composition_digest != with.composition_digest,
+        "the composition digest changes when only the arm's claim changes");
+  check(without.composition_digest != with.composition_digest,
+        "the composition digest changes when an arm is added");
+
+  // The authority repeats compile's check, so a plan cannot reach a worker
+  // carrying an arm that compilation would have refused.
+  trainvm::PostTrainingArmDeclaration dishonest = declared;
+  dishonest.bounds = {{.kind = "wall_clock_seconds", .magnitude = 3600U}};
+  bool refused = false;
+  try {
+    (void)registry.resolve_composition(compose(dishonest));
+  } catch (const std::exception&) {
+    refused = true;
+  }
+  check(refused,
+        "a wall-clock arm claiming exact reproducibility is refused by the "
+        "registry, not only by compilation");
+}
+
 void compositions_extend_worker_authority() {
   const trainvm::TrainingComponentRegistry registry(
       {adamw(), cosine_schedule()});
@@ -628,6 +697,7 @@ int main() {
     registry_is_canonical_and_resolves_typed_configuration();
     invalid_descriptors_and_requests_fail_closed();
     compositions_extend_worker_authority();
+  a_post_training_arm_reaches_the_worker_and_binds_the_digest();
     experiment_composition_is_reflected_and_bounded();
     checked_in_component_catalog_matches_native_authority_contract();
   } catch (const std::exception& exception) {

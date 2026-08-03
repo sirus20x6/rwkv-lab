@@ -99,6 +99,12 @@ struct ResolvedTrainingComposition final {
   // none. Part of the composition digest, so a topology change is a different
   // composition rather than a silent substitution.
   nlohmann::json topologies = nullptr;
+  // The lowered post-training arm, null when the composition declares none.
+  // Also part of the composition digest: two runs with identical components
+  // but different bounds, seeds or reproducibility claims are different
+  // experiments, and a digest that could not tell them apart would let one be
+  // substituted for the other.
+  nlohmann::json post_training = nullptr;
   std::string registry_digest;
   std::string composition_digest;
 
