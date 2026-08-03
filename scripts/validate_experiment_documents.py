@@ -19,6 +19,9 @@ import sys
 
 import jsonschema
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+from scripts.gate_verdict import verdict_line  # noqa: E402
+
 DOCS = pathlib.Path("docs/experiment-vm")
 SCHEMA = DOCS / "experiment-v1.schema.json"
 EXAMPLES = DOCS / "examples"
@@ -95,15 +98,21 @@ def main() -> int:
     for path in fixtures:
         failures.extend(check_no_executable_authority(path))
 
+    # Vacuity is a failure like any other, so it belongs in the list rather
+    # than after the summary. It used to print its FAIL line *below* the tally
+    # and return early, which made this gate the one place where the last line
+    # did state a verdict -- inconsistently with its own passing output.
+    if validated == 0:
+        failures.append("no experiment document was validated")
+
     for failure in failures:
         print(f"FAIL: {failure}")
-    print(
-        f"schema gate: {validated} experiment documents validated, "
-        f"{len(fixtures)} coverage fixtures checked for executable authority"
-    )
-    if validated == 0:
-        print("FAIL: no experiment document was validated")
-        return 1
+    print(verdict_line(
+        "schema gate",
+        failures,
+        f"{validated} experiment documents validated, {len(fixtures)} "
+        "coverage fixtures checked for executable authority",
+    ))
     return 1 if failures else 0
 
 

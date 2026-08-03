@@ -22,6 +22,9 @@ import pathlib
 import re
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+from scripts.gate_verdict import verdict_line  # noqa: E402
+
 REPOSITORY = pathlib.Path(__file__).resolve().parent.parent
 DECLARATION = REPOSITORY / "docs/experiment-vm/native-ci-exclusions.v1.json"
 API_VERSION = "trainvm.native-ci-exclusions/v1"
@@ -94,18 +97,26 @@ def main() -> int:
     workflow = REPOSITORY / declaration.get("workflow", ".github/workflows/tests.yml")
     problems = failures(declaration, workflow.read_text(encoding="utf-8"))
 
-    if problems:
-        for problem in problems:
-            print(f"FAIL: {problem}", file=sys.stderr)
-        return 1
+    for problem in problems:
+        print(f"FAIL: {problem}", file=sys.stderr)
 
     entries = declaration["exclusions"]
-    print(f"native ctest exclusions: {len(entries)} declared and pinned to "
-          f"{declaration['workflow']}")
-    for entry in entries:
-        print(f"  NOT RUN in hosted CI: {entry['suite']} — {entry['reason']}")
-    print(f"  all of the above run in {declaration['covered_by']}")
-    return 0
+    if not problems:
+        for entry in entries:
+            print(f"  NOT RUN in hosted CI: {entry['suite']} — {entry['reason']}")
+        print(f"  all of the above run in {declaration['covered_by']}")
+
+    # Last, and after the per-suite listing, so the verdict is the line a
+    # reader sees when the log is truncated. Previously the failing path wrote
+    # only to stderr and returned early, so a stdout-only reader saw silence on
+    # failure and a suite listing on success -- distinguishable, but neither
+    # line said which had happened.
+    print(verdict_line(
+        "native ctest exclusions",
+        problems,
+        f"{len(entries)} declared and pinned to {declaration['workflow']}",
+    ))
+    return 1 if problems else 0
 
 
 if __name__ == "__main__":

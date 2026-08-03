@@ -24,6 +24,9 @@ import json
 import pathlib
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+from scripts.gate_verdict import verdict_line  # noqa: E402
+
 DEFAULT = pathlib.Path("docs/experiment-vm/benchmark-matrix.v1.json")
 
 # The roadmap requires fixtures "for MageFlow/flow, RWKV LM, transformer LM,
@@ -176,9 +179,12 @@ def main() -> int:
 
     for failure in failures:
         print(f"FAIL: {failure}")
-    print(
-        f"benchmark matrix: {len(fixtures)} fixtures over {len(families)} "
-        f"families, {len(transition_families)} with curriculum transitions")
+    print(verdict_line(
+        "benchmark matrix",
+        failures,
+        f"{len(fixtures)} fixtures over {len(families)} families, "
+        f"{len(transition_families)} with curriculum transitions",
+    ))
     return 1 if failures else 0
 
 

@@ -25,6 +25,9 @@ import re
 import subprocess
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+from scripts.gate_verdict import verdict_line  # noqa: E402
+
 EXCLUSIONS_NAME = "coverage_exclusions.json"
 
 
@@ -87,10 +90,12 @@ def main() -> int:
         print(f"STALE EXCLUSION: {path} is listed in {exclusions_path} "
               "but no longer exists")
 
-    print(
-        f"coverage gate: {len(covered)} covered, {len(exclusions)} explained "
-        f"exclusions, {len(on_disk)} test files on disk"
-    )
+    print(verdict_line(
+        "coverage gate",
+        uncovered + stale,
+        f"{len(covered)} covered, {len(exclusions)} explained exclusions, "
+        f"{len(on_disk)} test files on disk",
+    ))
     return 1 if uncovered or stale else 0
 
 
