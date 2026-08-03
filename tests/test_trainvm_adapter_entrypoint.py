@@ -1584,6 +1584,53 @@ def test_dispatch_table_is_closed_and_training_composition_is_required() -> None
         execute_invocation(supported)
 
 
+def test_a_declared_post_training_arm_no_handler_honours_is_refused() -> None:
+    """An arm nobody reads must be refused, not carried and ignored.
+
+    The arm declares what ends the run and what reproducibility it may claim,
+    and the composition digest covers it — so a handler that does not read it
+    would run the arm unbounded while the digest still asserts the run matched
+    its declaration. Silently ignoring it is the exact failure the post-training
+    authority exists to prevent, one layer below where it is checked.
+    """
+    arm = {
+        "api_version": "trainvm.post-training-arm/v1",
+        "arm_id": "arm.finetune-a",
+        "kind": "supervised_finetune",
+        "bounds": [{"kind": "optimizer_steps", "magnitude": 10000}],
+        "reproducibility_claim": "exact",
+    }
+    invocation = SimpleNamespace(
+        adapter={
+            "adapter": "rwkv-lab.qwen-ao3",
+            "version": "1.0.0",
+            "operation": "train",
+            "contract": "rwkv_lab.qwen_ao3.v1.Train",
+        },
+        training=SimpleNamespace(post_training=arm),
+    )
+    with pytest.raises(AdapterDispatchError) as failure:
+        execute_invocation(invocation)
+    message = str(failure.value)
+    # Name the arm and the adapter: "refused" without either sends the reader
+    # looking through the document for which of them was at fault.
+    assert "arm.finetune-a" in message
+    assert "rwkv-lab.qwen-ao3" in message
+
+    # A composition carrying no arm gets past this check. It fails later for an
+    # unrelated reason — this fixture is not a full composition — so assert on
+    # what the failure is NOT, rather than pinning an incidental error further
+    # down that would break the moment anything else changes.
+    without = SimpleNamespace(
+        adapter=dict(invocation.adapter), training=SimpleNamespace(post_training=None)
+    )
+    with pytest.raises(Exception) as unrelated:
+        execute_invocation(without)
+    assert "does not honour" not in str(unrelated.value), (
+        "the refusal fired for a composition that declares no arm"
+    )
+
+
 def test_nonadopted_adapter_receipts_enabled_phase_failure_before_dispatch() -> None:
     receipts = []
     channel = SimpleNamespace(

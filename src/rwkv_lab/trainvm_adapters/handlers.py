@@ -2378,6 +2378,15 @@ _HANDLERS: Mapping[AdapterKey, Handler] = {
 }
 
 
+# Handlers that actually read a post-training arm and honour its bounds.
+# Deliberately empty: the arm reaches the worker (PR #61 delivers it, PR #62
+# lets the worker load it) but no handler implements it yet. Add a handler here
+# only once it enforces the declared bounds — an entry here is a claim that the
+# run will match what the document said, and the composition digest is signing
+# that claim.
+_POST_TRAINING_HANDLERS: frozenset[object] = frozenset()
+
+
 def supported_adapter_keys() -> frozenset[AdapterKey]:
     return frozenset(_HANDLERS)
 
@@ -2402,6 +2411,21 @@ def execute_invocation(
         raise AdapterDispatchError(
             "worker invocation has no closed adapter handler"
         ) from error
+    training = invocation.training
+    arm = getattr(training, "post_training", None) if training is not None else None
+    if arm is not None and handler not in _POST_TRAINING_HANDLERS:
+        # An arm declares what ends the run — "stop at 10000 optimizer steps" —
+        # and which reproducibility it may claim. A handler that does not read
+        # it would run the arm unbounded while the composition digest, which
+        # covers the arm, still asserts the run was the one that was declared.
+        # That is the failure the whole post-training authority exists to
+        # prevent, arriving one layer below where it was checked.
+        raise AdapterDispatchError(
+            "worker invocation declares post-training arm "
+            f"{arm.get('arm_id', '<unnamed>')!r}, which adapter "
+            f"{adapter['adapter']} does not honour: refusing rather than "
+            "running a bounded arm unbounded"
+        )
     if execution_phases is not None and handler not in {
         _appearance_expert,
         _mageflow_full_backbone,
