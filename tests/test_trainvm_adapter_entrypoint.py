@@ -248,7 +248,7 @@ def test_appearance_handler_passes_only_canonical_authorized_paths(
     monkeypatch.setattr(
         mage_flow_expert_train,
         "train",
-        lambda config, *, worker_components, worker_step_profiler, worker_observability, worker_controls: (
+        lambda config, *, worker_components, worker_step_profiler, worker_observability, worker_controls, worker_execution_phases: (
             observed.append(
                 (
                     config,
@@ -256,6 +256,7 @@ def test_appearance_handler_passes_only_canonical_authorized_paths(
                     worker_step_profiler,
                     worker_observability,
                     worker_controls,
+                    worker_execution_phases,
                 )
             )
         ),
@@ -281,15 +282,29 @@ def test_appearance_handler_passes_only_canonical_authorized_paths(
             "mixed_precision": "bf16",
         }
     )
+    execution_phases = SimpleNamespace(
+        request=lambda phase: (
+            SimpleNamespace(enabled=True)
+            if phase is ExecutionPhase.COMPILE
+            else None
+        )
+    )
 
     assert _appearance_expert(
-        invocation, components, observability=observability, controls=controls
+        invocation,
+        components,
+        observability=observability,
+        controls=controls,
+        execution_phases=execution_phases,
     ) == HandlerResult("worker.completed", {"reason": "training_complete"})
     assert observed[0][0].train_manifest == str(manifest.resolve())
     assert observed[0][0].output_dir == str(run_directory.resolve())
     assert observed[0][1] is components
     assert observed[0][3] is observability
     assert observed[0][4] is controls
+    assert observed[0][5] is execution_phases
+    assert observed[0][0].compile_transformer_blocks is True
+    assert observed[0][0].compile_vae_encoder is True
     assert observed[0][0].learning_rate == pytest.approx(2.0e-5)
     assert observed[0][0].eval_every == 25
     assert observed[0][0].caption_dropout == pytest.approx(0.2)

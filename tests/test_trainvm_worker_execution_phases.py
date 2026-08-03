@@ -144,6 +144,23 @@ def test_runtime_rejects_an_underexecuted_completed_phase() -> None:
     assert channel.calls[0][1] is ExecutionPhaseDisposition.FAILED
 
 
+def test_runtime_receipts_changed_trajectory_as_failure() -> None:
+    invocation, values = _fixture()
+    compile_request = decode_execution_phase_requests(values, invocation)[0]
+    channel = _Channel()
+    runtime = WorkerExecutionPhaseRuntime(channel)
+    state = {"model": "before"}
+
+    def mutate(_steps, _mark_step):
+        state["model"] = "after"
+
+    with pytest.raises(WorkerExecutionPhaseError, match="restore"):
+        runtime.run(compile_request, snapshot=lambda: state, execute=mutate)
+    _, disposition, receipt = channel.calls[0]
+    assert disposition is ExecutionPhaseDisposition.FAILED
+    assert receipt["state_fingerprint_before"] != receipt["state_fingerprint_after"]
+
+
 def test_phase_coordinator_is_one_shot_and_requires_every_receipt() -> None:
     invocation, values = _fixture()
     requests = decode_execution_phase_requests(values, invocation)

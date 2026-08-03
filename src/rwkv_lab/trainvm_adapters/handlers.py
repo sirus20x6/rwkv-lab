@@ -15,6 +15,7 @@ from typing import Any
 from rwkv_lab.trainvm_worker import (
     ArtifactPublicationRequest,
     CheckpointPublicationRequest,
+    ExecutionPhase,
     NullStepProfiler,
     WorkerControlRuntime,
     WorkerExecutionPhases,
@@ -176,6 +177,16 @@ def _appearance_expert(
         invocation.workspace, require_content=True
     )
     raw_config = read_inline_config(invocation.inputs)
+    if execution_phases is not None:
+        compile_request = execution_phases.request(ExecutionPhase.COMPILE)
+        compile_enabled = (
+            compile_request.enabled if compile_request is not None else False
+        )
+        raw_config = {
+            **raw_config,
+            "compile_transformer_blocks": compile_enabled,
+            "compile_vae_encoder": compile_enabled,
+        }
     train_manifest = paths.read_path(
         _raw_config_path(raw_config, "train_manifest", required=True) or "",
         label="train_manifest",
@@ -245,6 +256,7 @@ def _appearance_expert(
         worker_step_profiler=step_profiler or NullStepProfiler(),
         worker_observability=observability,
         worker_controls=controls,
+        worker_execution_phases=execution_phases,
     )
     request, step, status = completed_checkpoint_request(
         invocation,
@@ -2257,7 +2269,10 @@ def execute_invocation(
         raise AdapterDispatchError(
             "worker invocation has no closed adapter handler"
         ) from error
-    if execution_phases is not None and handler is not _rwkv_scratch:
+    if execution_phases is not None and handler not in {
+        _appearance_expert,
+        _rwkv_scratch,
+    }:
         preinitialization_state = {
             "lifecycle": "pre_initialization",
             "invocation_digest": invocation.invocation_digest,
