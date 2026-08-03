@@ -3,9 +3,11 @@
 #include <fcntl.h>
 #include <linux/magic.h>
 #include <openssl/evp.h>
+#include <poll.h>
 #include <signal.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
+#include <sys/syscall.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -13,9 +15,11 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -576,6 +580,7 @@ LinuxAllocationCgroupIdentity observed_cgroup_identity(std::int64_t pid) {
 
 struct CrashOutcome final {
   bool signalled{};
+  bool timed_out{};
   int signal_number{};
   int exit_status{};
   std::int64_t pid{};
@@ -583,9 +588,32 @@ struct CrashOutcome final {
   std::string failure;
 };
 
-CrashOutcome run_crashing_child(const std::function<void()>& body) {
+int open_process_pidfd(pid_t pid) noexcept {
+#ifdef SYS_pidfd_open
+  return static_cast<int>(::syscall(SYS_pidfd_open, pid, 0U));
+#else
+  (void)pid;
+  errno = ENOSYS;
+  return -1;
+#endif
+}
+
+int signal_process_pidfd(int pidfd, int signal_number) noexcept {
+#ifdef SYS_pidfd_send_signal
+  return static_cast<int>(
+      ::syscall(SYS_pidfd_send_signal, pidfd, signal_number, nullptr, 0U));
+#else
+  (void)pidfd;
+  (void)signal_number;
+  errno = ENOSYS;
+  return -1;
+#endif
+}
+
+CrashOutcome run_crashing_child(const std::function<void()>& body,
+                                std::int64_t timeout_ms) {
   std::array<int, 2U> channel{-1, -1};
-  if (::pipe(channel.data()) != 0)
+  if (::pipe2(channel.data(), O_CLOEXEC | O_NONBLOCK) != 0)
     throw HostdCrashQualificationError("qualification diagnostic pipe failed");
   const pid_t child = ::fork();
   if (child < 0) {
@@ -610,13 +638,80 @@ CrashOutcome run_crashing_child(const std::function<void()>& body) {
   }
   (void)::close(channel[1]);
   CrashOutcome outcome;
+  const int raw_pidfd = open_process_pidfd(child);
+  if (raw_pidfd < 0) {
+    (void)::kill(child, SIGKILL);
+    int ignored = 0;
+    while (::waitpid(child, &ignored, 0) < 0 && errno == EINTR) {
+    }
+    (void)::close(channel[0]);
+    throw HostdCrashQualificationError(
+        "qualification could not pin its child pidfd");
+  }
+  Descriptor pidfd(raw_pidfd);
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(timeout_ms);
+  // Wait on the exact direct child, not diagnostic-pipe closure. A stopped
+  // pre-exec worker legitimately inherits the pipe until its launch gate is
+  // resolved and must not make a successfully killed daemon look wedged.
+  pollfd process{
+      .fd = pidfd.get(),
+      .events = POLLIN,
+      .revents = 0,
+  };
+  int ready = 0;
+  while (true) {
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+        deadline - std::chrono::steady_clock::now());
+    if (remaining.count() <= 0) {
+      outcome.timed_out = true;
+      break;
+    }
+    const auto bounded = std::min<std::int64_t>(
+        remaining.count(), std::numeric_limits<int>::max());
+    ready = ::poll(&process, 1U, static_cast<int>(bounded));
+    if (ready < 0 && errno == EINTR) continue;
+    if (ready == 0) {
+      outcome.timed_out = true;
+      break;
+    }
+    if (ready < 0) {
+      (void)signal_process_pidfd(pidfd.get(), SIGKILL);
+      int ignored = 0;
+      while (::waitpid(child, &ignored, 0) < 0 && errno == EINTR) {
+      }
+      (void)::close(channel[0]);
+      throw HostdCrashQualificationError(
+          "qualification child pidfd poll failed");
+    }
+    if ((process.revents & (POLLIN | POLLHUP)) == 0) {
+      (void)signal_process_pidfd(pidfd.get(), SIGKILL);
+      int ignored = 0;
+      while (::waitpid(child, &ignored, 0) < 0 && errno == EINTR) {
+      }
+      (void)::close(channel[0]);
+      throw HostdCrashQualificationError(
+          "qualification child pidfd reported an invalid poll state");
+    }
+    break;
+  }
+  if (outcome.timed_out) {
+    if (signal_process_pidfd(pidfd.get(), SIGKILL) != 0) {
+      // The unreaped direct child still owns its PID, so this fallback cannot
+      // signal a recycled process identity.
+      (void)::kill(child, SIGKILL);
+    }
+    outcome.failure = "qualification case exceeded its wall-clock bound";
+  }
   std::array<char, 512U> bytes{};
   ssize_t count = 0;
-  do {
-    count = ::read(channel[0], bytes.data(), bytes.size());
-  } while (count < 0 && errno == EINTR);
-  if (count > 0)
-    outcome.failure.assign(bytes.data(), static_cast<std::size_t>(count));
+  if (!outcome.timed_out) {
+    do {
+      count = ::read(channel[0], bytes.data(), bytes.size());
+    } while (count < 0 && errno == EINTR);
+    if (count > 0)
+      outcome.failure.assign(bytes.data(), static_cast<std::size_t>(count));
+  }
   (void)::close(channel[0]);
   int status = 0;
   while (::waitpid(child, &status, 0) < 0) {
@@ -986,8 +1081,9 @@ HostdCrashCaseReceipt run_durable_case(
     durable_child_body(ledger_path, cgroup_config, plan);
     // Reaching here without a crash means the declared window never opened.
     ::_exit(93);
-  });
-  require(crash.signalled && crash.signal_number == SIGKILL,
+  }, config.case_timeout_ms);
+  require(!crash.timed_out && crash.signalled &&
+              crash.signal_number == SIGKILL,
           "declared crash window did not destroy the process (exit status " +
               std::to_string(crash.exit_status) + ", signal " +
               std::to_string(crash.signal_number) + ", detail: " +
@@ -1122,7 +1218,8 @@ HostProcessSpawnRequest surviving_worker_identity(std::int64_t pid) {
                                      self_executable_digest(pid));
 }
 
-HostdCrashCaseReceipt run_process_case(HostdCrashPoint point) {
+HostdCrashCaseReceipt run_process_case(
+    HostdCrashPoint point, const HostdCrashQualificationConfig& config) {
   SurvivingWorker worker;
   worker.pid = spawn_surviving_worker();
   // The observation probe reads /proc; give the child a moment to be visible
@@ -1132,8 +1229,9 @@ HostdCrashCaseReceipt run_process_case(HostdCrashPoint point) {
   const CrashOutcome crash = run_crashing_child([] {
     (void)::raise(SIGKILL);
     ::_exit(97);
-  });
-  require(crash.signalled && crash.signal_number == SIGKILL,
+  }, config.case_timeout_ms);
+  require(!crash.timed_out && crash.signalled &&
+              crash.signal_number == SIGKILL,
           "daemon crash was not delivered before restart observation");
 
   const LinuxProcessRecoveryProbe probe;
@@ -1229,8 +1327,9 @@ HostdCrashCaseReceipt run_process_case(HostdCrashPoint point) {
       const CrashOutcome gone = run_crashing_child([] {
         (void)::raise(SIGKILL);
         ::_exit(97);
-      });
-      require(gone.signalled, "absent-pid fixture did not terminate");
+      }, config.case_timeout_ms);
+      require(!gone.timed_out && gone.signalled,
+              "absent-pid fixture did not terminate");
       HostProcessSpawnRequest absent = identity;
       absent.host_pid = gone.pid;
       absent.canonical_request_digest.clear();
@@ -1340,6 +1439,10 @@ ResourceBundleGrant open_qualification_grant(SQLiteHostLedger& ledger,
   return *result.grant;
 }
 
+void cleanup_privileged_workers_on_failure(
+    const std::filesystem::path& ledger_path,
+    const LinuxCgroupAuthorityConfig& cgroup_config) noexcept;
+
 void run_stopped_child_crashing_daemon(
     const std::filesystem::path& ledger_path,
     const LinuxCgroupAuthorityConfig& cgroup_config,
@@ -1396,8 +1499,13 @@ HostdCrashCaseReceipt run_privileged_stopped_child_case(
   const CrashOutcome crash = run_crashing_child([&] {
     run_stopped_child_crashing_daemon(ledger_path, cgroup_config, workspace,
                                       worker_path);
-  });
-  require(crash.signalled && crash.signal_number == SIGKILL,
+  }, config.case_timeout_ms);
+  if (crash.timed_out || !crash.signalled ||
+      crash.signal_number != SIGKILL) {
+    cleanup_privileged_workers_on_failure(ledger_path, cgroup_config);
+  }
+  require(!crash.timed_out && crash.signalled &&
+              crash.signal_number == SIGKILL,
           "stopped-child spawn window did not SIGKILL hostd (exit status " +
               std::to_string(crash.exit_status) + ", detail: " +
               crash.failure + ")");
@@ -1509,6 +1617,36 @@ void terminate_qualification_worker_on_failure(
   }
 }
 
+void cleanup_privileged_workers_on_failure(
+    const std::filesystem::path& ledger_path,
+    const LinuxCgroupAuthorityConfig& cgroup_config) noexcept {
+  try {
+    auto ledger = std::make_shared<SQLiteHostLedger>(
+        ledger_authority_for(ledger_path), qualification_inventory(), nullptr,
+        qualification_audit_policy());
+    const auto records = ledger->active_process_recovery_records();
+    LinuxCgroupAuthority cgroups(cgroup_config);
+    for (const HostProcessRecoveryRecord& record : records) {
+      if (record.spawn)
+        terminate_qualification_worker_on_failure(record.spawn->request);
+      const auto& request = record.intent.request;
+      for (std::size_t attempt = 0U; attempt < 2000U; ++attempt) {
+        const auto disposition = cgroups.terminate_intent_or_confirm_absent(
+            record.grant.allocation_id, request.launch_id,
+            {.unified_path = request.cgroup_path,
+             .device = request.cgroup_device,
+             .inode = request.cgroup_inode});
+        if (disposition !=
+            LinuxTerminalCgroupCleanupDisposition::termination_pending) {
+          break;
+        }
+        (void)::usleep(1000U);
+      }
+    }
+  } catch (...) {
+  }
+}
+
 HostdCrashCaseReceipt run_privileged_device_policy_case(
     const HostdCrashQualificationConfig& config,
     const std::filesystem::path& cgroup_parent) {
@@ -1527,8 +1665,13 @@ HostdCrashCaseReceipt run_privileged_device_policy_case(
   const CrashOutcome crash = run_crashing_child([&] {
     run_device_policy_crashing_daemon(ledger_path, cgroup_config, workspace,
                                       worker_path);
-  });
-  require(crash.signalled && crash.signal_number == SIGKILL,
+  }, config.case_timeout_ms);
+  if (crash.timed_out || !crash.signalled ||
+      crash.signal_number != SIGKILL) {
+    cleanup_privileged_workers_on_failure(ledger_path, cgroup_config);
+  }
+  require(!crash.timed_out && crash.signalled &&
+              crash.signal_number == SIGKILL,
           "device-policy daemon did not SIGKILL after worker exec (exit status " +
               std::to_string(crash.exit_status) + ", detail: " +
               crash.failure + ")");
@@ -1696,8 +1839,9 @@ HostdCrashCaseReceipt run_privileged_socket_restart_case(
     (void)socket.reattest();
     (void)::raise(SIGKILL);
     ::_exit(97);
-  });
-  require(crash.signalled && crash.signal_number == SIGKILL,
+  }, config.case_timeout_ms);
+  require(!crash.timed_out && crash.signalled &&
+              crash.signal_number == SIGKILL,
           "socket-owning daemon did not die by SIGKILL");
 
   struct stat stale{};
@@ -1899,6 +2043,9 @@ HostdCrashQualificationReceipt qualify_hostd_crash_recovery(
     const HostdCrashQualificationConfig& config) {
   require(config.workspace.is_absolute(),
           "the disposable qualification workspace must be an absolute path");
+  require(config.case_timeout_ms >= 1000 &&
+              config.case_timeout_ms <= 60'000,
+          "the destructive case timeout must be between 1 and 60 seconds");
   std::error_code failure;
   std::filesystem::create_directories(config.workspace, failure);
   require(!failure, "could not create the disposable qualification workspace");
@@ -1937,7 +2084,7 @@ HostdCrashQualificationReceipt qualify_hostd_crash_recovery(
               run_durable_case(point, config, cgroup_parent, receipt.findings));
           break;
         case HostdCrashExecutor::real_process:
-          receipt.cases.push_back(run_process_case(point));
+          receipt.cases.push_back(run_process_case(point, config));
           break;
         case HostdCrashExecutor::real_cgroup:
           receipt.cases.push_back(

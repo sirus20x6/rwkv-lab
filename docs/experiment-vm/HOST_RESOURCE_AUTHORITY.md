@@ -893,6 +893,13 @@ only assigned device is `/dev/null` (character device 1:3). They therefore exerc
 cgroup-device BPF compiler, attachment, durable receipt, and restart reattestation without reserving
 or opening a real accelerator, so the matrix is safe to run beside live training. Exit status is `0`
 when the gate is open, `3` when any declared point is unqualified, and `1` on harness failure.
+Every destructive case has a configurable 1–60 second wall-clock bound (15 seconds by default).
+The harness pins its direct child with a pidfd and kills that exact process on expiry. If a
+privileged launch has already created a worker, failure cleanup reopens the durable ledger, signals
+only the recorded exact worker identity, and converges its disposable cgroup before returning the
+failure. Diagnostics are nonblocking and close-on-exec; case completion waits on the daemon pidfd,
+so neither an adopted worker nor a stopped pre-exec child can keep a dead daemon's case open or
+make its expected death look like a timeout.
 
 The contract is the enumeration in `trainvm/include/trainvm/hostd_crash_qualification.hpp`. A
 receipt that omits, reorders, or duplicates a declared point is rejected by

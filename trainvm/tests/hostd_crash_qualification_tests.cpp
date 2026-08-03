@@ -209,6 +209,19 @@ void host_probe_reports_the_current_authority_grade() {
             "a delegated cgroup subtree reports its unified path");
 }
 
+void destructive_case_timeout_is_bounded_before_execution() {
+  TemporaryDirectory workspace;
+  HostdCrashQualificationConfig config;
+  config.workspace = workspace.path();
+  config.case_timeout_ms = 999;
+  require_throws([&] { (void)qualify_hostd_crash_recovery(config); },
+                 "a sub-second destructive timeout must be rejected");
+
+  config.case_timeout_ms = 60'001;
+  require_throws([&] { (void)qualify_hostd_crash_recovery(config); },
+                 "an excessive destructive timeout must be rejected");
+}
+
 // The destructive matrix itself. It is opt-in because it kills processes and
 // writes a disposable host ledger; CI enables it through the environment.
 void destructive_matrix_gate_is_honest() {
@@ -258,6 +271,7 @@ int main() {
     receipt_validation_rejects_incomplete_or_overclaiming_evidence();
     receipt_json_round_trips_every_declared_point();
     host_probe_reports_the_current_authority_grade();
+    destructive_case_timeout_is_bounded_before_execution();
     destructive_matrix_gate_is_honest();
     std::cout << "hostd crash qualification tests passed\n";
     return 0;

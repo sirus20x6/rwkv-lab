@@ -1,6 +1,8 @@
 #include <signal.h>
 #include <unistd.h>
 
+#include <charconv>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -18,13 +20,27 @@ namespace {
 void usage() {
   std::cerr
       << "usage: trainvm-hostd-crash-qualification --workspace /disposable/dir"
-         " [--cgroup-parent /sys/fs/cgroup/...] [--receipt /out.json]\n"
+         " [--cgroup-parent /sys/fs/cgroup/...] [--case-timeout-ms 15000]"
+         " [--receipt /out.json]\n"
          "\n"
          "Destructive. It forks and SIGKILLs real processes and writes a\n"
          "disposable host ledger and cgroup subtree beneath --workspace.\n"
          "Point it only at a host you are willing to damage.\n"
          "Exit status: 0 when the gate is open, 3 when any declared crash\n"
          "point is unqualified, 1 on harness failure.\n";
+}
+
+std::int64_t parse_timeout(std::string_view value) {
+  std::int64_t result = 0;
+  const auto parsed = std::from_chars(
+      value.data(), value.data() + value.size(), result);
+  if (value.empty() || parsed.ec != std::errc{} ||
+      parsed.ptr != value.data() + value.size() || result < 1000 ||
+      result > 60'000) {
+    throw std::runtime_error(
+        "case timeout must be an integer between 1000 and 60000 ms");
+  }
+  return result;
 }
 
 }  // namespace
@@ -70,6 +86,8 @@ int main(int argc, char** argv) {
         config.workspace = argv[++index];
       } else if (flag == "--cgroup-parent" && has_value) {
         config.cgroup_parent = argv[++index];
+      } else if (flag == "--case-timeout-ms" && has_value) {
+        config.case_timeout_ms = parse_timeout(argv[++index]);
       } else if (flag == "--receipt" && has_value) {
         receipt_path = argv[++index];
       } else {
