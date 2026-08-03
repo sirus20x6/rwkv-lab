@@ -66,7 +66,7 @@ tensor in bounded chunks plus optimizer groups, all Torch/CUDA/Python/NumPy RNG 
 cursor. It deliberately hashes tensor contents because `Tensor.data` writes can evade version
 counters.
 
-Both MageFlow expert adapters use the same coordinator through the family bridge in
+All three MageFlow training adapters use the same coordinator through the family bridge in
 `trainvm_adapters.mageflow_phases`. The invocation's compile declaration owns both regional
 transformer and VAE compilation, a deterministic real training batch triggers lazy compilation,
 and warmup repeats that disposable forward/backward exactly as declared. The terminal/TREAD route
@@ -145,10 +145,10 @@ mutating effective state, and reports pause/restart controls as replacement-work
 runner constructs this service from the sealed invocation rather than giving a trainer the session.
 Scratch RWKV consumes all four safe-point hooks, persists the effective control snapshot in its
 terminal checkpoint, verifies it on resume, and honestly rejects live mutation because its v1
-catalog is restart-only. Both MageFlow training adapters additionally lower their authority-selected
+catalog is restart-only. All MageFlow training adapters additionally lower their authority-selected
 initial controls before construction and atomically apply learning rate, evaluation cadence, and
 caption dropout at their declared boundaries. Learning-rate rebasing is owned by the schedule
-component and preserves schedule phase plus appearance/terminal expert, backbone, and REPA group
+component and preserve schedule phase plus full-backbone or appearance/terminal expert, backbone, and REPA group
 ratios; checkpoints bind and verify the
 effective revision and values, while the static training-contract identity excludes only the named
 mutable fields. Cached conditioning rejects a zero-to-positive caption-dropout transition when no
@@ -180,7 +180,7 @@ fixed; the normal native test target builds it twice and requires byte equality.
 sealed interpreter with `-I`, installs the zipapp at fd 3 through its separately bound code-argument
 slot, clears the environment, and appends exactly `--trainvm-bootstrap-fd=4`; the runner rejects
 every other argument. Its dispatch table contains exact `(adapter, version, operation, contract)`
-tuples for the MageFlow appearance and terminal experts, Qwen AO3 continuation, eight canonical
+tuples for MageFlow full-backbone plus appearance and terminal experts, Qwen AO3 continuation, eight canonical
 MLA-family variants, scratch RWKV pretraining, and restart-only RWKV post-training. The latter
 publishes adapter, reward-head, terminal result, and metric files through the generic immutable-tree
 artifact boundary rather than presenting them as a resumable checkpoint. An experiment cannot

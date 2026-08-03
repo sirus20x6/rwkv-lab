@@ -22,6 +22,7 @@ from rwkv_lab.training_components import (
     FixedGradientAccumulationConfiguration,
     FP32ParametersBFloat16ComputeConfiguration,
     FP32ParametersBFloat16ComputePolicy,
+    FullBackboneRoutingConfiguration,
     GlobalNormClippingConfiguration,
     GradientAccumulationImplementation,
     GradientClippingImplementation,
@@ -640,6 +641,24 @@ def test_resolved_parameter_router_dispatch_uses_exact_catalog_defaults():
     )
     assert result.report["passed"]
     assert [group["lr"] for group in result.groups] == pytest.approx([2.0e-5, 1.0e-5])
+
+
+def test_full_backbone_parameter_router_claims_every_trainable_tensor():
+    first = torch.nn.Parameter(torch.ones(2))
+    second = torch.nn.Parameter(torch.ones(3))
+    frozen = torch.nn.Parameter(torch.ones(5), requires_grad=False)
+    result = build_registered_parameter_routing(
+        ParameterRouterImplementation.MAGEFLOW_FULL_BACKBONE_V1,
+        [("first", first), ("second", second), ("frozen", frozen)],
+        {},
+        base_learning_rate=3.0e-5,
+        configuration=FullBackboneRoutingConfiguration(),
+    )
+    assert len(result.groups) == 1
+    assert result.groups[0]["group_name"] == "full_backbone"
+    assert result.groups[0]["params"] == [first, second]
+    assert result.report["trainable_parameter_count"] == 5
+    assert result.report["frozen_tensor_count"] == 1
 
 
 @pytest.mark.parametrize(

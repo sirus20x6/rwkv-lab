@@ -30,14 +30,24 @@ import shutil
 import signal
 import struct
 import threading
+import time
 import zlib
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from queue import Full, Queue
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from rwkv_lab.trainvm_adapters import WorkerTrainingComponents
+    from rwkv_lab.trainvm_worker import (
+        WorkerControlRuntime,
+        WorkerExecutionPhases,
+        WorkerObservability,
+        WorkerStepProfiler,
+    )
 
 RUN_SCHEMA = "rwkv-lab.mage-flow-pretrain.v1"
 OFFICIAL_REPOSITORY = "https://github.com/microsoft/Mage"
@@ -473,9 +483,10 @@ def prepare_reddit_split(
 @dataclass
 class MageFlowTrainConfig:
     train_manifest: str
-    eval_manifest: str | None
     output_dir: str
+    eval_manifest: str | None = None
     model_id: str = DEFAULT_MODEL_ID
+    model_path: str | None = None
     model_revision: str = DEFAULT_MODEL_REVISION
     official_source_revision: str = OFFICIAL_SOURCE_REVISION
     max_steps: int = 16_000
@@ -509,6 +520,9 @@ class MageFlowTrainConfig:
     gradient_checkpointing: bool = True
     vae_sample_posterior: bool = True
     compile_vae_encoder: bool = True
+    compile_transformer_blocks: bool = False
+    compile_transformer_mode: str = "default"
+    compile_transformer_dynamic: bool = False
     tracker_project: str | None = None
 
     @classmethod
@@ -525,6 +539,12 @@ class MageFlowTrainConfig:
                 "this full-pretraining contract is qualified for "
                 f"{DEFAULT_MODEL_ID}, got {self.model_id}"
             )
+        if self.model_revision != DEFAULT_MODEL_REVISION:
+            raise ValueError("unqualified Mage-Flow model revision")
+        if self.official_source_revision != OFFICIAL_SOURCE_REVISION:
+            raise ValueError("unqualified Microsoft Mage source revision")
+        if self.model_path and not Path(self.model_path).expanduser().is_dir():
+            raise ValueError(f"model path not found: {self.model_path}")
         if self.max_steps < 1 or self.packed_sequence_tokens < 1:
             raise ValueError("max_steps and packed_sequence_tokens must be positive")
         if self.gradient_accumulation_steps < 1:
@@ -551,6 +571,79 @@ class MageFlowTrainConfig:
             raise ValueError("keep_last_n must be positive")
         if self.mixed_precision != "bf16":
             raise ValueError("Mage-Flow full training is qualified only for bf16")
+
+
+def resolved_worker_component_contract(
+    config: MageFlowTrainConfig,
+    worker_components: WorkerTrainingComponents | None,
+    worker_controls: WorkerControlRuntime | None = None,
+) -> tuple[float, Mapping[str, Mapping[str, str]] | None, str | None]:
+    """Bind the legacy scalar configuration to the sealed composition."""
+
+    if worker_components is None:
+        return config.learning_rate, None, None
+    optimizer = dict(worker_components.configuration("optimizer", category="optimizer"))
+    schedule = dict(
+        worker_components.configuration(
+            "learning_rate", category="learning_rate_schedule"
+        )
+    )
+    expected_optimizer = {
+        "learning_rate": (
+            optimizer["learning_rate"]
+            if worker_controls is not None
+            and "learning_rate" in worker_controls.effective_values
+            else config.learning_rate
+        ),
+        "beta1": config.adam_beta1,
+        "beta2": config.adam_beta2,
+        "epsilon": config.adam_epsilon,
+        "foreach": True,
+        "fused": False,
+    }
+    if optimizer != expected_optimizer:
+        raise ValueError(
+            "authority optimizer composition disagrees with full-backbone configuration"
+        )
+    if dict(
+        worker_components.configuration(
+            "parameter_router", category="parameter_router"
+        )
+    ):
+        raise ValueError("full-backbone parameter-router configuration must be empty")
+    if schedule != {
+        "warmup_steps": config.warmup_steps,
+        "max_steps": config.max_steps,
+        "minimum_ratio": config.min_learning_rate_ratio,
+    }:
+        raise ValueError(
+            "authority LR-schedule composition disagrees with full-backbone configuration"
+        )
+    if dict(
+        worker_components.configuration(
+            "weight_decay", category="weight_decay_schedule"
+        )
+    ) != {"weight_decay": config.weight_decay}:
+        raise ValueError(
+            "authority weight-decay composition disagrees with full-backbone configuration"
+        )
+    if dict(
+        worker_components.configuration(
+            "gradient_clipping", category="gradient_clipping"
+        )
+    ) != {
+        "max_norm": config.max_grad_norm,
+        "norm_type": 2.0,
+        "error_if_nonfinite": False,
+    }:
+        raise ValueError(
+            "authority gradient-clipping composition disagrees with full-backbone configuration"
+        )
+    return (
+        float(config.learning_rate),
+        worker_components.evidence(),
+        worker_components.composition.composition_digest,
+    )
 
 
 def load_manifest(path: Path) -> list[dict[str, Any]]:
@@ -850,7 +943,15 @@ def rectified_flow_path(clean, noise, token_timesteps):
 
 
 def _write_rank_state(
-    directory: Path, *, rank: int, global_step: int, epoch: int, pack_index: int
+    directory: Path,
+    *,
+    rank: int,
+    global_step: int,
+    epoch: int,
+    pack_index: int,
+    component_composition_digest: str | None = None,
+    parameter_routing: Mapping[str, Any] | None = None,
+    control_state: Mapping[str, object] | None = None,
 ) -> None:
     _json_dump(
         directory / f"trainer_state_rank{rank:04d}.json",
@@ -859,6 +960,9 @@ def _write_rank_state(
             "global_step": global_step,
             "epoch": epoch,
             "pack_index": pack_index,
+            "component_composition_digest": component_composition_digest,
+            "parameter_routing": parameter_routing,
+            "worker_controls": control_state,
             "saved_at": _utc_now(),
         },
     )
@@ -888,6 +992,9 @@ def _save_checkpoint(
     epoch: int,
     pack_index: int,
     keep_last_n: int,
+    component_composition_digest: str | None = None,
+    parameter_routing: Mapping[str, Any] | None = None,
+    control_state: Mapping[str, object] | None = None,
 ) -> Path:
     final = output_dir / f"checkpoint-{global_step:08d}"
     temp = output_dir / f".checkpoint-{global_step:08d}.incomplete"
@@ -906,6 +1013,9 @@ def _save_checkpoint(
         global_step=global_step,
         epoch=epoch,
         pack_index=pack_index,
+        component_composition_digest=component_composition_digest,
+        parameter_routing=parameter_routing,
+        control_state=control_state,
     )
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
@@ -1203,7 +1313,15 @@ def _generate_eval_snapshot(
     return artifact
 
 
-def train(config: MageFlowTrainConfig) -> None:
+def train(
+    config: MageFlowTrainConfig,
+    *,
+    worker_components: WorkerTrainingComponents | None = None,
+    worker_step_profiler: WorkerStepProfiler | None = None,
+    worker_observability: WorkerObservability | None = None,
+    worker_controls: WorkerControlRuntime | None = None,
+    worker_execution_phases: WorkerExecutionPhases | None = None,
+) -> None:
     """Execute a full NR-MMDiT continued-pretraining run."""
     config.validate()
     try:
@@ -1217,6 +1335,8 @@ def train(config: MageFlowTrainConfig) -> None:
         )
         from huggingface_hub import snapshot_download
         from mage_flow import MageFlowPipeline
+
+        from rwkv_lab.mage_flow_optimizations import compile_transformer_blocks
         from rwkv_lab.training_components import (
             AdamWConfiguration,
             LinearWarmupCosineConfiguration,
@@ -1225,6 +1345,7 @@ def train(config: MageFlowTrainConfig) -> None:
             build_registered_optimizer,
             build_registered_schedule,
         )
+        from rwkv_lab.trainvm_adapters.mageflow_controls import MageFlowMutableControls
     except ImportError as error:
         raise RuntimeError(
             "Mage-Flow training dependencies are missing. Run the generated "
@@ -1247,13 +1368,21 @@ def train(config: MageFlowTrainConfig) -> None:
         project_config=project,
         log_with=log_with,
     )
+    if worker_components is not None and accelerator.num_processes != 1:
+        raise RuntimeError(
+            "the TrainVM full-backbone profile currently requires one worker process"
+        )
     set_seed(config.seed, device_specific=True)
     if config.tracker_project:
         accelerator.init_trackers(config.tracker_project, config=asdict(config))
 
-    model_dir = snapshot_download(
-        repo_id=config.model_id,
-        revision=config.model_revision,
+    model_dir = (
+        str(Path(config.model_path).expanduser().resolve())
+        if config.model_path
+        else snapshot_download(
+            repo_id=config.model_id,
+            revision=config.model_revision,
+        )
     )
     pipeline = MageFlowPipeline.from_pretrained(
         model_dir, device=str(accelerator.device)
@@ -1261,13 +1390,26 @@ def train(config: MageFlowTrainConfig) -> None:
     model = pipeline.model
     model.vae.sample_posterior = config.vae_sample_posterior
     model.config.compile_vae_encoder = config.compile_vae_encoder
-    if config.compile_vae_encoder:
+    if config.compile_vae_encoder and worker_execution_phases is None:
         model.maybe_compile_vae_encoder()
     model.vae.eval().requires_grad_(False)
     model.txt_enc.eval().requires_grad_(False)
     transformer = model.transformer
     transformer.checkpoint = config.gradient_checkpointing
     transformer.train().requires_grad_(True)
+
+    optimizer_learning_rate, component_evidence, component_digest = (
+        resolved_worker_component_contract(config, worker_components, worker_controls)
+    )
+    parameter_routing = (
+        worker_components.parameter_routing(
+            transformer.named_parameters(),
+            {},
+            base_learning_rate=optimizer_learning_rate,
+        )
+        if worker_components is not None
+        else None
+    )
 
     train_rows = load_manifest(Path(config.train_manifest).expanduser().resolve())
     eval_rows = (
@@ -1279,8 +1421,216 @@ def train(config: MageFlowTrainConfig) -> None:
     if eval_rows:
         annotate_packed_token_lengths(model, eval_rows)
 
+    deepspeed_config = (
+        accelerator.state.deepspeed_plugin.deepspeed_config
+        if accelerator.state.deepspeed_plugin is not None
+        else {}
+    )
+    if worker_components is not None and (
+        "optimizer" in deepspeed_config or "scheduler" in deepspeed_config
+    ):
+        raise RuntimeError(
+            "DeepSpeed may not replace a TrainVM-authority optimizer or schedule"
+        )
+    weight_decay_schedule = None
+    if worker_components is not None:
+        assert parameter_routing is not None
+        optimizer = worker_components.optimizer(parameter_routing.groups)
+        weight_decay_schedule = worker_components.weight_decay_schedule(optimizer)
+    elif "optimizer" in deepspeed_config:
+        optimizer = DummyOptim(
+            transformer.parameters(),
+            lr=config.learning_rate,
+            weight_decay=config.weight_decay,
+        )
+    else:
+        optimizer = build_registered_optimizer(
+            OptimizerImplementation.TORCH_ADAMW_V1,
+            transformer.parameters(),
+            AdamWConfiguration(
+                learning_rate=config.learning_rate,
+                beta1=config.adam_beta1,
+                beta2=config.adam_beta2,
+                epsilon=config.adam_epsilon,
+                weight_decay=config.weight_decay,
+            ),
+        )
+    if worker_components is not None:
+        scheduler = worker_components.learning_rate_schedule(optimizer)
+    elif "scheduler" in deepspeed_config:
+        scheduler = DummyScheduler(
+            optimizer,
+            total_num_steps=config.max_steps,
+            warmup_num_steps=config.warmup_steps,
+        )
+    else:
+        scheduler = build_registered_schedule(
+            ScheduleImplementation.LINEAR_WARMUP_COSINE_V1,
+            optimizer,
+            LinearWarmupCosineConfiguration(
+                warmup_steps=config.warmup_steps,
+                max_steps=config.max_steps,
+                minimum_ratio=config.min_learning_rate_ratio,
+            ),
+        )
+    mutable_scheduler = scheduler
+    transformer, optimizer, scheduler = accelerator.prepare(
+        transformer, optimizer, scheduler
+    )
+    mutable_controls = (
+        MageFlowMutableControls(config, mutable_scheduler, worker_controls)
+        if worker_controls is not None
+        else None
+    )
+
+    global_step, start_epoch, start_pack = 0, 0, 0
+    if config.resume_from:
+        resume = Path(config.resume_from).expanduser().resolve()
+        accelerator.load_state(str(resume))
+        rank_state = json.loads(
+            (
+                resume / f"trainer_state_rank{accelerator.process_index:04d}.json"
+            ).read_text()
+        )
+        global_step = int(rank_state["global_step"])
+        start_epoch = int(rank_state["epoch"])
+        start_pack = int(rank_state["pack_index"])
+        if worker_components is not None:
+            if rank_state.get("component_composition_digest") != component_digest:
+                raise ValueError(
+                    "resume checkpoint component composition disagrees with invocation"
+                )
+            expected_routing = (
+                parameter_routing.report if parameter_routing is not None else None
+            )
+            if rank_state.get("parameter_routing") != expected_routing:
+                raise ValueError(
+                    "resume checkpoint parameter routing disagrees with invocation"
+                )
+        if worker_controls is not None:
+            state = rank_state.get("worker_controls")
+            if not isinstance(state, Mapping):
+                raise ValueError("resume checkpoint omits worker control state")
+            worker_controls.verify_checkpoint_state(state)
+    last_epoch, next_pack = start_epoch, start_pack
+
+    unwrapped_transformer = accelerator.unwrap_model(transformer)
+    if worker_execution_phases is None:
+        compile_report = compile_transformer_blocks(
+            unwrapped_transformer,
+            enabled=config.compile_transformer_blocks,
+            mode=config.compile_transformer_mode,
+            dynamic=config.compile_transformer_dynamic,
+        )
+    else:
+        from rwkv_lab.trainvm_adapters.mageflow_phases import (
+            run_mageflow_execution_phases,
+        )
+        from rwkv_lab.trainvm_worker import ExecutionPhase
+
+        compile_report = compile_transformer_blocks(
+            unwrapped_transformer,
+            enabled=False,
+            mode=config.compile_transformer_mode,
+            dynamic=config.compile_transformer_dynamic,
+        )
+        compile_request = worker_execution_phases.request(ExecutionPhase.COMPILE)
+        warmup_request = worker_execution_phases.request(ExecutionPhase.WARMUP)
+        needs_workload = any(
+            request is not None and request.enabled
+            for request in (compile_request, warmup_request)
+        )
+        phase_rows: list[dict[str, Any]] = []
+        phase_images: list[Any] = []
+        if needs_workload:
+            phase_epoch = start_epoch
+            phase_pack = start_pack
+            while not phase_rows:
+                phase_packs = epoch_packs(
+                    train_rows,
+                    token_budget=config.packed_sequence_tokens,
+                    seed=config.seed,
+                    epoch=phase_epoch,
+                    rank=accelerator.process_index,
+                    world_size=accelerator.num_processes,
+                    shuffle=True,
+                )
+                if phase_pack < len(phase_packs):
+                    phase_rows = [
+                        train_rows[index] for index in phase_packs[phase_pack]
+                    ]
+                    break
+                phase_epoch += 1
+                phase_pack = 0
+                if phase_epoch > start_epoch + 1:
+                    raise RuntimeError(
+                        "MageFlow execution phase could not resolve a training pack"
+                    )
+            phase_images = [_load_image_tensor(row) for row in phase_rows]
+
+        def phase_extra_state() -> Mapping[str, Any]:
+            return {
+                "component_composition_digest": component_digest,
+                "controls": (
+                    worker_controls.checkpoint_state()
+                    if worker_controls is not None
+                    else {}
+                ),
+                "data_cursor": {
+                    "epoch": start_epoch,
+                    "optimizer_step": global_step,
+                    "pack_index": start_pack,
+                },
+                "parameter_routing": (
+                    parameter_routing.report if parameter_routing is not None else None
+                ),
+                "scheduler": scheduler.state_dict(),
+            }
+
+        def phase_training_workload() -> None:
+            flow = _encode_pack(
+                model,
+                phase_rows,
+                phase_images,
+                config,
+                accelerator.device,
+            )
+            prediction = transformer(
+                img=flow["img"],
+                txt=flow["txt"],
+                timesteps=flow["timesteps"],
+                img_shapes=flow["img_shapes"],
+                img_cu_seqlens=flow["img_cu_seqlens"],
+                txt_cu_seqlens=flow["txt_cu_seqlens"],
+            )
+            loss, _observed = rectified_flow_loss(prediction, flow["velocity"])
+            loss.backward()
+
+        def compile_phase() -> Mapping[str, Any]:
+            if config.compile_vae_encoder:
+                model.maybe_compile_vae_encoder()
+            return compile_transformer_blocks(
+                unwrapped_transformer,
+                enabled=True,
+                mode=config.compile_transformer_mode,
+                dynamic=config.compile_transformer_dynamic,
+            )
+
+        compile_report = run_mageflow_execution_phases(
+            worker_execution_phases,
+            trajectory_model=unwrapped_transformer,
+            optimizer=optimizer,
+            optimizer_step=global_step,
+            disabled_compile_report=compile_report,
+            compile_workload=compile_phase,
+            training_workload=phase_training_workload,
+            extra_state=phase_extra_state,
+            synchronize=lambda: torch.cuda.synchronize(accelerator.device),
+        )
+
     if (
-        eval_rows
+        global_step == 0
+        and eval_rows
         and config.eval_gen_samples
         and config.eval_gen_step_zero
     ):
@@ -1306,63 +1656,6 @@ def train(config: MageFlowTrainConfig) -> None:
             )
         accelerator.wait_for_everyone()
 
-    deepspeed_config = (
-        accelerator.state.deepspeed_plugin.deepspeed_config
-        if accelerator.state.deepspeed_plugin is not None
-        else {}
-    )
-    if "optimizer" in deepspeed_config:
-        optimizer = DummyOptim(
-            transformer.parameters(),
-            lr=config.learning_rate,
-            weight_decay=config.weight_decay,
-        )
-    else:
-        optimizer = build_registered_optimizer(
-            OptimizerImplementation.TORCH_ADAMW_V1,
-            transformer.parameters(),
-            AdamWConfiguration(
-                learning_rate=config.learning_rate,
-                beta1=config.adam_beta1,
-                beta2=config.adam_beta2,
-                epsilon=config.adam_epsilon,
-                weight_decay=config.weight_decay,
-            ),
-        )
-    if "scheduler" in deepspeed_config:
-        scheduler = DummyScheduler(
-            optimizer,
-            total_num_steps=config.max_steps,
-            warmup_num_steps=config.warmup_steps,
-        )
-    else:
-        scheduler = build_registered_schedule(
-            ScheduleImplementation.LINEAR_WARMUP_COSINE_V1,
-            optimizer,
-            LinearWarmupCosineConfiguration(
-                warmup_steps=config.warmup_steps,
-                max_steps=config.max_steps,
-                minimum_ratio=config.min_learning_rate_ratio,
-            ),
-        )
-    transformer, optimizer, scheduler = accelerator.prepare(
-        transformer, optimizer, scheduler
-    )
-
-    global_step, start_epoch, start_pack = 0, 0, 0
-    if config.resume_from:
-        resume = Path(config.resume_from).expanduser().resolve()
-        accelerator.load_state(str(resume))
-        rank_state = json.loads(
-            (
-                resume / f"trainer_state_rank{accelerator.process_index:04d}.json"
-            ).read_text()
-        )
-        global_step = int(rank_state["global_step"])
-        start_epoch = int(rank_state["epoch"])
-        start_pack = int(rank_state["pack_index"])
-    last_epoch, next_pack = start_epoch, start_pack
-
     if accelerator.is_main_process:
         _json_dump(
             output_dir / "run_contract.json",
@@ -1377,6 +1670,12 @@ def train(config: MageFlowTrainConfig) -> None:
                 "world_size": accelerator.num_processes,
                 "train_examples": len(train_rows),
                 "eval_examples": len(eval_rows),
+                "component_composition": component_evidence,
+                "component_composition_digest": component_digest,
+                "parameter_routing": (
+                    parameter_routing.report if parameter_routing is not None else None
+                ),
+                "regional_compile": compile_report,
             },
         )
     accelerator.wait_for_everyone()
@@ -1405,6 +1704,12 @@ def train(config: MageFlowTrainConfig) -> None:
         )
 
     epoch = start_epoch
+    update_started = time.perf_counter()
+    accumulated_samples = 0
+    accumulated_microbatches = 0
+    accumulated_target_tokens = 0
+    accumulated_sequence_tokens = 0
+    accumulated_loss = None
     while global_step < config.max_steps:
         packs = epoch_packs(
             train_rows,
@@ -1429,9 +1734,15 @@ def train(config: MageFlowTrainConfig) -> None:
                 [_load_image_tensor(row) for row in batch_rows],
             )
 
-        for pack_index, batch_rows, images in _prefetched(
+        loaded_packs = _prefetched(
             pack_stream, load_pack, depth=config.prefetch_packs
-        ):
+        )
+        if worker_step_profiler is not None:
+            loaded_packs = worker_step_profiler.track_input(loaded_packs)
+        for pack_index, batch_rows, images in loaded_packs:
+            if mutable_controls is not None:
+                worker_controls.microbatch(global_step + 1, mutable_controls.apply)
+            accumulated_samples += len(batch_rows)
             with accelerator.accumulate(transformer):
                 flow = _encode_pack(
                     model, batch_rows, images, config, accelerator.device
@@ -1446,12 +1757,34 @@ def train(config: MageFlowTrainConfig) -> None:
                 )
                 loss, observed_mse = rectified_flow_loss(prediction, flow["velocity"])
                 accelerator.backward(loss)
+                accumulated_microbatches += 1
+                accumulated_target_tokens += sum(flow["image_lens"])
+                accumulated_sequence_tokens += sum(
+                    int(row["packed_tokens"]) for row in batch_rows
+                )
+                accumulated_loss = (
+                    observed_mse.detach()
+                    if accumulated_loss is None
+                    else accumulated_loss + observed_mse.detach()
+                )
                 if accelerator.sync_gradients:
-                    grad_norm = accelerator.clip_grad_norm_(
-                        transformer.parameters(), config.max_grad_norm
+                    if mutable_controls is not None:
+                        worker_controls.optimizer_step(
+                            global_step + 1, mutable_controls.apply
+                        )
+                    grad_norm = (
+                        worker_components.gradient_clipping(
+                            unwrapped_transformer.parameters()
+                        )
+                        if worker_components is not None
+                        else accelerator.clip_grad_norm_(
+                            transformer.parameters(), config.max_grad_norm
+                        )
                     )
                 else:
                     grad_norm = torch.tensor(float("nan"), device=accelerator.device)
+                if accelerator.sync_gradients and weight_decay_schedule is not None:
+                    weight_decay_schedule.step(global_step)
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
@@ -1459,20 +1792,52 @@ def train(config: MageFlowTrainConfig) -> None:
             if not accelerator.sync_gradients:
                 continue
             global_step += 1
+            step_seconds = time.perf_counter() - update_started
+            if worker_step_profiler is not None:
+                worker_step_profiler.step(global_step)
             last_epoch, next_pack = epoch, pack_index + 1
+            if accumulated_loss is None or accumulated_microbatches < 1:
+                raise RuntimeError("optimizer update has no accumulated loss")
+            mean_loss = float(
+                (accumulated_loss / accumulated_microbatches).item()
+            )
             metrics = {
-                "train/loss": float(observed_mse.item()),
-                "train/optimization_loss": float(loss.detach().item()),
+                "train/loss": mean_loss,
+                "train/optimization_loss": mean_loss,
                 "train/grad_norm": float(grad_norm),
                 "train/lr": float(scheduler.get_last_lr()[0]),
-                "train/samples": len(batch_rows),
-                "train/target_tokens": sum(flow["image_lens"]),
-                "train/sequence_tokens": sum(
-                    int(row["packed_tokens"]) for row in batch_rows
-                ),
+                "train/samples": accumulated_samples,
+                "train/target_tokens": accumulated_target_tokens,
+                "train/sequence_tokens": accumulated_sequence_tokens,
                 "train/epoch": epoch,
+                "train/images_per_second": accumulated_samples / step_seconds,
+                "train/step_seconds": step_seconds,
             }
             accelerator.log(metrics, step=global_step)
+            if worker_observability is not None:
+                worker_observability.optimizer_step(global_step)
+                worker_observability.publish_if_declared(
+                    "train.loss",
+                    metrics["train/loss"],
+                    step=global_step,
+                    sample_weight=accumulated_samples,
+                )
+                worker_observability.publish_if_declared(
+                    "train.images_per_second",
+                    metrics["train/images_per_second"],
+                    step=global_step,
+                )
+                worker_observability.publish_if_declared(
+                    "system.gpu_memory_used",
+                    int(torch.cuda.memory_allocated(accelerator.device)),
+                    step=global_step,
+                )
+            update_started = time.perf_counter()
+            accumulated_samples = 0
+            accumulated_microbatches = 0
+            accumulated_target_tokens = 0
+            accumulated_sequence_tokens = 0
+            accumulated_loss = None
             if accelerator.is_main_process:
                 with (output_dir / "train.jsonl").open(
                     "a", encoding="utf-8"
@@ -1500,6 +1865,8 @@ def train(config: MageFlowTrainConfig) -> None:
                     },
                 )
             if eval_rows and global_step % config.eval_every == 0:
+                if mutable_controls is not None:
+                    worker_controls.evaluation(global_step, mutable_controls.apply)
                 eval_loss = _evaluate(
                     accelerator,
                     transformer,
@@ -1509,6 +1876,10 @@ def train(config: MageFlowTrainConfig) -> None:
                     accelerator.device,
                 )
                 accelerator.log({"eval/loss": eval_loss}, step=global_step)
+                if worker_observability is not None:
+                    worker_observability.publish_if_declared(
+                        "eval.loss", eval_loss, step=global_step
+                    )
                 if accelerator.is_main_process:
                     with (output_dir / "train.jsonl").open(
                         "a", encoding="utf-8"
@@ -1524,15 +1895,53 @@ def train(config: MageFlowTrainConfig) -> None:
                             )
                             + "\n"
                         )
-            if global_step % config.checkpoint_every == 0:
-                _save_checkpoint(
+            checkpoint_requested = bool(
+                worker_controls is not None
+                and worker_controls.checkpoint_boundary_requested
+            )
+            if global_step % config.checkpoint_every == 0 or checkpoint_requested:
+                if mutable_controls is not None:
+                    worker_controls.checkpoint(global_step, mutable_controls.apply)
+                checkpoint = _save_checkpoint(
                     accelerator,
                     output_dir,
                     global_step=global_step,
                     epoch=epoch,
                     pack_index=pack_index + 1,
                     keep_last_n=config.keep_last_n,
+                    component_composition_digest=component_digest,
+                    parameter_routing=(
+                        parameter_routing.report
+                        if parameter_routing is not None
+                        else None
+                    ),
+                    control_state=(
+                        worker_controls.checkpoint_state()
+                        if worker_controls is not None
+                        else None
+                    ),
                 )
+                if (
+                    worker_controls is not None
+                    and worker_controls.checkpoint_completion_requested
+                ):
+                    worker_controls.publish_requested_checkpoint_directory(
+                        str(checkpoint),
+                        optimizer_step=global_step,
+                        resume_grade="compatible",
+                        state_components=(
+                            "component_composition",
+                            "control_revision",
+                            "data_cursor",
+                            "lr_schedule",
+                            "model",
+                            "optimizer",
+                            "parameter_routing",
+                            "rng_accelerator",
+                            "rng_python",
+                            "rng_torch",
+                        ),
+                    )
             if (
                 eval_rows
                 and config.eval_gen_samples
@@ -1569,6 +1978,8 @@ def train(config: MageFlowTrainConfig) -> None:
                     )
                 accelerator.wait_for_everyone()
             if stop_requested["value"]:
+                if mutable_controls is not None:
+                    worker_controls.checkpoint(global_step, mutable_controls.apply)
                 checkpoint = _save_checkpoint(
                     accelerator,
                     output_dir,
@@ -1576,12 +1987,24 @@ def train(config: MageFlowTrainConfig) -> None:
                     epoch=epoch,
                     pack_index=pack_index + 1,
                     keep_last_n=config.keep_last_n,
+                    component_composition_digest=component_digest,
+                    parameter_routing=(
+                        parameter_routing.report
+                        if parameter_routing is not None
+                        else None
+                    ),
+                    control_state=(
+                        worker_controls.checkpoint_state()
+                        if worker_controls is not None
+                        else None
+                    ),
                 )
                 if accelerator.is_main_process:
                     _json_dump(
                         output_dir / "interrupted.json",
                         {
                             "schema": RUN_SCHEMA,
+                            "state": "interrupted",
                             "interrupted_at": _utc_now(),
                             "global_step": global_step,
                             "checkpoint": str(checkpoint),
@@ -1613,6 +2036,15 @@ def train(config: MageFlowTrainConfig) -> None:
         epoch=last_epoch,
         pack_index=next_pack,
         keep_last_n=config.keep_last_n,
+        component_composition_digest=component_digest,
+        parameter_routing=(
+            parameter_routing.report if parameter_routing is not None else None
+        ),
+        control_state=(
+            worker_controls.checkpoint_state()
+            if worker_controls is not None
+            else None
+        ),
     )
     export_dir = _export_transformer(
         accelerator,
