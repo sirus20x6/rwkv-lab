@@ -155,6 +155,21 @@ jobs:
       - name: Native ctest exclusions are declared and pinned
         run: python scripts/validate_native_ci_exclusions.py
 
+      # Same reasoning, applied to the source-disposition pins. The native
+      # suite already enforces them, but only after an ~8 minute toolchain and
+      # C++26 build; this reports the same drift in seconds and keeps reporting
+      # it if the native job is skipped or cannot start.
+      #
+      # It matters most for a Python-only change: every classified source under
+      # src/rwkv_lab is content-pinned, so editing one moves a disposition
+      # digest, and that is exactly the pull request least likely to be waiting
+      # on a native build.
+      - name: Source disposition pins match the files on disk
+        run: |
+          for catalog in docs/experiment-vm/source-dispositions.*.v1.json; do
+            python scripts/print_disposition_digests.py "$catalog" --check
+          done
+
   go:
     name: Dashboard (Go)
     runs-on: ubuntu-latest
