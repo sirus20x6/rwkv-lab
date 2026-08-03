@@ -1,5 +1,6 @@
 #include "trainvm/training_component_registry.hpp"
 
+#include "trainvm/post_training_authority.hpp"
 #include "trainvm/rwkv_scratch_profiles.hpp"
 
 #include <algorithm>
@@ -238,6 +239,8 @@ Json composition_body(const ResolvedTrainingComposition& composition) {
             {"registry_digest", composition.registry_digest}};
   if (!composition.topologies.is_null())
     body["topologies"] = composition.topologies;
+  if (!composition.post_training.is_null())
+    body["post_training"] = composition.post_training;
   return body;
 }
 
@@ -344,6 +347,7 @@ ResolvedTrainingComposition TrainingComponentRegistry::resolve_composition(
       .model_family = composition.model_family,
       .components = {},
       .topologies = nullptr,
+      .post_training = nullptr,
       .registry_digest = registry_digest_,
       .composition_digest = {},
   };
@@ -362,6 +366,22 @@ ResolvedTrainingComposition TrainingComponentRegistry::resolve_composition(
     // declared-incompatible pair. Compile already checked; this is the
     // authority-side repeat so a plan cannot reach a worker unvalidated.
     resolved.topologies = rwkv_scratch_training_block(selections);
+  }
+  if (composition.post_training) {
+    // Same discipline as the topology block above: compile already validated
+    // this, and the authority repeats it so a plan cannot reach a worker
+    // unvalidated. Refused here rather than lowered silently, because the
+    // worker has no way to tell a missing arm from a rejected one.
+    const PostTrainingArmLowering lowering =
+        lower_post_training_arm(*composition.post_training);
+    if (!lowering.complete())
+      reject("training composition post-training arm names an unknown kind, "
+             "claim or bound");
+    if (const auto refusal =
+            validate_post_training_arm_declaration(lowering.arm))
+      reject("training composition post-training arm is invalid: " +
+             refusal->message);
+    resolved.post_training = post_training_arm_json(lowering.arm);
   }
   for (const auto& [slot, selection] : composition.components) {
     if (!symbolic_identity(slot))

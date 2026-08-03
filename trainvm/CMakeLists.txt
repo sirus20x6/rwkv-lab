@@ -215,14 +215,15 @@ target_compile_definitions(trainvm_tests PRIVATE
 )
 target_link_libraries(trainvm_tests PRIVATE trainvm_service)
 add_test(NAME trainvm_tests COMMAND trainvm_tests)
-# The suite drives real gRPC streams and asserts their ordering. Under heavy
-# ctest parallelism it intermittently fails "WorkerControl gRPC orders Hello,
-# durable telemetry acknowledgements, Event, and durable Receipt" -- observed
-# on a 4-core CI runner and reproduced once locally at -j12, passing when run
-# alone. RUN_SERIAL stops it competing with other suites for cores. It is a
-# mitigation, not a fix: the ordering assertion's own timing sensitivity is
-# tracked separately.
-set_tests_properties(trainvm_tests PROPERTIES RUN_SERIAL TRUE)
+# RUN_SERIAL removed: the cause it mitigated is gone. The suite's WorkerControl
+# stream reads no longer assume that the next frame is the reply to whatever was
+# just written, which is what made it lose races under contention. Keeping a
+# mitigation for a removed cause costs wall-clock on every CI run -- this is the
+# largest suite in the tree -- and quietly hides a recurrence.
+#
+# If that assertion ever fails again, restore RUN_SERIAL as the immediate
+# mitigation and audit the stream reads for a frame kind that take_frame does
+# not yet distinguish.
 if(TRAINVM_GO_EXECUTABLE)
   # The live stack runs the real service, which acquires its journal under the
   # strict_filesystem grade. That grade requires the whole authority ancestry to
@@ -291,6 +292,15 @@ if(TRAINVM_PYTHON_EXECUTABLE)
       PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../src
       ${TRAINVM_PYTHON_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_rwkv_lab_worker_contract.py
+      $<TARGET_FILE:trainvm>
+  )
+  # Deliberately NOT part of rwkv_lab_worker_artifact: that test builds a
+  # sealed worker artifact and is excluded from the hosted native job, which
+  # is how a stale adapter pin survived for hours. This one needs only the
+  # binary, so it runs everywhere the suite runs.
+  add_test(NAME rwkv_lab_runtime_requirements
+    COMMAND ${TRAINVM_PYTHON_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_rwkv_lab_runtime_requirements.py
       $<TARGET_FILE:trainvm>
   )
   add_test(NAME rwkv_lab_worker_artifact

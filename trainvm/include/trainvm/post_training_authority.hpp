@@ -4,7 +4,10 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 #include "trainvm/adapter_registry.hpp"
 #include "trainvm/lifecycle_admission.hpp"
@@ -119,6 +122,47 @@ struct PostTrainingArm final {
 [[nodiscard]] std::optional<LifecycleAdmissionRefusal> admit_post_training_arm(
     const PostTrainingArm& arm, const AdapterProfile& profile);
 
+// The subset of the rules that depend on the arm alone. Document compilation
+// has no adapter registry — compile_document takes only JSON, because the
+// registry is authority-owned and applied later — so this is what can be
+// enforced while an author is still writing.
+//
+// It is deliberately a STRICT SUBSET, not a cheaper version: an arm that
+// passes here can still be refused at launch by the effect and resume-grade
+// rules, which need the profile. Callers must not present a compile-time pass
+// as admission. Every rule here is also re-run by admit_post_training_arm, so
+// the compile diagnostic and the launch gate cannot disagree about the rules
+// they share.
+[[nodiscard]] std::optional<LifecycleAdmissionRefusal>
+validate_post_training_arm_declaration(const PostTrainingArm& arm);
+
+// Lowering the document surface into the authority's type, reported rather
+// than thrown, because the two callers need different things from a failure:
+// document compilation wants a diagnostic per offending field, and the
+// registry wants to refuse. One function so they cannot disagree about what a
+// declaration means — the earlier version of this lived inline in
+// document.cpp, and a second copy in the registry would have been free to
+// drift.
+struct PostTrainingArmLowering final {
+  PostTrainingArm arm;
+  // Each holds the name the author wrote, so a diagnostic can repeat it back
+  // instead of reporting a default the author never chose.
+  std::optional<std::string> unknown_kind;
+  std::optional<std::string> unknown_claim;
+  std::vector<std::pair<std::size_t, std::string>> unknown_bounds;
+
+  [[nodiscard]] bool complete() const {
+    return !unknown_kind && !unknown_claim && unknown_bounds.empty();
+  }
+};
+
+[[nodiscard]] PostTrainingArmLowering lower_post_training_arm(
+    const PostTrainingArmDeclaration& declared);
+
+// The arm as it travels to the worker, inside the resolved composition and so
+// inside its digest.
+[[nodiscard]] nlohmann::json post_training_arm_json(const PostTrainingArm& arm);
+
 // The strongest claim this arm's own declarations can support. Callers that
 // want a label rather than a refusal should ask for this and use it, instead
 // of proposing a claim and hoping.
@@ -135,6 +179,16 @@ qualify_post_training_completion(
 
 [[nodiscard]] std::string_view post_training_arm_kind_name(
     PostTrainingArmKind kind);
+
+// Name-to-value for the document surface. Returning nullopt rather than a
+// default is the point: an unknown name must produce a diagnostic that repeats
+// it back, not decode to something the author did not write.
+[[nodiscard]] std::optional<PostTrainingArmKind> post_training_arm_kind_from_name(
+    std::string_view name);
+[[nodiscard]] std::optional<RunBoundKind> run_bound_kind_from_name(
+    std::string_view name);
+[[nodiscard]] std::optional<ReproducibilityClaim> reproducibility_claim_from_name(
+    std::string_view name);
 [[nodiscard]] std::string_view run_bound_kind_name(RunBoundKind kind);
 [[nodiscard]] std::string_view reproducibility_claim_name(
     ReproducibilityClaim claim);

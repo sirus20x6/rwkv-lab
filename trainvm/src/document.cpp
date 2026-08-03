@@ -1,5 +1,6 @@
 #include "trainvm/document.hpp"
 
+#include "trainvm/post_training_authority.hpp"
 #include "trainvm/rwkv_scratch_profiles.hpp"
 
 #include <openssl/evp.h>
@@ -1035,6 +1036,43 @@ void validate_experiment(const Experiment& experiment, std::vector<Diagnostic>& 
           }
         }
       }
+      if (training.post_training) {
+        // Lower the authored arm into the authority's own type and run the
+        // rules that do not need a resolved adapter profile. compile_document
+        // takes only JSON — the registry is authority-owned and applied later
+        // — so the effect and resume-grade rules still gate at launch. What
+        // can be caught while the author is still writing is caught here.
+        const std::string arm_path =
+            child_path(training_path, "post_training");
+        // One lowering, shared with the registry, so a document and the
+        // authority cannot disagree about what a declaration means.
+        const PostTrainingArmLowering lowering =
+            lower_post_training_arm(*training.post_training);
+
+        // Unknown enum names are reported by the name the author wrote rather
+        // than decoded to a default and then validated as something else.
+        if (lowering.unknown_kind)
+          error(diagnostics, "training.post_training.kind",
+                child_path(arm_path, "kind"),
+                "unknown post-training arm kind " + *lowering.unknown_kind);
+        if (lowering.unknown_claim)
+          error(diagnostics, "training.post_training.reproducibility_claim",
+                child_path(arm_path, "reproducibility_claim"),
+                "unknown reproducibility claim " + *lowering.unknown_claim);
+        for (const auto& [index, name] : lowering.unknown_bounds)
+          error(diagnostics, "training.post_training.bound",
+                child_path(child_path(arm_path, "bounds"),
+                           std::to_string(index)),
+                "unknown run bound kind " + name);
+
+        if (lowering.complete()) {
+          if (const auto refusal =
+                  validate_post_training_arm_declaration(lowering.arm)) {
+            error(diagnostics, refusal->code, arm_path, refusal->message);
+          }
+        }
+      }
+
       for (const auto& [slot, selection] : training.components) {
         const std::string selection_path = child_path(
             child_path(training_path, "components"), slot);

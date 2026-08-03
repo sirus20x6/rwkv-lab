@@ -217,7 +217,7 @@ jobs:
       # is unwritable by others, and CMake derives TRAINVM_E2E_AUTHORITY_DIR
       # from the binary directory.
       #
-      # 62 of 66 suites run. Four are excluded because they fail on a GitHub
+      # 63 of 67 suites run. Four are excluded because they fail on a GitHub
       # hosted runner specifically -- not merely "in a container". They pass in
       # this same image locally, including under a 4-core cpuset and full ctest
       # contention, so the difference is the runner's kernel and sandbox rather
@@ -235,6 +235,15 @@ jobs:
       # All four run in scripts/acceptance.sh on a real host, which is where
       # they are meaningful. Excluding them keeps this job a signal: a
       # permanently red job is one everybody learns to ignore.
+      #
+      # An exclusion still costs coverage, though, so it is worth checking what
+      # rides along inside an excluded test. rwkv_lab_worker_artifact also held
+      # the adapter-set pin, which needs only the binary — so an adapter was
+      # added and the pin stayed stale for hours because the only thing that
+      # checked it never ran on a pull request. That pin now lives in
+      # rwkv_lab_runtime_requirements, which is not excluded. Before excluding
+      # anything else, split out whatever part of it does not need the thing
+      # that forced the exclusion.
       #
       # The set above is pinned by docs/experiment-vm/native-ci-exclusions.v1.json
       # and checked by scripts/validate_native_ci_exclusions.py in the
