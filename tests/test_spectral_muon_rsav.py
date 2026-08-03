@@ -11,6 +11,8 @@ Guarantees checked:
 Run: python test_spectral_muon_rsav.py   (CPU-only, no GPU/fla needed)
 """
 import copy
+
+import pytest
 import torch
 
 from rwkv_lab.spectral_muon import SpectralMuon
@@ -79,6 +81,43 @@ def test_damps_on_energy_spike():
             saw_below_1 = True
     assert saw_below_1, "RSAV never damped (xi stayed >=1) under a rising-energy schedule"
     print(f"[3] damping OK (xi dipped below 1 on rising energy; last xi={opt._rsav_last_xi:.3f})")
+
+
+def test_rsav_global_state_resumes_exactly():
+    W0 = torch.randn(6, 6)
+    p, opt = _make(W0, rsav=True, rsav_cap=0.3, rsav_c=2.0, rsav_relax=0.1)
+    for scale in (0.5, 1.0, 2.0):
+        p.grad = torch.full_like(p, scale)
+        opt.step()
+        p.grad = None
+    saved_parameter = p.detach().clone()
+    saved_optimizer = copy.deepcopy(opt.state_dict())
+    resumed_parameter, resumed = _make(
+        saved_parameter,
+        rsav=True,
+        rsav_cap=0.3,
+        rsav_c=2.0,
+        rsav_relax=0.1,
+    )
+    resumed.load_state_dict(saved_optimizer)
+    gradient = torch.full_like(p, 3.0)
+    p.grad = gradient.clone()
+    resumed_parameter.grad = gradient.clone()
+
+    opt.step()
+    resumed.step()
+
+    assert torch.equal(p, resumed_parameter)
+    assert torch.equal(opt._rsav_r, resumed._rsav_r)
+
+
+def test_rsav_resume_rejects_changed_global_configuration():
+    parameter, optimizer = _make(torch.randn(4, 4), rsav=True, rsav_cap=0.2)
+    parameter.grad = torch.ones_like(parameter)
+    optimizer.step()
+    _, incompatible = _make(parameter.detach(), rsav=True, rsav_cap=0.4)
+    with pytest.raises(ValueError, match="configuration is incompatible"):
+        incompatible.load_state_dict(copy.deepcopy(optimizer.state_dict()))
 
 
 if __name__ == "__main__":
