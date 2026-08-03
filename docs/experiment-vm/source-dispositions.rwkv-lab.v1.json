@@ -10,7 +10,7 @@
       ".py"
     ]
   },
-  "source_tree_digest": "sha256:34993ceda01afedb37467663f3828be108541c8ec3980147b5729bf269f17a0a",
+  "source_tree_digest": "sha256:e14181fe0b687760a6bbb8ee235f36febd6afa000072008f52baeff485cef016",
   "entries": [
     {
       "source_path": "src/rwkv_lab/__init__.py",
@@ -1348,7 +1348,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "mageflow.routed-expert-train",
-      "source_sha256": "sha256:86b929c206da895713fed82dc61ae9ae65e3105e37cfaf7ce62d9454dff4d3e7",
+      "source_sha256": "sha256:c263c6d7a34b3d1a4e7fbe77e40ce2d15cc38473a9131ee42e067b1e30790e79",
       "family": "mageflow_diffusion",
       "coverage": "direct",
       "consumers": [
@@ -1393,7 +1393,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "mageflow.full-backbone-pretrain",
-      "source_sha256": "sha256:ac426866f3d9fede2a7c54c25fd800fbb3f12238d0b381c8b8574cc8dfacf6f2",
+      "source_sha256": "sha256:7aa166bd4a062fa5f183203b0b58f441b2bb2f7651873ea7a76bb7cf73aecc47",
       "family": "mageflow_diffusion",
       "coverage": "direct",
       "consumers": [
@@ -1444,7 +1444,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "mageflow.terminal-tread-train",
-      "source_sha256": "sha256:07bb691ad0e56a5787493381ee3d4f4ddcac1fd96a5d064cbdff5b192cc4f7e4",
+      "source_sha256": "sha256:b56eb1b9e38b1d5e258adcbc0805bcc3999756eed340dc28d543ede53f6e0987",
       "family": "mageflow_diffusion",
       "coverage": "direct",
       "consumers": [

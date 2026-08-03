@@ -11,14 +11,17 @@ from rwkv_lab.trainvm_worker import (
     WorkerExecutionPhases,
     WorkerInvocation,
     WorkerObservability,
+    WorkerPublicationRuntime,
     WorkerResourcesReleasedPause,
     WorkerSession,
     WorkerStepProfiler,
     apply_worker_runtime_policy,
+    bind_eval_gallery_checkpoints,
     controls_from_invocation,
     observability_from_invocation,
     publish_artifact_requests,
     publish_checkpoint_requests,
+    publish_eval_gallery_requests,
     read_worker_bootstrap_fd,
     step_profiler_from_invocation,
 )
@@ -40,6 +43,7 @@ InvocationExecutor = Callable[
         WorkerObservability,
         WorkerControlRuntime,
         WorkerExecutionPhases,
+        WorkerPublicationRuntime,
     ],
     HandlerResult,
 ]
@@ -69,9 +73,7 @@ def run_worker(
         if session.completed_before_connect:
             return 0
         try:
-            apply_worker_runtime_policy(
-                getattr(session.invocation, "resources", {})
-            )
+            apply_worker_runtime_policy(getattr(session.invocation, "resources", {}))
             with step_profiler_from_invocation(
                 session, session.invocation
             ) as step_profiler:
@@ -79,6 +81,15 @@ def run_worker(
                     session, session.invocation
                 )
                 controls = controls_from_invocation(session, session.invocation)
+                publications = WorkerPublicationRuntime(
+                    session,
+                    checkpoint_progress=lambda step: observability.optimizer_step(
+                        step, "publishing_checkpoint"
+                    ),
+                    gallery_progress=lambda step: observability.optimizer_step(
+                        step, "publishing_eval_gallery"
+                    ),
+                )
                 execution_phases = WorkerExecutionPhases(
                     session, session.execution_phase_requests
                 )
@@ -89,14 +100,19 @@ def run_worker(
                     observability,
                     controls,
                     execution_phases,
+                    publications,
                 )
                 execution_phases.require_complete()
-            published_checkpoints = publish_checkpoint_requests(
+            terminal_checkpoints = publish_checkpoint_requests(
                 session,
                 result.checkpoint_requests,
                 progress=lambda step: observability.optimizer_step(
                     step, "publishing_checkpoint"
                 ),
+            )
+            published_checkpoints = (
+                *publications.published_checkpoints,
+                *terminal_checkpoints,
             )
             if published_checkpoints:
                 result = replace(
@@ -123,6 +139,29 @@ def run_worker(
                         **result.payload,
                         "artifact_ids": [
                             artifact.artifact_id for artifact in published_artifacts
+                        ],
+                    },
+                )
+            terminal_galleries = publish_eval_gallery_requests(
+                session,
+                bind_eval_gallery_checkpoints(
+                    result.eval_gallery_requests, terminal_checkpoints
+                ),
+                progress=lambda step: observability.optimizer_step(
+                    step, "publishing_eval_gallery"
+                ),
+            )
+            published_galleries = (
+                *publications.published_galleries,
+                *terminal_galleries,
+            )
+            if published_galleries:
+                result = replace(
+                    result,
+                    payload={
+                        **result.payload,
+                        "eval_gallery_artifact_ids": [
+                            gallery.artifact_id for gallery in published_galleries
                         ],
                     },
                 )

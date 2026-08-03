@@ -18,7 +18,7 @@ import shutil
 import signal
 import time
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -423,9 +423,7 @@ def resolved_worker_component_contract(
         worker_components.configuration("optimizer", category="optimizer")
     )
     router_configuration = dict(
-        worker_components.configuration(
-            "parameter_router", category="parameter_router"
-        )
+        worker_components.configuration("parameter_router", category="parameter_router")
     )
     schedule_configuration = dict(
         worker_components.configuration(
@@ -472,11 +470,14 @@ def resolved_worker_component_contract(
         raise ValueError(
             "authority optimizer composition disagrees with MageFlow configuration"
         )
-    if dict(
-        worker_components.configuration(
-            "weight_decay", category="weight_decay_schedule"
+    if (
+        dict(
+            worker_components.configuration(
+                "weight_decay", category="weight_decay_schedule"
+            )
         )
-    ) != expected_decay:
+        != expected_decay
+    ):
         raise ValueError(
             "authority weight-decay composition disagrees with MageFlow configuration"
         )
@@ -733,9 +734,7 @@ def encode_domain_batch(
                 device,
             )
             offset = 0
-            for prompt, length in zip(
-                missing_prompts, missing_lens, strict=True
-            ):
+            for prompt, length in zip(missing_prompts, missing_lens, strict=True):
                 value = missing_flat[offset : offset + length]
                 encoder_cache.save_text(prompt, template, drop_idx, value)
                 cached_text[prompt] = value.detach().cpu()
@@ -752,9 +751,7 @@ def encode_domain_batch(
     )
     txt_cu = _lens_to_cu(text_lens, device)
     repa_enabled = bool(getattr(config, "repa_enabled", False))
-    use_repa_posterior_mean = bool(
-        getattr(config, "repa_use_posterior_mean", True)
-    )
+    use_repa_posterior_mean = bool(getattr(config, "repa_use_posterior_mean", True))
     repa_target: torch.Tensor | None = None
 
     if encoder_cache is None:
@@ -782,13 +779,11 @@ def encode_domain_batch(
             for index, image in enumerate(gpu_images):
                 shape = (int(image.shape[-2]), int(image.shape[-1]))
                 groups.setdefault(shape, []).append(index)
-            moments_by_index: list[
-                tuple[torch.Tensor, torch.Tensor] | None
-            ] = [None] * len(gpu_images)
+            moments_by_index: list[tuple[torch.Tensor, torch.Tensor] | None] = [
+                None
+            ] * len(gpu_images)
             for indices in groups.values():
-                batch = torch.stack(
-                    [gpu_images[index] for index in indices], dim=0
-                )
+                batch = torch.stack([gpu_images[index] for index in indices], dim=0)
                 batch = batch.to(memory_format=torch.contiguous_format).float()
                 batch = batch.to(model.vae.device, dtype=model.vae.dtype)
                 mean_batch, logvar_batch = model.vae._encode_moments(batch)
@@ -814,9 +809,7 @@ def encode_domain_batch(
                 packed_latents.append(
                     latent.permute(0, 2, 3, 1).reshape(-1, latent.shape[1])
                 )
-                packed_means.append(
-                    mean.permute(0, 2, 3, 1).reshape(-1, mean.shape[1])
-                )
+                packed_means.append(mean.permute(0, 2, 3, 1).reshape(-1, mean.shape[1]))
             clean = torch.cat(packed_latents, dim=0).unsqueeze(0)
             posterior_mean = torch.cat(packed_means, dim=0).unsqueeze(0)
             repa_target = posterior_mean if use_repa_posterior_mean else clean
@@ -880,22 +873,14 @@ def encode_domain_batch(
             _, _, latent_height, latent_width = latent.shape
             image_shapes.append([(1, latent_height, latent_width)])
             packed_latents.append(
-                latent.permute(0, 2, 3, 1).reshape(
-                    -1, latent.shape[1]
-                )
+                latent.permute(0, 2, 3, 1).reshape(-1, latent.shape[1])
             )
             if repa_enabled:
-                packed_means.append(
-                    mean.permute(0, 2, 3, 1).reshape(
-                        -1, mean.shape[1]
-                    )
-                )
+                packed_means.append(mean.permute(0, 2, 3, 1).reshape(-1, mean.shape[1]))
         clean = torch.cat(packed_latents, dim=0).unsqueeze(0)
         if repa_enabled:
             posterior_mean = torch.cat(packed_means, dim=0).unsqueeze(0)
-            repa_target = (
-                posterior_mean if use_repa_posterior_mean else clean
-            )
+            repa_target = posterior_mean if use_repa_posterior_mean else clean
     image_lens = [int(row["latent_tokens"]) for row in rows]
     if clean.shape[1] != sum(image_lens):
         raise RuntimeError(
@@ -914,9 +899,7 @@ def encode_domain_batch(
         # may permute the sampled Gaussian across an accumulation window. Keep
         # both exact tensors instead of reconstructing either from the path.
         "clean": clean.detach(),
-        "repa_target": (
-            repa_target.detach() if repa_target is not None else None
-        ),
+        "repa_target": (repa_target.detach() if repa_target is not None else None),
         "noise": noise,
         "img": noised.to(dtype=clean.dtype),
         "txt": txt,
@@ -1566,8 +1549,7 @@ def evaluate_routes(
                 images = [
                     (
                         None
-                        if encoder_cache is not None
-                        and encoder_cache.has_moments(row)
+                        if encoder_cache is not None and encoder_cache.has_moments(row)
                         else _load_image_tensor(row)
                     )
                     for row in batch_rows
@@ -1737,9 +1719,20 @@ def generate_eval_gallery(
         os.replace(temporary, image_path)
         items.append(
             {
+                "image_id": str(row["image_id"]),
                 "image": str(image_path),
                 "target_image": str(row["image"]),
                 "prompt": str(row["caption"]),
+                "seed": seed,
+                "sampling_attributes": {
+                    "cfg": f"{EVAL_GALLERY_CFG:g}",
+                    "domain": domain,
+                    "height": str(row["train_height"]),
+                    "route": domain,
+                    "sampler": "mage_flow_rectified_flow",
+                    "steps": str(EVAL_GALLERY_STEPS),
+                    "width": str(row["train_width"]),
+                },
                 "reference": f"held-out {domain} target",
                 "caption": (
                     f"{domain} expert · step {step} · seed {seed} · "
@@ -1930,9 +1923,7 @@ def cache_frozen_encoders(config: MageFlowExpertTrainConfig) -> dict[str, Any]:
     encoded_rows = 0
     reused_rows = 0
     with torch.inference_mode():
-        if config.caption_dropout > 0 and not cache.has_text(
-            " ", template, drop_idx
-        ):
+        if config.caption_dropout > 0 and not cache.has_text(" ", template, drop_idx):
             txt_flat, _vec, lens = _encode_texts_packed(
                 model, [" "], template, drop_idx, device
             )
@@ -1943,11 +1934,7 @@ def cache_frozen_encoders(config: MageFlowExpertTrainConfig) -> dict[str, Any]:
             if has_text and has_moments:
                 reused_rows += 1
             else:
-                image = (
-                    None
-                    if has_moments
-                    else _load_image_tensor(row).pin_memory()
-                )
+                image = None if has_moments else _load_image_tensor(row).pin_memory()
                 encode_domain_batch(
                     model,
                     [row],
@@ -2005,6 +1992,7 @@ def train(
     worker_observability: WorkerObservability | None = None,
     worker_controls: WorkerControlRuntime | None = None,
     worker_execution_phases: WorkerExecutionPhases | None = None,
+    worker_eval_publication: Callable[[Path, int], None] | None = None,
 ) -> None:
     """Run single-GPU routed expert/shared-backbone optimization."""
     config.validate()
@@ -2101,9 +2089,7 @@ def train(
     if not preflight["passed"]:
         raise RuntimeError(f"training-scope preflight failed: {preflight}")
     optimizer_learning_rate, component_evidence, component_digest = (
-        resolved_worker_component_contract(
-            config, worker_components, worker_controls
-        )
+        resolved_worker_component_contract(config, worker_components, worker_controls)
     )
     optimizer_routing = optimizer_parameter_routing(
         transformer,
@@ -2350,8 +2336,7 @@ def train(
                 )
                 if phase_batch_start < len(phase_batches):
                     phase_batch_rows = [
-                        train_rows[index]
-                        for index in phase_batches[phase_batch_start]
+                        train_rows[index] for index in phase_batches[phase_batch_start]
                     ]
                     break
                 phase_epoch += 1
@@ -2378,9 +2363,7 @@ def train(
                     value is None
                     for value in phase_prefetched_cache.text_by_prompt.values()
                 )
-                or any(
-                    value is None for value in phase_prefetched_cache.moments
-                )
+                or any(value is None for value in phase_prefetched_cache.moments)
             ):
                 raise RuntimeError(
                     "MageFlow execution phases require complete frozen-encoder cache coverage"
@@ -2388,23 +2371,23 @@ def train(
 
         def phase_extra_state() -> Mapping[str, Any]:
             return {
-                    "contract_fingerprint": contract_fingerprint,
-                    "controls": (
-                        worker_controls.checkpoint_state()
-                        if worker_controls is not None
-                        else {}
-                    ),
-                    "data_cursor": {
-                        "batch_index": start_batch,
-                        "epoch": start_epoch,
-                        "optimizer_step": global_step,
-                    },
-                    "frozen_encoders": {
-                        "model_id": config.model_id,
-                        "model_revision": config.model_revision,
-                    },
-                    "scheduler": scheduler.state_dict(),
-                }
+                "contract_fingerprint": contract_fingerprint,
+                "controls": (
+                    worker_controls.checkpoint_state()
+                    if worker_controls is not None
+                    else {}
+                ),
+                "data_cursor": {
+                    "batch_index": start_batch,
+                    "epoch": start_epoch,
+                    "optimizer_step": global_step,
+                },
+                "frozen_encoders": {
+                    "model_id": config.model_id,
+                    "model_revision": config.model_revision,
+                },
+                "scheduler": scheduler.state_dict(),
+            }
 
         def phase_training_workload() -> None:
             flow = encode_domain_batch(
@@ -2419,9 +2402,7 @@ def train(
             with controller.route(domain):
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                     prediction = _forward_transformer(transformer, flow)
-                    loss, _observed = rectified_flow_loss(
-                        prediction, flow["velocity"]
-                    )
+                    loss, _observed = rectified_flow_loss(prediction, flow["velocity"])
                     scaled_loss = loss / config.gradient_accumulation_steps
                 scaled_loss.backward()
 
@@ -2434,6 +2415,7 @@ def train(
                 mode=config.compile_transformer_mode,
                 dynamic=config.compile_transformer_dynamic,
             )
+
         compile_report = run_mageflow_execution_phases(
             worker_execution_phases,
             trajectory_model=transformer,
@@ -2674,9 +2656,7 @@ def train(
                 continue
 
             if mutable_controls is not None:
-                worker_controls.optimizer_step(
-                    global_step + 1, mutable_controls.apply
-                )
+                worker_controls.optimizer_step(global_step + 1, mutable_controls.apply)
 
             optimizer_start = torch.cuda.Event(enable_timing=True)
             optimizer_end = torch.cuda.Event(enable_timing=True)
@@ -2684,9 +2664,7 @@ def train(
             grad_norm = (
                 worker_components.gradient_clipping(trainable)
                 if worker_components is not None
-                else torch.nn.utils.clip_grad_norm_(
-                    trainable, config.max_grad_norm
-                )
+                else torch.nn.utils.clip_grad_norm_(trainable, config.max_grad_norm)
             )
             if weight_decay_schedule is not None:
                 weight_decay_schedule.step(global_step)
@@ -2790,7 +2768,8 @@ def train(
             update_window_started = time.perf_counter()
             input_wait_started = update_window_started
 
-            if eval_rows and global_step % config.eval_every == 0:
+            evaluated = bool(eval_rows and global_step % config.eval_every == 0)
+            if evaluated:
                 if mutable_controls is not None:
                     worker_controls.evaluation(global_step, mutable_controls.apply)
                 run_unified_evaluation(
@@ -2808,7 +2787,16 @@ def train(
                 worker_controls is not None
                 and worker_controls.checkpoint_boundary_requested
             )
-            if global_step % config.checkpoint_every == 0 or checkpoint_requested:
+            publish_eval_revision = bool(
+                worker_eval_publication is not None
+                and evaluated
+                and global_step < config.max_steps
+            )
+            if (
+                global_step % config.checkpoint_every == 0
+                or checkpoint_requested
+                or publish_eval_revision
+            ):
                 if mutable_controls is not None:
                     worker_controls.checkpoint(global_step, mutable_controls.apply)
                 checkpoint = save_training_checkpoint(
@@ -2851,6 +2839,9 @@ def train(
                             "rng_torch",
                         ),
                     )
+                if publish_eval_revision:
+                    assert worker_eval_publication is not None
+                    worker_eval_publication(checkpoint, global_step)
             if stop_requested["value"]:
                 if mutable_controls is not None:
                     worker_controls.checkpoint(global_step, mutable_controls.apply)
@@ -2892,6 +2883,20 @@ def train(
         start_batch = 0
         last_epoch, next_batch = epoch, 0
 
+    if eval_rows and not unified_evaluation_is_complete(output_dir, global_step):
+        if mutable_controls is not None:
+            worker_controls.evaluation(global_step, mutable_controls.apply)
+        run_unified_evaluation(
+            pipeline,
+            transformer,
+            controller,
+            model,
+            eval_rows,
+            config,
+            device,
+            output_dir,
+            step=global_step,
+        )
     if mutable_controls is not None:
         worker_controls.checkpoint(global_step, mutable_controls.apply)
     final_checkpoint = save_training_checkpoint(
@@ -2907,9 +2912,7 @@ def train(
         transformer=transformer,
         fixed_expert_source_dir=fixed_expert_source_dir,
         control_state=(
-            worker_controls.checkpoint_state()
-            if worker_controls is not None
-            else None
+            worker_controls.checkpoint_state() if worker_controls is not None else None
         ),
     )
     exports = export_final_weights(controller, transformer, output_dir)

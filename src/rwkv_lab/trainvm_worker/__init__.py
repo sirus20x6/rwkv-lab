@@ -45,9 +45,12 @@ from .eval_gallery import (
     EVAL_GALLERY_SCHEMA,
     EvalGalleryError,
     EvalGalleryItem,
+    EvalGalleryPublicationRequest,
     EvalGalleryPublisher,
     GalleryImage,
     PublishedEvalGallery,
+    bind_eval_gallery_checkpoints,
+    publish_eval_gallery_requests,
 )
 from .execution_phases import (
     ExecutionPhase,
@@ -94,6 +97,7 @@ from .profiling import (
     step_profiler_from_invocation,
     trace_request_from_invocation,
 )
+from .publication import WorkerPublicationError, WorkerPublicationRuntime
 from .runtime_policy import (
     EffectiveWorkerRuntimePolicy,
     WorkerRuntimePolicy,
@@ -151,6 +155,7 @@ __all__ = [
     "EffectiveWorkerRuntimePolicy",
     "EvalGalleryError",
     "EvalGalleryItem",
+    "EvalGalleryPublicationRequest",
     "EvalGalleryPublisher",
     "ExecutionPhase",
     "ExecutionPhaseDisposition",
@@ -192,6 +197,8 @@ __all__ = [
     "WorkerInvocation",
     "WorkerObservability",
     "WorkerObservabilityError",
+    "WorkerPublicationError",
+    "WorkerPublicationRuntime",
     "WorkerReceipt",
     "WorkerResourcesReleasedPause",
     "WorkerRuntimePolicy",
@@ -200,6 +207,7 @@ __all__ = [
     "WorkerSessionError",
     "WorkerStepProfiler",
     "apply_worker_runtime_policy",
+    "bind_eval_gallery_checkpoints",
     "controls_from_invocation",
     "decode_execution_phase_requests",
     "load_external_profiler_authority",
@@ -212,6 +220,7 @@ __all__ = [
     "observability_from_invocation",
     "publish_artifact_requests",
     "publish_checkpoint_requests",
+    "publish_eval_gallery_requests",
     "read_external_profiler_authority_fd",
     "read_input_artifact_file",
     "read_worker_bootstrap_fd",

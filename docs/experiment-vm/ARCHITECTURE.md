@@ -454,7 +454,9 @@ axis. High-rate samples may be compacted only after immutable rollups are commit
 Artifacts are named contracts, not paths found by convention. Each publication includes type,
 producer, URI, size, content hash or declared fingerprint strategy, schema version, completeness,
 and lineage. Eval galleries pair generated and target images through the same manifest and remain
-addressable by step for the existing scrubber.
+addressable by step for the existing scrubber. Long-running adapters publish each qualitative
+revision through a narrow fixed-runner service that first freezes its same-step checkpoint; model
+code never receives journal or controller transport authority.
 
 ## Storage
 

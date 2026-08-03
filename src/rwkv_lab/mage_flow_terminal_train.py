@@ -21,7 +21,7 @@ import shlex
 import shutil
 import signal
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,6 +46,7 @@ from rwkv_lab.mage_flow_expert_train import (
     encode_domain_batch,
     generate_eval_gallery,
     prefetch_frozen_encoder_batch,
+    unified_evaluation_is_complete,
 )
 from rwkv_lab.mage_flow_optimizations import (
     ACTIVATION_CHECKPOINT_MODES,
@@ -297,13 +298,15 @@ class TerminalExpertTrainConfig:
             raise ValueError("terminal expert checkpoint does not exist")
         if self.eval_manifest and not Path(self.eval_manifest).expanduser().is_file():
             raise ValueError("evaluation manifest does not exist")
-        if self.shared_backbone_checkpoint and not Path(
+        if (
             self.shared_backbone_checkpoint
-        ).expanduser().is_file():
+            and not Path(self.shared_backbone_checkpoint).expanduser().is_file()
+        ):
             raise ValueError("shared-backbone checkpoint does not exist")
-        if self.tread_loop_checkpoint and not Path(
+        if (
             self.tread_loop_checkpoint
-        ).expanduser().is_file():
+            and not Path(self.tread_loop_checkpoint).expanduser().is_file()
+        ):
             raise ValueError("TREAD/factored-loop checkpoint does not exist")
         if bool(self.domain_window_schedule) != bool(self.expert_checkpoints):
             raise ValueError(
@@ -325,14 +328,12 @@ class TerminalExpertTrainConfig:
             if not schedule_path.is_file():
                 raise ValueError("domain-window schedule does not exist")
             schedule = json.loads(schedule_path.read_text(encoding="utf-8"))
-            if (
-                schedule.get("schema")
-                != "rwkv-lab.mage-flow-domain-window-schedule.v1"
-            ):
+            if schedule.get("schema") != "rwkv-lab.mage-flow-domain-window-schedule.v1":
                 raise ValueError("unsupported domain-window schedule schema")
-            if Path(schedule["train_manifest"]).resolve() != Path(
-                self.train_manifest
-            ).expanduser().resolve():
+            if (
+                Path(schedule["train_manifest"]).resolve()
+                != Path(self.train_manifest).expanduser().resolve()
+            ):
                 raise ValueError("domain-window schedule has the wrong manifest")
             if int(schedule["max_steps"]) != self.max_steps:
                 raise ValueError("domain-window schedule has the wrong max_steps")
@@ -340,9 +341,7 @@ class TerminalExpertTrainConfig:
             if not isinstance(windows, list) or not windows:
                 raise ValueError("domain-window schedule contains no windows")
             if not self.resume_from and windows[0].get("domain") != self.domain:
-                raise ValueError(
-                    "initial domain must match the first residency window"
-                )
+                raise ValueError("initial domain must match the first residency window")
             if set(self.expert_checkpoints or {}) != set(EXPERT_DOMAINS):
                 raise ValueError(
                     f"expert_checkpoints must contain exactly {list(EXPERT_DOMAINS)}"
@@ -356,9 +355,10 @@ class TerminalExpertTrainConfig:
                 raise ValueError(
                     f"alternating expert checkpoints do not exist: {missing_experts}"
                 )
-            if Path((self.expert_checkpoints or {})[self.domain]).resolve() != Path(
-                self.expert_checkpoint
-            ).expanduser().resolve():
+            if (
+                Path((self.expert_checkpoints or {})[self.domain]).resolve()
+                != Path(self.expert_checkpoint).expanduser().resolve()
+            ):
                 raise ValueError(
                     "expert_checkpoint must match the initial domain checkpoint"
                 )
@@ -366,9 +366,9 @@ class TerminalExpertTrainConfig:
             raise ValueError("resume checkpoint directory does not exist")
         if self.resume_from and self.domain_window_schedule:
             checkpoint_contract = json.loads(
-                (
-                    Path(self.resume_from).expanduser() / "checkpoint.json"
-                ).read_text(encoding="utf-8")
+                (Path(self.resume_from).expanduser() / "checkpoint.json").read_text(
+                    encoding="utf-8"
+                )
             )
             checkpoint_step = int(checkpoint_contract.get("step", -1))
             active_window = next(
@@ -429,9 +429,7 @@ class TerminalExpertTrainConfig:
         if self.float8_recipe not in FLOAT8_RECIPES:
             raise ValueError("unsupported float8_recipe")
         if self.float8_training and not self.compile_transformer_blocks:
-            raise ValueError(
-                "float8_training requires compile_transformer_blocks"
-            )
+            raise ValueError("float8_training requires compile_transformer_blocks")
         if self.encoder_cache_mode not in ENCODER_CACHE_MODES:
             raise ValueError("unsupported encoder_cache_mode")
         if self.encoder_cache_mode != "off" and not self.encoder_cache_dir:
@@ -441,9 +439,7 @@ class TerminalExpertTrainConfig:
                 "offload_cached_encoders requires a complete read_only cache"
             )
         if self.encoder_cache_coverage_manifest:
-            coverage_path = Path(
-                self.encoder_cache_coverage_manifest
-            ).expanduser()
+            coverage_path = Path(self.encoder_cache_coverage_manifest).expanduser()
             if not coverage_path.is_file():
                 raise ValueError("encoder-cache coverage manifest does not exist")
             if self.encoder_cache_mode != "read_only":
@@ -467,9 +463,9 @@ class TerminalExpertTrainConfig:
                 raise ValueError("encoder-cache ending step is outside training")
             if self.resume_from:
                 resume_contract = json.loads(
-                    (
-                        Path(self.resume_from).expanduser() / "checkpoint.json"
-                    ).read_text(encoding="utf-8")
+                    (Path(self.resume_from).expanduser() / "checkpoint.json").read_text(
+                        encoding="utf-8"
+                    )
                 )
                 if self.encoder_cache_covered_until_step <= int(
                     resume_contract["step"]
@@ -520,10 +516,7 @@ class TerminalExpertTrainConfig:
                 "the qualified Lightning block migration enables SwiGLU and "
                 "RMSNorm together"
             )
-        if (
-            self.reset_optimizer_on_architecture_migration
-            and not self.resume_from
-        ):
+        if self.reset_optimizer_on_architecture_migration and not self.resume_from:
             raise ValueError(
                 "optimizer reset for architecture migration requires resume"
             )
@@ -559,9 +552,7 @@ class TerminalExpertTrainConfig:
                 eval_rows = load_domain_manifest(Path(self.eval_manifest))
                 for domain in required_domains:
                     if not any(row["domain"] == domain for row in eval_rows):
-                        raise ValueError(
-                            f"manifest has no {domain} evaluation rows"
-                        )
+                        raise ValueError(f"manifest has no {domain} evaluation rows")
 
 
 def _contract_fingerprint(
@@ -614,9 +605,9 @@ def resolved_worker_component_contract(
     expected = {
         "optimizer": {
             "learning_rate": (
-                worker_components.configuration(
-                    "optimizer", category="optimizer"
-                )["learning_rate"]
+                worker_components.configuration("optimizer", category="optimizer")[
+                    "learning_rate"
+                ]
                 if worker_controls is not None
                 and "learning_rate" in worker_controls.effective_values
                 else config.learning_rate
@@ -657,9 +648,7 @@ def resolved_worker_component_contract(
         "loop_gate_gradient_clipping": "gradient_clipping",
     }
     for slot, configuration in expected.items():
-        actual = dict(
-            worker_components.configuration(slot, category=categories[slot])
-        )
+        actual = dict(worker_components.configuration(slot, category=categories[slot]))
         if actual != configuration:
             raise ValueError(
                 f"authority {categories[slot]} composition disagrees with "
@@ -1065,9 +1054,7 @@ def _rapid_alternating_batches(
     microbatch_in_step = 0
     yielded = 0
     maximum_microbatches = (
-        optimizer_steps * accumulation_steps
-        if optimizer_steps is not None
-        else None
+        optimizer_steps * accumulation_steps if optimizer_steps is not None else None
     )
     while True:
         if maximum_microbatches is not None and yielded >= maximum_microbatches:
@@ -1120,9 +1107,7 @@ def plan_cache_span(
     if optimizer_steps < 1:
         raise ValueError("cache span must contain at least one optimizer step")
     checkpoint = checkpoint.expanduser().resolve()
-    contract = json.loads(
-        (checkpoint / "checkpoint.json").read_text(encoding="utf-8")
-    )
+    contract = json.loads((checkpoint / "checkpoint.json").read_text(encoding="utf-8"))
     if contract.get("schema") != RUN_SCHEMA:
         raise ValueError("cache-span checkpoint has the wrong schema")
     start_step = int(contract["step"])
@@ -1233,9 +1218,7 @@ def plan_cache_span(
                     if completed_step != config.max_steps:
                         raise RuntimeError("domain schedule ended before cache span")
                     continue
-                current_domain = str(
-                    schedule["windows"][window_index]["domain"]
-                )
+                current_domain = str(schedule["windows"][window_index]["domain"])
 
     unique_rows: list[dict[str, Any]] = []
     seen = set()
@@ -1403,9 +1386,7 @@ def _optimizer_value_to_cpu(value: Any) -> Any:
     if isinstance(value, torch.Tensor):
         return value.detach().cpu().clone()
     if isinstance(value, dict):
-        return {
-            key: _optimizer_value_to_cpu(item) for key, item in value.items()
-        }
+        return {key: _optimizer_value_to_cpu(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_optimizer_value_to_cpu(item) for item in value]
     if isinstance(value, tuple):
@@ -1418,8 +1399,7 @@ def _optimizer_value_to_device(value: Any, device: torch.device) -> Any:
         return value.to(device=device)
     if isinstance(value, dict):
         return {
-            key: _optimizer_value_to_device(item, device)
-            for key, item in value.items()
+            key: _optimizer_value_to_device(item, device) for key, item in value.items()
         }
     if isinstance(value, list):
         return [_optimizer_value_to_device(item, device) for item in value]
@@ -1475,9 +1455,7 @@ class ResidentExpertOptimizerBank:
         for model, master, _independent in self.pairs:
             records.append(
                 {
-                    "master": master.detach()
-                    .to(device=self.storage_device)
-                    .clone(),
+                    "master": master.detach().to(device=self.storage_device).clone(),
                     "optimizer": _optimizer_value_to_device(
                         self.optimizer.state.pop(master, {}),
                         self.storage_device,
@@ -1539,7 +1517,9 @@ class ResidentExpertOptimizerBank:
             if not initialize_from_model:
                 raise ValueError(f"{domain} expert optimizer state is not parked")
             for model, master, _independent in self.pairs:
-                master.copy_(model.detach().to(device=master.device, dtype=master.dtype))
+                master.copy_(
+                    model.detach().to(device=master.device, dtype=master.dtype)
+                )
                 self.optimizer.state.pop(master, None)
             return False
         if len(records) != len(self.pairs):
@@ -1550,13 +1530,9 @@ class ResidentExpertOptimizerBank:
             saved_master = record["master"]
             if saved_master.shape != master.shape:
                 raise ValueError("parked expert master weight has the wrong shape")
-            master.copy_(
-                saved_master.to(device=master.device, dtype=master.dtype)
-            )
+            master.copy_(saved_master.to(device=master.device, dtype=master.dtype))
             model.copy_(master.to(device=model.device, dtype=model.dtype))
-            restored = _optimizer_value_to_device(
-                record["optimizer"], master.device
-            )
+            restored = _optimizer_value_to_device(record["optimizer"], master.device)
             if not isinstance(restored, Mapping):
                 raise TypeError("parked expert optimizer entry must be a mapping")
             self.optimizer.state[master] = dict(restored)
@@ -1599,9 +1575,7 @@ class ResidentExpertSwitcher:
         work_dir: Path,
     ) -> None:
         if set(checkpoints) != set(EXPERT_DOMAINS):
-            raise ValueError(
-                f"expert switcher requires exactly {list(EXPERT_DOMAINS)}"
-            )
+            raise ValueError(f"expert switcher requires exactly {list(EXPERT_DOMAINS)}")
         self.controller = controller
         self.optimizer_bank = optimizer_bank
         self.latest = {
@@ -1695,10 +1669,10 @@ def weighted_domain_windows(
     """
 
     if set(domain_counts) != set(EXPERT_DOMAINS):
-        raise ValueError(
-            f"domain counts must contain exactly {list(EXPERT_DOMAINS)}"
-        )
-    if any(not isinstance(count, int) or count <= 0 for count in domain_counts.values()):
+        raise ValueError(f"domain counts must contain exactly {list(EXPERT_DOMAINS)}")
+    if any(
+        not isinstance(count, int) or count <= 0 for count in domain_counts.values()
+    ):
         raise ValueError("domain counts must be positive integers")
     if max_steps < 1:
         raise ValueError("max_steps must be positive")
@@ -1810,13 +1784,11 @@ def domain_window_schedule_report(
         "max_steps": max_steps,
         "domain_counts": counts,
         "domain_weights": {
-            domain: counts[domain] / sum(counts.values())
-            for domain in EXPERT_DOMAINS
+            domain: counts[domain] / sum(counts.values()) for domain in EXPERT_DOMAINS
         },
         "scheduled_steps": scheduled_steps,
         "scheduled_step_weights": {
-            domain: scheduled_steps[domain] / max_steps
-            for domain in EXPERT_DOMAINS
+            domain: scheduled_steps[domain] / max_steps for domain in EXPERT_DOMAINS
         },
         "windows": [asdict(window) | {"steps": window.steps} for window in windows],
     }
@@ -1855,9 +1827,7 @@ def _save_checkpoint(
         for inactive_domain in EXPERT_DOMAINS:
             if inactive_domain == domain:
                 continue
-            inactive_name = (
-                f"mageflow-{inactive_domain}-terminal-expert.safetensors"
-            )
+            inactive_name = f"mageflow-{inactive_domain}-terminal-expert.safetensors"
             switcher.save_domain(
                 inactive_domain,
                 temporary / inactive_name,
@@ -1884,9 +1854,7 @@ def _save_checkpoint(
         "torch_rng": torch.get_rng_state(),
         "cuda_rng": torch.cuda.get_rng_state_all(),
         "resident_expert_optimizer_bank": (
-            switcher.optimizer_bank.state_dict()
-            if switcher is not None
-            else None
+            switcher.optimizer_bank.state_dict() if switcher is not None else None
         ),
         "domain_positions": (
             {key: dict(value) for key, value in domain_positions.items()}
@@ -2005,9 +1973,7 @@ def _promote_best_checkpoint(
 def _export_checkpoint_experts(checkpoint: Path, output_dir: Path) -> dict[str, Path]:
     """Publish every final expert from the just-written atomic checkpoint."""
 
-    contract = json.loads(
-        (checkpoint / "checkpoint.json").read_text(encoding="utf-8")
-    )
+    contract = json.loads((checkpoint / "checkpoint.json").read_text(encoding="utf-8"))
     checkpoint_experts = contract.get("experts")
     if not isinstance(checkpoint_experts, Mapping):
         checkpoint_experts = {str(contract["domain"]): contract["expert"]}
@@ -2016,9 +1982,7 @@ def _export_checkpoint_experts(checkpoint: Path, output_dir: Path) -> dict[str, 
         source = checkpoint / str(source_name)
         if not source.is_file():
             raise FileNotFoundError(source)
-        destination = (
-            output_dir / f"mageflow-{domain}-terminal-expert.safetensors"
-        )
+        destination = output_dir / f"mageflow-{domain}-terminal-expert.safetensors"
         shutil.copy2(source, destination)
         metadata = source.with_suffix(source.suffix + ".json")
         if metadata.is_file():
@@ -2218,9 +2182,7 @@ def _evaluate(
 ) -> dict[str, float | int]:
     was_training = transformer.training
     transformer.eval()
-    active_loop_controller = getattr(
-        transformer, "tread_loop_controller", None
-    )
+    active_loop_controller = getattr(transformer, "tread_loop_controller", None)
     if active_loop_controller is not None:
         active_loop_controller.refresh_inference_skip_refinements()
     selected = rows[: config.eval_examples] if config.eval_examples else rows
@@ -2245,8 +2207,7 @@ def _evaluate(
             images = [
                 (
                     None
-                    if encoder_cache is not None
-                    and encoder_cache.has_moments(row)
+                    if encoder_cache is not None and encoder_cache.has_moments(row)
                     else _load_image_tensor(row)
                 )
                 for row in batch_rows
@@ -2317,21 +2278,15 @@ def _evaluate(
             total_flow_weighted_loss += float(
                 (per_example.detach() * raw_flow_weights).sum().item()
             )
-            total_direction_loss += float(
-                direction_per_example.detach().sum().item()
-            )
+            total_direction_loss += float(direction_per_example.detach().sum().item())
             total_direction_weighted_loss += float(
-                (
-                    direction_per_example.detach() * raw_flow_weights
-                ).sum().item()
+                (direction_per_example.detach() * raw_flow_weights).sum().item()
             )
             total_flow_weight += float(raw_flow_weights.sum().item())
             if repa_loss is not None:
                 total_repa_loss += float(repa_loss.item()) * len(batch_rows)
             total_loop_aux_loss += float(loop_aux_loss.item()) * len(batch_rows)
-            total_loop_ponder_loss += float(loop_ponder_loss.item()) * len(
-                batch_rows
-            )
+            total_loop_ponder_loss += float(loop_ponder_loss.item()) * len(batch_rows)
             total_examples += len(batch_rows)
     transformer.train(was_training)
     metrics: dict[str, float | int] = {
@@ -2362,9 +2317,7 @@ def _evaluate(
     loop_ponder_weight = 0.0
     if active_loop_controller is not None:
         metrics["eval/loop_auxiliary_loss"] = total_loop_aux_loss / total_examples
-        loop_auxiliary_weight = (
-            active_loop_controller.config.looping.auxiliary_weight
-        )
+        loop_auxiliary_weight = active_loop_controller.config.looping.auxiliary_weight
         metrics["eval/loop_ponder_loss"] = total_loop_ponder_loss / total_examples
         loop_ponder_weight = (
             active_loop_controller.config.looping.factorization.ponder_weight
@@ -2375,9 +2328,7 @@ def _evaluate(
         metrics["eval/repa_loss"] = mean_repa
     metrics["eval/optimization_loss"] = _evaluation_optimization_loss(
         float(metrics["eval/flow_weighted_loss"]),
-        velocity_direction_loss=float(
-            metrics["eval/velocity_direction_weighted_loss"]
-        ),
+        velocity_direction_loss=float(metrics["eval/velocity_direction_weighted_loss"]),
         velocity_direction_weight=config.velocity_direction_loss_weight,
         loop_auxiliary_loss=float(metrics.get("eval/loop_auxiliary_loss", 0.0)),
         loop_auxiliary_weight=loop_auxiliary_weight,
@@ -2543,8 +2494,8 @@ def _run_alternating_evaluation(
     combined["eval/primary_loss"] = combined["loss"]
     combined["eval/routes_per_example"] = 1
     combined["eval/gallery_artifact"] = str(artifact)
-    combined["eval/gallery_samples"] = (
-        EVAL_GALLERY_SAMPLES_PER_DOMAIN * len(EXPERT_DOMAINS)
+    combined["eval/gallery_samples"] = EVAL_GALLERY_SAMPLES_PER_DOMAIN * len(
+        EXPERT_DOMAINS
     )
     with (output_dir / "train.jsonl").open("a") as handle:
         handle.write(json.dumps({"kind": "eval", "step": step, **combined}) + "\n")
@@ -2569,6 +2520,7 @@ def train(
     worker_observability: WorkerObservability | None = None,
     worker_controls: WorkerControlRuntime | None = None,
     worker_execution_phases: WorkerExecutionPhases | None = None,
+    worker_eval_publication: Callable[[Path, int], None] | None = None,
 ) -> None:
     config.validate()
     try:
@@ -2709,9 +2661,7 @@ def train(
         checkpoint_mode,
     )
     optimizer_learning_rate, component_evidence, component_digest = (
-        resolved_worker_component_contract(
-            config, worker_components, worker_controls
-        )
+        resolved_worker_component_contract(config, worker_components, worker_controls)
     )
     optimizer_routing = terminal_optimizer_parameter_routing(
         transformer,
@@ -2740,9 +2690,7 @@ def train(
         )
         weight_decay_schedule = None
     domain_schedule = (
-        json.loads(
-            Path(config.domain_window_schedule).read_text(encoding="utf-8")
-        )
+        json.loads(Path(config.domain_window_schedule).read_text(encoding="utf-8"))
         if config.domain_window_schedule
         else None
     )
@@ -2780,7 +2728,9 @@ def train(
         if worker_controls is not None
         else None
     )
-    required_domains = EXPERT_DOMAINS if domain_schedule is not None else (config.domain,)
+    required_domains = (
+        EXPERT_DOMAINS if domain_schedule is not None else (config.domain,)
+    )
     train_rows_by_domain = {
         domain: _domain_rows(config.train_manifest, domain)
         for domain in required_domains
@@ -2835,11 +2785,7 @@ def train(
             "mode": config.encoder_cache_mode,
             "root": str(encoder_cache.root),
             "bounded_coverage_manifest": (
-                str(
-                    Path(config.encoder_cache_coverage_manifest)
-                    .expanduser()
-                    .resolve()
-                )
+                str(Path(config.encoder_cache_coverage_manifest).expanduser().resolve())
                 if config.encoder_cache_coverage_manifest
                 else None
             ),
@@ -2955,8 +2901,7 @@ def train(
                 )
                 if phase_batch_start < len(phase_batches):
                     phase_batch_rows = [
-                        train_rows[index]
-                        for index in phase_batches[phase_batch_start]
+                        train_rows[index] for index in phase_batches[phase_batch_start]
                     ]
                     break
                 phase_epoch += 1
@@ -2983,9 +2928,7 @@ def train(
                     value is None
                     for value in phase_prefetched_cache.text_by_prompt.values()
                 )
-                or any(
-                    value is None for value in phase_prefetched_cache.moments
-                )
+                or any(value is None for value in phase_prefetched_cache.moments)
             ):
                 raise RuntimeError(
                     "MageFlow terminal phases require complete frozen-encoder cache coverage"
@@ -3012,9 +2955,7 @@ def train(
                     "model_revision": config.model_revision,
                 },
                 "resident_expert_optimizer_bank": (
-                    optimizer_bank.state_dict()
-                    if optimizer_bank is not None
-                    else {}
+                    optimizer_bank.state_dict() if optimizer_bank is not None else {}
                 ),
                 "scheduler": scheduler.state_dict(),
             }
@@ -3058,13 +2999,8 @@ def train(
                         flow["repa_target"],
                         flow["image_lens"],
                     )
-                loss, _observed = rectified_flow_loss(
-                    prediction, flow["velocity"]
-                )
-                if (
-                    config.immiscible_enabled
-                    or config.flow_loss_weighting != "uniform"
-                ):
+                loss, _observed = rectified_flow_loss(prediction, flow["velocity"])
+                if config.immiscible_enabled or config.flow_loss_weighting != "uniform":
                     weighted_loss, _ = weighted_rectified_flow_loss(
                         prediction,
                         flow["velocity"],
@@ -3085,9 +3021,7 @@ def train(
                                 flow["velocity"],
                                 flow["image_lens"],
                                 flow_weights,
-                                effective_example_count=int(
-                                    flow_weights.numel()
-                                ),
+                                effective_example_count=int(flow_weights.numel()),
                                 epsilon=config.velocity_direction_loss_epsilon,
                             )
                         )
@@ -3105,16 +3039,13 @@ def train(
                     weighted_direction_loss = loss.new_zeros(())
                 optimization_loss = (
                     weighted_loss
-                    + config.velocity_direction_loss_weight
-                    * weighted_direction_loss
+                    + config.velocity_direction_loss_weight * weighted_direction_loss
                 )
                 if loop_controller is not None:
                     optimization_loss = (
                         optimization_loss
                         + loop_controller.config.looping.auxiliary_weight
-                        * auxiliary_loop_flow_loss(
-                            loop_controller, flow["velocity"]
-                        )
+                        * auxiliary_loop_flow_loss(loop_controller, flow["velocity"])
                         / config.gradient_accumulation_steps
                         + loop_controller.config.looping.factorization.ponder_weight
                         * learned_loop_ponder_loss(loop_controller)
@@ -3167,9 +3098,7 @@ def train(
         existing_fingerprint = existing_contract.get("fingerprint")
         if existing_fingerprint:
             _atomic_json(
-                output_dir
-                / "run_contracts"
-                / f"{existing_fingerprint}.json",
+                output_dir / "run_contracts" / f"{existing_fingerprint}.json",
                 existing_contract,
             )
     _atomic_json(
@@ -3210,24 +3139,19 @@ def train(
                         if config.rapid_expert_alternation
                         else "scheduled_windows"
                     ),
-                    "optimizer_state_device": (
-                        config.expert_optimizer_state_device
-                    ),
+                    "optimizer_state_device": (config.expert_optimizer_state_device),
                     "host_device_transfer_at_switch": (
                         config.expert_optimizer_state_device != "cuda"
                     ),
                 },
-                "balanced_accumulation_window": (
-                    config.balance_accumulation_window
-                ),
+                "balanced_accumulation_window": (config.balance_accumulation_window),
                 "deferred_training_metric_sync": True,
                 "loop_gate_optimization": {
                     "update_multiplier": config.loop_gate_update_multiplier,
                     "max_grad_norm": config.loop_gate_max_grad_norm,
                     "separate_from_main_gradient_clip": (
                         config.loop_gate_update_multiplier != 1.0
-                        or config.loop_gate_max_grad_norm
-                        != config.max_grad_norm
+                        or config.loop_gate_max_grad_norm != config.max_grad_norm
                     ),
                 },
             },
@@ -3415,8 +3339,7 @@ def train(
             images = [
                 (
                     None
-                    if encoder_cache is not None
-                    and encoder_cache.has_moments(row)
+                    if encoder_cache is not None and encoder_cache.has_moments(row)
                     else _load_image_tensor(row).pin_memory()
                 )
                 for row in batch_rows
@@ -3475,9 +3398,8 @@ def train(
                     int(domain_schedule["windows"][window_index]["end_step"]),
                 )
             remaining_microbatches = (
-                (stream_stop_step - step) * config.gradient_accumulation_steps
-                - accumulation
-            )
+                stream_stop_step - step
+            ) * config.gradient_accumulation_steps - accumulation
             batch_stream = itertools.islice(
                 enumerate(batches[batch_start:], start=batch_start),
                 max(0, remaining_microbatches),
@@ -3495,8 +3417,7 @@ def train(
                 images = [
                     (
                         None
-                        if encoder_cache is not None
-                        and encoder_cache.has_moments(row)
+                        if encoder_cache is not None and encoder_cache.has_moments(row)
                         else _load_image_tensor(row).pin_memory()
                     )
                     for row in batch_rows
@@ -3556,9 +3477,7 @@ def train(
                 active_flows = pending_flows
                 pending_flows = []
                 if config.immiscible_enabled:
-                    immiscible_metrics = apply_immiscible_noise_assignment(
-                        active_flows
-                    )
+                    immiscible_metrics = apply_immiscible_noise_assignment(active_flows)
             else:
                 active_flows = [flow]
             flow_weight_batches, flow_weight_metrics = effective_flow_loss_weights(
@@ -3571,7 +3490,10 @@ def train(
                 int(weights.numel()) for weights in flow_weight_batches
             )
             timestep_window = torch.cat(
-                [active_flow["timesteps"].detach().float() for active_flow in active_flows]
+                [
+                    active_flow["timesteps"].detach().float()
+                    for active_flow in active_flows
+                ]
             )
 
             for active_flow, flow_weights in zip(
@@ -3602,19 +3524,15 @@ def train(
                         prediction, active_flow["velocity"]
                     )
                     if use_effective_batch_window:
-                        weighted_loss, _ = (
-                            weighted_rectified_flow_loss(
-                                prediction,
-                                active_flow["velocity"],
-                                active_flow["image_lens"],
-                                flow_weights,
-                                effective_example_count=effective_example_count,
-                            )
+                        weighted_loss, _ = weighted_rectified_flow_loss(
+                            prediction,
+                            active_flow["velocity"],
+                            active_flow["image_lens"],
+                            flow_weights,
+                            effective_example_count=effective_example_count,
                         )
                     else:
-                        weighted_loss = (
-                            loss / config.gradient_accumulation_steps
-                        )
+                        weighted_loss = loss / config.gradient_accumulation_steps
                     if config.velocity_direction_loss_weight > 0:
                         if use_effective_batch_window:
                             (
@@ -3629,20 +3547,15 @@ def train(
                                 epsilon=config.velocity_direction_loss_epsilon,
                             )
                         else:
-                            direction_per_example = (
-                                velocity_direction_loss_per_example(
-                                    prediction,
-                                    active_flow["velocity"],
-                                    active_flow["image_lens"],
-                                    epsilon=(
-                                        config.velocity_direction_loss_epsilon
-                                    ),
-                                )
+                            direction_per_example = velocity_direction_loss_per_example(
+                                prediction,
+                                active_flow["velocity"],
+                                active_flow["image_lens"],
+                                epsilon=(config.velocity_direction_loss_epsilon),
                             )
                             direction_loss = direction_per_example.mean()
                             weighted_direction_loss = (
-                                direction_loss
-                                / config.gradient_accumulation_steps
+                                direction_loss / config.gradient_accumulation_steps
                             )
                     else:
                         direction_loss = active_flow["velocity"].new_zeros(
@@ -3674,9 +3587,7 @@ def train(
                             (), dtype=torch.float32
                         )
                     else:
-                        loop_ponder_loss = learned_loop_ponder_loss(
-                            loop_controller
-                        )
+                        loop_ponder_loss = learned_loop_ponder_loss(loop_controller)
                         optimization_loss = (
                             optimization_loss
                             + loop_controller.config.looping.factorization.ponder_weight
@@ -3698,9 +3609,7 @@ def train(
                 accumulation += 1
                 loss_values.append(observed.detach())
                 direction_loss_values.append(direction_loss.detach())
-                weighted_direction_loss_values.append(
-                    weighted_direction_loss.detach()
-                )
+                weighted_direction_loss_values.append(weighted_direction_loss.detach())
                 if repa_loss is not None:
                     repa_loss_values.append(repa_loss.detach())
                     for name, value in repa.last_metrics.items():
@@ -3722,9 +3631,7 @@ def train(
             )
             if isolate_loop_gates:
                 if worker_components is not None:
-                    grad_norm = worker_components.gradient_clipping(
-                        main_trainable
-                    )
+                    grad_norm = worker_components.gradient_clipping(main_trainable)
                     loop_gate_grad_norm = worker_components.gradient_clipping(
                         loop_gate_parameters,
                         slot="loop_gate_gradient_clipping",
@@ -3811,9 +3718,7 @@ def train(
                 "loss": loss_sum / accumulation,
                 "flow_weighted_loss": weighted_flow_loss_sum,
                 "velocity_direction_loss": direction_loss_sum / accumulation,
-                "velocity_direction_weighted_loss": (
-                    weighted_direction_loss_sum
-                ),
+                "velocity_direction_weighted_loss": (weighted_direction_loss_sum),
                 "velocity_direction_loss_weight": (
                     config.velocity_direction_loss_weight
                 ),
@@ -3833,9 +3738,7 @@ def train(
                 ),
                 "gnorm": float(grad_norm),
                 "loop_gate_gnorm": float(loop_gate_grad_norm),
-                "loop_gate_update_multiplier": (
-                    config.loop_gate_update_multiplier
-                ),
+                "loop_gate_update_multiplier": (config.loop_gate_update_multiplier),
                 "expert_lr": learning_rates.get("terminal_expert"),
                 "shared_backbone_lr": learning_rates.get("shared_backbone"),
                 "repa_lr": learning_rates.get("vae_repa_projection"),
@@ -3930,7 +3833,9 @@ def train(
                     "domain_window": (
                         None
                         if config.rapid_expert_alternation
-                        else window_index if domain_schedule else None
+                        else window_index
+                        if domain_schedule
+                        else None
                     ),
                     "expert_switches": switcher.switch_count if switcher else 0,
                 },
@@ -3975,11 +3880,17 @@ def train(
                 worker_controls is not None
                 and worker_controls.checkpoint_boundary_requested
             )
+            publish_eval_revision = bool(
+                worker_eval_publication is not None
+                and evaluation_metrics is not None
+                and step < config.max_steps
+            )
             if (
                 step % config.checkpoint_every == 0
                 or stop["requested"]
                 or best_evaluation
                 or checkpoint_requested
+                or publish_eval_revision
             ):
                 if mutable_controls is not None:
                     worker_controls.checkpoint(step, mutable_controls.apply)
@@ -4001,7 +3912,9 @@ def train(
                     window_index=(
                         None
                         if config.rapid_expert_alternation
-                        else window_index if domain_schedule else None
+                        else window_index
+                        if domain_schedule
+                        else None
                     ),
                     control_state=(
                         worker_controls.checkpoint_state()
@@ -4039,6 +3952,9 @@ def train(
                         step=step,
                         loss=float(evaluation_metrics["eval/primary_loss"]),
                     )
+                if publish_eval_revision:
+                    assert worker_eval_publication is not None
+                    worker_eval_publication(checkpoint, step)
                 if stop["requested"]:
                     _atomic_json(
                         output_dir / "status.json",
@@ -4075,7 +3991,9 @@ def train(
                     window_index=(
                         None
                         if config.rapid_expert_alternation
-                        else window_index if domain_schedule else None
+                        else window_index
+                        if domain_schedule
+                        else None
                     ),
                     control_state=(
                         worker_controls.checkpoint_state()
@@ -4144,17 +4062,13 @@ def train(
                     train_rows = train_rows_by_domain[next_domain]
                     eval_rows = eval_rows_by_domain[next_domain]
                     epoch = int(domain_positions[next_domain]["epoch"])
-                    batch_start = int(
-                        domain_positions[next_domain]["batch_start"]
-                    )
+                    batch_start = int(domain_positions[next_domain]["batch_start"])
                     switch_metrics = {
                         "kind": "domain_switch",
                         "step": step,
                         "window": window_index,
                         "domain": next_domain,
-                        "window_end_step": int(
-                            windows[window_index]["end_step"]
-                        ),
+                        "window_end_step": int(windows[window_index]["end_step"]),
                         "expert_switches": switcher.switch_count,
                     }
                     with (output_dir / "train.jsonl").open("a") as handle:
@@ -4181,6 +4095,36 @@ def train(
             "batch_start": batch_start,
         }
 
+    if all_eval_rows and not unified_evaluation_is_complete(output_dir, step):
+        if mutable_controls is not None:
+            worker_controls.evaluation(step, mutable_controls.apply)
+        if switcher is None:
+            _run_evaluation(
+                pipeline=pipeline,
+                transformer=transformer,
+                controller=controller,
+                repa=repa,
+                model=model,
+                rows=eval_rows,
+                config=config,
+                device=device,
+                output_dir=output_dir,
+                step=step,
+            )
+        else:
+            _run_alternating_evaluation(
+                pipeline=pipeline,
+                transformer=transformer,
+                controller=controller,
+                switcher=switcher,
+                repa=repa,
+                model=model,
+                rows_by_domain=eval_rows_by_domain,
+                config=config,
+                device=device,
+                output_dir=output_dir,
+                step=step,
+            )
     if mutable_controls is not None:
         worker_controls.checkpoint(step, mutable_controls.apply)
     checkpoint = _save_checkpoint(
@@ -4201,12 +4145,12 @@ def train(
         window_index=(
             None
             if config.rapid_expert_alternation
-            else window_index if domain_schedule else None
+            else window_index
+            if domain_schedule
+            else None
         ),
         control_state=(
-            worker_controls.checkpoint_state()
-            if worker_controls is not None
-            else None
+            worker_controls.checkpoint_state() if worker_controls is not None else None
         ),
     )
     _export_checkpoint_experts(checkpoint, output_dir)
@@ -4266,9 +4210,7 @@ def prepare_run(config: TerminalExpertTrainConfig, run_dir: Path) -> dict[str, A
         "train_examples": sum(
             len(_domain_rows(config.train_manifest, domain))
             for domain in (
-                EXPERT_DOMAINS
-                if config.domain_window_schedule
-                else (config.domain,)
+                EXPERT_DOMAINS if config.domain_window_schedule else (config.domain,)
             )
         ),
         "eval_examples": (
@@ -4290,9 +4232,7 @@ def prepare_run(config: TerminalExpertTrainConfig, run_dir: Path) -> dict[str, A
             "immiscible_diffusion": config.immiscible_enabled,
             "flow_loss_weighting": config.flow_loss_weighting,
             "timestep_sampling": config.timestep_sampling,
-            "velocity_direction_loss_weight": (
-                config.velocity_direction_loss_weight
-            ),
+            "velocity_direction_loss_weight": (config.velocity_direction_loss_weight),
         },
     }
     _atomic_json(run_dir / "plan.json", receipt)
