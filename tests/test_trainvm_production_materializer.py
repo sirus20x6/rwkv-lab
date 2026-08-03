@@ -49,8 +49,12 @@ def _inputs(tmp_path: Path) -> dict:
     transformer_model.mkdir()
     transformer_patch = tmp_path / "transformer-patch"
     transformer_patch.mkdir()
+    (transformer_patch / "manifest.json").write_text(
+        json.dumps({"source_checkpoint": str(transformer_model)}),
+        encoding="utf-8",
+    )
     transformer_tokens = tmp_path / "transformer-tokens.bin"
-    transformer_tokens.write_bytes(b"\0" * 8192)
+    transformer_tokens.write_bytes(b"\0" * 16384)
     return {
         "api_version": MATERIALIZER.API_VERSION,
         "workspace_root": str(workspace),
@@ -219,6 +223,44 @@ def test_materializer_fails_closed_on_invalid_deployment_inputs(
 ) -> None:
     inputs = _inputs(tmp_path)
     mutation(inputs)
+    with pytest.raises(MATERIALIZER.MaterializationError, match=message):
+        MATERIALIZER.build_documents(inputs)
+
+
+def test_materializer_rejects_transformer_patch_from_a_different_base(
+    tmp_path,
+) -> None:
+    inputs = _inputs(tmp_path)
+    different_base = tmp_path / "different-transformer-base"
+    different_base.mkdir()
+    patch_manifest = Path(inputs["transformer"]["patch_dir"]) / "manifest.json"
+    patch_manifest.write_text(
+        json.dumps({"source_checkpoint": str(different_base)}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        MATERIALIZER.MaterializationError,
+        match="source checkpoint disagrees",
+    ):
+        MATERIALIZER.build_documents(inputs)
+
+
+@pytest.mark.parametrize(
+    ("token_bytes", "total_tokens", "message"),
+    [
+        (4097, 1024, "packed uint32"),
+        (4096, 1025, "packed uint32"),
+        (16384, 300, "partitions must each exceed"),
+    ],
+)
+def test_materializer_rejects_unusable_transformer_token_partitions(
+    tmp_path, token_bytes, total_tokens, message
+) -> None:
+    inputs = _inputs(tmp_path)
+    Path(inputs["transformer"]["tokens_bin"]).write_bytes(b"\0" * token_bytes)
+    inputs["transformer"]["total_tokens_in_bin"] = total_tokens
+
     with pytest.raises(MATERIALIZER.MaterializationError, match=message):
         MATERIALIZER.build_documents(inputs)
 

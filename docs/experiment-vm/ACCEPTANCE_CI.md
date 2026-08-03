@@ -205,6 +205,29 @@ model/patch/token stream, and the authority-owned run root. The source-only
 materializer validates every input path and emits three schema-valid real
 experiments plus the exact root sets required for content locking:
 
+Large training manifests should first be reduced to a new, content-bound
+qualification snapshot. The preparer deterministically selects the
+lowest-latent-token animation and photo rows independently, round-robins the
+two domains so the first two gallery items cover both, copies only the selected
+images, and emits an exact little-endian uint32 stream using the local
+transformer tokenizer and explicitly named local text sources:
+
+```bash
+scripts/prepare_trainvm_production_qualification_data.py \
+  --train-manifest /absolute/mageflow/train.jsonl \
+  --eval-manifest /absolute/mageflow/eval.jsonl \
+  --tokenizer-directory /absolute/transformer-base \
+  --text-source /absolute/source-one.md \
+  --text-source /absolute/source-two.md \
+  --destination /absolute/new/qualification-data
+```
+
+The new-only snapshot carries the source manifest, source text, tokenizer,
+selected-image, and produced-token hashes in `snapshot.json`. Its small
+`mageflow` and `transformer` subtrees—not the multi-terabyte source roots—are
+then named by the deployment input document below. The native content locker
+still independently measures the final snapshot before submission.
+
 ```json
 {
   "api_version": "trainvm.production-qualification-inputs/v1",

@@ -140,6 +140,20 @@ def _path_list(value: Any, label: str) -> list[str]:
     return paths
 
 
+def _json_object(path: Path, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=_pairs,
+            parse_constant=_reject_constant,
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise MaterializationError(f"{label} is not valid JSON: {error}") from error
+    if not isinstance(value, dict):
+        raise MaterializationError(f"{label} must be a JSON object")
+    return value
+
+
 def _artifact(kind: str, schema: str, *, fingerprint: str = "manifest_sha256") -> dict[str, Any]:
     return {
         "type": kind,
@@ -538,6 +552,29 @@ def _transformer(raw: Any, common: Mapping[str, Any]) -> tuple[dict[str, Any], l
     max_steps = _integer(raw.get("max_steps", 8), "transformer.max_steps", 5, 10000)
     sequence_length = _integer(raw.get("sequence_length", 128), "transformer.sequence_length", 16, 1048576)
     eval_tokens = _integer(raw.get("eval_tokens", max(256, sequence_length * 2)), "transformer.eval_tokens", 1, total_tokens - 1)
+    token_bytes = Path(tokens).stat().st_size
+    if token_bytes % 4 or total_tokens > token_bytes // 4:
+        raise MaterializationError(
+            "transformer token stream is not a sufficient packed uint32 file"
+        )
+    if eval_tokens <= sequence_length or total_tokens - eval_tokens <= sequence_length:
+        raise MaterializationError(
+            "transformer train and eval partitions must each exceed sequence_length"
+        )
+    patch_manifest = _json_object(Path(patch) / "manifest.json", "transformer patch manifest")
+    source_checkpoint = patch_manifest.get("source_checkpoint")
+    if not isinstance(source_checkpoint, str) or not source_checkpoint:
+        raise MaterializationError("transformer patch manifest has no source checkpoint")
+    try:
+        patch_source = Path(source_checkpoint).expanduser().resolve(strict=True)
+    except OSError as error:
+        raise MaterializationError(
+            f"transformer patch source checkpoint is unavailable: {error}"
+        ) from error
+    if patch_source != Path(model):
+        raise MaterializationError(
+            "transformer patch source checkpoint disagrees with model_dir"
+        )
     learning_rate = _number(raw.get("learning_rate", 1.0e-4), "transformer.learning_rate", 1.0e-12, 1.0)
     minimum_lr = _number(raw.get("minimum_learning_rate", learning_rate * 0.1), "transformer.minimum_learning_rate", 0.0, learning_rate)
     minimum_ratio = minimum_lr / learning_rate
