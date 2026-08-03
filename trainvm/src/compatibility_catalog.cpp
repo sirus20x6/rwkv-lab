@@ -38,9 +38,9 @@ constexpr std::size_t kMaximumPathBytes = 512U;
 constexpr std::size_t kMaximumLegacyDisplayBytes = 1024U;
 constexpr std::size_t kMaximumNotesBytes = 2048U;
 constexpr std::string_view kReviewedCatalogDigest =
-    "sha256:e0bc81ed31e9b889ff99b6e768b46deb2a6792b99ad450abdf3740942f843731";
+    "sha256:99d40c212dc0471371b1ffbc8caf6f0d6d62082826b1028e9e1ea1978941959d";
 
-constexpr std::array<std::string_view, 156> kReviewedWorkflowIds = {
+constexpr std::array<std::string_view, 157> kReviewedWorkflowIds = {
     "acquisition.civitai-anima",
     "acquisition.civitai-balanced",
     "acquisition.i1-direct-archives",
@@ -105,6 +105,7 @@ constexpr std::array<std::string_view, 156> kReviewedWorkflowIds = {
     "data.rwkv-corpus-preparation",
     "dedup.materialize-exact-links",
     "evaluation.conversion-baseline",
+    "evaluation.experiment-registry",
     "evaluation.loop-probe",
     "evaluation.radio1d-batch-caption",
     "evaluation.rwkv-generation",

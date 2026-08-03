@@ -174,14 +174,14 @@ SHA-256, a closed role/effect/resume classification, a canonical entry point,
 and compatibility linkage. Optional live-root validation rejects missing, stale,
 or byte-drifted sources. Neither catalog grants execution authority.
 
-RWKV compatibility coverage is 68 direct, 60 transitive, 36 uncovered library
-or research surfaces, and one runnable direct gap: `rwkv_lab.registry`. Native
-TrainVM now covers that module's read-only campaign listing, latest-result
-collapse, comparison view, and shared statistical decision helpers. Writable
-campaign/result registration remains the explicit gap. Native runs now expose a bounded,
-prefix-fenced, integrity-bound reproducibility capsule through the dashboard without writing the
-legacy database; this partial migration grants no permission to launch the Python
-module or let a worker share a writable database.
+RWKV compatibility coverage is 69 direct, 60 transitive, and 36 uncovered library
+or research surfaces, with no runnable direct gap. Native TrainVM covers
+`rwkv_lab.registry` campaign listing, latest-result collapse, comparison views,
+and shared statistical decision helpers. Its writable consumers are mapped to
+declarative campaigns, journal events, and typed result/artifact publication rather than migrated
+as another shared database writer. Native runs also expose a bounded, prefix-fenced,
+integrity-bound reproducibility capsule through the dashboard. This mapping grants no permission to
+launch the legacy Python module or let a worker share a writable database.
 
 ## Acceptance scenarios
 

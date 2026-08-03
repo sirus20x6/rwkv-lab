@@ -2154,10 +2154,10 @@
         "write_artifact"
       ],
       "resume_relevance": "none",
-      "compatibility_workflow_id": null,
+      "compatibility_workflow_id": "evaluation.experiment-registry",
       "source_sha256": "sha256:1d7a06445fac68dfa95515884e5984e9594313633beb4e9e9ffe6f46e7826781",
       "family": "rwkv",
-      "coverage": "direct_gap",
+      "coverage": "direct",
       "consumers": [
         "src/rwkv_lab/config.py",
         "src/rwkv_lab/experiment.py",

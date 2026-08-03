@@ -1,7 +1,7 @@
 {
   "api_version": "trainvm.compatibility-workflows/v1",
   "authority": "compatibility_evidence_only",
-  "source_tree_digest": "sha256:3e0ee6e1b8f21b785701045192e325745dafb602a489bd279f5b02dc685558fa",
+  "source_tree_digest": "sha256:e2c47731d1fcb767eafb0be93a1bacf15cb109679ae241e14c0dc90d999b25d3",
   "entries": [
     {
       "stable_id": "rwkv.synthetic-campaign",
@@ -1046,6 +1046,19 @@
       "operation_role": "evaluation",
       "notes": "Untouched-Qwen baseline PPL evaluation.",
       "legacy_invocation_display": "python -m rwkv_lab.eval_baseline <arguments>"
+    },
+    {
+      "stable_id": "evaluation.experiment-registry",
+      "family": "evaluation_profile_export",
+      "source_paths": [
+        "src/rwkv_lab/registry.py"
+      ],
+      "observed_invocation": "python_module",
+      "stateful": false,
+      "resume_evidence": "none",
+      "operation_role": "evaluation",
+      "notes": "Legacy SQLite campaign listing/comparison executable plus shared writable result-library surface. Native inspect-registry replaces the CLI reads; declarative campaign graphs, journal events, typed result/artifact publication, and prefix-fenced capsule export replace its consumers without granting the legacy module launch or database authority.",
+      "legacy_invocation_display": "python -m rwkv_lab.registry compare|campaigns <arguments>"
     },
     {
       "stable_id": "evaluation.loop-probe",

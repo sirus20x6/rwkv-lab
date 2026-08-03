@@ -196,7 +196,7 @@ int main() {
       rwkv_checked, std::nullopt, known_ids);
   check(rwkv_catalog.entries().size() == 165U,
         "RWKV disposition catalog covers all 165 reviewed modules");
-  check(rwkv_catalog.catalog_digest() == "sha256:c1dd76d14de4d5400d80a2cd04fa05de59d246d861aa260b9ec9cbe758464c63",
+  check(rwkv_catalog.catalog_digest() == "sha256:a7689b8817d1e014a3317de49da4cba67a048b92c2a3ef8d3e89f464356f5dea",
         std::string("RWKV catalog pins the exact reviewed canonical mapping") +
             " (computed " + rwkv_catalog.catalog_digest() + ")");
   classes.clear();
@@ -217,9 +217,9 @@ int main() {
         "RWKV catalog pins the audited 24/28/60/52/1 role split");
   check(complete_rwkv_metadata,
         "every RWKV disposition retains language, family, and coverage metadata");
-  check(coverage["direct"] == 68U && coverage["transitive"] == 60U &&
-            coverage["uncovered"] == 36U && coverage["direct_gap"] == 1U,
-        "RWKV catalog pins the audited 68/60/36/1 coverage split");
+  check(coverage["direct"] == 69U && coverage["transitive"] == 60U &&
+            coverage["uncovered"] == 36U && coverage["direct_gap"] == 0U,
+        "RWKV catalog pins the audited 69/60/36/0 coverage split");
 
   TemporaryDirectory temporary;
   const fs::path repository = temporary.path() / "repository";
