@@ -46,6 +46,10 @@ PORTABLE_WORKLOAD = (
 ACCELERATOR_WORKLOAD = (
     REPOSITORY / "scripts/benchmark_workloads/accelerator_lm_step.py"
 )
+AO3_CORPUS_WORKLOAD = (
+    REPOSITORY / "scripts/benchmark_workloads/ao3_corpus_lm_step.py"
+)
+AO3_CORPUS_FIXTURE = "rwkv.ao3-real-input"
 # A compositor plus an editor can hold several hundred MiB of compute residency
 # on a workstation. One GiB covers that ambient footprint while remaining far
 # below a credible training allocation; operators can pass zero for strict idle.
@@ -64,7 +68,9 @@ def digest(*parts: str) -> str:
 
 
 def workload_for_fixture(fixture: dict) -> pathlib.Path:
-    """Select the implementation from the fixture's hardware requirement."""
+    """Select the closed implementation for a fixture declaration."""
+    if fixture.get("id") == AO3_CORPUS_FIXTURE:
+        return AO3_CORPUS_WORKLOAD
     return (
         ACCELERATOR_WORKLOAD
         if fixture["accelerator_required"]
@@ -326,10 +332,11 @@ def run_cell(
         "peak_memory_bytes": timed["peak_memory_bytes"],
         "peak_memory_kind": timed["peak_memory_kind"],
         "input_wait_seconds": timed["input_wait_seconds"],
+        "training_step_seconds": timed.get("training_step_seconds"),
+        "input_wait_ratio": timed.get("input_wait_ratio"),
         # Carried so a receipt states what its input-wait number describes.
-        # Every current fixture synthesizes its tensors, so no fixture measures
-        # a real input pipeline yet, and an input-stall gain claimed against
-        # these cells would be measuring tensor construction.
+        # Most fixtures synthesize tensors; the AO3 fixture performs real file
+        # reads, UTF-8 decode, and tokenization inside the measured interval.
         "input_pipeline": timed.get("input_pipeline", "unknown"),
         "quality_metric": timed["quality_metric"],
         "final_loss": timed["final_loss"],
@@ -337,6 +344,24 @@ def run_cell(
         "compiled": compile_step,
         "compile_mode": compile_mode if compile_step else None,
     })
+    for diagnostic in (
+        "corpus_index",
+        "corpus_root",
+        "minimum_document_bytes",
+        "maximum_document_bytes",
+        "document_set_size",
+        "documents_read",
+        "corpus_bytes_read",
+        "decoded_characters",
+        "tokens_encoded",
+        "document_selection_digest",
+        "tokenizer",
+        "tokenizer_version",
+        "sequence_length",
+        "batch_size",
+    ):
+        if diagnostic in timed:
+            cell[diagnostic] = timed[diagnostic]
     if accelerator_required:
         cell.update({
             "accelerator": True,

@@ -164,6 +164,8 @@ def main() -> int:
     first_step = step_seconds[0]
     sorted_step_seconds = sorted(step_seconds)
     median = sorted_step_seconds[len(sorted_step_seconds) // 2]
+    training_step_seconds = sum(step_seconds)
+    measured_total = input_wait + training_step_seconds
     # Peak RSS is the portable stand-in for device peak memory. It is the
     # honest measure available without an accelerator, and it is reported under
     # its own name rather than pretending to be allocator statistics.
@@ -176,6 +178,8 @@ def main() -> int:
         "peak_memory_bytes": peak_memory,
         "peak_memory_kind": "process_max_rss",
         "input_wait_seconds": input_wait,
+        "training_step_seconds": training_step_seconds,
+        "input_wait_ratio": input_wait / measured_total if measured_total else 0.0,
         # This workload synthesizes tensors in process. There is no decode,
         # tokenization, bucketing, prefetch, worker pool, or host-to-device
         # copy, so the interval above is the cost of torch.randint and is NOT

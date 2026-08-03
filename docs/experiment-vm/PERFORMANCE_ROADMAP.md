@@ -487,7 +487,15 @@ startup orphan recovery are defined in
   for that existing qualification path. Portable fixtures run with accelerator visibility masked,
   so their receipts prove the CPU path was measured even on an accelerator host. Accelerator
   fixtures require a real CUDA device and fail closed when any timed cell lacks a device name,
-  capability, or nonzero CUDA allocator peak. Before every accelerator cell the runner bounds
+  capability, or nonzero CUDA allocator peak. Accelerator fixtures and the existing portable LM
+  fixtures still synthesize tensors in process and label their input waits
+  `synthetic_in_process`. `rwkv.ao3-real-input` is the real-input
+  exception: each measured step reads complete indexed AO3 source files of at least 128 KiB,
+  decodes UTF-8, tokenizes the entire decoded text with the RWKV World `ztok` tokenizer, and then
+  buckets IDs for the portable LM step. Its receipt publishes document-set size, source bytes,
+  decoded characters, encoded tokens, and the deterministic selection digest; it fails instead of
+  falling back when the corpus index, corpus root, or tokenizer is unavailable. Before every
+  accelerator cell the runner bounds
   resident compute-process memory and records the process residency, total and used device memory,
   utilization, and applied allowance in the benchmark-run receipt, making ambient compositor
   conditions auditable. Benchmark remains not a separate executor — throughput and peak-memory
