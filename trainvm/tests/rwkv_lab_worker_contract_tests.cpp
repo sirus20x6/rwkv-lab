@@ -69,8 +69,8 @@ int main() {
     const trainvm::RwkvLabWorkerContract contract =
         trainvm::rwkv_lab_worker_contract(fingerprint);
     require(contract.adapter_registry.api_version == "trainvm.adapters/v2" &&
-                contract.adapter_registry.profiles.size() == 19U,
-            "rwkv_lab catalog must expose nineteen exact adapter profiles");
+                contract.adapter_registry.profiles.size() == 20U,
+            "rwkv_lab catalog must expose twenty exact adapter profiles");
     require(std::ranges::is_sorted(contract.provided_capabilities) &&
                 std::ranges::adjacent_find(contract.provided_capabilities) ==
                     contract.provided_capabilities.end(),
@@ -80,7 +80,7 @@ int main() {
         trainvm::rwkv_lab_worker_runtime_requirements();
     require(runtime_requirements.api_version ==
                     "trainvm.rwkv-lab-worker-runtime-requirements/v1" &&
-                runtime_requirements.profiles.size() == 19U &&
+                runtime_requirements.profiles.size() == 20U &&
                 runtime_requirements.shared_root_distributions ==
                     std::vector<std::string>(
                         {"grpcio", "pillow", "protobuf", "torch"}),
@@ -102,6 +102,8 @@ int main() {
 
     const auto& appearance = find_profile(
         contract, "rwkv-lab.mageflow-appearance-expert");
+    const auto& mageflow_full = find_profile(
+        contract, "rwkv-lab.mageflow-full-backbone");
     const auto& terminal = find_profile(
         contract, "rwkv-lab.mageflow-terminal-expert");
     const auto& qwen = find_profile(contract, "rwkv-lab.qwen-ao3");
@@ -162,6 +164,15 @@ int main() {
         });
     require(appearance.training_composition &&
                 appearance.training_composition->model_family == "mageflow" &&
+                mageflow_full.training_composition &&
+                mageflow_full.training_composition->model_family == "mageflow" &&
+                mageflow_full.training_composition->slots.size() == 5U &&
+                mageflow_full.training_composition->allowed_components->at(
+                    "optimizer").front().name ==
+                    "torch_adamw_no_decay" &&
+                mageflow_full.training_composition->allowed_components->at(
+                    "parameter_router").front().name ==
+                    "mageflow_full_backbone" &&
                 appearance.training_composition->slots.size() == 5U &&
                 terminal.training_composition &&
                 terminal.training_composition->model_family == "mageflow" &&
@@ -245,6 +256,10 @@ int main() {
                 appearance.lifecycle.checkpoint_now &&
                 appearance.lifecycle.compile &&
                 appearance.lifecycle.warmup &&
+                mageflow_full.lifecycle.resume_grade ==
+                    trainvm::ResumeGrade::compatible &&
+                mageflow_full.lifecycle.compile &&
+                mageflow_full.lifecycle.warmup &&
                 terminal.lifecycle.resume_grade ==
                     trainvm::ResumeGrade::compatible &&
                 terminal.lifecycle.compile &&
@@ -298,7 +313,7 @@ int main() {
         operation_registry.operation_descriptors_json();
     require(operation_document.at("api_version") ==
                     "trainvm.operations/v1" &&
-                operation_document.at("operations").size() == 19U &&
+                operation_document.at("operations").size() == 20U &&
                 operation_registry.operation_descriptors_digest() ==
                     "sha256:" +
                         trainvm::sha256_hex(operation_document.dump()),
@@ -307,30 +322,32 @@ int main() {
     require(operations.at(0).at("key").at("adapter") ==
                     "rwkv-lab.mageflow-appearance-expert" &&
                 operations.at(1).at("key").at("adapter") ==
-                    "rwkv-lab.mageflow-terminal-expert" &&
+                    "rwkv-lab.mageflow-full-backbone" &&
                 operations.at(2).at("key").at("adapter") ==
-                    "rwkv-lab.qwen-ao3" &&
+                    "rwkv-lab.mageflow-terminal-expert" &&
                 operations.at(3).at("key").at("adapter") ==
-                    "rwkv-lab.rwkv-posttraining" &&
+                    "rwkv-lab.qwen-ao3" &&
                 operations.at(4).at("key").at("adapter") ==
-                    "rwkv-lab.rwkv-rlvr" &&
+                    "rwkv-lab.rwkv-posttraining" &&
                 operations.at(5).at("key").at("adapter") ==
-                    "rwkv-lab.rwkv-scratch" &&
+                    "rwkv-lab.rwkv-rlvr" &&
                 operations.at(6).at("key").at("adapter") ==
-                    "rwkv-lab.scalar-metric-decision" &&
+                    "rwkv-lab.rwkv-scratch" &&
                 operations.at(7).at("key").at("adapter") ==
+                    "rwkv-lab.scalar-metric-decision" &&
+                operations.at(8).at("key").at("adapter") ==
                     "rwkv-lab.transformer-mla" &&
-                operations.at(13).at("key").at("adapter") ==
-                    "rwkv-lab.transformer-mla-parallel" &&
                 operations.at(14).at("key").at("adapter") ==
-                    "rwkv-lab.transformer-mla-rwkv8" &&
+                    "rwkv-lab.transformer-mla-parallel" &&
                 operations.at(15).at("key").at("adapter") ==
-                    "rwkv-lab.vision-frozen-adapter" &&
+                    "rwkv-lab.transformer-mla-rwkv8" &&
                 operations.at(16).at("key").at("adapter") ==
-                    "rwkv-lab.vision-native-head" &&
+                    "rwkv-lab.vision-frozen-adapter" &&
                 operations.at(17).at("key").at("adapter") ==
-                    "rwkv-lab.vision-rwkv-student" &&
+                    "rwkv-lab.vision-native-head" &&
                 operations.at(18).at("key").at("adapter") ==
+                    "rwkv-lab.vision-rwkv-student" &&
+                operations.at(19).at("key").at("adapter") ==
                     "rwkv-lab.vision-teacher-compressor",
             "operation descriptors must use canonical exact-key ordering");
     for (const nlohmann::json& operation : operations) {
@@ -544,6 +561,30 @@ int main() {
         trainvm::compile_document(phased_exact_source);
     require(phased_exact_plan.valid(),
             "appearance-expert authoring must accept its receipted compile and warmup phases");
+    nlohmann::json full_backbone_source = phased_exact_source;
+    full_backbone_source["spec"]["components"]["mageflow"]["adapter"] =
+        "rwkv-lab.mageflow-full-backbone";
+    full_backbone_source["spec"]["components"]["mageflow"]["operations"]
+                        ["train"]["contract"] =
+        "rwkv_lab.mageflow_full_backbone.v1.Train";
+    auto& full_components =
+        full_backbone_source["spec"]["workflow"]["nodes"]
+                            ["train_to_boundary"]["invoke"]["training"]
+                            ["components"];
+    full_components["optimizer"]["key"] = {
+        {"category", "optimizer"},
+        {"name", "torch_adamw_no_decay"},
+        {"version", "2.0.0"},
+    };
+    full_components["parameter_router"]["key"] = {
+        {"category", "parameter_router"},
+        {"name", "mageflow_full_backbone"},
+        {"version", "1.0.0"},
+    };
+    const trainvm::CompileResult full_backbone_plan =
+        trainvm::compile_document(full_backbone_source);
+    require(full_backbone_plan.valid(),
+            "full-backbone MageFlow authoring with phases must compile");
     const auto registry_path =
         std::filesystem::temp_directory_path() /
         ("trainvm-exact-operation-" + std::to_string(::getpid()) + ".json");
@@ -581,6 +622,20 @@ int main() {
     }
     require(phased_exact_plan_accepted,
             "an appearance plan with compile and warmup must validate against the production worker registry");
+    bool full_backbone_plan_accepted = full_backbone_plan.valid();
+    if (full_backbone_plan.valid()) {
+      try {
+        trainvm::AdapterRegistry::load_file(
+            std::filesystem::absolute(registry_path))
+            .validate_plan(*full_backbone_plan.plan);
+      } catch (const std::exception& error) {
+        std::cerr << "full-backbone registry rejection: " << error.what()
+                  << '\n';
+        full_backbone_plan_accepted = false;
+      }
+    }
+    require(full_backbone_plan_accepted,
+            "a full-backbone MageFlow plan with phases must validate against the production worker registry");
 
     const trainvm::CompileResult vision_ab_plan =
         trainvm::compile_document(load_vision_representation_ab_fixture());
@@ -725,7 +780,7 @@ int main() {
         extended_registry.operation_descriptors_json();
     const auto& extended_operations =
         extended_document.at("operations");
-    require(extended_operations.size() == 20U &&
+    require(extended_operations.size() == 21U &&
                 std::ranges::any_of(
                     extended_operations, [](const nlohmann::json& operation) {
                       return operation.at("key").at("adapter") ==
@@ -834,7 +889,7 @@ int main() {
                     contract.provided_capabilities &&
                 deployment.host_launch_registry.api_version ==
                     "trainvm.host-launches/v4" &&
-                deployment.host_launch_registry.profiles.size() == 19U,
+                deployment.host_launch_registry.profiles.size() == 20U,
             "deployment lowering must retain the complete reflected worker catalog");
     for (const trainvm::HostLaunchProfile& launch :
          deployment.host_launch_registry.profiles) {

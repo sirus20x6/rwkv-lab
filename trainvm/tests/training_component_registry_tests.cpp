@@ -368,7 +368,7 @@ void checked_in_component_catalog_matches_native_authority_contract() {
   const trainvm::TrainingComponentRegistry registry =
       trainvm::TrainingComponentRegistry::load_file(
           std::filesystem::absolute(path));
-  check(registry.document_json().at("components").size() == 21U &&
+  check(registry.document_json().at("components").size() == 22U &&
             registry.registry_digest().starts_with("sha256:") &&
             registry.registry_digest().size() == 71U,
         "checked-in cross-family component catalog is a canonical native authority document");
@@ -410,6 +410,19 @@ void checked_in_component_catalog_matches_native_authority_contract() {
             router.configuration.at("shared_backbone_multiplier") == 0.5 &&
             router.configuration.at("repa_projection_multiplier") == 1.0,
         "terminal expert ownership and LR multipliers resolve as one stateless component");
+  const auto full_backbone_router = registry.resolve({
+      .key = {.category = trainvm::TrainingComponentCategory::parameter_router,
+              .name = "mageflow_full_backbone",
+              .version = "1.0.0"},
+      .model_family = "mageflow",
+      .configuration = nlohmann::json::object(),
+  });
+  check(full_backbone_router.descriptor.implementation ==
+                "rwkv_lab.parameter_router.mageflow_full_backbone.v1" &&
+            full_backbone_router.configuration.empty() &&
+            full_backbone_router.descriptor.state_grade ==
+                trainvm::TrainingStateGrade::stateless,
+        "full-backbone ownership resolves as one closed empty configuration");
   const auto clipping = registry.resolve({
       .key = {
           .category = trainvm::TrainingComponentCategory::gradient_clipping,

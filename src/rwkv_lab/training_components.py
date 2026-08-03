@@ -71,6 +71,7 @@ from rwkv_lab.training_runtime.precision import (
 )
 from rwkv_lab.training_runtime.routers import (
     AppearanceExpertRoutingConfiguration,
+    FullBackboneRoutingConfiguration,
     ParameterRouterImplementation,
     TerminalExpertRoutingConfiguration,
     build_registered_parameter_routing,
@@ -117,6 +118,7 @@ __all__ = [
     "FP32ParametersBFloat16ComputePolicy",
     "FixedGradientAccumulation",
     "FixedGradientAccumulationConfiguration",
+    "FullBackboneRoutingConfiguration",
     "GlobalNormClippingConfiguration",
     "GradientAccumulationImplementation",
     "GradientClippingImplementation",

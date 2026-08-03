@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -10,6 +11,7 @@ from rwkv_lab.mage_flow_pretrain import (
     _generate_eval_snapshot,
     _load_image_tensor,
     _png_has_only_ancillary_crc_errors,
+    _save_checkpoint,
     canonical_caption_row,
     epoch_packs,
     latent_tokens,
@@ -19,6 +21,7 @@ from rwkv_lab.mage_flow_pretrain import (
     prepare_run,
     rectified_flow_loss,
     rectified_flow_path,
+    resolved_worker_component_contract,
 )
 
 
@@ -73,6 +76,91 @@ def test_native_size_preserves_aspect_and_mage_vae_geometry():
 def test_native_size_rejects_extreme_aspect():
     with pytest.raises(ValueError, match="aspect ratio"):
         native_size(5000, 500, max_aspect_ratio=4.0)
+
+
+def test_full_backbone_component_contract_and_checkpoint_state_are_bound(tmp_path):
+    config = MageFlowTrainConfig(
+        train_manifest=str(tmp_path / "train.jsonl"),
+        output_dir=str(tmp_path / "run"),
+        learning_rate=2.0e-5,
+        warmup_steps=7,
+        max_steps=31,
+        min_learning_rate_ratio=0.2,
+        weight_decay=0.03,
+        max_grad_norm=0.7,
+    )
+    configurations = {
+        "optimizer": {
+            "learning_rate": 2.0e-5,
+            "beta1": config.adam_beta1,
+            "beta2": config.adam_beta2,
+            "epsilon": config.adam_epsilon,
+            "foreach": True,
+            "fused": False,
+        },
+        "parameter_router": {},
+        "learning_rate": {
+            "warmup_steps": 7,
+            "max_steps": 31,
+            "minimum_ratio": 0.2,
+        },
+        "weight_decay": {"weight_decay": 0.03},
+        "gradient_clipping": {
+            "max_norm": 0.7,
+            "norm_type": 2.0,
+            "error_if_nonfinite": False,
+        },
+    }
+
+    class Components:
+        composition = SimpleNamespace(composition_digest="sha256:" + "c" * 64)
+
+        @staticmethod
+        def configuration(slot, *, category):
+            assert category
+            return configurations[slot]
+
+        @staticmethod
+        def evidence():
+            return {"optimizer": {"implementation": "test"}}
+
+    learning_rate, evidence, digest = resolved_worker_component_contract(
+        config, Components()
+    )
+    assert learning_rate == pytest.approx(2.0e-5)
+    assert evidence == {"optimizer": {"implementation": "test"}}
+    assert digest == "sha256:" + "c" * 64
+    (tmp_path / "run").mkdir()
+
+    class Accelerator:
+        process_index = 0
+        is_main_process = True
+
+        @staticmethod
+        def wait_for_everyone():
+            return None
+
+        @staticmethod
+        def save_state(path):
+            (Path(path) / "accelerate-state").write_bytes(b"state")
+
+    checkpoint = _save_checkpoint(
+        Accelerator(),
+        tmp_path / "run",
+        global_step=9,
+        epoch=2,
+        pack_index=4,
+        keep_last_n=2,
+        component_composition_digest=digest,
+        parameter_routing={"passed": True},
+        control_state={"effective_control_revision": 3, "effective_controls": {}},
+    )
+    rank_state = json.loads(
+        (checkpoint / "trainer_state_rank0000.json").read_text(encoding="utf-8")
+    )
+    assert rank_state["component_composition_digest"] == digest
+    assert rank_state["parameter_routing"] == {"passed": True}
+    assert rank_state["worker_controls"]["effective_control_revision"] == 3
 
 
 def test_canonical_rows_use_caption_not_captioner_prompt(tmp_path):

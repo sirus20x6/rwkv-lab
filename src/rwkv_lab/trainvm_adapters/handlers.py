@@ -285,6 +285,122 @@ def _appearance_expert(
     )
 
 
+def _mageflow_full_backbone(
+    invocation: WorkerInvocation,
+    components: WorkerTrainingComponents,
+    step_profiler: WorkerStepProfiler | None = None,
+    observability: WorkerObservability | None = None,
+    controls: WorkerControlRuntime | None = None,
+    execution_phases: WorkerExecutionPhases | None = None,
+) -> HandlerResult:
+    """Run the sealed, full NR-MMDiT continued-pretraining profile."""
+
+    paths = WorkspacePathAuthority.from_workspace(
+        invocation.workspace, require_content=True
+    )
+    raw_config = read_inline_config(invocation.inputs)
+    if execution_phases is not None:
+        compile_request = execution_phases.request(ExecutionPhase.COMPILE)
+        compile_enabled = (
+            compile_request.enabled if compile_request is not None else False
+        )
+        raw_config = {
+            **raw_config,
+            "compile_transformer_blocks": compile_enabled,
+            "compile_vae_encoder": compile_enabled,
+        }
+    train_manifest = paths.read_path(
+        _raw_config_path(raw_config, "train_manifest", required=True) or "",
+        label="train_manifest",
+        kind="file",
+    )
+    eval_value = _raw_config_path(raw_config, "eval_manifest", required=False)
+    eval_manifest = (
+        paths.read_path(eval_value, label="eval_manifest", kind="file")
+        if eval_value
+        else None
+    )
+    model_path_value = _raw_config_path(raw_config, "model_path", required=True)
+    model_path = paths.read_path(
+        model_path_value or "", label="model_path", kind="directory"
+    )
+    paths.verify_jsonl_file_references(
+        train_manifest,
+        fields=("image", "image_path"),
+        label="train_manifest",
+    )
+    if eval_manifest is not None:
+        paths.verify_jsonl_file_references(
+            eval_manifest,
+            fields=("image", "image_path"),
+            label="eval_manifest",
+        )
+    from rwkv_lab.mage_flow_pretrain import MageFlowTrainConfig, train
+
+    config = MageFlowTrainConfig(**raw_config)
+    if controls is not None:
+        lower_initial_mageflow_controls(config, controls)
+    resume_payload = _resume_payload(
+        invocation,
+        paths,
+        required_state=frozenset(
+            {"data_cursor", "model", "optimizer", "rng_torch"}
+        ),
+    )
+    config = replace(
+        config,
+        train_manifest=str(train_manifest),
+        eval_manifest=(str(eval_manifest) if eval_manifest is not None else None),
+        model_path=str(model_path),
+        output_dir=str(paths.exact_run_directory(config.output_dir)),
+        resume_from=(
+            str(resume_payload)
+            if resume_payload is not None
+            else (
+                str(
+                    paths.read_path(
+                        config.resume_from, label="resume_from", kind="directory"
+                    )
+                )
+                if config.resume_from
+                else None
+            )
+        ),
+    )
+    train(
+        config,
+        worker_components=components,
+        worker_step_profiler=step_profiler or NullStepProfiler(),
+        worker_observability=observability,
+        worker_controls=controls,
+        worker_execution_phases=execution_phases,
+    )
+    request, step, status = completed_checkpoint_request(
+        invocation,
+        Path(config.output_dir),
+        document_names=("complete.json", "interrupted.json", "status.json"),
+        step_fields=("global_step", "step"),
+        state_components=(
+            "component_composition",
+            "control_revision",
+            "data_cursor",
+            "lr_schedule",
+            "model",
+            "optimizer",
+            "parameter_routing",
+            "rng_accelerator",
+            "rng_python",
+            "rng_torch",
+        ),
+    )
+    return HandlerResult(
+        "worker.completed",
+        {"reason": completion_reason(status)},
+        optimizer_step=step,
+        checkpoint_requests=((request,) if request is not None else ()),
+    )
+
+
 def _terminal_expert(
     invocation: WorkerInvocation,
     components: WorkerTrainingComponents,
@@ -2176,6 +2292,12 @@ _HANDLERS: Mapping[AdapterKey, Handler] = {
         "rwkv_lab.mageflow_appearance_expert.v1.Train",
     ): _appearance_expert,
     (
+        "rwkv-lab.mageflow-full-backbone",
+        "1.0.0",
+        "train",
+        "rwkv_lab.mageflow_full_backbone.v1.Train",
+    ): _mageflow_full_backbone,
+    (
         "rwkv-lab.mageflow-terminal-expert",
         "1.0.0",
         "train",
@@ -2282,6 +2404,7 @@ def execute_invocation(
         ) from error
     if execution_phases is not None and handler not in {
         _appearance_expert,
+        _mageflow_full_backbone,
         _rwkv_scratch,
         _terminal_expert,
     }:
