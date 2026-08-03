@@ -298,6 +298,7 @@ int serve(const std::filesystem::path& journal_path,
           TrainingComponentRegistry training_components =
               TrainingComponentRegistry({}),
           std::optional<HostdClientConfiguration> hostd_configuration =
-              std::nullopt);
+              std::nullopt,
+          std::optional<std::uint32_t> worker_socket_gid = std::nullopt);
 
 }  // namespace trainvm

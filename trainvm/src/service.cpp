@@ -5685,7 +5685,8 @@ int serve(const std::filesystem::path& journal_path,
           AdapterRegistry adapter_registry,
           HostLaunchRegistry host_launch_registry,
           TrainingComponentRegistry training_components,
-          std::optional<HostdClientConfiguration> hostd_configuration) {
+          std::optional<HostdClientConfiguration> hostd_configuration,
+          std::optional<std::uint32_t> worker_socket_gid) {
   if (journal_path.empty() || socket_path.empty()) {
     throw std::invalid_argument("serve requires journal and socket paths");
   }
@@ -5693,6 +5694,14 @@ int serve(const std::filesystem::path& journal_path,
   const auto parent = absolute_socket.parent_path();
   if (!parent.empty()) {
     std::filesystem::create_directories(parent);
+  }
+  if (worker_socket_gid &&
+      parent == std::filesystem::absolute(journal_path)
+                    .lexically_normal()
+                    .parent_path()) {
+    throw std::runtime_error(
+        "group-accessible worker socket requires a directory separate from "
+        "the owner-only journal authority");
   }
 
   SignalMaskGuard signal_mask;
@@ -5705,6 +5714,20 @@ int serve(const std::filesystem::path& journal_path,
                          std::move(hostd_configuration),
                          "unix:" + absolute_socket.string(), nullptr,
                          SqliteAuthorityEnforcementGrade::strict_filesystem);
+  if (worker_socket_gid) {
+    struct stat parent_status {};
+    if (*worker_socket_gid != static_cast<std::uint32_t>(::getegid()) ||
+        ::lstat(parent.c_str(), &parent_status) != 0 ||
+        !S_ISDIR(parent_status.st_mode) ||
+        parent_status.st_uid != ::geteuid() ||
+        parent_status.st_gid != static_cast<gid_t>(*worker_socket_gid) ||
+        (parent_status.st_mode & (S_IWGRP | S_IRWXO)) != 0 ||
+        ::chmod(parent.c_str(), S_IRWXU | S_IXGRP) != 0) {
+      throw std::runtime_error(
+          "worker socket group requires an owned, same-egid, nonwritable "
+          "authority directory");
+    }
+  }
   SocketAuthorityLock socket_authority(absolute_socket);
   remove_stale_socket(absolute_socket);
   SocketCleanupGuard socket_cleanup(absolute_socket);
@@ -5714,10 +5737,13 @@ int serve(const std::filesystem::path& journal_path,
   builder.RegisterService(static_cast<v1::TrainVM::Service*>(&service));
   builder.RegisterService(static_cast<v1::WorkerControl::Service*>(&service));
   std::unique_ptr<grpc::Server> server;
+  const mode_t socket_mode = worker_socket_gid
+                                 ? S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP
+                                 : S_IRUSR | S_IWUSR;
   {
-    // The Unix socket must be born owner-only. chmod after binding is retained as
-    // defense in depth, but is too late to close the bind-to-chmod access window.
-    UmaskGuard owner_only(S_IRWXG | S_IRWXO);
+    // The socket is born at its final access grade. chmod below is retained as
+    // defense in depth, but is too late to close the bind-to-chmod window.
+    UmaskGuard restricted(static_cast<mode_t>(0777U & ~socket_mode));
     server = builder.BuildAndStart();
   }
   if (!server) {
@@ -5731,9 +5757,16 @@ int serve(const std::filesystem::path& journal_path,
     server->Wait();
     socket_cleanup.restore_replacement();
   };
-  if (::chmod(absolute_socket.c_str(), S_IRUSR | S_IWUSR) != 0) {
+  struct stat socket_status {};
+  if (::chmod(absolute_socket.c_str(), socket_mode) != 0 ||
+      ::lstat(absolute_socket.c_str(), &socket_status) != 0 ||
+      !S_ISSOCK(socket_status.st_mode) ||
+      socket_status.st_uid != ::geteuid() ||
+      socket_status.st_gid != ::getegid() ||
+      (socket_status.st_mode & 0777U) != socket_mode ||
+      socket_status.st_nlink != 1) {
     shutdown_server();
-    throw std::runtime_error("could not restrict TrainVM authority socket permissions: " +
+    throw std::runtime_error("could not attest TrainVM authority socket permissions: " +
                              std::string(std::strerror(errno)));
   }
   try {

@@ -62,7 +62,8 @@ void usage() {
       << "  trainvm serve --journal <journal.db> --socket <trainvm.sock> "
          "--registry <adapters.json> --host-launch-registry "
          "<host-launches.json> --training-component-registry "
-         "<training-components.json> [--hostd-client <hostd-client.json>]\n"
+         "<training-components.json> [--hostd-client <hostd-client.json>] "
+         "[--worker-socket-gid <gid>]\n"
       << "  trainvm simulate <experiment.json> <events.jsonl> [run-id]\n"
       << "  trainvm journal init <journal.db>\n"
       << "  trainvm journal verify <journal.db>\n"
@@ -579,14 +580,17 @@ int journal_command(int argc, char** argv) {
 }
 
 int serve_command(int argc, char** argv) {
-  const bool with_hostd = argc == 14;
-  if ((argc != 12 && !with_hostd) ||
+  const bool with_hostd = argc == 14 || argc == 16;
+  const bool with_worker_group = argc == 16;
+  if ((argc != 12 && argc != 14 && argc != 16) ||
       std::string_view(argv[2]) != "--journal" ||
       std::string_view(argv[4]) != "--socket" ||
       std::string_view(argv[6]) != "--registry" ||
       std::string_view(argv[8]) != "--host-launch-registry" ||
       std::string_view(argv[10]) != "--training-component-registry" ||
-      (with_hostd && std::string_view(argv[12]) != "--hostd-client")) {
+      (with_hostd && std::string_view(argv[12]) != "--hostd-client") ||
+      (with_worker_group &&
+       std::string_view(argv[14]) != "--worker-socket-gid")) {
     usage();
     return 64;
   }
@@ -595,12 +599,25 @@ int serve_command(int argc, char** argv) {
     hostd = trainvm::HostdClientConfiguration::load_file(
         std::filesystem::absolute(argv[13]).lexically_normal());
   }
+  std::optional<std::uint32_t> worker_socket_gid;
+  if (with_worker_group) {
+    const std::string_view text(argv[15]);
+    std::uint32_t value = 0U;
+    const auto [end, error] =
+        std::from_chars(text.data(), text.data() + text.size(), value);
+    if (error != std::errc{} || end != text.data() + text.size() ||
+        value == 0U) {
+      throw std::invalid_argument(
+          "--worker-socket-gid must be one nonzero numeric gid");
+    }
+    worker_socket_gid = value;
+  }
   return trainvm::serve(argv[3], argv[5],
                         trainvm::AdapterRegistry::load_file(argv[7]),
                         trainvm::HostLaunchRegistry::load_file(argv[9]),
                         trainvm::TrainingComponentRegistry::load_file(
                             argv[11]),
-                        std::move(hostd));
+                        std::move(hostd), worker_socket_gid);
 }
 
 int inspect_rwkv_lab_worker_command(std::string code_fingerprint) {
