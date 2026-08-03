@@ -243,12 +243,17 @@ int main() {
     require(appearance.lifecycle.resume_grade ==
                 trainvm::ResumeGrade::compatible &&
                 appearance.lifecycle.checkpoint_now &&
+                appearance.lifecycle.compile &&
+                appearance.lifecycle.warmup &&
                 terminal.lifecycle.resume_grade ==
                     trainvm::ResumeGrade::compatible &&
+                terminal.lifecycle.compile &&
+                terminal.lifecycle.warmup &&
                 qwen.lifecycle.resume_grade ==
                     trainvm::ResumeGrade::compatible &&
                 rwkv.lifecycle.resume_grade ==
                     trainvm::ResumeGrade::terminal_checkpoint &&
+                rwkv.lifecycle.compile && rwkv.lifecycle.warmup &&
                 posttraining.lifecycle.resume_grade ==
                     trainvm::ResumeGrade::restart_only &&
                 rlvr.lifecycle.resume_grade ==
@@ -528,6 +533,17 @@ int main() {
         trainvm::compile_document(exact_source);
     require(exact_plan.valid(),
             "exact appearance-expert authoring fixture must compile");
+    nlohmann::json phased_exact_source = exact_source;
+    phased_exact_source["spec"]["execution"] = {
+        {"component", "mageflow"},
+        {"operation", "train"},
+        {"compile", {{"enabled", true}}},
+        {"warmup", {{"enabled", true}, {"steps", 2}}},
+    };
+    const trainvm::CompileResult phased_exact_plan =
+        trainvm::compile_document(phased_exact_source);
+    require(phased_exact_plan.valid(),
+            "appearance-expert authoring must accept its receipted compile and warmup phases");
     const auto registry_path =
         std::filesystem::temp_directory_path() /
         ("trainvm-exact-operation-" + std::to_string(::getpid()) + ".json");
@@ -551,6 +567,20 @@ int main() {
     }
     require(exact_plan_accepted,
             "an executable exact-profile plan must validate against the production rwkv_lab worker registry plus core operations");
+    bool phased_exact_plan_accepted = phased_exact_plan.valid();
+    if (phased_exact_plan.valid()) {
+      try {
+        trainvm::AdapterRegistry::load_file(
+            std::filesystem::absolute(registry_path))
+            .validate_plan(*phased_exact_plan.plan);
+      } catch (const std::exception& error) {
+        std::cerr << "phased appearance registry rejection: " << error.what()
+                  << '\n';
+        phased_exact_plan_accepted = false;
+      }
+    }
+    require(phased_exact_plan_accepted,
+            "an appearance plan with compile and warmup must validate against the production worker registry");
 
     const trainvm::CompileResult vision_ab_plan =
         trainvm::compile_document(load_vision_representation_ab_fixture());

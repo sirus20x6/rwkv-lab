@@ -35,6 +35,13 @@ OperationLifecycleCapabilities resumable_training_lifecycle() {
   };
 }
 
+OperationLifecycleCapabilities receipted_training_lifecycle() {
+  OperationLifecycleCapabilities lifecycle = resumable_training_lifecycle();
+  lifecycle.compile = true;
+  lifecycle.warmup = true;
+  return lifecycle;
+}
+
 OperationLifecycleCapabilities restart_only_training_lifecycle() {
   return {
       .stateful = true,
@@ -387,7 +394,7 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
            {"weight_decay",
             TrainingComponentCategory::weight_decay_schedule},
        }},
-      resumable_training_lifecycle()));
+      receipted_training_lifecycle()));
   profiles.push_back(profile(
       key("rwkv-lab.mageflow-terminal-expert",
           "rwkv_lab.mageflow_terminal_expert.v1.Train"),
@@ -404,7 +411,7 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
            {"weight_decay",
             TrainingComponentCategory::weight_decay_schedule},
        }},
-      resumable_training_lifecycle()));
+      receipted_training_lifecycle()));
   profiles.push_back(profile(
       key("rwkv-lab.rwkv-posttraining",
           "rwkv_lab.rwkv_posttraining.v1.Train"),
@@ -542,8 +549,8 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
        .checkpoint_now = false,
        .pause_keep_resources = false,
        .pause_release_resources = false,
-       .compile = false,
-       .warmup = false,
+       .compile = true,
+       .warmup = true,
        .qualify = false,
        .profile = true,
        .resume_grade = ResumeGrade::terminal_checkpoint}));
