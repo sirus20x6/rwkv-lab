@@ -359,6 +359,65 @@ def _action(
         raise QualificationRunError(f"{run.family} {action} was not accepted")
 
 
+def _prove_resume_progress(
+    client: AuthorityClient,
+    run: SubmittedRun,
+    paused: dict[str, Any],
+    completed: dict[str, Any],
+) -> None:
+    paused_step = paused.get("optimizer_step")
+    final_step = completed.get("optimizer_step")
+    through = completed.get("last_event_sequence")
+    if (
+        isinstance(paused_step, bool)
+        or not isinstance(paused_step, int)
+        or paused_step < 1
+        or isinstance(final_step, bool)
+        or not isinstance(final_step, int)
+        or final_step <= paused_step
+        or isinstance(through, bool)
+        or not isinstance(through, int)
+        or through < 1
+    ):
+        raise QualificationRunError(
+            f"{run.family} made no authoritative optimizer progress after resume"
+        )
+    base = "/api/trainvm/runs/" + urllib.parse.quote(run.run_id, safe="")
+    timeline = client.paged(base + "/timeline", through)
+    resumed_checkpoint_ids = {
+        event.get("payload", {}).get("checkpoint_artifact_id")
+        for event in timeline
+        if isinstance(event, dict)
+        and event.get("run_id") == run.run_id
+        and event.get("event_type") == "node.attempt_restarted"
+        and event.get("optimizer_step") == paused_step
+        and isinstance(event.get("payload"), dict)
+        and isinstance(event["payload"].get("checkpoint_artifact_id"), str)
+        and event["payload"]["checkpoint_artifact_id"]
+    }
+    if not resumed_checkpoint_ids:
+        raise QualificationRunError(
+            f"{run.family} has no checkpoint-bound restart at its paused step"
+        )
+    metrics = client.paged(base + "/metrics", through)
+    if not any(
+        isinstance(metric, dict)
+        and metric.get("run_id") == run.run_id
+        and isinstance(metric.get("name"), str)
+        and metric["name"]
+        and isinstance(metric.get("optimizer_step"), int)
+        and not isinstance(metric.get("optimizer_step"), bool)
+        and metric["optimizer_step"] > paused_step
+        and isinstance(metric.get("value"), (int, float))
+        and not isinstance(metric.get("value"), bool)
+        and math.isfinite(float(metric["value"]))
+        for metric in metrics
+    ):
+        raise QualificationRunError(
+            f"{run.family} emitted no finite live metric after resume"
+        )
+
+
 def qualify(
     origin: str,
     documents: dict[str, str],
@@ -412,7 +471,7 @@ def qualify(
                 f"{family} resource-releasing pause left host authority active"
             )
         _action(client, run, paused, "resume", 1)
-        _wait(
+        completed = _wait(
             client,
             run,
             lambda view: view.get("observed_state") == "completed",
@@ -420,6 +479,7 @@ def qualify(
             deadline,
             poll_seconds,
         )
+        _prove_resume_progress(client, run, paused, completed)
         runs[family] = run.run_id
     return CAPTURE.live_capture(origin, runs, output)
 

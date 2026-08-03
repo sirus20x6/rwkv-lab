@@ -143,15 +143,42 @@ class FakeAuthorityClient:
             return {"active_process_count": 0, "active_fence_count": 0}
         run_id = path.rsplit("/", 1)[-1]
         state = self.states[run_id]
+        optimizer_step = 4 if state == "completed" else 3
         return {
             "run_id": run_id,
             "plan_hash": run_id.replace("-run", "-plan"),
             "run_revision": len(self.actions) + 1,
             "observed_state": state,
             "desired_state": state,
-            "optimizer_step": 3,
+            "optimizer_step": optimizer_step,
+            "last_event_sequence": 10,
             "failure_summary": "",
         }
+
+    def paged(self, path: str, through: int) -> list[dict[str, Any]]:
+        assert through == 10
+        run_id = path.split("/runs/", 1)[1].split("/", 1)[0]
+        if path.endswith("/timeline"):
+            return [
+                {
+                    "sequence": 8,
+                    "run_id": run_id,
+                    "event_type": "node.attempt_restarted",
+                    "optimizer_step": 3,
+                    "payload": {"checkpoint_artifact_id": f"{run_id}-checkpoint"},
+                }
+            ]
+        if path.endswith("/metrics"):
+            return [
+                {
+                    "sequence": 9,
+                    "run_id": run_id,
+                    "name": "train.loss",
+                    "value": 1.0,
+                    "optimizer_step": 4,
+                }
+            ]
+        raise AssertionError(path)
 
     def post(self, path: str, value: Any, expected: set[int]) -> tuple[int, Any]:
         del expected
@@ -231,4 +258,42 @@ def test_wait_rejects_run_that_finishes_before_pause() -> None:
             "checkpoint and pause",
             deadline=MODULE.time.monotonic() + 1,
             poll_seconds=0.05,
+        )
+
+
+@pytest.mark.parametrize(
+    ("final_step", "timeline", "metrics", "message"),
+    [
+        (3, [], [], "no authoritative optimizer progress"),
+        (4, [], [], "no checkpoint-bound restart"),
+        (
+            4,
+            [
+                {
+                    "sequence": 8,
+                    "run_id": "rwkv-run",
+                    "event_type": "node.attempt_restarted",
+                    "optimizer_step": 3,
+                    "payload": {"checkpoint_artifact_id": "checkpoint-3"},
+                }
+            ],
+            [],
+            "no finite live metric",
+        ),
+    ],
+)
+def test_resume_proof_fails_closed_without_post_restart_progress(
+    final_step, timeline, metrics, message
+) -> None:
+    class EvidenceClient:
+        def paged(self, path: str, through: int) -> list[dict[str, Any]]:
+            assert through == 10
+            return timeline if path.endswith("/timeline") else metrics
+
+    with pytest.raises(MODULE.QualificationRunError, match=message):
+        MODULE._prove_resume_progress(
+            EvidenceClient(),
+            MODULE.SubmittedRun("rwkv", "rwkv-run", "rwkv-plan"),
+            {"optimizer_step": 3},
+            {"optimizer_step": final_step, "last_event_sequence": 10},
         )
