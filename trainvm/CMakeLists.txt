@@ -215,6 +215,14 @@ target_compile_definitions(trainvm_tests PRIVATE
 )
 target_link_libraries(trainvm_tests PRIVATE trainvm_service)
 add_test(NAME trainvm_tests COMMAND trainvm_tests)
+# The suite drives real gRPC streams and asserts their ordering. Under heavy
+# ctest parallelism it intermittently fails "WorkerControl gRPC orders Hello,
+# durable telemetry acknowledgements, Event, and durable Receipt" -- observed
+# on a 4-core CI runner and reproduced once locally at -j12, passing when run
+# alone. RUN_SERIAL stops it competing with other suites for cores. It is a
+# mitigation, not a fix: the ordering assertion's own timing sensitivity is
+# tracked separately.
+set_tests_properties(trainvm_tests PROPERTIES RUN_SERIAL TRUE)
 if(TRAINVM_GO_EXECUTABLE)
   # The live stack runs the real service, which acquires its journal under the
   # strict_filesystem grade. That grade requires the whole authority ancestry to

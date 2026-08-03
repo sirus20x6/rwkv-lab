@@ -65,13 +65,55 @@ is the dependency pair:
   `find_package` and then fails at generate time with a missing ALIAS target,
   because the two halves no longer agree on their protobuf targets.
 
-The workable route is a purpose-built image with GCC 16 and a matched
-protobuf/gRPC pair built together from source, published once and referenced
-with `container:`. That is real but bounded work, and it is tracked as its own
-card rather than left as a footnote.
+That image now exists: `.github/docker/trainvm-ci.Dockerfile`. **The native
+job builds it and runs the suite inside it on an ordinary hosted runner — no
+self-hosted runner, no gate.** Only the GPU job stays gated, because it needs a
+real accelerator.
 
-Until that image exists the jobs stay gated, which is still preferable to a
-native job that cannot build reporting green.
+The job builds the image rather than pulling a published one. A registry copy
+has to be published, made visible to this repository, and kept in step with the
+Dockerfile; each of those is a way for CI to drift from the source it claims to
+test. Buildx layer caching makes the cost a first-run one.
+
+Building it surfaced three more blockers beyond the protobuf/gRPC pair, none of
+which were guessable from the outside:
+
+- Debian's CMake 3.31 `FindSQLite3` does not define the `SQLite3::SQLite3`
+  imported target the build links against. `find_package(SQLite3 REQUIRED)`
+  still *succeeds*, so the failure surfaces much later as a missing ALIAS
+  target. The image pins CMake 4.4.0.
+- The journal's auxiliary-path authority refuses to run below SQLite 3.53.3,
+  which is newer than Debian ships, so the hostd and ledger suites failed
+  outright. SQLite is built from source.
+- The authority reads `/etc/machine-id` as its host identity, and container
+  images do not ship one, so `trainvm_tests` aborted before its first
+  assertion. The image generates a stable per-image id.
+
+Every version is pinned with a verified checksum, and the Dockerfile ends in a
+smoke test asserting each part of the contract — reflection compiles, both
+CMake config packages exist, `SQLite3::SQLite3` resolves, SQLite clears the
+floor, protoc/grpc_cpp_plugin/Go/Python/torch are present. A toolchain image
+that silently loses one of those is worse than no image, because the native job
+would go red for a reason unrelated to the change under test.
+
+### What the native job does not cover
+
+57 of 61 suites run. Four are excluded, each for a stated reason:
+
+| suite | why |
+|---|---|
+| `hostd_linux_session_authority_tests` | needs `openat2` to pin the session procfs; a container cannot provide it |
+| `host_resources_tests` | asserts pinned inventory/occupancy digests built from a real host |
+| `trainvm_dashboard_live_e2e` | not yet diagnosed |
+| `rwkv_lab_worker_artifact` | not yet diagnosed |
+
+The last two are excluded so the job is usable today, and tracked as a
+follow-up rather than quietly dropped. A permanently red job teaches everyone
+to ignore it, which is worse than not having one. All four still run in
+`scripts/acceptance.sh` on a real host.
+
+The job was verified to fail for the right reason: breaking one native
+assertion turns it red (ctest exit 8), so it is a gate rather than decoration.
 
 Both jobs therefore target self-hosted runners and stay off until the
 repository variable `TRAINVM_SELF_HOSTED` is set to `true`. This is a
