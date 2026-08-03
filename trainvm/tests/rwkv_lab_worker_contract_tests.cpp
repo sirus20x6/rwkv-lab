@@ -94,8 +94,8 @@ int main() {
     const trainvm::RwkvLabWorkerContract contract =
         trainvm::rwkv_lab_worker_contract(fingerprint);
     require(contract.adapter_registry.api_version == "trainvm.adapters/v2" &&
-                contract.adapter_registry.profiles.size() == 23U,
-            "rwkv_lab catalog must expose twenty-three exact adapter profiles");
+                contract.adapter_registry.profiles.size() == 24U,
+            "rwkv_lab catalog must expose twenty-four exact adapter profiles");
     require(std::ranges::is_sorted(contract.provided_capabilities) &&
                 std::ranges::adjacent_find(contract.provided_capabilities) ==
                     contract.provided_capabilities.end(),
@@ -105,7 +105,7 @@ int main() {
         trainvm::rwkv_lab_worker_runtime_requirements();
     require(runtime_requirements.api_version ==
                     "trainvm.rwkv-lab-worker-runtime-requirements/v1" &&
-                runtime_requirements.profiles.size() == 23U &&
+                runtime_requirements.profiles.size() == 24U &&
                 runtime_requirements.shared_root_distributions ==
                     std::vector<std::string>(
                         {"grpcio", "pillow", "protobuf", "torch"}),
@@ -135,6 +135,8 @@ int main() {
         contract, "rwkv-lab.mageflow-cache-plan");
     const auto& cache_build = find_profile(
         contract, "rwkv-lab.mageflow-cache-build");
+    const auto& tread_convert = find_profile(
+        contract, "rwkv-lab.mageflow-tread-convert");
     const auto& qwen = find_profile(contract, "rwkv-lab.qwen-ao3");
     const auto& posttraining =
         find_profile(contract, "rwkv-lab.rwkv-posttraining");
@@ -307,9 +309,17 @@ int main() {
                 cache_build.lifecycle.resume_grade ==
                     trainvm::ResumeGrade::restart_only &&
                 !cache_build.lifecycle.checkpoint_now &&
-                !cache_build.lifecycle.profile && terminal.authoring &&
+                !cache_build.lifecycle.profile &&
+                !tread_convert.training_composition &&
+                tread_convert.lifecycle.stateful &&
+                !tread_convert.lifecycle.graceful_stop &&
+                tread_convert.lifecycle.resume_grade ==
+                    trainvm::ResumeGrade::restart_only &&
+                !tread_convert.lifecycle.checkpoint_now &&
+                !tread_convert.lifecycle.profile && terminal.authoring &&
                 terminal.authoring->inputs.contains("cache") &&
                 terminal.authoring->inputs.contains("checkpoint") &&
+                terminal.authoring->inputs.contains("tread_controller") &&
                 !terminal.authoring->inputs.at("checkpoint").required &&
                 terminal.authoring->inputs.at("checkpoint").artifact_type ==
                     trainvm::ArtifactType::checkpoint &&
@@ -317,8 +327,13 @@ int main() {
                 terminal.authoring->inputs.at("cache").artifact_type ==
                     trainvm::ArtifactType::dataset &&
                 terminal.authoring->inputs.at("cache").artifact_schema ==
-                    "rwkv-lab.encoder-cache.v1",
-            "MageFlow cache operations must expose their exact non-training lifecycles");
+                    "rwkv-lab.encoder-cache.v1" &&
+                !terminal.authoring->inputs.at("tread_controller").required &&
+                terminal.authoring->inputs.at("tread_controller").artifact_type ==
+                    trainvm::ArtifactType::opaque &&
+                terminal.authoring->inputs.at("tread_controller").artifact_schema ==
+                    "rwkv-lab.mageflow-tread-controller.v1",
+            "MageFlow handoff operations must expose exact non-training lifecycles");
     require(appearance.lifecycle.resume_grade ==
                 trainvm::ResumeGrade::compatible &&
                 appearance.lifecycle.checkpoint_now &&
@@ -384,7 +399,7 @@ int main() {
         operation_registry.operation_descriptors_json();
     require(operation_document.at("api_version") ==
                     "trainvm.operations/v1" &&
-                operation_document.at("operations").size() == 23U &&
+                operation_document.at("operations").size() == 24U &&
                 operation_registry.operation_descriptors_digest() ==
                     "sha256:" +
                         trainvm::sha256_hex(operation_document.dump()),
@@ -401,30 +416,32 @@ int main() {
                 operations.at(4).at("key").at("adapter") ==
                     "rwkv-lab.mageflow-terminal-expert" &&
                 operations.at(5).at("key").at("adapter") ==
-                    "rwkv-lab.qwen-ao3" &&
+                    "rwkv-lab.mageflow-tread-convert" &&
                 operations.at(6).at("key").at("adapter") ==
-                    "rwkv-lab.rwkv-optimizer-finetune" &&
+                    "rwkv-lab.qwen-ao3" &&
                 operations.at(7).at("key").at("adapter") ==
-                    "rwkv-lab.rwkv-posttraining" &&
+                    "rwkv-lab.rwkv-optimizer-finetune" &&
                 operations.at(8).at("key").at("adapter") ==
-                    "rwkv-lab.rwkv-rlvr" &&
+                    "rwkv-lab.rwkv-posttraining" &&
                 operations.at(9).at("key").at("adapter") ==
-                    "rwkv-lab.rwkv-scratch" &&
+                    "rwkv-lab.rwkv-rlvr" &&
                 operations.at(10).at("key").at("adapter") ==
-                    "rwkv-lab.scalar-metric-decision" &&
+                    "rwkv-lab.rwkv-scratch" &&
                 operations.at(11).at("key").at("adapter") ==
+                    "rwkv-lab.scalar-metric-decision" &&
+                operations.at(12).at("key").at("adapter") ==
                     "rwkv-lab.transformer-mla" &&
-                operations.at(17).at("key").at("adapter") ==
-                    "rwkv-lab.transformer-mla-parallel" &&
                 operations.at(18).at("key").at("adapter") ==
-                    "rwkv-lab.transformer-mla-rwkv8" &&
+                    "rwkv-lab.transformer-mla-parallel" &&
                 operations.at(19).at("key").at("adapter") ==
-                    "rwkv-lab.vision-frozen-adapter" &&
+                    "rwkv-lab.transformer-mla-rwkv8" &&
                 operations.at(20).at("key").at("adapter") ==
-                    "rwkv-lab.vision-native-head" &&
+                    "rwkv-lab.vision-frozen-adapter" &&
                 operations.at(21).at("key").at("adapter") ==
-                    "rwkv-lab.vision-rwkv-student" &&
+                    "rwkv-lab.vision-native-head" &&
                 operations.at(22).at("key").at("adapter") ==
+                    "rwkv-lab.vision-rwkv-student" &&
+                operations.at(23).at("key").at("adapter") ==
                     "rwkv-lab.vision-teacher-compressor",
             "operation descriptors must use canonical exact-key ordering");
     for (const nlohmann::json& operation : operations) {
@@ -460,25 +477,34 @@ int main() {
       const bool is_cache_build =
           operation.at("key").at("adapter") ==
           "rwkv-lab.mageflow-cache-build";
-      if (is_cache_plan || is_cache_build) {
+      const bool is_tread_convert =
+          operation.at("key").at("adapter") ==
+          "rwkv-lab.mageflow-tread-convert";
+      if (is_cache_plan || is_cache_build || is_tread_convert) {
         const auto& authoring = operation.at("authoring");
+        const std::string secondary_input =
+            is_cache_plan ? "config" : (is_cache_build ? "plan" : "config");
+        const std::string output = is_cache_plan
+                                       ? "plan"
+                                       : (is_cache_build ? "cache"
+                                                         : "tread_controller");
+        const std::string schema =
+            is_cache_plan
+                ? "rwkv-lab.mageflow-cache-plan.v1"
+                : (is_cache_build
+                       ? "rwkv-lab.encoder-cache.v1"
+                       : "rwkv-lab.mageflow-tread-controller.v1");
         require(authoring.at("inputs").at("checkpoint").at("required") ==
                         true &&
                     authoring.at("inputs")
-                            .at(is_cache_plan ? "config" : "plan")
+                            .at(secondary_input)
                             .at("required") == true &&
-                    authoring.at("outputs")
-                            .at(is_cache_plan ? "plan" : "cache")
-                            .at("required") == true &&
-                    authoring.at("outputs")
-                            .at(is_cache_plan ? "plan" : "cache")
-                            .at("artifact_schema") ==
-                        (is_cache_plan
-                             ? "rwkv-lab.mageflow-cache-plan.v1"
-                             : "rwkv-lab.encoder-cache.v1") &&
+                    authoring.at("outputs").at(output).at("required") == true &&
+                    authoring.at("outputs").at(output).at("artifact_schema") ==
+                        schema &&
                     (!operation.contains("training_composition") ||
                      operation.at("training_composition").is_null()),
-                "MageFlow cache operation ports must preserve immutable lineage");
+                "MageFlow handoff operation ports must preserve immutable lineage");
         continue;
       }
       require(operation.at("authoring").at("inputs").at("config").at(
@@ -611,7 +637,8 @@ int main() {
     const trainvm::CompileResult cache_handoff_plan =
         trainvm::compile_document(load_mageflow_cache_artifact_fixture());
     require(cache_handoff_plan.valid(),
-            "typed MageFlow checkpoint-cache continuation fixture must compile");
+            "typed MageFlow checkpoint-cache-TREAD continuation fixture must compile");
+    contract.adapter_registry.validate_plan(*cache_handoff_plan.plan);
     nlohmann::json exact_source = load_mageflow_fixture();
     exact_source["spec"].erase("execution");
     exact_source["spec"]["recovery"]["exact_resume"] = false;
@@ -937,7 +964,7 @@ int main() {
         extended_registry.operation_descriptors_json();
     const auto& extended_operations =
         extended_document.at("operations");
-    require(extended_operations.size() == 24U &&
+    require(extended_operations.size() == 25U &&
                 std::ranges::any_of(
                     extended_operations, [](const nlohmann::json& operation) {
                       return operation.at("key").at("adapter") ==
@@ -1046,7 +1073,7 @@ int main() {
                     contract.provided_capabilities &&
                 deployment.host_launch_registry.api_version ==
                     "trainvm.host-launches/v4" &&
-                deployment.host_launch_registry.profiles.size() == 23U,
+                deployment.host_launch_registry.profiles.size() == 24U,
             "deployment lowering must retain the complete reflected worker catalog");
     for (const trainvm::HostLaunchProfile& launch :
          deployment.host_launch_registry.profiles) {

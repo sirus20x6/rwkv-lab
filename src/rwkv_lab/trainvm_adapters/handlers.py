@@ -5,6 +5,7 @@ import json
 import math
 import os
 import shutil
+import stat
 from argparse import Namespace
 from collections.abc import Callable, Mapping
 from contextlib import nullcontext
@@ -46,6 +47,7 @@ from .mageflow_cache import (
 )
 from .mageflow_controls import lower_initial_mageflow_controls
 from .mageflow_gallery import completed_mageflow_gallery_request
+from .mageflow_tread import MageFlowTreadConversionConfig, build_tread_controller
 from .metric_decision import ScalarMetricDecisionConfig
 from .posttraining import RWKVPostTrainConfig
 from .qwen_controls import lower_initial_qwen_controls
@@ -625,10 +627,13 @@ def _terminal_expert(
     if (
         not isinstance(inputs, Mapping)
         or "config" not in inputs
-        or not set(inputs).issubset({"cache", "checkpoint", "config"})
+        or not set(inputs).issubset(
+            {"cache", "checkpoint", "config", "tread_controller"}
+        )
     ):
         raise AdapterDispatchError(
-            "terminal MageFlow requires config plus optional checkpoint/cache artifacts"
+            "terminal MageFlow requires config plus optional "
+            "checkpoint/cache/TREAD artifacts"
         )
     raw_config = read_inline_config({"config": inputs["config"]})
     if execution_phases is not None:
@@ -725,6 +730,67 @@ def _terminal_expert(
             coverage_manifest,
             covered_until_step,
         )
+    tread_binding: Path | None = None
+    if "tread_controller" in inputs:
+        if resolved_resume is None or resume_payload is None:
+            raise AdapterDispatchError(
+                "terminal MageFlow TREAD consumption requires a selected checkpoint"
+            )
+        if config.tread_loop_checkpoint is not None:
+            raise AdapterDispatchError(
+                "artifact-bound TREAD controller rejects duplicate path configuration"
+            )
+        tread = resolve_input_artifact(
+            invocation,
+            "tread_controller",
+            required_kind="opaque",
+            required_schema="rwkv-lab.mageflow-tread-controller.v1",
+        )
+        if set(tread.parent_artifact_ids) != {resolved_resume.artifact_id}:
+            raise AdapterDispatchError(
+                "TREAD controller is not bound only to the selected checkpoint"
+            )
+        receipt = load_input_artifact_json(
+            tread, "trainvm_tread_receipt.json", maximum_bytes=64 * 1024
+        )
+        report = load_input_artifact_json(
+            tread, "report.json", maximum_bytes=128 * 1024
+        )
+        controller_objects = [
+            item
+            for item in tread.objects
+            if item.relative_path == "controller.safetensors"
+        ]
+        report_objects = [
+            item for item in tread.objects if item.relative_path == "report.json"
+        ]
+        if (
+            receipt.get("schema")
+            != "rwkv-lab.mageflow-tread-controller-receipt.v1"
+            or receipt.get("checkpoint_artifact_id")
+            != resolved_resume.artifact_id
+            or receipt.get("checkpoint_optimizer_step")
+            != resolved_resume.optimizer_step
+            or receipt.get("domain") != config.domain
+            or receipt.get("controller_file") != "controller.safetensors"
+            or len(controller_objects) != 1
+            or receipt.get("controller_sha256")
+            != controller_objects[0].sha256
+            or receipt.get("report_file") != "report.json"
+            or len(report_objects) != 1
+            or receipt.get("report_sha256") != report_objects[0].sha256
+            or receipt.get("functional_equivalence")
+            != "exact_zero_gate_initialization"
+            or report.get("schema")
+            != "rwkv-lab.mageflow-tread-conversion-report.v1"
+            or report.get("domain") != config.domain
+            or report.get("base_model") != config.model_id
+            or report.get("base_revision") != config.model_revision
+            or report.get("attention_backend") != config.attention_backend
+            or report.get("config_digest") != receipt.get("config_digest")
+        ):
+            raise AdapterDispatchError("TREAD controller receipt lineage is invalid")
+        tread_binding = tread.payload_directory / "controller.safetensors"
     config = _resolve_terminal_config(
         paths,
         config,
@@ -740,6 +806,8 @@ def _terminal_expert(
             encoder_cache_coverage_manifest=str(coverage_manifest),
             encoder_cache_covered_until_step=covered_until_step,
         )
+    if tread_binding is not None:
+        config = replace(config, tread_loop_checkpoint=str(tread_binding))
     eval_manifest = Path(config.eval_manifest) if config.eval_manifest else None
     checkpoint_state = (
         "component_composition",
@@ -812,9 +880,9 @@ def _write_canonical_json(path: Path, value: object) -> None:
             sort_keys=True,
         ).encode("utf-8")
     except (TypeError, ValueError) as error:
-        raise AdapterDispatchError("cache artifact JSON is invalid") from error
+        raise AdapterDispatchError("generated artifact JSON is invalid") from error
     if not encoded or len(encoded) > 4 * 1024 * 1024:
-        raise AdapterDispatchError("cache artifact JSON exceeds its byte bound")
+        raise AdapterDispatchError("generated artifact JSON exceeds its byte bound")
     temporary = path.with_name(path.name + ".canonical")
     descriptor = os.open(
         temporary,
@@ -848,6 +916,161 @@ def _canonicalize_generated_json(directory: Path) -> None:
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
             raise AdapterDispatchError("cache plan JSON is invalid") from error
         _write_canonical_json(path, value)
+
+
+def _regular_file_sha256(path: Path, *, maximum_bytes: int) -> str:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        status = os.fstat(descriptor)
+        if not stat.S_ISREG(status.st_mode) or not 0 < status.st_size <= maximum_bytes:
+            raise AdapterDispatchError("generated artifact object is invalid")
+        digest = hashlib.sha256()
+        remaining = status.st_size
+        while remaining:
+            block = os.read(descriptor, min(1024 * 1024, remaining))
+            if not block:
+                raise AdapterDispatchError("generated artifact object was truncated")
+            digest.update(block)
+            remaining -= len(block)
+        after = os.fstat(descriptor)
+        before_identity = (
+            status.st_dev,
+            status.st_ino,
+            status.st_mode,
+            status.st_size,
+            status.st_mtime_ns,
+            status.st_ctime_ns,
+        )
+        after_identity = (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        if after_identity != before_identity:
+            raise AdapterDispatchError("generated artifact object changed while read")
+        return "sha256:" + digest.hexdigest()
+    finally:
+        os.close(descriptor)
+
+
+def _mageflow_tread_convert(
+    invocation: WorkerInvocation,
+    _components: WorkerTrainingComponents | None,
+    _step_profiler: WorkerStepProfiler | None = None,
+    observability: WorkerObservability | None = None,
+    controls: WorkerControlRuntime | None = None,
+    _execution_phases: WorkerExecutionPhases | None = None,
+) -> HandlerResult:
+    """Publish a zero-gated TREAD controller from one immutable checkpoint."""
+
+    if getattr(invocation, "resume", None) is not None:
+        raise AdapterDispatchError(
+            "TREAD conversion restarts from its immutable checkpoint input"
+        )
+    if not _declares_artifact_output(invocation, "tread_controller"):
+        raise AdapterDispatchError(
+            "TREAD conversion omits its required controller artifact"
+        )
+    if controls is not None and controls.effective_values:
+        raise AdapterDispatchError("TREAD conversion rejects live controls")
+    inputs = getattr(invocation, "inputs", None)
+    if not isinstance(inputs, Mapping) or set(inputs) != {"config", "checkpoint"}:
+        raise AdapterDispatchError(
+            "TREAD conversion requires exactly config and checkpoint inputs"
+        )
+    raw_config = read_inline_config({"config": inputs["config"]})
+    paths = WorkspacePathAuthority.from_workspace(
+        invocation.workspace, require_content=True
+    )
+    model_path = paths.read_path(
+        _raw_config_path(raw_config, "model_path", required=True) or "",
+        label="model_path",
+        kind="directory",
+    )
+    tread_config = paths.read_path(
+        _raw_config_path(raw_config, "tread_config", required=True) or "",
+        label="tread_config",
+        kind="file",
+    )
+    config = MageFlowTreadConversionConfig(
+        **{
+            **raw_config,
+            "model_path": str(model_path),
+            "tread_config": str(tread_config),
+        }
+    )
+    config.validate()
+    checkpoint = resolve_input_checkpoint(invocation, "checkpoint")
+    node_directory = paths.node_run_directory(invocation.node_id)
+    node_directory.mkdir(mode=0o750, parents=True, exist_ok=True)
+    attempt_id = str(getattr(invocation, "attempt_id", "attempt"))
+    suffix = hashlib.sha256(attempt_id.encode("utf-8")).hexdigest()[:16]
+    output_directory = node_directory / f"tread-controller-{suffix}"
+    try:
+        output_directory.mkdir(mode=0o750, exist_ok=False)
+        phase = (
+            observability.keepalive(
+                checkpoint.optimizer_step, "converting_tread_controller"
+            )
+            if observability is not None
+            else nullcontext()
+        )
+        with phase:
+            report = build_tread_controller(
+                config,
+                checkpoint.payload_directory,
+                output_directory,
+            )
+        controller_sha256 = _regular_file_sha256(
+            output_directory / "controller.safetensors",
+            maximum_bytes=16 * 1024 * 1024 * 1024,
+        )
+        report_sha256 = _regular_file_sha256(
+            output_directory / "report.json",
+            maximum_bytes=128 * 1024,
+        )
+        _write_canonical_json(
+            output_directory / "trainvm_tread_receipt.json",
+            {
+                "schema": "rwkv-lab.mageflow-tread-controller-receipt.v1",
+                "checkpoint_artifact_id": checkpoint.artifact_id,
+                "checkpoint_optimizer_step": checkpoint.optimizer_step,
+                "domain": config.domain,
+                "config_digest": config.canonical_digest(),
+                "controller_file": "controller.safetensors",
+                "controller_sha256": controller_sha256,
+                "report_file": "report.json",
+                "report_sha256": report_sha256,
+                "functional_equivalence": "exact_zero_gate_initialization",
+            },
+        )
+    except BaseException:
+        if (
+            output_directory.exists()
+            and output_directory.is_dir()
+            and not output_directory.is_symlink()
+        ):
+            shutil.rmtree(output_directory)
+        raise
+    return HandlerResult(
+        "operation.completed",
+        {
+            "checkpoint_optimizer_step": checkpoint.optimizer_step,
+            "domain": config.domain,
+            "tensor_count": report.get("tensor_count"),
+        },
+        optimizer_step=checkpoint.optimizer_step,
+        artifact_requests=(
+            ArtifactPublicationRequest(
+                source_directory=output_directory,
+                output_name="tread_controller",
+                parent_artifact_ids=(checkpoint.artifact_id,),
+            ),
+        ),
+    )
 
 
 def _mageflow_cache_plan(
@@ -2994,6 +3217,12 @@ _HANDLERS: Mapping[AdapterKey, Handler] = {
         "rwkv_lab.mageflow_cache_build.v1.Build",
     ): _mageflow_cache_build,
     (
+        "rwkv-lab.mageflow-tread-convert",
+        "1.0.0",
+        "convert",
+        "rwkv_lab.mageflow_tread_convert.v1.Convert",
+    ): _mageflow_tread_convert,
+    (
         "rwkv-lab.mageflow-appearance-expert",
         "1.0.0",
         "train",
@@ -3146,6 +3375,7 @@ def execute_invocation(
         if handler not in {
             _mageflow_cache_build,
             _mageflow_cache_plan,
+            _mageflow_tread_convert,
             _scalar_metric_decision,
         }:
             raise AdapterDispatchError("training adapter has no resolved composition")

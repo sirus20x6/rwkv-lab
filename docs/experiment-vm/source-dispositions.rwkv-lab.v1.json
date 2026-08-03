@@ -10,7 +10,7 @@
       ".py"
     ]
   },
-  "source_tree_digest": "sha256:db75948263c856b023cabda3653873a329b813cd24af556c9458ee71fd1086de",
+  "source_tree_digest": "sha256:b3add89a181c7e51cddc06a12570faa544a47ec523dcfd6c9b6bbf4afb0a1775",
   "entries": [
     {
       "source_path": "src/rwkv_lab/__init__.py",
@@ -1422,7 +1422,7 @@
       ],
       "resume_relevance": "consumer_owned",
       "compatibility_workflow_id": null,
-      "source_sha256": "sha256:4a6a1087131c3e738523a011870bec248c2b4db4d33d241f16e2c84b691c30db",
+      "source_sha256": "sha256:88e83bdd10ef3dbf782fc6f510980c7b0883e34d0bc2623c6a833f37fefdd4aa",
       "family": "mageflow_diffusion",
       "coverage": "transitive",
       "consumers": [
@@ -1444,7 +1444,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "mageflow.terminal-tread-train",
-      "source_sha256": "sha256:b56eb1b9e38b1d5e258adcbc0805bcc3999756eed340dc28d543ede53f6e0987",
+      "source_sha256": "sha256:01b389782996b90a7d422613533e6bf1474e3685788dec8a592e36582a40f54c",
       "family": "mageflow_diffusion",
       "coverage": "direct",
       "consumers": [

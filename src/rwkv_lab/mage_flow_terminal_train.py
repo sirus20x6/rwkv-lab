@@ -94,6 +94,7 @@ from rwkv_lab.mage_flow_tread_looping import (
     install_tread_factored_looping,
     learned_loop_ponder_loss,
     load_tread_loop_controller,
+    save_tread_loop_controller,
     write_mageflow_loop_telemetry,
 )
 from rwkv_lab.training_components import (
@@ -130,6 +131,10 @@ _RUNTIME_FIELDS = frozenset(
         "compile_transformer_dynamic",
         "eval_on_resume",
         "expert_optimizer_state_device",
+        # This is an immutable initialization source. Learned controller state
+        # is persisted in every terminal checkpoint and takes precedence on
+        # ordinary resume.
+        "tread_loop_checkpoint",
     }
 )
 
@@ -819,7 +824,7 @@ def _architecture_resume_change(
     checkpoint: Path,
     config: TerminalExpertTrainConfig,
 ) -> bool:
-    """Allow the explicit one-way GELU/LayerNorm to Lightning-block migration."""
+    """Allow one explicit optimizer-reset architecture migration."""
 
     if not (
         _architecture_migration_required(checkpoint, config)
@@ -830,6 +835,9 @@ def _architecture_resume_change(
     if run_contract is None:
         return False
     previous = dict(run_contract.get("config") or {})
+    previous_loop = TreadLoopConfig.from_dict(
+        previous.get("tread_factored_looping")
+    )
     current = asdict(config)
     defaults = asdict(
         TerminalExpertTrainConfig(
@@ -859,6 +867,13 @@ def _architecture_resume_change(
         "reset_optimizer_on_architecture_migration",
         *_RUNTIME_FIELDS,
     }
+    current_loop = TreadLoopConfig.from_dict(config.tread_factored_looping)
+    if (
+        config.tread_loop_checkpoint
+        and current_loop.combined.enabled
+        and not previous_loop.combined.enabled
+    ):
+        ignored.add("tread_factored_looping")
     if config.domain_window_schedule:
         ignored.update({"domain", "expert_checkpoint", "expert_checkpoints"})
     for key in ignored:
@@ -871,23 +886,35 @@ def _architecture_migration_required(
     checkpoint: Path,
     config: TerminalExpertTrainConfig,
 ) -> bool:
-    """Return whether this resume crosses the legacy-to-Lightning boundary.
+    """Return whether this resume crosses a declared architecture boundary.
 
     The reset flag authorizes a one-time optimizer reset; it must not discard
     optimizer momentum on every later resume from an already migrated
     checkpoint.
     """
 
-    if not (config.lightning_swiglu and config.lightning_rmsnorm):
-        return False
     run_contract = _checkpoint_run_contract(checkpoint, config)
     if run_contract is None:
         return False
     previous = dict(run_contract.get("config") or {})
-    return not (
-        bool(previous.get("lightning_swiglu", False))
-        and bool(previous.get("lightning_rmsnorm", False))
+    lightning_migration = bool(
+        config.lightning_swiglu
+        and config.lightning_rmsnorm
+        and not (
+            bool(previous.get("lightning_swiglu", False))
+            and bool(previous.get("lightning_rmsnorm", False))
+        )
     )
+    previous_loop = TreadLoopConfig.from_dict(
+        previous.get("tread_factored_looping")
+    )
+    current_loop = TreadLoopConfig.from_dict(config.tread_factored_looping)
+    tread_migration = bool(
+        config.tread_loop_checkpoint
+        and current_loop.combined.enabled
+        and not previous_loop.combined.enabled
+    )
+    return lightning_migration or tread_migration
 
 
 def _checkpoint_run_contract(
@@ -899,14 +926,25 @@ def _checkpoint_run_contract(
     )
     fingerprint = str(checkpoint_contract.get("fingerprint") or "")
     output_dir = Path(config.output_dir).expanduser().resolve()
-    candidates = [
+    candidates: list[Path] = []
+    embedded_name = checkpoint_contract.get("run_contract")
+    if embedded_name is not None:
+        if (
+            not isinstance(embedded_name, str)
+            or not embedded_name
+            or Path(embedded_name).name != embedded_name
+            or Path(embedded_name).is_absolute()
+        ):
+            raise ValueError("checkpoint run-contract path is invalid")
+        candidates.append(checkpoint / embedded_name)
+    candidates.extend([
         output_dir / "run_contract.json",
         output_dir / "run_contracts" / f"{fingerprint}.json",
         checkpoint.parent / "run_contract.json",
         checkpoint.parent / "run_contracts" / f"{fingerprint}.json",
         checkpoint.parent.parent / "run_contract.json",
         checkpoint.parent.parent / "run_contracts" / f"{fingerprint}.json",
-    ]
+    ])
     for path in candidates:
         if not path.is_file():
             continue
@@ -1842,6 +1880,22 @@ def _save_checkpoint(
         controller,
         temporary / "mageflow-shared-final-third.safetensors",
     )
+    loop_controller = getattr(transformer, "tread_loop_controller", None)
+    tread_controller_name = None
+    if loop_controller is not None:
+        tread_controller_name = "mageflow-tread-loop-controller.safetensors"
+        save_tread_loop_controller(
+            loop_controller,
+            temporary / tread_controller_name,
+        )
+    run_contract_name = None
+    run_contract_source = output_dir / "run_contract.json"
+    if run_contract_source.is_file() and not run_contract_source.is_symlink():
+        run_contract = json.loads(run_contract_source.read_text(encoding="utf-8"))
+        if run_contract.get("fingerprint") != fingerprint:
+            raise ValueError("run contract disagrees with checkpoint fingerprint")
+        run_contract_name = "run_contract.json"
+        _atomic_json(temporary / run_contract_name, run_contract)
     trainer_state = {
         "schema": RUN_SCHEMA,
         "step": step,
@@ -1880,6 +1934,8 @@ def _save_checkpoint(
             "resident_expert": domain,
             "repa_projection": repa_name,
             "shared_backbone": shared.name if shared else None,
+            "tread_loop_controller": tread_controller_name,
+            "run_contract": run_contract_name,
             "domain_positions": (
                 {key: dict(value) for key, value in domain_positions.items()}
                 if domain_positions is not None
@@ -2016,7 +2072,7 @@ def _load_resume(
         not config.reset_optimizer_on_architecture_migration
     ):
         raise ValueError(
-            "legacy-to-Lightning migration requires an explicit fresh optimizer"
+            "architecture migration requires an explicit fresh optimizer"
         )
     contract = json.loads((checkpoint / "checkpoint.json").read_text())
     if contract.get("schema") != RUN_SCHEMA or contract.get("domain") != domain:
@@ -2066,6 +2122,24 @@ def _load_resume(
     shared = contract.get("shared_backbone")
     if shared:
         load_terminal_shared_backbone(transformer, checkpoint / str(shared))
+    saved_tread_controller = contract.get("tread_loop_controller")
+    active_tread_controller = getattr(transformer, "tread_loop_controller", None)
+    if saved_tread_controller:
+        if active_tread_controller is None:
+            raise ValueError(
+                "resume checkpoint has TREAD state but the run disabled it"
+            )
+        load_tread_loop_controller(
+            active_tread_controller,
+            checkpoint / str(saved_tread_controller),
+        )
+    elif active_tread_controller is not None and not (
+        config.tread_loop_checkpoint and reset_architecture_optimizer
+    ):
+        raise ValueError(
+            "resume checkpoint is missing its TREAD controller; an explicit "
+            "controller migration and fresh optimizer are required"
+        )
     if not reset_architecture_optimizer:
         optimizer.load_state_dict(state["optimizer"])
     if fresh_repa_state is not None:

@@ -63,6 +63,21 @@ OperationLifecycleCapabilities restart_only_operation_lifecycle() {
   return lifecycle;
 }
 
+OperationLifecycleCapabilities atomic_restart_only_operation_lifecycle() {
+  return {
+      .stateful = true,
+      .graceful_stop = false,
+      .checkpoint_now = false,
+      .pause_keep_resources = false,
+      .pause_release_resources = false,
+      .compile = false,
+      .warmup = false,
+      .qualify = false,
+      .profile = false,
+      .resume_grade = ResumeGrade::restart_only,
+  };
+}
+
 OperationAuthoringDeclaration checkpoint_authoring() {
   return {
       .inputs = {
@@ -167,7 +182,56 @@ OperationAuthoringDeclaration mageflow_terminal_authoring() {
               "Optional immutable encoder cache bound to the selected resume "
               "checkpoint and its exact future-example coverage.",
       });
+  authoring.inputs.emplace(
+      "tread_controller",
+      OperationPortDescriptor{
+          .type = OperationPortType::artifact,
+          .required = false,
+          .artifact_type = ArtifactType::opaque,
+          .artifact_schema = "rwkv-lab.mageflow-tread-controller.v1",
+          .description =
+              "Optional zero-gated TREAD controller bound to the same "
+              "explicit continuation checkpoint.",
+      });
   return authoring;
+}
+
+OperationAuthoringDeclaration mageflow_tread_convert_authoring() {
+  return {
+      .inputs = {
+          {"config",
+           OperationPortDescriptor{
+               .type = OperationPortType::object,
+               .required = true,
+               .artifact_type = std::nullopt,
+               .artifact_schema = std::nullopt,
+               .description =
+                   "Content-bound local base-model and TREAD conversion "
+                   "configuration.",
+           }},
+          {"checkpoint",
+           OperationPortDescriptor{
+               .type = OperationPortType::artifact,
+               .required = true,
+               .artifact_type = ArtifactType::checkpoint,
+               .artifact_schema = std::nullopt,
+               .description =
+                   "Immutable terminal MageFlow checkpoint to convert.",
+           }},
+      },
+      .outputs = {
+          {"tread_controller",
+           OperationPortDescriptor{
+               .type = OperationPortType::artifact,
+               .required = true,
+               .artifact_type = ArtifactType::opaque,
+               .artifact_schema = "rwkv-lab.mageflow-tread-controller.v1",
+               .description =
+                   "Immutable zero-gated learned-depth controller and "
+                   "lineage receipt.",
+           }},
+      },
+  };
 }
 
 OperationAuthoringDeclaration mageflow_cache_build_authoring() {
@@ -641,6 +705,17 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
       .training_composition = std::nullopt,
       .authoring = mageflow_cache_build_authoring(),
   });
+  profiles.push_back({
+      .key = key("rwkv-lab.mageflow-tread-convert",
+                 "rwkv_lab.mageflow_tread_convert.v1.Convert", "convert"),
+      .effect = Effect::process,
+      .idempotency = Idempotency::receipt_required,
+      .code_fingerprint = code_fingerprint,
+      .required_capabilities = {"worker.controls", "worker.metrics"},
+      .lifecycle = atomic_restart_only_operation_lifecycle(),
+      .training_composition = std::nullopt,
+      .authoring = mageflow_tread_convert_authoring(),
+  });
   profiles.push_back(profile(
       key("rwkv-lab.rwkv-posttraining",
           "rwkv_lab.rwkv_posttraining.v1.Train"),
@@ -853,6 +928,11 @@ rwkv_lab_worker_runtime_requirements() {
             "grpcio", "huggingface-hub", "mage-flow", "numpy", "pillow",
             "protobuf", "safetensors", "torch", "transformers"})},
       {"rwkv-lab.mageflow-cache-build",
+       canonical_distributions(
+           {"accelerate", "deepspeed", "diffusers", "einops", "flash-attn",
+            "grpcio", "huggingface-hub", "mage-flow", "numpy", "pillow",
+            "protobuf", "safetensors", "torch", "transformers"})},
+      {"rwkv-lab.mageflow-tread-convert",
        canonical_distributions(
            {"accelerate", "deepspeed", "diffusers", "einops", "flash-attn",
             "grpcio", "huggingface-hub", "mage-flow", "numpy", "pillow",

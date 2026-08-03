@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import asdict
 from types import MappingProxyType, SimpleNamespace
@@ -19,6 +20,7 @@ from rwkv_lab.trainvm_adapters.handlers import (
     HandlerResult,
     _appearance_expert,
     _mageflow_full_backbone,
+    _mageflow_tread_convert,
     _rlvr,
     _rwkv_optimizer_finetune,
     _rwkv_posttraining,
@@ -140,6 +142,93 @@ def test_mageflow_cache_configs_are_bounded_and_typed(tmp_path) -> None:
     ] == "complete"
     with pytest.raises(MageFlowCacheConfigError, match="not finite"):
         finite_cache_receipt({"elapsed": float("inf")})
+
+
+def test_mageflow_tread_conversion_publishes_checkpoint_bound_receipt(
+    tmp_path, monkeypatch
+) -> None:
+    read_root = tmp_path / "read"
+    model = read_root / "model"
+    checkpoint = read_root / "checkpoint"
+    run_directory = tmp_path / "write" / "run"
+    model.mkdir(parents=True)
+    checkpoint.mkdir()
+    run_directory.mkdir(parents=True)
+    (model / "model_index.json").write_text("{}", encoding="utf-8")
+    tread_config = read_root / "tread.json"
+    tread_config.write_text("{}", encoding="utf-8")
+
+    resolved_checkpoint = SimpleNamespace(
+        artifact_id="checkpoint-17",
+        optimizer_step=17,
+        payload_directory=checkpoint,
+    )
+    monkeypatch.setattr(
+        "rwkv_lab.trainvm_adapters.handlers.resolve_input_checkpoint",
+        lambda *_args, **_kwargs: resolved_checkpoint,
+    )
+
+    observed = []
+
+    def build(config, checkpoint_directory, output_directory):
+        observed.append((config, checkpoint_directory, output_directory))
+        (output_directory / "controller.safetensors").write_bytes(b"controller")
+        (output_directory / "report.json").write_text(
+            '{"tensor_count":7}', encoding="utf-8"
+        )
+        return {"tensor_count": 7}
+
+    monkeypatch.setattr(
+        "rwkv_lab.trainvm_adapters.handlers.build_tread_controller", build
+    )
+    invocation = SimpleNamespace(
+        inputs={
+            "config": {
+                "domain": "animation",
+                "model_path": str(model),
+                "tread_config": str(tread_config),
+                "model_id": "microsoft/Mage-Flow-Base",
+                "model_revision": "59a9cfd58cf6ecef28245852c6bdace3f12428a2",
+            },
+            "checkpoint": {},
+        },
+        workspace=_sealed_workspace(read_root, run_directory),
+        publishes={"tread_controller": {}},
+        resume=None,
+        node_id="convert_tread",
+        attempt_id="convert_tread@1",
+    )
+    observability = SimpleNamespace(
+        keepalive=lambda *_args: __import__("contextlib").nullcontext()
+    )
+
+    result = _mageflow_tread_convert(
+        invocation,
+        None,
+        observability=observability,
+        controls=SimpleNamespace(effective_values={}),
+    )
+
+    assert result.event_type == "operation.completed"
+    assert result.optimizer_step == 17
+    assert result.payload == {
+        "checkpoint_optimizer_step": 17,
+        "domain": "animation",
+        "tensor_count": 7,
+    }
+    request = result.artifact_requests[0]
+    assert request.output_name == "tread_controller"
+    assert request.parent_artifact_ids == ("checkpoint-17",)
+    receipt = json.loads(
+        (request.source_directory / "trainvm_tread_receipt.json").read_text()
+    )
+    assert receipt["checkpoint_artifact_id"] == "checkpoint-17"
+    assert receipt["checkpoint_optimizer_step"] == 17
+    assert receipt["controller_sha256"].startswith("sha256:")
+    assert receipt["functional_equivalence"] == "exact_zero_gate_initialization"
+    assert observed[0][0].model_path == str(model.resolve())
+    assert observed[0][0].tread_config == str(tread_config.resolve())
+    assert observed[0][1] == checkpoint
 
 
 def test_run_directory_must_equal_the_authority_workspace(tmp_path) -> None:
@@ -437,6 +526,133 @@ def test_terminal_handler_lowers_compile_phase_into_trainer_config(
     assert config.compile_transformer_blocks is True
     assert config.compile_vae_encoder is True
     assert keyword_arguments["worker_execution_phases"] is execution_phases
+
+
+def test_terminal_handler_consumes_only_same_checkpoint_tread_controller(
+    tmp_path, monkeypatch
+) -> None:
+    from rwkv_lab import mage_flow_terminal_train
+
+    read_root = tmp_path / "read"
+    checkpoint = read_root / "checkpoint"
+    tread_payload = read_root / "tread" / "payload"
+    run_directory = tmp_path / "write" / "run"
+    checkpoint.mkdir(parents=True)
+    tread_payload.mkdir(parents=True)
+    run_directory.mkdir(parents=True)
+    image = read_root / "image.png"
+    image.write_bytes(b"image")
+    manifest = read_root / "train.jsonl"
+    manifest.write_text(
+        json.dumps({"image": str(image)}) + "\n", encoding="utf-8"
+    )
+    expert = read_root / "expert.safetensors"
+    expert.write_bytes(b"expert")
+    controller = tread_payload / "controller.safetensors"
+    controller.write_bytes(b"controller")
+    controller_sha = "sha256:" + hashlib.sha256(controller.read_bytes()).hexdigest()
+    report = tread_payload / "report.json"
+    report_document = {
+        "schema": "rwkv-lab.mageflow-tread-conversion-report.v1",
+        "domain": "animation",
+        "base_model": "microsoft/Mage-Flow-Base",
+        "base_revision": "59a9cfd58cf6ecef28245852c6bdace3f12428a2",
+        "attention_backend": "flash2",
+        "config_digest": "sha256:" + "c" * 64,
+    }
+    report.write_text(
+        json.dumps(report_document, separators=(",", ":"), sort_keys=True),
+        encoding="utf-8",
+    )
+    report_sha = "sha256:" + hashlib.sha256(report.read_bytes()).hexdigest()
+    resolved_checkpoint = SimpleNamespace(
+        artifact_id="boundary-checkpoint",
+        optimizer_step=5500,
+        payload_directory=checkpoint,
+        state_components=(
+            "data_cursor",
+            "expert_routing",
+            "model",
+            "optimizer",
+            "rng_torch",
+        ),
+    )
+    tread_artifact = SimpleNamespace(
+        artifact_id="tread-1",
+        parent_artifact_ids=("boundary-checkpoint",),
+        payload_directory=tread_payload,
+        objects=(
+            SimpleNamespace(
+                relative_path="controller.safetensors",
+                sha256=controller_sha,
+            ),
+            SimpleNamespace(relative_path="report.json", sha256=report_sha),
+        ),
+    )
+    receipt = {
+        "schema": "rwkv-lab.mageflow-tread-controller-receipt.v1",
+        "checkpoint_artifact_id": "boundary-checkpoint",
+        "checkpoint_optimizer_step": 5500,
+        "domain": "animation",
+        "controller_file": "controller.safetensors",
+        "controller_sha256": controller_sha,
+        "config_digest": report_document["config_digest"],
+        "report_file": "report.json",
+        "report_sha256": report_sha,
+        "functional_equivalence": "exact_zero_gate_initialization",
+    }
+    monkeypatch.setattr(
+        "rwkv_lab.trainvm_adapters.handlers.resolve_input_checkpoint",
+        lambda *_args, **_kwargs: resolved_checkpoint,
+    )
+    monkeypatch.setattr(
+        "rwkv_lab.trainvm_adapters.handlers.resolve_input_artifact",
+        lambda *_args, **_kwargs: tread_artifact,
+    )
+    monkeypatch.setattr(
+        "rwkv_lab.trainvm_adapters.handlers.load_input_artifact_json",
+        lambda _artifact, path, **_kwargs: (
+            receipt if path == "trainvm_tread_receipt.json" else report_document
+        ),
+    )
+    observed = []
+    monkeypatch.setattr(
+        mage_flow_terminal_train,
+        "train",
+        lambda config, **_kwargs: observed.append(config),
+    )
+    invocation = SimpleNamespace(
+        inputs={
+            "config": {
+                "domain": "animation",
+                "train_manifest": str(manifest),
+                "expert_checkpoint": str(expert),
+                "output_dir": str(run_directory),
+                "model_path": None,
+            },
+            "checkpoint": {},
+            "tread_controller": {},
+        },
+        workspace=_sealed_workspace(read_root, run_directory),
+        publishes={},
+        resume=None,
+    )
+
+    _terminal_expert(
+        invocation,
+        SimpleNamespace(),
+        observability=SimpleNamespace(),
+    )
+    assert observed[0].resume_from == str(checkpoint.resolve())
+    assert observed[0].tread_loop_checkpoint == str(controller.resolve())
+
+    tread_artifact.parent_artifact_ids = ("another-checkpoint",)
+    with pytest.raises(AdapterDispatchError, match="bound only"):
+        _terminal_expert(
+            invocation,
+            SimpleNamespace(),
+            observability=SimpleNamespace(),
+        )
 
 
 def test_full_backbone_handler_seals_model_tree_and_lowers_phases(
@@ -1603,6 +1819,12 @@ def test_dispatch_table_is_closed_and_training_composition_is_required() -> None
             "1.0.0",
             "build",
             "rwkv_lab.mageflow_cache_build.v1.Build",
+        ),
+        (
+            "rwkv-lab.mageflow-tread-convert",
+            "1.0.0",
+            "convert",
+            "rwkv_lab.mageflow_tread_convert.v1.Convert",
         ),
         (
             "rwkv-lab.mageflow-appearance-expert",

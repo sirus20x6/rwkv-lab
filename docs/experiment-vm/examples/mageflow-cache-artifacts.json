@@ -3,10 +3,10 @@
   "kind": "Experiment",
   "metadata": {
     "name": "mageflow-cache-artifact-continuation",
-    "description": "Train to a fixed boundary, publish exact cache coverage, build an immutable encoder cache, and continue from the same verified checkpoint.",
+    "description": "Train to a fixed baseline boundary, derive a zero-gated TREAD controller and exact cache coverage from that checkpoint, then continue with both immutable handoffs.",
     "labels": {
       "family": "mageflow",
-      "handoff": "checkpoint-cache"
+      "handoff": "checkpoint-cache-tread"
     }
   },
   "spec": {
@@ -67,6 +67,12 @@
         "schema": "rwkv-lab.encoder-cache.v1",
         "immutability": "immutable",
         "fingerprint": "manifest_sha256"
+      },
+      "tread_controller": {
+        "type": "opaque",
+        "schema": "rwkv-lab.mageflow-tread-controller.v1",
+        "immutability": "immutable",
+        "fingerprint": "manifest_sha256"
       }
     },
     "components": {
@@ -110,6 +116,16 @@
         "operations": {
           "build": {
             "contract": "rwkv_lab.mageflow_cache_build.v1.Build"
+          }
+        }
+      },
+      "tread_convert": {
+        "adapter": "rwkv-lab.mageflow-tread-convert",
+        "version": "1.0.0",
+        "runtime": "python_worker",
+        "operations": {
+          "convert": {
+            "contract": "rwkv_lab.mageflow_tread_convert.v1.Convert"
           }
         }
       }
@@ -160,7 +176,8 @@
                   "attention_backend": "flash2",
                   "repa_enabled": false,
                   "repa_loss_weight": 0.0,
-                  "encoder_cache_mode": "off"
+                  "encoder_cache_mode": "off",
+                  "tread_factored_looping": {}
                 }
               }
             },
@@ -226,6 +243,52 @@
           "transitions": [
             {
               "on": "worker.completed",
+              "target": "convert_tread"
+            },
+            {
+              "on": "operation.failed",
+              "target": "$failed"
+            }
+          ]
+        },
+        "convert_tread": {
+          "description": "Create one immutable zero-gated controller from the exact boundary checkpoint.",
+          "invoke": {
+            "component": "tread_convert",
+            "operation": "convert",
+            "inputs": {
+              "config": {
+                "literal": {
+                  "domain": "animation",
+                  "model_path": "/thearray/git/ob/text-generation-webui/models/Mage-Flow-Base",
+                  "tread_config": "/thearray/git/moe-mla/experiments/mageflow_tread_factored_looping.json",
+                  "model_id": "microsoft/Mage-Flow-Base",
+                  "model_revision": "59a9cfd58cf6ecef28245852c6bdace3f12428a2",
+                  "attention_backend": "flash2"
+                }
+              },
+              "checkpoint": {
+                "artifact": "boundary_checkpoint"
+              }
+            }
+          },
+          "publishes": {
+            "tread_controller": "tread_controller"
+          },
+          "idempotency": "receipt_required",
+          "effect": "process",
+          "retry": {
+            "maximum_attempts": 2,
+            "backoff": "fixed",
+            "initial_delay_seconds": 5,
+            "retryable_events": [
+              "worker.lost",
+              "worker.out_of_memory"
+            ]
+          },
+          "transitions": [
+            {
+              "on": "operation.completed",
               "target": "prepare_cache"
             },
             {
@@ -255,7 +318,8 @@
                     "attention_backend": "flash2",
                     "repa_enabled": false,
                     "repa_loss_weight": 0.0,
-                    "encoder_cache_mode": "off"
+                    "encoder_cache_mode": "off",
+                    "tread_factored_looping": {}
                   }
                 }
               },
@@ -320,7 +384,7 @@
           ]
         },
         "resume_training": {
-          "description": "Continue from the checkpoint with only its lineage-bound immutable cache.",
+          "description": "Continue from the checkpoint with its lineage-bound immutable cache and zero-gated TREAD controller.",
           "invoke": {
             "component": "mageflow",
             "operation": "train",
@@ -339,7 +403,8 @@
                   "attention_backend": "flash2",
                   "repa_enabled": false,
                   "repa_loss_weight": 0.0,
-                  "encoder_cache_mode": "off"
+                  "encoder_cache_mode": "off",
+                  "reset_optimizer_on_architecture_migration": true
                 }
               },
               "checkpoint": {
@@ -347,6 +412,9 @@
               },
               "cache": {
                 "artifact": "encoder_cache"
+              },
+              "tread_controller": {
+                "artifact": "tread_controller"
               }
             },
             "training": {

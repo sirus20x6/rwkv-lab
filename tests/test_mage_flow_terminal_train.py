@@ -27,6 +27,7 @@ from rwkv_lab.mage_flow_terminal_train import (
     _resume_batch_index,
     _resume_domain_positions,
     _runtime_only_resume_change,
+    _save_checkpoint,
     domain_window_schedule_report,
     plan_cache_span,
     prepare_cache_span,
@@ -47,6 +48,7 @@ from rwkv_lab.mage_flow_training_objectives import (
     weighted_rectified_flow_loss,
     weighted_velocity_direction_loss,
 )
+from rwkv_lab.mage_flow_tread_looping import TreadLoopConfig
 
 
 def _row(index: int, domain: str) -> dict:
@@ -566,6 +568,119 @@ def test_lightning_resume_does_not_repeat_architecture_optimizer_reset(tmp_path)
     resumed.validate()
     assert not _architecture_migration_required(checkpoint, resumed)
     assert not _architecture_resume_change(checkpoint, resumed)
+
+
+def test_tread_controller_migration_requires_one_explicit_optimizer_reset(tmp_path):
+    manifest = tmp_path / "train.jsonl"
+    _write_manifest(manifest, [_row(index, "animation") for index in range(16)])
+    expert = tmp_path / "animation.safetensors"
+    expert.touch()
+    controller = tmp_path / "controller.safetensors"
+    controller.touch()
+    old_run = tmp_path / "old-run"
+    old_run.mkdir()
+    checkpoint = old_run / "checkpoint-00000002"
+    checkpoint.mkdir()
+    old = TerminalExpertTrainConfig(
+        model_path=None,
+        domain="animation",
+        train_manifest=str(manifest),
+        expert_checkpoint=str(expert),
+        output_dir=str(old_run),
+        max_steps=10,
+    )
+    old_document = dict(old.__dict__)
+    old_document["tread_factored_looping"] = TreadLoopConfig().to_dict()
+    (checkpoint / "run_contract.json").write_text(
+        json.dumps({"fingerprint": "old", "config": old_document})
+    )
+    (checkpoint / "checkpoint.json").write_text(
+        json.dumps({"fingerprint": "old", "run_contract": "run_contract.json"})
+    )
+    current = TerminalExpertTrainConfig(
+        **(
+            old.__dict__
+            | {
+                "output_dir": str(tmp_path / "new-run"),
+                "resume_from": str(checkpoint),
+                "tread_loop_checkpoint": str(controller),
+                "reset_optimizer_on_architecture_migration": True,
+            }
+        )
+    )
+
+    current.validate()
+    assert _architecture_migration_required(checkpoint, current)
+    assert _architecture_resume_change(checkpoint, current)
+    current.reset_optimizer_on_architecture_migration = False
+    assert not _architecture_resume_change(checkpoint, current)
+
+
+def test_terminal_checkpoint_persists_complete_tread_controller(
+    tmp_path, monkeypatch
+):
+    output = tmp_path / "run"
+    output.mkdir()
+    (output / "run_contract.json").write_text(
+        json.dumps({"fingerprint": "sha256:" + "a" * 64}),
+        encoding="utf-8",
+    )
+    tread_controller = object()
+    transformer = SimpleNamespace(tread_loop_controller=tread_controller)
+
+    def save_expert(_controller, path):
+        path.write_bytes(b"expert")
+
+    def save_shared(_transformer, _controller, path):
+        path.write_bytes(b"shared")
+        return path
+
+    observed = []
+
+    def save_tread(controller, path):
+        observed.append(controller)
+        path.write_bytes(b"complete-tread-state")
+        return {"tensor_count": 3}
+
+    monkeypatch.setattr(
+        "rwkv_lab.mage_flow_terminal_train.save_terminal_expert", save_expert
+    )
+    monkeypatch.setattr(
+        "rwkv_lab.mage_flow_terminal_train.save_terminal_shared_backbone",
+        save_shared,
+    )
+    monkeypatch.setattr(
+        "rwkv_lab.mage_flow_terminal_train.save_tread_loop_controller",
+        save_tread,
+    )
+    monkeypatch.setattr(torch.cuda, "get_rng_state_all", list)
+    final = _save_checkpoint(
+        controller=object(),
+        transformer=transformer,
+        repa=None,
+        optimizer=SimpleNamespace(state_dict=lambda: {"optimizer": 1}),
+        scheduler=SimpleNamespace(state_dict=lambda: {"scheduler": 1}),
+        output_dir=output,
+        domain="animation",
+        step=9,
+        epoch=1,
+        batch_index=4,
+        fingerprint="sha256:" + "a" * 64,
+        keep=2,
+    )
+
+    contract = json.loads((final / "checkpoint.json").read_text())
+    assert observed == [tread_controller]
+    assert contract["tread_loop_controller"] == (
+        "mageflow-tread-loop-controller.safetensors"
+    )
+    assert contract["run_contract"] == "run_contract.json"
+    assert json.loads((final / "run_contract.json").read_text())[
+        "fingerprint"
+    ] == "sha256:" + "a" * 64
+    assert (final / contract["tread_loop_controller"]).read_bytes() == (
+        b"complete-tread-state"
+    )
 
 
 def test_rapid_alternating_batch_stream_persists_and_groups_accumulation():

@@ -76,8 +76,8 @@ bool declared(const OperationLifecycleCapabilities& lifecycle,
 // admitted. There is no third answer.
 void every_adapter_admits_exactly_what_it_declares() {
   const auto& profiles = registered_profiles();
-  require(profiles.size() == 23U,
-          "the contract registers the complete twenty-three-adapter catalog");
+  require(profiles.size() == 24U,
+          "the contract registers the complete twenty-four-adapter catalog");
   std::size_t admitted = 0U;
   std::size_t refused = 0U;
   for (const AdapterProfile& profile : profiles) {
