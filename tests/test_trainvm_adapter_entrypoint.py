@@ -1790,6 +1790,62 @@ def test_runner_publishes_handler_artifacts_before_terminal_event(
     ]
 
 
+def test_runner_publishes_handler_eval_galleries_before_terminal_event(
+    monkeypatch,
+) -> None:
+    from rwkv_lab.trainvm_worker import EvalGalleryPublicationRequest
+
+    bootstrap = SimpleNamespace(run_id="run-1")
+    session = FakeSession(bootstrap)
+    request = EvalGalleryPublicationRequest(
+        output_name="eval_gallery",
+        step=23,
+        step_domain="optimizer_step",
+        checkpoint_manifest_digest="sha256:" + "c" * 64,
+        evaluator_profile_digest="sha256:" + "d" * 64,
+        use_policy_digest="sha256:" + "e" * 64,
+        items=(),
+        parent_artifact_ids=("checkpoint-23",),
+    )
+    observed = []
+
+    def publish(actual_session, requests, *, progress):
+        assert actual_session is session
+        observed.extend(requests)
+        progress(23)
+        return (SimpleNamespace(artifact_id="eval-gallery-23"),)
+
+    monkeypatch.setattr(
+        "rwkv_lab.trainvm_adapters.entrypoint.publish_eval_gallery_requests",
+        publish,
+    )
+    status = run_worker(
+        bootstrap_reader=lambda _descriptor: bootstrap,
+        session_factory=lambda _bootstrap: session,
+        executor=lambda _invocation, _profiler, _observability, _controls, _phases: (
+            HandlerResult(
+                "worker.completed",
+                {"reason": "evaluation_complete"},
+                23,
+                eval_gallery_requests=(request,),
+            )
+        ),
+    )
+
+    assert status == 0
+    assert observed == [request]
+    assert session.finished == [
+        (
+            "worker.completed",
+            {
+                "reason": "evaluation_complete",
+                "eval_gallery_artifact_ids": ["eval-gallery-23"],
+            },
+            23,
+        )
+    ]
+
+
 def test_runner_reports_sanitized_failure_and_skips_completed_replay() -> None:
     bootstrap = SimpleNamespace(run_id="run-1")
     failed = FakeSession(bootstrap)

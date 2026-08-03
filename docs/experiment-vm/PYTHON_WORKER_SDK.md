@@ -133,6 +133,13 @@ them into a SHA-256 object store beneath the run directory. It then atomically s
 manifest, publishes that manifest through `WorkerSession.artifact()`, and returns the durable worker
 sequence. Generated and target/source images, held-out membership, condition digest, evaluator,
 checkpoint, policy, seed, sampling attributes, producer attempt, and optimizer step are all bound.
+Family handlers do not receive the controller session: they return typed
+`EvalGalleryPublicationRequest` values after evaluation has completed, and the fixed worker runner
+publishes those requests before its terminal event. This keeps transport and artifact authority out
+of evaluator code while allowing a handler to return multiple append-only gallery revisions. A
+request may refer to a checkpoint publication from the same handler by its request index; after the
+checkpoint is sealed, the runner substitutes its actual artifact ID and manifest SHA-256 before the
+gallery can be published.
 
 `CheckpointPublisher` is the independent state-artifact path. A family handler returns only a
 typed publication request after its trainer has atomically completed a checkpoint; it never gets a
