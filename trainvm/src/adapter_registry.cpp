@@ -792,11 +792,9 @@ void AdapterRegistry::validate_plan(const CompiledPlan& plan) const {
             " requests exact resume but is an at-most-once process operation");
       }
       if (profile.lifecycle.stateful) {
-        if (!profile.lifecycle.graceful_stop) {
-          throw AdapterResolutionError(
-              "workflow node " + name +
-              " has a graceful-stop timeout but its stateful operation cannot stop gracefully");
-        }
+        const bool training_operation =
+            profile.training_composition.has_value() ||
+            profile.key.operation == "train";
         if (plan.experiment.spec.recovery.exact_resume &&
             profile.lifecycle.resume_grade != ResumeGrade::exact) {
           throw AdapterResolutionError(
@@ -804,7 +802,14 @@ void AdapterRegistry::validate_plan(const CompiledPlan& plan) const {
               " requests exact resume but its stateful process operation is not "
               "exact-resumable");
         }
-        if (plan.experiment.spec.recovery.release_accelerators_when_paused) {
+        // Recovery carries the default pause policy for training, while
+        // per-operation lifecycle admission remains authoritative for an
+        // explicit pause or cancel.  A mixed workflow may legitimately place
+        // atomic restart-only conversion/evaluation operations between
+        // pausable training nodes; the required graceful-stop timeout is the
+        // escalation bound, not a claim that every operation supports cancel.
+        if (training_operation &&
+            plan.experiment.spec.recovery.release_accelerators_when_paused) {
           const bool release = *plan.experiment.spec.recovery
                                     .release_accelerators_when_paused;
           const bool supported =
@@ -817,7 +822,7 @@ void AdapterRegistry::validate_plan(const CompiledPlan& plan) const {
                      ? " cannot pause while releasing resources as requested"
                      : " cannot pause while retaining resources as requested"));
           }
-        } else if (pause_required &&
+        } else if (training_operation && pause_required &&
                    !profile.lifecycle.pause_keep_resources &&
                    !profile.lifecycle.pause_release_resources) {
           throw AdapterResolutionError(

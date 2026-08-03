@@ -1030,7 +1030,7 @@ void dead_socket_is_recovered_only_after_the_listener_dies() {
   require(::pipe2(ready.data(), O_CLOEXEC) == 0,
           "create socket-restart readiness pipe");
   const pid_t child = ::fork();
-  require(child > 0, "fork socket-restart daemon");
+  require(child >= 0, "fork socket-restart daemon");
   if (child == 0) {
     (void)::close(ready[0]);
     try {

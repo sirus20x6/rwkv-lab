@@ -132,7 +132,7 @@ int main() {
   check(catalog.authority() ==
             trainvm::CompatibilityAuthority::compatibility_evidence_only,
         "catalog is explicitly compatibility evidence only");
-  check(catalog.entries().size() == 156U,
+  check(catalog.entries().size() == 157U,
         "checked-in catalog matches the compiled reviewed v1 inventory");
   check(catalog.catalog_digest() ==
             trainvm::CompatibilityCatalog::reviewed_catalog_digest(),
@@ -315,7 +315,7 @@ int main() {
         "catalog contains every family and observed invocation kind");
   check(required_additions.empty(),
         "catalog retains the expanded audited workflow inventory");
-  check(reviewed_sources.size() == 155U,
+  check(reviewed_sources.size() == 156U,
         "catalog binds the complete reviewed source inventory");
   check(sealed_compatible.empty() && saw_restart_only_review,
         "sealed compatible operations and restart-only review are classified narrowly");

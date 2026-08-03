@@ -685,7 +685,22 @@ int main() {
         trainvm::compile_document(load_mageflow_cache_artifact_fixture());
     require(cache_handoff_plan.valid(),
             "typed MageFlow checkpoint-cache-TREAD continuation fixture must compile");
-    contract.adapter_registry.validate_plan(*cache_handoff_plan.plan);
+    const auto cache_registry_path =
+        std::filesystem::temp_directory_path() /
+        ("trainvm-cache-operation-" + std::to_string(::getpid()) + ".json");
+    {
+      std::ofstream output(cache_registry_path,
+                           std::ios::binary | std::ios::trunc);
+      output << trainvm::encode_json(contract.adapter_registry).dump();
+    }
+    std::filesystem::permissions(
+        cache_registry_path, std::filesystem::perms::owner_read |
+                                 std::filesystem::perms::owner_write,
+        std::filesystem::perm_options::replace);
+    trainvm::AdapterRegistry::load_file(
+        std::filesystem::absolute(cache_registry_path))
+        .validate_plan(*cache_handoff_plan.plan);
+    std::filesystem::remove(cache_registry_path);
     nlohmann::json exact_source = load_mageflow_fixture();
     exact_source["spec"].erase("execution");
     exact_source["spec"]["recovery"]["exact_resume"] = false;
@@ -1011,7 +1026,7 @@ int main() {
         extended_registry.operation_descriptors_json();
     const auto& extended_operations =
         extended_document.at("operations");
-    require(extended_operations.size() == 25U &&
+    require(extended_operations.size() == 26U &&
                 std::ranges::any_of(
                     extended_operations, [](const nlohmann::json& operation) {
                       return operation.at("key").at("adapter") ==

@@ -10,7 +10,7 @@ The catalog is evidence only. Its root `authority` is fixed to
 capability, credential, or execution method. Only the sealed adapter and host-execution registries
 can authorize work.
 
-The reviewed v1 inventory contains 156 effect-specific records over 145 unique source files.
+The reviewed v1 inventory contains 157 effect-specific records over 156 unique source files.
 Its closed families are `rwkv`, `transformer`, `vision_multimodal`, `mageflow_diffusion`,
 `conversion_distillation`, `rwkv_posttraining`, `rwkv_rlvr`, `external_trainer`, `data_cache`,
 `evaluation_profile_export`, and `control_plane`. The broad `transformer` name is intentional:

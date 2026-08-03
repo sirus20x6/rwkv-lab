@@ -62,6 +62,29 @@ void require(bool condition, std::string_view message) {
     throw HostdCrashQualificationError(std::string(message));
 }
 
+class Descriptor final {
+ public:
+  explicit Descriptor(int value = -1) noexcept : value_(value) {}
+  ~Descriptor() {
+    if (value_ >= 0) (void)::close(value_);
+  }
+  Descriptor(Descriptor&& other) noexcept
+      : value_(std::exchange(other.value_, -1)) {}
+  Descriptor& operator=(Descriptor&& other) noexcept {
+    if (this != &other) {
+      if (value_ >= 0) (void)::close(value_);
+      value_ = std::exchange(other.value_, -1);
+    }
+    return *this;
+  }
+  Descriptor(const Descriptor&) = delete;
+  Descriptor& operator=(const Descriptor&) = delete;
+  [[nodiscard]] int get() const noexcept { return value_; }
+
+ private:
+  int value_;
+};
+
 std::string digest_of(std::string_view material) {
   std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> context(
       EVP_MD_CTX_new(), EVP_MD_CTX_free);
@@ -218,7 +241,12 @@ ResourceBundleRequest qualification_request(std::string id) {
       .count = 1U,
       .access_mode = ResourceAccessMode::mutex_exclusive,
       .topology = TopologyPolicy::exact_resources,
-      .selector = {.exact_resources = {qualification_resource_id()}},
+      .selector = {
+          .vendor = std::nullopt,
+          .minimum_memory_bytes = std::nullopt,
+          .exact_labels = {},
+          .exact_resources = {qualification_resource_id()},
+      },
       .canonical_request_digest = {},
   });
 }
@@ -234,7 +262,12 @@ ResourceBundleRequest qualification_device_request(std::string id) {
       .count = 1U,
       .access_mode = ResourceAccessMode::exclusive_device,
       .topology = TopologyPolicy::exact_resources,
-      .selector = {.exact_resources = {qualification_accelerator_id()}},
+      .selector = {
+          .vendor = std::nullopt,
+          .minimum_memory_bytes = std::nullopt,
+          .exact_labels = {},
+          .exact_resources = {qualification_accelerator_id()},
+      },
       .canonical_request_digest = {},
   });
 }

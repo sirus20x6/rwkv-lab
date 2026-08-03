@@ -9798,7 +9798,7 @@ void test_adapter_registry_and_reconciler() {
       profile.lifecycle.pause_release_resources = false;
     }
   }
-  check(rejects_plan_profiles(std::move(no_graceful_stop), *compiled.plan) &&
+  check(!rejects_plan_profiles(std::move(no_graceful_stop), *compiled.plan) &&
             rejects_plan_profiles(std::move(no_release_pause), *compiled.plan) &&
             retained_pause_plan.valid() &&
             rejects_plan_profiles(std::move(no_retained_pause),
@@ -9806,7 +9806,7 @@ void test_adapter_registry_and_reconciler() {
             unspecified_pause_plan.valid() &&
             rejects_plan_profiles(std::move(no_pause_protocol),
                                   *unspecified_pause_plan.plan),
-        "reachable stateful operations must support graceful stop and the plan's release, retain, or pause-required control policy");
+        "training operations must support the plan's release, retain, or pause-required control policy while graceful-stop admission remains operation-local");
 
   auto stateful_at_most_once_source = load_fixture();
   stateful_at_most_once_source["spec"]["workflow"]["nodes"]
