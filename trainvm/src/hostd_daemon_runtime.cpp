@@ -19,6 +19,7 @@
 
 #include "trainvm/authority_time.hpp"
 #include "trainvm/document.hpp"
+#include "trainvm/gpu_fault_observer.hpp"
 #include "trainvm/reflection_json.hpp"
 #include "trainvm/host_ledger.hpp"
 #include "trainvm/sqlite_filesystem_authority.hpp"
@@ -474,8 +475,14 @@ struct HostdDaemonRuntime::Implementation final {
         configuration.startup_auditor().policy);
     logical_fence = std::make_shared<JournalHostdLogicalFenceEvidenceSource>(
         *journal, *clock);
+    if (configuration.document().gpu_fault_guard) {
+      const auto& guard = *configuration.document().gpu_fault_guard;
+      gpu_fault_guard = std::make_shared<LinuxGpuFaultAdmissionGuard>(
+          guard.state_path, configuration.document().boot_id,
+          guard.maximum_state_age_ns, configuration.document().authority_uid);
+    }
     coordinator = std::make_shared<HostGrantCoordinator>(
-        configuration.coordinator(), ledger, logical_fence);
+        configuration.coordinator(), ledger, logical_fence, gpu_fault_guard);
 
     launcher = std::make_unique<LinuxStoppedLauncherKernel>();
     device_kernel = std::make_unique<LinuxCgroupDeviceKernel>();
@@ -568,6 +575,7 @@ struct HostdDaemonRuntime::Implementation final {
   std::shared_ptr<SQLiteHostLedger> ledger;
   std::unique_ptr<Journal> journal;
   std::shared_ptr<JournalHostdLogicalFenceEvidenceSource> logical_fence;
+  std::shared_ptr<LinuxGpuFaultAdmissionGuard> gpu_fault_guard;
   std::shared_ptr<HostGrantCoordinator> coordinator;
   std::unique_ptr<LinuxCgroupAuthority> cgroups;
   std::unique_ptr<LinuxStoppedLauncherKernel> launcher;

@@ -85,6 +85,7 @@ add_library(trainvm_core
   src/external_profiler_artifact.cpp
   src/fake_worker.cpp
   src/fsm.cpp
+  src/gpu_fault_observer.cpp
   src/host_ledger.cpp
   src/sqlite_filesystem_authority.cpp
   src/host_process_saga.cpp
@@ -213,6 +214,11 @@ target_link_libraries(trainvm PRIVATE
 )
 
 add_executable(trainvm-hostd src/hostd_main.cpp)
+add_executable(trainvm-gpu-fault-observer src/gpu_fault_observer_main.cpp)
+target_compile_options(trainvm-gpu-fault-observer PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(trainvm-gpu-fault-observer PRIVATE trainvm_core)
 add_executable(trainvm-hostd-crash-qualification
   src/hostd_crash_qualification_main.cpp
 )
@@ -458,6 +464,12 @@ target_compile_options(host_resources_tests PRIVATE
 )
 target_link_libraries(host_resources_tests PRIVATE trainvm_core)
 add_test(NAME host_resources_tests COMMAND host_resources_tests)
+add_executable(gpu_fault_observer_tests tests/gpu_fault_observer_tests.cpp)
+target_compile_options(gpu_fault_observer_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(gpu_fault_observer_tests PRIVATE trainvm_core)
+add_test(NAME gpu_fault_observer_tests COMMAND gpu_fault_observer_tests)
 add_executable(resource_request_builder_tests
   tests/resource_request_builder_tests.cpp
 )

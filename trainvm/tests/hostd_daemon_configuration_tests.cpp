@@ -65,6 +65,7 @@ HostdDaemonConfigurationDocument document() {
                     .maximum_snapshot_age_ns = 1'000'000'000ULL,
                     .trusted_host_namespace = true,
                     .trusted_nvml_loader = true},
+      .gpu_fault_guard = std::nullopt,
       .cgroup = {.root_path = "/sys/fs/cgroup/trainvm-workers.slice",
                  .root_unified_path = "/trainvm-workers.slice"},
       .socket = {.path = "/run/trainvm-hostd/hostd.sock",
@@ -135,12 +136,19 @@ private:
 };
 
 void valid_document_compiles_every_authority_policy() {
-  const HostdDaemonConfiguration config(document());
+  auto source = document();
+  source.gpu_fault_guard = HostdDaemonGpuFaultGuardDocument{
+      .state_path = "/run/trainvm-gpu-fault/state.json",
+      .maximum_state_age_ns = 10'000'000'000ULL};
+  const HostdDaemonConfiguration config(std::move(source));
   require(
       config.ledger_authority().enforcement_grade ==
               HostLedgerEnforcementGrade::strict_filesystem &&
           config.inventory().trusted_host_namespace &&
           config.inventory().trusted_nvml_loader &&
+          config.document().gpu_fault_guard.has_value() &&
+          config.document().gpu_fault_guard->maximum_state_age_ns ==
+              10'000'000'000ULL &&
           config.cgroup().root_unified_path == "/trainvm-workers.slice" &&
           config.worker_credentials().uid ==
               config.document().worker_identity.uid &&
@@ -222,6 +230,23 @@ void unsafe_paths_trust_roles_and_bounds_are_rejected() {
   require_throws<HostdDaemonConfigurationError>(
       [&] { HostdDaemonConfiguration invalid(std::move(socket_name)); },
       "socket basenames have an explicit portable bound");
+
+  auto relative_fault_state = document();
+  relative_fault_state.gpu_fault_guard = HostdDaemonGpuFaultGuardDocument{
+      .state_path = "state.json", .maximum_state_age_ns = 10'000'000'000ULL};
+  require_throws<HostdDaemonConfigurationError>(
+      [&] {
+        HostdDaemonConfiguration invalid(std::move(relative_fault_state));
+      },
+      "GPU fault evidence cannot be redirected through a relative path");
+
+  auto stale_fault_policy = document();
+  stale_fault_policy.gpu_fault_guard = HostdDaemonGpuFaultGuardDocument{
+      .state_path = "/run/trainvm-gpu-fault/state.json",
+      .maximum_state_age_ns = 0U};
+  require_throws<HostdDaemonConfigurationError>(
+      [&] { HostdDaemonConfiguration invalid(std::move(stale_fault_policy)); },
+      "GPU fault evidence must have a bounded freshness policy");
 }
 
 void file_loading_is_strict_and_reflection_closed() {

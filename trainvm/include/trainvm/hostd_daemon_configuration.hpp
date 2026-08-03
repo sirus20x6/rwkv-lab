@@ -40,6 +40,13 @@ struct HostdDaemonInventoryDocument final {
   bool operator==(const HostdDaemonInventoryDocument &) const = default;
 };
 
+struct HostdDaemonGpuFaultGuardDocument final {
+  std::string state_path;
+  std::uint64_t maximum_state_age_ns{};
+
+  bool operator==(const HostdDaemonGpuFaultGuardDocument &) const = default;
+};
+
 struct HostdDaemonCgroupDocument final {
   std::string root_path;
   std::string root_unified_path;
@@ -117,6 +124,7 @@ struct HostdDaemonConfigurationDocument final {
   std::string journal_path;
   JournalFileIdentity journal_identity;
   HostdDaemonInventoryDocument inventory;
+  std::optional<HostdDaemonGpuFaultGuardDocument> gpu_fault_guard;
   HostdDaemonCgroupDocument cgroup;
   HostdDaemonSocketDocument socket;
   HostdLinuxHostNamespacePolicy host_namespaces;

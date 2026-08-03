@@ -163,6 +163,13 @@ HostdDaemonConfiguration::HostdDaemonConfiguration(
       !document_.inventory.trusted_nvml_loader) {
     reject("hostd daemon inventory trust or bounds are invalid");
   }
+  if (document_.gpu_fault_guard &&
+      (!canonical_absolute(document_.gpu_fault_guard->state_path) ||
+       document_.gpu_fault_guard->maximum_state_age_ns < 1'000'000'000ULL ||
+       document_.gpu_fault_guard->maximum_state_age_ns >
+           60'000'000'000ULL)) {
+    reject("hostd daemon GPU fault guard path or freshness is invalid");
+  }
   if (!canonical_absolute(document_.cgroup.root_path) ||
       document_.cgroup.root_unified_path.empty() ||
       document_.cgroup.root_unified_path.front() != '/' ||
