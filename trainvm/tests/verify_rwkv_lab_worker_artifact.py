@@ -271,60 +271,9 @@ def main() -> int:
     ):
         raise SystemExit("native runtime requirements schema drifted")
     adapters = tuple(profile["adapter"] for profile in requirements["profiles"])
-    shared_distributions = tuple(requirements["shared_root_distributions"])
-    # Pinned by identity rather than by count. A bare length said only that
-    # something had changed, and said it as "not canonical", which is why the
-    # last adapter addition cost a bisect to locate. Naming the set makes the
-    # failure report which profile appeared or vanished, while still forcing
-    # the same deliberate confirmation that a new one belongs here.
-    #
-    # Order is pinned too, because the grouping assertion below already depends
-    # on it: adapters[:3] are the MageFlow routes that share one closure.
-    expected_adapters = (
-        "rwkv-lab.mageflow-appearance-expert",
-        "rwkv-lab.mageflow-full-backbone",
-        "rwkv-lab.mageflow-terminal-expert",
-        "rwkv-lab.rwkv-posttraining",
-        "rwkv-lab.scalar-metric-decision",
-        "rwkv-lab.qwen-ao3",
-        "rwkv-lab.transformer-mla",
-        "rwkv-lab.transformer-mla-mtp",
-        "rwkv-lab.transformer-mla-mutor",
-        "rwkv-lab.transformer-mla-fsp",
-        "rwkv-lab.transformer-mla-parallel",
-        "rwkv-lab.transformer-mla-rwkv8",
-        "rwkv-lab.transformer-mla-engram",
-        "rwkv-lab.transformer-mla-full-backbone",
-        "rwkv-lab.vision-teacher-compressor",
-        "rwkv-lab.vision-frozen-adapter",
-        "rwkv-lab.vision-native-head",
-        "rwkv-lab.vision-rwkv-student",
-        "rwkv-lab.rwkv-rlvr",
-        "rwkv-lab.rwkv-scratch",
-    )
-    if adapters != expected_adapters:
-        added = sorted(set(adapters) - set(expected_adapters))
-        removed = sorted(set(expected_adapters) - set(adapters))
-        if added or removed:
-            raise SystemExit(
-                "native runtime requirement profiles drifted: "
-                f"added={added} removed={removed}. Confirm each new profile's "
-                "root_distributions before pinning it here."
-            )
-        raise SystemExit(
-            "native runtime requirement profile order changed: "
-            f"{list(adapters)}. The grouping assertion below depends on it."
-        )
-    if (
-        len(set(adapters)) != len(adapters)
-        or shared_distributions != tuple(sorted(set(shared_distributions)))
-        or any(
-            not set(shared_distributions).issubset(profile["root_distributions"])
-            for profile in requirements["profiles"]
-        )
-    ):
-        raise SystemExit("native runtime requirements are not canonical")
-
+    # The adapter-set pin lives in verify_rwkv_lab_runtime_requirements.py so
+    # that it can run in hosted CI; this test builds a sealed worker artifact
+    # and is excluded there. What remains here is only what needs the artifact.
     module_spec = importlib.util.spec_from_file_location(
         "materialize_trainvm_worker_deployment", materializer
     )
@@ -350,8 +299,11 @@ def main() -> int:
     )
     # The three MageFlow routes deliberately share one identical sealed Python
     # closure. Every other adapter currently owns a distinct closure.
-    if len(grouped) != len(adapters) - 2 or not any(
-        members == list(adapters[:3]) for members in grouped.values()
+    # Derived by name, not by position. This used to read adapters[:3], which
+    # silently depended on registry order that is pinned in another file now.
+    mageflow_routes = [adapter for adapter in adapters if "mageflow" in adapter]
+    if len(grouped) != len(adapters) - (len(mageflow_routes) - 1) or not any(
+        members == mageflow_routes for members in grouped.values()
     ):
         raise SystemExit("per-adapter runtime grouping drifted from native requirements")
     with tempfile.TemporaryDirectory(prefix="trainvm-worker-artifact-") as raw:
