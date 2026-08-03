@@ -1375,7 +1375,7 @@ HostdCrashCaseReceipt run_privileged_stopped_child_case(
     const std::filesystem::path& cgroup_parent) {
   constexpr std::string_view name =
       "case-privileged-stopped-child-before-spawn-commit";
-  const auto workspace = config.workspace / name;
+  const auto workspace = config.workspace / std::string(name);
   std::filesystem::create_directories(workspace);
   if (::chmod(workspace.c_str(), 0700) != 0)
     throw HostdCrashQualificationError(
@@ -1506,7 +1506,7 @@ HostdCrashCaseReceipt run_privileged_device_policy_case(
     const std::filesystem::path& cgroup_parent) {
   constexpr std::string_view name =
       "case-privileged-device-policy-recovery";
-  const auto workspace = config.workspace / name;
+  const auto workspace = config.workspace / std::string(name);
   std::filesystem::create_directories(workspace);
   if (::chmod(workspace.c_str(), 0700) != 0)
     throw HostdCrashQualificationError(

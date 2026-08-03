@@ -1,5 +1,5 @@
-#include <unistd.h>
 #include <signal.h>
+#include <unistd.h>
 
 #include <cstdlib>
 #include <filesystem>
@@ -7,6 +7,7 @@
 #include <iostream>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "trainvm/hostd_crash_qualification.hpp"
 #include "trainvm/hostd_linux_stopped_launcher.hpp"
