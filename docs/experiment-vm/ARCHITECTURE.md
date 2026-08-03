@@ -42,6 +42,20 @@ GCC-reflection-first:
   generation, and internal operation registration inside the C++ process.
 - Persisted data never depends on a compiler-specific reflection representation.
 
+A member of a reflected struct is optional to authors **if and only if it is
+`std::optional`**. A default member initializer does not make it optional:
+`bool enabled{}` and `std::vector<Thing> things` are both REQUIRED in the
+document, and omitting either is a `field.required` error even though the C++
+side would have been perfectly happy with the default.
+
+This is worth knowing before adding a field to a spec struct, because of how it
+presents. The document passes JSON Schema validation — the schema can say the
+field is optional — and then fails during reflected decoding, so the diagnostic
+points at the field rather than at the mistake, and every document written
+before the field existed starts failing at once. That reads like a broken
+feature rather than a decoding rule. If a field should be omissible, declare it
+`std::optional` and treat absence explicitly at the use site.
+
 GCC 16 in this workspace compiles the P2996 reflection syntax with
 `-std=c++26 -freflection`, consistent with the [GCC C++ status table](https://gcc.gnu.org/projects/cxx-status.html).
 [Clang's C++ status table](https://clang.llvm.org/cxx_status) still marks P2996 unsupported. TrainVM
