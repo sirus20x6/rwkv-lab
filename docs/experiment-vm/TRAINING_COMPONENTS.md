@@ -61,6 +61,13 @@ The initial concrete cross-family catalog contains:
   fused-backend preference, consumed by baseline scratch RWKV;
 - a stateless BF16 parameter/compute and FP32 reduction precision policy for baseline scratch
   RWKV; gradient scaling is explicitly disabled rather than inferred from dtype;
+- qualification-only FP8 and NVFP4 precision policies registered in the Python runtime. FP8
+  declares its backend (`transformer_engine` delayed per-tensor scaling with a declared amax
+  history, or `torchao` dynamic per-tensor scaling), format, FP32-master retention, checkpoint
+  state domains, eligible projection patterns, and excluded parameter patterns. NVFP4 declares
+  Transformer Engine microscaling in 16-value blocks, FP32-master retention, the same projection
+  surface, and its scale/master-weight checkpoint domains. Embeddings, LM heads, and norms are
+  excluded by the default declaration and can be narrowed further by configuration;
 - independently selected squared-ReLU and SiLU activations installed at RWKV ChannelMix topology
   points; squared-ReLU-only fused kernels reject SiLU rather than changing semantics silently;
 - an independently configured affine LayerNorm factory installed at every baseline scratch-RWKV
@@ -129,3 +136,23 @@ does not add a Go endpoint or component-specific JavaScript.
 
 Passing schema tests makes a component selectable; it does not prove mathematical interchangeability
 or production fitness.
+
+## Scaled-precision qualification status
+
+The FP8 and NVFP4 implementations are runtime-registered and fail closed, but are not advertised by
+the unchanged native authority or worker-capability catalog. Selection requires the declared backend
+package, CUDA, and an explicitly qualified device capability. This qualification recognizes only
+SM120; it deliberately does not infer a minimum capability threshold from architecture numbers.
+
+Scaled-policy checkpoints are stateful. FP8 delayed scaling persists scale factors, same-key amax
+history tensors of the declared length, and FP32 master weights when retained. Dynamic FP8 omits the
+amax domain. NVFP4 persists microscale factors and FP32 master weights when retained. Missing or empty
+scale state, missing state domains, mismatched amax keys or lengths, nonfinite state, and non-FP32
+state tensors are rejected on resume. The scratch-RWKV checkpoint path stores and restores the
+precision-policy state alongside model and optimizer state; old BF16 checkpoints remain compatible
+because the BF16 policy requires empty state.
+
+Neither `transformer_engine` nor `torchao` is installed in the qualification environment, so FP8 and
+NVFP4 are registered and fail closed but not yet measured. There is no speedup, numerical-parity,
+resumed-trajectory, or quality result for either format. Backend module conversion remains
+execution-unqualified and raises instead of silently running BF16.

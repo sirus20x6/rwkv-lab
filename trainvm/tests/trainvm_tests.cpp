@@ -5545,6 +5545,45 @@ void test_worker_control_grpc_stream() {
   const grpc::Status live_control_status = service.CommandRun(
       nullptr, &live_control_request, &live_control_response);
 
+  // The controller pushes commands onto this stream on its own schedule. Both
+  // CommandRun calls above enqueue one before the worker frames below are even
+  // written, and nothing in the protocol makes a worker acknowledgement
+  // overtake a command that was queued first. A read that assumes "the next
+  // frame is the reply to what I just wrote" is therefore asserting an ordering
+  // the stream does not promise: it holds on an idle machine and stops holding
+  // under CPU contention, which is exactly the intermittent failure this test
+  // showed. Take the next frame OF THE EXPECTED KIND instead, holding anything
+  // that arrives early rather than consuming it as the wrong thing.
+  std::deque<trainvm::v1::ControllerToWorker> deferred_frames;
+  const auto take_frame = [&](auto&& matches,
+                              trainvm::v1::ControllerToWorker& out) {
+    for (auto it = deferred_frames.begin(); it != deferred_frames.end(); ++it) {
+      if (matches(*it)) {
+        out = *it;
+        deferred_frames.erase(it);
+        return true;
+      }
+    }
+    trainvm::v1::ControllerToWorker frame;
+    while (primary->Read(&frame)) {
+      if (matches(frame)) {
+        out = frame;
+        return true;
+      }
+      deferred_frames.push_back(frame);
+    }
+    return false;
+  };
+  const auto is_acknowledgement = [](const trainvm::v1::ControllerToWorker& f) {
+    return f.has_acknowledge_worker_sequence();
+  };
+  const auto is_command = [](const trainvm::v1::ControllerToWorker& f) {
+    return f.has_command();
+  };
+  const auto is_receipt = [](const trainvm::v1::ControllerToWorker& f) {
+    return f.has_receipt();
+  };
+
   bool result_written = false;
   bool telemetry_acknowledged = false;
   trainvm::v1::ControllerToWorker receipt_message;
@@ -5559,10 +5598,10 @@ void test_worker_control_grpc_stream() {
     heartbeat->mutable_observed_at()->set_seconds(1);
     trainvm::v1::ControllerToWorker heartbeat_ack;
     const bool heartbeat_written = primary->Write(heartbeat_message);
-    const bool heartbeat_received = primary->Read(&heartbeat_ack);
+    const bool heartbeat_received = take_frame(is_acknowledgement, heartbeat_ack);
 
     trainvm::v1::ControllerToWorker worker_command_message;
-    const bool worker_command_received = primary->Read(&worker_command_message);
+    const bool worker_command_received = take_frame(is_command, worker_command_message);
     const bool worker_command_valid =
         live_control_status.ok() && live_control_response.has_control() &&
         worker_command_received && worker_command_message.has_command() &&
@@ -5596,7 +5635,7 @@ void test_worker_control_grpc_stream() {
     control_ack->mutable_acknowledged_at()->set_seconds(2);
     trainvm::v1::ControllerToWorker control_receipt;
     const bool control_ack_written = primary->Write(control_ack_message);
-    const bool control_ack_received = primary->Read(&control_receipt);
+    const bool control_ack_received = take_frame(is_acknowledgement, control_receipt);
 
     trainvm::v1::RunCommandRequest checkpoint_request;
     checkpoint_request.set_run_id(launch.run_id);
@@ -5623,11 +5662,11 @@ void test_worker_control_grpc_stream() {
     metric->mutable_observed_at()->set_seconds(3);
     trainvm::v1::ControllerToWorker metric_ack;
     const bool metric_written = primary->Write(metric_message);
-    const bool metric_received = primary->Read(&metric_ack);
+    const bool metric_received = take_frame(is_acknowledgement, metric_ack);
 
     trainvm::v1::ControllerToWorker checkpoint_command_message;
     const bool checkpoint_command_received =
-        primary->Read(&checkpoint_command_message);
+        take_frame(is_command, checkpoint_command_message);
     const bool checkpoint_command_valid =
         checkpoint_status.ok() && checkpoint_response.has_checkpoint() &&
         checkpoint_response.disposition() ==
@@ -5658,7 +5697,7 @@ void test_worker_control_grpc_stream() {
     artifact->mutable_published_at()->set_seconds(4);
     trainvm::v1::ControllerToWorker artifact_ack;
     const bool artifact_written = primary->Write(artifact_message);
-    const bool artifact_received = primary->Read(&artifact_ack);
+    const bool artifact_received = take_frame(is_acknowledgement, artifact_ack);
 
     trainvm::v1::WorkerToController checkpoint_ack_message;
     auto* checkpoint_ack = checkpoint_ack_message.mutable_checkpoint_ack();
@@ -5675,7 +5714,7 @@ void test_worker_control_grpc_stream() {
     checkpoint_ack->mutable_acknowledged_at()->set_seconds(5);
     trainvm::v1::ControllerToWorker checkpoint_receipt;
     const bool checkpoint_ack_written = primary->Write(checkpoint_ack_message);
-    const bool checkpoint_ack_received = primary->Read(&checkpoint_receipt);
+    const bool checkpoint_ack_received = take_frame(is_acknowledgement, checkpoint_receipt);
 
     trainvm::v1::RunCommandRequest pause_request;
     pause_request.set_run_id(launch.run_id);
@@ -5699,9 +5738,9 @@ void test_worker_control_grpc_stream() {
     pause_trigger->mutable_observed_at()->set_seconds(6);
     trainvm::v1::ControllerToWorker pause_trigger_receipt;
     const bool pause_trigger_written = primary->Write(pause_trigger_message);
-    const bool pause_trigger_received = primary->Read(&pause_trigger_receipt);
+    const bool pause_trigger_received = take_frame(is_acknowledgement, pause_trigger_receipt);
     trainvm::v1::ControllerToWorker pause_command_message;
-    const bool pause_command_received = primary->Read(&pause_command_message);
+    const bool pause_command_received = take_frame(is_command, pause_command_message);
     const bool pause_command_valid =
         pause_status.ok() && pause_response.has_lifecycle() &&
         pause_response.lifecycle().kind() ==
@@ -5725,7 +5764,7 @@ void test_worker_control_grpc_stream() {
     pause_ack->mutable_acknowledged_at()->set_seconds(7);
     trainvm::v1::ControllerToWorker pause_ack_receipt;
     const bool pause_ack_written = primary->Write(pause_ack_message);
-    const bool pause_ack_received = primary->Read(&pause_ack_receipt);
+    const bool pause_ack_received = take_frame(is_acknowledgement, pause_ack_receipt);
     const auto paused_projection = service.journal_.projection(launch.run_id);
 
     trainvm::v1::RunCommandRequest resume_request;
@@ -5749,9 +5788,9 @@ void test_worker_control_grpc_stream() {
     resume_trigger->mutable_observed_at()->set_seconds(8);
     trainvm::v1::ControllerToWorker resume_trigger_receipt;
     const bool resume_trigger_written = primary->Write(resume_trigger_message);
-    const bool resume_trigger_received = primary->Read(&resume_trigger_receipt);
+    const bool resume_trigger_received = take_frame(is_acknowledgement, resume_trigger_receipt);
     trainvm::v1::ControllerToWorker resume_command_message;
-    const bool resume_command_received = primary->Read(&resume_command_message);
+    const bool resume_command_received = take_frame(is_command, resume_command_message);
     const bool resume_command_valid =
         resume_status.ok() && resume_response.has_lifecycle() &&
         resume_response.lifecycle().kind() ==
@@ -5775,7 +5814,7 @@ void test_worker_control_grpc_stream() {
     resume_ack->mutable_acknowledged_at()->set_seconds(9);
     trainvm::v1::ControllerToWorker resume_ack_receipt;
     const bool resume_ack_written = primary->Write(resume_ack_message);
-    const bool resume_ack_received = primary->Read(&resume_ack_receipt);
+    const bool resume_ack_received = take_frame(is_acknowledgement, resume_ack_receipt);
 
     trainvm::v1::WorkerToController resumed_metric_message;
     auto* resumed_metric = resumed_metric_message.mutable_metric();
@@ -5789,7 +5828,7 @@ void test_worker_control_grpc_stream() {
     resumed_metric->mutable_observed_at()->set_seconds(10);
     trainvm::v1::ControllerToWorker resumed_metric_receipt;
     const bool resumed_metric_written = primary->Write(resumed_metric_message);
-    const bool resumed_metric_received = primary->Read(&resumed_metric_receipt);
+    const bool resumed_metric_received = take_frame(is_acknowledgement, resumed_metric_receipt);
     telemetry_acknowledged =
         heartbeat_written && heartbeat_received &&
         heartbeat_ack.has_acknowledge_worker_sequence() &&
@@ -5823,7 +5862,7 @@ void test_worker_control_grpc_stream() {
     result.mutable_event()->set_worker_sequence(11);
     result_written = primary->Write(result);
     primary->WritesDone();
-    receipt_received = primary->Read(&receipt_message);
+    receipt_received = take_frame(is_receipt, receipt_message);
     trainvm::v1::ControllerToWorker trailing;
     check(!primary->Read(&trailing),
           "WorkerControl gRPC closes after its single result Receipt");

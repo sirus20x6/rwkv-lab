@@ -22,7 +22,12 @@ def supported_implementation_ids() -> frozenset[str]:
             *NormalizationImplementation,
             *OptimizerImplementation,
             *ObjectiveImplementation,
-            *PrecisionImplementation,
+            # Scaled precision codecs (FP8, NVFP4) are runtime-allowlisted for
+            # qualification but remain absent from the unchanged native authority
+            # registry, so they are deliberately not listed here. The unscaled
+            # policies are registered natively and must be.
+            PrecisionImplementation.BF16_PARAMETERS_FP32_REDUCTIONS_V1,
+            PrecisionImplementation.FP32_PARAMETERS_BF16_COMPUTE_V1,
             *ScheduleImplementation,
             *ParameterRouterImplementation,
             *GradientClippingImplementation,

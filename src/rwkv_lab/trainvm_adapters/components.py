@@ -13,10 +13,12 @@ from rwkv_lab.training_components import (
     ContextLengthCurriculum,
     FixedGradientAccumulation,
     FP32ParametersBFloat16ComputePolicy,
+    Float8PrecisionPolicy,
     LayerNormFactory,
     LinearHeadCrossEntropyObjective,
     LinearWarmupConstantConfiguration,
     LinearWarmupCosineConfiguration,
+    NVFP4PrecisionPolicy,
     PowerCoolConfiguration,
     RegisteredActivation,
     ScheduleImplementation,
@@ -129,7 +131,12 @@ class WorkerTrainingComponents:
         self,
         *,
         slot: str = "precision",
-    ) -> BFloat16PrecisionPolicy | FP32ParametersBFloat16ComputePolicy:
+    ) -> (
+        BFloat16PrecisionPolicy
+        | FP32ParametersBFloat16ComputePolicy
+        | Float8PrecisionPolicy
+        | NVFP4PrecisionPolicy
+    ):
         component = self.composition.require(slot, category="precision")
         return precision_policy_from_resolved_component(
             component.runtime_envelope()

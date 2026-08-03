@@ -10,7 +10,7 @@
       ".py"
     ]
   },
-  "source_tree_digest": "sha256:b3add89a181c7e51cddc06a12570faa544a47ec523dcfd6c9b6bbf4afb0a1775",
+  "source_tree_digest": "sha256:580932df5e443a686e8bccf3456b0430df22ac3b405f655cd07aa1cf2c4f3a5b",
   "entries": [
     {
       "source_path": "src/rwkv_lab/__init__.py",
@@ -1393,7 +1393,7 @@
       ],
       "resume_relevance": "compatible",
       "compatibility_workflow_id": "mageflow.full-backbone-pretrain",
-      "source_sha256": "sha256:7aa166bd4a062fa5f183203b0b58f441b2bb2f7651873ea7a76bb7cf73aecc47",
+      "source_sha256": "sha256:04c1a7246f918a80046a67266a0222daf8ffa7b35f4cc051e97821f50733f505",
       "family": "mageflow_diffusion",
       "coverage": "direct",
       "consumers": [
@@ -2442,7 +2442,7 @@
       ],
       "resume_relevance": "terminal_checkpoint",
       "compatibility_workflow_id": "rwkv.scratch-pretrain",
-      "source_sha256": "sha256:2deff18e549a75932176878d4531e6e0a7dd85e6c914644c44dece47ac6751c9",
+      "source_sha256": "sha256:73b46211aba073c4325d814ceb2b96117b9167b441d7aba345b2c41139aee644",
       "family": "rwkv",
       "coverage": "direct",
       "consumers": [
