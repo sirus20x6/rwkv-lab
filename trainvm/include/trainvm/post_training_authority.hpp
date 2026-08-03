@@ -111,6 +111,14 @@ struct PostTrainingArm final {
 [[nodiscard]] std::optional<LifecycleAdmissionRefusal> admit_post_training_arm(
     const PostTrainingArm& arm, ResumeGrade resume_grade, Effect declared_effect);
 
+// The form callers should use. Both of the values above belong to the resolved
+// adapter profile, so passing them separately invites a caller to supply the
+// pair it wants rather than the pair the registry holds — which is the failure
+// this authority exists to refuse. The overload above stays for tests that
+// need to sweep grades and effects the registry does not currently contain.
+[[nodiscard]] std::optional<LifecycleAdmissionRefusal> admit_post_training_arm(
+    const PostTrainingArm& arm, const AdapterProfile& profile);
+
 // The strongest claim this arm's own declarations can support. Callers that
 // want a label rather than a refusal should ask for this and use it, instead
 // of proposing a claim and hoping.
