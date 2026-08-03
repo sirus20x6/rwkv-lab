@@ -50,6 +50,10 @@ AO3_CORPUS_WORKLOAD = (
     REPOSITORY / "scripts/benchmark_workloads/ao3_corpus_lm_step.py"
 )
 AO3_CORPUS_FIXTURE = "rwkv.ao3-real-input"
+VISION_CORPUS_WORKLOAD = (
+    REPOSITORY / "scripts/benchmark_workloads/vision_corpus_image_step.py"
+)
+VISION_CORPUS_FIXTURE = "vision.multimodal-student"
 # A compositor plus an editor can hold several hundred MiB of compute residency
 # on a workstation. One GiB covers that ambient footprint while remaining far
 # below a credible training allocation; operators can pass zero for strict idle.
@@ -71,6 +75,8 @@ def workload_for_fixture(fixture: dict) -> pathlib.Path:
     """Select the closed implementation for a fixture declaration."""
     if fixture.get("id") == AO3_CORPUS_FIXTURE:
         return AO3_CORPUS_WORKLOAD
+    if fixture.get("id") == VISION_CORPUS_FIXTURE:
+        return VISION_CORPUS_WORKLOAD
     return (
         ACCELERATOR_WORKLOAD
         if fixture["accelerator_required"]

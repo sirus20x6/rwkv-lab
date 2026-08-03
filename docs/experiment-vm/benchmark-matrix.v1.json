@@ -159,14 +159,15 @@
       ],
       "declares_curriculum_transition": true,
       "quality_gate": "held_out_image_eval_suite",
-      "notes": "Raw-pixel vision student against a frozen teacher. The quality gate is an image eval suite rather than perplexity, which is why family-specific gates are declared per fixture.",
+      "notes": "Raw-pixel vision student against a frozen teacher. The quality gate is an image eval suite rather than perplexity, which is why family-specific gates are declared per fixture. Input is real: images are read from a JSONL manifest and decoded with PIL, bounded by both encoded bytes and decoded pixels so batch size rather than one outlier image controls the work per step.",
       "parity_evidence": [
         "output_parity",
         "gradient_parity",
         "optimizer_update_parity",
         "state_parity",
         "resumed_trajectory_parity"
-      ]
+      ],
+      "input_pipeline": "manifest_jsonl_pil_decode_rgb_resize"
     },
     {
       "id": "finetune.optimizer-arm",
