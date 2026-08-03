@@ -6130,6 +6130,84 @@ void test_checked_in_topology_example_compiles() {
         "the example carries both selected topologies into the plan");
 }
 
+void test_post_training_arm_is_gated_at_compile_time() {
+  const auto with_arm = [](nlohmann::json arm) {
+    nlohmann::json document = load_fixture();
+    auto& node = document["spec"]["workflow"]["nodes"]["train_to_boundary"];
+    node["invoke"]["training"] = {
+        {"model_family", "rwkv"},
+        {"components",
+         {{"optimizer",
+           {{"key", {{"category", "optimizer"},
+                     {"name", "optimizer.torch_adamw"},
+                     {"version", "1"}}},
+            {"configuration", nlohmann::json::object()}}}}},
+        {"post_training", std::move(arm)},
+    };
+    return document;
+  };
+  const auto refused_with = [&](nlohmann::json arm, std::string_view code) {
+    const auto compiled = trainvm::compile_document(with_arm(std::move(arm)));
+    return !compiled.valid() &&
+           std::ranges::any_of(compiled.diagnostics,
+                               [code](const trainvm::Diagnostic& value) {
+                                 return value.code == code;
+                               });
+  };
+
+  const nlohmann::json honest = {
+      {"arm_id", "arm.finetune-a"},
+      {"kind", "supervised_finetune"},
+      {"bounds", nlohmann::json::array({
+                     {{"kind", "optimizer_steps"}, {"magnitude", 10000}}})},
+      {"reproducibility_claim", "exact"},
+      {"seed", 7},
+  };
+  check(trainvm::compile_document(with_arm(honest)).valid(),
+        "a step-bounded seeded fine-tune arm compiles");
+
+  // The card's first clause, now refused while the author is still writing
+  // rather than at launch. A seed does not rescue a wall-clock endpoint.
+  nlohmann::json timed = honest;
+  timed["bounds"] = nlohmann::json::array(
+      {{{"kind", "wall_clock_seconds"}, {"magnitude", 3600}}});
+  check(refused_with(timed, "post-training-claim-unsupported"),
+        "a wall-clock arm claiming exact reproducibility is refused");
+  timed["reproducibility_claim"] = "none";
+  check(trainvm::compile_document(with_arm(timed)).valid(),
+        "the same wall-clock arm compiles once it is labelled honestly");
+
+  // The card's second clause.
+  nlohmann::json unauthorized = honest;
+  unauthorized["kind"] = "direct_rlvr";
+  unauthorized["verifier_identity"] = "verifier.unit-tests@sha256-abc";
+  unauthorized["reproducibility_claim"] = "seeded";
+  unauthorized["external_mutations"] = nlohmann::json::array(
+      {{{"target", "verifier.unit-tests"},
+        {"effect", "record_judgement"},
+        {"authorized", false}}});
+  check(refused_with(unauthorized, "post-training-mutation-unauthorized"),
+        "an unauthorized external mutation is refused at compile time");
+
+  nlohmann::json anonymous_verifier = honest;
+  anonymous_verifier["kind"] = "direct_rlvr";
+  anonymous_verifier["reproducibility_claim"] = "seeded";
+  check(refused_with(anonymous_verifier, "post-training-verifier-unbound"),
+        "an RLVR arm with no verifier identity is refused");
+
+  // An unknown enum name must name itself rather than decode to a default and
+  // then be validated as something the author never wrote.
+  nlohmann::json unknown_kind = honest;
+  unknown_kind["kind"] = "supervised_finetuning";
+  check(refused_with(unknown_kind, "training.post_training.kind"),
+        "an unknown arm kind is reported by name");
+  nlohmann::json unknown_bound = honest;
+  unknown_bound["bounds"] =
+      nlohmann::json::array({{{"kind", "epochs"}, {"magnitude", 3}}});
+  check(refused_with(unknown_bound, "training.post_training.bound"),
+        "an unknown run bound kind is reported by name");
+}
+
 void test_topology_selection_compiles_and_refuses_invalid_combinations() {
   const auto with_topologies = [](nlohmann::json topologies) {
     nlohmann::json document = load_fixture();
@@ -13046,6 +13124,7 @@ int main() {
     test_resource_releasing_pause_lifecycle();
     test_adversarial_control_idempotency_and_replay();
     test_topology_selection_compiles_and_refuses_invalid_combinations();
+  test_post_training_arm_is_gated_at_compile_time();
     test_checked_in_topology_example_compiles();
     test_typed_managed_resource_release();
     test_typed_cache_qualification_executor();

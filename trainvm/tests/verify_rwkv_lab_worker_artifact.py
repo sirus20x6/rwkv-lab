@@ -271,18 +271,9 @@ def main() -> int:
     ):
         raise SystemExit("native runtime requirements schema drifted")
     adapters = tuple(profile["adapter"] for profile in requirements["profiles"])
-    shared_distributions = tuple(requirements["shared_root_distributions"])
-    if (
-        len(adapters) != 19
-        or len(set(adapters)) != len(adapters)
-        or shared_distributions != tuple(sorted(set(shared_distributions)))
-        or any(
-            not set(shared_distributions).issubset(profile["root_distributions"])
-            for profile in requirements["profiles"]
-        )
-    ):
-        raise SystemExit("native runtime requirements are not canonical")
-
+    # The adapter-set pin lives in verify_rwkv_lab_runtime_requirements.py so
+    # that it can run in hosted CI; this test builds a sealed worker artifact
+    # and is excluded there. What remains here is only what needs the artifact.
     module_spec = importlib.util.spec_from_file_location(
         "materialize_trainvm_worker_deployment", materializer
     )
@@ -306,8 +297,13 @@ def main() -> int:
             for profile in requirements["profiles"]
         },
     )
-    if len(grouped) != len(adapters) - 1 or not any(
-        members == list(adapters[:2]) for members in grouped.values()
+    # The three MageFlow routes deliberately share one identical sealed Python
+    # closure. Every other adapter currently owns a distinct closure.
+    # Derived by name, not by position. This used to read adapters[:3], which
+    # silently depended on registry order that is pinned in another file now.
+    mageflow_routes = [adapter for adapter in adapters if "mageflow" in adapter]
+    if len(grouped) != len(adapters) - (len(mageflow_routes) - 1) or not any(
+        members == mageflow_routes for members in grouped.values()
     ):
         raise SystemExit("per-adapter runtime grouping drifted from native requirements")
     with tempfile.TemporaryDirectory(prefix="trainvm-worker-artifact-") as raw:
