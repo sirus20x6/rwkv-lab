@@ -1274,8 +1274,10 @@ def _generate_eval_snapshot(
         label = "pinned base model" if baseline else f"training step {step}"
         items.append(
             {
+                "image_id": str(row["image_id"]),
                 "image": str(image_path),
                 "prompt": prompts[index],
+                "route": "full_backbone",
                 "reference": f"held-out target image: {row['image']}",
                 "caption": (
                     f"{label} · seed {seeds[index]} · "
@@ -1289,6 +1291,14 @@ def _generate_eval_snapshot(
                 "seed": seeds[index],
                 "width": widths[index],
                 "height": heights[index],
+                "sampling_attributes": {
+                    "cfg": f"{config.eval_gen_cfg:g}",
+                    "height": str(heights[index]),
+                    "route": "full_backbone",
+                    "sampler": "mage_flow_rectified_flow",
+                    "steps": str(config.eval_gen_steps),
+                    "width": str(widths[index]),
+                },
             }
         )
     _json_dump(
@@ -2029,6 +2039,22 @@ def train(
         last_epoch, next_pack = epoch, 0
         start_pack = 0
 
+    if eval_rows and config.eval_gen_samples:
+        if mutable_controls is not None:
+            worker_controls.evaluation(global_step, mutable_controls.apply)
+        if accelerator.is_main_process:
+            _generate_eval_snapshot(
+                pipeline,
+                transformer,
+                eval_rows,
+                config,
+                accelerator.device,
+                output_dir,
+                step=global_step,
+            )
+        accelerator.wait_for_everyone()
+    if mutable_controls is not None:
+        worker_controls.checkpoint(global_step, mutable_controls.apply)
     final_checkpoint = _save_checkpoint(
         accelerator,
         output_dir,

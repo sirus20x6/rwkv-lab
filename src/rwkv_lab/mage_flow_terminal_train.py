@@ -46,6 +46,7 @@ from rwkv_lab.mage_flow_expert_train import (
     encode_domain_batch,
     generate_eval_gallery,
     prefetch_frozen_encoder_batch,
+    unified_evaluation_is_complete,
 )
 from rwkv_lab.mage_flow_optimizations import (
     ACTIVATION_CHECKPOINT_MODES,
@@ -4181,6 +4182,36 @@ def train(
             "batch_start": batch_start,
         }
 
+    if all_eval_rows and not unified_evaluation_is_complete(output_dir, step):
+        if mutable_controls is not None:
+            worker_controls.evaluation(step, mutable_controls.apply)
+        if switcher is None:
+            _run_evaluation(
+                pipeline=pipeline,
+                transformer=transformer,
+                controller=controller,
+                repa=repa,
+                model=model,
+                rows=eval_rows,
+                config=config,
+                device=device,
+                output_dir=output_dir,
+                step=step,
+            )
+        else:
+            _run_alternating_evaluation(
+                pipeline=pipeline,
+                transformer=transformer,
+                controller=controller,
+                switcher=switcher,
+                repa=repa,
+                model=model,
+                rows_by_domain=eval_rows_by_domain,
+                config=config,
+                device=device,
+                output_dir=output_dir,
+                step=step,
+            )
     if mutable_controls is not None:
         worker_controls.checkpoint(step, mutable_controls.apply)
     checkpoint = _save_checkpoint(
