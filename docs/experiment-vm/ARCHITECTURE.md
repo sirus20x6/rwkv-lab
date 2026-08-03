@@ -56,6 +56,12 @@ before the field existed starts failing at once. That reads like a broken
 feature rather than a decoding rule. If a field should be omissible, declare it
 `std::optional` and treat absence explicitly at the use site.
 
+That rule governs documents an author writes. A field added to an envelope the
+C++ and Python sides exchange — a worker invocation, a resolved training
+composition — is a different problem with its own rule, because both readers
+check the key set exactly and neither is reading a schema. See "Adding a field
+to a shared envelope" in [PYTHON_WORKER_SDK.md](PYTHON_WORKER_SDK.md).
+
 GCC 16 in this workspace compiles the P2996 reflection syntax with
 `-std=c++26 -freflection`, consistent with the [GCC C++ status table](https://gcc.gnu.org/projects/cxx-status.html).
 [Clang's C++ status table](https://clang.llvm.org/cxx_status) still marks P2996 unsupported. TrainVM
