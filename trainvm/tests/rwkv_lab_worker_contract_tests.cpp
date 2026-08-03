@@ -46,6 +46,19 @@ nlohmann::json load_mageflow_fixture() {
   return source;
 }
 
+nlohmann::json load_mageflow_cache_artifact_fixture() {
+  const auto path = std::filesystem::path(TRAINVM_SOURCE_ROOT) /
+                    "docs/experiment-vm/examples/mageflow-cache-artifacts.json";
+  std::ifstream input(path);
+  if (!input) {
+    throw std::runtime_error(
+        "could not open typed MageFlow cache-artifact fixture");
+  }
+  nlohmann::json source;
+  input >> source;
+  return source;
+}
+
 nlohmann::json load_vision_representation_ab_fixture() {
   const auto path = std::filesystem::path(TRAINVM_SOURCE_ROOT) /
                     "docs/experiment-vm/examples/vision-representation-ab.json";
@@ -81,8 +94,8 @@ int main() {
     const trainvm::RwkvLabWorkerContract contract =
         trainvm::rwkv_lab_worker_contract(fingerprint);
     require(contract.adapter_registry.api_version == "trainvm.adapters/v2" &&
-                contract.adapter_registry.profiles.size() == 21U,
-            "rwkv_lab catalog must expose twenty-one exact adapter profiles");
+                contract.adapter_registry.profiles.size() == 23U,
+            "rwkv_lab catalog must expose twenty-three exact adapter profiles");
     require(std::ranges::is_sorted(contract.provided_capabilities) &&
                 std::ranges::adjacent_find(contract.provided_capabilities) ==
                     contract.provided_capabilities.end(),
@@ -92,7 +105,7 @@ int main() {
         trainvm::rwkv_lab_worker_runtime_requirements();
     require(runtime_requirements.api_version ==
                     "trainvm.rwkv-lab-worker-runtime-requirements/v1" &&
-                runtime_requirements.profiles.size() == 21U &&
+                runtime_requirements.profiles.size() == 23U &&
                 runtime_requirements.shared_root_distributions ==
                     std::vector<std::string>(
                         {"grpcio", "pillow", "protobuf", "torch"}),
@@ -118,6 +131,10 @@ int main() {
         contract, "rwkv-lab.mageflow-full-backbone");
     const auto& terminal = find_profile(
         contract, "rwkv-lab.mageflow-terminal-expert");
+    const auto& cache_plan = find_profile(
+        contract, "rwkv-lab.mageflow-cache-plan");
+    const auto& cache_build = find_profile(
+        contract, "rwkv-lab.mageflow-cache-build");
     const auto& qwen = find_profile(contract, "rwkv-lab.qwen-ao3");
     const auto& posttraining =
         find_profile(contract, "rwkv-lab.rwkv-posttraining");
@@ -277,6 +294,31 @@ int main() {
                 decision.lifecycle.resume_grade == trainvm::ResumeGrade::none &&
                 !decision.lifecycle.profile,
             "scalar metric decision must remain stateless and non-training");
+    require(!cache_plan.training_composition &&
+                !cache_plan.lifecycle.stateful &&
+                cache_plan.lifecycle.resume_grade ==
+                    trainvm::ResumeGrade::none &&
+                !cache_plan.lifecycle.profile &&
+                cache_plan.effect == trainvm::Effect::workspace_write &&
+                cache_plan.idempotency == trainvm::Idempotency::replay_safe &&
+                !cache_build.training_composition &&
+                cache_build.lifecycle.stateful &&
+                cache_build.lifecycle.graceful_stop &&
+                cache_build.lifecycle.resume_grade ==
+                    trainvm::ResumeGrade::restart_only &&
+                !cache_build.lifecycle.checkpoint_now &&
+                !cache_build.lifecycle.profile && terminal.authoring &&
+                terminal.authoring->inputs.contains("cache") &&
+                terminal.authoring->inputs.contains("checkpoint") &&
+                !terminal.authoring->inputs.at("checkpoint").required &&
+                terminal.authoring->inputs.at("checkpoint").artifact_type ==
+                    trainvm::ArtifactType::checkpoint &&
+                !terminal.authoring->inputs.at("cache").required &&
+                terminal.authoring->inputs.at("cache").artifact_type ==
+                    trainvm::ArtifactType::dataset &&
+                terminal.authoring->inputs.at("cache").artifact_schema ==
+                    "rwkv-lab.encoder-cache.v1",
+            "MageFlow cache operations must expose their exact non-training lifecycles");
     require(appearance.lifecycle.resume_grade ==
                 trainvm::ResumeGrade::compatible &&
                 appearance.lifecycle.checkpoint_now &&
@@ -342,7 +384,7 @@ int main() {
         operation_registry.operation_descriptors_json();
     require(operation_document.at("api_version") ==
                     "trainvm.operations/v1" &&
-                operation_document.at("operations").size() == 21U &&
+                operation_document.at("operations").size() == 23U &&
                 operation_registry.operation_descriptors_digest() ==
                     "sha256:" +
                         trainvm::sha256_hex(operation_document.dump()),
@@ -351,34 +393,38 @@ int main() {
     require(operations.at(0).at("key").at("adapter") ==
                     "rwkv-lab.mageflow-appearance-expert" &&
                 operations.at(1).at("key").at("adapter") ==
-                    "rwkv-lab.mageflow-full-backbone" &&
+                    "rwkv-lab.mageflow-cache-build" &&
                 operations.at(2).at("key").at("adapter") ==
-                    "rwkv-lab.mageflow-terminal-expert" &&
+                    "rwkv-lab.mageflow-cache-plan" &&
                 operations.at(3).at("key").at("adapter") ==
-                    "rwkv-lab.qwen-ao3" &&
+                    "rwkv-lab.mageflow-full-backbone" &&
                 operations.at(4).at("key").at("adapter") ==
-                    "rwkv-lab.rwkv-optimizer-finetune" &&
+                    "rwkv-lab.mageflow-terminal-expert" &&
                 operations.at(5).at("key").at("adapter") ==
-                    "rwkv-lab.rwkv-posttraining" &&
+                    "rwkv-lab.qwen-ao3" &&
                 operations.at(6).at("key").at("adapter") ==
-                    "rwkv-lab.rwkv-rlvr" &&
+                    "rwkv-lab.rwkv-optimizer-finetune" &&
                 operations.at(7).at("key").at("adapter") ==
-                    "rwkv-lab.rwkv-scratch" &&
+                    "rwkv-lab.rwkv-posttraining" &&
                 operations.at(8).at("key").at("adapter") ==
-                    "rwkv-lab.scalar-metric-decision" &&
+                    "rwkv-lab.rwkv-rlvr" &&
                 operations.at(9).at("key").at("adapter") ==
+                    "rwkv-lab.rwkv-scratch" &&
+                operations.at(10).at("key").at("adapter") ==
+                    "rwkv-lab.scalar-metric-decision" &&
+                operations.at(11).at("key").at("adapter") ==
                     "rwkv-lab.transformer-mla" &&
-                operations.at(15).at("key").at("adapter") ==
-                    "rwkv-lab.transformer-mla-parallel" &&
-                operations.at(16).at("key").at("adapter") ==
-                    "rwkv-lab.transformer-mla-rwkv8" &&
                 operations.at(17).at("key").at("adapter") ==
-                    "rwkv-lab.vision-frozen-adapter" &&
+                    "rwkv-lab.transformer-mla-parallel" &&
                 operations.at(18).at("key").at("adapter") ==
-                    "rwkv-lab.vision-native-head" &&
+                    "rwkv-lab.transformer-mla-rwkv8" &&
                 operations.at(19).at("key").at("adapter") ==
-                    "rwkv-lab.vision-rwkv-student" &&
+                    "rwkv-lab.vision-frozen-adapter" &&
                 operations.at(20).at("key").at("adapter") ==
+                    "rwkv-lab.vision-native-head" &&
+                operations.at(21).at("key").at("adapter") ==
+                    "rwkv-lab.vision-rwkv-student" &&
+                operations.at(22).at("key").at("adapter") ==
                     "rwkv-lab.vision-teacher-compressor",
             "operation descriptors must use canonical exact-key ordering");
     for (const nlohmann::json& operation : operations) {
@@ -408,6 +454,33 @@ int main() {
       const bool is_mageflow =
           operation.at("key").at("adapter").get<std::string>().starts_with(
               "rwkv-lab.mageflow-");
+      const bool is_cache_plan =
+          operation.at("key").at("adapter") ==
+          "rwkv-lab.mageflow-cache-plan";
+      const bool is_cache_build =
+          operation.at("key").at("adapter") ==
+          "rwkv-lab.mageflow-cache-build";
+      if (is_cache_plan || is_cache_build) {
+        const auto& authoring = operation.at("authoring");
+        require(authoring.at("inputs").at("checkpoint").at("required") ==
+                        true &&
+                    authoring.at("inputs")
+                            .at(is_cache_plan ? "config" : "plan")
+                            .at("required") == true &&
+                    authoring.at("outputs")
+                            .at(is_cache_plan ? "plan" : "cache")
+                            .at("required") == true &&
+                    authoring.at("outputs")
+                            .at(is_cache_plan ? "plan" : "cache")
+                            .at("artifact_schema") ==
+                        (is_cache_plan
+                             ? "rwkv-lab.mageflow-cache-plan.v1"
+                             : "rwkv-lab.encoder-cache.v1") &&
+                    (!operation.contains("training_composition") ||
+                     operation.at("training_composition").is_null()),
+                "MageFlow cache operation ports must preserve immutable lineage");
+        continue;
+      }
       require(operation.at("authoring").at("inputs").at("config").at(
                   "type") == "object" &&
                   operation.at("authoring").at("inputs").at("config").at(
@@ -535,6 +608,10 @@ int main() {
                 !appearance.authoring->outputs.contains("metrics"),
             "MageFlow must advertise only its protocol-published checkpoint and eval gallery outputs");
 
+    const trainvm::CompileResult cache_handoff_plan =
+        trainvm::compile_document(load_mageflow_cache_artifact_fixture());
+    require(cache_handoff_plan.valid(),
+            "typed MageFlow checkpoint-cache continuation fixture must compile");
     nlohmann::json exact_source = load_mageflow_fixture();
     exact_source["spec"].erase("execution");
     exact_source["spec"]["recovery"]["exact_resume"] = false;
@@ -860,7 +937,7 @@ int main() {
         extended_registry.operation_descriptors_json();
     const auto& extended_operations =
         extended_document.at("operations");
-    require(extended_operations.size() == 21U &&
+    require(extended_operations.size() == 24U &&
                 std::ranges::any_of(
                     extended_operations, [](const nlohmann::json& operation) {
                       return operation.at("key").at("adapter") ==
@@ -969,7 +1046,7 @@ int main() {
                     contract.provided_capabilities &&
                 deployment.host_launch_registry.api_version ==
                     "trainvm.host-launches/v4" &&
-                deployment.host_launch_registry.profiles.size() == 21U,
+                deployment.host_launch_registry.profiles.size() == 23U,
             "deployment lowering must retain the complete reflected worker catalog");
     for (const trainvm::HostLaunchProfile& launch :
          deployment.host_launch_registry.profiles) {

@@ -28,6 +28,7 @@ from .checkpoint import (
     PublishedCheckpoint,
     ResolvedResumeCheckpoint,
     publish_checkpoint_requests,
+    resolve_input_checkpoint,
     resolve_resume_checkpoint,
 )
 from .controls import (
@@ -225,6 +226,7 @@ __all__ = [
     "read_input_artifact_file",
     "read_worker_bootstrap_fd",
     "resolve_input_artifact",
+    "resolve_input_checkpoint",
     "resolve_resume_checkpoint",
     "state_fingerprint",
     "step_profiler_from_invocation",

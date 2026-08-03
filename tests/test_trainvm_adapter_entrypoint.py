@@ -39,6 +39,12 @@ from rwkv_lab.trainvm_adapters.io import (
     read_inline_config,
     require_run_directory,
 )
+from rwkv_lab.trainvm_adapters.mageflow_cache import (
+    MageFlowCacheConfigError,
+    MageFlowCachePlanConfig,
+    MageFlowEncoderCacheConfig,
+    finite_cache_receipt,
+)
 from rwkv_lab.trainvm_worker import (
     ExecutionPhase,
     ExecutionPhaseRequest,
@@ -102,6 +108,38 @@ def test_inline_config_is_frozen_content_not_a_mutable_path(tmp_path) -> None:
         read_inline_config({"config": str(tmp_path / "mutable.json")})
     with pytest.raises(AdapterInputError, match="exactly one"):
         read_inline_config({"config": {}, "argv": ["--import", "anything"]})
+
+
+def test_mageflow_cache_configs_are_bounded_and_typed(tmp_path) -> None:
+    plan = MageFlowCachePlanConfig(trainer={"max_steps": 20}, optimizer_steps=5)
+    assert plan.optimizer_steps == 5
+    with pytest.raises(MageFlowCacheConfigError, match="positive integer"):
+        MageFlowCachePlanConfig(trainer={"max_steps": 20}, optimizer_steps=True)
+    with pytest.raises(MageFlowCacheConfigError, match="finite JSON"):
+        MageFlowCachePlanConfig(trainer={"lr": float("nan")}, optimizer_steps=5)
+
+    config = MageFlowEncoderCacheConfig(
+        train_manifest=str(tmp_path / "coverage.jsonl"),
+        eval_manifest=None,
+        encoder_cache_dir=str(tmp_path / "cache"),
+        model_id="microsoft/Mage-Flow",
+        model_revision="revision",
+        model_path=None,
+        attention_backend="flash4",
+        vae_sample_posterior=False,
+        caption_dropout=0.1,
+        seed=42,
+        timestep_sampling="shifted_uniform",
+        timestep_shift=3.0,
+        repa_enabled=False,
+        repa_use_posterior_mean=True,
+    )
+    config.validate()
+    assert finite_cache_receipt({"state": "complete", "elapsed": 1.0})[
+        "state"
+    ] == "complete"
+    with pytest.raises(MageFlowCacheConfigError, match="not finite"):
+        finite_cache_receipt({"elapsed": float("inf")})
 
 
 def test_run_directory_must_equal_the_authority_workspace(tmp_path) -> None:
@@ -1554,6 +1592,18 @@ def test_transformer_mla_handler_binds_paths_profile_and_compatible_checkpoint(
 
 def test_dispatch_table_is_closed_and_training_composition_is_required() -> None:
     expected = {
+        (
+            "rwkv-lab.mageflow-cache-plan",
+            "1.0.0",
+            "prepare",
+            "rwkv_lab.mageflow_cache_plan.v1.Prepare",
+        ),
+        (
+            "rwkv-lab.mageflow-cache-build",
+            "1.0.0",
+            "build",
+            "rwkv_lab.mageflow_cache_build.v1.Build",
+        ),
         (
             "rwkv-lab.mageflow-appearance-expert",
             "1.0.0",

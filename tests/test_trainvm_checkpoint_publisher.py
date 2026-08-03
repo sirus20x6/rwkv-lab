@@ -17,6 +17,7 @@ from rwkv_lab.trainvm_worker import (
     CheckpointPublisher,
     PublishedCheckpoint,
     publish_checkpoint_requests,
+    resolve_input_checkpoint,
     resolve_resume_checkpoint,
 )
 from rwkv_lab.trainvm_worker.checkpoint import _STATE_COMPONENTS
@@ -278,6 +279,75 @@ def resume_invocation(
             "resume_command_id": "resume-1",
         },
     )
+
+
+def input_checkpoint_invocation(
+    session: FakeCheckpointSession,
+    result: PublishedCheckpoint,
+) -> SimpleNamespace:
+    resume = resume_invocation(session, result)
+    return SimpleNamespace(
+        run_id=resume.run_id,
+        node_id="cache-plan",
+        attempt_id="cache-plan@1",
+        workspace=resume.workspace,
+        inputs={"checkpoint": resume.resume["checkpoint"]},
+    )
+
+
+def test_ordinary_checkpoint_input_reuses_full_snapshot_verification(
+    tmp_path: Path,
+) -> None:
+    session = FakeCheckpointSession(tmp_path)
+    result = CheckpointPublisher(session).publish(
+        make_checkpoint(tmp_path),
+        optimizer_step=12,
+        resume_grade="compatible",
+        state_components=("model", "optimizer", "rng_torch"),
+        parent_artifact_ids=("base-model-1",),
+    )
+    invocation = input_checkpoint_invocation(session, result)
+
+    resolved = resolve_input_checkpoint(
+        invocation,
+        "checkpoint",
+        required_schema="rwkv-lab.test-checkpoint.v1",
+    )
+
+    assert resolved.artifact_id == result.artifact_id
+    assert resolved.optimizer_step == 12
+    assert resolved.payload_directory.is_dir()
+
+
+def test_ordinary_checkpoint_input_rejects_wrong_schema_and_escape(
+    tmp_path: Path,
+) -> None:
+    session = FakeCheckpointSession(tmp_path)
+    result = CheckpointPublisher(session).publish(
+        make_checkpoint(tmp_path),
+        optimizer_step=12,
+        resume_grade="compatible",
+        state_components=("model", "optimizer", "rng_torch"),
+    )
+    invocation = input_checkpoint_invocation(session, result)
+    with pytest.raises(CheckpointPublicationError, match="descriptor is invalid"):
+        resolve_input_checkpoint(
+            invocation,
+            "checkpoint",
+            required_schema="rwkv-lab.wrong-checkpoint.v1",
+        )
+
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+    invocation.workspace = MappingProxyType(
+        {
+            "run_directory": str(tmp_path),
+            "allowed_read_roots": (str(unrelated),),
+            "allowed_write_roots": (str(unrelated),),
+        }
+    )
+    with pytest.raises(CheckpointPublicationError, match="escaped workspace"):
+        resolve_input_checkpoint(invocation, "checkpoint")
 
 
 def test_controller_selected_resume_checkpoint_is_rehashed_before_use(

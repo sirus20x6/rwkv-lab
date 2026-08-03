@@ -1,0 +1,8 @@
+{
+  "api_version": "trainvm.input-content-root-set/v1",
+  "paths": [
+    "/thearray/git/datasets/midjourney-v6-recap-continuation-30pct-b-512-1024",
+    "/thearray/git/moe-mla/runs/mage_flow_terminal_tread_loop_repa_fixed_v2/checkpoint-00004500/mageflow-animation-terminal-expert.safetensors",
+    "/thearray/git/ob/text-generation-webui/models/Mage-Flow-Base"
+  ]
+}

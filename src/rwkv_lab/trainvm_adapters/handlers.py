@@ -27,6 +27,7 @@ from rwkv_lab.trainvm_worker import (
     WorkerStepProfiler,
     load_input_artifact_json,
     resolve_input_artifact,
+    resolve_input_checkpoint,
     resolve_resume_checkpoint,
 )
 
@@ -38,6 +39,11 @@ from .checkpoints import (
 )
 from .components import WorkerTrainingComponents
 from .io import WorkspacePathAuthority, read_inline_config
+from .mageflow_cache import (
+    MageFlowCachePlanConfig,
+    MageFlowEncoderCacheConfig,
+    finite_cache_receipt,
+)
 from .mageflow_controls import lower_initial_mageflow_controls
 from .mageflow_gallery import completed_mageflow_gallery_request
 from .metric_decision import ScalarMetricDecisionConfig
@@ -153,8 +159,9 @@ def _resume_payload(
     paths: WorkspacePathAuthority,
     *,
     required_state: frozenset[str],
+    resolved: Any | None = None,
 ) -> Path | None:
-    resolved = resolve_resume_checkpoint(invocation)
+    resolved = resolved or resolve_resume_checkpoint(invocation)
     if resolved is None:
         return None
     missing = required_state.difference(resolved.state_components)
@@ -500,38 +507,22 @@ def _mageflow_full_backbone(
     )
 
 
-def _terminal_expert(
-    invocation: WorkerInvocation,
-    components: WorkerTrainingComponents,
-    step_profiler: WorkerStepProfiler | None = None,
-    observability: WorkerObservability | None = None,
-    controls: WorkerControlRuntime | None = None,
-    execution_phases: WorkerExecutionPhases | None = None,
-    publications: WorkerPublicationRuntime | None = None,
-) -> HandlerResult:
-    paths = WorkspacePathAuthority.from_workspace(
-        invocation.workspace, require_content=True
-    )
-    raw_config = read_inline_config(invocation.inputs)
-    if execution_phases is not None:
-        compile_request = execution_phases.request(ExecutionPhase.COMPILE)
-        compile_enabled = (
-            compile_request.enabled if compile_request is not None else False
-        )
-        raw_config = {
-            **raw_config,
-            "compile_transformer_blocks": compile_enabled,
-            "compile_vae_encoder": compile_enabled,
-        }
+def _resolve_terminal_config(
+    paths: WorkspacePathAuthority,
+    config: Any,
+    *,
+    resume_payload: Path | None = None,
+    output_directory: Path | None = None,
+) -> Any:
+    """Resolve every terminal/cache path through workspace content authority."""
     train_manifest = paths.read_path(
-        _raw_config_path(raw_config, "train_manifest", required=True) or "",
+        config.train_manifest,
         label="train_manifest",
         kind="file",
     )
-    eval_value = _raw_config_path(raw_config, "eval_manifest", required=False)
     eval_manifest = (
-        paths.read_path(eval_value, label="eval_manifest", kind="file")
-        if eval_value
+        paths.read_path(config.eval_manifest, label="eval_manifest", kind="file")
+        if config.eval_manifest
         else None
     )
     paths.verify_jsonl_file_references(
@@ -545,18 +536,6 @@ def _terminal_expert(
             fields=("image", "image_path"),
             label="eval_manifest",
         )
-    from rwkv_lab.mage_flow_terminal_train import TerminalExpertTrainConfig, train
-
-    config = TerminalExpertTrainConfig(**raw_config)
-    if controls is not None:
-        lower_initial_mageflow_controls(config, controls)
-    resume_payload = _resume_payload(
-        invocation,
-        paths,
-        required_state=frozenset(
-            {"data_cursor", "expert_routing", "model", "optimizer", "rng_torch"}
-        ),
-    )
     expert_checkpoints = (
         {
             domain: str(
@@ -571,7 +550,12 @@ def _terminal_expert(
         if config.expert_checkpoints
         else None
     )
-    config = replace(
+    resolved_output = (
+        output_directory
+        if output_directory is not None
+        else paths.exact_run_directory(config.output_dir)
+    )
+    return replace(
         config,
         train_manifest=str(train_manifest),
         expert_checkpoint=str(
@@ -579,7 +563,7 @@ def _terminal_expert(
                 config.expert_checkpoint, label="expert_checkpoint", kind="file"
             )
         ),
-        output_dir=str(paths.exact_run_directory(config.output_dir)),
+        output_dir=str(resolved_output),
         eval_manifest=(str(eval_manifest) if eval_manifest is not None else None),
         shared_backbone_checkpoint=_optional_read_path(
             paths,
@@ -623,6 +607,140 @@ def _terminal_expert(
         ),
         expert_checkpoints=expert_checkpoints,
     )
+
+
+def _terminal_expert(
+    invocation: WorkerInvocation,
+    components: WorkerTrainingComponents,
+    step_profiler: WorkerStepProfiler | None = None,
+    observability: WorkerObservability | None = None,
+    controls: WorkerControlRuntime | None = None,
+    execution_phases: WorkerExecutionPhases | None = None,
+    publications: WorkerPublicationRuntime | None = None,
+) -> HandlerResult:
+    paths = WorkspacePathAuthority.from_workspace(
+        invocation.workspace, require_content=True
+    )
+    inputs = getattr(invocation, "inputs", None)
+    if (
+        not isinstance(inputs, Mapping)
+        or "config" not in inputs
+        or not set(inputs).issubset({"cache", "checkpoint", "config"})
+    ):
+        raise AdapterDispatchError(
+            "terminal MageFlow requires config plus optional checkpoint/cache artifacts"
+        )
+    raw_config = read_inline_config({"config": inputs["config"]})
+    if execution_phases is not None:
+        compile_request = execution_phases.request(ExecutionPhase.COMPILE)
+        compile_enabled = (
+            compile_request.enabled if compile_request is not None else False
+        )
+        raw_config = {
+            **raw_config,
+            "compile_transformer_blocks": compile_enabled,
+            "compile_vae_encoder": compile_enabled,
+        }
+    from rwkv_lab.mage_flow_terminal_train import TerminalExpertTrainConfig, train
+
+    config = TerminalExpertTrainConfig(**raw_config)
+    if controls is not None:
+        lower_initial_mageflow_controls(config, controls)
+    if "checkpoint" in inputs and getattr(invocation, "resume", None) is not None:
+        raise AdapterDispatchError(
+            "terminal MageFlow cannot select both recovery and input checkpoints"
+        )
+    resolved_resume = (
+        resolve_input_checkpoint(invocation, "checkpoint")
+        if "checkpoint" in inputs
+        else resolve_resume_checkpoint(invocation)
+    )
+    resume_payload = _resume_payload(
+        invocation,
+        paths,
+        required_state=frozenset(
+            {"data_cursor", "expert_routing", "model", "optimizer", "rng_torch"}
+        ),
+        resolved=resolved_resume,
+    )
+    cache_binding: tuple[Path, Path, int] | None = None
+    if "cache" in inputs:
+        if resolved_resume is None or resume_payload is None:
+            raise AdapterDispatchError(
+                "terminal MageFlow cache consumption requires a selected checkpoint"
+            )
+        if (
+            config.encoder_cache_mode != "off"
+            or config.encoder_cache_dir is not None
+            or config.encoder_cache_coverage_manifest is not None
+            or config.encoder_cache_covered_until_step is not None
+            or config.offload_cached_encoders
+        ):
+            raise AdapterDispatchError(
+                "artifact-bound encoder cache rejects duplicate path configuration"
+            )
+        cache = resolve_input_artifact(
+            invocation,
+            "cache",
+            required_kind="dataset",
+            required_schema="rwkv-lab.encoder-cache.v1",
+        )
+        if resolved_resume.artifact_id not in cache.parent_artifact_ids:
+            raise AdapterDispatchError(
+                "encoder cache is not descended from the selected checkpoint"
+            )
+        cache_receipt = load_input_artifact_json(
+            cache, "trainvm_cache_receipt.json", maximum_bytes=64 * 1024
+        )
+        coverage_objects = [
+            item for item in cache.objects if item.relative_path == "coverage.jsonl"
+        ]
+        plan_artifact_id = cache_receipt.get("plan_artifact_id")
+        covered_until_step = cache_receipt.get("covered_until_step")
+        if (
+            cache_receipt.get("schema") != "rwkv-lab.encoder-cache-receipt.v1"
+            or cache_receipt.get("checkpoint_artifact_id")
+            != resolved_resume.artifact_id
+            or not isinstance(plan_artifact_id, str)
+            or not plan_artifact_id
+            or set(cache.parent_artifact_ids)
+            != {resolved_resume.artifact_id, plan_artifact_id}
+            or cache_receipt.get("start_step") != resolved_resume.optimizer_step
+            or not isinstance(covered_until_step, int)
+            or isinstance(covered_until_step, bool)
+            or covered_until_step <= resolved_resume.optimizer_step
+            or len(coverage_objects) != 1
+            or cache_receipt.get("coverage_sha256")
+            != coverage_objects[0].sha256
+        ):
+            raise AdapterDispatchError("encoder cache receipt lineage is invalid")
+        coverage_manifest = cache.payload_directory / "coverage.jsonl"
+        paths.verify_jsonl_file_references(
+            coverage_manifest,
+            fields=("image", "image_path"),
+            label="encoder cache coverage manifest",
+        )
+        cache_binding = (
+            cache.payload_directory,
+            coverage_manifest,
+            covered_until_step,
+        )
+    config = _resolve_terminal_config(
+        paths,
+        config,
+        resume_payload=resume_payload,
+    )
+    if cache_binding is not None:
+        cache_directory, coverage_manifest, covered_until_step = cache_binding
+        config = replace(
+            config,
+            encoder_cache_dir=str(cache_directory),
+            encoder_cache_mode="read_only",
+            offload_cached_encoders=True,
+            encoder_cache_coverage_manifest=str(coverage_manifest),
+            encoder_cache_covered_until_step=covered_until_step,
+        )
+    eval_manifest = Path(config.eval_manifest) if config.eval_manifest else None
     checkpoint_state = (
         "component_composition",
         "control_revision",
@@ -681,6 +799,315 @@ def _terminal_expert(
         optimizer_step=step,
         checkpoint_requests=((request,) if request is not None else ()),
         eval_gallery_requests=((gallery,) if gallery is not None else ()),
+    )
+
+
+def _write_canonical_json(path: Path, value: object) -> None:
+    try:
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise AdapterDispatchError("cache artifact JSON is invalid") from error
+    if not encoded or len(encoded) > 4 * 1024 * 1024:
+        raise AdapterDispatchError("cache artifact JSON exceeds its byte bound")
+    temporary = path.with_name(path.name + ".canonical")
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o640,
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(encoded)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        temporary = path.with_name(path.name + ".canonical")
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _canonicalize_generated_json(directory: Path) -> None:
+    """Make generated plan JSON portable and byte-stable before publication."""
+
+    for path in sorted(directory.rglob("*.json")):
+        if path.is_symlink() or not path.is_file():
+            raise AdapterDispatchError("cache plan contains a nonregular JSON file")
+        try:
+            value = json.loads(path.read_bytes())
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise AdapterDispatchError("cache plan JSON is invalid") from error
+        _write_canonical_json(path, value)
+
+
+def _mageflow_cache_plan(
+    invocation: WorkerInvocation,
+    _components: WorkerTrainingComponents | None,
+    _step_profiler: WorkerStepProfiler | None = None,
+    observability: WorkerObservability | None = None,
+    controls: WorkerControlRuntime | None = None,
+    _execution_phases: WorkerExecutionPhases | None = None,
+) -> HandlerResult:
+    """Publish exact future-example coverage from an immutable checkpoint."""
+
+    if getattr(invocation, "resume", None) is not None:
+        raise AdapterDispatchError("cache planning is a stateless operation")
+    if not _declares_artifact_output(invocation, "plan"):
+        raise AdapterDispatchError("cache planning omits its required plan artifact")
+    if controls is not None and controls.effective_values:
+        raise AdapterDispatchError("cache planning rejects live controls")
+    inputs = getattr(invocation, "inputs", None)
+    if not isinstance(inputs, Mapping) or set(inputs) != {"config", "checkpoint"}:
+        raise AdapterDispatchError(
+            "cache planning requires exactly config and checkpoint inputs"
+        )
+    plan_config = MageFlowCachePlanConfig(
+        **read_inline_config({"config": inputs["config"]})
+    )
+    checkpoint = resolve_input_checkpoint(invocation, "checkpoint")
+    paths = WorkspacePathAuthority.from_workspace(
+        invocation.workspace, require_content=True
+    )
+    node_directory = paths.node_run_directory(invocation.node_id)
+    trainer_values = {
+        **dict(plan_config.trainer),
+        "output_dir": str(node_directory / "trainer-placeholder"),
+        "resume_from": str(checkpoint.payload_directory),
+        "encoder_cache_dir": None,
+        "encoder_cache_mode": "off",
+        "offload_cached_encoders": False,
+        "encoder_cache_coverage_manifest": None,
+        "encoder_cache_covered_until_step": None,
+    }
+    from rwkv_lab.mage_flow_terminal_train import (
+        TerminalExpertTrainConfig,
+        prepare_cache_span,
+    )
+
+    trainer = _resolve_terminal_config(
+        paths,
+        TerminalExpertTrainConfig(**trainer_values),
+        resume_payload=checkpoint.payload_directory,
+        output_directory=node_directory / "trainer-placeholder",
+    )
+    trainer.validate()
+    plan_directory = node_directory / "cache-plan"
+    phase = (
+        observability.keepalive(checkpoint.optimizer_step, "planning_encoder_cache")
+        if observability is not None
+        else nullcontext()
+    )
+    with phase:
+        receipt = prepare_cache_span(
+            trainer,
+            checkpoint.payload_directory,
+            optimizer_steps=plan_config.optimizer_steps,
+            output_dir=plan_directory,
+        )
+    if (
+        receipt.get("start_step") != checkpoint.optimizer_step
+        or receipt.get("optimizer_steps") != plan_config.optimizer_steps
+    ):
+        raise AdapterDispatchError("cache plan disagrees with checkpoint authority")
+    _canonicalize_generated_json(plan_directory)
+    return HandlerResult(
+        "operation.completed",
+        {
+            "start_step": checkpoint.optimizer_step,
+            "end_step": receipt.get("end_step"),
+            "unique_examples": receipt.get("unique_examples"),
+        },
+        artifact_requests=(
+            ArtifactPublicationRequest(
+                source_directory=plan_directory,
+                output_name="plan",
+                parent_artifact_ids=(checkpoint.artifact_id,),
+            ),
+        ),
+    )
+
+
+def _mageflow_cache_build(
+    invocation: WorkerInvocation,
+    _components: WorkerTrainingComponents | None,
+    _step_profiler: WorkerStepProfiler | None = None,
+    observability: WorkerObservability | None = None,
+    controls: WorkerControlRuntime | None = None,
+    _execution_phases: WorkerExecutionPhases | None = None,
+) -> HandlerResult:
+    """Materialize and publish one immutable frozen-encoder cache artifact."""
+
+    if getattr(invocation, "resume", None) is not None:
+        raise AdapterDispatchError("cache build restarts from immutable inputs")
+    if not _declares_artifact_output(invocation, "cache"):
+        raise AdapterDispatchError("cache build omits its required cache artifact")
+    if controls is not None and controls.effective_values:
+        raise AdapterDispatchError("cache build rejects live controls")
+    inputs = getattr(invocation, "inputs", None)
+    if not isinstance(inputs, Mapping) or set(inputs) != {"plan", "checkpoint"}:
+        raise AdapterDispatchError(
+            "cache build requires exactly plan and checkpoint inputs"
+        )
+    plan = resolve_input_artifact(
+        invocation,
+        "plan",
+        required_kind="report",
+        required_schema="rwkv-lab.mageflow-cache-plan.v1",
+    )
+    checkpoint = resolve_input_checkpoint(invocation, "checkpoint")
+    if checkpoint.artifact_id not in plan.parent_artifact_ids:
+        raise AdapterDispatchError(
+            "cache plan is not descended from the selected checkpoint"
+        )
+    receipt = load_input_artifact_json(
+        plan, "preparation_receipt.json", maximum_bytes=4 * 1024 * 1024
+    )
+    raw_config = load_input_artifact_json(
+        plan, "cache_build_config.json", maximum_bytes=4 * 1024 * 1024
+    )
+    end_step = receipt.get("end_step")
+    optimizer_steps = receipt.get("optimizer_steps")
+    if (
+        receipt.get("schema") != "rwkv-lab.mage-flow-cache-span.v1"
+        or receipt.get("start_step") != checkpoint.optimizer_step
+        or not isinstance(end_step, int)
+        or isinstance(end_step, bool)
+        or not isinstance(optimizer_steps, int)
+        or isinstance(optimizer_steps, bool)
+        or optimizer_steps < 1
+        or end_step != checkpoint.optimizer_step + optimizer_steps
+        or receipt.get("coverage_manifest") is None
+    ):
+        raise AdapterDispatchError("cache plan receipt semantics are invalid")
+    coverage = plan.payload_directory / "coverage.jsonl"
+    expected_coverage = receipt.get("coverage_manifest_sha256")
+    coverage_objects = [
+        item for item in plan.objects if item.relative_path == "coverage.jsonl"
+    ]
+    if len(coverage_objects) != 1:
+        raise AdapterDispatchError(
+            "cache plan must contain exactly one coverage manifest"
+        )
+    actual_coverage = coverage_objects[0].sha256
+    if not isinstance(expected_coverage, str) or (
+        expected_coverage.removeprefix("sha256:")
+        != actual_coverage.removeprefix("sha256:")
+    ):
+        raise AdapterDispatchError("cache coverage manifest digest is invalid")
+    paths = WorkspacePathAuthority.from_workspace(
+        invocation.workspace, require_content=True
+    )
+    paths.verify_jsonl_file_references(
+        coverage,
+        fields=("image", "image_path"),
+        label="cache coverage manifest",
+    )
+    eval_manifest = (
+        paths.read_path(
+            str(raw_config["eval_manifest"]), label="eval_manifest", kind="file"
+        )
+        if raw_config.get("eval_manifest")
+        else None
+    )
+    if eval_manifest is not None:
+        paths.verify_jsonl_file_references(
+            eval_manifest,
+            fields=("image", "image_path"),
+            label="eval_manifest",
+        )
+    model_path = (
+        paths.read_path(
+            str(raw_config["model_path"]), label="model_path", kind="directory"
+        )
+        if raw_config.get("model_path")
+        else None
+    )
+    node_directory = paths.node_run_directory(invocation.node_id)
+    node_directory.mkdir(mode=0o750, parents=True, exist_ok=True)
+    cache_directory = node_directory / "encoder-cache"
+    config = MageFlowEncoderCacheConfig(
+        train_manifest=str(coverage),
+        eval_manifest=(str(eval_manifest) if eval_manifest is not None else None),
+        encoder_cache_dir=str(cache_directory),
+        model_id=str(raw_config["model_id"]),
+        model_revision=str(raw_config["model_revision"]),
+        model_path=(str(model_path) if model_path is not None else None),
+        attention_backend=str(raw_config["attention_backend"]),
+        vae_sample_posterior=bool(raw_config["vae_sample_posterior"]),
+        caption_dropout=float(raw_config["caption_dropout"]),
+        seed=int(raw_config["seed"]),
+        timestep_sampling=str(raw_config["timestep_sampling"]),
+        timestep_shift=float(raw_config["timestep_shift"]),
+        repa_enabled=bool(raw_config.get("repa_enabled", False)),
+        repa_use_posterior_mean=bool(
+            raw_config.get("repa_use_posterior_mean", True)
+        ),
+    )
+    config.validate()
+    from rwkv_lab.mage_flow_expert_train import cache_frozen_encoders
+
+    phase = (
+        observability.keepalive(checkpoint.optimizer_step, "building_encoder_cache")
+        if observability is not None
+        else nullcontext()
+    )
+    with phase:
+        result = finite_cache_receipt(
+            cache_frozen_encoders(
+                config,
+                worker_safe_point=(
+                    (lambda progress: controls.microbatch(progress, lambda _a, _b: None))
+                    if controls is not None
+                    else None
+                ),
+            )
+        )
+    if result.get("state") != "complete":
+        raise AdapterDispatchError("cache builder did not complete its coverage")
+    coverage_copy = cache_directory / "coverage.jsonl"
+    coverage_temporary = cache_directory / "coverage.jsonl.copying"
+    if coverage_temporary.exists() and not coverage_temporary.is_symlink():
+        coverage_temporary.unlink()
+    if coverage_temporary.exists() or coverage_temporary.is_symlink():
+        raise AdapterDispatchError("cache coverage staging path is unsafe")
+    shutil.copyfile(coverage, coverage_temporary, follow_symlinks=False)
+    os.replace(coverage_temporary, coverage_copy)
+    _write_canonical_json(
+        cache_directory / "trainvm_cache_receipt.json",
+        {
+            "schema": "rwkv-lab.encoder-cache-receipt.v1",
+            "checkpoint_artifact_id": checkpoint.artifact_id,
+            "plan_artifact_id": plan.artifact_id,
+            "start_step": checkpoint.optimizer_step,
+            "covered_until_step": end_step,
+            "coverage_sha256": actual_coverage,
+        },
+    )
+    return HandlerResult(
+        "operation.completed",
+        {
+            "encoded_rows": result.get("encoded_rows"),
+            "reused_rows": result.get("reused_rows"),
+            "start_step": checkpoint.optimizer_step,
+            "end_step": end_step,
+        },
+        artifact_requests=(
+            ArtifactPublicationRequest(
+                source_directory=cache_directory,
+                output_name="cache",
+                parent_artifact_ids=(plan.artifact_id, checkpoint.artifact_id),
+            ),
+        ),
     )
 
 
@@ -2555,6 +2982,18 @@ def _cache_directory(
 
 _HANDLERS: Mapping[AdapterKey, Handler] = {
     (
+        "rwkv-lab.mageflow-cache-plan",
+        "1.0.0",
+        "prepare",
+        "rwkv_lab.mageflow_cache_plan.v1.Prepare",
+    ): _mageflow_cache_plan,
+    (
+        "rwkv-lab.mageflow-cache-build",
+        "1.0.0",
+        "build",
+        "rwkv_lab.mageflow_cache_build.v1.Build",
+    ): _mageflow_cache_build,
+    (
         "rwkv-lab.mageflow-appearance-expert",
         "1.0.0",
         "train",
@@ -2704,7 +3143,11 @@ def execute_invocation(
                 execute=unsupported,
             )
     if invocation.training is None:
-        if handler is not _scalar_metric_decision:
+        if handler not in {
+            _mageflow_cache_build,
+            _mageflow_cache_plan,
+            _scalar_metric_decision,
+        }:
             raise AdapterDispatchError("training adapter has no resolved composition")
         components = None
     else:

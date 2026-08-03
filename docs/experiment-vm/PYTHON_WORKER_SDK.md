@@ -274,6 +274,21 @@ finite JSON. The scalar-metric decision adapter is the first production consumer
 it compares two independently verified result artifacts and publishes a new immutable receipt whose
 parents are exactly those candidate artifact IDs.
 
+Checkpoint artifacts selected as ordinary graph inputs use `resolve_input_checkpoint()`. It applies
+the same bounded canonical-manifest, producer, object-tree, payload, and fingerprint verification as
+controller-selected resume state without pretending the downstream node produced the checkpoint.
+The MageFlow cache path uses this boundary twice: the stateless `mageflow-cache-plan` operation
+publishes an immutable coverage/config report descended from a checkpoint, and the restart-only
+`mageflow-cache-build` operation publishes a frozen-encoder dataset descended from both. Terminal
+MageFlow may consume that dataset only alongside the same selected resume checkpoint. Its handler
+verifies direct ancestry, the cache receipt, coverage-object digest, covered optimizer-step window,
+and every image reference before replacing path-based cache configuration with the verified artifact
+payload. The checkpoint may be selected either by controller-owned same-node recovery or by the
+terminal operation's optional checkpoint artifact port; selecting both is rejected. The latter
+closes a declarative cross-node `train boundary → plan → build → continue` graph without weakening
+checkpoint verification. Thus cache preparation is visible, independently retryable, monitorable,
+and incapable of silently changing training membership.
+
 Install the optional runtime dependencies with:
 
 ```sh

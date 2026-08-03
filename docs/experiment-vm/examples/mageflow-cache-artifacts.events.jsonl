@@ -1,0 +1,6 @@
+{"event_id":"sim-1","run_id":"simulation","node_id":"acquire_gpu","attempt_id":"acquire_gpu@1","event_type":"resource.acquired"}
+{"event_id":"sim-2","run_id":"simulation","node_id":"train_to_boundary","attempt_id":"train_to_boundary@1","event_type":"worker.completed","optimizer_step":5500,"payload":{"reason":"training_complete"}}
+{"event_id":"sim-3","run_id":"simulation","node_id":"prepare_cache","attempt_id":"prepare_cache@1","event_type":"operation.completed","payload":{"start_step":5500,"end_step":12228}}
+{"event_id":"sim-4","run_id":"simulation","node_id":"build_cache","attempt_id":"build_cache@1","event_type":"operation.completed","payload":{"start_step":5500,"end_step":12228}}
+{"event_id":"sim-5","run_id":"simulation","node_id":"resume_training","attempt_id":"resume_training@1","event_type":"worker.completed","optimizer_step":12228,"payload":{"reason":"training_complete"}}
+{"event_id":"sim-6","run_id":"simulation","node_id":"release_gpu","attempt_id":"release_gpu@1","event_type":"resource.released"}
