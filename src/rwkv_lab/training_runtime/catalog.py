@@ -47,6 +47,7 @@ def supported_worker_capabilities() -> frozenset[str]:
             "schedule.linear_warmup_cosine.v1",
             "schedule.powercool.v1",
             "parameter_router.mageflow_appearance_expert.v1",
+            "parameter_router.mageflow_full_backbone.v1",
             "parameter_router.mageflow_terminal_expert.v1",
             "gradient_clipping.global_norm.v1",
             "gradient_accumulation.fixed.v1",

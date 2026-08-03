@@ -420,7 +420,7 @@ and adapter qualification; a production daemon should enable it only with worker
 advertise the catalog's exact capabilities.
 
 `inspect-rwkv-lab-worker` emits the directly loadable `trainvm.adapters/v2`
-document for the real MageFlow appearance/terminal, Qwen AO3, and scratch-RWKV
+document for the real MageFlow full-backbone/appearance/terminal, Qwen AO3, and scratch-RWKV
 handlers, plus the canonical `provided_capabilities` list to place in each
 matching `trainvm.host-launches/v4` profile. The caller supplies the digest of
 the already-built immutable worker code artifact; invalid digests fail closed.

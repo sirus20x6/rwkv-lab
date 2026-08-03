@@ -18,6 +18,7 @@ from rwkv_lab.trainvm_adapters.handlers import (
     AdapterDispatchError,
     HandlerResult,
     _appearance_expert,
+    _mageflow_full_backbone,
     _rlvr,
     _rwkv_posttraining,
     _rwkv_scratch,
@@ -401,6 +402,65 @@ def test_terminal_handler_lowers_compile_phase_into_trainer_config(
     assert config.compile_transformer_blocks is True
     assert config.compile_vae_encoder is True
     assert keyword_arguments["worker_execution_phases"] is execution_phases
+
+
+def test_full_backbone_handler_seals_model_tree_and_lowers_phases(
+    tmp_path, monkeypatch
+) -> None:
+    from rwkv_lab import mage_flow_pretrain
+
+    read_root = tmp_path / "read"
+    run_directory = tmp_path / "write" / "run"
+    model_path = read_root / "model"
+    model_path.mkdir(parents=True)
+    (model_path / "model_index.json").write_text("{}\n", encoding="utf-8")
+    run_directory.mkdir(parents=True)
+    image = read_root / "image.png"
+    image.write_bytes(b"image")
+    manifest = read_root / "train.jsonl"
+    manifest.write_text(json.dumps({"image": str(image)}) + "\n", encoding="utf-8")
+    observed = []
+    monkeypatch.setattr(
+        mage_flow_pretrain,
+        "train",
+        lambda config, **kwargs: observed.append((config, kwargs)),
+    )
+    invocation = SimpleNamespace(
+        inputs={
+            "config": {
+                "train_manifest": str(manifest),
+                "model_path": str(model_path),
+                "output_dir": str(run_directory),
+            }
+        },
+        workspace=_sealed_workspace(read_root, run_directory),
+    )
+    phases = SimpleNamespace(
+        request=lambda phase: (
+            SimpleNamespace(enabled=True)
+            if phase is ExecutionPhase.COMPILE
+            else None
+        )
+    )
+    components = SimpleNamespace()
+    result = _mageflow_full_backbone(
+        invocation,
+        components,
+        observability=SimpleNamespace(),
+        controls=SimpleNamespace(effective_values={}),
+        execution_phases=phases,
+    )
+    assert result == HandlerResult(
+        "worker.completed", {"reason": "training_complete"}
+    )
+    config, kwargs = observed[0]
+    assert config.train_manifest == str(manifest.resolve())
+    assert config.model_path == str(model_path.resolve())
+    assert config.output_dir == str(run_directory.resolve())
+    assert config.compile_transformer_blocks is True
+    assert config.compile_vae_encoder is True
+    assert kwargs["worker_components"] is components
+    assert kwargs["worker_execution_phases"] is phases
 
 
 def test_mageflow_manifest_cannot_reference_unsealed_payload(
@@ -1424,6 +1484,12 @@ def test_dispatch_table_is_closed_and_training_composition_is_required() -> None
             "1.0.0",
             "train",
             "rwkv_lab.mageflow_terminal_expert.v1.Train",
+        ),
+        (
+            "rwkv-lab.mageflow-full-backbone",
+            "1.0.0",
+            "train",
+            "rwkv_lab.mageflow_full_backbone.v1.Train",
         ),
         (
             "rwkv-lab.qwen-ao3",

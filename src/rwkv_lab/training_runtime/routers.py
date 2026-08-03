@@ -18,6 +18,9 @@ from .resolved import resolved_component_parts
 
 
 class ParameterRouterImplementation(str, Enum):
+    MAGEFLOW_FULL_BACKBONE_V1 = (
+        "rwkv_lab.parameter_router.mageflow_full_backbone.v1"
+    )
     MAGEFLOW_APPEARANCE_EXPERT_V1 = (
         "rwkv_lab.parameter_router.mageflow_appearance_expert.v1"
     )
@@ -57,6 +60,21 @@ class AppearanceExpertRoutingConfiguration:
 
 
 @dataclass(frozen=True, slots=True)
+class FullBackboneRoutingConfiguration:
+    """The full NR-MMDiT path owns every trainable transformer parameter."""
+
+    @classmethod
+    def from_resolved(
+        cls, configuration: Mapping[str, Any]
+    ) -> FullBackboneRoutingConfiguration:
+        if configuration:
+            raise ValueError(
+                "resolved full-backbone routing configuration has unknown fields"
+            )
+        return cls()
+
+
+@dataclass(frozen=True, slots=True)
 class TerminalExpertRoutingConfiguration:
     shared_backbone_multiplier: float = 0.5
     repa_projection_multiplier: float = 1.0
@@ -90,14 +108,24 @@ def build_registered_parameter_routing(
     *,
     base_learning_rate: float,
     configuration: (
-        AppearanceExpertRoutingConfiguration | TerminalExpertRoutingConfiguration
+        AppearanceExpertRoutingConfiguration
+        | FullBackboneRoutingConfiguration
+        | TerminalExpertRoutingConfiguration
     ),
 ) -> ParameterRoutingResult:
     """Resolve model-owned roles through one closed routing implementation."""
 
     named = list(named_parameters)
     all_parameter_ids = frozenset(id(parameter) for _, parameter in named)
-    if implementation is ParameterRouterImplementation.MAGEFLOW_APPEARANCE_EXPERT_V1:
+    if implementation is ParameterRouterImplementation.MAGEFLOW_FULL_BACKBONE_V1:
+        if not isinstance(configuration, FullBackboneRoutingConfiguration):
+            raise TypeError(
+                "full-backbone router requires full-backbone routing configuration"
+            )
+        if role_parameter_ids:
+            raise ValueError("full-backbone router does not accept partial ownership roles")
+        routes = (ParameterRoute("full_backbone", 1.0, all_parameter_ids, required=True),)
+    elif implementation is ParameterRouterImplementation.MAGEFLOW_APPEARANCE_EXPERT_V1:
         if not isinstance(configuration, AppearanceExpertRoutingConfiguration):
             raise TypeError(
                 "appearance router requires appearance routing configuration"
@@ -164,9 +192,15 @@ def parameter_routing_from_resolved_component(
             "resolved parameter-router implementation is not allowlisted"
         ) from error
     typed_configuration: (
-        AppearanceExpertRoutingConfiguration | TerminalExpertRoutingConfiguration
+        AppearanceExpertRoutingConfiguration
+        | FullBackboneRoutingConfiguration
+        | TerminalExpertRoutingConfiguration
     )
-    if selected is ParameterRouterImplementation.MAGEFLOW_APPEARANCE_EXPERT_V1:
+    if selected is ParameterRouterImplementation.MAGEFLOW_FULL_BACKBONE_V1:
+        typed_configuration = FullBackboneRoutingConfiguration.from_resolved(
+            configuration
+        )
+    elif selected is ParameterRouterImplementation.MAGEFLOW_APPEARANCE_EXPERT_V1:
         typed_configuration = AppearanceExpertRoutingConfiguration.from_resolved(
             configuration
         )

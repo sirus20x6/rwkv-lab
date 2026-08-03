@@ -125,6 +125,21 @@
     {
       "key": {
         "category": "parameter_router",
+        "name": "mageflow_full_backbone",
+        "version": "1.0.0"
+      },
+      "backend": "python",
+      "implementation": "rwkv_lab.parameter_router.mageflow_full_backbone.v1",
+      "model_families": ["mageflow"],
+      "required_capabilities": ["parameter_router.mageflow_full_backbone.v1"],
+      "configuration": [],
+      "state": [],
+      "state_grade": "stateless",
+      "reference_implementation": true
+    },
+    {
+      "key": {
+        "category": "parameter_router",
         "name": "mageflow_terminal_expert",
         "version": "1.0.0"
       },

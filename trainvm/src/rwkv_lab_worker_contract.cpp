@@ -35,6 +35,13 @@ OperationLifecycleCapabilities resumable_training_lifecycle() {
   };
 }
 
+OperationLifecycleCapabilities receipted_training_lifecycle() {
+  OperationLifecycleCapabilities lifecycle = resumable_training_lifecycle();
+  lifecycle.compile = true;
+  lifecycle.warmup = true;
+  return lifecycle;
+}
+
 OperationLifecycleCapabilities restart_only_training_lifecycle() {
   return {
       .stateful = true,
@@ -297,6 +304,30 @@ TrainingCompositionContract vision_frozen_adapter_composition() {
   };
 }
 
+TrainingCompositionContract mageflow_full_backbone_composition() {
+  return {
+      .model_family = "mageflow",
+      .slots = {
+          {"gradient_clipping", TrainingComponentCategory::gradient_clipping},
+          {"learning_rate",
+           TrainingComponentCategory::learning_rate_schedule},
+          {"optimizer", TrainingComponentCategory::optimizer},
+          {"parameter_router", TrainingComponentCategory::parameter_router},
+          {"weight_decay",
+           TrainingComponentCategory::weight_decay_schedule},
+      },
+      .allowed_components =
+          std::map<std::string, std::vector<TrainingComponentKey>>{
+              {"optimizer",
+               {{TrainingComponentCategory::optimizer,
+                 "torch_adamw_no_decay", "2.0.0"}}},
+              {"parameter_router",
+               {{TrainingComponentCategory::parameter_router,
+                 "mageflow_full_backbone", "1.0.0"}}},
+          },
+  };
+}
+
 TrainingCompositionContract transformer_mla_composition() {
   TrainingCompositionContract composition{
       .model_family = "transformer",
@@ -386,8 +417,13 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
            {"parameter_router", TrainingComponentCategory::parameter_router},
            {"weight_decay",
             TrainingComponentCategory::weight_decay_schedule},
-       }},
-      resumable_training_lifecycle()));
+      }},
+      receipted_training_lifecycle()));
+  profiles.push_back(profile(
+      key("rwkv-lab.mageflow-full-backbone",
+          "rwkv_lab.mageflow_full_backbone.v1.Train"),
+      code_fingerprint, mageflow_full_backbone_composition(),
+      receipted_training_lifecycle()));
   profiles.push_back(profile(
       key("rwkv-lab.mageflow-terminal-expert",
           "rwkv_lab.mageflow_terminal_expert.v1.Train"),
@@ -404,7 +440,7 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
            {"weight_decay",
             TrainingComponentCategory::weight_decay_schedule},
        }},
-      resumable_training_lifecycle()));
+      receipted_training_lifecycle()));
   profiles.push_back(profile(
       key("rwkv-lab.rwkv-posttraining",
           "rwkv_lab.rwkv_posttraining.v1.Train"),
@@ -542,8 +578,8 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
        .checkpoint_now = false,
        .pause_keep_resources = false,
        .pause_release_resources = false,
-       .compile = false,
-       .warmup = false,
+       .compile = true,
+       .warmup = true,
        .qualify = false,
        .profile = true,
        .resume_grade = ResumeGrade::terminal_checkpoint}));
@@ -568,6 +604,7 @@ RwkvLabWorkerContract rwkv_lab_worker_contract(
           "optimizer.torch_adamw_no_decay.v2",
           "optimizer.torch_sparse_adam.v1",
           "parameter_router.mageflow_appearance_expert.v1",
+          "parameter_router.mageflow_full_backbone.v1",
           "parameter_router.mageflow_terminal_expert.v1",
           "precision.bf16_parameters_fp32_reductions.v1",
           "precision.fp32_parameters_bf16_compute.v1",
@@ -588,6 +625,11 @@ rwkv_lab_worker_runtime_requirements() {
       {"grpcio", "pillow", "protobuf", "torch"});
   std::map<std::string, std::vector<std::string>> requirements{
       {"rwkv-lab.mageflow-appearance-expert",
+       canonical_distributions(
+           {"accelerate", "deepspeed", "diffusers", "einops", "flash-attn",
+            "grpcio", "huggingface-hub", "mage-flow", "numpy", "pillow",
+            "protobuf", "safetensors", "torch", "transformers"})},
+      {"rwkv-lab.mageflow-full-backbone",
        canonical_distributions(
            {"accelerate", "deepspeed", "diffusers", "einops", "flash-attn",
             "grpcio", "huggingface-hub", "mage-flow", "numpy", "pillow",
