@@ -21,6 +21,12 @@ import resource
 import sys
 import time
 
+# Run as a script the sibling module is already importable; loaded by file
+# path from a test it is not, so make both work.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from batch_identity import batch_digest, chain_digests  # noqa: E402
+
 
 def parse_bucket(bucket: str) -> tuple[int, int]:
     """'seq512xbatch8' -> (512, 8). Shapes come from the fixture, not here."""
@@ -113,8 +119,9 @@ def main() -> int:
         )
 
     final_gradient_norm = float("nan")
+    step_digests: list[str] = []
 
-    for _ in range(arguments.steps):
+    for step_index in range(arguments.steps):
         # Input wait is measured separately so a throughput win that merely
         # moved cost into the loader is visible rather than hidden.
         input_started = time.perf_counter()
@@ -123,6 +130,7 @@ def main() -> int:
         targets = torch.randint(0, vocabulary, (batch_size, sequence_length),
                                 generator=generator)
         input_wait += time.perf_counter() - input_started
+        step_digests.append(batch_digest(step_index, tokens, targets))
 
         step_started = time.perf_counter()
         loss, gradient_norm = measured_step(tokens, targets)
@@ -187,6 +195,13 @@ def main() -> int:
         # optimization card — from treating it as a pipeline measurement and
         # "improving" a number that describes nothing.
         "input_pipeline": "synthetic_in_process",
+        "input_workers": 0,
+        "input_prefetch_depth": 0,
+        "input_pipeline_mode": "serial",
+        # Emitted even though this workload has no loader to reorder, so the
+        # runner never has to fall back to assuming ordering parity.
+        "batch_sequence_digest": chain_digests(step_digests),
+        "step_batch_digests": step_digests,
         "final_loss": loss_value,
         "result_fingerprint": {
             "final_loss": loss_value,

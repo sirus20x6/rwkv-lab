@@ -158,6 +158,35 @@ an optimizer:
 Algorithmic changes additionally require paired seeds and a quality/non-regression decision.
 Single-run speedrun results are hypotheses, not production defaults.
 
+### Throughput basis, and why an input-pipeline candidate needs a different one
+
+`steady_state_step_seconds` measures the training step and deliberately excludes time blocked on
+input. That is the correct basis for a kernel candidate, whose effect is entirely inside the step,
+and the wrong one for an input-pipeline candidate, whose effect is entirely outside it.
+
+A prefetching loader moves cost rather than removing it: the training thread blocks for less time,
+while the producer's own CPU work contends with compute and inflates the step. Scored on step time
+alone, a real end-to-end win is recorded as a regression. Measured on the AO3 fixture at
+`seq512xbatch8`, six steps, one seed:
+
+| basis | baseline | candidate (8 workers, depth 2) | ratio |
+| --- | --- | --- | --- |
+| input wait (total) | 1.3985 s | 0.1290 s | 10.8x less blocking |
+| end to end, input + compute | 9.459 steps/s | 17.260 steps/s | 1.82x |
+| training step only | 24.627 steps/s | 15.851 steps/s | 0.64x |
+
+Both bases are real measurements of different things, so `run_benchmark_fixture.py` publishes both
+in every receipt, along with a `throughput_basis` field naming the one the evidence used:
+`training_step_only` by default, `end_to_end_including_input_wait` for `--candidate prefetch`. The
+basis is stated rather than switched silently, because a candidate that gets to choose its own
+metric can always find one that flatters it.
+
+The claim this permits is narrow: the same batches, in the same order, arrive with less blocking.
+`ordering_parity` and `content_parity` are what hold it to that, and they are measured from
+per-step batch digests published by both arms — not asserted. A loader that reorders batches, drops
+one, or resumes on the wrong cursor fails those gates however good its throughput looks. Absent
+digests report `false`, because unmeasured is not the same as equal.
+
 ### Consumer-Blackwell attention candidate
 
 Track [SecondNatureComputing/flash-attn-4-sm120](https://huggingface.co/SecondNatureComputing/flash-attn-4-sm120)

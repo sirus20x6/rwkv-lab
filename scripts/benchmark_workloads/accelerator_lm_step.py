@@ -17,6 +17,14 @@ import json
 import sys
 import time
 
+# Run as a script the sibling module is already importable; loaded by file
+# path from a test it is not, so make both work.
+import os.path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from batch_identity import batch_digest, chain_digests  # noqa: E402
+
 
 def parse_bucket(bucket: str) -> tuple[int, int]:
     """'seq512xbatch8' -> (512, 8). Shapes come from the fixture, not here."""
@@ -120,9 +128,10 @@ def main() -> int:
         )
 
     final_gradient_norm = float("nan")
+    step_digests: list[str] = []
 
     torch.cuda.reset_peak_memory_stats(device)
-    for _ in range(arguments.steps):
+    for step_index in range(arguments.steps):
         # Input wait includes completion of device-side input generation rather
         # than measuring only the time needed to enqueue it.
         input_started = time.perf_counter()
@@ -142,6 +151,9 @@ def main() -> int:
         )
         torch.cuda.synchronize(device)
         input_wait += time.perf_counter() - input_started
+        # Digested after the fence, so the bytes read back are the completed
+        # device-side batch rather than a partially enqueued one.
+        step_digests.append(batch_digest(step_index, tokens, targets))
 
         # CUDA launches are asynchronous. These fences make the interval
         # contain completed device work, not merely queued launches.
@@ -209,6 +221,11 @@ def main() -> int:
         # tensor construction, not dataloader stall, and no host-to-device copy
         # is being measured because the data never leaves the device.
         "input_pipeline": "synthetic_in_process",
+        "input_workers": 0,
+        "input_prefetch_depth": 0,
+        "input_pipeline_mode": "serial",
+        "batch_sequence_digest": chain_digests(step_digests),
+        "step_batch_digests": step_digests,
         "final_loss": loss_value,
         "result_fingerprint": {
             "final_loss": loss_value,
