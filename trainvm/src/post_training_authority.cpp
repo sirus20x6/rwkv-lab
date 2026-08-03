@@ -229,6 +229,12 @@ std::optional<LifecycleAdmissionRefusal> admit_post_training_arm(
   return std::nullopt;
 }
 
+std::optional<LifecycleAdmissionRefusal> admit_post_training_arm(
+    const PostTrainingArm& arm, const AdapterProfile& profile) {
+  return admit_post_training_arm(arm, profile.lifecycle.resume_grade,
+                                 profile.effect);
+}
+
 std::optional<LifecycleAdmissionRefusal> qualify_post_training_completion(
     const PostTrainingArm& arm,
     const std::vector<ExternalMutation>& performed_mutations) {

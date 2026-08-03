@@ -1,5 +1,7 @@
 #include "trainvm/post_training_authority.hpp"
 
+#include "trainvm/rwkv_lab_worker_contract.hpp"
+
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -305,6 +307,60 @@ void the_adapters_declared_effect_decides_external_reach() {
           "a workspace-write adapter with a reproducible end may claim exact");
 }
 
+// Everything above drives the authority with hand-chosen grades and effects.
+// This drives it with the profile rwkv-lab actually ships, so the rules are
+// pinned against the registry rather than against a fixture that agrees with
+// them by construction.
+const AdapterProfile& shipped_posttraining_profile() {
+  static const RwkvLabWorkerContract contract =
+      rwkv_lab_worker_contract("sha256:" + std::string(64U, 'a'));
+  for (const AdapterProfile& profile : contract.adapter_registry.profiles) {
+    if (profile.key.adapter == "rwkv-lab.rwkv-posttraining") return profile;
+  }
+  throw std::runtime_error(
+      "rwkv-lab no longer ships an rwkv-posttraining adapter; this test binds "
+      "to it deliberately and should be repointed, not deleted");
+}
+
+void the_shipped_posttraining_adapter_constrains_its_arms() {
+  const AdapterProfile& profile = shipped_posttraining_profile();
+
+  // Read, not asserted into existence: if either of these changes, the
+  // expectations below change with it and this test says so.
+  require(profile.lifecycle.resume_grade == ResumeGrade::restart_only,
+          "the shipped rwkv-posttraining adapter is restart_only");
+  require(profile.effect == Effect::process,
+          "the shipped rwkv-posttraining adapter does not act outside the host");
+
+  // It is restart_only, so no arm on it may promise a continued trajectory —
+  // and the caller no longer gets to supply a grade that disagrees.
+  auto continuing = finetune();
+  continuing.kind = PostTrainingArmKind::recursive_post_training;
+  require_refused(
+      admit_post_training_arm(continuing, profile),
+      "post-training-resume-claim-unsupported",
+      "an arm on the restart-only posttraining adapter promised to resume");
+
+  // It is Effect::process, so an arm on it may not reach outside the host.
+  auto reaching = finetune();
+  reaching.claims_trajectory_preserving_resume = false;
+  reaching.claim = ReproducibilityClaim::seeded;
+  reaching.external_mutations = {{.target = "model-registry.production",
+                                  .effect = "publish",
+                                  .authorized = true,
+                                  .receipt_id = std::nullopt}};
+  require_refused(admit_post_training_arm(reaching, profile),
+                  "post-training-external-effect-unadmitted",
+                  "an arm on a process-effect adapter reached outside the host");
+
+  // An honest arm on the shipped adapter is admissible, so the two refusals
+  // above are about the arms and not about the profile being unusable.
+  auto honest = finetune();
+  honest.claims_trajectory_preserving_resume = false;
+  require(!admit_post_training_arm(honest, profile),
+          "an honest arm on the shipped posttraining adapter is admissible");
+}
+
 }  // namespace
 
 int main() {
@@ -317,6 +373,7 @@ int main() {
     an_arm_must_declare_what_ends_it();
     a_restart_only_adapter_cannot_promise_a_continued_trajectory();
     the_adapters_declared_effect_decides_external_reach();
+    the_shipped_posttraining_adapter_constrains_its_arms();
     std::cout << "post-training authority tests passed\n";
     return 0;
   } catch (const std::exception& error) {
