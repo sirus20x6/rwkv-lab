@@ -49,6 +49,16 @@ from .eval_gallery import (
     GalleryImage,
     PublishedEvalGallery,
 )
+from .execution_phases import (
+    ExecutionPhase,
+    ExecutionPhaseDisposition,
+    ExecutionPhaseRequest,
+    WorkerExecutionPhaseError,
+    WorkerExecutionPhaseRuntime,
+    WorkerExecutionPhases,
+    decode_execution_phase_requests,
+    state_fingerprint,
+)
 from .invocation import (
     MAXIMUM_INVOCATION_BYTES,
     InvocationError,
@@ -102,6 +112,7 @@ from .session import (
     WorkerSession,
     WorkerSessionError,
 )
+from .torch_trajectory import TorchTrajectoryStateError, torch_trajectory_state
 from .training import (
     MAXIMUM_COMPONENT_SLOTS,
     RESOLVED_TRAINING_API_VERSION,
@@ -141,6 +152,9 @@ __all__ = [
     "EvalGalleryError",
     "EvalGalleryItem",
     "EvalGalleryPublisher",
+    "ExecutionPhase",
+    "ExecutionPhaseDisposition",
+    "ExecutionPhaseRequest",
     "ExternalProfilerAuthority",
     "ExternalStepProfiler",
     "GalleryImage",
@@ -165,12 +179,16 @@ __all__ = [
     "SafePoint",
     "Scalar",
     "TorchStepProfiler",
+    "TorchTrajectoryStateError",
     "TrainingCompositionError",
     "WorkerBootstrap",
     "WorkerCancellationRequested",
     "WorkerCommand",
     "WorkerControlError",
     "WorkerControlRuntime",
+    "WorkerExecutionPhaseError",
+    "WorkerExecutionPhaseRuntime",
+    "WorkerExecutionPhases",
     "WorkerInvocation",
     "WorkerObservability",
     "WorkerObservabilityError",
@@ -183,6 +201,7 @@ __all__ = [
     "WorkerStepProfiler",
     "apply_worker_runtime_policy",
     "controls_from_invocation",
+    "decode_execution_phase_requests",
     "load_external_profiler_authority",
     "load_input_artifact_json",
     "load_observability_declaration",
@@ -198,6 +217,8 @@ __all__ = [
     "read_worker_bootstrap_fd",
     "resolve_input_artifact",
     "resolve_resume_checkpoint",
+    "state_fingerprint",
     "step_profiler_from_invocation",
+    "torch_trajectory_state",
     "trace_request_from_invocation",
 ]

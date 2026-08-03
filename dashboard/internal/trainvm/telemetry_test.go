@@ -250,6 +250,16 @@ func TestTypedTelemetryRejectsMalformedAuthorityPayloads(t *testing.T) {
 	}); err == nil {
 		t.Fatal("duplicate event filter unexpectedly accepted")
 	}
+	mutated := executionPhaseEvent(2, "completed")
+	beforeFingerprint := "sha256:" + strings.Repeat("a", 64)
+	afterFingerprint := "sha256:" + strings.Repeat("b", 64)
+	mutated.Payload = json.RawMessage(strings.Replace(
+		string(mutated.Payload),
+		`"state_fingerprint_after":"`+beforeFingerprint+`"`,
+		`"state_fingerprint_after":"`+afterFingerprint+`"`, 1))
+	if _, err := executionPhaseReceiptFromEvent(mutated); err == nil {
+		t.Fatal("execution phase without restored state unexpectedly crossed the boundary")
+	}
 }
 
 func compiledTelemetryFixture(metrics string) CompiledPlanView {
@@ -286,6 +296,21 @@ func optimizerMetricEvent(sequence, step uint64) Event {
 			"name":"train.loss","value":1.25,"unit":"loss","step_domain":"optimizer_step",
 			"step":` + strconv.FormatUint(step, 10) + `,"sample_weight":1,"labels":{"route":"animation"}
 		}`),
+	}
+}
+
+func executionPhaseEvent(sequence uint64, disposition string) Event {
+	fingerprint := "sha256:" + strings.Repeat("a", 64)
+	return Event{
+		Sequence: sequence, EventID: "phase", RunID: "run-1", NodeID: "train",
+		AttemptID: "train@1", WorkerSequence: sequence,
+		EventType: "worker.execution_phase_receipted", WallTimeNS: 3_000,
+		Payload: json.RawMessage(fmt.Sprintf(`{
+			"phase":"warmup","enabled":true,"requested_steps":2,
+			"request_digest":%q,"disposition":%q,"steps_executed":2,
+			"state_fingerprint_before":%q,"state_fingerprint_after":%q,
+			"started_at_ns":2000,"completed_at_ns":3000,"diagnostics":[]
+		}`, fingerprint, disposition, fingerprint, fingerprint)),
 	}
 }
 
@@ -328,6 +353,7 @@ func TestTelemetrySnapshotColdLoadsOneCoherentTail(t *testing.T) {
 			WallTimeNS: 2_000, OptimizerStep: &step,
 			Payload: json.RawMessage(`{"phase":"train","observed_at_ns":1900}`)},
 		optimizerMetricEvent(4, step),
+		executionPhaseEvent(5, "completed"),
 		{Sequence: 7, EventID: "artifact", RunID: "run-1", NodeID: "eval",
 			AttemptID: "eval@1", WorkerSequence: 7, EventType: "artifact.published",
 			WallTimeNS: 7_000, Payload: json.RawMessage(`{
@@ -345,15 +371,19 @@ func TestTelemetrySnapshotColdLoadsOneCoherentTail(t *testing.T) {
 	if err != nil || !found || !snapshot.CaughtUp || snapshot.ReplayPending ||
 		snapshot.TargetSequence != 9 || snapshot.NextSequence != 9 ||
 		len(snapshot.Heartbeats) != 1 || len(snapshot.Metrics) != 1 ||
-		len(snapshot.Artifacts) != 1 || snapshot.Metrics[0].Aggregation != "weighted_mean" ||
+		len(snapshot.Artifacts) != 1 || len(snapshot.ExecutionPhases) != 1 ||
+		snapshot.ExecutionPhases[0].Disposition != "completed" ||
+		snapshot.Metrics[0].Aggregation != "weighted_mean" ||
 		snapshot.Metrics[0].Description != "objective" {
 		t.Fatalf("unexpected telemetry tail: %#v found=%v err=%v", snapshot, found, err)
 	}
-	if len(reader.queries) != 3 || !reader.queries[0].NewestFirst ||
+	if len(reader.queries) != 4 || !reader.queries[0].NewestFirst ||
 		reader.queries[1].NewestFirst || !reader.queries[1].NewestPerMetricSeries ||
 		!reader.queries[2].NewestFirst ||
+		!reader.queries[3].NewestFirst ||
 		reader.queries[0].Through != 9 || reader.queries[0].Limit != 1 ||
-		reader.queries[1].Limit != maximumLiveMetricSeries+1 || reader.queries[2].Limit != 10 {
+		reader.queries[1].Limit != maximumLiveMetricSeries+1 || reader.queries[2].Limit != 10 ||
+		reader.queries[3].Limit != 64 {
 		t.Fatalf("cold load did not use independently bounded upper-fenced tails: %#v", reader.queries)
 	}
 }

@@ -144,6 +144,23 @@ backends. They never carry commands or environment maps. Adapter capability reso
 whether a MageFlow, RWKV, transformer, or future worker can implement a requested phase; the shared
 plan vocabulary does not encode model-family-specific launch behavior.
 
+Compile and warmup are worker-side execution phases, not authority-side simulations. The immutable
+worker invocation is lowered into digest-bound `WorkerExecutionPhaseRequest` values in
+`WorkerWelcome`. A worker can answer only those requests and returns a fenced
+`WorkerExecutionPhaseReceipt` carrying disposition, exact completed-step count, timestamps,
+diagnostics, and before/after fingerprints of every trajectory-affecting state component. A
+successful or skipped phase must restore the identical state fingerprint; failed phases retain
+their possibly changed state evidence and cannot masquerade as completion. Each receipt is a
+replay-safe, dashboard-visible journal observation and does not advance the workflow FSM.
+Adapters receive a one-shot coordinator and must receipt every declared phase; unsupported phase
+sets fail before dispatch. Scratch RWKV and both MageFlow expert routes are adopted runtimes and
+use content-complete, bounded-memory Torch trajectory hashing around cold compile and disposable
+warmup. MageFlow supplies a real routed image batch through a family bridge while RWKV supplies its
+own token workload. Terminal/TREAD includes every enabled auxiliary objective and auxiliary module
+in the disposable workload and state proof. The coordinator and proof boundary remain
+family-neutral; other trainers must
+supply their own real disposable workload rather than inheriting either implementation.
+
 Before a run exists, the plan compiler performs:
 
 - JSON Schema validation and schema-version migration;

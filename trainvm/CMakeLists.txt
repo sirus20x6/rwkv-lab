@@ -114,6 +114,7 @@ add_library(trainvm_core
   src/resource_request_builder.cpp
   src/rwkv_lab_worker_contract.cpp
   src/conversion_publication.cpp
+  src/post_training_authority.cpp
   src/profiler_launch_profiles.cpp
   src/rwkv_scratch_profiles.cpp
   src/sqlite_authority_vfs.cpp
@@ -460,6 +461,16 @@ target_compile_options(conversion_publication_tests PRIVATE
 target_link_libraries(conversion_publication_tests PRIVATE trainvm_core)
 add_test(NAME conversion_publication_tests
   COMMAND conversion_publication_tests
+)
+add_executable(post_training_authority_tests
+  tests/post_training_authority_tests.cpp
+)
+target_compile_options(post_training_authority_tests PRIVATE
+  -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror
+)
+target_link_libraries(post_training_authority_tests PRIVATE trainvm_core)
+add_test(NAME post_training_authority_tests
+  COMMAND post_training_authority_tests
 )
 add_executable(host_ledger_tests tests/host_ledger_tests.cpp)
 target_compile_options(host_ledger_tests PRIVATE

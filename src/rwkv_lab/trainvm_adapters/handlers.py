@@ -15,8 +15,10 @@ from typing import Any
 from rwkv_lab.trainvm_worker import (
     ArtifactPublicationRequest,
     CheckpointPublicationRequest,
+    ExecutionPhase,
     NullStepProfiler,
     WorkerControlRuntime,
+    WorkerExecutionPhases,
     WorkerInvocation,
     WorkerObservability,
     WorkerStepProfiler,
@@ -124,6 +126,7 @@ Handler = Callable[
         WorkerStepProfiler,
         WorkerObservability,
         WorkerControlRuntime,
+        WorkerExecutionPhases | None,
     ],
     HandlerResult,
 ]
@@ -168,11 +171,22 @@ def _appearance_expert(
     step_profiler: WorkerStepProfiler | None = None,
     observability: WorkerObservability | None = None,
     controls: WorkerControlRuntime | None = None,
+    execution_phases: WorkerExecutionPhases | None = None,
 ) -> HandlerResult:
     paths = WorkspacePathAuthority.from_workspace(
         invocation.workspace, require_content=True
     )
     raw_config = read_inline_config(invocation.inputs)
+    if execution_phases is not None:
+        compile_request = execution_phases.request(ExecutionPhase.COMPILE)
+        compile_enabled = (
+            compile_request.enabled if compile_request is not None else False
+        )
+        raw_config = {
+            **raw_config,
+            "compile_transformer_blocks": compile_enabled,
+            "compile_vae_encoder": compile_enabled,
+        }
     train_manifest = paths.read_path(
         _raw_config_path(raw_config, "train_manifest", required=True) or "",
         label="train_manifest",
@@ -242,6 +256,7 @@ def _appearance_expert(
         worker_step_profiler=step_profiler or NullStepProfiler(),
         worker_observability=observability,
         worker_controls=controls,
+        worker_execution_phases=execution_phases,
     )
     request, step, status = completed_checkpoint_request(
         invocation,
@@ -276,11 +291,22 @@ def _terminal_expert(
     step_profiler: WorkerStepProfiler | None = None,
     observability: WorkerObservability | None = None,
     controls: WorkerControlRuntime | None = None,
+    execution_phases: WorkerExecutionPhases | None = None,
 ) -> HandlerResult:
     paths = WorkspacePathAuthority.from_workspace(
         invocation.workspace, require_content=True
     )
     raw_config = read_inline_config(invocation.inputs)
+    if execution_phases is not None:
+        compile_request = execution_phases.request(ExecutionPhase.COMPILE)
+        compile_enabled = (
+            compile_request.enabled if compile_request is not None else False
+        )
+        raw_config = {
+            **raw_config,
+            "compile_transformer_blocks": compile_enabled,
+            "compile_vae_encoder": compile_enabled,
+        }
     train_manifest = paths.read_path(
         _raw_config_path(raw_config, "train_manifest", required=True) or "",
         label="train_manifest",
@@ -387,6 +413,7 @@ def _terminal_expert(
         worker_step_profiler=step_profiler or NullStepProfiler(),
         worker_observability=observability,
         worker_controls=controls,
+        worker_execution_phases=execution_phases,
     )
     request, step, status = completed_checkpoint_request(
         invocation,
@@ -421,6 +448,7 @@ def _qwen_ao3(
     step_profiler: WorkerStepProfiler | None = None,
     observability: WorkerObservability | None = None,
     controls: WorkerControlRuntime | None = None,
+    execution_phases: WorkerExecutionPhases | None = None,
 ) -> HandlerResult:
     paths = WorkspacePathAuthority.from_workspace(
         invocation.workspace, require_content=True
@@ -531,6 +559,7 @@ def _rwkv_scratch(
     step_profiler: WorkerStepProfiler | None = None,
     observability: WorkerObservability | None = None,
     controls: WorkerControlRuntime | None = None,
+    execution_phases: WorkerExecutionPhases | None = None,
 ) -> HandlerResult:
     paths = WorkspacePathAuthority.from_workspace(
         invocation.workspace, require_content=True
@@ -580,6 +609,7 @@ def _rwkv_scratch(
             worker_step_profiler=step_profiler or NullStepProfiler(),
             worker_observability=observability,
             worker_controls=controls,
+            worker_execution_phases=execution_phases,
         )
     except SystemExit as error:
         raise AdapterDispatchError(
@@ -628,6 +658,7 @@ def _rwkv_posttraining(
     step_profiler: WorkerStepProfiler | None = None,
     observability: WorkerObservability | None = None,
     controls: WorkerControlRuntime | None = None,
+    execution_phases: WorkerExecutionPhases | None = None,
 ) -> HandlerResult:
     """Run one immutable-parent, restart-only RWKV post-training attempt."""
 
@@ -767,6 +798,7 @@ def _rlvr(
     step_profiler: WorkerStepProfiler | None = None,
     observability: WorkerObservability | None = None,
     controls: WorkerControlRuntime | None = None,
+    execution_phases: WorkerExecutionPhases | None = None,
 ) -> HandlerResult:
     """Run one bounded RLVR candidate with a terminal immutable checkpoint."""
 
@@ -967,6 +999,7 @@ def _vision_teacher_compressor(
     step_profiler: WorkerStepProfiler | None = None,
     observability: WorkerObservability | None = None,
     controls: WorkerControlRuntime | None = None,
+    execution_phases: WorkerExecutionPhases | None = None,
 ) -> HandlerResult:
     """Run the canonical multi-teacher vision compressor under TrainVM authority."""
 
@@ -1136,6 +1169,7 @@ def _vision_frozen_adapter(
     step_profiler: WorkerStepProfiler | None = None,
     observability: WorkerObservability | None = None,
     controls: WorkerControlRuntime | None = None,
+    execution_phases: WorkerExecutionPhases | None = None,
 ) -> HandlerResult:
     """Run the canonical cached MoonViT/compressor caption trainer."""
 
@@ -1467,6 +1501,7 @@ def _vision_native_head(
     step_profiler: WorkerStepProfiler | None = None,
     observability: WorkerObservability | None = None,
     controls: WorkerControlRuntime | None = None,
+    execution_phases: WorkerExecutionPhases | None = None,
 ) -> HandlerResult:
     """Calibrate the compressor-owned native RWKV output head."""
 
@@ -1630,6 +1665,7 @@ def _scalar_metric_decision(
     _step_profiler: WorkerStepProfiler | None = None,
     observability: WorkerObservability | None = None,
     controls: WorkerControlRuntime | None = None,
+    execution_phases: WorkerExecutionPhases | None = None,
 ) -> HandlerResult:
     """Compare two immutable scalar results and publish one lineage-bound receipt."""
 
@@ -1771,6 +1807,7 @@ def _vision_rwkv_student(
     step_profiler: WorkerStepProfiler | None = None,
     observability: WorkerObservability | None = None,
     controls: WorkerControlRuntime | None = None,
+    execution_phases: WorkerExecutionPhases | None = None,
 ) -> HandlerResult:
     """Distill the frozen vision stack into the raw-pixel RWKV student."""
 
@@ -1954,6 +1991,7 @@ def _transformer_mla(
     step_profiler: WorkerStepProfiler | None = None,
     observability: WorkerObservability | None = None,
     controls: WorkerControlRuntime | None = None,
+    execution_phases: WorkerExecutionPhases | None = None,
 ) -> HandlerResult:
     paths = WorkspacePathAuthority.from_workspace(
         invocation.workspace, require_content=True
@@ -2227,6 +2265,7 @@ def execute_invocation(
     step_profiler: WorkerStepProfiler | None = None,
     observability: WorkerObservability | None = None,
     controls: WorkerControlRuntime | None = None,
+    execution_phases: WorkerExecutionPhases | None = None,
 ) -> HandlerResult:
     adapter = invocation.adapter
     key = (
@@ -2241,6 +2280,30 @@ def execute_invocation(
         raise AdapterDispatchError(
             "worker invocation has no closed adapter handler"
         ) from error
+    if execution_phases is not None and handler not in {
+        _appearance_expert,
+        _rwkv_scratch,
+        _terminal_expert,
+    }:
+        preinitialization_state = {
+            "lifecycle": "pre_initialization",
+            "invocation_digest": invocation.invocation_digest,
+        }
+        for phase in sorted(execution_phases.phases, key=lambda item: item.value):
+            request = execution_phases.request(phase)
+            if request is None:  # pragma: no cover - coordinator owns this set
+                raise AdapterDispatchError("execution phase request disappeared")
+
+            def unsupported(_steps, _mark_step, *, phase_name=phase.value):
+                raise AdapterDispatchError(
+                    f"adapter does not implement enabled {phase_name} phase"
+                )
+
+            execution_phases.run(
+                phase,
+                snapshot=lambda: preinitialization_state,
+                execute=unsupported,
+            )
     if invocation.training is None:
         if handler is not _scalar_metric_decision:
             raise AdapterDispatchError("training adapter has no resolved composition")
@@ -2261,4 +2324,5 @@ def execute_invocation(
         step_profiler or NullStepProfiler(),
         observability,
         controls,
+        execution_phases,
     )

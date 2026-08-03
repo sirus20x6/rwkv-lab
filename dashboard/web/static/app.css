@@ -174,6 +174,16 @@ details.panel[open] .d-caret { transform: rotate(90deg); color: var(--accent); }
 .vm-observability-state.live { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 50%, var(--border)); }
 .vm-observability-state.stale { color: var(--err); border-color: color-mix(in srgb, var(--err) 55%, var(--border)); }
 .vm-observability-state.terminal { color: var(--text-dim); }
+.vm-execution-phases { margin-bottom: 12px; border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden; background: var(--bg); }
+.vm-execution-phase-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 7px; padding: 8px; }
+.vm-execution-phase { min-width: 0; padding: 7px 8px; border: 1px solid var(--border); border-left: 3px solid var(--muted); border-radius: var(--r-sm); background: var(--bg-elev); font: var(--fs-xs)/1.35 var(--mono); }
+.vm-execution-phase.completed { border-left-color: var(--ok); }
+.vm-execution-phase.failed { border-left-color: var(--err); }
+.vm-execution-phase.skipped { border-left-color: var(--muted); }
+.vm-execution-phase header { display: flex; justify-content: space-between; gap: 8px; color: var(--text); }
+.vm-execution-phase header span { color: var(--muted); }
+.vm-execution-phase .vm-phase-proof { margin-top: 4px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vm-execution-phase .vm-phase-error { margin-top: 4px; color: var(--err); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .vm-fact { border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--bg); padding: 7px 9px; min-width: 0; }
 .vm-fact span { display: block; color: var(--muted); font: var(--fs-xs)/1.2 var(--mono); text-transform: uppercase; letter-spacing: .05em; }
 .vm-fact strong { display: block; margin-top: 3px; color: var(--text); font: 600 var(--fs-sm)/1.25 var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

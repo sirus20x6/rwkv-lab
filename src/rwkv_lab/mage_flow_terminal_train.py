@@ -109,6 +109,7 @@ if TYPE_CHECKING:
     from rwkv_lab.trainvm_adapters import WorkerTrainingComponents
     from rwkv_lab.trainvm_worker import (
         WorkerControlRuntime,
+        WorkerExecutionPhases,
         WorkerObservability,
         WorkerStepProfiler,
     )
@@ -2567,6 +2568,7 @@ def train(
     worker_step_profiler: WorkerStepProfiler | None = None,
     worker_observability: WorkerObservability | None = None,
     worker_controls: WorkerControlRuntime | None = None,
+    worker_execution_phases: WorkerExecutionPhases | None = None,
 ) -> None:
     config.validate()
     try:
@@ -2618,6 +2620,7 @@ def train(
     )
     model = pipeline.model
     model.vae.sample_posterior = config.vae_sample_posterior
+    model.config.compile_vae_encoder = config.compile_vae_encoder
     model.vae.eval().requires_grad_(False)
     model.txt_enc.eval().requires_grad_(False)
     transformer = model.transformer
@@ -2744,6 +2747,7 @@ def train(
         else None
     )
     switcher = None
+    optimizer_bank: ResidentExpertOptimizerBank | None = None
     if domain_schedule is not None:
         expert_group = next(
             group for group in groups if group.get("group_name") == "terminal_expert"
@@ -2906,12 +2910,252 @@ def train(
         )
     if loop_controller is not None:
         loop_controller.refresh_inference_skip_refinements()
-    compile_report = compile_transformer_blocks(
-        transformer,
-        enabled=config.compile_transformer_blocks,
-        mode=config.compile_transformer_mode,
-        dynamic=config.compile_transformer_dynamic,
-    )
+    if worker_execution_phases is None:
+        if config.compile_vae_encoder:
+            model.maybe_compile_vae_encoder()
+        compile_report = compile_transformer_blocks(
+            transformer,
+            enabled=config.compile_transformer_blocks,
+            mode=config.compile_transformer_mode,
+            dynamic=config.compile_transformer_dynamic,
+        )
+    else:
+        from rwkv_lab.trainvm_adapters.mageflow_phases import (
+            run_mageflow_execution_phases,
+        )
+        from rwkv_lab.trainvm_worker import ExecutionPhase
+
+        compile_report = compile_transformer_blocks(
+            transformer,
+            enabled=False,
+            mode=config.compile_transformer_mode,
+            dynamic=config.compile_transformer_dynamic,
+        )
+        compile_request = worker_execution_phases.request(ExecutionPhase.COMPILE)
+        warmup_request = worker_execution_phases.request(ExecutionPhase.WARMUP)
+        needs_disposable_workload = any(
+            request is not None and request.enabled
+            for request in (compile_request, warmup_request)
+        )
+        phase_batch_rows: list[dict[str, Any]] = []
+        phase_images: list[torch.Tensor | None] = []
+        phase_prefetched_cache = None
+        if needs_disposable_workload:
+            phase_epoch = epoch
+            phase_batch_start = batch_start
+            while not phase_batch_rows:
+                phase_batches = _epoch_batches(
+                    len(train_rows),
+                    batch_size=config.microbatch_size,
+                    seed=config.seed,
+                    epoch=phase_epoch,
+                    accumulation_steps=config.gradient_accumulation_steps,
+                    token_counts=[int(row["latent_tokens"]) for row in train_rows],
+                    balance_accumulation_window=config.balance_accumulation_window,
+                )
+                if phase_batch_start < len(phase_batches):
+                    phase_batch_rows = [
+                        train_rows[index]
+                        for index in phase_batches[phase_batch_start]
+                    ]
+                    break
+                phase_epoch += 1
+                phase_batch_start = 0
+                if phase_epoch > epoch + 1:
+                    raise RuntimeError(
+                        "MageFlow terminal phase could not resolve a training batch"
+                    )
+            phase_images = [
+                (
+                    None
+                    if encoder_cache is not None and encoder_cache.has_moments(row)
+                    else _load_image_tensor(row).pin_memory()
+                )
+                for row in phase_batch_rows
+            ]
+            phase_prefetched_cache = prefetch_frozen_encoder_batch(
+                model,
+                phase_batch_rows,
+                config,
+            )
+            if phase_prefetched_cache is not None and (
+                any(
+                    value is None
+                    for value in phase_prefetched_cache.text_by_prompt.values()
+                )
+                or any(
+                    value is None for value in phase_prefetched_cache.moments
+                )
+            ):
+                raise RuntimeError(
+                    "MageFlow terminal phases require complete frozen-encoder cache coverage"
+                )
+
+        def phase_extra_state() -> Mapping[str, Any]:
+            return {
+                "contract_fingerprint": fingerprint,
+                "controls": (
+                    worker_controls.checkpoint_state()
+                    if worker_controls is not None
+                    else {}
+                ),
+                "data_cursor": {
+                    "batch_index": batch_start,
+                    "domain": config.domain,
+                    "domain_positions": resumed_domain_positions or {},
+                    "epoch": epoch,
+                    "optimizer_step": step,
+                    "window_index": resumed_window_index,
+                },
+                "frozen_encoders": {
+                    "model_id": config.model_id,
+                    "model_revision": config.model_revision,
+                },
+                "resident_expert_optimizer_bank": (
+                    optimizer_bank.state_dict()
+                    if optimizer_bank is not None
+                    else {}
+                ),
+                "scheduler": scheduler.state_dict(),
+            }
+
+        def phase_training_workload() -> None:
+            flow = encode_domain_batch(
+                model,
+                phase_batch_rows,
+                phase_images,
+                config,
+                device,
+                prefetched_cache=phase_prefetched_cache,
+            )
+            if config.immiscible_enabled:
+                apply_immiscible_noise_assignment([flow])
+            flow_weight_batches, _metrics = effective_flow_loss_weights(
+                [flow["timesteps"]],
+                weighting=config.flow_loss_weighting,
+                gamma=config.flow_min_snr_gamma,
+                normalize=config.normalize_flow_loss_weights,
+            )
+            flow_weights = flow_weight_batches[0]
+            with (
+                controller.route(config.domain),
+                torch.autocast(device_type="cuda", dtype=torch.bfloat16),
+            ):
+                forwarded = _forward_transformer(
+                    transformer,
+                    flow,
+                    return_hidden_layer=(
+                        config.repa_hidden_layer if repa is not None else None
+                    ),
+                )
+                if repa is None:
+                    prediction = forwarded
+                    repa_loss = None
+                else:
+                    prediction, hidden = forwarded
+                    repa_loss = repa(
+                        hidden,
+                        flow["repa_target"],
+                        flow["image_lens"],
+                    )
+                loss, _observed = rectified_flow_loss(
+                    prediction, flow["velocity"]
+                )
+                if (
+                    config.immiscible_enabled
+                    or config.flow_loss_weighting != "uniform"
+                ):
+                    weighted_loss, _ = weighted_rectified_flow_loss(
+                        prediction,
+                        flow["velocity"],
+                        flow["image_lens"],
+                        flow_weights,
+                        effective_example_count=int(flow_weights.numel()),
+                    )
+                else:
+                    weighted_loss = loss / config.gradient_accumulation_steps
+                if config.velocity_direction_loss_weight > 0:
+                    if (
+                        config.immiscible_enabled
+                        or config.flow_loss_weighting != "uniform"
+                    ):
+                        weighted_direction_loss, _direction_loss = (
+                            weighted_velocity_direction_loss(
+                                prediction,
+                                flow["velocity"],
+                                flow["image_lens"],
+                                flow_weights,
+                                effective_example_count=int(
+                                    flow_weights.numel()
+                                ),
+                                epsilon=config.velocity_direction_loss_epsilon,
+                            )
+                        )
+                    else:
+                        direction_loss = velocity_direction_loss_per_example(
+                            prediction,
+                            flow["velocity"],
+                            flow["image_lens"],
+                            epsilon=config.velocity_direction_loss_epsilon,
+                        ).mean()
+                        weighted_direction_loss = (
+                            direction_loss / config.gradient_accumulation_steps
+                        )
+                else:
+                    weighted_direction_loss = loss.new_zeros(())
+                optimization_loss = (
+                    weighted_loss
+                    + config.velocity_direction_loss_weight
+                    * weighted_direction_loss
+                )
+                if loop_controller is not None:
+                    optimization_loss = (
+                        optimization_loss
+                        + loop_controller.config.looping.auxiliary_weight
+                        * auxiliary_loop_flow_loss(
+                            loop_controller, flow["velocity"]
+                        )
+                        / config.gradient_accumulation_steps
+                        + loop_controller.config.looping.factorization.ponder_weight
+                        * learned_loop_ponder_loss(loop_controller)
+                        / config.gradient_accumulation_steps
+                    )
+                repa_contribution = (
+                    config.repa_loss_weight
+                    * repa_loss
+                    / config.gradient_accumulation_steps
+                    if repa_loss is not None
+                    else None
+                )
+            _backward_training_objective(
+                optimization_loss,
+                repa_contribution,
+            )
+
+        def compile_phase() -> Mapping[str, Any]:
+            if config.compile_vae_encoder:
+                model.maybe_compile_vae_encoder()
+            return compile_transformer_blocks(
+                transformer,
+                enabled=True,
+                mode=config.compile_transformer_mode,
+                dynamic=config.compile_transformer_dynamic,
+            )
+
+        trajectory_models = {"transformer": transformer}
+        if repa is not None:
+            trajectory_models["repa"] = repa
+        compile_report = run_mageflow_execution_phases(
+            worker_execution_phases,
+            trajectory_model=trajectory_models,
+            optimizer=optimizer,
+            optimizer_step=step,
+            disabled_compile_report=compile_report,
+            compile_workload=compile_phase,
+            training_workload=phase_training_workload,
+            extra_state=phase_extra_state,
+            synchronize=lambda: torch.cuda.synchronize(device),
+        )
     architecture = terminal_architecture_report(controller)
     if not architecture["passed"]:
         raise RuntimeError(f"architecture preflight failed: {architecture}")

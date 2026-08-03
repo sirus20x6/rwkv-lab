@@ -400,9 +400,18 @@ startup orphan recovery are defined in
   verdict. The gate cannot release the fence it runs under, the journal refuses a self-contradictory
   verdict, and replay revalidates the verdict against its own receipt. Throughput and peak-memory
   gates are part of that same qualification receipt, so `benchmark` is not a separate executor.
-  Compile and warmup remain declaration-only: both are worker-side phases, so an authority-side
-  node would have to attest work it never observed. They need the typed worker phase protocol
-  (request/receipt messages plus SDK support) before they can become real executors.
+  Compile and warmup now have a typed worker phase protocol. The authority lowers their immutable
+  declarations into digest-bound Welcome requests and accepts only fenced receipts with exact step,
+  timing, diagnostic, and before/after trajectory-state evidence. Successful or skipped phases must
+  prove state restoration, recovery-safe repeats remain separate receipts, and the generic dashboard
+  renders the receipt history. Scratch RWKV now consumes the requests, triggers lazy compilation,
+  counts exact disposable warmup workloads, restores RNG/gradients, and content-hashes the complete
+  model/optimizer trajectory around both phases. The MageFlow appearance route now also lowers the
+  phase declaration into VAE/regional compilation and real-shaped disposable forwards/backwards,
+  with complete tensor, schedule, control, RNG, and cursor proofs. The terminal/TREAD route shares
+  that bridge and covers its configured REPA, immiscible-flow, weighted/directional, and loop
+  objectives. Remaining RWKV paths, transformer, and vision-loop adoption plus privileged CUDA
+  qualification remain before these phases are production-qualified.
 - Fingerprinted cache namespaces; typed CPU/I/O policy lowering and recovery attestation are
   implemented, with privileged real-host qualification remaining.
 - Declarative bounded Torch GPU profiling and dashboard trace artifacts are implemented; qualified

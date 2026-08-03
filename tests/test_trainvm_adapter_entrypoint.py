@@ -22,6 +22,7 @@ from rwkv_lab.trainvm_adapters.handlers import (
     _rwkv_posttraining,
     _rwkv_scratch,
     _scalar_metric_decision,
+    _terminal_expert,
     _transformer_mla,
     _vision_frozen_adapter,
     _vision_native_head,
@@ -37,7 +38,10 @@ from rwkv_lab.trainvm_adapters.io import (
     require_run_directory,
 )
 from rwkv_lab.trainvm_worker import (
+    ExecutionPhase,
+    ExecutionPhaseRequest,
     WorkerCancellationRequested,
+    WorkerExecutionPhases,
     WorkerResourcesReleasedPause,
 )
 
@@ -58,6 +62,7 @@ class FakeSession:
         )
         self.finished: list[tuple[str, object, int | None]] = []
         self.heartbeats: list[tuple[int, str]] = []
+        self.execution_phase_requests = ()
         self.closed = False
 
     def __enter__(self) -> Self:
@@ -244,7 +249,7 @@ def test_appearance_handler_passes_only_canonical_authorized_paths(
     monkeypatch.setattr(
         mage_flow_expert_train,
         "train",
-        lambda config, *, worker_components, worker_step_profiler, worker_observability, worker_controls: (
+        lambda config, *, worker_components, worker_step_profiler, worker_observability, worker_controls, worker_execution_phases: (
             observed.append(
                 (
                     config,
@@ -252,6 +257,7 @@ def test_appearance_handler_passes_only_canonical_authorized_paths(
                     worker_step_profiler,
                     worker_observability,
                     worker_controls,
+                    worker_execution_phases,
                 )
             )
         ),
@@ -277,15 +283,29 @@ def test_appearance_handler_passes_only_canonical_authorized_paths(
             "mixed_precision": "bf16",
         }
     )
+    execution_phases = SimpleNamespace(
+        request=lambda phase: (
+            SimpleNamespace(enabled=True)
+            if phase is ExecutionPhase.COMPILE
+            else None
+        )
+    )
 
     assert _appearance_expert(
-        invocation, components, observability=observability, controls=controls
+        invocation,
+        components,
+        observability=observability,
+        controls=controls,
+        execution_phases=execution_phases,
     ) == HandlerResult("worker.completed", {"reason": "training_complete"})
     assert observed[0][0].train_manifest == str(manifest.resolve())
     assert observed[0][0].output_dir == str(run_directory.resolve())
     assert observed[0][1] is components
     assert observed[0][3] is observability
     assert observed[0][4] is controls
+    assert observed[0][5] is execution_phases
+    assert observed[0][0].compile_transformer_blocks is True
+    assert observed[0][0].compile_vae_encoder is True
     assert observed[0][0].learning_rate == pytest.approx(2.0e-5)
     assert observed[0][0].eval_every == 25
     assert observed[0][0].caption_dropout == pytest.approx(0.2)
@@ -325,6 +345,62 @@ def test_family_handler_rejects_same_path_mutation_before_trainer_call(
     with pytest.raises(AdapterInputError, match="content identity verification"):
         _appearance_expert(invocation, SimpleNamespace())
     assert called is False
+
+
+def test_terminal_handler_lowers_compile_phase_into_trainer_config(
+    tmp_path, monkeypatch
+) -> None:
+    from rwkv_lab import mage_flow_terminal_train
+
+    read_root = tmp_path / "read"
+    run_directory = tmp_path / "write" / "run"
+    read_root.mkdir()
+    run_directory.mkdir(parents=True)
+    image = read_root / "image.png"
+    image.write_bytes(b"image")
+    manifest = read_root / "train.jsonl"
+    manifest.write_text(json.dumps({"image": str(image)}) + "\n", encoding="utf-8")
+    expert = read_root / "expert.safetensors"
+    expert.write_bytes(b"expert")
+    observed = []
+
+    def train(config, **kwargs):
+        observed.append((config, kwargs))
+
+    monkeypatch.setattr(mage_flow_terminal_train, "train", train)
+    invocation = SimpleNamespace(
+        inputs={
+            "config": {
+                "domain": "animation",
+                "train_manifest": str(manifest),
+                "expert_checkpoint": str(expert),
+                "output_dir": str(run_directory),
+                "model_path": None,
+            }
+        },
+        workspace=_sealed_workspace(read_root, run_directory),
+    )
+    execution_phases = SimpleNamespace(
+        request=lambda phase: (
+            SimpleNamespace(enabled=True)
+            if phase is ExecutionPhase.COMPILE
+            else None
+        )
+    )
+
+    result = _terminal_expert(
+        invocation,
+        SimpleNamespace(),
+        observability=SimpleNamespace(),
+        execution_phases=execution_phases,
+    )
+    assert result == HandlerResult(
+        "worker.completed", {"reason": "training_complete"}
+    )
+    config, keyword_arguments = observed[0]
+    assert config.compile_transformer_blocks is True
+    assert config.compile_vae_encoder is True
+    assert keyword_arguments["worker_execution_phases"] is execution_phases
 
 
 def test_mageflow_manifest_cannot_reference_unsealed_payload(
@@ -454,6 +530,7 @@ def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoin
     profiler = SimpleNamespace()
     observability = SimpleNamespace()
     controls = SimpleNamespace()
+    execution_phases = SimpleNamespace()
 
     result = _rwkv_scratch(
         invocation,
@@ -461,6 +538,7 @@ def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoin
         step_profiler=profiler,
         observability=observability,
         controls=controls,
+        execution_phases=execution_phases,
     )
     arguments, keyword_arguments = observed[0]
     assert arguments[arguments.index("--data") + 1] == str(corpus.resolve())
@@ -473,6 +551,7 @@ def test_rwkv_scratch_handler_lowers_only_typed_arguments_and_terminal_checkpoin
         "worker_step_profiler": profiler,
         "worker_observability": observability,
         "worker_controls": controls,
+        "worker_execution_phases": execution_phases,
     }
     assert result.optimizer_step == 120
     assert len(result.checkpoint_requests) == 1
@@ -1439,6 +1518,41 @@ def test_dispatch_table_is_closed_and_training_composition_is_required() -> None
         execute_invocation(supported)
 
 
+def test_nonadopted_adapter_receipts_enabled_phase_failure_before_dispatch() -> None:
+    receipts = []
+    channel = SimpleNamespace(
+        execution_phase_receipt=lambda request, disposition, **values: (
+            receipts.append((request, disposition, values)) or 1
+        )
+    )
+    phases = WorkerExecutionPhases(
+        channel,
+        (
+            ExecutionPhaseRequest(
+                phase=ExecutionPhase.COMPILE,
+                enabled=True,
+                steps=None,
+                request_digest="sha256:" + "1" * 64,
+            ),
+        ),
+    )
+    invocation = SimpleNamespace(
+        adapter={
+            "adapter": "rwkv-lab.qwen-ao3",
+            "version": "1.0.0",
+            "operation": "train",
+            "contract": "rwkv_lab.qwen_ao3.v1.Train",
+        },
+        invocation_digest="sha256:" + "2" * 64,
+        training=SimpleNamespace(),
+    )
+
+    with pytest.raises(AdapterDispatchError, match="enabled compile"):
+        execute_invocation(invocation, execution_phases=phases)
+    assert len(receipts) == 1
+    assert receipts[0][1].value == "failed"
+
+
 def test_runner_reports_success_with_optimizer_step() -> None:
     bootstrap = SimpleNamespace(run_id="run-1")
     sessions: list[FakeSession] = []
@@ -1456,7 +1570,7 @@ def test_runner_reports_success_with_optimizer_step() -> None:
             else pytest.fail("wrong descriptor")
         ),
         session_factory=factory,
-        executor=lambda invocation, _profiler, _observability, _controls: HandlerResult(
+        executor=lambda invocation, _profiler, _observability, _controls, _phases: HandlerResult(
             "worker.completed", {"reason": "training_complete"}, 41
         ),
     )
@@ -1495,7 +1609,7 @@ def test_runner_publishes_handler_checkpoints_before_terminal_event(
     status = run_worker(
         bootstrap_reader=lambda _descriptor: bootstrap,
         session_factory=lambda _bootstrap: session,
-        executor=lambda _invocation, _profiler, _observability, _controls: (
+        executor=lambda _invocation, _profiler, _observability, _controls, _phases: (
             HandlerResult(
                 "worker.completed",
                 {"reason": "training_complete"},
@@ -1540,7 +1654,7 @@ def test_runner_publishes_handler_artifacts_before_terminal_event(
     status = run_worker(
         bootstrap_reader=lambda _descriptor: bootstrap,
         session_factory=lambda _bootstrap: session,
-        executor=lambda _invocation, _profiler, _observability, _controls: (
+        executor=lambda _invocation, _profiler, _observability, _controls, _phases: (
             HandlerResult(
                 "worker.completed",
                 {"reason": "training_complete"},
@@ -1572,6 +1686,7 @@ def test_runner_reports_sanitized_failure_and_skips_completed_replay() -> None:
         _profiler: object,
         _observability: object,
         _controls: object,
+        _phases: object,
     ) -> HandlerResult:
         raise RuntimeError("secret dataset path")
 
@@ -1597,7 +1712,7 @@ def test_runner_reports_sanitized_failure_and_skips_completed_replay() -> None:
         run_worker(
             bootstrap_reader=lambda _descriptor: bootstrap,
             session_factory=lambda _bootstrap: completed,
-            executor=lambda _invocation, _profiler, _observability, _controls: (
+            executor=lambda _invocation, _profiler, _observability, _controls, _phases: (
                 pytest.fail("replayed completed work")
             ),
         )

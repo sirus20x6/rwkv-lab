@@ -91,7 +91,9 @@ def training_composition() -> dict[str, object]:
     return {**body, "composition_digest": digest(canonical(body))}
 
 
-def invocation_document(*, training: object = None, resume: object = None) -> bytes:
+def invocation_document(
+    *, training: object = None, resume: object = None, execution: object = None
+) -> bytes:
     body = {
         "adapter": {
             "adapter": "rwkv-lab.mageflow",
@@ -109,7 +111,7 @@ def invocation_document(*, training: object = None, resume: object = None) -> by
         "controls": {"learning_rate": 2e-6},
         "dispatch_id": "dispatch-1",
         "effective_control_revision": 2,
-        "execution": None,
+        "execution": execution,
         "host_id": "sha256:" + "b" * 64,
         "inputs": {"caption": "雪"},
         "node_id": "train",

@@ -66,14 +66,16 @@ Implemented now:
   completion, so an expired, released, or superseded worker cannot mutate the FSM;
 - a bounded `WorkerControl.Connect` stream that requires `WorkerHello` first, persists readiness
   and dispatch before `WorkerWelcome`, durably ingests replay-safe heartbeats, scalar metrics,
-  artifact manifests, and ordered control acknowledgements without advancing the FSM, delivers
+  artifact manifests, digest-bound compile/warmup receipts, and ordered control acknowledgements
+  without advancing the FSM, delivers
   pending live-control patches by controller sequence, and persists the terminal transition and
   receipt before acknowledging it; duplicate live streams are rejected and lost acknowledgements
   or receipts replay exactly; metric names, units, and step domains must match the sealed
   observability declaration, non-optimizer domains cannot mutate optimizer progress, and bounded
   event replay supports an upper-fenced newest-first tail for scale-independent observers;
 - a matching Python worker SDK with sealed bootstrap and immutable invocation decoders, checked-in
-  protobuf bindings, strict bidirectional stream sequencing, typed telemetry/artifact/control APIs,
+  protobuf bindings, strict bidirectional stream sequencing, typed telemetry/artifact/control and
+  disposable execution-phase APIs,
   adapter-owned safe-point polling, and cross-runtime canonical JSON golden digests; see
   [`PYTHON_WORKER_SDK.md`](../docs/experiment-vm/PYTHON_WORKER_SDK.md);
 - typed `trainvm.core` artifact-validation and resource-release execution that cannot enter through
