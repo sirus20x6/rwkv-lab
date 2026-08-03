@@ -1790,10 +1790,12 @@ def terminal_optimizer_parameter_routing(
     expert_ids = {id(parameter) for parameter in controller.parameters()}
     loop_controller = getattr(transformer, "tread_loop_controller", None)
     if loop_controller is not None:
-        # The controller has its own complete, metadata-bearing checkpoint.
-        # Excluding it here avoids duplicate partial state and makes one file
-        # authoritative for both backbone and expert loop controls.
-        expert_ids.update(id(parameter) for parameter in loop_controller.parameters())
+        # Loop controls follow the path they refine: expert-loop controls are
+        # expert-owned, while backbone-loop controls remain in the shared
+        # backbone group and checkpoint at its reduced learning rate.
+        expert_ids.update(
+            id(parameter) for parameter in loop_controller.expert_parameters()
+        )
     repa_ids = (
         frozenset(id(parameter) for parameter in repa_projection.parameters())
         if repa_projection is not None

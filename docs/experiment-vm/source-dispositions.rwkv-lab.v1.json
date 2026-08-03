@@ -10,7 +10,7 @@
       ".py"
     ]
   },
-  "source_tree_digest": "sha256:580932df5e443a686e8bccf3456b0430df22ac3b405f655cd07aa1cf2c4f3a5b",
+  "source_tree_digest": "sha256:673632b0659a8d9fdf3d4ecba201ed67f71253b023121459497c3aaf8826d6f9",
   "entries": [
     {
       "source_path": "src/rwkv_lab/__init__.py",
@@ -1422,7 +1422,7 @@
       ],
       "resume_relevance": "consumer_owned",
       "compatibility_workflow_id": null,
-      "source_sha256": "sha256:88e83bdd10ef3dbf782fc6f510980c7b0883e34d0bc2623c6a833f37fefdd4aa",
+      "source_sha256": "sha256:60aac7c004c52a02ee9c4f99faddd52dc02b61011b7722952675312274c79e69",
       "family": "mageflow_diffusion",
       "coverage": "transitive",
       "consumers": [
