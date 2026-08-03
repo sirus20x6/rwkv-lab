@@ -273,7 +273,7 @@ def main() -> int:
     adapters = tuple(profile["adapter"] for profile in requirements["profiles"])
     shared_distributions = tuple(requirements["shared_root_distributions"])
     if (
-        len(adapters) != 19
+        len(adapters) != 20
         or len(set(adapters)) != len(adapters)
         or shared_distributions != tuple(sorted(set(shared_distributions)))
         or any(
@@ -306,8 +306,10 @@ def main() -> int:
             for profile in requirements["profiles"]
         },
     )
-    if len(grouped) != len(adapters) - 1 or not any(
-        members == list(adapters[:2]) for members in grouped.values()
+    # The three MageFlow routes deliberately share one identical sealed Python
+    # closure. Every other adapter currently owns a distinct closure.
+    if len(grouped) != len(adapters) - 2 or not any(
+        members == list(adapters[:3]) for members in grouped.values()
     ):
         raise SystemExit("per-adapter runtime grouping drifted from native requirements")
     with tempfile.TemporaryDirectory(prefix="trainvm-worker-artifact-") as raw:
