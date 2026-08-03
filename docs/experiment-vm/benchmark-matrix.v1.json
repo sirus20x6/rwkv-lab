@@ -84,6 +84,28 @@
       ]
     },
     {
+      "id": "rwkv.ao3-real-input",
+      "family": "rwkv_scratch",
+      "effect_class": "training_kernel",
+      "portability": "portable",
+      "accelerator_required": false,
+      "shape_buckets": [
+        "seq128xbatch2",
+        "seq256xbatch4",
+        "seq512xbatch8"
+      ],
+      "declares_curriculum_transition": false,
+      "quality_gate": "validation_perplexity",
+      "notes": "Portable AO3 input-path fixture. Every step reads complete indexed raw documents of at least 128 KiB, decodes UTF-8, tokenizes all decoded text with the RWKV World tokenizer, and then buckets IDs; increasing batch size increases the distinct document set and bytes tokenized.",
+      "parity_evidence": [
+        "output_parity",
+        "gradient_parity",
+        "optimizer_update_parity",
+        "state_parity",
+        "resumed_trajectory_parity"
+      ]
+    },
+    {
       "id": "rwkv.pretrained-continuation",
       "family": "rwkv_pretrained",
       "effect_class": "training_kernel",

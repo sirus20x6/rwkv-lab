@@ -191,6 +191,8 @@ def main() -> int:
     first_step = step_seconds[0]
     sorted_step_seconds = sorted(step_seconds)
     median = sorted_step_seconds[len(sorted_step_seconds) // 2]
+    training_step_seconds = sum(step_seconds)
+    measured_total = input_wait + training_step_seconds
     peak_memory = int(torch.cuda.max_memory_allocated(device))
     capability = torch.cuda.get_device_capability(device)
 
@@ -201,6 +203,8 @@ def main() -> int:
         "peak_memory_bytes": peak_memory,
         "peak_memory_kind": "cuda_max_memory_allocated",
         "input_wait_seconds": input_wait,
+        "training_step_seconds": training_step_seconds,
+        "input_wait_ratio": input_wait / measured_total if measured_total else 0.0,
         # Synthesized on device; see portable_lm_step.py. The interval above is
         # tensor construction, not dataloader stall, and no host-to-device copy
         # is being measured because the data never leaves the device.
