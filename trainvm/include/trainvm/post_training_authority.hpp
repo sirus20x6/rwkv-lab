@@ -119,6 +119,20 @@ struct PostTrainingArm final {
 [[nodiscard]] std::optional<LifecycleAdmissionRefusal> admit_post_training_arm(
     const PostTrainingArm& arm, const AdapterProfile& profile);
 
+// The subset of the rules that depend on the arm alone. Document compilation
+// has no adapter registry — compile_document takes only JSON, because the
+// registry is authority-owned and applied later — so this is what can be
+// enforced while an author is still writing.
+//
+// It is deliberately a STRICT SUBSET, not a cheaper version: an arm that
+// passes here can still be refused at launch by the effect and resume-grade
+// rules, which need the profile. Callers must not present a compile-time pass
+// as admission. Every rule here is also re-run by admit_post_training_arm, so
+// the compile diagnostic and the launch gate cannot disagree about the rules
+// they share.
+[[nodiscard]] std::optional<LifecycleAdmissionRefusal>
+validate_post_training_arm_declaration(const PostTrainingArm& arm);
+
 // The strongest claim this arm's own declarations can support. Callers that
 // want a label rather than a refusal should ask for this and use it, instead
 // of proposing a claim and hoping.
@@ -135,6 +149,16 @@ qualify_post_training_completion(
 
 [[nodiscard]] std::string_view post_training_arm_kind_name(
     PostTrainingArmKind kind);
+
+// Name-to-value for the document surface. Returning nullopt rather than a
+// default is the point: an unknown name must produce a diagnostic that repeats
+// it back, not decode to something the author did not write.
+[[nodiscard]] std::optional<PostTrainingArmKind> post_training_arm_kind_from_name(
+    std::string_view name);
+[[nodiscard]] std::optional<RunBoundKind> run_bound_kind_from_name(
+    std::string_view name);
+[[nodiscard]] std::optional<ReproducibilityClaim> reproducibility_claim_from_name(
+    std::string_view name);
 [[nodiscard]] std::string_view run_bound_kind_name(RunBoundKind kind);
 [[nodiscard]] std::string_view reproducibility_claim_name(
     ReproducibilityClaim claim);

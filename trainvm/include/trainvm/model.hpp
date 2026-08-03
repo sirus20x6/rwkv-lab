@@ -189,11 +189,49 @@ struct TrainingTopologySelection {
   Json parameters = Json::object();
 };
 
+// What ends a post-training run, as the author declares it. Kept as strings
+// here rather than the authority's enums because this is the document surface:
+// an unknown value must produce a diagnostic naming it, not fail to decode.
+struct PostTrainingBoundDeclaration {
+  std::string kind;
+  // Absent for external_signal, which has no magnitude. Optional because the
+  // reflected decoder treats every non-optional member as required.
+  std::optional<std::uint64_t> magnitude;
+};
+
+// A change the arm makes outside this host. Authorization is the author's
+// explicit act; the receipt is recorded later, by the run.
+struct PostTrainingMutationDeclaration {
+  std::string target;
+  std::string effect;
+  bool authorized{};
+};
+
+// One post-training arm attached to a composition. Lowered at compile time
+// into the authority's PostTrainingArm so a document that misdescribes its own
+// reproducibility is refused before anything runs, rather than at launch.
+struct PostTrainingArmDeclaration {
+  std::string arm_id;
+  std::string kind;
+  std::vector<PostTrainingBoundDeclaration> bounds;
+  std::string reproducibility_claim;
+  std::optional<std::uint64_t> seed;
+  std::optional<std::string> verifier_identity;
+  // Both optional so an arm that changes nothing outside the host, and makes
+  // no resume promise, is written without ceremony.
+  std::optional<std::vector<PostTrainingMutationDeclaration>>
+      external_mutations;
+  std::optional<bool> claims_trajectory_preserving_resume;
+};
+
 struct TrainingComposition {
   std::string model_family;
   std::map<std::string, TrainingComponentSelection> components;
   // Optional so a document without topologies encodes exactly as before.
   std::optional<std::vector<TrainingTopologySelection>> topologies;
+  // Optional for the same reason. Present only for fine-tuning, RLVR and other
+  // post-training arms.
+  std::optional<PostTrainingArmDeclaration> post_training;
 };
 
 struct Binding {
