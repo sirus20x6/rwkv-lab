@@ -228,6 +228,8 @@ def run_phase(
     accelerator_required: bool,
     compile_step: bool = False,
     compile_mode: str = "default",
+    input_workers: int = 0,
+    input_prefetch_depth: int = 0,
 ) -> dict:
     """Run one phase in its own process and return its structured report."""
     started = time.perf_counter()
@@ -253,6 +255,11 @@ def run_phase(
     ]
     if compile_step:
         command.extend(["--compile", "--compile-mode", compile_mode])
+    if input_workers or input_prefetch_depth:
+        command.extend([
+            "--input-workers", str(input_workers),
+            "--input-prefetch-depth", str(input_prefetch_depth),
+        ])
     completed = subprocess.run(
         command,
         capture_output=True, text=True, cwd=REPOSITORY,
@@ -288,12 +295,19 @@ def run_cell(
     accelerator_conditions: dict | None = None,
     compile_step: bool = False,
     compile_mode: str = "default",
+    input_workers: int = 0,
+    input_prefetch_depth: int = 0,
 ) -> dict:
     """Cold compile, disposable warmup, then a fresh timed process."""
-    phase_options = (
-        {"compile_step": True, "compile_mode": compile_mode}
-        if compile_step else {}
-    )
+    phase_options: dict = {}
+    if compile_step:
+        phase_options.update(
+            {"compile_step": True, "compile_mode": compile_mode})
+    if input_workers or input_prefetch_depth:
+        phase_options.update({
+            "input_workers": input_workers,
+            "input_prefetch_depth": input_prefetch_depth,
+        })
     cold = run_phase(
         "cold", bucket, seed, 1, workload, accelerator_required,
         **phase_options)
@@ -334,10 +348,27 @@ def run_cell(
         "input_wait_seconds": timed["input_wait_seconds"],
         "training_step_seconds": timed.get("training_step_seconds"),
         "input_wait_ratio": timed.get("input_wait_ratio"),
+        # Wall time a real training loop spends per step: blocked on input
+        # PLUS computing. steady_state_step_seconds excludes input entirely,
+        # which is the right basis for a kernel candidate and the wrong one
+        # for an input-pipeline candidate, whose whole effect is on the part
+        # that measure omits.
+        "end_to_end_step_seconds": (
+            (timed["input_wait_seconds"]
+             + (timed.get("training_step_seconds") or 0.0)) / steps
+            if steps > 0 else None),
         # Carried so a receipt states what its input-wait number describes.
         # Most fixtures synthesize tensors; the AO3 fixture performs real file
         # reads, UTF-8 decode, and tokenization inside the measured interval.
         "input_pipeline": timed.get("input_pipeline", "unknown"),
+        # How the input work was scheduled, and the identity of what it
+        # produced. The digest is what lets ordering and content parity be
+        # compared between arms instead of assumed.
+        "input_pipeline_mode": timed.get("input_pipeline_mode", "unknown"),
+        "input_workers": timed.get("input_workers", 0),
+        "input_prefetch_depth": timed.get("input_prefetch_depth", 0),
+        "batch_sequence_digest": timed.get("batch_sequence_digest"),
+        "step_batch_digests": timed.get("step_batch_digests", []),
         "quality_metric": timed["quality_metric"],
         "final_loss": timed["final_loss"],
         "result_fingerprint": timed["result_fingerprint"],
@@ -393,6 +424,45 @@ def compare_scalar(baseline: float, candidate: float) -> dict:
     }
 
 
+def compare_batch_identity(baseline: dict, candidate: dict) -> dict:
+    """Derive ordering and content parity from what each arm actually loaded.
+
+    A prefetching or worker-parallel loader is precisely the change that can
+    return the right batches in the wrong order, and a throughput number will
+    not notice. Both arms publish a per-step digest bound to the step index and
+    a chained digest over the sequence, so:
+
+      content parity  - the same steps trained on the same bytes
+      ordering parity - they arrived in the same order
+
+    An arm that published no digest yields False rather than True. Absent
+    evidence is not parity; that assumption is what this replaces.
+    """
+    baseline_steps = baseline.get("step_batch_digests") or []
+    candidate_steps = candidate.get("step_batch_digests") or []
+    baseline_chain = baseline.get("batch_sequence_digest")
+    candidate_chain = candidate.get("batch_sequence_digest")
+
+    observed = bool(baseline_steps) and bool(candidate_steps)
+    content = (
+        observed
+        and sorted(baseline_steps) == sorted(candidate_steps)
+    )
+    ordering = (
+        observed
+        and isinstance(baseline_chain, str)
+        and baseline_chain == candidate_chain
+        and baseline_steps == candidate_steps
+    )
+    return {
+        "content_parity": content,
+        "ordering_parity": ordering,
+        "batch_identity_observed": observed,
+        "baseline_batch_sequence_digest": baseline_chain,
+        "candidate_batch_sequence_digest": candidate_chain,
+    }
+
+
 def compare_fingerprints(baseline: dict, candidate: dict) -> dict:
     """Derive evidence parity from measured baseline/candidate fingerprints."""
     output = compare_scalar(
@@ -440,6 +510,13 @@ def comparison_cell(baseline: dict, candidate: dict) -> dict:
     })
     cell.update(compare_fingerprints(
         baseline["result_fingerprint"], candidate["result_fingerprint"]))
+    cell.update(compare_batch_identity(baseline, candidate))
+    cell.update({
+        "baseline_input_wait_seconds": baseline["input_wait_seconds"],
+        "candidate_input_wait_seconds": candidate["input_wait_seconds"],
+        "baseline_input_pipeline_mode": baseline["input_pipeline_mode"],
+        "candidate_input_pipeline_mode": candidate["input_pipeline_mode"],
+    })
     return cell
 
 
@@ -456,7 +533,21 @@ def main() -> int:
     parser.add_argument("--seeds", type=int, default=2)
     parser.add_argument("--steps", type=int, default=8)
     parser.add_argument(
-        "--candidate", choices=["eager", "compile"], default="eager")
+        "--candidate", choices=["eager", "compile", "prefetch"],
+        default="eager")
+    parser.add_argument(
+        "--input-workers",
+        type=nonnegative_integer,
+        default=8,
+        help="worker threads for --candidate prefetch; the baseline arm "
+             "always stays serial so the comparison has a fixed reference",
+    )
+    parser.add_argument(
+        "--input-prefetch-depth",
+        type=nonnegative_integer,
+        default=2,
+        help="batches prepared ahead for --candidate prefetch",
+    )
     parser.add_argument(
         "--compile-mode",
         choices=["default", "reduce-overhead"],
@@ -530,6 +621,18 @@ def main() -> int:
                 # comparison rather than from asserted constants.
                 cells.append(comparison_cell(baseline, baseline))
             else:
+                candidate_options: dict = {}
+                if arguments.candidate == "compile":
+                    candidate_options.update({
+                        "compile_step": True,
+                        "compile_mode": arguments.compile_mode,
+                    })
+                else:
+                    candidate_options.update({
+                        "input_workers": arguments.input_workers,
+                        "input_prefetch_depth": (
+                            arguments.input_prefetch_depth),
+                    })
                 candidate = run_cell(
                     bucket,
                     seed,
@@ -537,8 +640,7 @@ def main() -> int:
                     workload,
                     fixture["accelerator_required"],
                     accelerator_conditions,
-                    compile_step=True,
-                    compile_mode=arguments.compile_mode,
+                    **candidate_options,
                 )
                 cells.append(comparison_cell(baseline, candidate))
     completed = [cell for cell in cells if cell["status"] == "ok"]
@@ -576,10 +678,22 @@ def main() -> int:
         print("every cell failed; no evidence emitted", file=sys.stderr)
         return 1
 
+    # An input-pipeline candidate moves cost between blocking on input and
+    # computing. Scoring it on step time alone would credit none of the gain
+    # and charge it for the producer's CPU contention, rejecting a real
+    # improvement as a regression. The basis is published in the receipt and
+    # in the evidence-adjacent report rather than silently switched.
+    throughput_basis = (
+        "end_to_end_including_input_wait"
+        if arguments.candidate == "prefetch" else "training_step_only")
+    measure = (
+        "end_to_end_step_seconds"
+        if throughput_basis == "end_to_end_including_input_wait"
+        else "steady_state_step_seconds")
     baseline_steps = sorted(
-        cell["baseline"]["steady_state_step_seconds"] for cell in completed)
+        cell["baseline"][measure] for cell in completed)
     candidate_steps = sorted(
-        cell["candidate"]["steady_state_step_seconds"] for cell in completed)
+        cell["candidate"][measure] for cell in completed)
     baseline_memory = max(
         cell["baseline"]["peak_memory_bytes"] for cell in completed)
     candidate_memory = max(
@@ -600,20 +714,33 @@ def main() -> int:
             cell["gradient_absolute_deviation"] for cell in completed),
         "maximum_gradient_relative_deviation": max(
             cell["gradient_relative_deviation"] for cell in completed),
+        "content_parity": all(cell["content_parity"] for cell in completed),
+        "ordering_parity": all(cell["ordering_parity"] for cell in completed),
+        "batch_identity_observed": all(
+            cell["batch_identity_observed"] for cell in completed),
+    }
+    report["input_pipeline"] = {
+        "baseline_mode": completed[0]["baseline_input_pipeline_mode"],
+        "candidate_mode": completed[0]["candidate_input_pipeline_mode"],
+        "baseline_input_wait_seconds": sum(
+            cell["baseline_input_wait_seconds"] for cell in completed),
+        "candidate_input_wait_seconds": sum(
+            cell["candidate_input_wait_seconds"] for cell in completed),
     }
     # Parity is deliberately copied from the measured comparison above. A
     # throughput win cannot survive the native authority when either differs.
-    candidate_digest = (
-        digest("candidate", fixture["id"], coverage)
-        if arguments.candidate == "eager"
-        else digest(
-            "candidate",
-            arguments.candidate,
-            arguments.compile_mode,
-            fixture["id"],
-            coverage,
-        )
-    )
+    if arguments.candidate == "eager":
+        candidate_digest = digest("candidate", fixture["id"], coverage)
+    elif arguments.candidate == "compile":
+        candidate_digest = digest(
+            "candidate", arguments.candidate, arguments.compile_mode,
+            fixture["id"], coverage)
+    else:
+        candidate_digest = digest(
+            "candidate", arguments.candidate,
+            str(arguments.input_workers),
+            str(arguments.input_prefetch_depth),
+            fixture["id"], coverage)
     evidence = {
         "api_version": "trainvm.cache-qualification-evidence/v1",
         "authority_receipt_digest": digest("authority", fixture["id"]),
@@ -642,8 +769,11 @@ def main() -> int:
         "state_parity": True,
         "resumed_trajectory_parity": True,
         "determinism_parity": True,
-        "content_parity": True,
-        "ordering_parity": True,
+        # Measured from the per-step batch digests published by both arms, not
+        # asserted. A loader that reorders batches, or resumes on the wrong
+        # cursor, fails here even when its throughput number improves.
+        "content_parity": report["parity"]["content_parity"],
+        "ordering_parity": report["parity"]["ordering_parity"],
         "manifest_parity": True,
         "model_quality_pass": True,
         "baseline_throughput": baseline_throughput,
@@ -658,10 +788,24 @@ def main() -> int:
     # The strict evidence schema cannot carry diagnostic measurements. Publish
     # them in the benchmark-run receipt and rewrite it after aggregation.
     report["aggregate"] = {
+        "throughput_basis": throughput_basis,
         "baseline_throughput": baseline_throughput,
         "candidate_throughput": candidate_throughput,
         "baseline_peak_memory_bytes": baseline_memory,
         "candidate_peak_memory_bytes": candidate_memory,
+        # Both bases, always, so a reader can see what the chosen one omits.
+        "baseline_training_step_only_throughput": 1.0 / statistics.median(
+            sorted(cell["baseline"]["steady_state_step_seconds"]
+                   for cell in completed)),
+        "candidate_training_step_only_throughput": 1.0 / statistics.median(
+            sorted(cell["candidate"]["steady_state_step_seconds"]
+                   for cell in completed)),
+        "baseline_end_to_end_throughput": 1.0 / statistics.median(
+            sorted(cell["baseline"]["end_to_end_step_seconds"]
+                   for cell in completed)),
+        "candidate_end_to_end_throughput": 1.0 / statistics.median(
+            sorted(cell["candidate"]["end_to_end_step_seconds"]
+                   for cell in completed)),
     }
     if arguments.receipt:
         arguments.receipt.write_text(json.dumps(report, indent=2) + "\n")

@@ -20,14 +20,23 @@ import hashlib
 import json
 import os
 import pathlib
+import queue
 import random
 import resource
 import sqlite3
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Any
+
+# Run as a script the sibling module is already importable; loaded by file
+# path from a test it is not, so make both work.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
+from batch_identity import batch_digest, chain_digests  # noqa: E402
 
 DEFAULT_CORPUS_INDEX = pathlib.Path(
     "/thearray/data/AO3_final_location/ao3_current.sqlite3"
@@ -242,6 +251,45 @@ def _decode_document(document: CorpusDocument) -> tuple[str, int]:
     return decoded, len(source_bytes)
 
 
+@dataclass(frozen=True)
+class DocumentWork:
+    """How much real input work one document actually cost."""
+
+    bytes_read: int
+    characters: int
+    tokens: int
+
+
+def prepare_document(
+    document: CorpusDocument,
+    required_ids: int,
+    tokenizer: Any,
+    vocabulary: int,
+) -> tuple[list[int], DocumentWork]:
+    """Decode and tokenize one document into a fixed-length row of model IDs.
+
+    Deliberately pure: the same document and shape always produce the same
+    row, so moving this onto a worker thread changes how the input work is
+    scheduled and never what a step trains on. That property is what the
+    batch digests published below are able to prove rather than assert.
+    """
+    text, bytes_read = _decode_document(document)
+    token_ids = tokenizer.encode(text)
+    if not token_ids:
+        raise RuntimeError(
+            f"tokenizer produced no IDs for {document.relative_path!r}; "
+            "no synthetic fallback is available"
+        )
+    model_ids = [int(token_id) % vocabulary for token_id in token_ids]
+    repeats = (required_ids + len(model_ids) - 1) // len(model_ids)
+    row = (model_ids * repeats)[:required_ids]
+    return row, DocumentWork(
+        bytes_read=bytes_read,
+        characters=len(text),
+        tokens=len(token_ids),
+    )
+
+
 def _selection_digest(documents: list[CorpusDocument]) -> str:
     digest = hashlib.sha256()
     for document in documents:
@@ -264,9 +312,39 @@ def main() -> int:
         default="default",
     )
     parser.add_argument("--fallback-bucket")
+    parser.add_argument(
+        "--input-workers",
+        type=int,
+        default=0,
+        help="worker threads decoding and tokenizing a batch; 0 keeps the "
+             "serial baseline loader unchanged",
+    )
+    parser.add_argument(
+        "--input-prefetch-depth",
+        type=int,
+        default=0,
+        help="batches prepared ahead of the training step; 0 disables "
+             "prefetch so input and compute stay strictly serial",
+    )
+    parser.add_argument(
+        "--start-step",
+        type=int,
+        default=0,
+        help="first step index to load, so a resumed loader can be shown to "
+             "produce the same batches as an uninterrupted run",
+    )
     arguments = parser.parse_args()
     if arguments.steps < 1:
         raise SystemExit("steps must be positive")
+    if arguments.input_workers < 0:
+        raise SystemExit("input workers must not be negative")
+    if arguments.input_prefetch_depth < 0:
+        raise SystemExit("input prefetch depth must not be negative")
+    if arguments.start_step < 0:
+        raise SystemExit("start step must not be negative")
+    if arguments.start_step >= arguments.steps:
+        raise SystemExit("start step must be inside the run; --steps is the "
+                         "total run length, not the number remaining")
 
     sequence_length, batch_size = parse_bucket(arguments.bucket)
     fallback_shape = (
@@ -341,6 +419,8 @@ def main() -> int:
     decoded_characters = 0
     documents_read = 0
     tokens_encoded = 0
+    document_order: list[str] = []
+    step_digests: list[str] = []
 
     def training_step(tokens, targets):
         hidden = model(tokens)
@@ -364,70 +444,184 @@ def main() -> int:
             mode=arguments.compile_mode,
         )
 
+    def batch_documents(
+        step_index: int, selected_batch: int,
+    ) -> list[CorpusDocument]:
+        """The documents a step consumes: a pure function of the step index.
+
+        Because it depends on nothing but the step index and the seeded
+        document set, a run resumed at step K sees exactly the batch an
+        uninterrupted run saw at step K. --start-step exists to prove that.
+        """
+        offset = (step_index * selected_batch) % len(documents)
+        return [
+            documents[(offset + batch_index) % len(documents)]
+            for batch_index in range(selected_batch)
+        ]
+
     def load_batch(
         step_index: int, selected_sequence: int, selected_batch: int,
-        tokenizer: Any,
+        tokenizer: Any, executor: ThreadPoolExecutor | None,
     ):
         nonlocal corpus_bytes_read, decoded_characters
         nonlocal documents_read, tokens_encoded
-        rows: list[list[int]] = []
         required_ids = selected_sequence + 1
-        document_offset = (step_index * selected_batch) % len(documents)
-        for batch_index in range(selected_batch):
-            document = documents[
-                (document_offset + batch_index) % len(documents)]
-            text, bytes_read = _decode_document(document)
-            token_ids = tokenizer.encode(text)
-            if not token_ids:
-                raise RuntimeError(
-                    f"tokenizer produced no IDs for "
-                    f"{document.relative_path!r}; "
-                    "no synthetic fallback is available"
-                )
-            corpus_bytes_read += bytes_read
-            decoded_characters += len(text)
+        batch = batch_documents(step_index, selected_batch)
+
+        def prepare(document: CorpusDocument):
+            return prepare_document(
+                document, required_ids, tokenizer, vocabulary)
+
+        # Executor.map yields in SUBMISSION order regardless of completion
+        # order, so a worker pool cannot permute a batch. The digest below
+        # proves that held for this run rather than trusting the contract.
+        prepared = (
+            list(executor.map(prepare, batch)) if executor is not None
+            else [prepare(document) for document in batch]
+        )
+
+        rows: list[list[int]] = []
+        for document, (row, work) in zip(batch, prepared):
+            rows.append(row)
+            corpus_bytes_read += work.bytes_read
+            decoded_characters += work.characters
             documents_read += 1
-            tokens_encoded += len(token_ids)
-            model_ids = [int(token_id) % vocabulary for token_id in token_ids]
-            repeats = (required_ids + len(model_ids) - 1) // len(model_ids)
-            rows.append((model_ids * repeats)[:required_ids])
+            tokens_encoded += work.tokens
+            document_order.append(document.relative_path)
         packed = torch.tensor(rows, dtype=torch.long)
-        return packed[:, :-1], packed[:, 1:]
+        tokens, targets = packed[:, :-1], packed[:, 1:]
+        return tokens, targets, batch_digest(step_index, tokens, targets)
+
+    def batch_stream(
+        step_indices: list[int], selected_sequence: int, selected_batch: int,
+        tokenizer: Any, executor: ThreadPoolExecutor | None, depth: int,
+    ):
+        """Yield each step's batch, optionally prepared ahead of the step.
+
+        With depth 0 the loader stays strictly serial: load, step, load, step.
+        With a positive depth a single producer prepares batches ahead into a
+        bounded queue, so the measured input wait becomes the time the training
+        thread actually BLOCKS. Total input work is unchanged — it is overlapped
+        with compute, never skipped, which is why the batch digests must and do
+        stay identical between the two.
+        """
+        if depth <= 0:
+            for step_index in step_indices:
+                yield load_batch(
+                    step_index, selected_sequence, selected_batch,
+                    tokenizer, executor)
+            return
+
+        pending: queue.Queue = queue.Queue(maxsize=depth)
+        finished = object()
+        stopping = threading.Event()
+
+        def offer(item: Any) -> bool:
+            """Hand one item over, giving up if the consumer went away.
+
+            A plain blocking put would park forever on a full queue when the
+            consumer exits early, and the join below would then deadlock.
+            """
+            while not stopping.is_set():
+                try:
+                    pending.put(item, timeout=0.05)
+                    return True
+                except queue.Full:
+                    continue
+            return False
+
+        def produce() -> None:
+            try:
+                for step_index in step_indices:
+                    batch = load_batch(
+                        step_index, selected_sequence, selected_batch,
+                        tokenizer, executor)
+                    if not offer(batch):
+                        return
+            except BaseException as error:  # surfaced on the consuming thread
+                offer(error)
+            else:
+                offer(finished)
+
+        producer = threading.Thread(
+            target=produce, name="ao3-input-prefetch", daemon=True)
+        producer.start()
+        try:
+            while True:
+                item = pending.get()
+                if item is finished:
+                    return
+                if isinstance(item, BaseException):
+                    raise item
+                yield item
+        finally:
+            stopping.set()
+            producer.join(timeout=30.0)
 
     final_gradient_norm = float("nan")
+    executed_steps = list(range(arguments.start_step, arguments.steps))
     with ztok.Pipeline.from_rwkv(tokenizer_vocab) as tokenizer:
-        for step_index in range(arguments.steps):
-            input_started = time.perf_counter()
-            tokens, targets = load_batch(
-                step_index, sequence_length, batch_size, tokenizer)
-            input_wait += time.perf_counter() - input_started
+        # One persistent pool for the whole run: per-step pools would charge
+        # every step for thread creation and measure the pool, not the loader.
+        executor = (
+            ThreadPoolExecutor(
+                max_workers=arguments.input_workers,
+                thread_name_prefix="ao3-input",
+            )
+            if arguments.input_workers > 0 else None
+        )
+        try:
+            stream = iter(batch_stream(
+                executed_steps, sequence_length, batch_size,
+                tokenizer, executor, arguments.input_prefetch_depth))
+            while True:
+                # Timed around the CONSUMER pulling the next batch, so this is
+                # the interval the training thread spends BLOCKED on input.
+                # A `for` loop would advance the generator before the body and
+                # measure nothing. Prefetch shrinks this by overlapping the
+                # same work with compute; it never removes work, which is why
+                # the digests below stay identical.
+                input_started = time.perf_counter()
+                try:
+                    tokens, targets, step_digest = next(stream)
+                except StopIteration:
+                    break
+                input_wait += time.perf_counter() - input_started
+                step_digests.append(step_digest)
 
-            step_started = time.perf_counter()
-            loss, gradient_norm = measured_step(tokens, targets)
-            step_seconds.append(time.perf_counter() - step_started)
-            loss_value = float(loss.detach())
-            final_gradient_norm = float(gradient_norm.detach())
+                step_started = time.perf_counter()
+                loss, gradient_norm = measured_step(tokens, targets)
+                step_seconds.append(time.perf_counter() - step_started)
+                loss_value = float(loss.detach())
+                final_gradient_norm = float(gradient_norm.detach())
 
-        fallback = None
-        if fallback_shape is not None:
-            if arguments.fallback_bucket == arguments.bucket:
-                raise SystemExit("fallback bucket must be outside the compiled shape")
-            fallback_sequence, fallback_batch = fallback_shape
-            fallback_tokens, fallback_targets = load_batch(
-                arguments.steps, fallback_sequence, fallback_batch, tokenizer)
-            fallback_started = time.perf_counter()
-            fallback_loss, fallback_gradient_norm = measured_step(
-                fallback_tokens, fallback_targets)
-            fallback_seconds = time.perf_counter() - fallback_started
-            fallback = {
-                "bucket": arguments.fallback_bucket,
-                "step_seconds": fallback_seconds,
-                "result_fingerprint": {
-                    "final_loss": float(fallback_loss.detach()),
-                    "gradient_norm_sum": float(
-                        fallback_gradient_norm.detach()),
-                },
-            }
+            fallback = None
+            if fallback_shape is not None:
+                if arguments.fallback_bucket == arguments.bucket:
+                    raise SystemExit(
+                        "fallback bucket must be outside the compiled shape")
+                fallback_sequence, fallback_batch = fallback_shape
+                fallback_tokens, fallback_targets, _ = load_batch(
+                    arguments.steps, fallback_sequence, fallback_batch,
+                    tokenizer, executor)
+                fallback_started = time.perf_counter()
+                fallback_loss, fallback_gradient_norm = measured_step(
+                    fallback_tokens, fallback_targets)
+                fallback_seconds = time.perf_counter() - fallback_started
+                fallback = {
+                    "bucket": arguments.fallback_bucket,
+                    "step_seconds": fallback_seconds,
+                    "result_fingerprint": {
+                        "final_loss": float(fallback_loss.detach()),
+                        "gradient_norm_sum": float(
+                            fallback_gradient_norm.detach()),
+                    },
+                }
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=True)
+
+    batch_sequence_digest = chain_digests(step_digests)
 
     first_step = step_seconds[0]
     sorted_step_seconds = sorted(step_seconds)
@@ -446,6 +640,29 @@ def main() -> int:
         "training_step_seconds": training_step_seconds,
         "input_wait_ratio": input_wait / measured_total if measured_total else 0.0,
         "input_pipeline": INPUT_PIPELINE,
+        # How the same input work was scheduled. A receipt that shows a lower
+        # input wait is only meaningful next to the mode that produced it.
+        "input_workers": arguments.input_workers,
+        "input_prefetch_depth": arguments.input_prefetch_depth,
+        "input_pipeline_mode": (
+            "serial" if arguments.input_workers == 0
+            and arguments.input_prefetch_depth == 0
+            else "parallel_prefetch" if arguments.input_workers > 0
+            and arguments.input_prefetch_depth > 0
+            else "parallel" if arguments.input_workers > 0
+            else "prefetch"
+        ),
+        # The exact IDs each step trained on, chained in arrival order. This is
+        # what makes ordering and content parity a measurement: any permutation
+        # of documents within a batch, across batches, or a resumed cursor
+        # landing on the wrong step changes the chained value.
+        "batch_sequence_digest": batch_sequence_digest,
+        "step_batch_digests": step_digests,
+        "document_order_digest": "sha256:" + hashlib.sha256(
+            "\0".join(document_order).encode("utf-8", "surrogatepass"),
+        ).hexdigest(),
+        "start_step": arguments.start_step,
+        "executed_steps": len(executed_steps),
         "corpus_index": str(corpus_index),
         "corpus_root": str(corpus_root),
         "minimum_document_bytes": MINIMUM_DOCUMENT_BYTES,
