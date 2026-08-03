@@ -316,6 +316,33 @@ def test_controller_selected_resume_checkpoint_is_rehashed_before_use(
         resolve_resume_checkpoint(invocation)
 
 
+def test_controller_selected_resume_accepts_frozen_parent_lineage(
+    tmp_path: Path,
+) -> None:
+    session = FakeCheckpointSession(tmp_path)
+    result = CheckpointPublisher(session).publish(
+        make_checkpoint(tmp_path),
+        optimizer_step=12,
+        resume_grade="compatible",
+        state_components=("model", "optimizer", "rng_torch"),
+        parent_artifact_ids=("base-model-1",),
+    )
+    invocation = resume_invocation(session, result)
+    checkpoint = dict(invocation.resume["checkpoint"])
+    checkpoint["parent_artifact_ids"] = tuple(checkpoint["parent_artifact_ids"])
+    invocation.resume = MappingProxyType(
+        {
+            **invocation.resume,
+            "checkpoint": MappingProxyType(checkpoint),
+        }
+    )
+
+    resolved = resolve_resume_checkpoint(invocation)
+
+    assert resolved is not None
+    assert resolved.artifact_id == result.artifact_id
+
+
 def test_resume_checkpoint_rejects_authority_manifest_lineage_mismatch(
     tmp_path: Path,
 ) -> None:

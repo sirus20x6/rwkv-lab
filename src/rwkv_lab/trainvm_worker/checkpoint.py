@@ -548,7 +548,8 @@ def resolve_resume_checkpoint(invocation: object) -> ResolvedResumeCheckpoint | 
         isinstance(parents, list)
         and all(is_bounded_text(parent, 1024) for parent in parents)
         and len(parents) == len(set(parents))
-        and parents == authority_parents
+        and isinstance(authority_parents, (tuple, list))
+        and tuple(parents) == tuple(authority_parents)
     )
     if (
         manifest.get("schema") != CHECKPOINT_SNAPSHOT_SCHEMA
