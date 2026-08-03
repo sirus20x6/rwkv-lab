@@ -37,8 +37,12 @@ constexpr std::size_t kMaximumIdentifierBytes = 96U;
 constexpr std::size_t kMaximumPathBytes = 512U;
 constexpr std::size_t kMaximumLegacyDisplayBytes = 1024U;
 constexpr std::size_t kMaximumNotesBytes = 2048U;
+// Covers the entries and the classification surface digest, NOT the byte-level
+// source tree digest. Refreshing this is a review: it moves only when an
+// entry's recorded classification, or the entrypoint/argument/checkpoint
+// surface of a referenced source, has actually changed.
 constexpr std::string_view kReviewedCatalogDigest =
-    "sha256:98a8e98a65ff53df10cac0025ea8517966bd6d3a44a0f07bceaa2c785547b2ae";
+    "sha256:f6521108b4d1c50749a549f702f649cb2b4d48f45bf5552fe72d6c6ecd4dd2f0";
 
 constexpr std::array<std::string_view, 156> kReviewedWorkflowIds = {
     "acquisition.civitai-anima",
@@ -444,6 +448,105 @@ std::string compute_source_tree_digest(
   return "sha256:" + sha256_bytes(tree_material);
 }
 
+// The substrings that make a line able to change how its file is classified.
+// The catalog records family, operation_role, statefulness and resume_evidence;
+// what can move those is how the file is entered, what arguments it accepts,
+// and how it writes or reads training state. Nothing else in a Python module
+// can, which is why a comment or an internal computation is not here.
+//
+// Deliberately over-broad rather than precise. "checkpoint" and "resume" match
+// far more lines than strictly bear on resume_evidence, and that is the safe
+// direction: a surface that is too wide costs an occasional unnecessary
+// re-review, while one that is too narrow lets a real classification change
+// through unnoticed. This gate exists to force review, so it fails closed.
+constexpr std::array<std::string_view, 14> kClassificationTokens = {
+    "def main",       // entrypoint declaration, including "async def main"
+    "__main__",       // the module-vs-script distinction the catalog records
+    "argparse",       //
+    "ArgumentParser", // argument surface
+    "add_argument",   //
+    "add_subparsers", //
+    "entry_points",   // console_script wiring
+    "console_scripts",
+    "checkpoint",     // resume_evidence and statefulness
+    "Checkpoint",
+    "resume",
+    "state_dict",
+    "torch.save",
+    "torch.load",
+};
+
+// Only Python is understood. Shell, Go, C++, JSON and Markdown sources fall
+// back to their full bytes, so nothing is weakened for a language the
+// extractor cannot read -- a narrower surface must be earned per language, not
+// assumed. 109 of the 155 referenced paths are Python.
+bool has_python_surface(std::string_view relative_path) {
+  return relative_path.ends_with(".py");
+}
+
+// Line-based and deliberately not a Python parser. A real grammar would be a
+// second thing to keep correct, and the only prior art here is the equally
+// lexical Go route scan in the catalog tests. What matters is that the result
+// is deterministic and that it cannot quietly become empty; the caller
+// enforces the latter.
+std::string extract_classification_surface(std::string_view relative_path,
+                                           std::string_view bytes) {
+  if (!has_python_surface(relative_path)) {
+    return std::string(bytes);
+  }
+  std::string surface;
+  std::size_t offset = 0;
+  while (offset <= bytes.size()) {
+    const auto newline = bytes.find('\n', offset);
+    const auto end = newline == std::string_view::npos ? bytes.size() : newline;
+    std::string_view line = bytes.substr(offset, end - offset);
+    // Trailing whitespace and CR carry no classification meaning, and leaving
+    // them in would make a line-ending change look like a surface change.
+    while (!line.empty() && (line.back() == '\r' || line.back() == ' ' ||
+                             line.back() == '\t')) {
+      line.remove_suffix(1);
+    }
+    const bool significant = std::ranges::any_of(
+        kClassificationTokens, [line](std::string_view token) {
+          return line.find(token) != std::string_view::npos;
+        });
+    if (significant) {
+      // Leading whitespace is kept: whether "def main" sits at module scope or
+      // nested inside another block is exactly the kind of difference that
+      // changes how a file is entered.
+      surface.append(line);
+      surface.push_back('\n');
+    }
+    if (newline == std::string_view::npos) break;
+    offset = newline + 1;
+  }
+  return surface;
+}
+
+std::string compute_classification_surface_digest(
+    int root_descriptor, const std::set<std::string>& source_paths,
+    std::set<std::string>& paths_with_empty_surface) {
+  std::string tree_material =
+      "trainvm.compatibility-classification-surface-tree/v1";
+  for (const auto& path : source_paths) {
+    auto descriptor = open_source_beneath(root_descriptor, path);
+    const auto bytes = read_regular_file_stably(
+        descriptor.get(), kMaximumSourceBytes,
+        "compatibility source " + path);
+    const auto surface = extract_classification_surface(path, bytes);
+    if (surface.empty()) paths_with_empty_surface.insert(path);
+    std::string leaf_material =
+        "trainvm.compatibility-classification-surface-leaf/v1";
+    leaf_material.push_back('\0');
+    leaf_material.append(path);
+    leaf_material.push_back('\0');
+    leaf_material.append(sha256_bytes(surface));
+    tree_material.push_back('\0');
+    tree_material.append(sha256_bytes(leaf_material));
+  }
+  return "sha256:" + sha256_bytes(tree_material);
+}
+
 std::string repository_identity(int descriptor) {
   struct stat status {};
   if (::fstat(descriptor, &status) != 0) {
@@ -533,15 +636,20 @@ CompatibilityCatalog::CompatibilityCatalog(
     throw std::invalid_argument(
         "compatibility catalog entries must be nonempty and bounded");
   }
-  if (document.source_tree_digest.size() != 71U ||
-      !document.source_tree_digest.starts_with("sha256:") ||
-      !std::ranges::all_of(document.source_tree_digest.substr(7),
-                           [](char character) {
-        return std::isdigit(static_cast<unsigned char>(character)) ||
-               (character >= 'a' && character <= 'f');
-      })) {
+  const auto is_lowercase_sha256 = [](const std::string& digest) {
+    return digest.size() == 71U && digest.starts_with("sha256:") &&
+           std::ranges::all_of(digest.substr(7), [](char character) {
+             return std::isdigit(static_cast<unsigned char>(character)) ||
+                    (character >= 'a' && character <= 'f');
+           });
+  };
+  if (!is_lowercase_sha256(document.source_tree_digest)) {
     throw std::invalid_argument(
         "compatibility source_tree_digest must be lowercase sha256");
+  }
+  if (!is_lowercase_sha256(document.classification_surface_digest)) {
+    throw std::invalid_argument(
+        "compatibility classification_surface_digest must be lowercase sha256");
   }
 
   auto root_descriptor = open_repository_root(repository_root);
@@ -625,15 +733,55 @@ CompatibilityCatalog::CompatibilityCatalog(
         "compatibility source tree digest does not match referenced file bytes");
   }
 
+  std::set<std::string> paths_with_empty_surface;
+  const auto computed_surface_digest = compute_classification_surface_digest(
+      root_descriptor.get(), all_source_paths, paths_with_empty_surface);
+  if (computed_surface_digest != document.classification_surface_digest) {
+    throw std::invalid_argument(
+        "compatibility classification surface digest does not match the "
+        "entrypoint, argument and checkpoint surface of the referenced files");
+  }
+
+  // The vacuity guard, and the reason this mechanism can be trusted at all.
+  // An extractor that quietly returned nothing on an unfamiliar file shape
+  // would make that file's surface permanently unchanged, so every later edit
+  // to it would pass review it never received. A Python entry the catalog
+  // records as invocable MUST expose an entrypoint or argument surface, or the
+  // extraction has failed and is declared broken rather than believed.
+  for (const auto& entry : document.entries) {
+    const bool python_entrypoint =
+        entry.observed_invocation == ObservedInvocationKind::python_module ||
+        entry.observed_invocation == ObservedInvocationKind::console_script;
+    if (!python_entrypoint) continue;
+    const bool any_surface = std::ranges::any_of(
+        entry.source_paths, [&](const std::string& path) {
+          return !paths_with_empty_surface.contains(path);
+        });
+    if (!any_surface) {
+      throw std::invalid_argument(
+          "compatibility entry " + entry.stable_id +
+          " is recorded as invocable but no referenced source exposes an "
+          "entrypoint or argument surface; the extraction is vacuous for it");
+    }
+  }
+
   std::ranges::sort(document.entries, {},
                     &CompatibilityWorkflowEntry::stable_id);
   authority_ = document.authority;
   source_tree_digest_ = document.source_tree_digest;
+  classification_surface_digest_ = document.classification_surface_digest;
   entries_ = std::move(document.entries);
+  // source_tree_digest is deliberately NOT here. It still fails closed above,
+  // so the byte-level record stays true, but binding it into the reviewed
+  // digest meant every comment and every internal edit demanded a recompiled
+  // constant and a workflow re-review that could not possibly have changed.
+  // Three separate cards resolved as "re-reviewed, no classification change,
+  // hashes updated", which is what a gate looks like just before people stop
+  // reading it.
   const nlohmann::json canonical = {
       {"api_version", "trainvm.compatibility-workflows/v1"},
       {"authority", enum_to_string(authority_)},
-      {"source_tree_digest", source_tree_digest_},
+      {"classification_surface_digest", classification_surface_digest_},
       {"entries", encode_json(entries_)},
   };
   catalog_digest_ = "sha256:" + sha256_bytes(canonical.dump());
@@ -659,6 +807,39 @@ CompatibilityCatalog CompatibilityCatalog::load_file(
   return CompatibilityCatalog(std::move(document), repository_root);
 }
 
+CompatibilityCatalogComputedDigests CompatibilityCatalog::compute_digests(
+    const std::filesystem::path& catalog_path,
+    const std::filesystem::path& repository_root) {
+  CompatibilityCatalogDocument document;
+  std::vector<Diagnostic> diagnostics;
+  const auto source = parse_catalog(read_catalog(catalog_path));
+  if (!decode_json(source, document, "", diagnostics)) {
+    throw std::invalid_argument(
+        "compatibility catalog schema validation failed: " +
+        diagnostic_summary(diagnostics));
+  }
+  std::set<std::string> all_source_paths;
+  for (const auto& entry : document.entries) {
+    for (const auto& path : entry.source_paths) {
+      // Spelling is still enforced here even though this entry point skips the
+      // pinned-value checks: the paths are fed straight to openat2, so a
+      // malformed one must be refused rather than resolved.
+      validate_source_path_spelling(path);
+      all_source_paths.insert(path);
+    }
+  }
+  auto root_descriptor = open_repository_root(repository_root);
+  std::set<std::string> paths_with_empty_surface;
+  CompatibilityCatalogComputedDigests computed;
+  computed.source_tree_digest =
+      compute_source_tree_digest(root_descriptor.get(), all_source_paths);
+  computed.classification_surface_digest = compute_classification_surface_digest(
+      root_descriptor.get(), all_source_paths, paths_with_empty_surface);
+  computed.paths_with_empty_classification_surface.assign(
+      paths_with_empty_surface.begin(), paths_with_empty_surface.end());
+  return computed;
+}
+
 const std::vector<CompatibilityWorkflowEntry>&
 CompatibilityCatalog::entries() const {
   return entries_;
@@ -670,6 +851,15 @@ const std::string& CompatibilityCatalog::catalog_digest() const {
 
 const std::string& CompatibilityCatalog::source_tree_digest() const {
   return source_tree_digest_;
+}
+
+const std::string& CompatibilityCatalog::classification_surface_digest() const {
+  return classification_surface_digest_;
+}
+
+std::string CompatibilityCatalog::classification_surface_for_testing(
+    std::string_view relative_path, std::string_view bytes) {
+  return extract_classification_surface(relative_path, bytes);
 }
 
 const std::string& CompatibilityCatalog::repository_root_identity_display()

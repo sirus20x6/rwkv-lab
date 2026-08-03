@@ -33,6 +33,8 @@ void usage() {
       << "  trainvm plan <experiment.json> [--canonical]\n"
       << "  trainvm compile  # read JSON from stdin; emit canonical preview JSON\n"
       << "  trainvm validate-catalog <compatibility.json> <repository-root>\n"
+      << "  trainvm print-catalog-digests <compatibility.json> <repository-root>"
+         "  # compute the pinned digests; does not check them\n"
       << "  trainvm qualify-evidence"
          "  # read trainvm.cache-qualification-evidence/v1 JSON from stdin;"
          " exit 0 qualified, 3 rejected\n"
@@ -135,8 +137,32 @@ int validate_catalog_command(const std::filesystem::path& catalog_path,
                    {"entries", catalog.entries().size()},
                    {"catalog_digest", catalog.catalog_digest()},
                    {"source_tree_digest", catalog.source_tree_digest()},
+                   {"classification_surface_digest",
+                    catalog.classification_surface_digest()},
                    {"repository_root_identity",
                     catalog.repository_root_identity_display()},
+               }
+                   .dump(2)
+            << '\n';
+  return 0;
+}
+
+// The generator the catalog never had. Both pinned digests were maintained by
+// hand, so refreshing one after an unrelated source edit meant hashing files
+// yourself -- which is how re-pinning became a chore performed without the
+// review it was supposed to force.
+int print_catalog_digests_command(
+    const std::filesystem::path& catalog_path,
+    const std::filesystem::path& repository_root) {
+  const auto computed = trainvm::CompatibilityCatalog::compute_digests(
+      std::filesystem::absolute(catalog_path).lexically_normal(),
+      std::filesystem::absolute(repository_root).lexically_normal());
+  std::cout << nlohmann::json{
+                   {"source_tree_digest", computed.source_tree_digest},
+                   {"classification_surface_digest",
+                    computed.classification_surface_digest},
+                   {"paths_with_empty_classification_surface",
+                    computed.paths_with_empty_classification_surface},
                }
                    .dump(2)
             << '\n';
@@ -562,6 +588,9 @@ int main(int argc, char** argv) {
     }
     if (argc == 4 && std::string_view(argv[1]) == "validate-catalog") {
       return validate_catalog_command(argv[2], argv[3]);
+    }
+    if (argc == 4 && std::string_view(argv[1]) == "print-catalog-digests") {
+      return print_catalog_digests_command(argv[2], argv[3]);
     }
     if (argc == 3 &&
         std::string_view(argv[1]) == "inspect-training-components") {
