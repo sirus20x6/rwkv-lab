@@ -134,7 +134,7 @@ than being killed mid-device.
 
 ## Local acceptance
 
-`scripts/acceptance.sh` runs the same matrix locally, including the native
+`scripts/acceptance.sh` runs the developer matrix locally, including the native
 suites CI cannot host:
 
 ```bash
@@ -146,4 +146,83 @@ It writes `evidence/acceptance.json`: a per-suite pass/fail/skip receipt
 stamped with the exact commit and whether the worktree was dirty, so a result
 can never be attributed to source it did not run against. Skips are recorded
 with their reason rather than omitted, because a silently missing suite is the
-failure this whole document is about.
+failure this whole document is about. A required skip closes `gate_open` and
+returns status 3. The receipt calls its scope `non_gpu` or `gpu_unit`: even the
+latter is developer acceptance, not a claim that hostd launched a production
+trainer.
+
+## Production parity gate
+
+The production gate is deliberately separate from `pytest -m gpu`. Kernel and
+adapter tests can pass without traversing hostd, without publishing a real
+checkpoint, and without proving that the dashboard can read a trainer's live
+outputs. `scripts/verify_trainvm_production_acceptance.py` verifies one offline,
+content-bound evidence bundle described by
+`production-acceptance-v1.schema.json`:
+
+```bash
+scripts/verify_trainvm_production_acceptance.py \
+  evidence/production/bundle.json \
+  --receipt evidence/production/receipt.json
+```
+
+The gate opens only when all of the following evidence agrees on one clean
+source commit:
+
+- the complete `gpu_unit` developer acceptance matrix passed;
+- the destructive, privileged 16-point hostd crash qualification gate opened;
+- the live dashboard observed an admitted, unpoisoned hostd authority with a
+  verified ledger and process launch enabled;
+- native journal-chain verification passed after the runs stopped;
+- MageFlow, RWKV, and transformer runs all completed through the durable host
+  resource and process sagas, emitted finite live train and eval metrics,
+  published verified checkpoints, resumed from a durable attempt, and
+  published non-empty accelerator trace profiles;
+- the MageFlow evidence additionally contains a checkpoint-bound side-by-side
+  eval gallery; and
+- every run has a valid reproducibility capsule bound to its run and plan.
+
+Every referenced JSON document is a relative, non-symlink regular file whose
+exact SHA-256 appears in the bundle. A missing family, skipped GPU suite,
+worker launched outside hostd, truncated required evidence, invalid checkpoint,
+empty profile, or changed evidence byte rejects the claim. Passing developer
+acceptance alone must never be described as production parity.
+
+Capture is two-phase so journal verification is not raced against a running
+authority. First, while the dashboard still serves three completed
+qualification runs, capture its immutable views:
+
+```bash
+scripts/capture_trainvm_production_evidence.py live \
+  --dashboard-url http://127.0.0.1:9124 \
+  --run mageflow=MAGEFLOW_RUN_ID \
+  --run rwkv=RWKV_RUN_ID \
+  --run transformer=TRANSFORMER_RUN_ID \
+  --output evidence/production/live
+```
+
+The capture reads only the loopback dashboard and refuses a run that changes
+during capture. It pages the complete terminal timeline, metrics, and artifact
+views, selects the newest MageFlow gallery detail, writes every document with
+mode 0600 beneath a new staging directory, and publishes the directory only
+after all three families are coherent.
+
+Then stop the TrainVM authority, run `trainvm journal verify` against the exact
+journal, and run the privileged crash matrix separately against a disposable
+workspace. The crash command really forks and SIGKILLs processes; its workspace
+and delegated cgroup must never be a live deployment path. Once those JSON
+receipts and `scripts/acceptance.sh --gpu` exist, seal and verify the capture:
+
+```bash
+scripts/capture_trainvm_production_evidence.py finalize \
+  --capture evidence/production/live/live-capture.json \
+  --acceptance evidence/acceptance.json \
+  --hostd-crash evidence/hostd-crash.json \
+  --journal-verification evidence/journal-verification.json \
+  --receipt evidence/production/receipt.json
+```
+
+Finalization copies the three external receipts without rewriting their bytes,
+constructs `bundle.json`, runs the offline verifier, and publishes a receipt
+only if the production gate opens. A failed verification removes the tentative
+bundle and cannot leave a passing receipt behind.

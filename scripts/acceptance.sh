@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Full non-GPU acceptance: every suite CI runs, plus the native suites no
-# hosted runner can build. Writes one machine-readable receipt so a claim of
-# "acceptance passed" can be checked instead of believed.
+# Developer acceptance: every non-GPU suite CI runs, plus the native suites no
+# hosted runner can build. --gpu additionally runs the serialized GPU unit and
+# kernel suites. This is not the production trainer/hostd E2E gate; see
+# verify_trainvm_production_acceptance.py.
 #
 #   scripts/acceptance.sh [--gpu] [--evidence DIR]
 #
@@ -20,7 +21,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$repo_root"
+cd "$repo_root" || exit 1
 mkdir -p "$evidence_dir"
 receipt="$evidence_dir/acceptance.json"
 build_dir="${TRAINVM_BUILD_DIR:-trainvm/build-acceptance}"
@@ -57,6 +58,8 @@ if command -v cmake >/dev/null && command -v g++ >/dev/null &&
     record compatibility-catalog skipped "trainvm binary was not built"
   fi
 else
+  record native-configure skipped "requires cmake and GCC 16+ for C++26 reflection"
+  record native-build skipped "requires cmake and GCC 16+ for C++26 reflection"
   record native-ctest skipped "requires cmake and GCC 16+ for C++26 reflection"
   record compatibility-catalog skipped "requires the native build"
 fi
@@ -69,10 +72,12 @@ run_suite python-cpu python3 -m pytest -q -n "${PYTEST_WORKERS:-auto}" \
   --junitxml="$evidence_dir/python-cpu.xml"
 
 if command -v go >/dev/null; then
-  (cd dashboard && go build ./... && go vet ./... && go test ./...) \
-    >"$evidence_dir/go.log" 2>&1 &&
-    record go passed "$evidence_dir/go.log" ||
+  if (cd dashboard && go build ./... && go vet ./... && go test ./...) \
+    >"$evidence_dir/go.log" 2>&1; then
+    record go passed "$evidence_dir/go.log"
+  else
     record go FAILED "$evidence_dir/go.log"
+  fi
 else
   record go skipped "go toolchain not installed"
 fi
@@ -93,9 +98,31 @@ if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; th
 fi
 
 failed=0
+incomplete=0
+scope="non_gpu"
+[[ "$run_gpu" == "1" ]] && scope="gpu_unit"
+required=(native-configure native-build native-ctest compatibility-catalog schema-golden coverage-gate python-cpu go)
+[[ "$run_gpu" == "1" ]] && required+=(gpu)
+for required_name in "${required[@]}"; do
+  found=0
+  for index in "${!names[@]}"; do
+    if [[ "${names[$index]}" == "$required_name" ]]; then
+      found=1
+      [[ "${statuses[$index]}" != "passed" ]] && incomplete=1
+      break
+    fi
+  done
+  [[ "$found" == "0" ]] && incomplete=1
+done
 {
   printf '{\n  "api_version": "trainvm.acceptance/v1",\n'
   printf '  "commit": "%s",\n  "dirty_worktree": %s,\n' "$commit" "$dirty"
+  printf '  "scope": "%s",\n' "$scope"
+  if [[ "$incomplete" == "0" ]]; then
+    printf '  "gate_open": true,\n'
+  else
+    printf '  "gate_open": false,\n'
+  fi
   printf '  "generated_at": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf '  "suites": [\n'
   for index in "${!names[@]}"; do
@@ -111,7 +138,11 @@ failed=0
 echo
 echo "receipt: $receipt"
 if [[ "$failed" == "1" ]]; then
-  echo "ACCEPTANCE FAILED"
+  echo "DEVELOPER ACCEPTANCE FAILED"
   exit 1
 fi
-echo "acceptance passed"
+if [[ "$incomplete" == "1" ]]; then
+  echo "DEVELOPER ACCEPTANCE INCOMPLETE"
+  exit 3
+fi
+echo "developer acceptance passed for scope: $scope"

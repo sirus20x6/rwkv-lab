@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rwkv-lab.invalid/trainvm/production-acceptance-v1.schema.json",
+  "title": "TrainVM production acceptance evidence bundle",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "api_version",
+    "source_commit",
+    "acceptance",
+    "hostd_crash",
+    "host_authority",
+    "journal_verification",
+    "runs"
+  ],
+  "properties": {
+    "api_version": {
+      "const": "trainvm.production-acceptance-bundle/v1"
+    },
+    "source_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "acceptance": {
+      "$ref": "#/$defs/evidenceReference"
+    },
+    "hostd_crash": {
+      "$ref": "#/$defs/evidenceReference"
+    },
+    "host_authority": {
+      "$ref": "#/$defs/evidenceReference"
+    },
+    "journal_verification": {
+      "$ref": "#/$defs/evidenceReference"
+    },
+    "runs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mageflow", "rwkv", "transformer"],
+      "properties": {
+        "mageflow": {
+          "$ref": "#/$defs/runEvidence"
+        },
+        "rwkv": {
+          "$ref": "#/$defs/runEvidence"
+        },
+        "transformer": {
+          "$ref": "#/$defs/runEvidence"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "evidenceReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      }
+    },
+    "runEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run",
+        "plan",
+        "timeline",
+        "metrics",
+        "artifacts",
+        "checkpoints",
+        "galleries",
+        "gallery",
+        "profiles",
+        "capsule"
+      ],
+      "properties": {
+        "run": {
+          "$ref": "#/$defs/evidenceReference"
+        },
+        "plan": {
+          "$ref": "#/$defs/evidenceReference"
+        },
+        "timeline": {
+          "$ref": "#/$defs/evidenceReference"
+        },
+        "metrics": {
+          "$ref": "#/$defs/evidenceReference"
+        },
+        "artifacts": {
+          "$ref": "#/$defs/evidenceReference"
+        },
+        "checkpoints": {
+          "$ref": "#/$defs/evidenceReference"
+        },
+        "galleries": {
+          "$ref": "#/$defs/evidenceReference"
+        },
+        "gallery": {
+          "$ref": "#/$defs/evidenceReference"
+        },
+        "profiles": {
+          "$ref": "#/$defs/evidenceReference"
+        },
+        "capsule": {
+          "$ref": "#/$defs/evidenceReference"
+        }
+      }
+    }
+  }
+}

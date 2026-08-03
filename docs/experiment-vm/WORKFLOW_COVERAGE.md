@@ -201,6 +201,14 @@ gRPC already-completed replay, lowers all twenty-five real adapter profiles into
 materializes the same deployment twice without drift. It
 does not replace the outstanding privileged hostd or real trainer qualification scenarios below.
 
+The production qualification claim is now also mechanically closed: the two-phase capture and
+offline verifier described in `ACCEPTANCE_CI.md` require one content-bound bundle containing an open
+privileged hostd crash receipt plus completed, hostd-launched MageFlow, RWKV, and transformer runs
+with metrics, evals, verified checkpoints, checkpoint-bound resumes, GPU traces, reproducibility
+capsules, and a MageFlow generated/original gallery. This is a gate definition, not passing evidence:
+until a current-commit `trainvm.production-acceptance-receipt/v1` with `gate_open=true` exists, the
+real-host and real-GPU scenarios below remain outstanding and parity must not be claimed.
+
 1. Validate and plan the example MageFlow document without starting a worker.
 2. Kill TrainVM before dispatch, after dispatch, before receipt, and after receipt at every node; replay
    must choose the same next action without duplicating a published artifact.
