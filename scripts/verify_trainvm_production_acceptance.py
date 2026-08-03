@@ -103,7 +103,11 @@ def _strict_object(value: Any, keys: set[str], label: str) -> dict[str, Any]:
 
 def _canonical_bytes(value: Any) -> bytes:
     return json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
     ).encode("utf-8")
 
 
@@ -117,13 +121,33 @@ def _digest_document_without(value: dict[str, Any], field: str) -> str:
     return _digest_bytes(_canonical_bytes(material))
 
 
+def _object_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise QualificationError(f"duplicate JSON field: {key}")
+        result[key] = value
+    return result
+
+
+def _invalid_constant(value: str) -> Any:
+    raise QualificationError(f"non-finite JSON number: {value}")
+
+
 def _load_json(path: Path, label: str) -> Any:
     try:
         raw = path.read_bytes()
     except OSError as error:
         raise QualificationError(f"cannot read {label}: {error}") from error
     try:
-        return json.loads(raw), raw
+        return (
+            json.loads(
+                raw,
+                object_pairs_hook=_object_without_duplicates,
+                parse_constant=_invalid_constant,
+            ),
+            raw,
+        )
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise QualificationError(f"{label} is not valid JSON: {error}") from error
 
@@ -367,6 +391,21 @@ def _verify_run(family: str, documents: dict[str, Any]) -> dict[str, Any]:
     }
     if not resumed_checkpoint_ids:
         raise QualificationError(f"{family} has no durable checkpoint resume evidence")
+    resumed_steps = {
+        event.get("optimizer_step")
+        for event in timeline
+        if event.get("event_type") == "node.attempt_restarted"
+        and isinstance(event.get("optimizer_step"), int)
+        and not isinstance(event.get("optimizer_step"), bool)
+    }
+    final_step = run.get("optimizer_step")
+    if (
+        not resumed_steps
+        or isinstance(final_step, bool)
+        or not isinstance(final_step, int)
+        or final_step <= max(resumed_steps)
+    ):
+        raise QualificationError(f"{family} made no optimizer progress after resume")
 
     metrics = documents["metrics"]
     if not isinstance(metrics, list) or not metrics:
@@ -375,6 +414,13 @@ def _verify_run(family: str, documents: dict[str, Any]) -> dict[str, Any]:
         raise QualificationError(f"{family} metrics contain non-finite or foreign samples")
     if not any(_is_eval_metric(metric.get("name")) for metric in metrics):
         raise QualificationError(f"{family} emitted no evaluation metric")
+    if not any(
+        isinstance(metric.get("optimizer_step"), int)
+        and not isinstance(metric.get("optimizer_step"), bool)
+        and metric["optimizer_step"] > max(resumed_steps)
+        for metric in metrics
+    ):
+        raise QualificationError(f"{family} emitted no live metric after resume")
 
     artifacts = documents["artifacts"]
     if not isinstance(artifacts, list) or not artifacts:

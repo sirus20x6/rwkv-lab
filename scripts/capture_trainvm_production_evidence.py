@@ -34,12 +34,35 @@ class CaptureError(RuntimeError):
     """Live evidence could not be captured coherently."""
 
 
+def _object_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise CaptureError(f"duplicate JSON field: {key}")
+        result[key] = value
+    return result
+
+
+def _invalid_constant(value: str) -> Any:
+    raise CaptureError(f"non-finite JSON number: {value}")
+
+
+def _parse_json(raw: bytes | str) -> Any:
+    return json.loads(
+        raw,
+        object_pairs_hook=_object_without_duplicates,
+        parse_constant=_invalid_constant,
+    )
+
+
 def _digest(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
 
 
 def _json_bytes(value: Any) -> bytes:
-    return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    return (
+        json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    ).encode("utf-8")
 
 
 def _publish(root: Path, relative: str, value: Any) -> dict[str, str]:
@@ -73,7 +96,7 @@ def _copy_json(root: Path, relative: str, source: Path) -> dict[str, str]:
         if not source.is_file():
             raise CaptureError(f"evidence source is not a regular file: {source}")
         raw = source.read_bytes()
-        json.loads(raw)
+        _parse_json(raw)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise CaptureError(f"cannot copy JSON evidence {source}: {error}") from error
     destination = root / relative
@@ -159,7 +182,7 @@ class Dashboard:
         if len(raw) > MAXIMUM_RESPONSE_BYTES:
             raise CaptureError(f"GET {path} exceeded the capture bound")
         try:
-            return json.loads(raw)
+            return _parse_json(raw)
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise CaptureError(f"GET {path} returned invalid JSON: {error}") from error
 
@@ -307,7 +330,7 @@ def live_capture(origin: str, runs: dict[str, str], output: Path) -> Path:
 
 def _load_capture(path: Path) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_bytes())
+        value = _parse_json(path.read_bytes())
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise CaptureError(f"cannot read live capture: {error}") from error
     if (
@@ -342,7 +365,7 @@ def finalize_capture(
     root = capture_path.parent
     capture = _load_capture(capture_path)
     try:
-        acceptance_document = json.loads(acceptance.read_bytes())
+        acceptance_document = _parse_json(acceptance.read_bytes())
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise CaptureError(f"cannot read developer acceptance receipt: {error}") from error
     commit = acceptance_document.get("commit") if isinstance(acceptance_document, dict) else None

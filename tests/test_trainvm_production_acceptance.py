@@ -107,7 +107,10 @@ def _run_documents(family: str) -> dict[str, Any]:
             "run_id": run_id,
             "event_type": event_type,
             **(
-                {"payload": {"checkpoint_artifact_id": "checkpoint-1"}}
+                {
+                    "optimizer_step": 2,
+                    "payload": {"checkpoint_artifact_id": "checkpoint-1"},
+                }
                 if event_type == "node.attempt_restarted"
                 else {}
             ),
@@ -115,8 +118,18 @@ def _run_documents(family: str) -> dict[str, Any]:
         for index, event_type in enumerate(event_types, 1)
     ]
     metrics = [
-        {"run_id": run_id, "name": "train.loss", "value": 1.0},
-        {"run_id": run_id, "name": "eval.loss", "value": 0.9},
+        {
+            "run_id": run_id,
+            "name": "train.loss",
+            "value": 1.0,
+            "optimizer_step": 4,
+        },
+        {
+            "run_id": run_id,
+            "name": "eval.loss",
+            "value": 0.9,
+            "optimizer_step": 4,
+        },
     ]
     artifacts = [
         {"artifact_id": "checkpoint-1", "kind": "checkpoint"},
@@ -278,6 +291,16 @@ def test_bundle_rejects_changed_evidence_bytes(tmp_path: Path) -> None:
     bundle = _bundle(tmp_path)
     (tmp_path / "rwkv" / "metrics.json").write_text("[]\n")
     with pytest.raises(MODULE.QualificationError, match="digest mismatch"):
+        MODULE.verify_bundle(bundle)
+
+
+def test_bundle_rejects_duplicate_fields(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    bundle.write_text(
+        '{"api_version":"trainvm.production-acceptance-bundle/v1",'
+        '"api_version":"trainvm.production-acceptance-bundle/v1"}\n'
+    )
+    with pytest.raises(MODULE.QualificationError, match="duplicate JSON field"):
         MODULE.verify_bundle(bundle)
 
 

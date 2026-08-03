@@ -188,9 +188,38 @@ worker launched outside hostd, truncated required evidence, invalid checkpoint,
 empty profile, or changed evidence byte rejects the claim. Passing developer
 acceptance alone must never be described as production parity.
 
-Capture is two-phase so journal verification is not raced against a running
-authority. First, while the dashboard still serves three completed
-qualification runs, capture its immutable views:
+The normal path creates those three runs with the qualification controller. It
+accepts only real registered family adapters—not `coverage.*` fixtures—and
+preflights each document for a checkpoint-publishing training node, checkpoint
+recovery, a declared eval metric, and a bounded in-process accelerator trace.
+MageFlow must additionally declare its generated/original gallery. The
+controller runs the families sequentially, waits for the selected optimizer
+step, requests a checkpoint-first resource-releasing pause, proves the hostd
+process and fence counts returned to zero, resumes, and requires optimizer and
+metric progress before terminal completion:
+
+```bash
+scripts/run_trainvm_production_qualification.py \
+  --dashboard-url http://127.0.0.1:9124 \
+  --experiment mageflow=/absolute/mageflow-qualification.json \
+  --experiment rwkv=/absolute/rwkv-qualification.json \
+  --experiment transformer=/absolute/transformer-qualification.json \
+  --pause-after-step mageflow=2 \
+  --pause-after-step rwkv=2 \
+  --pause-after-step transformer=2 \
+  --output evidence/production/live
+```
+
+The controller submits the documents through the dashboard's native compile
+and immutable submission APIs. It never derives or launches a Python command
+line. It leaves a failed run intact for diagnosis rather than silently
+cancelling or replacing it, and it calls the live capture only after all three
+runs have completed their resume cycle.
+
+Capture remains available as a separate first phase when the runs were launched
+interactively. Journal verification must not be raced against a running
+authority. While the dashboard still serves three completed qualification
+runs, capture its immutable views:
 
 ```bash
 scripts/capture_trainvm_production_evidence.py live \
