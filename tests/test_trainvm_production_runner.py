@@ -31,7 +31,12 @@ def _document(family: str) -> dict[str, Any]:
             "type": "checkpoint",
             "schema": f"qualification.{family}-checkpoint.v1",
         },
-        "gpu_trace": {"type": "opaque", "schema": "trainvm.gpu-trace.v1"},
+        "gpu_trace": {
+            "type": "opaque",
+            "schema": "trainvm.gpu-trace.v1",
+            "immutability": "mutable_until_publish",
+            "fingerprint": "adapter",
+        },
     }
     publishes = {"checkpoint": "checkpoint"}
     observability: dict[str, Any] = {

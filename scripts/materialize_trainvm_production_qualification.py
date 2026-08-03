@@ -154,11 +154,18 @@ def _json_object(path: Path, label: str) -> dict[str, Any]:
     return value
 
 
-def _artifact(kind: str, schema: str, *, fingerprint: str = "manifest_sha256") -> dict[str, Any]:
+def _artifact(
+    kind: str,
+    schema: str,
+    *,
+    fingerprint: str = "manifest_sha256",
+    immutability: str | None = None,
+) -> dict[str, Any]:
     return {
         "type": kind,
         "schema": schema,
-        "immutability": "immutable" if kind != "image_gallery" else "append_only",
+        "immutability": immutability
+        or ("immutable" if kind != "image_gallery" else "append_only"),
         "fingerprint": fingerprint,
         "required": True,
     }
@@ -458,7 +465,12 @@ def _mageflow(raw: Any, common: Mapping[str, Any]) -> tuple[dict[str, Any], list
         artifacts={
             "checkpoint": _artifact("checkpoint", "rwkv-lab.mageflow-checkpoint.v1"),
             "eval_gallery": _artifact("image_gallery", "rwkv-lab.eval-gallery.v2"),
-            "gpu_trace": _artifact("opaque", "trainvm.gpu-trace.v1", fingerprint="adapter"),
+            "gpu_trace": _artifact(
+                "opaque",
+                "trainvm.gpu-trace.v1",
+                fingerprint="adapter",
+                immutability="mutable_until_publish",
+            ),
         },
         publishes={"checkpoint": "checkpoint", "eval_gallery": "eval_gallery"},
         metrics=[
@@ -520,7 +532,12 @@ def _rwkv(raw: Any, common: Mapping[str, Any]) -> tuple[dict[str, Any], list[str
         artifacts={
             "checkpoint": _artifact("checkpoint", "rwkv-lab.rwkv-optimizer-finetune-checkpoint.v1"),
             "result": _artifact("report", "rwkv-lab.scalar-metric-result.v1"),
-            "gpu_trace": _artifact("opaque", "trainvm.gpu-trace.v1", fingerprint="adapter"),
+            "gpu_trace": _artifact(
+                "opaque",
+                "trainvm.gpu-trace.v1",
+                fingerprint="adapter",
+                immutability="mutable_until_publish",
+            ),
         },
         publishes={"checkpoint": "checkpoint", "result": "result"},
         metrics=[
@@ -618,7 +635,12 @@ def _transformer(raw: Any, common: Mapping[str, Any]) -> tuple[dict[str, Any], l
         training_components=components,
         artifacts={
             "checkpoint": _artifact("checkpoint", "rwkv-lab.transformer-mla-checkpoint.v1"),
-            "gpu_trace": _artifact("opaque", "trainvm.gpu-trace.v1", fingerprint="adapter"),
+            "gpu_trace": _artifact(
+                "opaque",
+                "trainvm.gpu-trace.v1",
+                fingerprint="adapter",
+                immutability="mutable_until_publish",
+            ),
         },
         publishes={"checkpoint": "checkpoint"},
         metrics=[

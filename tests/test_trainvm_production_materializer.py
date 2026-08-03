@@ -110,6 +110,13 @@ def test_materialized_documents_are_schema_valid_and_runner_qualified(tmp_path) 
         assert loaded == document
         assert json.loads(source) == document
         assert document["spec"]["execution"]["compile"] == {"enabled": False}
+        assert document["spec"]["artifacts"]["gpu_trace"] == {
+            "type": "opaque",
+            "schema": "trainvm.gpu-trace.v1",
+            "immutability": "mutable_until_publish",
+            "fingerprint": "adapter",
+            "required": True,
+        }
         assert document["spec"]["recovery"]["reconcile"] == "restart_from_checkpoint"
         assert document["spec"]["recovery"]["release_accelerators_when_paused"] is True
 

@@ -168,7 +168,11 @@ def load_qualification_document(family: str, path: Path) -> tuple[dict[str, Any]
         not isinstance(artifacts, dict)
         or not isinstance(output_artifact, str)
         or not isinstance(artifacts.get(output_artifact), dict)
+        or artifacts[output_artifact].get("type") != "opaque"
         or artifacts[output_artifact].get("schema") != "trainvm.gpu-trace.v1"
+        or artifacts[output_artifact].get("immutability")
+        != "mutable_until_publish"
+        or artifacts[output_artifact].get("fingerprint") != "adapter"
         or not checkpoint_outputs.issubset(artifacts)
     ):
         raise QualificationRunError(f"{family} qualification artifact contract is incomplete")
