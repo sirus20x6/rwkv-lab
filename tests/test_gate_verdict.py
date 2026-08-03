@@ -8,8 +8,11 @@ phrasing and prove nothing about that property.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
+
+import pytest
 
 from scripts.gate_verdict import verdict_line
 
@@ -78,23 +81,39 @@ def test_the_detail_survives_in_both_forms():
         assert DETAIL in verdict_line("coverage gate", problems, DETAIL)
 
 
-def test_every_wired_gate_ends_with_a_verdict_line():
-    """End to end, against the real scripts rather than the helper alone.
+@pytest.mark.parametrize("gate", GATES)
+def test_the_wired_gate_ends_with_a_verdict_line(gate):
+    """End to end, against the real script rather than the helper alone.
 
     A gate could import the helper and still print something else afterwards;
-    this runs each one and looks at the line that is actually last. The gates
-    are run in their passing configuration, so this pins the passing form --
-    the failing form is proven against the helper above, since making a real
-    gate fail here would mean corrupting checked-in fixtures.
+    this runs it and looks at the line that is actually last. Gates run in
+    their passing configuration, so this pins the passing form -- the failing
+    form is proven against the helper above, since making a real gate fail here
+    would mean corrupting checked-in fixtures.
+
+    Parametrized rather than looped so a gate that cannot run in this
+    environment skips on its own instead of taking the others with it.
     """
-    for gate in GATES:
-        completed = subprocess.run(
-            [sys.executable, gate],
-            capture_output=True, text=True, check=False,
-        )
-        last = completed.stdout.strip().splitlines()[-1]
-        assert "PASSED" in last or "FAILED" in last, (
-            f"{gate} ends with {last!r}, which states no verdict")
-        assert (completed.returncode == 0) == ("PASSED" in last), (
-            f"{gate} exited {completed.returncode} but its last line says "
-            f"{last!r}; the summary and the exit code disagree")
+    completed = subprocess.run(
+        [sys.executable, gate],
+        capture_output=True, text=True, check=False,
+    )
+    # Not every job installs every gate's dependencies -- the CPU job has no
+    # jsonschema, which only the schema-golden job pip-installs. A gate that
+    # dies at import prints nothing, and asserting against that empty output
+    # would be an assertion about the environment rather than about the code.
+    missing = re.search(r"ModuleNotFoundError: No module named '([^']+)'",
+                        completed.stderr)
+    if missing and not completed.stdout.strip():
+        pytest.skip(f"{gate} needs {missing.group(1)}, absent in this job")
+
+    lines = completed.stdout.strip().splitlines()
+    assert lines, (
+        f"{gate} printed nothing on stdout (exit {completed.returncode}); "
+        f"stderr was: {completed.stderr.strip()[:400]}")
+    last = lines[-1]
+    assert "PASSED" in last or "FAILED" in last, (
+        f"{gate} ends with {last!r}, which states no verdict")
+    assert (completed.returncode == 0) == ("PASSED" in last), (
+        f"{gate} exited {completed.returncode} but its last line says "
+        f"{last!r}; the summary and the exit code disagree")
