@@ -37,6 +37,7 @@ from .checkpoints import (
 from .components import WorkerTrainingComponents
 from .io import WorkspacePathAuthority, read_inline_config
 from .mageflow_controls import lower_initial_mageflow_controls
+from .mageflow_gallery import completed_mageflow_gallery_request
 from .metric_decision import ScalarMetricDecisionConfig
 from .posttraining import RWKVPostTrainConfig
 from .qwen_controls import lower_initial_qwen_controls
@@ -279,11 +280,27 @@ def _appearance_expert(
             "rng_torch",
         ),
     )
+    gallery = None
+    if status == "complete" and eval_manifest is not None and _declares_artifact_output(
+        invocation, "eval_gallery"
+    ):
+        if request is None or step is None:
+            raise AdapterDispatchError(
+                "MageFlow gallery publication requires a terminal checkpoint"
+            )
+        gallery = completed_mageflow_gallery_request(
+            invocation,
+            Path(config.output_dir),
+            eval_manifest,
+            step=step,
+            checkpoint_request_index=0,
+        )
     return HandlerResult(
         "worker.completed",
         {"reason": completion_reason(status)},
         optimizer_step=step,
         checkpoint_requests=((request,) if request is not None else ()),
+        eval_gallery_requests=((gallery,) if gallery is not None else ()),
     )
 
 
@@ -395,11 +412,27 @@ def _mageflow_full_backbone(
             "rng_torch",
         ),
     )
+    gallery = None
+    if status == "complete" and eval_manifest is not None and _declares_artifact_output(
+        invocation, "eval_gallery"
+    ):
+        if request is None or step is None:
+            raise AdapterDispatchError(
+                "MageFlow gallery publication requires a terminal checkpoint"
+            )
+        gallery = completed_mageflow_gallery_request(
+            invocation,
+            Path(config.output_dir),
+            eval_manifest,
+            step=step,
+            checkpoint_request_index=0,
+        )
     return HandlerResult(
         "worker.completed",
         {"reason": completion_reason(status)},
         optimizer_step=step,
         checkpoint_requests=((request,) if request is not None else ()),
+        eval_gallery_requests=((gallery,) if gallery is not None else ()),
     )
 
 
@@ -552,11 +585,27 @@ def _terminal_expert(
             "rng_torch",
         ),
     )
+    gallery = None
+    if status == "complete" and eval_manifest is not None and _declares_artifact_output(
+        invocation, "eval_gallery"
+    ):
+        if request is None or step is None:
+            raise AdapterDispatchError(
+                "MageFlow gallery publication requires a terminal checkpoint"
+            )
+        gallery = completed_mageflow_gallery_request(
+            invocation,
+            Path(config.output_dir),
+            eval_manifest,
+            step=step,
+            checkpoint_request_index=0,
+        )
     return HandlerResult(
         "worker.completed",
         {"reason": completion_reason(status)},
         optimizer_step=step,
         checkpoint_requests=((request,) if request is not None else ()),
+        eval_gallery_requests=((gallery,) if gallery is not None else ()),
     )
 
 
