@@ -83,6 +83,36 @@ std::string_view reproducibility_claim_name(ReproducibilityClaim claim) {
   return "unknown";
 }
 
+std::optional<PostTrainingArmKind> post_training_arm_kind_from_name(
+    std::string_view name) {
+  for (const PostTrainingArmKind kind :
+       {PostTrainingArmKind::supervised_finetune,
+        PostTrainingArmKind::recursive_post_training,
+        PostTrainingArmKind::external_ltx, PostTrainingArmKind::direct_rlvr}) {
+    if (post_training_arm_kind_name(kind) == name) return kind;
+  }
+  return std::nullopt;
+}
+
+std::optional<RunBoundKind> run_bound_kind_from_name(std::string_view name) {
+  for (const RunBoundKind kind :
+       {RunBoundKind::optimizer_steps, RunBoundKind::training_tokens,
+        RunBoundKind::wall_clock_seconds, RunBoundKind::external_signal}) {
+    if (run_bound_kind_name(kind) == name) return kind;
+  }
+  return std::nullopt;
+}
+
+std::optional<ReproducibilityClaim> reproducibility_claim_from_name(
+    std::string_view name) {
+  for (const ReproducibilityClaim claim :
+       {ReproducibilityClaim::none, ReproducibilityClaim::seeded,
+        ReproducibilityClaim::exact}) {
+    if (reproducibility_claim_name(claim) == name) return claim;
+  }
+  return std::nullopt;
+}
+
 bool run_bound_is_reproducible(RunBoundKind kind) {
   switch (kind) {
     case RunBoundKind::optimizer_steps:
@@ -110,9 +140,8 @@ ReproducibilityClaim supportable_reproducibility_claim(
   return ReproducibilityClaim::exact;
 }
 
-std::optional<LifecycleAdmissionRefusal> admit_post_training_arm(
-    const PostTrainingArm& arm, ResumeGrade resume_grade,
-    Effect declared_effect) {
+std::optional<LifecycleAdmissionRefusal>
+validate_post_training_arm_declaration(const PostTrainingArm& arm) {
   if (arm.arm_id.empty())
     return refuse("post-training-arm-unidentified",
                   "a post-training arm must carry an identifier");
@@ -139,41 +168,18 @@ std::optional<LifecycleAdmissionRefusal> admit_post_training_arm(
                         " must declare a magnitude");
   }
 
-  // Checked before the reproducibility label, because an arm acting outside
-  // what its adapter is admitted for is the more fundamental problem: telling
-  // the operator it mislabelled its determinism would bury that.
-  //
-  // The adapter is declared external, so something out there changes when this
-  // runs. An arm that names nothing leaves the authorization gate below with
-  // nothing to check, which is indistinguishable from having no gate.
-  if (arm_calls_outside_this_host(declared_effect) &&
-      arm.external_mutations.empty())
-    return refuse(
-        "post-training-external-effect-undeclared",
-        std::string("a ") + std::string(post_training_arm_kind_name(arm.kind)) +
-            " arm on an adapter declared external must say what it changes");
-
-  // The mirror, and the reason to read the effect off the registry rather than
-  // the arm: an adapter admitted only to write its workspace may not reach
-  // outside it, whatever the arm calls itself. Admitting this would let an arm
-  // widen its own adapter's effect by declaring a mutation.
-  if (!arm_calls_outside_this_host(declared_effect) &&
-      !arm.external_mutations.empty())
-    return refuse(
-        "post-training-external-effect-unadmitted",
-        std::string("the arm declares an external mutation, but its adapter is "
-                    "declared ") +
-            std::string(effect_name(declared_effect)) +
-            " and is not admitted to act outside this host");
-
   // The card's first clause. A wall-clock arm stops wherever the machine
   // happened to be, so no seed makes its endpoint repeat, and presenting it as
   // deterministic invites a comparison against a seeded arm that is not valid.
   // ReproducibilityClaim is declared weakest-first, so a claim stronger than
   // what the declarations support compares greater. Claiming something weaker
   // than supported is always allowed: under-claiming misleads nobody.
+  // Effect::process is the profile-independent ceiling: a profile can only
+  // LOWER what an arm may claim (an external adapter caps it at seeded),
+  // never raise it. So refusing a claim above this ceiling can never refuse
+  // something the launch gate would have allowed.
   const ReproducibilityClaim supportable =
-      supportable_reproducibility_claim(arm, declared_effect);
+      supportable_reproducibility_claim(arm, Effect::process);
   if (arm.claim > supportable) {
     return refuse(
         "post-training-claim-unsupported",
@@ -215,6 +221,57 @@ std::optional<LifecycleAdmissionRefusal> admit_post_training_arm(
           "post-training-mutation-unauthorized",
           "the arm would change '" + mutation.target +
               "' outside this host without authorization");
+  }
+
+  return std::nullopt;
+}
+
+std::optional<LifecycleAdmissionRefusal> admit_post_training_arm(
+    const PostTrainingArm& arm, ResumeGrade resume_grade,
+    Effect declared_effect) {
+  // Re-run the profile-independent rules rather than trusting that a document
+  // was compiled first. Admission must not depend on the compile path having
+  // run, and the two must not be able to drift apart.
+  if (auto refusal = validate_post_training_arm_declaration(arm)) return refusal;
+
+  // Checked before the reproducibility label, because an arm acting outside
+  // what its adapter is admitted for is the more fundamental problem: telling
+  // the operator it mislabelled its determinism would bury that.
+  //
+  // The adapter is declared external, so something out there changes when this
+  // runs. An arm that names nothing leaves the authorization gate below with
+  // nothing to check, which is indistinguishable from having no gate.
+  if (arm_calls_outside_this_host(declared_effect) &&
+      arm.external_mutations.empty())
+    return refuse(
+        "post-training-external-effect-undeclared",
+        std::string("a ") + std::string(post_training_arm_kind_name(arm.kind)) +
+            " arm on an adapter declared external must say what it changes");
+
+  // The mirror, and the reason to read the effect off the registry rather than
+  // the arm: an adapter admitted only to write its workspace may not reach
+  // outside it, whatever the arm calls itself. Admitting this would let an arm
+  // widen its own adapter's effect by declaring a mutation.
+  if (!arm_calls_outside_this_host(declared_effect) &&
+      !arm.external_mutations.empty())
+    return refuse(
+        "post-training-external-effect-unadmitted",
+        std::string("the arm declares an external mutation, but its adapter is "
+                    "declared ") +
+            std::string(effect_name(declared_effect)) +
+            " and is not admitted to act outside this host");
+
+  // Now with the adapter's own effect, which can only tighten the ceiling the
+  // declaration check already applied.
+  const ReproducibilityClaim admitted =
+      supportable_reproducibility_claim(arm, declared_effect);
+  if (arm.claim > admitted) {
+    return refuse(
+        "post-training-claim-unsupported",
+        std::string("the arm claims reproducibility '") +
+            std::string(reproducibility_claim_name(arm.claim)) +
+            "' but its adapter supports at most '" +
+            std::string(reproducibility_claim_name(admitted)) + "'");
   }
 
   // Resume honesty: the adapter's grade decides whether a resumed run is the

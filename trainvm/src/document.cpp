@@ -1,5 +1,6 @@
 #include "trainvm/document.hpp"
 
+#include "trainvm/post_training_authority.hpp"
 #include "trainvm/rwkv_scratch_profiles.hpp"
 
 #include <openssl/evp.h>
@@ -1035,6 +1036,74 @@ void validate_experiment(const Experiment& experiment, std::vector<Diagnostic>& 
           }
         }
       }
+      if (training.post_training) {
+        // Lower the authored arm into the authority's own type and run the
+        // rules that do not need a resolved adapter profile. compile_document
+        // takes only JSON — the registry is authority-owned and applied later
+        // — so the effect and resume-grade rules still gate at launch. What
+        // can be caught while the author is still writing is caught here.
+        const PostTrainingArmDeclaration& declared = *training.post_training;
+        const std::string arm_path =
+            child_path(training_path, "post_training");
+        PostTrainingArm arm;
+        arm.arm_id = declared.arm_id;
+        arm.seed = declared.seed;
+        arm.verifier_identity = declared.verifier_identity;
+        arm.claims_trajectory_preserving_resume =
+            declared.claims_trajectory_preserving_resume.value_or(false);
+        bool lowered = true;
+
+        // An unknown enum name must name itself in the diagnostic rather than
+        // decode to a default and be silently validated as something else.
+        if (const auto kind = post_training_arm_kind_from_name(declared.kind)) {
+          arm.kind = *kind;
+        } else {
+          error(diagnostics, "training.post_training.kind",
+                child_path(arm_path, "kind"),
+                "unknown post-training arm kind " + declared.kind);
+          lowered = false;
+        }
+        if (const auto claim =
+                reproducibility_claim_from_name(declared.reproducibility_claim)) {
+          arm.claim = *claim;
+        } else {
+          error(diagnostics, "training.post_training.reproducibility_claim",
+                child_path(arm_path, "reproducibility_claim"),
+                "unknown reproducibility claim " +
+                    declared.reproducibility_claim);
+          lowered = false;
+        }
+        for (std::size_t index = 0U; index < declared.bounds.size(); ++index) {
+          const PostTrainingBoundDeclaration& bound = declared.bounds[index];
+          if (const auto kind = run_bound_kind_from_name(bound.kind)) {
+            arm.bounds.push_back(
+                {.kind = *kind, .magnitude = bound.magnitude.value_or(0U)});
+          } else {
+            error(diagnostics, "training.post_training.bound",
+                  child_path(child_path(arm_path, "bounds"),
+                             std::to_string(index)),
+                  "unknown run bound kind " + bound.kind);
+            lowered = false;
+          }
+        }
+        for (const PostTrainingMutationDeclaration& mutation :
+             declared.external_mutations.value_or(
+                 std::vector<PostTrainingMutationDeclaration>{})) {
+          arm.external_mutations.push_back({.target = mutation.target,
+                                            .effect = mutation.effect,
+                                            .authorized = mutation.authorized,
+                                            .receipt_id = std::nullopt});
+        }
+        if (lowered) {
+          // One call, so a document diagnostic and the launch gate cannot
+          // disagree about the rules they share.
+          if (const auto refusal =
+                  validate_post_training_arm_declaration(arm)) {
+            error(diagnostics, refusal->code, arm_path, refusal->message);
+          }
+        }
+      }
+
       for (const auto& [slot, selection] : training.components) {
         const std::string selection_path = child_path(
             child_path(training_path, "components"), slot);
