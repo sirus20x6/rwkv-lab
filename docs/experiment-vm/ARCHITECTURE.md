@@ -502,8 +502,12 @@ The first algorithm migration is also native: the bounded experiment-analysis li
 paired effect/interval/permutation statistics, Holm and sequential alpha-spending decisions, and
 Pareto selection. Its registry adapter opens existing `experiments.db` files strictly read-only and
 returns one typed SQLite snapshot across normalized campaigns or the legacy latest-result fallback.
-It does not yet own result writes, reproducibility-capsule capture, or campaign mutation; those stay
-in Python until they can publish typed events through TrainVM rather than share a writable database.
+It does not own legacy result writes or campaign mutation; those must become typed TrainVM events
+rather than share a writable database. The dashboard can now export a bounded
+`trainvm.reproducibility-capsule/v1` view for any native run. That capsule binds one durable journal
+prefix, the canonical plan, live control history, latest declared metric series, redacted artifact
+lineage, execution-phase receipts, and an independent body digest. It is a read-only projection,
+not a second result store or a substitute for immutable worker publications.
 
 ## Dashboard behavior
 

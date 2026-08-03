@@ -729,6 +729,12 @@
   function renderVMSummary(run) {
     const target = document.getElementById("trainvm-summary");
     if (!target) return;
+    const capsule = document.getElementById("trainvm-capsule-download");
+    if (capsule) {
+      capsule.href = `/api/trainvm/runs/${encodeURIComponent(run.run_id)}/capsule`;
+      capsule.download = `trainvm-${String(run.run_id || "run").replace(/[^A-Za-z0-9_.-]/g, "_")}-capsule.json`;
+      capsule.hidden = false;
+    }
     const terminalStates = new Set(["completed", "cancelled", "failed"]);
     const nodeFallback = terminalStates.has(run.observed_state) ? "terminal" : "waiting for assignment";
     const fact = (label, value, title = "") =>
@@ -1068,6 +1074,12 @@
     vmSelectionGeneration += 1;
     vmSelectedRun = null;
     publishVMRunSelection(null);
+    const capsule = document.getElementById("trainvm-capsule-download");
+    if (capsule) {
+      capsule.hidden = true;
+      capsule.href = "#";
+      capsule.removeAttribute("download");
+    }
     resetVMWorkflow(runID);
     resetVMGallery(runID);
     resetVMProfiles(runID);

@@ -420,6 +420,23 @@ func TestTrainVMReadModelEndpoints(t *testing.T) {
 		t.Fatalf("unexpected observability snapshot: %#v err=%v body=%s",
 			snapshot, err, response.Body.String())
 	}
+	request = httptest.NewRequest(http.MethodGet,
+		"/api/trainvm/runs/vm-run/capsule", nil)
+	response = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(response, request)
+	var capsule trainvmstore.ReproducibilityCapsule
+	if err := json.Unmarshal(response.Body.Bytes(), &capsule); err != nil ||
+		response.Code != http.StatusOK ||
+		capsule.Body.APIVersion != "trainvm.reproducibility-capsule/v1" ||
+		capsule.Body.ThroughSequence != 5 || capsule.Body.PlanHash != plan.PlanHash ||
+		len(capsule.Body.LatestMetrics) != 1 || len(capsule.Body.Artifacts) != 1 ||
+		strings.Contains(response.Body.String(), "file:///") ||
+		response.Header().Get("ETag") != `"`+capsule.CapsuleDigest+`"` ||
+		!strings.Contains(response.Header().Get("Content-Disposition"),
+			"trainvm-vm-run-capsule.json") {
+		t.Fatalf("unexpected reproducibility capsule: %#v err=%v headers=%v body=%s",
+			capsule, err, response.Header(), response.Body.String())
+	}
 }
 
 func TestTrainVMDisabledIsExplicit(t *testing.T) {
